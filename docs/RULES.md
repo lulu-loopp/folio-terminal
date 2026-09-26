@@ -1102,18 +1102,23 @@ of ten named lanes (`inline_image`, `peek`, `animation`, `preview`, `pdf`,
 build when a product read appears outside an inventoried door. **Child
 processes** are constructed only by `bt_platform::quiet_command` /
 `quiet_command_named`: silent, an absolute program path resolved beforehand, an
-explicit working directory. **Hand-offs to the operating system** — the four
+explicit working directory. **Hand-offs to the operating system** — the seven
 verbs that leave the window — live only in `bt_platform::handoff`, which holds
-the workspace's only `ShellExecuteW` and its only platform hand-off sites, and
-run on the OS hand-off lane (`bt-app::handoff_lane`), never the window thread;
-nothing else in `bt-app` names a door (`no_handoff_runs_on_the_window_thread`).
-**Named threads** come only from `bt_platform::spawn_at_priority`, which sets the
-band as the new thread's first statement and is the single `unsafe` boundary for
-it. **Which kind of thread this is** is `bt_platform::admission`'s fact: the
-window thread enters once, in `fn main` after the argument parse, and each
-OS-owned callback enters through `enter_callback` for its length; **a spawned
-thread is `Unset` until the thread door lends it a `WorkerCtx` (0.4.6, A1b)**, and
-`Unset` is never a worker and never the window. **An owner-thread wait** — a row
+the workspace's only `ShellExecuteW` and its only platform hand-off sites; the
+verbs are private to it, reached only through `ShellThread::hand_over`, and a
+`ShellThread` is entered only with a `WorkerCtx`, so they run on the OS hand-off
+lane (`bt-app::handoff_lane`), never the window thread
+(`no_handoff_runs_on_the_window_thread`). **Named threads** come only from
+`bt_platform::spawn_at_priority`, the thread door, which sets the band as the new
+thread's first statement (the band call is the single `unsafe` boundary for it),
+makes the thread `Worker(name)` and **lends its body a `WorkerCtx`** — the
+capability a worker-only door takes, made nowhere else but
+`enter_standalone_main`. **Which kind of thread this is** is
+`bt_platform::admission`'s fact: the window thread enters once, in `fn main`
+after the argument parse, and each OS-owned callback enters through
+`enter_callback` for its length; a thread started outside the door is `Unset`
+(until A1c for the bare spawns; for good for `bt-pty`'s four and the resample
+pool), and `Unset` is never a worker and never the window. **An owner-thread wait** — a row
 of `docs/ARCHITECTURE.md` §5.3 — is admitted through `admission::admitted`, on the
 window thread and in its door type's phases, or refused and counted; the door
 types are the registry `crates/bt-app/src/window_waits.tsv`, and **no door takes
@@ -1125,7 +1130,7 @@ does not go through the pseudoconsole comes out of one silent door*; §13.18
 *M2-2/M2-4: the four verbs handed to the machine live in one module*; §1.4
 *resilience under CPU starvation* (three bands, one spawner); 2026-09-22 *a
 hand-off to the system runs on its own lane, and the window that receives it may
-take the front*; 2026-09-26 *every thread that runs Folio's code has a role, the window thread has a phase, and each owner-thread wait is a door the registry lists*.
+take the front*; 2026-09-26 *every thread that runs Folio's code has a role, the window thread has a phase, and each owner-thread wait is a door the registry lists*; 2026-09-26 *the thread door lends every worker a `WorkerCtx`, and a hand-off can be made only with one*.
 **Overrides.** none found.
 **The gap, recorded as a fact.** The self-report declares that directory
 enumeration and metadata are **excluded from the ledger's accounting**. That is a

@@ -491,7 +491,7 @@ impl Runtime<'_> {
         bt_platform::spawn_at_priority(
             "background-picture",
             bt_platform::ThreadPriority::BelowNormal,
-            move || {
+            move |_ctx| {
                 let result = bt_term::decode_background_image(&path, ceiling).map(|decoded| {
                     Arc::new(bt_render::BackgroundImage {
                         key: decoded.key,
@@ -13397,7 +13397,7 @@ impl Runtime<'_> {
         let started = bt_platform::spawn_at_priority(
             "clipboard-picture",
             bt_platform::ThreadPriority::Normal,
-            move || {
+            move |_ctx| {
                 // Held for the whole body and dropped with it, on every road out.
                 let _place = place;
                 let result = clipboard_picture::save(&folder, &offered, SystemTime::now());

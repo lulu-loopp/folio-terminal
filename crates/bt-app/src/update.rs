@@ -936,7 +936,7 @@ pub fn begin() {
     let _ = bt_platform::spawn_at_priority(
         "bt-update-check",
         bt_platform::ThreadPriority::BelowNormal,
-        move || {
+        move |_ctx| {
             let now_ms = unix_epoch_ms();
             if matches!(owner.run(now_ms, &GitHubReleases), Outcome::Answered(_))
                 && let Some(wake) = WAKE.get()

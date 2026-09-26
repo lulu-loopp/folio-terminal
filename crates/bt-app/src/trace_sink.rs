@@ -294,7 +294,7 @@ fn open() -> Option<Sink> {
     let writer = bt_platform::spawn_at_priority(
         "bt-trace-sink",
         bt_platform::ThreadPriority::BelowNormal,
-        move || {
+        move |_ctx| {
             run(&waiting, &counted);
             // The one thing that makes `flush`'s wait a wait on this body.
             drop(done);

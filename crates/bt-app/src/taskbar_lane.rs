@@ -134,7 +134,7 @@ impl TaskbarLane {
         let started = bt_platform::spawn_at_priority(
             "taskbar-state",
             bt_platform::ThreadPriority::BelowNormal,
-            move || self.serve(),
+            move |_ctx| self.serve(),
         );
         if started.is_err() {
             // A machine that will not give this process a thread keeps the answer it has, and the

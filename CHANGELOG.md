@@ -44,6 +44,9 @@ All notable changes to Folio are recorded here. The format follows
   Homebrew or winget, or by hand — the groundwork for updating itself.
 - Folio now knows which of its threads is the window's, and the waits that
   thread may make are listed in one place the architecture notes are built from.
+- Every background thread Folio starts now carries proof that it is one, and
+  opening or revealing something in the system can only be done from such a
+  thread.
 
 ## 0.4.5-preview — 2026-09-26
 

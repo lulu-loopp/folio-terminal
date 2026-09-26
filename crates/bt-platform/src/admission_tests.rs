@@ -1,4 +1,5 @@
-//! The executed half of `admission`'s proofs (design note 2026-09-26, revision (d)1's A1a rows).
+//! The executed half of `admission`'s proofs (design note 2026-09-26, revision (d)1's A1a rows,
+//! and its A1b rows: every arm whose thread is started by the thread door).
 //!
 //! **Isolation.** Every case runs on a thread it starts itself, so no case inherits another's role
 //! or phase (libtest runs cases on the main thread under `--test-threads=1`). Every refusal case
@@ -24,9 +25,26 @@ door!(ProbeQuit, "probe", 0, [Running, Exiting]);
 door!(ProbeMetered, "probe", 7, [Running]);
 door!(ProbeOuter, "probe", 8, [Running]);
 door!(ProbeInner, "probe", 9, [Running]);
+door!(ProbeWorker, "probe", 0, [Starting, Running, Exiting]);
+door!(ProbeBoxed, "probe", 0, [Starting, Running, Exiting]);
+door!(ProbePointer, "probe", 0, [Starting, Running, Exiting]);
 
 /// Taken by every case that makes a phase writer refuse, and by no other.
 static WRITERS: Mutex<()> = Mutex::new(());
+
+/// Run `body` on a thread the thread door starts, lending it the capability, and hand its answer
+/// (or its panic) back — the real producer of a worker (revision (d)1: no stand-in).
+fn on_a_door_started_thread<T: Send + 'static>(
+    name: &'static str,
+    body: impl FnOnce(&WorkerCtx) -> T + Send + 'static,
+) -> T {
+    let worker = spawn_at_priority(name, crate::ThreadPriority::BelowNormal, body)
+        .expect("the door starts a thread");
+    match worker.join() {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
 
 /// Run `body` on a thread of its own and hand its answer (or its panic) back.
 fn on_a_fresh_thread<T: Send>(body: impl FnOnce() -> T + Send) -> T {
@@ -518,4 +536,157 @@ fn a_doors_constants_are_its_keys() {
         doors::ALL.contains(&<doors::PtyResize as Door>::KEY),
         "every door type is in the list"
     );
+}
+
+/// RED (A1b, M4g) — **a thread the door started is a worker by its name, and a worker is refused an
+/// owner-thread wait: the work does not run and the door's counter rises by exactly one.**
+///
+/// The executed proof of the role boundary with the real producer: the thread is started by
+/// [`spawn_at_priority`], not made a worker by hand. Its role is `Worker` with the name it was
+/// started under, its lent capability carries the same name, and it has no phase (a phase is the
+/// window thread's). An owner-thread door asked for there is refused, because a wait on a worker is
+/// not the window thread's to admit.
+///
+/// MUTATION: admit a `Worker` in `admitted` (`role != Role::Window && !matches!(role,
+/// Role::Worker(_))`) and `ran` comes back true; drop the `ROLE` write from `lend_worker` and the
+/// role assertion goes red.
+#[test]
+fn a_thread_the_door_started_is_a_worker_and_is_refused_an_owner_wait() {
+    let before = refusals_of::<ProbeWorker>();
+    let (role_inside, lent, phase_inside, answer, ran) =
+        on_a_door_started_thread("bt-probe-worker", |ctx| {
+            let mut ran = false;
+            let answer = admitted::<ProbeWorker, _>(|_token| ran = true);
+            (role(), ctx.name(), phase(), answer, ran)
+        });
+    assert_eq!(role_inside, Role::Worker("bt-probe-worker"));
+    assert_eq!(lent, "bt-probe-worker", "the capability names its thread");
+    assert_eq!(phase_inside, None, "a worker has no phase");
+    assert_eq!(
+        answer,
+        Err(Refused {
+            door: "ProbeWorker",
+            role: Role::Worker("bt-probe-worker"),
+            phase: None,
+        })
+    );
+    assert!(!ran, "the work of a refused admission does not run");
+    assert_eq!(refusals_of::<ProbeWorker>(), before + 1);
+}
+
+/// RED (A1b, M4i′ worker arm) — **a worker cannot write the window thread's phase or become the
+/// window thread: each writer is refused there, and counted.**
+///
+/// The phase writers are pinned to the window thread's call sites; one reached from a worker
+/// (a quit driver moved onto a lane, say) must neither invent a phase for the worker nor pass
+/// unrecorded, and a worker that asks to be the window stays a worker.
+///
+/// MUTATION: drop the role check in `write_phase` and the worker's `loop_running` is taken (its
+/// counter does not rise).
+#[test]
+fn the_phase_writers_refuse_and_count_on_a_thread_the_door_started() {
+    let _writers = WRITERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let before = [
+        counted(&LOOP_RUNNING_REFUSED),
+        counted(&EXITING_REFUSED),
+        counted(&QUIT_ABANDONED_REFUSED),
+        counted(&ENTER_WINDOW_REFUSED),
+    ];
+    let (taken, role_after, phase_after) = on_a_door_started_thread("bt-probe-writers", |_ctx| {
+        let taken = [
+            loop_running(),
+            exiting(),
+            quit_abandoned(),
+            enter_window_thread(),
+        ];
+        (taken, role(), phase())
+    });
+    assert_eq!(taken, [false; 4], "no writer is taken on a worker");
+    assert_eq!(role_after, Role::Worker("bt-probe-writers"));
+    assert_eq!(phase_after, None);
+    assert_eq!(
+        [
+            counted(&LOOP_RUNNING_REFUSED),
+            counted(&EXITING_REFUSED),
+            counted(&QUIT_ABANDONED_REFUSED),
+            counted(&ENTER_WINDOW_REFUSED),
+        ],
+        before.map(|count| count + 1)
+    );
+}
+
+static POINTER_RAN: AtomicBool = AtomicBool::new(false);
+
+fn admit_through_a_pointer() -> Result<(), Refused> {
+    admitted::<ProbePointer, _>(|_token| POINTER_RAN.store(true, Ordering::Relaxed))
+}
+
+/// RED (A1b, owner-side M5, the worker-refusal arm) — **an owner-thread wait reached through a
+/// boxed closure or a function pointer is still refused on a worker.**
+///
+/// Admission is decided where the wait is asked for, by the thread's role, not by the shape of
+/// the call that got there: a `Box<dyn Fn()>` and an `fn()` that call `admitted`, run in a body the
+/// door started, are each refused, neither runs its work, and each door counts one. (The `Window`
+/// control — the same two admitted on a window-entered thread — is A1d's.)
+///
+/// MUTATION: admit a `Worker` in `admitted` and both indirections run their work.
+#[test]
+fn an_owner_wait_reached_through_an_indirection_is_refused_on_a_worker() {
+    let boxed_before = refusals_of::<ProbeBoxed>();
+    let pointer_before = refusals_of::<ProbePointer>();
+    let (boxed, boxed_ran, pointer) = on_a_door_started_thread("bt-probe-indirect", |_ctx| {
+        let ran = std::cell::Cell::new(false);
+        let boxed: Box<dyn Fn() -> Result<(), Refused> + '_> =
+            Box::new(|| admitted::<ProbeBoxed, _>(|_token| ran.set(true)));
+        let pointer: fn() -> Result<(), Refused> = admit_through_a_pointer;
+        let boxed = boxed();
+        (boxed, ran.get(), pointer())
+    });
+    let worker = Role::Worker("bt-probe-indirect");
+    assert_eq!(
+        boxed,
+        Err(Refused {
+            door: "ProbeBoxed",
+            role: worker,
+            phase: None,
+        })
+    );
+    assert_eq!(
+        pointer,
+        Err(Refused {
+            door: "ProbePointer",
+            role: worker,
+            phase: None,
+        })
+    );
+    assert!(!boxed_ran, "the boxed closure's work did not run");
+    assert!(
+        !POINTER_RAN.load(Ordering::Relaxed),
+        "the pointer's work did not run"
+    );
+    assert_eq!(refusals_of::<ProbeBoxed>(), boxed_before + 1);
+    assert_eq!(refusals_of::<ProbePointer>(), pointer_before + 1);
+}
+
+/// RED (A1b, revision (c)7) — **a callback delivered on a worker is the worker: its scope changes
+/// nothing and gives nothing back.**
+///
+/// A scope that found a role is non-owning. If it set `Callback` on a worker, the worker would be
+/// named a callback while it still held its capability; if its drop restored `Unset`, the worker
+/// would lose its role for the rest of its life.
+///
+/// MUTATION: have every scope restore `Unset` (not only the owning one) and the role after the
+/// scope is `Unset`.
+#[test]
+fn a_callback_on_a_thread_the_door_started_is_that_worker() {
+    let (inside, after) = on_a_door_started_thread("bt-probe-callback", |_ctx| {
+        let scope = enter_callback("probe");
+        let inside = role();
+        drop(scope);
+        (inside, role())
+    });
+    assert_eq!(inside, Role::Worker("bt-probe-callback"));
+    assert_eq!(after, Role::Worker("bt-probe-callback"));
 }

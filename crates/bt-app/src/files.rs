@@ -1249,7 +1249,7 @@ impl FilesWorker {
         bt_platform::spawn_at_priority(
             "bt-files-worker",
             bt_platform::ThreadPriority::BelowNormal,
-            move || {
+            move |_ctx| {
                 run_dir_worker(request_rx, |request| {
                     let outcome = read_directory(&request.path);
                     if response_tx

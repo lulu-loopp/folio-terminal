@@ -7290,7 +7290,7 @@ impl PreviewWorker {
         bt_platform::spawn_at_priority(
             "bt-preview-worker",
             bt_platform::ThreadPriority::BelowNormal,
-            move || {
+            move |_ctx| {
                 run_preview_worker(request_rx, |request| {
                     // **This thread is a disk**, and every one of its questions
                     // is about bytes at a path. A source with nothing at a path is

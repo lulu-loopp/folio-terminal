@@ -2037,7 +2037,7 @@ impl FontLane {
         if bt_platform::spawn_at_priority(
             "font-families",
             bt_platform::ThreadPriority::BelowNormal,
-            move || self.serve(),
+            move |_ctx| self.serve(),
         )
         .is_err()
         {

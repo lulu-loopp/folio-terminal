@@ -2155,7 +2155,7 @@ fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8
     bt_platform::spawn_at_priority(
         "bt-git-pipe",
         bt_platform::ThreadPriority::BelowNormal,
-        move || {
+        move |_ctx| {
             let mut buffer = Vec::new();
             if let Some(mut pipe) = pipe {
                 let _ = bt_platform::file_reads::Reader::new(
@@ -2232,7 +2232,7 @@ fn run_git_with_input(
         bt_platform::spawn_at_priority(
             "bt-git-stdin",
             bt_platform::ThreadPriority::BelowNormal,
-            move || {
+            move |_ctx| {
                 if let Some(pipe) = pipe.as_mut() {
                     use std::io::Write as _;
                     let _ = pipe.write_all(&input);
@@ -3910,7 +3910,7 @@ impl GitWorker {
         bt_platform::spawn_at_priority(
             "bt-git-worker",
             bt_platform::ThreadPriority::BelowNormal,
-            move || {
+            move |_ctx| {
                 let program = crate::profiles::find_git(&bt_pty::SystemShellEnvironment);
                 run_git_worker(request_rx, |request| {
                     let answer = match program.as_deref() {

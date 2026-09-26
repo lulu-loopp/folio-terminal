@@ -795,7 +795,7 @@ pub(crate) fn begin_probe() {
     bt_platform::spawn_at_priority(
         "copilot-version-probe",
         bt_platform::ThreadPriority::BelowNormal,
-        || {
+        |_ctx| {
             let _ = PROBE.set(run_probe());
             // After the answer is published, never before: a wake that raced the `set` would send
             // the loop to read an answer that is still missing, and there is no second wake coming.

@@ -53,6 +53,7 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use crate::NativeWindow;
+use crate::admission::WorkerCtx;
 
 /// The refusal's own words, so the caller can tell "this window will not do
 /// that" apart from "Windows could not".
@@ -138,6 +139,71 @@ pub enum Handoff {
 /// autoreleased objects, and a thread of our own has no pool that drains
 /// between requests); on a third platform it is nothing, and every door there
 /// already refuses.
+///
+/// **And it is a worker's** (A1b). [`ShellThread::enter`] takes the
+/// [`WorkerCtx`] the thread door lends the body of every thread it starts, so a
+/// hand-off can be prepared only on a thread the door started — never on the
+/// window thread, which has no such value, and never on a callback thread. The
+/// seven verbs behind [`ShellThread::hand_over`] are private to this module, so
+/// the value is the only road to them (the proofs are on `hand_over`).
+///
+/// It stays on the thread that entered it — its auto traits, each probed alone:
+///
+/// ```compile_fail
+/// fn is_send<T: Send>() {}
+/// is_send::<bt_platform::ShellThread>();
+/// ```
+///
+/// ```compile_fail
+/// fn is_sync<T: Sync>() {}
+/// is_sync::<bt_platform::ShellThread>();
+/// ```
+///
+/// MUTATION: make `_not_send` a `PhantomData<()>` and both compile. The control
+/// instantiates the same probes at a byte:
+///
+/// ```
+/// fn is_send<T: Send>() {}
+/// fn is_sync<T: Sync>() {}
+/// is_send::<u8>();
+/// is_sync::<u8>();
+/// ```
+///
+/// — and it cannot be carried to another thread, with no `'static` bound in the
+/// way (a scoped thread):
+///
+/// ```compile_fail
+/// // RED (A1b) — an entered apartment does not move to a thread that did not enter it.
+/// let _ = bt_platform::spawn_at_priority(
+///     "doc-probe",
+///     bt_platform::ThreadPriority::BelowNormal,
+///     |ctx| {
+///         let shell = bt_platform::ShellThread::enter(ctx);
+///         std::thread::scope(|threads| {
+///             threads.spawn(move || drop(shell));
+///         });
+///     },
+/// );
+/// ```
+///
+/// MUTATION: make `_not_send` a `PhantomData<()>` and it compiles. The control
+/// is the same scoped spawn carrying a byte, the value dropped where it was
+/// made:
+///
+/// ```no_run
+/// let _ = bt_platform::spawn_at_priority(
+///     "doc-probe",
+///     bt_platform::ThreadPriority::BelowNormal,
+///     |ctx| {
+///         let shell = bt_platform::ShellThread::enter(ctx);
+///         let byte = 0_u8;
+///         std::thread::scope(|threads| {
+///             threads.spawn(move || drop(byte));
+///         });
+///         drop(shell);
+///     },
+/// );
+/// ```
 pub struct ShellThread {
     /// Whether this value entered an apartment and so owes the matching leave.
     #[cfg(windows)]
@@ -148,8 +214,12 @@ pub struct ShellThread {
 impl ShellThread {
     /// Prepare the calling thread for hand-offs. Call it on the lane thread,
     /// before the first request.
+    ///
+    /// `worker` is the capability the thread door lent this thread's body: the
+    /// signature is the whole of the check, and the value is not read.
     #[must_use]
-    pub fn enter() -> Self {
+    pub fn enter(worker: &WorkerCtx) -> Self {
+        let _ = worker;
         Self {
             #[cfg(windows)]
             entered: windows_handoff::enter_apartment(),
@@ -166,6 +236,102 @@ impl ShellThread {
     /// # Errors
     ///
     /// Whatever the named door refuses with.
+    ///
+    /// # The only road
+    ///
+    /// The seven verbs this dispatches to are private to `bt_platform::handoff`
+    /// (A1b): nothing outside it — `bt-app` included — can name one by either
+    /// spelling, the crate root's or the module's, so a hand-off happens only
+    /// through an entered [`ShellThread`], which only a thread the door started
+    /// can hold.
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::shell_execute(NativeWindow::stand_in(0), "https://example.invalid/");
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::shell_execute(NativeWindow::stand_in(0), "https://example.invalid/");
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::open_local_file(NativeWindow::stand_in(0), std::path::Path::new("picture.png"));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::open_local_file(NativeWindow::stand_in(0), std::path::Path::new("picture.png"));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::open_local_path(NativeWindow::stand_in(0), std::path::Path::new("notes.md"));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::open_local_path(NativeWindow::stand_in(0), std::path::Path::new("notes.md"));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::open_local_path_verified(NativeWindow::stand_in(0), std::path::Path::new("notes.md"), bt_platform::VerifiedTarget::absent());
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::open_local_path_verified(NativeWindow::stand_in(0), std::path::Path::new("notes.md"), bt_platform::VerifiedTarget::absent());
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::reveal_in_explorer(NativeWindow::stand_in(0), std::path::Path::new("notes.md"));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::reveal_in_explorer(NativeWindow::stand_in(0), std::path::Path::new("notes.md"));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::reveal_verified(NativeWindow::stand_in(0), std::path::Path::new("notes.md"), bt_platform::VerifiedTarget::absent());
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::reveal_verified(NativeWindow::stand_in(0), std::path::Path::new("notes.md"), bt_platform::VerifiedTarget::absent());
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::open_system_fonts_page(NativeWindow::stand_in(0));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::open_system_fonts_page(NativeWindow::stand_in(0));
+    /// ```
+    ///
+    /// MUTATION: re-export the seven verbs again (`pub use` in `handoff` and at the
+    /// crate root) and every block above compiles. The control is the road that
+    /// stays, from a body the door started:
+    ///
+    /// ```no_run
+    /// let _ = bt_platform::spawn_at_priority(
+    ///     "doc-probe",
+    ///     bt_platform::ThreadPriority::BelowNormal,
+    ///     |ctx| {
+    ///         let shell = bt_platform::ShellThread::enter(ctx);
+    ///         shell.hand_over(
+    ///             bt_platform::NativeWindow::stand_in(0),
+    ///             &bt_platform::Handoff::FontsPage,
+    ///         )
+    ///     },
+    /// );
+    /// ```
     pub fn hand_over(&self, window: NativeWindow, request: &Handoff) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
@@ -703,16 +869,18 @@ mod portable_handoff {
 #[cfg(not(windows))]
 pub use portable_handoff::program_on_path;
 
-/// The other five, on a platform with neither a Win32 shell nor a `NSWorkspace`.
+/// The other seven, on a platform with neither a Win32 shell nor a `NSWorkspace` —
+/// private to this module, reached only through [`ShellThread::hand_over`].
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub use portable_handoff::{
+use portable_handoff::{
     open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
     reveal_in_explorer, reveal_verified, shell_execute,
 };
 
-/// **The five verbs that leave this window, over `NSWorkspace`** (M2-2).
+/// **The seven verbs that leave this window, over `NSWorkspace`** (M2-2) —
+/// private to this module, reached only through [`ShellThread::hand_over`].
 #[cfg(target_os = "macos")]
-pub use macos_handoff::{
+use macos_handoff::{
     open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
     reveal_in_explorer, reveal_verified, shell_execute,
 };
@@ -1655,9 +1823,14 @@ mod macos_handoff {
 
 /// The Windows half: the real directories, the real `PATHEXT`, the real disk.
 #[cfg(windows)]
-pub use windows_handoff::{
+pub use windows_handoff::program_on_path;
+
+/// The seven verbs that leave this window, over `ShellExecuteW` — private to
+/// this module, reached only through [`ShellThread::hand_over`].
+#[cfg(windows)]
+use windows_handoff::{
     open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
-    program_on_path, reveal_in_explorer, reveal_verified, shell_execute,
+    reveal_in_explorer, reveal_verified, shell_execute,
 };
 
 #[cfg(windows)]
@@ -2658,9 +2831,9 @@ mod tests {
     /// call down in tests instead of making it); what it cannot hold is Explorer's own
     /// behaviour, which is the owner's machine's measurement.
     ///
-    /// Run through [`ShellThread`], the lane's own entry, over a real file and a real folder, so
-    /// the argument is the real reveal's (`reveal_arguments` asked of the disk) and not a string
-    /// written here.
+    /// Run through [`ShellThread`], the lane's own entry, on a thread the door started (the only
+    /// thread that can enter one), over a real file and a real folder, so the argument is the real
+    /// reveal's (`reveal_arguments` asked of the disk) and not a string written here.
     ///
     /// MUTATION: delete the `let_the_receiver_take_the_front();` line from `hand_over`, or move
     /// it after `shell_execute_w`, and the first entry is no longer the grant.
@@ -2673,33 +2846,92 @@ mod tests {
         let file = scratch.join("notes.md");
         std::fs::write(&file, b"x").expect("a scratch file");
         let window = crate::NativeWindow::stand_in(0);
-        let shell = ShellThread::enter();
-        let _ = windows_handoff::recorded::take();
+        let (lane_file, lane_scratch) = (file.clone(), scratch.clone());
+        let lane = crate::spawn_at_priority(
+            "bt-test-handoff",
+            crate::ThreadPriority::BelowNormal,
+            move |ctx| {
+                let (file, scratch) = (lane_file, lane_scratch);
+                let shell = ShellThread::enter(ctx);
+                let _ = windows_handoff::recorded::take();
 
-        for request in [
-            Handoff::Reveal(file.clone()),
-            Handoff::Reveal(scratch.clone()),
-            Handoff::Open(file.clone()),
-        ] {
-            assert_eq!(shell.hand_over(window, &request), Ok(()), "{request:?}");
-            let calls = windows_handoff::recorded::take();
-            assert_eq!(calls.len(), 2, "one grant, one hand-off: {calls:?}");
-            assert_eq!(
-                calls[0], "AllowSetForegroundWindow(ASFW_ANY)",
-                "the grant comes first, or the receiver cannot take the front: {calls:?}"
-            );
-            assert!(calls[1].starts_with("ShellExecuteW "), "{calls:?}");
+                for request in [
+                    Handoff::Reveal(file.clone()),
+                    Handoff::Reveal(scratch.clone()),
+                    Handoff::Open(file.clone()),
+                ] {
+                    assert_eq!(shell.hand_over(window, &request), Ok(()), "{request:?}");
+                    let calls = windows_handoff::recorded::take();
+                    assert_eq!(calls.len(), 2, "one grant, one hand-off: {calls:?}");
+                    assert_eq!(
+                        calls[0], "AllowSetForegroundWindow(ASFW_ANY)",
+                        "the grant comes first, or the receiver cannot take the front: {calls:?}"
+                    );
+                    assert!(calls[1].starts_with("ShellExecuteW "), "{calls:?}");
+                }
+                // The grant is not a second decision: a refused hand-off grants nothing, because
+                // the refusal is the door's and comes before the call.
+                let program = scratch.join("payload.exe");
+                assert_eq!(
+                    shell.hand_over(window, &Handoff::Open(program)),
+                    Err(PROGRAM_REFUSED.to_owned())
+                );
+                assert!(windows_handoff::recorded::take().is_empty());
+            },
+        )
+        .expect("the door starts a thread");
+        if let Err(panic) = lane.join() {
+            std::panic::resume_unwind(panic);
         }
-        // The grant is not a second decision: a refused hand-off grants nothing, because the
-        // refusal is the door's and comes before the call.
-        let program = scratch.join("payload.exe");
-        assert_eq!(
-            shell.hand_over(window, &Handoff::Open(program)),
-            Err(PROGRAM_REFUSED.to_owned())
-        );
-        assert!(windows_handoff::recorded::take().is_empty());
 
         let _ = std::fs::remove_file(&file);
         let _ = std::fs::remove_dir(&scratch);
+    }
+
+    /// RED (A1b, worker-side M5) — **the hand-off is reached through an indirection only when
+    /// the indirection is handed the capability, and then it is the real door that answers.**
+    ///
+    /// A boxed closure and a function pointer, each typed `(&WorkerCtx)`, run inside a body the
+    /// thread door started and pass the lent capability on to [`ShellThread::enter`]; the entered
+    /// value hands a relative name — which every platform's door refuses before it asks the
+    /// machine anything — to the door it names. Both roads come back with the door's own refusal,
+    /// the same words, on a thread whose role is the worker's. (Their compile-time twins, the same
+    /// indirections typed with no capability, are the `compile_fail` pairs on
+    /// [`crate::admission::spawn_at_priority`].)
+    ///
+    /// MUTATION: have `ShellThread::door` answer `Ok(())` for `Handoff::Open` instead of calling
+    /// the verb, and the refusal assertion goes red.
+    #[test]
+    fn a_boxed_closure_and_a_function_pointer_reach_the_hand_off_only_with_the_capability() {
+        type HandOver = dyn Fn(&WorkerCtx) -> Result<(), String>;
+        fn through_a_pointer(ctx: &WorkerCtx) -> Result<(), String> {
+            ShellThread::enter(ctx).hand_over(
+                crate::NativeWindow::stand_in(0),
+                &Handoff::Open(PathBuf::from("relative-name.md")),
+            )
+        }
+        let worker = crate::spawn_at_priority(
+            "bt-test-indirect-handoff",
+            crate::ThreadPriority::BelowNormal,
+            |ctx| {
+                let boxed: Box<HandOver> = Box::new(|ctx| {
+                    ShellThread::enter(ctx).hand_over(
+                        crate::NativeWindow::stand_in(0),
+                        &Handoff::Open(PathBuf::from("relative-name.md")),
+                    )
+                });
+                let pointer: fn(&WorkerCtx) -> Result<(), String> = through_a_pointer;
+                (crate::admission::role(), boxed(ctx), pointer(ctx))
+            },
+        )
+        .expect("the door starts a thread");
+        let (role, boxed, pointer) = worker.join().expect("the worker ran");
+        assert_eq!(
+            role,
+            crate::admission::Role::Worker("bt-test-indirect-handoff")
+        );
+        let refusal = boxed.expect_err("a relative name is refused by every platform's door");
+        assert!(!refusal.is_empty(), "the door says why");
+        assert_eq!(pointer, Err(refusal), "both roads reach the same door");
     }
 }

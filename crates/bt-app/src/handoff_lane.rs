@@ -36,6 +36,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
+use bt_platform::admission::WorkerCtx;
 use bt_platform::{Handoff, NativeWindow};
 
 /// How many hand-offs may wait behind the one running.
@@ -85,22 +86,24 @@ impl HandoffLane {
     /// process.
     ///
     /// The thread enters its [`bt_platform::ShellThread`] first, which on Windows is the COM
-    /// apartment `ShellExecuteW` wants, and then hands each request to the door it names.
+    /// apartment `ShellExecuteW` wants, and then hands each request to the door it names. The
+    /// entry takes the capability the thread door lent this thread's body — the hand-off is a
+    /// worker-only door, and this lane is the one worker that holds it.
     pub(crate) fn spawn(wake: impl Fn() + Clone + Send + 'static) -> Result<Self> {
         Self::start(
-            || {
-                let shell = bt_platform::ShellThread::enter();
+            |ctx| {
+                let shell = bt_platform::ShellThread::enter(ctx);
                 move |window: NativeWindow, handoff: &Handoff| shell.hand_over(window, handoff)
             },
             wake,
         )
     }
 
-    /// The lane with the executor made on its own thread — the production one above, or a
-    /// recording one in a test.
+    /// The lane with the executor made on its own thread, from the capability the door lent it —
+    /// the production one above, or a recording one in a test.
     fn start<M, E, W>(make_executor: M, wake: W) -> Result<Self>
     where
-        M: FnOnce() -> E + Send + 'static,
+        M: FnOnce(&WorkerCtx) -> E + Send + 'static,
         E: FnMut(NativeWindow, &Handoff) -> Result<(), String>,
         W: Fn() + Clone + Send + 'static,
     {
@@ -110,7 +113,7 @@ impl HandoffLane {
         bt_platform::spawn_at_priority(
             "bt-os-handoff",
             bt_platform::ThreadPriority::BelowNormal,
-            move || run_handoff_lane(request_rx, answer_tx, make_executor(), lane_wake),
+            move |ctx| run_handoff_lane(request_rx, answer_tx, make_executor(ctx), lane_wake),
         )
         .context("spawn the OS hand-off lane")?;
         Ok(Self {
@@ -311,7 +314,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
         let lane = HandoffLane::start(
-            move || {
+            move |_ctx| {
                 move |_window: NativeWindow, handoff: &Handoff| {
                     let count = {
                         let mut log = log.lock().expect("the log");
@@ -470,7 +473,10 @@ mod tests {
     /// the program refusal. The door now answers on the lane, so the words are rebuilt from a
     /// [`Completion`] — and a reader must not be able to tell. Run through the **real** lane with
     /// the **real** [`bt_platform::ShellThread`] over the **real** verifier's answer for a real
-    /// folder, against the old code's own spelling of the same line.
+    /// folder, against the old code's own spelling of the same line. The door's own answer for that
+    /// spelling is asked through the only road to it that is left (A1b made the verbs private to
+    /// `bt_platform::handoff`): a `ShellThread` entered on a second thread the thread door started,
+    /// handed the same two requests — not through the lane under test.
     ///
     /// The program is a folder so that one fixture is a program on both machines without touching
     /// a mode bit: `payload.exe` is one by name to Windows, `Payload.app` is one by bundle to
@@ -523,18 +529,18 @@ mod tests {
                     .then(crate::files_program_refused_notice),
             }
         };
-        let old = [
-            before(bt_platform::open_local_path_verified(
-                window(),
-                &program,
-                facts,
-            )),
-            before(bt_platform::open_local_path_verified(
-                window(),
-                &missing,
-                bt_platform::VerifiedTarget::absent(),
-            )),
-        ];
+        let doors = bt_platform::spawn_at_priority(
+            "bt-test-handoff-door",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |ctx| {
+                let shell = bt_platform::ShellThread::enter(ctx);
+                requests.map(|request| shell.hand_over(window(), &request))
+            },
+        )
+        .expect("the door starts a thread")
+        .join()
+        .expect("the door answered");
+        let old = doors.map(before);
         for (completion, old) in answered.iter().zip(old) {
             let reason = completion
                 .outcome
@@ -662,7 +668,7 @@ pub(crate) mod contract_adapter {
         let door = Arc::clone(&gate);
         let wake = Arc::clone(&probe);
         let lane = HandoffLane::start(
-            move || {
+            move |_ctx| {
                 move |_window: NativeWindow, handoff: &Handoff| {
                     door.pass(question_of(handoff));
                     Ok(())

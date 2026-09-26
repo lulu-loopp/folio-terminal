@@ -524,7 +524,7 @@ impl SessionWriter {
         self.thread = bt_platform::spawn_at_priority(
             "session-writer",
             bt_platform::ThreadPriority::BelowNormal,
-            move || {
+            move |_ctx| {
                 let Some(ends) = ends.lock().ok().and_then(|mut held| held.take()) else {
                     return;
                 };
