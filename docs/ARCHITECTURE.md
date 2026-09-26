@@ -644,7 +644,7 @@ admitted in (§5.1). Rows 16b and 23 were found by the thread-door note
 | `WebEnvironment` | 21 | `WebEnvironment` | Running | `WebHost::request_environment` | `WebSeat::start_environment` | one call |
 | `WebRehost` | 21 | `WebRehost` | Running | `WebHost::rehost` | `WebSeat::rehost` | the steps and their commits |
 | `ImeCaretArea` | 22 | `ImeCursorArea` | Running, Exiting | `owner_door::set_ime_cursor_area` | `Runtime::apply_ime_cursor_area` | one call |
-| `GpuOpen` | 23 | `GpuOpen` | Running | `gpu_door::open` (`pollster::block_on(GpuContext::open)`) | `Runtime::create` | one call |
+| `GpuOpen` | 23 | `GpuOpen` | Running | `gpu_door::open_first_window` (`pollster::block_on(GpuContext::open)`) | `Runtime::create` | one call |
 | `FocusWindow` | §5.2 | `WindowFocus` | Running | `owner_door::focus_window` | `Runtime::open_from_notification` | one call |
 | `SetVisible` | §5.2 | `WindowVisible` | Running, Exiting | `owner_door::set_visible` | `Runtime::put_the_window_on_the_glass`, `Runtime::hide_quake_window`, `Runtime::let_go_of_this_window` | one call |
 | `SetCursor` | §5.2 | `WindowCursor` | Running | `owner_door::set_cursor` | `Runtime::apply_pointer_cursor` | one call |

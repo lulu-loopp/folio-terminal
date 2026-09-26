@@ -72,6 +72,7 @@ mod git_graph;
 mod git_panel;
 mod git_watch;
 mod glyph_trace;
+mod gpu_door;
 mod handoff_lane;
 mod hang_watch;
 mod hex_peek;
@@ -41498,12 +41499,22 @@ impl Runtime<'_> {
         // and a floor that learned its colour only from the *next* theme flip
         // would be black under the first one.
         install_page_ground_color(&compositor);
-        let (mut gpu, mut renderer) = pollster::block_on(GpuContext::open(
-            window_surface_target(&window, &compositor),
-            physical.width,
-            physical.height,
-            startup_scale_factor,
-        ))
+        // Row 23's wait, admitted as its owner-thread door (`doors::GpuOpen`); a refusal is this
+        // road's own error.
+        let (mut gpu, mut renderer) = bt_platform::admission::admitted::<
+            bt_platform::admission::doors::GpuOpen,
+            _,
+        >(|token| {
+            gpu_door::open_first_window(
+                token,
+                window_surface_target(&window, &compositor),
+                physical.width,
+                physical.height,
+                startup_scale_factor,
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
         .context("initialize wgpu renderer")?;
         note_gpu_adapter(&gpu);
         if trace_startup && let Some(alpha) = renderer.alpha_report() {
