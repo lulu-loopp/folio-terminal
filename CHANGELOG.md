@@ -6,6 +6,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Internal
+
+- The self-updater's recovery rules exist as tested code: what an interrupted
+  update leaves on disk decides whether it is finished, rolled back or retried.
+  Nothing calls them yet, and no build updates itself.
+
 ### Fixed
 
 - A web pane survives the browser engine updating itself underneath it.

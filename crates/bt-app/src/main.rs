@@ -161,6 +161,7 @@ mod trace;
 mod trace_sink;
 mod uninstall;
 mod update;
+mod update_txn;
 mod version;
 mod video_seat;
 mod watch_clock;
