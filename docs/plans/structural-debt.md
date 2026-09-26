@@ -241,7 +241,7 @@ ledger's.
 | D-49 | §7.2 chain stub — resize | §7.2 | none yet | 0.4.7 | open |
 | D-50 | §7.2 chain stub — paste convergence | §7.2 | none yet | 0.4.6 — tickets 02 and 03 have just walked it | open |
 | D-51 | §4.2 class — observations of external state (survey facts 1, 5, 6, 7, 12) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
-| D-52 | §4.2 class — asynchronous publication and competing operations (facts 4, 10, 13, 19, 22) | §4.2; survey Part 4 | none yet | 0.4.6, with D-3 | open |
+| D-52 | §4.2 class — asynchronous publication and competing operations (facts 4, 10, 13, 19, 22) | §4.2; survey Part 4 | none yet | 0.4.6, with D-3 | open — fact 10 touched by U-25, not widened (the start's renewal rides the existing probe and latch) |
 | D-53 | §4.2 class — durability and external transactions (facts 8, 9, 11) | §4.2; survey Part 4 | U-6 | 0.4.6, with D-34 and D-47 | open — **narrowed by U-6 (0.4.6)**: fact 11's part repaid — the update check's memory, file and claim have one owner, `update::OfferState`, whose one lock is held across every read-modify-write; facts 8 and 9 remain |
 | D-54 | §4.2 class — identity, admission and lifecycle (facts 2, 3, 14, 20) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
 | D-55 | §4.2 class — projections, delivery and loss (facts 15, 16, 17, 18, 21) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
@@ -1114,7 +1114,9 @@ lanes they name; D-51, D-54 and D-55 are 0.4.7.
   read), 12 (`shell_integration::PROFILE_ANSWERS`, never re-asked).
 - **D-52 · asynchronous publication and competing operations** — facts 4
   (`schemes::CATALOGUE` and `REVISION`), 10 (Explorer registration's three
-  copies), 13 (the font slots, two writers), 19 (`profile_runtime::REMOVAL`,
+  copies; **touched by U-25, not widened** — the start's renewal is one more
+  trigger of the same probe under the same `BUSY` latch, not a new copy or a
+  new writer thread), 13 (the font slots, two writers), 19 (`profile_runtime::REMOVAL`,
   one slot, two writers, no latch), 22 (the generation check re-derived three
   times: `window.background_decode`, `window.clipboard_picture`, the web host).
 - **D-53 · durability and external transactions** — facts 8 (the session

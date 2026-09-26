@@ -6629,8 +6629,9 @@ pub fn focus_mode_row_in(lang: Lang, chord: Option<&str>) -> String {
 /// So the sentences are interned instead, and the pool is bounded by the things
 /// that generate them: one entry per language per distinct value this process is
 /// told about — at most two versions, and one chord per recording the reader
-/// makes on the `focus-mode` row. It does not grow with frames, with dialog
-/// opens, or with time.
+/// makes on the `focus-mode` row, and at most one refusal of the Explorer
+/// registration's renewal per start (`explorer_menu::renewal_line`, U-25).
+/// It does not grow with frames, with dialog opens, or with time.
 pub(crate) fn intern(text: String) -> &'static str {
     static POOL: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
     let mut pool = POOL

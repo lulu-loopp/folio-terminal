@@ -768,6 +768,24 @@ The substitution is done on the parsed XML and not with a search over the text,
 because `0.0.0.0` appears twice in that file: once as the attribute and once in
 the comment explaining why the attribute is a placeholder.
 
+### A registration is renewed at the next start after an update (0.4.6, U-25)
+
+A registration records the version of the `folio.msix` it was made from, and an
+update replaces `folio.exe` and `folio.msix` without touching the deployment
+database. So every start of every copy compares the registration it reads with
+this build's own four-part version — the same `major.minor.patch.0` this script
+writes, read in `bt_app::explorer_menu::this_package_version` with the parser
+`build.rs` uses for `VERSIONINFO`. When the registration names **this** folder
+and is older, the start registers the `folio.msix` beside it again; equal or
+newer, another folder's registration, or no registration at all, and it does
+nothing. It runs on the Explorer probe's worker, under the same latch as the
+switch, and during an update's trial it waits for the commit like the probe
+does. A refusal shows on the Explorer row in the words a refused registration
+has, and the next start tries again; `diagnostics.log` gets one
+`BT_EXPLORER_PACKAGE renewal:` line per start naming the outcome and the two
+versions. Nothing about when a registration exists changes: the setting still
+decides that.
+
 ### `makeappx.exe`
 
 `makeappx.exe` comes from the Windows SDK — the same install `signtool.exe` comes
