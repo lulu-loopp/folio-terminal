@@ -70386,8 +70386,8 @@ fn main() -> Result<()> {
     // one line until its door arrives (U-23).
     if let Some(door) = cli::update_door(std::env::args_os().skip(1)) {
         let usage = match door {
-            Ok(cli::UpdateDoor::Recover { then_launch }) => {
-                std::process::exit(update_recover::run_here(then_launch))
+            Ok(cli::UpdateDoor::Recover { home, then_launch }) => {
+                std::process::exit(update_recover::run_here(home, then_launch))
             }
             Ok(cli::UpdateDoor::Apply) => None,
             Err(usage) => Some(usage),

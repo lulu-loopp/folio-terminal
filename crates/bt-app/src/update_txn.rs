@@ -1934,6 +1934,42 @@ impl Home {
         ))
     }
 
+    /// **The home the entrance named, and the installed program the rescue
+    /// build at `exe` starts again** — `--update-recover <home>` (F-3).
+    ///
+    /// macOS: `home` must be a locator's home, `<parent>/.<Bundle>.folio-update`;
+    /// the installed bundle is `<parent>/<Bundle>`, and its program sits where
+    /// the rescue clone's own executable sits inside the clone (the clone is a
+    /// copy of that bundle). Windows: the home the rescue build's own path
+    /// gives ([`Home::of_rescue`]), which must be the one named. `None` for a
+    /// name that is not a home's, and on every other platform.
+    pub(crate) fn of_rescue_named(
+        platform: HostPlatform,
+        exe: &Path,
+        home: &Path,
+    ) -> Option<(Self, PathBuf)> {
+        match platform {
+            HostPlatform::Windows => {
+                Self::of_rescue(platform, exe).filter(|(found, _)| found.root == home)
+            }
+            HostPlatform::MacOs => {
+                let name = home.file_name()?.to_str()?;
+                let bundle_name = name.strip_prefix('.')?.strip_suffix(MACOS_HOME_SUFFIX)?;
+                let bundle = home.parent()?.join(bundle_name);
+                let (_, inside) = bundle_of(exe)?;
+                let mut found = Self::for_bundle(&bundle)?;
+                if found.root != home {
+                    return None;
+                }
+                if let RescueShape::Bundle { inside: at, .. } = &mut found.rescue {
+                    *at = inside.to_path_buf();
+                }
+                Some((found, bundle.join(inside)))
+            }
+            HostPlatform::OtherUnix => None,
+        }
+    }
+
     /// **The locator (F-3): the macOS home of the bundle at `bundle`**, a fixed
     /// sibling `<parent>/.<BundleName>.folio-update/`, or `None` for a path
     /// that is not an `.app` with a parent.
@@ -4169,6 +4205,71 @@ mod tests {
         assert_eq!(windows.stage_bundle(txn()), None);
         assert_eq!(windows.rescue_executable(txn()), None);
         assert_eq!(windows.mount_point(txn()), None);
+    }
+
+    /// RED (U-26) — **a home named by the entrance gives the recovery its
+    /// journal and the installed program: on macOS from the home's name and
+    /// the clone's own place, on Windows only when it is the home the rescue
+    /// build's path gives.**
+    ///
+    /// F-3's plist passes `--update-recover <home>`; F-2's `Run` value passes
+    /// no home. A name that is not a locator's home is no home at all.
+    ///
+    /// MUTATION: in `Home::of_rescue_named`'s macOS arm, drop the
+    /// `found.root != home` check.
+    #[test]
+    fn a_named_home_gives_the_journal_and_the_installed_program() {
+        let applications = PathBuf::from("/Applications");
+        let home = applications.join(".Folio.app.folio-update");
+        let clone = home
+            .join("7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a")
+            .join("rescue")
+            .join("Folio.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("folio");
+        let (found, installed) = Home::of_rescue_named(HostPlatform::MacOs, &clone, &home).unwrap();
+        assert_eq!(found.journal(), home.join("journal.json"));
+        assert_eq!(
+            installed,
+            applications
+                .join("Folio.app")
+                .join("Contents")
+                .join("MacOS")
+                .join("folio")
+        );
+        for not_a_home in [
+            applications.join("Folio.app"),
+            applications.join(".Folio.app"),
+            applications.join(".Folio.folio-update"),
+            PathBuf::from("/"),
+        ] {
+            assert_eq!(
+                Home::of_rescue_named(HostPlatform::MacOs, &clone, &not_a_home),
+                None,
+                "{not_a_home:?}"
+            );
+        }
+
+        let install = PathBuf::from(r"C:\Folio");
+        let rescue = install
+            .join(WINDOWS_HOME)
+            .join("7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a")
+            .join("rescue")
+            .join("folio.exe");
+        let derived = Home::of_rescue(HostPlatform::Windows, &rescue).unwrap();
+        assert_eq!(
+            Home::of_rescue_named(HostPlatform::Windows, &rescue, &install.join(WINDOWS_HOME)),
+            Some(derived)
+        );
+        assert_eq!(
+            Home::of_rescue_named(HostPlatform::Windows, &rescue, &install.join("elsewhere")),
+            None
+        );
+        assert_eq!(
+            Home::of_rescue_named(HostPlatform::OtherUnix, &clone, &home),
+            None
+        );
     }
 
     /// PIN (U-26) — **the LaunchAgent entrance starts the rescue build with the

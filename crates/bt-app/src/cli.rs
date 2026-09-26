@@ -829,8 +829,13 @@ pub fn uninstall_cleanup(
 /// **What a line that opens with an update's own door asks for.**
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpdateDoor {
-    /// `--update-recover [--then-launch <argument>...]`.
+    /// `--update-recover [<home>] [--then-launch <argument>...]`.
     Recover {
+        /// The installation home, when the entrance names it: the macOS
+        /// LaunchAgent does (`<parent>/.<Bundle>.folio-update`, F-3); the
+        /// Windows `Run` value does not, and the rescue build derives the home
+        /// from its own path (F-2).
+        home: Option<PathBuf>,
         /// The command line to start the installed Folio with afterwards, when
         /// an ordinary start handed itself over; `None` when the entrance at
         /// logon started the rescue build.
@@ -841,7 +846,8 @@ pub enum UpdateDoor {
 }
 
 /// The one line `--update-recover` answers a malformed line with.
-pub const UPDATE_RECOVER_USAGE: &str = "folio --update-recover [--then-launch <argument>...]";
+pub const UPDATE_RECOVER_USAGE: &str =
+    "folio --update-recover [<home>] [--then-launch <argument>...]";
 
 /// **The rescue build's two doors, recognised by the first word and only the
 /// first** — [`explorer_command`]'s rule, for its reason: these processes
@@ -851,9 +857,12 @@ pub const UPDATE_RECOVER_USAGE: &str = "folio --update-recover [--then-launch <a
 /// `None` is every other launch. `--then-launch` takes the rest of the line
 /// whatever it says, `--`, flags and all: it is somebody else's command line.
 ///
+/// The one word `--update-recover` may take before `--then-launch` is the
+/// installation home: any argument that does not begin with `-`.
+///
 /// # Errors
-/// [`UPDATE_RECOVER_USAGE`] when `--update-recover` is followed by anything
-/// but `--then-launch`.
+/// [`UPDATE_RECOVER_USAGE`] when `--update-recover` (and its home) is
+/// followed by anything but `--then-launch`.
 pub fn update_door(
     args: impl IntoIterator<Item = OsString>,
 ) -> Option<Result<UpdateDoor, &'static str>> {
@@ -861,12 +870,25 @@ pub fn update_door(
     let first = args.next()?;
     match first.to_str()? {
         UPDATE_APPLY_FLAG => Some(Ok(UpdateDoor::Apply)),
-        UPDATE_RECOVER_FLAG => Some(match args.next() {
-            None => Ok(UpdateDoor::Recover { then_launch: None }),
-            Some(next) if next.to_str() == Some(THEN_LAUNCH_FLAG) => Ok(UpdateDoor::Recover {
-                then_launch: Some(args.collect()),
-            }),
-            Some(_) => Err(UPDATE_RECOVER_USAGE),
+        UPDATE_RECOVER_FLAG => Some({
+            let mut next = args.next();
+            let home = next
+                .take_if(|word| !word.to_string_lossy().starts_with('-'))
+                .map(PathBuf::from);
+            if home.is_some() {
+                next = args.next();
+            }
+            match next {
+                None => Ok(UpdateDoor::Recover {
+                    home,
+                    then_launch: None,
+                }),
+                Some(word) if word.to_str() == Some(THEN_LAUNCH_FLAG) => Ok(UpdateDoor::Recover {
+                    home,
+                    then_launch: Some(args.collect()),
+                }),
+                Some(_) => Err(UPDATE_RECOVER_USAGE),
+            }
         }),
         _ => None,
     }
@@ -1885,6 +1907,52 @@ mod tests {
         );
     }
 
+    /// RED (U-26) — **`--update-recover` takes the installation home as an
+    /// optional first word: the macOS LaunchAgent names it, the Windows `Run`
+    /// value does not.**
+    ///
+    /// F-3: the plist runs the rescue executable with `--update-recover
+    /// <home>`; F-2: the `Run` value's command is `"<rescue>" --update-recover`
+    /// and the rescue build finds the journal from its own path. Both lines
+    /// open the same door, and a home may be followed by `--then-launch`.
+    ///
+    /// MUTATION: in `update_door`, take no home (drop the `take_if`).
+    #[test]
+    fn the_recovery_door_takes_a_home_or_derives_one() {
+        let home = "/Applications/.Folio.app.folio-update";
+        assert_eq!(
+            update_door(args(&["--update-recover", home])),
+            Some(Ok(UpdateDoor::Recover {
+                home: Some(PathBuf::from(home)),
+                then_launch: None
+            }))
+        );
+        assert_eq!(
+            update_door(args(&[
+                "--update-recover",
+                home,
+                "--then-launch",
+                "--cwd",
+                "/x"
+            ])),
+            Some(Ok(UpdateDoor::Recover {
+                home: Some(PathBuf::from(home)),
+                then_launch: Some(args(&["--cwd", "/x"]))
+            }))
+        );
+        assert_eq!(
+            update_door(args(&["--update-recover"])),
+            Some(Ok(UpdateDoor::Recover {
+                home: None,
+                then_launch: None
+            }))
+        );
+        assert_eq!(
+            update_door(args(&["--update-recover", home, "extra"])),
+            Some(Err(UPDATE_RECOVER_USAGE))
+        );
+    }
+
     /// RED (U-12) — **the line an ordinary start hands itself to the rescue
     /// build with is the line the rescue door reads back, the handed command
     /// line verbatim; and the two rescue doors open on the first word only.**
@@ -1909,18 +1977,23 @@ mod tests {
         assert_eq!(
             update_door(line),
             Some(Ok(UpdateDoor::Recover {
+                home: None,
                 then_launch: Some(handed)
             }))
         );
         assert_eq!(
             update_door(recover_command_line(&[])),
             Some(Ok(UpdateDoor::Recover {
+                home: None,
                 then_launch: Some(Vec::new())
             }))
         );
         assert_eq!(
             update_door(args(&["--update-recover"])),
-            Some(Ok(UpdateDoor::Recover { then_launch: None }))
+            Some(Ok(UpdateDoor::Recover {
+                home: None,
+                then_launch: None
+            }))
         );
         assert_eq!(
             update_door(args(&["--update-recover", "--cwd", "D:\\x"])),

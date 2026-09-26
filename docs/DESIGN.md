@@ -12513,3 +12513,11 @@ The source guard `tests::every_thread_bt_app_and_bt_platform_start_comes_through
 **Undo.** `--uninstall-cleanup` gains two macOS rows: the update entrances in `~/Library/LaunchAgents`, removed by the door's exact name shape and nothing else, and this bundle's home, removed whole. The Windows home is inside the install folder; the Windows `Run` value's row is U-22's.
 
 **Not here.** No product caller: the macOS Prepare (U-27) clones and makes the home, and the exchange (U-28) arms. macOS self-update stays off until its recovery contract passes its experiments (owner ruling 2, 2026-09-25).
+
+### 2026-09-26 — The journal's `Armed` proof is one type for both platforms, and `--update-recover` takes the home the macOS entrance names
+
+Supersedes the U-22 entry's "`bt_platform::logon_hook::Armed`, which only `logon_hook::arm` makes" and U-12's `--update-recover [--then-launch …]` grammar; revision (b), F-2 and F-3.
+
+**One proof.** `update_txn::Event::Armed` carries `bt_platform::install_txn::Armed`. Two functions construct it, each after its read-back: `logon_hook::arm_in`, for the Windows `Run` value, and `launch_agent::arm_with`, for the macOS LaunchAgent plist. `logon_hook::Armed` is a re-export of the same type. The proof is still not `Clone`, still binds its transaction (`Refusal::EntranceForAnotherTransaction`), and still keeps its fields private. A pin (`update_txn::tests::only_the_two_entrance_doors_make_the_armed_proof`) reads `bt-platform` through `bt_source` and finds `Armed::proved(` only in those two.
+
+**The home on the command line.** `--update-recover [<home>] [--then-launch <argument>…]`. The macOS plist names the home, as F-3 specifies, and `update_txn::Home::of_rescue_named` takes the journal from it and the installed bundle from its name (`.<Bundle>.folio-update` gives `<Bundle>`), keeping the executable's place inside the clone. The Windows `Run` value names no home, and the rescue build derives it from its own path (`Home::of_rescue`). A named home on Windows is accepted only when it is that derived one.

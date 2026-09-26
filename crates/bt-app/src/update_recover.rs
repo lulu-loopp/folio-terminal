@@ -1,4 +1,4 @@
-//! **`folio --update-recover [--then-launch <argument>...]`: the rescue
+//! **`folio --update-recover [<home>] [--then-launch <argument>...]`: the rescue
 //! build's recovery door** (0.4.6 ticket U-22;
 //! `docs/plans/design/self-update-2026-09-16.md` revision (b), F-2 and F-6).
 //!
@@ -6,9 +6,13 @@
 //! (`bt_platform::logon_hook`, `"<H>\<txn>\rescue\folio.exe" --update-recover`),
 //! and an ordinary start that found a transaction it may not continue through
 //! (`update_startup`, which adds `--then-launch` and its own command line).
-//! The rescue build finds everything from its own path: the installation home
-//! `H` is three folders up, the journal is `H\journal.json`, and the installed
-//! program is `<install>\<its own name>` (`update_txn::Home::of_rescue`).
+//! On Windows the rescue build finds everything from its own path: the
+//! installation home `H` is three folders up, the journal is
+//! `H\journal.json`, and the installed program is `<install>\<its own name>`
+//! (`update_txn::Home::of_rescue`). On macOS the LaunchAgent names the home
+//! (`bt_platform::launch_agent`, `--update-recover <home>`, U-26): the journal
+//! is in it, and the installed bundle is the one the home's name is made of
+//! (`update_txn::Home::of_rescue_named`).
 //!
 //! **What it does today, until recovery itself arrives (U-23, U-24).** It
 //! reads the journal's frozen header — nothing else, and it moves and removes
@@ -58,7 +62,7 @@ pub(crate) trait World {
 }
 
 /// **The door, for this process**: this executable must be a rescue build.
-pub(crate) fn run_here(then_launch: Option<Vec<OsString>>) -> i32 {
+pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>) -> i32 {
     let mut world = Machine;
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
@@ -69,7 +73,12 @@ pub(crate) fn run_here(then_launch: Option<Vec<OsString>>) -> i32 {
             return 2;
         }
     };
-    let Some((home, installed)) = Home::of_rescue(bt_platform::host_platform(), &exe) else {
+    let platform = bt_platform::host_platform();
+    let found = match &home {
+        Some(named) => Home::of_rescue_named(platform, &exe, named),
+        None => Home::of_rescue(platform, &exe),
+    };
+    let Some((home, installed)) = found else {
         world.say(&format!(
             "BT_UPDATE_RECOVER {} is not a rescue build; {} runs only from an installation home's rescue folder",
             exe.display(),
