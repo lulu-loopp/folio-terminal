@@ -6617,6 +6617,9 @@ impl DeviceResources {
         {
             let latch = Arc::clone(&device_loss);
             device.set_device_lost_callback(move |reason, message| {
+                // wgpu's choice of thread: the window thread when it notices during a call made
+                // there, a backend thread otherwise (design note 2026-09-26, revision (c)7).
+                let _callback = bt_platform::admission::enter_callback("gpu-device-lost");
                 if let Some(line) = note_what_the_device_said(
                     &latch,
                     DEVICE_LOST_HEADLINE,
@@ -6630,6 +6633,8 @@ impl DeviceResources {
         {
             let latch = Arc::clone(&device_fault);
             device.on_uncaptured_error(Arc::new(move |error: wgpu::Error| {
+                // The thread of the call that raised the error.
+                let _callback = bt_platform::admission::enter_callback("gpu-uncaptured-error");
                 // **Nothing in here may panic**, and that is the whole of what
                 // this handler is for. It is called from inside wgpu, on the
                 // thread of whatever call raised the error and with wgpu's own

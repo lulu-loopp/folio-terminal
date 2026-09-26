@@ -6190,6 +6190,7 @@ mod windows_impl {
                     ToastNotification,
                     windows::core::IInspectable,
                 >::new(move |_sender, arguments| {
+                    let _callback = crate::admission::enter_callback("toast-activated");
                     let launched = arguments
                         .as_ref()
                         .and_then(|arguments| arguments.cast::<ToastActivatedEventArgs>().ok())
@@ -11547,6 +11548,7 @@ mod windows_impl {
         };
 
         unsafe extern "system" fn handle(event: u32) -> windows::core::BOOL {
+            let _callback = crate::admission::enter_callback("console-ctrl");
             matches!(event, CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT).into()
         }
 

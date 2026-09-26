@@ -50429,6 +50429,9 @@ impl App {
     /// window's [`Runtime::close_window`] has taken its picture, and never per
     /// window, because a second window's shut is not this process ending.
     fn finish(&mut self) {
+        // The process is ending: the session's last write and its writer's retirement are exit
+        // doors (§5.3 rows 16 and 16b).
+        bt_platform::admission::exiting();
         self.session_store.close();
     }
 
@@ -61881,6 +61884,9 @@ impl FolioApp {
                     self.report_to_quit(quit::Quit::photographed);
                 }
                 quit::QuitStep::Write => {
+                    // The way out begins with the write (§5.3 rows 15–17 are admitted from here);
+                    // a refused write comes back at `Abandon`.
+                    bt_platform::admission::exiting();
                     let landed = match self.app.as_mut() {
                         Some(app) => app.session_store.flush_judged(),
                         None => return Ok(()),
@@ -61974,6 +61980,9 @@ impl FolioApp {
                     return Ok(());
                 }
                 quit::QuitStep::Abandon => {
+                    // Back to `Running` after a refused write; a quit cancelled at its card, or
+                    // whose saves did not all land, never left it.
+                    bt_platform::admission::quit_abandoned();
                     if let Some(app) = self.app.as_mut() {
                         app.quit = None;
                     }
@@ -63673,8 +63682,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
     /// that wedges inside that event is a thread holding control — which is a
     /// hang, and would be excused by the deadline it was parked with if the
     /// parking outlived the park.
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, _cause: StartCause) {
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
         hang_watch::woke();
+        // winit's first callback, before `resumed`: the window thread's phase turns to `Running`.
+        if matches!(cause, StartCause::Init) {
+            bt_platform::admission::loop_running();
+        }
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
@@ -70147,6 +70160,11 @@ fn main() -> Result<()> {
             std::process::exit(fault.exit_code());
         }
     };
+    // **This thread owns the window from here** (`bt_platform::admission`, ARCHITECTURE §5.1):
+    // the role every owner-thread door is admitted on, in the phase `Starting` until the loop's
+    // first turn. Below the five argv doors, whose processes never have a window, and above the
+    // hand-over, which is this phase's one wait (§5.3 row 18).
+    bt_platform::admission::enter_window_thread();
     // **And the third doorbell, which is this program ringing its own** (§7.59).
     //
     // The claim on the data directory is R4-5's and is taken exactly where it
@@ -70320,7 +70338,15 @@ fn main() -> Result<()> {
         use winit::platform::macos::EventLoopBuilderExtMacOS;
         builder.with_default_menu(false);
     }
-    let event_loop = builder.build().context("create winit event loop")?;
+    let event_loop = match builder.build() {
+        Ok(event_loop) => event_loop,
+        Err(error) => {
+            // The way out from before the loop: `_trace_shutdown`'s drop flushes the trace, which
+            // is an exit door (§5.3 row 17), so the phase says so first.
+            bt_platform::admission::exiting();
+            return Err(anyhow::Error::new(error).context("create winit event loop"));
+        }
+    };
     let _ = SUMMON_PROXY.set(event_loop.create_proxy());
     // **The application delegate, and it has to be here** (M3-1, X-4).
     //
@@ -70376,6 +70402,9 @@ fn main() -> Result<()> {
     let outcome = event_loop
         .run_app(&mut application)
         .map_err(|error| anyhow!(error));
+    // The loop has returned, and what follows is the way out (§5.3 rows 15–17) — from `Running`,
+    // or from `Starting` when the loop stopped before its first turn.
+    bt_platform::admission::exiting();
     // The session that outlived every question is released once the loop has
     // returned, never before a question could still be in flight.
     bt_platform::video::shutdown_media_session();

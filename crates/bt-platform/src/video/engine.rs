@@ -1393,6 +1393,7 @@ struct Notify {
 
 impl IMFMediaEngineNotify_Impl for Notify_Impl {
     fn EventNotify(&self, event: u32, _param1: usize, _param2: u32) -> windows::core::Result<()> {
+        let _callback = crate::admission::enter_callback("mf-engine-notify");
         if let Ok(commands) = self.commands.lock() {
             // A closed channel is an engine whose thread has already stopped,
             // which is an ordinary ending and not an error to report to the

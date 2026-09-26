@@ -308,6 +308,7 @@ define_class!(
             request: &NSURLRequest,
             handler: &DynBlock<dyn Fn(*mut NSURLRequest)>,
         ) {
+            let _callback = crate::admission::enter_callback("http-session");
             let secure = request
                 .URL()
                 .and_then(|url| url.scheme())
@@ -338,6 +339,7 @@ define_class!(
             _task: &NSURLSessionTask,
             error: Option<&NSError>,
         ) {
+            let _callback = crate::admission::enter_callback("http-session");
             let exchange = self.ivars();
             if let Some(error) = error {
                 exchange.refuse(format!("NSURLSession: {}", error.localizedDescription()));
@@ -363,6 +365,7 @@ define_class!(
             response: &NSURLResponse,
             handler: &DynBlock<dyn Fn(NSURLSessionResponseDisposition)>,
         ) {
+            let _callback = crate::admission::enter_callback("http-session");
             let status = response
                 .downcast_ref::<NSHTTPURLResponse>()
                 .map(NSHTTPURLResponse::statusCode);
@@ -387,6 +390,7 @@ define_class!(
             task: &NSURLSessionDataTask,
             data: &NSData,
         ) {
+            let _callback = crate::admission::enter_callback("http-session");
             let exchange = self.ivars();
             let chunk = data.to_vec();
             let mut progress = exchange.locked();
