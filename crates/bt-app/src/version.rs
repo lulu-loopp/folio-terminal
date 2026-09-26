@@ -293,8 +293,22 @@ mod tests {
             VERSION,
             "CFBundleVersion, what the system orders builds by, is the same line"
         );
+        // `FolioMinUpdater` (0.4.6 ticket U-9) is a version too, and it is this
+        // version whenever the release is the oldest one able to install itself
+        // — 0.4.6 is. It is a different fact that may be spelled the same, so it
+        // is taken out before the count rather than counted as a third copy of
+        // this one.
+        let min_updater = format!(
+            "<key>FolioMinUpdater</key>\n\t<string>{}</string>",
+            bt_winres::release_manifest::MIN_UPDATER
+        );
         assert_eq!(
-            plist.matches(VERSION).count(),
+            plist.matches(&min_updater).count(),
+            1,
+            "the bundle's oldest-updater key is where this count expects it"
+        );
+        assert_eq!(
+            plist.replacen(&min_updater, "", 1).matches(VERSION).count(),
             2,
             "two places in the bundle and no third"
         );

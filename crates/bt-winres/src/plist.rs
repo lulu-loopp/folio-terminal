@@ -22,29 +22,46 @@
 //!
 //! # What the renderer is, exactly
 //!
-//! A substitution of one name, and two refusals. `packaging/macos/Info.plist.in`
-//! is XML that is already a valid plist apart from `@VERSION@` standing where a
-//! version belongs, twice; [`render`] puts the workspace version in both places
-//! and hands back the text. It is deliberately not a plist *writer*: the
+//! A substitution of three names, and two refusals.
+//! `packaging/macos/Info.plist.in` is XML that is already a valid plist apart
+//! from `@VERSION@` standing where a version belongs, twice, and `@PROTOCOL@`
+//! and `@MIN_UPDATER@` standing where the release's update protocol and the
+//! oldest updater that can install it belong. [`render`] puts the workspace
+//! version in the first two places and
+//! [`crate::release_manifest::PROTOCOL`] and
+//! [`crate::release_manifest::MIN_UPDATER`] in the other two — the same two
+//! constants the Windows build writes into the manifest `folio.exe` carries
+//! (0.4.6 ticket U-9; on macOS the bundle's seal already covers every file, so
+//! these two keys are all of that manifest a bundle needs) — and hands back the
+//! text. It is deliberately not a plist *writer*: the
 //! template is the file a person reads, argues with and comments, and a
 //! generator that emitted the whole document from Rust would move all of that
 //! into code nobody opens when they want to know what the bundle claims.
 
 use crate::ResourceError;
+use crate::release_manifest::{MIN_UPDATER, PROTOCOL};
 
-/// The one name [`render`] fills in. Any other `@…@` is refused.
-const VERSION_PLACEHOLDER: &str = "VERSION";
+/// The names [`render`] fills in. Any other `@…@` is refused.
+const PLACEHOLDERS: [&str; 3] = ["VERSION", "PROTOCOL", "MIN_UPDATER"];
 
-/// The template, with `@VERSION@` replaced by `version` everywhere it stands.
+/// The template, with `@VERSION@` replaced by `version`, `@PROTOCOL@` by
+/// [`PROTOCOL`] and `@MIN_UPDATER@` by [`MIN_UPDATER`], everywhere they stand.
 ///
 /// # Errors
 ///
 /// [`ResourceError`] when `version` is not something `CFBundleVersion` can
 /// carry (see [`check_version`]), or when the template names a placeholder
-/// other than `@VERSION@` — which would otherwise be shipped verbatim inside a
+/// other than those three — which would otherwise be shipped verbatim inside a
 /// signed bundle, where the first reader of it is a user.
 pub fn render(template: &str, version: &str) -> Result<String, ResourceError> {
     check_version(version)?;
+    let protocol = PROTOCOL.to_string();
+    let value_of = |name: &str| match name {
+        "VERSION" => Some(version),
+        "PROTOCOL" => Some(protocol.as_str()),
+        "MIN_UPDATER" => Some(MIN_UPDATER),
+        _ => None,
+    };
 
     let mut out = String::with_capacity(template.len());
     let mut rest = template;
@@ -63,14 +80,15 @@ pub fn render(template: &str, version: &str) -> Result<String, ResourceError> {
             continue;
         };
         let name = &after[..end];
-        if name != VERSION_PLACEHOLDER {
+        let Some(value) = value_of(name) else {
             return Err(ResourceError(format!(
                 "the template asks for @{name}@, which nothing fills; \
-                 @{VERSION_PLACEHOLDER}@ is the only substitution"
+                 the substitutions are {}",
+                PLACEHOLDERS.map(|known| format!("@{known}@")).join(", ")
             )));
-        }
+        };
         out.push_str(&rest[..at]);
-        out.push_str(version);
+        out.push_str(value);
         rest = &after[end + 1..];
     }
     out.push_str(rest);
@@ -166,7 +184,8 @@ mod tests {
         }
     }
 
-    /// PIN — **the template may ask for one substitution, and this is it.**
+    /// PIN — **the template may ask for three substitutions, and these are
+    /// they.**
     ///
     /// An unfilled `@…@` does not fail a build, does not fail `codesign`, and
     /// does not fail notarization: it ships, inside a signed bundle, and is read
@@ -187,6 +206,62 @@ mod tests {
         assert_eq!(
             rendered,
             "<string>folio@example.invalid</string>\n<string>0.3.0</string>\n"
+        );
+    }
+
+    /// RED (U-9) — **the bundle carries the release's update protocol and the
+    /// oldest updater that can install it, from the constants the Windows
+    /// manifest carries.**
+    ///
+    /// `docs/plans/design/self-update-2026-09-16.md` revision (b), F-4: on
+    /// macOS the bundle's seal covers every file, so the manifest `folio.exe`
+    /// carries reduces to two facts, and they travel as `Info.plist` keys —
+    /// sealed by `codesign` like the rest of the file. A running build reads its
+    /// successor's before it quits (F-8), so a key spelled differently from the
+    /// constant, or a literal that stayed behind when the constant moved, is an
+    /// updater that refuses or accepts the wrong release.
+    ///
+    /// MUTATION: write `1` into the template in place of `@PROTOCOL@` and move
+    /// `PROTOCOL` to 2; or drop the two keys from the template.
+    #[test]
+    fn the_rendered_bundle_carries_the_update_protocol_and_min_updater() {
+        use crate::release_manifest::{MIN_UPDATER, PROTOCOL};
+
+        let template = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/macos/Info.plist.in"
+        ))
+        .expect("the bundle template is at packaging/macos/Info.plist.in");
+        assert_eq!(template.matches("@PROTOCOL@").count(), 1, "one key, filled");
+        assert_eq!(
+            template.matches("@MIN_UPDATER@").count(),
+            1,
+            "one key, filled"
+        );
+
+        let plist = render(&template, "0.3.0").expect("the shipped template renders");
+        let value = |key: &str| {
+            let after = plist
+                .split_once(&format!("<key>{key}</key>"))
+                .unwrap_or_else(|| panic!("the bundle declares {key}"))
+                .1
+                .trim_start();
+            let (tag, rest) = after
+                .strip_prefix('<')
+                .and_then(|rest| rest.split_once('>'))
+                .unwrap_or_else(|| panic!("{key} is followed by a value"));
+            let (value, _) = rest
+                .split_once(&format!("</{tag}>"))
+                .unwrap_or_else(|| panic!("{key}'s value is closed"));
+            (tag.to_owned(), value.to_owned())
+        };
+        assert_eq!(
+            value("FolioUpdateProtocol"),
+            ("integer".to_owned(), PROTOCOL.to_string())
+        );
+        assert_eq!(
+            value("FolioMinUpdater"),
+            ("string".to_owned(), MIN_UPDATER.to_owned())
         );
     }
 

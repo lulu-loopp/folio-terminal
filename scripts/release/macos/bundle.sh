@@ -32,6 +32,13 @@
 # moved it. `set -e` and the renderer's own exit code are what stand between an
 # unfilled `@VERSION@` and a signed bundle carrying it.
 #
+# The same render writes the two update keys (0.4.6 ticket U-9):
+# `FolioUpdateProtocol` and `FolioMinUpdater`, from
+# `bt_winres::release_manifest::{PROTOCOL, MIN_UPDATER}` — the constants the
+# Windows build writes into the manifest `folio.exe` carries. They are sealed
+# with the rest of `Info.plist` when the bundle is signed, which is all of that
+# manifest a bundle needs: its seal already covers every file in it.
+#
 # 2. **Reproducible means the same commit gives the same plist and the same
 # layout.** Everything this script writes other than the executable is a
 # function of the checkout: the plist is the template plus one version string,
@@ -411,3 +418,4 @@ if [ "$dsym" = "1" ]; then
 fi
 echo
 echo "bundle.sh: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist") $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")"
+echo "bundle.sh: update protocol $(/usr/libexec/PlistBuddy -c 'Print :FolioUpdateProtocol' "$app/Contents/Info.plist"), min updater $(/usr/libexec/PlistBuddy -c 'Print :FolioMinUpdater' "$app/Contents/Info.plist")"

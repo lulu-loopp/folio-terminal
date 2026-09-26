@@ -14,6 +14,9 @@ All notable changes to Folio are recorded here. The format follows
 - A build now records whether it may ever update itself, and only a release
   build says yes; `diagnostics.log` names it on each run's first line
   (`updater on` / `updater off`). Nothing uses it yet.
+- `folio.exe` now carries a signed list of every other file in the Windows
+  download, with their hashes, and a release is refused if any file differs
+  from it; the Mac app records the same update facts in its signed bundle.
 
 ### Fixed
 
