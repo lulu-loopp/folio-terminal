@@ -1223,7 +1223,16 @@ fn uninstall_update_rows_remove_only_ours() {
     scope.update_home = Some(home.clone());
 
     let report = execute(&scope, false, system_absent);
-    assert_eq!(report.code, 0, "{}", report.stderr());
+    // Only the two update rows are asked about: on macOS every other row of a
+    // sandbox under `$TMPDIR` refuses, because `/var` is a link to `/private/var`
+    // and those rows refuse a path with a link among its ancestors.
+    let update_refusals: Vec<String> = report
+        .entries
+        .iter()
+        .filter(|e| e.mark.starts_with("Update ") && matches!(e.fate, Fate::Refused(_)))
+        .map(Entry::line)
+        .collect();
+    assert!(update_refusals.is_empty(), "{update_refusals:?}");
     let stdout = report.stdout();
     for name in &ours {
         assert!(!agents.join(name).exists(), "{name}");
@@ -1246,9 +1255,7 @@ fn uninstall_update_rows_remove_only_ours() {
     assert!(applications.join("Folio.app/Contents/MacOS").exists());
     assert!(applications.join(".Other.app.folio-update").exists());
 
-    let second = execute(&scope, false, system_absent);
-    assert_eq!(second.code, 0, "{}", second.stderr());
-    let second = second.stdout();
+    let second = execute(&scope, false, system_absent).stdout();
     assert!(
         second.contains("Update entrances (LaunchAgents) (per-account): not present"),
         "{second}"
