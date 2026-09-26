@@ -22,6 +22,7 @@ use std::path::{Path, PathBuf};
 
 pub use bt_winres::digest::{hex, sha256};
 use bt_winres::release_manifest::sidecar_key;
+use bt_winres::zip;
 
 /// The vendored package, by file name. `build.rs` joins it to `WORKSPACE/vendor/conpty`.
 pub const PACKAGE: &str = "Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg";
@@ -103,108 +104,71 @@ pub fn unpack(package: &[u8]) -> Result<Vec<(&'static SidecarFile, Vec<u8>)>, St
         .collect()
 }
 
-const END_OF_CENTRAL_DIRECTORY: u32 = 0x0605_4b50;
-const CENTRAL_DIRECTORY_HEADER: u32 = 0x0201_4b50;
-const LOCAL_FILE_HEADER: u32 = 0x0403_4b50;
-const STORED: u16 = 0;
-const DEFLATED: u16 = 8;
-
 /// **The contents of the entry called `name` in the zip archive `archive`.**
 ///
 /// Stored and deflated entries are read. An encrypted entry, another compression method, or a
-/// ZIP64 archive (whose sizes do not fit the fields read here) is an error that says which.
+/// ZIP64 archive (whose sizes do not fit the fields read here) is an error that says which. The
+/// records are read through `bt_winres::zip`, the workspace's one copy of the format's layout,
+/// which the updater's archive reader reads a release archive with too (0.4.6 ticket U-14).
 pub fn zip_entry(archive: &[u8], name: &str) -> Result<Vec<u8>, String> {
-    let end = end_of_central_directory(archive)?;
-    let entries = u16_at(archive, end + 10)?;
-    let directory_size = u32_at(archive, end + 12)?;
-    let directory_offset = u32_at(archive, end + 16)?;
-    if entries == u16::MAX || directory_size == u32::MAX || directory_offset == u32::MAX {
+    let tail_start = archive
+        .len()
+        .saturating_sub(zip::END_RECORD_BYTES + zip::MAX_COMMENT_BYTES);
+    let (_, end) = zip::find_end(&archive[tail_start..])?;
+    if end.entries == u16::MAX || end.directory_size == u32::MAX || end.directory_offset == u32::MAX
+    {
         return Err("a ZIP64 archive, which this reader does not read".to_owned());
     }
 
-    let mut at = directory_offset as usize;
-    for _ in 0..entries {
-        if u32_at(archive, at)? != CENTRAL_DIRECTORY_HEADER {
-            return Err(format!("no central directory header at offset {at}"));
-        }
-        let flags = u16_at(archive, at + 8)?;
-        let method = u16_at(archive, at + 10)?;
-        let compressed_size = u32_at(archive, at + 20)?;
-        let size = u32_at(archive, at + 24)?;
-        let name_length = usize::from(u16_at(archive, at + 28)?);
-        let extra_length = usize::from(u16_at(archive, at + 30)?);
-        let comment_length = usize::from(u16_at(archive, at + 32)?);
-        let local_offset = u32_at(archive, at + 42)?;
-        let entry_name = slice(archive, at + 46, name_length)?;
-        at += 46 + name_length + extra_length + comment_length;
-        if entry_name != name.as_bytes() {
+    let mut at = end.directory_offset as usize;
+    for _ in 0..end.entries {
+        let (entry, next) = zip::central_entry(archive, at)?;
+        at = next;
+        if entry.name != name.as_bytes() {
             continue;
         }
 
-        if flags & 1 != 0 {
+        if entry.flags & zip::FLAG_ENCRYPTED != 0 {
             return Err(format!("{name} is encrypted"));
         }
-        if compressed_size == u32::MAX || size == u32::MAX || local_offset == u32::MAX {
+        if entry.compressed_size == u32::MAX
+            || entry.size == u32::MAX
+            || entry.local_offset == u32::MAX
+        {
             return Err(format!(
                 "{name} is a ZIP64 entry, which this reader does not read"
             ));
         }
-        let local = local_offset as usize;
-        if u32_at(archive, local)? != LOCAL_FILE_HEADER {
-            return Err(format!("no local file header for {name} at offset {local}"));
-        }
-        let data_start = local
-            + 30
-            + usize::from(u16_at(archive, local + 26)?)
-            + usize::from(u16_at(archive, local + 28)?);
-        let data = slice(archive, data_start, compressed_size as usize)?;
-        let contents = match method {
-            STORED => data.to_vec(),
-            DEFLATED => miniz_oxide::inflate::decompress_to_vec_with_limit(data, size as usize)
-                .map_err(|e| format!("{name} does not inflate: {:?}", e.status))?,
+        let local = entry.local_offset as usize;
+        let header = archive
+            .get(local..)
+            .ok_or_else(|| format!("{name}: its local header at {local} is past the end"))
+            .and_then(|rest| {
+                zip::local_header(rest).map_err(|error| format!("{name}: {error} (offset {local})"))
+            })?;
+        let data = zip::slice(
+            archive,
+            local + header.length,
+            entry.compressed_size as usize,
+        )?;
+        let contents = match entry.method {
+            zip::STORED => data.to_vec(),
+            zip::DEFLATED => {
+                miniz_oxide::inflate::decompress_to_vec_with_limit(data, entry.size as usize)
+                    .map_err(|e| format!("{name} does not inflate: {:?}", e.status))?
+            }
             other => return Err(format!("{name} uses compression method {other}")),
         };
-        if contents.len() != size as usize {
+        if contents.len() != entry.size as usize {
             return Err(format!(
-                "{name} inflated to {} bytes, but its directory entry says {size}",
-                contents.len()
+                "{name} inflated to {} bytes, but its directory entry says {}",
+                contents.len(),
+                entry.size
             ));
         }
         return Ok(contents);
     }
     Err(format!("no entry named {name}"))
-}
-
-/// The offset of the end-of-central-directory record: the last occurrence of its signature within
-/// the 22-byte record plus the longest comment a zip can carry.
-fn end_of_central_directory(archive: &[u8]) -> Result<usize, String> {
-    const RECORD: usize = 22;
-    if archive.len() < RECORD {
-        return Err(
-            "not a zip archive: shorter than an end-of-central-directory record".to_owned(),
-        );
-    }
-    let lowest = archive.len().saturating_sub(RECORD + usize::from(u16::MAX));
-    (lowest..=archive.len() - RECORD)
-        .rev()
-        .find(|&at| u32_at(archive, at) == Ok(END_OF_CENTRAL_DIRECTORY))
-        .ok_or_else(|| "not a zip archive: no end-of-central-directory record".to_owned())
-}
-
-fn slice(bytes: &[u8], at: usize, length: usize) -> Result<&[u8], String> {
-    at.checked_add(length)
-        .and_then(|end| bytes.get(at..end))
-        .ok_or_else(|| format!("truncated: {length} bytes at offset {at} run past the end"))
-}
-
-fn u16_at(bytes: &[u8], at: usize) -> Result<u16, String> {
-    let b = slice(bytes, at, 2)?;
-    Ok(u16::from_le_bytes([b[0], b[1]]))
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> Result<u32, String> {
-    let b = slice(bytes, at, 4)?;
-    Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
 #[cfg(test)]
