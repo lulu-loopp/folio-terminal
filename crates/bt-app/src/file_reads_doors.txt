@@ -106,3 +106,7 @@
 1 psreadline.rs: install_recorded: Marks::read
 1 psreadline.rs: recorded_install: Marks::read
 1 uninstall.rs: execute_with_claim: Marks::read
+# The install channel (U-1): the marker and scoop's receipt on Lane::Install, each
+# capped; the derivation's one call of the folder read.
+1 capped: .read_to_end
+1 derive_fact: read

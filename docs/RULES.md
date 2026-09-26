@@ -939,7 +939,17 @@ that wrote it**, all reachable through one door, `folio --uninstall-cleanup`
 to **this copy**, compared by executable path, and a mark naming a vanished path
 is nobody's and is removed; per-account marks (the `$PROFILE` line, the module)
 are removed and reported. **How Folio was installed is read from a written
-channel marker, never inferred from a path.**
+channel marker, never inferred from a path.** The marker is written by the
+package manager, never by Folio: on Windows the file `folio-install.json`
+beside `folio.exe`, on macOS the extended attribute
+`io.github.lulu-loopp.folio.install` on the `.app` bundle, both holding
+`{"v":1,"manager":"scoop"|"homebrew"|"winget","uninstall_hook":true|false}`
+(exactly those keys; a byte-order mark and surrounding whitespace allowed).
+scoop's own receipt in the version folder (`install.json` with `manifest.json`)
+also says scoop. With neither, the copy is ours only if its folder's owner is the
+account running Folio. Every failed read, and every marker or receipt that is
+malformed, of another version, partial or in disagreement, is **unknown**, never
+ours (`install_channel::classify`, ticket U-1).
 **From.** `docs/plans/design/clean-uninstall-2026-09-20.md` — §1 what is left
 outside, §3 the six committed rules, and §6 *what the reviews changed*, which
 states that it rules, together with its closure addendum.

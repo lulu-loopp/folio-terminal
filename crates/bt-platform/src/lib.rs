@@ -3378,6 +3378,13 @@ pub mod explorer_command;
 pub mod cleanup;
 pub mod instance;
 
+/// **Who owns an install folder, and the macOS install marker attribute** — the
+/// two reads of `bt-app`'s `install_channel` that are not file content (ticket
+/// U-1; `docs/plans/design/self-update-2026-09-16.md` revision (b), F-2, F-10).
+/// Read-only: `GetNamedSecurityInfoW` and the process token on Windows, `stat`,
+/// `geteuid` and `getxattr` on Unix.
+pub mod install_evidence;
+
 mod web_environment;
 mod webview;
 
