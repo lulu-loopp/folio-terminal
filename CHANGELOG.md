@@ -14,6 +14,9 @@ All notable changes to Folio are recorded here. The format follows
 - A build now records whether it may ever update itself, and only a release
   build says yes; `diagnostics.log` names it on each run's first line
   (`updater on` / `updater off`). Nothing uses it yet.
+- The coming updater can write its record of an update so that it survives a
+  power cut, move files the same way, and tell a running Folio from the one
+  applying an update through a lock in the install folder. Nothing uses it yet.
 
 ### Fixed
 
