@@ -3,9 +3,10 @@
 <!--
   The template the bundle's `Contents/Info.plist` is generated from.
 
-  The two version fields below are the only substitution in this file, and a
-  template asking for any other placeholder is refused rather than shipped with
-  it unfilled. They are filled at bundle time from `[workspace.package] version`
+  The two version fields below, and the two update keys after them, are the
+  only substitutions in this file, and a template asking for any other
+  placeholder is refused rather than shipped with it unfilled. The version
+  fields are filled at bundle time from `[workspace.package] version`
   in the workspace `Cargo.toml` — the same single line
   `bt_app::version::tests::the_version_is_the_manifests_and_nothing_elses` holds
   the executable, the PE resource and every diagnostic header to, and its
@@ -60,6 +61,20 @@
 	<string>@VERSION@</string>
 	<key>CFBundleVersion</key>
 	<string>@VERSION@</string>
+
+	<!-- **What an updater reads of this release before it installs it**
+	     (0.4.6 ticket U-9; `docs/plans/design/self-update-2026-09-16.md`
+	     revision (b), F-4 and F-8): the update protocol this build speaks, and
+	     the oldest Folio whose updater can install it. The Windows archive
+	     carries the same two facts inside the manifest `folio.exe` is built
+	     with; a bundle needs nothing more, because its seal already covers
+	     every file in it, and these two are sealed with the rest of this file.
+	     Both are filled from `bt_winres::release_manifest`, never written
+	     here. -->
+	<key>FolioUpdateProtocol</key>
+	<integer>@PROTOCOL@</integer>
+	<key>FolioMinUpdater</key>
+	<string>@MIN_UPDATER@</string>
 
 	<!-- `Contents/Resources/Folio.icns`, named without its extension as the
 	     key wants it. -->

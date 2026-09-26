@@ -22,9 +22,26 @@
 //! value stops the build. Only the release pipeline sets it. The decision is
 //! `src/update_eligibility.rs`, reached below by `#[path]` so its tests run with
 //! the crate's.
+//!
+//! And a fourth, which is about the archive the executable ships in: **what this
+//! release contains** (0.4.6 ticket U-9). For a Windows target the `.res` also
+//! carries `FOLIO_RELEASE_MANIFEST`, an `RCDATA` block listing the name, SHA-256
+//! and size of every archive member but `folio.exe` itself and `folio.msix`, so
+//! that the executable's own signature signs the rest of the archive. This
+//! script is that fact's one owner: the members are the lines of
+//! `scripts/release/archive-members.txt` — the list `package.ps1` packs from —
+//! and the bytes are the tree's and `bt-pty`'s ConPTY sidecar, whose paths
+//! arrive through that crate's `links` metadata. The format is
+//! `bt_winres::release_manifest`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use bt_winres::digest::{hex, sha256};
+use bt_winres::release_manifest::{
+    MEMBER_LIST, MIN_UPDATER, Manifest, Member, PRODUCT, PROTOCOL, RESOURCE_NAME, Source,
+    archive_arch, archive_root, parse_member_list, sidecar_key,
+};
 
 #[path = "src/update_eligibility.rs"]
 mod update_eligibility;
@@ -50,9 +67,14 @@ fn main() {
     let icon = workspace.join("assets").join("app-icon").join("folio.ico");
     println!("cargo:rerun-if-changed={}", icon.display());
 
+    let version = env("CARGO_PKG_VERSION");
+    let manifest = release_manifest(&workspace, &version);
     let resource = PathBuf::from(env("OUT_DIR")).join("folio.res");
-    std::fs::write(&resource, resource_bytes(&icon, &env("CARGO_PKG_VERSION")))
-        .unwrap_or_else(|error| panic!("write {}: {error}", resource.display()));
+    std::fs::write(
+        &resource,
+        resource_bytes(&icon, &version, manifest.as_deref()),
+    )
+    .unwrap_or_else(|error| panic!("write {}: {error}", resource.display()));
     // Read by `bt_app::version`'s gate, which checks that the version in the
     // resource is the version in the binary. It is set for every target of this
     // crate, including the test one, which is the point.
@@ -91,8 +113,89 @@ fn updater_flag() {
     }
 }
 
-/// The icon and the version, as the bytes of a `.res` file.
-fn resource_bytes(icon: &Path, version: &str) -> Vec<u8> {
+/// **What this release contains**, as the text of the manifest `folio.exe`
+/// carries — for a Windows target, and `None` for every other, whose release is
+/// not this archive (a macOS bundle's seal covers its files, and its two update
+/// keys are `Info.plist`'s).
+///
+/// Every line of [`MEMBER_LIST`] whose source the manifest lists, in the list's
+/// order, hashed from where that source is: the ConPTY sidecar from the path
+/// `bt-pty`'s build script exported (`DEP_CONPTY_<KEY>`), `packaging/` and the
+/// repository root from this checkout. `.gitattributes` holds those text files
+/// to LF on every machine, so the runner that builds and the machine that
+/// packages hash the same bytes. Each file is a rebuild trigger: a manifest
+/// built before a licence changed would name bytes the archive no longer has,
+/// and `package.ps1` would refuse it — correctly, and one build too late.
+///
+/// The text is also written to `OUT_DIR` and named by `FOLIO_RELEASE_MANIFEST`,
+/// so the crate's tests read the manifest this build embedded rather than a
+/// second computation of it.
+fn release_manifest(workspace: &Path, version: &str) -> Option<String> {
+    if env("CARGO_CFG_TARGET_OS") != "windows" {
+        return None;
+    }
+    let list_path = workspace.join(MEMBER_LIST);
+    println!("cargo:rerun-if-changed={}", list_path.display());
+    let list = std::fs::read_to_string(&list_path)
+        .unwrap_or_else(|error| panic!("read {}: {error}", list_path.display()));
+    let listed = parse_member_list(&list).unwrap_or_else(|error| panic!("{error}"));
+
+    let members = listed
+        .iter()
+        .filter_map(|item| {
+            let path = match item.source {
+                Source::Exe | Source::Msix => return None,
+                Source::Sidecar => {
+                    let variable = format!(
+                        "DEP_CONPTY_{}",
+                        sidecar_key(&item.name).to_ascii_uppercase()
+                    );
+                    PathBuf::from(std::env::var_os(&variable).unwrap_or_else(|| {
+                        panic!(
+                            "{MEMBER_LIST} lists {} as a sidecar and bt-pty's build script \
+                             exported no {variable}",
+                            item.name
+                        )
+                    }))
+                }
+                Source::Packaging => workspace.join("packaging").join(&item.name),
+                Source::Documents => workspace.join(&item.name),
+            };
+            println!("cargo:rerun-if-changed={}", path.display());
+            let bytes = std::fs::read(&path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+            Some(Member {
+                name: item.name.clone(),
+                sha256: hex(&sha256(&bytes)),
+                size: bytes.len() as u64,
+            })
+        })
+        .collect();
+
+    let text = Manifest {
+        product: PRODUCT.to_owned(),
+        version: version.to_owned(),
+        arch: archive_arch(&env("CARGO_CFG_TARGET_ARCH")).to_owned(),
+        archive_root: archive_root(version),
+        protocol: PROTOCOL,
+        min_updater: MIN_UPDATER.to_owned(),
+        members,
+    }
+    .encode();
+
+    let written = PathBuf::from(env("OUT_DIR")).join("release-manifest.txt");
+    std::fs::write(&written, &text)
+        .unwrap_or_else(|error| panic!("write {}: {error}", written.display()));
+    println!(
+        "cargo:rustc-env=FOLIO_RELEASE_MANIFEST={}",
+        written.display()
+    );
+    Some(text)
+}
+
+/// The icon, the version and — for a Windows target — the release manifest, as
+/// the bytes of a `.res` file.
+fn resource_bytes(icon: &Path, version: &str, manifest: Option<&str>) -> Vec<u8> {
     let ico = std::fs::read(icon)
         .unwrap_or_else(|error| panic!("read the application icon {}: {error}", icon.display()));
     let icon = bt_winres::IconGroup::parse(&ico)
@@ -137,6 +240,9 @@ fn resource_bytes(icon: &Path, version: &str) -> Vec<u8> {
             ),
         ],
     });
+    if let Some(manifest) = manifest {
+        file.add_named_rcdata(RESOURCE_NAME, manifest.as_bytes());
+    }
     file.finish()
 }
 

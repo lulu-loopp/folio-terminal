@@ -14,8 +14,14 @@
 //! The archive reader is the stored-and-deflated subset of the zip format that the package uses:
 //! the end-of-central-directory record, the central directory, and each local header, with the
 //! inflating done by `miniz_oxide`, which is already in `Cargo.lock` through `flate2` and `png`, so
-//! reading the package costs no new package. SHA-256 is FIPS 180-4, written out below for the same
-//! reason; the tests below hold it to the standard's own examples.
+//! reading the package costs no new package. SHA-256 is `bt_winres::digest`, the workspace's one
+//! written-out copy of FIPS 180-4, which `bt-app`'s build script hashes the release archive's
+//! members with too; the standard's own examples hold it there.
+
+use std::path::{Path, PathBuf};
+
+pub use bt_winres::digest::{hex, sha256};
+use bt_winres::release_manifest::sidecar_key;
 
 /// The vendored package, by file name. `build.rs` joins it to `WORKSPACE/vendor/conpty`.
 pub const PACKAGE: &str = "Microsoft.Windows.Console.ConPTY.1.25.260710002-preview.nupkg";
@@ -24,7 +30,8 @@ pub const PACKAGE: &str = "Microsoft.Windows.Console.ConPTY.1.25.260710002-previ
 pub const PACKAGE_SHA256: &str = "05fe9b571ea4fb198f5012405cb39a132cf23eee50feaa496524c149b2502692";
 
 /// One file the sidecar is made of: where it sits in the package, the hash it must have, and the
-/// paths, relative to each destination directory, that it is written to.
+/// paths, relative to each destination directory, that it is written to. The first of those is
+/// the one beside the executable, which is the file the release archive carries under that name.
 pub struct SidecarFile {
     pub entry: &'static str,
     pub sha256: &'static str,
@@ -47,6 +54,24 @@ pub const SIDECAR: [SidecarFile; 2] = [
         targets: &["OpenConsole.exe", "x64/OpenConsole.exe"],
     },
 ];
+
+/// **What `build.rs` tells the build scripts of the packages that depend on this one** (the
+/// `links = "conpty"` metadata, 0.4.6 ticket U-9): for each sidecar file, the key
+/// [`sidecar_key`] makes of the name it has beside the executable, and where in `profile_dir` it
+/// was written under that name. `bt-app`'s build script reads each back as `DEP_CONPTY_<KEY>` and
+/// hashes the file into the release manifest `folio.exe` carries.
+pub fn exported(profile_dir: &Path) -> Vec<(String, PathBuf)> {
+    SIDECAR
+        .iter()
+        .map(|file| {
+            let beside_the_executable = file.targets[0];
+            (
+                sidecar_key(beside_the_executable),
+                profile_dir.join(beside_the_executable),
+            )
+        })
+        .collect()
+}
 
 /// **Refuses `bytes` unless their SHA-256 is `pinned`, and the refusal names `name`.**
 ///
@@ -182,88 +207,12 @@ fn u32_at(bytes: &[u8], at: usize) -> Result<u32, String> {
     Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
 }
 
-/// Lower-case hex, two digits a byte.
-pub fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
-
-/// **SHA-256 of `message`** (FIPS 180-4 §6.2).
-pub fn sha256(message: &[u8]) -> [u8; 32] {
-    const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-        0xc67178f2,
-    ];
-    let mut state: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-
-    // Padding: a one bit, zeros up to 56 bytes mod 64, then the length in bits, big-endian.
-    let mut padded = message.to_vec();
-    padded.push(0x80);
-    while padded.len() % 64 != 56 {
-        padded.push(0);
-    }
-    padded.extend_from_slice(&(message.len() as u64).wrapping_mul(8).to_be_bytes());
-
-    for block in padded.chunks_exact(64) {
-        let mut w = [0u32; 64];
-        for (word, bytes) in w.iter_mut().zip(block.chunks_exact(4)) {
-            *word = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-        }
-        for t in 16..64 {
-            let s0 = w[t - 15].rotate_right(7) ^ w[t - 15].rotate_right(18) ^ (w[t - 15] >> 3);
-            let s1 = w[t - 2].rotate_right(17) ^ w[t - 2].rotate_right(19) ^ (w[t - 2] >> 10);
-            w[t] = w[t - 16]
-                .wrapping_add(s0)
-                .wrapping_add(w[t - 7])
-                .wrapping_add(s1);
-        }
-
-        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = state;
-        for (k, w) in K.iter().zip(w) {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let choose = (e & f) ^ (!e & g);
-            let t1 = h
-                .wrapping_add(s1)
-                .wrapping_add(choose)
-                .wrapping_add(*k)
-                .wrapping_add(w);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let majority = (a & b) ^ (a & c) ^ (b & c);
-            let t2 = s0.wrapping_add(majority);
-            h = g;
-            g = f;
-            f = e;
-            e = d.wrapping_add(t1);
-            d = c;
-            c = b;
-            b = a;
-            a = t1.wrapping_add(t2);
-        }
-        for (word, value) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
-            *word = word.wrapping_add(value);
-        }
-    }
-
-    let mut digest = [0u8; 32];
-    for (bytes, word) in digest.chunks_exact_mut(4).zip(state) {
-        bytes.copy_from_slice(&word.to_be_bytes());
-    }
-    digest
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{PACKAGE, PACKAGE_SHA256, SIDECAR, hex, sha256, unpack, verify_pinned, zip_entry};
+    use super::{
+        PACKAGE, PACKAGE_SHA256, SIDECAR, exported, hex, sha256, unpack, verify_pinned, zip_entry,
+    };
+    use bt_winres::release_manifest::{MEMBER_LIST, Source, parse_member_list, sidecar_key};
 
     fn vendored_package() -> Vec<u8> {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -357,38 +306,39 @@ mod tests {
         assert_eq!(hex(&sha256(&vendored_package())), PACKAGE_SHA256);
     }
 
-    /// RED (67) — **The hash the pins are checked with is SHA-256, by the standard's own examples.**
+    /// RED (U-9) — **the build script exports exactly the sidecar files the release archive lists,
+    /// under the keys the manifest's build reads, at the paths beside the executable.**
     ///
-    /// The digest is written out in the build script rather than taken from a crate, so it is held
-    /// to the FIPS 180-4 examples: the empty message, the one-block `abc`, the two-block 448-bit
-    /// message whose padding spills into a second block, and a million `a`s, which crosses many
-    /// blocks.
+    /// `bt-app`'s build script hashes the two ConPTY files into the manifest `folio.exe` carries,
+    /// and it finds them only through this package's `links` metadata. So the set exported here has
+    /// to be the set `scripts/release/archive-members.txt` calls `sidecar` — a file exported that
+    /// the archive does not carry, or one the archive carries that is not exported, is a manifest
+    /// `build.rs` cannot complete — and each path has to be the copy beside the executable, which
+    /// is the one `package.ps1` packs, and not the `x64/` mirror.
     ///
-    /// MUTATION: rotate by 7 instead of 6 in the first `Σ1` term. (On a Windows target the build
-    /// script refuses the package first, naming it; elsewhere this is what goes red.)
+    /// MUTATION: export `file.targets.last()` instead of `targets[0]` and the `OpenConsole.exe`
+    /// path is `x64/OpenConsole.exe`; export only `SIDECAR[..1]` and the two lists differ.
     #[test]
-    fn the_digest_is_sha_256_by_the_standard_s_own_examples() {
-        let million_a = vec![b'a'; 1_000_000];
-        let examples: [(&[u8], &str); 4] = [
-            (
-                b"",
-                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-            ),
-            (
-                b"abc",
-                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
-            ),
-            (
-                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq",
-                "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1",
-            ),
-            (
-                &million_a,
-                "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0",
-            ),
-        ];
-        for (message, digest) in examples {
-            assert_eq!(hex(&sha256(message)), digest, "{} bytes", message.len());
-        }
+    fn the_sidecar_is_exported_under_the_keys_the_manifest_reads() {
+        let list = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(MEMBER_LIST),
+        )
+        .expect("the release member list is in the workspace");
+        let listed: Vec<String> = parse_member_list(&list)
+            .expect("the release member list parses")
+            .into_iter()
+            .filter(|item| item.source == Source::Sidecar)
+            .map(|item| item.name)
+            .collect();
+        assert!(!listed.is_empty(), "the archive carries the sidecar");
+
+        let profile = std::path::Path::new("PROFILE");
+        let expected: Vec<(String, std::path::PathBuf)> = listed
+            .iter()
+            .map(|name| (sidecar_key(name), profile.join(name)))
+            .collect();
+        assert_eq!(exported(profile), expected);
     }
 }

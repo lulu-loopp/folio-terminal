@@ -73,6 +73,21 @@ attestation independent of the GitHub account and workflow being trusted.
    copy can no longer pass unsigned BUILDINFO verification. For a retry, make
    another copy of the pristine download. PDB and BUILDINFO stay out of the zip.
 
+   **The CI-built `folio.exe` also decides what the other eight archive
+   members must be** (0.4.6 ticket U-9). Its `build.rs` embedded the release
+   manifest `FOLIO_RELEASE_MANIFEST` on the runner: the name, SHA-256 and size
+   of the two ConPTY sidecars it extracted and of the six text files from the
+   commit it built (`scripts/release/archive-members.txt` is the list). Before
+   packing, `package.ps1` reads that resource out of the executable — never by
+   running it — and refuses, naming each member, when a file in this checkout or
+   in `target/ci-signing` is missing, unlisted, or differs. That is the
+   "release documents and packaging inputs unchanged" of step 2, now checked
+   rather than asked; `.gitattributes` holds those six files to LF so the runner
+   and this machine hash the same bytes. `smoke.ps1` reads the manifest again
+   from the `folio.exe` inside the packed archive and checks every entry against
+   it; signing changes only `folio.exe` and `folio.msix`, which the manifest does
+   not list.
+
 4. Continue [RELEASING.md](RELEASING.md)'s Mac asset collection, smoke checks,
    draft asset verification, publishing and distribution-manifest update steps.
    The existing SBOM generator runs in the build job, and `-Binary` copies its

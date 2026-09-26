@@ -125,6 +125,26 @@ run by hand exactly as it runs there:
 | `scripts/release/package.ps1` | `folio-<version>-windows-x64.zip`, with `folio.msix` and the executable both in it, a copy of it called `folio-windows-x64.zip`, and `SHA256SUMS.txt` over everything beside it — **after emptying the output directory**, apart from that bill of materials, and refusing to empty one that holds anything this lane did not write |
 | `scripts/release/smoke.ps1` | starts the executable that was built and checks the seven things a green build can still be broken about, and refuses an output directory holding a file from another release |
 
+**The archive's members are one list, and `folio.exe` carries their hashes**
+(0.4.6 ticket U-9). `scripts/release/archive-members.txt` names the ten files and
+where each comes from; `package.ps1` packs from it, and `crates/bt-app/build.rs`
+reads it to embed the release manifest `FOLIO_RELEASE_MANIFEST` in every Windows
+`folio.exe` — the name, SHA-256 and size of each member but `folio.exe` itself
+and `folio.msix`, plus the version, archive root, update protocol and oldest
+updater (`bt_winres::release_manifest`). The executable's signature therefore
+signs the other eight files. `package.ps1` reads the manifest out of the file
+(`scripts/release/release-manifest.ps1`, `LoadLibraryExW` as a data file; the
+executable is never started) and refuses to pack a member that is missing,
+unlisted or differs, naming it; `smoke.ps1` checks the packed archive's entries
+against the manifest in the archive's own `folio.exe`, and `smoke.ps1
+-ArchiveOnly` does only that and starts nothing. Adding a file to the archive is
+one line in the list, and the next build carries it. On macOS the bundle's seal
+already covers every file; the update protocol and oldest updater travel as the
+`FolioUpdateProtocol` and `FolioMinUpdater` keys of `Info.plist`, filled by the
+same renderer as the version. `scripts/release/package-tests.ps1` packs a real
+archive from a development build and checks both refusals (it needs `cargo build
+-p bt-app` and the Windows SDK's `makeappx`, and starts nothing).
+
 ## What gets published
 
 **Every final asset on a release page comes off the machine that signed it.**

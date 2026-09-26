@@ -52,6 +52,20 @@
 # grammar that no longer loads.
 *.packdump binary
 
+# The release archive's text members, by name (0.4.6 ticket U-9). `folio.exe`
+# carries the SHA-256 of each (`scripts/release/archive-members.txt`,
+# `FOLIO_RELEASE_MANIFEST`), computed where it is compiled — a CI runner — and
+# `package.ps1` refuses to pack a member whose bytes differ, on whichever machine
+# packs. So these six have to be the same bytes on every checkout. The first
+# line above already says LF for them; `text` here takes away the one thing it
+# leaves to chance, which is Git deciding by content that a file is text at all.
+packaging/folio-here.cmd text eol=lf
+packaging/uninstall.cmd text eol=lf
+LICENSE-MIT text eol=lf
+LICENSE-APACHE text eol=lf
+THIRD-PARTY-NOTICES.md text eol=lf
+TRADEMARK.md text eol=lf
+
 # ── bytes that are not ours to normalise ──────────────────────────────────────
 #
 # Everything below was committed with CRLF because that is how its author wrote

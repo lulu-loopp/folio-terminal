@@ -773,21 +773,20 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
 
 #[test]
 fn uninstall_archive_has_ten_files_and_cleanup_only_wrapper() {
+    // The archive's members are one list, `scripts/release/archive-members.txt`
+    // (0.4.6 ticket U-9): `package.ps1` packs from it and `build.rs` builds the
+    // release manifest from it. It is read here with the grammar both use, and
+    // `package.ps1` is held to reading it rather than to a list of its own.
     let package = include_str!("../../../scripts/release/package.ps1");
-    let manifest = package
-        .split_once("$manifest = @(")
-        .unwrap()
-        .1
-        .split_once("\n)")
-        .unwrap()
-        .0;
-    let names: Vec<_> = manifest
-        .lines()
-        .filter_map(|line| {
-            line.split_once("@{ Name = '")
-                .map(|(_, rest)| rest.split('\'').next().unwrap())
-        })
-        .collect();
+    assert!(
+        package.contains("$listed = Get-ArchiveMemberList"),
+        "package.ps1 packs from archive-members.txt"
+    );
+    let listed = bt_winres::release_manifest::parse_member_list(include_str!(
+        "../../../scripts/release/archive-members.txt"
+    ))
+    .expect("the archive's member list parses");
+    let names: Vec<_> = listed.iter().map(|item| item.name.as_str()).collect();
     assert_eq!(
         names,
         [

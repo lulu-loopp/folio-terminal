@@ -1,0 +1,35 @@
+# **The Windows release archive, member by member — the one list.**
+#
+# `package.ps1` builds `folio-<version>-windows-x64.zip` from these lines, in
+# this order, and nothing else goes in. `crates/bt-app/build.rs` builds the
+# release manifest `folio.exe` carries (`FOLIO_RELEASE_MANIFEST`, 0.4.6 ticket
+# U-9) from the same lines, so the two cannot list different files. The grammar
+# is `bt_winres::release_manifest::parse_member_list`'s, and `package.ps1`
+# reads it through `release-manifest.ps1`, which parses it the same way.
+#
+# A line is `<name> <source>`. The source says where the file comes from:
+#
+#   exe        the build's `folio.exe`, which carries the manifest and so is
+#              not listed in it;
+#   msix       packed by `package.ps1` out of `packaging/msix/`, signed with the
+#              same identity as `folio.exe`, and not listed in the manifest
+#              either (it is authenticated by its own signature);
+#   sidecar    written beside the executable by `bt-pty`'s build script, which
+#              exports its path to `bt-app`'s through `links` metadata;
+#   packaging  a file under `packaging/`;
+#   documents  a file at the repository root.
+#
+# Why each file is here, and why `README.md` is not, is `package.ps1`'s
+# description. Adding a line here is adding a file to every release and to the
+# manifest in the same change; a line removed is removed from both.
+
+folio.exe                exe
+folio.msix               msix
+conpty.dll               sidecar
+OpenConsole.exe          sidecar
+folio-here.cmd           packaging
+uninstall.cmd            packaging
+LICENSE-MIT              documents
+LICENSE-APACHE           documents
+THIRD-PARTY-NOTICES.md   documents
+TRADEMARK.md             documents

@@ -5,6 +5,14 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
+# **The sidecar's paths, told to the build script that packs them into a
+# manifest** (0.4.6 ticket U-9). A `links` key is what lets this package's build
+# script hand values to the build scripts of the packages that depend on it:
+# each `cargo:<key>=<value>` it prints arrives in `bt-app`'s as
+# `DEP_CONPTY_<KEY>`, and `bt-app`'s hashes `conpty.dll` and `OpenConsole.exe`
+# from there into the release manifest `folio.exe` carries. There is no native
+# library called `conpty` to link: the name only has to be unique in the graph.
+links = "conpty"
 
 [dependencies]
 bt-transcript = { path = "../bt-transcript" }
@@ -16,7 +24,13 @@ thiserror.workspace = true
 # through `flate2` and `png`, so it costs no new package; it is pinned to that locked version.
 # The library compiles the same file for its tests, which hold it to the real package, so the
 # tests name it too.
+#
+# `bt-winres` is this workspace's SHA-256 (`bt_winres::digest`), shared with
+# `bt-app`'s build script so the workspace has one copy of the standard, and
+# the rule that names the `links` keys (`bt_winres::release_manifest::
+# sidecar_key`). It has no dependencies.
 [build-dependencies]
+bt-winres = { path = "../bt-winres" }
 miniz_oxide = "=0.8.9"
 
 # A transport does not depend on terminal policy: no code this crate ships names
@@ -25,6 +39,7 @@ miniz_oxide = "=0.8.9"
 # the integration tests in `tests/`, both of which see dev-dependencies.
 [dev-dependencies]
 bt-term = { path = "../bt-term" }
+bt-winres = { path = "../bt-winres" }
 miniz_oxide = "=0.8.9"
 
 # The Unix child tests ask the kernel whether a pid is still in its table with `kill(pid, 0)`;

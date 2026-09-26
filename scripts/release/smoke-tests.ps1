@@ -383,6 +383,37 @@ Test-Case 'an absolute path is passed through as it was written' {
     }
 }
 
+# ── -ArchiveOnly, which starts nothing (0.4.6 ticket U-9) ────────────────────
+#
+# The archive check reads the manifest out of the archive's `folio.exe` and the
+# members out of the zip; `-ArchiveOnly` stops after it, before the first
+# process. The cases with a real archive, packed from a real build, are
+# `package-tests.ps1`'s; these two are the door, with the fixtures above.
+
+Test-Case 'with -ArchiveOnly and no archive anywhere, it refuses and starts nothing' {
+    $result = Invoke-Smoke -StandingIn $scratch -Parameters @{
+        Exe = $stubExe; ArchiveOnly = $true; Artifacts = (Join-Path $scratch 'archive-none')
+        PackageDirectory = $emptyPackage }
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if ($result.Flat -notmatch '-ArchiveOnly checks a release archive') {
+        throw "the refusal was something else: $($result.Text)"
+    }
+    if ($result.Flat -match '--version') { throw "it went on to the front door: $($result.Text)" }
+}
+
+Test-Case 'an archive whose executable carries no manifest is refused, naming the file' {
+    # The fixture archive's `folio.exe` is a line of text: no image, so no
+    # resources and no manifest in it to read.
+    $result = Invoke-Smoke -StandingIn $scratch -Parameters @{
+        Exe = $stubExe; ArchiveOnly = $true; Archive = $archive
+        Artifacts = (Join-Path $scratch 'archive-no-manifest'); PackageDirectory = $emptyPackage }
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    $carrier = Join-Path $scratch 'archive-no-manifest\manifest\folio.exe'
+    if ($result.Flat -notmatch [regex]::Escape($carrier)) {
+        throw "the refusal did not name $carrier : $($result.Text)"
+    }
+}
+
 Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host ''

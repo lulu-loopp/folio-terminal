@@ -23,6 +23,9 @@ All notable changes to Folio are recorded here. The format follows
 - The coming updater can write its record of an update so that it survives a
   power cut, move files the same way, and tell a running Folio from the one
   applying an update through a lock in the install folder. Nothing uses it yet.
+- `folio.exe` now carries a signed list of every other file in the Windows
+  download, with their hashes, and a release is refused if any file differs
+  from it; the Mac app records the same update facts in its signed bundle.
 
 ### Fixed
 
