@@ -48,7 +48,7 @@ drop the test items; a number that moves edits this table and the pictures.
 | what | count | pattern |
 |---|---|---|
 | thread-spawn sites | **48** — `bt-app` 32, `bt-platform` 12, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
-| through the thread door | **44** — `bt-app` 32, `bt-platform` 12; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c; U-13's `folio-trial-watch` joined). A source guard holds both crates to it (`tests::every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door`) | `spawn_at_priority` |
+| through the thread door | **44** — `bt-app` 32, `bt-platform` 12; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c; U-13's `folio-trial-watch` joined). A source guard holds both crates to it (the assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` of `hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e) | `spawn_at_priority` |
 | bare spawns | **4**, all in `bt-pty` and `Unset` by design: the reader, the writer, the dump publisher (unnamed) and `pty-retirement` | `thread::spawn\(`, `thread::Builder::new\(\)` |
 | of those through the door, in a door process rather than the window process | **3**: `folio-attention-stdin` (`attention_wire::payload_on_stdin`), `folio-explorer-removal` (`explorer_menu::remove_from_explorer_menu`), `folio-explorer-cleanup` (`explorer_menu::cleanup_registrations`); each process's main thread waits for its thread as a worker, entered once through `enter_standalone_main` (`folio-attention`, `folio-remove-explorer-menu`, `folio-uninstall-cleanup`) | `enter_standalone_main\(` |
 | named sites / distinct names | **45 / 40**, besides the pool | the first argument, or `.name(…)` |
@@ -531,6 +531,50 @@ batch (compose, configure, acquire, submit, present), then `CompositorCommit`.
 A refusal is handled before anything the call would change, on the road the
 door's own failure takes.
 
+**The escapes are fenced by one source guard** (0.4.6 ticket A1e; the note's §9.1
+as amended, and its revision (g)). `hang_watch::window_waits_tests::every_door_is_where_the_registry_says`
+reads the product's source through `bt_source` — `bt-app` and every first-party
+package its manifests reach, test modules out by their declaration, `vendor/` out —
+and runs nine named assertions, each failure naming its assertion, the row and the
+difference:
+(1) every first-party package is the product or a declared tool (`bt-corpus`,
+`bt-source`);
+(2) `WaitToken`, `WorkerCtx` and `admission::doors` are never named inside
+`unsafe` or inside a `transmute`, `zeroed`, `MaybeUninit` or `read` expression, and
+`admission` keeps `#![forbid(unsafe_code)]` and writes no `unsafe`;
+(3) one `WorkerCtx` struct literal, in `admission::lend_worker`, called by the
+thread door and `enter_standalone_main` once each, and one inherent `impl` and no
+derive for `WorkerCtx` and `WaitToken`;
+(4) the role and phase writers at their pinned call sites, each after its landmark
+(`enter_window_thread` after the parse; `exiting` in `settle_quit`'s `Write` arm,
+at `App::finish`'s head, in the build-error arm and after `run_app`;
+`quit_abandoned` in the `Abandon` arm; `loop_running` on `Init`; the three
+standalone entries), each spelled only as the call `admission::writer(…)`, and
+`enter_callback` at its nineteen entries;
+(5) no `allow` or `expect` of `clippy::disallowed_methods`, `clippy::style`,
+`clippy::all` or `warnings`, at any level, in either path spelling, inside
+`cfg_attr` at any depth — only a door's own `expect`, of which there are none until
+A2;
+(6) `msg_send!`, `vtable(`, `GetProcAddress`, `extern` blocks, `#[link]` and
+`#[macro_export]` only with the owners the registry's `# owners` section counts,
+and no exported macro naming the vocabulary;
+(7) every function that takes a `WaitToken` takes one registry door's and runs its
+effect inside its own call: not `async`, returning no closure, future, iterator,
+`dyn` object or `fn` pointer, keeping no `'static` closure;
+(8) **the closed `Drop` inventory**: thirteen `Drop`s may reach the vocabulary —
+`DirWatch` on both platforms, `trace_sink::Shutdown`, `AttentionPipe` and
+`LaunchPipe` on both platforms, the two video engines, `VideoSeat`, `VideoSeats`,
+`PtySession` and WinHTTP's `http::Request` — each with its chain pinned body by
+body (the first-party edges in order, the vocabulary effects by call site) and a
+repayment in `docs/plans/structural-debt.md` (D-40, D-78…D-82); any other `Drop`
+that names a wait, or calls a door or a pinned body, is red;
+(9) every thread `bt-app` and `bt-platform` start comes through the thread door
+(A1c's guard, absorbed under its own name).
+It is a check over the stated inventories, not a whole-program analysis: a `Drop`
+outside the table that reaches a wait through a helper of its own is not seen, and
+neither is an inference-typed `transmute` inside `bt-platform`'s own `unsafe` (the
+note's (b)2).
+
 **The update pass runs on the window thread in `Starting`** (0.4.6 U-12,
 `update_startup::pass`; the design's startup-recovery row). Directly after
 `enter_window_thread` and before anything touches the data directory, it holds
@@ -766,8 +810,8 @@ happen" has one answer and a guard can hold it.
 | constructing a child process | `bt_platform::quiet_command_named` (and `quiet_command`) — absolute path resolved by `handoff::program_on_path` | pinned as the only `Command` construction |
 | handing something to the operating system | `bt_platform::handoff` — the only `ShellExecuteW` and `NSWorkspace` sites in the workspace; the seven verbs are private to it and reached only through `ShellThread::hand_over`, and a `ShellThread` is entered only with the `WorkerCtx` the thread door lends (A1b), so a hand-off can happen only on a thread the door started | its own module, one function per verb; `compile_fail` doctests on `hand_over` name each verb by both spellings; `handoff_lane::no_handoff_runs_on_the_window_thread` |
 | reaching the network | `bt_platform::http` — `https_get` (one `GET` into memory: the update check) and `https_download` (one `GET` streamed to a file under a ceiling, U-7), over the operating system's own stack (WinHTTP, `NSURLSession`), `https` only, no caller headers; the download's ceiling, temporary file, deadlines and stage vocabulary are `bt_platform::https_download`'s, shared by both real arms | `update_check_transport_tests` holds the three arms to one signature per door and one set of request types |
-| starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` (one definition, in `admission`) — a `&'static` name and a priority band; the new thread is `Worker(name)` (§5.1) and its body is `FnOnce(&WorkerCtx) -> T`, lent the capability a worker-only door takes (0.4.6, A1b) | `tests::every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` finds `std::thread` spawning named in `bt-app`'s and `bt-platform`'s product code only inside the door (A1c; A1e's guard absorbs it); `admission`'s tests start their workers through it |
-| waiting on the window thread (an owner-thread wait) | `bt_platform::admission::admitted` — a `WaitToken` for one door type of `admission::doors`, admitted only on the window thread and in that door's phases (§5.1) | the registry `window_waits.tsv`, held equal to the door types by `hang_watch::window_waits_tests`; every door's function takes its token by value (A1d), and `tests::every_owner_door_takes_its_own_token_by_value` checks each signature |
+| starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` (one definition, in `admission`) — a `&'static` name and a priority band; the new thread is `Worker(name)` (§5.1) and its body is `FnOnce(&WorkerCtx) -> T`, lent the capability a worker-only door takes (0.4.6, A1b) | the source guard's assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` (`hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e; A1c wrote it) finds `std::thread` spawning named in `bt-app`'s and `bt-platform`'s product code only inside the door; `admission`'s tests start their workers through it |
+| waiting on the window thread (an owner-thread wait) | `bt_platform::admission::admitted` — a `WaitToken` for one door type of `admission::doors`, admitted only on the window thread and in that door's phases (§5.1) | the registry `window_waits.tsv`, held equal to the door types by `hang_watch::window_waits_tests`; every door's function takes its token by value (A1d), and `tests::every_owner_door_takes_its_own_token_by_value` checks each signature; the source guard (§5.1, A1e) holds every function that takes a token to one registry door and to running its effect inside its own call |
 | creating a native window outside the framework | `bt_platform::SpareParent` / `spare_parent` — the spare web controller's never-shown `WS_POPUP` parent (ticket 60); dropped only on a pumping thread, left to process exit by an orderly stop | the one `CreateWindowExW` in product code, pinned by `web_spare::spare_wiring_tests::the_spare_parent_is_the_one_window_product_code_creates` |
 | taking a native window's messages away from the framework | `bt_platform::let_the_system_translate_touch` — the touch subclass that hands `WM_TOUCH` and the three `WM_POINTER*` to `DefWindowProc` | a message table pinned by test; called once per window, from the two `create_window` sites |
 
@@ -775,6 +819,17 @@ Two corollaries. **Each lane declares itself**: a new kind of read joins
 `file_reads` with a named lane rather than reading bytes beside it. **The worker
 produces the door's input with the door's own function**, never a second
 derivation of it.
+
+**What stays pending until A2** (the note's revisions (c)1 and (c)6). The source
+guard of §5.1 fences the escapes around the doors; nothing yet refuses a raw
+effect written outside one. These guarantees are A2's, and are not claimed here:
+**the lint on raw effects** (`disallowed_methods` denied in the workspace lints,
+the registry's vocabulary in `clippy.toml`, and each door's own `expect`, whose
+expected count the guard then takes from the registry); **the `file_writes` and
+`wait::{join_bounded, recv_bounded}` doors**; **`file_reads`' execution-level
+design** — a capability checked at `open` would authorise the construction, not
+the reads that follow it; and **the transport doors inside `bt-pty`**, whose
+waits are fenced by owner and count, not by thread authority.
 
 Each door is held by a pin: `bt_app::file_reads_source_tests` reads
 `file_reads_doors.txt` and fails the build when a product read appears outside

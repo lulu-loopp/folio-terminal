@@ -170,6 +170,16 @@ stand, through `bt-app::pty_door` (`spawn_shell` minted in `create_leaf_session`
 `resize` minted in `commit_leaf_resize`) — their location is recorded, they did not
 move. D-77: row 23 is admitted through `bt-app::gpu_door::open_first_window`, where it stands.
 
+0.4.6 ticket A1e repaid no row. It added D-78…D-82: the `Drop` exception rows of the
+thread-door note's (e)3 that had no ledger row (the trace writer's, the endpoints',
+the video engines' and seats', the shell's), and one its check found (WinHTTP's
+`http::Request`, the note's revision (g)2); `DirWatch`'s two rows are D-40's. Each is
+a row of the closed `Drop` inventory the source guard holds, and each is owed a
+repayment by a named 0.4.7 ticket. It advanced D-2: the escapes the compiler cannot
+see around the doors — `unsafe`, a second constructor, a writer called where no
+transition was ruled, a lowered lint, a macro or FFI construct outside its owner, a
+door that returns its effect, a `Drop` that waits — are fenced by one source guard.
+
 ## The ledger
 
 "§" alone means a section of `docs/ARCHITECTURE.md`. "Split prep" is
@@ -181,7 +191,7 @@ ledger's.
 | ID | what | source | ticket | version | status |
 |---|---|---|---|---|---|
 | D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 | open |
-| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid); the thread door lends every worker a `WorkerCtx` and the hand-off door takes it (A1b, 2026-09-26: advanced, not repaid); every owner-thread door takes its token and each listed wait happens only admitted (A1d, 2026-09-26: advanced, not repaid) |
+| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid); the thread door lends every worker a `WorkerCtx` and the hand-off door takes it (A1b, 2026-09-26: advanced, not repaid); every owner-thread door takes its token and each listed wait happens only admitted (A1d, 2026-09-26: advanced, not repaid); the escapes the compiler cannot see are fenced by one source guard, and every `Drop` that may wait is a row of a closed inventory (A1e, 2026-09-27: advanced, not repaid) |
 | D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
 | D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
 | D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not) |
@@ -219,7 +229,7 @@ ledger's.
 | D-37 | §5.3 row 5 — the machine's whole font collection enumerated inline | §5.3 | 50 | 0.4.5 — the traced frozen gear | repaid (ticket 50) |
 | D-38 | §5.3 row 6 — the find box re-scans every frozen line per keystroke | §5.3 | 51 | 0.4.5 — a per-keystroke cost | repaid (ticket 51) |
 | D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | none yet | 0.4.6 | open |
-| D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | 0.4.6 | open |
+| D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | 0.4.6 | open — both platforms' `DirWatch::drop` are rows of the closed `Drop` inventory the source guard holds (A1e, 2026-09-27); B7 repays them |
 | D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | 0.4.5 — presenting off the input thread is the typing-stability work | open — since ticket 37 a presented picture is a pair (frame and metrics: `SeatSignature::metrics`, `LeafSession::presented_metrics`), and the lane must carry both |
 | D-42 | §5.3 row 10 — device recovery blocks and sleeps on the window thread | §5.3; §5.4 step 4 | none yet | 0.4.6 — independent of D-41 (budget note R8, 2026-09-26): no frame is admitted while recovering, so B9 does not wait for the presentation lane | open |
 | D-43 | §5.3 row 11 — PTY birth on the window thread | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — needs D-1's session owner to keep input and resize order | open — admitted where it stands through `pty_door::spawn_shell`, minted in `create_leaf_session` (A1d, 2026-09-26: its door, not its move) |
@@ -257,6 +267,11 @@ ledger's.
 | D-75 | the computation lane: no request identity — an answer carries only its question, so one question asked twice gives two answers nobody can tell apart | A5 (Computation × every request has its own identity) | none yet | 0.4.6 — with D-33 | open |
 | D-76 | the computation lane: the decoration thread's death is invisible while the scaling and path-verification threads hold clones of the one answer sender; the drain sees a disconnection only when all three have gone | A5 (Computation × a dead worker is observable) | none yet | 0.4.6 — with D-33 | open |
 | D-77 | §5.3 row 23 — the first window's GPU is opened with `pollster::block_on(GpuContext::open(…))` in `Runtime::create`, on the window thread, a wait no row listed | thread-door note revision (e)2; A1a | B9 (device recovery rests on deadlines and rebuilds on a worker) | 0.4.6 — moves with B9's rebuild on a worker (D-42) | open — registered as row 23 `pending`, door `admission::doors::GpuOpen`; it stays on the window thread until then (coordinator, 2026-09-26); admitted where it stands through `gpu_door::open_first_window` (A1d, 2026-09-26) |
+| D-78 | `trace_sink::Shutdown`'s `Drop` flushes the trace — a bounded wait, through its admitted door — when `fn main` returns early from a loop that could not be built | thread-door note (c)4, (e)3, (g)1; A1e | none yet — *The trace writer is retired through its admitted flush door, never by a drop* | 0.4.7 | open — a row of the closed `Drop` inventory (A1e, 2026-09-27) |
+| D-79 | `AttentionPipe` and `LaunchPipe`, on both platforms, join their listener thread in `Drop` | thread-door note (c)4, (e)3; A1e | none yet — *An endpoint is retired through an explicit door, not by its drop* | 0.4.7 | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); no product reach: the endpoints live in statics |
+| D-80 | the video engines (`video::engine::Engine`, `macos_player::Engine`) and `VideoSeat` and `VideoSeats` shut the engine down — a bounded poll and a join — in `Drop` | thread-door note (c)4, (e)3, (f)2; A1e | none yet — *A video engine is shut down through an explicit door, not by its drop* | 0.4.7 | open — rows of the closed `Drop` inventory (A1e, 2026-09-27) |
+| D-81 | `PtySession`'s `Drop` finishes the input dump (a write, two `sync_data`) and runs `shutdown` (a bounded reap, a bounded join) | thread-door note (c)4, (e)3; A1e | none yet — *A shell is taken apart only through `retire_within`, never by a drop on the window thread* | 0.4.7 | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); on `pty-retirement`, and on the caller only when that thread cannot start |
+| D-82 | WinHTTP's `http::Request` waits up to `CLOSE_WAIT` (5 s) on a `Condvar` in `Drop` for its handle's closing callback | thread-door note (g)2; A1e | none yet — *A download's request is closed through its own bounded door, not by its drop* | 0.4.7 | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); no product caller of `https_download` yet |
 
 ---
 
@@ -1360,3 +1375,37 @@ drains; neither lane states a bound, and the contract asks for one.
   D-42), which is the same request run for the first device. Owed: the first
   window's device asked for off the window thread, with the window shown only when
   it lands.
+
+## D-78…D-82 — the rows added on 2026-09-27 by A1e
+
+The `Drop`s that may reach the window-thread vocabulary, from the thread-door
+note's closed inventory ((c)4, (e)3, (f)2, (g)). Each is held body by body by
+`hang_watch::window_waits_tests::every_door_is_where_the_registry_says`: its
+first-party edges in order and its effects by call site, so a new wait under a
+row is red. None is ruled to stay: each wait can reach a thread that must not
+wait on some road, and none has a ruling that it may.
+
+- **D-78 · the trace writer's drop.** `trace_sink::Shutdown::drop` admits the
+  `TraceFlush` door and flushes: a polled close, a bounded `recv_timeout`, a
+  polled finish and a join. Reached only on `fn main`'s early return from a loop
+  that could not be built, which says `exiting()` first. Owed: the writer retired
+  through its admitted flush door, never by a drop.
+- **D-79 · the endpoints' drops.** `AttentionPipe` and `LaunchPipe`, on both
+  platforms, signal their listener and join it in `Drop`. No product reach today —
+  the endpoints live in statics for the process's life — but a public-API and a
+  test destruction path exist. Owed: an explicit retirement door.
+- **D-80 · the video engines' drops.** `video::engine::Engine` and
+  `macos_player::Engine` shut down in `Drop` (a 2 ms poll under `SHUTDOWN_BUDGET`,
+  then a join); `VideoSeat` and `VideoSeats` reach the same `shutdown` from their
+  own drops, on the window thread when a pane or a window closes. Owed: an explicit
+  shutdown door, repaying both layers together.
+- **D-81 · the shell's drop.** `PtySession::drop` finishes the input dump (one
+  write, two `sync_data`) and then runs `shutdown` (a bounded reap and a bounded
+  join). It runs on `pty-retirement`, and on the caller only when that thread
+  cannot be started. Owed: a shell taken apart only through `retire_within`, with
+  the thread-refused road still tearing it down.
+- **D-82 · a download's request.** WinHTTP's `http::Request::drop` (U-7) closes
+  its handle and waits up to `CLOSE_WAIT` on a `Condvar` for the closing callback.
+  `https_download` has no product caller yet; the update's download will call it
+  on a worker. Found by A1e's check, not by a review (the note's (g)2). Owed: the
+  request closed through its own bounded door, not by its drop.

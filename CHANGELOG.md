@@ -77,6 +77,10 @@ All notable changes to Folio are recorded here. The format follows
   engine, the session save on the way out — can now only happen on the window
   thread, at the stage of the run it belongs to, and is timed where it happens.
   Nothing changes while Folio runs normally.
+- A test now reads Folio's own code for the ways around those rules that the
+  compiler cannot see — a forged proof, a second maker of one, a rule switched
+  off, a wait hidden in a macro or in something's clean-up — and names the one
+  it finds. Nothing changes while Folio runs.
 
 ## 0.4.5-preview — 2026-09-26
 
