@@ -561,7 +561,14 @@ mod tests {
             std::env::temp_dir().join(format!("bt-update-trial-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).expect("a private folder for this test");
-        root
+        // macOS hands out its temporary folder through a link (`/var` →
+        // `/private/var`), and the integration marks refuse a path through
+        // one; the folder's own name is what a real data folder has.
+        if bt_platform::host_platform() == bt_platform::HostPlatform::Windows {
+            root
+        } else {
+            std::fs::canonicalize(&root).expect("the private folder has a real name")
+        }
     }
 
     /// The journal of `txn` in `phase`, as the lock holder encodes it.
