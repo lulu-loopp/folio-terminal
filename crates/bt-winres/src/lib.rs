@@ -57,6 +57,11 @@ pub mod digest;
 /// archive (0.4.6 ticket U-9). See the module.
 pub mod release_manifest;
 
+/// **The zip format's records**, read field by field: the one copy of the
+/// layout `bt-pty`'s build script and the updater's archive reader share
+/// (0.4.6 ticket U-14). See the module.
+pub mod zip;
+
 use std::fmt;
 
 /// `RT_ICON` — one image out of an `.ico`.

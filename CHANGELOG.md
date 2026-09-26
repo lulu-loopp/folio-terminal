@@ -30,6 +30,10 @@ All notable changes to Folio are recorded here. The format follows
   install is unfinished: a finished one's leftovers are cleared, and a start
   made while an update is being applied waits for it. No build writes such an
   update yet, so nothing changes for anyone today.
+- The coming updater can read a downloaded Windows release and stage it only
+  if every file is one the new `folio.exe`'s signed list names, with the same
+  bytes; odd file names, oversized or damaged files and anything unlisted are
+  refused by name. Nothing uses it yet.
 
 ### Fixed
 

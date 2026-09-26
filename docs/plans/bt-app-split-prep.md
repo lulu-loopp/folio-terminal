@@ -651,6 +651,8 @@ The twelve wholly-test files, by the declaration that makes each one:
 
 **Sixteen at the merge of both (2026-09-27):** U-8's `update_eligibility.rs` and A1a's `window_waits_tests.rs` both joined, so the test is `the_wholly_test_files_of_bt_app_are_the_sixteen`.
 
+**A seventeenth since 2026-09-26** (0.4.6 ticket U-14): `update_archive.rs` declares `#[cfg(test)] #[path = "update_archive_tests.rs"] mod tests;` — the archive reader's tests, which build release archives in memory — which makes `update_archive_tests.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_seventeen`.
+
 ---
 
 ## 7. The end measurement

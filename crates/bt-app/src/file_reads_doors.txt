@@ -110,3 +110,8 @@
 # capped; the derivation's one call of the folder read.
 1 capped: .read_to_end
 1 derive_fact: read
+# The updater's archive reader (U-14): the downloaded archive on Lane::Update,
+# opened once by `expand` (`file_reads::open`), its records read by `read_at`
+# and each member's data a bounded chunk at a time by `expand_member`.
+1 read_at: .read_exact
+1 expand_member: .read_exact

@@ -1028,6 +1028,12 @@ windows = { version = "0.62.2", features = [
     # `GetThreadContext` alone, which the `windows` crate files under `Kernel`
     # even though it sits beside `ReadProcessMemory` in `Diagnostics::Debug`.
     "Win32_System_Kernel",
+    # `LoadLibraryExW` with `LOAD_LIBRARY_AS_DATAFILE |
+    # LOAD_LIBRARY_AS_IMAGE_RESOURCE`, `FindResourceW` and the three calls
+    # beside it: the release manifest read out of a new `folio.exe` that is
+    # never executed (`src/pe_resource.rs`, 0.4.6 ticket U-14, experiment E-14).
+    # A feature, not a package.
+    "Win32_System_LibraryLoader",
     # `ReadDirectoryChangesW`'s three companions: the overlapped completion
     # (`Win32_System_IO`), and the events the watcher thread waits on and the
     # caller stops it with (`Win32_System_Threading`). See `DirWatch`.
@@ -1069,6 +1075,14 @@ windows = { version = "0.62.2", features = [
     # manifest, and `folio.exe` has none; this decides whether the machine has a
     # first-page context menu at all (`src/msix.rs`).
     "Wdk_System_SystemServices",
+    # `NtCreateFile` with a `RootDirectory` and `OBJECT_ATTRIBUTES`: the update
+    # archive's members created **under the staging directory's handle**, never
+    # through a path that could be re-pointed between the check and the write
+    # (`src/exclusive_create.rs`, 0.4.6 ticket U-14, revision (b) F-12). Two
+    # features and not a package — `windows` is already here, which is
+    # `docs/DESIGN.md` §8's bar.
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
     "Win32_UI_HiDpi",
     # `ImmGetContext` / `ImmNotifyIME` / `ImmReleaseContext`: the one call that
     # ends a composition the field it was typed into no longer exists for

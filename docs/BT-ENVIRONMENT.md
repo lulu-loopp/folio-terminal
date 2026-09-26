@@ -311,7 +311,7 @@ byte and read-pass totals for every lane each minute, including zero minutes,
 through the existing stderr trace sink.
 
 Lanes are `inline_image`, `peek`, `animation`, `preview`, `pdf`, `git_pipe`,
-`settings`, `fonts`, `attention`, `install` and `other`. Bytes count content delivered by
+`settings`, `fonts`, `attention`, `install`, `update` and `other`. Bytes count content delivered by
 the instrumented readers; directory enumeration and metadata are excluded.
 `git_pipe` measures the child's pipe output consumed here, not the child's
 disk reads. Reads mean logical passes, including bounded heads/tails and

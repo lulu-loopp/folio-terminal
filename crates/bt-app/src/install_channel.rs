@@ -66,9 +66,9 @@ pub const MARKER_VERSION: u64 = 1;
 /// A marker longer than this is not a marker.
 const MARKER_MAX_BYTES: u64 = install_evidence::ATTRIBUTE_MAX_BYTES as u64;
 /// scoop's record of an install: which bucket and architecture.
-const SCOOP_INSTALL_RECEIPT: &str = "install.json";
+pub(crate) const SCOOP_INSTALL_RECEIPT: &str = "install.json";
 /// scoop's copy of the bucket manifest it installed from.
-const SCOOP_MANIFEST_RECEIPT: &str = "manifest.json";
+pub(crate) const SCOOP_MANIFEST_RECEIPT: &str = "manifest.json";
 /// A receipt longer than this is not scoop's.
 const RECEIPT_MAX_BYTES: u64 = 1 << 20;
 
