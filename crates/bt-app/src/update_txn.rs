@@ -1957,10 +1957,8 @@ impl Home {
                 let bundle_name = name.strip_prefix('.')?.strip_suffix(MACOS_HOME_SUFFIX)?;
                 let bundle = home.parent()?.join(bundle_name);
                 let (_, inside) = bundle_of(exe)?;
+                // The locator of that bundle is `home` itself, by construction.
                 let mut found = Self::for_bundle(&bundle)?;
-                if found.root != home {
-                    return None;
-                }
                 if let RescueShape::Bundle { inside: at, .. } = &mut found.rescue {
                     *at = inside.to_path_buf();
                 }
@@ -4215,8 +4213,8 @@ mod tests {
     /// F-3's plist passes `--update-recover <home>`; F-2's `Run` value passes
     /// no home. A name that is not a locator's home is no home at all.
     ///
-    /// MUTATION: in `Home::of_rescue_named`'s macOS arm, drop the
-    /// `found.root != home` check.
+    /// MUTATION: in `Home::of_rescue_named`'s macOS arm, answer the rescue
+    /// clone's own executable (`exe.to_path_buf()`) as the installed program.
     #[test]
     fn a_named_home_gives_the_journal_and_the_installed_program() {
         let applications = PathBuf::from("/Applications");
