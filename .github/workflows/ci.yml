@@ -567,6 +567,9 @@ jobs:
   #    fourteen macOS-only findings (D-67) nobody's gate saw: items whose only
   #    readers are `#[cfg(windows)]`, and two `#[must_use]` answers whose
   #    Windows signatures did not carry the attribute;
+  # ⑤ that lint line can fail: a planted macOS-only dead item is refused, the
+  #    `gates-can-fail` mechanism run on this platform (the Windows job cannot
+  #    plant it — Windows never compiles the item).
   #
   # What is still checked and not tested, and why, as measured on the owner's
   # Mac mini on 2026-09-26 (ticket 72): **`bt-term`** — 43 of its tests assert a
@@ -671,6 +674,38 @@ jobs:
           cargo clippy --workspace --all-targets --locked
           --exclude mitex --exclude mitex-parser
           -- -D warnings
+
+      # **The macOS lint line can actually fail** — `gates-can-fail`'s mechanism
+      # (plant, demand red, put the file back), run here because the violation
+      # it plants exists only on this platform: an item compiled only on macOS
+      # that nothing reads. Windows never compiles it, so the Windows canary
+      # cannot stand in for this one. The refusal must name the planted item, so
+      # a red for any other reason is not mistaken for this proof, and the file
+      # is compared with the checkout afterwards.
+      - name: the macOS lint gate can actually fail
+        run: |
+          file=crates/bt-app/src/explorer_menu.rs
+          original="$RUNNER_TEMP/lint-gate-original.rs"
+          log="$RUNNER_TEMP/lint-gate.log"
+          cp "$file" "$original"
+          printf '\n#[cfg(target_os = "macos")]\nfn macos_lint_gate_probe() {}\n' >> "$file"
+          set +e
+          cargo clippy --locked -p bt-app -- -D warnings > "$log" 2>&1
+          clippy=$?
+          set -e
+          cp "$original" "$file"
+          git diff --exit-code -- "$file"
+          if [ "$clippy" -eq 0 ]; then
+            echo "clippy passed a planted macOS-only dead item - the macOS lint line is not a gate"
+            exit 1
+          fi
+          if ! grep -q "macos_lint_gate_probe" "$log"; then
+            cat "$log"
+            echo "clippy failed with exit $clippy, but not on the planted item"
+            exit 1
+          fi
+          grep -m1 -B1 -A3 "macos_lint_gate_probe" "$log"
+          echo "clippy refused the planted macOS-only item with exit $clippy, which is this gate passing."
 
   # ── the platform the remote work runs on ──────────────────────────────────
   #

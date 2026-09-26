@@ -1187,7 +1187,8 @@ two privilege-bound fixtures, each with its reason there; they are not debt.
   and D-62 make widening it green.
   **Repaid by ticket 72 (2026-09-26).** `core-macos` runs `logic`'s clippy line
   word for word (`--workspace --all-targets --exclude mitex --exclude
-  mitex-parser -- -D warnings`) and adds `bt-render` (295 + 7 tests, green on the Mac mini's
+  mitex-parser -- -D warnings`), plants a macOS-only dead item and demands that
+  line refuse it, and adds `bt-render` (295 + 7 tests, green on the Mac mini's
   Metal device) and `bt-corpus` (16 tests) to its test line. `bt-app` and
   `bt-term` stay checked and not tested, because their suites are red on macOS
   by construction (D-78); that part of the row moves there rather than staying
