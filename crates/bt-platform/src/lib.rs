@@ -3340,6 +3340,12 @@ pub mod http;
 #[path = "http_portable.rs"]
 pub mod http;
 
+/// **What a download is, apart from the stack that carries it** (U-7) — the
+/// ceiling, the temporary file and its rename, the deadlines, the stage
+/// vocabulary and the monitor that [`http::https_download`]'s arms share. No
+/// `cfg`: it is the same on every platform, and its tests run on all three.
+pub mod https_download;
+
 /// **Folio's package identity** — the strings `packaging/msix/AppxManifest.xml`
 /// declares, and the deployment calls that register them (DESIGN §7.4a).
 ///
@@ -15988,6 +15994,65 @@ mod update_check_transport_tests {
             signature(PORTABLE),
             "the portable arm is a second door"
         );
+    }
+
+    /// The download door's signature, from `pub fn` to the brace, as one
+    /// line.
+    fn download_signature(source: &str) -> String {
+        let at = source
+            .find("pub fn https_download(")
+            .expect("every arm defines the download door");
+        let rest = &source[at..];
+        let end = rest
+            .find(" {")
+            .expect("a function signature ends at its brace");
+        rest[..end].split_whitespace().collect::<Vec<_>>().join(" ")
+    }
+
+    /// RED (U-7) — **one download door, spelled the same way in all three
+    /// arms, over one request type.**
+    ///
+    /// The update job will name `http::https_download` without a `cfg`, as
+    /// `bt_app::update` names `https_get`; an arm that took another argument
+    /// would compile where it was written and fail on the other two. The
+    /// request, the error and the monitor are one set of types in
+    /// `https_download.rs`, re-exported by each arm, so the three cannot come
+    /// to describe different downloads.
+    ///
+    /// MUTATION: give the macOS arm's `https_download` a second argument, or
+    /// define a local `HttpsDownload` in any arm.
+    #[test]
+    fn the_three_http_arms_declare_one_download_door() {
+        let windows = download_signature(WINDOWS);
+        assert_eq!(
+            windows,
+            "pub fn https_download(request: &HttpsDownload<'_>) -> Result<Downloaded, DownloadError>"
+        );
+        assert_eq!(
+            windows,
+            download_signature(MACOS),
+            "the macOS arm is a second door"
+        );
+        assert_eq!(
+            windows,
+            download_signature(PORTABLE),
+            "the portable arm is a second door"
+        );
+        for (arm, source) in [
+            ("Windows", WINDOWS),
+            ("macOS", MACOS),
+            ("portable", PORTABLE),
+        ] {
+            let code = code_only(source);
+            assert!(
+                code.contains("pub use crate::https_download::{"),
+                "the {arm} arm no longer re-exports the shared download types"
+            );
+            assert!(
+                !code.contains("struct HttpsDownload"),
+                "the {arm} arm describes a download of its own"
+            );
+        }
     }
 
     /// RED — **one request, described with the same six fields in the same
