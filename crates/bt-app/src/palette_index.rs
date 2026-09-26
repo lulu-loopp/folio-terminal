@@ -406,7 +406,7 @@ impl IndexWorker {
         bt_platform::spawn_at_priority(
             INDEX_WORKER_THREAD,
             bt_platform::ThreadPriority::BelowNormal,
-            move || {
+            move |_ctx| {
                 // A plain queue and no newest-per-target coalescing, unlike the
                 // directory lane: `FileIndexes::claim` will not ask twice about
                 // a root whose walk is already out, so there is no burst of

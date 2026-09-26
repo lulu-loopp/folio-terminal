@@ -336,7 +336,7 @@ pub fn begin_probe() {
     bt_platform::spawn_at_priority(
         "psreadline-probe",
         bt_platform::ThreadPriority::BelowNormal,
-        || {
+        |_ctx| {
             let _ = PROBE.set(run_probe());
             // After the answer is published, never before: a wake that raced the
             // `set` would send the loop to read a row that is still `Probing`,

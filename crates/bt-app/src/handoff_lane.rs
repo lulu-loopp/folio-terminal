@@ -36,6 +36,7 @@ use std::collections::HashMap;
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
+use bt_platform::admission::WorkerCtx;
 use bt_platform::{Handoff, NativeWindow};
 
 /// How many hand-offs may wait behind the one running.
@@ -85,22 +86,24 @@ impl HandoffLane {
     /// process.
     ///
     /// The thread enters its [`bt_platform::ShellThread`] first, which on Windows is the COM
-    /// apartment `ShellExecuteW` wants, and then hands each request to the door it names.
+    /// apartment `ShellExecuteW` wants, and then hands each request to the door it names. The
+    /// entry takes the capability the thread door lent this thread's body — the hand-off is a
+    /// worker-only door, and this lane is the one worker that holds it.
     pub(crate) fn spawn(wake: impl Fn() + Clone + Send + 'static) -> Result<Self> {
         Self::start(
-            || {
-                let shell = bt_platform::ShellThread::enter();
+            |ctx| {
+                let shell = bt_platform::ShellThread::enter(ctx);
                 move |window: NativeWindow, handoff: &Handoff| shell.hand_over(window, handoff)
             },
             wake,
         )
     }
 
-    /// The lane with the executor made on its own thread — the production one above, or a
-    /// recording one in a test.
+    /// The lane with the executor made on its own thread, from the capability the door lent it —
+    /// the production one above, or a recording one in a test.
     fn start<M, E, W>(make_executor: M, wake: W) -> Result<Self>
     where
-        M: FnOnce() -> E + Send + 'static,
+        M: FnOnce(&WorkerCtx) -> E + Send + 'static,
         E: FnMut(NativeWindow, &Handoff) -> Result<(), String>,
         W: Fn() + Clone + Send + 'static,
     {
@@ -110,7 +113,7 @@ impl HandoffLane {
         bt_platform::spawn_at_priority(
             "bt-os-handoff",
             bt_platform::ThreadPriority::BelowNormal,
-            move || run_handoff_lane(request_rx, answer_tx, make_executor(), lane_wake),
+            move |ctx| run_handoff_lane(request_rx, answer_tx, make_executor(ctx), lane_wake),
         )
         .context("spawn the OS hand-off lane")?;
         Ok(Self {
@@ -311,7 +314,7 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
         let lane = HandoffLane::start(
-            move || {
+            move |_ctx| {
                 move |_window: NativeWindow, handoff: &Handoff| {
                     let count = {
                         let mut log = log.lock().expect("the log");
@@ -662,7 +665,7 @@ pub(crate) mod contract_adapter {
         let door = Arc::clone(&gate);
         let wake = Arc::clone(&probe);
         let lane = HandoffLane::start(
-            move || {
+            move |_ctx| {
                 move |_window: NativeWindow, handoff: &Handoff| {
                     door.pass(question_of(handoff));
                     Ok(())

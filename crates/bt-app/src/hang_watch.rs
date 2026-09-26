@@ -3149,7 +3149,7 @@ pub fn start(reports: PathBuf, trace_perf: bool) {
     if let Err(error) = bt_platform::spawn_at_priority(
         "bt-hang-watch",
         bt_platform::ThreadPriority::BelowNormal,
-        move || watch_forever(reports, ui_thread_id, threshold, trace_perf),
+        move |_ctx| watch_forever(reports, ui_thread_id, threshold, trace_perf),
     ) {
         crate::diagnostics::note(&format!("Folio could not start its hang watchdog: {error}"));
     }

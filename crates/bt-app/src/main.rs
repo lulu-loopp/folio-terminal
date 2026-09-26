@@ -2104,7 +2104,7 @@ impl MathWorker {
         bt_platform::spawn_at_priority(
             "bt-path-verify-worker",
             bt_platform::ThreadPriority::BelowNormal,
-            move || {
+            move |_ctx| {
                 run_path_verify_worker(path_rx, path_result_tx, path_wake);
             },
         )
@@ -2116,7 +2116,7 @@ impl MathWorker {
         bt_platform::spawn_at_priority(
             "bt-image-scale-worker",
             bt_platform::ThreadPriority::BelowNormal,
-            move || {
+            move |_ctx| {
                 run_scale_worker(scale_rx, |request| {
                     // **What a Lanczos3 pass actually costs on this machine**,
                     // beside the size that provoked it. The lane is the one
@@ -2156,7 +2156,7 @@ impl MathWorker {
             "bt-math-worker",
             bt_platform::ThreadPriority::BelowNormal,
             Some(bt_math::MATH_WORKER_STACK_BYTES),
-            move || {
+            move |_ctx| {
                 run_decoration_worker(task_rx, result_tx, wake);
             },
         )

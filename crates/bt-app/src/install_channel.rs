@@ -450,7 +450,7 @@ pub fn begin() {
     let _ = bt_platform::spawn_at_priority(
         "bt-install-channel",
         bt_platform::ThreadPriority::BelowNormal,
-        || {
+        |_ctx| {
             let fact = FACT.get_or_init(|| {
                 derive_fact(
                     std::env::current_exe(),

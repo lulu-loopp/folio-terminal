@@ -1,7 +1,7 @@
 //! **Which kind of thread this is, and whether the window thread may wait here now.**
 //!
 //! The owner of three facts no code owned before (`docs/plans/design/thread-door-2026-09-26.md`,
-//! the ruling copy with its revisions (b)–(e); `docs/ARCHITECTURE.md` §5.1):
+//! the ruling copy with its revisions (b)–(f); `docs/ARCHITECTURE.md` §5.1):
 //!
 //! - **a thread's role** — [`Role`], one thread-local, written only by the entries below;
 //! - **the window thread's phase** — [`Phase`], a thread-local meaningful only where the role is
@@ -15,11 +15,15 @@
 //! the [`Meter`] `hang_watch` installs once. A refusal does not run the work, is counted, and is
 //! returned as [`Refused`] for the caller to handle as it handles the door's own error.
 //!
-//! **What is not here yet, said so that nobody reads more into it** (A1a lands this module alone):
-//! no door takes a token yet (A1d converts them), the thread door does not lend a [`WorkerCtx`] yet
-//! (A1b moves `spawn_at_priority` here), and every spawned thread is still [`Role::Unset`] until
-//! it does. The roles in use today are [`Role::Window`] (the thread that runs `fn main` past the
-//! argument parse) and [`Role::Callback`] (the OS-owned callback entries).
+//! **The thread door lives here too** ([`spawn_at_priority`], re-exported at the crate root): every
+//! thread it starts is [`Role::Worker`] by its name and its body is lent a [`WorkerCtx`], the
+//! capability a worker-only door takes (A1b). The one such door today is the hand-off's
+//! (`ShellThread::enter`).
+//!
+//! **What is not here yet, said so that nobody reads more into it:** no owner-thread door takes a
+//! token yet (A1d converts them), and the threads started outside the door — `bt-platform`'s and
+//! `bt-app`'s bare spawns (A1c), `bt-pty`'s four and `bt-term`'s resample pool (by design) — are
+//! still [`Role::Unset`].
 //!
 //! # What the compiler proves, and how the proofs are written
 //!
@@ -52,15 +56,15 @@ use std::time::Instant;
 
 /// **What kind of thread the calling thread is.**
 ///
-/// `Unset` is never a worker and never the window: it is every thread nothing has named yet —
-/// after A1a, every spawned thread, the main thread of a door process, and an OS thread outside a
-/// callback scope.
+/// `Unset` is never a worker and never the window: it is every thread nothing has named yet — a
+/// thread started outside the thread door, the main thread of a door process, and an OS thread
+/// outside a callback scope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Role {
     Unset,
     /// The thread that runs `fn main` in a launch that got past the argument parse.
     Window,
-    /// A thread the thread door started (A1b), or a standalone process's main thread
+    /// A thread the thread door ([`spawn_at_priority`]) started, or a standalone process's main thread
     /// ([`enter_standalone_main`]), by its name.
     Worker(&'static str),
     /// An OS-owned thread running one of our callbacks, by the callback's name, for the length of
@@ -340,9 +344,9 @@ impl Drop for CallbackScope {
 ///
 /// Private fields, `!Send`, `!Sync`, no `Clone`, `Default` or public constructor. Made in one
 /// function, [`lend_worker`], on the thread it names, in the statement after that thread's role
-/// becomes [`Role::Worker`]. Today its one caller is [`enter_standalone_main`]; the thread door
-/// becomes the second when `spawn_at_priority` moves here (A1b), and a worker-only door then takes
-/// `&WorkerCtx`, so a caller with none does not compile.
+/// becomes [`Role::Worker`]. Its two callers are the thread door ([`spawn_at_priority_with_stack`])
+/// and [`enter_standalone_main`]; a worker-only door takes `&WorkerCtx`, so a caller with none does
+/// not compile (the proofs are on [`spawn_at_priority`]).
 ///
 /// ```compile_fail
 /// // RED (A1a) — a `WorkerCtx` cannot be built outside `admission`.
@@ -352,11 +356,19 @@ impl Drop for CallbackScope {
 /// };
 /// ```
 ///
-/// MUTATION: make `WorkerCtx`'s fields `pub` and the block above compiles. The control is the
-/// public road, which lends one to a body:
+/// MUTATION: make `WorkerCtx`'s fields `pub` and the block above compiles. The controls are the
+/// two public roads, each of which lends one to a body:
 ///
 /// ```no_run
 /// let _ = bt_platform::admission::enter_standalone_main("doc-probe", |ctx| ctx.name());
+/// ```
+///
+/// ```no_run
+/// let _ = bt_platform::spawn_at_priority(
+///     "doc-probe",
+///     bt_platform::ThreadPriority::BelowNormal,
+///     |ctx| ctx.name(),
+/// );
 /// ```
 ///
 /// Its auto traits, probed alone:
@@ -418,13 +430,201 @@ impl WorkerCtx {
 
 /// **The worker writer**: the calling thread becomes `Worker(name)`, permanently, and the
 /// capability that says so is built on its stack in the next statement, so role and capability
-/// cannot disagree. Private; its callers check that the thread is theirs to name.
+/// cannot disagree. Private; its two callers make sure the thread is theirs to name — the thread
+/// door calls it first thing on a thread it has just started (after the band), and
+/// [`enter_standalone_main`] only on an `Unset` thread, once per process.
 fn lend_worker(name: &'static str) -> WorkerCtx {
     ROLE.with(|role| role.set(Role::Worker(name)));
     WorkerCtx {
         name,
         _local: PhantomData,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The thread door
+// ---------------------------------------------------------------------------
+
+/// **Start a named thread that is already in its band, and lend its body the capability that says
+/// it is a worker** — the thread door (`docs/ARCHITECTURE.md` §6, `docs/RULES.md` rows 52 and 53;
+/// design note `docs/plans/design/thread-door-2026-09-26.md` §2).
+///
+/// Inside the new thread, in this order: the band, as the first statement; the role
+/// [`Role::Worker`] `(name)`; then a [`WorkerCtx`] built on the thread's own stack and lent to
+/// `body` by reference. `body` cannot keep the capability past its return (it is lent, and the
+/// result type is chosen outside the loan), cannot send it to another thread (`!Sync`), and nothing
+/// but this door and [`enter_standalone_main`] can make one.
+///
+/// **The band is set from inside the new thread, not from the spawner**, and that is the whole
+/// reason this helper exists rather than a `set_priority(&handle)` called after `spawn`: between a
+/// `spawn` and a call on its `JoinHandle` the new thread is already running, and under the exact
+/// saturation this is for, "already running" can mean "has already decoded the image" — a worker
+/// that spends its first and busiest milliseconds at the frame's priority. Here the first statement
+/// the thread executes is the one that gets out of the frame's way. Off Windows the band is
+/// requested and not taken ([`crate::set_current_thread_priority`] answers `false`); the name, the
+/// role and the capability are the same on every platform.
+///
+/// # Errors
+///
+/// Whatever [`std::thread::Builder::spawn`] answers when the operating system will not start a
+/// thread; `body` has not run and no role was written.
+///
+/// # The capability, proved
+///
+/// A worker-only door takes `&WorkerCtx`, so code with none in scope does not compile (M3):
+///
+/// ```compile_fail
+/// // RED (A1b, M3) — a function the door did not start has no capability to hand a worker door.
+/// fn on_any_thread() {
+///     drop(bt_platform::ShellThread::enter());
+/// }
+/// ```
+///
+/// MUTATION: make `ShellThread::enter` take no capability and the block above compiles. The
+/// control is the same statement inside a body the door started, handing it the lent `ctx`:
+///
+/// ```no_run
+/// let _ = bt_platform::spawn_at_priority(
+///     "doc-probe",
+///     bt_platform::ThreadPriority::BelowNormal,
+///     |ctx| {
+///         drop(bt_platform::ShellThread::enter(ctx));
+///     },
+/// );
+/// ```
+///
+/// The lent capability does not cross into another thread, with no `'static` bound in the way (a
+/// scoped thread; M3r):
+///
+/// ```compile_fail
+/// // RED (A1b, M3r) — a door-started body cannot hand its capability to a thread it starts.
+/// let _ = bt_platform::spawn_at_priority(
+///     "doc-probe",
+///     bt_platform::ThreadPriority::BelowNormal,
+///     |ctx| {
+///         std::thread::scope(|threads| {
+///             threads.spawn(move || ctx.name());
+///         });
+///     },
+/// );
+/// ```
+///
+/// MUTATION: drop `_local` from `WorkerCtx` (a `Sync` `WorkerCtx` makes `&WorkerCtx` `Send`) and it
+/// compiles. The control is the same scoped spawn carrying a byte, with the capability used where
+/// it was lent:
+///
+/// ```no_run
+/// let _ = bt_platform::spawn_at_priority(
+///     "doc-probe",
+///     bt_platform::ThreadPriority::BelowNormal,
+///     |ctx| {
+///         let byte = 0_u8;
+///         std::thread::scope(|threads| {
+///             threads.spawn(move || byte);
+///         });
+///         ctx.name()
+///     },
+/// );
+/// ```
+///
+/// An indirection does not carry a capability it was not given (worker-side M5): a boxed closure
+/// and a function pointer, each typed with no capability, cannot reach the door even inside a body
+/// the door started —
+///
+/// ```compile_fail
+/// // RED (A1b, M5) — a boxed closure with no capability in its type.
+/// let _ = bt_platform::spawn_at_priority(
+///     "doc-probe",
+///     bt_platform::ThreadPriority::BelowNormal,
+///     |_ctx| {
+///         let enter: Box<dyn Fn()> = Box::new(|| drop(bt_platform::ShellThread::enter()));
+///         enter();
+///     },
+/// );
+/// ```
+///
+/// ```compile_fail
+/// // RED (A1b, M5) — a function pointer with no capability in its type.
+/// let _ = bt_platform::spawn_at_priority(
+///     "doc-probe",
+///     bt_platform::ThreadPriority::BelowNormal,
+///     |_ctx| {
+///         let enter: fn() = || drop(bt_platform::ShellThread::enter());
+///         enter();
+///     },
+/// );
+/// ```
+///
+/// MUTATION: make `ShellThread::enter` take no capability and both compile. The controls type the
+/// same indirections with the capability and pass the lent one on:
+///
+/// ```no_run
+/// use bt_platform::admission::WorkerCtx;
+/// let _ = bt_platform::spawn_at_priority(
+///     "doc-probe",
+///     bt_platform::ThreadPriority::BelowNormal,
+///     |ctx| {
+///         let enter: Box<dyn Fn(&WorkerCtx)> =
+///             Box::new(|ctx| drop(bt_platform::ShellThread::enter(ctx)));
+///         enter(ctx);
+///     },
+/// );
+/// ```
+///
+/// ```no_run
+/// use bt_platform::admission::WorkerCtx;
+/// let _ = bt_platform::spawn_at_priority(
+///     "doc-probe",
+///     bt_platform::ThreadPriority::BelowNormal,
+///     |ctx| {
+///         let enter: fn(&WorkerCtx) = |ctx| drop(bt_platform::ShellThread::enter(ctx));
+///         enter(ctx);
+///     },
+/// );
+/// ```
+pub fn spawn_at_priority<F, T>(
+    name: &'static str,
+    band: crate::ThreadPriority,
+    body: F,
+) -> std::io::Result<std::thread::JoinHandle<T>>
+where
+    F: FnOnce(&WorkerCtx) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    spawn_at_priority_with_stack(name, band, None, body)
+}
+
+/// **The same door, for a thread that has a reason to say how much stack it needs.**
+///
+/// Rust's default is two mebibytes, which is nobody's measurement of any particular work. A caller
+/// that recurses over input it did not write — the math worker descends through a LaTeX parser and
+/// then Typst's parser and layout — states its own, because a stack overflow is not a panic and
+/// cannot be contained by the thread that suffers it.
+///
+/// # Errors
+///
+/// As [`spawn_at_priority`].
+pub fn spawn_at_priority_with_stack<F, T>(
+    name: &'static str,
+    band: crate::ThreadPriority,
+    stack_bytes: Option<usize>,
+    body: F,
+) -> std::io::Result<std::thread::JoinHandle<T>>
+where
+    F: FnOnce(&WorkerCtx) -> T + Send + 'static,
+    T: Send + 'static,
+{
+    let mut builder = std::thread::Builder::new().name(name.to_owned());
+    if let Some(bytes) = stack_bytes {
+        builder = builder.stack_size(bytes);
+    }
+    builder.spawn(move || {
+        // The band first (RULES 53): Windows hands a new thread `Normal` whatever its creator
+        // stands in, and this is the statement that gets it out of the frame's way.
+        crate::set_current_thread_priority(band);
+        let ctx = lend_worker(name);
+        body(&ctx)
+    })
 }
 
 static STANDALONE_ENTERED: AtomicBool = AtomicBool::new(false);

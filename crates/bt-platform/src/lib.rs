@@ -7,6 +7,11 @@ use std::num::NonZeroIsize;
 /// crate that forbids `unsafe`.
 pub mod admission;
 pub mod file_reads;
+
+/// **The thread door** — one definition, in [`admission`], for every platform: a named thread in
+/// its band whose body is lent a [`admission::WorkerCtx`]. Re-exported here, where every caller
+/// has always found it.
+pub use admission::{spawn_at_priority, spawn_at_priority_with_stack};
 pub mod ime_trace;
 
 /// Fresh native facts for a diagnostic line only. Unreadable is not false.
@@ -11073,46 +11078,6 @@ mod windows_impl {
         }
     }
 
-    /// Spawn a named thread that is already in its band before it does anything.
-    ///
-    /// **The band is set from inside the new thread, not from the spawner**, and
-    /// that is the whole reason this helper exists rather than a
-    /// `set_priority(&handle)` called after `spawn`: between a `spawn` and a
-    /// call on its `JoinHandle` the new thread is already running, and under the
-    /// exact saturation this is for, "already running" can mean "has already
-    /// decoded the image" — a worker that spends its first and busiest
-    /// milliseconds at the frame's priority. Here the first statement the thread
-    /// executes is the one that gets out of the frame's way.
-    pub fn spawn_at_priority<T: Send + 'static>(
-        name: &str,
-        priority: ThreadPriority,
-        body: impl FnOnce() -> T + Send + 'static,
-    ) -> std::io::Result<std::thread::JoinHandle<T>> {
-        spawn_at_priority_with_stack(name, priority, None, body)
-    }
-
-    /// The same, for a thread that has a reason to say how much stack it needs.
-    ///
-    /// Rust's default is two mebibytes, which is nobody's measurement of any particular work. A
-    /// caller that recurses over input it did not write — the math worker descends through a LaTeX
-    /// parser and then Typst's parser and layout — states its own, because a stack overflow is not
-    /// a panic and cannot be contained by the thread that suffers it.
-    pub fn spawn_at_priority_with_stack<T: Send + 'static>(
-        name: &str,
-        priority: ThreadPriority,
-        stack_bytes: Option<usize>,
-        body: impl FnOnce() -> T + Send + 'static,
-    ) -> std::io::Result<std::thread::JoinHandle<T>> {
-        let mut builder = std::thread::Builder::new().name(name.to_owned());
-        if let Some(bytes) = stack_bytes {
-            builder = builder.stack_size(bytes);
-        }
-        builder.spawn(move || {
-            set_current_thread_priority(priority);
-            body()
-        })
-    }
-
     /// Put one block of text where the person who started this process will see
     /// it, and say whether there was anywhere to put it.
     ///
@@ -11811,12 +11776,11 @@ pub use windows_impl::{
     pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
     register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
     set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
-    set_window_topmost, silence_std_streams, spawn_at_priority, spawn_at_priority_with_stack,
-    stand_window_at, std_error_is_console, stop_flashing_window, system_backdrop_available,
-    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
-    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error,
-    write_to_console,
+    set_window_topmost, silence_std_streams, stand_window_at, std_error_is_console,
+    stop_flashing_window, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
+    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
+    window_is_exposed, work_area_at, write_std_error, write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -12676,7 +12640,7 @@ pub use handoff::{
     resolved_for_a_door, reveal_arguments, reveal_in_explorer, reveal_verified, shell_execute,
 };
 
-/// The three thread-band calls, off Windows.
+/// The two thread-band calls, off Windows.
 ///
 /// **The band is a Win32 notion, and the honest answer off Win32 is that nobody
 /// took it.** [`windows_impl::set_current_thread_priority`] already returns
@@ -12699,10 +12663,11 @@ pub use handoff::{
 /// class C), and making it here on the way past would be answering it by
 /// accident.
 ///
-/// [`spawn_at_priority`] still exists, still names its thread, and still runs
-/// the body — the band is the only thing it drops. A caller that spawns a
-/// worker gets a worker; what it does not get is a promise that the worker is
-/// out of the frame's way.
+/// [`spawn_at_priority`] (one definition for every platform, in [`admission`])
+/// still names its thread, still makes it a worker and still runs the body —
+/// the band is the only thing it drops here. A caller that spawns a worker gets
+/// a worker; what it does not get is a promise that the worker is out of the
+/// frame's way.
 #[cfg(not(windows))]
 mod portable_priority {
     use super::ThreadPriority;
@@ -12720,47 +12685,10 @@ mod portable_priority {
     pub fn current_thread_priority() -> Option<ThreadPriority> {
         None
     }
-
-    /// A named thread, started. The band is requested from inside it exactly as
-    /// the Windows arm requests it, and refused exactly as
-    /// [`set_current_thread_priority`] refuses it, so the shape a caller reads
-    /// is the same on both.
-    pub fn spawn_at_priority<T: Send + 'static>(
-        name: &str,
-        priority: ThreadPriority,
-        body: impl FnOnce() -> T + Send + 'static,
-    ) -> std::io::Result<std::thread::JoinHandle<T>> {
-        spawn_at_priority_with_stack(name, priority, None, body)
-    }
-
-    /// The same, for a thread that has a reason to say how much stack it needs.
-    ///
-    /// Rust's default is two mebibytes, which is nobody's measurement of any particular work. A
-    /// caller that recurses over input it did not write — the math worker descends through a LaTeX
-    /// parser and then Typst's parser and layout — states its own, because a stack overflow is not
-    /// a panic and cannot be contained by the thread that suffers it.
-    pub fn spawn_at_priority_with_stack<T: Send + 'static>(
-        name: &str,
-        priority: ThreadPriority,
-        stack_bytes: Option<usize>,
-        body: impl FnOnce() -> T + Send + 'static,
-    ) -> std::io::Result<std::thread::JoinHandle<T>> {
-        let mut builder = std::thread::Builder::new().name(name.to_owned());
-        if let Some(bytes) = stack_bytes {
-            builder = builder.stack_size(bytes);
-        }
-        builder.spawn(move || {
-            set_current_thread_priority(priority);
-            body()
-        })
-    }
 }
 
 #[cfg(not(windows))]
-pub use portable_priority::{
-    current_thread_priority, set_current_thread_priority, spawn_at_priority,
-    spawn_at_priority_with_stack,
-};
+pub use portable_priority::{current_thread_priority, set_current_thread_priority};
 
 /// **Ending a composition on macOS: the input context's, and the view's**
 /// (M1-8; `docs/DESIGN.md` §7.1.5a″, §13.16).
@@ -16354,7 +16282,7 @@ mod portable_priority_tests {
         let thread = super::spawn_at_priority(
             "bt-portable-band-probe",
             ThreadPriority::BelowNormal,
-            || {
+            |_ctx| {
                 std::thread::current()
                     .name()
                     .map(str::to_owned)
@@ -16923,7 +16851,7 @@ mod thread_priority_tests {
     #[test]
     fn a_worker_is_already_below_normal_when_its_body_starts() {
         let thread =
-            super::spawn_at_priority("bt-test-worker", ThreadPriority::BelowNormal, || {
+            super::spawn_at_priority("bt-test-worker", ThreadPriority::BelowNormal, |_ctx| {
                 current_thread_priority()
             })
             .expect("spawn a worker");
@@ -16945,8 +16873,9 @@ mod thread_priority_tests {
             ThreadPriority::Normal,
             ThreadPriority::BelowNormal,
         ] {
-            let thread = super::spawn_at_priority("bt-test-band", band, current_thread_priority)
-                .expect("spawn a thread in a band");
+            let thread =
+                super::spawn_at_priority("bt-test-band", band, |_ctx| current_thread_priority())
+                    .expect("spawn a thread in a band");
             assert_eq!(
                 thread.join().expect("join the thread"),
                 Some(band),

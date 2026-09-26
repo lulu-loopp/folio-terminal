@@ -687,7 +687,7 @@ pub fn begin(dir: PathBuf, enabled: bool) {
     let _ = bt_platform::spawn_at_priority(
         "bt-update-check",
         bt_platform::ThreadPriority::BelowNormal,
-        move || {
+        move |_ctx| {
             let now_ms = unix_epoch_ms();
             let outcome = run(&dir, now_ms, &GitHubReleases);
             if matches!(outcome, Outcome::Answered(_)) {

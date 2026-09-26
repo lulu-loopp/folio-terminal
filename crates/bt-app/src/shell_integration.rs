@@ -1258,7 +1258,7 @@ fn begin_profile_probe(program: &Path) {
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-probe",
         bt_platform::ThreadPriority::BelowNormal,
-        move || {
+        move |_ctx| {
             cached_profile_answer(&program);
             if let Some(wake) = WAKE.get() {
                 wake();

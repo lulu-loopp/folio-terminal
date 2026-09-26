@@ -49,7 +49,7 @@ pub fn begin_startup_migration() {
             let _ = bt_platform::spawn_at_priority(
                 "powershell-profile-migration",
                 bt_platform::ThreadPriority::BelowNormal,
-                move || {
+                move |_ctx| {
                     let report = operate(&data, Asker::InApp, Action::Migrate);
                     for refusal in report.refusals() {
                         eprintln!(
@@ -304,7 +304,7 @@ pub fn begin_enable() {
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-enable",
         bt_platform::ThreadPriority::BelowNormal,
-        || {
+        |_ctx| {
             let data = persist::storage_dir();
             if let Err(error) = enable_record(&data) {
                 let report = Report {
@@ -328,7 +328,7 @@ pub fn begin_removal() {
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-removal",
         bt_platform::ThreadPriority::BelowNormal,
-        || {
+        |_ctx| {
             let report = remove_shell_integration(Asker::InApp);
             if let Ok(mut outcome) = REMOVAL.lock() {
                 *outcome = Some(report);
