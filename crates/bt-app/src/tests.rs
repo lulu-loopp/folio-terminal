@@ -54126,6 +54126,16 @@ pub(crate) fn on_the_window_thread() {
     );
 }
 
+/// [`on_the_window_thread`], then on the way out: the phase the rows admitted only in `Exiting`
+/// (15, 16, 16b, 17) are admitted in.
+pub(crate) fn on_the_window_thread_exiting() {
+    on_the_window_thread();
+    assert!(
+        bt_platform::admission::exiting(),
+        "and it is on the way out"
+    );
+}
+
 /// **Run one test again, alone, in a process of its own, and pass only if it passed there.**
 ///
 /// For a claim that holds once per process: `bt_platform::admission::enter_standalone_main` lends

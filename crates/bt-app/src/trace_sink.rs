@@ -31,6 +31,8 @@ use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use bt_platform::admission::{WaitToken, admitted, doors};
+
 use crate::trace::TraceFile;
 
 /// **How many lines may be waiting for the writer before one is dropped.**
@@ -169,8 +171,11 @@ pub fn started() -> bool {
 pub struct Shutdown;
 
 impl Drop for Shutdown {
+    /// Reached only on `main`'s early return from a loop that could not be built, which says
+    /// `exiting()` first (the design note's revision (c)5), so the flush is admitted there. A
+    /// refusal loses what is still queued, as the flush's own timeout does.
     fn drop(&mut self) {
-        flush();
+        let _ = admitted::<doors::TraceFlush, _>(flush);
     }
 }
 
@@ -216,7 +221,11 @@ pub fn file_line(file: Arc<TraceFile>, text: String) {
 /// Called on the way out of `main`, after the footer and before
 /// `bt_platform::leave_process` — so the last thing in a trace is the last thing
 /// that happened, and not whatever the queue happened to be holding.
-pub fn flush() {
+///
+/// **An owner-thread door** (`doors::TraceFlush`, §5.3 row 17): a bounded wait, admitted only on
+/// the way out, minted in `main` and in [`Shutdown`]'s drop.
+pub fn flush(token: WaitToken<'_, doors::TraceFlush>) {
+    let _ = token;
     let Some(sink) = SINK.get().and_then(Option::as_ref) else {
         return;
     };

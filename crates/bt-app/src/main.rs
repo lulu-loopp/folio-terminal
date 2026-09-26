@@ -70337,9 +70337,16 @@ fn main() -> Result<()> {
     // would answer that search first — turning a pin on where the run's last
     // line is written into a pin on a branch that never writes one.
     let storage = persist::storage_dir();
+    //
+    // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
+    // only in `Starting`. A refusal is one more `None`: carry on and open a window.
     if !persist::is_writer_of(&storage)
         && let Some(handed) =
-            launch_wire::hand_over(&admitted, &storage, &request, say_at_the_front_door)
+            bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
+                launch_wire::hand_over(token, &admitted, &storage, &request, say_at_the_front_door)
+            })
+            .ok()
+            .flatten()
     {
         bt_platform::leave_process(handed);
     }
@@ -70583,7 +70590,10 @@ fn main() -> Result<()> {
     // (T-TRACE-OFF-THREAD). Under a bound — see `trace_sink::FLUSH_TIMEOUT`:
     // the failure that queue exists for is a writer stuck in a kernel write,
     // and waiting on it forever here would move the hang to the end of the run.
-    trace_sink::flush();
+    //
+    // An owner-thread door (`doors::TraceFlush`, row 17), admitted on the way out. A refusal
+    // loses what is still queued, as the flush's own timeout does.
+    let _ = bt_platform::admission::admitted::<doors::TraceFlush, _>(trace_sink::flush);
     bt_platform::leave_process(code)
 }
 
