@@ -2,6 +2,10 @@
 
 use std::num::NonZeroIsize;
 
+/// Which kind of thread this is, the window thread's phase, and the owner-thread doors'
+/// admission (`docs/ARCHITECTURE.md` §5.1; design note 2026-09-26). The one module of this
+/// crate that forbids `unsafe`.
+pub mod admission;
 pub mod file_reads;
 pub mod ime_trace;
 
@@ -6199,6 +6203,7 @@ mod windows_impl {
                     ToastNotification,
                     windows::core::IInspectable,
                 >::new(move |_sender, arguments| {
+                    let _callback = crate::admission::enter_callback("toast-activated");
                     let launched = arguments
                         .as_ref()
                         .and_then(|arguments| arguments.cast::<ToastActivatedEventArgs>().ok())
@@ -11556,6 +11561,7 @@ mod windows_impl {
         };
 
         unsafe extern "system" fn handle(event: u32) -> windows::core::BOOL {
+            let _callback = crate::admission::enter_callback("console-ctrl");
             matches!(event, CTRL_C_EVENT | CTRL_BREAK_EVENT | CTRL_CLOSE_EVENT).into()
         }
 

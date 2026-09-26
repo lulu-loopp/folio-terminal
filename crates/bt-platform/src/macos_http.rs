@@ -310,6 +310,7 @@ define_class!(
             request: &NSURLRequest,
             handler: &DynBlock<dyn Fn(*mut NSURLRequest)>,
         ) {
+            let _callback = crate::admission::enter_callback("http-session");
             let follow = follows(request, &mut self.ivars().locked().redirects);
             // The pointer is the argument's own, unretained, for the length of
             // this call — which is what `completionHandler(request)` is in
@@ -332,6 +333,7 @@ define_class!(
             _task: &NSURLSessionTask,
             error: Option<&NSError>,
         ) {
+            let _callback = crate::admission::enter_callback("http-session");
             let exchange = self.ivars();
             if let Some(error) = error {
                 exchange.refuse(format!("NSURLSession: {}", error.localizedDescription()));
@@ -357,6 +359,7 @@ define_class!(
             response: &NSURLResponse,
             handler: &DynBlock<dyn Fn(NSURLSessionResponseDisposition)>,
         ) {
+            let _callback = crate::admission::enter_callback("http-session");
             let status = response
                 .downcast_ref::<NSHTTPURLResponse>()
                 .map(NSHTTPURLResponse::statusCode);
@@ -381,6 +384,7 @@ define_class!(
             task: &NSURLSessionDataTask,
             data: &NSData,
         ) {
+            let _callback = crate::admission::enter_callback("http-session");
             let exchange = self.ivars();
             let chunk = data.to_vec();
             let mut progress = exchange.locked();
@@ -687,6 +691,7 @@ define_class!(
             request: &NSURLRequest,
             handler: &DynBlock<dyn Fn(*mut NSURLRequest)>,
         ) {
+            let _callback = crate::admission::enter_callback("http-download-session");
             let follow = {
                 let mut transfer = self.ivars().locked();
                 transfer.heard = true;
@@ -708,6 +713,7 @@ define_class!(
             _task: &NSURLSessionTask,
             error: Option<&NSError>,
         ) {
+            let _callback = crate::admission::enter_callback("http-download-session");
             let download = self.ivars();
             let mut transfer = download.locked();
             if let Some(error) = error {
@@ -738,6 +744,7 @@ define_class!(
             response: &NSURLResponse,
             handler: &DynBlock<dyn Fn(NSURLSessionResponseDisposition)>,
         ) {
+            let _callback = crate::admission::enter_callback("http-download-session");
             let download = self.ivars();
             let mut transfer = download.locked();
             transfer.heard = true;
@@ -778,6 +785,7 @@ define_class!(
             task: &NSURLSessionDataTask,
             data: &NSData,
         ) {
+            let _callback = crate::admission::enter_callback("http-download-session");
             let download = self.ivars();
             let mut transfer = download.locked();
             transfer.heard = true;

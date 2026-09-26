@@ -1161,6 +1161,7 @@ define_class!(
         /// the word.
         #[unsafe(method(folioVideoDidPlayToEnd:))]
         fn did_play_to_end(&self, _notification: &NSNotification) {
+            let _callback = crate::admission::enter_callback("video-end");
             if let Ok(commands) = self.ivars().commands.lock() {
                 // A closed channel is an engine whose thread has already
                 // stopped, which is an ordinary ending and not an error.

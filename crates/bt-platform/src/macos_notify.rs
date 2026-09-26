@@ -264,6 +264,7 @@ define_class!(
             _notification: &UNNotification,
             handler: &DynBlock<dyn Fn(UNNotificationPresentationOptions)>,
         ) {
+            let _callback = crate::admission::enter_callback("notification-center");
             handler.call((UNNotificationPresentationOptions::Banner
                 | UNNotificationPresentationOptions::List
                 | UNNotificationPresentationOptions::Sound,));
@@ -289,6 +290,7 @@ define_class!(
             response: &UNNotificationResponse,
             handler: &DynBlock<dyn Fn()>,
         ) {
+            let _callback = crate::admission::enter_callback("notification-center");
             // SAFETY: reading one of the framework's own constant strings,
             // which is initialised before any notification can be responded to.
             let opened = unsafe { UNNotificationDefaultActionIdentifier };
@@ -438,6 +440,7 @@ impl Notifier {
         // not need its permission.
         let answering = Arc::clone(&shared);
         let block = RcBlock::new(move |granted: Bool, error: *mut NSError| {
+            let _callback = crate::admission::enter_callback("notification-center");
             if !error.is_null() {
                 // SAFETY: a non-null `NSError*` the framework handed this block
                 // for the length of the call.
@@ -508,6 +511,7 @@ impl Notifier {
         );
         let answering = Arc::clone(&self.shared);
         let block = RcBlock::new(move |error: *mut NSError| {
+            let _callback = crate::admission::enter_callback("notification-center");
             if !error.is_null() {
                 // SAFETY: a non-null `NSError*` the framework handed this block
                 // for the length of the call.

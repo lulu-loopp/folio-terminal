@@ -215,6 +215,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize,
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use bt_platform::admission::{Cookie, DoorKey, Meter};
 use bt_platform::mem::Footprint;
 
 pub use bt_platform::hang::Answer;
@@ -321,7 +322,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 210;
+const STATION_COUNT: usize = 219;
 
 /// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
 /// apart can nest (ticket 64).
@@ -341,6 +342,12 @@ const SLOW_MESSAGE_MS: u64 = 20;
 
 #[path = "hang_watch_detail.rs"]
 mod detail;
+
+/// The window thread's waits as one registry, held equal to `bt_platform::admission::doors` and
+/// to `docs/ARCHITECTURE.md` §5.3 (A1a). Here because the stations are this module's.
+#[cfg(test)]
+#[path = "window_waits_tests.rs"]
+mod window_waits_tests;
 
 /// How many reports are kept. The oldest beyond this are deleted.
 ///
@@ -1000,6 +1007,36 @@ pub enum Station {
     /// parked controller to the page's window, in place of `request_environment`,
     /// `request_controller` and a pump dispatch on the gesture's turn.
     WebAdopt = 209,
+    /// **A shell's pseudoconsole and process being made** — `PtySession::spawn_shell_in`, from
+    /// `create_leaf_session` (§5.3 row 11; admission door `PtyBirth`). Its own name for the day the
+    /// call is admitted (A1d): the registry's lines each name the station their meter enters, and
+    /// this one had none.
+    PtyBirth = 210,
+    /// **The quit's bounded wait for the panes being taken apart** —
+    /// `bt_pty::wait_for_retirements` in `settle_quit`'s `Retire` step (§5.3 row 15; door
+    /// `PaneRetirementWait`).
+    PaneRetirementWait = 211,
+    /// **The synchronous session save's bounded wait** — `SessionWriter::wait_for` (§5.3 row 16;
+    /// door `SessionWriteWait`).
+    SessionWriteWait = 212,
+    /// **The session writer's bounded poll and join** — `SessionWriter::close`, on the way out
+    /// (§5.3 row 16b; door `SessionWriterRetire`).
+    SessionWriterRetire = 213,
+    /// **The trace writer's bounded flush** — `trace_sink::flush`, after the loop (§5.3 row 17;
+    /// door `TraceFlush`).
+    TraceFlush = 214,
+    /// **The first window's GPU** — `pollster::block_on(GpuContext::open(…))` in
+    /// `Runtime::create` (§5.3 row 23, pending; door `GpuOpen`).
+    GpuOpen = 215,
+    /// **A window's DirectComposition tree built** — `Compositor::new`, and the spare's parent
+    /// (§5.3 row 9; door `CompositorBirth`).
+    CompositorBirth = 216,
+    /// **The window's own ground placed and committed after a resize** —
+    /// `Compositor::set_window_size` (§5.3 row 9; door `CompositorWindowSize`).
+    CompositorWindowSize = 217,
+    /// **A page moved to another window's tree** — `WebHost::rehost` with its commits (§5.3 row
+    /// 21; door `WebRehost`).
+    WebRehost = 218,
 }
 
 impl Station {
@@ -1217,6 +1254,15 @@ impl Station {
             Self::WebWarmup => "warm_web_engine",
             Self::WebSpare => "make_spare_web_controller",
             Self::WebAdopt => "adopt_spare_web_controller",
+            Self::PtyBirth => "PtySession::spawn_shell_in",
+            Self::PaneRetirementWait => "bt_pty::wait_for_retirements",
+            Self::SessionWriteWait => "SessionWriter::wait_for",
+            Self::SessionWriterRetire => "SessionWriter::close",
+            Self::TraceFlush => "trace_sink::flush",
+            Self::GpuOpen => "GpuContext::open",
+            Self::CompositorBirth => "Compositor::new",
+            Self::CompositorWindowSize => "Compositor::set_window_size",
+            Self::WebRehost => "WebHost::rehost",
         }
     }
 
@@ -1448,6 +1494,15 @@ impl Station {
             207 => Self::WebWarmup,
             208 => Self::WebSpare,
             209 => Self::WebAdopt,
+            210 => Self::PtyBirth,
+            211 => Self::PaneRetirementWait,
+            212 => Self::SessionWriteWait,
+            213 => Self::SessionWriterRetire,
+            214 => Self::TraceFlush,
+            215 => Self::GpuOpen,
+            216 => Self::CompositorBirth,
+            217 => Self::CompositorWindowSize,
+            218 => Self::WebRehost,
             _ => Self::Starting,
         }
     }
@@ -2413,6 +2468,17 @@ impl From<Station> for Location {
 
 impl Heartbeat {
     fn enter_at(&self, station: Station, pane: u64, now: u64) -> Location {
+        let (previous, node, scope) = self.enter_saving(station, pane, now);
+        Location::Resume {
+            station: previous,
+            node,
+            scope,
+        }
+    }
+
+    /// Enter `station` and answer the three things a return must put back: the station being
+    /// left, the call-tree node and the scope.
+    fn enter_saving(&self, station: Station, pane: u64, now: u64) -> (Station, usize, usize) {
         let parent = self.detail.current();
         let scope = self.detail.scope();
         let previous = Station::from_byte(self.station.load(Ordering::Relaxed));
@@ -2420,11 +2486,7 @@ impl Heartbeat {
         self.park.store(PARK_RUNNING, Ordering::Relaxed);
         self.detail.enter(station, parent, pane);
         self.detail.set_scope(self.detail.current());
-        Location::Resume {
-            station: previous,
-            node: parent,
-            scope,
-        }
+        (previous, parent, scope)
     }
 
     fn resume_at(&self, station: Station, node: usize, scope: usize, now: u64) {
@@ -2521,6 +2583,95 @@ pub fn during_pane<T>(station: Station, pane: u64, work: impl FnOnce() -> T) -> 
     let output = work();
     at(parent);
     output
+}
+
+/// **The meter `bt_platform::admission` measures every admitted call with** (design note
+/// 2026-09-26, revisions (c)2, (d)2 and (e)1). Installed once, by [`start`].
+///
+/// `enter` is [`enter`] for the door's station, and packs what it returned — the station left,
+/// the call-tree node and the scope — into the admission's cookie; `leave` unpacks it and puts all
+/// three back, as [`during`] does with the `Location` it keeps. Nesting needs no stack of its own:
+/// each admitted frame holds its own cookie. The two instants `leave` is given are the call's
+/// inclusive interval, for A3's per-call record; nothing reads them yet.
+///
+/// A panicking call is entered and never left (the admission has no guard, for [`enter`]'s own
+/// reason), so its station stays the thread's current one until a later station replaces it —
+/// which makes the next report name the call that did not come back.
+pub const ADMISSION_METER: Meter = Meter {
+    enter: admitted_enter,
+    leave: admitted_leave,
+};
+
+fn admitted_enter(door: DoorKey) -> Cookie {
+    let heart = meter_heart();
+    heart.admitted_enter_at(Station::from_byte(door.station()), heart.now_ms())
+}
+
+fn admitted_leave(_door: DoorKey, cookie: Cookie, _start: Instant, _end: Instant) {
+    let heart = meter_heart();
+    heart.admitted_leave_at(cookie, heart.now_ms());
+}
+
+/// The heartbeat the meter charges: the process's, except in a test that lent its thread one.
+fn meter_heart() -> &'static Heartbeat {
+    #[cfg(test)]
+    if let Some(heart) = TEST_HEART.with(std::cell::Cell::get) {
+        return heart;
+    }
+    &HEARTBEAT
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A test's own heartbeat for the meter on its thread; the process's heartbeat is shared by
+    /// every test that runs at once.
+    static TEST_HEART: std::cell::Cell<Option<&'static Heartbeat>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// A cookie's saved node and scope are the call tree's indices, `0..=ROOT`, sixteen bits each; a
+/// tree that outgrew sixteen bits would truncate them, and this refuses to build instead.
+const _: () = assert!(detail::CAPACITY < u16::MAX as usize);
+
+/// Cookies the meter was handed back that it did not make (see [`decode`]).
+static INVALID_COOKIES: AtomicU64 = AtomicU64::new(0);
+
+/// **A cookie's layout**: bits 0–7 the station byte, 8–23 the node, 24–39 the scope, 40–63 zero.
+fn pack(station: Station, node: usize, scope: usize) -> Cookie {
+    Cookie::from_raw(u64::from(station as u8) | (node as u64) << 8 | (scope as u64) << 24)
+}
+
+/// **What a cookie saved, if the meter made it.** Every field is range-checked before
+/// [`Station::from_byte`] reads the station, so its fallback is never reached from here.
+fn decode(cookie: Cookie) -> Option<(Station, usize, usize)> {
+    let raw = cookie.raw();
+    let station = (raw & 0xFF) as u8;
+    let node = ((raw >> 8) & 0xFFFF) as usize;
+    let scope = ((raw >> 24) & 0xFFFF) as usize;
+    let rest = raw >> 40;
+    (usize::from(station) < STATION_COUNT
+        && node <= detail::ROOT
+        && scope <= detail::ROOT
+        && rest == 0)
+        .then(|| (Station::from_byte(station), node, scope))
+}
+
+impl Heartbeat {
+    fn admitted_enter_at(&self, station: Station, now: u64) -> Cookie {
+        let (previous, node, scope) = self.enter_saving(station, 0, now);
+        pack(previous, node, scope)
+    }
+
+    /// Put back what the cookie saved, and answer whether it could: a cookie the meter did not
+    /// make restores nothing and is counted.
+    fn admitted_leave_at(&self, cookie: Cookie, now: u64) -> bool {
+        let Some((station, node, scope)) = decode(cookie) else {
+            INVALID_COOKIES.fetch_add(1, Ordering::Relaxed);
+            return false;
+        };
+        self.resume_at(station, node, scope, now);
+        true
+    }
 }
 
 /// The window thread is handing control back. See [`Heartbeat::park`].
@@ -2981,6 +3132,9 @@ pub fn prune_reports(directory: &Path, keep: usize) -> std::io::Result<usize> {
 /// start because it could not arrange to diagnose itself would be a worse
 /// program than one that starts without the diagnosis.
 pub fn start(reports: PathBuf, trace_perf: bool) {
+    // The admission meter, installed once for the run: `start` is called once, from `main`. An
+    // admission before this line (the launch hand-over) is measured by nothing, as before.
+    let _ = bt_platform::admission::install_meter(ADMISSION_METER);
     CPU_ARMED.store(true, Ordering::Relaxed);
     let ui_thread_id = bt_platform::hang::current_thread_id();
     // Touch the heartbeat here so its origin is the start of the run rather
@@ -5415,5 +5569,241 @@ mod tests {
             "{}",
             hold.line()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // The admission meter (design note 2026-09-26, revisions (d)2 and (e)1)
+    // -----------------------------------------------------------------------
+
+    /// Where the heart is: its station, its call-tree node and its scope.
+    fn standing(heart: &Heartbeat) -> (Station, usize, usize) {
+        (
+            heart.sample().station,
+            heart.detail.current(),
+            heart.detail.scope(),
+        )
+    }
+
+    /// RED (A1a) — **every cookie the meter can hand out decodes to exactly what it saved.**
+    ///
+    /// Every station byte, and a node and a scope at 0, 255 and 256 (`ROOT`, what a full call
+    /// tree hands out): a field that did not fit its bits would come back as another station or
+    /// another place in the tree, and the parent's time would be charged to a stranger.
+    ///
+    /// MUTATION: shift the scope by 16 instead of 24 in `pack` and the round trip breaks.
+    #[test]
+    fn every_cookie_the_meter_can_hand_out_decodes_to_what_it_saved() {
+        let places = [0, 255, super::detail::ROOT];
+        for byte in 0..STATION_COUNT {
+            let station = Station::from_byte(u8::try_from(byte).expect("one byte"));
+            for node in places {
+                for scope in places {
+                    assert_eq!(
+                        super::decode(super::pack(station, node, scope)),
+                        Some((station, node, scope)),
+                        "{station} at node {node}, scope {scope}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// RED (A1a, revision (e)1) — **a cookie the meter did not make restores nothing and is
+    /// counted once.**
+    ///
+    /// `Station::from_byte` answers `starting` for a byte it does not know, so a decoder that
+    /// trusted it would put the window thread back at a station it never left. Each field is
+    /// checked first: a station past the last, a node or a scope past `ROOT`, a bit set above the
+    /// scope.
+    ///
+    /// MUTATION: drop `rest == 0` from `decode` and the last two are restored.
+    #[test]
+    fn a_cookie_the_meter_did_not_make_restores_nothing_and_is_counted_once() {
+        use bt_platform::admission::Cookie;
+        let root = super::detail::ROOT as u64;
+        let heart = Heartbeat::sampling(|| None);
+        heart.woke_at(0);
+        heart.at_station(Station::Event, 1);
+        let before = standing(&heart);
+        for (why, raw) in [
+            ("a station past the last", STATION_COUNT as u64),
+            ("a node past ROOT", (root + 1) << 8),
+            ("a scope past ROOT", (root + 1) << 24),
+            ("bit 40", 1 << 40),
+            ("bit 63", 1 << 63),
+        ] {
+            let counted = super::INVALID_COOKIES.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(super::decode(Cookie::from_raw(raw)), None, "{why}");
+            assert!(!heart.admitted_leave_at(Cookie::from_raw(raw), 2), "{why}");
+            assert_eq!(standing(&heart), before, "{why}: nothing is restored");
+            assert_eq!(
+                super::INVALID_COOKIES.load(std::sync::atomic::Ordering::Relaxed),
+                counted + 1,
+                "{why}: counted once"
+            );
+        }
+    }
+
+    /// RED (A1a, revision (d)2) — **an admitted call inside `during` and inside `during_pane`
+    /// gives back the station, the node and the scope it found.**
+    ///
+    /// The meter replaces an outer `during` at every converted door (A1d), so it must leave the
+    /// enclosing scope exactly as `during` leaves it; a door inside a pane's scope must return to
+    /// that pane's node, or the rest of the pane's work is charged to the door.
+    ///
+    /// MUTATION: restore only the station in `admitted_leave_at` (`at_station` instead of
+    /// `resume_at`) and the node assertion goes red.
+    #[test]
+    fn an_admitted_call_gives_back_the_station_node_and_scope_it_found() {
+        let heart = Heartbeat::sampling(|| None);
+        heart.woke_at(0);
+        heart.at_station(Station::Event, 1);
+        let resume = |location: Location, now: u64| {
+            let Location::Resume {
+                station,
+                node,
+                scope,
+            } = location
+            else {
+                unreachable!("`enter_at` answers a resume")
+            };
+            heart.resume_at(station, node, scope, now);
+        };
+        // Inside `during`: its `enter`.
+        let outer = heart.enter_at(Station::ImeCommit, 0, 2);
+        let found = standing(&heart);
+        let cookie = heart.admitted_enter_at(Station::PtyResize, 3);
+        assert_eq!(heart.sample().station, Station::PtyResize);
+        assert_ne!(standing(&heart), found);
+        assert!(heart.admitted_leave_at(cookie, 4));
+        assert_eq!(standing(&heart), found, "inside `during`");
+        resume(outer, 5);
+        // Inside `during_pane`: the pane's scope.
+        let pane = heart.enter_at(Station::DrainPane, 8, 6);
+        let found = standing(&heart);
+        let cookie = heart.admitted_enter_at(Station::PtyResize, 7);
+        assert_ne!(standing(&heart), found);
+        assert!(heart.admitted_leave_at(cookie, 8));
+        assert_eq!(standing(&heart), found, "inside `during_pane`");
+        resume(pane, 9);
+        assert_eq!(heart.sample().station, Station::Event);
+    }
+
+    /// RED (A1a, revision (d)2) — **the same door admitted inside itself, sixty-four calls deep,
+    /// gives each level back its own station, node and scope.**
+    ///
+    /// Nesting is carried by the admitted frames' own cookies, not by a stack with a depth limit,
+    /// so no level may be lost however deep and however alike the calls are.
+    ///
+    /// MUTATION: make `admitted_enter_at` save `detail::ROOT` instead of the current node and
+    /// every level below the first comes back wrong.
+    #[test]
+    fn nested_admitted_calls_each_give_back_their_own_level() {
+        let heart = Heartbeat::sampling(|| None);
+        heart.woke_at(0);
+        heart.at_station(Station::Event, 1);
+        let mut levels = vec![standing(&heart)];
+        let mut cookies = Vec::new();
+        for depth in 0..64_u64 {
+            cookies.push(heart.admitted_enter_at(Station::PtyResize, 2 + depth));
+            levels.push(standing(&heart));
+        }
+        for (depth, cookie) in cookies.into_iter().enumerate().rev() {
+            assert!(heart.admitted_leave_at(cookie, 100));
+            assert_eq!(standing(&heart), levels[depth], "level {depth}");
+        }
+    }
+
+    /// RED (A1a, revision (d)2) — **with the call tree full, an admitted call still gives back its
+    /// parent's `ROOT` node and scope.**
+    ///
+    /// A full tree hands out `ROOT` rather than inventing a parent; the cookie must carry `ROOT`
+    /// both ways, or a full tree would put the call's parent back at a node that is not its own.
+    ///
+    /// MUTATION: have `pack` keep the node modulo `CAPACITY` and `ROOT` comes back as node 0.
+    #[test]
+    fn a_full_call_tree_still_gets_its_parent_back() {
+        let heart = Heartbeat::sampling(|| None);
+        heart.woke_at(0);
+        heart.at_station(Station::Event, 1);
+        for pane in 0..super::detail::CAPACITY {
+            heart
+                .detail
+                .enter(Station::DrainPane, super::detail::ROOT, pane as u64);
+        }
+        heart.detail.restore(super::detail::ROOT);
+        heart.detail.set_scope(super::detail::ROOT);
+        let found = standing(&heart);
+        assert_eq!(found.1, super::detail::ROOT);
+        let cookie = heart.admitted_enter_at(Station::PtyResize, 2);
+        // The call's own work moves the tree before it returns.
+        heart.detail.restore(5);
+        heart.detail.set_scope(5);
+        assert!(heart.admitted_leave_at(cookie, 3));
+        assert_eq!(standing(&heart), found);
+    }
+
+    /// Enter the window thread, run the loop's first turn, lend this thread `heart` for the meter,
+    /// and install the real meter for the process — the one `start` installs. Installing it again
+    /// from another case is refused and changes nothing: it is the same meter.
+    fn metered_window_thread(heart: &'static Heartbeat) {
+        let _ = bt_platform::admission::install_meter(super::ADMISSION_METER);
+        super::TEST_HEART.with(|cell| cell.set(Some(heart)));
+        assert!(bt_platform::admission::enter_window_thread());
+        assert!(bt_platform::admission::loop_running());
+    }
+
+    /// A heartbeat of the case's own, standing at `window_event`.
+    fn a_heart_at_an_event() -> &'static Heartbeat {
+        let heart: &'static Heartbeat = Box::leak(Box::new(Heartbeat::sampling(|| None)));
+        heart.woke_at(0);
+        heart.at_station(Station::Event, 1);
+        heart
+    }
+
+    /// RED (A1a, the meter's registration) — **an admitted door is the window thread's station
+    /// while its work runs, read by the accessor the watchdog's report reads, and the station it
+    /// found is back afterwards.**
+    ///
+    /// The whole reason the meter has an enter half: a door that never returns must already be
+    /// the station a hang report names.
+    ///
+    /// MUTATION: make `admitted_enter` answer a cookie without calling `enter_saving` and the
+    /// station inside is still `window_event`.
+    #[test]
+    fn an_admitted_door_is_the_station_while_it_runs() {
+        use bt_platform::admission::{admitted, doors};
+        std::thread::spawn(|| {
+            let heart = a_heart_at_an_event();
+            metered_window_thread(heart);
+            let inside = admitted::<doors::PtyResize, _>(|_token| heart.sample().station);
+            assert_eq!(inside, Ok(Station::PtyResize));
+            assert_eq!(heart.sample().station, Station::Event);
+        })
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    }
+
+    /// RED (A1a, revision (b)4) — **a door whose work panics stays the thread's station.**
+    ///
+    /// No guard runs on the unwind path, so the next report names the call that did not come
+    /// back rather than the one around it.
+    ///
+    /// MUTATION: call the meter's `leave` from a drop guard in `admitted` and the station after
+    /// the panic is `window_event` again.
+    #[test]
+    fn a_door_whose_work_panics_stays_the_station() {
+        use bt_platform::admission::{admitted, doors};
+        std::thread::spawn(|| {
+            let heart = a_heart_at_an_event();
+            metered_window_thread(heart);
+            let unwound = std::panic::catch_unwind(|| {
+                let _ = admitted::<doors::PtyResize, ()>(|_token| panic!("the door failed"));
+            });
+            assert!(unwound.is_err());
+            assert_eq!(heart.sample().station, Station::PtyResize);
+        })
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     }
 }

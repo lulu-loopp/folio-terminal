@@ -1159,6 +1159,7 @@ mod macos_handoff {
         configuration.setActivates(false);
         let handler = RcBlock::new(
             move |running: *mut NSRunningApplication, _error: *mut NSError| {
+                let _callback = crate::admission::enter_callback("finder-open");
                 // The default option set, which is the whole ruling: main and
                 // key, never `NSApplicationActivateAllWindows`.
                 // SAFETY: the block is AppKit's to call and the pointer is

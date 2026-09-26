@@ -1,0 +1,117 @@
+## The window thread's waits: the one registry (design note 2026-09-26; budget note R7).
+##
+## Three sections, each a header line then tab-separated lines. A line starting `##` is a comment.
+##
+## `# rows` — ARCHITECTURE §5.3, one line per numbered exception. `status` is `done` (repaid:
+## what remains on the window thread is its residue, still listed), `open` (to be moved),
+## `ruled to stay`, or `pending` (found and recorded, not ruled). The §5.3 table is generated from
+## this section by `scripts/dev/generate-window-waits-table.ps1`; edit here, never there.
+##
+## `# doors` — one line per `bt_platform::admission::doors` type, in its order: the §5.3 row it
+## serves, the `hang_watch::Station` its meter enters, the phases it is admitted in, the call it
+## admits, where the admission is minted, and what one admission measures. Held equal to the
+## types by `hang_watch::window_waits_tests`. No door takes its token until A1d.
+##
+## `# vocabulary` — the effects that wait (or are counted beside the waits), with the targets
+## they exist on. A2 compares it with the lint's list.
+
+# rows
+row	status	call	where	disposition
+1	done	`ShellExecuteW` / `NSWorkspace::openURL:` — synchronous, no timeout; the measured ~1.4 s Ctrl+click stall	`bt-platform::handoff::{windows_handoff,macos_handoff}::hand_over`, reached from `Runtime::open_local_path`, `reveal_in_explorer`, `open_local_path_verified`, `reveal_verified`, `open_preview_link`, `hand_url_to_the_browser`, `activate_local_image_path`, `open_font_settings`	**done** — *a hand-off to the system runs on its own lane, and the window that receives it may take the front* (`DESIGN.md`, 2026-09-22)
+2	open	the marks lock: a wait with no deadline behind our own writer, then `try_lock` and `sleep` up to `OUR_TURN` = 2 s for a holder in another process (`DESIGN.md`, 2026-09-23), then a dated `$PROFILE` copy, an atomic write and two marks writes	`Runtime::add_to_profile`, `spend_powershell_intent` → `profile_runtime::install_recorded`	**0.4.4** — storage lane; the enable and removal halves are already on workers, the install half is not
+3	open	`psreadline::apply_recorded` — nine files, ~429 KB, under the same lock	`Runtime::apply_psreadline`	**0.4.4** — storage lane; named by the 2026-09-21 history entry
+4	open	`psreadline::installed_copy` — a recursive walk of the module directory	`Runtime::refresh_psreadline_installed`	**0.4.4** — observation lane
+5	done	`bt_platform::monospace_font_families()` — the machine's whole font collection, enumerated inline; the traced cause of the frozen gear	`settings::monospace_family_files` ← `apply_stored_terminal_font`	**done** — *the font list is walked only on its lane, by a numbered request; the face in settings.json is found by its name* (`DESIGN.md`, 2026-09-24); what is left on the window thread is `bt_platform::monospace_family_named`, one family asked of the system collection (station `font family lookup`), measured at 2.6–3.4 ms cold against the walk's 71–80 ms on the development machine
+6	done	`search::scan_history` / `scan_volatile` — the pattern re-run over every frozen line on every keystroke in the find box	`Runtime::refresh_search`, from the keystroke roads (`search_field_key`, `toggle_search_flag`, `search_ime`, `open_search`) and from `publish_frame_inner`	**done** — *a changed search scans one slice of history on the keystroke's frame and the rest on the following turns* (`DESIGN.md`, 2026-09-24; ticket 51). Not the observation lane: the frozen plane is the session's and mutable, so a worker needs a copy per question or an ownership change in `bt-transcript`; the bounded walk stays on this thread, one `search::SEARCH_HISTORY_SLICE` per keystroke and per turn (`Runtime::advance_search_scan`)
+7	open	macOS `defaults read -g AppleLocale` and `locale -a`, blocking, no timeout, on the pane-birth road	`bt_platform::read_system_locale_declaration`	**0.4.4** — observation lane
+8	open	`bt-platform::macos_watch::DirWatch::start_scoped` waits on `listening.recv()`; `Drop` does `SetEvent` then an unbounded `join()`	the watch subscriptions	**0.4.4** — make watcher start and retirement asynchronous
+9	open	surface acquire, queue submit, swapchain present, surface configure, DirectComposition size and commit	`Runtime::present_seats_and_commit`	**0.5** — presentation lane; the present mode itself comes from `get_default_config` and has no owner
+10	open	device recovery's `pollster::block_on(rebuild_after_device_loss)` plus deliberate 150 ms and 450 ms sleeps across three attempts	`FolioApp::recovered_from_a_lost_device`	**0.5** — an explicit asynchronous state machine
+11	open	`CreatePseudoConsole` + `CreateProcessW`, and a `stat` of the working directory	`create_leaf_session` → `PtySession::spawn_shell_in`	**0.5→0.6** — session lane, preserving input and resize ordering
+12	open	the synchronous `ResizePseudoConsole` round trip	`Runtime::flush_pending_pty_resize`	**0.5→0.6** — session lane; moving it must preserve the ordering this function represents
+13	done	`sample_window_place` — 4 to 8 syscalls, at three call sites for one instant	`drain_pty`, `advance_strip_animation`, `FolioApp::user_event`	**done** — *where the window is gets asked once per turn, at the turn's head; the drain and the strip tick read that answer* (`DESIGN.md`, 2026-09-24); one writer, `Runtime::observe_window_place`, also called at a window's birth and by an attention delivery between turns; each probe has its own station
+14	done	`Window::set_title` at five call sites with no throttle	`drain_pty`, `activate_tab`, `dress_new_window`, `finish_synchronized_update_if_due`, `finish_rename`	**done** — *the window's title is one wanted value, written to the system only when it changes and at most once a frame* (`DESIGN.md`, 2026-09-24); the one remaining call is `Runtime::flush_title`, on this thread by §5.2
+15	ruled to stay	`bt_pty::wait_for_retirements` — a bounded `Condvar::wait_timeout` on the way out	`FolioApp::settle_quit`, `QuitStep::Retire`	**ruled to stay** (`T-QUIT-HAS-A-DEADLINE`, `T-QUIT-TIMEOUT-PROCEEDS`)
+16	ruled to stay	`SessionWriter::wait_for` — `recv_timeout(SESSION_SAVE_BUDGET)` on the synchronous save	the quit write	**ruled to stay** — a timeout sets `stalled` and quit proceeds; a disconnect stops quit
+16b	pending	`SessionWriter::close` — a bounded poll for the session writer's end, then its join	`SessionStore::close` ← `App::finish`, on the way out	**pending** — found beside row 16 by the thread-door note's revision (c)3 (`docs/plans/design/thread-door-2026-09-26.md`), recorded and not ruled (`DESIGN.md`, 2026-09-26, *every thread that runs Folio's code has a role, the window thread has a phase, and each owner-thread wait is a door the registry lists*); bounded by the writer's own budget, past which the writer is left to process exit; its door is `SessionWriterRetire`
+17	ruled to stay	`trace_sink::flush` — `recv_timeout(FLUSH_TIMEOUT)`	the way out of `fn main`	**ruled to stay** (`T-TRACE-OFF-THREAD`)
+18	ruled to stay	`launch_wire::hand_over`, bounded by `HANDOVER_BUDGET`	`fn main`, before the loop exists	**ruled to stay** — there is no loop yet to be blocked
+19	ruled to stay	`OutputRing::try_pop`, `InputRing::try_push` — both bounded to one lock, never split, never partly taken	`drain_leaf_pty`, `offer_pty_input`	**ruled to stay** — this is the design
+20	open	`fs::rename`, the preserving atomic preview save, settings/keybindings/profiles writes, diagnostic file writes	`rename_preview_file`, `rename_files_row`, `save_preview_on`, `persist.rs`'s store methods	**0.4.4** — storage lane, with document-revision preconditions and receipts rather than a generic "background job finished" toast
+21	open	a web page coming up: `CreateCoreWebView2CompositionController` on the first page of the process (88–269 ms synchronous, ~4,500 page faults: the engine's in-process half loading), then one engine dispatch of 70–303 ms on the message pump before the controller's callback; later pages ~3 ms and ~50 ms. `CreateCoreWebView2EnvironmentWithOptions` 10–38 ms on the first page, the install burst 2–6 ms. Measured headless on the development machine (ticket 43); the owner's next89 run held 4,099 ms	`WebSeat::step` → `WebHost::request_controller` (station `request_controller`), and the pump after it (station `message pump`); `WebSeat::start_environment` (station `request_environment`)	**open — narrowed by ticket 54**: the environment is asked for once on an idle turn after startup (`Runtime::warm_web_engine`, station `warm_web_engine`), which takes its 8.5–39 ms out of the first page's gesture; the environment starts no runtime process (measured), so the controller and the pump dispatch are still the first page's, and a new ruling is owed for them (D-64). **Narrowed again by ticket 60 (ruled 2026-09-25, option A):** for a profile that has opened a page (`web_pages_used`), the controller call (≤ 590 ms worst on the clean VM) moves to a quiet idle turn under `make_spare_web_controller`, and the first eligible page's window-thread cost is the rehost walk (`adopt_spare_web_controller`, 11–73 ms on the VM) and a navigate — 2318 → 146 ms median to the first page in spike 59. Still the first page's: a profile's first-ever page, a page that arrives before the spare has landed, and every page after the spare is used (~0.6 s warm, ~2.3 s cold); open for 0.4.6. Not movable to a lane: WebView2 refuses an environment used from any thread but the one that created it (`0x802A000C`, measured), so the environment, the controller and the engine's callbacks all belong to the window thread with the controller (§5.2); the pump after the first page is named per message since ticket 64
+22	done	`Window::set_ime_cursor_area` — `ImmSetCompositionWindow` + `ImmSetCandidateWindow`, answered by the input method; the owner's next93 caught 15 + 85 ms in one turn and a single call of 3,138 ms under load	`Runtime::apply_ime_cursor_area`, reached before ticket 63 from every offer: `publish_frame_inner`, `repaint_preview`, `reoffer_ime_cursor_area`, the turn's offer	**done** — *the input method's caret area is one wanted value, told to the system at most once a turn and only when it moved* (`DESIGN.md`, 2026-09-25); the one road is `Runtime::flush_ime_cursor_area`, from the turn's tail and from `Ime::Enabled`, on this thread by §5.2. A single slow answer still holds the thread; the repetition is gone
+23	pending	`pollster::block_on(GpuContext::open(…))` — the first window's adapter, device and surface, asked for and waited on	`Runtime::create` ← `FolioApp::resumed`	**pending** — found by the thread-door note's revision (e)2 and recorded, not ruled (`DESIGN.md`, 2026-09-26, *every thread that runs Folio's code has a role, the window thread has a phase, and each owner-thread wait is a door the registry lists*); it stays on this thread (coordinator, 2026-09-26), its door is `GpuOpen`, and it moves when device recovery rebuilds on a worker (B9, D-42) — D-77 holds it until then
+
+# doors
+door	row	station	phases	call	minted at	measures
+FontFamilyLookup	5	FontLookup	Running	`bt_platform::monospace_family_named`	`settings::monospace_family_files`	one call
+PresentFrame	9	RenderCompose	Running, Exiting	`WindowRenderer::present_frame_with_phases`	`Runtime::present_seats_and_commit`	one window's present
+CompositorCommit	9	CompositorCommit	Running, Exiting	`bt_platform::Compositor::commit`	`Runtime::present_seats_and_commit`; `WebSeat::stand_parked`, `WebSeat::adopt`; `SpareSeat::advance`, `SpareSeat::retire`	one call
+CompositorBirth	9	CompositorBirth	Running	`bt_platform::Compositor::new`, `bt_platform::spare_parent`	`Runtime::create`, `Runtime::open_window`, `Runtime::make_spare_web_controller`	the tree and its commit
+CompositorWindowSize	9	CompositorWindowSize	Running, Exiting	`bt_platform::Compositor::set_window_size`	`Runtime::resize`	the ground and its commit
+SurfaceBirth	9	SurfaceConfigure	Running	`WindowRenderer::new`	`Runtime::open_window`	the surface and its configure
+PtyBirth	11	PtyBirth	Running, Exiting	`pty_door::spawn_shell` (`PtySession::spawn_shell_in`)	`create_leaf_session`	one call
+PtyResize	12	PtyResize	Running, Exiting	`pty_door::resize` (`PtySession::resize`)	`commit_leaf_resize`	one call per leaf
+PlaceHidden	13	PlaceHidden	Running, Exiting	`window_is_hidden`	`sample_window_place`	one call
+PlaceExposure	13	PlaceExposure	Running, Exiting	`window_is_exposed`	`sample_window_place`	one call
+TitleFlush	14	WindowTitle	Running, Exiting	`owner_door::set_title`	`Runtime::flush_title`	one call
+PaneRetirementWait	15	PaneRetirementWait	Exiting	`pty_door::wait_for_retirements` (`bt_pty::wait_for_retirements`)	`FolioApp::settle_quit`, `Retire`	one call
+SessionWriteWait	16	SessionWriteWait	Exiting	`SessionWriter::wait_for`	`SessionStore::wait_for_landing`	one call
+SessionWriterRetire	16b	SessionWriterRetire	Exiting	`SessionWriter::close`	`SessionStore::close`	one call
+TraceFlush	17	TraceFlush	Exiting	`trace_sink::flush`	`fn main`; `trace_sink::Shutdown::drop`	one call
+LaunchHandOver	18	Starting	Starting	`launch_wire::hand_over`	`fn main`	one call
+WebController	21	WebController	Running	`WebHost::request_controller`	`WebSeat::step`	one call
+WebEnvironment	21	WebEnvironment	Running	`WebHost::request_environment`	`WebSeat::start_environment`	one call
+WebRehost	21	WebRehost	Running	`WebHost::rehost`	`WebSeat::rehost`	the steps and their commits
+ImeCaretArea	22	ImeCursorArea	Running, Exiting	`owner_door::set_ime_cursor_area`	`Runtime::apply_ime_cursor_area`	one call
+GpuOpen	23	GpuOpen	Running	`gpu_door::open` (`pollster::block_on(GpuContext::open)`)	`Runtime::create`	one call
+FocusWindow	§5.2	WindowFocus	Running	`owner_door::focus_window`	`Runtime::open_from_notification`	one call
+SetVisible	§5.2	WindowVisible	Running, Exiting	`owner_door::set_visible`	`Runtime::put_the_window_on_the_glass`, `Runtime::hide_quake_window`, `Runtime::let_go_of_this_window`	one call
+SetCursor	§5.2	WindowCursor	Running	`owner_door::set_cursor`	`Runtime::apply_pointer_cursor`	one call
+
+# vocabulary
+path	targets	reason
+std::thread::sleep	all	waits for a duration
+std::thread::JoinHandle::join	all	waits for a thread to end
+std::sync::mpsc::Receiver::recv	all	waits for a message
+std::sync::mpsc::Receiver::recv_timeout	all	waits for a message, bounded
+std::sync::Condvar::wait	all	waits for a notification
+std::sync::Condvar::wait_timeout	all	waits for a notification, bounded
+std::fs::rename	all	the file system
+std::fs::write	all	the file system
+std::fs::copy	all	the file system
+std::fs::canonicalize	all	the file system
+std::fs::metadata	all	the file system
+std::fs::read_dir	all	the file system
+std::fs::create_dir_all	all	the file system
+std::fs::File::create	all	the file system
+std::fs::File::sync_data	all	the disk
+std::fs::File::sync_all	all	the disk
+std::io::Write::write_fmt	all	a write to a file (`writeln!`)
+std::process::Command::output	all	waits for a child process
+std::process::Command::status	all	waits for a child process
+std::process::Child::wait	all	waits for a child process
+portable_pty::Child::try_wait	all	counted by call site, does not wait
+pollster::block_on	all	an executor entry: waits for a future
+wgpu::Queue::submit	all	the GPU driver
+wgpu::SurfaceTexture::present	all	the GPU driver and the compositor
+bt_render::WindowRenderer::present_frame_with_phases	all	a cross-crate entrance that waits inside
+bt_render::WindowRenderer::new	all	a cross-crate entrance that waits inside
+bt_render::GpuContext::open	all	a cross-crate entrance that waits inside
+bt_pty::PtySession::spawn_shell_in	all	a cross-crate entrance that waits inside
+bt_pty::PtySession::resize	all	a cross-crate entrance that waits inside
+bt_pty::wait_for_retirements	all	a cross-crate entrance that waits inside
+bt_platform::monospace_family_named	all	a cross-crate entrance that waits inside
+bt_platform::Compositor::new	all	a cross-crate entrance that waits inside
+bt_platform::Compositor::commit	all	a cross-crate entrance that waits inside
+bt_platform::Compositor::set_window_size	all	a cross-crate entrance that waits inside
+bt_platform::WebHost::request_controller	all	a cross-crate entrance that waits inside
+bt_platform::WebHost::request_environment	all	a cross-crate entrance that waits inside
+bt_platform::WebHost::rehost	all	a cross-crate entrance that waits inside
+bt_platform::DirWatch::start_scoped	windows, macos	a cross-crate entrance that waits inside
+bt_platform::read_system_locale_declaration	macos	a cross-crate entrance that waits inside
+windows::Win32::UI::Shell::ShellExecuteW	windows	waits for the shell
+windows::Win32::System::Threading::SetEvent	windows	counted by call site, does not wait
+windows::Win32::Foundation::CloseHandle	windows	counted by call site, does not wait
+libc::write	macos	counted by call site, does not wait
+libc::close	macos	counted by call site, does not wait

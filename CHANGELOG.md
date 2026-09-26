@@ -33,6 +33,8 @@ All notable changes to Folio are recorded here. The format follows
   from Linux or macOS.
 - Folio notes in its diagnostics log how this copy was installed — by scoop,
   Homebrew or winget, or by hand — the groundwork for updating itself.
+- Folio now knows which of its threads is the window's, and the waits that
+  thread may make are listed in one place the architecture notes are built from.
 
 ## 0.4.5-preview — 2026-09-26
 

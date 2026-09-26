@@ -647,6 +647,10 @@ The twelve wholly-test files, by the declaration that makes each one:
 
 **A fifteenth since 2026-09-26** (0.4.6 ticket U-8): `main.rs` declares `#[cfg(test)] mod update_eligibility;` — the build script's updater-flag decision, which `build.rs` reaches by `#[path]` and the binary compiles only for its tests — which makes `update_eligibility.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_fifteen`.
 
+**A fifteenth since 2026-09-27** (0.4.6 ticket A1a): `main.rs` declares `#[cfg(test)] mod window_waits_tests;` — the admission registry's source guard — which makes `window_waits_tests.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_fifteen`.
+
+**Sixteen at the merge of both (2026-09-27):** U-8's `update_eligibility.rs` and A1a's `window_waits_tests.rs` both joined, so the test is `the_wholly_test_files_of_bt_app_are_the_sixteen`.
+
 ---
 
 ## 7. The end measurement

@@ -721,4 +721,156 @@ mod tests {
             "a quit that could not write leaves an application with everything still to say"
         );
     }
+
+    /// Walk `quit` from `step` as `FolioApp::settle_quit` walks it, writing the window thread's
+    /// phase where its arms write it — `exiting()` at the head of `Write`, `quit_abandoned()` at
+    /// the head of `Abandon` — and answer the steps and the phase after each.
+    ///
+    /// `settle_quit` itself cannot run in a test: it takes winit's `ActiveEventLoop`, which exists
+    /// only inside a running loop. What this drives is the real transaction, every step of it,
+    /// against the real phase writers; the two writer calls are the two statements of
+    /// `settle_quit` it stands in for.
+    fn walk_with_the_phase(
+        quit: &mut Quit,
+        mut step: QuitStep,
+        verdict: WriteVerdict,
+    ) -> Vec<(QuitStep, Option<bt_platform::admission::Phase>)> {
+        use bt_platform::admission;
+        let mut seen = Vec::new();
+        loop {
+            match step {
+                QuitStep::Write => assert!(admission::exiting(), "the write is on the way out"),
+                QuitStep::Abandon => assert!(
+                    admission::quit_abandoned(),
+                    "giving a quit up is never a violation"
+                ),
+                _ => {}
+            }
+            seen.push((step, admission::phase()));
+            step = match step {
+                QuitStep::Save => quit.saved(&SaveReport {
+                    saved: vec!["a.txt".to_owned()],
+                    failed: vec![("b.md".to_owned(), "the disk is full".to_owned())],
+                }),
+                QuitStep::Discard => quit.discarded(),
+                QuitStep::Photograph => quit.photographed(),
+                QuitStep::Write => quit.written(verdict),
+                QuitStep::Retire => quit.retired(Instant::now()),
+                QuitStep::WaitForPages => quit.pages(true, Instant::now()),
+                QuitStep::Ask | QuitStep::Exit | QuitStep::Abandon => return seen,
+            };
+        }
+    }
+
+    /// Run `body` on a thread of its own that has entered the window thread and taken the loop's
+    /// first turn.
+    fn on_a_running_window_thread(body: impl FnOnce() + Send) {
+        std::thread::scope(|threads| {
+            let answer = threads
+                .spawn(|| {
+                    assert!(bt_platform::admission::enter_window_thread());
+                    assert!(bt_platform::admission::loop_running());
+                    body();
+                })
+                .join();
+            if let Err(panic) = answer {
+                std::panic::resume_unwind(panic);
+            }
+        });
+    }
+
+    /// RED (A1a, revision (c)5) — **the window thread's phase follows the real quit: a quit
+    /// cancelled at its card or whose saves did not all land never leaves `Running`; one whose
+    /// write was refused goes to `Exiting` and comes back; one that retires stays `Exiting`, where
+    /// the exit doors are admitted.**
+    ///
+    /// Cancel and an incomplete save reach `Abandon` without passing `Write`. If giving a quit up
+    /// were admitted only from `Exiting`, every Cancel would count a violation for an ordinary
+    /// gesture; if the write did not turn the phase, the exit doors (§5.3 rows 15–17) would be
+    /// refused on the way out.
+    ///
+    /// MUTATION: admit `quit_abandoned` only from `Exiting` (`bt_platform::admission`) and the
+    /// Cancel walk goes red.
+    #[test]
+    fn the_window_threads_phase_follows_the_real_quit() {
+        use bt_platform::admission::{Phase, admitted, doors};
+        on_a_running_window_thread(|| {
+            // Cancel at the card.
+            let mut quit = Quit::begin(names());
+            let first = quit.answer(QuitAnswer::Cancel);
+            assert_eq!(
+                walk_with_the_phase(&mut quit, first, WriteVerdict::Landed),
+                vec![(QuitStep::Abandon, Some(Phase::Running))]
+            );
+            // A save that did not all land.
+            let mut quit = Quit::begin(names());
+            let first = quit.answer(QuitAnswer::Save);
+            assert_eq!(
+                walk_with_the_phase(&mut quit, first, WriteVerdict::Landed),
+                vec![
+                    (QuitStep::Save, Some(Phase::Running)),
+                    (QuitStep::Abandon, Some(Phase::Running)),
+                ]
+            );
+            // A write the store refused.
+            let mut quit = Quit::begin(Vec::new());
+            assert_eq!(
+                walk_with_the_phase(&mut quit, QuitStep::Photograph, WriteVerdict::Refused),
+                vec![
+                    (QuitStep::Photograph, Some(Phase::Running)),
+                    (QuitStep::Write, Some(Phase::Exiting)),
+                    (QuitStep::Abandon, Some(Phase::Running)),
+                ]
+            );
+            // A quit that goes.
+            let mut quit = Quit::begin(Vec::new());
+            assert_eq!(
+                walk_with_the_phase(&mut quit, QuitStep::Photograph, WriteVerdict::Landed),
+                vec![
+                    (QuitStep::Photograph, Some(Phase::Running)),
+                    (QuitStep::Write, Some(Phase::Exiting)),
+                    (QuitStep::Retire, Some(Phase::Exiting)),
+                    (QuitStep::WaitForPages, Some(Phase::Exiting)),
+                    (QuitStep::Exit, Some(Phase::Exiting)),
+                ]
+            );
+            assert_eq!(
+                admitted::<doors::PaneRetirementWait, _>(|_token| ()),
+                Ok(())
+            );
+            assert_eq!(admitted::<doors::SessionWriteWait, _>(|_token| ()), Ok(()));
+            assert_eq!(
+                admitted::<doors::SessionWriterRetire, _>(|_token| ()),
+                Ok(())
+            );
+            assert_eq!(admitted::<doors::TraceFlush, _>(|_token| ()), Ok(()));
+            // `App::finish` on that road finds the thread already leaving.
+            assert!(bt_platform::admission::exiting());
+        });
+    }
+
+    /// RED (A1a, revisions (b)1 and (c)5) — **a loop that could not be built still leaves through
+    /// the trace flush.**
+    ///
+    /// `fn main`'s event-loop build error arm calls `exiting()` before it returns, from
+    /// `Starting`, so the trace guard's drop reaches row 17's flush admitted.
+    ///
+    /// MUTATION: refuse `Starting` in `admission::exiting` and the flush is refused.
+    #[test]
+    fn a_loop_that_could_not_be_built_still_flushes_the_trace() {
+        use bt_platform::admission::{Phase, admitted, doors};
+        std::thread::scope(|threads| {
+            let answer = threads
+                .spawn(|| {
+                    assert!(bt_platform::admission::enter_window_thread());
+                    assert_eq!(bt_platform::admission::phase(), Some(Phase::Starting));
+                    assert!(bt_platform::admission::exiting());
+                    assert_eq!(admitted::<doors::TraceFlush, _>(|_token| ()), Ok(()));
+                })
+                .join();
+            if let Err(panic) = answer {
+                std::panic::resume_unwind(panic);
+            }
+        });
+    }
 }

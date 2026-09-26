@@ -222,10 +222,14 @@ pub fn run_header(now: &str, process_id: u32) -> String {
 /// clean Windows 11 the process sets its exit code and then never leaves, and
 /// this line is the difference between a shut that hung inside Folio and one
 /// that hung after Folio had finished (`docs/DESIGN.md` §7.35).
+///
+/// It also carries `bt_platform::admission`'s refusal total for the run: every owner-thread wait
+/// asked for off the window thread or outside its phase, and every role or phase write made where
+/// it may not be. A healthy run says 0.
 #[must_use]
-pub fn run_footer(now: &str, code: i32) -> String {
+pub fn run_footer(now: &str, code: i32, refused: u64) -> String {
     format!(
-        "── {} — run ended {now}, exit {code} ──",
+        "── {} — run ended {now}, exit {code}, admissions refused {refused} ──",
         crate::version::banner()
     )
 }
@@ -1264,5 +1268,22 @@ mod bt_environment_doc_tests {
     fn the_document_names_both_directories_the_product_writes_under() {
         assert!(DOCUMENT.contains(r"%APPDATA%\Folio"));
         assert!(DOCUMENT.contains(r"%LOCALAPPDATA%\Folio\WebView2"));
+    }
+
+    /// RED (A1a) — **the run's last line says how many admissions were refused.**
+    ///
+    /// `bt_platform::admission` counts every owner-thread wait asked for off the window thread or
+    /// outside its phase, and every role or phase write made where it may not be; the total is
+    /// persistent and the footer is where a run reports it (design note 2026-09-26, revision
+    /// (c)2).
+    ///
+    /// MUTATION: drop the total from `run_footer`'s format and it goes red.
+    #[test]
+    fn the_runs_last_line_says_how_many_admissions_were_refused() {
+        let line = super::run_footer("2026-09-26 00:00:00", 0, 3);
+        assert!(
+            line.contains("exit 0, admissions refused 3"),
+            "the footer carries the total: {line}"
+        );
     }
 }

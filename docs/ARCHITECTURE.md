@@ -36,16 +36,19 @@ door or a ruling redraws them in the same commit (`docs/architecture/PROVENANCE.
 
 Counted on 2026-09-23 at `b6ca4329`, product code only: `#[cfg(test)]` and
 `#[cfg(all(test, …))]` items, `tests/`, `src/bin/`, `*tests.rs` files and
-`build.rs` are left out. To re-count, grep the patterns in the last column and
+`build.rs` are left out. The thread rows were recounted on 2026-09-26 at
+`78a3699a` (the thread-door note, §5), and no spawn site changed up to `5effa23b`: one site more, `taskbar_lane`'s
+`taskbar-state` (ticket 62). `crates/bt-platform/src/lib.rs` holds a NUL byte, so
+ripgrep skips it as binary; search it with `grep -a`. To re-count, grep the patterns in the last column and
 drop the test items; a number that moves edits this table and the pictures.
 
 | what | count | pattern |
 |---|---|---|
-| thread-spawn sites | **45** — `bt-app` 29, `bt-platform` 12, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
-| through the thread door | **23**, every one in `bt-app` | `spawn_at_priority` |
+| thread-spawn sites | **46** — `bt-app` 30, `bt-platform` 12, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
+| through the thread door | **24**, every one in `bt-app` | `spawn_at_priority` |
 | bare spawns | **22**: in `bt-app`, `folio-web-thumb` and five unnamed (`explorer_menu` ×4, `attention_wire::payload_on_stdin`); in `bt-platform`, twelve named `Builder`s (the two endpoints and the directory watch on each platform, six video threads); in `bt-pty`, the reader, the writer, the dump publisher (unnamed) and `pty-retirement` | as above |
 | of those, in a door process rather than the window process | **3**: `explorer_menu::remove_from_explorer_menu`, `explorer_menu::cleanup_registrations`, `attention_wire::payload_on_stdin` | — |
-| named sites / distinct names | **37 / 32**, besides the pool | the first argument, or `.name(…)` |
+| named sites / distinct names | **38 / 33**, besides the pool | the first argument, or `.name(…)` |
 | `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
 | channel constructions | **30** — 26 `mpsc::channel`, 4 `mpsc::sync_channel`; `bt-app` 24, `bt-platform` 6 — and **6** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 1); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
 | `AppEvent` variants | **29** | `enum AppEvent` in `main.rs` |
@@ -362,8 +365,8 @@ does not have to find it later.
 
 ### 5.1 The seven lanes
 
-Forty-five production thread-spawn sites exist across three crates (`bt-app`
-29, `bt-platform` 12, `bt-pty` 4), plus one lazy rayon pool in `bt-term` (§0.1). **The thread count is not the defect; the absence of a contract
+Forty-six production thread-spawn sites exist across three crates (`bt-app`
+30, `bt-platform` 12, `bt-pty` 4), plus one lazy rayon pool in `bt-term` (§0.1). **The thread count is not the defect; the absence of a contract
 is.** `MathWorker::spawn` starts path verification and image scaling as well as
 math and returns all three through one `MathWorkerResult` — a historical hosting
 decision wearing a subsystem's name. `Runtime::apply_psreadline` performs an
@@ -398,6 +401,49 @@ the closure, because Windows hands a new thread `Normal` whatever its creator
 stands in, and that call is the one `unsafe` boundary for thread priority.
 MMCSS is explicitly refused. `folio-web-thumb` breaks the rule with a bare
 `Builder` at inherited `Normal`, beside the loop, and nothing goes red.
+
+**Which kind of thread this is** (0.4.6 ticket A1a;
+`docs/plans/design/thread-door-2026-09-26.md`, whose revisions (b)–(e) rule over
+its earlier sections). `bt_platform::admission` owns three facts, and forbids
+`unsafe`. **A thread's role** — `Unset`, `Window`, `Worker(name)`,
+`Callback(name)` — is a thread-local written only by its entries:
+`enter_window_thread`, once, in `fn main` directly after the argument parse (the
+five argv doors above it never make a window); `enter_callback(name)` as the first
+statement of each OS-owned callback entry — the console control handler, the
+toast's `Activated` handler, Media Foundation's `EventNotify`, the `NSURLSession`
+delegate, the notification centre's delegate and completions, the Finder open's
+completion, `AVPlayer`'s end observer, and wgpu's device-lost and uncaptured-error
+callbacks — whose `CallbackScope` names a thread nobody named for the callback's
+length and gives it back, even on unwind, and leaves a thread that has a role as
+it is (AppKit and the message pump deliver most callbacks on the window thread,
+which is `Window` there); `enter_standalone_main`, once per process, for a door
+process's main thread (its callers come with A1c); and, from A1b, the thread
+door, which lends each worker a `WorkerCtx` — private fields, `!Send`, `!Sync`,
+made only where a thread becomes a worker. **Until A1b every spawned thread is
+`Unset`**, and `Unset` is never a worker and never the window. **The window
+thread's phase** — `Starting`, `Running`, `Exiting` — has four writers at pinned
+places: `enter_window_thread` (`Starting`); `loop_running` in
+`FolioApp::new_events` on `StartCause::Init`; `exiting` at the head of
+`settle_quit`'s `Write` arm, at the head of `App::finish`, after `run_app` returns
+and in `fn main`'s event-loop build error arm (from `Running` or `Starting`, so a
+loop that fails before its first turn still leaves through the exit doors); and
+`quit_abandoned` at the head of the `Abandon` arm (back from `Exiting`; from
+`Running`, where a cancelled quit or an incomplete save leaves it, nothing). A
+writer called off the window thread, or on a transition not its own, changes
+nothing and is counted. **An owner-thread wait is admitted** by
+`admission::admitted::<D, _>(|token| door(token, …))`: on a thread that is not
+`Window`, or in a phase outside the door's, it returns `Refused` without running
+the work, and counts it on the door's counter and on the process total, which
+`diagnostics::run_footer` writes as the run's last line. Otherwise the work gets
+a `WaitToken` for that door alone, which cannot be returned, stored, sent,
+copied or made anywhere else, and the call is measured by the meter
+`hang_watch::start` installs once (`hang_watch::ADMISSION_METER`): the door's
+station is entered before the work — so a call that never returns is already the
+station a hang report names — and the station, call-tree node and scope it left
+are restored after it, from a cookie the admitted frame keeps; a work that
+panics is entered and never left. The doors are the types of
+`admission::doors`, one per line of the registry (§5.3). **No door takes its
+token yet**: A1d converts them where they stand.
 
 **Results come back three ways**, and the rule for which is the last paragraph
 of this section:
@@ -469,30 +515,75 @@ Numbered because each is an exception and each carries an owner. A call not on
 this list that blocks on something outside the process is a defect.
 "Ticket to be issued" means the version is ruled and the id is not yet minted.
 
-| # | call | where | disposition |
-|---|---|---|---|
-| 1 | `ShellExecuteW` / `NSWorkspace::openURL:` — synchronous, no timeout; the measured ~1.4 s Ctrl+click stall | `bt-platform::handoff::{windows_handoff,macos_handoff}::hand_over`, reached from `Runtime::open_local_path`, `reveal_in_explorer`, `open_local_path_verified`, `reveal_verified`, `open_preview_link`, `hand_url_to_the_browser`, `activate_local_image_path`, `open_font_settings` | **done** — *a hand-off to the system runs on its own lane, and the window that receives it may take the front* (`DESIGN.md`, 2026-09-22) |
-| 2 | the marks lock: a wait with no deadline behind our own writer, then `try_lock` and `sleep` up to `OUR_TURN` = 2 s for a holder in another process (`DESIGN.md`, 2026-09-23), then a dated `$PROFILE` copy, an atomic write and two marks writes | `Runtime::add_to_profile`, `spend_powershell_intent` → `profile_runtime::install_recorded` | **0.4.4** — storage lane; the enable and removal halves are already on workers, the install half is not |
-| 3 | `psreadline::apply_recorded` — nine files, ~429 KB, under the same lock | `Runtime::apply_psreadline` | **0.4.4** — storage lane; named by the 2026-09-21 history entry |
-| 4 | `psreadline::installed_copy` — a recursive walk of the module directory | `Runtime::refresh_psreadline_installed` | **0.4.4** — observation lane |
-| 5 | `bt_platform::monospace_font_families()` — the machine's whole font collection, enumerated inline; the traced cause of the frozen gear | `settings::monospace_family_files` ← `apply_stored_terminal_font` | **done** — *the font list is walked only on its lane, by a numbered request; the face in settings.json is found by its name* (`DESIGN.md`, 2026-09-24); what is left on the window thread is `bt_platform::monospace_family_named`, one family asked of the system collection (station `font family lookup`), measured at 2.6–3.4 ms cold against the walk's 71–80 ms on the development machine |
-| 6 | `search::scan_history` / `scan_volatile` — the pattern re-run over every frozen line on every keystroke in the find box | `Runtime::refresh_search`, from the keystroke roads (`search_field_key`, `toggle_search_flag`, `search_ime`, `open_search`) and from `publish_frame_inner` | **done** — *a changed search scans one slice of history on the keystroke's frame and the rest on the following turns* (`DESIGN.md`, 2026-09-24; ticket 51). Not the observation lane: the frozen plane is the session's and mutable, so a worker needs a copy per question or an ownership change in `bt-transcript`; the bounded walk stays on this thread, one `search::SEARCH_HISTORY_SLICE` per keystroke and per turn (`Runtime::advance_search_scan`) |
-| 7 | macOS `defaults read -g AppleLocale` and `locale -a`, blocking, no timeout, on the pane-birth road | `bt_platform::read_system_locale_declaration` | **0.4.4** — observation lane |
-| 8 | `bt-platform::macos_watch::DirWatch::start_scoped` waits on `listening.recv()`; `Drop` does `SetEvent` then an unbounded `join()` | the watch subscriptions | **0.4.4** — make watcher start and retirement asynchronous |
-| 9 | surface acquire, queue submit, swapchain present, surface configure, DirectComposition size and commit | `Runtime::present_seats_and_commit` | **0.5** — presentation lane; the present mode itself comes from `get_default_config` and has no owner |
-| 10 | device recovery's `pollster::block_on(rebuild_after_device_loss)` plus deliberate 150 ms and 450 ms sleeps across three attempts | `FolioApp::recovered_from_a_lost_device` | **0.5** — an explicit asynchronous state machine |
-| 11 | `CreatePseudoConsole` + `CreateProcessW`, and a `stat` of the working directory | `create_leaf_session` → `PtySession::spawn_shell_in` | **0.5→0.6** — session lane, preserving input and resize ordering |
-| 12 | the synchronous `ResizePseudoConsole` round trip | `Runtime::flush_pending_pty_resize` | **0.5→0.6** — session lane; moving it must preserve the ordering this function represents |
-| 13 | `sample_window_place` — 4 to 8 syscalls, at three call sites for one instant | `drain_pty`, `advance_strip_animation`, `FolioApp::user_event` | **done** — *where the window is gets asked once per turn, at the turn's head; the drain and the strip tick read that answer* (`DESIGN.md`, 2026-09-24); one writer, `Runtime::observe_window_place`, also called at a window's birth and by an attention delivery between turns; each probe has its own station |
-| 14 | `Window::set_title` at five call sites with no throttle | `drain_pty`, `activate_tab`, `dress_new_window`, `finish_synchronized_update_if_due`, `finish_rename` | **done** — *the window's title is one wanted value, written to the system only when it changes and at most once a frame* (`DESIGN.md`, 2026-09-24); the one remaining call is `Runtime::flush_title`, on this thread by §5.2 |
-| 15 | `bt_pty::wait_for_retirements` — a bounded `Condvar::wait_timeout` on the way out | `FolioApp::settle_quit`, `QuitStep::Retire` | **ruled to stay** (`T-QUIT-HAS-A-DEADLINE`, `T-QUIT-TIMEOUT-PROCEEDS`) |
-| 16 | `SessionWriter::wait_for` — `recv_timeout(SESSION_SAVE_BUDGET)` on the synchronous save | the quit write | **ruled to stay** — a timeout sets `stalled` and quit proceeds; a disconnect stops quit |
-| 17 | `trace_sink::flush` — `recv_timeout(FLUSH_TIMEOUT)` | the way out of `fn main` | **ruled to stay** (`T-TRACE-OFF-THREAD`) |
-| 18 | `launch_wire::hand_over`, bounded by `HANDOVER_BUDGET` | `fn main`, before the loop exists | **ruled to stay** — there is no loop yet to be blocked |
-| 19 | `OutputRing::try_pop`, `InputRing::try_push` — both bounded to one lock, never split, never partly taken | `drain_leaf_pty`, `offer_pty_input` | **ruled to stay** — this is the design |
-| 20 | `fs::rename`, the preserving atomic preview save, settings/keybindings/profiles writes, diagnostic file writes | `rename_preview_file`, `rename_files_row`, `save_preview_on`, `persist.rs`'s store methods | **0.4.4** — storage lane, with document-revision preconditions and receipts rather than a generic "background job finished" toast |
-| 21 | a web page coming up: `CreateCoreWebView2CompositionController` on the first page of the process (88–269 ms synchronous, ~4,500 page faults: the engine's in-process half loading), then one engine dispatch of 70–303 ms on the message pump before the controller's callback; later pages ~3 ms and ~50 ms. `CreateCoreWebView2EnvironmentWithOptions` 10–38 ms on the first page, the install burst 2–6 ms. Measured headless on the development machine (ticket 43); the owner's next89 run held 4,099 ms | `WebSeat::step` → `WebHost::request_controller` (station `request_controller`), and the pump after it (station `message pump`); `WebSeat::start_environment` (station `request_environment`) | **open — narrowed by ticket 54**: the environment is asked for once on an idle turn after startup (`Runtime::warm_web_engine`, station `warm_web_engine`), which takes its 8.5–39 ms out of the first page's gesture; the environment starts no runtime process (measured), so the controller and the pump dispatch are still the first page's, and a new ruling is owed for them (D-64). **Narrowed again by ticket 60 (ruled 2026-09-25, option A):** for a profile that has opened a page (`web_pages_used`), the controller call (≤ 590 ms worst on the clean VM) moves to a quiet idle turn under `make_spare_web_controller`, and the first eligible page's window-thread cost is the rehost walk (`adopt_spare_web_controller`, 11–73 ms on the VM) and a navigate — 2318 → 146 ms median to the first page in spike 59. Still the first page's: a profile's first-ever page, a page that arrives before the spare has landed, and every page after the spare is used (~0.6 s warm, ~2.3 s cold); open for 0.4.6. Not movable to a lane: WebView2 refuses an environment used from any thread but the one that created it (`0x802A000C`, measured), so the environment, the controller and the engine's callbacks all belong to the window thread with the controller (§5.2); the pump after the first page is named per message since ticket 64 |
-| 22 | `Window::set_ime_cursor_area` — `ImmSetCompositionWindow` + `ImmSetCandidateWindow`, answered by the input method; the owner's next93 caught 15 + 85 ms in one turn and a single call of 3,138 ms under load | `Runtime::apply_ime_cursor_area`, reached before ticket 63 from every offer: `publish_frame_inner`, `repaint_preview`, `reoffer_ime_cursor_area`, the turn's offer | **done** — *the input method's caret area is one wanted value, told to the system at most once a turn and only when it moved* (`DESIGN.md`, 2026-09-25); the one road is `Runtime::flush_ime_cursor_area`, from the turn's tail and from `Ime::Enabled`, on this thread by §5.2. A single slow answer still holds the thread; the repetition is gone |
+**The table is generated** (2026-09-26, 0.4.6 ticket A1a): its one source is the
+registry `crates/bt-app/src/window_waits.tsv`, and
+`scripts/dev/generate-window-waits-table.ps1` writes it here;
+`hang_watch::window_waits_tests::the_architecture_table_is_the_registry` fails the
+build when the two differ. The registry's `# doors` section is the door types of
+`bt_platform::admission::doors`, one per line, held equal to them by
+`every_door_type_is_a_registry_line_and_says_what_the_line_says`: each door names
+the row it serves, the `hang_watch` station its meter enters and the phases it is
+admitted in (§5.1). Rows 16b and 23 were found by the thread-door note
+(`docs/plans/design/thread-door-2026-09-26.md`, revisions (c)3 and (e)2) and are
+`pending`: recorded, not ruled.
+
+<!-- window_waits.tsv: generated by scripts/dev/generate-window-waits-table.ps1; edit the registry, not this table -->
+| # | status | call | where | disposition |
+|---|---|---|---|---|
+| 1 | done | `ShellExecuteW` / `NSWorkspace::openURL:` — synchronous, no timeout; the measured ~1.4 s Ctrl+click stall | `bt-platform::handoff::{windows_handoff,macos_handoff}::hand_over`, reached from `Runtime::open_local_path`, `reveal_in_explorer`, `open_local_path_verified`, `reveal_verified`, `open_preview_link`, `hand_url_to_the_browser`, `activate_local_image_path`, `open_font_settings` | **done** — *a hand-off to the system runs on its own lane, and the window that receives it may take the front* (`DESIGN.md`, 2026-09-22) |
+| 2 | open | the marks lock: a wait with no deadline behind our own writer, then `try_lock` and `sleep` up to `OUR_TURN` = 2 s for a holder in another process (`DESIGN.md`, 2026-09-23), then a dated `$PROFILE` copy, an atomic write and two marks writes | `Runtime::add_to_profile`, `spend_powershell_intent` → `profile_runtime::install_recorded` | **0.4.4** — storage lane; the enable and removal halves are already on workers, the install half is not |
+| 3 | open | `psreadline::apply_recorded` — nine files, ~429 KB, under the same lock | `Runtime::apply_psreadline` | **0.4.4** — storage lane; named by the 2026-09-21 history entry |
+| 4 | open | `psreadline::installed_copy` — a recursive walk of the module directory | `Runtime::refresh_psreadline_installed` | **0.4.4** — observation lane |
+| 5 | done | `bt_platform::monospace_font_families()` — the machine's whole font collection, enumerated inline; the traced cause of the frozen gear | `settings::monospace_family_files` ← `apply_stored_terminal_font` | **done** — *the font list is walked only on its lane, by a numbered request; the face in settings.json is found by its name* (`DESIGN.md`, 2026-09-24); what is left on the window thread is `bt_platform::monospace_family_named`, one family asked of the system collection (station `font family lookup`), measured at 2.6–3.4 ms cold against the walk's 71–80 ms on the development machine |
+| 6 | done | `search::scan_history` / `scan_volatile` — the pattern re-run over every frozen line on every keystroke in the find box | `Runtime::refresh_search`, from the keystroke roads (`search_field_key`, `toggle_search_flag`, `search_ime`, `open_search`) and from `publish_frame_inner` | **done** — *a changed search scans one slice of history on the keystroke's frame and the rest on the following turns* (`DESIGN.md`, 2026-09-24; ticket 51). Not the observation lane: the frozen plane is the session's and mutable, so a worker needs a copy per question or an ownership change in `bt-transcript`; the bounded walk stays on this thread, one `search::SEARCH_HISTORY_SLICE` per keystroke and per turn (`Runtime::advance_search_scan`) |
+| 7 | open | macOS `defaults read -g AppleLocale` and `locale -a`, blocking, no timeout, on the pane-birth road | `bt_platform::read_system_locale_declaration` | **0.4.4** — observation lane |
+| 8 | open | `bt-platform::macos_watch::DirWatch::start_scoped` waits on `listening.recv()`; `Drop` does `SetEvent` then an unbounded `join()` | the watch subscriptions | **0.4.4** — make watcher start and retirement asynchronous |
+| 9 | open | surface acquire, queue submit, swapchain present, surface configure, DirectComposition size and commit | `Runtime::present_seats_and_commit` | **0.5** — presentation lane; the present mode itself comes from `get_default_config` and has no owner |
+| 10 | open | device recovery's `pollster::block_on(rebuild_after_device_loss)` plus deliberate 150 ms and 450 ms sleeps across three attempts | `FolioApp::recovered_from_a_lost_device` | **0.5** — an explicit asynchronous state machine |
+| 11 | open | `CreatePseudoConsole` + `CreateProcessW`, and a `stat` of the working directory | `create_leaf_session` → `PtySession::spawn_shell_in` | **0.5→0.6** — session lane, preserving input and resize ordering |
+| 12 | open | the synchronous `ResizePseudoConsole` round trip | `Runtime::flush_pending_pty_resize` | **0.5→0.6** — session lane; moving it must preserve the ordering this function represents |
+| 13 | done | `sample_window_place` — 4 to 8 syscalls, at three call sites for one instant | `drain_pty`, `advance_strip_animation`, `FolioApp::user_event` | **done** — *where the window is gets asked once per turn, at the turn's head; the drain and the strip tick read that answer* (`DESIGN.md`, 2026-09-24); one writer, `Runtime::observe_window_place`, also called at a window's birth and by an attention delivery between turns; each probe has its own station |
+| 14 | done | `Window::set_title` at five call sites with no throttle | `drain_pty`, `activate_tab`, `dress_new_window`, `finish_synchronized_update_if_due`, `finish_rename` | **done** — *the window's title is one wanted value, written to the system only when it changes and at most once a frame* (`DESIGN.md`, 2026-09-24); the one remaining call is `Runtime::flush_title`, on this thread by §5.2 |
+| 15 | ruled to stay | `bt_pty::wait_for_retirements` — a bounded `Condvar::wait_timeout` on the way out | `FolioApp::settle_quit`, `QuitStep::Retire` | **ruled to stay** (`T-QUIT-HAS-A-DEADLINE`, `T-QUIT-TIMEOUT-PROCEEDS`) |
+| 16 | ruled to stay | `SessionWriter::wait_for` — `recv_timeout(SESSION_SAVE_BUDGET)` on the synchronous save | the quit write | **ruled to stay** — a timeout sets `stalled` and quit proceeds; a disconnect stops quit |
+| 16b | pending | `SessionWriter::close` — a bounded poll for the session writer's end, then its join | `SessionStore::close` ← `App::finish`, on the way out | **pending** — found beside row 16 by the thread-door note's revision (c)3 (`docs/plans/design/thread-door-2026-09-26.md`), recorded and not ruled (`DESIGN.md`, 2026-09-26, *every thread that runs Folio's code has a role, the window thread has a phase, and each owner-thread wait is a door the registry lists*); bounded by the writer's own budget, past which the writer is left to process exit; its door is `SessionWriterRetire` |
+| 17 | ruled to stay | `trace_sink::flush` — `recv_timeout(FLUSH_TIMEOUT)` | the way out of `fn main` | **ruled to stay** (`T-TRACE-OFF-THREAD`) |
+| 18 | ruled to stay | `launch_wire::hand_over`, bounded by `HANDOVER_BUDGET` | `fn main`, before the loop exists | **ruled to stay** — there is no loop yet to be blocked |
+| 19 | ruled to stay | `OutputRing::try_pop`, `InputRing::try_push` — both bounded to one lock, never split, never partly taken | `drain_leaf_pty`, `offer_pty_input` | **ruled to stay** — this is the design |
+| 20 | open | `fs::rename`, the preserving atomic preview save, settings/keybindings/profiles writes, diagnostic file writes | `rename_preview_file`, `rename_files_row`, `save_preview_on`, `persist.rs`'s store methods | **0.4.4** — storage lane, with document-revision preconditions and receipts rather than a generic "background job finished" toast |
+| 21 | open | a web page coming up: `CreateCoreWebView2CompositionController` on the first page of the process (88–269 ms synchronous, ~4,500 page faults: the engine's in-process half loading), then one engine dispatch of 70–303 ms on the message pump before the controller's callback; later pages ~3 ms and ~50 ms. `CreateCoreWebView2EnvironmentWithOptions` 10–38 ms on the first page, the install burst 2–6 ms. Measured headless on the development machine (ticket 43); the owner's next89 run held 4,099 ms | `WebSeat::step` → `WebHost::request_controller` (station `request_controller`), and the pump after it (station `message pump`); `WebSeat::start_environment` (station `request_environment`) | **open — narrowed by ticket 54**: the environment is asked for once on an idle turn after startup (`Runtime::warm_web_engine`, station `warm_web_engine`), which takes its 8.5–39 ms out of the first page's gesture; the environment starts no runtime process (measured), so the controller and the pump dispatch are still the first page's, and a new ruling is owed for them (D-64). **Narrowed again by ticket 60 (ruled 2026-09-25, option A):** for a profile that has opened a page (`web_pages_used`), the controller call (≤ 590 ms worst on the clean VM) moves to a quiet idle turn under `make_spare_web_controller`, and the first eligible page's window-thread cost is the rehost walk (`adopt_spare_web_controller`, 11–73 ms on the VM) and a navigate — 2318 → 146 ms median to the first page in spike 59. Still the first page's: a profile's first-ever page, a page that arrives before the spare has landed, and every page after the spare is used (~0.6 s warm, ~2.3 s cold); open for 0.4.6. Not movable to a lane: WebView2 refuses an environment used from any thread but the one that created it (`0x802A000C`, measured), so the environment, the controller and the engine's callbacks all belong to the window thread with the controller (§5.2); the pump after the first page is named per message since ticket 64 |
+| 22 | done | `Window::set_ime_cursor_area` — `ImmSetCompositionWindow` + `ImmSetCandidateWindow`, answered by the input method; the owner's next93 caught 15 + 85 ms in one turn and a single call of 3,138 ms under load | `Runtime::apply_ime_cursor_area`, reached before ticket 63 from every offer: `publish_frame_inner`, `repaint_preview`, `reoffer_ime_cursor_area`, the turn's offer | **done** — *the input method's caret area is one wanted value, told to the system at most once a turn and only when it moved* (`DESIGN.md`, 2026-09-25); the one road is `Runtime::flush_ime_cursor_area`, from the turn's tail and from `Ime::Enabled`, on this thread by §5.2. A single slow answer still holds the thread; the repetition is gone |
+| 23 | pending | `pollster::block_on(GpuContext::open(…))` — the first window's adapter, device and surface, asked for and waited on | `Runtime::create` ← `FolioApp::resumed` | **pending** — found by the thread-door note's revision (e)2 and recorded, not ruled (`DESIGN.md`, 2026-09-26, *every thread that runs Folio's code has a role, the window thread has a phase, and each owner-thread wait is a door the registry lists*); it stays on this thread (coordinator, 2026-09-26), its door is `GpuOpen`, and it moves when device recovery rebuilds on a worker (B9, D-42) — D-77 holds it until then |
+
+**The doors** — one `bt_platform::admission::doors` type per line of the registry's `# doors` section; the station is the `hang_watch` station its meter enters. No door takes its token until A1d.
+
+| door | row | station | admitted in | call | minted at | measures |
+|---|---|---|---|---|---|---|
+| `FontFamilyLookup` | 5 | `FontLookup` | Running | `bt_platform::monospace_family_named` | `settings::monospace_family_files` | one call |
+| `PresentFrame` | 9 | `RenderCompose` | Running, Exiting | `WindowRenderer::present_frame_with_phases` | `Runtime::present_seats_and_commit` | one window's present |
+| `CompositorCommit` | 9 | `CompositorCommit` | Running, Exiting | `bt_platform::Compositor::commit` | `Runtime::present_seats_and_commit`; `WebSeat::stand_parked`, `WebSeat::adopt`; `SpareSeat::advance`, `SpareSeat::retire` | one call |
+| `CompositorBirth` | 9 | `CompositorBirth` | Running | `bt_platform::Compositor::new`, `bt_platform::spare_parent` | `Runtime::create`, `Runtime::open_window`, `Runtime::make_spare_web_controller` | the tree and its commit |
+| `CompositorWindowSize` | 9 | `CompositorWindowSize` | Running, Exiting | `bt_platform::Compositor::set_window_size` | `Runtime::resize` | the ground and its commit |
+| `SurfaceBirth` | 9 | `SurfaceConfigure` | Running | `WindowRenderer::new` | `Runtime::open_window` | the surface and its configure |
+| `PtyBirth` | 11 | `PtyBirth` | Running, Exiting | `pty_door::spawn_shell` (`PtySession::spawn_shell_in`) | `create_leaf_session` | one call |
+| `PtyResize` | 12 | `PtyResize` | Running, Exiting | `pty_door::resize` (`PtySession::resize`) | `commit_leaf_resize` | one call per leaf |
+| `PlaceHidden` | 13 | `PlaceHidden` | Running, Exiting | `window_is_hidden` | `sample_window_place` | one call |
+| `PlaceExposure` | 13 | `PlaceExposure` | Running, Exiting | `window_is_exposed` | `sample_window_place` | one call |
+| `TitleFlush` | 14 | `WindowTitle` | Running, Exiting | `owner_door::set_title` | `Runtime::flush_title` | one call |
+| `PaneRetirementWait` | 15 | `PaneRetirementWait` | Exiting | `pty_door::wait_for_retirements` (`bt_pty::wait_for_retirements`) | `FolioApp::settle_quit`, `Retire` | one call |
+| `SessionWriteWait` | 16 | `SessionWriteWait` | Exiting | `SessionWriter::wait_for` | `SessionStore::wait_for_landing` | one call |
+| `SessionWriterRetire` | 16b | `SessionWriterRetire` | Exiting | `SessionWriter::close` | `SessionStore::close` | one call |
+| `TraceFlush` | 17 | `TraceFlush` | Exiting | `trace_sink::flush` | `fn main`; `trace_sink::Shutdown::drop` | one call |
+| `LaunchHandOver` | 18 | `Starting` | Starting | `launch_wire::hand_over` | `fn main` | one call |
+| `WebController` | 21 | `WebController` | Running | `WebHost::request_controller` | `WebSeat::step` | one call |
+| `WebEnvironment` | 21 | `WebEnvironment` | Running | `WebHost::request_environment` | `WebSeat::start_environment` | one call |
+| `WebRehost` | 21 | `WebRehost` | Running | `WebHost::rehost` | `WebSeat::rehost` | the steps and their commits |
+| `ImeCaretArea` | 22 | `ImeCursorArea` | Running, Exiting | `owner_door::set_ime_cursor_area` | `Runtime::apply_ime_cursor_area` | one call |
+| `GpuOpen` | 23 | `GpuOpen` | Running | `gpu_door::open` (`pollster::block_on(GpuContext::open)`) | `Runtime::create` | one call |
+| `FocusWindow` | §5.2 | `WindowFocus` | Running | `owner_door::focus_window` | `Runtime::open_from_notification` | one call |
+| `SetVisible` | §5.2 | `WindowVisible` | Running, Exiting | `owner_door::set_visible` | `Runtime::put_the_window_on_the_glass`, `Runtime::hide_quake_window`, `Runtime::let_go_of_this_window` | one call |
+| `SetCursor` | §5.2 | `WindowCursor` | Running | `owner_door::set_cursor` | `Runtime::apply_pointer_cursor` | one call |
+<!-- window_waits.tsv: end -->
 
 Row 21 after ticket 54: the ruling of 2026-09-24 warmed the environment on the
 premise that it brings the runtime's processes up. A windowless probe over the
@@ -576,7 +667,8 @@ happen" has one answer and a guard can hold it.
 | constructing a child process | `bt_platform::quiet_command_named` (and `quiet_command`) — absolute path resolved by `handoff::program_on_path` | pinned as the only `Command` construction |
 | handing something to the operating system | `bt_platform::handoff` — the only `ShellExecuteW` and `NSWorkspace` sites in the workspace | its own module, one function per verb |
 | reaching the network | `bt_platform::http` — `https_get` (one `GET` into memory: the update check) and `https_download` (one `GET` streamed to a file under a ceiling, U-7), over the operating system's own stack (WinHTTP, `NSURLSession`), `https` only, no caller headers; the download's ceiling, temporary file, deadlines and stage vocabulary are `bt_platform::https_download`'s, shared by both real arms | `update_check_transport_tests` holds the three arms to one signature per door and one set of request types |
-| starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` — a name and a priority band | every call site is in `bt-app`, so the name is the thread |
+| starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` — a name and a priority band; the thread's role (§5.1) is `Unset` until the door lends it a `WorkerCtx` (0.4.6, A1b) | every call site is in `bt-app`, so the name is the thread |
+| waiting on the window thread (an owner-thread wait) | `bt_platform::admission::admitted` — a `WaitToken` for one door type of `admission::doors`, admitted only on the window thread and in that door's phases (§5.1) | the registry `window_waits.tsv`, held equal to the door types by `hang_watch::window_waits_tests`; no door takes the token until A1d |
 | creating a native window outside the framework | `bt_platform::SpareParent` / `spare_parent` — the spare web controller's never-shown `WS_POPUP` parent (ticket 60); dropped only on a pumping thread, left to process exit by an orderly stop | the one `CreateWindowExW` in product code, pinned by `web_spare::spare_wiring_tests::the_spare_parent_is_the_one_window_product_code_creates` |
 | taking a native window's messages away from the framework | `bt_platform::let_the_system_translate_touch` — the touch subclass that hands `WM_TOUCH` and the three `WM_POINTER*` to `DefWindowProc` | a message table pinned by test; called once per window, from the two `create_window` sites |
 
