@@ -2,6 +2,10 @@
 
 use std::num::NonZeroIsize;
 
+/// Which kind of thread this is, the window thread's phase, and the owner-thread doors'
+/// admission (`docs/ARCHITECTURE.md` §5.1; design note 2026-09-26). The one module of this
+/// crate that forbids `unsafe`.
+pub mod admission;
 pub mod file_reads;
 pub mod ime_trace;
 
