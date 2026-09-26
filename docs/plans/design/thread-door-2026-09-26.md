@@ -2659,7 +2659,7 @@ can be read against it:
 
 - **The owners of §C-3** are the registry's new `# owners` section
   (`crates/bt-app/src/window_waits.tsv`), counted from the code: `msg_send!` 19
-  in 17 owners (the note's 20, at `78a3699a`), `extern` blocks 6, `#[link]` **5**
+  in 19 owners, one each (the note's 20, at `78a3699a`), `extern` blocks 6, `#[link]` **5**
   (the note's 6), `vtable(` 1 (`video::engine::Machinery::take_frame`),
   `GetProcAddress` 0, `#[macro_export]` 0. The note's "one exported macro exists
   today" is `bt-source`'s `needle!`, which is not in the product.
