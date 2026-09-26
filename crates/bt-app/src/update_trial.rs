@@ -27,9 +27,9 @@
 //! **The watch** is a worker of its own (`folio-trial-watch`, below normal):
 //! one read of `H\journal.json` every [`WATCH_INTERVAL`] through `file_reads`
 //! on [`Lane::UpdateJournal`], never a write, until the transaction is decided
-//! ([`update_txn::trial_sight`]). `Committed` releases; anything else decided —
-//! `RollbackIntent`, `Stuck`, `RolledBack`, `Abandoned`, a retirement without a
-//! commit, the journal gone or naming another transaction — **drops** the
+//! ([`update_txn::trial_sight`]), from the frozen header alone: `outcome`
+//! `committed` releases; `rolled_back`, a `terminal` class, the journal gone or
+//! naming another transaction **drops** the
 //! pending writes, and the gate stays shut for the rest of the process: the
 //! process runs on, writing nothing, until the applier ends it (F-7's live-child
 //! policy; nothing here ends a process). `diagnostics.log` is exempt (F-7), and
@@ -588,6 +588,14 @@ mod tests {
         .encode()
     }
 
+    /// The header alone of `phase`'s journal: no body at all.
+    fn journal_bytes_header_only(phase: Phase) -> Vec<u8> {
+        let bytes = journal_bytes(TXN, phase);
+        crate::update_txn::Header::parse(&bytes)
+            .expect("a journal's header")
+            .encode()
+    }
+
     fn trial_phase() -> Phase {
         Phase::Trial {
             nonce: nonce(),
@@ -602,13 +610,14 @@ mod tests {
     /// RED (U-13) — **a trial reads `Committed` only where the journal says
     /// it, and reads every other decision and every disappearance as an end.**
     ///
-    /// The header alone cannot say it: `Trial`, `Committed` and
-    /// `RollbackIntent` share the class `destructive`, and both retirements are
-    /// `terminal`. So the phase's name decides, read from the lock holder's own
-    /// encoding.
+    /// From the frozen header alone (F-8, coordinator ruling 2026-09-27):
+    /// `outcome` says committed or rolled back, since the class cannot —
+    /// `Trial`, `Committed` and `RollbackIntent` share `destructive`, both
+    /// retirements `terminal`. A bare header, with no body at all, decides the
+    /// same way.
     ///
-    /// MUTATION: answer `Committed` for `"Retired"` whatever its outcome in
-    /// `update_txn::trial_sight`.
+    /// MUTATION: in `update_txn::trial_sight`, answer `Committed` for a
+    /// `terminal` class whatever its outcome.
     #[test]
     fn a_trial_reads_committed_only_where_the_journal_says_it() {
         let cases = [
@@ -654,6 +663,18 @@ mod tests {
             "another transaction's journal: ours is gone"
         );
         assert_eq!(trial_sight(None, &TXN), TrialSight::Ended, "no journal");
+        for (phase, seen) in [
+            (Phase::Committed, TrialSight::Committed),
+            (trial_phase(), TrialSight::Undecided),
+            (Phase::Abandoned, TrialSight::Ended),
+        ] {
+            let header = journal_bytes_header_only(phase.clone());
+            assert_eq!(
+                trial_sight(Some(&header), &TXN),
+                seen,
+                "header only: {phase:?}"
+            );
+        }
         let torn = journal_bytes(TXN, Phase::Committed);
         assert_eq!(
             trial_sight(Some(&torn[..torn.len() / 2]), &TXN),

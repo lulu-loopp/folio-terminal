@@ -954,7 +954,7 @@ mod tests {
     /// Journal-shaped bytes: a header v1 as `bt-app`'s `update_txn` encodes it.
     /// Spelled out rather than encoded, because `bt-platform` sits below
     /// `bt-app` and cannot name its types; the door never reads what it writes.
-    const JOURNAL: &[u8] = br#"{"v":1,"txn":"00112233445566778899aabbccddeeff","rescue":"rescue\\folio.exe","class":"deferred","body":{"phase":"Prepared"}}"#;
+    const JOURNAL: &[u8] = br#"{"v":1,"txn":"00112233445566778899aabbccddeeff","rescue":"rescue\\folio.exe","class":"deferred","outcome":"none","body":{"phase":"Prepared"}}"#;
 
     fn home() -> PathBuf {
         PathBuf::from("home").join(".folio-update")

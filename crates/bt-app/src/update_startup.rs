@@ -530,6 +530,7 @@ mod tests {
                     txn: txn(),
                     rescue: self.rescue.to_string_lossy().into_owned(),
                     class,
+                    outcome: crate::update_txn::HeaderOutcome::None,
                 }
                 .encode();
                 std::fs::write(self.home.journal(), &bytes).unwrap();
