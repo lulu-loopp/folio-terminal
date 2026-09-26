@@ -766,7 +766,7 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
             .unwrap(),
         Path::new("local/Folio")
     );
-    assert_eq!(INVENTORY.len(), 25);
+    assert_eq!(INVENTORY.len(), 27);
     // The update entrance's writer is in `bt-platform` and is asked for by its
     // identity through `bt-source`, not by a file (U-22): `logon_hook::arm_in`
     // is the one function that writes a `Run` value, and the row names it.
@@ -1118,4 +1118,178 @@ fn uninstall_existing_instance_mechanism_blocks_the_door() {
     assert_eq!(fs::read(profile).unwrap(), before);
     drop(claim);
     fs::remove_dir_all(root).unwrap();
+}
+
+/// A bundle-shaped application under a sandbox root, as `/Applications/Folio.app`
+/// is laid out: the executable at `Contents/MacOS/folio`.
+fn bundle_exe(root: &Path) -> PathBuf {
+    root.join("Applications/Folio.app/Contents/MacOS/folio")
+}
+
+/// RED (U-26) — **on macOS the door finds the update entrances in the account's
+/// `~/Library/LaunchAgents` and the installation home beside the bundle it runs
+/// from; on every other platform it has neither.**
+///
+/// §(b).3: both are written outside Folio's own folder on macOS, so both need an
+/// `--uninstall-cleanup` row, and the home is found from the bundle's path (the
+/// locator of F-3), never from a data root. The Windows home is inside the install
+/// folder and needs no row.
+///
+/// MUTATION: in `Scope::resolve`, derive the home from the data root
+/// (`data[0].join(".Folio.app.folio-update")`) instead of `update_txn::Home::of`.
+#[test]
+fn uninstall_finds_the_update_marks_beside_the_bundle_on_macos() {
+    let (root, _) = sandbox("update-marks");
+    let mapped = root.clone();
+    let env = move |name: &str| {
+        Some(
+            mapped
+                .join(match name {
+                    "APPDATA" => "roaming",
+                    "LOCALAPPDATA" => "local",
+                    "HOME" | "USERPROFILE" => "home",
+                    "BT_PSREADLINE_DOCUMENTS" => "documents",
+                    _ => return None,
+                })
+                .into_os_string(),
+        )
+    };
+    let scope = Scope::resolve(
+        bundle_exe(&root),
+        HostPlatform::MacOs,
+        &env,
+        root.join("temp"),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        scope.launch_agents,
+        Some(root.join("home/Library/LaunchAgents"))
+    );
+    assert_eq!(
+        scope.update_home,
+        Some(root.join("Applications/.Folio.app.folio-update"))
+    );
+    for platform in [HostPlatform::Windows, HostPlatform::OtherUnix] {
+        let scope =
+            Scope::resolve(bundle_exe(&root), platform, &env, root.join("temp"), false).unwrap();
+        assert_eq!(scope.launch_agents, None, "{platform:?}");
+        assert_eq!(scope.update_home, None, "{platform:?}");
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (U-26) — **the two update rows remove our entrances and our home, and
+/// nothing beside them**: another program's agent, a plist of a near-miss name,
+/// the bundle itself and a home that belongs to another bundle all stay; a rerun
+/// finds nothing.
+///
+/// (b).3's rows, run through the whole door with the real removers over a
+/// temporary tree standing in for `~/Library/LaunchAgents` and `/Applications`.
+///
+/// MUTATION: in `update_entrances`, sweep with a remover that takes every file in
+/// the folder (replace `launch_agent::sweep`'s `is_ours` filter with `true`).
+#[test]
+fn uninstall_update_rows_remove_only_ours() {
+    if bt_platform::host_platform() == HostPlatform::OtherUnix {
+        // No arm of the update door removes anything here, and no row runs.
+        return;
+    }
+    let (root, mut scope) = sandbox("update-rows");
+    let agents = root.join("home/Library/LaunchAgents");
+    let applications = root.join("Applications");
+    let home = applications.join(".Folio.app.folio-update");
+    fs::create_dir_all(&agents).unwrap();
+    fs::create_dir_all(home.join("0123456789abcdef0123456789abcdef/rescue/Folio.app")).unwrap();
+    fs::write(home.join("journal.json"), b"{}").unwrap();
+    fs::write(home.join("lock"), b"").unwrap();
+    fs::create_dir_all(applications.join("Folio.app/Contents/MacOS")).unwrap();
+    fs::create_dir_all(applications.join(".Other.app.folio-update")).unwrap();
+    let ours = [
+        bt_platform::launch_agent::file_name(&[0x01; 16]),
+        bt_platform::launch_agent::file_name(&[0xab; 16]),
+    ];
+    for name in &ours {
+        fs::write(agents.join(name), b"plist").unwrap();
+    }
+    let theirs = [
+        "com.example.agent.plist",
+        "io.github.lulu-loopp.folio.update-01010101.plist.bak",
+    ];
+    for name in theirs {
+        fs::write(agents.join(name), b"theirs").unwrap();
+    }
+    scope.launch_agents = Some(agents.clone());
+    scope.update_home = Some(home.clone());
+
+    let report = execute(&scope, false, system_absent);
+    assert_eq!(report.code, 0, "{}", report.stderr());
+    let stdout = report.stdout();
+    for name in &ours {
+        assert!(!agents.join(name).exists(), "{name}");
+        assert!(
+            stdout.contains(&format!("{}: removed", agents.join(name).display())),
+            "{stdout}"
+        );
+    }
+    for name in theirs {
+        assert!(agents.join(name).exists(), "{name}");
+    }
+    assert!(!home.exists());
+    assert!(
+        stdout.contains(&format!(
+            "Update home beside the bundle (per-copy): {}: removed",
+            home.display()
+        )),
+        "{stdout}"
+    );
+    assert!(applications.join("Folio.app/Contents/MacOS").exists());
+    assert!(applications.join(".Other.app.folio-update").exists());
+
+    let second = execute(&scope, false, system_absent);
+    assert_eq!(second.code, 0, "{}", second.stderr());
+    let second = second.stdout();
+    assert!(
+        second.contains("Update entrances (LaunchAgents) (per-account): not present"),
+        "{second}"
+    );
+    assert!(
+        second.contains(&format!(
+            "Update home beside the bundle (per-copy): {}: not present",
+            home.display()
+        )),
+        "{second}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// PIN (U-26) — **each update row names the writer it undoes, and the writer is
+/// where the row says**: the entrance door writes its plist through the durable
+/// write and sweeps only its own names, and the home is the locator's.
+///
+/// Read through `bt_source` (the standing rule for a guard over Folio's own
+/// source), by identity rather than by file.
+#[test]
+fn uninstall_update_rows_name_their_writers() {
+    let platform = bt_source::Index::of_package("bt-platform");
+    let body = |name: &str| {
+        platform
+            .body_of(&bt_source::ItemQuery::function(name).in_module("crate::launch_agent"))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    };
+    assert!(body("arm").contains("arm_with("));
+    assert!(body("arm_with").contains("durable_write_with("));
+    assert!(body("sweep").contains("is_ours("));
+    assert!(method_body("Home", "for_bundle").contains("MACOS_HOME_SUFFIX"));
+    for (remover, writer) in [
+        (Remover::UpdateEntrances, "launch_agent.rs:arm"),
+        (Remover::UpdateHome, "update_txn.rs:Home::for_bundle"),
+    ] {
+        assert!(
+            INVENTORY
+                .iter()
+                .any(|mark| mark.remover == remover && mark.writer.contains(writer)),
+            "writer has no undo: {writer}"
+        );
+    }
 }

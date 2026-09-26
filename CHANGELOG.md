@@ -47,6 +47,10 @@ All notable changes to Folio are recorded here. The format follows
   same developer as the one running and what Gatekeeper says about it; it
   refuses a copy Gatekeeper rejects, and when Gatekeeper is turned off it
   relies on the signature alone. Nothing uses it yet.
+- On the Mac, the coming updater can keep its record of an update in a folder
+  beside the app, register a login item that finishes an interrupted update,
+  and copy the running app to run that recovery from; `--uninstall-cleanup`
+  removes the folder and the login item. Nothing uses them yet.
 
 ### Fixed
 
