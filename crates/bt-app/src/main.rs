@@ -162,6 +162,8 @@ mod trace;
 mod trace_sink;
 mod uninstall;
 mod update;
+// The updater's archive reader (0.4.6 ticket U-14); U-20's Prepare is its caller.
+mod update_archive;
 // The build script's updater-flag decision, compiled here only so its tests run:
 // `build.rs` reaches the same file by `#[path]`, and nothing of it ships.
 #[cfg(test)]

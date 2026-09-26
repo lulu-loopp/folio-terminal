@@ -26,6 +26,10 @@ All notable changes to Folio are recorded here. The format follows
 - `folio.exe` now carries a signed list of every other file in the Windows
   download, with their hashes, and a release is refused if any file differs
   from it; the Mac app records the same update facts in its signed bundle.
+- The coming updater can read a downloaded Windows release and stage it only
+  if every file is one the new `folio.exe`'s signed list names, with the same
+  bytes; odd file names, oversized or damaged files and anything unlisted are
+  refused by name. Nothing uses it yet.
 
 ### Fixed
 

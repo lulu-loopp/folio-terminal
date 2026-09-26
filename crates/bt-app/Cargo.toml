@@ -49,6 +49,21 @@ bt-term = { path = "../bt-term" }
 bt-transcript = { path = "../bt-transcript" }
 bt-unicode = { path = "../bt-unicode" }
 bt-viewport = { path = "../bt-viewport" }
+# **The release manifest, SHA-256 and the zip records** (`update_archive`, 0.4.6
+# ticket U-14). The updater's archive reader parses the manifest a new
+# `folio.exe` carries with the grammar `build.rs` writes it with
+# (`bt_winres::release_manifest`), hashes each member with the workspace's one
+# SHA-256 (`bt_winres::digest`) and reads the archive's records through the one
+# zip record layout (`bt_winres::zip`) `bt-pty`'s build script reads the ConPTY
+# package with. The crate has no dependencies and was already this package's
+# build and dev dependency, so it costs no package.
+bt-winres = { path = "../bt-winres" }
+# **The archive's deflated members, inflated a bounded chunk at a time**
+# (`update_archive`). Already in `Cargo.lock` through `flate2` and `png`, and
+# already `bt-pty`'s build dependency at this version, so it costs no new
+# package — `docs/DESIGN.md` §8's bar. Its streaming state is what lets the
+# reader count the decompressor's actual output before every write.
+miniz_oxide = "=0.8.9"
 # **The attention ledger** (`docs/ARCHITECTURE.md` §12.1, D-57). This crate is
 # its only dependent.
 bt-workbench = { path = "../bt-workbench" }
