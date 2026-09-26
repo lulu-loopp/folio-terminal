@@ -25,6 +25,8 @@ All notable changes to Folio are recorded here. The format follows
 - Building Folio for Windows no longer needs Windows PowerShell: the ConPTY
   files are unpacked by the build itself, so the Windows build can be checked
   from Linux or macOS.
+- Folio notes in its diagnostics log how this copy was installed — by scoop,
+  Homebrew or winget, or by hand — the groundwork for updating itself.
 
 ## 0.4.5-preview — 2026-09-26
 

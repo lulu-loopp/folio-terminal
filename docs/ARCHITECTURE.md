@@ -314,6 +314,17 @@ Generations solve supersession. They do not solve durable writes, freshness
 policy, lost messages or admission guarantees — which is why this is five rules
 and not one.
 
+**A single-owner observation born after the survey: how this copy was
+installed** (ticket U-1, 2026-09-26). Owner `bt-app::install_channel`, which
+derives it once at start on the `bt-install-channel` worker from three reads of
+the install folder — the marker (`folio-install.json` beside `folio.exe`; the
+attribute `io.github.lulu-loopp.folio.install` on the macOS bundle), scoop's
+receipt (`install.json` + `manifest.json`), and the folder's owner — and holds
+it in `install_channel::FACT`, never refreshed within a run. `classify` is the
+one judgement: every failed read is `Channel::Unknown`. The only reader today is
+the one `diagnostics.log` line; the Explorer default (U-3) and the updater's
+eligibility will read the same `FACT`.
+
 ### 4.3 The `Deref` trap
 
 `main.rs` declares `impl Deref for Runtime<'_>` and `impl DerefMut for Runtime<'_>`
@@ -559,7 +570,8 @@ happen" has one answer and a guard can hold it.
 
 | effect | door | what holds it |
 |---|---|---|
-| reading file bytes | `bt_platform::file_reads` — ten named lanes, `Lane`, `Ledger::add`, the process-wide `LEDGER` | `file_reads_doors.txt` plus a source guard |
+| reading file bytes | `bt_platform::file_reads` — eleven named lanes, `Lane`, `Ledger::add`, the process-wide `LEDGER` | `file_reads_doors.txt` plus a source guard |
+| reading who owns an install folder, and the macOS install-marker attribute | `bt_platform::install_evidence` — `owner_of`, `current_account`, `attribute` (read-only: `GetNamedSecurityInfoW` and the process token on Windows, `stat`, `geteuid` and `getxattr` on Unix); the attribute's bytes are charged to `file_reads`' `Lane::Install` | its own module, one function per read; its one caller is `install_channel::read` |
 | constructing a child process | `bt_platform::quiet_command_named` (and `quiet_command`) — absolute path resolved by `handoff::program_on_path` | pinned as the only `Command` construction |
 | handing something to the operating system | `bt_platform::handoff` — the only `ShellExecuteW` and `NSWorkspace` sites in the workspace | its own module, one function per verb |
 | starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` — a name and a priority band | every call site is in `bt-app`, so the name is the thread |

@@ -27,11 +27,14 @@ pub enum Lane {
     Settings,
     Fonts,
     Attention,
+    /// The install marker and the package manager's receipt beside the
+    /// executable, read once at start (`install_channel`, ticket U-1).
+    Install,
     Other,
 }
 
 impl Lane {
-    pub const ALL: [Self; 10] = [
+    pub const ALL: [Self; 11] = [
         Self::InlineImage,
         Self::Peek,
         Self::Animation,
@@ -41,6 +44,7 @@ impl Lane {
         Self::Settings,
         Self::Fonts,
         Self::Attention,
+        Self::Install,
         Self::Other,
     ];
 
@@ -55,6 +59,7 @@ impl Lane {
             Self::Settings => "settings",
             Self::Fonts => "fonts",
             Self::Attention => "attention",
+            Self::Install => "install",
             Self::Other => "other",
         }
     }

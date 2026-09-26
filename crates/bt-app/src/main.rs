@@ -81,6 +81,7 @@ mod icons;
 mod ime_outbound;
 mod ime_report;
 mod input;
+mod install_channel;
 /// **Every journey this window runs, put through the worst schedule it can be
 /// given** (review round 3, 2026-09-18). A file of its own because the table is
 /// long and because it drives the real hosts rather than reading this one as
@@ -41138,6 +41139,9 @@ impl Runtime<'_> {
         explorer_menu::begin_probe();
         update::load(&persist::storage_dir());
         update::begin(persist::storage_dir(), settings_store.loaded().update_check);
+        // **How this copy was installed** (U-1): read once, off this thread, and said once in
+        // `diagnostics.log`. Nothing acts on it yet.
+        install_channel::begin();
         // **The data directory's two endpoints, opened by its writer and by nobody else** (§7.59,
         // audit 3 A-3). One call and one gate, so that a third door added beside them cannot be
         // added outside it.
