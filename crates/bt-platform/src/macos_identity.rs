@@ -510,10 +510,6 @@ pub fn identity_decision(
 
 /// What one child said: its exit status (`None` when a signal ended it) and
 /// its two streams, as text.
-#[cfg_attr(
-    not(target_os = "macos"),
-    expect(dead_code, reason = "only the macOS arm runs a tool")
-)]
 struct Answer {
     status: Option<i32>,
     stdout: String,
