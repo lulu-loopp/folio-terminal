@@ -1882,3 +1882,25 @@ F-3 and U-26–U-29). They are no longer open. What remains:
 1. A copy may update itself only when the running build is signed **and** built with the updater flag; both are required.
 2. If the macOS recovery path is not ready at the 0.4.6 cut, 0.4.6 ships the updater on Windows only; macOS stays on the releases page until its recovery contract passes its experiments.
 3. A Folio started while an update is being applied waits for the update to finish before it opens a window (up to the apply deadline); this is accepted as the behaviour right after Restart.
+
+## Revision 2026-09-26 — E-8's method (U-16)
+
+U-16 built `bt_platform::macos_identity` and measured, on the Mac mini with
+synthetic bundles only, the grammar it reads: `spctl --status` answers
+`assessments enabled` on stdout; `spctl --assess --type execute -vv` answers on
+stderr `<path>: accepted` + `source=` (+ `origin=`) with exit 0, `<path>:
+rejected` (+ `source=`) with exit 3, and any other first line with exit 1
+(`a sealed resource is missing or invalid`, `invalid Info.plist …`). Three
+notarized third-party applications answered `source=Notarized Developer ID`;
+two of them satisfy their own designated requirement conjoined with the
+Developer ID requirement under `--strict --deep`, and the third fails `--strict`
+validity with `resource fork, Finder information, or similar detritus not
+allowed` — a Finder or resource-fork attribute on the installed copy; whether
+the install marker's attribute counts as one is E1's question. An ad-hoc bundle is `rejected` and fails the Developer
+ID requirement with `codesign` exit 3. E-8 itself runs on a real notarized, stapled `Folio.app`, so
+it is the owner's: a `ditto` copy assessed online, then offline with
+`--ignore-cache --no-cache` (the cache not yet warm), then with its stapled
+ticket removed while offline (an explicit rejection), and `spctl --status` and
+`--assess` while assessments are off (`sudo spctl --global-disable`, then
+*Anywhere* in System Settings, which macOS 15 and later require). The exact
+commands are in U-16's report.
