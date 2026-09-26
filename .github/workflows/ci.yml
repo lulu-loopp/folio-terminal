@@ -557,21 +557,29 @@ jobs:
   #    point: a `#[cfg(test)]` module and an example are where a platform
   #    assumption hides most cheaply, and the three targets M1-10 fixed were
   #    exactly those;
-  # ③ twelve suites run, `bt-platform`'s and `bt-pty`'s among them — the second
+  # ③ sixteen suites run, `bt-platform`'s and `bt-pty`'s among them — the second
   #    starts real Unix children over a real pty, which is a thing no Windows job
-  #    in this file can do;
-  # ④ `bt-platform` passes clippy with `-D warnings`, which is the lint line
-  #    `logic` holds on Windows, held on the platform where half that crate is a
-  #    refusal.
+  #    in this file can do — and, since ticket 72, `bt-render`'s against the
+  #    runner's own Metal device and `bt-corpus`'s (D-63);
+  # ④ **the whole workspace passes clippy with `-D warnings`** — the same line
+  #    `logic` holds on Windows, held on the second platform (ticket 72, D-63).
+  #    Until then only `bt-platform` was linted here, and `bt-app` carried
+  #    fourteen macOS-only findings (D-67) nobody's gate saw: items whose only
+  #    readers are `#[cfg(windows)]`, and two `#[must_use]` answers whose
+  #    Windows signatures did not carry the attribute;
+  # ⑤ that lint line can fail: a planted macOS-only dead item is refused, the
+  #    `gates-can-fail` mechanism run on this platform (the Windows job cannot
+  #    plant it — Windows never compiles the item).
   #
-  # What is still checked and not tested, and why: `bt-render` asks for a real
-  # adapter and a runner has none (the `gpu` job above is where that question is
-  # asked); `bt-term` and `bt-corpus` because nobody has measured their suites on
-  # a second platform, and a list of what we have measured is worth more than a
-  # list of what we hope. **`bt-app` is checked and not tested on purpose**: its
-  # suite is 3,498 tests and most of them want a window, a renderer or a ConPTY,
-  # and turning that on here would be a different ticket with a different
-  # acceptance line rather than a longer command.
+  # What is still checked and not tested, and why, as measured on the owner's
+  # Mac mini on 2026-09-26 (ticket 72): **`bt-term`** — 43 of its tests assert a
+  # Windows fact (drive-letter working directories, `cmd`/Git Bash/WSL
+  # integration scripts) and are red here by design; they are spread over
+  # `inline_image::tests`, `session::tests` and five integration binaries next to
+  # hundreds of green neighbours, so no name filter excludes exactly them (D-83).
+  # **`bt-app`** — 282 of its 4,600 tests fail here (Windows path fixtures,
+  # Ctrl-for-Cmd chords, Windows-only rows), so its suite is not portable yet
+  # and a longer command would only be a red one; that is D-83.
   core-macos:
     runs-on: macos-latest
     timeout-minutes: 45
@@ -651,20 +659,53 @@ jobs:
           -p bt-unicode -p bt-doc -p bt-detect -p bt-layout -p bt-persist
           -p bt-winres -p bt-math -p bt-transcript -p bt-viewport
           -p bt-platform -p bt-pty -p bt-source -p bt-workbench -p alacritty_terminal
+          -p bt-render -p bt-corpus
 
-      # **The lint line, held on the second platform** (M1-10). `logic` runs
-      # `clippy --workspace --all-targets -- -D warnings` on Windows, and until
-      # this ticket nothing held that bar anywhere else: M1-6 reported
-      # `bt-platform` and `bt-transcript` red here on Windows-only dead code,
-      # which is how a `#[cfg(windows)]` that should have been written gets
-      # noticed at all.
-      #
-      # `bt-platform` and not the workspace, for now. It is the crate the port
-      # is about and the one whose non-Windows half is written rather than
-      # inherited; widening this to the crates above is cheap and is a decision
-      # somebody should take on purpose rather than a flag that grew.
-      - name: the lint line on bt-platform
-        run: cargo clippy --locked --all-targets -p bt-platform -- -D warnings
+      # **The lint line, held on the second platform** — `logic`'s own clippy
+      # line, word for word (ticket 72, D-63). M1-10 started it on `bt-platform`
+      # alone and left widening it as "a decision somebody should take on
+      # purpose"; ticket 72 took it once `bt-app` was clean here (D-67). The
+      # findings this line exists for are the ones Windows cannot see: an item
+      # whose only readers are `#[cfg(windows)]` is dead code on this platform,
+      # and a `#[must_use]` that only the non-Windows arm of a door carries is an
+      # ignored answer only here.
+      - name: clippy
+        run: >
+          cargo clippy --workspace --all-targets --locked
+          --exclude mitex --exclude mitex-parser
+          -- -D warnings
+
+      # **The macOS lint line can actually fail** — `gates-can-fail`'s mechanism
+      # (plant, demand red, put the file back), run here because the violation
+      # it plants exists only on this platform: an item compiled only on macOS
+      # that nothing reads. Windows never compiles it, so the Windows canary
+      # cannot stand in for this one. The refusal must name the planted item, so
+      # a red for any other reason is not mistaken for this proof, and the file
+      # is compared with the checkout afterwards.
+      - name: the macOS lint gate can actually fail
+        run: |
+          file=crates/bt-app/src/explorer_menu.rs
+          original="$RUNNER_TEMP/lint-gate-original.rs"
+          log="$RUNNER_TEMP/lint-gate.log"
+          cp "$file" "$original"
+          printf '\n#[cfg(target_os = "macos")]\nfn macos_lint_gate_probe() {}\n' >> "$file"
+          set +e
+          cargo clippy --locked -p bt-app -- -D warnings > "$log" 2>&1
+          clippy=$?
+          set -e
+          cp "$original" "$file"
+          git diff --exit-code -- "$file"
+          if [ "$clippy" -eq 0 ]; then
+            echo "clippy passed a planted macOS-only dead item - the macOS lint line is not a gate"
+            exit 1
+          fi
+          if ! grep -q "macos_lint_gate_probe" "$log"; then
+            cat "$log"
+            echo "clippy failed with exit $clippy, but not on the planted item"
+            exit 1
+          fi
+          grep -m1 -B1 -A3 "macos_lint_gate_probe" "$log"
+          echo "clippy refused the planted macOS-only item with exit $clippy, which is this gate passing."
 
   # ── the platform the remote work runs on ──────────────────────────────────
   #

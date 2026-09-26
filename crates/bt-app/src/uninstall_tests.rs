@@ -41,11 +41,48 @@ fn method_body(owner: &str, name: &str) -> &'static str {
     item_body(&bt_source::ItemQuery::method(owner, name))
 }
 
+/// **The temporary directory with every link above it resolved, in its ordinary spelling.**
+///
+/// The door refuses a root with a link anywhere among its ancestors, on purpose — a planted link
+/// must never turn a deletion into authority over its target. A sandbox is a place the door is
+/// pointed at, so its own spelling must carry no link, or every row reads as a planted one. On
+/// macOS it would: `$TMPDIR` is `/var/folders/…`, and `/var` is the system's link to
+/// `/private/var`, so every sandbox under the unresolved name was refused whole (12 tests red on
+/// the Mac, ticket 72). `canonicalize` is the resolution; on Windows it answers the verbatim
+/// `\\?\` form, where `/` is not a separator and the fixtures' `root.join("app/folio.exe")` would
+/// name no file, so a verbatim drive or share prefix is spelled back the ordinary way. Nothing here
+/// names a platform: a path with no prefix (every Unix path) is the canonical answer itself.
+///
+/// The product's rule is unchanged: every root production names is under the home, the
+/// application-data folders or the temporary directory, and only the last sits under `/var`
+/// (reported as a finding in ticket 72's report, not changed here).
+fn link_free_temp_dir() -> PathBuf {
+    use std::path::{Component, Prefix};
+    let real = fs::canonicalize(std::env::temp_dir()).expect("the temporary directory exists");
+    let mut components = real.components();
+    let Some(Component::Prefix(prefix)) = components.next() else {
+        return real;
+    };
+    let head = match prefix.kind() {
+        Prefix::VerbatimDisk(letter) => format!("{}:\\", char::from(letter)),
+        Prefix::VerbatimUNC(server, share) => format!(
+            r"\\{}\{}\",
+            server.to_string_lossy(),
+            share.to_string_lossy()
+        ),
+        _ => return real,
+    };
+    let rest: PathBuf = components
+        .filter(|component| !matches!(component, Component::RootDir))
+        .collect();
+    PathBuf::from(head).join(rest)
+}
+
 fn sandbox(tag: &str) -> (PathBuf, Scope) {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let root =
-        std::env::temp_dir().join(format!("folio-uninstall-{tag}-{}-{n}", std::process::id()));
+        link_free_temp_dir().join(format!("folio-uninstall-{tag}-{}-{n}", std::process::id()));
     fs::create_dir_all(root.join("app")).unwrap();
     let exe = root.join("app/folio.exe");
     fs::write(&exe, b"fixture executable").unwrap();
@@ -1058,15 +1095,17 @@ fn uninstall_sandbox_door_is_not_read_by_a_shipped_build() {
 }
 
 /// What a purge row reports is what was true at the check that decided the deletion.
+///
+/// The row is the clipboard staging folder because it is a data root on every platform (a temp
+/// row); the Windows-only `Local data (including WebView2)` this used to pick has no root on macOS
+/// or Linux, so there the test found no row at all (ticket 72).
 #[test]
 fn uninstall_purge_reports_the_root_it_found_at_the_deciding_check() {
     let (root, scope) = sandbox("recreated");
     let (name, late) = scope
         .purge_roots
         .iter()
-        .find_map(|(name, path)| {
-            (*name == "Local data (including WebView2)").then(|| (*name, path.clone()))
-        })
+        .find_map(|(name, path)| (*name == "Clipboard staging").then(|| (*name, path.clone())))
         .unwrap();
     assert!(!late.exists());
     let report = execute(&scope, true, |_| {

@@ -1295,6 +1295,7 @@ mod windows_hotkey {
     /// never reported to a reader — there is nothing a person can do about a
     /// foreground lock, and the worst it costs is a window that opens behind
     /// another one.
+    #[must_use]
     pub fn allow_foreground_for(process: u32) -> bool {
         // `u32::MAX` is `ASFW_ANY` and `0` is `ASFW_NONE` — the two values that
         // are not a process, and the two this call must never be asked with.

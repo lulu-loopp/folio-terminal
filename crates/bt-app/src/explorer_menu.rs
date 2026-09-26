@@ -514,7 +514,11 @@ fn remember(state: PackageState) {
 /// Not public: every caller of it is on a thread of its own, and a version of
 /// this that could be called from the window thread is a version somebody calls
 /// from the window thread.
-#[cfg(windows)]
+///
+/// **One reading on every platform.** Off Windows [`supported`] is `false`, so
+/// the answer is [`PackageState::Unsupported`] before the deployment database is
+/// asked; `bt_platform::msix::registered` exists there too and answers
+/// `Ok(None)`, so nothing below needs a platform arm of its own.
 fn read_state() -> PackageState {
     if !supported() {
         return PackageState::Unsupported;
@@ -539,11 +543,6 @@ fn read_state() -> PackageState {
         here.as_deref(),
         is_this_executable,
     )
-}
-
-#[cfg(not(windows))]
-fn read_state() -> PackageState {
-    PackageState::Unsupported
 }
 
 /// **Which of ours a registration is, from the folder it serves** — the whole of

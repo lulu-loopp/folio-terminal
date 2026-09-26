@@ -4,8 +4,8 @@
 //! workspace is written in. Three things live here, and all three are facts
 //! about `main` today that go red the day they stop being true:
 //!
-//! 1. **The eleven duplicated conditional identities** of §2.4, *regenerated*
-//!    from the index and compared with the plan's list — so a twelfth is a red
+//! 1. **The ten duplicated conditional identities** of §2.4, *regenerated*
+//!    from the index and compared with the plan's list — so an eleventh is a red
 //!    test and not a surprise in P3.
 //! 2. **The macro facts of §2.7**: two `macro_rules!` definitions in `bt-app`,
 //!    neither of them constructing an item; no source inclusion, no
@@ -32,7 +32,7 @@ fn workspace() -> Workspace {
 }
 
 /// `bt-app`'s own `src/` — the universe §5's measurement is written about, and
-/// the one the eleven and the macro facts are facts about.
+/// the one the ten and the macro facts are facts about.
 fn bt_app() -> Arc<Index> {
     let workspace = workspace();
     let package = workspace.package("bt-app").expect("bt-app");
@@ -68,10 +68,15 @@ fn item_at(index: &Index, span: Span) -> Option<&ItemRecord> {
         .min_by_key(|record| record.whole().len())
 }
 
-// ── §2.4 — the eleven, regenerated ────────────────────────────────────────
+// ── §2.4 — the ten, regenerated ───────────────────────────────────────────
 
-/// RED — **`bt-app` declares exactly eleven callable identities twice**, and
+/// RED — **`bt-app` declares exactly ten callable identities twice**, and
 /// this set is computed from the index rather than copied from the plan.
+///
+/// §2.4 counted eleven. Ticket 72 (2026-09-26) made `explorer_menu::read_state`
+/// one portable declaration — its Windows arm already asked nothing the other
+/// platforms lack — so the set shrank by that one row, which is the only way
+/// it may change without a finding.
 ///
 /// "The full module path is unique" is false in this tree, and these are the
 /// rows that make it false. A query for any of them by name alone is a refusal
@@ -86,12 +91,12 @@ fn item_at(index: &Index, span: Span) -> Option<&ItemRecord> {
 /// is the reading §2.4 forbids in the other direction: two different things
 /// taken for one.
 ///
-/// MUTATION: add a second `#[cfg(unix)]` arm to any function in `bt-app` and a
-/// twelfth row appears here; take `#[cfg(debug_assertions)]` off
+/// MUTATION: add a second `#[cfg(unix)]` arm to any function in `bt-app` and an
+/// eleventh row appears here; take `#[cfg(debug_assertions)]` off
 /// `panic_selftest_if_due`'s pair and one disappears; drop the kind from the
 /// key and the field/method pairs flood the first list.
 #[test]
-fn the_identities_bt_app_declares_twice_are_the_eleven() {
+fn the_identities_bt_app_declares_twice_are_the_ten() {
     let index = bt_app();
     let mut by_identity: BTreeMap<(&'static str, String), Vec<String>> = BTreeMap::new();
     for record in index.items() {
@@ -134,7 +139,6 @@ fn the_identities_bt_app_declares_twice_are_the_eleven() {
         [
             "crate::FolioApp::surface_selftest_if_due",
             "crate::attention_copilot::run_probe",
-            "crate::explorer_menu::read_state",
             "crate::files::is_concealed",
             "crate::hang_watch::run_selftest_if_due",
             "crate::panic_selftest_if_due",
@@ -144,14 +148,15 @@ fn the_identities_bt_app_declares_twice_are_the_eleven() {
             "crate::wsl::<CurrentUser as Registry>::string",
             "crate::wsl::<CurrentUser as Registry>::subkeys",
         ],
-        "the eleven of `docs/plans/bt-app-split-prep.md` §2.4, regenerated — a twelfth is a \
-         finding about the tree, never a row added to make this green"
+        "the ten of `docs/plans/bt-app-split-prep.md` §2.4 (eleven until ticket 72), \
+         regenerated — an eleventh is a finding about the tree, never a row added to make \
+         this green"
     );
 
     // The same claim for the data the program keeps, whose identities arrived
     // with the struct and field ticket. `bt-app` declares none of them twice:
     // the day it does, the row below is a finding about the tree in exactly the
-    // way a twelfth callable would be.
+    // way an eleventh callable would be.
     let data: Vec<String> = duplicated
         .keys()
         .filter(|(sort, _)| *sort != "callable")

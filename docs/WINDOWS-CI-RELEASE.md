@@ -140,3 +140,21 @@ bundle plus dSYM (generate dSYM while object files still exist). Signing and
 notarisation still need the owner's Developer ID and notary keys. Adopting that
 split, or provisioning keys on runners, requires a separate decision; this
 Windows job does neither and touches no Mac environment or service.
+
+## What CI runs on macOS
+
+CI's `core-macos` job (`.github/workflows/ci.yml`) is a check and lint lane, not
+a release build. Since ticket 72 (2026-09-26) it:
+
+- checks every product crate with `--all-targets`, `bt-app` included;
+- runs the same clippy line as the Windows `logic` job, over the whole
+  workspace with `-D warnings`, and plants a macOS-only dead item to show that
+  line refuses it;
+- tests the portable crates plus `bt-render` (on the runner's Metal device)
+  and `bt-corpus`.
+
+`bt-term` and `bt-app` are checked but not tested there. Their suites contain
+tests that assert Windows facts on every host, and those tests are red on a
+Mac by design: 43 in `bt-term` and 282 in `bt-app` on the owner's Mac mini
+(structural-debt D-83). A macOS run of either suite should be read against
+those counts, not against zero.
