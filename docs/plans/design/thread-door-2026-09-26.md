@@ -3209,3 +3209,103 @@ Adopted as (i)3 said, with the contract the review asked for:
 none. (d) yes, as (i)8 said, with (i)'s three amendments to B§C-2/C-4 now in
 the forms of (j)2, (j)3 and (j)4; the metadata check and the `_bounded` names
 of (i) are withdrawn.
+
+### (j)11 · After the scoped Codex review of (j): eight corrections, all carried into A2a
+
+Review: `trace/tickets-046/thread-door-review-codex-2026-09-26-j.md` (adopt
+with changes for A2a's dispatch; A2a stays independent of A2b–A2e). Each
+finding is adopted as follows; the A2a brief is the binding text.
+
+1. **The mint boundary is fenced before any entrance leaves the vocabulary.**
+   A safe sibling of `admitted` inside `admission` (`work(WaitToken::fresh())`
+   with no role, phase or meter) would pass every check A1e has, and a helper
+   taking `lend_worker` as a function value would pass the caller counter. A2a
+   adds to the guard: `WaitToken::fresh` is referenced (as a call **or** a
+   value) exactly once, inside `admitted`; `lend_worker` is referenced exactly
+   by its two owners; every reference to either mint anywhere in the workspace
+   is counted by the identifier view, not by `name(`; the constructors' visibility
+   is pinned; and for each entrance removed from the vocabulary the required
+   parameter is checked **per cfg arm** as the exact capability type
+   (`WaitToken<'_, D>` for the door's `D`, or `&WorkerCtx`), never
+   `Option<…>`. Mutations: the safe alternate mint; the indirect mint through a
+   function value; the removed parameter; `Option<WaitToken>`. (b)2's
+   qualification (inference-typed unsafe fabrication in bt-platform is outside
+   the accident-level guarantee) stands and is restated beside the removal.
+2. **Private functions are not vocabulary entries.** `DirWatch::start_scoped`
+   and `read_system_locale_declaration` are private to bt-platform; no
+   external probe can call them, and making them public for a probe would widen
+   the product interface. The vocabulary lists library paths and cross-crate
+   entrances callable from outside; these two leave it **as entries**, and the
+   raw effects inside them (already vocabulary: the spawn and joins, the
+   `Command` wait) are inventory rows that (k) allocates to A2c with rows 7 and
+   8. Nothing is deleted silently: the report lists both with their effects.
+   The external probe then covers every retained entry, with direct
+   dependencies on `bt-render`, `bt-pty`, `bt-platform`, `wgpu`,
+   `portable-pty`, `pollster`, `windows` (the binding features the recipes
+   use) under `cfg(windows)`, `libc` under `cfg(target_os = "macos")`; its
+   own `[lints.rust] unsafe_code = "allow"` (a tool crate; the FFI recipes are
+   `unsafe` blocks); public typed functions that are compiled and never run.
+   Recipes (receiver, arguments, generics) live in a non-`.rs` template keyed
+   by entry, beside the registry.
+3. **The positive control runs in A2a, in a dedicated invocation.** The probe
+   crate has its own `crates/bt-lint-probe/clippy.toml` — generated from the
+   registry, equality-checked, and the fifth member of (j)3's closed list — so
+   the vocabulary is effective for the probe alone and never for a product
+   crate; the step is `cargo clippy -p bt-lint-probe --all-targets --
+   --force-warn clippy::disallowed_methods` (measured: `--force-warn` fires
+   through the root allowance), whose diagnostics the script matches by source
+   span to the entry each generated line names, requiring one diagnostic per
+   entry assigned to the job's target, refusing a compile error, and applying
+   (j)4's target-aware rule to reachable-function warnings. Mutations: an entry
+   missing from the probe file; a misspelled path; a wrong target assignment
+   (red on the other job); a correct off-target entry (green). The ordinary
+   product invocation stays separate and unchanged.
+4. **The fence covers Cargo's legacy configuration road.** `.cargo/config`
+   (no extension) anywhere in the tree is red outright; `[env]` entries
+   naming `CLIPPY_CONF_DIR` in `.cargo/config.toml` are red (M7e extended);
+   the shell assertion stays as a control. Plant: the `[env]` road with the
+   shell variable unset, red for the named reason.
+5. **Bootstrap without an exit-0 exception.** Two commits: S1 seeds the
+   inventory at the ticket's BASE (the equality half only; the coordinator
+   reviews the seed against A2's Windows survey for plausibility before S2);
+   S2 lands the historical half and pins S1's sha as the **seed baseline**:
+   the baseline is the merge base's committed file when it has one, else the
+   pinned seed blob (`git show <S1>:<path>`) — so a branch whose merge base
+   predates the seed compares against the seed without rebasing, and a dirty
+   plant at S1's own HEAD is an addition against the seed blob and red. No
+   "HEAD == seed → pass". `core-macos` fetches full history (it is shallow
+   today). Plants: a new call plus row at seed HEAD (dirty); a descendant
+   adding call plus row; a branch whose merge base lacks the file (compares
+   against the seed).
+6. **Counts are compared numerically.** Row key = `(crate, cfg arm, item,
+   entry)`; `count` is a positive integer; duplicate keys refused;
+   `current[key] <= baseline[key]` with a missing key read as zero; a new key
+   refused. Plants: `3 → 2` (green), `2 → 3` with the extra site (red).
+7. **Target kinds without `harness`; reachability wins; parsing plants.**
+   `cargo metadata` gives `kind` and `src_path` and no `harness` field; the
+   two-form rule needs only the kind (every `test`/`example`/`bench`/
+   `custom-build` root takes the unconditional form). Every target is
+   enumerated, `required-features` or not. A file reachable from a product
+   root is product whatever its label; a `src_path` shared by a product and an
+   excluded target is refused. `bt-source`'s manifest reader gains
+   examples/benches/build scripts as target kinds, and `bt-lint-probe` is
+   registered as an excluded tool package. The placement plant of (j)2 ("the
+   attribute after a `use`") does not parse and is withdrawn; the plants that
+   parse and must be refused are a `#[path]`-mounted module carrying a leading
+   inner allowance (measured: it inherits and silences), a leading inner
+   allowance in a nested module, and an outer allowance on a function.
+8. **The copier and the tripwire.** The generator reads the registry TSV and
+   a non-`.rs` template and takes its output path as a parameter (a
+   double-quoted `.rs` literal beside a read call would trip shape 2 even for
+   a writer — measured); it is run against the unchanged tripwire in the
+   ticket; equality is `git diff --exit-code -- <generated paths>` in a clean
+   checkout on both jobs, with a tracked-file check; `cfg` predicates come from
+   the entry's target assignment so the wrong-target mutation really moves the
+   call.
+
+Also: M9 refuses only a **newly added** registry line without a ruling — the
+baseline `pending` rows (16b, 23) are a shrink-only set like the inventory; and
+`flush_sink` is inventory, not in-door by being called from `flush`.
+
+**Dispatch.** With these in the brief, A2a is dispatched on this revision;
+(k) is reviewed against A2a's landed commit.
