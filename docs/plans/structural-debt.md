@@ -56,11 +56,11 @@ they answer "what does this machine do" — not by debt.
 | version | rows | open | repaid |
 |---|---:|---:|---:|
 | 0.4.5 | 10 | 2 | 8 |
-| 0.4.6 | 49 | 48 | 1 |
-| 0.4.7 | 14 | 14 | 0 |
+| 0.4.6 | 49 | 47 | 2 |
+| 0.4.7 | 15 | 15 | 0 |
 | deferred (reason on the row) | 3 | 3 | 0 |
 | already repaid | 1 | 0 | 1 |
-| **total** | **77** | **67** | **10** |
+| **total** | **78** | **67** | **11** |
 
 (2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
 presentation lane, its second client, and revision (b) R8 of
@@ -71,7 +71,8 @@ the already-repaid D-58.)
 
 (2026-09-26, A1a: D-77 added to 0.4.6.)
 
-(2026-09-26, ticket 72: D-67 repaid.)
+(2026-09-26, ticket 72: D-63 and D-67 repaid; D-78 added to 0.4.7, the version
+proposed by the ticket for the coordinator to confirm.)
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -244,7 +245,7 @@ ledger's.
 | D-60 | two macOS `http` tests that reach the network | `docs/plans/port/m4-7/transcript.md` | none yet | 0.4.6 | open |
 | D-61 | a Mac-only red test in `webnav` | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
 | D-62 | `bt-render` fails clippy on macOS: three unused constants | ticket 13's report | 55 | 0.4.5 — small; the Mac CI job (D-63) is in 0.4.6 | repaid (ticket 55) |
-| D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | none yet | 0.4.6 | open |
+| D-63 | the macOS CI job tests none of `bt-app`, `bt-term`, `bt-render` and lints only `bt-platform` | `.github/workflows/ci.yml`, `core-macos` | 72 | 0.4.6 | repaid (ticket 72) — the job lints the workspace and tests `bt-render` and `bt-corpus`; the `bt-app` and `bt-term` suites are not portable yet and are D-78 |
 | D-64 | opening a web page holds the window thread for seconds: WebView2 environment and controller creation and `drive_web_page`'s install burst, unprobed inside `window_event` | the 2026-09-23 investigation of hover cards, float drag and web-open stutter, §3; ticket 43 | 43, 54 | 0.4.5 — a multi-second hold on the input thread is the typing-stability work | open — narrowed by ticket 43: the phases are named in the stall self-report; the remaining cost is the engine's own thread-affine work (§5.3 row 21) ruled 2026-09-24: warm the engine at a quiet moment — follow-up warm-up, ticket 54; narrowed by ticket 54: the environment call is taken at an idle turn, but the environment starts no runtime process (measured), so the first page's `request_controller` and pump dispatch remain; ruling owed; ruled 2026-09-25 (option A) and **narrowed by ticket 60**: a profile that has opened a page gets a spare controller made at idle for its first eligible page (2318 → 146 ms median, spike 59); **open for 0.4.6** — the residual is a profile's first-ever page, a page that arrives before the spare has landed, and every page after the spare is used |
 | D-65 | overlay fades are folded per primitive and blended in linear light: a fading surface shows its text before its plate, and translucent inks differ from the CSS mock | the 2026-09-23 fade audit, §0–§2 and §7; ticket 46 | 46; the L variant none yet | 0.4.7 — the group composite (ticket 46, M) in 0.4.5; the L variant, all overlay translucency in encoded space, in 0.4.7 before the 0.5 restyle, and the row closes with it | open |
 | D-66 | a fading surface's translucent pixels step at the landing frame: composited on encoded bytes while it fades, blended in linear light at rest — on the light theme the tip's shadow lightens at its darkest pixel from about `#DB` to `#EE` as the fade lands | ticket 46's report (Findings); the 2026-09-23 fade audit, §7 | none yet | 0.4.7 — the L variant (all overlay translucency in encoded space, with D-65), which removes the step | open |
@@ -259,6 +260,7 @@ ledger's.
 | D-75 | the computation lane: no request identity — an answer carries only its question, so one question asked twice gives two answers nobody can tell apart | A5 (Computation × every request has its own identity) | none yet | 0.4.6 — with D-33 | open |
 | D-76 | the computation lane: the decoration thread's death is invisible while the scaling and path-verification threads hold clones of the one answer sender; the drain sees a disconnection only when all three have gone | A5 (Computation × a dead worker is observable) | none yet | 0.4.6 — with D-33 | open |
 | D-77 | §5.3 row 23 — the first window's GPU is opened with `pollster::block_on(GpuContext::open(…))` in `Runtime::create`, on the window thread, a wait no row listed | thread-door note revision (e)2; A1a | B9 (device recovery rests on deadlines and rebuilds on a worker) | 0.4.6 — moves with B9's rebuild on a worker (D-42) | open — registered as row 23 `pending`, door `admission::doors::GpuOpen`; it stays on the window thread until then (coordinator, 2026-09-26); admitted where it stands through `gpu_door::open_first_window` (A1d, 2026-09-26) |
+| D-78 | the `bt-app` and `bt-term` suites are not portable: on macOS 294 of `bt-app`'s 4,600 tests (282 after ticket 72) and 43 of `bt-term`'s fail, each asserting a Windows fact on every host | ticket 72's report (Mac mini, 2026-09-26) | none yet | 0.4.7 — proposed by ticket 72 | open |
 
 ---
 
@@ -1183,6 +1185,13 @@ two privilege-bound fixtures, each with its reason there; they are not debt.
   and `bt-render` but tests none of them, and runs clippy on `bt-platform`
   only — which is why D-61 and D-62 were found by a person. 0.4.6, after D-61
   and D-62 make widening it green.
+  **Repaid by ticket 72 (2026-09-26).** `core-macos` runs `logic`'s clippy line
+  word for word (`--workspace --all-targets --exclude mitex --exclude
+  mitex-parser -- -D warnings`) and adds `bt-render` (295 + 7 tests, green on the Mac mini's
+  Metal device) and `bt-corpus` (16 tests) to its test line. `bt-app` and
+  `bt-term` stay checked and not tested, because their suites are red on macOS
+  by construction (D-78); that part of the row moves there rather than staying
+  open here.
 
 ---
 
@@ -1377,3 +1386,27 @@ drains; neither lane states a bound, and the contract asks for one.
   D-42), which is the same request run for the first device. Owed: the first
   window's device asked for off the window thread, with the window shown only when
   it lands.
+
+## D-78 — the row added on 2026-09-26 by ticket 72
+
+- **D-78 · the `bt-app` and `bt-term` suites assert Windows facts on every
+  host.** Measured on the owner's Mac mini at `a7939601` (`cargo test -p <crate>
+  --no-fail-fast`): `bt-app`'s bin suite ran 4,600 tests, 4,298 passed and 294
+  failed; ticket 72 made the twelve `uninstall::tests` among them pass (their
+  sandbox sat under `$TMPDIR`, and `/var` is a link), which leaves 282. The rest
+  are fixtures written as Windows facts: drive-letter and `\`-joined paths
+  (`profiles` 82, the flat `tests` module 51, `shell_integration` 43,
+  `preview` 14, `printed_path_provenance_tests` 10, `launch_wire`, `cli`,
+  `git_graph`, `file_peek`), Ctrl where macOS reads Cmd (`shortcuts` 34,
+  `input` 6, `preview_edit`), Windows-only rows and folders (`webhost` 12,
+  `settings` 7, `explorer_menu`), and the environment-named config folders of
+  the three agent installers. `bt-term`'s suite has 43 of the same kind (12 of
+  `inline_image::tests`' 47, 22 of `session::tests`' 347, and 9 in the
+  `notifications`, `shell_integration_bash`, `shell_integration_cmd`,
+  `shell_integration_script` and `shell_integration_wsl` binaries). Neither is
+  a product defect by itself — the webnav test D-61 repaired was the same
+  shape — but until they pass, `core-macos` cannot test either crate, and a
+  macOS-only regression in them is found by a person. Owed: each test asks the
+  question its claim is about on the host it runs on, or states its platform
+  with a gate, the D-61 way; then the two crates join `core-macos`'s test line.
+  0.4.7, proposed by ticket 72.
