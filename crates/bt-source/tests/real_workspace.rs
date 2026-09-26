@@ -150,7 +150,9 @@ fn expected_unreached() -> BTreeMap<String, Vec<String>> {
 /// `text_size_tests.rs` (0.4.5 ticket 37, 2026-09-24), declared `#[cfg(test)] mod
 /// text_size_tests;` in `main.rs`; twelve again since 0.4.6 census-3
 /// (2026-09-25), which moved `attention.rs` and its `attention/tests.rs` out of
-/// `bt-app` into `bt-workbench`.
+/// `bt-app` into `bt-workbench`; fourteen with A5's two lane files; fifteen
+/// with `update_eligibility.rs` (0.4.6 ticket U-8), the build script's decision
+/// that `main.rs` declares `#[cfg(test)]` so its tests run.
 ///
 /// `scripts/dev/bt-app-graph.py` carries this set as a hand-written literal of
 /// five names, and §6.6 of the plan is about the seven it is missing — four of
@@ -161,7 +163,7 @@ fn expected_unreached() -> BTreeMap<String, Vec<String>> {
 /// MUTATION: take `#[cfg(test)]` off `mod tests;` in `main.rs` and the set loses
 /// `tests.rs`; put one on `mod quake;` and it gains `quake.rs`.
 #[test]
-fn the_wholly_test_files_of_bt_app_are_the_fourteen() {
+fn the_wholly_test_files_of_bt_app_are_the_fifteen() {
     let workspace = workspace();
     let package = workspace.package("bt-app").expect("bt-app");
     let universe = universes::crate_sources(package, Vendor::Excluded).expect("bt-app's own src");
@@ -188,8 +190,9 @@ fn the_wholly_test_files_of_bt_app_are_the_fourteen() {
             "tests.rs",
             "text_size_tests.rs",
             "uninstall_tests.rs",
+            "update_eligibility.rs",
         ],
-        "the fourteen of `docs/plans/bt-app-split-prep.md` §6.6"
+        "the fifteen of `docs/plans/bt-app-split-prep.md` §6.6"
     );
     println!("bt-app: {} files reached", enumeration.files().len());
     assert!(

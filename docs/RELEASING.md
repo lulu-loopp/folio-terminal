@@ -62,6 +62,21 @@ The shipped Windows executable is now built by `build-release.yml`; follow
 fetch, verify, sign and package it. The workstation does no compilation in the
 normal release path. The section below describes the separate rehearsal.
 
+**A release is built with `FOLIO_UPDATER=on`, and nothing else is** (0.4.6
+ticket U-8). `crates/bt-app/build.rs` compiles that variable into the binary as
+whether the copy may update itself; `on` is the only value it takes, unset or
+empty builds a copy that never will, and any other value stops the build. So it
+is set at the build invocation and cannot be added later by packaging or
+signing: `build-release.yml` sets it on a `v*` tag push, and on a dispatch only
+when given `-f updater=true` (a release dispatched by ref, or the updater-test
+candidate); the macOS release build below carries it on its `cargo build` line;
+`release.yml`, `ci.yml` and every candidate leave it unset. `smoke.ps1` reads the
+answer from the `diagnostics.log` header (`updater on` / `updater off`):
+`-ExpectSigned` requires `on`, a signed candidate is smoked with
+`-ExpectSigned -Updater off`, and CI's two smoke runs pass `-Updater off`. It is
+a capability the bytes carry, not proof of where they came from, and it is only
+half of the rule: a copy also has to be signed before it updates itself.
+
 `.github/workflows/release.yml` has a Windows job, `archive`, and two ways in.
 **Neither of them publishes anything**, and the job holds no permission that
 would let it. It builds, runs the licensing gates against the tree it is
@@ -970,7 +985,7 @@ unlocked window the length of a release instead of the length of a login.
 
 ```sh
 export RUSTUP_TOOLCHAIN=1.94.1-aarch64-apple-darwin     # docs/BUILDING.md says why
-cargo build --release -p bt-app
+FOLIO_UPDATER=on cargo build --release -p bt-app        # a release may update itself; see "The workflow"
 scripts/release/macos/bundle.sh --out target/macos
 scripts/release/macos/sign.sh   --app target/macos/Folio.app \
     --identity "Developer ID Application: … (TEAMID)" --no-spctl

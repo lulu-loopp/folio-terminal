@@ -33,6 +33,11 @@ attestation independent of the GitHub account and workflow being trusted.
    gh workflow run build-release.yml --ref <workflow-branch> -f ref=<full-commit-or-tag>
    ```
 
+   A tag push builds with `FOLIO_UPDATER=on`; a dispatch does only with
+   `-f updater=true`, which a release dispatched this way must pass
+   (RELEASING.md, "The workflow"). `smoke.ps1 -ExpectSigned` in step 3 refuses
+   a release build that says `updater off`.
+
 2. After it succeeds, on the owner's signing machine, use a checkout at that
    exact commit, with its release documents and packaging inputs unchanged:
 
@@ -93,7 +98,8 @@ existing loose `folio-nextNN.exe` candidate, copy the verified `folio.exe` under
 that name and use `sign.ps1 -Files <candidate> -OutDir <new-signed-directory>` as
 before. Keep the verified sidecars beside the candidate. Archive candidates use
 the normal package contents and can be copied to a `nextNN` distribution name
-after packaging; retain the original checksums and compute a checksum for any
+after packaging (a candidate is dispatched without `updater`, so a signed one is
+smoked with `-ExpectSigned -Updater off`); retain the original checksums and compute a checksum for any
 renamed distribution asset. No local compile is part of either candidate path.
 
 ## Coordinator proof (not run by the implementer)
