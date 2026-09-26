@@ -3438,6 +3438,20 @@ pub mod macos_identity;
 /// E-7). Windows is real; every other platform refuses by name.
 pub mod logon_hook;
 
+/// **The macOS entrance of an update transaction** — a LaunchAgent plist in a
+/// folder the caller names, written through `install_txn`'s durable write,
+/// read back, and only then the `install_txn::Armed` proof; removed again one
+/// by one or swept by name for `--uninstall-cleanup`; no `launchctl` call
+/// (0.4.6 ticket U-26; `docs/plans/design/self-update-2026-09-16.md`
+/// revision (b), F-3, §(b).3). Arming is refused by name off macOS.
+pub mod launch_agent;
+
+/// **The rescue clone of a macOS bundle** — `clonefile(2)`, or `ditto` where
+/// the file system cannot clone, verified with `codesign` against the old
+/// bundle's designated requirement and cdhash (0.4.6 ticket U-26; revision
+/// (b), F-3, F-8, E-11). Refused by name off macOS.
+pub mod macos_update;
+
 mod web_environment;
 mod webview;
 
