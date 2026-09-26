@@ -1788,6 +1788,17 @@ pub fn storage_dir() -> PathBuf {
         .clone()
 }
 
+/// **The data directory by [`storage_location`]'s rule, and nothing else** —
+/// no relocation, no creation: for a process that must not change the data
+/// directory, the rescue build's recovery door (`update_recover`, U-22), which
+/// only appends its one line to the `diagnostics.log` there.
+pub(crate) fn storage_dir_unmoved() -> PathBuf {
+    storage_location(bt_platform::host_platform(), |name: &str| {
+        std::env::var_os(name)
+    })
+    .directory
+}
+
 /// What [`relocate`] found, and did.
 ///
 /// No `PartialEq`: the failure arm carries the `io::Error` the user has to be

@@ -8,6 +8,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- An update that is cut off can now leave itself a way back in: one
+  `FolioUpdate-…` entry in the Windows startup list, written and checked
+  before anything moves, and removed by `--uninstall-cleanup`. Nothing
+  writes one yet.
 - The self-updater's recovery rules exist as tested code: what an interrupted
   update leaves on disk decides whether it is finished, rolled back or retried.
   Nothing calls them yet, and no build updates itself.

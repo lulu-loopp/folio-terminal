@@ -184,6 +184,11 @@ impl<K: Field, const N: usize> Fixed<K, N> {
     pub(crate) fn parse(text: &str) -> Result<Self, ParseRefusal> {
         parse_hex::<N>(K::NAME, text).map(Self::new)
     }
+
+    /// The bytes themselves.
+    pub(crate) const fn bytes(&self) -> &[u8; N] {
+        &self.bytes
+    }
 }
 
 impl<K, const N: usize> Clone for Fixed<K, N> {
@@ -879,7 +884,10 @@ impl Journal {
 // ─────────────────────────────────── transitions ───────────────────────────────────
 
 /// **Something that happened, which a writer records as the next phase.**
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Not `Clone`: [`Event::Armed`] carries the entrance's proof, which only the
+/// entrance door makes.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Event {
     /// O verified and staged the successor (§C.2's last step).
     Prepared,
@@ -892,8 +900,12 @@ pub(crate) enum Event {
     Discarded,
     /// The quit landed and O hands the transaction to its applier (F-6).
     HandedOff { applier: Nonce },
-    /// The entrance is written, flushed and read back (F-2).
-    Armed,
+    /// The entrance is written, flushed and read back (F-2). The proof is
+    /// `bt_platform::logon_hook::Armed`, which only `logon_hook::arm` makes, and
+    /// only after the read-back matched — so `Armed` cannot be recorded before
+    /// the entrance is on disk (U-22). It must name this journal's
+    /// transaction ([`Refusal::EntranceForAnotherTransaction`]).
+    Armed(bt_platform::logon_hook::Armed),
     /// The entrance could not be made durable, or its command is too long.
     EntranceFailed,
     /// The restart is put back to `Prepared`: admission refused (W3, W5), an
@@ -989,7 +1001,7 @@ impl Event {
             Event::LaunchedWithoutResume => EventKind::LaunchedWithoutResume,
             Event::Discarded => EventKind::Discarded,
             Event::HandedOff { .. } => EventKind::HandedOff,
-            Event::Armed => EventKind::Armed,
+            Event::Armed(_) => EventKind::Armed,
             Event::EntranceFailed => EventKind::EntranceFailed,
             Event::Reverted => EventKind::Reverted,
             Event::Admitted => EventKind::Admitted,
@@ -1013,6 +1025,8 @@ pub(crate) enum Refusal {
     ReceiptForAnotherTransaction,
     /// A receipt whose nonce is not this trial's.
     ReceiptForAnotherTrial,
+    /// An entrance's proof made for another transaction (U-22).
+    EntranceForAnotherTransaction,
     /// **A receipt that arrives once `RollbackIntent` is durable is ignored, by
     /// rule** (F-1, F-14): the rollback has been decided and a late health
     /// report does not overturn it.
@@ -1144,7 +1158,13 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
         (Phase::Prepared { .. }, Event::HandedOff { applier }) => {
             Ok(Phase::Handoff { applier: *applier })
         }
-        (Phase::Handoff { .. }, Event::Armed) => Ok(Phase::Armed),
+        (Phase::Handoff { .. }, Event::Armed(proof)) => {
+            if proof.transaction() == txn.bytes() {
+                Ok(Phase::Armed)
+            } else {
+                Err(Refusal::EntranceForAnotherTransaction)
+            }
+        }
         (Phase::Handoff { .. }, Event::EntranceFailed) => Ok(Phase::Abandoned),
         (Phase::Handoff { .. } | Phase::Armed | Phase::Moving, Event::Reverted) => {
             Ok(Phase::Prepared {
@@ -1875,6 +1895,37 @@ impl Home {
         }
     }
 
+    /// **The home of the rescue build whose executable is `exe`, and the
+    /// installed program it starts again**: `H\<txn>\rescue\<name>` gives `H`
+    /// and `<install>\<name>` — the entrance's command names only the rescue
+    /// program, and the journal's place follows from it (F-2). `None` when
+    /// `exe` does not sit in a `rescue` folder of an installation home, and on
+    /// every platform but Windows (the macOS rescue clone is U-26's).
+    pub(crate) fn of_rescue(platform: HostPlatform, exe: &Path) -> Option<(Self, PathBuf)> {
+        if platform != HostPlatform::Windows {
+            return None;
+        }
+        let rescue = exe.parent()?;
+        let root = rescue.parent()?.parent()?;
+        if rescue.file_name()? != "rescue" || root.file_name()? != WINDOWS_HOME {
+            return None;
+        }
+        let installed = root.parent()?.join(exe.file_name()?);
+        Some((
+            Self {
+                root: root.to_path_buf(),
+                rescue: RescueShape::Executable,
+            },
+            installed,
+        ))
+    }
+
+    /// `H` itself: the folder the uninstall row compares an entrance's
+    /// program with (U-22).
+    pub(crate) fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// A Windows-shaped home at `root` itself, for a test that builds one in a
     /// temporary folder.
     #[cfg(test)]
@@ -2089,6 +2140,51 @@ mod tests {
 
     fn txn() -> TxnId {
         TxnId::new([0x7a; 16])
+    }
+
+    /// **A registry in memory**, for the entrance's proof: the proof is made
+    /// only by `logon_hook::arm_in`, after a write, a flush and a read-back,
+    /// and these tests make it that way too.
+    #[derive(Default)]
+    struct MemoryRegistry(BTreeMap<String, (u32, Vec<u8>)>);
+
+    impl bt_platform::logon_hook::Registry for MemoryRegistry {
+        fn set(&mut self, _: &str, name: &str, kind: u32, data: &[u8]) -> std::io::Result<()> {
+            self.0.insert(name.to_owned(), (kind, data.to_vec()));
+            Ok(())
+        }
+
+        fn flush(&mut self, _: &str) -> std::io::Result<()> {
+            Ok(())
+        }
+
+        fn get(&mut self, _: &str, name: &str) -> std::io::Result<Option<(u32, Vec<u8>)>> {
+            Ok(self.0.get(name).cloned())
+        }
+
+        fn delete(&mut self, _: &str, name: &str) -> std::io::Result<bool> {
+            Ok(self.0.remove(name).is_some())
+        }
+
+        fn names(&mut self, _: &str) -> std::io::Result<Vec<String>> {
+            Ok(self.0.keys().cloned().collect())
+        }
+    }
+
+    /// The entrance's proof for `txn`, made through the door.
+    fn armed_for(txn: TxnId) -> bt_platform::logon_hook::Armed {
+        bt_platform::logon_hook::arm_in(
+            &mut MemoryRegistry::default(),
+            "test",
+            txn.bytes(),
+            Path::new(r"C:\Folio\.folio-update\7a7a\rescue\folio.exe"),
+        )
+        .expect("the in-memory entrance reads back")
+    }
+
+    /// The entrance's proof for this module's transaction.
+    fn armed() -> Event {
+        Event::Armed(armed_for(txn()))
     }
 
     const TRIAL: TrialProcess = TrialProcess {
@@ -2396,7 +2492,7 @@ mod tests {
             Event::HandedOff {
                 applier: nonce(0x44),
             },
-            Event::Armed,
+            armed(),
             Event::EntranceFailed,
             Event::Reverted,
             Event::Admitted,
@@ -3075,7 +3171,7 @@ mod tests {
         assert_eq!(decide(&holder(&journal, prepared_located())), Action::Apply);
         assert_eq!(Asker::LockHolder.actor(PhaseKind::Handoff), Actor::Applier);
         assert_eq!(
-            journal.advance(&Event::Armed).map(|j| j.body.phase),
+            journal.advance(&armed()).map(|j| j.body.phase),
             Ok(Phase::Armed)
         );
         assert_eq!(
@@ -3083,6 +3179,42 @@ mod tests {
             Ok(Phase::Prepared {
                 deferred_launches: 0
             })
+        );
+    }
+
+    /// RED (U-22) — **`Armed` is recorded only with the entrance's proof, and
+    /// only the proof of this journal's own transaction.**
+    ///
+    /// F-2: the entrance is written, flushed and read back **before** the
+    /// journal records `Armed`. [`Event::Armed`] carries
+    /// `bt_platform::logon_hook::Armed`, which only `logon_hook::arm` makes
+    /// after its read-back; a proof made for another transaction is refused,
+    /// so an entrance another transaction left cannot stand in for this one's.
+    ///
+    /// MUTATION: in `next`, answer `Ok(Phase::Armed)` for any proof.
+    #[test]
+    fn armed_is_recorded_only_with_the_entrance_of_its_own_transaction() {
+        let journal = journal(
+            Phase::Handoff {
+                applier: nonce(0x44),
+            },
+            members_layout(),
+        );
+        assert_eq!(
+            journal.advance(&armed()).map(|j| j.body.phase),
+            Ok(Phase::Armed)
+        );
+        let another = Event::Armed(armed_for(TxnId::new([0x11; 16])));
+        assert_eq!(
+            journal.advance(&another).map(|j| j.body.phase),
+            Err(Refusal::EntranceForAnotherTransaction)
+        );
+        assert_eq!(
+            journal
+                .advance(&Event::EntranceFailed)
+                .map(|j| j.body.phase),
+            Ok(Phase::Abandoned),
+            "an entrance that could not be made abandons the transaction"
         );
     }
 
