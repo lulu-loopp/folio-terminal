@@ -189,6 +189,10 @@ pub(crate) struct Request {
 
 /// **What the job is still waiting for** before it may decide anything.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "the names the ticket gives the pending state (U-18: `Pending::AwaitingClassification` / `AwaitingCheck`)"
+)]
 pub(crate) enum Pending {
     /// Neither the channel nor the check has arrived.
     AwaitingBoth,
