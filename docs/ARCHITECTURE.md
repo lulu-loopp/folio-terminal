@@ -335,6 +335,15 @@ The three hub fields — `tabs`, `active_tab`, `window` — are the document mod
 No boundary that leaves them on the far side of an interface will hold, and no
 interface that hands a subsystem `&mut tabs` is a boundary.
 
+### 4.4 Facts born with one owner (0.4.6)
+
+A fact a ticket creates is written here with its owner, so the census of §4.2
+does not have to find it later.
+
+| fact | owner | who writes it | class (§4.2) | status |
+|---|---|---|---|---|
+| **the installation's transaction** — the update journal `H\journal.json`, its frozen header `{v, txn, rescue, class}`, the trial's receipt, and the member inventories | `bt-app::update_txn` (pure: `Header`, `Phase` and `next`, `JOURNAL_WRITERS` and `EFFECT_RIGHTS`, `decide`, `at_start`, `Receipt`, `Inventories`) | O (the running build and its in-app job) writes `Allocated`, `Prepared`, `Handoff` and O's `Abandoned`; only the transaction-lock holder (the rescue copy of O, as applier or recovery) writes every later phase, and `Committed` only on N's receipt while the journal says `Trial`; N writes only its receipt (`docs/plans/design/self-update-2026-09-16.md` revision (b), §(b).2) | durability and external transactions | 0.4.6 U-10: protocol only, no product caller; the journal, lock and entrance effects arrive behind their own doors in U-11, U-22 and U-26 |
+
 ---
 
 ## 5. Execution lanes
