@@ -2646,7 +2646,8 @@ fn check_pinned(
     }
     if let Some(missing) = pin.edges.get(next) {
         failures.push(format!(
-            "row {rows}: `{}` no longer calls its listed edge `{}`, in the listed order ({} of its              {} edges taken)",
+            "row {rows}: `{}` no longer calls its listed edge `{}`, in the listed order ({} of \
+             its {} edges taken)",
             pin.body,
             missing.join(" | "),
             next,
