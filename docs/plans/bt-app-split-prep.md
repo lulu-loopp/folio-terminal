@@ -161,7 +161,13 @@ conditions — 22 declarations, each confirmed:
 
 A sweep of every other conditional found no twelfth. **None is a method in the
 two moving blocks**, so 2a touches none of them; they constrain the mechanism,
-not the move. Identity is the tuple
+not the move.
+
+**Ten since 2026-09-26** (0.4.6 ticket 72): `explorer_menu::read_state` is one
+declaration on every platform — its Windows arm reads only what
+`bt_platform::msix` offers everywhere, and `supported()` answers off Windows
+first — so its row above is history, and `bt-source`'s pin is
+`the_identities_bt_app_declares_twice_are_the_ten`. Identity is the tuple
 
 ```
 module path  ·  type owner (None for a free function)  ·  trait (None for an inherent impl)  ·  conditional variant

@@ -117,6 +117,9 @@ pub(crate) struct Version {
     patch: u32,
 }
 
+/// Read only by the Windows probe ([`run_probe`]) and by this file's tests: off Windows the probe
+/// answers `None` without asking a program, so there is no sentence to read a version out of.
+#[cfg(any(windows, test))]
 impl Version {
     /// **The first three-part number in whatever the program said.**
     ///

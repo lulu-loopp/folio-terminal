@@ -419,6 +419,9 @@ pub fn install_probe_override() {
 /// it may take seconds, and on the machines this is aimed at it is where the
 /// user's own PSReadLine configuration lives. `-NonInteractive` so nothing can
 /// stop for a prompt on a thread with no console.
+///
+/// Windows only, like its one reader: off Windows [`run_probe`] asks no PowerShell.
+#[cfg(windows)]
 const PROBE_COMMAND: &str = "\
 $m = Get-Module -ListAvailable PSReadLine | Sort-Object Version -Descending | Select-Object -First 1; \
 if ($m) { $m.Version.ToString() } else { '' }; \
@@ -463,6 +466,9 @@ fn run_probe() -> Probe {
 /// Split out so the parsing is testable without a PowerShell: the failure this
 /// guards is a build that reads the policy off the version line, which on a
 /// machine with no PSReadLine would report the policy as the version.
+///
+/// Read by the Windows [`run_probe`] and by the tests; off Windows there is no output to read.
+#[cfg(any(windows, test))]
 #[must_use]
 pub fn parse_probe_output(stdout: &str) -> Probe {
     let mut lines = stdout

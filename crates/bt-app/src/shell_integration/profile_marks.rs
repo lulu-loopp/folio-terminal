@@ -710,11 +710,6 @@ fn plan_recorded(
         .collect()
 }
 
-#[cfg(test)]
-pub fn apply(paths: &[PathBuf], forms: &Forms, action: Action) -> Report {
-    apply_recorded(paths, forms, action, |_| Ok(()))
-}
-
 pub fn apply_recorded(
     paths: &[PathBuf],
     forms: &Forms,

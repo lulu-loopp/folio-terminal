@@ -70023,7 +70023,10 @@ fn install_panic_log_hook() {
         if !announce_panic(path) {
             return;
         }
-        bt_platform::hide_every_window_of_this_process();
+        // The count is for a test of the hide itself; nothing here reads it,
+        // because the next two statements end the process whether one window
+        // was hidden or none.
+        let _ = bt_platform::hide_every_window_of_this_process();
         eprintln!(
             "{}",
             diagnostics::run_footer(

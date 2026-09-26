@@ -11480,6 +11480,7 @@ mod windows_impl {
     /// is one that has just stopped answering. A hide that could block is worse
     /// than a hide that might not land, because the caller's next statement is
     /// the one that ends the process.
+    #[must_use]
     pub fn hide_every_window_of_this_process() -> usize {
         use windows::Win32::Foundation::{HWND, LPARAM};
         use windows::Win32::System::Threading::GetCurrentThreadId;

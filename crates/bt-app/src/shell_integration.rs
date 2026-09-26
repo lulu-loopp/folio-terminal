@@ -1129,6 +1129,9 @@ pub fn is_powershell(program: &Path) -> bool {
 /// may take seconds, and running the reader's startup file in order to find out
 /// where their startup file is would be absurd. `-NonInteractive` so nothing can
 /// stop for a prompt on a thread with no console.
+///
+/// Windows only, like its one reader: off Windows [`run_profile_probe`] asks no PowerShell.
+#[cfg(windows)]
 const PROFILE_COMMAND: &str = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $PROFILE.CurrentUserCurrentHost";
 
 /// **The path is asked of the shell and never composed**, and the machine this
@@ -1352,6 +1355,10 @@ fn run_profile_probe(_program: &Path) -> Option<PathBuf> {
 /// **verbatim**: whatever the shell said is the path, whichever drive it is on
 /// and whichever folder — there is no shape this function is entitled to expect,
 /// because the answer is exactly the thing this build must not think it knows.
+///
+/// Read by the Windows [`run_profile_probe`] and by the tests; off Windows there is no answer
+/// to read.
+#[cfg(any(windows, test))]
 #[must_use]
 pub fn parse_profile_answer(stdout: &str) -> Option<PathBuf> {
     stdout
@@ -1947,6 +1954,18 @@ mod tests {
         assert!(refuse_profile_path_with(&file, |_| Ok(ProfileAccess::Missing)).is_ok());
     }
 
+    /// [`profile_marks::apply_recorded`] with no owned-edit record, which is what the two
+    /// Windows-only profile tests below (a file locked by a share mode, a symlinked profile) hand
+    /// their files to. Gated like its only readers.
+    #[cfg(windows)]
+    fn apply_unrecorded(
+        paths: &[PathBuf],
+        forms: &profile_marks::Forms,
+        action: profile_marks::Action,
+    ) -> profile_marks::Report {
+        profile_marks::apply_recorded(paths, forms, action, |_| Ok(()))
+    }
+
     #[cfg(windows)]
     #[test]
     fn shell_integration_locked_profile_is_byte_identical_and_other_file_is_removed() {
@@ -1962,7 +1981,7 @@ mod tests {
             .share_mode(0)
             .open(&locked)
             .unwrap();
-        let report = profile_marks::apply(
+        let report = apply_unrecorded(
             &[locked.clone(), other.clone()],
             &profile_marks::Forms::new(&[]),
             profile_marks::Action::Remove,
@@ -1984,7 +2003,7 @@ mod tests {
         std::fs::write(&target, LINE).unwrap();
         std::os::windows::fs::symlink_file(&target, &link)
             .expect("developer mode permits sandbox symlinks");
-        let report = profile_marks::apply(
+        let report = apply_unrecorded(
             std::slice::from_ref(&link),
             &profile_marks::Forms::new(&[]),
             profile_marks::Action::Remove,

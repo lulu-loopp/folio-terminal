@@ -618,8 +618,12 @@ pub(crate) fn hand_over(
         // **`server` and never a number out of the reply** (review C-7): it is the pid the kernel
         // named for the far end of this pipe, which is the one spelling of "who am I talking to"
         // that the thing being talked to cannot write.
+        //
+        // **The grant's answer is not read**, by the door's own rule: a refused grant is never
+        // reported to a reader (nothing a person can do about a foreground lock), and the far end
+        // activates itself whether or not it was granted — at worst its window opens behind.
         if answer == Some(Reply::Taken) {
-            bt_platform::hotkey::allow_foreground_for(server);
+            let _ = bt_platform::hotkey::allow_foreground_for(server);
         }
     })
     .ok()?;
