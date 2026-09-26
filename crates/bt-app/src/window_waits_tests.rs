@@ -2368,7 +2368,7 @@ const PINNED: [Pinned; 40] = [
         body: METER,
         edges: &[],
         effects: &[],
-        leaves: &[],
+        leaves: &["get"],
     },
     Pinned {
         body: FRESH,

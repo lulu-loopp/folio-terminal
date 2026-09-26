@@ -2680,3 +2680,24 @@ can be read against it:
 (a) None. (b) None. (c) This commit adds nothing to the ledger; A1e's docs
 commit opens D-78…D-82 for (e)3's rows without one and for (g)2, and notes D-40
 as `DirWatch`'s. (c′) None. (d) No.
+
+---
+
+## Revision 2026-09-27 (h), the leaf list after U-16 and U-22
+
+**Checked**, on `cae97e8a` (A1e merged over U-16 `macos_identity` and U-22
+`logon_hook`/`update_recover`). U-22 added a first-party trait method named `get`
+(`logon_hook::os::<CurrentUser as Registry>::get`, both arms). `admission::meter`'s
+body reads the installed meter with `METER.get()`, a `OnceLock::get` at a receiver
+whose type the source does not write (a static), so by (g)3's rule the guard could
+no longer tell it from the new method, and the `trace_sink::Shutdown` row went red.
+Nothing waits there and no edge changed.
+
+**The change to (g)1's table:** `admission::meter` lists `get` as a leaf, as
+`trace_sink::flush` already does for its own `SINK.get()`. No other row moved: U-16
+and U-22 added no `Drop` that waits, no `msg_send!`, `extern` block, `#[link]` or
+`vtable(` outside the owner table, no role or phase writer call and no callback
+entry, all of which the guard re-read on `cae97e8a`.
+
+(a)–(d): none.
+
