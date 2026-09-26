@@ -668,8 +668,10 @@ pub fn reveal_argument_form(path: &Path, is_directory: bool) -> Option<OsString>
 /// Explorer, and every other shell consumer, reads the ordinary spellings. The
 /// verbatim ones are refused as *input* ([`asks_windows_not_to_normalise`]);
 /// this is the other direction, taking one off a string the operating system
-/// itself produced.
-fn strip_verbatim_prefix(path: &Path) -> PathBuf {
+/// itself produced. Public because `--uninstall-cleanup` prints the purge roots
+/// it resolved, and a reader reads the ordinary spelling there too.
+#[must_use]
+pub fn strip_verbatim_prefix(path: &Path) -> PathBuf {
     let text = path.as_os_str().to_string_lossy();
     if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
         return PathBuf::from(format!(r"\\{rest}"));
