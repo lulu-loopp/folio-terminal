@@ -131,6 +131,7 @@ mod preview_watch;
 mod preview_wrap;
 mod profiles;
 mod psreadline;
+mod pty_door;
 mod quake;
 mod quit;
 mod recent_folders;
@@ -20577,8 +20578,15 @@ fn commit_leaf_resize(
     let rows = nonzero_u32(next_grid.rows.get());
     let reconciled = if told_the_child {
         if let Some(pty) = pty {
-            pty.resize(pty_size(next_grid, physical))
-                .context("commit a coalesced final ConPTY resize")?;
+            // **One leaf's resize is one admitted owner-thread door** (`doors::PtyResize`, row
+            // 12), at the statement that made the call: after the reflow, before the reconcile.
+            // A refusal is the error a failed resize takes.
+            bt_platform::admission::admitted::<doors::PtyResize, _>(|token| {
+                pty_door::resize(token, pty, pty_size(next_grid, physical))
+                    .map_err(anyhow::Error::from)
+            })
+            .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
+            .context("commit a coalesced final ConPTY resize")?;
         }
         replace_psreadline_resize_reanchor_debt(reanchor, prompt_the_shell_opened);
         session.mark_pty_resize_requested_at(columns, rows, observed_at)
@@ -37856,15 +37864,23 @@ fn create_leaf_session(
             ));
         }
         resolved_program = Some(PathBuf::from(&program));
+        // **The shell's birth is an owner-thread door** (`doors::PtyBirth`, row 11): the one
+        // `spawn_shell_in`, admitted here and nowhere else. A refusal is this branch's own spawn
+        // failure.
         Some(
-            PtySession::spawn_shell_in(
-                program,
-                &command.arguments,
-                &command.environment,
-                pty_size(grid, PhysicalSize::new(body.width, body.height)),
-                wake.output(),
-                place.working_directory,
-            )
+            bt_platform::admission::admitted::<doors::PtyBirth, _>(|token| {
+                pty_door::spawn_shell(
+                    token,
+                    program.into(),
+                    &command.arguments,
+                    &command.environment,
+                    pty_size(grid, PhysicalSize::new(body.width, body.height)),
+                    wake.output(),
+                    place.working_directory,
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
             .with_context(|| {
                 format!(
                     "spawn the {} profile in ConPTY",
@@ -62039,11 +62055,21 @@ impl FolioApp {
                     // outliving the window that owned it. Bounded like every
                     // other wait on this path: what is still going past it goes
                     // when the job objects close with the process.
-                    let still_going = bt_pty::wait_for_retirements(PANE_RETIREMENT_DEADLINE);
-                    if still_going > 0 {
-                        eprintln!(
+                    //
+                    // An owner-thread door (`doors::PaneRetirementWait`, row 15), admitted only
+                    // on the way out. A refusal did not wait: the count is unknown, said so, and
+                    // the quit goes on as it does when the budget runs out.
+                    match bt_platform::admission::admitted::<doors::PaneRetirementWait, _>(
+                        |token| pty_door::wait_for_retirements(token, PANE_RETIREMENT_DEADLINE),
+                    ) {
+                        Ok(0) => {}
+                        Ok(still_going) => eprintln!(
                             "{APP_NAME} quit with {still_going} pane(s) still being taken apart"
-                        );
+                        ),
+                        Err(refused) => eprintln!(
+                            "{APP_NAME} quit without knowing how many panes are still being taken \
+                             apart: {refused}"
+                        ),
                     }
                     let now = Instant::now();
                     // **The spare retires with the windows, under the run's one bound** (ticket 60).
