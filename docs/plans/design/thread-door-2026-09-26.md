@@ -2939,3 +2939,273 @@ debt row. (c′) none. (d) yes — the two amendments to B§C-2 (three admitted
 exclusion spellings; two lint tables) and the one to B§C-4 (no `CLIPPY_CONF_DIR`;
 one root file plus two checks), each stated here and pointed to from the budget
 note in A2a's docs commit.
+
+---
+
+## Revision 2026-09-26 (j), after the Codex review of (i)
+
+Review: `trace/tickets-046/thread-door-review-codex-2026-09-26-i.md` (adopt
+with changes; nine findings, P1–P8 high or medium, P9 low; every practical claim
+of (i) tested on clippy 0.1.94 / Rust 1.94.1 in a scratch workspace). All nine
+are adopted. The family split and the lint-last order stand; what changes is
+that **A2a now lands the inventory and the schema the other four need, and
+A2b–A2e are briefed only after A2a's inventory is on main** and every effect in
+it has a disposition (revision (k), the allocation table). (i)'s counts are
+kept as the Windows diagnostic survey they were and are not the baseline.
+
+### (j)1 · P1 — the bare-site gate is shrink-only against the merge base, with multiplicity
+
+(i)2 item 1 compared the observed set with the committed file two ways; that
+accepts a new site landed together with its new row, and it cannot see two
+identical effects in one function. The gate now holds three things:
+
+1. **Row identity with multiplicity.** A row is `(crate, cfg arm, item
+   identity, vocabulary entry, count)`, where the item identity is
+   `bt_source`'s (module path and name, the arm from the enclosing `cfg`), and
+   `count` is the number of sites of that entry in that item. The file is
+   `docs/plans/window-thread-bare-sites.tsv`.
+2. **Two comparisons, both required.** `observed == committed` as multisets;
+   and `committed ⊆ merge-base committed` as multisets — the historical half
+   `scripts/ci/check-migration-debt.ps1` already performs for MIGRATION-DEBT
+   (whole rows, against the PR merge base, added rows refused). The seeding
+   commit is the one exception, named by sha in the script; there is no
+   "missing base → pass" road after it.
+3. **A move is a removal.** A function that carries a bare site and changes
+   its item identity is one deletion and one addition, and the addition is
+   refused; a ticket that must relocate such a function first routes the site
+   through a door. Rows whose effects neither merged side removed stay legal
+   across a merge; a row whose effect either side removed is stale and red.
+
+At A2e the gate proves the observed multiset empty **and then** the file is
+deleted; from then on the check requires the file to be absent and the multiset
+empty. A missing file never disables the check. Plants: a new site with its
+matching new row; a second identical effect in a listed function with the count
+left unchanged; a deleted site with its row retained — each red for its named
+reason.
+
+### (j)2 · P2 — the excluded roots are Cargo targets, not file names
+
+(i)5 item 1's conditional form does not activate in an ordinary example (measured:
+`--all-targets` fails on an example's sleep with the root `cfg_attr(test, …)` in
+place; the survey already lists example sites in `container-probe.rs`,
+`gif-fixture.rs`, `video-probe.rs`), and development binaries had no form at all.
+
+- **The universe of roots comes from `cargo metadata`'s `targets`** (kind,
+  `src_path`, `harness`), per product package. `lib` and product `bin` targets
+  are product roots; `test`, `example`, `bench` and `custom-build` targets are
+  excluded roots (B§C-3); a `bin` target of a product crate that is not the
+  product (`folio` is the only product binary today) is listed by name in the
+  script as excluded, or it is product — no third state.
+- **Two forms, by root kind.** Product roots: `#![cfg_attr(test,
+  allow(clippy::disallowed_methods))]` (inline `#[cfg(test)] mod` bodies are
+  covered by inheritance — measured). Excluded roots, at their `src_path` only:
+  `#![allow(clippy::disallowed_methods)]` unconditionally (covers examples,
+  custom-harness tests and benches, build scripts alike). Each form once per
+  file, in the leading inner-attribute block; the guard matches the text and
+  the position, and the script matches the file set against the target list.
+- **Mounting is refused.** An excluded root's source file `include!`d or
+  `#[path]`-mounted into a product target is inside the product universe (the
+  guard follows modules from product roots), so its `#![allow]` is red there.
+  Nested test support files under `tests/` that are not roots carry nothing.
+- Controls: an ordinary example and a development binary with a bare sleep are
+  green; the mounting mutation is red; the guard's placement rule is proven
+  by a plant that still parses (the attribute after a `use`), not by a parse
+  error.
+
+### (j)3 · P3 — the configuration fence is a closed list of paths and contents, both basenames
+
+Clippy reads `clippy.toml` **and** `.clippy.toml`, nearest first (measured: a
+product package's `.clippy.toml` with an empty vocabulary passed a bare sleep);
+and the root `clippy.toml` already exists with three test settings, so "root
+plus three shields" is four files.
+
+- **The closed list**, with pinned contents: the root `clippy.toml` (today's
+  settings; A2e appends the vocabulary), `vendor/clippy.toml`,
+  `crates/bt-corpus/clippy.toml`, `crates/bt-source/clippy.toml`, the three
+  shields each exactly `disallowed-methods = []` under a comment naming this
+  revision. The script hashes each and refuses a difference.
+- **Any other `clippy.toml` or `.clippy.toml`** under the tree (`target/`
+  excluded) is red — the hidden-basename plant in a product crate is the test.
+- **`CLIPPY_CONF_DIR` is asserted unset** by a step in `logic` and
+  `core-macos` and refused by the script in workflows, `.cargo/config.toml` and
+  `scripts/**`.
+- A2a's wording is "no root **vocabulary** before A2e", not "no root file".
+
+### (j)4 · P4 — one root file, and resolution proven per entry per target by a positive control
+
+(i)6 item 1's two checks are not enough: a present crate's off-target function
+also prints the reachable-function warning (measured: a dependency loaded on
+Windows whose function is `cfg(macos)`), so a blanket scan would reject a
+legitimate off-target entry; and `cargo metadata` has no `std` package and
+names `portable-pty`, not `portable_pty`, so the first-segment check fails the
+existing vocabulary before any typo. The metadata check is withdrawn.
+
+- **One root file** carrying every target's entries stays (no `CLIPPY_CONF_DIR`
+  — it would defeat the shields).
+- **The warning scan is target-aware**: each job parses clippy's
+  reachable-function warnings; a warning on an entry the registry assigns to
+  the job's target is fatal; a warning on an entry not assigned to it is
+  expected; nothing else is exempt.
+- **The positive control** (B§C-4's, kept): a development-only crate
+  `crates/bt-lint-probe` (an excluded target, shielded by the (j)2 form on its
+  root, outside the product universe) whose one file calls **every vocabulary
+  entry assigned to the current target**, generated from the registry by the
+  same PowerShell copier pattern (reads the registry, never `.rs`), each call
+  under the entry's `cfg`; the job requires clippy to report the lint on each
+  call, by entry. A misspelled path or a wrong target assignment fails to
+  compile or fails to fire — red either way, in an actual linted unit with the
+  target's dependencies. Every assigned target has a job that runs the probe.
+- Plants: the absent crate; the misspelled function in a loaded crate; the
+  present-crate/off-target function assigned to the wrong target; a correct
+  off-target entry (green).
+
+### (j)5 · P5, P9 — every effect gets a disposition, in revision (k), from A2a's inventory
+
+(i) allocated the census by its coarse families and left the 29
+"door-entrance" rows, the four `wgpu::Queue::submit` sites, `ShellExecuteW`
+in `handoff.rs` and bt-pty's twelve writes unassigned; and its arithmetic was
+off by one (58 writes, not 57; 228 includes six build-script sites and sites
+already inside door bodies).
+
+- **A2a's inventory is the baseline**: cfg-blind (both arms), the vocabulary
+  corrected, product-only by (j)2's target universe. Its total is its own
+  measurement; 228 and 171 describe the Windows diagnostic survey on `fcda5dfa`
+  and nothing else.
+- **Revision (k)** — written by the coordinator from that inventory and
+  reviewed before any of A2b–A2e is briefed — gives every row one of five
+  dispositions: (1) inside an effect function that will carry the `expect`
+  (the `# effects` section of (j)7); (2) routed through a door A2b/A2c/A2d
+  creates; (3) excluded by (j)2; (4) a typed-entrance call site, handled by
+  (j)5's next bullet; (5) a retained destructor road ((j)6). No sixth.
+- **Typed entrances leave the vocabulary when their signature is the door.**
+  A cross-crate entrance that takes a `WaitToken` or `&WorkerCtx` (after A1b
+  and A1d) cannot be called without a capability, so listing it in the
+  vocabulary only makes its admission sites red; A2a removes each such entry
+  from `# vocabulary` under a **checked removal**: the guard asserts that every
+  entrance removed takes a capability parameter (the synchronous-door scan
+  already reads these signatures). An entrance that does not yet take one
+  stays listed and its call sites are bare rows to allocate.
+- **Effect functions are lexical.** The `expect` goes on the function whose
+  body contains the raw effect — bt-render's presentation helpers for
+  `Queue::submit`/`Queue::present`, `handoff.rs`'s function around
+  `ShellExecuteW`, bt-pty's `PtyDump::create_at`, `write_chunk`,
+  `write_input_at`, `finish`, `write_resize` and the publisher — never on a
+  caller or a wrapper, and a forwarding call never shares its callee's
+  suppression. bt-pty's writes are transport effects like its waits: A2d owns
+  every bt-pty row, with no bt-platform edge (§7 departure 1 stands).
+
+### (j)6 · P6 — waits are classified by their executing caller; interim doors carry an effect-level table; no new deadlines
+
+- "68 worker waits" was wrong: the 68 include bt-pty's ten (transport),
+  `gpu_door::open_first_window`, `SessionWriter::wait_for`/`close`,
+  `trace_sink::flush_sink` (four raw effects in a helper that holds neither
+  context nor token — the owner token is consumed by `flush`), device recovery,
+  the clipboard retry's sleep in `bt-platform/src/lib.rs`, and the pinned
+  destructor chains. (k) classifies each wait by the thread that executes it —
+  owner, worker, transport, or a retained destructor road — not by proximity
+  to a spawn.
+- **Retained destructor roads stay as they are.** The thirteen pinned `Drop`
+  rows keep their raw effects in the functions A1e pins; A2e puts the `expect`
+  on those lexical effect functions as rows of kind `drop-exception` in
+  `# effects`, and no helper is introduced inside a pinned chain (its edges and
+  counts are the debt's evidence, and moving them would launder it).
+- **Names say what they do, and today's semantics are kept.** `wait::recv`,
+  `wait::join`, `wait::sleep`, `wait::recv_timeout`, `wait::condvar_wait`,
+  `wait::block_on` on `&WorkerCtx`: an unbounded receive stays unbounded; a
+  deadline is introduced by no A2 ticket (that is a behaviour decision with
+  its own ticket). (i)'s `_bounded` suffixes are withdrawn.
+- **Each interim owner door has a row in the effect-level table** of (k):
+  the exact function boundary, role, capability (token or context), phases,
+  admission site, refusal behaviour, effect count, witness test, the owing
+  B-ticket and version, the discovery date and the execution context as found.
+  `open` is never rendered "ruled to stay"; deleting an interim door later
+  leaves any residue registered.
+- **Ownership is single.** Row 8 (`DirWatch::start_scoped` ×3) is A2c's.
+  `profile_marks` and `psreadline` (rows 2–4: observation, writes and waits
+  together) are A2c's wholly. bt-pty is A2d's wholly. The registry, the
+  admission types and the guard are shared surfaces: A2b lands first among
+  the three where they must change shape, and A2c/A2d rebase on it — (k) says
+  which, per item, after the allocation, and re-sizes the three.
+- **History corrected.** A1d converted the owner doors of B§R-A in place and
+  deferred rows 2, 3, 4, 7, 8, 10 and 20 ((c)3, (e)2). A2 now wraps those
+  deferred rows using A1d's pattern; (i)3's "the shape A1d gave rows 2–20" is
+  withdrawn.
+
+### (j)7 · P7 — the `# effects` section, and the `expect` equation
+
+The registry's `# doors` section holds 24 logical admission identities (not 26;
+(i)6 item 4 is withdrawn), some spanning several bodies (`CompositorBirth`:
+`Compositor::new` and `spare_parent`; platform arms), and some owner doors hold
+no listed effect at all (`owner_door.rs`'s five call winit methods outside the
+vocabulary; `trace_sink::flush` forwards to `flush_sink`). An `expect` on a
+function with no effect is itself red (`unfulfilled_lint_expectations`,
+measured), and an `expect` never reaches a separately defined callee.
+
+- **A2a adds `# effects`** to `window_waits.tsv`: one line per **effect
+  function**, keyed by item identity and cfg arm, with its vocabulary entries
+  and multiplicities, its kind (`owner-door-body`, `worker-door-body`,
+  `transport`, `drop-exception`, `interim-owner`), its authority (`WaitToken`,
+  `WorkerCtx`, `none (transport)`, `drop`), and the admission identity it
+  serves if any. Admission identities (`# doors`) and FFI construct owners
+  (`# owners`) stay distinct sections; neither is a list of `expect` holders,
+  and no `# owners` module is exempt from the bare-site gate — the gate reads
+  by function.
+- **The equation.** The expected `expect` holders are exactly the `# effects`
+  rows whose entries the current configuration compiles; zero-effect wrappers
+  carry none. The guard checks each holder's identity, reason text (the
+  effect-function id), placement (the function item) and effect count against
+  its row; a moved `expect` with the total unchanged is red; a second listed
+  effect under an unchanged row is red (B§C-2 item 3).
+- **A2e re-runs M7a–M7d against a positive baseline**, and adds the
+  worker/transport synchronous-door mutations.
+- A1e's aggregate count assertion (0 today) becomes this per-row check in
+  A2e; until then A2a keeps it at 0.
+
+### (j)8 · P8 — `file_reads` option (d), at execution level
+
+Adopted as (i)3 said, with the contract the review asked for:
+
+- **Worker readers borrow the executing worker's context**: `Reader<'w>` holds
+  `&'w WorkerCtx`, is `!Send`, and cannot be transferred or outlive the body;
+  `open`/`new`/`read`/`read_to_end`/`seek`/`metadata`/`opaque` are all covered
+  by that borrow (the lazy effects of `Read::read` and friends run under the
+  same context that opened). This is the one, stated streaming exception to
+  B§C-5's synchronous-door rule, and it is narrow: the capability is held for
+  the reader's whole life, not checked at construction.
+- **Owner observation doors complete inside the admission and return owned
+  data**: `observe` returns `Metadata` or an owned `Vec` of entries, never a
+  `ReadDir` or a tokenless reader; `read_dir`'s lazy iteration happens inside
+  the door.
+- **Contexts are inventoried by executing thread**, not by `Lane`: (k) lists
+  every lane × thread pair that reads today, including the Attention standalone
+  roads and any decoder or reader that moved to a spawned thread.
+
+### (j)9 · What each landing truthfully claims, and the order
+
+- **A2a** leaves: the frozen, exact bare-site inventory (with its own total),
+  the `# effects` schema (empty rows are allowed only where (k) will fill
+  them — the section exists with its header and the guard reads it), the
+  corrected vocabulary with the checked removals of typed entrances, the
+  configuration fence, the target-aware warning scan and the lint probe crate
+  with its jobs, the non-Rust checks (M7e, M9, `CLIPPY_CONF_DIR`), and the
+  (j)2 exclusion forms with their guard — **not** the C-1 invariant, which
+  ARCHITECTURE §6 keeps stating as pending with the count.
+- **Revision (k)** (coordinator; reviewed): the allocation table over A2a's
+  inventory, the effect-level table for every interim door, B10's brief, the
+  per-item ownership among A2b/A2c/A2d and their re-sized briefs, the
+  `file_reads` context inventory.
+- **A2b, A2c, A2d** establish the listed authority and effect boundaries and
+  remove exactly the rows (k) assigned to them; they keep A1e's `Drop` and FFI
+  checks untouched.
+- **A2e** establishes C-1 on both product jobs only after: the observed
+  multiset is empty, the configuration fence and the probe pass on both
+  targets, and every `# effects` row's `expect` is checked by owner. The
+  Windows-only interim of B§C-4 is available only if A2e declares it.
+
+### (j)10 · This revision's own architecture impact
+
+(a) none. (b) none by this commit. (c) none by this commit; A2a opens no row,
+(k) opens B10 and the transport debt row when its tickets are briefed. (c′)
+none. (d) yes, as (i)8 said, with (i)'s three amendments to B§C-2/C-4 now in
+the forms of (j)2, (j)3 and (j)4; the metadata check and the `_bounded` names
+of (i) are withdrawn.
