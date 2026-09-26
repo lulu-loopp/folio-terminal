@@ -645,6 +645,8 @@ The twelve wholly-test files, by the declaration that makes each one:
 
 **Fourteen at the merge of both (2026-09-26):** A5's two lane files joined and census-3's `attention/tests.rs` left, so the test is `the_wholly_test_files_of_bt_app_are_the_fourteen`.
 
+**A fifteenth since 2026-09-27** (0.4.6 ticket A1a): `main.rs` declares `#[cfg(test)] mod window_waits_tests;` — the admission registry's source guard — which makes `window_waits_tests.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_fifteen`.
+
 ---
 
 ## 7. The end measurement

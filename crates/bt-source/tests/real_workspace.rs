@@ -161,7 +161,7 @@ fn expected_unreached() -> BTreeMap<String, Vec<String>> {
 /// MUTATION: take `#[cfg(test)]` off `mod tests;` in `main.rs` and the set loses
 /// `tests.rs`; put one on `mod quake;` and it gains `quake.rs`.
 #[test]
-fn the_wholly_test_files_of_bt_app_are_the_fourteen() {
+fn the_wholly_test_files_of_bt_app_are_the_fifteen() {
     let workspace = workspace();
     let package = workspace.package("bt-app").expect("bt-app");
     let universe = universes::crate_sources(package, Vendor::Excluded).expect("bt-app's own src");
@@ -188,8 +188,9 @@ fn the_wholly_test_files_of_bt_app_are_the_fourteen() {
             "tests.rs",
             "text_size_tests.rs",
             "uninstall_tests.rs",
+            "window_waits_tests.rs",
         ],
-        "the fourteen of `docs/plans/bt-app-split-prep.md` §6.6"
+        "the fifteen of `docs/plans/bt-app-split-prep.md` §6.6"
     );
     println!("bt-app: {} files reached", enumeration.files().len());
     assert!(
