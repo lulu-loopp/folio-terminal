@@ -29,7 +29,9 @@ path = "tests/macos_glyph_surface.rs"
 harness = false
 
 # The icon and the `VERSIONINFO` block, plus the commit hash the diagnostic files
-# carry. See `build.rs`.
+# carry, and — for a Windows target — the release manifest `folio.exe` carries of
+# its own archive (`bt_winres::release_manifest`, 0.4.6 ticket U-9). See
+# `build.rs`.
 [build-dependencies]
 bt-winres = { path = "../bt-winres" }
 

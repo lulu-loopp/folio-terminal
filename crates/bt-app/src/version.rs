@@ -304,6 +304,111 @@ mod tests {
         );
     }
 
+    /// RED (U-9) — **the manifest this build embedded lists every member of the
+    /// release archive but the two signed ones, in the packaging list's order,
+    /// with the bytes this tree holds.**
+    ///
+    /// `docs/plans/design/self-update-2026-09-16.md` revision (b), F-4:
+    /// `folio.exe` carries the manifest of its own archive, and `package.ps1`
+    /// packs the archive from `scripts/release/archive-members.txt`. This reads
+    /// both — the manifest `build.rs` wrote into this build's `.res`, and the
+    /// list — and holds them to each other: the same names in the same order,
+    /// less `folio.exe` (which cannot list its own hash) and `folio.msix`
+    /// (signed with the same identity), under this version's archive root, with
+    /// every file the checkout provides hashed as it is on disk now. The
+    /// ConPTY sidecar's bytes are held to their pins by `bt-pty`.
+    ///
+    /// Only a Windows build carries the manifest — the archive is Windows' —
+    /// so elsewhere the check is that there is none.
+    ///
+    /// MUTATION: make `build.rs`'s `release_manifest` skip `Source::Packaging`
+    /// members and the two name lists differ at `folio-here.cmd`.
+    #[test]
+    fn the_embedded_manifest_is_the_packaging_list_but_the_two_signed_ones() {
+        use bt_winres::digest::{hex, sha256};
+        use bt_winres::release_manifest::{
+            MEMBER_LIST, MIN_UPDATER, Manifest, PROTOCOL, RESOURCE_NAME, Source, archive_root,
+            parse_member_list,
+        };
+
+        let Some(path) = option_env!("FOLIO_RELEASE_MANIFEST") else {
+            assert_ne!(
+                bt_platform::host_platform(),
+                bt_platform::HostPlatform::Windows,
+                "a Windows build always embeds the release manifest"
+            );
+            return;
+        };
+        let text = std::fs::read_to_string(path).expect("build.rs wrote the manifest it embedded");
+        let manifest = Manifest::parse(&text).expect("the embedded manifest parses");
+
+        let workspace = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let list = std::fs::read_to_string(workspace.join(MEMBER_LIST))
+            .expect("the packaging list is in the workspace");
+        let listed = parse_member_list(&list).expect("the packaging list parses");
+
+        let embedded: Vec<&str> = manifest.members.iter().map(|m| m.name.as_str()).collect();
+        let packed: Vec<&str> = listed
+            .iter()
+            .filter(|item| item.source.in_manifest())
+            .map(|item| item.name.as_str())
+            .collect();
+        assert_eq!(embedded, packed, "the manifest is the packaging list");
+        let signed: Vec<&str> = listed
+            .iter()
+            .filter(|item| !item.source.in_manifest())
+            .map(|item| item.name.as_str())
+            .collect();
+        assert_eq!(
+            signed,
+            ["folio.exe", "folio.msix"],
+            "and what it leaves out"
+        );
+
+        assert_eq!(manifest.product, "folio");
+        assert_eq!(manifest.version, VERSION);
+        assert_eq!(manifest.arch, "x64");
+        assert_eq!(manifest.archive_root, archive_root(VERSION));
+        assert_eq!(manifest.protocol, PROTOCOL);
+        assert_eq!(manifest.min_updater, MIN_UPDATER);
+
+        for item in &listed {
+            let on_disk = match item.source {
+                Source::Packaging => workspace.join("packaging").join(&item.name),
+                Source::Documents => workspace.join(&item.name),
+                Source::Exe | Source::Msix | Source::Sidecar => continue,
+            };
+            let bytes = std::fs::read(&on_disk).expect("a listed file is in the checkout");
+            let member = manifest
+                .members
+                .iter()
+                .find(|member| member.name == item.name)
+                .expect("listed, so embedded");
+            assert_eq!(
+                (member.sha256.as_str(), member.size),
+                (hex(&sha256(&bytes)).as_str(), bytes.len() as u64),
+                "{} is embedded with the bytes the checkout holds",
+                item.name
+            );
+        }
+
+        // And it is in the `.res` the linker was handed, under its name.
+        assert!(
+            RESOURCE
+                .windows(text.len())
+                .any(|window| window == text.as_bytes()),
+            "the resource file carries the manifest text whole"
+        );
+        let name: Vec<u8> = RESOURCE_NAME
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert!(
+            RESOURCE.windows(name.len()).any(|window| window == name),
+            "under the name {RESOURCE_NAME}"
+        );
+    }
+
     /// `packaging/macos/Info.plist.in`, as text.
     ///
     /// Found from this crate rather than from the working directory, the same

@@ -34,6 +34,14 @@
     than over anything running: the executable's signature, and the sparse
     package beside it that carries the same publisher and the same certificate.
 
+    **And the release archive, when there is one, is checked against the
+    manifest its own `folio.exe` carries** (0.4.6 ticket U-9): every member but
+    `folio.exe` and `folio.msix`, by name, size and SHA-256, and nothing in the
+    archive that the manifest does not list. That is before anything runs too —
+    the manifest is read out of the executable's resources, never by starting
+    it — and `-ArchiveOnly` stops there, which is how the archive is checked on
+    a machine where a window may not be opened.
+
     A picture of the window and every trace file are written to `-Artifacts`
     whatever happens, because the CI run that fails is the one nobody can
     reproduce.
@@ -99,6 +107,21 @@
     given, the answer is printed and not held to anything: the clean-machine
     run starts whatever archive it was handed.
 
+.PARAMETER Archive
+    The release archive to check against the manifest its `folio.exe` carries.
+    Defaults to the one release archive in `-PackageDirectory` — the versioned
+    one, or the copy under the stable name when that is all there is. With
+    neither there the check is skipped and says so, because an ordinary build
+    has no archive and is not meant to; `-ArchiveOnly` refuses instead.
+
+.PARAMETER ArchiveOnly
+    Check the arguments, the signatures under `-ExpectSigned` and the archive
+    against its manifest, and stop: **nothing is started**, no `--version`, no
+    window. For the machine where a window may not be opened, and for
+    `smoke-tests.ps1` and `package-tests.ps1`, which run this script's archive
+    check against archives they build. Refused when there is no archive to
+    check.
+
 .PARAMETER PackageDirectory
     The directory `package.ps1` writes the release page into. Defaults to
     `target/release-package`, which is `package.ps1 -Output`'s own default.
@@ -118,7 +141,9 @@ param(
     [string] $Msix,
     [string] $PackageDirectory,
     [ValidateSet('on', 'off')]
-    [string] $Updater
+    [string] $Updater,
+    [string] $Archive,
+    [switch] $ArchiveOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -143,6 +168,8 @@ if (-not $here) {
     throw 'smoke.ps1 cannot tell where it is; run it as a file (-File, or &), not from a pasted body'
 }
 $root = (Resolve-Path (Join-Path (Join-Path $here '..') '..')).Path
+# The archive's member list and the manifest `folio.exe` carries of it.
+. (Join-Path $here 'release-manifest.ps1')
 
 # **Every path this script was handed is made absolute here, before anything
 # reads it.** A relative path has two answers on Windows and they are allowed to
@@ -361,6 +388,89 @@ if (Test-Path -LiteralPath $PackageDirectory -PathType Container) {
                "also holds $($strangers -join ', '). Run package.ps1, which empties it, and " +
                'fetch the macOS assets again afterwards.')
     }
+}
+
+# ── the archive, against the manifest its executable carries ────────────────
+#
+# **What `package.ps1` refused to pack is checked again on what it packed.** The
+# archive is the artefact: the manifest inside its `folio.exe` names every other
+# member's size and SHA-256 (`FOLIO_RELEASE_MANIFEST`, 0.4.6 ticket U-9), and the
+# executable's signature is what vouches for them. So the check is made of the
+# archive's own entries — each read out of the zip and hashed, nothing
+# extracted but the executable whose resources are read — and a member missing,
+# a member added, or a byte changed after packing is refused here with its name,
+# before anything is started.
+#
+# The manifest is read from the `folio.exe` *in the archive*, which is the copy a
+# recipient gets; `-Exe` may be the same bytes or not, and is not what this is
+# about. Which two names the manifest leaves out is `archive-members.txt`'s
+# answer, the list `package.ps1` packed from.
+function Find-ReleaseArchive {
+    if ($Archive) {
+        $path = Resolve-GivenPath $Archive
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "-Archive names $path, and there is no file there" }
+        return $path
+    }
+    if (-not (Test-Path -LiteralPath $PackageDirectory -PathType Container)) { return $null }
+    $versioned = @(Get-ChildItem -LiteralPath $PackageDirectory -File -Filter 'folio-*-windows-x64.zip')
+    if ($versioned.Count -gt 1) {
+        throw ("$PackageDirectory holds $($versioned.Count) release archives — " +
+               "$(($versioned | ForEach-Object { $_.Name }) -join ', ') — so which one to check is not " +
+               'a guess to make. Name one with -Archive.')
+    }
+    if ($versioned.Count -eq 1) { return $versioned[0].FullName }
+    $stable = Join-Path $PackageDirectory 'folio-windows-x64.zip'
+    if (Test-Path -LiteralPath $stable -PathType Leaf) { return $stable }
+    return $null
+}
+
+function Assert-ArchiveMatchesManifest {
+    param([string] $Path, [string] $Into)
+
+    $listed = Get-ArchiveMemberList
+    $exe = @($listed | Where-Object { $_.Source -ceq 'exe' })[0].Name
+    $exempt = @($listed | Where-Object { -not $_.InManifest } | ForEach-Object { $_.Name })
+
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
+    try {
+        $entries = @($zip.Entries | Where-Object { $_.FullName -notmatch '/$' })
+        $carriers = @($entries | Where-Object { $_.FullName -cmatch "^[^/]+/$([regex]::Escape($exe))$" })
+        if ($carriers.Count -ne 1) {
+            throw "$Path holds $($carriers.Count) $exe at its root folder; the manifest is read from exactly one"
+        }
+        if (Test-Path -LiteralPath $Into) { Remove-Item -LiteralPath $Into -Recurse -Force }
+        [System.IO.Directory]::CreateDirectory($Into) | Out-Null
+        $carrier = Join-Path $Into $exe
+        [System.IO.Compression.ZipFileExtensions]::ExtractToFile($carriers[0], $carrier, $true)
+        $release = Read-ReleaseManifest -Exe $carrier
+
+        $problems = New-Object System.Collections.Generic.List[string]
+        $prefix = "$($release.ArchiveRoot)/"
+        $found = @(
+            foreach ($entry in $entries) {
+                if (-not $entry.FullName.StartsWith($prefix, [StringComparison]::Ordinal)) {
+                    $problems.Add("outside   : $($entry.FullName) is not under $prefix, the manifest's root")
+                    continue
+                }
+                $stream = $entry.Open()
+                try { $hash = Get-StreamSha256 -Stream $stream } finally { $stream.Dispose() }
+                [pscustomobject]@{ Name = $entry.FullName.Substring($prefix.Length); Size = $entry.Length; Sha256 = $hash }
+            }
+        )
+        foreach ($problem in (Compare-ReleaseMembers -Manifest $release -Found $found -Exempt $exempt)) {
+            $problems.Add($problem)
+        }
+    }
+    finally { $zip.Dispose() }
+
+    if ($problems.Count -gt 0) {
+        Write-Host "$([IO.Path]::GetFileName($Path)) does not match the release manifest its $exe carries:"
+        $problems | ForEach-Object { Write-Host "  $_" }
+        throw "$($problems.Count) member(s) of $Path differ from the manifest in its $exe"
+    }
+    Write-Host ("archive: $([IO.Path]::GetFileName($Path)) — $($release.Members.Count) members match the " +
+                "manifest in its $exe (protocol $($release.Protocol), min updater $($release.MinUpdater))")
 }
 
 Add-Type -Namespace Smoke -Name Win32 -MemberDefinition @'
@@ -592,6 +702,27 @@ if ($ExpectSigned) {
 
     Write-Host "package publisher: $publisher"
     Write-Host "package stamped by: $($packageSignature.TimeStamperCertificate.Subject)"
+}
+
+# The archive check itself, after the signatures: both read files and start
+# nothing, and a signature refused is the more basic answer.
+$releaseArchive = Find-ReleaseArchive
+if ($releaseArchive) {
+    Assert-ArchiveMatchesManifest -Path $releaseArchive -Into (Join-Path $Artifacts 'manifest')
+}
+elseif ($ArchiveOnly) {
+    throw ("-ArchiveOnly checks a release archive against its manifest, and there is none: no " +
+           "-Archive, and no release archive in $PackageDirectory")
+}
+else {
+    Write-Host "archive: none in $PackageDirectory, so the manifest check has nothing to read"
+}
+
+# **`-ArchiveOnly` ends here**, before the first process is started: everything
+# above reads files, and everything below runs one.
+if ($ArchiveOnly) {
+    Write-Host 'archive only: nothing was started.'
+    return
 }
 
 # ── 1 and 2: the front door ──────────────────────────────────────────────────

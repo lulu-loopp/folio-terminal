@@ -61,6 +61,16 @@
       * every name on the list is present, and nothing else is in the archive;
       * `folio.exe`'s own `VERSIONINFO` says the version being packaged, which
         is what makes the file's name and the file's contents one claim;
+      * **every other member is byte for byte what `folio.exe` says it is.**
+        The executable carries the manifest of its own archive
+        (`FOLIO_RELEASE_MANIFEST`, 0.4.6 ticket U-9): the name, SHA-256 and size
+        of every member but itself and `folio.msix`, computed by `build.rs` when
+        it was compiled. It is read out of the file — never by running it — and
+        a member that is missing, unlisted, or whose bytes differ stops the run
+        before anything is packed. `folio.exe`'s own signature is what signs
+        those eight files, so a release whose `uninstall.cmd` changed after the
+        build would ship a hash that no longer matches; this is where that is
+        caught, rather than on a reader's machine;
       * `AppxManifest.xml` in the tree still says `Version="0.0.0.0"`, so the
         version that reaches the package is this run's and not a second one
         somebody wrote down;
@@ -170,6 +180,8 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..' '..')).Path
+# The archive's member list and the manifest `folio.exe` carries of it.
+. (Join-Path $PSScriptRoot 'release-manifest.ps1')
 if (-not $Binaries) { $Binaries = Join-Path $root 'target\release' }
 if (-not $Documents) { $Documents = $root }
 if (-not $Packaging) { $Packaging = Join-Path $root 'packaging' }
@@ -353,54 +365,57 @@ if ($Binary) {
     Copy-Item -LiteralPath (Join-Path $Binaries $sbomName) -Destination (Join-Path $Output $sbomName) -Force
 }
 
-# The archive, in the order a person opening it should meet it: the program,
-# the two files it cannot start without, then what it is under and what that
-# does not give them.
+# **The archive is `archive-members.txt`, in its order** — the program, the two
+# files it cannot start without, then what it is under and what that does not
+# give them — and nothing else. The list lives in that file rather than here
+# because `crates/bt-app/build.rs` reads it too, to build the manifest
+# `folio.exe` carries: one list, so the archive and the manifest cannot name
+# different files. What each line's source means here:
 #
-# **The README is deliberately not here.** It is written for a repository page:
-# every link in it is relative (`docs/PRIVACY.md`, `CONTRIBUTING.md`) and every
-# picture it shows is a file under `docs/screenshots/` and `assets/readme/`.
-# Dropped into an archive on its own it is a page of dead links and broken
-# images, which is worse than no page at all. It is read where it works - the
-# repository and the releases page - and what ships here is what the licences
-# require to ship.
+#   * `exe` and `sidecar` come from the build, `$Binaries`: the executable, and
+#     the ConPTY files `bt-pty`'s build script wrote beside it;
+#   * `msix` is the sparse package that puts "Open in Folio" on the first page of
+#     the right-click menu. It is packed further down out of `packaging/msix/`
+#     rather than copied from anywhere, which is why it is marked `Packed` — it is
+#     the one entry that does not exist yet when the list is checked — and into
+#     `$work` rather than `$Output`, because it goes into the archive and nowhere
+#     else. It is inert there: nothing registers until a user sets
+#     `Settings ▸ General ▸ Explorer context menu` to `On the first page`;
+#   * `packaging` comes from `$Packaging`: `folio-here.cmd`, which is one line —
+#     `folio.exe --cwd` on the directory it was started in, with `%~dp0` making
+#     it a sibling reference, for a program that opens an external terminal with
+#     no way to say which folder it means (VS Code's
+#     `terminal.external.windowsExec`) — and `uninstall.cmd`;
+#   * `documents` comes from `$Documents`: the two licences, the third-party
+#     notices and the trademark notice.
 #
-# `folio-here.cmd` is here because it only works from here. It is one line —
-# `folio.exe --cwd` on the directory it was started in — and `%~dp0` is what
-# makes it a sibling reference rather than a path somebody has to edit: a
-# program that opens an external terminal by running a command with no
-# arguments (VS Code's `terminal.external.windowsExec` is the one it was
-# written for) has nowhere to say which folder it means, and this says it for
-# them. Outside the folder `folio.exe` was unpacked into it names nothing.
-$manifest = @(
-    @{ Name = 'folio.exe';                From = $Binaries },
-    # The sparse package that puts "Open in Folio" on the first page of the
-    # right-click menu. Packed further down out of `packaging/msix/` rather than
-    # copied from a build directory, which is why it is marked `Packed` — it is
-    # the one entry that does not exist yet when the list is checked. It is inert
-    # in the archive: nothing registers until a user sets
-    # `Settings ▸ General ▸ Explorer context menu` to `On the first page`.
-    #
-    # `$work` and not `$Output`: the package goes into the archive and nowhere
-    # else, and the working directory it is packed in is taken away once the
-    # archive has been read back.
-    @{ Name = 'folio.msix';               From = $work; Packed = $true },
-    @{ Name = 'conpty.dll';               From = $Binaries },
-    @{ Name = 'OpenConsole.exe';          From = $Binaries },
-    @{ Name = 'folio-here.cmd';           From = $Packaging },
-    @{ Name = 'uninstall.cmd';            From = $Packaging },
-    @{ Name = 'LICENSE-MIT';              From = $Documents },
-    @{ Name = 'LICENSE-APACHE';           From = $Documents },
-    @{ Name = 'THIRD-PARTY-NOTICES.md';   From = $Documents },
-    @{ Name = 'TRADEMARK.md';             From = $Documents }
+# **The README is deliberately not on the list.** It is written for a repository
+# page: every link in it is relative and every picture it shows is a file under
+# `docs/screenshots/` and `assets/readme/`. Dropped into an archive on its own it
+# is a page of dead links and broken images, which is worse than no page at all.
+$sourceDirectory = @{
+    exe       = $Binaries
+    sidecar   = $Binaries
+    msix      = $work
+    packaging = $Packaging
+    documents = $Documents
+}
+$listed = Get-ArchiveMemberList
+$members = @(
+    foreach ($entry in $listed) {
+        $item = @{ Name = $entry.Name; From = $sourceDirectory[$entry.Source]; InManifest = $entry.InManifest }
+        if ($entry.Source -ceq 'msix') { $item.Packed = $true }
+        $item
+    }
 )
+$exempt = @($listed | Where-Object { -not $_.InManifest } | ForEach-Object { $_.Name })
 
 # What has to be there already, which is everything some other step produced: a
 # build, a checkout. The one entry this script packs itself cannot be asked for
 # here, because it does not exist yet — makeappx's exit code is what says it was
 # made, a few lines further down.
 $missing = @()
-foreach ($item in $manifest) {
+foreach ($item in $members) {
     $item.Path = Join-Path $item.From $item.Name
     if ($item.ContainsKey('Packed')) { continue }
     if (-not (Test-Path -LiteralPath $item.Path -PathType Leaf)) { $missing += $item.Path }
@@ -426,6 +441,53 @@ if ($stamped -ne $core) {
 if ($info.ProductVersion.Trim() -ne $Version) {
     throw "folio.exe's ProductVersion string is '$($info.ProductVersion)'; expected '$Version'"
 }
+
+# ── the members, against the manifest the executable carries ────────────────
+#
+# **Before anything is packed or signed**, because a refusal here is a release
+# that must not be made, and the sooner it is said the less there is to undo.
+# Signing below changes `folio.exe` and packs `folio.msix`, and the manifest
+# names neither; the other eight are not touched by anything after this line, so
+# the bytes checked here are the bytes that go into the archive.
+#
+# The manifest is `crates/bt-app/build.rs`'s, made from `archive-members.txt`
+# and the tree the build compiled, so it disagrees with what is here only when
+# the build and this packaging run saw different files — a document edited
+# after the build, a sidecar from another build, a list changed without a
+# rebuild. Every disagreement is printed with its member's name, and the run
+# stops: a manifest that does not describe its archive is a release whose
+# executable's signature vouches for bytes the archive does not hold.
+$exe = Join-Path $Binaries 'folio.exe'
+$release = Read-ReleaseManifest -Exe $exe
+$expectedHeader = [ordered]@{
+    Product     = 'folio'
+    Version     = $Version
+    Arch        = 'x64'
+    ArchiveRoot = "folio-$Version"
+}
+foreach ($field in $expectedHeader.Keys) {
+    if ($release.$field -cne $expectedHeader[$field]) {
+        throw "folio.exe's release manifest says $field $($release.$field); this archive is $($expectedHeader[$field])"
+    }
+}
+$found = @(
+    foreach ($item in $members) {
+        if (-not $item.InManifest) { continue }
+        [pscustomobject]@{
+            Name   = $item.Name
+            Size   = (Get-Item -LiteralPath $item.Path).Length
+            Sha256 = (Get-FileHash -LiteralPath $item.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+        }
+    }
+)
+$problems = @(Compare-ReleaseMembers -Manifest $release -Found $found -Exempt $exempt)
+if ($problems.Count -gt 0) {
+    Write-Host "the members do not match the release manifest folio.exe carries:"
+    $problems | ForEach-Object { Write-Host "  $_" }
+    throw ("$($problems.Count) member(s) differ from the manifest in folio.exe. Rebuild folio.exe from " +
+           'this tree, or package the files it was built with.')
+}
+Write-Host "release manifest: $($release.Members.Count) members match folio.exe's (protocol $($release.Protocol), min updater $($release.MinUpdater))"
 
 # ── the sparse package ───────────────────────────────────────────────────────
 #
@@ -563,7 +625,7 @@ if ($Sign) {
     Write-Host ''
 }
 
-foreach ($item in $manifest) {
+foreach ($item in $members) {
     $item.Length = (Get-Item -LiteralPath $item.Path).Length
 }
 
@@ -571,7 +633,7 @@ $folder = "folio-$Version"
 $staging = Join-Path $Output $folder
 if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
 [System.IO.Directory]::CreateDirectory($staging) | Out-Null
-foreach ($item in $manifest) {
+foreach ($item in $members) {
     Copy-Item -LiteralPath $item.Path -Destination (Join-Path $staging $item.Name) -Force
 }
 
@@ -592,7 +654,7 @@ Remove-Item -LiteralPath $staging -Recurse -Force
 # **Read back what was written**, rather than trusting what was copied. The
 # archive is the artefact; the staging directory is not.
 $expected = @{}
-foreach ($item in $manifest) { $expected["$folder/$($item.Name)"] = $item.Length }
+foreach ($item in $members) { $expected["$folder/$($item.Name)"] = $item.Length }
 
 $zip = [System.IO.Compression.ZipFile]::OpenRead($archive)
 try {
