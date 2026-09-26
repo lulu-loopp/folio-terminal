@@ -1158,3 +1158,573 @@ is watching" and the proposed band point in different directions.
 ledger row for each §(b)3 row without one: the endpoints, the video engines and
 seats, and `PtySession`. (c′) None. (d) No. A1a and A1b's (d) = yes is
 unchanged (§13.2).
+
+---
+
+## Revision 2026-09-26 (c), after the Codex review
+
+Review: `docs/plans/design/thread-door-review-codex-2026-09-26.md` (Codex,
+static, at `6090cfbd`), verdict **adopt with changes**. It adopts the lent
+`WorkerCtx`, typed owner admission, the 46-site census and the atomic 24-site
+migration. It raises eight findings (P1–P8) and answers §7 and §12. This
+revision is appended. Sections 0–13 and revision (b) stay as written, and
+**where this section differs from them, it rules**. The coordinator ruled on
+each finding and on §12. Each is taken in order, checked against the code at
+`78a3699a` where it names code, and marked adopted or refused. None is refused.
+
+### (c)1 · P1 — the ticket graph does not support its landing claims: adopted
+
+**Checked.** Both spawner bodies on the base set only the band. `admission`
+does not exist, `ShellThread::enter()` takes nothing, and `hang_watch::start`
+installs no meter. After A1a alone, therefore, the 24 door threads and the bare
+threads are still `Unset`. §11's A1a sentence "every thread that runs our code
+is classified" is false for that landing. M4i′'s worker half needs A1b's
+producer. A1e's one-`WorkerCtx`-literal check needs A1b's literal. A1d's
+worker-side M5 needs A1b. And A3 "lands after A1a" departed from budget §C-8
+without saying so.
+
+**§11 is replaced by this table.** Sizes are Codex's assessments; each is
+provisional only where its own row says so.
+
+| id | size | prerequisites | lands alone as — and what is still pending when it does |
+|---|---|---|---|
+| A1a | M | the 0.4.5 tag; this note reviewed | **Infrastructure only**: `admission` (`Role`, the phase and its writers per (c)5, `enter_window_thread`, `enter_callback` per (c)7, `enter_standalone_main` per (c)6, `Door`, `doors`, `WaitToken`, `admitted`, `Refused`, counters, `Meter` and `Cookie` per (c)2), the registry and generated A§5.3, the D-33/D-42 notes, A§0.1's counts. **Pending, and said so in A§6 and RULES 52 as landed:** worker threads are still `Unset` until A1b (roles are `Window`, `Callback`, and `Unset` for every spawned thread). No door takes a token or a capability yet. Tests: M4a–M4h, M4g′, M4g″, M4i (window half, including (b)1's early-error sequence and (c)5's cases), the meter tests of (c)2. The worker half of M4i′ moves to A1b |
+| A1b | S–M | A1a | The 24 heads and the 3 band tests in one commit (§6.1). Then, **before the ticket is declared done**, the raw hand-off verbs become private, and **every caller of them changes in the same ticket**: `a_refused_handoff_raises_the_same_words_it_did_before` and any other test that calls a raw verb directly, plus the recording-lane factories that `HandoffLane::start`'s tests pass as `make_executor` (now `FnOnce(&WorkerCtx) -> E`). Tests: M3, M3r, M3r′, M4g, the worker half of M4i′, the worker-side M5 (moved here from A1d), and (c)8's worker controls. **Pending:** the bare threads (A1c), the owner doors (A1d), the prohibitions (A1e) |
+| A1c | S | A1b | The 18 swaps of (b)5, **each preserving its site's spawn-failure behaviour exactly**. The five `std::thread::spawn` sites panic on a refused thread today, so they keep that with `.expect(…)` carrying the old message. The `Builder` sites that propagate or ignore the `io::Result` keep doing so, and no site discards a `Result` it did not discard before. Every thread keeps its current band ((c)9). RULES 53's exception clause lands here ((c)9). Repays the classification and entrance debt (A§6's bypass paragraph). **Scheduling debt is not repaid.** |
+| A1d | M, **provisional until (c)3's table is reviewed** | A1a | (c)3's door table converted, row by row. Its worker-side M5 now lives in A1b, so A1d has no A1b prerequisite. Owner-side M5 and every row's test witness ship here. **Pending:** the rows (c)3 marks deferred |
+| A1e | M, for the stated inventories only — it is not a whole-program blocking analysis | A1b (worker-construction assertions), A1d (owner-signature checks) | §9.1's A1e rows as amended by (c)4 and (c)8. **It states in A§6 which guarantees stay pending until A2:** the lint on raw effects, the `file_writes`/`wait` doors, `file_reads`' execution-level design ((c)6), and the transport doors in `bt-pty` ((c)6) |
+
+**Outside A1.** A2 keeps its prerequisite on the completed owner conversions
+(A1d) as well as A1b, A1c and A1e. **A3 lands after all of A1, A1a to A1e**, as
+budget §C-7 and §C-8 say. The narrower "after A1a" milestone in §11 is
+withdrawn, because an installed but unused meter provides no per-call coverage.
+The owner's D-2 ruling is unchanged: D-2 closes after A1 (all five), A2 and A3,
+and the two named rows open then.
+
+**Adopted.**
+
+### (c)2 · P2 — the meter needs a return context: adopted
+
+**Checked.** `hang_watch::enter` returns `Location::Resume { station, node,
+scope }`. `during` keeps that value and passes it to `at`, and
+`Heartbeat::resume_at` restores all three parts. `hang_watch_detail::Ledger` is
+a bounded, aggregated call tree, not a per-invocation stack. `enter` and `at`
+each read the clock. The run footer is `diagnostics::run_footer`, written by
+`fn main` through `trace_sink::stderr_line`; `watch_forever` has no exit path.
+§7 departure 2's `Meter { enter: fn(DoorKey), leave: fn(DoorKey, Instant,
+Instant) }` throws the `Location` away, and a door key cannot rebuild it.
+
+**The change.** This replaces §7 departure 2's `Meter` and §4.4's steps 2–4.
+Revision (b)4's no-guard unwind policy stands.
+
+```rust
+// bt_platform::admission
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Cookie(u64);            // opaque; built and read only by the meter's owner
+impl Cookie { pub fn new(raw: u64) -> Self; pub fn raw(self) -> u64 }
+
+pub struct Meter {
+    pub enter: fn(DoorKey) -> Cookie,
+    pub leave: fn(DoorKey, Cookie, Instant, Instant),
+}
+pub fn install_meter(meter: Meter) -> Result<(), AlreadyInstalled>; // once per process
+```
+
+`admitted` calls `enter` and keeps the `Cookie` on its own stack. It reads
+`start` and `end` itself around `work`, then calls
+`leave(key, cookie, start, end)`. `Cookie` is plain data, so it carries no
+authority, and `admission` never interprets it.
+
+**`hang_watch`'s adapter.** This is new state that `hang_watch` owns.
+
+- **The stack.** `hang_watch` keeps a window-thread-local adapter stack of
+  `Location` values of fixed capacity, `ADMITTED_DEPTH` = 16. `enter` pushes
+  the `Location` that `hang_watch::enter` returned, and returns
+  `Cookie(generation << 8 | depth)`. The generation is a per-thread counter
+  that rises on every push.
+- **The matching leave.** `leave` pops the entry only when the cookie's depth
+  and generation match the top. It then calls `at(location)`, which restores
+  station, node and scope exactly as `during` does.
+- **Mismatches.** A cookie that does not match the top is a panic left
+  unwound under (b)4's policy, or corruption. The adapter then pops down to and
+  including the matching entry, if one exists, and counts the mismatch. If no
+  entry matches, it restores nothing and counts.
+- **Overflow.** Past 16 nested admitted calls, `enter` returns
+  `Cookie::OVERFLOW` and pushes nothing, `leave` restores nothing for it, and
+  the overflow is counted. Nothing panics. The station is still charged,
+  because `hang_watch::enter` still ran.
+- **Nesting under `during_pane`.** The saved `Location` is the one the pane
+  scope produced, so `at` restores the pane scope unchanged.
+- **Recursive or same-door admission.** Each call has its own stack entry and
+  cookie. The door key is never used to find an entry.
+- **Unwind.** Under (b)4, a panicking `work` leaves its entry on the adapter
+  stack. The next matched `leave` below it pops through it (counted). Codex's
+  caveat is taken: the next hang report names the door **until** a later
+  `at`, a scope restoration or a turn's reinitialisation replaces the station.
+  It is not "forever".
+
+**Timestamps and their cost.** `leave` receives `admitted`'s two `Instant`s
+and records the inclusive interval from them. `hang_watch::enter` and `at`
+still take their own clock reads for the exclusive station charge. So an
+admitted call costs **four** clock reads: `enter`, `start`, `end` and `at`.
+`during` today costs two. §10's "the clock reads do not double" is withdrawn.
+A3 measures that cost in B§R-C's four regimes. Letting `enter` and `at` take
+`admitted`'s timestamps is an A3 option, not settled here.
+
+**Refusal summary.** The writer is `diagnostics::run_footer`, as `fn main`
+writes it through `trace_sink::stderr_line`, and the footer gains the refusal
+total. This replaces §3.4's "the exit line `hang_watch` already writes". The
+door-process and early-exit roads print no footer today, and none is added.
+
+**Tests (A1a).** All are deterministic, on a test thread with a test meter or
+`hang_watch`'s own:
+- station, node and scope are restored after a nested admitted call inside
+  `during` and inside `during_pane`;
+- two same-door admitted calls, recursive and back to back, restore correctly;
+- the 17th nested call counts an overflow and restores its parent correctly;
+- a caught panic in `work` leaves the entry, and the next outer `leave` pops
+  it (counted);
+- an inner call's `[start, end]` lies inside its outer call's.
+
+**Adopted.**
+
+### (c)3 · P3 — owner conversion needs an effect-level inventory: adopted
+
+**Checked.**
+- `Runtime::flush_pending_pty_resize` loops over tabs and leaves into
+  `release_due_leaf_resize` and then `commit_leaf_resize`. `commit_leaf_resize`
+  holds the one `pty.resize(pty_size(…))` call, after the actor may have
+  reflowed and before the transaction is reconciled.
+- `create_leaf_session` does a lot of preparation before
+  `PtySession::spawn_shell_in`.
+- Row 15's `bt_pty::wait_for_retirements` cannot take a token, for the same
+  crate-edge reason as rows 11–12.
+- `SessionStore::close` calls `flush` (row 16's `wait_for`) **and**
+  `SessionWriter::close`, which has its own bounded polling and join.
+
+**The change.** A1d converts exactly this table. §8's "A1d wraps them in
+`admitted` where they are owner-thread rows" and §11's A1d list are replaced
+by it. *Metric* says whether one admission measures one native call or a
+declared batch. *Refusal* says what the caller does with `Refused`; in every
+row the refusal happens **before** any state the row mutates.
+
+| row · registry identity | effect-containing function (the door) | typed signature | real callers | phases | metric | refusal | witness |
+|---|---|---|---|---|---|---|---|
+| 11 · `PtyBirth` | new `bt-app` `pty_door::spawn_shell(token, command, size, wake)`, wrapping `PtySession::spawn_shell_in` only (the preparation in `create_leaf_session` stays outside) | `WaitToken<'_, doors::PtyBirth>` by value | `create_leaf_session` | Running, Exiting | single call | returned as the spawn's error (the pane shows its existing birth-failure state) | a headless pane birth through `create_leaf_session` asserts the admitted station and a live session |
+| 12 · `PtyResize` | new `bt-app` `pty_door::resize(token, pty, size)`, called **inside `commit_leaf_resize` at the existing `pty.resize` statement**. The admitted boundary is that one raw call, not the outer flush | `WaitToken<'_, doors::PtyResize>` | `commit_leaf_resize` (via `release_due_leaf_resize` ← `flush_pending_pty_resize`) | Running, Exiting | single call **per leaf** | mapped to the resize's existing error road, at the same point in the transaction as today's `resize` error, so reflow-before and reconcile-after ordering is unchanged | two panes resized in one flush give two admitted records; a refused resize leaves the transaction exactly as a failed `resize` does today |
+| 15 · `PaneRetirementWait` | new `bt-app` `pty_door::wait_for_retirements(token, deadline)` wrapping `bt_pty::wait_for_retirements` | `WaitToken<'_, doors::PaneRetirementWait>` | `settle_quit`'s `Retire` arm | Exiting | single call | treated as "0 still going" is **not** allowed: a refusal is logged with the count unknown, and quit proceeds as on a timeout | the quit driver's `Retire` step through the real `settle_quit` |
+| 16 · `SessionWriteWait` | `SessionWriter::wait_for` | `WaitToken<'_, doors::SessionWriteWait>` | `SessionStore::flush_judged` (from `QuitStep::Write`; from `SessionStore::close` ← `App::finish`) | Exiting | single call | `SaveRefusal` with the existing stalled meaning, so quit proceeds as on a timeout | `flush_judged` through `QuitStep::Write` asserts the admitted record |
+| 16b · `SessionWriterRetire` | `SessionWriter::close` (its bounded poll and join) | `WaitToken<'_, doors::SessionWriterRetire>` | `SessionStore::close` | Exiting | single call | the writer is left to process exit, exactly as its own budget-expired branch does today | `App::finish` through the real close road |
+| 17 · `TraceFlush` | `trace_sink::flush` | `WaitToken<'_, doors::TraceFlush>` | `fn main` after `run_app`; `Shutdown::drop` ((c)4) | Exiting | single call | lines still queued are lost, as on its timeout | `fn main`'s tail shape, driven by a test calling the same sequence on a window-entered test thread |
+| 18 · `LaunchHandOver` | `launch_wire::hand_over` | `WaitToken<'_, doors::LaunchHandOver>` | `fn main` | Starting | single call | `None`: open a window, as every other `None` does | the existing hand-over tests on a window-entered thread |
+| 9 · `Present` | `WindowRenderer::present_frame*`, `configure_window_surface` | per door type | `Runtime::present_seats_and_commit` and its configure road | Running, Exiting | **declared batch**: one admission per window's present-and-commit | the frame is not presented; the existing lost-frame road | a headless present asserts one record per window |
+| §5.2 natives: `TitleFlush`, `ImeCaretFlush`, `FocusWindow`, `SetVisible`, `SetCursor`, `CompositorCommit` | `Runtime::flush_title`, `flush_ime_cursor_area`, and one `bt-app` door each for focus, visibility and cursor at their existing single call sites; the DirectComposition commit inside `present_seats_and_commit` | per door type | as today | Running, Exiting | single call | the wanted value stays wanted and is retried next turn (title, IME); the others skip the call | each converted door reached through its real caller asserts its effect |
+| 21 · `WebController`, `WebEnvironment` | `WebHost::request_controller`, `WebSeat::start_environment` | per door type | `WebSeat::step`, `Runtime::warm_web_engine`, `make_spare_web_controller` | Running | single call | the page stays in its "coming up" state and the step retries | ticket 54/60's warm and spare tests on a window-entered thread |
+| 5 residue · `FontFamilyLookup`; 13 residue · `WindowPlaceProbe` | `bt_platform::monospace_family_named`; `Runtime::observe_window_place`'s probes | per door type | as today | Running, Exiting | single call | the previous answer is kept | the existing tests on a window-entered thread |
+
+**Deferred, marked in the registry** (their lines exist with status `open`, and
+A1d does not convert them):
+- rows 2, 3, 4 and 20 — B4, B5, B8; their owner-thread residue is admitted
+  when those tickets move the work;
+- row 7 — B6;
+- row 8 — B7;
+- row 10 — B9;
+- row 19 — bound ring operations, no token (B§R-A: never waited on by design);
+- row 22's residue, `flush_ime_cursor_area`, is in the table above.
+
+§8's "No move" paragraph is corrected to match: A1d wraps only the rows in the
+table.
+
+**Adopted.** A1d's size stays provisional until this table is reviewed.
+
+### (c)4 · P4 — the `Drop` inventory through real destructor chains: adopted
+
+**Checked.**
+- `trace_sink::Shutdown::drop` calls `flush`, which reaches `flush_sink`'s
+  `recv_timeout`, polling sleeps and a conditional join. `fn main` holds
+  `_trace_shutdown` across `builder.build().context(…)?`.
+- `attention_wire::open` and `launch_wire::open` put successful endpoints into
+  static `OnceLock<Option<_>>` values, and the product never drops them. The
+  Unix modules say so.
+- `PtySession::shutdown` takes the writer (a detach, **not** a join), bounds
+  the reader's join, and drops the native master. `PtySession::drop` also
+  finishes an input dump, which writes and calls `sync_data`.
+- A resolved lint on `join` cannot see a `Drop` that calls a permitted helper.
+
+**The inventory, replacing (b)3's table.** *Product reach* says how the
+product drops the value; public-API or test-only destruction is not counted
+as reach. Each row's *authorized chain* is exact: A1e pins these
+destructor → helper edges, and nothing else under that `Drop` may reach
+vocabulary.
+
+| type | authorized chain | product reach | repayment · version |
+|---|---|---|---|
+| `DirWatch` (Windows, macOS) | `drop` → `SetEvent`/`stopper.signal()` → `thread.join()` | a directory watch retired on the window thread (row 8) | **B7** (D-40) · 0.4.6. Not "remove the join": the handles must outlive the thread |
+| `trace_sink::Shutdown` (**added**) | `drop` → `flush` → `flush_sink` → `recv_timeout`, `sleep`, `join` | only on `fn main`'s early `?` return from `EventLoopBuilder::build`, which (c)5 now admits in `Exiting`. The normal exit calls `flush` explicitly and leaves through `leave_process` | new ticket *The trace writer is retired through its admitted flush door, never by a drop* · 0.4.7 |
+| `AttentionPipe`, `LaunchPipe` (Windows, Unix) | `drop` → `listener.join()` | **none in the product**: the successful endpoint lives in a static for the process's life. (b)3's "an endpoint dropped at quit" is withdrawn. A public-API and test-only destruction path exists | new ticket *An endpoint is retired through an explicit door, not by its drop* · 0.4.7 |
+| `video::engine::Engine`, `macos_player::Engine` | `drop` → `shutdown` → the engine thread's join | a seat closed on the window thread | new ticket *A video engine is shut down through an explicit door, not by its drop* · 0.4.7 |
+| `VideoSeat`, `VideoSeats` | `drop` → `shutdown` / `shutdown_all` → `VideoSeat::shutdown` → `Engine::shutdown` | a pane or window closed on the window thread | the same ticket · 0.4.7 |
+| `PtySession` | `drop` → `shutdown` (writer taken and detached; reader joined within its bound; master dropped) → input dump `finish` (write, `sync_data`) | on `pty-retirement`. On the caller only when `retire_within` cannot start that thread | new ticket *A shell is taken apart only through `retire_within`, never by a drop on the window thread* · 0.4.7. Not "make `Drop` a no-op": the thread-refused road must still tear the session down |
+
+**Fencing the indirect paths.** This replaces §7 departure 4's "only A2's lint
+… closes it", which is withdrawn: Clippy supplies no call-graph prohibition.
+A1e's check reads each `impl Drop` body in the product universe and resolves
+its direct calls by item, using `bt_source`'s item identity. It then asserts:
+
+1. a `Drop` whose body calls any function other than the row's pinned first
+   edge is red, if that function is a door, reaches vocabulary directly, or is
+   itself a pinned chain member;
+2. each pinned chain member's body calls only the next pinned member and
+   non-vocabulary items;
+3. a `Drop` not in the table that calls a registered door or a chain member is
+   red.
+
+This is a pinned-edge check, not a whole-program analysis, and the note claims
+no more. **Mutation (A1e):** add a call from `VideoSeats::drop` to a new helper
+that calls `SessionWriter::wait_for`, or add a `sleep` to `Engine::shutdown` —
+both must go red. The passing control is today's chains.
+
+**Adopted.**
+
+### (c)5 · P5 — quit cancellation and the pre-loop trace guard: adopted
+
+**Checked.**
+- `Quit::answer(Cancel)` goes from asking to `Abandoned`, and `Quit::saved`
+  does the same after an incomplete save. Both reach `settle_quit`'s `Abandon`
+  arm **without passing `Write`**, so admission is still `Running`, and §4.2's
+  `quit_abandoned()` would count a violation for an ordinary gesture.
+- `_trace_shutdown` is built before the fallible `builder.build()`.
+
+**The change to §4.2's table.**
+
+| writer | transition |
+|---|---|
+| `quit_abandoned()` | `Exiting → Running`, **or idempotent from `Running`**: Cancel and an incomplete save change nothing and count nothing |
+| `exiting()` | as (b)1 (`Running` or `Starting` → `Exiting`, idempotent from `Exiting`), with **one more pinned call site**: `fn main`'s event-loop build error arm calls `exiting()` explicitly before returning its error, so `_trace_shutdown`'s drop reaches row 17's flush admitted in `Exiting` (the (c)4 `Shutdown` row) |
+
+The `?` on `build()` becomes a `match` whose `Err` arm calls `exiting()` and
+then returns. A1e pins that call. **Ordinary doors are not broadened to
+`Starting`.**
+
+**Tests (A1a), through the real quit driver.** `quit::Quit` and
+`FolioApp::settle_quit`'s step loop are driven on a window-entered test thread:
+
+| case | expected |
+|---|---|
+| Cancel | `Running` before and after; no count |
+| an incomplete save | `Running`; no count |
+| a refused session write | `Exiting` after `Write`, `Running` after `Abandon`; no count |
+| successful retirement | `Exiting` through `Retire`; rows 15–17 admitted |
+
+Plus the build-error road: `exiting()` from `Starting`, then `TraceFlush`
+admitted.
+
+**Adopted.**
+
+### (c)6 · P6 — the threads left `Unset` need an explicit A2 contract: adopted
+
+**Checked.**
+- `bt-pty` has no `bt-platform` edge.
+- `InputRing`/`OutputRing` wait on condition variables, and `join_within`,
+  `reap_within`, `Retirements::wait_within` and `spawn_dump_publisher` contain
+  listed waits and sleeps.
+- `attention_wire::payload_on_stdin`, `explorer_menu::remove_from_explorer_menu`
+  and `explorer_menu::cleanup_registrations` each `recv_timeout` on their
+  process's main thread, which stays `Unset` after (b)5.
+
+**The contract this note now carries** (implemented by A2 and A1a as marked):
+
+1. **`bt-pty`'s transport waits are registered transport doors inside
+   `bt-pty`.**
+   - Each wait function (the ring waits, `join_within`, `reap_within`,
+     `Retirements::wait_within`, the dump publisher's sleep and sync) carries
+     its own `#[expect(clippy::disallowed_methods, reason = "<door id>")]` and
+     is a registry line with role **`Transport`**. It takes no capability.
+   - These lines are listed as effects **outside the admission invariant**,
+     with one debt row: *the PTY transport's waits are fenced by owner and
+     count, not by thread authority*.
+   - A2's lint applies to `bt-pty` like any crate. Nothing is suppressed
+     crate-wide, and no `Unset` thread is inferred to be a worker.
+   - The rayon pool stays `Unset`, for (c)'s reason (pure resampling). That
+     reason does not extend to transport waits.
+2. **A standalone process's main thread enters through a sealed entry**
+   (A1a):
+
+   ```rust
+   pub fn enter_standalone_main<R>(
+       name: &'static str,
+       body: impl FnOnce(&WorkerCtx) -> R,
+   ) -> Result<R, Refused>;
+   ```
+
+   - It is callable **once per process** (an `AtomicBool`), and only on an
+     `Unset` thread. It sets `Worker(name)` permanently and lends that
+     process's one `WorkerCtx` to `body`, built by the same private
+     constructor as the door's. This is the second and last `WorkerCtx`
+     literal; A1e's count becomes two, each pinned.
+   - A second call, or a call on a thread with a role, is `Refused` and
+     counted, and `body` does not run.
+   - Pinned product callers (A1e): the attention verb's payload reader
+     (`attention_wire::payload_on_stdin`'s caller in the `attention` door),
+     `explorer_menu::remove_from_explorer_menu` and
+     `explorer_menu::cleanup_registrations`.
+   - Their `recv_timeout` waits then go through A2's worker `wait` doors like
+     any worker's.
+3. **`file_reads`' execution-level design is an A2 decision.** One paragraph
+   of options, not settled here:
+   - `file_reads::Reader` performs its reads after construction, in `Read`
+     calls the caller makes later, while `opaque` runs its closure
+     synchronously. A capability checked at `open`/`Reader::new` alone would
+     authorize construction, not the reads, which is the returned-effect shape
+     §C-5 refuses.
+   - The options are:
+     - (a) `Reader` carries a borrowed `&WorkerCtx` for its whole life, so it
+       is `!Send` and cannot outlive the worker body;
+     - (b) the reading methods take a capability per call;
+     - (c) window-thread lanes get their own owner doors with tokens, and only
+       worker lanes take a context;
+     - (d) a combination: (a) for worker lanes, (c) for the inventoried
+       window-thread reads.
+   - A2 chooses, after inventorying which lanes are read on which thread (§6.3).
+
+**Adopted.**
+
+### (c)7 · P7 — the callback inventory: adopted
+
+**Checked.**
+- `macos_video::read_first_frame` → `generate` calls the synchronous
+  `copyCGImageAtTime_actualTime_error`. The module discusses the asynchronous
+  API only to explain why it does not use it, so no completion exists.
+- Windows `Notifier::show` (`bt-platform` `lib.rs`) registers a
+  `ToastNotification::Activated` `TypedEventHandler` that queues the
+  activation and calls the application's wake. `Notifier::new` allows delivery
+  on any thread.
+- `bt-render`'s `DeviceResources::mint` installs
+  `device.set_device_lost_callback` and `device.on_uncaptured_error`.
+  `bt-render` depends on `bt-platform`, so it can name `enter_callback`.
+
+**§3.3's table is corrected.** The rows below replace or add to the old ones;
+entry symbols are pinned by A1e.
+
+| callback | entry symbol | delivery | role after A1a |
+|---|---|---|---|
+| ~~`AVAssetImageGenerator` completion~~ | **removed**: `macos_video::generate` is synchronous and runs on the `folio-video-frame` worker (`Worker` after A1c) | — | — |
+| `AVPlayer` end notification | `macos_player`'s observer `folioVideoDidPlayToEnd:` | notification queue | `Callback("video-end")` |
+| **Windows toast activation** (added) | the `TypedEventHandler` closure registered in `Notifier::show` | any thread the platform picks | `Callback("toast-activated")`, or the thread's existing role if it has one |
+| **wgpu device loss** (added) | the closure passed to `set_device_lost_callback` in `DeviceResources::mint` | wgpu's choice: synchronously on the thread that polls or submits (the window thread today), or a backend thread | the existing role if any, else `Callback("gpu-device-lost")` |
+| **wgpu uncaptured error** (added) | the closure passed to `on_uncaptured_error` in `DeviceResources::mint` | the thread that made the failing call | the existing role if any, else `Callback("gpu-uncaptured-error")` |
+
+The other rows of §3.3 stand, each now naming its entry symbol in A1a's brief:
+- `install_console_ctrl_handler`'s `handle`;
+- `Notify_Impl::EventNotify`;
+- `macos_http`'s delegate methods;
+- `macos_notify`'s completion block and delegate;
+- `open_folder_in_finder`'s completion block.
+
+**`CallbackScope`, specified.**
+
+```rust
+pub struct CallbackScope {
+    restore: Option<Role>,           // Some(Unset) if this scope set Callback; None if it found a role
+    _local: PhantomData<*const ()>,  // !Send, !Sync
+}
+pub fn enter_callback(name: &'static str) -> CallbackScope; // the only constructor
+```
+
+- A scope that **finds a role** (`Window`, `Worker`, `Callback`) is
+  *non-owning*: it changes nothing and restores nothing.
+- A scope that **finds `Unset`** is *owning*: it sets `Callback(name)` and
+  restores `Unset` on drop, including on unwind. This is the one guard in
+  `admission`. It restores a thread-local, runs no meter code, and is
+  therefore not "work" in `hang_watch`'s sense.
+- Because the scope is `!Send`, a scope made on an `Unset` thread cannot be
+  moved into a door-started worker and dropped there. That closes Codex's
+  counterexample, in which the drop would reset the worker's role while its
+  `WorkerCtx` lived.
+
+**Tests (A1a):**
+- nested `enter_callback` on `Unset` (the outer scope owns, the inner does
+  not; `Unset` after both);
+- `enter_callback` on `Window` and on a worker (A1b), with the role unchanged
+  inside and after;
+- a panic inside an owning scope, caught, leaves `Unset`;
+- a compile-fail pair: sending a `CallbackScope` to `std::thread::scope`'s
+  spawn fails because of `!Send`, and the control drops it locally ((c)8's
+  contract).
+
+**Adopted.**
+
+### (c)8 · P8 — the paired proofs, made property-isolating: adopted
+
+**Checked.** On the pinned 1.94.1, rustdoc enables error-code checking only
+for a nightly build (the collector's `ErrorCodes::from(…is_nightly_build())`),
+as §7 departure 7 said. So a stable `compile_fail` block proves only that it
+fails. Codex's overlaps are real:
+- M3r and M4e mix `!Send`/`!Sync` with a `'static` obstacle;
+- M4b's `&token` fails because of a borrow of a local;
+- M4c's mutable `static` fails because of unsafe/static rules;
+- M3r′ and M4f have no control;
+- M5 names no `fn`-pointer pair;
+- nothing tests double consumption;
+- a recording executor proves no real affinity;
+- shared atomics and the install-once meter are not isolated by fresh
+  threads.
+
+**The contract, adopted explicitly.** There is no `trybuild` and no stderr
+matching. It is the **property-isolating paired-proof contract**:
+
+1. **Each `compile_fail` case must be sensitive to removing the property it
+   claims.** The brief states, per case, the one product edit that would make
+   it compile, as a `MUTATION:` line, and the case contains no second obstacle
+   that would survive that edit. A stable `compile_fail` block proves no
+   error reason, and the note does not claim it does. The departure-7 canary
+   only confirms the stable behaviour; it proves nothing about other mutants.
+2. **Auto-traits get independent probes**, with no lifetimes involved:
+   `fn is_send<T: Send>() {}` and `fn is_sync<T: Sync>() {}` instantiated at
+   `WorkerCtx`, `WaitToken<'static, doors::X>` (the type exists at `'static`
+   even though no value does), `CallbackScope` and `ShellThread`. Each is a
+   `compile_fail` block, and its control instantiates the same probe at
+   `u8`.
+3. **Cross-thread transfer cases use `std::thread::scope`**, so no `'static`
+   bound is involved. The cases are:
+   - moving a `&WorkerCtx` into a scoped spawn (`!Sync`);
+   - moving a `WaitToken` by value (`!Send`);
+   - moving a `CallbackScope` (`!Send`);
+   - moving a `ShellThread` (`!Send`).
+
+   Each control is the same scoped spawn capturing a `u8`.
+4. **Separate token tests, one property each:**
+   - *higher-ranked escape*: `work` returns the owned token as `R` — the
+     control returns `()`;
+   - *safe outer storage*: `work` stores the owned token into an outer
+     `let mut slot: Option<_> = None` declared before `admitted` — the control
+     stores a `u8`;
+   - *privacy*: `WaitToken { … }` and `WorkerCtx { … }` literals outside
+     `admission` — the control is a call of the public road
+     (`admitted(|t| door(t))`, a door-started body);
+   - *wrong identity*: a `doors::A` token passed to a `doors::B` door — the
+     control uses `doors::A`;
+   - *double consumption*: `door(token); door(token)` — the control makes one
+     call.
+5. **Controls exist for every named variant.** The boxed closure and the
+   `fn` pointer each get a compile-fail case and a compiling control. The
+   **executed** indirect calls also run through both a `Box<dyn Fn>` and a
+   `fn` pointer: on the worker side (A1b) a door-started body calls
+   `ShellThread::enter` through each; on the owner side (A1d) each is refused
+   on a worker and admitted on a window-entered thread.
+6. **The hand-off producer control is the real refusal path.**
+   `a_refused_handoff_raises_the_same_words_it_did_before` now runs through
+   `HandoffLane::spawn` (the real `ShellThread::enter(ctx)` executor) with a
+   target the OS refuses, not through a recording executor. `ShellThread`'s
+   own non-transferability is (c)8 items 2 and 3.
+7. **Isolation protocol for counters and the meter.**
+   - `admission`'s counters are per door type, and each executed refusal test
+     uses **its own** `#[cfg(test)]` probe door type. `Probe` is not shared, so
+     "exactly one" deltas cannot race.
+   - The process-wide meter is **not installed** in `bt-platform`'s unit
+     tests; the meter tests use `admission::test_meter_scope`, a
+     `#[cfg(test)]` thread-local override consulted before the global.
+   - `bt-app`'s one `hang_watch` registration test runs in its own test
+     binary target, or asserts only on its own thread's station stack.
+8. **Duplicate window entry.** After `loop_running()`, a second
+   `enter_window_thread()` on the same thread leaves the phase `Running`, with
+   no reset to `Starting`, and counts. This is an A1a executed test.
+9. **Typed assertions where the compiler can check.**
+   - The registry equality instantiates each door type's constants in a
+     generated `const` table
+     (`const _: () = assert!(doors::X::ROW == …)`, or a test reading
+     `<doors::X as Door>::ROW`) rather than parsing their text.
+   - Each owner door's signature is checked by coercion:
+     `let _: fn(WaitToken<'_, doors::X>, …) -> _ = door_fn;` in a test.
+   - Source inspection stays for what only the source can show:
+     - call-site inventories (the role and phase writers, `enter_standalone_main`);
+     - the `WorkerCtx` constructors — counted by resolved item, covering
+       `Self { … }` spellings and derives (a derive of `Clone`, `Default` or
+       `Copy` on the type is red);
+     - the unsafe/FFI policy;
+     - the `Drop` edges of (c)4.
+
+§9.1–§9.3's rows are amended accordingly. Where a row there and an item here
+disagree, the item here rules.
+
+**Adopted.**
+
+### (c)9 · §12 Q2 — decided: thread role does not decide priority
+
+**Decided by the coordinator, with the owner's delegation.**
+- A1c is behaviour-preserving: every site keeps its current band.
+- **RULES 53 gains, in A1c's commit, an explicit exception clause.** Under it,
+  these stay at `Normal`:
+  - playback engines (`folio-video-engine`, both platforms);
+  - first-frame extraction (`folio-video-frame`);
+  - launch and attention ingress (`folio-launch-endpoint`,
+    `folio-attention-endpoint`);
+  - clipboard saves (`clipboard-picture`);
+  - the three standalone-process workers.
+- Observation and probe threads now at `Normal` move below normal in a separate
+  **0.4.7** ticket: *Observation threads started at `Normal` move to the
+  workers' band*. They are `bt-dir-watch`, `folio-video-prewarm`,
+  `folio-video-canplay`, `folio-web-thumb`, and the explorer probe and
+  deployment threads.
+- RULES 53 and A1c's brief state that the portable priority setter returns
+  `false`. **On macOS a band is requested, not enforced.**
+
+**(b)6's video comparison is corrected.** `video::within_budget` and
+`video_portable::within_budget` serve first-frame extraction through
+`first_frame`. `Engine::open_on` and `macos_player::Engine::open` start the
+playback threads separately. These are **separate workloads**, first frame and
+playback. They are not "a frame question at seat birth" set against the
+playing loop, and neither source fact establishes behaviour under load. Both
+stay at `Normal` by the clause above. §12 has no open questions left.
+
+### (c)10 · §12 Q1 — settled, and §6.1's reason narrowed
+
+Q1 stays as (b)5 settled it: A1c makes 18 conversions, which leaves `bt-pty`'s
+four bare sites and the pool. The standalone main threads' own waits are
+(c)6's. The 24-head change stays in one commit. Codex is right that §6.1
+overstates the necessity. A compatibility adapter that delegates to one
+canonical spawning body would still be one effect entrance, as
+`spawn_at_priority` already delegates to `_with_stack`. So a staged migration
+is possible, but it costs an extra public contract and delays enforcement, and
+no benefit has been shown for a small mechanical change. §6.1's "exactly what
+RULES 52 forbids" is withdrawn; the reason is now **no demonstrated benefit
+over an atomic change**.
+
+### (c)11 · Answers to §7, as they stand after this revision
+
+1. The no-edge choice is accepted. Rows 11, 12 and 15 get `bt-app` doors
+   ((c)3), and the transport's waits get registered transport doors ((c)6).
+2. The two-half meter stays, with (b)4's unwind policy; the cookie and adapter
+   are (c)2's.
+3. The back edge, the three exits and ordinary work in `Exiting` stay.
+   Cancellation and the build-error arm are (c)5's.
+4. Drop debt is temporary, effect-scoped and repaid per row; the inventory and
+   fence are (c)4's.
+5. `expect_worker()` stays dropped. Codex accepts this, subject to (c)7's
+   thread-bound `CallbackScope` and (c)8's auto-trait proofs, both adopted.
+6. M3 is compile-only. The worker passing control is the real hand-off path
+   ((c)8 item 6).
+7. The stable limitation is accepted. The proof contract is (c)8's; it does
+   not claim error reasons.
+
+### (c)12 · This revision's own architecture impact
+
+(a) Facts touched: none; this is a document.
+
+(b) Doors: none in this commit. The design now names three new door kinds for
+later tickets:
+- `bt-app`'s `pty_door` (A1d);
+- `bt-pty`'s transport doors (A2);
+- `enter_standalone_main` (A1a).
+
+(c) Debt: nothing repaid or added in this commit. The tickets will add:
+- A1e: the `Drop` rows of (c)4 without a ledger row (`Shutdown`, the
+  endpoints, the video engines and seats, `PtySession`);
+- A2: the transport-invariant row of (c)6 item 1;
+- a 0.4.7 row for the observation-band ticket of (c)9.
+
+(c′) None.
+
+(d) No ownership changes in this commit. Revision (c) adds one ownership
+change for A1a, beyond §13.2's: "which role does a standalone process's main
+thread have" gets an owner, `enter_standalone_main`.
