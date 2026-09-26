@@ -1015,10 +1015,16 @@ scoop's own receipt in the version folder (`install.json` with `manifest.json`)
 also says scoop. With neither, the copy is ours only if its folder's owner is the
 account running Folio. Every failed read, and every marker or receipt that is
 malformed, of another version, partial or in disagreement, is **unknown**, never
-ours (`install_channel::classify`, ticket U-1).
+ours (`install_channel::classify`, ticket U-1). **And every such mark keeps a
+format the previous version also reads** — the PSReadLine module install, the
+Explorer registration, the toast identity, the PowerShell profile line and the
+agent hooks — so an update's rollback leaves nothing the old build cannot repair
+on its next start; presses that write them during an update's trial are neither
+held back nor greyed (owner's ruling 2026-09-27).
 **From.** `docs/plans/design/clean-uninstall-2026-09-20.md` — §1 what is left
 outside, §3 the six committed rules, and §6 *what the reviews changed*, which
-states that it rules, together with its closure addendum.
+states that it rules, together with its closure addendum; the owner's ruling of
+2026-09-27 at the end of `docs/plans/design/self-update-2026-09-16.md`.
 **Overrides.** §6 supersedes §§2–5 wherever they disagree: §3's ownership rule is
 replaced by §6's two-kinds-of-mark rule, and §6 corrects revision 1's harm
 ranking and its claim about which removal code was new.

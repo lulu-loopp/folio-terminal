@@ -1882,3 +1882,5 @@ F-3 and U-26–U-29). They are no longer open. What remains:
 1. A copy may update itself only when the running build is signed **and** built with the updater flag; both are required.
 2. If the macOS recovery path is not ready at the 0.4.6 cut, 0.4.6 ships the updater on Windows only; macOS stays on the releases page until its recovery contract passes its experiments.
 3. A Folio started while an update is being applied waits for the update to finish before it opens a window (up to the apply deadline); this is accepted as the behaviour right after Restart.
+
+**Owner ruling 2026-09-27** (a frozen cross-version surface, beside F-8's list): everything Folio writes outside its own data root — the PSReadLine module install, the Explorer registration, the toast identity, the PowerShell profile line and the agent hooks — keeps a format the previous version also reads, so a rollback leaves nothing the old build cannot repair on its next start. Presses during an update's trial are neither blocked nor greyed; the Explorer repair at the next start already re-syncs the registration with the setting.
