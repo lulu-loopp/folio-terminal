@@ -54101,3 +54101,55 @@ fn under_reduced_motion_no_fade_offers_the_group_path() {
         cards.groups
     );
 }
+
+/// **Run one test again, alone, in a process of its own, and pass only if it passed there.**
+///
+/// For a claim that holds once per process: `bt_platform::admission::enter_standalone_main` lends
+/// one `WorkerCtx` per process, so a second test of this binary that entered would be refused. The
+/// parent runs this binary again with `--exact <selector>` and
+/// `BT_STANDALONE_ENTRY_TEST_CHILD=<selector>`, writes `stdin` to the child's standard input and
+/// closes it, and requires the child's own summary to say that one test ran and passed. A selector
+/// that names nothing makes the harness print `running 0 tests` and exit 0, which is not a pass
+/// (`docs/plans/bt-app-split-prep.md` §6.3, P9); the summary line is what tells the two apart.
+///
+/// Answers `true` in the child, where the caller goes on to make its claim, and `false` in the
+/// parent once the child has passed.
+pub(crate) fn alone_in_a_process(selector: &str, stdin: &[u8]) -> bool {
+    const CHILD: &str = "BT_STANDALONE_ENTRY_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some_and(|named| named == selector) {
+        return true;
+    }
+    let mut child = bt_platform::quiet_command(std::env::current_exe().unwrap())
+        .args(["--exact", selector, "--nocapture", "--test-threads=1"])
+        .env(CHILD, selector)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("the harness can run one of its own tests");
+    {
+        use std::io::Write as _;
+        let mut input = child.stdin.take().expect("the child's standard input");
+        input
+            .write_all(stdin)
+            .expect("the child's standard input takes its bytes");
+    }
+    let started = std::time::Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        if started.elapsed() > std::time::Duration::from_secs(60) {
+            child.kill().unwrap();
+            let _ = child.wait();
+            panic!("`{selector}` ran for a minute in its own process and was stopped");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let output = child.wait_with_output().unwrap();
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && said.contains("test result: ok. 1 passed"),
+        "`{selector}` did not pass as the one test of its own process ({}):\n{said}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    false
+}
