@@ -7604,3 +7604,42 @@ mod favicon_tests {
         );
     }
 }
+
+/// **The page's engine requests are owner-thread doors** (A1d, §5.3 row 21).
+#[cfg(test)]
+mod owner_door_tests {
+    use super::rehost_address_tests::{detached, page, window};
+    use super::*;
+
+    /// RED (A1d, row 21) — **an engine asked for where its door is not admitted did not start,
+    /// and the card says why.**
+    ///
+    /// This test's own thread never entered as the window thread, so `WebEnvironment` is refused
+    /// before the platform is asked anything — no loader runs, no browser starts — and the seat
+    /// takes the road a refused creation call takes: no answer is owed, the machine hears the
+    /// engine did not start, and the fault's words name the door.
+    ///
+    /// MUTATION: map the refusal to `Ok(())` instead of the step's `Err` road and the seat waits
+    /// for an answer that is never coming.
+    #[test]
+    fn an_engine_asked_for_off_the_window_thread_did_not_start_and_says_why() {
+        let mut seat = detached(SeatAddress {
+            page: page(1, 1),
+            window: window(1),
+        });
+        let mut outcomes = Vec::new();
+        seat.start_environment(&mut outcomes);
+        assert!(
+            seat.engine_owes_an_answer.is_none(),
+            "no answer is owed for a question that was not asked"
+        );
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [WebOutcome::Fault(detail)] if detail.contains("the WebEnvironment door was refused")
+            ),
+            "the seat's one outcome is the fault, naming the door: {outcomes:?}"
+        );
+        assert!(seat.fault.is_some(), "and the card is up");
+    }
+}

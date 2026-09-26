@@ -620,7 +620,7 @@ admitted in (§5.1). Rows 16b and 23 were found by the thread-door note
 | 22 | done | `Window::set_ime_cursor_area` — `ImmSetCompositionWindow` + `ImmSetCandidateWindow`, answered by the input method; the owner's next93 caught 15 + 85 ms in one turn and a single call of 3,138 ms under load | `Runtime::apply_ime_cursor_area`, reached before ticket 63 from every offer: `publish_frame_inner`, `repaint_preview`, `reoffer_ime_cursor_area`, the turn's offer | **done** — *the input method's caret area is one wanted value, told to the system at most once a turn and only when it moved* (`DESIGN.md`, 2026-09-25); the one road is `Runtime::flush_ime_cursor_area`, from the turn's tail and from `Ime::Enabled`, on this thread by §5.2. A single slow answer still holds the thread; the repetition is gone |
 | 23 | pending | `pollster::block_on(GpuContext::open(…))` — the first window's adapter, device and surface, asked for and waited on | `Runtime::create` ← `FolioApp::resumed` | **pending** — found by the thread-door note's revision (e)2 and recorded, not ruled (`DESIGN.md`, 2026-09-26, *every thread that runs Folio's code has a role, the window thread has a phase, and each owner-thread wait is a door the registry lists*); it stays on this thread (coordinator, 2026-09-26), its door is `GpuOpen`, and it moves when device recovery rebuilds on a worker (B9, D-42) — D-77 holds it until then |
 
-**The doors** — one `bt_platform::admission::doors` type per line of the registry's `# doors` section; the station is the `hang_watch` station its meter enters. No door takes its token until A1d.
+**The doors** — one `bt_platform::admission::doors` type per line of the registry's `# doors` section; the station is the `hang_watch` station its meter enters. Every door takes its token by value, minted where the line says (A1d).
 
 | door | row | station | admitted in | call | minted at | measures |
 |---|---|---|---|---|---|---|
@@ -640,7 +640,7 @@ admitted in (§5.1). Rows 16b and 23 were found by the thread-door note
 | `SessionWriterRetire` | 16b | `SessionWriterRetire` | Exiting | `SessionWriter::close` | `SessionStore::close` | one call |
 | `TraceFlush` | 17 | `TraceFlush` | Exiting | `trace_sink::flush` | `fn main`; `trace_sink::Shutdown::drop` | one call |
 | `LaunchHandOver` | 18 | `Starting` | Starting | `launch_wire::hand_over` | `fn main` | one call |
-| `WebController` | 21 | `WebController` | Running | `WebHost::request_controller` | `WebSeat::step` | one call |
+| `WebController` | 21 | `WebController` | Running, Exiting | `WebHost::request_controller` | `WebSeat::step` | one call |
 | `WebEnvironment` | 21 | `WebEnvironment` | Running | `WebHost::request_environment` | `WebSeat::start_environment` | one call |
 | `WebRehost` | 21 | `WebRehost` | Running | `WebHost::rehost` | `WebSeat::rehost` | the steps and their commits |
 | `ImeCaretArea` | 22 | `ImeCursorArea` | Running, Exiting | `owner_door::set_ime_cursor_area` | `Runtime::apply_ime_cursor_area` | one call |

@@ -20,10 +20,11 @@
 //! capability a worker-only door takes (A1b). The one such door today is the hand-off's
 //! (`ShellThread::enter`).
 //!
-//! **What is not here yet, said so that nobody reads more into it:** no owner-thread door takes a
-//! token yet (A1d converts them), and the threads started outside the door — `bt-platform`'s and
-//! `bt-app`'s bare spawns (A1c), `bt-pty`'s four and `bt-term`'s resample pool (by design) — are
-//! still [`Role::Unset`].
+//! **Every owner-thread door takes its token** (A1d): each [`doors`] type's function takes
+//! `WaitToken<'_, doors::X>` by value, so it cannot be called outside an admission. **What is not
+//! here, said so that nobody reads more into it:** the threads started outside the door —
+//! `bt-pty`'s four and `bt-term`'s resample pool (by design) — are still [`Role::Unset`], and the
+//! waits of worker threads have no door yet (A2).
 //!
 //! # What the compiler proves, and how the proofs are written
 //!
@@ -774,8 +775,8 @@ macro_rules! door {
 /// `doors` section, held equal to it — name, row, station and phases — by `bt-app`'s
 /// `window_waits_tests`. The station is `hang_watch::Station`'s byte, named in the comment.
 ///
-/// No door takes its token yet: A1d converts them, row by row, as revision (e)2 of the design
-/// note tables them.
+/// Every door's function takes its token by value, minted by [`admitted`] at the statement the
+/// line names (A1d, revision (e)2 of the design note as corrected by (f)1).
 pub mod doors {
     macro_rules! doors {
         ($($(#[$meta:meta])* $name:ident => $row:literal, $station:literal, [$($phase:ident),+];)+) => {
@@ -821,7 +822,7 @@ pub mod doors {
         /// Row 18: the launch handed to a running Folio, before the loop exists (`Starting`).
         LaunchHandOver => "18", 0, [Starting];
         /// Row 21: `CreateCoreWebView2CompositionController` (`WebController`).
-        WebController => "21", 200, [Running];
+        WebController => "21", 200, [Running, Exiting];
         /// Row 21: `CreateCoreWebView2EnvironmentWithOptions` (`WebEnvironment`).
         WebEnvironment => "21", 199, [Running];
         /// Row 21: a page moved to another window's tree, with its commits (`WebRehost`).

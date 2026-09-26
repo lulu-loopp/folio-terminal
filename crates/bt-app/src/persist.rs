@@ -3093,4 +3093,125 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// RED (A1d, revision (c)8 item 9) — **the session writer's two waits take their own doors'
+    /// tokens, by value.**
+    ///
+    /// MUTATION: take the token off `SessionWriter::close`, or give it `SessionWriteWait`'s, and
+    /// this does not compile.
+    #[test]
+    fn the_session_writers_two_waits_take_their_own_doors_tokens() {
+        let _: fn(
+            &mut SessionWriter,
+            WaitToken<'_, doors::SessionWriteWait>,
+            u64,
+        ) -> SessionWaitAnswer = SessionWriter::wait_for;
+        let _: fn(&mut SessionWriter, WaitToken<'_, doors::SessionWriterRetire>) =
+            SessionWriter::close;
+    }
+
+    /// RED (A1d, rows 16 and 16b) — **on the way out, the quit's judged save is one admitted
+    /// `SessionWriteWait` and the store's close is one admitted `SessionWriterRetire`.**
+    ///
+    /// Through the real roads: `flush_judged` (what `QuitStep::Write` calls) with a document to
+    /// land, then `close` (what `App::finish` calls) with nothing left to land, on a test thread
+    /// entered as the window thread and on its way out. The document is on the disk and the
+    /// sentinel is gone, exactly as before A1d.
+    ///
+    /// MUTATION: mint the wait anywhere but `wait_for_landing` (in `flush_judged`'s first branch
+    /// too, say) and the list grows; drop `Exiting` from either door and its call is refused.
+    #[test]
+    fn on_the_way_out_the_quits_save_and_the_writers_retirement_are_each_one_admission() {
+        crate::tests::on_the_window_thread_exiting();
+        let root = std::env::temp_dir().join(format!(
+            "bt-app-session-admitted-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private directory for this test");
+        let sentinel = root.join("session.lock");
+        std::fs::write(&sentinel, b"").expect("this run's claim to still be running");
+        let mut store = SessionStore::at(root.join("session.json"), sentinel.clone());
+        store.armed = true;
+        let mut document = SessionV1::default();
+        document
+            .windows
+            .push(bt_persist::SessionWindowV1::default());
+        store.record(document, Instant::now());
+        let _ = crate::hang_watch::admissions_on_this_thread();
+
+        assert_eq!(store.flush_judged(), Ok(()), "the quit's save lands");
+        assert_eq!(
+            crate::hang_watch::admissions_on_this_thread(),
+            ["SessionWriteWait"],
+            "and its one wait was one admission"
+        );
+        store.close();
+        assert_eq!(
+            crate::hang_watch::admissions_on_this_thread(),
+            ["SessionWriterRetire"],
+            "the close had nothing left to wait for but the writer's end"
+        );
+        assert!(
+            root.join("session.json").exists(),
+            "the document is on the disk"
+        );
+        assert!(!sentinel.exists(), "and the run vouched for it");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (A1d, rows 16 and 16b) — **a session wait asked before the way out is not waited: the
+    /// quit hears the stalled answer and may go on, and the close leaves the writer and the
+    /// sentinel as a spent budget does.**
+    ///
+    /// The window thread in `Running`, where neither door is admitted. Nothing is admitted, the
+    /// judged save answers `TimedOut` — the answer the transaction reads as "leave anyway" — and
+    /// the sentinel stays, because nobody heard the document land.
+    ///
+    /// MUTATION: map the wait's refusal to `SaveRefusal::Refused` and the quit would stop over it
+    /// (the verdict assertion goes red); drop the `stalled` in the close's refusal and the
+    /// sentinel goes.
+    #[test]
+    fn a_session_wait_asked_before_the_way_out_is_the_stalled_answer() {
+        crate::tests::on_the_window_thread();
+        let root = std::env::temp_dir().join(format!(
+            "bt-app-session-refused-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private directory for this test");
+        let sentinel = root.join("session.lock");
+        std::fs::write(&sentinel, b"").expect("this run's claim to still be running");
+        let mut store = SessionStore::at(root.join("session.json"), sentinel.clone());
+        store.armed = true;
+        let mut document = SessionV1::default();
+        document
+            .windows
+            .push(bt_persist::SessionWindowV1::default());
+        store.record(document, Instant::now());
+
+        let verdict = store.flush_judged();
+        assert_eq!(
+            verdict,
+            Err(SaveRefusal::TimedOut(save_did_not_finish())),
+            "a wait that was not admitted is the stalled answer"
+        );
+        assert!(
+            verdict.is_err_and(|refusal| refusal.quit_may_proceed()),
+            "which the quit reads as `leave anyway`"
+        );
+        store.close();
+        assert!(
+            sentinel.exists(),
+            "a close that could not wait for the writer does not vouch for the document"
+        );
+        assert!(
+            crate::hang_watch::admissions_on_this_thread().is_empty(),
+            "and nothing was admitted"
+        );
+        drop(store);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

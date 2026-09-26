@@ -176,8 +176,8 @@ fn rendered() -> String {
     }
     table.push_str(
         "\n**The doors** — one `bt_platform::admission::doors` type per line of the registry's \
-         `# doors` section; the station is the `hang_watch` station its meter enters. No door \
-         takes its token until A1d.\n\n",
+         `# doors` section; the station is the `hang_watch` station its meter enters. Every door \
+         takes its token by value, minted where the line says (A1d).\n\n",
     );
     table.push_str(
         "| door | row | station | admitted in | call | minted at | measures |\n\
