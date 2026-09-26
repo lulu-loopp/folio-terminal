@@ -51,7 +51,7 @@ drop the test items; a number that moves edits this table and the pictures.
 | named sites / distinct names | **38 / 33**, besides the pool | the first argument, or `.name(…)` |
 | `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
 | channel constructions | **30** — 26 `mpsc::channel`, 4 `mpsc::sync_channel`; `bt-app` 24, `bt-platform` 6 — and **6** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 1); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
-| `AppEvent` variants | **29** | `enum AppEvent` in `main.rs` |
+| `AppEvent` variants | **30** (U-3 added `InstallChannelRead`, §5) | `enum AppEvent` in `main.rs` |
 | child-process construction | **one** `Command::new`, inside the door `bt_platform::quiet_command`, with **6** product callers — `attention_copilot::run_probe`, `explorer_menu::serve`, `git::git_command`, `psreadline::run_probe`, `shell_integration::run_profile_probe`, and `bt_platform`'s macOS `quiet_command_text` (two programs); besides the door, `bt-pty::PtySession::spawn`'s `spawn_command` and the one `ShellExecuteW` in `bt_platform::handoff` | `quiet_command(_named)?\(`, `Command::new\(`, `spawn_command\(`, `ShellExecuteW\(` |
 | `Runtime` methods | **1,424** — 1,223 in the 27 `runtime/*.rs` topics, 201 still in `main.rs` (§13) | a four-space-indented `fn` in an `impl Runtime<'_>` block |
 
@@ -329,9 +329,15 @@ the install folder — the marker (`folio-install.json` beside `folio.exe`; the
 attribute `io.github.lulu-loopp.folio.install` on the macOS bundle), scoop's
 receipt (`install.json` + `manifest.json`), and the folder's owner — and holds
 it in `install_channel::FACT`, never refreshed within a run. `classify` is the
-one judgement: every failed read is `Channel::Unknown`. The only reader today is
-the one `diagnostics.log` line; the Explorer default (U-3) and the updater's
-eligibility will read the same `FACT`.
+one judgement: every failed read is `Channel::Unknown`. Two readers today,
+both through the one accessor `install_channel::channel()`: the
+`diagnostics.log` line, and `first_run` (U-3), whose Explorer row arrives on
+exactly where the fact is `Managed { uninstall_hook: true }`
+(`first_run::explorer_arrives_on`). The card is built on the window thread and
+never waits on the worker: it waits one turn for a fact that has not landed —
+the worker wakes the loop with `AppEvent::InstallChannelRead` after publishing
+it — and then builds a missing fact as `Unknown`. The updater's eligibility
+will read the same `FACT`.
 
 ### 4.3 The `Deref` trap
 
@@ -907,9 +913,13 @@ the only map of the window thread that exists anywhere in the tree — that enum
 is a description of what was **measured**, not of what is **allowed**, and this
 file is where what is allowed now lives.
 
-`AppEvent` has twenty-nine wake variants and `AppEvent::station` maps each to a
+`AppEvent` has thirty wake variants and `AppEvent::station` maps each to a
 `hang_watch::Station`. **A new off-thread answer shares an existing lane unless
-this file records why it cannot.**
+this file records why it cannot.** Recorded: `InstallChannelRead` (U-3) cannot
+share `UpdateChecked` or any other member of the Chrome family, because every
+one of their handlers rebuilds every window's chrome and this answer has one
+reader, the first-run poll on the next turn's clock run; its handler does
+nothing and it is charged to `Woken`, like `LaunchAsked`.
 
 ---
 

@@ -858,10 +858,44 @@ Entries: §7.19 *the words on the settings page are written for the reader* (the
 second §7.19); the copy guide under `docs/plans/ui-style/`; the `i18n.rs` module
 doc. Strings are compiled in; the language revision invalidates the caches.
 
-### 35. First run — `not yet folded`
-Entries: §7.56 *a card that appears once: four questions about what this machine
-lets Folio touch, asked together, with the answers still going through the
-settings page*.
+### 35. First run — `folded`
+**Rule.** A window-modal card appears once per machine: only when
+`settings.json` was missing at launch (`SettingsStore::was_missing`) **and** its
+`first_run_card` is `NotShown`. `Shown` is written the moment the card goes up,
+never when it is answered, and the v31 → v32 migration marks every existing file
+`Shown`. The card asks together the questions whose answers leave a mark outside
+what the reader opened: the update check, Explorer's right-click menu, the
+PowerShell integration, and each agent found on the path whose own configuration
+does not yet call Folio. Each row declares the platform capability it needs
+(`first_run::Capability`), and a row appears only where the platform has that
+capability and the machine can honour the row (`rows_for(platform, machine)`:
+the platform is a value, never a `cfg`). A Mac gets one row, the update check. A
+card with no row is not shown (`Card::open`). The copilot row waits for the
+version probe to settle. **Which rows arrive on:** the update check, on every
+platform, and it is the first row; the Explorer row, where `install_channel`'s
+fact is `Managed { uninstall_hook: true }` (`first_run::explorer_arrives_on`;
+the card waits one turn for a fact that has not landed, then builds it as
+unknown, which is off); every other row arrives off. Every answer leaves the card
+as the press the Settings page sends (`settings_target`, through
+`apply_settings_choice_announcing`); the card installs nothing itself. `Done`
+spends every row that is on, and also the update check's and the PowerShell
+offer's answers when they are off. `Not now`, `Esc` and closing the window spend
+nothing, a row that arrived on included. The PowerShell row records an intent
+(`powershell_install_pending`) that the first PowerShell to name its `$PROFILE`
+spends. Success is silent; a failure raises its own card. Each row is one line;
+the mechanism, and the address of the reader's own file, are in the row's
+tooltip, which only the pointer raises. Focus opens on the first switch with the
+ring hidden until a key the card acts on; `Enter` is `Done` and `Esc` is `Not
+now`. `BT_FIRST_RUN_CARD` overrides the gate and nothing else. The card sits
+under the gate and the quit card and above everything else.
+**From.** §7.56 with ⓪ (v4), ⓪′ (v5), ⓪″ and ⑬ (M3-6); trailing entries
+2026-09-21 *a removal that found nothing says nothing in the window* and *Folio's
+own writers wait their turn for the marks record*; 2026-09-22 ruling 2 (the card
+keeps its switches); 2026-09-26 *the first-run card's Explorer row arrives on
+exactly where the install marker says the manager has an uninstall hook*.
+**Overrides.** v4 and v5 replace v3's headings, second lines, row lines and
+hover fill. The 2026-09-26 entry replaces "the update check is the only row that
+arrives on".
 
 ### 36. The update check — `not yet folded`
 Entries: §7.52 *an installed preview has no way to know it is out of date: one
@@ -870,10 +904,40 @@ request, a stamp good for a day, and a gear*; the `update.rs` module doc;
 that holds one lock across every read-modify-write, and a skipped version is
 compared by precedence*.
 
-### 37. The Explorer and Finder verbs — `not yet folded`
-Entries: §7.4 *the Explorer context-menu verb*; §7.4a *the first-level context
-menu on Windows 11 (sparse package)*; §7.4b *two switches make one three-state
-row* (owner's ruling 2026-09-07); §13.36 *"Open in Folio" in Finder*.
+### 37. The Explorer and Finder verbs — `folded`
+**Rule.** On Windows there is one verb in two registrations: the classic trees
+`HKCU\Software\Classes\Directory\shell\Folio` and
+`Directory\Background\shell\Folio` (`Open Folio here`; the command is
+`"<folio.exe>" --cwd "%V"`, the icon the executable's resource 0), and, on
+Windows 11, the menu's first page through the sparse package `folio.msix` beside
+`folio.exe` (`Open in Folio`), whose `IExplorerCommand` is served out of process
+by `folio.exe --explorer-command`. The Settings row is one On/Off switch. **On is
+everything this machine can do** (`explorer_menu::place_when_on`: the package
+and the classic trees where Windows 11 and `folio.msix` are both present, the
+classic trees otherwise); Off is neither. The row's state is read from the
+machine — the registry and the deployment database, through
+`explorer_menu::place`, where a package registration wins — and never stored in
+`settings.json`; a stale registration reads as On. At start a stale registration
+is rewritten, and a package that points at another folder is re-registered,
+unless the registration names a `folio.exe` that still exists and is not this
+one (`bt_platform::explorer_reassert_wanted`); a machine that never had the verb
+is never given it at start, and an explicit press always writes. Removal deletes
+only the keys Folio created. **The default is off**, except that the first-run
+card's row arrives on where the install marker says `uninstall_hook: true`
+(rows 35 and 41). Package registration runs off the window thread and answers
+through `AppEvent::ExplorerPackageChanged`. On macOS the verb is the Finder
+service *Open in Folio* (`NSServices` and a services provider registered at
+start, then `NSUpdateDynamicServices`), delivered through the application
+delegate's channel; a file opens a tab in its folder (`explorer_menu::folder_for`),
+where opening a document opens the document itself.
+**From.** §7.4 with its 2026-09-07 correction; §7.4a with its 2026-09-08
+correction; §7.4b with its same-day second ruling; §13.36; trailing entry
+2026-09-26 *the first-run card's Explorer row arrives on exactly where the
+install marker says the manager has an uninstall hook*.
+**Overrides.** §7.4b's second ruling replaces §7.4a's two rows and §7.4b's own
+three-state row. The 2026-09-07 and 2026-09-08 corrections replace "a stale
+registration is always rewritten". The 2026-09-26 entry replaces "the first-run
+card's Explorer row arrives off".
 
 ### 38. PSReadLine — `folded`
 **Rule.** Folio ships and installs its own patched copy of the module, because
@@ -1249,9 +1313,9 @@ no design note.
 
 ## What is folded, and what is not
 
-**Folded (20 rows):** 4, 5, 6, 8, 9, 18, 19, 22, 23, 29, 30, 33, 38, 41, 42, 43,
-52, 53, 54, 55. Row 46 is folded for the layering rule only.
+**Folded (22 rows):** 4, 5, 6, 8, 9, 18, 19, 22, 23, 29, 30, 33, 35, 37, 38, 41,
+42, 43, 52, 53, 54, 55. Row 46 is folded for the layering rule only.
 
-**Not yet folded (35 rows):** everything else. For those rows the entries listed
+**Not yet folded (33 rows):** everything else. For those rows the entries listed
 are still the authority, and a ticket that depends on one of them folds it — into
 this file, in the same commit.

@@ -890,6 +890,7 @@ mod tests {
                 copilot_found: false,
                 copilot_installable: false,
                 powershell_integration_installed: false,
+                install_channel: crate::install_channel::Channel::Ours,
             },
         );
         for row in &mut rows {

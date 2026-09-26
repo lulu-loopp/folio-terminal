@@ -543,6 +543,18 @@ enum AppEvent {
     /// taskbar flash already running on a desktop whose bar turned out to hide itself
     /// ([`Runtime::replace_contradicted_flash`]), and that window may be sitting idle.
     TaskbarAnswered,
+    /// **How this copy was installed has been read** (U-3): the fact is in
+    /// `install_channel::channel()`.
+    ///
+    /// Its own variant and not a share of [`Self::UpdateChecked`] (the other
+    /// updater-lineage wake), because nothing is refreshed on it: every member
+    /// of the Chrome family rebuilds every window's chrome, and this answer has
+    /// one reader, the first-run card, which the clock run of the very next
+    /// turn polls. So it does nothing in `user_event` and is charged to
+    /// `Woken`, like [`Self::LaunchAsked`]. Owed a wake because the card waits
+    /// a turn for it, and a window about to put up its first modal may have
+    /// nothing else coming.
+    InstallChannelRead,
     /// **Something spoke into this process's attention endpoint** (`attention_wire`).
     ///
     /// The same family again and the same reason for a wake of its own, in its strongest form: the
@@ -764,6 +776,7 @@ impl AppEvent {
             | Self::FilesDirChanged
             | Self::QuakeSummoned
             | Self::LaunchAsked
+            | Self::InstallChannelRead
             | Self::AppDelegateSpoke => Station::Woken,
         }
     }
@@ -12383,6 +12396,10 @@ struct App {
     /// Whether the ready first-run attempt has been consumed, even if no card
     /// could open. This is an edge latch, not another agent-availability cache.
     first_run_attempted: bool,
+    /// Whether the first-run card has already waited its one turn for how this
+    /// copy was installed (U-3). Never rearmed: once spent, a still-missing
+    /// answer is read as unknown.
+    first_run_waited_for_channel: bool,
     /// Whether Explorer's right-click menu carries Folio's verb (§7.4).
     ///
     /// Cached for [`Self::psreadline_installed`]'s reason and no other: the
@@ -41147,7 +41164,14 @@ impl Runtime<'_> {
         );
         update::begin();
         // **How this copy was installed** (U-1): read once, off this thread, and said once in
-        // `diagnostics.log`. Nothing acts on it yet.
+        // `diagnostics.log`. The first-run card's Explorer row reads it (U-3) and waits a turn
+        // for it, so the wake is installed before the worker can finish.
+        {
+            let proxy = proxy.clone();
+            install_channel::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::InstallChannelRead);
+            });
+        }
         install_channel::begin();
         // **The data directory's two endpoints, opened by its writer and by nobody else** (§7.59,
         // audit 3 A-3). One call and one gate, so that a third door added beside them cannot be
@@ -41753,6 +41777,7 @@ impl Runtime<'_> {
             psreadline_documents,
             psreadline_installed: None,
             first_run_attempted: false,
+            first_run_waited_for_channel: false,
             // Reads the registry once and, on a machine whose `folio.exe`
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
@@ -62892,6 +62917,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // the launch requests it shares its whole shape with, and it needs
             // the `ActiveEventLoop` and every window at once.
             AppEvent::AppDelegateSpoke => Ok(()),
+            // **Nothing here either** (U-3): the fact is in `install_channel`'s
+            // slot, and its one reader, `raise_first_run_if_due`, is on the clock
+            // run of the turn this wake brings round.
+            AppEvent::InstallChannelRead => Ok(()),
             AppEvent::MathReady => {
                 let (mut batch, gone) = self.drain_math_answers();
                 self.for_each_window(|runtime| runtime.apply_math_results(&mut batch, gone))

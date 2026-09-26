@@ -39,6 +39,7 @@ use bt_render::{
 use crate::{
     explorer_menu::ExplorerPlace,
     i18n::Text,
+    install_channel::Channel,
     marks::OverlayLayer,
     settings::{SettingsRow, SettingsTarget, push_float_window},
     shell_integration,
@@ -58,6 +59,24 @@ use crate::{
 #[must_use]
 pub fn due(settings_file_was_missing: bool, stored: FirstRunCardV1) -> bool {
     settings_file_was_missing && stored == FirstRunCardV1::NotShown
+}
+
+/// **Whether the card may be built on this turn, as far as how this copy was
+/// installed is concerned** (U-3).
+///
+/// The fact lands on `install_channel`'s worker, the card is built on the
+/// window thread, and the window thread never waits on a worker. So the card
+/// waits **one turn** for it: the first turn that finds it missing spends the
+/// wait and answers `false`; the worker's wake brings the next turn round, and
+/// that turn — or any later one — goes ahead whether the fact has landed or
+/// not, reading a missing one as [`Channel::Unknown`]. `waited` is the App's,
+/// and it is never rearmed: the wait is one turn per process.
+pub fn install_channel_settled(waited: &mut bool, landed: bool) -> bool {
+    if landed || *waited {
+        return true;
+    }
+    *waited = true;
+    false
 }
 
 /// Consume the first ready attempt, including one that cannot show a card.
@@ -313,7 +332,7 @@ impl ExplorerShape {
 /// three of the four answers are read off the registry and off the agents' own
 /// files, and a card built from stored booleans would be a second copy of a
 /// truth free to disagree with the files it is about.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Machine {
     /// Whether Windows shows a first page of its own — and whether the file
     /// that can be registered on it shipped beside `folio.exe`. One field
@@ -336,6 +355,11 @@ pub struct Machine {
     /// recorded intent cleared by the shell that reports it rather than by this
     /// row being withheld.
     pub powershell_integration_installed: bool,
+    /// **How this copy was installed** — `install_channel`'s fact, read through
+    /// `install_channel::channel()`, and [`Channel::Unknown`] when the card's
+    /// one turn of waiting ran out before it landed. Decides whether the
+    /// Explorer row arrives on ([`explorer_arrives_on`]).
+    pub install_channel: Channel,
 }
 
 /// What the pointer resting on a row earns.
@@ -409,11 +433,13 @@ pub struct Row {
 /// The rows this machine is offered, in the order they are drawn: of **the rows
 /// this platform has the capability for**, the ones this machine can honour.
 ///
-/// **Row order is deliberate.** The one row that is already on opens the card,
-/// so the reader is first told what Folio *does* and only then asked what it
-/// *may* do — and in a body that can scroll, the only row that is already on is
-/// guaranteed to be above the fold. Then the two Windows writes, then the
-/// agents.
+/// **Row order is deliberate.** The update check, which arrives on everywhere,
+/// opens the card, so the reader is first told what Folio *does* and only then
+/// asked what it *may* do — and in a body that can scroll, it is guaranteed to
+/// be above the fold. Then the two Windows writes, then the agents. The
+/// Explorer row, second, also arrives on where a package manager will remove
+/// the verb again when it uninstalls Folio ([`explorer_arrives_on`]); every
+/// other row arrives off.
 ///
 /// **A row Folio would have to refuse is not listed at all.** If none of the
 /// three agents is found the group break and its rows are both absent, and the
@@ -468,7 +494,7 @@ pub fn rows_for(platform: HostPlatform, machine: &Machine) -> Vec<Row> {
             group_break_above: false,
             line: explorer_shape(machine).line(),
             tip: Tip::Fixed(Text::FirstRunTipExplorer),
-            on: false,
+            on: explorer_arrives_on(machine.install_channel),
         });
     }
     if offered(RowKind::PowerShell) && !machine.powershell_integration_installed {
@@ -515,6 +541,27 @@ pub fn rows_for(platform: HostPlatform, machine: &Machine) -> Vec<Row> {
         opened = true;
     }
     rows
+}
+
+/// **Whether the Explorer row arrives switched on** (U-3; owner ruling
+/// 2026-09-20: the right-click menu is on by default only in installs that
+/// have an uninstall hook, told by the install marker, never by a path).
+///
+/// On exactly where the manager that installed this copy runs
+/// `folio --uninstall-cleanup` before removing it — the marker's
+/// `uninstall_hook: true` — because there the verb leaves with Folio. Off for
+/// a copy unpacked by hand ([`Channel::Ours`], another account's), a managed
+/// copy with no hook (winget, a scoop install whose `post_install` never ran),
+/// and [`Channel::Unknown`]. Nothing else reads the channel on this card.
+#[must_use]
+pub fn explorer_arrives_on(channel: Channel) -> bool {
+    matches!(
+        channel,
+        Channel::Managed {
+            uninstall_hook: true,
+            ..
+        }
+    )
 }
 
 /// What the Explorer switch means here.
@@ -783,7 +830,9 @@ impl Card {
 ///
 /// **Nothing.** The card closes with the factory values — the rows off, the
 /// update check on — writes nothing outside `settings.json`, and does not come
-/// back. The one difference from pressing `Done` with the card untouched is the
+/// back. An Explorer row that arrived on (a copy whose manager has an uninstall
+/// hook, [`explorer_arrives_on`]) is no exception: arriving on is what the card
+/// proposes, and only `Done` spends a proposal. The one difference from pressing `Done` with the card untouched is the
 /// PowerShell offer: `Not now` means *nothing was asked*, so the one question
 /// that has a second surface keeps it, exactly as it works today.
 ///
@@ -1990,6 +2039,7 @@ pub fn settings_line_width(surface_width: f32, scale: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::install_channel::{self, MARKER_FILE_NAME, Manager};
     use crate::settings;
 
     /// RED (ticket 21) — **the first-run card's option rows are as tall as a
@@ -2062,7 +2112,8 @@ mod tests {
     }
 
     /// A machine with everything: Windows 11 with the package beside the
-    /// executable, all three agents on the path, none of them configured yet.
+    /// executable, all three agents on the path, none of them configured yet —
+    /// and a copy unpacked by hand from the zip, which has no install marker.
     fn every_row() -> Machine {
         Machine {
             explorer_first_page_available: true,
@@ -2073,6 +2124,7 @@ mod tests {
             copilot_found: true,
             copilot_installable: true,
             powershell_integration_installed: false,
+            install_channel: Channel::Ours,
         }
     }
 
@@ -2413,24 +2465,204 @@ mod tests {
         );
     }
 
-    /// PIN (§7.56 §3) — **the one row that arrives on is the first row, and it
-    /// is the only one.**
+    /// PIN (§7.56 §3, restated by U-3) — **the update check arrives on and
+    /// arrives first; the only other row that may arrive on is the Explorer
+    /// row, and only where the install has an uninstall hook.**
     ///
     /// The reader is first told what Folio *does* and only then asked what it
-    /// *may* do; and in a body that can scroll, the only row that is already on
-    /// is guaranteed to be above the fold.
+    /// *may* do; and in a body that can scroll, the row that is always on is
+    /// guaranteed to be above the fold. Until U-3 this pin said the update
+    /// check was the *only* row that arrives on; the ruling of 2026-09-20 made
+    /// the Explorer row arrive on where a package manager will take the verb
+    /// away again, so the pin now states that exception and nothing wider —
+    /// on a copy unpacked by hand every row after the first still arrives off.
     ///
     /// MUTATION: ship any other row on and a machine gets a registry key or
     /// somebody's `~/.claude/settings.json` edited by a reader who pressed the
     /// only button on the card that looked like agreement.
     #[test]
-    fn the_update_check_is_the_only_row_that_arrives_on_and_it_arrives_first() {
+    fn the_update_check_arrives_on_and_first_and_only_a_hooked_explorer_row_joins_it() {
         let offered = rows(&every_row());
         assert_eq!(offered[0].kind, RowKind::Update);
         assert!(offered[0].on);
         assert!(
             offered[1..].iter().all(|row| !row.on),
             "a row that writes outside %APPDATA%\\Folio is switched on before anybody asked"
+        );
+        let hooked = rows(&Machine {
+            install_channel: Channel::Managed {
+                manager: Manager::Scoop,
+                uninstall_hook: true,
+            },
+            ..every_row()
+        });
+        assert_eq!(hooked[0].kind, RowKind::Update);
+        assert!(hooked[0].on);
+        let on: Vec<RowKind> = hooked[1..]
+            .iter()
+            .filter(|row| row.on)
+            .map(|row| row.kind)
+            .collect();
+        assert_eq!(
+            on,
+            [RowKind::Explorer],
+            "with an uninstall hook the Explorer row, and nothing else, joins the update check"
+        );
+    }
+
+    /// A temporary folder standing in for the folder `folio.exe` was installed
+    /// into, never the real one.
+    fn install_folder(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "folio-first-run-channel-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// RED (U-3) — **the Explorer row arrives on exactly where the install
+    /// marker says the manager has an uninstall hook.**
+    ///
+    /// The owner's ruling of 2026-09-20: the right-click menu is on by default
+    /// only in installs that can remove it again, told by the marker the
+    /// install wrote and never by a path. Each case runs the real producer: a
+    /// real folder, the marker bytes a manager writes, `install_channel::read`
+    /// and `classify` — the product's own reads and judgement — and then the
+    /// card's own `rows_for`. The four channels are the design note's: a
+    /// hand-unpacked copy (`Ours`), scoop with its hook, winget (no hook: it
+    /// installs a zip and runs nothing at uninstall), and a marker that does
+    /// not parse (`Unknown`).
+    ///
+    /// MUTATION: in `explorer_arrives_on`, answer `true` for every
+    /// `Channel::Managed` (the winget case goes red), or `false` always (the
+    /// scoop case goes red); on BASE `rows_for` built the row with `on: false`.
+    #[test]
+    fn the_explorer_row_is_on_only_where_an_uninstall_hook_exists() {
+        let me = bt_platform::install_evidence::current_account().unwrap();
+        let cases: [(&str, Option<&[u8]>, Channel, bool); 4] = [
+            ("ours", None, Channel::Ours, false),
+            (
+                "scoop",
+                Some(br#"{"v":1,"manager":"scoop","uninstall_hook":true}"#),
+                Channel::Managed {
+                    manager: Manager::Scoop,
+                    uninstall_hook: true,
+                },
+                true,
+            ),
+            (
+                "winget",
+                Some(br#"{"v":1,"manager":"winget","uninstall_hook":false}"#),
+                Channel::Managed {
+                    manager: Manager::Winget,
+                    uninstall_hook: false,
+                },
+                false,
+            ),
+            (
+                "unknown",
+                Some(br#"{"v":1,"manager":"scoop"}"#),
+                Channel::Unknown,
+                false,
+            ),
+        ];
+        for (tag, marker, expected, on) in cases {
+            let root = install_folder(tag);
+            if let Some(marker) = marker {
+                std::fs::write(root.join(MARKER_FILE_NAME), marker).unwrap();
+            }
+            let channel = install_channel::classify(&install_channel::read(
+                &root,
+                HostPlatform::Windows,
+                Ok(&me),
+            ));
+            assert_eq!(
+                channel, expected,
+                "the {tag} folder was not read as {expected:?}"
+            );
+            let offered = rows(&Machine {
+                install_channel: channel,
+                ..every_row()
+            });
+            let explorer = offered
+                .iter()
+                .find(|row| row.kind == RowKind::Explorer)
+                .expect("the Explorer row is offered on every Windows");
+            assert_eq!(
+                explorer.on,
+                on,
+                "the Explorer row arrives {} for {channel:?}",
+                if explorer.on { "on" } else { "off" }
+            );
+            std::fs::remove_dir_all(&root).unwrap();
+        }
+        // And the channels no folder above produces, on the same rule: a scoop
+        // copy found by its receipt alone has no hook, another account's copy
+        // is not ours to decide for, and the rule is the hook, not the manager.
+        for (channel, on) in [
+            (
+                Channel::Managed {
+                    manager: Manager::Scoop,
+                    uninstall_hook: false,
+                },
+                false,
+            ),
+            (Channel::NotOurs, false),
+            (
+                Channel::Managed {
+                    manager: Manager::Homebrew,
+                    uninstall_hook: true,
+                },
+                true,
+            ),
+        ] {
+            assert_eq!(explorer_arrives_on(channel), on, "{channel:?}");
+        }
+    }
+
+    /// RED (U-3) — **the card waits one turn for how this copy was installed,
+    /// and a card built before the answer lands shows the Explorer row off.**
+    ///
+    /// The fact lands on `bt-install-channel`; the card is built on the window
+    /// thread, which never waits on a worker. The first turn that finds the
+    /// fact missing spends the wait and holds the card; the worker's wake
+    /// brings the next turn, which goes ahead whether the fact landed or not.
+    /// A fact that is there on the first turn costs no wait at all, and the
+    /// wait is spent once per process, never rearmed. What the card is built
+    /// from when the wait ran out is `Unknown`, and `Unknown` is off.
+    ///
+    /// MUTATION: make `install_channel_settled` answer `landed` (the card
+    /// waits for ever on a worker that never came back) or `true` (it never
+    /// waits for a fact a millisecond away).
+    #[test]
+    fn a_card_built_before_the_install_channel_lands_waits_one_turn_then_shows_the_row_off() {
+        let mut waited = false;
+        assert!(
+            !install_channel_settled(&mut waited, false),
+            "the first turn without the fact built the card without waiting for it"
+        );
+        assert!(waited);
+        assert!(
+            install_channel_settled(&mut waited, false),
+            "the card is still waiting after its one turn"
+        );
+        assert!(install_channel_settled(&mut waited, true));
+        let mut fresh = false;
+        assert!(install_channel_settled(&mut fresh, true));
+        assert!(!fresh, "a fact that was already there spent the wait");
+        let late = rows(&Machine {
+            install_channel: Channel::Unknown,
+            ..every_row()
+        });
+        assert!(
+            late.iter()
+                .any(|row| row.kind == RowKind::Explorer && !row.on),
+            "a card built without the fact switched the Explorer row on"
         );
     }
 
@@ -4026,7 +4258,22 @@ mod clock_edge_tests {
             .find("first_run::take_ready_edge(")
             .expect("one attempt after the probe settles");
         let compact: String = body.split_whitespace().collect();
-        assert!(compact.contains("if!first_run::take_ready_edge(&mutself.app.first_run_attempted,!copilot_on_path||attention_copilot::probe_settled(),){returnOk(());}"));
+        assert!(
+            compact
+                .contains("letcopilot_ready=!copilot_on_path||attention_copilot::probe_settled();")
+        );
+        assert!(compact.contains("if!first_run::take_ready_edge(&mutself.app.first_run_attempted,copilot_ready){returnOk(());}"));
+        // U-3: the one turn of waiting for the install channel comes before the
+        // edge and only once the copilot wait is over, and a missing answer is
+        // built as unknown.
+        let wait = body
+            .find("first_run::install_channel_settled(")
+            .expect("the card waits a turn for the install channel");
+        assert!(wait < edge, "the channel wait must come before the edge");
+        assert!(compact.contains("ifcopilot_ready&&!first_run::install_channel_settled(&mutself.app.first_run_waited_for_channel,install_channel::channel().is_some(),){returnOk(());}"));
+        assert!(compact.contains(
+            "install_channel:install_channel::channel().unwrap_or(install_channel::Channel::Unknown),"
+        ));
         for forbidden in ["std::fs::", "search_path(", "Command::"] {
             assert!(!body.contains(forbidden));
         }

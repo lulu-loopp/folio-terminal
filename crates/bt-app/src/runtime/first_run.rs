@@ -3,7 +3,8 @@
 
 use crate::{
     Announce, Runtime, attention_codex, attention_copilot, attention_hooks, attention_ownership,
-    diagnostics, explorer_menu, first_run, i18n, persist, psreadline, restore, toast, tooltip,
+    diagnostics, explorer_menu, first_run, i18n, install_channel, persist, psreadline, restore,
+    toast, tooltip,
 };
 use anyhow::Result;
 use std::path::PathBuf;
@@ -579,12 +580,25 @@ impl Runtime<'_> {
         if copilot_on_path {
             attention_copilot::begin_probe();
         }
+        let copilot_ready = !copilot_on_path || attention_copilot::probe_settled();
+        // **How this copy was installed decides whether the Explorer row
+        // arrives on** (U-3), and it lands on its own worker. Read at start and
+        // in milliseconds, so it is almost always here; when it is not, the card
+        // waits one turn for it — the worker's wake brings that turn round — and
+        // then reads a still-missing answer as unknown. Only once the copilot
+        // wait is over, so the one turn is not spent while something else is
+        // holding the card anyway.
+        if copilot_ready
+            && !first_run::install_channel_settled(
+                &mut self.app.first_run_waited_for_channel,
+                install_channel::channel().is_some(),
+            )
+        {
+            return Ok(());
+        }
         // The machine questions below include file reads. Consume readiness
         // once, before asking them, even if this platform offers no card rows.
-        if !first_run::take_ready_edge(
-            &mut self.app.first_run_attempted,
-            !copilot_on_path || attention_copilot::probe_settled(),
-        ) {
+        if !first_run::take_ready_edge(&mut self.app.first_run_attempted, copilot_ready) {
             return Ok(());
         }
         let machine = first_run::Machine {
@@ -609,6 +623,8 @@ impl Runtime<'_> {
             // line has their recorded intent cleared by the shell that reports
             // it — `first_run::pending_step`.
             powershell_integration_installed: false,
+            install_channel: install_channel::channel()
+                .unwrap_or(install_channel::Channel::Unknown),
         };
         let rows = first_run::rows(&machine);
         let shape = first_run::explorer_shape(&machine);
