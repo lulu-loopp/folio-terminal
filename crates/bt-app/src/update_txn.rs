@@ -4136,8 +4136,8 @@ mod tests {
         let exe = bundle.join("Contents").join("MacOS").join("folio");
         // Two accounts, each with its own data root; neither enters the answer.
         let data_roots = [
-            PathBuf::from("/Users/a/Library/Application Support/Folio"),
-            PathBuf::from("/Users/b/Library/Application Support/Folio"),
+            PathBuf::from("/Users/alice/Library/Application Support/Folio"),
+            PathBuf::from("/Users/bob/Library/Application Support/Folio"),
         ];
         let mut found = Vec::new();
         for data in &data_roots {
