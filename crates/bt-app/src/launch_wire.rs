@@ -582,7 +582,13 @@ pub(crate) fn take() -> Vec<LaunchRequest> {
 /// running Folio must never leave the person with nothing; the fallback is the behaviour every
 /// Folio had before this channel existed, and it is one branch rather than five so that a new way
 /// of failing cannot arrive with a new way of doing nothing.
+///
+/// **Only after the update pass** (`crate::update_startup`, 0.4.6 U-12): the
+/// [`crate::update_startup::Admitted`] it asks for is made by that pass alone,
+/// so this launch holds its installation's admission before it can be handed
+/// anywhere.
 pub(crate) fn hand_over(
+    _admitted: &crate::update_startup::Admitted,
     directory: &Path,
     argv: &cli::CliRequest,
     say: impl Fn(&str),

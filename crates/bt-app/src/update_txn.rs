@@ -46,6 +46,9 @@
 
 use std::fmt;
 use std::marker::PhantomData;
+use std::path::{Path, PathBuf};
+
+use bt_platform::HostPlatform;
 
 use serde::{Deserialize, Serialize};
 
@@ -1718,6 +1721,115 @@ fn finish_commit(disk: &Disk<'_>) -> Action {
     }
 }
 
+// ───────────────────────────── the installation home ─────────────────────────────
+
+/// The name of the Windows installation home inside the install folder.
+pub(crate) const WINDOWS_HOME: &str = ".folio-update";
+
+/// **The installation home `H` and the objects in it** ((b).2's objects
+/// table): `<install>\.folio-update\` on Windows, and on macOS the fixed
+/// sibling of the bundle, `<parent>/.<BundleName>.folio-update/` (F-3), so the
+/// running copy finds it from its own executable and nothing else.
+///
+/// A path, not a claim that anything is there: a copy started before any
+/// transaction finds no home at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Home {
+    root: PathBuf,
+    rescue: RescueShape,
+}
+
+/// **What the header's `rescue` names**, which differs by platform: the
+/// rescue executable itself on Windows (`H\<txn>\rescue\folio.exe`), the
+/// rescue clone's bundle on macOS, whose executable sits where this copy's own
+/// sits inside its bundle — the clone is a copy of this very bundle (F-8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RescueShape {
+    Executable,
+    Bundle { inside: PathBuf },
+}
+
+impl Home {
+    /// The home of the copy whose executable is `exe`, or `None` where this
+    /// build has no updater home: an executable outside a bundle on macOS, and
+    /// every other platform.
+    pub(crate) fn of(platform: HostPlatform, exe: &Path) -> Option<Self> {
+        match platform {
+            HostPlatform::Windows => Some(Self {
+                root: exe.parent()?.join(WINDOWS_HOME),
+                rescue: RescueShape::Executable,
+            }),
+            HostPlatform::MacOs => {
+                let (bundle, inside) = bundle_of(exe)?;
+                let mut name = std::ffi::OsString::from(".");
+                name.push(bundle.file_name()?);
+                name.push(".folio-update");
+                Some(Self {
+                    root: bundle.parent()?.join(name),
+                    rescue: RescueShape::Bundle {
+                        inside: inside.to_path_buf(),
+                    },
+                })
+            }
+            HostPlatform::OtherUnix => None,
+        }
+    }
+
+    /// A Windows-shaped home at `root` itself, for a test that builds one in a
+    /// temporary folder.
+    #[cfg(test)]
+    pub(crate) fn at(root: PathBuf) -> Self {
+        Self {
+            root,
+            rescue: RescueShape::Executable,
+        }
+    }
+
+    /// **The program a start hands itself to**, from the header's `rescue`.
+    pub(crate) fn rescue_program(&self, rescue: &str) -> PathBuf {
+        match &self.rescue {
+            RescueShape::Executable => PathBuf::from(rescue),
+            RescueShape::Bundle { inside } => Path::new(rescue).join(inside),
+        }
+    }
+
+    /// `H\admission`: shared by every running copy, exclusive by the mover.
+    pub(crate) fn admission(&self) -> PathBuf {
+        self.root.join("admission")
+    }
+
+    /// `H\lock`: the transaction lock, held exclusive by whoever advances or
+    /// retires the journal.
+    pub(crate) fn lock(&self) -> PathBuf {
+        self.root.join("lock")
+    }
+
+    /// `H\journal.json`.
+    pub(crate) fn journal(&self) -> PathBuf {
+        self.root.join("journal.json")
+    }
+
+    /// `H\<txn>`: everything one transaction owns.
+    pub(crate) fn transaction(&self, txn: TxnId) -> PathBuf {
+        self.root.join(txn.to_string())
+    }
+}
+
+/// A macOS executable's bundle and its path inside it:
+/// `<X>.app/Contents/MacOS/<name>` → (`<X>.app`, `Contents/MacOS/<name>`).
+fn bundle_of(exe: &Path) -> Option<(&Path, &Path)> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    let shaped = macos.file_name()? == "MacOS"
+        && contents.file_name()? == "Contents"
+        && bundle.extension()? == "app";
+    if !shaped {
+        return None;
+    }
+    Some((bundle, exe.strip_prefix(bundle).ok()?))
+}
+
 // ───────────────────────────── the ordinary start ─────────────────────────────
 
 /// What an ordinary start found at `H\journal.json`.
@@ -1732,11 +1844,14 @@ pub(crate) enum JournalRead {
 /// the header, whether the transaction lock was free, the digest of its own
 /// image and of the rescue build the header names, and the transaction its
 /// own `--update-trial` names, if it was started as a trial.
+///
+/// `own_image` is `None` when the start did not or could not measure itself:
+/// it then cannot tell a replaced install from its own, and replaces nothing.
 #[derive(Clone, Debug)]
 pub(crate) struct StartView {
     pub(crate) journal: JournalRead,
     pub(crate) lock_free: bool,
-    pub(crate) own_image: Digest,
+    pub(crate) own_image: Option<Digest>,
     pub(crate) rescue_image: Option<Digest>,
     pub(crate) trial_of: Option<TxnId>,
 }
@@ -1788,9 +1903,10 @@ pub(crate) fn at_start(view: &StartView) -> StartAction {
         Class::Destructive if view.trial_of == Some(header.txn) => StartAction::RunAsTrial,
         Class::Destructive => StartAction::HandToRescue,
         Class::Preparing | Class::Deferred => {
-            let replaced = view
-                .rescue_image
-                .is_some_and(|rescue| rescue != view.own_image);
+            let replaced = matches!(
+                (view.own_image, view.rescue_image),
+                (Some(own), Some(rescue)) if own != rescue
+            );
             if view.lock_free && replaced {
                 StartAction::Discard
             } else {
@@ -2034,7 +2150,7 @@ mod tests {
         StartView {
             journal,
             lock_free,
-            own_image: digest(0x01),
+            own_image: Some(digest(0x01)),
             rescue_image: Some(digest(0x01)),
             trial_of: None,
         }
@@ -3413,7 +3529,69 @@ mod tests {
             view.lock_free = true;
             view.rescue_image = None;
             assert_eq!(at_start(&view), StartAction::Continue);
+            view.rescue_image = Some(digest(0x02));
+            view.own_image = None;
+            assert_eq!(at_start(&view), StartAction::Continue);
         }
+    }
+
+    /// RED (U-12) — **the installation home is found from the running
+    /// executable alone: inside the install folder on Windows, beside the
+    /// bundle on macOS, and nowhere on any other platform or outside a
+    /// bundle.**
+    ///
+    /// (b).2's objects table, and F-3's reason for the macOS shape: the home
+    /// must outlive the swap of the bundle it serves, so it cannot be inside
+    /// it. The rescue build's program follows the same layout: the Windows
+    /// header names the executable, the macOS header the clone's bundle, whose
+    /// executable is where this copy's own is inside its bundle.
+    ///
+    /// MUTATION: in `Home::of`'s macOS arm, join the name onto `bundle`
+    /// instead of `bundle.parent()?` (a home inside the bundle).
+    #[test]
+    fn the_home_is_found_from_the_running_executable() {
+        let install = PathBuf::from("Folio");
+        let home = Home::of(HostPlatform::Windows, &install.join("folio.exe")).unwrap();
+        let root = install.join(WINDOWS_HOME);
+        assert_eq!(home.admission(), root.join("admission"));
+        assert_eq!(home.lock(), root.join("lock"));
+        assert_eq!(home.journal(), root.join("journal.json"));
+        assert_eq!(
+            home.transaction(txn()),
+            root.join("7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a")
+        );
+        let rescue = root
+            .join("7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a")
+            .join("rescue")
+            .join("folio.exe");
+        assert_eq!(home.rescue_program(&rescue.to_string_lossy()), rescue);
+
+        let applications = PathBuf::from("Applications");
+        let exe = applications
+            .join("Folio.app")
+            .join("Contents")
+            .join("MacOS")
+            .join("folio");
+        let home = Home::of(HostPlatform::MacOs, &exe).unwrap();
+        assert_eq!(
+            home.journal(),
+            applications
+                .join(".Folio.app.folio-update")
+                .join("journal.json")
+        );
+        let clone = applications
+            .join(".Folio.app.folio-update")
+            .join("7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a7a")
+            .join("rescue")
+            .join("Folio.app");
+        assert_eq!(
+            home.rescue_program(&clone.to_string_lossy()),
+            clone.join("Contents").join("MacOS").join("folio")
+        );
+
+        let loose = PathBuf::from("target").join("debug").join("folio");
+        assert_eq!(Home::of(HostPlatform::MacOs, &loose), None);
+        assert_eq!(Home::of(HostPlatform::OtherUnix, &exe), None);
     }
 
     /// RED (U-10) — **a file already present at a name the new set ships is a

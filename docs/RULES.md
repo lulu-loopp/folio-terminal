@@ -809,7 +809,7 @@ preferences; persists under the data directory; versioned through
 `persist::SettingsStore` / `SettingsV1` and a forward-only migration list;
 applied in process at its own door and **not re-read from disk during a run**.
 *CLI* — audience: the outside world (a shell, Explorer, another Folio); carries
-per-launch placement and the six argv doors; never persists; `cli::parse` is pure
+per-launch placement and the seven argv doors; never persists; `cli::parse` is pure
 and total over the raw arguments, producing a request or a fault, and `resolve`
 asks this machine once, at launch.
 *Environment* — audience: whoever can already run programs as this user; carries

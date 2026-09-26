@@ -26,6 +26,10 @@ All notable changes to Folio are recorded here. The format follows
 - `folio.exe` now carries a signed list of every other file in the Windows
   download, with their hashes, and a release is refused if any file differs
   from it; the Mac app records the same update facts in its signed bundle.
+- Every start now checks, before anything else, whether an update of its own
+  install is unfinished: a finished one's leftovers are cleared, and a start
+  made while an update is being applied waits for it. No build writes such an
+  update yet, so nothing changes for anyone today.
 
 ### Fixed
 
