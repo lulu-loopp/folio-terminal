@@ -126,7 +126,12 @@ Compiled out of release builds.
 Never present in a release binary. `BT_PSREADLINE_MODULE_PATH`, `BT_BURST_EMIT`,
 `BT_BURST_ONLY`, `BT_DEFER_EMIT`, `BT_MATH_ROBUSTNESS_TEST_CHILD` (the marker a
 test process sets on the child it spawns to prove the decoration worker survives a
-hostile formula).
+hostile formula), and `BT_INSTALL_TXN_CHILD_ADMISSION`, `BT_INSTALL_TXN_CHILD_READY`
+and `BT_INSTALL_TXN_CHILD_GO` — the three paths `bt-platform`'s
+`install_txn::tests::admission_shared_blocks_exclusive_across_processes` sets on the
+second copy of its own test binary: the admission file the child holds shared, the
+file the child creates once it holds it, and the file whose appearance tells it to
+let go. Only that test's child half reads them; no product code does.
 
 | Variable | Value | What it does | What can end up in the file | Default |
 | --- | --- | --- | --- | --- |
