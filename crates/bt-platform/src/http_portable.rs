@@ -41,3 +41,21 @@ pub fn https_get(request: &HttpsGet<'_>) -> Result<String, String> {
     let _ = request;
     Err("this build has no HTTP stack".to_owned())
 }
+
+pub use crate::https_download::{
+    DownloadError, DownloadMonitor, DownloadProgress, DownloadStage, Downloaded, HttpsDownload,
+};
+
+/// Stream a file. Refused, for the reason `https_get` is: this build has no
+/// HTTP stack. Nothing is written.
+///
+/// # Errors
+///
+/// Always, at [`DownloadStage::Connect`].
+pub fn https_download(request: &HttpsDownload<'_>) -> Result<Downloaded, DownloadError> {
+    let _ = request;
+    Err(DownloadError::at(
+        DownloadStage::Connect,
+        "this build has no HTTP stack",
+    ))
+}

@@ -16,6 +16,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- Folio can download a release file on its own, for the coming in-app update:
+  one request, a size limit set before the first byte, and nothing left behind
+  when a download fails or is cancelled. Nothing uses it yet.
 - Building Folio for Windows no longer needs Windows PowerShell: the ConPTY
   files are unpacked by the build itself, so the Windows build can be checked
   from Linux or macOS.

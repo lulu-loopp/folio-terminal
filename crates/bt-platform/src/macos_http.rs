@@ -137,6 +137,8 @@ use objc2_foundation::{
     NSURLSessionTaskDelegate, ns_string,
 };
 
+use crate::https_download::{Deadlines, Destination, Partial, admit_length};
+
 /// The one request this module knows how to make.
 ///
 /// **The same six fields as the Windows arm, in the same order, with the same
@@ -308,20 +310,12 @@ define_class!(
             request: &NSURLRequest,
             handler: &DynBlock<dyn Fn(*mut NSURLRequest)>,
         ) {
-            let secure = request
-                .URL()
-                .and_then(|url| url.scheme())
-                .is_some_and(|scheme| scheme.to_string().eq_ignore_ascii_case("https"));
-            let within = {
-                let mut progress = self.ivars().locked();
-                progress.redirects += 1;
-                progress.redirects <= MAX_REDIRECTS
-            };
+            let follow = follows(request, &mut self.ivars().locked().redirects);
             // The pointer is the argument's own, unretained, for the length of
             // this call — which is what `completionHandler(request)` is in
             // Objective-C, and what the loading system expects: it retains the
             // request itself if it goes on to use it.
-            let next = if secure && within {
+            let next = if follow {
                 ptr::from_ref(request).cast_mut()
             } else {
                 ptr::null_mut()
@@ -421,6 +415,18 @@ impl Transport {
         // allocation whose ivars are set.
         unsafe { msg_send![super(this), init] }
     }
+}
+
+/// **The redirect policy, for both delegates**: follow an `https` target, up to
+/// [`MAX_REDIRECTS`]; refuse anything else, which hands the `30x` back as the
+/// response. `redirects` is the count so far, and is counted here.
+fn follows(request: &NSURLRequest, redirects: &mut u32) -> bool {
+    let secure = request
+        .URL()
+        .and_then(|url| url.scheme())
+        .is_some_and(|scheme| scheme.to_string().eq_ignore_ascii_case("https"));
+    *redirects += 1;
+    secure && *redirects <= MAX_REDIRECTS
 }
 
 /// **The address, built here and then made to prove it is the one that was
@@ -538,6 +544,344 @@ fn fetch(url: &NSURL, request: &HttpsGet<'_>) -> Result<String, String> {
     session.invalidateAndCancel();
 
     String::from_utf8(answer?).map_err(|_| "the body is not text".to_owned())
+}
+
+pub use crate::https_download::{
+    DownloadError, DownloadMonitor, DownloadProgress, DownloadStage, Downloaded, HttpsDownload,
+};
+
+/// **What the download's delegate is filling in and the caller is waiting
+/// for** — [`Exchange`]'s twin for a body that goes to a file.
+///
+/// The partial file lives here, not on the caller's stack: the delegate writes
+/// each chunk into it on the session's queue, as it arrives, so the body is
+/// never held in memory. When the caller gives up (a cancel, a deadline) it
+/// marks the transfer abandoned and drops the partial under the lock, which
+/// removes the temporary file; a callback that arrives afterwards finds no
+/// partial and writes nothing.
+struct Download {
+    destination: Destination,
+    transfer: Mutex<Transfer>,
+    /// Raised by every callback.
+    stirred: Condvar,
+}
+
+/// The part of a download two threads touch.
+#[derive(Default)]
+struct Transfer {
+    /// The HTTP status, once there is a response.
+    status: Option<NSInteger>,
+    /// What the response announced, if it announced a length. A negative
+    /// `expectedContentLength` is Foundation's "unknown" and becomes `None`
+    /// here, never a number.
+    announced: Option<u64>,
+    /// The body on its way to the file, between an admitted response and the
+    /// end of the task.
+    partial: Option<Partial>,
+    /// The first thing that went wrong.
+    refusal: Option<DownloadError>,
+    /// How many redirects have been followed.
+    redirects: u32,
+    /// Whether a callback ran since the caller last looked — the idle clock's
+    /// input.
+    heard: bool,
+    /// Whether `didCompleteWithError:` has run.
+    done: bool,
+    /// Whether the caller has stopped waiting.
+    abandoned: bool,
+}
+
+impl Download {
+    fn locked(&self) -> MutexGuard<'_, Transfer> {
+        self.transfer
+            .lock()
+            .expect("the download's transfer is not held across a panic")
+    }
+
+    /// Record the first thing that went wrong, and drop the partial with it —
+    /// which removes the temporary file.
+    fn refuse(transfer: &mut Transfer, why: DownloadError) {
+        if transfer.refusal.is_none() {
+            transfer.refusal = Some(why);
+        }
+        transfer.partial = None;
+    }
+
+    /// The stage the transfer is in, for a failure the caller observes.
+    fn stage(transfer: &Transfer) -> DownloadStage {
+        match (transfer.status, &transfer.partial) {
+            (None, _) => DownloadStage::Connect,
+            (Some(_), None) => DownloadStage::Headers,
+            (Some(_), Some(_)) => DownloadStage::Body,
+        }
+    }
+
+    /// **Block this thread until the task is over, a deadline passes or the
+    /// caller cancels** — in slices of at most `DOWNLOAD_CANCEL_LATENCY`.
+    fn wait(
+        &self,
+        deadlines: &mut Deadlines,
+        task: &NSURLSessionDataTask,
+    ) -> Result<(Partial, Option<u64>), DownloadError> {
+        let mut transfer = self.locked();
+        while !transfer.done {
+            if std::mem::take(&mut transfer.heard) {
+                deadlines.heard();
+            }
+            if let Err(why) = deadlines.check(Self::stage(&transfer), self.destination.monitor()) {
+                transfer.abandoned = true;
+                transfer.partial = None;
+                drop(transfer);
+                task.cancel();
+                return Err(why);
+            }
+            let (next, _) = self
+                .stirred
+                .wait_timeout(transfer, deadlines.slice())
+                .expect("the download's transfer is not held across a panic");
+            transfer = next;
+        }
+        match (transfer.status, transfer.refusal.take()) {
+            (Some(status), _) if status != 200 => Err(DownloadError::at(
+                DownloadStage::Status,
+                format!("the server answered {status}"),
+            )),
+            (_, Some(why)) => Err(why),
+            (Some(_), None) => match transfer.partial.take() {
+                Some(partial) => Ok((partial, transfer.announced)),
+                None => Err(DownloadError::at(
+                    DownloadStage::Body,
+                    "the body ended before a file was made".to_owned(),
+                )),
+            },
+            (None, None) => Err(DownloadError::at(
+                DownloadStage::Connect,
+                "the request ended without an answer".to_owned(),
+            )),
+        }
+    }
+}
+
+define_class!(
+    // SAFETY:
+    // - `NSObject` has no subclassing requirements.
+    // - This class does not implement `Drop`; its one ivar does, and the
+    //   macro's generated `dealloc` runs it.
+    #[unsafe(super(NSObject))]
+    #[name = "FolioUpdateDownloadTransport"]
+    #[ivars = Arc<Download>]
+    struct DownloadTransport;
+
+    unsafe impl NSObjectProtocol for DownloadTransport {}
+
+    unsafe impl NSURLSessionDelegate for DownloadTransport {}
+
+    unsafe impl NSURLSessionTaskDelegate for DownloadTransport {
+        /// The check's redirect policy, word for word: `https` only, ten hops.
+        #[unsafe(method(URLSession:task:willPerformHTTPRedirection:newRequest:completionHandler:))]
+        fn will_perform_redirection(
+            &self,
+            _session: &NSURLSession,
+            _task: &NSURLSessionTask,
+            _response: &NSHTTPURLResponse,
+            request: &NSURLRequest,
+            handler: &DynBlock<dyn Fn(*mut NSURLRequest)>,
+        ) {
+            let follow = {
+                let mut transfer = self.ivars().locked();
+                transfer.heard = true;
+                follows(request, &mut transfer.redirects)
+            };
+            let next = if follow {
+                ptr::from_ref(request).cast_mut()
+            } else {
+                ptr::null_mut()
+            };
+            handler.call((next,));
+        }
+
+        /// The task is over. The one place that marks it done.
+        #[unsafe(method(URLSession:task:didCompleteWithError:))]
+        fn did_complete_with_error(
+            &self,
+            _session: &NSURLSession,
+            _task: &NSURLSessionTask,
+            error: Option<&NSError>,
+        ) {
+            let download = self.ivars();
+            let mut transfer = download.locked();
+            if let Some(error) = error {
+                let stage = Download::stage(&transfer);
+                Download::refuse(
+                    &mut transfer,
+                    DownloadError::at(
+                        stage,
+                        format!("NSURLSession: {}", error.localizedDescription()),
+                    ),
+                );
+            }
+            transfer.done = true;
+            transfer.heard = true;
+            drop(transfer);
+            download.stirred.notify_all();
+        }
+    }
+
+    unsafe impl NSURLSessionDataDelegate for DownloadTransport {
+        /// The status, the announced length against the ceiling, and — only
+        /// for an admitted `200` — the temporary file.
+        #[unsafe(method(URLSession:dataTask:didReceiveResponse:completionHandler:))]
+        fn did_receive_response(
+            &self,
+            _session: &NSURLSession,
+            _task: &NSURLSessionDataTask,
+            response: &NSURLResponse,
+            handler: &DynBlock<dyn Fn(NSURLSessionResponseDisposition)>,
+        ) {
+            let download = self.ivars();
+            let mut transfer = download.locked();
+            transfer.heard = true;
+            let status = response
+                .downcast_ref::<NSHTTPURLResponse>()
+                .map(NSHTTPURLResponse::statusCode);
+            transfer.status = status;
+            let announced = u64::try_from(response.expectedContentLength()).ok();
+            transfer.announced = announced;
+            let admitted = !transfer.abandoned
+                && status == Some(200)
+                && match admit_length(announced, download.destination.ceiling())
+                    .and_then(|()| Partial::create(&download.destination, announced))
+                {
+                    Ok(partial) => {
+                        transfer.partial = Some(partial);
+                        true
+                    }
+                    Err(why) => {
+                        Download::refuse(&mut transfer, why);
+                        false
+                    }
+                };
+            drop(transfer);
+            download.stirred.notify_all();
+            handler.call((if admitted {
+                NSURLSessionResponseDisposition::Allow
+            } else {
+                NSURLSessionResponseDisposition::Cancel
+            },));
+        }
+
+        /// One chunk, counted against the ceiling before it is written.
+        #[unsafe(method(URLSession:dataTask:didReceiveData:))]
+        fn did_receive_data(
+            &self,
+            _session: &NSURLSession,
+            task: &NSURLSessionDataTask,
+            data: &NSData,
+        ) {
+            let download = self.ivars();
+            let mut transfer = download.locked();
+            transfer.heard = true;
+            let Some(partial) = transfer.partial.as_mut() else {
+                return;
+            };
+            let refused = partial.accept(&data.to_vec()).err();
+            if let Some(why) = refused {
+                Download::refuse(&mut transfer, why);
+                drop(transfer);
+                task.cancel();
+            }
+            download.stirred.notify_all();
+        }
+    }
+);
+
+// SAFETY: the class has exactly one ivar, an `Arc<Download>`, and every
+// mutation of what it points at goes through `Download`'s own `Mutex`.
+unsafe impl Send for DownloadTransport {}
+// SAFETY: as above.
+unsafe impl Sync for DownloadTransport {}
+
+impl DownloadTransport {
+    fn new(download: Arc<Download>) -> Retained<Self> {
+        let this = Self::alloc().set_ivars(download);
+        // SAFETY: `NSObject`'s designated initializer, called on a fresh
+        // allocation whose ivars are set.
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+/// **Stream `https://{host}{path}` to `directory/file_name`, bounded** (U-7).
+///
+/// The Windows arm's contract, on `NSURLSession`: `Ok` only for a `200` whose
+/// body arrived whole, within the ceiling, flushed and renamed; every other
+/// outcome an `Err` naming its stage, with nothing left in the directory. No
+/// retries and no resumption: see [`crate::https_download`].
+///
+/// Blocks for as long as the transfer takes, up to `budget`: a worker's call,
+/// never the window thread's.
+///
+/// # Errors
+///
+/// A [`DownloadError`] whenever the file is not whole under its name.
+pub fn https_download(request: &HttpsDownload<'_>) -> Result<Downloaded, DownloadError> {
+    let url = address(request.host, request.path)
+        .map_err(|why| DownloadError::at(DownloadStage::Connect, why))?;
+    download_from(&url, request)
+}
+
+/// **The whole download, once the address is settled** — split from
+/// [`https_download`] at [`fetch`]'s seam, for [`fetch`]'s reason.
+///
+/// The session's own two timeouts are set **past** this module's deadlines,
+/// as backstops: the wait below checks the idle and budget clocks every
+/// `DOWNLOAD_CANCEL_LATENCY`, and it is its sentence a caller reads, not
+/// Foundation's `The request timed out.`
+fn download_from(url: &NSURL, request: &HttpsDownload<'_>) -> Result<Downloaded, DownloadError> {
+    let download = Arc::new(Download {
+        destination: Destination::of(request),
+        transfer: Mutex::new(Transfer::default()),
+        stirred: Condvar::new(),
+    });
+    let transport = DownloadTransport::new(Arc::clone(&download));
+    let mut deadlines = Deadlines::start(request.idle_timeout, request.budget);
+
+    let configuration = NSURLSessionConfiguration::ephemeralSessionConfiguration();
+    configuration.setTimeoutIntervalForRequest(
+        (request.idle_timeout + Duration::from_secs(1)).as_secs_f64(),
+    );
+    configuration
+        .setTimeoutIntervalForResource((request.budget + request.idle_timeout).as_secs_f64());
+    configuration.setHTTPShouldSetCookies(false);
+    configuration.setRequestCachePolicy(NSURLRequestCachePolicy::ReloadIgnoringLocalCacheData);
+    configuration.setHTTPMaximumConnectionsPerHost(1);
+
+    // SAFETY: as in `fetch`: the delegate is this file's own class and the
+    // queue is the session's own serial one.
+    let session = unsafe {
+        NSURLSession::sessionWithConfiguration_delegate_delegateQueue(
+            &configuration,
+            Some(ProtocolObject::from_ref(&*transport)),
+            None,
+        )
+    };
+    let http = NSMutableURLRequest::requestWithURL_cachePolicy_timeoutInterval(
+        url,
+        NSURLRequestCachePolicy::ReloadIgnoringLocalCacheData,
+        (request.idle_timeout + Duration::from_secs(1)).as_secs_f64(),
+    );
+    http.setHTTPMethod(ns_string!("GET"));
+    http.setValue_forHTTPHeaderField(
+        Some(&NSString::from_str(request.user_agent)),
+        ns_string!("User-Agent"),
+    );
+
+    let task = session.dataTaskWithRequest(&http);
+    task.resume();
+    let answer = download.wait(&mut deadlines, &task);
+    // Unconditional, on every path, for `fetch`'s reason.
+    session.invalidateAndCancel();
+    let (partial, announced) = answer?;
+    partial.finish(announced)
 }
 
 #[cfg(test)]
@@ -817,5 +1161,320 @@ mod tests {
         )
         .expect_err("there is no such repository");
         assert_eq!(refusal, "the server answered 404");
+    }
+
+    /// **The download's cases, on `NSURLSession`** — the Windows arm's list,
+    /// against the same loopback server, through [`super::download_from`] for
+    /// the reason `ask_this_machine` uses `fetch`.
+    mod downloads {
+        use std::{
+            path::{Path, PathBuf},
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+
+        use objc2_foundation::{NSString, NSURL};
+
+        use super::super::{
+            DownloadError, DownloadMonitor, DownloadStage, Downloaded, HttpsDownload, download_from,
+        };
+        use crate::https_download::{
+            DOWNLOAD_BUDGET, DOWNLOAD_IDLE_TIMEOUT,
+            loopback::{Step, body, head, ok, serve},
+        };
+
+        const IDLE: Duration = Duration::from_secs(5);
+        const BUDGET: Duration = Duration::from_secs(20);
+
+        fn scratch(name: &str) -> PathBuf {
+            let directory = std::env::temp_dir()
+                .join("bt-platform-http-download")
+                .join(format!("{name}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&directory);
+            std::fs::create_dir_all(&directory).expect("a scratch directory");
+            directory
+        }
+
+        fn entries(directory: &Path) -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(directory)
+                .expect("the scratch directory")
+                .map(|entry| {
+                    entry
+                        .expect("an entry")
+                        .file_name()
+                        .to_string_lossy()
+                        .into_owned()
+                })
+                .collect();
+            names.sort();
+            names
+        }
+
+        fn fetch(
+            port: u16,
+            directory: &Path,
+            ceiling: u64,
+            deadlines: (Duration, Duration),
+            monitor: &Arc<DownloadMonitor>,
+        ) -> Result<Downloaded, DownloadError> {
+            let composed = format!("http://127.0.0.1:{port}/folio-0.4.6-aarch64.dmg");
+            let url = NSURL::URLWithString(&NSString::from_str(&composed))
+                .expect("a loopback address this system can read");
+            download_from(
+                &url,
+                &HttpsDownload {
+                    host: "127.0.0.1",
+                    path: "/folio-0.4.6-aarch64.dmg",
+                    user_agent: "Folio",
+                    directory,
+                    file_name: "folio.dmg",
+                    ceiling,
+                    idle_timeout: deadlines.0,
+                    budget: deadlines.1,
+                    monitor,
+                },
+            )
+        }
+
+        fn quiet() -> Arc<DownloadMonitor> {
+            Arc::new(DownloadMonitor::new(|| {}))
+        }
+
+        /// RED (U-7) — **a body with its length lands under its name byte for
+        /// byte, and nothing else is left.**
+        ///
+        /// MUTATION: skip `partial.accept` in `didReceiveData:` and the
+        /// length check refuses the body.
+        #[test]
+        fn a_whole_body_lands_under_its_name_byte_for_byte() {
+            let directory = scratch("whole");
+            let bytes = body(300_000);
+            let served = bytes.clone();
+            let port = serve(1, move |_| {
+                vec![Step::Send(ok(&served, Some(served.len())))]
+            });
+            let monitor = quiet();
+            let done =
+                fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &monitor).expect("the body");
+            assert_eq!(done.bytes, 300_000);
+            assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
+            assert_eq!(entries(&directory), vec!["folio.dmg".to_owned()]);
+            let seen = monitor.take();
+            assert_eq!(seen.received, 300_000);
+            assert_eq!(seen.expected, Some(300_000));
+        }
+
+        /// RED (U-7) — **a body exactly at the ceiling is accepted.**
+        ///
+        /// MUTATION: make the ceiling test `>=` in `Partial::accept`.
+        #[test]
+        fn a_body_exactly_at_the_ceiling_is_accepted() {
+            let directory = scratch("at-ceiling");
+            let bytes = body(70_000);
+            let served = bytes.clone();
+            let port = serve(1, move |_| {
+                vec![Step::Send(ok(&served, Some(served.len())))]
+            });
+            let done =
+                fetch(port, &directory, 70_000, (IDLE, BUDGET), &quiet()).expect("at the ceiling");
+            assert_eq!(std::fs::read(&done.path).expect("the file"), bytes);
+        }
+
+        /// RED (U-7) — **a stream with no length is bounded: one byte over is
+        /// refused mid-stream, and neither name is left.**
+        ///
+        /// §F Transport: `unknown_length_stream_is_bounded`. Foundation
+        /// reports the absent length as `-1`; it must reach the card as
+        /// `None`, never as a number.
+        ///
+        /// MUTATION: cast `expectedContentLength` with `as u64`, and
+        /// `expected` is 18446744073709551615.
+        #[test]
+        fn unknown_length_stream_is_bounded() {
+            let directory = scratch("over-unknown");
+            let served = body(70_001);
+            let port = serve(1, move |_| vec![Step::Send(ok(&served, None))]);
+            let monitor = quiet();
+            let error = fetch(port, &directory, 70_000, (IDLE, BUDGET), &monitor)
+                .expect_err("one byte over");
+            assert_eq!(error.stage, DownloadStage::Body, "{error}");
+            assert_eq!(error.reason, "the body passed the ceiling of 70000 bytes");
+            assert!(entries(&directory).is_empty(), "{:?}", entries(&directory));
+            assert_eq!(monitor.peek().expected, None, "no length was announced");
+        }
+
+        /// RED (U-7) — **a `Content-Length` over the ceiling is refused at the
+        /// headers, before any body or file.**
+        ///
+        /// MUTATION: drop `admit_length` from `didReceiveResponse:`.
+        #[test]
+        fn an_announced_length_over_the_ceiling_is_refused_before_the_body() {
+            let directory = scratch("announced-over");
+            let port = serve(1, |_| {
+                vec![
+                    Step::Send(head(200, "OK", &["Content-Length: 1073741824".to_owned()])),
+                    Step::Pause(Duration::from_secs(10)),
+                ]
+            });
+            let started = Instant::now();
+            let error =
+                fetch(port, &directory, 70_000, (IDLE, BUDGET), &quiet()).expect_err("too long");
+            assert_eq!(error.stage, DownloadStage::Headers, "{error}");
+            assert_eq!(
+                error.reason,
+                "the server announced 1073741824 bytes, more than the ceiling of 70000"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(3),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(entries(&directory).is_empty());
+        }
+
+        /// RED (U-7) — **a body cut short of its announced length is refused,
+        /// and no file stands under the final name.**
+        ///
+        /// MUTATION: pass `None` to `Partial::finish` and ignore the task's
+        /// error, and a 40,000-byte `folio.dmg` appears.
+        #[test]
+        fn a_truncated_body_never_takes_the_name() {
+            let directory = scratch("truncated");
+            let port = serve(1, |_| {
+                let mut bytes = head(200, "OK", &["Content-Length: 100000".to_owned()]);
+                bytes.extend_from_slice(&body(40_000));
+                vec![Step::Send(bytes)]
+            });
+            let error =
+                fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &quiet()).expect_err("cut short");
+            assert_eq!(error.stage, DownloadStage::Body, "{error}");
+            assert!(entries(&directory).is_empty(), "{:?}", entries(&directory));
+        }
+
+        /// RED (U-7) — **a status that is not `200` is the status stage and
+        /// makes no file.**
+        ///
+        /// MUTATION: let the `refusal` outrank the status in
+        /// `Download::wait`, and this answers `NSURLSession: cancelled`.
+        #[test]
+        fn a_status_that_is_not_200_makes_no_file() {
+            let directory = scratch("status");
+            let port = serve(1, |_| {
+                let page = b"<h1>Not Found</h1>";
+                let mut bytes = head(
+                    404,
+                    "Not Found",
+                    &[format!("Content-Length: {}", page.len())],
+                );
+                bytes.extend_from_slice(page);
+                vec![Step::Send(bytes)]
+            });
+            let error =
+                fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &quiet()).expect_err("404");
+            assert_eq!(error.stage, DownloadStage::Status);
+            assert_eq!(error.reason, "the server answered 404");
+            assert!(entries(&directory).is_empty());
+        }
+
+        /// RED (U-7) — **a redirect to a plain `http` address is refused, and
+        /// the `302` is the answer.**
+        ///
+        /// §F Transport: the refusing half of
+        /// `https_redirects_work_and_http_redirects_refuse`. This arm's policy
+        /// is `follows`: an `https` target only. A loopback server can only
+        /// redirect to `http`, which is exactly the case to refuse; the
+        /// following half needs TLS on this machine and is `follows`'s scheme
+        /// test, shared with the check.
+        ///
+        /// MUTATION: return `true` from `follows` whatever the scheme, and the
+        /// file is saved from `http`.
+        #[test]
+        fn a_redirect_to_plain_http_is_refused_with_its_status() {
+            let directory = scratch("redirect");
+            let served = body(5_000);
+            let port = serve(2, move |path| {
+                if path == "/folio-0.4.6-aarch64.dmg" {
+                    vec![Step::Send(head(
+                        302,
+                        "Found",
+                        &[
+                            "Location: /objects/asset".to_owned(),
+                            "Content-Length: 0".to_owned(),
+                        ],
+                    ))]
+                } else {
+                    vec![Step::Send(ok(&served, Some(served.len())))]
+                }
+            });
+            let error =
+                fetch(port, &directory, 1 << 20, (IDLE, BUDGET), &quiet()).expect_err("refused");
+            assert_eq!(error.stage, DownloadStage::Status, "{error}");
+            assert_eq!(error.reason, "the server answered 302");
+            assert!(entries(&directory).is_empty());
+        }
+
+        /// RED (U-7) — **a trickling body ends at the budget, which nothing
+        /// resets, and leaves no file.**
+        ///
+        /// §F Transport: `redirect_loop_and_trickle_body_hit_deadlines` (the
+        /// loop half is `follows`'s count, which the check already carries).
+        ///
+        /// MUTATION: reset `started` in `Deadlines::heard`.
+        #[test]
+        fn redirect_loop_and_trickle_body_hit_deadlines() {
+            let directory = scratch("trickle");
+            let port = serve(1, |_| {
+                vec![
+                    Step::Send(head(200, "OK", &[])),
+                    Step::Trickle(Duration::from_millis(50), Duration::from_secs(8)),
+                ]
+            });
+            let started = Instant::now();
+            let budget = Duration::from_millis(1_500);
+            let error =
+                fetch(port, &directory, 1 << 20, (IDLE, budget), &quiet()).expect_err("the budget");
+            let took = started.elapsed();
+            assert_eq!(error.stage, DownloadStage::Body, "{error}");
+            assert!(error.reason.contains("inside its budget"), "{error}");
+            assert!(took < budget + Duration::from_secs(1), "{took:?}");
+            assert!(entries(&directory).is_empty(), "{:?}", entries(&directory));
+        }
+
+        /// RED (U-7) — **a cancel interrupts a wait the server is not ending,
+        /// within the stated latency.**
+        ///
+        /// §F Transport: `cancel_interrupts_idle_wait`, with the product's
+        /// deadlines. `NSURLSession` does not say when the request was sent,
+        /// so a wait before the response is named `connect` on this arm.
+        ///
+        /// MUTATION: drop the cancel test from `Deadlines::check`.
+        #[test]
+        fn cancel_interrupts_idle_wait() {
+            let directory = scratch("cancel");
+            let port = serve(1, |_| vec![Step::Pause(Duration::from_secs(40))]);
+            let monitor = quiet();
+            let canceller = Arc::clone(&monitor);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                canceller.cancel();
+            });
+            let started = Instant::now();
+            let error = fetch(
+                port,
+                &directory,
+                1 << 20,
+                (DOWNLOAD_IDLE_TIMEOUT, DOWNLOAD_BUDGET),
+                &monitor,
+            )
+            .expect_err("cancelled");
+            assert!(error.cancelled, "{error}");
+            assert_eq!(error.stage, DownloadStage::Connect, "{error}");
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "{:?}",
+                started.elapsed()
+            );
+            assert!(entries(&directory).is_empty());
+        }
     }
 }
