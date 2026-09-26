@@ -55,7 +55,7 @@ drop the test items; a number that moves edits this table and the pictures.
 | `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
 | channel constructions | **31** — 27 `mpsc::channel`, 4 `mpsc::sync_channel`; `bt-app` 25 (U-13: the storage worker's answer for a trial's receipt), `bt-platform` 6 — and **6** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 1); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
 | `AppEvent` variants | **31** (U-3 added `InstallChannelRead`, U-13 `TrialWritesReleased`, §5, §10) | `enum AppEvent` in `main.rs` |
-| child-process construction | **one** `Command::new`, inside the door `bt_platform::quiet_command`, with **7** product callers — `attention_copilot::run_probe`, `explorer_menu::serve`, `git::git_command`, `psreadline::run_probe`, `shell_integration::run_profile_probe`, `update_startup`'s start of the rescue build (0.4.6 U-12), and `bt_platform`'s macOS `quiet_command_text` (two programs); besides the door, `bt-pty::PtySession::spawn`'s `spawn_command` and the one `ShellExecuteW` in `bt_platform::handoff` | `quiet_command(_named)?\(`, `Command::new\(`, `spawn_command\(`, `ShellExecuteW\(` |
+| child-process construction | **one** `Command::new`, inside the door `bt_platform::quiet_command`, with **8** product callers — `attention_copilot::run_probe`, `explorer_menu::serve`, `git::git_command`, `psreadline::run_probe`, `shell_integration::run_profile_probe`, `update_startup`'s start of the rescue build (0.4.6 U-12), `bt_platform`'s macOS `quiet_command_text` (two programs), and `bt_platform::macos_identity`'s bounded runner (`/usr/bin/codesign`, `/usr/sbin/spctl`; 0.4.6 U-16); besides the door, `bt-pty::PtySession::spawn`'s `spawn_command` and the one `ShellExecuteW` in `bt_platform::handoff` | `quiet_command(_named)?\(`, `Command::new\(`, `spawn_command\(`, `ShellExecuteW\(` |
 | `Runtime` methods | **1,424** — 1,223 in the 27 `runtime/*.rs` topics, 201 still in `main.rs` (§13) | a four-space-indented `fn` in an `impl Runtime<'_>` block |
 
 ---
@@ -137,7 +137,7 @@ anything asks — the updated build's road (`docs/plans/design/self-update-2026-
 §C.7, R-3). A second process hands its argv down the launch pipe
 (`launch_wire::hand_over`) and leaves through `bt_platform::leave_process`.
 
-### 2.2 The thirteen kinds of child process
+### 2.2 The fourteen kinds of child process
 
 | kind | started by | note |
 |---|---|---|
@@ -154,6 +154,7 @@ anything asks — the updated build's road (`docs/plans/design/self-update-2026-
 | `git` | `git::git_command`, always from `bt-git-worker` | never from the window thread; one status costs three threads |
 | `explorer.exe`, the registered handler, Finder | `bt_platform::handoff` | fully detached: no handle, no wait, no kill |
 | `defaults read -g AppleLocale`, `locale -a` | `bt_platform::read_system_locale_declaration` | macOS; memoised, so twice per process |
+| `/usr/bin/codesign --verify` / `-d -r-`, `/usr/sbin/spctl --status` / `--assess` | `bt_platform::macos_identity` (0.4.6 U-16), for the updater's check of a copied bundle | macOS; worker only; each under a deadline (10 s to 120 s) and ended by its own handle past it; inert until the macOS Prepare (U-27) calls it |
 
 Children reached through `bt_platform::quiet_command_named` are named by an
 absolute path resolved by `handoff::program_on_path`, never a bare name, so a

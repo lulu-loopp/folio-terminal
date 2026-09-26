@@ -3420,6 +3420,16 @@ pub mod pe_resource;
 /// Worker only: every call blocks on the disk.
 pub mod install_txn;
 
+/// **Is a bundle the same publisher's Folio, and does Gatekeeper accept it** —
+/// the macOS identity check of the self-updater (0.4.6 ticket U-16;
+/// `docs/plans/design/self-update-2026-09-16.md` §E, C7, revision (b) F-9 and
+/// E-8): `codesign --verify --strict --deep` against the running code's
+/// designated requirement and Apple's Developer ID requirement, `spctl`'s
+/// status and assessment read from a fixed grammar, and F-9's decision over
+/// the two. Children through [`quiet_command`], bounded; worker only; refused
+/// by name off macOS.
+pub mod macos_identity;
+
 mod web_environment;
 mod webview;
 

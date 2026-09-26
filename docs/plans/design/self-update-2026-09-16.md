@@ -1884,3 +1884,31 @@ F-3 and U-26–U-29). They are no longer open. What remains:
 3. A Folio started while an update is being applied waits for the update to finish before it opens a window (up to the apply deadline); this is accepted as the behaviour right after Restart.
 
 **Owner ruling 2026-09-27** (a frozen cross-version surface, beside F-8's list): everything Folio writes outside its own data root — the PSReadLine module install, the Explorer registration, the toast identity, the PowerShell profile line and the agent hooks — keeps a format the previous version also reads, so a rollback leaves nothing the old build cannot repair on its next start. Presses during an update's trial are neither blocked nor greyed; the Explorer repair at the next start already re-syncs the registration with the setting.
+
+## Revision 2026-09-26 — E-8's method (U-16)
+
+U-16 built `bt_platform::macos_identity` and measured, on the Mac mini with
+synthetic bundles only, the grammar it reads: `spctl --status` answers
+`assessments enabled` on stdout; `spctl --assess --type execute -vv` answers on
+stderr `<path>: accepted` + `source=` (+ `origin=`) with exit 0, `<path>:
+rejected` (+ `source=`) with exit 3, and any other first line with exit 1
+(`a sealed resource is missing or invalid`, `invalid Info.plist …`). Three
+notarized third-party applications answered `source=Notarized Developer ID`;
+two of them satisfy their own designated requirement conjoined with the
+Developer ID requirement under `--strict --deep`, and the third fails `--strict`
+validity with `resource fork, Finder information, or similar detritus not
+allowed` — a Finder or resource-fork attribute on the installed copy. U-1's
+marker attribute is not such an attribute: on an ad-hoc bundle,
+`io.github.lulu-loopp.folio.install` on the bundle root, `Contents/`,
+`Contents/MacOS/`, the main executable or a resource file leaves
+`--verify --strict --deep --all-architectures` at exit 0 (and survives
+`ditto`), while `com.apple.FinderInfo` on the root or the executable is refused
+with that sentence. E1's remaining half — signing, stapling and Gatekeeper on a
+real notarized bundle — is unchanged. An ad-hoc bundle is `rejected` and fails the Developer
+ID requirement with `codesign` exit 3. E-8 itself runs on a real notarized, stapled `Folio.app`, so
+it is the owner's: a `ditto` copy assessed online, then offline with
+`--ignore-cache --no-cache` (the cache not yet warm), then with its stapled
+ticket removed while offline (an explicit rejection), and `spctl --status` and
+`--assess` while assessments are off (`sudo spctl --global-disable`, then
+*Anywhere* in System Settings, which macOS 15 and later require). The exact
+commands are in U-16's report.

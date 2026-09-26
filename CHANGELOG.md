@@ -39,6 +39,10 @@ All notable changes to Folio are recorded here. The format follows
   confirmed, so undoing the update leaves everything as it was; once it has
   drawn its first text it leaves the note that confirms it. No build starts
   such a trial yet.
+- The coming Mac updater can check that a downloaded Folio is signed by the
+  same developer as the one running and what Gatekeeper says about it; it
+  refuses a copy Gatekeeper rejects, and when Gatekeeper is turned off it
+  relies on the signature alone. Nothing uses it yet.
 
 ### Fixed
 
