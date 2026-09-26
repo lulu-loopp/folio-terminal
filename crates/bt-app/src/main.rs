@@ -69786,7 +69786,8 @@ fn install_panic_log_hook() {
             "{}",
             diagnostics::run_footer(
                 &hang_watch::utc_timestamp(std::time::SystemTime::now()),
-                PANIC_EXIT_CODE
+                PANIC_EXIT_CODE,
+                bt_platform::admission::refusals(),
             )
         );
         bt_platform::leave_process(PANIC_EXIT_CODE)
@@ -70401,6 +70402,7 @@ fn main() -> Result<()> {
     trace_sink::stderr_line(diagnostics::run_footer(
         &hang_watch::utc_timestamp(std::time::SystemTime::now()),
         code,
+        bt_platform::admission::refusals(),
     ));
     // **And what the trace still has queued, before the process goes**
     // (T-TRACE-OFF-THREAD). Under a bound — see `trace_sink::FLUSH_TIMEOUT`:
