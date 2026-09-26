@@ -72,6 +72,7 @@ mod git_graph;
 mod git_panel;
 mod git_watch;
 mod glyph_trace;
+mod gpu_door;
 mod handoff_lane;
 mod hang_watch;
 mod hex_peek;
@@ -104,6 +105,7 @@ mod menubar;
 mod mouse_trace;
 mod notice;
 mod notify;
+mod owner_door;
 mod pace;
 mod palette;
 mod palette_index;
@@ -129,6 +131,7 @@ mod preview_watch;
 mod preview_wrap;
 mod profiles;
 mod psreadline;
+mod pty_door;
 mod quake;
 mod quit;
 mod recent_folders;
@@ -203,6 +206,7 @@ use text_scale::{TextScale, TextStep};
 use bt_doc::Bias;
 #[cfg(test)]
 use bt_persist::WindowStateV1;
+use bt_platform::admission::{WaitToken, doors};
 use bt_pty::{
     OutputWake, PSREADLINE_INVOKE_PROMPT_INPUT, PSREADLINE_PASTE_INPUT, PtyError, PtySession,
     PtySize,
@@ -20591,8 +20595,15 @@ fn commit_leaf_resize(
     let rows = nonzero_u32(next_grid.rows.get());
     let reconciled = if told_the_child {
         if let Some(pty) = pty {
-            pty.resize(pty_size(next_grid, physical))
-                .context("commit a coalesced final ConPTY resize")?;
+            // **One leaf's resize is one admitted owner-thread door** (`doors::PtyResize`, row
+            // 12), at the statement that made the call: after the reflow, before the reconcile.
+            // A refusal is the error a failed resize takes.
+            bt_platform::admission::admitted::<doors::PtyResize, _>(|token| {
+                pty_door::resize(token, pty, pty_size(next_grid, physical))
+                    .map_err(anyhow::Error::from)
+            })
+            .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
+            .context("commit a coalesced final ConPTY resize")?;
         }
         replace_psreadline_resize_reanchor_debt(reanchor, prompt_the_shell_opened);
         session.mark_pty_resize_requested_at(columns, rows, observed_at)
@@ -26717,6 +26728,14 @@ impl TitleSlot {
         self.wanted = Some(title);
     }
 
+    /// **The title [`Self::take_due`] handed out was not written** (its door was refused): it is
+    /// wanted again, unless a newer one already is, and the throttle forgets that it was told —
+    /// but not when — so the next turn writes it.
+    fn refused(&mut self, title: String) {
+        self.written.rearm();
+        self.wanted.get_or_insert(title);
+    }
+
     /// The title to write to the OS now, if any, at `interval` (the display
     /// frame the window is on).
     fn take_due(&mut self, interval: Duration, now: Instant) -> Option<String> {
@@ -27186,7 +27205,11 @@ fn next_attention_stop<T: Copy>(queue: &[(T, u64)], standing_on: Option<u64>) ->
 /// [`bt_platform::cloaked_from_attribute`]'s reasoning: under-stating flashes a taskbar button
 /// nobody sees, and over-stating puts a toast in front of somebody who is looking straight at the
 /// pane it is about.
-fn window_is_hidden(window: &Window) -> bool {
+///
+/// **An owner-thread door** (`doors::PlaceHidden`, row 13's residue), minted only in
+/// [`sample_window_place`].
+fn window_is_hidden(token: WaitToken<'_, doors::PlaceHidden>, window: &Window) -> bool {
+    let _ = token;
     let Ok(native) = native_window(window) else {
         return false;
     };
@@ -27213,18 +27236,25 @@ fn window_is_hidden(window: &Window) -> bool {
 /// *inside* a turn read them back from there rather than asking again about the same instant. **This is the pass
 /// that decides a delivery**, which is what the probe is priced against; nothing on the drawing path
 /// asks any of these.
+///
+/// **Each probe is an owner-thread door** (`doors::PlaceHidden`, `doors::PlaceExposure`, row 13's
+/// residue): admitted where it is asked, and a refused probe keeps the answer of `previous`, the
+/// place this window last observed.
 fn sample_window_place(
     window: &Window,
     focused: bool,
+    previous: notify::WindowPlace,
 ) -> (notify::WindowPlace, bt_platform::TaskbarReading) {
     // **Each probe under its own station** (ticket 48): two of them go to other processes —
     // the hit tests to whatever window is under each point, `SHAppBarMessage` to the shell's
     // taskbar — and a stall line should say which one waited.
-    // Spelled as `enter`/`at` rather than `during` so the fused call keeps the exact line
+    // The admission's meter enters the probe's station and puts the turn's back, the
+    // `enter`/`at` pair this replaced; the fused call keeps the line
     // `present_diagnostics_tests::existing_hidden_callers_keep_the_same_fused_value` reads.
-    let leaving = hang_watch::enter(hang_watch::Station::PlaceHidden);
-    let hidden = window_is_hidden(window);
-    hang_watch::at(leaving);
+    let hidden = bt_platform::admission::admitted::<doors::PlaceHidden, _>(|token| {
+        window_is_hidden(token, window)
+    })
+    .unwrap_or(previous.hidden);
     // **The taskbar is read, not asked** (ticket 62). The shell is asked on its own lane; this
     // reads the latest answer without waiting, and — while the window is on a screen — asks the
     // lane for a fresh one when the last request is `REFRESH_INTERVAL` old. The reading travels
@@ -27242,9 +27272,10 @@ fn sample_window_place(
         // window is on no screen by definition. Either way the honest answer is that nothing of it
         // is showing, and `desktop_reach` tests the hidden bit outermost anyway.
         exposed: !hidden
-            && hang_watch::during(hang_watch::Station::PlaceExposure, || {
-                window_is_exposed(window)
-            }),
+            && bt_platform::admission::admitted::<doors::PlaceExposure, _>(|token| {
+                window_is_exposed(token, window)
+            })
+            .unwrap_or(previous.exposed),
         taskbar_is_auto_hidden: taskbar.auto_hidden,
     };
     (place, taskbar)
@@ -27260,7 +27291,11 @@ fn sample_window_place(
 /// [`bt_platform::cloaked_from_attribute`] argues for — of the two wrong answers, one leaves the
 /// reader with the marks inside a window they are looking at, and the other puts a toast on a
 /// desktop they can see.
-fn window_is_exposed(window: &Window) -> bool {
+///
+/// **An owner-thread door** (`doors::PlaceExposure`, row 13's residue), minted only in
+/// [`sample_window_place`].
+fn window_is_exposed(token: WaitToken<'_, doors::PlaceExposure>, window: &Window) -> bool {
+    let _ = token;
     let Ok(native) = native_window(window) else {
         return true;
     };
@@ -37855,15 +37890,23 @@ fn create_leaf_session(
             ));
         }
         resolved_program = Some(PathBuf::from(&program));
+        // **The shell's birth is an owner-thread door** (`doors::PtyBirth`, row 11): the one
+        // `spawn_shell_in`, admitted here and nowhere else. A refusal is this branch's own spawn
+        // failure.
         Some(
-            PtySession::spawn_shell_in(
-                program,
-                &command.arguments,
-                &command.environment,
-                pty_size(grid, PhysicalSize::new(body.width, body.height)),
-                wake.output(),
-                place.working_directory,
-            )
+            bt_platform::admission::admitted::<doors::PtyBirth, _>(|token| {
+                pty_door::spawn_shell(
+                    token,
+                    program.into(),
+                    &command.arguments,
+                    &command.environment,
+                    pty_size(grid, PhysicalSize::new(body.width, body.height)),
+                    wake.output(),
+                    place.working_directory,
+                )
+                .map_err(anyhow::Error::from)
+            })
+            .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
             .with_context(|| {
                 format!(
                     "spawn the {} profile in ConPTY",
@@ -41526,21 +41569,36 @@ impl Runtime<'_> {
         // anywhere the swapchain has not reached yet — before the first present,
         // and in the band a resize opens up — shows the class background brush
         // installed a few lines above, exactly as it did when the swapchain was
-        // the window's own.
-        let compositor = bt_platform::Compositor::new(native)
-            .map_err(|error| anyhow!(error))
-            .context("open the window's DirectComposition visual tree")?;
+        // the window's own. An owner-thread door (`doors::CompositorBirth`): a refusal is this
+        // road's own error.
+        let compositor = bt_platform::admission::admitted::<
+            bt_platform::admission::doors::CompositorBirth,
+            _,
+        >(|token| bt_platform::Compositor::new(token, native))
+        .unwrap_or_else(|refused| Err(refused.to_string()))
+        .map_err(|error| anyhow!(error))
+        .context("open the window's DirectComposition visual tree")?;
         // The floor's colour is settled with the tree and not with the first
         // page: a page can be born at launch (`BT_WEB_DEV`, a restored session),
         // and a floor that learned its colour only from the *next* theme flip
         // would be black under the first one.
         install_page_ground_color(&compositor);
-        let (mut gpu, mut renderer) = pollster::block_on(GpuContext::open(
-            window_surface_target(&window, &compositor),
-            physical.width,
-            physical.height,
-            startup_scale_factor,
-        ))
+        // Row 23's wait, admitted as its owner-thread door (`doors::GpuOpen`); a refusal is this
+        // road's own error.
+        let (mut gpu, mut renderer) = bt_platform::admission::admitted::<
+            bt_platform::admission::doors::GpuOpen,
+            _,
+        >(|token| {
+            gpu_door::open_first_window(
+                token,
+                window_surface_target(&window, &compositor),
+                physical.width,
+                physical.height,
+                startup_scale_factor,
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
         .context("initialize wgpu renderer")?;
         note_gpu_adapter(&gpu);
         if trace_startup && let Some(alpha) = renderer.alpha_report() {
@@ -52397,7 +52455,15 @@ mod hold_station_tests {
                 .chars()
                 .filter(|character| !character.is_whitespace())
                 .collect();
-            let opened = format!("hang_watch::during(hang_watch::Station::{station},||");
+            // **Two of them are owner-thread doors since A1d** (`doors::WebEnvironment`,
+            // `doors::WebController`): their admission is what enters the station now — the
+            // meter's `enter` before the call, its `leave` after — so the scope that stands
+            // around the call is the admission's.
+            let opened = if matches!(station, "WebEnvironment" | "WebController") {
+                format!("admitted::<doors::{station},_>(|token|")
+            } else {
+                format!("hang_watch::during(hang_watch::Station::{station},||")
+            };
             assert_eq!(
                 body.matches(opened.as_str()).count(),
                 1,
@@ -62081,11 +62147,21 @@ impl FolioApp {
                     // outliving the window that owned it. Bounded like every
                     // other wait on this path: what is still going past it goes
                     // when the job objects close with the process.
-                    let still_going = bt_pty::wait_for_retirements(PANE_RETIREMENT_DEADLINE);
-                    if still_going > 0 {
-                        eprintln!(
+                    //
+                    // An owner-thread door (`doors::PaneRetirementWait`, row 15), admitted only
+                    // on the way out. A refusal did not wait: the count is unknown, said so, and
+                    // the quit goes on as it does when the budget runs out.
+                    match bt_platform::admission::admitted::<doors::PaneRetirementWait, _>(
+                        |token| pty_door::wait_for_retirements(token, PANE_RETIREMENT_DEADLINE),
+                    ) {
+                        Ok(0) => {}
+                        Ok(still_going) => eprintln!(
                             "{APP_NAME} quit with {still_going} pane(s) still being taken apart"
-                        );
+                        ),
+                        Err(refused) => eprintln!(
+                            "{APP_NAME} quit without knowing how many panes are still being taken \
+                             apart: {refused}"
+                        ),
                     }
                     let now = Instant::now();
                     // **The spare retires with the windows, under the run's one bound** (ticket 60).
@@ -66204,9 +66280,15 @@ mod resize_skirt_order_tests {
         let handler = body("resize");
         // Plain needles: `body` hands back one method's text, so this test's own
         // source is not among the things being searched.
+        // The call is admitted as an owner-thread door (A1d), so the statement that tells the
+        // compositor begins at its admission, and the call inside it carries the token.
+        assert!(
+            handler.contains(".set_window_size(token,physical.width,physical.height)"),
+            "the resize handler tells the compositor the window's new size: {handler}"
+        );
         let told = handler
-            .find(".set_window_size(physical.width,physical.height)")
-            .expect("the resize handler tells the compositor the window's new size");
+            .find("admitted::<doors::CompositorWindowSize,_>(")
+            .expect("through its admitted door");
         let solved = handler
             .find(".resize(&self.app.gpu,physical.width,physical.height)")
             .expect("and it also synchronizes the renderer's swapchain");
@@ -66241,7 +66323,7 @@ mod resize_skirt_order_tests {
             .find(".set_covered_size(covered_width,covered_height)")
             .expect("the funnel tells the compositor what the swapchain now covers");
         let published = funnel
-            .find(".commit()")
+            .find(".commit(token)")
             .expect("and the funnel is what publishes the frame");
         assert!(
             shrunk < published,
@@ -67024,7 +67106,7 @@ mod floated_page_tests {
     fn a_window_that_is_shut_leaves_the_screen_before_the_process_does() {
         let letting_go = method_body("Runtime", "let_go_of_this_window");
         assert!(
-            letting_go.contains("self.window.window.set_visible(false)"),
+            letting_go.contains("owner_door::set_visible(token, &self.window.window, false)"),
             "a shut window is left on the screen for Windows to ghost:\n{letting_go}"
         );
         let retire = method_body("Runtime", "retire_window");
@@ -67098,7 +67180,8 @@ mod floated_page_tests {
         );
         let hide = method_body("Runtime", "hide_quake_window");
         assert!(
-            hide.contains("set_visible(false)") && !hide.contains("window_shown = false"),
+            hide.contains("owner_door::set_visible(token, &self.window.window, false)")
+                && !hide.contains("window_shown = false"),
             "a summon that is sent away is closed rather than hidden, or forgets \
              that it has ever been on the glass:\n{hide}"
         );
@@ -70363,9 +70446,16 @@ fn main() -> Result<()> {
         bt_platform::write_std_error(format!("{line}\n").as_bytes());
         bt_platform::leave_process(1);
     }
+    //
+    // The hand-over is this phase's owner-thread door (`doors::LaunchHandOver`, row 18), admitted
+    // only in `Starting`. A refusal is one more `None`: carry on and open a window.
     if !persist::is_writer_of(&storage)
         && let Some(handed) =
-            launch_wire::hand_over(&admitted, &storage, &request, say_at_the_front_door)
+            bt_platform::admission::admitted::<doors::LaunchHandOver, _>(|token| {
+                launch_wire::hand_over(token, &admitted, &storage, &request, say_at_the_front_door)
+            })
+            .ok()
+            .flatten()
     {
         bt_platform::leave_process(handed);
     }
@@ -70609,7 +70699,10 @@ fn main() -> Result<()> {
     // (T-TRACE-OFF-THREAD). Under a bound — see `trace_sink::FLUSH_TIMEOUT`:
     // the failure that queue exists for is a writer stuck in a kernel write,
     // and waiting on it forever here would move the hang to the end of the run.
-    trace_sink::flush();
+    //
+    // An owner-thread door (`doors::TraceFlush`, row 17), admitted on the way out. A refusal
+    // loses what is still queued, as the flush's own timeout does.
+    let _ = bt_platform::admission::admitted::<doors::TraceFlush, _>(trace_sink::flush);
     bt_platform::leave_process(code)
 }
 

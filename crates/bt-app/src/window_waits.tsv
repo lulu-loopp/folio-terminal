@@ -10,7 +10,7 @@
 ## `# doors` — one line per `bt_platform::admission::doors` type, in its order: the §5.3 row it
 ## serves, the `hang_watch::Station` its meter enters, the phases it is admitted in, the call it
 ## admits, where the admission is minted, and what one admission measures. Held equal to the
-## types by `hang_watch::window_waits_tests`. No door takes its token until A1d.
+## types by `hang_watch::window_waits_tests`. Every door takes its token, minted where the line says (A1d).
 ##
 ## `# vocabulary` — the effects that wait (or are counted beside the waits), with the targets
 ## they exist on. A2 compares it with the lint's list.
@@ -60,11 +60,11 @@ SessionWriteWait	16	SessionWriteWait	Exiting	`SessionWriter::wait_for`	`SessionS
 SessionWriterRetire	16b	SessionWriterRetire	Exiting	`SessionWriter::close`	`SessionStore::close`	one call
 TraceFlush	17	TraceFlush	Exiting	`trace_sink::flush`	`fn main`; `trace_sink::Shutdown::drop`	one call
 LaunchHandOver	18	Starting	Starting	`launch_wire::hand_over`	`fn main`	one call
-WebController	21	WebController	Running	`WebHost::request_controller`	`WebSeat::step`	one call
+WebController	21	WebController	Running, Exiting	`WebHost::request_controller`	`WebSeat::step`	one call
 WebEnvironment	21	WebEnvironment	Running	`WebHost::request_environment`	`WebSeat::start_environment`	one call
 WebRehost	21	WebRehost	Running	`WebHost::rehost`	`WebSeat::rehost`	the steps and their commits
 ImeCaretArea	22	ImeCursorArea	Running, Exiting	`owner_door::set_ime_cursor_area`	`Runtime::apply_ime_cursor_area`	one call
-GpuOpen	23	GpuOpen	Running	`gpu_door::open` (`pollster::block_on(GpuContext::open)`)	`Runtime::create`	one call
+GpuOpen	23	GpuOpen	Running	`gpu_door::open_first_window` (`pollster::block_on(GpuContext::open)`)	`Runtime::create`	one call
 FocusWindow	§5.2	WindowFocus	Running	`owner_door::focus_window`	`Runtime::open_from_notification`	one call
 SetVisible	§5.2	WindowVisible	Running, Exiting	`owner_door::set_visible`	`Runtime::put_the_window_on_the_glass`, `Runtime::hide_quake_window`, `Runtime::let_go_of_this_window`	one call
 SetCursor	§5.2	WindowCursor	Running	`owner_door::set_cursor`	`Runtime::apply_pointer_cursor`	one call

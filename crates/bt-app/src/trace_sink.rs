@@ -31,6 +31,8 @@ use std::sync::{Arc, Mutex, OnceLock, TryLockError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use bt_platform::admission::{WaitToken, admitted, doors};
+
 use crate::trace::TraceFile;
 
 /// **How many lines may be waiting for the writer before one is dropped.**
@@ -169,8 +171,11 @@ pub fn started() -> bool {
 pub struct Shutdown;
 
 impl Drop for Shutdown {
+    /// Reached only on `main`'s early return from a loop that could not be built, which says
+    /// `exiting()` first (the design note's revision (c)5), so the flush is admitted there. A
+    /// refusal loses what is still queued, as the flush's own timeout does.
     fn drop(&mut self) {
-        flush();
+        let _ = admitted::<doors::TraceFlush, _>(flush);
     }
 }
 
@@ -216,7 +221,11 @@ pub fn file_line(file: Arc<TraceFile>, text: String) {
 /// Called on the way out of `main`, after the footer and before
 /// `bt_platform::leave_process` — so the last thing in a trace is the last thing
 /// that happened, and not whatever the queue happened to be holding.
-pub fn flush() {
+///
+/// **An owner-thread door** (`doors::TraceFlush`, §5.3 row 17): a bounded wait, admitted only on
+/// the way out, minted in `main` and in [`Shutdown`]'s drop.
+pub fn flush(token: WaitToken<'_, doors::TraceFlush>) {
+    let _ = token;
     let Some(sink) = SINK.get().and_then(Option::as_ref) else {
         return;
     };
@@ -820,5 +829,36 @@ mod tests {
             "SOMETHING_TRACE_V9"
         )])));
         assert!(!a_trace_was_asked_for(names(&["PATH", "APPDATA", "BT_BG"])));
+    }
+
+    /// RED (A1d, row 17) — **the trace's flush is one admitted `TraceFlush` on the way out, and
+    /// is not waited for anywhere else.**
+    ///
+    /// Through the real road `main`'s early return takes: `Shutdown`'s drop. On a test thread
+    /// entered as the window thread and on its way out it is admitted once; on the same kind of
+    /// thread still running it is refused, and nothing is admitted.
+    ///
+    /// MUTATION: call `flush` from the drop outside its admission (a token cannot be had there,
+    /// so: skip the admission and do nothing) and the first list is empty; give the door
+    /// `Running` and the second is not.
+    #[test]
+    fn the_trace_is_flushed_through_its_door_only_on_the_way_out() {
+        std::thread::spawn(|| {
+            crate::tests::on_the_window_thread();
+            drop(Shutdown);
+            assert!(
+                crate::hang_watch::admissions_on_this_thread().is_empty(),
+                "a running window thread does not wait for the trace"
+            );
+            assert!(bt_platform::admission::exiting());
+            drop(Shutdown);
+            assert_eq!(
+                crate::hang_watch::admissions_on_this_thread(),
+                ["TraceFlush"],
+                "on the way out, the drop's flush is one admission"
+            );
+        })
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
     }
 }

@@ -122,6 +122,7 @@ use super::{
     WebDpiOwnership, WebEvent, WebGuards, WebInstallReport, WebMouseEvent, WebNavigationVerdict,
     WebRequestVerdict, WebSetting, install_rollback,
 };
+use crate::admission::{WaitToken, doors};
 use crate::macos_impl::{window_for, window_thread};
 use crate::{Compositor, EnvironmentAnswer, NativeWindow, WebWarmUp};
 
@@ -1397,7 +1398,15 @@ impl WebHost {
     ///
     /// The event is queued on the spot rather than from a callback, which is the
     /// same shape the Windows arm takes when the environment is already cached.
-    pub fn request_environment(&mut self, folder: &Path, generation: u64) -> Result<(), String> {
+    ///
+    /// **A door** (`doors::WebEnvironment`), the same signature as the Windows arm's.
+    pub fn request_environment(
+        &mut self,
+        token: WaitToken<'_, doors::WebEnvironment>,
+        folder: &Path,
+        generation: u64,
+    ) -> Result<(), String> {
+        let _ = token;
         let what = "the page's engine";
         let mtm = window_thread(what)?;
         std::fs::create_dir_all(folder)
@@ -1425,11 +1434,15 @@ impl WebHost {
     /// completion block, and a page whose third door is not yet on it is not a
     /// page this host will let anybody navigate. So the view is made now and the
     /// event is queued when the list is on.
+    ///
+    /// **A door** (`doors::WebController`), the same signature as the Windows arm's.
     pub fn request_controller(
         &mut self,
+        token: WaitToken<'_, doors::WebController>,
         window: NativeWindow,
         generation: u64,
     ) -> Result<(), String> {
+        let _ = token;
         let what = "the page";
         let mtm = window_thread(what)?;
         if self.door.store.borrow().is_none() {
@@ -1711,13 +1724,17 @@ impl WebHost {
     /// page belongs to both windows, and therefore no half-moved state for a
     /// compensation to undo. A failure leaves the page where it was, which is
     /// [`RehostOutcome::KeptSource`] with nothing compensated.
+    ///
+    /// **A door** (`doors::WebRehost`), the same signature as the Windows arm's.
     pub fn rehost(
         &mut self,
+        token: WaitToken<'_, doors::WebRehost>,
         from: &RehostSide<'_>,
         to: &RehostSide<'_>,
         rect: (i32, i32, u32, u32),
         visible: bool,
     ) -> RehostOutcome {
+        let _ = token;
         let keep = |error: String| RehostOutcome::KeptSource {
             failed_at: RehostStep::Hide,
             error,
@@ -2168,7 +2185,12 @@ impl SpareParent {
 }
 
 /// **Make the spare's parent**: nothing to make on this platform.
-pub fn spare_parent() -> Result<Option<SpareParent>, String> {
+///
+/// Under the `CompositorBirth` door, the same signature as the Windows arm's.
+pub fn spare_parent(
+    token: WaitToken<'_, doors::CompositorBirth>,
+) -> Result<Option<SpareParent>, String> {
+    let _ = token;
     Ok(None)
 }
 

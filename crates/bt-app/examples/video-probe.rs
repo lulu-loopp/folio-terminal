@@ -66,6 +66,25 @@ use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
 #[cfg(windows)]
 use winit::window::{Window, WindowId};
 
+/// **One admitted call of door `D` on this thread**, which is the window thread: the
+/// composition's commit and a present are owner-thread doors (design note 2026-09-26, revision
+/// (e)2). The first call enters the window thread and runs its loop: this probe's `main` is that
+/// thread.
+#[cfg(windows)]
+fn admit<D: bt_platform::admission::Door, R>(
+    work: impl for<'scope> FnOnce(bt_platform::admission::WaitToken<'scope, D>) -> R,
+) -> R {
+    use bt_platform::admission::{Role, admitted, enter_window_thread, loop_running, role};
+    if role() != Role::Window {
+        assert!(
+            enter_window_thread(),
+            "this thread enters as the window thread"
+        );
+        assert!(loop_running(), "and its loop is running");
+    }
+    admitted::<D, R>(work).expect("admitted on the window thread")
+}
+
 /// The window, and therefore the picture, is this many physical pixels.
 #[cfg(windows)]
 const WIDTH: u32 = 960;
@@ -203,7 +222,9 @@ impl ApplicationHandler for Probe {
                 return;
             }
         };
-        let compositor = match bt_platform::Compositor::new(native) {
+        let compositor = match admit::<bt_platform::admission::doors::CompositorBirth, _>(|token| {
+            bt_platform::Compositor::new(token, native)
+        }) {
             Ok(compositor) => compositor,
             Err(error) => {
                 eprintln!("PROBE no composition visual: {error}");
@@ -392,13 +413,19 @@ impl Probe {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
         };
-        let _ = surface.present_frame(gpu, &[], trigger);
+        let _ = admit::<bt_platform::admission::doors::PresentFrame, _>(|token| {
+            surface.present_frame(token, gpu, &[], trigger)
+        });
         // The compositor's half of the bargain: a swapchain hung off a visual is
         // not on the screen until the visual tree is committed.
         if let Some(compositor) = self.compositor.as_ref() {
-            let _ = compositor.commit();
+            let _ = admit::<bt_platform::admission::doors::CompositorCommit, _>(|token| {
+                compositor.commit(token)
+            });
         }
-        let _ = offscreen.present_frame(gpu, &[], trigger);
+        let _ = admit::<bt_platform::admission::doors::PresentFrame, _>(|token| {
+            offscreen.present_frame(token, gpu, &[], trigger)
+        });
 
         // The shots, on the playback's own clock.
         while let Some(due) = SHOTS_AT_SECS.get(self.taken).copied() {

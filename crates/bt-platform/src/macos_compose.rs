@@ -78,6 +78,7 @@ use objc2_core_graphics::CGColor;
 use objc2_foundation::{NSPoint, NSRect, NSSize};
 use objc2_quartz_core::{CALayer, CATransaction};
 
+use crate::admission::{WaitToken, doors};
 use crate::macos_impl::{folios_surface_view, window_for, window_thread};
 use crate::{NativeWindow, PageVisual, VisualLayer, composition_visual_offset, window_skirt};
 
@@ -349,7 +350,13 @@ impl Compositor {
     /// **Failure is failure**, exactly as the Windows arm's is: the two ways
     /// this can refuse are a thread that is not the window's and a handle whose
     /// window has gone, and neither is something a reader's machine can be.
-    pub fn new(window: NativeWindow) -> Result<Self, String> {
+    ///
+    /// **A door** (`doors::CompositorBirth`), the same signature as the Windows arm's.
+    pub fn new(
+        token: WaitToken<'_, doors::CompositorBirth>,
+        window: NativeWindow,
+    ) -> Result<Self, String> {
+        let _ = token;
         let (_mtm, content, surface) = folios_surface_view(window, "the window's composition")?;
         Ok(Self {
             window,
@@ -376,7 +383,15 @@ impl Compositor {
     /// nothing — see the type's own note for the measurement that says why.
     /// Cheap when nothing moved, which is what makes it safe to call from a
     /// handler that fires all through a drag.
-    pub fn set_window_size(&self, width: u32, height: u32) -> Result<(), String> {
+    ///
+    /// **A door** (`doors::CompositorWindowSize`), the same signature as the Windows arm's.
+    pub fn set_window_size(
+        &self,
+        token: WaitToken<'_, doors::CompositorWindowSize>,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        let _ = token;
         if self.window_size.get() == (width, height) {
             return Ok(());
         }
@@ -709,7 +724,15 @@ impl Compositor {
     /// from the door being absent: the app's present funnel calls it in one
     /// place on both platforms, and the day something here needs a
     /// `CATransaction::flush` this is where it goes.
-    pub fn commit(&self) -> Result<(), String> {
+    ///
+    /// **The door** (`doors::CompositorCommit`), the same signature as the Windows arm's.
+    pub fn commit(&self, token: WaitToken<'_, doors::CompositorCommit>) -> Result<(), String> {
+        let _ = token;
+        self.commit_now()
+    }
+
+    /// The commit with no token, the Windows arm's pair; its one caller is [`Self::commit`].
+    pub(crate) fn commit_now(&self) -> Result<(), String> {
         Ok(())
     }
 

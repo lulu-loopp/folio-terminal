@@ -13842,7 +13842,7 @@ fn an_engine_page_alone_in_a_tab_reaches_the_glass_through_the_retained_present(
     );
     let funnel = squeezed_body("Runtime", "present_seats_and_commit");
     assert!(
-        funnel.contains(".commit()"),
+        funnel.contains(".commit(token)"),
         "and nothing else in this window publishes the composition tree the \
              page's visual lives in:\n{funnel}"
     );
@@ -18266,19 +18266,26 @@ fn a_title_that_changes_every_turn_reaches_the_os_at_most_once_a_frame_and_the_l
 /// birth — and a sixth written the same way would bring back the unthrottled
 /// write this ticket removed. Read through `bt_source`, product files only.
 ///
+/// **Since A1d the one function reaches it through its owner-thread door**: the winit call is
+/// `owner_door::set_title`'s body, and that door is called from `flush_title` alone. The needle
+/// reads three: the door's own name where it is declared, its winit call, and `flush_title`'s
+/// call of it.
+///
 /// MUTATION: put a direct `self.window.window.set_title(&self.display_title())`
 /// back in `Runtime::activate_tab` — red.
 #[test]
 fn only_one_function_in_bt_app_calls_window_set_title() {
     let calls =
         found(needle!(Pattern::call("set_title")), View::Identifiers).in_the_product(source());
+    let mut readers = reader_names(&calls);
+    readers.sort();
     assert_eq!(
-        reader_names(&calls),
-        vec!["flush_title".to_owned()],
+        readers,
+        vec!["flush_title".to_owned(), "set_title".to_owned()],
         "{}",
         calls.report(source())
     );
-    assert_eq!(calls.len(), 1, "{}", calls.report(source()));
+    assert_eq!(calls.len(), 3, "{}", calls.report(source()));
     assert_eq!(calls.outside_items(source()), 0);
 }
 
@@ -54102,6 +54109,33 @@ fn under_reduced_motion_no_fade_offers_the_group_path() {
     );
 }
 
+/// **This test's thread is the window thread, and its loop is running** — what every test that
+/// reaches an owner-thread door's minting statement calls first (design note 2026-09-26, revision
+/// (e)2's test protocol). The thread is metered as the window thread is, so a door's witness reads
+/// its admissions with `hang_watch::admissions_on_this_thread`. Test code: outside the universe in
+/// which the phase writers' product call sites are pinned.
+pub(crate) fn on_the_window_thread() {
+    crate::hang_watch::meter_this_test_thread();
+    assert!(
+        bt_platform::admission::enter_window_thread(),
+        "this test's thread enters as the window thread once"
+    );
+    assert!(
+        bt_platform::admission::loop_running(),
+        "and its loop takes its first turn"
+    );
+}
+
+/// [`on_the_window_thread`], then on the way out: the phase the rows admitted only in `Exiting`
+/// (15, 16, 16b, 17) are admitted in.
+pub(crate) fn on_the_window_thread_exiting() {
+    on_the_window_thread();
+    assert!(
+        bt_platform::admission::exiting(),
+        "and it is on the way out"
+    );
+}
+
 /// **Run one test again, alone, in a process of its own, and pass only if it passed there.**
 ///
 /// For a claim that holds once per process: `bt_platform::admission::enter_standalone_main` lends
@@ -54215,4 +54249,336 @@ fn every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door() {
         "the thread door itself builds its threads with `std::thread::Builder`, once; if it no \
          longer does, this guard is reading nothing"
     );
+}
+
+// ── A1d: every owner-thread door takes a token (design note 2026-09-26, revision (e)2 as
+//    corrected by (f)1) ──────────────────────────────────────────────────────────────────────
+
+/// **One owner-thread door, asked from a worker and in every phase of the window thread.**
+///
+/// A thread the thread door started (A1b's real spawner) is refused with the door's name and
+/// its work does not run; on a thread that entered as the window thread the door is admitted —
+/// and its work runs — in exactly `phases`, and in every other phase it is refused, with that
+/// phase named, and its work does not run.
+fn a_door_answers_by_role_and_phase<D: bt_platform::admission::Door>(
+    phases: &'static [bt_platform::admission::Phase],
+) {
+    use bt_platform::admission::{Phase, Refused, Role, admitted};
+    const WORKER: &str = "bt-test-owner-door";
+    let door = D::KEY.name();
+    let on_a_worker =
+        bt_platform::spawn_at_priority(WORKER, bt_platform::ThreadPriority::BelowNormal, |_ctx| {
+            let mut ran = false;
+            let answer = admitted::<D, _>(|_token| ran = true);
+            (answer, ran)
+        })
+        .expect("a worker through the thread door")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    assert_eq!(
+        on_a_worker,
+        (
+            Err(Refused {
+                door,
+                role: Role::Worker(WORKER),
+                phase: None,
+            }),
+            false
+        ),
+        "`{door}` is refused on a worker, by its own name, and does nothing there"
+    );
+    std::thread::spawn(move || {
+        assert!(bt_platform::admission::enter_window_thread());
+        for phase in [Phase::Starting, Phase::Running, Phase::Exiting] {
+            match phase {
+                Phase::Starting => {}
+                Phase::Running => assert!(bt_platform::admission::loop_running()),
+                Phase::Exiting => assert!(bt_platform::admission::exiting()),
+            }
+            let mut ran = false;
+            let answer = admitted::<D, _>(|_token| ran = true);
+            if phases.contains(&phase) {
+                assert_eq!(
+                    (answer, ran),
+                    (Ok(()), true),
+                    "`{door}` is admitted, and runs, on the window thread in {phase:?}"
+                );
+            } else {
+                assert_eq!(
+                    (answer, ran),
+                    (
+                        Err(Refused {
+                            door,
+                            role: Role::Window,
+                            phase: Some(phase),
+                        }),
+                        false
+                    ),
+                    "`{door}` is refused on the window thread in {phase:?}, and does nothing"
+                );
+            }
+        }
+    })
+    .join()
+    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
+/// RED (A1d) — **every owner-thread door is refused on a worker by its own name, and is admitted
+/// on the window thread in exactly the phases the design note's door table gives it.**
+///
+/// The phases are written here as the table (revision (e)2, with (f)1's `Exiting` for
+/// `WebController`) writes them, not read back from the types, so a door whose phase set drifts
+/// from the table goes red by name. What this adds to A1a's and A1b's probes is the claim per
+/// door, through the real thread door, for the doors the product now reaches only inside an
+/// admission.
+///
+/// MUTATION: widen a door's phases in `bt_platform::admission::doors` (`CompositorBirth` to
+/// `[Running, Exiting]`), or narrow one (`WebController` back to `[Running]`), and this names it.
+#[test]
+fn every_owner_door_is_refused_on_a_worker_and_admitted_only_in_its_phases() {
+    use bt_platform::admission::Phase::{Exiting, Running, Starting};
+    use bt_platform::admission::doors;
+    a_door_answers_by_role_and_phase::<doors::FontFamilyLookup>(&[Running]);
+    a_door_answers_by_role_and_phase::<doors::PresentFrame>(&[Running, Exiting]);
+    a_door_answers_by_role_and_phase::<doors::CompositorCommit>(&[Running, Exiting]);
+    a_door_answers_by_role_and_phase::<doors::CompositorBirth>(&[Running]);
+    a_door_answers_by_role_and_phase::<doors::CompositorWindowSize>(&[Running, Exiting]);
+    a_door_answers_by_role_and_phase::<doors::SurfaceBirth>(&[Running]);
+    a_door_answers_by_role_and_phase::<doors::PtyBirth>(&[Running, Exiting]);
+    a_door_answers_by_role_and_phase::<doors::PtyResize>(&[Running, Exiting]);
+    a_door_answers_by_role_and_phase::<doors::PlaceHidden>(&[Running, Exiting]);
+    a_door_answers_by_role_and_phase::<doors::PlaceExposure>(&[Running, Exiting]);
+    a_door_answers_by_role_and_phase::<doors::TitleFlush>(&[Running, Exiting]);
+    a_door_answers_by_role_and_phase::<doors::PaneRetirementWait>(&[Exiting]);
+    a_door_answers_by_role_and_phase::<doors::SessionWriteWait>(&[Exiting]);
+    a_door_answers_by_role_and_phase::<doors::SessionWriterRetire>(&[Exiting]);
+    a_door_answers_by_role_and_phase::<doors::TraceFlush>(&[Exiting]);
+    a_door_answers_by_role_and_phase::<doors::LaunchHandOver>(&[Starting]);
+    a_door_answers_by_role_and_phase::<doors::WebController>(&[Running, Exiting]);
+    a_door_answers_by_role_and_phase::<doors::WebEnvironment>(&[Running]);
+    a_door_answers_by_role_and_phase::<doors::WebRehost>(&[Running]);
+    a_door_answers_by_role_and_phase::<doors::ImeCaretArea>(&[Running, Exiting]);
+    a_door_answers_by_role_and_phase::<doors::GpuOpen>(&[Running]);
+    a_door_answers_by_role_and_phase::<doors::FocusWindow>(&[Running]);
+    a_door_answers_by_role_and_phase::<doors::SetVisible>(&[Running, Exiting]);
+    a_door_answers_by_role_and_phase::<doors::SetCursor>(&[Running]);
+    assert_eq!(
+        doors::ALL.len(),
+        24,
+        "a door added to the registry is a door this list has to name"
+    );
+}
+
+/// RED (A1d, the owner side of M5) — **a boxed closure and a function pointer that reach an
+/// owner-thread door from the window thread are admitted and run.**
+///
+/// The passing control for A1b's worker-refusal arm: the same two indirections, invoked on a
+/// thread that entered as the window thread with its loop running, reach the door. A check that
+/// read the caller's shape rather than the thread's role would refuse one of them.
+///
+/// MUTATION: make `admitted` refuse `Role::Window` too and both answers are `Err`.
+#[test]
+fn an_owner_door_reached_through_a_boxed_closure_or_a_function_pointer_runs_on_the_window_thread() {
+    use bt_platform::admission::{Refused, admitted, doors};
+    fn through_a_pointer() -> Result<&'static str, Refused> {
+        admitted::<doors::SetCursor, _>(|_token| "the pointer's door ran")
+    }
+    std::thread::spawn(|| {
+        assert!(bt_platform::admission::enter_window_thread());
+        assert!(bt_platform::admission::loop_running());
+        let boxed: Box<dyn Fn() -> Result<&'static str, Refused>> =
+            Box::new(|| admitted::<doors::TitleFlush, _>(|_token| "the box's door ran"));
+        let pointer: fn() -> Result<&'static str, Refused> = through_a_pointer;
+        assert_eq!(boxed(), Ok("the box's door ran"));
+        assert_eq!(pointer(), Ok("the pointer's door ran"));
+    })
+    .join()
+    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+}
+
+/// RED (A1d, revision (c)8 item 9) — **every owner-thread door's function takes its own door's
+/// token, by value, first.**
+///
+/// Checked by coercion, where the compiler reads the signature: each line below compiles only if
+/// the function's first parameter (after `self`) is `WaitToken<'_, doors::<its door>>`. The two
+/// generic doors (`present_frame_with_phases`, `launch_wire::hand_over`) are called from a
+/// function whose own signature says the same. The session writer's two doors are private to
+/// `persist` and are checked in its tests.
+///
+/// MUTATION: give any door another door's token type (`owner_door::set_title` taking
+/// `WaitToken<'_, doors::SetCursor>`), or take the token off it, and this does not compile.
+#[test]
+#[expect(
+    clippy::type_complexity,
+    reason = "each coercion spells one door's whole signature, which is what it checks"
+)]
+fn every_owner_door_takes_its_own_token_by_value() {
+    use bt_platform::admission::{WaitToken, doors};
+    use bt_platform::{Compositor, NativeWindow, RehostOutcome, RehostSide, WebHost};
+    use bt_render::{
+        FrameTrigger, GpuContext, PresentOutcome, RenderError, SeatFrame, WindowRenderer,
+        WindowTarget,
+    };
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+
+    let _: fn(
+        WaitToken<'_, doors::PtyBirth>,
+        OsString,
+        &[OsString],
+        &[(OsString, OsString)],
+        PtySize,
+        OutputWake,
+        Option<PathBuf>,
+    ) -> Result<PtySession, PtyError> = pty_door::spawn_shell;
+    let _: fn(WaitToken<'_, doors::PtyResize>, &mut PtySession, PtySize) -> Result<(), PtyError> =
+        pty_door::resize;
+    let _: fn(WaitToken<'_, doors::PaneRetirementWait>, Duration) -> usize =
+        pty_door::wait_for_retirements;
+    let _: fn(
+        WaitToken<'_, doors::GpuOpen>,
+        WindowTarget,
+        u32,
+        u32,
+        f64,
+    ) -> Result<(GpuContext, WindowRenderer), RenderError> = gpu_door::open_first_window;
+    let _: fn(WaitToken<'_, doors::TitleFlush>, &Window, &str) = owner_door::set_title;
+    let _: fn(WaitToken<'_, doors::ImeCaretArea>, &Window, winit::dpi::Position, winit::dpi::Size) =
+        owner_door::set_ime_cursor_area;
+    let _: fn(WaitToken<'_, doors::FocusWindow>, &Window) = owner_door::focus_window;
+    let _: fn(WaitToken<'_, doors::SetVisible>, &Window, bool) = owner_door::set_visible;
+    let _: fn(WaitToken<'_, doors::SetCursor>, &Window, winit::window::Cursor) =
+        owner_door::set_cursor;
+    let _: fn(WaitToken<'_, doors::PlaceHidden>, &Window) -> bool = window_is_hidden;
+    let _: fn(WaitToken<'_, doors::PlaceExposure>, &Window) -> bool = window_is_exposed;
+    let _: fn(WaitToken<'_, doors::TraceFlush>) = trace_sink::flush;
+    let _: fn(&Compositor, WaitToken<'_, doors::CompositorCommit>) -> Result<(), String> =
+        Compositor::commit;
+    let _: fn(WaitToken<'_, doors::CompositorBirth>, NativeWindow) -> Result<Compositor, String> =
+        Compositor::new;
+    let _: fn(
+        WaitToken<'_, doors::CompositorBirth>,
+    ) -> Result<Option<bt_platform::SpareParent>, String> = bt_platform::spare_parent;
+    let _: fn(
+        &Compositor,
+        WaitToken<'_, doors::CompositorWindowSize>,
+        u32,
+        u32,
+    ) -> Result<(), String> = Compositor::set_window_size;
+    let _: fn(
+        &mut WebHost,
+        WaitToken<'_, doors::WebController>,
+        NativeWindow,
+        u64,
+    ) -> Result<(), String> = WebHost::request_controller;
+    let _: fn(
+        &mut WebHost,
+        WaitToken<'_, doors::WebEnvironment>,
+        &Path,
+        u64,
+    ) -> Result<(), String> = WebHost::request_environment;
+    let _: fn(
+        &mut WebHost,
+        WaitToken<'_, doors::WebRehost>,
+        &RehostSide<'_>,
+        &RehostSide<'_>,
+        (i32, i32, u32, u32),
+        bool,
+    ) -> RehostOutcome = WebHost::rehost;
+    let _: fn(
+        WaitToken<'_, doors::FontFamilyLookup>,
+        &str,
+    ) -> Option<bt_platform::MonospaceFamily> = bt_platform::monospace_family_named;
+    let _: fn(
+        WaitToken<'_, doors::SurfaceBirth>,
+        &mut GpuContext,
+        WindowTarget,
+        u32,
+        u32,
+        f64,
+    ) -> Result<WindowRenderer, RenderError> = WindowRenderer::new;
+    fn presents(
+        renderer: &mut WindowRenderer,
+        token: WaitToken<'_, doors::PresentFrame>,
+        gpu: &mut GpuContext,
+        seats: &[SeatFrame<'_>],
+        trigger: FrameTrigger,
+    ) -> Result<PresentOutcome, RenderError> {
+        renderer.present_frame_with_phases(token, gpu, seats, trigger, |_| {})
+    }
+    let _ = presents;
+    fn hands_over(
+        token: WaitToken<'_, doors::LaunchHandOver>,
+        admitted: &update_startup::Admitted,
+        directory: &Path,
+        argv: &cli::CliRequest,
+    ) -> Option<i32> {
+        launch_wire::hand_over(token, admitted, directory, argv, |_| {})
+    }
+    let _ = hands_over;
+}
+
+/// RED (A1d, row 12) — **each leaf's resize is one admitted `PtyResize`, and a refused one takes
+/// the error road a failed resize takes.**
+///
+/// Two real shells, resized through the real `commit_leaf_resize` on a thread entered as the
+/// window thread with its loop running: two admissions, one per leaf, in order — the flush that
+/// walks the leaves is not admitted, each leaf's `ResizePseudoConsole` is. Then a third shell on
+/// a window thread still in `Starting`, where the door is not admitted: the commit answers the
+/// resize's own error, with the refusal named inside it.
+///
+/// MUTATION: give `doors::PtyResize` the `Starting` phase and the third commit succeeds; admit
+/// anything else inside `commit_leaf_resize` and the admission list names it.
+#[test]
+fn each_leafs_resize_is_one_admission_and_a_refused_one_is_a_failed_resize() {
+    fn commit(session: &mut DualPlaneSession, pty: &mut PtySession) -> Result<LeafResizeCommit> {
+        let mut pending = false;
+        commit_leaf_resize(
+            session,
+            Some(pty),
+            ResizeReanchor {
+                pending: &mut pending,
+                integration: profiles::Integration::None,
+            },
+            ReleaseGrids {
+                local: grid_of(80, 24),
+                conpty: grid_of(80, 24),
+                next: grid_of(60, 24),
+            },
+            PhysicalSize::new(480, 600),
+            Instant::now(),
+        )
+    }
+    fn a_leaf() -> (DualPlaneSession, PtySession) {
+        let size = PtySize::cells(
+            std::num::NonZeroU16::new(80).unwrap(),
+            std::num::NonZeroU16::new(24).unwrap(),
+        );
+        let pty = PtySession::spawn_default(size, Arc::new(|| {})).expect("a real shell");
+        (DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24)), pty)
+    }
+    on_the_window_thread();
+    let (mut first, mut first_pty) = a_leaf();
+    let (mut second, mut second_pty) = a_leaf();
+    let _ = crate::hang_watch::admissions_on_this_thread();
+    commit(&mut first, &mut first_pty).expect("the first leaf's child hears its size");
+    commit(&mut second, &mut second_pty).expect("and the second's");
+    assert_eq!(
+        crate::hang_watch::admissions_on_this_thread(),
+        ["PtyResize", "PtyResize"],
+        "one admission per leaf, and nothing else admitted on the way"
+    );
+    std::thread::spawn(|| {
+        assert!(bt_platform::admission::enter_window_thread());
+        let (mut session, mut pty) = a_leaf();
+        let refused = commit(&mut session, &mut pty).expect_err("not admitted before the loop");
+        let said = format!("{refused:#}");
+        assert!(
+            said.contains("commit a coalesced final ConPTY resize")
+                && said.contains("the PtyResize door was refused"),
+            "a refused resize is the resize's own error, and says why: {said}"
+        );
+    })
+    .join()
+    .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
 }

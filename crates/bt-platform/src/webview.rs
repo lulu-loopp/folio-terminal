@@ -79,6 +79,8 @@ use windows::core::{BOOL, HSTRING, IUnknown, Interface as _, PCWSTR, PWSTR};
 use super::PageVisual;
 use crate::Compositor;
 #[cfg(windows)]
+use crate::admission::{WaitToken, doors};
+#[cfg(windows)]
 use crate::{ControllerSlots, EnvironmentAnswer, EnvironmentAsk, EnvironmentSlot, WebWarmUp};
 
 // ── Reading out-parameters ─────────────────────────────────────────────────
@@ -820,8 +822,12 @@ unsafe extern "system" fn spare_parent_procedure(
 /// **Make the spare's parent** (0.4.5 ticket 60) — see [`SpareParent`]. `Ok(None)`
 /// on a platform whose engine is made on the spot; on Windows a window and a
 /// compositor, or the error that refused them.
+///
+/// **Under the `CompositorBirth` door**: the token is the one its compositor is built with.
 #[cfg(windows)]
-pub fn spare_parent() -> Result<Option<SpareParent>, String> {
+pub fn spare_parent(
+    token: WaitToken<'_, doors::CompositorBirth>,
+) -> Result<Option<SpareParent>, String> {
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, RegisterClassW, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_POPUP,
     };
@@ -858,7 +864,7 @@ pub fn spare_parent() -> Result<Option<SpareParent>, String> {
         hwnd,
         compositor: None,
     };
-    parent.compositor = Some(Compositor::new(window)?);
+    parent.compositor = Some(Compositor::new(token, window)?);
     Ok(Some(parent))
 }
 
@@ -1675,7 +1681,15 @@ impl WebHost {
     /// flight — the warm-up's, or another page's — this one waits for it and
     /// is answered with it (ticket 54), and otherwise the loader answers on a
     /// later turn of the message pump.
-    pub fn request_environment(&mut self, folder: &Path, generation: u64) -> Result<(), String> {
+    ///
+    /// **A door** (`doors::WebEnvironment`, row 21).
+    pub fn request_environment(
+        &mut self,
+        token: WaitToken<'_, doors::WebEnvironment>,
+        folder: &Path,
+        generation: u64,
+    ) -> Result<(), String> {
+        let _ = token;
         let shared = Rc::clone(&self.shared);
         let answer: EnvironmentAnswer =
             Box::new(move |error| shared.push(WebEvent::Environment { generation, error }));
@@ -1697,11 +1711,15 @@ impl WebHost {
 
     /// Ask for a composition controller on this window, reporting the answer as
     /// a [`WebEvent::Controller`] for this generation.
+    ///
+    /// **A door** (`doors::WebController`, row 21).
     pub fn request_controller(
         &mut self,
+        token: WaitToken<'_, doors::WebController>,
         window: NativeWindow,
         generation: u64,
     ) -> Result<(), String> {
+        let _ = token;
         let environment = self.adopt_environment()?;
         let environment3: ICoreWebView2Environment3 = environment
             .cast()
@@ -1858,13 +1876,18 @@ impl WebHost {
     /// A seat whose controller has not arrived yet has nothing to hand over and
     /// still has to follow its tab. That is the caller's own address move, not a
     /// handoff, and asking for one here answers `KeptSource`.
+    ///
+    /// **A door** (`doors::WebRehost`, row 21): the steps, their two commits and, on a failure,
+    /// [`Self::compensate`]'s two restoring commits are one admitted batch.
     pub fn rehost(
         &mut self,
+        token: WaitToken<'_, doors::WebRehost>,
         from: &RehostSide<'_>,
         to: &RehostSide<'_>,
         rect: (i32, i32, u32, u32),
         visible: bool,
     ) -> RehostOutcome {
+        let _ = token;
         let refuse = |error: String| RehostOutcome::KeptSource {
             failed_at: RehostStep::Hide,
             error,
@@ -1917,7 +1940,7 @@ impl WebHost {
                     unsafe { composition.SetRootVisualTarget(None::<&IUnknown>) }
                         .map_err(|error| failure("SetRootVisualTarget(nullptr)", &error))
                 }
-                RehostStep::CommitSource => from.compositor.commit(),
+                RehostStep::CommitSource => from.compositor.commit_now(),
                 RehostStep::ParentWindow => {
                     unsafe { controller.SetParentWindow(to.window.as_hwnd()) }
                         .map_err(|error| failure("put_ParentWindow", &error))
@@ -1926,7 +1949,7 @@ impl WebHost {
                     unsafe { composition.SetRootVisualTarget(&target_visual) }
                         .map_err(|error| failure("SetRootVisualTarget(target)", &error))
                 }
-                RehostStep::CommitTarget => to.compositor.commit(),
+                RehostStep::CommitTarget => to.compositor.commit_now(),
                 RehostStep::Bounds => unsafe { controller.SetBounds(bounds) }
                     .map_err(|error| failure("SetBounds", &error)),
                 RehostStep::Presence => unsafe { controller.SetIsVisible(visible) }
@@ -1982,7 +2005,7 @@ impl WebHost {
         if owed.root_visual_target {
             unsafe { composition.SetRootVisualTarget(None::<&IUnknown>) }
                 .map_err(|error| failure("compensate SetRootVisualTarget(nullptr)", &error))?;
-            restore.target.commit()?;
+            restore.target.commit_now()?;
         }
         if owed.parent_window {
             unsafe { controller.SetParentWindow(restore.hwnd) }
@@ -1991,7 +2014,7 @@ impl WebHost {
         if owed.root_visual_target {
             unsafe { composition.SetRootVisualTarget(&restore.visual) }
                 .map_err(|error| failure("compensate SetRootVisualTarget(source)", &error))?;
-            restore.source.commit()?;
+            restore.source.commit_now()?;
         }
         if owed.bounds {
             unsafe { controller.SetBounds(restore.bounds) }
@@ -3944,6 +3967,12 @@ mod webview2_runtime_probe {
         page_url: &str,
         allow: impl Fn(&str) -> bool + 'static,
     ) -> Pass {
+        use crate::admission::{Role, admitted, doors, enter_window_thread, loop_running, role};
+        // The engine's doors are owner-thread doors: this test's thread is the window thread.
+        if role() != Role::Window {
+            assert!(enter_window_thread());
+            assert!(loop_running());
+        }
         let window = HiddenWindow::open();
         let asked: Rc<RefCell<Vec<(String, bool)>>> = Rc::new(RefCell::new(Vec::new()));
         let log = Rc::clone(&asked);
@@ -3961,22 +3990,29 @@ mod webview2_runtime_probe {
             Box::new(|| {}),
         );
         let mut seen = Vec::new();
-        host.request_environment(profile, 1)
+        admitted::<doors::WebEnvironment, _>(|token| host.request_environment(token, profile, 1))
+            .expect("admitted on the window thread")
             .expect("the environment was asked for");
         pump_until(&host, &mut seen, |events| {
             events
                 .iter()
                 .any(|event| matches!(event, WebEvent::Environment { .. }))
         });
-        host.request_controller(window.key(), 1)
-            .expect("the controller was asked for");
+        admitted::<doors::WebController, _>(|token| {
+            host.request_controller(token, window.key(), 1)
+        })
+        .expect("admitted on the window thread")
+        .expect("the controller was asked for");
         pump_until(&host, &mut seen, |events| {
             events
                 .iter()
                 .any(|event| matches!(event, WebEvent::Controller { .. }))
         });
 
-        let compositor = Compositor::new(window.key()).expect("a composition tree");
+        let compositor =
+            admitted::<doors::CompositorBirth, _>(|token| Compositor::new(token, window.key()))
+                .expect("admitted on the window thread")
+                .expect("a composition tree");
         let page = PageVisual { tab: 1, seat: 1 };
         compositor.attach_web_visual(page).expect("a web visual");
         let report = host
@@ -3984,7 +4020,9 @@ mod webview2_runtime_probe {
             .expect("the controller was taken into service");
         host.set_bounds(0, 0, 800, 600).expect("bounds");
         host.set_visible(true).expect("visible");
-        compositor.commit().expect("a commit");
+        admitted::<doors::CompositorCommit, _>(|token| compositor.commit(token))
+            .expect("admitted on the window thread")
+            .expect("a commit");
         host.navigate(page_url).expect("a navigation");
         pump_until(&host, &mut seen, |events| {
             events

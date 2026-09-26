@@ -43,7 +43,7 @@
 1 hang_watch.rs: append_healed: .open
 1 main.rs: append_panic_report: .open
 1 Runtime::commit_web_page: .open
-1 Runtime::create: GpuContext::open
+1 open_first_window: GpuContext::open
 1 main.rs: open_the_data_directorys_endpoints: attention_wire::open
 1 main.rs: open_the_data_directorys_endpoints: launch_wire::open
 1 Runtime::create: persist::KeybindingsStore::open

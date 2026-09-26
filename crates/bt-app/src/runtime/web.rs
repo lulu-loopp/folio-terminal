@@ -97,7 +97,14 @@ impl Runtime<'_> {
     /// quiet turn, when the environment's answer is read. A failure is one diagnostics line and no
     /// spare: nothing is retried.
     fn make_spare_web_controller(&mut self) {
-        let parent = match bt_platform::spare_parent() {
+        // The spare's parent and its tree are one owner-thread door (`doors::CompositorBirth`);
+        // a refusal is this road's own `Err`: one line, and no spare.
+        let parent = match bt_platform::admission::admitted::<
+            bt_platform::admission::doors::CompositorBirth,
+            _,
+        >(bt_platform::spare_parent)
+        .unwrap_or_else(|refused| Err(refused.to_string()))
+        {
             Ok(Some(parent)) => parent,
             Ok(None) => return,
             Err(error) => {

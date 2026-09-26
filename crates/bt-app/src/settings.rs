@@ -2168,9 +2168,16 @@ pub fn monospace_family_files(name: &str) -> Vec<std::path::PathBuf> {
             .map(|candidate| candidate.files.clone())
             .unwrap_or_default();
     }
-    let files = bt_platform::monospace_family_named(name)
-        .map(|family| family.files)
-        .unwrap_or_default();
+    // An owner-thread door (`doors::FontFamilyLookup`): a refusal is a family not found, the
+    // lookup's own `None`.
+    let files = bt_platform::admission::admitted::<
+        bt_platform::admission::doors::FontFamilyLookup,
+        _,
+    >(|token| bt_platform::monospace_family_named(token, name))
+    .ok()
+    .flatten()
+    .map(|family| family.files)
+    .unwrap_or_default();
     MONOSPACE_FAMILIES.seed(name);
     request_font_walk();
     files
@@ -16720,12 +16727,20 @@ mod tests {
     /// MUTATION: restore the `MONOSPACE_FAMILIES.publish(
     /// bt_platform::monospace_font_families(), true)` line (with its
     /// `count_walk()`) in `monospace_family_files` and the count moves.
+    ///
+    /// **And the lookup is one admitted owner-thread door** (A1d, `doors::FontFamilyLookup`):
+    /// the launch road on the window thread records exactly one admission of it.
+    /// MUTATION: call `bt_platform::monospace_family_named` outside its admission (a token
+    /// cannot be had there, so: drop the `admitted` and answer `None`) and the admission list is
+    /// empty and the files are gone.
     #[test]
     fn launching_with_a_stored_font_family_walks_no_font_collection_on_the_window_thread() {
+        crate::tests::on_the_window_thread();
         let name = bt_platform::DEFAULT_MONOSPACE_FAMILY;
-        let expected = bt_platform::monospace_family_named(name)
+        let expected = looked_up_by_name(name)
             .map(|found| found.files)
             .unwrap_or_default();
+        let _ = crate::hang_watch::admissions_on_this_thread();
         let before = monospace_scans();
         let files = monospace_family_files(name);
         assert_eq!(
@@ -16734,6 +16749,20 @@ mod tests {
             "loading the stored face walked the font collection on the calling thread"
         );
         assert_eq!(files, expected, "and the files are the named family's");
+        assert_eq!(
+            crate::hang_watch::admissions_on_this_thread(),
+            ["FontFamilyLookup"],
+            "the lookup by name is one admitted call of its door"
+        );
+    }
+
+    /// The lookup by name through its admitted door, on a thread already entered as the window
+    /// thread.
+    fn looked_up_by_name(name: &str) -> Option<bt_platform::MonospaceFamily> {
+        bt_platform::admission::admitted::<bt_platform::admission::doors::FontFamilyLookup, _>(
+            |token| bt_platform::monospace_family_named(token, name),
+        )
+        .expect("admitted on the window thread")
     }
 
     /// RED (50) — **The family named at launch comes from a lookup by name,
@@ -16751,8 +16780,9 @@ mod tests {
     /// machine's.
     #[test]
     fn the_launch_face_is_looked_up_by_name_and_the_picker_list_comes_from_the_lane() {
+        crate::tests::on_the_window_thread();
         let name = bt_platform::DEFAULT_MONOSPACE_FAMILY;
-        let looked_up = bt_platform::monospace_family_named(name);
+        let looked_up = looked_up_by_name(name);
         let files = monospace_family_files(name);
         assert_eq!(
             files,

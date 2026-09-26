@@ -347,8 +347,11 @@ impl GlyphFixture {
     /// exactly that frame on the Mac — 212 887 pixels of cell ground at
     /// `round(0.3 × 255)` and 458 717 pixels of clear at 255 — while the same
     /// cases at `--test-threads=1` on Windows had never shown it.
+    ///
+    /// Under the `PresentFrame` door: the caller admits the present, and this forwards its token.
     pub fn present(
         &self,
+        token: bt_platform::admission::WaitToken<'_, bt_platform::admission::doors::PresentFrame>,
         gpu: &mut GpuContext,
         window: &mut WindowRenderer,
     ) -> Result<PresentOutcome, RenderError> {
@@ -367,6 +370,7 @@ impl GlyphFixture {
         let _ = window.set_seat_viewport(seat);
         let _ = window.set_preview_bodies(vec![self.prose(metrics)]);
         let outcome = window.present_frame(
+            token,
             gpu,
             &[SeatFrame {
                 seat,

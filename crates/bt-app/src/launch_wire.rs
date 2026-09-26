@@ -587,12 +587,17 @@ pub(crate) fn take() -> Vec<LaunchRequest> {
 /// [`crate::update_startup::Admitted`] it asks for is made by that pass alone,
 /// so this launch holds its installation's admission before it can be handed
 /// anywhere.
+///
+/// **An owner-thread door** (`doors::LaunchHandOver`, §5.3 row 18): the window thread's one wait
+/// before the loop exists, admitted only in `Starting`, minted in `main`.
 pub(crate) fn hand_over(
+    token: bt_platform::admission::WaitToken<'_, bt_platform::admission::doors::LaunchHandOver>,
     _admitted: &crate::update_startup::Admitted,
     directory: &Path,
     argv: &cli::CliRequest,
     say: impl Fn(&str),
 ) -> Option<i32> {
+    let _ = token;
     let request = LaunchRequest::from_cli(
         argv,
         cli::machine_path_kind,

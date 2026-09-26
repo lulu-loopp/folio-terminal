@@ -512,8 +512,24 @@ station is entered before the work — so a call that never returns is already t
 station a hang report names — and the station, call-tree node and scope it left
 are restored after it, from a cookie the admitted frame keeps; a work that
 panics is entered and never left. The doors are the types of
-`admission::doors`, one per line of the registry (§5.3). **No door takes its
-token yet**: A1d converts them where they stand.
+`admission::doors`, one per line of the registry (§5.3). **Every door takes its
+token** (A1d): each door's function takes `WaitToken<'_, doors::X>` by value as its
+first parameter, so it cannot be called outside an admission, and the admission
+stands at the statement that made the call — the preparation around it stays
+outside. The composition's commit, birth and window-size doors, the web engine's
+controller, environment and rehost, `WindowRenderer`'s present and surface
+birth, and the font lookup by name take theirs in `bt-platform` and `bt-render`,
+on every platform arm; winit's calls go through `bt-app::owner_door` (title,
+caret area, focus, visibility, cursor); `bt-pty`'s three — a shell's birth, a
+leaf's resize, the quit's wait for retirements — through `bt-app::pty_door`,
+because `bt-pty` has no edge to `bt-platform`; the first window's GPU through
+`bt-app::gpu_door`. The commits inside an admitted batch (a tree's birth, the
+window's ground, a page's rehost and its compensation) call
+`Compositor::commit_now`, which is `pub(crate)` with seven callers. A present is
+two sibling admissions under `during(PresentSeats)`: `PresentFrame`, a declared
+batch (compose, configure, acquire, submit, present), then `CompositorCommit`.
+A refusal is handled before anything the call would change, on the road the
+door's own failure takes.
 
 **The update pass runs on the window thread in `Starting`** (0.4.6 U-12,
 `update_startup::pass`; the design's startup-recovery row). Directly after
@@ -635,7 +651,7 @@ admitted in (§5.1). Rows 16b and 23 were found by the thread-door note
 | 22 | done | `Window::set_ime_cursor_area` — `ImmSetCompositionWindow` + `ImmSetCandidateWindow`, answered by the input method; the owner's next93 caught 15 + 85 ms in one turn and a single call of 3,138 ms under load | `Runtime::apply_ime_cursor_area`, reached before ticket 63 from every offer: `publish_frame_inner`, `repaint_preview`, `reoffer_ime_cursor_area`, the turn's offer | **done** — *the input method's caret area is one wanted value, told to the system at most once a turn and only when it moved* (`DESIGN.md`, 2026-09-25); the one road is `Runtime::flush_ime_cursor_area`, from the turn's tail and from `Ime::Enabled`, on this thread by §5.2. A single slow answer still holds the thread; the repetition is gone |
 | 23 | pending | `pollster::block_on(GpuContext::open(…))` — the first window's adapter, device and surface, asked for and waited on | `Runtime::create` ← `FolioApp::resumed` | **pending** — found by the thread-door note's revision (e)2 and recorded, not ruled (`DESIGN.md`, 2026-09-26, *every thread that runs Folio's code has a role, the window thread has a phase, and each owner-thread wait is a door the registry lists*); it stays on this thread (coordinator, 2026-09-26), its door is `GpuOpen`, and it moves when device recovery rebuilds on a worker (B9, D-42) — D-77 holds it until then |
 
-**The doors** — one `bt_platform::admission::doors` type per line of the registry's `# doors` section; the station is the `hang_watch` station its meter enters. No door takes its token until A1d.
+**The doors** — one `bt_platform::admission::doors` type per line of the registry's `# doors` section; the station is the `hang_watch` station its meter enters. Every door takes its token by value, minted where the line says (A1d).
 
 | door | row | station | admitted in | call | minted at | measures |
 |---|---|---|---|---|---|---|
@@ -655,11 +671,11 @@ admitted in (§5.1). Rows 16b and 23 were found by the thread-door note
 | `SessionWriterRetire` | 16b | `SessionWriterRetire` | Exiting | `SessionWriter::close` | `SessionStore::close` | one call |
 | `TraceFlush` | 17 | `TraceFlush` | Exiting | `trace_sink::flush` | `fn main`; `trace_sink::Shutdown::drop` | one call |
 | `LaunchHandOver` | 18 | `Starting` | Starting | `launch_wire::hand_over` | `fn main` | one call |
-| `WebController` | 21 | `WebController` | Running | `WebHost::request_controller` | `WebSeat::step` | one call |
+| `WebController` | 21 | `WebController` | Running, Exiting | `WebHost::request_controller` | `WebSeat::step` | one call |
 | `WebEnvironment` | 21 | `WebEnvironment` | Running | `WebHost::request_environment` | `WebSeat::start_environment` | one call |
 | `WebRehost` | 21 | `WebRehost` | Running | `WebHost::rehost` | `WebSeat::rehost` | the steps and their commits |
 | `ImeCaretArea` | 22 | `ImeCursorArea` | Running, Exiting | `owner_door::set_ime_cursor_area` | `Runtime::apply_ime_cursor_area` | one call |
-| `GpuOpen` | 23 | `GpuOpen` | Running | `gpu_door::open` (`pollster::block_on(GpuContext::open)`) | `Runtime::create` | one call |
+| `GpuOpen` | 23 | `GpuOpen` | Running | `gpu_door::open_first_window` (`pollster::block_on(GpuContext::open)`) | `Runtime::create` | one call |
 | `FocusWindow` | §5.2 | `WindowFocus` | Running | `owner_door::focus_window` | `Runtime::open_from_notification` | one call |
 | `SetVisible` | §5.2 | `WindowVisible` | Running, Exiting | `owner_door::set_visible` | `Runtime::put_the_window_on_the_glass`, `Runtime::hide_quake_window`, `Runtime::let_go_of_this_window` | one call |
 | `SetCursor` | §5.2 | `WindowCursor` | Running | `owner_door::set_cursor` | `Runtime::apply_pointer_cursor` | one call |
@@ -751,7 +767,7 @@ happen" has one answer and a guard can hold it.
 | handing something to the operating system | `bt_platform::handoff` — the only `ShellExecuteW` and `NSWorkspace` sites in the workspace; the seven verbs are private to it and reached only through `ShellThread::hand_over`, and a `ShellThread` is entered only with the `WorkerCtx` the thread door lends (A1b), so a hand-off can happen only on a thread the door started | its own module, one function per verb; `compile_fail` doctests on `hand_over` name each verb by both spellings; `handoff_lane::no_handoff_runs_on_the_window_thread` |
 | reaching the network | `bt_platform::http` — `https_get` (one `GET` into memory: the update check) and `https_download` (one `GET` streamed to a file under a ceiling, U-7), over the operating system's own stack (WinHTTP, `NSURLSession`), `https` only, no caller headers; the download's ceiling, temporary file, deadlines and stage vocabulary are `bt_platform::https_download`'s, shared by both real arms | `update_check_transport_tests` holds the three arms to one signature per door and one set of request types |
 | starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` (one definition, in `admission`) — a `&'static` name and a priority band; the new thread is `Worker(name)` (§5.1) and its body is `FnOnce(&WorkerCtx) -> T`, lent the capability a worker-only door takes (0.4.6, A1b) | `tests::every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` finds `std::thread` spawning named in `bt-app`'s and `bt-platform`'s product code only inside the door (A1c; A1e's guard absorbs it); `admission`'s tests start their workers through it |
-| waiting on the window thread (an owner-thread wait) | `bt_platform::admission::admitted` — a `WaitToken` for one door type of `admission::doors`, admitted only on the window thread and in that door's phases (§5.1) | the registry `window_waits.tsv`, held equal to the door types by `hang_watch::window_waits_tests`; no door takes the token until A1d |
+| waiting on the window thread (an owner-thread wait) | `bt_platform::admission::admitted` — a `WaitToken` for one door type of `admission::doors`, admitted only on the window thread and in that door's phases (§5.1) | the registry `window_waits.tsv`, held equal to the door types by `hang_watch::window_waits_tests`; every door's function takes its token by value (A1d), and `tests::every_owner_door_takes_its_own_token_by_value` checks each signature |
 | creating a native window outside the framework | `bt_platform::SpareParent` / `spare_parent` — the spare web controller's never-shown `WS_POPUP` parent (ticket 60); dropped only on a pumping thread, left to process exit by an orderly stop | the one `CreateWindowExW` in product code, pinned by `web_spare::spare_wiring_tests::the_spare_parent_is_the_one_window_product_code_creates` |
 | taking a native window's messages away from the framework | `bt_platform::let_the_system_translate_touch` — the touch subclass that hands `WM_TOUCH` and the three `WM_POINTER*` to `DefWindowProc` | a message table pinned by test; called once per window, from the two `create_window` sites |
 

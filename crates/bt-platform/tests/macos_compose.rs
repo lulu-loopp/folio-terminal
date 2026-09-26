@@ -66,6 +66,7 @@ mod mac {
     use std::ffi::c_void;
     use std::ptr::NonNull;
 
+    use bt_platform::admission::doors;
     use bt_platform::{Compositor, NativeWindow, PageVisual};
     use objc2::rc::{Retained, autoreleasepool};
     use objc2::{MainThreadMarker, MainThreadOnly, define_class, msg_send};
@@ -77,6 +78,23 @@ mod mac {
         NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSRunLoop, NSSize, ns_string,
     };
     use objc2_quartz_core::CALayer;
+
+    /// **One admitted call of door `D` on this thread**, which is the window thread: the
+    /// composition's and the engine's doors are owner-thread doors (design note 2026-09-26,
+    /// revision (e)2). The first call enters the window thread and runs its loop.
+    fn admit<D: bt_platform::admission::Door, R>(
+        work: impl for<'scope> FnOnce(bt_platform::admission::WaitToken<'scope, D>) -> R,
+    ) -> R {
+        use bt_platform::admission::{Role, admitted, enter_window_thread, loop_running, role};
+        if role() != Role::Window {
+            assert!(
+                enter_window_thread(),
+                "this thread enters as the window thread"
+            );
+            assert!(loop_running(), "and its loop is running");
+        }
+        admitted::<D, R>(work).expect("admitted on the window thread")
+    }
 
     // ── the window server's own picture ────────────────────────────────────
 
@@ -626,7 +644,8 @@ mod mac {
             window.backingScaleFactor()
         );
 
-        let compositor = Compositor::new(handle).expect("the composition builds on a real window");
+        let compositor = admit::<doors::CompositorBirth, _>(|token| Compositor::new(token, handle))
+            .expect("the composition builds on a real window");
         let page = PageVisual { tab: 1, seat: 1 };
         compositor
             .set_page_ground_color([
@@ -808,7 +827,8 @@ mod mac {
         let content = window.contentView().expect("the window has a content view");
         assert!(!content.isFlipped(), "the other premise of this case");
         let handle = handle_of(&window);
-        let compositor = Compositor::new(handle).expect("the composition builds");
+        let compositor = admit::<doors::CompositorBirth, _>(|token| Compositor::new(token, handle))
+            .expect("the composition builds");
         let page = PageVisual { tab: 7, seat: 2 };
         compositor.attach_web_visual(page).expect("a page joins");
         compositor

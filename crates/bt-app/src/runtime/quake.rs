@@ -1,9 +1,7 @@
 //! `quake` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
-use crate::{
-    Runtime, hang_watch, native_window, persisted_window_bounds, profiles, quake, shortcuts,
-};
+use crate::{Runtime, native_window, persisted_window_bounds, profiles, quake, shortcuts};
 use anyhow::Result;
 
 impl Runtime<'_> {
@@ -107,9 +105,11 @@ impl Runtime<'_> {
     /// visible present's dpi check reads — and a hidden window is not a window
     /// that was never shown.
     pub(crate) fn hide_quake_window(&mut self) -> Option<bt_platform::hotkey::Foreground> {
-        hang_watch::during(hang_watch::Station::WindowVisible, || {
-            self.window.window.set_visible(false)
-        });
+        // An owner-thread door (`doors::SetVisible`, whose station the meter enters). A refusal
+        // is a hide that had no effect.
+        let _ = bt_platform::admission::admitted::<bt_platform::admission::doors::SetVisible, _>(
+            |token| crate::owner_door::set_visible(token, &self.window.window, false),
+        );
         self.app.quake.hidden()
     }
 

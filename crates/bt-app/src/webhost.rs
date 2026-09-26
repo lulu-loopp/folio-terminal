@@ -45,6 +45,7 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use bt_persist::{SearchEngineV1, WebColorSchemeV1};
+use bt_platform::admission::{admitted, doors};
 use bt_platform::{WebChord, WebColorScheme, WebEvent, WebHost, WebNavigationVerdict};
 use winit::keyboard::{ModifiersState, NamedKey};
 
@@ -2317,7 +2318,9 @@ impl WebSeat {
         bounds: WebBounds,
     ) -> Result<(), String> {
         self.place(compositor, WebPresence::Shown(bounds), Some(bounds), &[])?;
-        compositor.commit()
+        // The commit is an owner-thread door; a refusal is this road's own `Err`.
+        admitted::<doors::CompositorCommit, _>(|token| compositor.commit(token))
+            .unwrap_or_else(|refused| Err(refused.to_string()))
     }
 
     /// **Before a handoff: the spare's own rectangle is not the page's** (SW-3, SW-5). Hidden,
@@ -2949,9 +2952,12 @@ impl WebSeat {
                 let window = self.address.window;
                 let generation = self.machine.generation();
                 self.made_under = Some(bt_platform::web_environment_epoch());
-                let asked = hang_watch::during(hang_watch::Station::WebController, || {
-                    self.host.request_controller(window, generation)
-                });
+                // An owner-thread door (`doors::WebController`, whose station the meter enters):
+                // a refusal takes the step's own `Err` road, as a refused creation call does.
+                let asked = admitted::<doors::WebController, _>(|token| {
+                    self.host.request_controller(token, window, generation)
+                })
+                .unwrap_or_else(|refused| Err(refused.to_string()));
                 match asked {
                     Ok(()) => {
                         self.engine_owes_an_answer = Some(Instant::now() + ENGINE_START_DEADLINE);
@@ -3271,9 +3277,13 @@ impl WebSeat {
         // **Its own station** (ticket 43): the first page in the process
         // spends the loader and the browser's launch request here, inside
         // whichever gesture asked for the page.
-        let asked = hang_watch::during(hang_watch::Station::WebEnvironment, || {
-            self.host.request_environment(&folder, generation)
-        });
+        //
+        // An owner-thread door (`doors::WebEnvironment`, whose station the meter enters): a
+        // refusal is the engine not starting, as a refused creation call is.
+        let asked = admitted::<doors::WebEnvironment, _>(|token| {
+            self.host.request_environment(token, &folder, generation)
+        })
+        .unwrap_or_else(|refused| Err(refused.to_string()));
         match asked {
             Ok(()) => self.engine_owes_an_answer = Some(Instant::now() + ENGINE_START_DEADLINE),
             Err(error) => self.the_engine_did_not_start(error, outcomes),
@@ -3729,20 +3739,31 @@ impl WebSeat {
                 (bounds.x, bounds.y, bounds.width, bounds.height)
             });
         let visible = matches!(self.wanted, WebPresence::Shown(_));
-        let outcome = self.host.rehost(
-            &bt_platform::RehostSide {
-                compositor: from,
-                page: self.address.page,
-                window: self.address.window,
-            },
-            &bt_platform::RehostSide {
-                compositor: to,
-                page: address.page,
-                window: address.window,
-            },
-            rect,
-            visible,
-        );
+        // An owner-thread door (`doors::WebRehost`): the walk and its commits are one admission.
+        // A refusal is the shape `rehost` answers before its first step — nothing moved, nothing
+        // to compensate — so the page stays where it was.
+        let outcome = admitted::<doors::WebRehost, _>(|token| {
+            self.host.rehost(
+                token,
+                &bt_platform::RehostSide {
+                    compositor: from,
+                    page: self.address.page,
+                    window: self.address.window,
+                },
+                &bt_platform::RehostSide {
+                    compositor: to,
+                    page: address.page,
+                    window: address.window,
+                },
+                rect,
+                visible,
+            )
+        })
+        .unwrap_or_else(|refused| bt_platform::RehostOutcome::KeptSource {
+            failed_at: bt_platform::RehostStep::Hide,
+            error: refused.to_string(),
+            compensation: bt_platform::RehostCompensation::default(),
+        });
         match outcome {
             bt_platform::RehostOutcome::Moved => {
                 self.adopt(from, address);
@@ -3783,7 +3804,7 @@ impl WebSeat {
     /// somewhere else must not be reported as not having moved.
     fn adopt(&mut self, from: &bt_platform::Compositor, address: SeatAddress) {
         let _ = from.detach_web_visual(self.address.page);
-        let _ = from.commit();
+        let _ = admitted::<doors::CompositorCommit, _>(|token| from.commit(token));
         self.take_address(address);
     }
 
@@ -7581,5 +7602,44 @@ mod favicon_tests {
             )
             .is_empty()
         );
+    }
+}
+
+/// **The page's engine requests are owner-thread doors** (A1d, §5.3 row 21).
+#[cfg(test)]
+mod owner_door_tests {
+    use super::rehost_address_tests::{detached, page, window};
+    use super::*;
+
+    /// RED (A1d, row 21) — **an engine asked for where its door is not admitted did not start,
+    /// and the card says why.**
+    ///
+    /// This test's own thread never entered as the window thread, so `WebEnvironment` is refused
+    /// before the platform is asked anything — no loader runs, no browser starts — and the seat
+    /// takes the road a refused creation call takes: no answer is owed, the machine hears the
+    /// engine did not start, and the fault's words name the door.
+    ///
+    /// MUTATION: map the refusal to `Ok(())` instead of the step's `Err` road and the seat waits
+    /// for an answer that is never coming.
+    #[test]
+    fn an_engine_asked_for_off_the_window_thread_did_not_start_and_says_why() {
+        let mut seat = detached(SeatAddress {
+            page: page(1, 1),
+            window: window(1),
+        });
+        let mut outcomes = Vec::new();
+        seat.start_environment(&mut outcomes);
+        assert!(
+            seat.engine_owes_an_answer.is_none(),
+            "no answer is owed for a question that was not asked"
+        );
+        assert!(
+            matches!(
+                outcomes.as_slice(),
+                [WebOutcome::Fault(detail)] if detail.contains("the WebEnvironment door was refused")
+            ),
+            "the seat's one outcome is the fault, naming the door: {outcomes:?}"
+        );
+        assert!(seat.fault.is_some(), "and the card is up");
     }
 }

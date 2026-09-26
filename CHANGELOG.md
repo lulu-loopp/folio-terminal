@@ -72,6 +72,11 @@ All notable changes to Folio are recorded here. The format follows
   folder watching, the two doorbells, the Explorer menu's work and the helper
   commands' waits — now start the same way as every other, and a test keeps it
   that way. No thread runs at a different priority.
+- Each wait the window thread may make — presenting a frame, starting a shell,
+  resizing it, opening a window's surface, the title, the cursor, the page
+  engine, the session save on the way out — can now only happen on the window
+  thread, at the stage of the run it belongs to, and is timed where it happens.
+  Nothing changes while Folio runs normally.
 
 ## 0.4.5-preview — 2026-09-26
 

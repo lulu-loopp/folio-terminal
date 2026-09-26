@@ -17,11 +17,12 @@ use crate::{
     session_tab_layout, set_option_as_alt, solve_seats, stand_the_window_at, startup_window_rect,
     tear_out_rect, toast, unsaved_line, window_minimum_changed, window_surface_target,
 };
-use crate::{LeafView, TextScale};
+use crate::{LeafView, TextScale, owner_door};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{SeatId, SizePolicy, WorkAreaHint};
 use bt_persist::{SessionSidebarModeV1, SessionTabLayoutV1, SessionWindowV1, TabV1, WindowStateV1};
+use bt_platform::admission::{admitted, doors};
 use bt_render::{FrameSource, FrameTrigger, WindowRenderer};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -246,10 +247,14 @@ impl Runtime<'_> {
         let scale_factor = dpi_snapshot(&window)?.authoritative_scale;
         // The visual tree first, because the swapchain hangs off it — §2.3's
         // shape, once per window, because a `Compositor` is parameterised by the
-        // HWND it composes above.
-        let compositor = bt_platform::Compositor::new(native)
-            .map_err(|error| anyhow!(error))
-            .context("open the window's DirectComposition visual tree")?;
+        // HWND it composes above. An owner-thread door (`doors::CompositorBirth`): a refusal is
+        // this road's own error.
+        let compositor = admitted::<doors::CompositorBirth, _>(|token| {
+            bt_platform::Compositor::new(token, native)
+        })
+        .unwrap_or_else(|refused| Err(refused.to_string()))
+        .map_err(|error| anyhow!(error))
+        .context("open the window's DirectComposition visual tree")?;
         // Beside the first window's, and for its reason: a second window can be
         // opened straight onto a page (`Move pane to new window` on a web seat).
         install_page_ground_color(&compositor);
@@ -258,13 +263,21 @@ impl Runtime<'_> {
         // asked of the same adapter, which is the whole of the sharing contract;
         // the atlas, both pipelines and the one `FontSystem` come with it, and
         // that last is the saving that is not on the GPU at all.
-        let mut renderer = WindowRenderer::new(
-            &mut app.gpu,
-            window_surface_target(&window, &compositor),
-            physical.width,
-            physical.height,
-            scale_factor,
-        )
+        //
+        // The surface and its configure are one owner-thread door (`doors::SurfaceBirth`); a
+        // refusal is this road's own error.
+        let mut renderer = admitted::<doors::SurfaceBirth, _>(|token| {
+            WindowRenderer::new(
+                token,
+                &mut app.gpu,
+                window_surface_target(&window, &compositor),
+                physical.width,
+                physical.height,
+                scale_factor,
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
         .context("open the new window's surface on this application's device")?;
         let translucency_available = renderer
             .alpha_report()
@@ -655,10 +668,14 @@ impl Runtime<'_> {
         let Some(title) = self.window.title.take_due(interval, now) else {
             return;
         };
+        // An owner-thread door (`doors::TitleFlush`, whose station the meter enters). A refusal
+        // keeps the title wanted, and the next turn writes it.
         let window = &self.window.window;
-        hang_watch::during(hang_watch::Station::WindowTitle, || {
-            window.set_title(&title)
-        });
+        if admitted::<doors::TitleFlush, _>(|token| owner_door::set_title(token, window, &title))
+            .is_err()
+        {
+            self.window.title.refused(title);
+        }
     }
 
     /// Put the window on the screen — the other half of
@@ -688,9 +705,11 @@ impl Runtime<'_> {
         if maximized {
             self.window.window.set_maximized(true);
         }
-        hang_watch::during(hang_watch::Station::WindowVisible, || {
-            self.window.window.set_visible(true)
-        });
+        // An owner-thread door (`doors::SetVisible`, whose station the meter enters). A refusal
+        // leaves the window hidden and takes the show road's own failure.
+        admitted::<doors::SetVisible, _>(|token| {
+            owner_door::set_visible(token, &self.window.window, true);
+        })?;
         self.window.ime_report.shown(ime_report::now_ms());
         self.window
             .ime_report
@@ -2026,8 +2045,10 @@ impl Runtime<'_> {
         // cannot hold the foreground. So the hide moves down here, where every
         // road that ends a window already meets — the ordinary close, the quit's
         // retirement, `exiting`, and the failure stop.
-        hang_watch::during(hang_watch::Station::WindowVisible, || {
-            self.window.window.set_visible(false)
+        // An owner-thread door (`doors::SetVisible`, whose station the meter enters). A refusal
+        // is a hide that had no effect: the letting go carries on.
+        let _ = admitted::<doors::SetVisible, _>(|token| {
+            owner_door::set_visible(token, &self.window.window, false);
         });
         hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
             self.destroy_ime_caret("window_teardown")
