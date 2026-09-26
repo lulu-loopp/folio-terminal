@@ -167,6 +167,8 @@ mod uninstall;
 mod update;
 // The updater's archive reader (0.4.6 ticket U-14); U-20's Prepare is its caller.
 mod update_archive;
+// The update job, one per process on `App` (0.4.6 ticket U-18).
+mod update_job;
 // The build script's updater-flag decision, compiled here only so its tests run:
 // `build.rs` reaches the same file by `#[path]`, and nothing of it ships.
 #[cfg(test)]
@@ -574,6 +576,26 @@ enum AppEvent {
     /// (`App::release_trial_writes`). Owed a wake because nothing else may be
     /// coming: a commit lands while the reader is doing nothing at all.
     TrialWritesReleased,
+    /// **One of the update job's two facts has landed** (U-18): the day's
+    /// check settled (`update::begin`), or how this copy was installed was read
+    /// (`install_channel`'s worker).
+    ///
+    /// Carries nothing: both facts are in their owners' slots by the time this
+    /// is sent, and the handler gathers them (`update_job::Gathered::now`) and
+    /// lets the job decide — [`FolioApp::consider_update_offer`]. Not a share of
+    /// [`Self::UpdateChecked`], whose handler rebuilds every window's chrome and
+    /// which the check sends only on an answer, nor of
+    /// [`Self::InstallChannelRead`], which does nothing: this one decides, on a
+    /// station of its own so a slow decision is named.
+    UpdateJobOffer,
+    /// **An update driver or the quit barrier reported** (U-18): the reports
+    /// wait in the job's inbox, each named by its transaction, and the handler
+    /// applies them in order — a report for another transaction, or for a job
+    /// that was cancelled, is dropped (`update_job::Job::drain_progress`).
+    ///
+    /// Carries nothing, on `AttentionSpoke`'s footing: one nudge for any number
+    /// of reports. No driver sends it yet (U-20, U-27, U-21).
+    UpdateJobProgress,
     /// **Something spoke into this process's attention endpoint** (`attention_wire`).
     ///
     /// The same family again and the same reason for a wake of its own, in its strongest form: the
@@ -793,6 +815,9 @@ impl AppEvent {
             // migration, the PSReadLine upgrade and the registrations, each
             // one write — charged a station of their own so a slow one is named.
             Self::TrialWritesReleased => Station::TrialWritesReleased,
+            // The update job's decision and its progress, each named (U-18).
+            Self::UpdateJobOffer => Station::UpdateJobOffer,
+            Self::UpdateJobProgress => Station::UpdateJobProgress,
             Self::PtyOutput
             | Self::GitChanged
             | Self::PreviewFileChanged
@@ -12780,6 +12805,11 @@ struct App {
     /// per *process* — one `RegisterHotKey` on the loop's own thread — and
     /// because the window it names may not exist yet. See [`quake::Quake`].
     quake: quake::Quake,
+    /// **The update job** (U-18; `docs/plans/design/self-update-2026-09-16.md`
+    /// §B): one per process, on the application and not on a window, because
+    /// the offer outlives the window it was raised in and a download belongs to
+    /// the copy, not to a window of it. See [`update_job::Job`].
+    update_job: update_job::Job<WindowId>,
 }
 
 /// **The way a message from outside every window asks for a turn.**
@@ -41245,6 +41275,21 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::TrialWritesReleased);
             });
         }
+        // **And the update job's two** (U-18): one when either of its facts lands — the check
+        // settling here, the channel below — and one for a driver's report. Installed before
+        // either worker can finish.
+        {
+            let proxy = proxy.clone();
+            update_job::install_wake(move || {
+                let _ = proxy.send_event(AppEvent::UpdateJobOffer);
+            });
+        }
+        {
+            let proxy = proxy.clone();
+            update_job::install_progress_wake(move || {
+                let _ = proxy.send_event(AppEvent::UpdateJobProgress);
+            });
+        }
         update::load(
             &persist::storage_dir(),
             settings_store.loaded().update_check,
@@ -41252,11 +41297,13 @@ impl Runtime<'_> {
         update::begin();
         // **How this copy was installed** (U-1): read once, off this thread, and said once in
         // `diagnostics.log`. The first-run card's Explorer row reads it (U-3) and waits a turn
-        // for it, so the wake is installed before the worker can finish.
+        // for it, so the wake is installed before the worker can finish. It is the update job's
+        // other fact (U-18), so the same wake asks the job too.
         {
             let proxy = proxy.clone();
             install_channel::install_wake(move || {
                 let _ = proxy.send_event(AppEvent::InstallChannelRead);
+                let _ = proxy.send_event(AppEvent::UpdateJobOffer);
             });
         }
         install_channel::begin();
@@ -41944,6 +41991,7 @@ impl Runtime<'_> {
             window_ring: None,
             window_ring_shown: None,
             quake: quake::Quake::default(),
+            update_job: update_job::Job::default(),
         };
         // **The rest of the file's windows, queued at the door.** A window that
         // held a pinned tab opens straight away, through the very same door
@@ -45688,6 +45736,10 @@ impl Runtime<'_> {
         // The offer's owner is told, so `Off` suppresses a cached offer from the
         // next frame (U-6) — no thread is started or stopped here.
         update::set_enabled(enabled);
+        // And the update job (§B): `Off` puts an offer away and cancels a download.
+        if !enabled {
+            self.app.update_job.switch_off();
+        }
     }
 
     /// Point the `Focus card height` row at `height` logical pixels of card body
@@ -60994,6 +61046,34 @@ impl FolioApp {
         })
     }
 
+    /// **The update job considers an offer** (U-18) on what has landed — the
+    /// check's state and switch, how this copy was installed, the build's flag
+    /// and whether this start is a trial — in the window the reader was last in
+    /// (never the summoned terminal). Its decision is said once in
+    /// `diagnostics.log`, with no path and no account.
+    fn consider_update_offer(&mut self) {
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        let open = app
+            .windows_open
+            .iter()
+            .map(|open| open.id)
+            .collect::<Vec<_>>();
+        let presenters = update_job::Presenters {
+            visited: &app.activated,
+            open: &open,
+            quake: app.quake.window(),
+        };
+        if let Some(line) = app.update_job.consider(
+            update_job::Gathered::now(),
+            &presenters,
+            update_job::mint_txn,
+        ) {
+            diagnostics::note(&line);
+        }
+    }
+
     /// The window a delegate event lands in: the one the reader was last in, or
     /// a fresh one when this run has none left.
     ///
@@ -63095,6 +63175,18 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::TrialWritesReleased => {
                 if let Some(app) = self.app.as_mut() {
                     app.release_trial_writes(update_trial::take_released());
+                }
+                Ok(())
+            }
+            // **The update job decides** (U-18), on whatever has landed.
+            AppEvent::UpdateJobOffer => {
+                self.consider_update_offer();
+                Ok(())
+            }
+            // **The update job applies its reports** (U-18); a stale one is dropped.
+            AppEvent::UpdateJobProgress => {
+                if let Some(app) = self.app.as_mut() {
+                    app.update_job.drain_progress();
                 }
                 Ok(())
             }

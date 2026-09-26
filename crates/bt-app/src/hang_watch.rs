@@ -322,7 +322,7 @@ fn slow_hold_threshold_ms() -> u64 {
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 220;
+const STATION_COUNT: usize = 222;
 
 /// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
 /// apart can nest (ticket 64).
@@ -1041,6 +1041,12 @@ pub enum Station {
     /// `App::release_trial_writes` on `AppEvent::TrialWritesReleased`
     /// (`update_trial`, 0.4.6 U-13).
     TrialWritesReleased = 219,
+    /// **The update job deciding whether to offer** — `FolioApp::consider_update_offer`
+    /// on `AppEvent::UpdateJobOffer` (`update_job`, 0.4.6 U-18).
+    UpdateJobOffer = 220,
+    /// **The update job applying its drivers' reports** — `Job::drain_progress`
+    /// on `AppEvent::UpdateJobProgress` (`update_job`, 0.4.6 U-18).
+    UpdateJobProgress = 221,
 }
 
 impl Station {
@@ -1268,6 +1274,8 @@ impl Station {
             Self::CompositorWindowSize => "Compositor::set_window_size",
             Self::WebRehost => "WebHost::rehost",
             Self::TrialWritesReleased => "App::release_trial_writes",
+            Self::UpdateJobOffer => "FolioApp::consider_update_offer",
+            Self::UpdateJobProgress => "update_job::Job::drain_progress",
         }
     }
 
@@ -1509,6 +1517,8 @@ impl Station {
             217 => Self::CompositorWindowSize,
             218 => Self::WebRehost,
             219 => Self::TrialWritesReleased,
+            220 => Self::UpdateJobOffer,
+            221 => Self::UpdateJobProgress,
             _ => Self::Starting,
         }
     }

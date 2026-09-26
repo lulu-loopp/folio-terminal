@@ -47,6 +47,12 @@ All notable changes to Folio are recorded here. The format follows
   same developer as the one running and what Gatekeeper says about it; it
   refuses a copy Gatekeeper rejects, and when Gatekeeper is turned off it
   relies on the signature alone. Nothing uses it yet.
+- The coming updater decides, once per launch, whether this copy may be
+  offered the newer release the daily check found: only a copy you unpacked
+  yourself, from a release build, with the check on and the version not
+  skipped — a copy a package manager installed is pointed at its manager's
+  command instead. It waits until both facts are known, says its answer once
+  in `diagnostics.log`, and offers nothing to anybody yet.
 
 ### Fixed
 
