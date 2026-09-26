@@ -11,7 +11,7 @@ use crate::{
     files_row_menu_subject, float, float_viewport_rect, git, git_graph, git_panel, hang_watch,
     i18n, indeterminate_start_milliturns, marks, menubar, page_keepsake_icon, popup_owner, preview,
     preview_select, profiles, refused_preview_card, restore, revealable_preview_file, risen_frame,
-    seats, shown_address, update, version, webhost, webnav,
+    seats, shown_address, update, webhost, webnav,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -963,11 +963,11 @@ impl Runtime<'_> {
             seats::ChromeContent {
                 // **Read here rather than in `seats.rs`** — that file draws what
                 // this one has decided is true, and "is there a newer release"
-                // is a fact about a file on the disk. `known()` is a lock and a
-                // clone of three small fields; it is on the frame path for the
-                // reason `i18n::current()` is, and like that one it answers the
-                // same thing all frame.
-                update_mark: update::mark_is_lit(&update::known(), version::VERSION),
+                // is a fact about a file on the disk. The owner answers from
+                // memory — a lock and a clone of four small fields, never the
+                // disk; it is on the frame path for the reason `i18n::current()`
+                // is, and like that one it answers the same thing all frame.
+                update_mark: update::gear_mark_is_lit(),
                 // **Which caption run this window wears** (§7.54e ②) — the one
                 // window whose `×` hides rather than closes, and which therefore
                 // has no second button that means the same thing.

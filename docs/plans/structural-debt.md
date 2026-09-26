@@ -204,7 +204,7 @@ ledger's.
 | D-50 | §7.2 chain stub — paste convergence | §7.2 | none yet | 0.4.6 — tickets 02 and 03 have just walked it | open |
 | D-51 | §4.2 class — observations of external state (survey facts 1, 5, 6, 7, 12) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
 | D-52 | §4.2 class — asynchronous publication and competing operations (facts 4, 10, 13, 19, 22) | §4.2; survey Part 4 | none yet | 0.4.6, with D-3 | open |
-| D-53 | §4.2 class — durability and external transactions (facts 8, 9, 11) | §4.2; survey Part 4 | none yet | 0.4.6, with D-34 and D-47 | open |
+| D-53 | §4.2 class — durability and external transactions (facts 8, 9, 11) | §4.2; survey Part 4 | U-6 | 0.4.6, with D-34 and D-47 | open — **narrowed by U-6 (0.4.6)**: fact 11's part repaid — the update check's memory, file and claim have one owner, `update::OfferState`, whose one lock is held across every read-modify-write; facts 8 and 9 remain |
 | D-54 | §4.2 class — identity, admission and lifecycle (facts 2, 3, 14, 20) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
 | D-55 | §4.2 class — projections, delivery and loss (facts 15, 16, 17, 18, 21) | §4.2; survey Part 4 | none yet | 0.4.7 | open |
 | D-56 | §11 emergency termination — a journal and a defined recoverable revision | §11 | none yet | 0.4.7 | open |
@@ -1072,7 +1072,8 @@ lanes they name; D-51, D-54 and D-55 are 0.4.7.
   times: `window.background_decode`, `window.clipboard_picture`, the web host).
 - **D-53 · durability and external transactions** — facts 8 (the session
   snapshot's three copies), 9 (the marks record), 11 (the update check's
-  memory, file and claim).
+  memory, file and claim). Fact 11's part repaid by U-6 (0.4.6):
+  `update::OfferState`.
 - **D-54 · identity, admission and lifecycle** — facts 2
   (`launch_wire::ADMITTING`, one turn old), 3 (`hang_watch`'s opinion consumed
   by `launch_wire::admit`), 14 (`LeafWake::rebind`, the repair to copy), 20

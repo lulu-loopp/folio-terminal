@@ -17,6 +17,9 @@ All notable changes to Folio are recorded here. The format follows
 - An updated Folio can take over the data directory from the copy it
   replaces without a moment in which neither copy owns it. Nothing uses this
   yet.
+- The update check can remember a version you chose to skip, and never offers
+  that version or an older one again; turning the check off also hides a
+  version it had already found. There is no Skip button yet.
 
 ### Fixed
 

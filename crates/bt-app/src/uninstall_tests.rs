@@ -347,6 +347,30 @@ fn uninstall_purge_only_resolved_roots_and_never_application() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// PIN (U-6) — **`--purge` removes `update-check.json` at schema v2 as it removed v1**: the
+/// file lives in the data root the purge removes whole, and schema v2 adds no file elsewhere.
+///
+/// The document is written by the product's own owner (`update::OfferState::skip`), so the
+/// file on disk is the v2 shape a real Skip leaves.
+#[test]
+fn uninstall_purge_removes_the_v2_update_check_file() {
+    let (root, scope) = sandbox("purge-update-check");
+    let data = &scope.data[0];
+    fs::create_dir_all(data).unwrap();
+    crate::update::OfferState::load(data, true)
+        .skip("v0.5.0")
+        .expect("a Skip written into the sandbox's data root");
+    let file = data.join(crate::update::STATE_FILE_NAME);
+    let written: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+    assert_eq!(written["schema_version"], serde_json::json!(2));
+    assert_eq!(written["skipped_tag"], serde_json::json!("v0.5.0"));
+
+    let report = execute(&scope, true, system_absent);
+    assert_eq!(report.code, 0, "{}", report.stderr());
+    assert!(!file.exists(), "the v2 file went with the data root");
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(windows)]
 #[test]
 fn uninstall_purge_junction_refuses_root_without_touching_target() {

@@ -28,7 +28,7 @@ Nothing is downloaded and nothing is replaced.
 | **Method** | `GET`. No query string, no request body. |
 | **What is sent** | One header: `User-Agent: Folio`. No version, no build, no operating system, no identifier, no cookie. GitHub refuses a request with no user agent at all, which is why the header is not empty. |
 | **How often** | At most once every 24 hours, across every Folio window on the machine. A failure — no network, a proxy, a rate limit — counts as the attempt for that day and is not retried. |
-| **Where the answer goes** | `update-check.json` in the settings directory below: when the page was last asked, the tag it named, and the tag you have already been shown. |
+| **Where the answer goes** | `update-check.json` in the settings directory below: when the page was last asked, the tag it named, the tag you have already been shown, and the tag you chose to skip. |
 | **How to switch it off** | Settings > General > **Update check**, or `"update_check": false` in `settings.json`. On a machine that has never run Folio it is also the first row of the first-run card, where it arrives on and can be switched off before it has ever run. Off, no thread is started, no request is made and `update-check.json` is never written. |
 
 GitHub receives the request the way it receives any request: your IP address and
@@ -62,7 +62,7 @@ Delete it and Folio starts as it did the first time.
 | `schemes` | Colour schemes you added. |
 | `session.json`, `session.lock` | The windows, tabs and panes to restore. See below. |
 | `pins.json` | Pinned folders, files and addresses. |
-| `update-check.json` | When the releases page was last asked, and the two version tags that answer whether the gear wears a mark. Written only while the update check is on. |
+| `update-check.json` | When the releases page was last asked, the two version tags that answer whether the gear wears a mark, and the version you chose to skip. Written only while the update check is on. |
 | `shell-integration` | The scripts Folio writes for the PowerShell, bash and zsh integrations. On Windows the PowerShell one is referenced from a line added to your own `$PROFILE`; the bash and zsh ones are handed to the shell as Folio starts it and touch no file of yours. |
 | `diagnostics.log`, `diagnostics.prev.log` | Program output for a run started without a console. Checked once at startup: at 4 MiB the current log becomes `.prev.log`, replacing the older one. |
 | `hang-reports` | Written only when the window stops answering. Module names and offsets, not stack contents — and on macOS not even those: the entry says that a stack capture is a Windows facility and records the times instead. |
