@@ -3420,6 +3420,15 @@ pub mod pe_resource;
 /// Worker only: every call blocks on the disk.
 pub mod install_txn;
 
+/// **The update's entrance at logon** — one value, `FolioUpdate-<txn8>`, under
+/// `HKCU\…\CurrentVersion\Run`: written, flushed and read back before the
+/// journal may record `Armed` (the proof [`logon_hook::Armed`] is made only
+/// there), the 260-character command limit checked first, removal, and
+/// `--uninstall-cleanup`'s per-copy row (ticket U-22;
+/// `docs/plans/design/self-update-2026-09-16.md` revision (b), F-2, §(b).3,
+/// E-7). Windows is real; every other platform refuses by name.
+pub mod logon_hook;
+
 mod web_environment;
 mod webview;
 
