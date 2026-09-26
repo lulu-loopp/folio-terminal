@@ -166,6 +166,9 @@ enum Decided {
     Ended,
 }
 
+/// A document whose refused bytes are owed a copy, and the read that keeps it.
+type OwedCopy = (PathBuf, fn(&Path));
+
 /// **The gate's state**, one per process ([`GATE`]); a test builds its own.
 pub(crate) struct Gate {
     state: Mutex<GateState>,
@@ -178,9 +181,9 @@ struct GateState {
     pending: BTreeSet<Writer>,
     /// The documents whose refused bytes are owed a copy, each with the read
     /// that keeps it ([`Writer::RefusedCopies`]).
-    owed_copies: Vec<(PathBuf, fn(&Path))>,
+    owed_copies: Vec<OwedCopy>,
     /// What a commit released of them.
-    released_copies: Vec<(PathBuf, fn(&Path))>,
+    released_copies: Vec<OwedCopy>,
     /// What a commit released and the window thread has not yet run.
     released: Vec<Writer>,
     /// The trial's claim was adopted into the claim table (§C.7).
@@ -288,7 +291,7 @@ impl Gate {
     }
 
     /// The owed copies a commit released, once.
-    fn take_released_copies(&self) -> Vec<(PathBuf, fn(&Path))> {
+    fn take_released_copies(&self) -> Vec<OwedCopy> {
         std::mem::take(&mut self.state().released_copies)
     }
 
