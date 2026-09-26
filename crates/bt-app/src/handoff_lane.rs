@@ -473,7 +473,10 @@ mod tests {
     /// the program refusal. The door now answers on the lane, so the words are rebuilt from a
     /// [`Completion`] — and a reader must not be able to tell. Run through the **real** lane with
     /// the **real** [`bt_platform::ShellThread`] over the **real** verifier's answer for a real
-    /// folder, against the old code's own spelling of the same line.
+    /// folder, against the old code's own spelling of the same line. The door's own answer for that
+    /// spelling is asked through the only road to it that is left (A1b made the verbs private to
+    /// `bt_platform::handoff`): a `ShellThread` entered on a second thread the thread door started,
+    /// handed the same two requests — not through the lane under test.
     ///
     /// The program is a folder so that one fixture is a program on both machines without touching
     /// a mode bit: `payload.exe` is one by name to Windows, `Payload.app` is one by bundle to
@@ -526,18 +529,18 @@ mod tests {
                     .then(crate::files_program_refused_notice),
             }
         };
-        let old = [
-            before(bt_platform::open_local_path_verified(
-                window(),
-                &program,
-                facts,
-            )),
-            before(bt_platform::open_local_path_verified(
-                window(),
-                &missing,
-                bt_platform::VerifiedTarget::absent(),
-            )),
-        ];
+        let doors = bt_platform::spawn_at_priority(
+            "bt-test-handoff-door",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |ctx| {
+                let shell = bt_platform::ShellThread::enter(ctx);
+                requests.map(|request| shell.hand_over(window(), &request))
+            },
+        )
+        .expect("the door starts a thread")
+        .join()
+        .expect("the door answered");
+        let old = doors.map(before);
         for (completion, old) in answered.iter().zip(old) {
             let reason = completion
                 .outcome

@@ -143,7 +143,9 @@ pub enum Handoff {
 /// **And it is a worker's** (A1b). [`ShellThread::enter`] takes the
 /// [`WorkerCtx`] the thread door lends the body of every thread it starts, so a
 /// hand-off can be prepared only on a thread the door started — never on the
-/// window thread, which has no such value, and never on a callback thread.
+/// window thread, which has no such value, and never on a callback thread. The
+/// seven verbs behind [`ShellThread::hand_over`] are private to this module, so
+/// the value is the only road to them (the proofs are on `hand_over`).
 ///
 /// It stays on the thread that entered it — its auto traits, each probed alone:
 ///
@@ -234,6 +236,102 @@ impl ShellThread {
     /// # Errors
     ///
     /// Whatever the named door refuses with.
+    ///
+    /// # The only road
+    ///
+    /// The seven verbs this dispatches to are private to `bt_platform::handoff`
+    /// (A1b): nothing outside it — `bt-app` included — can name one by either
+    /// spelling, the crate root's or the module's, so a hand-off happens only
+    /// through an entered [`ShellThread`], which only a thread the door started
+    /// can hold.
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::shell_execute(NativeWindow::stand_in(0), "https://example.invalid/");
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::shell_execute(NativeWindow::stand_in(0), "https://example.invalid/");
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::open_local_file(NativeWindow::stand_in(0), std::path::Path::new("picture.png"));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::open_local_file(NativeWindow::stand_in(0), std::path::Path::new("picture.png"));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::open_local_path(NativeWindow::stand_in(0), std::path::Path::new("notes.md"));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::open_local_path(NativeWindow::stand_in(0), std::path::Path::new("notes.md"));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::open_local_path_verified(NativeWindow::stand_in(0), std::path::Path::new("notes.md"), bt_platform::VerifiedTarget::absent());
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::open_local_path_verified(NativeWindow::stand_in(0), std::path::Path::new("notes.md"), bt_platform::VerifiedTarget::absent());
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::reveal_in_explorer(NativeWindow::stand_in(0), std::path::Path::new("notes.md"));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::reveal_in_explorer(NativeWindow::stand_in(0), std::path::Path::new("notes.md"));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::reveal_verified(NativeWindow::stand_in(0), std::path::Path::new("notes.md"), bt_platform::VerifiedTarget::absent());
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::reveal_verified(NativeWindow::stand_in(0), std::path::Path::new("notes.md"), bt_platform::VerifiedTarget::absent());
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::open_system_fonts_page(NativeWindow::stand_in(0));
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use bt_platform::NativeWindow;
+    /// let _ = bt_platform::handoff::open_system_fonts_page(NativeWindow::stand_in(0));
+    /// ```
+    ///
+    /// MUTATION: re-export the seven verbs again (`pub use` in `handoff` and at the
+    /// crate root) and every block above compiles. The control is the road that
+    /// stays, from a body the door started:
+    ///
+    /// ```no_run
+    /// let _ = bt_platform::spawn_at_priority(
+    ///     "doc-probe",
+    ///     bt_platform::ThreadPriority::BelowNormal,
+    ///     |ctx| {
+    ///         let shell = bt_platform::ShellThread::enter(ctx);
+    ///         shell.hand_over(
+    ///             bt_platform::NativeWindow::stand_in(0),
+    ///             &bt_platform::Handoff::FontsPage,
+    ///         )
+    ///     },
+    /// );
+    /// ```
     pub fn hand_over(&self, window: NativeWindow, request: &Handoff) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
@@ -771,16 +869,18 @@ mod portable_handoff {
 #[cfg(not(windows))]
 pub use portable_handoff::program_on_path;
 
-/// The other five, on a platform with neither a Win32 shell nor a `NSWorkspace`.
+/// The other seven, on a platform with neither a Win32 shell nor a `NSWorkspace` —
+/// private to this module, reached only through [`ShellThread::hand_over`].
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub use portable_handoff::{
+use portable_handoff::{
     open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
     reveal_in_explorer, reveal_verified, shell_execute,
 };
 
-/// **The five verbs that leave this window, over `NSWorkspace`** (M2-2).
+/// **The seven verbs that leave this window, over `NSWorkspace`** (M2-2) —
+/// private to this module, reached only through [`ShellThread::hand_over`].
 #[cfg(target_os = "macos")]
-pub use macos_handoff::{
+use macos_handoff::{
     open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
     reveal_in_explorer, reveal_verified, shell_execute,
 };
@@ -1723,9 +1823,14 @@ mod macos_handoff {
 
 /// The Windows half: the real directories, the real `PATHEXT`, the real disk.
 #[cfg(windows)]
-pub use windows_handoff::{
+pub use windows_handoff::program_on_path;
+
+/// The seven verbs that leave this window, over `ShellExecuteW` — private to
+/// this module, reached only through [`ShellThread::hand_over`].
+#[cfg(windows)]
+use windows_handoff::{
     open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
-    program_on_path, reveal_in_explorer, reveal_verified, shell_execute,
+    reveal_in_explorer, reveal_verified, shell_execute,
 };
 
 #[cfg(windows)]

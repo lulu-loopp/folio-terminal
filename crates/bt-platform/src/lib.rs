@@ -12631,13 +12631,14 @@ mod argument_split_tests {
 
 /// **The hand-off, spelled once** — see [`handoff`].
 ///
-/// The four verbs that leave this window are re-exported at the crate root
-/// because that is where every caller has always found them, and moving the
-/// door is not the same as moving its handle.
+/// The request, the thread type and the pure half are re-exported at the crate
+/// root because that is where every caller has always found them. **The seven
+/// verbs that leave this window are not**: since A1b they are private to
+/// `handoff`, and [`ShellThread::hand_over`] — on a thread the door started,
+/// which alone can enter a [`ShellThread`] — is the only road to them.
 pub use handoff::{
-    Handoff, PROGRAM_REFUSED, ShellThread, VerifiedTarget, open_local_file, open_local_path,
-    open_local_path_verified, open_system_fonts_page, program_in_directories, program_on_path,
-    resolved_for_a_door, reveal_arguments, reveal_in_explorer, reveal_verified, shell_execute,
+    Handoff, PROGRAM_REFUSED, ShellThread, VerifiedTarget, program_in_directories, program_on_path,
+    resolved_for_a_door, reveal_arguments,
 };
 
 /// The two thread-band calls, off Windows.

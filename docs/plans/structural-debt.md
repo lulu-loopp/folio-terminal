@@ -142,6 +142,14 @@ opened with a blocking wait, found by the thread-door note's revision (e)2). The
 two version notes the budget note's R8 asks of the first ticket to touch the
 ledger: D-33's was made by A5; D-42's is made here (independent of D-41).
 
+0.4.6 ticket A1b repaid no row and added none. It advanced D-2: the thread door
+lends every worker a `WorkerCtx`, and the one worker-only door that exists, the
+hand-off, takes it (the seven verbs are private behind `ShellThread`). D-33's
+version note: unchanged at 0.4.6 — the hand-off lane's executor is now made from
+the capability the door lends (`HandoffLane::start`'s `make_executor` takes
+`&WorkerCtx`), its contract adapter drives it the same way, and no row of
+`lane::EXPECTED_FAILURES` moved.
+
 ## The ledger
 
 "§" alone means a section of `docs/ARCHITECTURE.md`. "Split prep" is
@@ -153,7 +161,7 @@ ledger's.
 | ID | what | source | ticket | version | status |
 |---|---|---|---|---|---|
 | D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 | open |
-| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid) |
+| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid); the thread door lends every worker a `WorkerCtx` and the hand-off door takes it (A1b, 2026-09-26: advanced, not repaid) |
 | D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
 | D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
 | D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not) |
