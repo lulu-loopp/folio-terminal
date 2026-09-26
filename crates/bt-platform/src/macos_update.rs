@@ -234,6 +234,16 @@ fn clone_bundle(from: &Path, to: &Path) -> Result<(), Refusal> {
     }
 }
 
+/// `<sys/clonefile.h>`'s `CLONE_NOFOLLOW`: a link at the source is cloned
+/// as a link. The `libc` crate declares `clonefile` but not its flags.
+#[cfg(target_os = "macos")]
+const CLONE_NOFOLLOW: u32 = 0x0001;
+
+/// `<sys/clonefile.h>`'s `CLONE_NOOWNERCOPY`: the clone is owned by the
+/// caller, as a copy would be.
+#[cfg(target_os = "macos")]
+const CLONE_NOOWNERCOPY: u32 = 0x0002;
+
 /// `clonefile(2)` with `CLONE_NOFOLLOW` (a link at `from` is cloned as a
 /// link, never followed) and `CLONE_NOOWNERCOPY` (the clone is the caller's,
 /// as a copy would be). A directory is cloned with everything in it.
@@ -251,7 +261,7 @@ fn clone_tree(from: &Path, to: &Path) -> io::Result<()> {
         libc::clonefile(
             from.as_ptr(),
             to.as_ptr(),
-            libc::CLONE_NOFOLLOW | libc::CLONE_NOOWNERCOPY,
+            CLONE_NOFOLLOW | CLONE_NOOWNERCOPY,
         )
     };
     if cloned == 0 {
@@ -343,16 +353,22 @@ fn verify_clone(old: &Identity, clone: &Path) -> Result<PathBuf, Refusal> {
             clone: cloned.cdhash,
         });
     }
-    if !cloned.executable.starts_with(clone) {
-        return Err(Refusal::NoIdentity {
+    // `codesign` names the executable by the clone's real path (`/var` is
+    // `/private/var`); the answer is given in the caller's own spelling.
+    let real = std::fs::canonicalize(clone).map_err(|error| Refusal::NoIdentity {
+        bundle: clone.to_path_buf(),
+        detail: error.to_string(),
+    })?;
+    match cloned.executable.strip_prefix(&real) {
+        Ok(inside) => Ok(clone.join(inside)),
+        Err(_) => Err(Refusal::NoIdentity {
             bundle: clone.to_path_buf(),
             detail: format!(
                 "its executable {} is outside it",
                 cloned.executable.display()
             ),
-        });
+        }),
     }
-    Ok(cloned.executable)
 }
 
 #[cfg(test)]
@@ -411,7 +427,7 @@ mod tests {
     /// RED (U-26) — **only "cannot clone here" falls back to `ditto`; any
     /// other `clonefile` failure is a refusal.**
     ///
-    /// MUTATION: in `clone_bundle`, fall back on every error.
+    /// MUTATION: `cannot_clone_here` answers `true` for every error.
     #[test]
     fn only_a_file_system_that_cannot_clone_falls_back_to_a_copy() {
         assert!(cannot_clone_here(&io::Error::from(
