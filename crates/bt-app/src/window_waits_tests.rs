@@ -9,10 +9,21 @@
 //!
 //! A child of `hang_watch` because the stations are `hang_watch`'s: a door's station byte is read
 //! back through `Station::from_byte`, which only this module may call.
+//!
+//! **And the source guard's prohibitions** (A1e): `every_door_is_where_the_registry_says` reads the
+//! product's source through `bt_source` and holds the escapes the compiler cannot see — the unsafe
+//! fences, the one capability constructor, the pinned role and phase writers, the lint
+//! suppressions, the constructs a lint cannot see through and their owners (`# owners`), the
+//! synchronous doors, and the closed `Drop` inventory — each as a named assertion.
 
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 
 use bt_platform::admission::{DoorKey, Phase, doors};
+use bt_source::{
+    Certainty, FileRecord, Index, ItemKind, ItemQuery, ItemRecord, MacroKind, Occurrence,
+    TargetKind,
+};
 
 use super::{STATION_COUNT, Station};
 
@@ -252,4 +263,2638 @@ fn the_architecture_table_is_the_registry() {
         );
     }
     assert_eq!(held, wanted, "the table ends where the registry does");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The source guard's prohibitions (A1e; design note 2026-09-26 §9.1 as amended by (c)4, (c)8,
+// (d)4, (e)3, (f)1, (f)2 and (g); budget note §C-2, §C-3, §C-5)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Everything below reads Folio's own source through `bt_source`, over a declared universe: the
+// product is `bt-app` and every first-party package its manifests reach (`product_packages`),
+// each package's own `src/` as `Index::of_package` lowers it, `vendor/` excluded; within it, only
+// a product target's file (a library, or `bt-app`'s `folio` binary — never a development binary
+// under `src/bin/`) and only an item standing on an arm a product build compiles
+// (`Occurrence::in_the_product`), so test modules are out by their declaration. The reading is
+// `cfg`-blind, so every platform's arm is read on every host.
+
+/// The first-party packages that are not in `folio.exe`: development tools. Every other
+/// workspace member outside `vendor/` must be one `bt-app` depends on.
+const NOT_THE_PRODUCT: [&str; 2] = ["bt-corpus", "bt-source"];
+
+/// The first-party packages a manifest depends on (`[dependencies]` and the per-target tables).
+fn manifest_dependencies(manifest: &str) -> Vec<String> {
+    let mut section = "";
+    let mut out = Vec::new();
+    for line in manifest.lines().map(str::trim) {
+        if line.starts_with('[') {
+            section = line;
+            continue;
+        }
+        let dependencies = section == "[dependencies]"
+            || (section.starts_with("[target.") && section.ends_with(".dependencies]"));
+        if dependencies
+            && line.starts_with("bt-")
+            && let Some((name, _)) = line.split_once('=')
+        {
+            out.push(name.trim().to_owned());
+        }
+    }
+    out
+}
+
+/// **The product**: `bt-app`, whose binary is `folio.exe`, and every first-party package it
+/// depends on however indirectly, each with its direct first-party dependencies — what its code
+/// can name.
+fn product_packages() -> Vec<(String, Vec<String>)> {
+    let root = repository_root();
+    let workspace = bt_source::Workspace::read(&root).expect("the workspace's manifests");
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    let mut queue = vec!["bt-app".to_owned()];
+    while let Some(name) = queue.pop() {
+        if out.iter().any(|(known, _)| *known == name) {
+            continue;
+        }
+        let package = workspace.package(&name).expect("a workspace package");
+        let manifest = std::fs::read_to_string(package.directory().join("Cargo.toml"))
+            .expect("a package has a manifest");
+        let dependencies = manifest_dependencies(&manifest);
+        queue.extend(dependencies.iter().cloned());
+        out.push((name, dependencies));
+    }
+    out.sort();
+    out
+}
+
+// ── the lexer: code tokens, comments skipped, a literal one token ───────────────────────────
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Ident,
+    Punct,
+    Literal,
+    Lifetime,
+}
+
+/// One code token, by its offsets in the index's union.
+#[derive(Clone, Copy, Debug)]
+struct Tok {
+    kind: Kind,
+    start: usize,
+    end: usize,
+}
+
+/// One product package's index.
+struct Src {
+    package: &'static str,
+    index: &'static Index,
+}
+
+/// The punctuation read as one token.
+const JOINED: [&str; 12] = [
+    "...", "..=", "::", "->", "=>", "..", "==", "!=", "<=", ">=", "&&", "||",
+];
+
+impl Src {
+    fn text(&self, tok: Tok) -> &'static str {
+        &self.index.union()[tok.start..tok.end]
+    }
+
+    /// Whether `tok` is code spelled `spelled`.
+    fn is(&self, tok: Option<&Tok>, spelled: &str) -> bool {
+        tok.is_some_and(|tok| tok.kind != Kind::Literal && self.text(*tok) == spelled)
+    }
+
+    fn file_end(&self, at: usize) -> usize {
+        self.index
+            .file_at(at)
+            .map_or(self.index.union().len(), |file| file.span().end())
+    }
+
+    /// The code tokens of `[from, to)`: comments are skipped (they are the index's own masks), a
+    /// literal is one token, and a name, a lifetime and the joined punctuation are one each.
+    fn lex(&self, from: usize, to: usize) -> Vec<Tok> {
+        let text = self.index.union();
+        let bytes = text.as_bytes();
+        let comments = self.index.comments();
+        let literals = self.index.literals();
+        let mut comment = comments.partition_point(|c| c.span().end() <= from);
+        let mut literal = literals.partition_point(|l| l.span().end() <= from);
+        let starts = |b: u8| b.is_ascii_alphabetic() || b == b'_' || b >= 0x80;
+        let continues = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+        let word_end = |from: usize| {
+            let mut end = from;
+            while end < to && continues(bytes[end]) {
+                end += 1;
+            }
+            end
+        };
+        let mut out = Vec::new();
+        let mut at = from;
+        while at < to {
+            while comment < comments.len() && comments[comment].span().end() <= at {
+                comment += 1;
+            }
+            if comment < comments.len() && comments[comment].span().start() <= at {
+                at = comments[comment].span().end();
+                continue;
+            }
+            while literal < literals.len() && literals[literal].span().end() <= at {
+                literal += 1;
+            }
+            if literal < literals.len() && literals[literal].span().start() <= at {
+                let span = literals[literal].span();
+                out.push(Tok {
+                    kind: Kind::Literal,
+                    start: span.start(),
+                    end: span.end(),
+                });
+                at = span.end();
+                continue;
+            }
+            let byte = bytes[at];
+            let (kind, start, end) = if byte.is_ascii_whitespace() {
+                at += 1;
+                continue;
+            } else if byte == b'r'
+                && bytes.get(at + 1) == Some(&b'#')
+                && bytes.get(at + 2).is_some_and(|b| starts(*b))
+            {
+                (Kind::Ident, at + 2, word_end(at + 2))
+            } else if starts(byte) {
+                (Kind::Ident, at, word_end(at))
+            } else if byte == b'\'' && bytes.get(at + 1).is_some_and(|b| starts(*b)) {
+                (Kind::Lifetime, at + 1, word_end(at + 1))
+            } else {
+                let rest = &bytes[at..to];
+                let width = JOINED
+                    .iter()
+                    .find(|joined| rest.starts_with(joined.as_bytes()))
+                    .map_or_else(
+                        || text[at..].chars().next().map_or(1, char::len_utf8),
+                        |joined| joined.len(),
+                    );
+                (Kind::Punct, at, at + width)
+            };
+            out.push(Tok { kind, start, end });
+            at = end;
+        }
+        out
+    }
+
+    /// The tokens of the bracketed group opening at `open`, delimiters included.
+    fn group(&self, open: usize) -> Vec<Tok> {
+        let end = self.file_end(open);
+        let mut window = 4096;
+        loop {
+            let to = (open + window).min(end);
+            let toks = self.lex(open, to);
+            if let Some(close) = closing(self, &toks, 0) {
+                return toks[..=close].to_vec();
+            }
+            if to == end {
+                return toks;
+            }
+            window *= 4;
+        }
+    }
+
+    /// Whether a file belongs to a product target: a library, or `bt-app`'s `folio` binary.
+    fn product_file(&self, file: &FileRecord) -> bool {
+        file.owners().iter().any(|owner| {
+            owner.compilation.permits_product()
+                && match owner.target.kind {
+                    TargetKind::Library => true,
+                    TargetKind::Binary => self.package == "bt-app" && owner.target.name == "folio",
+                    TargetKind::IntegrationTest => false,
+                }
+        })
+    }
+
+    /// Whether an item record is product code.
+    fn product_item(&self, record: &ItemRecord) -> bool {
+        self.product_file(self.index.file_of(record))
+            && record
+                .identities()
+                .any(|identity| identity.variant.permits_product())
+    }
+
+    /// Whether a build of the shipped program contains the token at `at`.
+    fn in_product(&self, at: usize) -> bool {
+        let Some(file) = self.index.file_at(at) else {
+            return false;
+        };
+        if !self.product_file(file) {
+            return false;
+        }
+        let tokens = self.index.tokens();
+        let literals = self.index.literals();
+        let token = tokens
+            .get(tokens.partition_point(|t| t.span().end() <= at))
+            .map(|t| t.span());
+        let literal = literals
+            .get(literals.partition_point(|l| l.span().end() <= at))
+            .map(|l| l.span());
+        let span = [token, literal]
+            .into_iter()
+            .flatten()
+            .find(|span| span.holds(at) || span.start() >= at)
+            .filter(|span| span.within(file.span()))
+            .unwrap_or_else(|| file.span());
+        Occurrence {
+            span,
+            certainty: Certainty::Resolved,
+        }
+        .in_the_product(self.index)
+    }
+
+    /// The smallest callable holding `at`.
+    fn callable_at(&self, at: usize) -> Option<&'static ItemRecord> {
+        self.index
+            .items()
+            .iter()
+            .filter(|record| record.kind().is_callable() && record.whole().holds(at))
+            .min_by_key(|record| record.whole().len())
+    }
+
+    /// The smallest module holding `at`, by its first path.
+    fn module_at(&self, at: usize) -> &'static str {
+        self.index
+            .modules()
+            .iter()
+            .filter(|module| module.span().holds(at))
+            .min_by_key(|module| module.span().len())
+            .map_or("crate", |module| module.module_paths()[0].as_str())
+    }
+
+    /// Who owns the code at `at`: `bt-platform crate::macos_app::delegate_answers_the_dock_menu`,
+    /// or the module when no function holds it (the inside of `define_class!`).
+    fn owner_of(&self, at: usize) -> String {
+        match self.callable_at(at) {
+            Some(record) => format!("{} {}", self.package, name_of(record)),
+            None => format!("{} {}", self.package, self.module_at(at)),
+        }
+    }
+
+    fn location(&self, at: usize) -> String {
+        self.index.locate(at).map_or_else(
+            || format!("{} at byte {at}", self.package),
+            |l| format!("{}:{}", l.file.display(), l.line),
+        )
+    }
+
+    /// Every token spelled `name`, by its offset.
+    fn named(&self, name: &str) -> Vec<usize> {
+        self.index
+            .tokens()
+            .iter()
+            .filter(|token| self.index.text(token.name_span()) == name)
+            .map(|token| token.name_span().start())
+            .collect()
+    }
+
+    /// The names spelled in `[from, to)`, out of `names`.
+    fn names_in(&self, from: usize, to: usize, names: &[&str]) -> Vec<(usize, &'static str)> {
+        let tokens = self.index.tokens();
+        let first = tokens.partition_point(|t| t.span().start() < from);
+        tokens[first..]
+            .iter()
+            .take_while(|t| t.span().start() < to)
+            .map(|t| (t.name_span().start(), self.index.text(t.name_span())))
+            .filter(|(_, name)| names.contains(name))
+            .collect()
+    }
+}
+
+/// `crate::x::Type::name`, by the item's first module path, without its arm.
+fn name_of(record: &ItemRecord) -> String {
+    let module = record.module_paths()[0];
+    match record.type_owner() {
+        Some(owner) => format!("{module}::{owner}::{}", record.name()),
+        None => format!("{module}::{}", record.name()),
+    }
+}
+
+/// `bt-pty crate::<PtySession as Drop>::drop`, with each predicate of the arm the item stands on
+/// in brackets — `[windows]`, `[target_os = "macos"]` — when it has one: the key the tables below
+/// name a body by.
+fn key_of(src: &Src, record: &ItemRecord) -> String {
+    let identity = record
+        .identities()
+        .next()
+        .expect("an item is reached by a declaration");
+    let mut key = format!("{} {}::", src.package, identity.module_path);
+    match (&identity.type_owner, &identity.trait_name) {
+        (Some(owner), Some(trait_name)) => key.push_str(&format!("<{owner} as {trait_name}>::")),
+        (Some(owner), None) => key.push_str(&format!("{owner}::")),
+        (None, Some(trait_name)) => key.push_str(&format!("{trait_name}::")),
+        (None, None) => {}
+    }
+    key.push_str(&identity.name);
+    for predicate in identity.variant.predicates() {
+        key.push_str(&format!(" [{predicate}]"));
+    }
+    key
+}
+
+/// The index of the token closing the group `toks[open]` opens.
+fn closing(src: &Src, toks: &[Tok], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, tok) in toks.iter().enumerate().skip(open) {
+        if tok.kind != Kind::Punct {
+            continue;
+        }
+        match src.text(*tok) {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `a, b(c, d), e = "f"` split at its top-level commas.
+fn split_commas(src: &Src, toks: &[Tok]) -> Vec<Vec<Tok>> {
+    let mut parts = vec![Vec::new()];
+    let mut depth = 0usize;
+    for tok in toks {
+        if tok.kind == Kind::Punct {
+            match src.text(*tok) {
+                "(" | "[" | "{" | "<" => depth += 1,
+                ")" | "]" | "}" | ">" => depth = depth.saturating_sub(1),
+                "," if depth == 0 => {
+                    parts.push(Vec::new());
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if let Some(part) = parts.last_mut() {
+            part.push(*tok);
+        }
+    }
+    parts.retain(|part| !part.is_empty());
+    parts
+}
+
+// ── attributes ─────────────────────────────────────────────────────────────────────────────
+
+/// One attribute: `#[…]` or `#![…]`, and the tokens between its brackets.
+struct Attribute {
+    inner: bool,
+    start: usize,
+    body: Vec<Tok>,
+}
+
+/// Every attribute written in a package, product or not: a `#` in code followed by `[` or `![`.
+fn attributes(src: &Src) -> Vec<Attribute> {
+    let text = src.index.union();
+    let bytes = text.as_bytes();
+    let comments = src.index.comments();
+    let literals = src.index.literals();
+    let masked = |at: usize| {
+        let comment = comments.partition_point(|c| c.span().end() <= at);
+        let literal = literals.partition_point(|l| l.span().end() <= at);
+        comments.get(comment).is_some_and(|c| c.span().holds(at))
+            || literals.get(literal).is_some_and(|l| l.span().holds(at))
+    };
+    let skip_space = |mut at: usize| {
+        while at < bytes.len() && bytes[at].is_ascii_whitespace() {
+            at += 1;
+        }
+        at
+    };
+    let mut out = Vec::new();
+    for (at, _) in text.match_indices('#') {
+        let mut next = skip_space(at + 1);
+        let inner = bytes.get(next) == Some(&b'!');
+        if inner {
+            next = skip_space(next + 1);
+        }
+        if bytes.get(next) != Some(&b'[') || masked(at) {
+            continue;
+        }
+        let group = src.group(next);
+        if group.len() >= 2 {
+            out.push(Attribute {
+                inner,
+                start: at,
+                body: group[1..group.len() - 1].to_vec(),
+            });
+        }
+    }
+    out
+}
+
+/// A path written as tokens, spaces dropped (`clippy :: style` is `clippy::style`), and how many
+/// tokens it took.
+fn path_of(src: &Src, toks: &[Tok]) -> (String, usize) {
+    let mut path = String::new();
+    let mut used = 0;
+    for tok in toks {
+        match tok.kind {
+            Kind::Ident => path.push_str(src.text(*tok)),
+            Kind::Punct if src.text(*tok) == "::" => path.push_str("::"),
+            _ => break,
+        }
+        used += 1;
+    }
+    (path, used)
+}
+
+/// Every `allow`/`expect` an attribute says, however deep inside `cfg_attr`: (verb, lint).
+fn suppressions(src: &Src, toks: &[Tok]) -> Vec<(String, String)> {
+    let (path, used) = path_of(src, toks);
+    let rest = &toks[used..];
+    let args = match rest.first() {
+        Some(open) if src.is(Some(open), "(") => &rest[1..rest.len().saturating_sub(1)],
+        _ => return Vec::new(),
+    };
+    match path.as_str() {
+        "allow" | "expect" => split_commas(src, args)
+            .into_iter()
+            .filter_map(|lint| {
+                let (name, used) = path_of(src, &lint);
+                (used == lint.len() && !name.is_empty()).then(|| (path.clone(), name))
+            })
+            .collect(),
+        "cfg_attr" => split_commas(src, args)
+            .into_iter()
+            .skip(1)
+            .flat_map(|attribute| suppressions(src, &attribute))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+// ── the world: the product's callables and fields, and calls resolved to them ───────────────
+
+/// A first-party function or method, or a `From::from` that `#[from]` generates.
+#[derive(Clone, Debug)]
+struct Callable {
+    src: usize,
+    module: String,
+    type_owner: Option<String>,
+    trait_name: Option<String>,
+    /// `None` for a generated `From::from`, which no byte holds.
+    record: Option<&'static ItemRecord>,
+}
+
+struct World {
+    srcs: Vec<Src>,
+    /// What each package's code can name: itself and its direct first-party dependencies.
+    reach: Vec<BTreeSet<usize>>,
+    callables: HashMap<String, Vec<Callable>>,
+    fields: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>>,
+}
+
+/// Words that open a parenthesis without calling anything.
+const KEYWORDS: [&str; 22] = [
+    "if", "while", "match", "return", "in", "as", "for", "loop", "move", "else", "let", "mut",
+    "ref", "unsafe", "async", "await", "where", "impl", "dyn", "fn", "break", "continue",
+];
+
+impl World {
+    fn new() -> Self {
+        let packages = product_packages();
+        let srcs: Vec<Src> = packages
+            .iter()
+            .map(|(name, _)| {
+                let package: &'static str = Box::leak(name.clone().into_boxed_str());
+                Src {
+                    package,
+                    index: Index::of_package(package),
+                }
+            })
+            .collect();
+        let reach = packages
+            .iter()
+            .enumerate()
+            .map(|(at, (_, dependencies))| {
+                let mut reach: BTreeSet<usize> = dependencies
+                    .iter()
+                    .map(|name| {
+                        srcs.iter()
+                            .position(|src| src.package == name)
+                            .expect("a product package's dependency is a product package")
+                    })
+                    .collect();
+                reach.insert(at);
+                reach
+            })
+            .collect();
+        let mut callables: HashMap<String, Vec<Callable>> = HashMap::new();
+        let mut fields: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>> =
+            HashMap::new();
+        for (at, src) in srcs.iter().enumerate() {
+            for record in src.index.items() {
+                if !src.product_item(record) {
+                    continue;
+                }
+                if record.kind().is_callable() {
+                    callables
+                        .entry(record.name().to_owned())
+                        .or_default()
+                        .push(Callable {
+                            src: at,
+                            module: record.module_paths()[0].to_owned(),
+                            type_owner: record.type_owner().map(ToOwned::to_owned),
+                            trait_name: record.trait_name().map(ToOwned::to_owned),
+                            record: Some(record),
+                        });
+                } else if record.kind() == ItemKind::Field
+                    && let Some(owner) = record.type_owner()
+                {
+                    fields
+                        .entry((owner.to_owned(), record.name().to_owned()))
+                        .or_default()
+                        .push((at, record));
+                }
+            }
+            // `#[from]` on an error enum's field makes a first-party `From::from` no byte holds.
+            for attribute in attributes(src) {
+                if path_of(src, &attribute.body).0 != "from" || !src.in_product(attribute.start) {
+                    continue;
+                }
+                if let Some(owner) = src
+                    .index
+                    .items()
+                    .iter()
+                    .filter(|r| r.kind() == ItemKind::Enum && r.whole().holds(attribute.start))
+                    .min_by_key(|r| r.whole().len())
+                {
+                    callables
+                        .entry("from".to_owned())
+                        .or_default()
+                        .push(Callable {
+                            src: at,
+                            module: owner.module_paths()[0].to_owned(),
+                            type_owner: Some(owner.name().to_owned()),
+                            trait_name: Some("From".to_owned()),
+                            record: None,
+                        });
+                }
+            }
+        }
+        Self {
+            srcs,
+            reach,
+            callables,
+            fields,
+        }
+    }
+
+    fn src(&self, package: &str) -> &Src {
+        self.srcs
+            .iter()
+            .find(|src| src.package == package)
+            .expect("a product package")
+    }
+
+    /// The key a callable is named by in the tables: an item's, or a generated one's.
+    fn key(&self, callable: &Callable) -> String {
+        let src = &self.srcs[callable.src];
+        match callable.record {
+            Some(record) => key_of(src, record),
+            None => format!(
+                "{} {}::{}::from (generated)",
+                src.package,
+                callable.module,
+                callable.type_owner.as_deref().unwrap_or_default()
+            ),
+        }
+    }
+
+    /// The upper-case names a type is written with: `Option<JoinHandle<()>>` is both.
+    fn type_names(src: &Src, toks: &[Tok]) -> BTreeSet<String> {
+        toks.iter()
+            .filter(|tok| tok.kind == Kind::Ident)
+            .map(|tok| src.text(*tok))
+            .filter(|name| name.starts_with(|c: char| c.is_ascii_uppercase()))
+            .map(ToOwned::to_owned)
+            .collect()
+    }
+
+    /// The types `field` is declared with on any of `owners`.
+    fn field_types(&self, owners: &BTreeSet<String>, field: &str) -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for owner in owners {
+            let declared = self.fields.get(&(owner.clone(), field.to_owned()));
+            for (at, record) in declared.into_iter().flatten() {
+                let src = &self.srcs[*at];
+                let toks = src.lex(record.whole().start(), record.whole().end());
+                if let Some(colon) = toks.iter().position(|t| src.is(Some(t), ":")) {
+                    out.extend(Self::type_names(src, &toks[colon + 1..]));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// One call, or one macro invocation, found in a body.
+#[derive(Clone, Debug)]
+struct Site {
+    at: usize,
+    name: &'static str,
+    form: Form,
+}
+
+#[derive(Clone, Debug)]
+enum Form {
+    /// `receiver.name(…)`: the receiver as a chain of names, when it is one.
+    Method(Option<Vec<&'static str>>),
+    /// `a::b::name(…)`: the qualifiers.
+    Path(Vec<&'static str>),
+    /// `name(…)`.
+    Bare,
+    /// `name!(…)`.
+    Macro,
+    /// A function handed by value to the admission as its work: `admitted::<…>(name)`.
+    Value,
+}
+
+/// A function's body, as the resolver reads it: its tokens, and what its parameters are.
+struct Body<'w> {
+    world: &'w World,
+    src: usize,
+    record: &'static ItemRecord,
+    params: HashMap<&'static str, Vec<Tok>>,
+    toks: Vec<Tok>,
+}
+
+impl<'w> Body<'w> {
+    fn new(world: &'w World, src: usize, record: &'static ItemRecord) -> Self {
+        let s = &world.srcs[src];
+        let declaration = s.lex(record.declaration().start(), record.declaration().end());
+        let mut params = HashMap::new();
+        let open = declaration
+            .iter()
+            .position(|t| s.is(Some(t), "fn"))
+            .and_then(|at| {
+                declaration[at..]
+                    .iter()
+                    .position(|t| s.is(Some(t), "("))
+                    .map(|open| open + at)
+            });
+        if let Some(open) = open
+            && let Some(close) = closing(s, &declaration, open)
+        {
+            for param in split_commas(s, &declaration[open + 1..close]) {
+                let Some(colon) = param.iter().position(|t| s.is(Some(t), ":")) else {
+                    continue;
+                };
+                if let Some(name) = param[..colon]
+                    .iter()
+                    .rev()
+                    .find(|t| t.kind == Kind::Ident && s.text(**t) != "mut")
+                {
+                    params.insert(s.text(*name), param[colon + 1..].to_vec());
+                }
+            }
+        }
+        let toks = record
+            .body()
+            .map_or_else(Vec::new, |body| s.lex(body.start(), body.end()));
+        Self {
+            world,
+            src,
+            record,
+            params,
+            toks,
+        }
+    }
+
+    fn s(&self) -> &Src {
+        &self.world.srcs[self.src]
+    }
+
+    /// Every call and macro invocation in the body, in the order they are written.
+    fn sites(&self) -> Vec<Site> {
+        sites_of(self.s(), &self.toks)
+    }
+
+    fn own_methods(&self, all: &[Callable]) -> Vec<Callable> {
+        let own = self
+            .record
+            .type_owner()
+            .map(|owner| BTreeSet::from([owner.to_owned()]))
+            .unwrap_or_default();
+        let methods = methods_of(all, &own);
+        let module = self.record.module_paths()[0];
+        let here: Vec<Callable> = methods
+            .iter()
+            .filter(|c| c.src == self.src && c.module == module)
+            .cloned()
+            .collect();
+        if here.is_empty() { methods } else { here }
+    }
+
+    /// The first-party items a call can be, by what the source says of it: a receiver whose type
+    /// is written (`self`, a field of it, a parameter) narrows by that type; one whose type is not
+    /// written answers every method of the name the package can reach.
+    fn resolve(&self, site: &Site) -> Vec<Callable> {
+        let world = self.world;
+        let reach = &world.reach[self.src];
+        let named = |name: &str| -> Vec<Callable> {
+            world
+                .callables
+                .get(name)
+                .into_iter()
+                .flatten()
+                .filter(|c| reach.contains(&c.src))
+                .cloned()
+                .collect()
+        };
+        let all = named(site.name);
+        let free = |filter: &dyn Fn(&Callable) -> bool| -> Vec<Callable> {
+            all.iter()
+                .filter(|c| c.type_owner.is_none() && c.trait_name.is_none() && filter(c))
+                .cloned()
+                .collect()
+        };
+        let any_method = || -> Vec<Callable> {
+            all.iter()
+                .filter(|c| c.type_owner.is_some())
+                .cloned()
+                .collect()
+        };
+        match &site.form {
+            Form::Macro => Vec::new(),
+            Form::Method(_) if site.name == "into" => named("from")
+                .into_iter()
+                .filter(|c| {
+                    c.trait_name
+                        .as_deref()
+                        .is_some_and(|t| t == "From" || t.starts_with("From<"))
+                })
+                .collect(),
+            Form::Method(Some(chain)) if chain.as_slice() == ["self"] => self.own_methods(&all),
+            Form::Method(Some(chain)) => {
+                let mut types = match chain[0] {
+                    "self" => self
+                        .record
+                        .type_owner()
+                        .map(|owner| BTreeSet::from([owner.to_owned()]))
+                        .unwrap_or_default(),
+                    first => match self.params.get(first) {
+                        Some(ty) => World::type_names(self.s(), ty),
+                        None => return any_method(),
+                    },
+                };
+                for field in &chain[1..] {
+                    types = world.field_types(&types, field);
+                }
+                methods_of(&all, &types)
+            }
+            Form::Method(None) => any_method(),
+            Form::Path(quals) => match quals.last().copied().unwrap_or_default() {
+                "Self" => self.own_methods(&all),
+                "crate" | "self" | "super" => free(&|c: &Callable| c.src == self.src),
+                qualifier if qualifier.starts_with(|c: char| c.is_ascii_uppercase()) => {
+                    methods_of(&all, &BTreeSet::from([qualifier.to_owned()]))
+                }
+                module => free(&|c: &Callable| c.module.rsplit("::").next() == Some(module)),
+            },
+            Form::Bare | Form::Value => {
+                if self.params.contains_key(site.name) {
+                    return Vec::new();
+                }
+                let module = self.record.module_paths()[0];
+                let here = free(&|c: &Callable| c.src == self.src && c.module == module);
+                if !here.is_empty() {
+                    return here;
+                }
+                let package = free(&|c: &Callable| c.src == self.src);
+                if package.is_empty() {
+                    free(&|_| true)
+                } else {
+                    package
+                }
+            }
+        }
+    }
+}
+
+fn methods_of(all: &[Callable], types: &BTreeSet<String>) -> Vec<Callable> {
+    all.iter()
+        .filter(|c| c.type_owner.as_ref().is_some_and(|t| types.contains(t)))
+        .cloned()
+        .collect()
+}
+
+/// The calls and macro invocations in a run of tokens, in order.
+fn sites_of(s: &Src, toks: &[Tok]) -> Vec<Site> {
+    let mut out = Vec::new();
+    for (at, tok) in toks.iter().enumerate() {
+        if tok.kind != Kind::Ident {
+            continue;
+        }
+        let name = s.text(*tok);
+        // Past a turbofish: `name::<…>(`.
+        let mut next = at + 1;
+        if s.is(toks.get(next), "::") && s.is(toks.get(next + 1), "<") {
+            let mut depth = 0usize;
+            for (inner, t) in toks.iter().enumerate().skip(next + 1) {
+                if t.kind != Kind::Punct {
+                    continue;
+                }
+                match s.text(*t) {
+                    "<" => depth += 1,
+                    ">" => {
+                        depth -= 1;
+                        if depth == 0 {
+                            next = inner + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if s.is(toks.get(next), "!")
+            && ["(", "[", "{"]
+                .iter()
+                .any(|open| s.is(toks.get(next + 1), open))
+        {
+            out.push(Site {
+                at: tok.start,
+                name,
+                form: Form::Macro,
+            });
+            continue;
+        }
+        if !s.is(toks.get(next), "(") || KEYWORDS.contains(&name) {
+            continue;
+        }
+        let previous = at.checked_sub(1).map(|p| toks[p]);
+        let form = if s.is(previous.as_ref(), ".") {
+            Form::Method(receiver(s, toks, at - 1))
+        } else if s.is(previous.as_ref(), "::") {
+            let mut quals = Vec::new();
+            let mut colons = at - 1;
+            while s.is(toks.get(colons), "::") {
+                match colons.checked_sub(1).map(|p| (p, toks[p])) {
+                    Some((before, named)) if named.kind == Kind::Ident => {
+                        quals.push(s.text(named));
+                        let Some(further) = before.checked_sub(1) else {
+                            break;
+                        };
+                        colons = further;
+                    }
+                    _ => {
+                        quals.push("<qualified>");
+                        break;
+                    }
+                }
+            }
+            quals.reverse();
+            Form::Path(quals)
+        } else if s.is(previous.as_ref(), "fn") {
+            continue;
+        } else {
+            Form::Bare
+        };
+        out.push(Site {
+            at: tok.start,
+            name,
+            form,
+        });
+        // The admission's work, handed over by value: `admitted::<…>(flush)`.
+        if name == "admitted"
+            && toks.get(next + 1).is_some_and(|t| t.kind == Kind::Ident)
+            && s.is(toks.get(next + 2), ")")
+        {
+            out.push(Site {
+                at: toks[next + 1].start,
+                name: s.text(toks[next + 1]),
+                form: Form::Value,
+            });
+        }
+    }
+    out
+}
+
+/// The receiver of the method call whose dot is `toks[dot]`, read backwards as `a.b.c`, when it
+/// is a plain chain of names.
+fn receiver(s: &Src, toks: &[Tok], dot: usize) -> Option<Vec<&'static str>> {
+    let mut chain = Vec::new();
+    let mut dot = dot;
+    loop {
+        let named = toks[dot.checked_sub(1)?];
+        if named.kind != Kind::Ident {
+            return None;
+        }
+        chain.push(s.text(named));
+        match (dot - 1).checked_sub(1).map(|p| toks[p]) {
+            Some(before) if s.is(Some(&before), ".") => dot -= 2,
+            Some(before) if [")", "]", "?", "::"].iter().any(|p| s.is(Some(&before), p)) => {
+                return None;
+            }
+            _ => break,
+        }
+    }
+    chain.reverse();
+    Some(chain)
+}
+
+// ── the vocabulary, as a call site shows it ─────────────────────────────────────────────────
+
+/// One registry vocabulary line: its path's last two segments, and whether it waits.
+struct Word {
+    parent: String,
+    last: String,
+    waits: bool,
+}
+
+fn vocabulary() -> Vec<Word> {
+    section("vocabulary", &VOCABULARY_COLUMNS)
+        .into_iter()
+        .map(|cells| {
+            let mut segments: Vec<&str> = cells[0].split("::").collect();
+            let last = segments.pop().unwrap_or_default().to_owned();
+            let parent = segments.pop().unwrap_or_default().to_owned();
+            Word {
+                parent,
+                last,
+                waits: cells[2] != "counted by call site, does not wait",
+            }
+        })
+        .collect()
+}
+
+/// The vocabulary effect a site is, named `Parent::last` — or a system call's own name — and
+/// whether it waits. A method call matches a line whose parent is a type; a path matches by its
+/// last qualifier; a bare call matches only a system call's capitalised name; `write!` and
+/// `writeln!` are `Write::write_fmt`.
+fn effect_of(words: &[Word], site: &Site) -> Option<(String, bool)> {
+    let typed = |word: &&Word| word.parent.starts_with(|c: char| c.is_ascii_uppercase());
+    let named = |word: &Word| (format!("{}::{}", word.parent, word.last), word.waits);
+    match &site.form {
+        Form::Macro if ["write", "writeln"].contains(&site.name) => {
+            Some(("Write::write_fmt".to_owned(), true))
+        }
+        Form::Macro | Form::Value => None,
+        Form::Method(_) => words
+            .iter()
+            .filter(typed)
+            .find(|word| word.last == site.name)
+            .map(named),
+        Form::Path(quals) => {
+            let qualifier = quals.last().copied().unwrap_or_default();
+            words
+                .iter()
+                .find(|word| word.last == site.name && word.parent == qualifier)
+                .map(named)
+        }
+        Form::Bare => words
+            .iter()
+            .find(|word| {
+                word.last == site.name && site.name.starts_with(|c: char| c.is_ascii_uppercase())
+            })
+            .map(|word| (word.last.clone(), word.waits)),
+    }
+}
+
+// ── assertion 0: the declared universe ──────────────────────────────────────────────────────
+
+/// **Every first-party package outside `vendor/` is the product or a declared tool.** The
+/// universe is `bt-app` and what it depends on; a new package nothing depends on and nobody
+/// declared is a package this guard would silently not read.
+fn the_universe_is_the_product_and_its_tools_are_declared(world: &World) -> Vec<String> {
+    let workspace = bt_source::Workspace::read(&repository_root()).expect("the workspace");
+    let mut failures = Vec::new();
+    for package in workspace.packages() {
+        let name = package.name();
+        let product = world.srcs.iter().any(|src| src.package == name);
+        if !bt_source::is_vendored(package.directory())
+            && !product
+            && !NOT_THE_PRODUCT.contains(&name)
+        {
+            failures.push(format!(
+                "`{name}` is a first-party package that `folio.exe` does not depend on and \
+                 `NOT_THE_PRODUCT` does not declare"
+            ));
+        }
+        if product && NOT_THE_PRODUCT.contains(&name) {
+            failures.push(format!(
+                "`{name}` is declared a tool, and `bt-app` depends on it"
+            ));
+        }
+    }
+    failures
+}
+
+// ── assertion 1: the unsafe fences (§C-5, M14) ──────────────────────────────────────────────
+
+/// The names no `unsafe` stretch and no fabrication expression may spell.
+const CAPABILITY_NAMES: [&str; 3] = ["WaitToken", "WorkerCtx", "doors"];
+/// The expressions that make a value out of bytes: each spelling of the note's four.
+const FABRICATION: [&str; 7] = [
+    "transmute",
+    "transmute_copy",
+    "zeroed",
+    "MaybeUninit",
+    "read",
+    "read_unaligned",
+    "read_volatile",
+];
+
+/// Where an `unsafe` written at `at` reaches: its block, or the item it marks.
+fn unsafe_region(src: &Src, at: usize) -> Option<(usize, usize)> {
+    let end = src.file_end(at);
+    let mut window = 512;
+    loop {
+        let toks = src.lex(at, (at + window).min(end));
+        let next = toks.get(1)?;
+        if src.is(Some(next), "{") {
+            return Some((at, src.group(next.start).last()?.end));
+        }
+        if !["fn", "impl", "trait", "extern"]
+            .iter()
+            .any(|word| src.is(Some(next), word))
+        {
+            return None;
+        }
+        let mut depth = 0usize;
+        for tok in toks.iter().skip(1).filter(|t| t.kind == Kind::Punct) {
+            match src.text(*tok) {
+                "(" | "[" => depth += 1,
+                ")" | "]" => depth = depth.saturating_sub(1),
+                "{" if depth == 0 => return Some((at, src.group(tok.start).last()?.end)),
+                ";" if depth == 0 => return Some((at, tok.end)),
+                _ => {}
+            }
+        }
+        if at + window >= end {
+            return None;
+        }
+        window *= 4;
+    }
+}
+
+/// How far a fabrication expression written at `at` reaches: through its call's parentheses, or
+/// to the end of the type it is written in.
+fn fabrication_region(src: &Src, at: usize) -> (usize, usize) {
+    let toks = src.lex(at, (at + 512).min(src.file_end(at)));
+    let mut angle = 0usize;
+    for tok in toks.iter().skip(1).filter(|t| t.kind == Kind::Punct) {
+        match src.text(*tok) {
+            "<" => angle += 1,
+            ">" => angle = angle.saturating_sub(1),
+            "(" if angle == 0 => {
+                return (at, src.group(tok.start).last().map_or(tok.end, |t| t.end));
+            }
+            ";" | "{" | "}" | "," | "=" | ")" | "]" if angle == 0 => return (at, tok.start),
+            _ => {}
+        }
+    }
+    (at, toks.last().map_or(at, |t| t.end))
+}
+
+/// **No capability is named where the compiler checks nothing**: `WaitToken`, `WorkerCtx` and
+/// `admission::doors` never inside an `unsafe` block, `unsafe fn`, `unsafe impl` or `unsafe
+/// extern`, nor inside a `transmute`, `zeroed`, `MaybeUninit` or `read` expression, anywhere in
+/// the product; and `admission` keeps `#![forbid(unsafe_code)]` and writes no `unsafe`.
+///
+/// What stays outside, as revision (b)2 names it: an inference-typed `transmute` inside
+/// `bt-platform`'s own `unsafe`, whose type is fixed at the door's parameter rather than written.
+fn no_capability_is_named_where_the_compiler_checks_nothing(world: &World) -> Vec<String> {
+    let mut failures = Vec::new();
+    let mut regions = 0;
+    for src in &world.srcs {
+        for at in src.named("unsafe") {
+            let Some((from, to)) = unsafe_region(src, at) else {
+                continue;
+            };
+            regions += 1;
+            for (name_at, name) in src.names_in(from, to, &CAPABILITY_NAMES) {
+                if src.in_product(name_at) {
+                    failures.push(format!(
+                        "`{name}` is named inside an `unsafe` stretch at {} ({})",
+                        src.location(name_at),
+                        src.owner_of(name_at)
+                    ));
+                }
+            }
+        }
+        for word in FABRICATION {
+            for at in src.named(word) {
+                let (from, to) = fabrication_region(src, at);
+                for (name_at, name) in src.names_in(from, to, &CAPABILITY_NAMES) {
+                    if src.in_product(name_at) {
+                        failures.push(format!(
+                            "`{name}` is named inside a `{word}` expression at {} ({})",
+                            src.location(name_at),
+                            src.owner_of(name_at)
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if regions == 0 {
+        failures.push("no `unsafe` stretch was found in the product: this reads nothing".into());
+    }
+    let platform = world.src("bt-platform");
+    let admission = platform
+        .index
+        .modules()
+        .iter()
+        .find(|module| {
+            module
+                .module_paths()
+                .iter()
+                .any(|p| p == "crate::admission")
+        })
+        .map(bt_source::ModuleRecord::span);
+    let Some(admission) = admission else {
+        failures.push("bt-platform has no module `crate::admission`".into());
+        return failures;
+    };
+    let forbids = attributes(platform).into_iter().any(|attribute| {
+        attribute.inner
+            && admission.holds(attribute.start)
+            && path_of(platform, &attribute.body).0 == "forbid"
+            && attribute
+                .body
+                .iter()
+                .any(|t| platform.text(*t) == "unsafe_code")
+    });
+    if !forbids {
+        failures.push(
+            "`crate::admission` does not say `#![forbid(unsafe_code)]`: the module that builds the \
+             capabilities is the one the compiler must keep free of `unsafe` (§2.4)"
+                .into(),
+        );
+    }
+    for at in platform.named("unsafe") {
+        if admission.holds(at) {
+            failures.push(format!(
+                "`unsafe` is written in `crate::admission` at {}",
+                platform.location(at)
+            ));
+        }
+    }
+    failures
+}
+
+// ── assertion 2: one constructor (§2.4) ─────────────────────────────────────────────────────
+
+/// Tokens that, written before `Name {`, make it a declaration or a type rather than a literal.
+const NOT_A_LITERAL: [&str; 9] = [
+    "struct", "enum", "union", "impl", "for", "trait", "->", "type", "dyn",
+];
+
+/// Every struct literal of `name` in a package's product code: `Name {`, and `Self {` inside the
+/// type's own `impl` blocks — every spelling (Codex P8).
+fn literals_of(src: &Src, name: &str) -> Vec<usize> {
+    let is_literal = |at: usize| {
+        let after = src.lex(at, (at + 64).min(src.file_end(at)));
+        let file_start = src.index.file_at(at).map_or(0, |f| f.span().start());
+        let before = src.lex(at.saturating_sub(64).max(file_start), at);
+        src.is(after.get(1), "{")
+            && !before
+                .last()
+                .is_some_and(|t| NOT_A_LITERAL.contains(&src.text(*t)))
+    };
+    let blocks: Vec<_> = src
+        .index
+        .impls()
+        .iter()
+        .filter(|block| block.type_owner() == name)
+        .map(bt_source::ImplRecord::body)
+        .collect();
+    src.named(name)
+        .into_iter()
+        .chain(
+            src.named("Self")
+                .into_iter()
+                .filter(|at| blocks.iter().any(|body| body.holds(*at))),
+        )
+        .filter(|at| is_literal(*at) && src.in_product(*at))
+        .collect()
+}
+
+/// **A worker's capability has one constructor and no trait road to another**: one `WorkerCtx`
+/// struct literal in the product, in `admission::lend_worker` (A1b), called by the thread door
+/// and by `enter_standalone_main` once each; `WorkerCtx` and `WaitToken` each have one `impl`
+/// block, the inherent one, and derive nothing.
+fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<String> {
+    let mut failures = Vec::new();
+    let literals: Vec<String> = world
+        .srcs
+        .iter()
+        .flat_map(|src| {
+            literals_of(src, "WorkerCtx")
+                .into_iter()
+                .map(|at| src.owner_of(at))
+        })
+        .collect();
+    if literals != ["bt-platform crate::admission::lend_worker"] {
+        failures.push(format!(
+            "`WorkerCtx` is built by a struct literal in one place, `admission::lend_worker`; \
+             found {literals:?}"
+        ));
+    }
+    let mut callers = BTreeMap::new();
+    for src in &world.srcs {
+        for at in src.named("lend_worker") {
+            let after = src.lex(at, (at + 32).min(src.file_end(at)));
+            let before = src.lex(at.saturating_sub(8), at);
+            if src.is(after.get(1), "(") && !src.is(before.last(), "fn") && src.in_product(at) {
+                *callers.entry(src.owner_of(at)).or_insert(0) += 1;
+            }
+        }
+    }
+    let wanted = BTreeMap::from([
+        (
+            "bt-platform crate::admission::enter_standalone_main".to_owned(),
+            1,
+        ),
+        (
+            "bt-platform crate::admission::spawn_at_priority_with_stack".to_owned(),
+            1,
+        ),
+    ]);
+    if callers != wanted {
+        failures.push(format!(
+            "`lend_worker` is called by the thread door and by `enter_standalone_main`, once \
+             each; found {callers:?}"
+        ));
+    }
+    let platform = world.src("bt-platform");
+    for type_name in ["WorkerCtx", "WaitToken"] {
+        let blocks: Vec<String> = world
+            .srcs
+            .iter()
+            .flat_map(|src| {
+                src.index
+                    .impls()
+                    .iter()
+                    .filter(|block| {
+                        block.type_owner() == type_name && src.in_product(block.whole().start())
+                    })
+                    .map(|block| match block.trait_name() {
+                        Some(name) => format!("impl {name} for {type_name}"),
+                        None => format!("impl {type_name}"),
+                    })
+            })
+            .collect();
+        if blocks != [format!("impl {type_name}")] {
+            failures.push(format!(
+                "`{type_name}` has one `impl` block, its inherent one — no `Default`, `Clone`, \
+                 `Copy`, `From`, `Send` or `Sync` road to another; found {blocks:?}"
+            ));
+        }
+        match platform
+            .index
+            .find(&ItemQuery::type_item(type_name).in_module("crate::admission"))
+        {
+            Ok(records) => {
+                for record in records {
+                    let declaration =
+                        platform.lex(record.declaration().start(), record.declaration().end());
+                    if declaration.iter().any(|t| platform.text(*t) == "derive") {
+                        failures.push(format!(
+                            "`{type_name}` derives a trait at {}: a derived `Clone`, `Copy` or \
+                             `Default` is a second constructor",
+                            platform.location(record.whole().start())
+                        ));
+                    }
+                }
+            }
+            Err(failure) => failures.push(format!("`crate::admission::{type_name}`: {failure}")),
+        }
+    }
+    failures
+}
+
+// ── assertion 3: the pinned writers (§3.2, §4.2, (c)5, (c)6, (c)7) ──────────────────────────
+
+/// One pinned call of a role or phase writer: who makes it, and the landmark it follows.
+struct Pin {
+    writer: &'static str,
+    owner: &'static str,
+    after: Option<&'static str>,
+}
+
+/// Each owner's landmarks. A pinned call's position is the nearest of them written before it in
+/// the owner's body; `QuitStep::*` is every name written after `QuitStep::` — the arm it is in.
+const LANDMARKS: [(&str, &[&str]); 4] = [
+    (
+        "bt-app crate::main",
+        &["parse", "hand_over", "build", "run_app"],
+    ),
+    ("bt-app crate::FolioApp::new_events", &["Init"]),
+    ("bt-app crate::App::finish", &["close"]),
+    ("bt-app crate::FolioApp::settle_quit", &["QuitStep::*"]),
+];
+
+/// The product's role and phase writer calls, as A1a–A1c landed them: `enter_window_thread` once
+/// in `fn main` after the parse (and so before the hand-over); `loop_running` on
+/// `StartCause::Init`; `exiting` at the head of `App::finish`, in `settle_quit`'s `Write` arm, in
+/// `main`'s build-error arm and after `run_app`; `quit_abandoned` in the `Abandon` arm; and the
+/// three standalone entries.
+const PINS: [Pin; 10] = [
+    Pin {
+        writer: "enter_window_thread",
+        owner: "bt-app crate::main",
+        after: Some("parse"),
+    },
+    Pin {
+        writer: "loop_running",
+        owner: "bt-app crate::FolioApp::new_events",
+        after: Some("Init"),
+    },
+    Pin {
+        writer: "exiting",
+        owner: "bt-app crate::App::finish",
+        after: None,
+    },
+    Pin {
+        writer: "exiting",
+        owner: "bt-app crate::FolioApp::settle_quit",
+        after: Some("Write"),
+    },
+    Pin {
+        writer: "exiting",
+        owner: "bt-app crate::main",
+        after: Some("build"),
+    },
+    Pin {
+        writer: "exiting",
+        owner: "bt-app crate::main",
+        after: Some("run_app"),
+    },
+    Pin {
+        writer: "quit_abandoned",
+        owner: "bt-app crate::FolioApp::settle_quit",
+        after: Some("Abandon"),
+    },
+    Pin {
+        writer: "enter_standalone_main",
+        owner: "bt-app crate::attention_wire::payload_on_stdin",
+        after: None,
+    },
+    Pin {
+        writer: "enter_standalone_main",
+        owner: "bt-app crate::explorer_menu::removal_waited_on",
+        after: None,
+    },
+    Pin {
+        writer: "enter_standalone_main",
+        owner: "bt-app crate::explorer_menu::cleanup_waited_on",
+        after: None,
+    },
+];
+
+/// `enter_callback`'s pinned entries (§3.3 as corrected by (c)7): package, module, the
+/// callback's name, calls.
+const CALLBACKS: [(&str, &str, &str, usize); 10] = [
+    (
+        "bt-platform",
+        "crate::handoff::macos_handoff",
+        "finder-open",
+        1,
+    ),
+    ("bt-platform", "crate::http", "http-download-session", 4),
+    ("bt-platform", "crate::http", "http-session", 4),
+    (
+        "bt-platform",
+        "crate::macos_notify",
+        "notification-center",
+        4,
+    ),
+    ("bt-platform", "crate::video::engine", "mf-engine-notify", 1),
+    ("bt-platform", "crate::video::macos_player", "video-end", 1),
+    ("bt-platform", "crate::windows_impl", "console-ctrl", 1),
+    ("bt-platform", "crate::windows_impl", "toast-activated", 1),
+    ("bt-render", "crate", "gpu-device-lost", 1),
+    ("bt-render", "crate", "gpu-uncaptured-error", 1),
+];
+
+fn landmark_before(
+    src: &Src,
+    record: &ItemRecord,
+    at: usize,
+    landmarks: &[&str],
+) -> Option<&'static str> {
+    let toks = src.lex(record.body()?.start(), at);
+    let mut found = None;
+    for (index, tok) in toks.iter().enumerate() {
+        if tok.kind != Kind::Ident {
+            continue;
+        }
+        let name = src.text(*tok);
+        let hit = landmarks
+            .iter()
+            .any(|landmark| match landmark.strip_suffix("::*") {
+                Some(prefix) => {
+                    index >= 2
+                        && src.text(toks[index - 1]) == "::"
+                        && src.text(toks[index - 2]) == prefix
+                }
+                None => *landmark == name,
+            });
+        if hit {
+            found = Some(name);
+        }
+    }
+    found
+}
+
+/// **The role and phase writers are called only where they are pinned**, each spelled as the
+/// call `admission::writer(…)` — an import or a value would let one be called where no pin can
+/// see.
+fn the_role_and_phase_writers_are_called_only_where_they_are_pinned(world: &World) -> Vec<String> {
+    let mut failures = Vec::new();
+    let writers: BTreeSet<&str> = PINS.iter().map(|pin| pin.writer).collect();
+    let mut found: Vec<(String, String, Option<&str>)> = Vec::new();
+    let mut callbacks: BTreeMap<(String, String, String), usize> = BTreeMap::new();
+    for src in &world.srcs {
+        for writer in writers.iter().copied().chain(["enter_callback"]) {
+            for at in src.named(writer) {
+                if !src.in_product(at) {
+                    continue;
+                }
+                let file_start = src.index.file_at(at).map_or(0, |f| f.span().start());
+                let before = src.lex(at.saturating_sub(96).max(file_start), at);
+                let after = src.lex(at, (at + 96).min(src.file_end(at)));
+                if src.is(before.last(), "fn") {
+                    continue;
+                }
+                let spelled = before.len() >= 2
+                    && src.is(before.last(), "::")
+                    && src.is(before.get(before.len() - 2), "admission")
+                    && src.is(after.get(1), "(");
+                if !spelled {
+                    failures.push(format!(
+                        "`{writer}` is named at {} ({}) other than as the call \
+                         `admission::{writer}(…)`",
+                        src.location(at),
+                        src.owner_of(at)
+                    ));
+                    continue;
+                }
+                if writer == "enter_callback" {
+                    let name = after
+                        .get(2)
+                        .filter(|t| t.kind == Kind::Literal)
+                        .map_or_else(|| "<not a literal>".to_owned(), |t| src.text(*t).to_owned());
+                    *callbacks
+                        .entry((src.package.to_owned(), src.module_at(at).to_owned(), name))
+                        .or_insert(0) += 1;
+                    continue;
+                }
+                let owner = src.owner_of(at);
+                let landmarks = LANDMARKS
+                    .iter()
+                    .find(|(named, _)| *named == owner)
+                    .map_or(&[][..], |(_, landmarks)| *landmarks);
+                let landmark = src
+                    .callable_at(at)
+                    .and_then(|record| landmark_before(src, record, at, landmarks));
+                found.push((writer.to_owned(), owner, landmark));
+            }
+        }
+    }
+    let mut wanted: Vec<(String, String, Option<&str>)> = PINS
+        .iter()
+        .map(|pin| (pin.writer.to_owned(), pin.owner.to_owned(), pin.after))
+        .collect();
+    wanted.sort();
+    found.sort();
+    let said = |(writer, owner, after): &(String, String, Option<&str>)| {
+        format!(
+            "`admission::{writer}` in `{owner}`{}",
+            after.map(|l| format!(" after `{l}`")).unwrap_or_default()
+        )
+    };
+    for missing in wanted.iter().filter(|pin| !found.contains(pin)) {
+        failures.push(format!("the pinned call {} is not there", said(missing)));
+    }
+    for extra in found.iter().filter(|site| !wanted.contains(site)) {
+        failures.push(format!("{} is not a pinned call site", said(extra)));
+    }
+    let wanted: BTreeMap<(String, String, String), usize> = CALLBACKS
+        .iter()
+        .map(|(package, module, name, count)| {
+            (
+                (
+                    (*package).to_owned(),
+                    (*module).to_owned(),
+                    format!("\"{name}\""),
+                ),
+                *count,
+            )
+        })
+        .collect();
+    for (key, count) in &callbacks {
+        if wanted.get(key) != Some(count) {
+            failures.push(format!(
+                "`admission::enter_callback({})` is called {count}× in `{} {}`, where the pinned \
+                 entries say {}",
+                key.2,
+                key.0,
+                key.1,
+                wanted
+                    .get(key)
+                    .map_or_else(|| "none".to_owned(), |c| format!("{c}×"))
+            ));
+        }
+    }
+    for key in wanted.keys().filter(|key| !callbacks.contains_key(*key)) {
+        failures.push(format!(
+            "the pinned callback entry `enter_callback({})` in `{} {}` is not there",
+            key.2, key.0, key.1
+        ));
+    }
+    failures
+}
+
+// ── assertion 4: §C-2, suppression ──────────────────────────────────────────────────────────
+
+/// The lint and the groups that hold it, on the pinned Clippy.
+const LOWERING: [&str; 4] = [
+    "clippy::disallowed_methods",
+    "clippy::style",
+    "clippy::all",
+    "warnings",
+];
+
+/// How many `#[expect(clippy::disallowed_methods)]` the registry's doors carry: none until A2
+/// turns the lint on and gives each door its own (§9.1: "with no lint yet, the expected count of
+/// door `expect`s is zero"). A2 makes this the registry's count.
+const DOOR_EXPECTS: usize = 0;
+
+/// **No lint on raw effects is lowered outside a door** (§C-2): no `allow` or `expect` of
+/// `clippy::disallowed_methods`, `clippy::style`, `clippy::all` or `warnings` — at a crate,
+/// module, item or statement, in either path spelling, inside `cfg_attr` at any depth — except a
+/// door function's own `expect(clippy::disallowed_methods)`, whose count is the registry's.
+fn no_lint_on_raw_effects_is_lowered_outside_a_door(world: &World) -> Vec<String> {
+    let mut failures = Vec::new();
+    let mut read = 0;
+    let mut door_expects = Vec::new();
+    for src in &world.srcs {
+        for attribute in attributes(src) {
+            read += 1;
+            for (verb, lint) in suppressions(src, &attribute.body) {
+                if !LOWERING.contains(&lint.as_str()) || !src.in_product(attribute.start) {
+                    continue;
+                }
+                let on_a_function = !attribute.inner
+                    && src
+                        .callable_at(attribute.start)
+                        .is_some_and(|record| record.declaration().holds(attribute.start));
+                if verb == "expect" && lint == "clippy::disallowed_methods" && on_a_function {
+                    door_expects.push(src.owner_of(attribute.start));
+                    continue;
+                }
+                failures.push(format!(
+                    "`{verb}({lint})` at {} ({})",
+                    src.location(attribute.start),
+                    src.owner_of(attribute.start)
+                ));
+            }
+        }
+    }
+    if door_expects.len() != DOOR_EXPECTS {
+        failures.push(format!(
+            "{} functions `expect(clippy::disallowed_methods)`, where the registry's doors carry \
+             {DOOR_EXPECTS}: {door_expects:?}",
+            door_expects.len()
+        ));
+    }
+    if read == 0 {
+        failures.push("no attribute was read in the product: this reads nothing".into());
+    }
+    failures
+}
+
+// ── assertion 5: §C-3, exported macros and the FFI owners ──────────────────────────────────
+
+const OWNER_COLUMNS: [&str; 3] = ["construct", "owner", "count"];
+
+/// Every (construct, owner) the product holds, counted.
+fn owners_found(world: &World) -> BTreeMap<(String, String), usize> {
+    let mut owners = BTreeMap::new();
+    let mut count = |construct: &str, owner: String| {
+        *owners.entry((construct.to_owned(), owner)).or_insert(0) += 1;
+    };
+    for src in &world.srcs {
+        for attribute in attributes(src) {
+            let (path, _) = path_of(src, &attribute.body);
+            if (path == "link" || path == "macro_export") && src.in_product(attribute.start) {
+                count(&format!("#[{path}]"), src.owner_of(attribute.start));
+            }
+        }
+        // `objc2::msg_send![…]` is one invocation however its path is written.
+        let invoked: BTreeSet<(usize, &str)> = src
+            .index
+            .macros()
+            .iter()
+            .filter(|record| {
+                record.kind() == MacroKind::Invocation
+                    && ["msg_send", "msg_send_id"].contains(&record.name())
+                    && src.in_product(record.span().start())
+            })
+            .map(|record| (record.tokens().start(), record.name()))
+            .collect();
+        for (at, name) in invoked {
+            count(&format!("{name}!"), src.owner_of(at));
+        }
+        for name in ["vtable", "GetProcAddress", "extern"] {
+            for at in src.named(name) {
+                let after = src.lex(at, (at + 64).min(src.file_end(at)));
+                let construct = match name {
+                    "extern" => {
+                        let brace = if after.get(1).is_some_and(|t| t.kind == Kind::Literal) {
+                            2
+                        } else {
+                            1
+                        };
+                        if !src.is(after.get(brace), "{") {
+                            continue;
+                        }
+                        "extern block"
+                    }
+                    "vtable" if !src.is(after.get(1), "(") => continue,
+                    "vtable" => "vtable(",
+                    _ => "GetProcAddress",
+                };
+                if src.in_product(at) {
+                    count(construct, src.owner_of(at));
+                }
+            }
+        }
+    }
+    owners
+}
+
+/// **The constructs a lint cannot see through stay with their owners** (§C-3): no first-party
+/// `#[macro_export]` body names the vocabulary; `msg_send!`/`msg_send_id!`, `vtable(`,
+/// `GetProcAddress`, `extern` blocks, `#[link]` and `#[macro_export]` are written only by the
+/// owners the registry's `# owners` section lists, as many times as it says.
+fn the_constructs_a_lint_cannot_see_through_stay_with_their_owners(
+    world: &World,
+    words: &[Word],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    for src in &world.srcs {
+        for attribute in attributes(src) {
+            if path_of(src, &attribute.body).0 != "macro_export" || !src.in_product(attribute.start)
+            {
+                continue;
+            }
+            let file = src.index.file_at(attribute.start).map(FileRecord::span);
+            let definition = src.index.macros().iter().find(|record| {
+                record.kind() == MacroKind::Definition
+                    && record.span().start() > attribute.start
+                    && file.is_some_and(|file| file.holds(record.span().start()))
+            });
+            let Some(definition) = definition else {
+                failures.push(format!(
+                    "`#[macro_export]` at {} marks no macro",
+                    src.location(attribute.start)
+                ));
+                continue;
+            };
+            let name = src
+                .lex(definition.span().start(), definition.tokens().start())
+                .iter()
+                .rev()
+                .find(|t| t.kind == Kind::Ident)
+                .map_or("?", |t| src.text(*t));
+            let toks = src.lex(definition.tokens().start(), definition.tokens().end());
+            for site in sites_of(src, &toks) {
+                if let Some((effect, _)) = effect_of(words, &site) {
+                    failures.push(format!(
+                        "the exported macro `{name}!` names the vocabulary's `{effect}` at {}: its \
+                         expansion runs in another crate, where the lint may not see it",
+                        src.location(site.at)
+                    ));
+                }
+            }
+        }
+    }
+    let found = owners_found(world);
+    let table: BTreeMap<(String, String), usize> = section("owners", &OWNER_COLUMNS)
+        .into_iter()
+        .map(|cells| {
+            let count = cells[2].parse().expect("an owner count is a number");
+            ((cells[0].to_owned(), cells[1].to_owned()), count)
+        })
+        .collect();
+    for ((construct, owner), count) in &found {
+        match table.get(&(construct.clone(), owner.clone())) {
+            Some(listed) if listed == count => {}
+            Some(listed) => failures.push(format!(
+                "`{construct}` is written {count}× in `{owner}`, where the owner table says \
+                 {listed}×"
+            )),
+            None => failures.push(format!(
+                "`{construct}` is written {count}× in `{owner}`, which is not one of its listed \
+                 owners"
+            )),
+        }
+    }
+    for ((construct, owner), listed) in &table {
+        if !found.contains_key(&(construct.clone(), owner.clone())) {
+            failures.push(format!(
+                "the owner table lists `{construct}` {listed}× in `{owner}`, and it is not there"
+            ));
+        }
+    }
+    failures
+}
+
+// ── assertion 6: §C-5, synchronous doors ─────────────────────────────────────────────────────
+
+/// A product function whose parameters take a `WaitToken`: an owner-thread door, and the door
+/// types its parameters name.
+struct DoorFunction {
+    src: usize,
+    record: &'static ItemRecord,
+    doors: Vec<&'static str>,
+}
+
+/// The `fn` token and the parameter list's parentheses of a declaration.
+fn signature(src: &Src, toks: &[Tok]) -> Option<(usize, usize, usize)> {
+    let at = toks.iter().position(|t| src.is(Some(t), "fn"))?;
+    let open = toks[at..].iter().position(|t| src.is(Some(t), "("))? + at;
+    Some((at, open, closing(src, toks, open)?))
+}
+
+fn door_functions(world: &World) -> Vec<DoorFunction> {
+    let mut out = Vec::new();
+    for (at, src) in world.srcs.iter().enumerate() {
+        for record in src.index.items() {
+            if !record.kind().is_callable()
+                || record.module_paths().contains(&"crate::admission")
+                || !src.product_item(record)
+            {
+                continue;
+            }
+            let toks = src.lex(record.declaration().start(), record.declaration().end());
+            let Some((_, open, close)) = signature(src, &toks) else {
+                continue;
+            };
+            let params = &toks[open..=close];
+            if !params.iter().any(|t| src.text(*t) == "WaitToken") {
+                continue;
+            }
+            let doors = params
+                .windows(3)
+                .filter(|w| src.text(w[0]) == "doors" && src.text(w[1]) == "::")
+                .map(|w| src.text(w[2]))
+                .collect();
+            out.push(DoorFunction {
+                src: at,
+                record,
+                doors,
+            });
+        }
+    }
+    out
+}
+
+/// What a door may not hand back: a closure, a future or an iterator.
+const RETURNED_LATER: [&str; 6] = [
+    "Fn",
+    "FnMut",
+    "FnOnce",
+    "Future",
+    "Iterator",
+    "IntoIterator",
+];
+const CLOSURES: [&str; 3] = ["Fn", "FnMut", "FnOnce"];
+
+/// **Every door runs its effect inside its own call** (§C-5, M10): a function that takes a
+/// `WaitToken` takes exactly one registry door's, is not `async`, returns no closure, `impl Fn*`,
+/// `impl Future`, `impl Iterator`, `dyn` object or `fn` pointer, and takes no `'static` closure to
+/// keep; and every registry door has such a function.
+fn every_door_runs_its_effect_inside_its_own_call(world: &World) -> Vec<String> {
+    let mut failures = Vec::new();
+    let registry: Vec<&str> = section("doors", &DOOR_COLUMNS)
+        .into_iter()
+        .map(|cells| cells[0])
+        .collect();
+    let mut served = BTreeSet::new();
+    for door in door_functions(world) {
+        let src = &world.srcs[door.src];
+        let name = key_of(src, door.record);
+        if door.doors.len() != 1 || !registry.contains(&door.doors[0]) {
+            failures.push(format!(
+                "`{name}` takes a `WaitToken` naming {:?}, where a door takes one registry door's",
+                door.doors
+            ));
+        }
+        served.extend(door.doors.iter().copied());
+        let toks = src.lex(
+            door.record.declaration().start(),
+            door.record.declaration().end(),
+        );
+        let Some((fn_at, open, close)) = signature(src, &toks) else {
+            continue;
+        };
+        let text = |t: &Tok| src.text(*t);
+        if toks[..fn_at].iter().any(|t| text(t) == "async") {
+            failures.push(format!("`{name}` is `async`"));
+        }
+        let where_at = toks
+            .iter()
+            .position(|t| text(t) == "where")
+            .unwrap_or(toks.len());
+        if let Some(arrow) = toks[close..where_at].iter().position(|t| text(t) == "->") {
+            let returned: Vec<&str> = toks[close + arrow + 1..where_at].iter().map(text).collect();
+            let later = returned
+                .windows(2)
+                .find_map(|w| {
+                    (w[0] == "impl" && RETURNED_LATER.contains(&w[1]))
+                        .then(|| format!("`impl {}`", w[1]))
+                })
+                .or_else(|| {
+                    returned
+                        .contains(&"dyn")
+                        .then(|| "a `dyn` object".to_owned())
+                })
+                .or_else(|| {
+                    returned
+                        .windows(2)
+                        .any(|w| w[0] == "fn" && w[1] == "(")
+                        .then(|| "a `fn` pointer".to_owned())
+                });
+            if let Some(later) = later {
+                failures.push(format!(
+                    "`{name}` returns {later}: an effect handed back runs after the door has \
+                     returned"
+                ));
+            }
+        }
+        let bounds: Vec<&str> = toks[fn_at..open]
+            .iter()
+            .chain(&toks[where_at..])
+            .map(text)
+            .collect();
+        for param in split_commas(src, &toks[open + 1..close]) {
+            let names: Vec<&str> = param.iter().map(text).collect();
+            let kept = names.iter().any(|n| CLOSURES.contains(n)) && names.contains(&"static");
+            // A generic parameter whose bound, in `<…>` or `where`, is a `'static` closure.
+            let kept_by_bound = names.iter().any(|generic| {
+                generic.len() == 1
+                    && generic.chars().all(|c| c.is_ascii_uppercase())
+                    && bounds.windows(2).any(|w| w[0] == *generic && w[1] == ":")
+                    && bounds.contains(&"static")
+                    && bounds.iter().any(|n| CLOSURES.contains(n))
+            });
+            if kept || kept_by_bound {
+                failures.push(format!(
+                    "`{name}` takes a `'static` closure (`{}`): a door that keeps one runs it after \
+                     it has returned",
+                    names.join(" ")
+                ));
+            }
+        }
+    }
+    for door in registry {
+        if !served.contains(door) {
+            failures.push(format!(
+                "no product function takes `WaitToken<'_, doors::{door}>`"
+            ));
+        }
+    }
+    failures
+}
+
+// ── assertion 7: the closed `Drop` inventory ((d)4, (e)3, (f)2, (g)) ─────────────────────────
+
+/// One pinned body: its first-party edges in the order written (each edge the bodies a call there
+/// may be — one, or one per platform arm), its vocabulary effects counted by call site, and the
+/// names it calls at a receiver whose type the source does not write that are std or foreign
+/// leaves a first-party item happens to share a name with.
+struct Pinned {
+    body: &'static str,
+    edges: &'static [&'static [&'static str]],
+    effects: &'static [(&'static str, usize)],
+    leaves: &'static [&'static str],
+}
+
+/// One row of the exception table: the `Drop` that may reach vocabulary, by the row's name.
+struct Exception {
+    row: &'static str,
+    drop: &'static str,
+}
+
+const DIRWATCH_WINDOWS: &str =
+    "bt-platform crate::windows_impl::<DirWatch as Drop>::drop [windows]";
+const CLOSE_WINDOWS: &str = "bt-platform crate::windows_impl::close [windows]";
+const DIRWATCH_MACOS: &str =
+    "bt-platform crate::macos_watch::<DirWatch as Drop>::drop [target_os = \"macos\"]";
+const STOPPER_SIGNAL: &str =
+    "bt-platform crate::macos_watch::Stopper::signal [target_os = \"macos\"]";
+const SHUTDOWN: &str = "bt-app crate::trace_sink::<Shutdown as Drop>::drop";
+const ADMITTED: &str = "bt-platform crate::admission::admitted";
+const ROLE: &str = "bt-platform crate::admission::role";
+const CONTAINS: &str = "bt-platform crate::admission::Phases::contains";
+const BIT: &str = "bt-platform crate::admission::Phases::bit";
+const COUNT: &str = "bt-platform crate::admission::count";
+const METER: &str = "bt-platform crate::admission::meter";
+const FRESH: &str = "bt-platform crate::admission::WaitToken::fresh";
+const FLUSH: &str = "bt-app crate::trace_sink::flush";
+const FLUSH_SINK: &str = "bt-app crate::trace_sink::flush_sink";
+const QUEUE_CLOSE: &str = "bt-app crate::trace_sink::Queue::close";
+const ATTENTION_WINDOWS: &str =
+    "bt-platform crate::attention_pipe::<AttentionPipe as Drop>::drop [windows]";
+const ATTENTION_UNIX: &str =
+    "bt-platform crate::attention_pipe::<AttentionPipe as Drop>::drop [unix]";
+const LAUNCH_WINDOWS: &str = "bt-platform crate::launch_pipe::<LaunchPipe as Drop>::drop [windows]";
+const LAUNCH_UNIX: &str = "bt-platform crate::launch_pipe::<LaunchPipe as Drop>::drop [unix]";
+const ENGINE_WINDOWS: &str = "bt-platform crate::video::engine::<Engine as Drop>::drop [windows]";
+const ENGINE_WINDOWS_SHUTDOWN: &str =
+    "bt-platform crate::video::engine::Engine::shutdown [windows]";
+const ENGINE_MACOS: &str = "bt-platform crate::video::macos_player::<Engine as Drop>::drop \
+                            [not(windows)] [target_os = \"macos\"]";
+const ENGINE_MACOS_SHUTDOWN: &str = "bt-platform crate::video::macos_player::Engine::shutdown \
+                                     [not(windows)] [target_os = \"macos\"]";
+const ENGINE_PORTABLE_SHUTDOWN: &str = "bt-platform crate::video::engine::no_player::Engine::\
+                                        shutdown [not(windows)] [not(target_os = \
+                                        \"macos\")]";
+const SEAT: &str = "bt-app crate::video_seat::<VideoSeat as Drop>::drop";
+const SEAT_SHUTDOWN: &str = "bt-app crate::video_seat::VideoSeat::shutdown";
+const SEATS: &str = "bt-app crate::video_seat::<VideoSeats as Drop>::drop";
+const SEATS_SHUTDOWN_ALL: &str = "bt-app crate::video_seat::VideoSeats::shutdown_all";
+const PTY: &str = "bt-pty crate::<PtySession as Drop>::drop";
+const PTY_SHUTDOWN: &str = "bt-pty crate::PtySession::shutdown";
+const DUMP_FINISH: &str = "bt-pty crate::PtyDump::finish";
+const DUMP_PUBLISH: &str = "bt-pty crate::PtyDump::publish";
+const INPUT_CLOSE: &str = "bt-pty crate::InputRing::close";
+const INPUT_STATE: &str = "bt-pty crate::InputRing::state";
+const OUTPUT_CLOSE: &str = "bt-pty crate::OutputRing::close";
+const OUTPUT_STATE: &str = "bt-pty crate::OutputRing::state";
+const REAP_WITHIN: &str = "bt-pty crate::reap_within";
+const JOIN_WITHIN: &str = "bt-pty crate::join_within";
+/// `thiserror`'s `#[from]` on `PtyError::Io`: a first-party `From` no byte holds, so an edge
+/// with no body to read.
+const PTY_ERROR_FROM: &str = "bt-pty crate::PtyError::from (generated)";
+const REQUEST: &str = "bt-platform crate::http::<Request as Drop>::drop [windows]";
+const SHARED_LOCKED: &str = "bt-platform crate::http::Shared::locked [windows]";
+
+/// **The exception table** (revision (e)3 as corrected by (f)2 and (g)): the `Drop`s that may
+/// reach the vocabulary, each owed a repayment in `docs/plans/structural-debt.md`.
+const EXCEPTIONS: [Exception; 13] = [
+    Exception {
+        row: "DirWatch (Windows)",
+        drop: DIRWATCH_WINDOWS,
+    },
+    Exception {
+        row: "DirWatch (macOS)",
+        drop: DIRWATCH_MACOS,
+    },
+    Exception {
+        row: "trace_sink::Shutdown",
+        drop: SHUTDOWN,
+    },
+    Exception {
+        row: "AttentionPipe (Windows)",
+        drop: ATTENTION_WINDOWS,
+    },
+    Exception {
+        row: "AttentionPipe (Unix)",
+        drop: ATTENTION_UNIX,
+    },
+    Exception {
+        row: "LaunchPipe (Windows)",
+        drop: LAUNCH_WINDOWS,
+    },
+    Exception {
+        row: "LaunchPipe (Unix)",
+        drop: LAUNCH_UNIX,
+    },
+    Exception {
+        row: "video::engine::Engine",
+        drop: ENGINE_WINDOWS,
+    },
+    Exception {
+        row: "macos_player::Engine",
+        drop: ENGINE_MACOS,
+    },
+    Exception {
+        row: "VideoSeat",
+        drop: SEAT,
+    },
+    Exception {
+        row: "VideoSeats",
+        drop: SEATS,
+    },
+    Exception {
+        row: "PtySession",
+        drop: PTY,
+    },
+    Exception {
+        row: "http::Request (Windows)",
+        drop: REQUEST,
+    },
+];
+
+/// **Every pinned body**, walked from the exceptions: nothing a listed `Drop` reaches is exempt.
+const PINNED: [Pinned; 40] = [
+    Pinned {
+        body: DIRWATCH_WINDOWS,
+        edges: &[&[CLOSE_WINDOWS], &[CLOSE_WINDOWS], &[CLOSE_WINDOWS]],
+        effects: &[("SetEvent", 1), ("JoinHandle::join", 1)],
+        leaves: &[],
+    },
+    Pinned {
+        body: CLOSE_WINDOWS,
+        edges: &[],
+        effects: &[("CloseHandle", 1)],
+        leaves: &[],
+    },
+    Pinned {
+        body: DIRWATCH_MACOS,
+        edges: &[&[STOPPER_SIGNAL]],
+        effects: &[("JoinHandle::join", 1)],
+        leaves: &[],
+    },
+    Pinned {
+        body: STOPPER_SIGNAL,
+        edges: &[],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: SHUTDOWN,
+        edges: &[&[ADMITTED], &[FLUSH]],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: ADMITTED,
+        edges: &[&[ROLE], &[CONTAINS], &[COUNT], &[METER], &[FRESH], &[FRESH]],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: ROLE,
+        edges: &[],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: CONTAINS,
+        edges: &[&[BIT]],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: BIT,
+        edges: &[],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: COUNT,
+        edges: &[],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: METER,
+        edges: &[],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: FRESH,
+        edges: &[],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: FLUSH,
+        edges: &[&[FLUSH_SINK]],
+        effects: &[],
+        leaves: &["get"],
+    },
+    Pinned {
+        body: FLUSH_SINK,
+        edges: &[&[QUEUE_CLOSE]],
+        effects: &[
+            ("thread::sleep", 2),
+            ("Receiver::recv_timeout", 1),
+            ("JoinHandle::join", 1),
+        ],
+        leaves: &["take"],
+    },
+    Pinned {
+        body: QUEUE_CLOSE,
+        edges: &[],
+        effects: &[],
+        leaves: &["take"],
+    },
+    Pinned {
+        body: ATTENTION_WINDOWS,
+        edges: &[],
+        effects: &[("SetEvent", 1), ("JoinHandle::join", 1), ("CloseHandle", 1)],
+        leaves: &[],
+    },
+    Pinned {
+        body: ATTENTION_UNIX,
+        edges: &[],
+        effects: &[
+            ("libc::write", 1),
+            ("JoinHandle::join", 1),
+            ("libc::close", 1),
+        ],
+        leaves: &[],
+    },
+    Pinned {
+        body: LAUNCH_WINDOWS,
+        edges: &[],
+        effects: &[("SetEvent", 1), ("JoinHandle::join", 1), ("CloseHandle", 1)],
+        leaves: &[],
+    },
+    Pinned {
+        body: LAUNCH_UNIX,
+        edges: &[],
+        effects: &[
+            ("libc::write", 1),
+            ("JoinHandle::join", 1),
+            ("libc::close", 1),
+        ],
+        leaves: &[],
+    },
+    Pinned {
+        body: ENGINE_WINDOWS,
+        edges: &[&[ENGINE_WINDOWS_SHUTDOWN]],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: ENGINE_WINDOWS_SHUTDOWN,
+        edges: &[],
+        effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
+        leaves: &[],
+    },
+    Pinned {
+        body: ENGINE_MACOS,
+        edges: &[&[ENGINE_MACOS_SHUTDOWN]],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: ENGINE_MACOS_SHUTDOWN,
+        edges: &[],
+        effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
+        leaves: &[],
+    },
+    Pinned {
+        body: ENGINE_PORTABLE_SHUTDOWN,
+        edges: &[],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: SEAT,
+        edges: &[&[SEAT_SHUTDOWN]],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: SEAT_SHUTDOWN,
+        edges: &[&[
+            ENGINE_WINDOWS_SHUTDOWN,
+            ENGINE_MACOS_SHUTDOWN,
+            ENGINE_PORTABLE_SHUTDOWN,
+        ]],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: SEATS,
+        edges: &[&[SEATS_SHUTDOWN_ALL]],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: SEATS_SHUTDOWN_ALL,
+        edges: &[&[SEAT_SHUTDOWN]],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: PTY,
+        edges: &[&[DUMP_FINISH], &[PTY_SHUTDOWN]],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: DUMP_FINISH,
+        edges: &[&[DUMP_PUBLISH]],
+        effects: &[("Write::write_fmt", 1)],
+        leaves: &[],
+    },
+    Pinned {
+        body: DUMP_PUBLISH,
+        edges: &[],
+        effects: &[("File::sync_data", 2)],
+        leaves: &[],
+    },
+    Pinned {
+        body: PTY_SHUTDOWN,
+        edges: &[
+            &[INPUT_CLOSE],
+            &[PTY_ERROR_FROM],
+            &[REAP_WITHIN],
+            &[PTY_ERROR_FROM],
+            &[OUTPUT_CLOSE],
+            &[JOIN_WITHIN],
+        ],
+        effects: &[("Child::try_wait", 2)],
+        leaves: &[],
+    },
+    Pinned {
+        body: INPUT_CLOSE,
+        edges: &[&[INPUT_STATE]],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: INPUT_STATE,
+        edges: &[],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: OUTPUT_CLOSE,
+        edges: &[&[OUTPUT_STATE]],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: OUTPUT_STATE,
+        edges: &[],
+        effects: &[],
+        leaves: &[],
+    },
+    Pinned {
+        body: REAP_WITHIN,
+        edges: &[],
+        effects: &[("thread::sleep", 1)],
+        leaves: &[],
+    },
+    Pinned {
+        body: JOIN_WITHIN,
+        edges: &[],
+        effects: &[("JoinHandle::join", 1), ("thread::sleep", 1)],
+        leaves: &[],
+    },
+    Pinned {
+        body: REQUEST,
+        edges: &[&[SHARED_LOCKED]],
+        effects: &[("Condvar::wait_timeout", 1)],
+        leaves: &[],
+    },
+    Pinned {
+        body: SHARED_LOCKED,
+        edges: &[],
+        effects: &[],
+        leaves: &[],
+    },
+];
+
+/// The exception rows whose chain reaches `body`, for a failure's message.
+fn rows_reaching(body: &str) -> Vec<&'static str> {
+    let pinned: BTreeMap<&str, &Pinned> = PINNED.iter().map(|p| (p.body, p)).collect();
+    EXCEPTIONS
+        .iter()
+        .filter(|row| {
+            let mut stack = vec![row.drop];
+            let mut seen = BTreeSet::new();
+            while let Some(at) = stack.pop() {
+                if at == body {
+                    return true;
+                }
+                if seen.insert(at)
+                    && let Some(pin) = pinned.get(at)
+                {
+                    stack.extend(pin.edges.iter().flat_map(|edge| edge.iter().copied()));
+                }
+            }
+            false
+        })
+        .map(|row| row.row)
+        .collect()
+}
+
+/// What one pinned body calls, against its row.
+fn check_pinned(
+    world: &World,
+    words: &[Word],
+    pin: &Pinned,
+    src: usize,
+    record: &'static ItemRecord,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    let rows = rows_reaching(pin.body).join(", ");
+    let body = Body::new(world, src, record);
+    let mut next = 0;
+    let mut effects: BTreeMap<String, usize> = BTreeMap::new();
+    let mut leaves: BTreeSet<&str> = BTreeSet::new();
+    for site in body.sites() {
+        let candidates: BTreeSet<String> = body
+            .resolve(&site)
+            .iter()
+            .map(|callable| world.key(callable))
+            .collect();
+        let effect = effect_of(words, &site).map(|(effect, _)| effect);
+        if candidates.is_empty() {
+            if let Some(effect) = effect {
+                *effects.entry(effect).or_insert(0) += 1;
+            }
+            continue;
+        }
+        if pin
+            .edges
+            .get(next)
+            .is_some_and(|edge| edge.iter().any(|member| candidates.contains(*member)))
+        {
+            next += 1;
+        } else if let Some(effect) = effect {
+            *effects.entry(effect).or_insert(0) += 1;
+        } else if pin.leaves.contains(&site.name) {
+            leaves.insert(site.name);
+        } else {
+            failures.push(format!(
+                "row {rows}: `{}` calls `{}` at {} — a first-party item ({}) where the table's next \
+                 edge is {}",
+                pin.body,
+                site.name,
+                body.s().location(site.at),
+                candidates.iter().take(3).cloned().collect::<Vec<_>>().join(", "),
+                pin.edges
+                    .get(next)
+                    .map_or_else(|| "none (all listed edges are taken)".to_owned(), |e| format!("`{}`", e.join(" | ")))
+            ));
+        }
+    }
+    if let Some(missing) = pin.edges.get(next) {
+        failures.push(format!(
+            "row {rows}: `{}` no longer calls its listed edge `{}`, in the listed order ({} of its              {} edges taken)",
+            pin.body,
+            missing.join(" | "),
+            next,
+            pin.edges.len()
+        ));
+    }
+    let wanted: BTreeMap<String, usize> = pin
+        .effects
+        .iter()
+        .map(|(effect, count)| ((*effect).to_owned(), *count))
+        .collect();
+    if effects != wanted {
+        failures.push(format!(
+            "row {rows}: `{}`'s vocabulary effects by call site are {effects:?}, where the table \
+             says {wanted:?}",
+            pin.body
+        ));
+    }
+    for leaf in pin.leaves.iter().filter(|leaf| !leaves.contains(**leaf)) {
+        failures.push(format!(
+            "row {rows}: `{}` lists `{leaf}` as a leaf and calls no `{leaf}` a first-party item \
+             could be",
+            pin.body
+        ));
+    }
+    failures
+}
+
+/// **Every `Drop` that may wait is a row of the closed inventory** ((d)4, (e)3, (f)2, (g)): each
+/// pinned body calls exactly its listed first-party edges, in order, and exactly its listed
+/// vocabulary effects by call site, and every edge is itself a pinned body; a `Drop` that is not a
+/// row reaches no registered door, no pinned body and no vocabulary that waits.
+///
+/// A call is resolved to first-party items by what its source says: a receiver whose type is
+/// written (`self`, a field of it, a parameter) narrows by that type, and one whose type is not
+/// written answers every method of that name the package can reach — which is why a row may list
+/// a leaf. This is a pinned-edge check over the stated inventory, not a whole-program analysis
+/// (§11, A1e's row).
+fn every_drop_that_may_wait_is_a_row_of_the_closed_inventory(
+    world: &World,
+    words: &[Word],
+) -> Vec<String> {
+    let mut failures = Vec::new();
+    let mut bodies: BTreeMap<String, (usize, &'static ItemRecord)> = BTreeMap::new();
+    for (at, src) in world.srcs.iter().enumerate() {
+        for record in src.index.items() {
+            if record.kind().is_callable() && src.product_item(record) {
+                bodies.insert(key_of(src, record), (at, record));
+            }
+        }
+    }
+    let pinned: BTreeSet<&str> = PINNED.iter().map(|pin| pin.body).collect();
+    for pin in &PINNED {
+        match bodies.get(pin.body) {
+            Some((src, record)) => failures.extend(check_pinned(world, words, pin, *src, record)),
+            None => failures.push(format!(
+                "the pinned body `{}` is not in the product: moved, renamed or gone",
+                pin.body
+            )),
+        }
+        for member in pin.edges.iter().flat_map(|edge| edge.iter()) {
+            if !member.ends_with("(generated)") && !pinned.contains(member) {
+                failures.push(format!(
+                    "`{}`'s edge `{member}` is not itself a pinned body",
+                    pin.body
+                ));
+            }
+        }
+    }
+    for row in &EXCEPTIONS {
+        if !pinned.contains(row.drop) {
+            failures.push(format!("row {}: its `Drop` is not a pinned body", row.row));
+        }
+    }
+    let rows: BTreeSet<&str> = EXCEPTIONS.iter().map(|row| row.drop).collect();
+    let doors: BTreeSet<String> = door_functions(world)
+        .iter()
+        .map(|door| key_of(&world.srcs[door.src], door.record))
+        .collect();
+    for (key, (src, record)) in &bodies {
+        if record.name() != "drop"
+            || record.trait_name() != Some("Drop")
+            || rows.contains(key.as_str())
+        {
+            continue;
+        }
+        let body = Body::new(world, *src, record);
+        for site in body.sites() {
+            if let Some((effect, true)) = effect_of(words, &site) {
+                failures.push(format!(
+                    "`{key}` is a `Drop` outside the exception table that waits: `{effect}` at {}",
+                    body.s().location(site.at)
+                ));
+            }
+            let candidates: Vec<String> = body
+                .resolve(&site)
+                .iter()
+                .map(|callable| world.key(callable))
+                .collect();
+            let reached: Vec<&String> = candidates
+                .iter()
+                .filter(|key| doors.contains(*key) || pinned.contains(key.as_str()))
+                .collect();
+            // A receiver whose type is written is exact; one whose type is not is red only when
+            // every item of that name the package can reach is a door or a pinned body.
+            let exact = !matches!(&site.form, Form::Method(None))
+                && !matches!(&site.form, Form::Method(Some(chain)) if chain[0] != "self" && !body.params.contains_key(chain[0]));
+            if !reached.is_empty() && (exact || reached.len() == candidates.len()) {
+                failures.push(format!(
+                    "`{key}` is a `Drop` outside the exception table that calls `{}` at {}, which \
+                     is {reached:?}",
+                    site.name,
+                    body.s().location(site.at)
+                ));
+            }
+        }
+    }
+    failures
+}
+
+// ── assertion 8: the thread door (A1c's guard, absorbed) ─────────────────────────────────────
+
+/// **Every thread `bt-app` and `bt-platform` start comes from the thread door**: the product names
+/// `std::thread::spawn`, `std::thread::Builder` and `std::thread::scope` in exactly one place, the
+/// door's own `admission::spawn_at_priority_with_stack` (A1c; ARCHITECTURE §5.1 and §6).
+/// `bt-pty`'s four threads and `bt-term`'s resample pool stay outside by design (revision (c)6).
+fn every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door() -> Vec<String> {
+    use bt_source::{Pattern, Search, View, needle};
+
+    let mut failures = Vec::new();
+    let mut door = 0;
+    for package in ["bt-app", "bt-platform"] {
+        let index = Index::of_package(package);
+        for path in ["thread::spawn", "thread::Builder", "thread::scope"] {
+            let found = match index.search(&Search::new(
+                needle!(Pattern::path(path)),
+                View::Identifiers,
+            )) {
+                Ok(found) => found.in_the_product(index),
+                Err(failure) => {
+                    failures.push(format!("{failure}"));
+                    continue;
+                }
+            };
+            if found.outside_items(index) != 0 {
+                failures.push(format!(
+                    "`{path}` is imported or named outside any function in {package}, where a bare \
+                     call can hide behind it:\n{}",
+                    found.report(index)
+                ));
+            }
+            for (owner, count) in found.owners(index) {
+                let the_door = package == "bt-platform"
+                    && owner.module_path == "crate::admission"
+                    && owner.type_owner.is_none()
+                    && owner.name == "spawn_at_priority_with_stack"
+                    && path == "thread::Builder";
+                if the_door {
+                    door += count;
+                } else {
+                    failures.push(format!(
+                        "`{path}` starts a thread in {package}'s {owner} ({count}×), outside the \
+                         thread door — use `bt_platform::spawn_at_priority`"
+                    ));
+                }
+            }
+        }
+    }
+    if door != 1 {
+        failures.push(format!(
+            "the thread door builds its threads with `std::thread::Builder` once; found {door}: if \
+             it no longer does, this reads nothing"
+        ));
+    }
+    failures
+}
+
+// ── the guard ──────────────────────────────────────────────────────────────────────────────
+
+/// RED (A1e, design note 2026-09-26 §9.1 and revisions (c)4, (c)8, (d)4, (e)3, (f)1–(f)2, (g))
+/// — **every door, capability and escape is where the registry and the note say, and nowhere
+/// else**: the source guard of budget note §R-A, its A1e assertions each named, each with its own
+/// message, over the declared universe (the product: `bt-app` and every first-party package it
+/// depends on; test modules out by declaration; `vendor/` out).
+///
+/// Without it the compile-time guarantees A1a–A1d built have side doors a reader cannot see: a
+/// `WorkerCtx` made by `transmute` or a second literal, a writer called where no phase transition
+/// was ruled, a lint lowered by `cfg_attr`, a blocking call inside a macro another crate expands,
+/// a door that returns its effect for later, a `Drop` that waits on the window thread one helper
+/// away. Each assertion below closes one, and says which, with the row and the difference.
+///
+/// MUTATION: plant any one of the prohibited shapes — `unsafe { transmute::<_, WaitToken<…>>(…) }`
+/// in a product function, a second `WorkerCtx { … }`, a second `enter_window_thread()`, an
+/// `exiting()` moved out of `settle_quit`'s `Write` arm, `#[cfg_attr(windows,
+/// allow(clippy::disallowed_methods))]`, a `#[macro_export]` macro naming `thread::sleep`, a
+/// `msg_send!` outside its owners, an `async` door, a second `thread::sleep` in
+/// `video::engine::Engine::shutdown`, `PtySession::drop` calling `shutdown` before the dump's
+/// `finish` — and the named assertion goes red with that site.
+#[test]
+fn every_door_is_where_the_registry_says() {
+    let world = World::new();
+    let words = vocabulary();
+    let assertions: [(&str, Vec<String>); 9] = [
+        (
+            "the_universe_is_the_product_and_its_tools_are_declared",
+            the_universe_is_the_product_and_its_tools_are_declared(&world),
+        ),
+        (
+            "no_capability_is_named_where_the_compiler_checks_nothing",
+            no_capability_is_named_where_the_compiler_checks_nothing(&world),
+        ),
+        (
+            "a_capability_has_one_constructor_and_no_trait_road",
+            a_capability_has_one_constructor_and_no_trait_road(&world),
+        ),
+        (
+            "the_role_and_phase_writers_are_called_only_where_they_are_pinned",
+            the_role_and_phase_writers_are_called_only_where_they_are_pinned(&world),
+        ),
+        (
+            "no_lint_on_raw_effects_is_lowered_outside_a_door",
+            no_lint_on_raw_effects_is_lowered_outside_a_door(&world),
+        ),
+        (
+            "the_constructs_a_lint_cannot_see_through_stay_with_their_owners",
+            the_constructs_a_lint_cannot_see_through_stay_with_their_owners(&world, &words),
+        ),
+        (
+            "every_door_runs_its_effect_inside_its_own_call",
+            every_door_runs_its_effect_inside_its_own_call(&world),
+        ),
+        (
+            "every_drop_that_may_wait_is_a_row_of_the_closed_inventory",
+            every_drop_that_may_wait_is_a_row_of_the_closed_inventory(&world, &words),
+        ),
+        (
+            "every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door",
+            every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door(),
+        ),
+    ];
+    let mut report = String::new();
+    for (assertion, failures) in &assertions {
+        for failure in failures {
+            report.push_str(&format!("\n[{assertion}] {failure}"));
+        }
+    }
+    assert!(
+        report.is_empty(),
+        "the source guard's prohibitions do not hold:{report}"
+    );
 }
