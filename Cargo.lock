@@ -399,6 +399,7 @@ version = "0.4.5"
 dependencies = [
  "bt-term",
  "bt-transcript",
+ "miniz_oxide",
  "nix",
  "portable-pty",
  "thiserror 2.0.18",

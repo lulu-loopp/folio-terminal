@@ -20,6 +20,10 @@ use portable_pty::{
 };
 use thiserror::Error;
 
+// The build script's ConPTY sidecar unpacking, compiled here only so its tests run: `build.rs`
+// reaches the same file by `#[path]`, and nothing of it ships in this library.
+#[cfg(test)]
+mod conpty_sidecar;
 mod shell;
 pub use shell::{
     ResolvedShell, ShellChoice, ShellEnvironment, SystemShellEnvironment, resolve_default_shell,
@@ -2716,12 +2720,12 @@ mod tests {
     /// **That sentence is about the spawned child and only about it**, and it was read too widely
     /// once: a run of flaky afternoons was blamed on `PSModulePath` leaking into these probes, and
     /// the interleaved experiment of 2026-08-20 found no such leak — sixteen paired runs, arms
-    /// indistinguishable, at rest and under load alike (`docs/DESIGN.md`). Where the variable does
-    /// bite is one level up, in `build.rs`: that launches **Windows PowerShell 5.1** as an
-    /// ordinary child process, with no registry rebuild in front of it, so a caller running under
-    /// PowerShell 7 handed 5.1 a module path whose first entries are 7's, and 5.1 could not
-    /// autoload its own `Microsoft.PowerShell.Utility`. See `crates/bt-pty/build.rs`, which now
-    /// names the module path it needs instead of inheriting one.
+    /// indistinguishable, at rest and under load alike (`docs/DESIGN.md`). Where the variable did
+    /// bite was one level up, in `build.rs`, while that launched **Windows PowerShell 5.1** as an
+    /// ordinary child process, with no registry rebuild in front of it: a caller running under
+    /// PowerShell 7 handed 5.1 a module path whose first entries were 7's, and 5.1 could not
+    /// autoload its own `Microsoft.PowerShell.Utility`. The build script unpacks the sidecar in
+    /// Rust now and starts no shell at all (`docs/DESIGN.md`, 2026-09-26).
     fn declare_probe_module_path(command: PtyCommand) -> PtyCommand {
         // Set-but-empty is unset ([`pty_dump_path`]'s rule): declaring
         // `PSModulePath=` would hand the child a module path that finds nothing,

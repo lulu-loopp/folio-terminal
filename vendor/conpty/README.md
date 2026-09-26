@@ -27,7 +27,9 @@ checked x64 SHA-256 values are:
 | `build/native/runtimes/x64/OpenConsole.exe` | `2525c351aa136d555e5df9a3c9d6ce9be43f785e37e3c993b8f23b3f0a53c7fa` |
 
 `crates/bt-pty/build.rs` verifies the package and entry hashes, then extracts only those two x64
-entries into Cargo's profile output and test directories. The profile copy sits beside
+entries into Cargo's profile output and test directories. It does so in Rust
+(`crates/bt-pty/src/conpty_sidecar.rs`), whenever the target is Windows and whatever the build
+host is. The profile copy sits beside
 `bt-app.exe`; the `deps` copy lets the real-ConPTY test executable exercise the identical strict
 loader. `OpenConsole.exe` is also mirrored below each output's `x64/` directory because that is the
 architecture-host layout required by the package's native `.targets`. Extracted binaries are build
@@ -37,8 +39,8 @@ silently falling back to the inbox implementation.
 
 The previous official `Microsoft.Windows.Console.ConPTY.1.24.260512001.nupkg` is retained beside
 the active package solely as a reproducible A/B archive. Its package SHA-256 is
-`3c66a99d38b5c2ac4c7552b7632cbbef23a1911aca5e20370109eb555a15d077`; neither `build.rs` nor the
-extractor references it.
+`3c66a99d38b5c2ac4c7552b7632cbbef23a1911aca5e20370109eb555a15d077`; the build script does not
+reference it.
 
 ## Pin verdict and real-ConPTY oracle
 

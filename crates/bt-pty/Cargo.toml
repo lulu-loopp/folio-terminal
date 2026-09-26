@@ -11,12 +11,21 @@ bt-transcript = { path = "../bt-transcript" }
 portable-pty.workspace = true
 thiserror.workspace = true
 
+# The build script unpacks the ConPTY sidecar out of its vendored NuGet package, which is a zip,
+# and inflates its entries with this (`src/conpty_sidecar.rs`). It is already in the lock file
+# through `flate2` and `png`, so it costs no new package; it is pinned to that locked version.
+# The library compiles the same file for its tests, which hold it to the real package, so the
+# tests name it too.
+[build-dependencies]
+miniz_oxide = "=0.8.9"
+
 # A transport does not depend on terminal policy: no code this crate ships names
 # `bt_term`. A terminal is only ever the thing a *test* puts in front of a real
 # ConPTY to read back what the transport carried — the unit tests in `lib.rs` and
 # the integration tests in `tests/`, both of which see dev-dependencies.
 [dev-dependencies]
 bt-term = { path = "../bt-term" }
+miniz_oxide = "=0.8.9"
 
 # The Unix child tests ask the kernel whether a pid is still in its table with `kill(pid, 0)`;
 # `nix` is already in the tree through `portable-pty`, so this adds no package, and its
