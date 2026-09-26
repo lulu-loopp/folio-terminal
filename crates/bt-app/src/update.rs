@@ -120,8 +120,8 @@ pub const RELEASES_PAGE: &str = "https://github.com/lulu-loopp/folio-terminal/re
 /// capability the bytes carry rather than a claim about where they came from:
 /// a copied release binary is as eligible as the one that was downloaded.
 ///
-/// Read today by the `diagnostics.log` run header, which is where `smoke.ps1`
-/// checks it; the update job (U-18) is its reader to come.
+/// Read by the `diagnostics.log` run header, which is where `smoke.ps1`
+/// checks it, and by the update job's eligibility (U-18, `update_job`).
 #[must_use]
 pub const fn eligible() -> bool {
     cfg!(folio_updater)
@@ -546,6 +546,10 @@ pub struct OfferState {
     /// F-7): [`Self::known`] holds it, and a commit writes it
     /// ([`Self::release_trial`]).
     owed: AtomicBool,
+    /// **This launch's check has settled** (U-18): it answered, was refused,
+    /// found the stamp too fresh or the claim held, or will not run at all. The
+    /// update job decides nothing before this ([`Self::job_evidence`]).
+    settled: AtomicBool,
     /// A test's pause between a transaction's read and its write — the one place
     /// a racing writer can land. Fires once.
     #[cfg(test)]
@@ -572,6 +576,7 @@ impl OfferState {
             known: Mutex::new(state),
             enabled: AtomicBool::new(enabled),
             owed: AtomicBool::new(false),
+            settled: AtomicBool::new(false),
             #[cfg(test)]
             between: Mutex::new(None),
         }
@@ -596,6 +601,23 @@ impl OfferState {
     /// at once, and an answer still on the wire when it lands.
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, AtomicOrdering::Release);
+    }
+
+    /// **This launch's check has said all it will** (U-18): mark it, so the
+    /// update job may decide on what this owner holds.
+    pub fn settle(&self) {
+        self.settled.store(true, AtomicOrdering::Release);
+    }
+
+    /// **What the update job decides on** (U-18): the state as this process
+    /// holds it and the switch — once this launch's check has settled, and
+    /// `None` before, so no offer is derived from a cache the check is about to
+    /// replace.
+    #[must_use]
+    pub fn job_evidence(&self) -> Option<(UpdateCheckV1, bool)> {
+        self.settled
+            .load(AtomicOrdering::Acquire)
+            .then(|| (self.known(), self.enabled()))
     }
 
     /// The tag this reader is offered now — [`should_offer`] over this owner's
@@ -703,7 +725,18 @@ impl OfferState {
     /// alternative — blocking a thread until the other window's request finishes,
     /// then reading the answer — would buy one dot one launch earlier at the price
     /// of a thread that can be made to wait on somebody else's network.
+    ///
+    /// Every outcome settles the check for the update job ([`Self::settle`]):
+    /// whatever it learned is in [`Self::known`] by then, and this launch asks
+    /// nothing more.
     pub fn run(&self, now_ms: u64, source: &dyn Releases) -> Outcome {
+        let outcome = self.ask(now_ms, source);
+        self.settle();
+        outcome
+    }
+
+    /// [`Self::run`]'s question, before it settles.
+    fn ask(&self, now_ms: u64, source: &dyn Releases) -> Outcome {
         let Some(_claim) = Claim::take(&self.claim, now_ms) else {
             return Outcome::Busy;
         };
@@ -921,6 +954,13 @@ pub fn gear_mark_is_lit() -> bool {
         .is_some_and(|owner| owner.mark_is_lit(crate::version::VERSION))
 }
 
+/// **What the update job decides on** — [`OfferState::job_evidence`] of this
+/// process's owner; `None` before the owner is opened or its check settles.
+#[must_use]
+pub fn job_evidence() -> Option<(UpdateCheckV1, bool)> {
+    OWNER.get().and_then(OfferState::job_evidence)
+}
+
 /// The reader turned the switch on or off (Settings > General > Update check).
 ///
 /// Off suppresses the cached offer from the next frame. On does not start a
@@ -972,17 +1012,27 @@ pub fn release_trial() {
 ///
 /// A no-op when the switch is off, and that is the whole of the switch: no
 /// thread, no claim, no file. Off is not a quieter check.
+///
+/// **Every road out settles the check for the update job** (U-18) and wakes
+/// the loop to consider an offer: the thread's answer, a check that will not
+/// run (the switch, a trial), and a kernel that would not give out a thread.
 pub fn begin() {
     let Some(owner) = OWNER.get() else {
         return;
     };
+    let settled_without_asking = || {
+        owner.settle();
+        crate::update_job::evidence_landed();
+    };
     if !owner.enabled() {
+        settled_without_asking();
         return;
     }
     // **Not in an update's trial** (`update_trial`, F-7): the check writes its
     // stamp and its claim file into O's folder. It is asked again when the
     // trial is committed ([`release_trial`]).
     if crate::update_trial::defer(crate::update_trial::Writer::UpdateCheck) {
+        settled_without_asking();
         return;
     }
     // **In the background band.** A thread starts at normal priority whatever
@@ -991,7 +1041,7 @@ pub fn begin() {
     // `git::drain`, which is where this crate first wrote that down. A kernel
     // that will not give out a thread is a launch that simply has no update
     // check, which is where every launch before this slice was.
-    let _ = bt_platform::spawn_at_priority(
+    let spawned = bt_platform::spawn_at_priority(
         "bt-update-check",
         bt_platform::ThreadPriority::BelowNormal,
         move |_ctx| {
@@ -1001,8 +1051,12 @@ pub fn begin() {
             {
                 wake();
             }
+            crate::update_job::evidence_landed();
         },
     );
+    if spawned.is_err() {
+        settled_without_asking();
+    }
 }
 
 /// The wall clock, in milliseconds since the Unix epoch.
@@ -2060,5 +2114,68 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&fresh);
+    }
+
+    /// RED (U-18) — **the update job decides only once this launch's check has
+    /// said all it will, whatever it said.**
+    ///
+    /// The job's typed pending state waits for two facts, and this is the
+    /// check's: before the check settles, the owner hands the job nothing, so a
+    /// cached tag the check is about to replace is never offered on; after an
+    /// answer, a refusal, a fresh stamp or a held claim, it hands over the state
+    /// and the switch. Each outcome is a real `run` over a real directory.
+    ///
+    /// MUTATION: drop `self.settle()` from `OfferState::run` and every owner
+    /// below still answers `None`.
+    #[test]
+    fn the_check_settles_for_the_update_job_on_every_outcome() {
+        let start = 1_756_000_000_000u64;
+
+        let root = dir("settles-answered");
+        let owner = OfferState::load(&root, true);
+        assert_eq!(
+            owner.job_evidence(),
+            None,
+            "nothing is decided before the check"
+        );
+        assert_eq!(
+            owner.run(start, &Counting::ok("v0.1.1")),
+            Outcome::Answered("v0.1.1".to_owned())
+        );
+        let (state, switch) = owner.job_evidence().expect("an answer settles the check");
+        assert_eq!(state.latest_tag.as_deref(), Some("v0.1.1"));
+        assert!(switch);
+        // A later launch inside the day: the stamp is fresh and the cache is the answer.
+        let again = OfferState::load(&root, true);
+        assert_eq!(again.job_evidence(), None);
+        assert_eq!(
+            again.run(start + 1, &Counting::ok("v0.1.2")),
+            Outcome::TooSoon
+        );
+        assert_eq!(
+            again.job_evidence().map(|(state, _)| state.latest_tag),
+            Some(Some("v0.1.1".to_owned())),
+            "a fresh stamp settles the check on the cached answer"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        let root = dir("settles-refused");
+        let owner = OfferState::load(&root, true);
+        assert_eq!(owner.run(start, &Counting::refusing()), Outcome::Refused);
+        assert!(
+            owner.job_evidence().is_some(),
+            "a refusal settles the check"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+
+        let root = dir("settles-busy");
+        std::fs::write(root.join(super::CLAIM_FILE_NAME), start.to_string()).unwrap();
+        let owner = OfferState::load(&root, true);
+        assert_eq!(owner.run(start, &Counting::ok("v0.1.1")), Outcome::Busy);
+        assert!(
+            owner.job_evidence().is_some(),
+            "a held claim settles the check"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
