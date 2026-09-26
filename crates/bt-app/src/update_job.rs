@@ -1185,8 +1185,8 @@ mod tests {
     /// come from.
     ///
     /// MUTATION: make Cancel leave the state as it is in `Job::answer_verb`
-    /// (`(state, Ok(Effect::None))`) and the late reports carry the "cancelled"
-    /// job on to `Verified`.
+    /// (`(state, Ok(Effect::None))`): the "cancelled" job is still
+    /// downloading, and its late reports would carry it on to `Verified`.
     #[test]
     fn stale_progress_cannot_revive_a_cancelled_job() {
         let mut job = available("v0.4.7");
