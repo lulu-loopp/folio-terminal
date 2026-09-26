@@ -2701,3 +2701,241 @@ entry, all of which the guard re-read on `cae97e8a`.
 
 (a)–(d): none.
 
+
+---
+
+## Revision 2026-09-26 (i), after A2's survey: the lint lands last, behind doors built by family
+
+**Why this revision.** A2 was dispatched on `fcda5dfa` as one M ticket whose
+brief read: turn the lint on, put one `expect` on each of the registry's doors,
+count 0 → 26. The agent turned the lint on as specified and ran CI's clippy line
+with the lint at warning level so that every site would print
+(`trace/tickets-046/reports/A2.md`, census in `A2-census/windows-product-sites.tsv`):
+
+| selection | vocabulary sites | functions |
+|---|---|---|
+| first-party product code, Windows arms (libraries, `folio`, build scripts; not mitex, bt-corpus, bt-source) | **228** | 171 |
+| of which inside a registered door | about 18 | — |
+| CI's `--all-targets` line (tests, examples, development binaries added) | 1,123 | — |
+
+By family: waits 68 (`sleep`, `join`, `recv*`, `Condvar::wait*`, `try_wait`,
+`block_on`), file writes 57, file observation 45 (`metadata`, `read_dir`,
+`canonicalize`), calls into registered door entrances 29, counted Win32 handles
+22 (`CloseHandle`, `SetEvent`), child-process waits 6. By crate: bt-app 123
+(+3 in its `build.rs`), bt-platform 64, bt-pty 22 (+3 in its `build.rs`),
+bt-render 5, bt-persist 5, bt-term 3. The macOS arms (`libc::write`/`close`,
+the macOS `DirWatch`, the locale children) add to these and were not counted.
+
+The premise was wrong in this note, not in the agent's reading of it: §6.3 and
+§8 give A2 the worker doors that do not exist yet (`file_writes`, `wait::*`, a
+door for child-process waits) and (c)6 gives it `bt-pty`'s transport doors and
+the `file_reads` execution-level choice, while §11 sized A2 as one M and the
+brief's architecture-impact line said "no new door". Nothing committed; the
+branch was deleted at BASE. The survey also found four facts that hold whatever
+the split (see (i)6).
+
+### (i)1 · A2 is five tickets, and the lint is the last of them
+
+The invariant of B§C-1 is unchanged: every listed effect passes through a door
+or the build fails. What changes is the order in which it becomes true. Turning
+`disallowed_methods` to `deny` (or leaving it at its default `warn` under CI's
+`-D warnings`) on a tree with 228 bare sites cannot be green, and B§C-2 item 1
+forbids lowering it, so the lint cannot be switched on before the doors exist
+and the sites go through them. The doors come first, by family; the lint comes
+last, and between the two a **source-level gate holds the bare-site count
+shrink-only**, the way `MIGRATION-DEBT.tsv` holds its rows.
+
+| id | title | size | prerequisites |
+|---|---|---|---|
+| **A2a** | The bare-site inventory is a shrink-only gate; the vocabulary is corrected; the non-Rust checks and the shields land | S–M | A1e on main (it is) |
+| **A2b** | The file doors: `file_writes` is born, `file_reads` takes option (d), observation reads go through it; the window thread's file effects get their interim owner doors | M | A2a |
+| **A2c** | The wait doors: `wait::*` and the child-process waits are born; the counted handles get theirs; the deferred owner rows get their interim doors | M | A2a |
+| **A2d** | `bt-pty`'s transport doors ((c)6 item 1); the admitted exclusion forms for tests, build scripts and tool crates, and the guard that accepts exactly them | S–M | A2a |
+| **A2e** | The lint: `deny` in the two lint tables, the root `clippy.toml` compared with the registry whole and with multiplicity, one `expect` per door, the per-target plants and checks, M1–M15; the bare list is empty and is deleted | M | A2b, A2c, A2d |
+
+A2b, A2c and A2d touch different families and mostly different crates and may
+run in parallel; each shrinks the committed bare list, and a merge between them
+keeps the smaller of both sides row by row (a row present on either side after
+the merge is red, so the merge re-runs the gate). A2e is the only ticket that
+flips a lint level, and it does so when the list is empty.
+
+**Version.** A2a–A2e stay 0.4.6 as A2 was; the owner's D-2 ruling ("closes when
+A1, A2 and A3 have landed") reads A2 as all five. If lanes do not allow it before
+the 0.4.6 release, A2b–A2e move together to 0.4.7 and ARCHITECTURE §6 keeps
+saying the lint is pending with the bare count — the owner's call, flagged.
+
+### (i)2 · A2a — the gate before the lint
+
+1. **The bare-site inventory** is a `bt-source` query held by
+   `window_waits_tests` (or a sibling test in the same file): every vocabulary
+   path or method name (the registry's `# vocabulary` section, both spellings,
+   through the identifier view (g)3 already uses) found in first-party product
+   code **outside the body of a registered door function** (the `# doors` and
+   `# owners` sections, plus the interim doors (i)3–(i)4 add), listed by crate,
+   item identity and vocabulary entry. Both platforms' `cfg` arms are read (the
+   source view does not resolve `cfg`; a Windows-only site and its macOS twin are
+   two rows). Committed as `docs/plans/window-thread-bare-sites.tsv`; the gate
+   refuses a row not in the file (a new bare site) and a file row the code no
+   longer has (stale — delete it in the same commit). The count is printed in
+   the run footer and stated in ARCHITECTURE §6.
+2. **The vocabulary is corrected**: `wgpu::SurfaceTexture::present` →
+   `wgpu::Queue::present` (wgpu 30: `Queue::present(&self, SurfaceTexture)`;
+   bt-render calls `gpu.queue.present(texture)`). A1e's owner and count
+   assertions re-read.
+3. **The shields**: `vendor/clippy.toml`, `crates/bt-corpus/clippy.toml` and
+   `crates/bt-source/clippy.toml`, each `disallowed-methods = []` with a comment
+   naming this revision. They are the closed set the script knows; a fourth
+   `clippy.toml` anywhere in the tree is red. `CLIPPY_CONF_DIR` is set nowhere
+   (it would override the shields) — this supersedes B§C-4's "per-target
+   `clippy.toml` directory through `CLIPPY_CONF_DIR`"; see (i)6 for why one root
+   file suffices.
+4. **The non-Rust checks** in `scripts/ci/check-window-waits.ps1` (new or the
+   existing check A1e calls): no `-A`/`-W`/`--cap-lints` touching
+   `clippy::disallowed_methods`, `clippy::style`, `clippy::all` or `warnings` in
+   `.github/workflows/*.yml`, `.cargo/config.toml`, `RUSTFLAGS`/`CLIPPY_FLAGS`
+   in `scripts/**`, or any member `[lints]` table other than the two (i)5 names
+   (M7e); a registry line without a ruling refused (M9); every vocabulary entry
+   assigned to at least one target; for each product target, every entry
+   assigned to it has a first path segment that is a crate in
+   `cargo metadata --filter-platform <triple>`'s graph (the misspelled-crate
+   half of M8b, which clippy does not report — (i)6). The script runs in `logic`
+   and `core-macos` from A2a on.
+5. **No lint change and no root `clippy.toml`** in A2a: `disallowed_methods` is
+   in clippy's `style` group, warn by default, and CI runs `-D warnings`, so a
+   root vocabulary file would make every bare site red at once. The vocabulary
+   file is A2e's.
+
+Red on BASE: the inventory test (no file), a planted bare site (added row → red),
+a planted stale row, a fourth `clippy.toml`, a planted `-A clippy::disallowed_methods`
+in a workflow, a registry line without a ruling, an entry naming `nosuchcrate::wait`.
+
+### (i)3 · A2b — the file doors, and `file_reads` option (d)
+
+- **`bt_platform::file_writes`** is born: `write`, `rename`, `copy`,
+  `create_dir_all`, `File::create`, `sync_data`/`sync_all` and the `writeln!`
+  family (`Write::write_fmt`) behind functions taking `&WorkerCtx`, each a
+  registry door line. `durable_write`/`durable_move` (U-11's `install_txn`) and
+  `bt-persist`'s stores are its first callers.
+- **`file_reads` takes option (d)** of (c)6 item 3: a worker lane's `Reader`
+  borrows `&WorkerCtx` for its life (so it is `!Send` and cannot outlive the
+  worker body), and the inventoried window-thread lanes (`Lane::Settings` at
+  launch, `Lane::Fonts` in bt-render, and whatever A2b's inventory adds) get
+  owner doors with `WaitToken`s. **Observation reads** (`metadata`, `read_dir`,
+  `canonicalize`) are `file_reads`' too: `file_reads::observe(...)` on a worker
+  context or an owner token, by lane.
+- **The window thread's file effects get interim owner doors.** Row 20's renames
+  and writes (`runtime/files.rs`, `runtime/preview.rs`, `persist.rs`,
+  `schemes.rs`) and the window-thread observation reads that are **not registry
+  rows today** (`main.rs`, `runtime/preview.rs`, `runtime/profiles.rs`,
+  `preview.rs`, `webhost.rs`) each become a registry row, status `open`, owed to
+  B8 (the stores) or to a new **B10** (the window thread's file observation
+  moves to a worker or a cache), with a thin owner door function holding exactly
+  the one effect — the same shape A1d gave rows 2–20 with `admitted`. B8/B10
+  later move the effect and delete the door; the registry line's `status`
+  becomes `done` with its residue, if any.
+
+Ruling carried here (coordinator, 2026-09-26, within the owner's delegation of
+Q2-class decisions): a window-thread effect found by the inventory and not yet
+ruled is admitted **as it is today** behind an interim door and a registry row
+marked `open` with the owing B-ticket named. It is not moved by A2 (§8 "No
+move" stands), and it is not left bare.
+
+### (i)4 · A2c — the wait doors
+
+- **`bt_platform::wait`** is born: `sleep_bounded`, `join_bounded`,
+  `recv_bounded`, `recv_timeout_bounded`, `condvar_wait_bounded`, `block_on`,
+  each taking `&WorkerCtx`, each a registry door line; the 68 worker waits go
+  through them, including the three standalone-main `recv_timeout`s of (c)6
+  item 2 (their threads already hold a `WorkerCtx` from `enter_standalone_main`).
+- **Child-process waits move into the door**: `quiet_command(_named)` gains
+  `output_within`/`status_within`/`wait_within` on `&WorkerCtx`, and its callers
+  stop calling `Command::output`/`status`/`Child::wait` themselves (§6.3's
+  "the waits are at the callers" ends).
+- **Counted handles** (`CloseHandle`, `SetEvent`; `libc::write`/`close` on
+  macOS) — 22 Windows sites in bt-platform — go through one `handles` door per
+  platform (`close_handle`, `set_event`), or stay inside the door body whose
+  effect they are, listed on that door's line with the count. The rule of B§C-2
+  item 3 (one `expect`, the declared number of effects) decides per site.
+- **The deferred owner rows get their interim doors**: rows 2, 3, 4
+  (`profile_marks`, `psreadline`), 7 (`read_system_locale_declaration`), 10
+  (device recovery's `block_on` and `sleep` in `main.rs`) — each a thin owner
+  door function, one effect, `open`, owed to B4/B5/B6/B9 as the registry already
+  says. Row 8 (`DirWatch::start_scoped` ×3, owed to B7) is A2c's too unless A2b
+  reaches it first (say which in the report).
+
+### (i)5 · A2d — `bt-pty`'s transport doors, and the admitted exclusions
+
+- **(c)6 item 1 stands**, and the A2 brief that told the agent not to lint
+  bt-pty's doors into existence was wrong against this note: the ring waits,
+  `join_within`, `reap_within`, `Retirements::wait_within`, the dump publisher's
+  sleep and sync and `try_wait` become registry lines with role `Transport`,
+  outside the admission invariant, each function carrying its `expect` from
+  A2e on, with the one debt row (c)6 names.
+- **The admitted exclusion forms** — B§C-3 puts `build.rs`, tests, examples,
+  benches and development tools outside the invariant, but clippy 1.94.1 has
+  no in-tests option for this lint, and CI's `--all-targets` lints them all.
+  This supersedes B§C-2 item 2's "these forms appear nowhere" for exactly three
+  spellings, each pinned by the guard and by the script:
+  1. **tests** — `#![cfg_attr(test, allow(clippy::disallowed_methods))]` at
+     the crate root of every product crate (`lib.rs` / `main.rs`) and at the
+     top of every `tests/*.rs`, `examples/*.rs` and `benches/*.rs` file; that
+     exact text, once per file, within the file's leading attribute block. A
+     `cfg_attr(test, …)` on a `#[cfg(test)] mod` or anywhere else stays red
+     (A1e assertion 5, narrowed to admit the root form).
+  2. **build scripts** — `#![allow(clippy::disallowed_methods)]` at the top of
+     each `build.rs`, and nowhere else.
+  3. **tool crates and vendor** — the shields of (i)2 item 3.
+  The guard's product universe already excludes test modules by declaration;
+  the amendment is that the root attribute is read and matched by text, not
+  treated as a product attribute. Mutations: the root form moved one item down
+  → red; the same form on a `mod tests` → red; `#![allow(...)]` in a product
+  `lib.rs` → red; a fourth shield → red.
+- **`bt-platform`'s own `[lints.clippy]` table** (it cannot inherit the
+  workspace table because `unsafe_code` must stay allowed there) carries the
+  same `disallowed_methods = "deny"` line from A2e on; the script checks both
+  tables and refuses any third table naming the lint. This narrows B§C-2 item 1's
+  "fixed in one place" to "fixed in two places, both checked".
+
+### (i)6 · What the survey established, carried into A2e
+
+1. **Clippy refuses neither M8b case.** A misspelled path in a crate that is in
+   the graph gives one non-lint warning (`does not refer to a reachable
+   function`) that `-D warnings` does not make fatal (rc = 0); a path whose crate
+   is not in the graph gives no message at all. So A2e's jobs **scan clippy's
+   output for that warning and fail on it**, and the metadata check of (i)2
+   item 4 catches the absent crate. With those two checks **one root
+   `clippy.toml` carrying every target's entries suffices**: an entry for a crate
+   absent on this target is ignored by clippy by construction (measured), and
+   the registry's `targets` column plus the metadata check tell "not on this
+   target" from "misspelled". No `CLIPPY_CONF_DIR`.
+2. **`writeln!` is caught**: `std::io::Write::write_fmt` fires through the
+   external macro (15 product sites), so B§C-3's macro row holds for it.
+3. **The vendored crates need the shield** of (i)2 item 3:
+   `alacritty_terminal` says `#![cfg_attr(clippy, deny(warnings))]` and would
+   refuse its own `File::create` under the root vocabulary; with
+   `vendor/clippy.toml` it is clean, and the crate directories stay byte-identical
+   for `check-vendor-notices.ps1`.
+4. **The door `expect` count** A1e pins at 0 becomes, in A2e, the number of
+   registry door lines including the transport and interim doors — not 26.
+
+### (i)7 · Plants and mutations, redistributed
+
+A2a: the inventory's planted bare site and stale row; M7e; M9; the absent-crate
+entry. A2b/A2c/A2d: each family's planted bare site red on the gate before the
+door exists and green after (the passing control), plus the exclusion-form
+mutations in A2d. A2e: M1, M2a/M2b, M6, M8a (an entry deleted from
+`clippy.toml` or the registry → the whole-and-multiplicity comparison), M8b
+(the reachable-function warning and the absent crate, both jobs), M15 (a
+Windows-only and a macOS-only violation → each job's lint; the macOS half is
+possible now that ticket 72 lints every product crate there), and the
+`gates-can-fail` plants per target.
+
+### (i)8 · This revision's own architecture impact
+
+(a) none. (b) none by this commit; A2b/A2c add `file_writes`, `wait`, the
+child-process and handle doors, and the interim owner doors, each a registry
+line. (c) none by this commit; A2b opens B10 and A2d opens (c)6's transport
+debt row. (c′) none. (d) yes — the two amendments to B§C-2 (three admitted
+exclusion spellings; two lint tables) and the one to B§C-4 (no `CLIPPY_CONF_DIR`;
+one root file plus two checks), each stated here and pointed to from the budget
+note in A2a's docs commit.
