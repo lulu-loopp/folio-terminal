@@ -12574,3 +12574,27 @@ Supersedes the U-22 entry's "`bt_platform::logon_hook::Armed`, which only `logon
 **Rollback.** A trial never renews (the gate holds the probe until the commit). An older build started later in a folder whose registration a newer build renewed finds a newer version and leaves it: the registration still names this folder and the same `folio.exe`, and its format is one the older build also reads (owner ruling 2026-09-27), so the item keeps working; the next-start repair does not re-sync the version, because it acts only on a registration serving another folder.
 
 **Pinned by** `explorer_menu::tests` — `another_copys_registration_is_never_renewed`, `renewal_is_re_evaluated_at_every_start`, `an_older_registration_is_renewed_only_after_the_trial_commits`, `an_equal_or_newer_registration_is_left_alone`, `a_failed_renewal_shows_on_the_row_and_is_not_nothing_changed`.
+
+### 2026-09-26 — The uninstall door resolves the head of every data root that the operating system names, and refuses a link only in the part Folio names below it
+
+**Supersedes** the last paragraph of the entry above ("The macOS CI job holds the workspace to the same clippy line…"), which reported and did not change that `--uninstall-cleanup --purge` refuses its two temporary-directory rows on macOS (ticket 72's F1). Ticket 73 changes it.
+
+**The rule, and why it stays.** `prepare_tree` refuses a purge root with a link anywhere among its ancestors or inside it, and never canonicalizes a root before deleting it: a link somebody or some program plants under a Folio-named path must never turn a deletion into authority over its target. The rule had no entry of its own until now (it arrived with `--uninstall-cleanup` in `52d24331`); this is it.
+
+**Where the boundary is.** Every purge root is now built as two parts (`uninstall::purge_root`): a **head the operating system names**, resolved (`bt_platform::instance::canonical_path` — resolved as far as it exists, the rest appended as written — then `bt_platform::handoff::strip_verbatim_prefix`, so the row prints the ordinary spelling), and **the part Folio names**, appended exactly as written. The walk then runs over that path unchanged, so a link it can still find is one in the part Folio names (or one swapped into a head after it was resolved, which is refused as before). Per base (`uninstall::Base`), every head is the system's and every relative path is wholly Folio's:
+
+| base | head the system names | part Folio names |
+|---|---|---|
+| `Roaming` | `%APPDATA%` | `Folio`, `BetterTerminal` |
+| `Local` | `%LOCALAPPDATA%` | `Folio` |
+| `Library(folder)` (was `Home`) | `~/Library/<folder>` — `Application Support`, `WebKit`, `Caches`, `HTTPStorages`, `Preferences`, `Saved Application State` | `Folio`, `io.github.lulu-loopp.folio`, `….plist`, `….savedState` |
+| `Temp` | `std::env::temp_dir()`; for the clipboard staging folder, the parent of `bt_platform::instance::temporary_directory()` (confstr's per-user directory on macOS, `/tmp` in its fallback) | `folio-panic.log`; `folio/clipboard` (or `folio-<uid>/clipboard` under `/tmp`) |
+| `Xdg` | `$XDG_DATA_HOME`, or `~/.local/share` | `Folio` |
+
+`Base::Home` became `Base::Library(folder)` because its relative paths began with `Library/<folder>/`, which macOS names, not Folio; the split is now in the inventory instead of inside a string.
+
+**Why an OS-named head is not a place a trap is planted for Folio.** A head is the machine's own layout, named by the system or by the account through the system's variable: `/var` → `private/var` on every Mac, a relocated `~/Library` or a redirected `%APPDATA%` that every program on the machine follows. Anything that can replace such a head with a link already owns every program's files below it, Folio's included, and gains nothing from Folio's door; the rule's purpose — a link inside a folder that Folio's name marks as Folio's — lives entirely in the second part, and there it is enforced unchanged. Nothing else about the door moved: the rows, their order, the preflight, the PSReadLine module's walk (a recorded path, not a base) and the application-folder refusal are as they were.
+
+**The data roots keep their written spelling.** The data directories the door claims before it reads anything (`Scope::data`) are still spelled from the variables, as `persist::storage_location` spells them: on Windows a claim's name folds case and nothing else (`bt_platform::instance::directory_tag`), so a resolved spelling (a long name for an 8.3 one, a junction's target) could miss a running Folio's claim.
+
+**Tests (red on the base on macOS).** `uninstall::tests::an_os_named_temporary_base_behind_a_link_is_not_a_refusal` (macOS: the `/var` shape built in a sandbox; both rows removed), `a_link_inside_the_folio_named_part_is_still_refused` (every platform: a symlink or junction at `<temp>/folio`, planted before the scope is resolved, is refused and its target untouched), `the_boundary_is_the_os_named_head` (the resolver: head canonical, Folio's part as written even through a link).

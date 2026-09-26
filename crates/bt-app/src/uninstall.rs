@@ -18,12 +18,25 @@ enum Kind {
     PerAccount,
     Data,
 }
+/// **Where a data row lives: a directory the operating system names, never Folio.**
+///
+/// Every variant is a head the system (or the account, through the system's own variable)
+/// names, and every row's relative path is wholly Folio's name below it. `Scope::resolve`
+/// resolves the head and never the relative part: a link above the head is the machine's
+/// own layout (macOS's `/var` → `private/var`), a link in the relative part is somebody's
+/// plant under a Folio name, and the door refuses only the second.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Base {
+    /// `%APPDATA%`.
     Roaming,
+    /// `%LOCALAPPDATA%`.
     Local,
-    Home,
+    /// `~/Library/<folder>` on macOS: the home, and a folder of the Library that macOS names.
+    Library(&'static str),
+    /// The system's temporary directory (`std::env::temp_dir`; the clipboard staging
+    /// folder's is `bt_platform::instance::temporary_directory`'s parent).
     Temp,
+    /// `$XDG_DATA_HOME`, or `~/.local/share`, which the XDG base-directory rule names.
     Xdg,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -143,8 +156,8 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(
             HostPlatform::MacOs,
-            Base::Home,
-            "Library/Application Support/Folio",
+            Base::Library("Application Support"),
+            "Folio",
         ),
         writer: "persist.rs:storage_location;webhost.rs:web_engine_folder",
     },
@@ -153,8 +166,8 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(
             HostPlatform::MacOs,
-            Base::Home,
-            "Library/WebKit/io.github.lulu-loopp.folio",
+            Base::Library("WebKit"),
+            "io.github.lulu-loopp.folio",
         ),
         writer: "../bt-platform/src/macos_webview.rs (WebKit, bundle identity)",
     },
@@ -163,8 +176,8 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(
             HostPlatform::MacOs,
-            Base::Home,
-            "Library/Caches/io.github.lulu-loopp.folio",
+            Base::Library("Caches"),
+            "io.github.lulu-loopp.folio",
         ),
         writer: "../bt-platform/src/macos_webview.rs (WebKit, bundle identity)",
     },
@@ -173,8 +186,8 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(
             HostPlatform::MacOs,
-            Base::Home,
-            "Library/HTTPStorages/io.github.lulu-loopp.folio",
+            Base::Library("HTTPStorages"),
+            "io.github.lulu-loopp.folio",
         ),
         writer: "../bt-platform/src/macos_webview.rs (WebKit, bundle identity)",
     },
@@ -183,8 +196,8 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(
             HostPlatform::MacOs,
-            Base::Home,
-            "Library/Preferences/io.github.lulu-loopp.folio.plist",
+            Base::Library("Preferences"),
+            "io.github.lulu-loopp.folio.plist",
         ),
         writer: "../bt-platform/src/macos_app.rs (AppKit, bundle identity)",
     },
@@ -193,8 +206,8 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(
             HostPlatform::MacOs,
-            Base::Home,
-            "Library/Saved Application State/io.github.lulu-loopp.folio.savedState",
+            Base::Library("Saved Application State"),
+            "io.github.lulu-loopp.folio.savedState",
         ),
         writer: "../bt-platform/src/macos_app.rs (AppKit, bundle identity)",
     },
@@ -411,16 +424,17 @@ impl Scope {
             Ok(p)
         };
         let mut purge_roots = Vec::new();
+        let mut data = Vec::new();
         for mark in INVENTORY {
             debug_assert!(!mark.writer.is_empty());
             if let Remover::Data(host, base, relative) = mark.remover {
                 if host != platform && base != Base::Temp {
                     continue;
                 }
-                let base = match base {
+                let head = match base {
                     Base::Roaming => named("APPDATA")?,
                     Base::Local => named("LOCALAPPDATA")?,
-                    Base::Home => named("HOME")?,
+                    Base::Library(folder) => named("HOME")?.join("Library").join(folder),
                     Base::Temp => temp.clone(),
                     Base::Xdg => {
                         if env("XDG_DATA_HOME").is_some() {
@@ -430,24 +444,24 @@ impl Scope {
                         }
                     }
                 };
-                let path = if mark.name == "Clipboard staging" && !sandbox {
-                    crate::clipboard_picture::directory()
+                let (head, folio) = if mark.name == "Clipboard staging" && !sandbox {
+                    clipboard_staging()
                 } else {
-                    base.join(relative)
+                    (head, PathBuf::from(relative))
                 };
-                purge_roots.push((mark.name, path));
+                // The data roots are claimed under the spelling Folio's own writer claims them
+                // (`persist::storage_location` reads the same variables): on Windows a claim's
+                // name folds case and nothing else, so a resolved spelling could miss a running
+                // Folio's claim.
+                if matches!(
+                    mark.name,
+                    "Roaming data" | "Legacy data" | "Application Support" | "Unix data"
+                ) {
+                    data.push(head.join(&folio));
+                }
+                purge_roots.push((mark.name, purge_root(&head, &folio)));
             }
         }
-        let data = purge_roots
-            .iter()
-            .filter(|(name, _)| {
-                matches!(
-                    *name,
-                    "Roaming data" | "Legacy data" | "Application Support" | "Unix data"
-                )
-            })
-            .map(|(_, p)| p.clone())
-            .collect();
         let profiles = env("BT_POWERSHELL_PROFILE")
             .map(|_| named("BT_POWERSHELL_PROFILE").map(|p| vec![p]))
             .transpose()?;
@@ -497,6 +511,41 @@ impl Scope {
             sandbox: sandbox.then(|| temp.clone()),
         })
     }
+}
+/// **A purge root: the head the operating system names, resolved, and Folio's name below it as
+/// written.**
+///
+/// The door refuses a root with a link anywhere above it or inside it ([`prepare_tree`]), so
+/// that a link somebody plants under a Folio-named path never turns a deletion into authority
+/// over its target. The head is not such a path: nobody plants a trap for Folio at `/var`,
+/// `%APPDATA%` or `~/Library/Caches` — they are the machine's layout, and on macOS the system's
+/// own temporary directory is reached through the link `/var` → `private/var`. So the head is
+/// resolved here, before the rule applies, and the part Folio names is appended untouched: a
+/// link there is still found by the walk and still refused. Resolved in its ordinary spelling
+/// (no Windows verbatim prefix), because that is the spelling the rows print. A head that does
+/// not exist yet is resolved as far as it exists, the rest appended as written
+/// (`bt_platform::instance::canonical_path`).
+fn purge_root(head: &Path, folio: &Path) -> PathBuf {
+    bt_platform::handoff::strip_verbatim_prefix(&bt_platform::instance::canonical_path(head))
+        .join(folio)
+}
+
+/// **The clipboard staging folder, split where the system's name ends.**
+///
+/// `bt_platform::instance::temporary_directory` is "a folder of Folio's own inside the system's
+/// temporary directory" — one component Folio names (`folio`, or `folio-<uid>` under the shared
+/// `/tmp`) below the directory the system names — and the writer's own folder is below that.
+fn clipboard_staging() -> (PathBuf, PathBuf) {
+    let staging = crate::clipboard_picture::directory();
+    let system = bt_platform::instance::temporary_directory()
+        .parent()
+        .expect("Folio's temporary folder is one name below the system's")
+        .to_path_buf();
+    let folio = staging
+        .strip_prefix(&system)
+        .expect("the clipboard staging folder is inside Folio's temporary folder")
+        .to_path_buf();
+    (system, folio)
 }
 fn push_unique(paths: &mut Vec<PathBuf>, path: PathBuf) {
     if !paths
@@ -881,6 +930,8 @@ fn held_file(error: &io::Error) -> Option<&Path> {
 }
 /// Preflight the WHOLE tree before deleting a leaf. Links in ancestors or descendants refuse.
 /// There is no canonicalize-and-delete: that would turn a link into authority over its target.
+/// A purge root's operating-system head arrives already resolved ([`purge_root`]), so what this
+/// walk can refuse is a link in the part Folio names.
 fn prepare_tree(root: &Path, exe: &Path) -> io::Result<bool> {
     if !root.is_absolute() || root.parent().is_none() || has_parent_component(root) {
         return Err(io::Error::other(english(Text::CleanupRoot)));

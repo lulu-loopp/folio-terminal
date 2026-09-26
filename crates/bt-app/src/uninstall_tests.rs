@@ -53,9 +53,8 @@ fn method_body(owner: &str, name: &str) -> &'static str {
 /// name no file, so a verbatim drive or share prefix is spelled back the ordinary way. Nothing here
 /// names a platform: a path with no prefix (every Unix path) is the canonical answer itself.
 ///
-/// The product's rule is unchanged: every root production names is under the home, the
-/// application-data folders or the temporary directory, and only the last sits under `/var`
-/// (reported as a finding in ticket 72's report, not changed here).
+/// Production resolves the same link in its own roots since ticket 73, but only in the head the
+/// operating system names (`purge_root`); a sandbox root is not such a head, so it is resolved here.
 fn link_free_temp_dir() -> PathBuf {
     use std::path::{Component, Prefix};
     let real = fs::canonicalize(std::env::temp_dir()).expect("the temporary directory exists");
@@ -96,8 +95,15 @@ fn sandbox(tag: &str) -> (PathBuf, Scope) {
 /// clipboard directory, exactly as production's do.
 fn unsandboxed(tag: &str) -> (PathBuf, Scope) {
     let (root, _) = sandbox(tag);
-    let mapped = root.clone();
-    let scope = Scope::resolve(
+    let scope = fixture_scope(&root, root.join("temp"), false);
+    assert!(scope.sandbox.is_none());
+    (root, scope)
+}
+
+/// The fixture tree's variables, with the temporary directory and the sandbox flag handed in.
+fn fixture_scope(root: &Path, temp: PathBuf, sandbox: bool) -> Scope {
+    let mapped = root.to_path_buf();
+    Scope::resolve(
         root.join("app/folio.exe"),
         bt_platform::host_platform(),
         move |name| {
@@ -118,12 +124,10 @@ fn unsandboxed(tag: &str) -> (PathBuf, Scope) {
                     .into_os_string(),
             )
         },
-        root.join("temp"),
-        false,
+        temp,
+        sandbox,
     )
-    .unwrap();
-    assert!(scope.sandbox.is_none());
-    (root, scope)
+    .unwrap()
 }
 
 fn system_absent(_: Remover) -> Vec<Entry> {
@@ -725,8 +729,8 @@ fn uninstall_source_guard_pins_known_writers_and_inventory() {
         (
             Remover::Data(
                 HostPlatform::MacOs,
-                Base::Home,
-                "Library/Application Support/Folio",
+                Base::Library("Application Support"),
+                "Folio",
             ),
             include_str!("webhost.rs"),
             "web_engine_folder",
@@ -1123,6 +1127,158 @@ fn uninstall_purge_reports_the_root_it_found_at_the_deciding_check() {
         .unwrap();
     assert_eq!(row.fate, Fate::Removed, "{}", report.stdout());
     fs::remove_dir_all(root).unwrap();
+}
+
+/// A directory link at `link` naming `target`: a symlink on Unix, a junction on Windows (which
+/// needs no developer-mode privilege, as `uninstall_purge_junction_refuses_root_without_touching_target`
+/// already relies on).
+fn plant_directory_link(link: &Path, target: &Path) {
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+    #[cfg(windows)]
+    {
+        let status = bt_platform::quiet_command("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "New-Item -ItemType Junction -Path $env:FOLIO_TEST_JUNCTION -Target $env:FOLIO_TEST_TARGET -ErrorAction Stop | Out-Null",
+            ])
+            .env("FOLIO_TEST_JUNCTION", link)
+            .env("FOLIO_TEST_TARGET", target)
+            .status()
+            .unwrap();
+        assert!(status.success());
+    }
+    assert!(bt_platform::cleanup::is_link(
+        &fs::symlink_metadata(link).unwrap()
+    ));
+}
+
+/// The link itself, never what it names.
+fn remove_directory_link(link: &Path) {
+    #[cfg(unix)]
+    fs::remove_file(link).unwrap();
+    #[cfg(windows)]
+    fs::remove_dir(link).unwrap();
+}
+
+/// RED (73) — **on macOS a temporary directory the system reaches through a link is not a planted
+/// link: the two temporary rows are removed.**
+///
+/// macOS's own temporary directory is `/var/folders/…/T/`, and `/var` is the system's link to
+/// `private/var`. The door refused every root with a link anywhere above it, so `--purge` reported
+/// `Clipboard staging` and `Panic log` refused on every Mac (ticket 72's F1). The shape is built
+/// here inside a sandbox — `var` → `private/var`, and the temporary directory named through `var`
+/// — and handed to the resolver exactly as production hands it `std::env::temp_dir()`. The rows
+/// resolve to the linked-to directory and both go.
+///
+/// MUTATION: in `purge_root`, join `folio` onto `head` as given instead of onto its canonical
+/// spelling, and both rows are refused (`A symlink or junction was found`).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_os_named_temporary_base_behind_a_link_is_not_a_refusal() {
+    let (root, _) = sandbox("os-link");
+    let real = root.join("private/var/T");
+    fs::create_dir_all(&real).unwrap();
+    std::os::unix::fs::symlink("private/var", root.join("var")).unwrap();
+    let scope = fixture_scope(&root, root.join("var/T"), true);
+    let rows = ["Clipboard staging", "Panic log"];
+    for (name, path) in scope.purge_roots.iter().filter(|(n, _)| rows.contains(n)) {
+        assert!(path.starts_with(&real), "{name}: {}", path.display());
+        if *name == "Panic log" {
+            fs::write(path, b"panic").unwrap();
+        } else {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("20260926-120000.png"), b"picture").unwrap();
+        }
+    }
+    let report = execute(&scope, true, system_absent);
+    assert_eq!(report.code, 0, "{}", report.stdout());
+    for name in rows {
+        let row = report
+            .entries
+            .iter()
+            .find(|entry| entry.mark.starts_with(&format!("{name} (data)")))
+            .unwrap();
+        assert_eq!(row.fate, Fate::Removed, "{}", report.stdout());
+    }
+    assert!(!real.join("folio/clipboard").exists());
+    assert!(!real.join("folio-panic.log").exists());
+    fs::remove_file(root.join("var")).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (73) — **a link inside the part of a root that Folio names is still refused, and what it
+/// names is untouched.**
+///
+/// Resolving the system's head must not resolve Folio's own part with it: a link somebody plants at
+/// `<temp>/folio`, where Folio's clipboard staging folder lives, would otherwise become authority
+/// over its target, which is the whole reason the door refuses links. The link is planted before
+/// the scope is resolved, so a resolver that resolved the whole root would see it and spell it
+/// away.
+///
+/// MUTATION: in `purge_root`, canonicalize `head.join(folio)` instead of `head` alone, and the row
+/// is removed through the link — the sentinel behind it goes too.
+#[test]
+fn a_link_inside_the_folio_named_part_is_still_refused() {
+    let (root, _) = sandbox("folio-link");
+    let outside = root.join("outside");
+    fs::create_dir_all(outside.join("clipboard")).unwrap();
+    fs::write(outside.join("clipboard/sentinel"), b"keep").unwrap();
+    fs::create_dir_all(root.join("temp")).unwrap();
+    let link = root.join("temp/folio");
+    plant_directory_link(&link, &outside);
+    let scope = Scope::sandbox(&root, root.join("app/folio.exe")).unwrap();
+    let report = execute(&scope, true, system_absent);
+    assert_eq!(report.code, 1, "{}", report.stdout());
+    let row = report
+        .entries
+        .iter()
+        .find(|entry| entry.mark.starts_with("Clipboard staging (data)"))
+        .unwrap();
+    assert!(
+        matches!(&row.fate, Fate::Refused(reason) if reason.contains(english(Text::CleanupLink))),
+        "{}",
+        report.stdout()
+    );
+    assert_eq!(
+        fs::read(outside.join("clipboard/sentinel")).unwrap(),
+        b"keep"
+    );
+    assert!(fs::symlink_metadata(&link).is_ok());
+    remove_directory_link(&link);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (73) — **the boundary is the head the operating system names: that part is resolved, and
+/// Folio's part below it is appended exactly as written.**
+///
+/// The head is spelled the way `std::env::temp_dir()` spells it (through `/var` on macOS, possibly
+/// a short 8.3 name on Windows) and must come back as its canonical, ordinary spelling — the same
+/// one this file's `link_free_temp_dir` derives independently. Folio's part carries a link
+/// (`folio` → `elsewhere`) and must come back as `folio/clipboard`, not as the link's target. A
+/// head that does not exist yet is resolved as far as it exists.
+///
+/// MUTATIONS: drop the canonicalize from `purge_root` and the head keeps its spelling (red on
+/// macOS); canonicalize the whole root and `folio` becomes `elsewhere` (red everywhere).
+#[test]
+fn the_boundary_is_the_os_named_head() {
+    let name = format!("folio-uninstall-boundary-{}", std::process::id());
+    let spelled = std::env::temp_dir().join(&name);
+    let resolved = link_free_temp_dir().join(&name);
+    fs::create_dir_all(resolved.join("elsewhere")).unwrap();
+    plant_directory_link(&resolved.join("folio"), &resolved.join("elsewhere"));
+    assert_eq!(
+        purge_root(&spelled, Path::new("folio/clipboard")),
+        resolved.join("folio/clipboard")
+    );
+    assert_eq!(
+        purge_root(&spelled.join("not-yet"), Path::new("folio")),
+        resolved.join("not-yet/folio")
+    );
+    remove_directory_link(&resolved.join("folio"));
+    fs::remove_dir_all(resolved).unwrap();
 }
 
 /// macOS cannot be asked whether a file is held, so a purge there says so instead of

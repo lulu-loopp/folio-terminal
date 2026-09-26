@@ -69,6 +69,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- macOS: uninstall cleanup with `--purge` now removes the clipboard staging
+  folder and the panic log instead of reporting them refused.
 - A web pane survives the browser engine updating itself underneath it.
 - A redraw that arrives in several pieces no longer shows a formula's source
   for a frame.
