@@ -11,6 +11,9 @@ All notable changes to Folio are recorded here. The format follows
 - The self-updater's recovery rules exist as tested code: what an interrupted
   update leaves on disk decides whether it is finished, rolled back or retried.
   Nothing calls them yet, and no build updates itself.
+- The update check can remember a version you chose to skip, and never offers
+  that version or an older one again; turning the check off also hides a
+  version it had already found. There is no Skip button yet.
 
 ### Fixed
 

@@ -866,7 +866,9 @@ settings page*.
 ### 36. The update check — `not yet folded`
 Entries: §7.52 *an installed preview has no way to know it is out of date: one
 request, a stamp good for a day, and a gear*; the `update.rs` module doc;
-`PRIVACY.md`.
+`PRIVACY.md`; trailing entry 2026-09-26 *the update check's state has one owner
+that holds one lock across every read-modify-write, and a skipped version is
+compared by precedence*.
 
 ### 37. The Explorer and Finder verbs — `not yet folded`
 Entries: §7.4 *the Explorer context-menu verb*; §7.4a *the first-level context

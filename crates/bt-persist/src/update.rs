@@ -1,11 +1,15 @@
 //! `update-check.json` — **when the releases page was last asked, and what it
 //! said** (`docs/DESIGN.md` §7.52).
 //!
-//! Three fields and no history. It is not a log of checks; it is the answer to
+//! Four fields and no history. It is not a log of checks; it is the answer to
 //! the only two questions the check has to ask itself before it runs — *is it
 //! time yet*, and *has this reader already been shown this version* — plus the
 //! one fact a second window needs so that it can draw the same mark without
-//! asking the network again.
+//! asking the network again, and, since schema v2, the one version the reader
+//! said never to be offered (`skipped_tag`).
+//!
+//! The file has one owner in `bt-app`, `update::OfferState`, which is its only
+//! reader and writer and holds one lock across every read-modify-write of it.
 //!
 //! # Why it is not a corner of `settings.json`
 //!
@@ -34,12 +38,16 @@ use serde_json::{Map, Value};
 
 /// The schema version this build writes.
 ///
-/// One, and there is nothing before it: this file is born with this slice, so
-/// [`crate::UPDATE_CHECK_MIGRATIONS`] is empty for the reason `pins.json`'s is —
-/// a document with no older shape has no step to register.
-pub const UPDATE_CHECK_SCHEMA_VERSION: u32 = 1;
+/// Two (0.4.6 ticket U-6): v2 adds [`UpdateCheckV1::skipped_tag`], and
+/// `migrate_update_check_v1_to_v2` — the first step
+/// [`crate::UPDATE_CHECK_MIGRATIONS`] has carried — writes it `null`, because a
+/// v1 build had no Skip and nobody has skipped anything.
+pub const UPDATE_CHECK_SCHEMA_VERSION: u32 = 2;
 
-/// `update-check.json` — `{ "schema_version": 1, "checked_at_ms": …, … }`.
+/// `update-check.json` — `{ "schema_version": 2, "checked_at_ms": …, … }`.
+///
+/// Named `V1` for the reason `SettingsV1` is at v39: the type is the document,
+/// and its version is the field inside it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateCheckV1 {
     pub schema_version: u32,
@@ -63,6 +71,14 @@ pub struct UpdateCheckV1 {
     /// that version and lights again for the next one.
     #[serde(default)]
     pub seen_tag: Option<String>,
+    /// The tag the reader said **Skip this version** to, verbatim (schema v2).
+    ///
+    /// Compared by **precedence**, not equality (`bt_app::update::should_offer`):
+    /// a tag at or below it is never offered again, and a tag above it is. So a
+    /// withdrawn release does not bring back an older tag that is still newer
+    /// than the running build. `None` until the reader skips something.
+    #[serde(default)]
+    pub skipped_tag: Option<String>,
     /// Top-level keys this build has no name for, kept so that a file written by
     /// a newer build survives a round trip through this one.
     #[serde(flatten)]
@@ -76,6 +92,7 @@ impl Default for UpdateCheckV1 {
             checked_at_ms: 0,
             latest_tag: None,
             seen_tag: None,
+            skipped_tag: None,
             extra: Map::new(),
         }
     }

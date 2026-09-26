@@ -911,13 +911,26 @@ pub const PROFILES_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 /// the row itself stops being `{kind, target}`.
 pub const PINS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 
-/// Migration table for `update-check.json`. Empty because the document is v1 and
-/// there is nothing behind it: a table registers steps between shapes that have
-/// both existed, and this file is born with the check it belongs to. The two
-/// halves of the fallback chain still apply — a file written by a *newer* build
-/// is refused rather than misread, which for this document means one extra
-/// question asked of the releases page and nothing else.
-pub const UPDATE_CHECK_MIGRATIONS: &[(u32, MigrationStep)] = &[];
+/// Migration table for `update-check.json`. One step, the first this table has
+/// carried (0.4.6 ticket U-6): v1 -> v2 adds `skipped_tag`. The two halves of the
+/// fallback chain still apply — a file written by a *newer* build is refused
+/// rather than misread, which for this document means one extra question asked
+/// of the releases page and nothing else.
+pub const UPDATE_CHECK_MIGRATIONS: &[(u32, MigrationStep)] = &[(1, migrate_update_check_v1_to_v2)];
+
+/// v1 -> v2: the version the reader skipped, written **`null`**.
+///
+/// [`migrate_settings_v3_to_v4`]'s shape — the absence of a choice — for its
+/// reason: a v1 build had no **Skip this version**, so no v1 reader has skipped
+/// anything, and any tag written here would be a decision nobody made. The other
+/// three fields are carried as they are.
+fn migrate_update_check_v1_to_v2(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(2));
+        object.insert("skipped_tag".to_owned(), Value::Null);
+    }
+    value
+}
 
 /// Migration table for `session.json`. Schema v2 adds the runtime theme and maps every v1 session
 /// to the historical dark default.
@@ -3525,6 +3538,71 @@ mod tests {
             "and the name is clear, so the next launch is not refused all over again"
         );
 
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// RED (U-6) — **a v1 `update-check.json` migrates to v2 with `skipped_tag: null`, keeps its
+    /// three fields, and round-trips.**
+    ///
+    /// The first step `UPDATE_CHECK_MIGRATIONS` has carried. A v1 file is what every machine that
+    /// ran 0.4.5 or earlier holds; read by a v2 build before this step existed it had no path
+    /// forward, fell back to defaults (a stamp of zero, so an extra question to the releases page)
+    /// and lost the tag the reader had already been shown, which lit the gear again.
+    ///
+    /// MUTATION: empty `UPDATE_CHECK_MIGRATIONS` again and the read falls back with
+    /// `NoMigrationPath { found: 1 }`; drop the `skipped_tag` insert and the written document
+    /// lacks the key.
+    #[test]
+    fn a_v1_update_check_migrates_to_v2_with_no_skipped_tag_and_round_trips() {
+        let dir = unique_dir("update-check-v1");
+        let path = write_fixture(
+            &dir,
+            "update-check.json",
+            r#"{"schema_version": 1, "checked_at_ms": 1756000000000, "latest_tag": "v0.4.6", "seen_tag": "v0.4.5"}"#,
+        );
+        let (state, report) = crate::read_update_check(&path);
+        assert_eq!(report, ReadReport::Loaded, "a v1 file has a path to v2");
+        assert_eq!(state.schema_version, 2);
+        assert_eq!(state.checked_at_ms, 1_756_000_000_000);
+        assert_eq!(state.latest_tag.as_deref(), Some("v0.4.6"));
+        assert_eq!(state.seen_tag.as_deref(), Some("v0.4.5"));
+        assert_eq!(
+            state.skipped_tag, None,
+            "nobody skipped anything on a v1 build"
+        );
+
+        crate::write_update_check_atomic(&path, &state).unwrap();
+        let written: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(written["schema_version"], json!(2));
+        assert_eq!(
+            written["skipped_tag"],
+            Value::Null,
+            "the key is written, as null"
+        );
+        let (again, report) = crate::read_update_check(&path);
+        assert_eq!(report, ReadReport::Loaded);
+        assert_eq!(again, state, "and what was written reads back whole");
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// PIN (U-6) — **a damaged `update-check.json` falls back to the default and is kept**, on the
+    /// same chain `syntax_error_falls_back_with_parse_error_reason` pins for the generic reader.
+    #[test]
+    fn a_damaged_update_check_falls_back_to_asking_again_and_is_kept() {
+        let dir = unique_dir("update-check-broken");
+        let path = write_fixture(&dir, "update-check.json", r#"{"schema_version": 2, "#);
+        let (state, report) = crate::read_update_check(&path);
+        assert_eq!(state, crate::UpdateCheckV1::default());
+        assert_eq!(state.checked_at_ms, 0, "a stamp of zero means ask now");
+        let ReadReport::FellBackToDefaults {
+            reason: FallbackReason::ParseError(_),
+            kept,
+        } = report
+        else {
+            panic!("a damaged document falls back with a parse error: {report:?}");
+        };
+        assert!(kept.is_some_and(|kept| kept.exists()), "its bytes are kept");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -41137,8 +41137,11 @@ impl Runtime<'_> {
         }
         taskbar_lane::request();
         explorer_menu::begin_probe();
-        update::load(&persist::storage_dir());
-        update::begin(persist::storage_dir(), settings_store.loaded().update_check);
+        update::load(
+            &persist::storage_dir(),
+            settings_store.loaded().update_check,
+        );
+        update::begin();
         // **How this copy was installed** (U-1): read once, off this thread, and said once in
         // `diagnostics.log`. Nothing acts on it yet.
         install_channel::begin();
@@ -42380,7 +42383,7 @@ impl Runtime<'_> {
         // `update::answer_mark`, which is also where the gear's own repaint is
         // argued about.
         if self.window.settings.category() == settings::SettingsCategory::General {
-            update::answer_mark(&persist::storage_dir());
+            update::answer_mark();
         }
         let inputs = settings::geometry::Inputs::new(
             [width as f32, height as f32],
@@ -45537,19 +45540,23 @@ impl Runtime<'_> {
     /// **Nothing is started or stopped here**, and that is deliberate rather
     /// than an omission. The check is a one-shot taken at launch: by the time
     /// this row can be pressed the thread has either run or was never started,
-    /// so `On` takes effect at the next launch and `Off` has nothing to cancel.
+    /// so `On` takes effect at the next launch; `Off` suppresses the cached offer
+    /// at once, and an answer still on the wire is dropped when it lands (U-6).
     /// A build that started the thread from this press would be a build where
     /// pressing `On` makes a network request the same second — which is the one
     /// thing a reader auditing this row is checking for.
     ///
-    /// The state file is left where it is on `Off`. It holds a stamp and two
-    /// tags, all three of which are only read by a check that is not going to
+    /// The state file is left where it is on `Off`. It holds a stamp and three
+    /// tags, all four of which are only read by a check that is not going to
     /// happen; deleting it would be this row reaching for a file the row is not
     /// about, and a reader who wants it gone has `docs/PRIVACY.md`'s one line.
     fn apply_update_check(&mut self, enabled: bool) {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.update_check = enabled;
         self.app.settings_store.store(settings);
+        // The offer's owner is told, so `Off` suppresses a cached offer from the
+        // next frame (U-6) — no thread is started or stopped here.
+        update::set_enabled(enabled);
     }
 
     /// Point the `Focus card height` row at `height` logical pixels of card body

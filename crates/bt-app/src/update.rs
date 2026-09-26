@@ -16,7 +16,7 @@
 //!   *is it time yet*; a claim file beside it answers *is another window already
 //!   asking*. Two windows opened together make one request, and the second one
 //!   does not queue behind the first — it simply does not ask. See
-//!   [`run`].
+//!   [`OfferState::run`].
 //! * **Its own thread.** Nothing on the path from `main` to the first frame
 //!   waits for this. The thread is started after the window exists and its
 //!   answer arrives as an ordinary wake, exactly the way the PSReadLine probe's
@@ -73,7 +73,10 @@ use std::{
     fs::OpenOptions,
     io::Write as _,
     path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -344,17 +347,50 @@ pub fn newer_than<'tag>(latest: Option<&'tag str>, running: &str) -> Option<&'ta
     (found > running).then_some(latest)
 }
 
+/// **The offer decision**: the tag this reader is offered, or `None` (0.4.6 ticket
+/// U-6; `docs/plans/design/self-update-2026-09-16.md` §B).
+///
+/// Three conditions, all necessary:
+///
+/// * **The switch is on.** Off suppresses a cached offer as well as a new one: a
+///   tag the file learned while the switch was on is not offered after it goes
+///   off.
+/// * **The tag is newer than the running build** — [`newer_than`].
+/// * **The tag is above the skipped one by precedence**, not merely different
+///   from it. A tag at or below `skipped_tag` is never offered again, and a tag
+///   above it is. Equality would re-offer a withdrawn release's predecessor: skip
+///   `0.5.1`, the release is pulled, the list's newest becomes `0.5.0`, and
+///   `0.5.0` is still newer than a running `0.4.x`.
+///
+/// A `skipped_tag` that does not parse as a version skips nothing, for
+/// [`newest_tag`]'s reason: a tag that is not a version takes no part in ordering.
+#[must_use]
+pub fn should_offer<'state>(
+    state: &'state UpdateCheckV1,
+    running: &str,
+    enabled: bool,
+) -> Option<&'state str> {
+    if !enabled {
+        return None;
+    }
+    let tag = newer_than(state.latest_tag.as_deref(), running)?;
+    let skipped = state.skipped_tag.as_deref().and_then(Version::parse);
+    match (Version::parse(tag), skipped) {
+        (Some(offered), Some(skipped)) if offered <= skipped => None,
+        _ => Some(tag),
+    }
+}
+
 /// Whether the gear wears its mark.
 ///
-/// Two conditions and both are necessary: there is a newer version, **and** this
-/// reader has not been shown this one. The second is what stops a dot that has
-/// been answered from coming back on the next launch, and it is keyed by the tag
-/// rather than by a flag, so the next release lights it again without anything
-/// having to clear anything.
+/// Two conditions and both are necessary: there is an offer ([`should_offer`]),
+/// **and** this reader has not been shown this one. The second is what stops a
+/// dot that has been answered from coming back on the next launch, and it is
+/// keyed by the tag rather than by a flag, so the next release lights it again
+/// without anything having to clear anything.
 #[must_use]
-pub fn mark_is_lit(state: &UpdateCheckV1, running: &str) -> bool {
-    newer_than(state.latest_tag.as_deref(), running).is_some()
-        && state.latest_tag.as_deref() != state.seen_tag.as_deref()
+pub fn mark_is_lit(state: &UpdateCheckV1, running: &str, enabled: bool) -> bool {
+    should_offer(state, running, enabled).is_some_and(|tag| Some(tag) != state.seen_tag.as_deref())
 }
 
 /// Whether the releases page is owed a question.
@@ -373,7 +409,7 @@ pub fn due(checked_at_ms: u64, now_ms: u64) -> bool {
 
 /// Where a tag comes from.
 ///
-/// A trait with one method so the whole of [`run`] can be tested without a
+/// A trait with one method so the whole of [`OfferState::run`] can be tested without a
 /// network: the tests hand it a source that counts its calls and answers from a
 /// string, and the product hands it [`GitHubReleases`]. Nothing else in this
 /// module knows that HTTP exists.
@@ -412,7 +448,7 @@ impl Releases for GitHubReleases {
     }
 }
 
-/// What one call to [`run`] did, for the tests and for nobody else.
+/// What one call to [`OfferState::run`] did, for the tests and for nobody else.
 ///
 /// The product ignores it: every arm below the first two ends in the same place,
 /// which is a state file on a disk and a window that may or may not draw a dot.
@@ -427,101 +463,306 @@ pub enum Outcome {
     Answered(String),
     /// The question was asked and did not come back. The stamp advanced anyway.
     Refused,
+    /// A tag came back after the switch had been turned off while the request
+    /// was on the wire. It is neither written nor offered (U-6).
+    SwitchedOff,
 }
 
-/// **The whole check, on the calling thread, against an injected world.**
+/// **The update check's state, under one owner** (0.4.6 ticket U-6; fact 11 of
+/// `docs/ARCHITECTURE.md` §4.2, structural debt D-53).
 ///
-/// The order of the first three steps is the two-window rule, and it is the
-/// order rather than the steps that makes it true:
+/// The only reader and writer of `update-check.json` and of this process's copy
+/// of it, and the holder of the claim file beside it. The file's four fields —
+/// `checked_at_ms`, `latest_tag`, `seen_tag`, `skipped_tag` — change only through
+/// [`Self::transact`], which holds [`Self::file`] across the **whole**
+/// read-modify-write: read the file, change it, write it, publish the result to
+/// [`Self::known`].
 ///
-/// 1. **Take the claim first.** Not "decide, then claim" — two windows that both
-///    read a stale stamp before either wrote one would both decide to ask.
-///    Everything that reads or writes the stamp happens inside the claim.
-/// 2. **Then read the stamp**, and let go if it is not time yet.
-/// 3. **Then write the stamp**, before the request rather than after it, so a
-///    window that starts while this one is waiting on a socket sees a fresh
-///    stamp the moment this one lets go of the claim.
+/// # Why one lock, and not re-reading before writing
 ///
-/// A window that finds the claim held does **not** wait: it does nothing at all
-/// this launch, and its gear draws whatever the file said when it opened. The
-/// alternative — blocking a thread until the other window's request finishes,
-/// then reading the answer — would buy one dot one launch earlier at the price
-/// of a thread that can be made to wait on somebody else's network.
-pub fn run(dir: &Path, now_ms: u64, source: &dyn Releases) -> Outcome {
-    let Some(_claim) = Claim::take(&dir.join(CLAIM_FILE_NAME), now_ms) else {
-        return Outcome::Busy;
-    };
+/// The check used to take its document before the request and, after R4-14,
+/// re-read it just before writing the answer back. That narrowed the window and
+/// did not close it: a Skip or an acknowledgement written between that re-read
+/// and its write was still replaced by the older document. Atomic replacement
+/// makes each write whole; it does not make read-modify-write atomic. The writers
+/// are two threads of this process — the check's `bt-update-check` worker and the
+/// window thread (the mark answered on the General page, and Skip) — so the lock
+/// is a mutex in this process, and every writer takes it.
+///
+/// # Why a lock, and not the storage worker
+///
+/// This file never went through `persist`'s stores or a storage worker: the
+/// check writes it from its own thread, and the window thread writes it on the
+/// frame the reader acknowledges the mark, as `settings.json` is written on a
+/// press. Routing it through a worker would add a channel and a wake for a file of
+/// four fields; a lock over one read and one atomic write of a few hundred bytes
+/// serialises the same writers with nothing new. The lock is **never** held
+/// across the network request: the check takes it once to advance the stamp and
+/// once to record the answer.
+///
+/// # What the lock does not cover
+///
+/// Other processes. Two processes on one data directory are kept from asking
+/// together by the claim file ([`CLAIM_FILE_NAME`]), which is a don't-wait
+/// exclusion and not a lock anybody waits on; a second process's write landing
+/// inside the first one's transaction is not excluded by it.
+pub struct OfferState {
+    /// `update-check.json`.
+    path: PathBuf,
+    /// `update-check.lock`, the cross-process claim to ask.
+    claim: PathBuf,
+    /// **The one lock**: held across every read-modify-write of the file.
+    file: Mutex<()>,
+    /// What this process last read or wrote. Replaced only at the end of a
+    /// transaction (under [`Self::file`]) or by [`Self::load`]; the frame reads
+    /// it and never waits on the disk.
+    known: Mutex<UpdateCheckV1>,
+    /// The reader's switch (`SettingsV1::update_check`), as last told.
+    enabled: AtomicBool,
+    /// A test's pause between a transaction's read and its write — the one place
+    /// a racing writer can land. Fires once.
+    #[cfg(test)]
+    between: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
 
-    let path = dir.join(STATE_FILE_NAME);
-    let (mut state, _) = bt_persist::read_update_check(&path);
-    if !due(state.checked_at_ms, now_ms) {
-        return Outcome::TooSoon;
-    }
-
-    state.checked_at_ms = now_ms;
-    let _ = bt_persist::write_update_check_atomic(&path, &state);
-
-    match source.latest_tag() {
-        Ok(tag) => {
-            // **Read again before writing back** (review row R4-14). The claim
-            // above keeps other *processes* out; it does not keep this process's
-            // own window thread out, and [`mark_seen`] runs there — so a reader
-            // who opened the About page and dismissed the mark while this request
-            // was on the wire had their `seen_tag` written, and then overwritten
-            // by the snapshot this thread took before the request. The dot came
-            // back, on a version they had just acknowledged, and the only way out
-            // was to acknowledge it again after every check.
-            //
-            // The two fields this thread owns are re-applied to whatever the file
-            // says now: `checked_at_ms` because this thread is what advanced it,
-            // and `latest_tag` because this thread is what fetched it. Everything
-            // else in the document is somebody else's and is left alone.
-            let (mut current, _) = bt_persist::read_update_check(&path);
-            current.checked_at_ms = state.checked_at_ms;
-            current.latest_tag = Some(tag.clone());
-            let _ = bt_persist::write_update_check_atomic(&path, &current);
-            Outcome::Answered(tag)
+impl OfferState {
+    /// The owner of `dir`'s state file, with the file read into memory.
+    ///
+    /// On the window thread at startup: one small file beside `settings.json`,
+    /// read so the first frame draws the right gear.
+    #[must_use]
+    pub fn load(dir: &Path, enabled: bool) -> Self {
+        let path = dir.join(STATE_FILE_NAME);
+        let (state, _) = bt_persist::read_update_check(&path);
+        Self {
+            claim: dir.join(CLAIM_FILE_NAME),
+            path,
+            file: Mutex::new(()),
+            known: Mutex::new(state),
+            enabled: AtomicBool::new(enabled),
+            #[cfg(test)]
+            between: Mutex::new(None),
         }
-        Err(_) => Outcome::Refused,
+    }
+
+    /// The state as this process last saw it.
+    #[must_use]
+    pub fn known(&self) -> UpdateCheckV1 {
+        self.known
+            .lock()
+            .expect("the update state is not held across a panic")
+            .clone()
+    }
+
+    /// Whether the switch is on.
+    #[must_use]
+    pub fn enabled(&self) -> bool {
+        self.enabled.load(AtomicOrdering::Acquire)
+    }
+
+    /// The reader turned the switch on or off. Off suppresses the cached offer
+    /// at once, and an answer still on the wire when it lands.
+    pub fn set_enabled(&self, enabled: bool) {
+        self.enabled.store(enabled, AtomicOrdering::Release);
+    }
+
+    /// The tag this reader is offered now — [`should_offer`] over this owner's
+    /// state and switch.
+    #[must_use]
+    pub fn offer(&self, running: &str) -> Option<String> {
+        should_offer(&self.known(), running, self.enabled()).map(str::to_owned)
+    }
+
+    /// Whether the gear wears its mark — [`mark_is_lit`] over this owner's state
+    /// and switch.
+    #[must_use]
+    pub fn mark_is_lit(&self, running: &str) -> bool {
+        mark_is_lit(&self.known(), running, self.enabled())
+    }
+
+    /// **The one read-modify-write.** `change` answers whether it changed
+    /// anything; an unchanged document is not written.
+    ///
+    /// The lock is held from before the read until after the write and the
+    /// publication to [`Self::known`], so no other writer in this process can
+    /// land between them. A failed write leaves [`Self::known`] as it was: what
+    /// the process believes is what is on the disk.
+    fn transact(
+        &self,
+        change: impl FnOnce(&mut UpdateCheckV1) -> bool,
+    ) -> Result<(), bt_persist::WriteError> {
+        let _file = self
+            .file
+            .lock()
+            .expect("the update state file is not held across a panic");
+        let (mut state, _) = bt_persist::read_update_check(&self.path);
+        let changed = change(&mut state);
+        #[cfg(test)]
+        {
+            let pause = self
+                .between
+                .lock()
+                .expect("the test pause is not held across a panic")
+                .take();
+            if let Some(pause) = pause {
+                pause();
+            }
+        }
+        if changed {
+            bt_persist::write_update_check_atomic(&self.path, &state)?;
+        }
+        *self
+            .known
+            .lock()
+            .expect("the update state is not held across a panic") = state;
+        Ok(())
+    }
+
+    /// **The whole check, on the calling thread, against an injected world.**
+    ///
+    /// The order of the first three steps is the two-window rule, and it is the
+    /// order rather than the steps that makes it true:
+    ///
+    /// 1. **Take the claim first.** Not "decide, then claim" — two windows that both
+    ///    read a stale stamp before either wrote one would both decide to ask.
+    ///    Everything that reads or writes the stamp happens inside the claim.
+    /// 2. **Then read the stamp**, and let go if it is not time yet.
+    /// 3. **Then write the stamp**, before the request rather than after it, so a
+    ///    window that starts while this one is waiting on a socket sees a fresh
+    ///    stamp the moment this one lets go of the claim.
+    ///
+    /// Steps 2 and 3 are one transaction and the answer is a second. The lock is
+    /// not held across the request, so the window thread is never made to wait
+    /// on somebody else's network.
+    ///
+    /// A window that finds the claim held does **not** wait: it does nothing at all
+    /// this launch, and its gear draws whatever the file said when it opened. The
+    /// alternative — blocking a thread until the other window's request finishes,
+    /// then reading the answer — would buy one dot one launch earlier at the price
+    /// of a thread that can be made to wait on somebody else's network.
+    pub fn run(&self, now_ms: u64, source: &dyn Releases) -> Outcome {
+        let Some(_claim) = Claim::take(&self.claim, now_ms) else {
+            return Outcome::Busy;
+        };
+
+        let mut too_soon = false;
+        let _ = self.transact(|state| {
+            too_soon = !due(state.checked_at_ms, now_ms);
+            if !too_soon {
+                state.checked_at_ms = now_ms;
+            }
+            !too_soon
+        });
+        if too_soon {
+            return Outcome::TooSoon;
+        }
+
+        match source.latest_tag() {
+            Ok(_) if !self.enabled() => Outcome::SwitchedOff,
+            Ok(tag) => {
+                // Only the field this thread fetched is written; everything else
+                // is whatever the file says under the lock — an acknowledgement
+                // or a Skip made while the request was on the wire included.
+                let _ = self.transact(|state| {
+                    state.latest_tag = Some(tag.clone());
+                    true
+                });
+                Outcome::Answered(tag)
+            }
+            Err(_) => Outcome::Refused,
+        }
+    }
+
+    /// Write the tag this reader has now been shown.
+    ///
+    /// # Errors
+    ///
+    /// The write's.
+    pub fn mark_seen(&self, tag: &str) -> Result<(), bt_persist::WriteError> {
+        self.transact(|state| {
+            if state.seen_tag.as_deref() == Some(tag) {
+                return false;
+            }
+            state.seen_tag = Some(tag.to_owned());
+            true
+        })
+    }
+
+    /// **Skip this version** (U-6; design note §B): write `skipped_tag` and
+    /// `seen_tag`.
+    ///
+    /// A new writer of the state (fact 11, (c′)). The skipped tag only rises: a
+    /// Skip of a tag at or below the one already skipped keeps the higher one,
+    /// which is the precedence [`should_offer`] compares by. `seen_tag` becomes
+    /// the tag pressed on, so the mark goes out with the card.
+    ///
+    /// # Errors
+    ///
+    /// The write's. A Skip that did not reach the disk is not in [`Self::known`]
+    /// either, so nothing reports it as kept.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "Skip's writer lands before its button: U-19 draws the card that calls it ((b).5)"
+        )
+    )]
+    pub fn skip(&self, tag: &str) -> Result<(), bt_persist::WriteError> {
+        self.transact(|state| {
+            let higher = match (
+                Version::parse(tag),
+                state.skipped_tag.as_deref().and_then(Version::parse),
+            ) {
+                (Some(pressed), Some(held)) => pressed > held,
+                _ => true,
+            };
+            let mut changed = false;
+            if higher && state.skipped_tag.as_deref() != Some(tag) {
+                state.skipped_tag = Some(tag.to_owned());
+                changed = true;
+            }
+            if state.seen_tag.as_deref() != Some(tag) {
+                state.seen_tag = Some(tag.to_owned());
+                changed = true;
+            }
+            changed
+        })
+    }
+
+    /// Arm a pause that runs once, inside the next transaction, between its
+    /// read and its write.
+    #[cfg(test)]
+    fn pause_between_read_and_write(&self, pause: impl FnOnce() + Send + 'static) {
+        *self
+            .between
+            .lock()
+            .expect("the test pause is not held across a panic") = Some(Box::new(pause));
     }
 }
 
-/// Write the tag this reader has now been shown into the state file.
+/// **The mark on the gear is answered**: the reader has been shown the page the
+/// row is on.
 ///
-/// Read-modify-write rather than a store of what the caller had, because the
-/// caller's copy is as old as the frame it came from and the field beside this
-/// one is written by a thread.
-pub fn mark_seen(dir: &Path, tag: &str) {
-    let path = dir.join(STATE_FILE_NAME);
-    let (mut state, _) = bt_persist::read_update_check(&path);
-    if state.seen_tag.as_deref() == Some(tag) {
-        return;
-    }
-    state.seen_tag = Some(tag.to_owned());
-    let _ = bt_persist::write_update_check_atomic(&path, &state);
-}
-
-/// **The reader has been shown the page the row is on**: put the mark out.
-///
-/// Idempotent and cheap to call every frame the page is up — it reads
-/// [`known`], which is in memory, and touches the disk only on the one frame
-/// that actually changes the answer.
+/// Idempotent and cheap to call every frame the page is up — it reads the
+/// owner's memory, and touches the disk only on the one frame that actually
+/// changes the answer.
 ///
 /// **The gear does not redraw on that frame, and it does not need to.** The page
 /// this is called from is a modal standing over the title bar with the scrim
 /// dimming everything behind it, so nobody is looking at the mark while it goes
 /// out; and closing the dialog rebuilds the whole of the chrome, which is the
 /// next moment the gear is a thing anybody can see.
-pub fn answer_mark(dir: &Path) {
-    let state = known();
-    if !mark_is_lit(&state, crate::version::VERSION) {
-        return;
-    }
-    let Some(tag) = state.latest_tag.as_deref() else {
+pub fn answer_mark() {
+    let Some(owner) = OWNER.get() else {
         return;
     };
-    mark_seen(dir, tag);
-    load(dir);
+    let running = crate::version::VERSION;
+    if !owner.mark_is_lit(running) {
+        return;
+    }
+    if let Some(tag) = owner.offer(running) {
+        let _ = owner.mark_seen(&tag);
+    }
 }
 
 /// The right to be the window that asks, held for one request.
@@ -582,12 +823,9 @@ impl Drop for Claim {
 
 // ── what the window reads, and how the answer gets back to it ───────────────
 
-/// The state as this process last saw it.
-///
-/// A `Mutex` and not a `OnceLock`, because it is written twice: once on the
-/// window thread at startup from the file, and once more from the checking
-/// thread when an answer lands.
-static KNOWN: Mutex<Option<UpdateCheckV1>> = Mutex::new(None);
+/// **This process's one owner of the state** — [`OfferState`], opened once at
+/// startup by [`load`] on the data directory.
+static OWNER: OnceLock<OfferState> = OnceLock::new();
 
 /// How a finished check asks for a frame — [`install_wake`].
 static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
@@ -601,27 +839,33 @@ pub fn install_wake<F: Fn() + Send + Sync + 'static>(wake: F) {
     let _ = WAKE.set(Box::new(wake));
 }
 
-/// Read the file into [`KNOWN`], so the first frame draws the right gear.
+/// Open this process's owner on `dir`, so the first frame draws the right gear.
 ///
 /// On the window thread, at startup, before anything is measured. It is one
 /// small file beside `settings.json`, which is read on the same thread a few
 /// lines earlier; the thing that must not be on this thread is the *request*,
 /// and that is [`begin`]'s.
-pub fn load(dir: &Path) {
-    let (state, _) = bt_persist::read_update_check(&dir.join(STATE_FILE_NAME));
-    *KNOWN
-        .lock()
-        .expect("the update state is not held across a panic") = Some(state);
+pub fn load(dir: &Path, enabled: bool) {
+    let _ = OWNER.set(OfferState::load(dir, enabled));
 }
 
-/// What the chrome and the dialog read.
+/// Whether the gear wears its mark — the chrome's one question, asked of the
+/// owner.
 #[must_use]
-pub fn known() -> UpdateCheckV1 {
-    KNOWN
-        .lock()
-        .expect("the update state is not held across a panic")
-        .clone()
-        .unwrap_or_default()
+pub fn gear_mark_is_lit() -> bool {
+    OWNER
+        .get()
+        .is_some_and(|owner| owner.mark_is_lit(crate::version::VERSION))
+}
+
+/// The reader turned the switch on or off (Settings > General > Update check).
+///
+/// Off suppresses the cached offer from the next frame. On does not start a
+/// check: that is still the next launch's (see `Runtime::apply_update_check`).
+pub fn set_enabled(enabled: bool) {
+    if let Some(owner) = OWNER.get() {
+        owner.set_enabled(enabled);
+    }
 }
 
 /// **The settings row's own sentence.**
@@ -640,10 +884,12 @@ pub fn row_description() -> &'static str {
 /// columns.
 #[must_use]
 pub fn row_description_in(lang: crate::i18n::Lang) -> &'static str {
-    let state = known();
-    match newer_than(state.latest_tag.as_deref(), crate::version::VERSION) {
+    match OWNER
+        .get()
+        .and_then(|owner| owner.offer(crate::version::VERSION))
+    {
         None => crate::i18n::Text::DescUpdateCheck.in_lang(lang),
-        Some(tag) => crate::i18n::intern(crate::i18n::update_row_available_in(lang, tag)),
+        Some(tag) => crate::i18n::intern(crate::i18n::update_row_available_in(lang, &tag)),
     }
 }
 
@@ -651,8 +897,11 @@ pub fn row_description_in(lang: crate::i18n::Lang) -> &'static str {
 ///
 /// A no-op when the switch is off, and that is the whole of the switch: no
 /// thread, no claim, no file. Off is not a quieter check.
-pub fn begin(dir: PathBuf, enabled: bool) {
-    if !enabled {
+pub fn begin() {
+    let Some(owner) = OWNER.get() else {
+        return;
+    };
+    if !owner.enabled() {
         return;
     }
     // **In the background band.** A thread starts at normal priority whatever
@@ -666,12 +915,10 @@ pub fn begin(dir: PathBuf, enabled: bool) {
         bt_platform::ThreadPriority::BelowNormal,
         move || {
             let now_ms = unix_epoch_ms();
-            let outcome = run(&dir, now_ms, &GitHubReleases);
-            if matches!(outcome, Outcome::Answered(_)) {
-                load(&dir);
-                if let Some(wake) = WAKE.get() {
-                    wake();
-                }
+            if matches!(owner.run(now_ms, &GitHubReleases), Outcome::Answered(_))
+                && let Some(wake) = WAKE.get()
+            {
+                wake();
             }
         },
     );
@@ -694,8 +941,8 @@ fn unix_epoch_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHECK_INTERVAL_MS, CLAIM_STALE_MS, Outcome, Releases, STATE_FILE_NAME, Version, due,
-        mark_is_lit, mark_seen, newer_than, newest_tag, run,
+        CHECK_INTERVAL_MS, CLAIM_STALE_MS, OfferState, Outcome, Releases, STATE_FILE_NAME, Version,
+        due, mark_is_lit, newer_than, newest_tag,
     };
     use bt_persist::UpdateCheckV1;
     use std::{
@@ -861,12 +1108,17 @@ mod tests {
             latest_tag: Some("v0.1.1".to_owned()),
             ..UpdateCheckV1::default()
         };
-        assert!(mark_is_lit(&state, "0.1.0"), "a newer tag lights the mark");
+        assert!(
+            mark_is_lit(&state, "0.1.0", true),
+            "a newer tag lights the mark"
+        );
 
-        mark_seen(&root, "v0.1.1");
+        OfferState::load(&root, true)
+            .mark_seen("v0.1.1")
+            .expect("the acknowledgement is written");
         state.seen_tag = state_of(&root).seen_tag;
         assert!(
-            !mark_is_lit(&state, "0.1.0"),
+            !mark_is_lit(&state, "0.1.0", true),
             "the mark goes out once this reader has been shown this version"
         );
 
@@ -874,7 +1126,7 @@ mod tests {
         // anything.
         state.latest_tag = Some("v0.1.2".to_owned());
         assert!(
-            mark_is_lit(&state, "0.1.0"),
+            mark_is_lit(&state, "0.1.0", true),
             "a version that has not been seen lights the mark whatever was seen before"
         );
 
@@ -884,7 +1136,7 @@ mod tests {
             latest_tag: Some("v0.0.9".to_owned()),
             ..UpdateCheckV1::default()
         };
-        assert!(!mark_is_lit(&old, "0.1.0"));
+        assert!(!mark_is_lit(&old, "0.1.0", true));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -897,11 +1149,12 @@ mod tests {
     #[test]
     fn the_releases_page_is_asked_at_most_once_a_day() {
         let root = dir("throttle");
+        let owner = OfferState::load(&root, true);
         let source = Counting::ok("v0.1.1");
 
         let start = 1_756_000_000_000u64;
         assert_eq!(
-            run(&root, start, &source),
+            owner.run(start, &source),
             Outcome::Answered("v0.1.1".to_owned())
         );
         assert_eq!(source.calls(), 1);
@@ -911,13 +1164,13 @@ mod tests {
         // Every launch inside the day — a second window, a restart, a hundred
         // restarts — asks nothing.
         for offset in [1, 1_000, 60_000, CHECK_INTERVAL_MS - 1] {
-            assert_eq!(run(&root, start + offset, &source), Outcome::TooSoon);
+            assert_eq!(owner.run(start + offset, &source), Outcome::TooSoon);
         }
         assert_eq!(source.calls(), 1, "no launch inside the day asks again");
 
         // And the day after, exactly one more.
         assert_eq!(
-            run(&root, start + CHECK_INTERVAL_MS, &source),
+            owner.run(start + CHECK_INTERVAL_MS, &source),
             Outcome::Answered("v0.1.1".to_owned())
         );
         assert_eq!(source.calls(), 2);
@@ -943,13 +1196,14 @@ mod tests {
     #[test]
     fn a_refused_question_is_silent_and_is_not_asked_again_until_tomorrow() {
         let root = dir("refused");
+        let owner = OfferState::load(&root, true);
         let source = Counting::refusing();
 
         let start = 1_756_000_000_000u64;
-        assert_eq!(run(&root, start, &source), Outcome::Refused);
+        assert_eq!(owner.run(start, &source), Outcome::Refused);
         for offset in 1..10u64 {
             assert_eq!(
-                run(&root, start + offset * 60_000, &source),
+                owner.run(start + offset * 60_000, &source),
                 Outcome::TooSoon
             );
         }
@@ -961,7 +1215,7 @@ mod tests {
             "the stamp advanced on the refusal"
         );
         assert_eq!(state.latest_tag, None, "and nothing was invented to draw");
-        assert!(!mark_is_lit(&state, "0.1.0"));
+        assert!(!mark_is_lit(&state, "0.1.0", true));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -990,8 +1244,10 @@ mod tests {
         impl Releases for Reentrant {
             fn latest_tag(&self) -> Result<String, String> {
                 self.calls.fetch_add(1, Ordering::Relaxed);
-                // The second window, opened while this request is in flight.
-                let second = run(&self.dir, self.now_ms, &Counting::ok("v9.9.9"));
+                // The second window, opened while this request is in flight: a
+                // second process, so an owner of its own on the same directory.
+                let second =
+                    OfferState::load(&self.dir, true).run(self.now_ms, &Counting::ok("v9.9.9"));
                 *self.inner.borrow_mut() = Some(second);
                 Ok("v0.1.1".to_owned())
             }
@@ -1005,7 +1261,7 @@ mod tests {
             calls: AtomicU32::new(0),
         };
         assert_eq!(
-            run(&root, 1_756_000_000_000, &source),
+            OfferState::load(&root, true).run(1_756_000_000_000, &source),
             Outcome::Answered("v0.1.1".to_owned())
         );
         assert_eq!(source.calls.load(Ordering::Relaxed), 1);
@@ -1027,7 +1283,7 @@ mod tests {
     /// in flight is not undone by it.**
     ///
     /// The claim keeps other *processes* out; it does not keep this process's
-    /// own window thread out, and [`mark_seen`] runs there — a reader opening
+    /// own window thread out, and `OfferState::mark_seen` runs there — a reader opening
     /// the About page while the daily check is on the wire. `run` took its whole
     /// document before the request and wrote that document back after it, so the
     /// `seen_tag` written in between was replaced by the one from before it
@@ -1037,26 +1293,30 @@ mod tests {
     /// The source below is the reader, in the one place the race is
     /// deterministic: inside the request.
     ///
-    /// Red gate: write `state` back instead of re-reading, and `seen_tag` below
+    /// Red gate: make the answer's transaction write the document the stamp's
+    /// transaction read, instead of reading under the lock, and `seen_tag` below
     /// is `None`.
     #[test]
     fn a_mark_answered_while_the_request_was_running_survives_it() {
-        struct AnswersMidFlight {
-            dir: PathBuf,
+        struct AnswersMidFlight<'owner> {
+            owner: &'owner OfferState,
         }
-        impl Releases for AnswersMidFlight {
+        impl Releases for AnswersMidFlight<'_> {
             fn latest_tag(&self) -> Result<String, String> {
                 // The reader opens the About page and the mark goes out, on the
                 // window thread, while this request is still on the wire.
-                mark_seen(&self.dir, "v0.2.3");
+                self.owner
+                    .mark_seen("v0.2.3")
+                    .expect("the acknowledgement is written");
                 Ok("v0.2.4".to_owned())
             }
         }
 
         let root = dir("seen-mid-flight");
-        let source = AnswersMidFlight { dir: root.clone() };
+        let owner = OfferState::load(&root, true);
+        let source = AnswersMidFlight { owner: &owner };
         assert_eq!(
-            run(&root, 1_756_000_000_000, &source),
+            owner.run(1_756_000_000_000, &source),
             Outcome::Answered("v0.2.4".to_owned())
         );
 
@@ -1094,12 +1354,13 @@ mod tests {
         std::fs::write(root.join(super::CLAIM_FILE_NAME), start.to_string())
             .expect("a claim left behind");
 
+        let owner = OfferState::load(&root, true);
         let source = Counting::ok("v0.1.1");
-        assert_eq!(run(&root, start + 1_000, &source), Outcome::Busy);
+        assert_eq!(owner.run(start + 1_000, &source), Outcome::Busy);
         assert_eq!(source.calls(), 0, "a fresh claim is another window's");
 
         assert_eq!(
-            run(&root, start + CLAIM_STALE_MS + 1, &source),
+            owner.run(start + CLAIM_STALE_MS + 1, &source),
             Outcome::Answered("v0.1.1".to_owned()),
             "a claim older than any request could be is a dead process's"
         );
@@ -1142,8 +1403,9 @@ mod tests {
 
         // And with nothing newer to say, the row wears the table's own sentence
         // — which is what every machine reads on the day its build is the
-        // newest. `KNOWN` is untouched by every test in this module, so this is
-        // the unloaded state and not a leftover.
+        // newest. The process's owner is never opened by a test in this module
+        // (each opens its own on a private directory), so this is the unopened
+        // state and not a leftover.
         for lang in crate::i18n::Lang::ALL {
             assert_eq!(
                 super::row_description_in(lang),
@@ -1319,27 +1581,28 @@ mod tests {
         let running = crate::version::VERSION;
         let newer = "v999.0.0";
         let root = dir("row-states");
+        let owner = OfferState::load(&root, true);
 
         // ① Not asked yet — there is no file, and nothing to say about a
         //    version.
         let fresh = state_of(&root);
         assert_eq!(fresh.latest_tag, None);
         assert_eq!(newer_than(fresh.latest_tag.as_deref(), running), None);
-        assert!(!mark_is_lit(&fresh, running));
+        assert!(!mark_is_lit(&fresh, running, true));
 
         // ② Asked, and this build is the newest there is.
         assert_eq!(
-            run(&root, CHECK_INTERVAL_MS, &Counting::ok(running)),
+            owner.run(CHECK_INTERVAL_MS, &Counting::ok(running)),
             Outcome::Answered(running.to_owned())
         );
         let current = state_of(&root);
         assert_eq!(newer_than(current.latest_tag.as_deref(), running), None);
-        assert!(!mark_is_lit(&current, running));
+        assert!(!mark_is_lit(&current, running, true));
 
         // ③ A newer release. This is the only state whose sentence names a
         //    version, and it names the verb beside it.
         assert_eq!(
-            run(&root, 2 * CHECK_INTERVAL_MS, &Counting::ok(newer)),
+            owner.run(2 * CHECK_INTERVAL_MS, &Counting::ok(newer)),
             Outcome::Answered(newer.to_owned())
         );
         let available = state_of(&root);
@@ -1347,7 +1610,7 @@ mod tests {
             newer_than(available.latest_tag.as_deref(), running),
             Some(newer)
         );
-        assert!(mark_is_lit(&available, running));
+        assert!(mark_is_lit(&available, running, true));
         for lang in crate::i18n::Lang::ALL {
             let sentence = crate::i18n::update_row_available_in(lang, newer);
             assert!(sentence.contains(newer), "{lang:?}: {sentence}");
@@ -1357,7 +1620,7 @@ mod tests {
         //    knew about stays known — a failed check is a silence, not an
         //    erasure.
         assert_eq!(
-            run(&root, 3 * CHECK_INTERVAL_MS, &Counting::refusing()),
+            owner.run(3 * CHECK_INTERVAL_MS, &Counting::refusing()),
             Outcome::Refused
         );
         let refused = state_of(&root);
@@ -1397,5 +1660,292 @@ mod tests {
         assert!(super::RELEASES_PAGE.ends_with("/releases"));
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    // ── U-6: one owner, Skip, precedence, the switch ───────────────────────
+
+    /// RED (U-6) — **a Skip landing between the check's read and its write is not
+    /// lost, and neither is anything the check wrote: all four fields survive.**
+    ///
+    /// The race R4-14's re-read narrowed and did not close: the check read the file,
+    /// and a Skip on the window thread wrote `skipped_tag` and `seen_tag` before
+    /// the check wrote its answer back over them. Here the two writers are two
+    /// threads driving the one owner. The check's answer transaction is paused
+    /// between its read and its write; the Skip is released at that instant and
+    /// given 300 ms to land. Under the owner's lock it cannot land until the
+    /// check's write is done, so it lands after it and both survive; without the
+    /// lock it lands inside the window and the check's write erases it.
+    ///
+    /// MUTATION: in `OfferState::transact`, release the lock after the read (the
+    /// re-read-before-write shape the file had on BASE) and `skipped_tag` and
+    /// `seen_tag` below are `None`.
+    #[test]
+    fn skip_racing_check_and_seen_keeps_all_fields() {
+        use std::sync::{Arc, Barrier, mpsc};
+        use std::time::Duration;
+
+        struct ArmsThePause {
+            owner: Arc<OfferState>,
+            barrier: Arc<Barrier>,
+            skipped: std::sync::Mutex<Option<mpsc::Receiver<()>>>,
+        }
+        impl Releases for ArmsThePause {
+            fn latest_tag(&self) -> Result<String, String> {
+                // The answer's transaction is the next one: pause it between its
+                // read and its write, release the Skip there, and wait for it.
+                let barrier = Arc::clone(&self.barrier);
+                let skipped = self
+                    .skipped
+                    .lock()
+                    .expect("one pause")
+                    .take()
+                    .expect("armed once");
+                self.owner.pause_between_read_and_write(move || {
+                    barrier.wait();
+                    let _ = skipped.recv_timeout(Duration::from_millis(300));
+                });
+                Ok("v0.2.4".to_owned())
+            }
+        }
+
+        let root = dir("skip-race");
+        let owner = Arc::new(OfferState::load(&root, true));
+        let barrier = Arc::new(Barrier::new(2));
+        let (done, skipped) = mpsc::channel();
+
+        let skipper = {
+            let owner = Arc::clone(&owner);
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                owner.skip("v0.2.3").expect("the Skip is written");
+                let _ = done.send(());
+            })
+        };
+        let source = ArmsThePause {
+            owner: Arc::clone(&owner),
+            barrier,
+            skipped: std::sync::Mutex::new(Some(skipped)),
+        };
+        assert_eq!(
+            owner.run(1_756_000_000_000, &source),
+            Outcome::Answered("v0.2.4".to_owned())
+        );
+        skipper.join().expect("the Skip thread finished");
+
+        let state = state_of(&root);
+        assert_eq!(state.checked_at_ms, 1_756_000_000_000, "the stamp survives");
+        assert_eq!(
+            state.latest_tag.as_deref(),
+            Some("v0.2.4"),
+            "the answer survives"
+        );
+        assert_eq!(
+            state.skipped_tag.as_deref(),
+            Some("v0.2.3"),
+            "the Skip survives"
+        );
+        assert_eq!(
+            state.seen_tag.as_deref(),
+            Some("v0.2.3"),
+            "and its seen tag"
+        );
+        assert_eq!(owner.known(), state, "and the owner's memory is the file");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-6) — **a Skip that did not reach the disk is not reported as kept.**
+    ///
+    /// The owner's memory is what the offer is decided from; a Skip adopted into
+    /// memory and lost on the disk would hide the card for this launch and bring
+    /// it back on the next, with nothing said.
+    ///
+    /// MUTATION: publish to `known` before the write in `OfferState::transact`
+    /// (or ignore the write's error) and the memory claims the Skip.
+    #[test]
+    fn skip_failure_is_not_reported_as_persistent() {
+        let root = dir("skip-fails");
+        // A directory that does not exist: the read finds nothing and the write
+        // cannot be made.
+        let owner = OfferState::load(&root.join("gone"), true);
+        assert!(
+            owner.skip("v0.2.3").is_err(),
+            "the write failed and says so"
+        );
+        assert_eq!(
+            owner.known().skipped_tag,
+            None,
+            "and memory does not claim it"
+        );
+        assert_eq!(owner.known().seen_tag, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-6) — **a skipped tag stays hidden across launches inside the day,
+    /// with no check to re-learn it.**
+    ///
+    /// The check runs once a day; a launch inside the day reads the cached answer.
+    /// The Skip is in the file, so the next launch's owner opens with it and the
+    /// cached tag is neither offered nor marked.
+    ///
+    /// MUTATION: drop the `skipped_tag` clause from `should_offer` and the second
+    /// launch offers `v0.5.0` again.
+    #[test]
+    fn cached_skipped_tag_stays_hidden_inside_daily_cadence() {
+        let root = dir("skip-cached");
+        let start = 1_756_000_000_000u64;
+        let first = OfferState::load(&root, true);
+        assert_eq!(
+            first.run(start, &Counting::ok("v0.5.0")),
+            Outcome::Answered("v0.5.0".to_owned())
+        );
+        assert_eq!(first.offer("0.4.6").as_deref(), Some("v0.5.0"));
+        first.skip("v0.5.0").expect("the Skip is written");
+        assert_eq!(first.offer("0.4.6"), None, "skipped, at once");
+
+        // The next launch, an hour later: no question is asked, and the cached
+        // tag stays skipped.
+        let second = OfferState::load(&root, true);
+        let source = Counting::ok("v0.5.0");
+        assert_eq!(second.run(start + 3_600_000, &source), Outcome::TooSoon);
+        assert_eq!(source.calls(), 0);
+        assert_eq!(second.offer("0.4.6"), None, "not offered inside the day");
+        assert!(!second.mark_is_lit("0.4.6"), "and the gear wears no mark");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-6) — **a newer tag is offered after a Skip, and an older one never
+    /// is — by precedence, not inequality.**
+    ///
+    /// The withdrawn-release case is the one inequality gets wrong: skip `v0.5.1`,
+    /// the release is pulled, and the list's newest is `v0.5.0` — different from
+    /// the skipped tag, still newer than the running `0.4.6`, and below what the
+    /// reader said no to.
+    ///
+    /// MUTATION: compare `offered != skipped` instead of `offered <= skipped` in
+    /// `should_offer` and the withdrawn case is offered; let `skip` lower the
+    /// skipped tag and the stale-Skip assertion goes red.
+    #[test]
+    fn newer_tag_is_offered_after_skip() {
+        let root = dir("skip-newer");
+        let owner = OfferState::load(&root, true);
+        let day = CHECK_INTERVAL_MS;
+
+        owner.run(day, &Counting::ok("v0.5.0"));
+        owner.skip("v0.5.0").expect("written");
+        assert_eq!(owner.offer("0.4.6"), None);
+
+        // The next release is offered, and lights the mark.
+        owner.run(2 * day, &Counting::ok("v0.5.1"));
+        assert_eq!(owner.offer("0.4.6").as_deref(), Some("v0.5.1"));
+        assert!(owner.mark_is_lit("0.4.6"));
+
+        // Skipped too, then withdrawn: the older tag comes back as the newest.
+        owner.skip("v0.5.1").expect("written");
+        owner.run(3 * day, &Counting::ok("v0.5.0"));
+        assert_eq!(owner.known().latest_tag.as_deref(), Some("v0.5.0"));
+        assert_eq!(
+            owner.offer("0.4.6"),
+            None,
+            "below the skipped tag: never again"
+        );
+        assert!(!owner.mark_is_lit("0.4.6"));
+
+        // A stale Skip of an older tag does not lower the bar.
+        owner.skip("v0.5.0").expect("written");
+        assert_eq!(owner.known().skipped_tag.as_deref(), Some("v0.5.1"));
+
+        // The pure decision, table-wise.
+        let state = |latest: &str, skipped: Option<&str>| UpdateCheckV1 {
+            latest_tag: Some(latest.to_owned()),
+            skipped_tag: skipped.map(str::to_owned),
+            ..UpdateCheckV1::default()
+        };
+        for (latest, skipped, offered) in [
+            ("v0.5.0", None, true),
+            ("v0.5.0", Some("v0.5.0"), false),
+            ("v0.5.0", Some("0.5.0+other"), false),
+            ("v0.5.0", Some("v0.5.1"), false),
+            ("v0.5.1", Some("v0.5.0"), true),
+            ("v0.5.0", Some("v0.5.0-rc.1"), true),
+            ("v0.5.0", Some("nightly"), true),
+        ] {
+            assert_eq!(
+                super::should_offer(&state(latest, skipped), "0.4.6", true).is_some(),
+                offered,
+                "{latest} with {skipped:?} skipped"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-6) — **switching off suppresses the cached offer and an answer still
+    /// on the wire.**
+    ///
+    /// Cached: a file that learned a newer tag while the switch was on is not
+    /// offered or marked once the switch is off. In flight: the switch goes off
+    /// while the request is out, and the answer is neither offered nor written
+    /// (off writes nothing).
+    ///
+    /// MUTATION: drop the `enabled` guard from `should_offer` and the cached half
+    /// goes red; drop the `SwitchedOff` arm in `OfferState::run` and the in-flight
+    /// answer is written.
+    #[test]
+    fn switch_off_suppresses_cached_and_inflight_offers() {
+        struct TurnsOff<'owner> {
+            owner: &'owner OfferState,
+        }
+        impl Releases for TurnsOff<'_> {
+            fn latest_tag(&self) -> Result<String, String> {
+                self.owner.set_enabled(false);
+                Ok("v9.1.0".to_owned())
+            }
+        }
+
+        let root = dir("switch-off");
+        bt_persist::write_update_check_atomic(
+            &root.join(STATE_FILE_NAME),
+            &UpdateCheckV1 {
+                checked_at_ms: 1,
+                latest_tag: Some("v9.0.0".to_owned()),
+                ..UpdateCheckV1::default()
+            },
+        )
+        .expect("a cached answer");
+
+        let owner = OfferState::load(&root, false);
+        assert_eq!(
+            owner.offer("0.4.6"),
+            None,
+            "a cached tag is not offered while off"
+        );
+        assert!(!owner.mark_is_lit("0.4.6"));
+        owner.set_enabled(true);
+        assert_eq!(owner.offer("0.4.6").as_deref(), Some("v9.0.0"));
+        owner.set_enabled(false);
+        assert_eq!(
+            owner.offer("0.4.6"),
+            None,
+            "and off again suppresses it at once"
+        );
+
+        let fresh = dir("switch-off-inflight");
+        let inflight = OfferState::load(&fresh, true);
+        assert_eq!(
+            inflight.run(CHECK_INTERVAL_MS, &TurnsOff { owner: &inflight }),
+            Outcome::SwitchedOff
+        );
+        assert_eq!(inflight.offer("0.4.6"), None);
+        assert_eq!(
+            state_of(&fresh).latest_tag,
+            None,
+            "the answer that landed after Off is not written"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&fresh);
     }
 }
