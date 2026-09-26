@@ -3400,6 +3400,19 @@ pub mod instance;
 /// `geteuid` and `getxattr` on Unix.
 pub mod install_evidence;
 
+/// **Files created only where nothing of that name exists, under a directory
+/// held open** — the door the updater's archive reader writes a release's
+/// members through (0.4.6 ticket U-14; revision (b) F-12). `NtCreateFile`
+/// relative to the directory's handle on Windows, `openat` / `linkat` on Unix;
+/// never follows a link.
+pub mod exclusive_create;
+
+/// **A resource read out of an executable without running it** — the E-14
+/// door: `LoadLibraryExW` with `LOAD_LIBRARY_AS_DATAFILE |
+/// LOAD_LIBRARY_AS_IMAGE_RESOURCE`, for the release manifest a new `folio.exe`
+/// carries (0.4.6 ticket U-14; revision (b) F-4).
+pub mod pe_resource;
+
 /// **The effects of an update transaction** — durable writes and moves, the
 /// registry flush and the two locks on the installation home (ticket U-11;
 /// `docs/plans/design/self-update-2026-09-16.md` revision (b), §(b).2, F-6,

@@ -30,11 +30,14 @@ pub enum Lane {
     /// The install marker and the package manager's receipt beside the
     /// executable, read once at start (`install_channel`, ticket U-1).
     Install,
+    /// The downloaded release archive the updater reads, and the manifest
+    /// read out of the new `folio.exe` in it (`update_archive`, ticket U-14).
+    Update,
     Other,
 }
 
 impl Lane {
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::InlineImage,
         Self::Peek,
         Self::Animation,
@@ -45,6 +48,7 @@ impl Lane {
         Self::Fonts,
         Self::Attention,
         Self::Install,
+        Self::Update,
         Self::Other,
     ];
 
@@ -60,6 +64,7 @@ impl Lane {
             Self::Fonts => "fonts",
             Self::Attention => "attention",
             Self::Install => "install",
+            Self::Update => "update",
             Self::Other => "other",
         }
     }
