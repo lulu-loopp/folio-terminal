@@ -11,6 +11,12 @@ All notable changes to Folio are recorded here. The format follows
 - Pasting a picture works with every kind of bitmap the clipboard can hold,
   including browser and screenshot-tool copies and long screenshots.
 
+### Internal
+
+- Building Folio for Windows no longer needs Windows PowerShell: the ConPTY
+  files are unpacked by the build itself, so the Windows build can be checked
+  from Linux or macOS.
+
 ## 0.4.5-preview — 2026-09-26
 
 ### Added

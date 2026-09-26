@@ -15,9 +15,10 @@
     enumerates from it is a real DX12 adapter — so the tests exercise the same
     code path they exercise on a machine with a GPU, at software speed.
 
-    Pinned by version AND by hash, like `extract-conpty-sidecar.ps1`: this pulls
-    a binary off the public internet into a job that then runs it, and a
-    package feed is not a thing to trust on its name alone.
+    Pinned by version AND by hash, like the ConPTY sidecar that
+    `crates/bt-pty/build.rs` unpacks: this pulls a binary off the public
+    internet into a job that then runs it, and a package feed is not a thing to
+    trust on its name alone.
 
 .PARAMETER TargetDir
     The build profile directory — `target/debug` or `target/release`. The DLL is
