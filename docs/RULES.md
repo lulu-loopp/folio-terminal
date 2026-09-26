@@ -1116,9 +1116,12 @@ capability a worker-only door takes, made nowhere else but
 `enter_standalone_main`. **Which kind of thread this is** is
 `bt_platform::admission`'s fact: the window thread enters once, in `fn main`
 after the argument parse, and each OS-owned callback enters through
-`enter_callback` for its length; a thread started outside the door is `Unset`
-(until A1c for the bare spawns; for good for `bt-pty`'s four and the resample
-pool), and `Unset` is never a worker and never the window. **An owner-thread wait** — a row
+`enter_callback` for its length; a door process's main thread enters once, as a
+worker, through `enter_standalone_main`; a thread started outside the door is
+`Unset` — since A1c only `bt-pty`'s four and the resample pool are, for good —
+and `Unset` is never a worker and never the window. **Every thread `bt-app` and
+`bt-platform` start, in every process, comes from the door**, and a source guard
+holds it. **An owner-thread wait** — a row
 of `docs/ARCHITECTURE.md` §5.3 — is admitted through `admission::admitted`, on the
 window thread and in its door type's phases, or refused and counted; the door
 types are the registry `crates/bt-app/src/window_waits.tsv`, and **no door takes
@@ -1130,14 +1133,15 @@ does not go through the pseudoconsole comes out of one silent door*; §13.18
 *M2-2/M2-4: the four verbs handed to the machine live in one module*; §1.4
 *resilience under CPU starvation* (three bands, one spawner); 2026-09-22 *a
 hand-off to the system runs on its own lane, and the window that receives it may
-take the front*; 2026-09-26 *every thread that runs Folio's code has a role, the window thread has a phase, and each owner-thread wait is a door the registry lists*; 2026-09-26 *the thread door lends every worker a `WorkerCtx`, and a hand-off can be made only with one*.
+take the front*; 2026-09-26 *every thread that runs Folio's code has a role, the window thread has a phase, and each owner-thread wait is a door the registry lists*; 2026-09-26 *the thread door lends every worker a `WorkerCtx`, and a hand-off can be made only with one*; 2026-09-26 *every thread `bt-app` and `bt-platform` start comes through the thread door, and a door process waits on its main thread as a worker*.
 **Overrides.** none found.
 **The gap, recorded as a fact.** The self-report declares that directory
 enumeration and metadata are **excluded from the ledger's accounting**. That is a
 statement about what the counters measure; it is not a decision that enumeration
 needs no door. The files column's `bt_app::files::read_directory` therefore has
-no lane, no door and no guard, and nothing rules whether it should.
-`folio-web-thumb` is the matching gap in the thread door.
+no lane, no door and no guard, and nothing rules whether it should. The
+thread door's matching gap (`folio-web-thumb` and five unnamed spawns) is closed
+since A1c.
 
 ### 53. Threads, bands and lanes — `folded`
 **Rule.** **Three bands**, set as the new thread's first statement through
