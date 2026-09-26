@@ -449,17 +449,19 @@ impl Engine {
         let thread = {
             let shared = Arc::clone(&shared);
             let commands = commands.clone();
-            std::thread::Builder::new()
-                .name("folio-video-engine".to_owned())
-                .spawn(move || {
+            crate::spawn_at_priority(
+                "folio-video-engine",
+                crate::ThreadPriority::Normal,
+                move |_ctx| {
                     run(&BSTR::from_wide(&url), adapter, &shared, &commands, &inbox);
                     // Last of all, and read by `Engine::shutdown` to know
                     // whether joining this thread will return — see there.
                     shared.stopped.store(true, Ordering::Release);
-                })
-                // The one thing that can still fail here, and it fails without
-                // having started anything: a process out of thread handles.
-                .map_err(|_| EngineError::Unresponsive)?
+                },
+            )
+            // The one thing that can still fail here, and it fails without
+            // having started anything: a process out of thread handles.
+            .map_err(|_| EngineError::Unresponsive)?
         };
         Ok(Self {
             commands,
@@ -839,9 +841,10 @@ pub fn can_play_types(types: &[&str]) -> Vec<CanPlay> {
     // the reason [`Engine::open`] states: a `BSTR` is a raw pointer and is not
     // `Send`.
     let asked: Vec<String> = types.iter().map(|kind| (*kind).to_owned()).collect();
-    let Ok(thread) = std::thread::Builder::new()
-        .name("folio-video-canplay".to_owned())
-        .spawn(move || {
+    let Ok(thread) = crate::spawn_at_priority(
+        "folio-video-canplay",
+        crate::ThreadPriority::Normal,
+        move |_ctx| {
             // SAFETY: an MTA entry on this thread, released below on every path.
             let apartment = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
             if apartment.is_err() {
@@ -874,8 +877,8 @@ pub fn can_play_types(types: &[&str]) -> Vec<CanPlay> {
             // interface this thread made has been dropped.
             unsafe { CoUninitialize() };
             answers
-        })
-    else {
+        },
+    ) else {
         return none();
     };
     let answers = thread.join().unwrap_or_default();

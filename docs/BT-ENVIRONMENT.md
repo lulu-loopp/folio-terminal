@@ -132,6 +132,10 @@ and `BT_INSTALL_TXN_CHILD_GO` — the three paths `bt-platform`'s
 second copy of its own test binary: the admission file the child holds shared, the
 file the child creates once it holds it, and the file whose appearance tells it to
 let go. Only that test's child half reads them; no product code does.
+`BT_STANDALONE_ENTRY_TEST_CHILD` carries the name of the one test `bt-app`'s
+`tests::alone_in_a_process` runs again in a process of its own — the three
+standalone-entry cases of `attention_wire` and `explorer_menu`, whose claim holds
+once per process — and only that test, in that child, reads it.
 
 | Variable | Value | What it does | What can end up in the file | Default |
 | --- | --- | --- | --- | --- |

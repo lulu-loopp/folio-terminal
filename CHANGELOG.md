@@ -59,6 +59,10 @@ All notable changes to Folio are recorded here. The format follows
 - Every background thread Folio starts now carries proof that it is one, and
   opening or revealing something in the system can only be done from such a
   thread.
+- The last threads Folio started on the side — the web page thumbnails, video,
+  folder watching, the two doorbells, the Explorer menu's work and the helper
+  commands' waits — now start the same way as every other, and a test keeps it
+  that way. No thread runs at a different priority.
 
 ## 0.4.5-preview — 2026-09-26
 

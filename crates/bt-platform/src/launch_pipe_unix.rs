@@ -198,11 +198,13 @@ impl LaunchPipe {
                 return Err(error);
             }
         };
-        let listener = std::thread::Builder::new()
-            .name("folio-launch-endpoint".to_owned())
-            .spawn(move || {
+        let listener = crate::spawn_at_priority(
+            "folio-launch-endpoint",
+            crate::ThreadPriority::Normal,
+            move |_ctx| {
                 listen(&listener, wake, &decide, &commit);
-            });
+            },
+        );
         match listener {
             Ok(listener) => Ok(Self {
                 name,

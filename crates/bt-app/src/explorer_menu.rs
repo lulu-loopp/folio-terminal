@@ -941,26 +941,61 @@ pub struct MenuRemovalReport {
 /// service when the bound expires is left there; this process is about to leave,
 /// and a deployment that lands afterwards lands on a machine nobody is waiting
 /// on.
+///
+/// **The waiting thread is a worker** (`bt_platform::admission`, design note
+/// 2026-09-26 revision (c)6): this is the `--remove-explorer-menu` process's main
+/// thread, answered above the argument parse, and it enters as
+/// [`REMOVAL_ENTRY`] before it waits. The thread it waits on comes from the
+/// thread door at `Normal` (RULES 53's standalone-process exception).
 #[must_use]
 pub fn remove_from_explorer_menu() -> MenuRemovalReport {
-    let (answered, waiting) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = answered.send(both_registrations_removed());
-    });
-    waiting.recv_timeout(REMOVAL_TIMEOUT).unwrap_or_else(|_| {
-        let seconds = REMOVAL_TIMEOUT.as_secs();
-        eprintln!(
-            "folio {}: nothing answered within {seconds} seconds",
-            crate::cli::REMOVE_EXPLORER_MENU_FLAG
-        );
-        MenuRemovalReport {
-            line: format!(
-                "Folio Explorer menu: nothing answered within {seconds} seconds, \
-                 so nothing is known to have been removed."
-            ),
-            exit_code: 1,
-        }
+    removal_waited_on(both_registrations_removed)
+}
+
+/// **The role the `--remove-explorer-menu` process's main thread takes to wait**:
+/// `Worker("folio-remove-explorer-menu")`.
+const REMOVAL_ENTRY: &str = "folio-remove-explorer-menu";
+
+/// **The role the `--uninstall-cleanup` process's main thread takes to wait for
+/// the Explorer registrations**: `Worker("folio-uninstall-cleanup")`.
+const CLEANUP_ENTRY: &str = "folio-uninstall-cleanup";
+
+/// Why neither entry can be refused where it is made: both doors are answered in
+/// `fn main` above the argument parse, so the process's main thread has no role,
+/// and each asks the Explorer question once.
+const ENTERED_ONCE: &str =
+    "a door process's main thread has no role before it waits on Explorer, and waits once";
+
+/// [`remove_from_explorer_menu`]'s entry and wait, with the removal it waits on
+/// handed in — the real one there, and in a test one that removes nothing.
+fn removal_waited_on(remove: fn() -> MenuRemovalReport) -> MenuRemovalReport {
+    bt_platform::admission::enter_standalone_main(REMOVAL_ENTRY, |_ctx| {
+        let (answered, waiting) = mpsc::channel();
+        bt_platform::spawn_at_priority(
+            "folio-explorer-removal",
+            bt_platform::ThreadPriority::Normal,
+            move |_ctx| {
+                let _ = answered.send(remove());
+            },
+        )
+        // What `std::thread::spawn` said when the system refused a thread, kept word for word.
+        .expect("failed to spawn thread");
+        waiting.recv_timeout(REMOVAL_TIMEOUT).unwrap_or_else(|_| {
+            let seconds = REMOVAL_TIMEOUT.as_secs();
+            eprintln!(
+                "folio {}: nothing answered within {seconds} seconds",
+                crate::cli::REMOVE_EXPLORER_MENU_FLAG
+            );
+            MenuRemovalReport {
+                line: format!(
+                    "Folio Explorer menu: nothing answered within {seconds} seconds, \
+                     so nothing is known to have been removed."
+                ),
+                exit_code: 1,
+            }
+        })
     })
+    .expect(ENTERED_ONCE)
 }
 
 /// Both stores, in one sentence. The package first, because it is the one on the
@@ -1016,27 +1051,55 @@ pub(crate) enum CleanupRegistration {
     Refused(String),
 }
 
+/// **This copy's two Explorer registrations, taken off the machine for
+/// `--uninstall-cleanup`**, under the same [`REMOVAL_TIMEOUT`].
+///
+/// Its waiting thread is the `--uninstall-cleanup` process's main thread, which
+/// enters as [`CLEANUP_ENTRY`] before it waits, as [`remove_from_explorer_menu`]'s
+/// does.
 pub(crate) fn cleanup_registrations() -> Vec<(&'static str, CleanupRegistration)> {
-    let (send, receive) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = send.send(vec![
-            ("Explorer sparse package (per-copy)", cleanup_package()),
-            (
-                "Explorer classic verbs (per-copy)",
-                crate::context_menu::cleanup_classic(),
-            ),
-        ]);
-    });
-    receive.recv_timeout(REMOVAL_TIMEOUT).unwrap_or_else(|_| {
-        vec![(
-            "Explorer registrations (per-copy)",
-            CleanupRegistration::Refused(format!(
-                "{} ({}s)",
-                crate::i18n::Text::CleanupSystemUnknown.text(),
-                REMOVAL_TIMEOUT.as_secs()
-            )),
-        )]
+    cleanup_waited_on(both_registrations_cleaned)
+}
+
+/// The two registrations, each with its answer.
+fn both_registrations_cleaned() -> Vec<(&'static str, CleanupRegistration)> {
+    vec![
+        ("Explorer sparse package (per-copy)", cleanup_package()),
+        (
+            "Explorer classic verbs (per-copy)",
+            crate::context_menu::cleanup_classic(),
+        ),
+    ]
+}
+
+/// [`cleanup_registrations`]' entry and wait, with the cleanup it waits on handed
+/// in — the real one there, and in a test one that removes nothing.
+fn cleanup_waited_on(
+    clean: fn() -> Vec<(&'static str, CleanupRegistration)>,
+) -> Vec<(&'static str, CleanupRegistration)> {
+    bt_platform::admission::enter_standalone_main(CLEANUP_ENTRY, |_ctx| {
+        let (send, receive) = mpsc::channel();
+        bt_platform::spawn_at_priority(
+            "folio-explorer-cleanup",
+            bt_platform::ThreadPriority::Normal,
+            move |_ctx| {
+                let _ = send.send(clean());
+            },
+        )
+        // What `std::thread::spawn` said when the system refused a thread, kept word for word.
+        .expect("failed to spawn thread");
+        receive.recv_timeout(REMOVAL_TIMEOUT).unwrap_or_else(|_| {
+            vec![(
+                "Explorer registrations (per-copy)",
+                CleanupRegistration::Refused(format!(
+                    "{} ({}s)",
+                    crate::i18n::Text::CleanupSystemUnknown.text(),
+                    REMOVAL_TIMEOUT.as_secs()
+                )),
+            )]
+        })
     })
+    .expect(ENTERED_ONCE)
 }
 
 fn cleanup_package() -> CleanupRegistration {
@@ -1073,61 +1136,67 @@ pub fn begin_probe() {
         remember(PackageState::Unsupported);
         return;
     }
-    std::thread::spawn(|| {
-        let state = read_state();
-        // **The repair takes the same latch a press does** (R2-20). It is a
-        // deployment, exactly like the one behind the switch, and until this line
-        // existed the two could run at once: a reader who pressed `Off` in the
-        // first second of a launch had `RemovePackageAsync` and `AddPackageAsync`
-        // in flight against one package name, and whichever finished last decided
-        // what the machine ended up with — while the row was drawn from whichever
-        // `read_state` happened to run after that.
-        //
-        // The press wins ties by construction: it takes the latch on the window
-        // thread the instant it is pressed, and this runs seconds later on a
-        // thread of its own. A repair that finds the latch taken does nothing at
-        // all, which is right — the reader is in the middle of saying what they
-        // want the machine to be, and a launch does not argue with that.
-        // Whether registering this folder would put this executable behind the
-        // menu item at all — see `reassert_wanted`.
-        let here_serves_us = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(package_exe_in))
-            .is_some_and(|exe| is_this_executable(&exe));
-        let repairing = reassert_wanted(
-            &state,
-            here_serves_us,
-            |exe| exe.is_file(),
-            is_this_executable,
-        ) && !BUSY.swap(true, Ordering::AcqRel);
-        if repairing
-            && let Some(package) = package_file()
-            && let Some(here) = package.parent()
-        {
-            let outcome = msix::register(&package, here);
-            match outcome {
-                Ok(()) => {
-                    REGISTERED_HERE.store(true, Ordering::Release);
-                    let state = read_state();
-                    remember(state.clone());
-                    finish_job(&state);
-                    wake();
-                    return;
-                }
-                Err(error) => {
-                    // Silent to the user, on `reassert`'s footing: the entry that
-                    // is there goes on being whatever it was, the next launch
-                    // tries again, and there is no window yet to put a card on.
-                    eprintln!("BT_EXPLORER_PACKAGE repair refused — {error}");
+    bt_platform::spawn_at_priority(
+        "folio-explorer-probe",
+        bt_platform::ThreadPriority::Normal,
+        |_ctx| {
+            let state = read_state();
+            // **The repair takes the same latch a press does** (R2-20). It is a
+            // deployment, exactly like the one behind the switch, and until this line
+            // existed the two could run at once: a reader who pressed `Off` in the
+            // first second of a launch had `RemovePackageAsync` and `AddPackageAsync`
+            // in flight against one package name, and whichever finished last decided
+            // what the machine ended up with — while the row was drawn from whichever
+            // `read_state` happened to run after that.
+            //
+            // The press wins ties by construction: it takes the latch on the window
+            // thread the instant it is pressed, and this runs seconds later on a
+            // thread of its own. A repair that finds the latch taken does nothing at
+            // all, which is right — the reader is in the middle of saying what they
+            // want the machine to be, and a launch does not argue with that.
+            // Whether registering this folder would put this executable behind the
+            // menu item at all — see `reassert_wanted`.
+            let here_serves_us = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(package_exe_in))
+                .is_some_and(|exe| is_this_executable(&exe));
+            let repairing = reassert_wanted(
+                &state,
+                here_serves_us,
+                |exe| exe.is_file(),
+                is_this_executable,
+            ) && !BUSY.swap(true, Ordering::AcqRel);
+            if repairing
+                && let Some(package) = package_file()
+                && let Some(here) = package.parent()
+            {
+                let outcome = msix::register(&package, here);
+                match outcome {
+                    Ok(()) => {
+                        REGISTERED_HERE.store(true, Ordering::Release);
+                        let state = read_state();
+                        remember(state.clone());
+                        finish_job(&state);
+                        wake();
+                        return;
+                    }
+                    Err(error) => {
+                        // Silent to the user, on `reassert`'s footing: the entry that
+                        // is there goes on being whatever it was, the next launch
+                        // tries again, and there is no window yet to put a card on.
+                        eprintln!("BT_EXPLORER_PACKAGE repair refused — {error}");
+                    }
                 }
             }
-        }
-        if repairing {
-            finish_job(&state);
-        }
-        remember(state);
-        wake();
-    });
+            if repairing {
+                finish_job(&state);
+            }
+            remember(state);
+            wake();
+        },
+    )
+    // What `std::thread::spawn` said when the system refused a thread, kept word for word.
+    .expect("failed to spawn thread");
 }
 
 /// Register the package, or take it back off — half of what the row's third
@@ -1194,57 +1263,65 @@ pub fn job_in_flight() -> bool {
 /// One deployment, on a thread of its own, with the latch already taken.
 fn run_request(install: bool) {
     let package = package_file();
-    std::thread::spawn(move || {
-        let outcome = if install {
-            match package.as_deref().and_then(|package| {
-                // The file, and the folder to register it against. Either being
-                // absent is the same answer, so they are fetched as one.
-                Some((package, package.parent()?))
-            }) {
-                Some((package, here)) => msix::register(package, here).map(|()| {
-                    // The row's line says what to do if Explorer has not
-                    // noticed — see `REGISTERED_HERE`. Set on the way out of a
-                    // registration that worked and never on one that did not,
-                    // because a refusal leaves the menu exactly as it was.
-                    REGISTERED_HERE.store(true, Ordering::Release);
-                    true
-                }),
-                None => Err(Text::ExplorerFirstPageNoPackage.text().to_owned()),
-            }
-        } else {
-            // **The name is fetched here and not carried in from the press.** The
-            // cached answer can be [`PackageState::Unknown`] — the first probe of
-            // a launch has not landed — and a removal that read `Unknown` as "no
-            // package" would report success over a package that is still
-            // registered. This thread can afford the question; the one that took
-            // the press could not.
+    bt_platform::spawn_at_priority(
+        "folio-explorer-deploy",
+        bt_platform::ThreadPriority::Normal,
+        move |_ctx| {
+            let outcome = if install {
+                match package.as_deref().and_then(|package| {
+                    // The file, and the folder to register it against. Either being
+                    // absent is the same answer, so they are fetched as one.
+                    Some((package, package.parent()?))
+                }) {
+                    Some((package, here)) => msix::register(package, here).map(|()| {
+                        // The row's line says what to do if Explorer has not
+                        // noticed — see `REGISTERED_HERE`. Set on the way out of a
+                        // registration that worked and never on one that did not,
+                        // because a refusal leaves the menu exactly as it was.
+                        REGISTERED_HERE.store(true, Ordering::Release);
+                        true
+                    }),
+                    None => Err(Text::ExplorerFirstPageNoPackage.text().to_owned()),
+                }
+            } else {
+                // **The name is fetched here and not carried in from the press.** The
+                // cached answer can be [`PackageState::Unknown`] — the first probe of
+                // a launch has not landed — and a removal that read `Unknown` as "no
+                // package" would report success over a package that is still
+                // registered. This thread can afford the question; the one that took
+                // the press could not.
+                let state = read_state();
+                match removal_for(&state) {
+                    // **A question Windows refused is not an answer** (R2-20).
+                    // Reporting success here would put the row on `Off` over a
+                    // package that may well still be registered; the press is told
+                    // what actually happened, and the next one asks again.
+                    Removal::Unanswerable => {
+                        Err(Text::ExplorerFirstPageUnreadable.text().to_owned())
+                    }
+                    Removal::Remove(full_name) => msix::remove(full_name).map(|()| {
+                        // **And the sentence goes away with the registration it was
+                        // about.** `REGISTERED_HERE` means "this process registered
+                        // the package and has not since taken it back"; a flag that
+                        // only ever went up would leave the row telling a reader who
+                        // just switched this off that Folio is registered for the
+                        // first page.
+                        REGISTERED_HERE.store(false, Ordering::Release);
+                        false
+                    }),
+                    // Nothing registered and a press asking for that: the machine is
+                    // already where the press wanted it.
+                    Removal::AlreadyGone => Ok(false),
+                }
+            };
             let state = read_state();
-            match removal_for(&state) {
-                // **A question Windows refused is not an answer** (R2-20).
-                // Reporting success here would put the row on `Off` over a
-                // package that may well still be registered; the press is told
-                // what actually happened, and the next one asks again.
-                Removal::Unanswerable => Err(Text::ExplorerFirstPageUnreadable.text().to_owned()),
-                Removal::Remove(full_name) => msix::remove(full_name).map(|()| {
-                    // **And the sentence goes away with the registration it was
-                    // about.** `REGISTERED_HERE` means "this process registered
-                    // the package and has not since taken it back"; a flag that
-                    // only ever went up would leave the row telling a reader who
-                    // just switched this off that Folio is registered for the
-                    // first page.
-                    REGISTERED_HERE.store(false, Ordering::Release);
-                    false
-                }),
-                // Nothing registered and a press asking for that: the machine is
-                // already where the press wanted it.
-                Removal::AlreadyGone => Ok(false),
-            }
-        };
-        let state = read_state();
-        remember(state.clone());
-        report(outcome);
-        finish_job(&state);
-    });
+            remember(state.clone());
+            report(outcome);
+            finish_job(&state);
+        },
+    )
+    // What `std::thread::spawn` said when the system refused a thread, kept word for word.
+    .expect("failed to spawn thread");
 }
 
 /// **The one exit every deployment takes** (review row R4-12).
@@ -2167,6 +2244,90 @@ mod tests {
             asked.into_inner(),
             vec![package_exe_in(Path::new(THERE))],
             "the question is about the registration's own folio.exe"
+        );
+    }
+
+    /// RED (A1c, revision (c)6) — **the `--remove-explorer-menu` process waits on its main thread
+    /// as a worker: the removal runs on `Worker("folio-explorer-removal")`, the main thread is
+    /// `Worker("folio-remove-explorer-menu")` after it, and the process's one entry is spent.**
+    ///
+    /// The door process's waiting thread had no role (`Unset`) and its removal thread was a bare
+    /// `std::thread::spawn`. Run alone in a process of its own, because the entry is once per
+    /// process. The removal handed in removes nothing — the real one would take this machine's
+    /// registration off — and reports the role it ran under; the entry, the thread and the wait
+    /// are the product's own [`removal_waited_on`].
+    ///
+    /// MUTATION: run `removal_waited_on`'s body without `enter_standalone_main` and the main
+    /// thread is `Unset` afterwards, and a second entry is taken rather than refused.
+    #[test]
+    fn the_menu_removal_process_waits_on_its_main_thread_as_a_worker() {
+        use bt_platform::admission::{Refused, Role, enter_standalone_main, role};
+        fn removes_nothing() -> MenuRemovalReport {
+            MenuRemovalReport {
+                line: format!("{:?}", role()),
+                exit_code: 0,
+            }
+        }
+        if !crate::tests::alone_in_a_process(
+            "explorer_menu::tests::the_menu_removal_process_waits_on_its_main_thread_as_a_worker",
+            b"",
+        ) {
+            return;
+        }
+        let report = removal_waited_on(removes_nothing);
+        assert_eq!(report.line, r#"Worker("folio-explorer-removal")"#);
+        assert_eq!(report.exit_code, 0);
+        assert_eq!(role(), Role::Worker("folio-remove-explorer-menu"));
+        assert_eq!(
+            enter_standalone_main("again", |_ctx| ()),
+            Err(Refused {
+                door: "enter_standalone_main",
+                role: Role::Worker("folio-remove-explorer-menu"),
+                phase: None,
+            }),
+            "the process's one entry is spent"
+        );
+    }
+
+    /// RED (A1c, revision (c)6) — **the `--uninstall-cleanup` process waits for the Explorer
+    /// registrations on its main thread as a worker: the cleanup runs on
+    /// `Worker("folio-explorer-cleanup")`, the main thread is `Worker("folio-uninstall-cleanup")`
+    /// after it, and the process's one entry is spent.**
+    ///
+    /// As the removal's case above, for the uninstaller's door: run alone in a process of its own,
+    /// with a cleanup handed in that removes nothing and reports the role it ran under.
+    ///
+    /// MUTATION: run `cleanup_waited_on`'s body without `enter_standalone_main` and the main
+    /// thread is `Unset` afterwards, and a second entry is taken rather than refused.
+    #[test]
+    fn the_uninstall_cleanup_waits_on_its_main_thread_as_a_worker() {
+        use bt_platform::admission::{Refused, Role, enter_standalone_main, role};
+        fn cleans_nothing() -> Vec<(&'static str, CleanupRegistration)> {
+            vec![(
+                "probe",
+                CleanupRegistration::Refused(format!("{:?}", role())),
+            )]
+        }
+        if !crate::tests::alone_in_a_process(
+            "explorer_menu::tests::the_uninstall_cleanup_waits_on_its_main_thread_as_a_worker",
+            b"",
+        ) {
+            return;
+        }
+        let cleaned = cleanup_waited_on(cleans_nothing);
+        let [("probe", CleanupRegistration::Refused(ran_as))] = cleaned.as_slice() else {
+            panic!("the cleanup handed in is the one that answered");
+        };
+        assert_eq!(ran_as, r#"Worker("folio-explorer-cleanup")"#);
+        assert_eq!(role(), Role::Worker("folio-uninstall-cleanup"));
+        assert_eq!(
+            enter_standalone_main("again", |_ctx| ()),
+            Err(Refused {
+                door: "enter_standalone_main",
+                role: Role::Worker("folio-uninstall-cleanup"),
+                phase: None,
+            }),
+            "the process's one entry is spent"
         );
     }
 }

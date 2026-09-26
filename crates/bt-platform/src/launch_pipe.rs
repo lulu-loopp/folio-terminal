@@ -259,11 +259,13 @@ impl LaunchPipe {
         let (armed, first_word) = mpsc::channel::<io::Result<()>>();
         let listener = {
             let name = name.clone();
-            std::thread::Builder::new()
-                .name("folio-launch-endpoint".to_owned())
-                .spawn(move || {
+            crate::spawn_at_priority(
+                "folio-launch-endpoint",
+                crate::ThreadPriority::Normal,
+                move |_ctx| {
                     listen(&name, descriptor, stop_for_thread, &armed, &decide, &commit);
-                })?
+                },
+            )?
         };
         // The listener is running and shares the event, so the guard's job is over: from here the
         // handle is closed by whichever of the three arms below is taken, and by `Drop` on the arm

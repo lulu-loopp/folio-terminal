@@ -690,3 +690,40 @@ fn a_callback_on_a_thread_the_door_started_is_that_worker() {
     assert_eq!(inside, Role::Worker("bt-probe-callback"));
     assert_eq!(after, Role::Worker("bt-probe-callback"));
 }
+
+/// RED (A1c) — **the attention endpoint's listener is a worker the thread door started: the line it
+/// delivers is delivered on `Worker("folio-attention-endpoint")`.**
+///
+/// A1c's role witness for this crate, with the real producer end to end: a real endpoint started
+/// by its own `start`, a real client writing one line, and the sink — which runs on the listener
+/// thread — recording the role it runs under. Before A1c the listener was a bare
+/// `std::thread::Builder`, and every thread started that way is `Unset`: neither a worker nor the
+/// window, so a worker-only door would not compile there and nothing said what kind of thread
+/// was delivering Folio's input. The same holds for the directory watches, the launch endpoint and
+/// the video threads, which changed in the same way; this one is asked because it runs on every
+/// platform that has an endpoint.
+///
+/// MUTATION: start the listener in `AttentionPipe::start` with
+/// `std::thread::Builder::new().name("folio-attention-endpoint".to_owned()).spawn(move || …)`
+/// again and the role delivered is `Unset`.
+#[cfg(any(windows, unix))]
+#[test]
+fn the_attention_endpoint_delivers_on_a_worker_the_door_started() {
+    let directory =
+        std::env::temp_dir().join(format!("bt-platform-attention-role-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).expect("make the data directory");
+    let (sender, heard) = std::sync::mpsc::channel();
+    let endpoint = crate::attention_pipe::AttentionPipe::start(&directory, move |line| {
+        let _ = sender.send((line, role()));
+    })
+    .expect("open the attention endpoint");
+    crate::attention_pipe::send_line(endpoint.name(), "raise probe:Role cap=abc")
+        .expect("the endpoint took the line");
+    assert_eq!(
+        heard.recv_timeout(std::time::Duration::from_secs(5)).ok(),
+        Some((
+            "raise probe:Role cap=abc".to_owned(),
+            Role::Worker("folio-attention-endpoint")
+        ))
+    );
+}

@@ -150,6 +150,15 @@ the capability the door lends (`HandoffLane::start`'s `make_executor` takes
 `&WorkerCtx`), its contract adapter drives it the same way, and no row of
 `lane::EXPECTED_FAILURES` moved.
 
+0.4.6 ticket A1c repaid the thread door's half of D-16 and added no row. The
+eighteen bare spawns of `bt-app` and `bt-platform` start through the door at the
+band each had, so every thread those crates start is a `Worker` by its name, and
+the three door processes' main threads wait as workers through
+`enter_standalone_main`. D-16 stays open for the enumeration lane and the
+observation threads' band; no band changed (RULES 53's 0.4.7 ticket). It advanced
+D-2: every thread that runs Folio's code outside `bt-pty` and the resample pool
+now has a role.
+
 ## The ledger
 
 "§" alone means a section of `docs/ARCHITECTURE.md`. "Split prep" is
@@ -175,7 +184,7 @@ ledger's.
 | D-13 | the `bt-pty → bt-term` edge | K-12 · C-4 · split prep P21 | P21 | 0.4.6 | open |
 | D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | none yet | 0.4.6 | open |
 | D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27 | 0.4.7 — the first slice, ahead of the 0.5 composition layer | open (recorded debt) |
-| D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | none yet | 0.4.7 | open — rule stated |
+| D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | A1c (the thread door's bypass) | 0.4.7 | open — rule stated; the thread door's bypass (`folio-web-thumb` and five unnamed spawns) repaid by A1c in 0.4.6; the enumeration lane and the observation threads' band (`folio-web-thumb` among them, RULES 53's 0.4.7 ticket) remain |
 | D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | 0.4.7 — the first slice, with D-1's first slice | open |
 | D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | census-2 (the census note's revision (b)) | 0.4.6 — D-29…D-32 need a true census | open |
 | D-19 | MIGRATION-DEBT class P0 — the documentation generators (3 rows) | `docs/plans/MIGRATION-DEBT.tsv`; split prep §6 | P0 | 0.4.6 | open |
@@ -814,10 +823,13 @@ priority spawner with a name and a band — plus one lane-admission line in each
 manifest.
 
 **Version.** 0.4.4. **Status.** **partly discharged** — the rule and the gap are
-stated in `docs/ARCHITECTURE.md` §6 and `docs/RULES.md` row 52; the enumeration
-lane and the thumbnail thread's band are open.
+stated in `docs/ARCHITECTURE.md` §6 and `docs/RULES.md` row 52; the thread door's
+bypass is repaid (0.4.6, A1c: every thread `bt-app` and `bt-platform` start comes
+through the door, held by a source guard); the enumeration lane and the thumbnail
+thread's band are open, the band with the other observation threads' in RULES 53's
+0.4.7 ticket.
 
-**Ledger.** source: K-13 · ticket: none yet · version: 0.4.7 · status: open — rule stated.
+**Ledger.** source: K-13 · ticket: A1c (the thread door's bypass) · version: 0.4.7 · status: open — rule stated; the thread door's bypass repaid in 0.4.6.
 
 ---
 
@@ -890,8 +902,9 @@ finding is not lost.
   latch; the last report written wins (also the subject of D-3).
 - `psreadline-probe` and `copilot-version-probe` block on their child with no
   timeout; a hung probe thread is never reclaimed.
-- `folio-web-thumb` is spawned with a bare builder at inherited priority,
-  breaking the band rule, and **panics on spawn failure**.
+- `folio-web-thumb` stands at `Normal`, breaking the band rule (it goes
+  through the thread door since A1c, at the band it had), and **panics on
+  spawn failure**.
   `folio-video-canplay` holds the video stack's last unbounded join.
   `bt-dir-watch` has an unbounded receive in its start and an unbounded join in
   its drop.

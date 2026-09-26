@@ -438,9 +438,10 @@ impl DirWatch {
         // instead, which is this function's error and not a thread that dies in
         // private after the caller has been told it has a watcher.
         let (armed, listening) = std::sync::mpsc::channel::<Result<Stopper, std::io::Error>>();
-        let thread = std::thread::Builder::new()
-            .name("bt-dir-watch".to_owned())
-            .spawn(move || watch_loop(&root, depth, &armed, wake))?;
+        let thread =
+            crate::spawn_at_priority("bt-dir-watch", crate::ThreadPriority::Normal, move |_ctx| {
+                watch_loop(&root, depth, &armed, wake)
+            })?;
 
         // A `RecvError` is the thread ending without a word, which is a panic
         // between the spawn and the start — there is no return path there that

@@ -520,28 +520,52 @@ const STDIN_BUDGET: Duration = Duration::from_millis(200);
 /// The read itself happens on a thread of its own so that [`STDIN_BUDGET`] can be enforced over it.
 /// Nothing is joined and nothing needs to be: this process exits within a moment of the send below,
 /// and a thread still parked on a handle nobody wrote to goes with it.
+///
+/// **The waiting thread is a worker** (`bt_platform::admission`, design note 2026-09-26 revision
+/// (c)6): this process never has a window, and the thread that waits out [`STDIN_BUDGET`] is its
+/// main thread, which enters as [`PAYLOAD_ENTRY`] — once, which is all a process that exits after
+/// one send ever asks. The reader it waits on comes from the thread door, as every thread Folio
+/// starts does, at `Normal` (RULES 53's standalone-process exception).
 #[must_use]
 fn payload_on_stdin() -> Option<String> {
     use std::io::IsTerminal;
     if std::io::stdin().is_terminal() {
         return None;
     }
-    let (sender, payload) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        use std::io::Read;
-        let mut bytes = Vec::new();
-        let read = bt_platform::file_reads::Reader::new(
-            std::io::stdin().lock(),
-            bt_platform::file_reads::Lane::Attention,
-            None,
+    bt_platform::admission::enter_standalone_main(PAYLOAD_ENTRY, |_ctx| {
+        let (sender, payload) = std::sync::mpsc::channel();
+        bt_platform::spawn_at_priority(
+            "folio-attention-stdin",
+            bt_platform::ThreadPriority::Normal,
+            move |_ctx| {
+                use std::io::Read;
+                let mut bytes = Vec::new();
+                let read = bt_platform::file_reads::Reader::new(
+                    std::io::stdin().lock(),
+                    bt_platform::file_reads::Lane::Attention,
+                    None,
+                )
+                .take(MAX_PAYLOAD_BYTES)
+                .read_to_end(&mut bytes);
+                let _ = sender.send(read.ok().map(|_| bytes));
+            },
         )
-        .take(MAX_PAYLOAD_BYTES)
-        .read_to_end(&mut bytes);
-        let _ = sender.send(read.ok().map(|_| bytes));
-    });
-    let bytes = payload.recv_timeout(STDIN_BUDGET).ok()??;
-    String::from_utf8(bytes).ok()
+        // What `std::thread::spawn` said when the system refused a thread, kept word for word.
+        .expect("failed to spawn thread");
+        let bytes = payload.recv_timeout(STDIN_BUDGET).ok()??;
+        String::from_utf8(bytes).ok()
+    })
+    .expect(ENTERED_ONCE)
 }
+
+/// **The role the `attention` verb's main thread takes to wait for its payload**:
+/// `Worker("folio-attention")`, from `bt_platform::admission::enter_standalone_main`.
+const PAYLOAD_ENTRY: &str = "folio-attention";
+
+/// Why the entry cannot be refused here: the verb is answered in `fn main` above the argument
+/// parse, so this process's main thread has no role, and the verb reads standard input once.
+const ENTERED_ONCE: &str =
+    "the attention verb's main thread has no role before it waits for its payload, and waits once";
 
 fn variable(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
@@ -1203,6 +1227,40 @@ mod tests {
         assert!(
             names.windows(2).all(|pair| pair[0] < pair[1]),
             "sorted and unique"
+        );
+    }
+
+    /// RED (A1c, revision (c)6) — **the `attention` verb waits for its payload on its main thread
+    /// as a worker: the payload on standard input arrives whole, the main thread is
+    /// `Worker("folio-attention")` after it, and the process's one entry is spent.**
+    ///
+    /// The verb's waiting thread had no role (`Unset`) and its reader was a bare
+    /// `std::thread::spawn`. Run alone in a process of its own, because the entry is once per
+    /// process, with a real payload written to the child's real standard input and read by the
+    /// real [`payload_on_stdin`].
+    ///
+    /// MUTATION: run `payload_on_stdin`'s body without `enter_standalone_main` and the main
+    /// thread is `Unset` afterwards, and a second entry is taken rather than refused.
+    #[test]
+    fn the_attention_verb_waits_for_its_payload_on_its_main_thread_as_a_worker() {
+        use bt_platform::admission::{Refused, Role, enter_standalone_main, role};
+        const PAYLOAD: &str = r#"{"hook_event_name":"Stop"}"#;
+        if !crate::tests::alone_in_a_process(
+            "attention_wire::tests::the_attention_verb_waits_for_its_payload_on_its_main_thread_as_a_worker",
+            PAYLOAD.as_bytes(),
+        ) {
+            return;
+        }
+        assert_eq!(payload_on_stdin().as_deref(), Some(PAYLOAD));
+        assert_eq!(role(), Role::Worker("folio-attention"));
+        assert_eq!(
+            enter_standalone_main("again", |_ctx| ()),
+            Err(Refused {
+                door: "enter_standalone_main",
+                role: Role::Worker("folio-attention"),
+                phase: None,
+            }),
+            "the process's one entry is spent"
         );
     }
 }

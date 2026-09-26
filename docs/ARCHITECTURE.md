@@ -39,17 +39,18 @@ Counted on 2026-09-23 at `b6ca4329`, product code only: `#[cfg(test)]` and
 `build.rs` are left out. The thread rows were recounted on 2026-09-26 at
 `78a3699a` (the thread-door note, §5), and no spawn site changed up to `5effa23b`: one site more, `taskbar_lane`'s
 `taskbar-state` (ticket 62). One more since, found by A1b on `4a8a8f3f`: `install_channel::begin`'s
-`bt-install-channel` (ticket U-1), through the door. `crates/bt-platform/src/lib.rs` holds a NUL byte, so
+`bt-install-channel` (ticket U-1), through the door. A1c (on `f2b31952`) moved the eighteen bare sites of `bt-app`
+and `bt-platform` through the door without adding or removing one. `crates/bt-platform/src/lib.rs` holds a NUL byte, so
 ripgrep skips it as binary; search it with `grep -a`. To re-count, grep the patterns in the last column and
 drop the test items; a number that moves edits this table and the pictures.
 
 | what | count | pattern |
 |---|---|---|
 | thread-spawn sites | **47** — `bt-app` 31, `bt-platform` 12, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
-| through the thread door | **25**, every one in `bt-app`; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b) | `spawn_at_priority` |
-| bare spawns | **22**: in `bt-app`, `folio-web-thumb` and five unnamed (`explorer_menu` ×4, `attention_wire::payload_on_stdin`); in `bt-platform`, twelve named `Builder`s (the two endpoints and the directory watch on each platform, six video threads); in `bt-pty`, the reader, the writer, the dump publisher (unnamed) and `pty-retirement` | as above |
-| of those, in a door process rather than the window process | **3**: `explorer_menu::remove_from_explorer_menu`, `explorer_menu::cleanup_registrations`, `attention_wire::payload_on_stdin` | — |
-| named sites / distinct names | **39 / 34**, besides the pool | the first argument, or `.name(…)` |
+| through the thread door | **43** — `bt-app` 31, `bt-platform` 12; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c). A source guard holds both crates to it (`tests::every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door`) | `spawn_at_priority` |
+| bare spawns | **4**, all in `bt-pty` and `Unset` by design: the reader, the writer, the dump publisher (unnamed) and `pty-retirement` | `thread::spawn\(`, `thread::Builder::new\(\)` |
+| of those through the door, in a door process rather than the window process | **3**: `folio-attention-stdin` (`attention_wire::payload_on_stdin`), `folio-explorer-removal` (`explorer_menu::remove_from_explorer_menu`), `folio-explorer-cleanup` (`explorer_menu::cleanup_registrations`); each process's main thread waits for its thread as a worker, entered once through `enter_standalone_main` (`folio-attention`, `folio-remove-explorer-menu`, `folio-uninstall-cleanup`) | `enter_standalone_main\(` |
+| named sites / distinct names | **44 / 39**, besides the pool | the first argument, or `.name(…)` |
 | `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
 | channel constructions | **30** — 26 `mpsc::channel`, 4 `mpsc::sync_channel`; `bt-app` 24, `bt-platform` 6 — and **6** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 1); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
 | `AppEvent` variants | **30** (U-3 added `InstallChannelRead`, §5) | `enum AppEvent` in `main.rs` |
@@ -400,8 +401,9 @@ does not have to find it later.
 
 ### 5.1 The seven lanes
 
-Forty-six production thread-spawn sites exist across three crates (`bt-app`
-30, `bt-platform` 12, `bt-pty` 4), plus one lazy rayon pool in `bt-term` (§0.1). **The thread count is not the defect; the absence of a contract
+Forty-seven production thread-spawn sites exist across three crates (`bt-app`
+31, `bt-platform` 12, `bt-pty` 4), plus one lazy rayon pool in `bt-term` (§0.1).
+All but `bt-pty`'s four go through the thread door (0.4.6, A1c). **The thread count is not the defect; the absence of a contract
 is.** `MathWorker::spawn` starts path verification and image scaling as well as
 math and returns all three through one `MathWorkerResult` — a historical hosting
 decision wearing a subsystem's name. `Runtime::apply_psreadline` performs an
@@ -436,8 +438,14 @@ the closure, because Windows hands a new thread `Normal` whatever its creator
 stands in; the band call, `set_current_thread_priority`, is the one `unsafe`
 boundary for thread priority, and the door itself lives in `admission`, which
 forbids `unsafe`.
-MMCSS is explicitly refused. `folio-web-thumb` breaks the rule with a bare
-`Builder` at inherited `Normal`, beside the loop, and nothing goes red.
+MMCSS is explicitly refused. Some threads stay at `Normal` by RULES 53's
+exceptions (playback, first-frame extraction, the two ingress endpoints,
+clipboard saves, the three standalone-process workers). The observation and
+probe threads that also start at `Normal` today — `bt-dir-watch`,
+`folio-video-prewarm`, `folio-video-canplay`, `folio-web-thumb`,
+`folio-explorer-probe` and `folio-explorer-deploy` — break the rule. They go
+through the door since A1c, at the band they had, and move to the workers' band
+in a 0.4.7 ticket.
 
 **Which kind of thread this is** (0.4.6 ticket A1a;
 `docs/plans/design/thread-door-2026-09-26.md`, whose revisions (b)–(e) rule over
@@ -454,7 +462,8 @@ callbacks — whose `CallbackScope` names a thread nobody named for the callback
 length and gives it back, even on unwind, and leaves a thread that has a role as
 it is (AppKit and the message pump deliver most callbacks on the window thread,
 which is `Window` there); `enter_standalone_main`, once per process, for a door
-process's main thread (its callers come with A1c); and the thread door,
+process's main thread (its three callers, since A1c: the `attention` verb's
+payload wait and the two Explorer-menu removals); and the thread door,
 `spawn_at_priority`, which since A1b lives in `admission`: inside the new
 thread it sets the band, then the role `Worker(name)`, then builds a `WorkerCtx`
 on the thread's own stack and lends it to the body — private fields, `!Send`,
@@ -462,10 +471,11 @@ on the thread's own stack and lends it to the body — private fields, `!Send`,
 `enter_standalone_main`. **A worker-only door takes `&WorkerCtx`**, so code with
 none — the window thread, a callback, a thread started outside the door — does
 not compile against it; the one such door today is the hand-off's
-(`ShellThread::enter`, below §6). **The threads started outside the door are
-still `Unset`** (A1c converts `bt-platform`'s and `bt-app`'s; `bt-pty`'s four
-and `bt-term`'s resample pool stay `Unset` by design), and `Unset` is never a
-worker and never the window. **The window
+(`ShellThread::enter`, below §6). **Every thread `bt-app` and `bt-platform`
+start comes from the door** (A1c), in the window process and in the door
+processes alike, so each of them is a `Worker` by its name. The only threads
+left outside it are `bt-pty`'s four and `bt-term`'s resample pool, which stay
+`Unset` by design, and `Unset` is never a worker and never the window. **The window
 thread's phase** — `Starting`, `Running`, `Exiting` — has four writers at pinned
 places: `enter_window_thread` (`Starting`); `loop_running` in
 `FolioApp::new_events` on `StartCause::Init`; `exiting` at the head of
@@ -723,7 +733,7 @@ happen" has one answer and a guard can hold it.
 | constructing a child process | `bt_platform::quiet_command_named` (and `quiet_command`) — absolute path resolved by `handoff::program_on_path` | pinned as the only `Command` construction |
 | handing something to the operating system | `bt_platform::handoff` — the only `ShellExecuteW` and `NSWorkspace` sites in the workspace; the seven verbs are private to it and reached only through `ShellThread::hand_over`, and a `ShellThread` is entered only with the `WorkerCtx` the thread door lends (A1b), so a hand-off can happen only on a thread the door started | its own module, one function per verb; `compile_fail` doctests on `hand_over` name each verb by both spellings; `handoff_lane::no_handoff_runs_on_the_window_thread` |
 | reaching the network | `bt_platform::http` — `https_get` (one `GET` into memory: the update check) and `https_download` (one `GET` streamed to a file under a ceiling, U-7), over the operating system's own stack (WinHTTP, `NSURLSession`), `https` only, no caller headers; the download's ceiling, temporary file, deadlines and stage vocabulary are `bt_platform::https_download`'s, shared by both real arms | `update_check_transport_tests` holds the three arms to one signature per door and one set of request types |
-| starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` (one definition, in `admission`) — a `&'static` name and a priority band; the new thread is `Worker(name)` (§5.1) and its body is `FnOnce(&WorkerCtx) -> T`, lent the capability a worker-only door takes (0.4.6, A1b) | every call site is in `bt-app`, so the name is the thread; `admission`'s tests start their workers through it |
+| starting a thread | `bt_platform::spawn_at_priority` / `spawn_at_priority_with_stack` (one definition, in `admission`) — a `&'static` name and a priority band; the new thread is `Worker(name)` (§5.1) and its body is `FnOnce(&WorkerCtx) -> T`, lent the capability a worker-only door takes (0.4.6, A1b) | `tests::every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` finds `std::thread` spawning named in `bt-app`'s and `bt-platform`'s product code only inside the door (A1c; A1e's guard absorbs it); `admission`'s tests start their workers through it |
 | waiting on the window thread (an owner-thread wait) | `bt_platform::admission::admitted` — a `WaitToken` for one door type of `admission::doors`, admitted only on the window thread and in that door's phases (§5.1) | the registry `window_waits.tsv`, held equal to the door types by `hang_watch::window_waits_tests`; no door takes the token until A1d |
 | creating a native window outside the framework | `bt_platform::SpareParent` / `spare_parent` — the spare web controller's never-shown `WS_POPUP` parent (ticket 60); dropped only on a pumping thread, left to process exit by an orderly stop | the one `CreateWindowExW` in product code, pinned by `web_spare::spare_wiring_tests::the_spare_parent_is_the_one_window_product_code_creates` |
 | taking a native window's messages away from the framework | `bt_platform::let_the_system_translate_touch` — the touch subclass that hands `WM_TOUCH` and the three `WM_POINTER*` to `DefWindowProc` | a message table pinned by test; called once per window, from the two `create_window` sites |
@@ -747,13 +757,17 @@ no lane, no door and no guard, and nothing rules whether it should. Until that
 is decided, the ledger's totals are not an account of what this process reads
 from disk, and the next enumeration-shaped effect will land the same way.
 
-`folio-web-thumb` is the matching bypass of the thread door: a bare
-`Builder::new().name(...)` at inherited `Normal` priority. It is not the only
-one in `bt-app`: five unnamed `std::thread::spawn` sites also skip
-`spawn_at_priority` — `explorer_menu`'s `begin_probe` and `run_request` in the
-window process, and `remove_from_explorer_menu`, `cleanup_registrations` and
-`attention_wire::payload_on_stdin` in door processes (§0.1). Whether a door
-process's thread owes the door is not ruled.
+**The thread door's bypass is repaid** (0.4.6, A1c). `folio-web-thumb` and the
+five unnamed `std::thread::spawn` sites that skipped `spawn_at_priority` now
+start through it, and so do `bt-platform`'s twelve. That covers `explorer_menu`'s
+`begin_probe` and `run_request` in the window process, and
+`remove_from_explorer_menu`, `cleanup_registrations` and
+`attention_wire::payload_on_stdin` in door processes. **A door process's threads
+owe the door** (the thread-door note's revision (b)5): their effects are
+first-party effects every process must show. Each door process's main thread
+waits for its thread as a worker, entered once through `enter_standalone_main`.
+Each thread kept its band, so the ones RULES 53 does not except still stand at
+`Normal` until its 0.4.7 ticket.
 
 ---
 

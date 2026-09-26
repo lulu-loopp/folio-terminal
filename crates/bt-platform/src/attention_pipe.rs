@@ -459,9 +459,10 @@ impl AttentionPipe {
         let listener = {
             let name = name.clone();
             let counts = Arc::clone(&counts);
-            std::thread::Builder::new()
-                .name("folio-attention-endpoint".to_owned())
-                .spawn(move || {
+            crate::spawn_at_priority(
+                "folio-attention-endpoint",
+                crate::ThreadPriority::Normal,
+                move |_ctx| {
                     listen(
                         &name,
                         descriptor,
@@ -470,7 +471,8 @@ impl AttentionPipe {
                         &armed,
                         &deliver,
                     )
-                })?
+                },
+            )?
         };
         // The listener is running and shares the event, so the guard's job is over: from here the
         // handle is closed by whichever of the three arms below is taken, and by `Drop` on the arm

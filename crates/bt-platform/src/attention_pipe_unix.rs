@@ -341,11 +341,13 @@ impl AttentionPipe {
         let counts = Arc::new(Mutex::new(PipeCounts::default()));
         let started = {
             let counts = Arc::clone(&counts);
-            std::thread::Builder::new()
-                .name("folio-attention-endpoint".to_owned())
-                .spawn(move || {
+            crate::spawn_at_priority(
+                "folio-attention-endpoint",
+                crate::ThreadPriority::Normal,
+                move |_ctx| {
                     listen(&listener, wake, &counts, &deliver);
-                })
+                },
+            )
         };
         match started {
             Ok(listener) => Ok(Self {
