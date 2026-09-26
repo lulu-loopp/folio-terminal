@@ -35,6 +35,11 @@ All notable changes to Folio are recorded here. The format follows
 - Pasting a picture works with every kind of bitmap the clipboard can hold,
   including browser and screenshot-tool copies and long screenshots.
 
+### Changed
+
+- The right-click menu is offered on by default only in installs that can
+  remove it again.
+
 ### Internal
 
 - Folio can download a release file on its own, for the coming in-app update:

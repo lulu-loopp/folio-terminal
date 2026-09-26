@@ -42,8 +42,11 @@
 //! * neither, and the folder is this account's → [`Channel::Ours`];
 //! * neither, and it is another account's → [`Channel::NotOurs`].
 //!
-//! Nothing reads the fact yet but the one `diagnostics.log` line at start: the
-//! Explorer default (U-3) and the updater's eligibility are later tickets.
+//! Two readers today: the one `diagnostics.log` line at start, and the
+//! first-run card, whose Explorer row arrives on exactly where the fact is
+//! `Managed { uninstall_hook: true, .. }` (U-3, ruling 2026-09-20). The card
+//! reads it through [`channel`] and hears it land through [`install_wake`].
+//! The updater's eligibility is a later ticket.
 
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
@@ -442,12 +445,41 @@ impl Fact {
 /// The fact, once derived. Written by [`begin`]'s worker and nobody else.
 static FACT: OnceLock<Fact> = OnceLock::new();
 
-/// **Derive the fact once, off the window thread**, and write its line.
+/// How the worker asks the event loop for a turn once the fact has landed.
+static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
+
+/// **How this copy was installed, or `None` while the worker is still out.**
 ///
-/// A kernel that will not give out a thread is a launch with no channel line,
-/// and nothing reads the fact yet.
+/// The one accessor. A reader that cannot wait reads `None` as
+/// [`Channel::Unknown`], which is never eligible for anything.
+#[must_use]
+pub fn channel() -> Option<Channel> {
+    FACT.get().map(|fact| fact.channel)
+}
+
+/// Install the event loop's wake, before [`begin`]: the first-run card waits a
+/// turn for the fact, and a window with a modal due and nothing else happening
+/// gets no turn unless the worker asks for one.
+pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
+    let _ = WAKE.set(Box::new(wake));
+}
+
+fn wake() {
+    if let Some(wake) = WAKE.get() {
+        wake();
+    }
+}
+
+/// **Derive the fact once, off the window thread**, write its line, and wake
+/// the loop.
+///
+/// The wake comes after the fact is published, never before: a turn that raced
+/// the `set` would read a fact that is still missing. A kernel that will not
+/// give out a thread is a launch with no channel line and no fact; the loop is
+/// woken all the same, so a card waiting for the fact reads it as unknown on
+/// the next turn instead of waiting for an unrelated event.
 pub fn begin() {
-    let _ = bt_platform::spawn_at_priority(
+    let spawned = bt_platform::spawn_at_priority(
         "bt-install-channel",
         bt_platform::ThreadPriority::BelowNormal,
         |_ctx| {
@@ -459,8 +491,12 @@ pub fn begin() {
                 )
             });
             crate::diagnostics::note(&fact.line());
+            wake();
         },
     );
+    if spawned.is_err() {
+        wake();
+    }
 }
 
 #[cfg(test)]
