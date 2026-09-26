@@ -1,0 +1,89 @@
+# The unknown sites of the ownership census (census-1): each write-shaped site
+# the rules could not resolve, with its item and the reason. Shrink-only: the
+# gate refuses a site this list does not carry. A resolved site's row is
+# removed by scripts/generate-ownership-census.ps1; a row is added by hand
+# only, and only with a reason.
+site	module	function	reason	sites
+?.attention	crate	settle_attention	call `claim_episode` through a receiver that does not resolve: a closure parameter without a type	1
+?.attention_clock	crate	attention_ledger_deadline	call `deadline` through a receiver that does not resolve: what `flat_map` returns	1
+?.files	crate::git_graph	build	call `get` through a receiver that does not resolve: what `as_ref` returns: the value of a block, a branch or a loop	1
+?.files	crate::git_graph	build	call `len` through a receiver that does not resolve: a closure parameter without a type	1
+?.files	crate::runtime::files	Runtime::ask_files_dir	call `clone` through a receiver that does not resolve: a closure parameter without a type	1
+?.files	crate::runtime::floats	Runtime::expand_float_commit	call `as_deref` through a receiver that does not resolve: what `and_then` returns	1
+?.files	crate::runtime::floats	Runtime::expand_float_commit	call `clone_from` through a receiver that does not resolve: what `and_then` returns	1
+?.files	crate::runtime::floats	Runtime::reveal_float_root	call `clone` through a receiver that does not resolve: a closure parameter without a type	1
+?.files	crate::runtime::git	Runtime::press_float_git_row	assign through a receiver that does not resolve: what `and_then` returns	1
+?.files	crate::runtime::git	Runtime::push_float_git_page	call `clone` through a receiver that does not resolve: a closure parameter without a type	1
+?.files	crate::runtime::git	Runtime::select_float_git_row	assign through a receiver that does not resolve: what `and_then` returns	1
+?.files	crate::seats	rail_chrome	call `filter` through a receiver that does not resolve: the value of a block, a branch or a loop	1
+?.files	crate::shell_integration::profile_runtime	candidates	call `push` through a receiver that does not resolve: `files` is declared by some of the types of that name and not by others	3
+?.files	crate::shell_integration::profile_runtime	operate_with	call `extend` through a receiver that does not resolve: `discover` is not a function the workspace declares	2
+?.git_scroll	crate::runtime::git	Runtime::push_float_git_page	assign through a receiver that does not resolve: what `and_then` returns	1
+?.git_scroll	crate::runtime::git	Runtime::scroll_float_git_page	assign through a receiver that does not resolve: what `and_then` returns	1
+?.ime_active	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	assign through a receiver that does not resolve: `hang_watch::during`	1
+?.ime_cursor	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call `reset` through a receiver that does not resolve: `hang_watch::during`	1
+?.integration	crate::profiles	compose_on	assign through a receiver that does not resolve: the value of a block, a branch or a loop	1
+?.key_hint	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call `hide` through a receiver that does not resolve: `hang_watch::during`	1
+?.leaving	crate	FolioApp::windows_left_after	call `is_none` through a receiver that does not resolve: a closure parameter without a type	1
+?.modifiers	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	assign through a receiver that does not resolve: `hang_watch::during`	1
+?.modifiers_held	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	assign through a receiver that does not resolve: `hang_watch::during`	1
+?.pane_press	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	assign through a receiver that does not resolve: `hang_watch::during`	1
+?.pinned	crate::profiles	apply_pins	assign through a receiver that does not resolve: the value of a block, a branch or a loop	1
+?.preview_panes	crate::runtime::panes	Runtime::seats_wearing_a_play_button	call `get` through a receiver that does not resolve: the value of a block, a branch or a loop	1
+?.preview_panes	crate::runtime::preview	Runtime::request_revived_previews	call `iter` through a receiver that does not resolve: a closure parameter without a type	1
+?.profile	crate::runtime::profiles	Runtime::add_to_profile	call `display` through a receiver that does not resolve: `shell_integration::install_into_profile`	2
+?.program	crate::profiles	compose_on	assign through a receiver that does not resolve: the value of a block, a branch or a loop	1
+?.pty	crate	create_tab_state	call `as_ref` through a receiver that does not resolve: a type argument that is not written	1
+?.quake	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call `is_showing` through a receiver that does not resolve: `hang_watch::during`	2
+?.quake	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call `note_blur` through a receiver that does not resolve: `hang_watch::during`	1
+?.quake	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call `press` through a receiver that does not resolve: `hang_watch::during`	1
+?.renderer	crate	<TheDeviceAndItsWindows as LostDevice>::rebuild	a `&mut` lend through a receiver that does not resolve: a closure parameter without a type	1
+?.row_press	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	assign through a receiver that does not resolve: `hang_watch::during`	1
+?.seats	crate::runtime::panes	Runtime::seats_wearing_a_play_button	call `preview_seats` through a receiver that does not resolve: the value of a block, a branch or a loop	1
+?.session	crate	Runtime::root_choices	call `working_directory` through a receiver that does not resolve: what `filter_map` returns	1
+?.session	crate	Runtime::trigger_root	call `working_directory` through a receiver that does not resolve: a closure parameter without a type	1
+?.session	crate::runtime::frame	Runtime::turn	call `resize_finish_deadline` through a receiver that does not resolve: what `flat_map` returns	1
+?.session	crate::runtime::frame	Runtime::turn	call `synchronized_update_deadline` through a receiver that does not resolve: what `flat_map` returns	1
+?.session	crate::runtime::preview	Runtime::advance_strip_animation	call `status` through a receiver that does not resolve: what `flat_map` returns	1
+?.sessions	crate	Runtime::trigger_root	call `get` through a receiver that does not resolve: a closure parameter without a type	1
+?.settings_store	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call `loaded` through a receiver that does not resolve: `hang_watch::during`	1
+?.tab_clicks	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call `interrupt` through a receiver that does not resolve: `hang_watch::during`	1
+?.tab_press	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	assign through a receiver that does not resolve: `hang_watch::during`	1
+?.tabs	crate	FolioApp::settle_restore_answer	call `iter` through a receiver that does not resolve: iterating _	1
+?.tabs	crate	Runtime::trigger_rect	call `get` through a receiver that does not resolve: `seats::tab_strip_geometry`	1
+?.tabs	crate::runtime::peek	Runtime::layout_peek_layer	call `get` through a receiver that does not resolve: `seats::tab_strip_geometry`	1
+?.tabs	crate::runtime::tabs	Runtime::measure_open_rename	call `get` through a receiver that does not resolve: `seats::tab_strip_geometry`	1
+?.tabs	crate::runtime::tabs	Runtime::measure_open_rename	call `get` through a receiver that does not resolve: a closure parameter without a type	1
+?.tabs	crate::runtime::windows	Runtime::open_window	call `clone` through a receiver that does not resolve: a closure parameter without a type	1
+?.taskbar_flash	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	assign through a receiver that does not resolve: `hang_watch::during`	1
+?.title	crate::runtime::preview	Runtime::dress_preview_head	call `clone` through a receiver that does not resolve: what `map` returns	1
+?.title	crate::seats	rail_chrome	call `clone` through a receiver that does not resolve: iterating _	1
+?.title	crate::seats	window_tab_strip	call `clone` through a receiver that does not resolve: iterating _	2
+?.title	crate::shortcuts	Shortcuts::editor_rows	call `text` through a receiver that does not resolve: a closure parameter without a type	1
+?.web	crate	FolioApp::about_to_wait_inner	call `is_empty` through a receiver that does not resolve: a closure parameter without a type	1
+?.window	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	assign through a receiver that does not resolve: `hang_watch::during`	7
+?.window	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call `hide` through a receiver that does not resolve: `hang_watch::during`	1
+?.window	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call `interrupt` through a receiver that does not resolve: `hang_watch::during`	1
+?.window	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call `reset` through a receiver that does not resolve: `hang_watch::during`	1
+?.window	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call:mem::take through a receiver that does not resolve: `hang_watch::during`	1
+?.window_close_requested	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call:mem::take through a receiver that does not resolve: `hang_watch::during`	1
+WindowRuntime.modifiers	crate	Runtime::settings_field_key	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::git	Runtime::git_menu_key	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::git	Runtime::graph_search_key	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::keyboard	Runtime::keyboard_input	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::mouse	Runtime::mouse_wheel	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	3
+WindowRuntime.modifiers	crate::runtime::mouse	Runtime::queue_wheel	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::mouse	Runtime::wheel_columns	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::palette	Runtime::palette_key	call `alt_key`: `ModifiersState::alt_key`, a type outside the workspace	2
+WindowRuntime.modifiers	crate::runtime::palette	Runtime::palette_key	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	4
+WindowRuntime.modifiers	crate::runtime::preview	Runtime::press_preview_body	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::preview	Runtime::press_preview_text	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::preview	Runtime::preview_browse_key	call `alt_key`: `ModifiersState::alt_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::preview	Runtime::preview_browse_key	call `control_key`: `ModifiersState::control_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::preview	Runtime::preview_browse_key	call `super_key`: `ModifiersState::super_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::preview	Runtime::scroll_preview_body	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::search	Runtime::search_field_key	call `alt_key`: `ModifiersState::alt_key`, a type outside the workspace	1
+WindowRuntime.modifiers	crate::runtime::search	Runtime::search_field_key	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
+WindowRuntime.modifiers_held	crate::runtime::mouse	Runtime::mouse_wheel	call `alt_key`: `ModifiersState::alt_key`, a type outside the workspace	1
+WindowRuntime.modifiers_held	crate::runtime::mouse	Runtime::mouse_wheel	call `control_key`: `ModifiersState::control_key`, a type outside the workspace	1
+WindowRuntime.modifiers_held	crate::runtime::mouse	Runtime::mouse_wheel	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1

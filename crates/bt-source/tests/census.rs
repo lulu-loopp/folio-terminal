@@ -19,18 +19,22 @@
 //! `scripts/generate-ownership-census.ps1` copies over the first three. The
 //! unknown list is rendered for copying only when it has not grown.
 
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use bt_source::{
-    Column, Committed, CommittedFile, Difference, DiskScope, FieldCensus, Index, SiteRow, TargetId,
-    TargetKind, TargetRoot, Universe, Vendor, report,
+    Column, Committed, CommittedFile, Difference, DiskScope, FieldCensus, Index, ItemKind, SiteRow,
+    TargetId, TargetKind, TargetRoot, Universe, Vendor, Workspace, is_vendored, report, universes,
 };
 
 /// The census's four structs, as the note's §1 names them. `Runtime` is not
 /// one of them: its two fields are the way to `App` and `WindowRuntime`, and
 /// its `Deref` target is `TabState`.
 const STRUCTS: [&str; 4] = ["App", "WindowRuntime", "TabState", "LeafSession"];
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+}
 
 // ── the fixtures ──────────────────────────────────────────────────────────
 
@@ -462,4 +466,150 @@ fn the_gate_refuses_a_missing_annotation_and_a_stale_one() {
             "App.gpu has proven writers in more than one module and no annotation row",
         ]
     );
+}
+
+// ── bt-app ────────────────────────────────────────────────────────────────
+
+/// The universe the rules stand on: every workspace member but this crate,
+/// each package's own sources, vendored ones included as what they are.
+fn declarations() -> Vec<Arc<Index>> {
+    let workspace = Workspace::read(&workspace_root()).expect("this workspace");
+    workspace
+        .packages()
+        .iter()
+        .filter(|package| package.name() != "bt-source")
+        .map(|package| {
+            let vendor = if is_vendored(package.directory()) {
+                Vendor::Included
+            } else {
+                Vendor::Excluded
+            };
+            let universe = universes::crate_sources(package, vendor)
+                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+            Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
+        })
+        .collect()
+}
+
+fn the_census() -> &'static FieldCensus {
+    static CENSUS: OnceLock<FieldCensus> = OnceLock::new();
+    CENSUS.get_or_init(|| {
+        let held = declarations();
+        let indexes: Vec<&Index> = held.iter().map(|index| &**index).collect();
+        FieldCensus::take(Index::of_package("bt-app"), &STRUCTS, &indexes)
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    })
+}
+
+/// The committed census, as text; a file that is not there is empty.
+fn committed_census() -> Committed {
+    let design = workspace_root().join("docs").join("plans").join("design");
+    let text = |name: &str| {
+        std::fs::read_to_string(design.join(format!("ownership-census-{name}.tsv")))
+            .unwrap_or_default()
+    };
+    Committed {
+        inventory: text("inventory"),
+        sites: text("sites"),
+        unknowns: text("unknowns"),
+        annotations: text("annotations"),
+    }
+}
+
+/// Leave the renderings where the copier looks for them.
+fn leave_renderings(census: &FieldCensus, committed: &Committed) {
+    let out = workspace_root().join("target").join("ownership-census");
+    std::fs::create_dir_all(&out).expect("target is writable");
+    let unknowns = out.join("ownership-census-unknowns.tsv");
+    let _ = std::fs::remove_file(&unknowns);
+    std::fs::write(
+        out.join("ownership-census-inventory.tsv"),
+        census.render_inventory(),
+    )
+    .expect("written");
+    std::fs::write(
+        out.join("ownership-census-sites.tsv"),
+        census.render_sites(),
+    )
+    .expect("written");
+    let grown_or_first = if committed.unknowns.is_empty() {
+        Some(census.render_unknowns())
+    } else {
+        census.render_unknowns_if_not_grown(&committed.unknowns)
+    };
+    if let Some(text) = grown_or_first {
+        std::fs::write(unknowns, text).expect("written");
+    }
+}
+
+/// RED (census-1) — **the committed census is what the code says**: the
+/// inventory and the site rows equal the committed files, the unknowns are a
+/// subset of the committed list, and every proven multi-writer fact is
+/// annotated.
+///
+/// This is the gate. A change that adds a writer, moves one, resolves an
+/// unknown or makes a fact single-writer changes a committed row, and the
+/// ticket that makes the change says so in the diff — which is what the note's
+/// §6 A asked for and what (b)2 §6 bounds to what can be proven.
+///
+/// MUTATION: add `self.window.title = String::new();` to any `Runtime` method
+/// in `bt-app` and this names the new site row.
+#[test]
+fn the_committed_census_is_what_the_code_says() {
+    let census = the_census();
+    let committed = committed_census();
+    leave_renderings(census, &committed);
+    assert!(
+        census.unparsed().is_empty(),
+        "every declaration parses: {:#?}",
+        census.unparsed()
+    );
+    let differences = census.judge(&committed);
+    assert!(
+        differences.is_empty(),
+        "{} difference(s) between bt-app and the committed census under docs/plans/design/ — \
+         run scripts/generate-ownership-census.ps1 to bring the inventory and the site rows up \
+         to date, and annotate or remove what it names by hand:\n{}",
+        differences.len(),
+        differences
+            .iter()
+            .map(|difference| format!("  {difference}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+}
+
+/// RED (census-1) — **every field of the four structs has an inventory row**,
+/// counted apart from the query by the index's own field identities.
+///
+/// The census note's figure was 436 at `f7826bd4`. The number is not pinned
+/// here, because a field added or removed is a row of the committed inventory
+/// already; what is pinned is that the query's facts are exactly the fields
+/// the index says the four declare, so no field is left out of the gate.
+///
+/// MUTATION: skip a struct's `cfg`-gated fields when the query reads the
+/// declarations, and the two lists differ by those fields.
+#[test]
+fn every_field_of_the_four_structs_has_an_inventory_row() {
+    let census = the_census();
+    let index = Index::of_package("bt-app");
+    let mut declared: Vec<String> = index
+        .items()
+        .iter()
+        .filter(|item| item.kind() == ItemKind::Field)
+        .filter(|item| {
+            item.type_owner()
+                .is_some_and(|owner| STRUCTS.contains(&owner))
+        })
+        .map(|item| format!("{}.{}", item.type_owner().unwrap_or_default(), item.name()))
+        .collect();
+    declared.sort();
+    declared.dedup();
+    let mut facts: Vec<String> = census
+        .facts()
+        .iter()
+        .map(|fact| fact.fact.clone())
+        .collect();
+    facts.sort();
+    assert_eq!(facts, declared);
 }

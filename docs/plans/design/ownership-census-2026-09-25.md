@@ -625,3 +625,16 @@ No row is repaid. (c′) None. (d) No.
 2. The restore card is a full-window gate: while it is up it owns the keyboard and the pointer (0.4.5 ticket 57 implements the keyboard and the pointer together).
 3. The first-run card stays a blocking card; the PowerShell integration invitation becomes a notification.
 4. Worker deaths and refused hand-offs are told as toasts, not only on the status line (they are also logged).
+
+## Revision 2026-09-26 (c): the inventory is the query's output (census-1)
+
+Ticket census-1 built revision (b)2's query. **§2's table is not rewritten; from this date the inventory is not this note's table but the output of `bt_source::FieldCensus`**, committed beside this note and held by `bt-source`'s `census` test:
+
+- `ownership-census-inventory.tsv` — one row per field of `App`, `WindowRuntime`, `TabState` and `LeafSession` (443 at `3e657f9e`; §0's 436 was `f7826bd4`), with `proven_writers` 0, 1 or n (distinct modules), the function counts of each column, the unknown sites that name the field, and `complete` / `incomplete`;
+- `ownership-census-sites.tsv` — fact × column × module × function, where the column is `write` (proven), `access` (a lend, `get_mut`, `iter_mut`, an index in a mutable place, a `ref mut` pattern, a method that returns `&mut`), `membership` (a hub's contents) or `inner` (`Cell`, `RefCell`, atomics, locks), and the module is the declaring item's module path;
+- `ownership-census-unknowns.tsv` — each write-shaped site the rules could not resolve, with its item and reason; shrink-only;
+- `ownership-census-annotations.tsv` — the class and proposed sole writer of every proven multi-writer fact, hand-edited, seeded from §2 and split per (b)4.
+
+The rules are (b)2 §3's, stated in `crates/bt-source/src/census.rs` and its `types` module; `scripts/generate-ownership-census.ps1` copies the rendering and reads no source. **§2's triggers and effects columns stay what they were: a snapshot dated 2026-09-25**, not in the gate ((b)2 §8). The dated TSV beside this note is that snapshot's data and is not regenerated.
+
+What the first run says, at `3e657f9e`: 154 fields have proven writers in more than one module (against §0's 170 write-shaped ones); the 29 of the 170 that are not among them are written by lending alone or in one module, and 13 fields not in §2 are (`App.{keybindings_store, pins_store, recent_folders, web_spare, web_warmup}`, `WindowRuntime.{chrome_marks, focus_mode, focus_reveal, ime_cursor, preview_menu, profile_menu, restore_prompt, root_menu}`: most through a method `&mut self` on the field's own type that the name rule of §1 dropped, as it dropped `dirty_gate.open`). `WindowRuntime.dirty_gate` is now lent to `raise_dirty_gate_over` (ticket 58, `fa033ddb`), so its opener is an access row, not a write. The counts per status and the unknowns by reason are in census-1's report.
