@@ -1073,61 +1073,67 @@ pub fn begin_probe() {
         remember(PackageState::Unsupported);
         return;
     }
-    std::thread::spawn(|| {
-        let state = read_state();
-        // **The repair takes the same latch a press does** (R2-20). It is a
-        // deployment, exactly like the one behind the switch, and until this line
-        // existed the two could run at once: a reader who pressed `Off` in the
-        // first second of a launch had `RemovePackageAsync` and `AddPackageAsync`
-        // in flight against one package name, and whichever finished last decided
-        // what the machine ended up with — while the row was drawn from whichever
-        // `read_state` happened to run after that.
-        //
-        // The press wins ties by construction: it takes the latch on the window
-        // thread the instant it is pressed, and this runs seconds later on a
-        // thread of its own. A repair that finds the latch taken does nothing at
-        // all, which is right — the reader is in the middle of saying what they
-        // want the machine to be, and a launch does not argue with that.
-        // Whether registering this folder would put this executable behind the
-        // menu item at all — see `reassert_wanted`.
-        let here_serves_us = std::env::current_exe()
-            .ok()
-            .and_then(|exe| exe.parent().map(package_exe_in))
-            .is_some_and(|exe| is_this_executable(&exe));
-        let repairing = reassert_wanted(
-            &state,
-            here_serves_us,
-            |exe| exe.is_file(),
-            is_this_executable,
-        ) && !BUSY.swap(true, Ordering::AcqRel);
-        if repairing
-            && let Some(package) = package_file()
-            && let Some(here) = package.parent()
-        {
-            let outcome = msix::register(&package, here);
-            match outcome {
-                Ok(()) => {
-                    REGISTERED_HERE.store(true, Ordering::Release);
-                    let state = read_state();
-                    remember(state.clone());
-                    finish_job(&state);
-                    wake();
-                    return;
-                }
-                Err(error) => {
-                    // Silent to the user, on `reassert`'s footing: the entry that
-                    // is there goes on being whatever it was, the next launch
-                    // tries again, and there is no window yet to put a card on.
-                    eprintln!("BT_EXPLORER_PACKAGE repair refused — {error}");
+    bt_platform::spawn_at_priority(
+        "folio-explorer-probe",
+        bt_platform::ThreadPriority::Normal,
+        |_ctx| {
+            let state = read_state();
+            // **The repair takes the same latch a press does** (R2-20). It is a
+            // deployment, exactly like the one behind the switch, and until this line
+            // existed the two could run at once: a reader who pressed `Off` in the
+            // first second of a launch had `RemovePackageAsync` and `AddPackageAsync`
+            // in flight against one package name, and whichever finished last decided
+            // what the machine ended up with — while the row was drawn from whichever
+            // `read_state` happened to run after that.
+            //
+            // The press wins ties by construction: it takes the latch on the window
+            // thread the instant it is pressed, and this runs seconds later on a
+            // thread of its own. A repair that finds the latch taken does nothing at
+            // all, which is right — the reader is in the middle of saying what they
+            // want the machine to be, and a launch does not argue with that.
+            // Whether registering this folder would put this executable behind the
+            // menu item at all — see `reassert_wanted`.
+            let here_serves_us = std::env::current_exe()
+                .ok()
+                .and_then(|exe| exe.parent().map(package_exe_in))
+                .is_some_and(|exe| is_this_executable(&exe));
+            let repairing = reassert_wanted(
+                &state,
+                here_serves_us,
+                |exe| exe.is_file(),
+                is_this_executable,
+            ) && !BUSY.swap(true, Ordering::AcqRel);
+            if repairing
+                && let Some(package) = package_file()
+                && let Some(here) = package.parent()
+            {
+                let outcome = msix::register(&package, here);
+                match outcome {
+                    Ok(()) => {
+                        REGISTERED_HERE.store(true, Ordering::Release);
+                        let state = read_state();
+                        remember(state.clone());
+                        finish_job(&state);
+                        wake();
+                        return;
+                    }
+                    Err(error) => {
+                        // Silent to the user, on `reassert`'s footing: the entry that
+                        // is there goes on being whatever it was, the next launch
+                        // tries again, and there is no window yet to put a card on.
+                        eprintln!("BT_EXPLORER_PACKAGE repair refused — {error}");
+                    }
                 }
             }
-        }
-        if repairing {
-            finish_job(&state);
-        }
-        remember(state);
-        wake();
-    });
+            if repairing {
+                finish_job(&state);
+            }
+            remember(state);
+            wake();
+        },
+    )
+    // What `std::thread::spawn` said when the system refused a thread, kept word for word.
+    .expect("failed to spawn thread");
 }
 
 /// Register the package, or take it back off — half of what the row's third
@@ -1194,57 +1200,65 @@ pub fn job_in_flight() -> bool {
 /// One deployment, on a thread of its own, with the latch already taken.
 fn run_request(install: bool) {
     let package = package_file();
-    std::thread::spawn(move || {
-        let outcome = if install {
-            match package.as_deref().and_then(|package| {
-                // The file, and the folder to register it against. Either being
-                // absent is the same answer, so they are fetched as one.
-                Some((package, package.parent()?))
-            }) {
-                Some((package, here)) => msix::register(package, here).map(|()| {
-                    // The row's line says what to do if Explorer has not
-                    // noticed — see `REGISTERED_HERE`. Set on the way out of a
-                    // registration that worked and never on one that did not,
-                    // because a refusal leaves the menu exactly as it was.
-                    REGISTERED_HERE.store(true, Ordering::Release);
-                    true
-                }),
-                None => Err(Text::ExplorerFirstPageNoPackage.text().to_owned()),
-            }
-        } else {
-            // **The name is fetched here and not carried in from the press.** The
-            // cached answer can be [`PackageState::Unknown`] — the first probe of
-            // a launch has not landed — and a removal that read `Unknown` as "no
-            // package" would report success over a package that is still
-            // registered. This thread can afford the question; the one that took
-            // the press could not.
+    bt_platform::spawn_at_priority(
+        "folio-explorer-deploy",
+        bt_platform::ThreadPriority::Normal,
+        move |_ctx| {
+            let outcome = if install {
+                match package.as_deref().and_then(|package| {
+                    // The file, and the folder to register it against. Either being
+                    // absent is the same answer, so they are fetched as one.
+                    Some((package, package.parent()?))
+                }) {
+                    Some((package, here)) => msix::register(package, here).map(|()| {
+                        // The row's line says what to do if Explorer has not
+                        // noticed — see `REGISTERED_HERE`. Set on the way out of a
+                        // registration that worked and never on one that did not,
+                        // because a refusal leaves the menu exactly as it was.
+                        REGISTERED_HERE.store(true, Ordering::Release);
+                        true
+                    }),
+                    None => Err(Text::ExplorerFirstPageNoPackage.text().to_owned()),
+                }
+            } else {
+                // **The name is fetched here and not carried in from the press.** The
+                // cached answer can be [`PackageState::Unknown`] — the first probe of
+                // a launch has not landed — and a removal that read `Unknown` as "no
+                // package" would report success over a package that is still
+                // registered. This thread can afford the question; the one that took
+                // the press could not.
+                let state = read_state();
+                match removal_for(&state) {
+                    // **A question Windows refused is not an answer** (R2-20).
+                    // Reporting success here would put the row on `Off` over a
+                    // package that may well still be registered; the press is told
+                    // what actually happened, and the next one asks again.
+                    Removal::Unanswerable => {
+                        Err(Text::ExplorerFirstPageUnreadable.text().to_owned())
+                    }
+                    Removal::Remove(full_name) => msix::remove(full_name).map(|()| {
+                        // **And the sentence goes away with the registration it was
+                        // about.** `REGISTERED_HERE` means "this process registered
+                        // the package and has not since taken it back"; a flag that
+                        // only ever went up would leave the row telling a reader who
+                        // just switched this off that Folio is registered for the
+                        // first page.
+                        REGISTERED_HERE.store(false, Ordering::Release);
+                        false
+                    }),
+                    // Nothing registered and a press asking for that: the machine is
+                    // already where the press wanted it.
+                    Removal::AlreadyGone => Ok(false),
+                }
+            };
             let state = read_state();
-            match removal_for(&state) {
-                // **A question Windows refused is not an answer** (R2-20).
-                // Reporting success here would put the row on `Off` over a
-                // package that may well still be registered; the press is told
-                // what actually happened, and the next one asks again.
-                Removal::Unanswerable => Err(Text::ExplorerFirstPageUnreadable.text().to_owned()),
-                Removal::Remove(full_name) => msix::remove(full_name).map(|()| {
-                    // **And the sentence goes away with the registration it was
-                    // about.** `REGISTERED_HERE` means "this process registered
-                    // the package and has not since taken it back"; a flag that
-                    // only ever went up would leave the row telling a reader who
-                    // just switched this off that Folio is registered for the
-                    // first page.
-                    REGISTERED_HERE.store(false, Ordering::Release);
-                    false
-                }),
-                // Nothing registered and a press asking for that: the machine is
-                // already where the press wanted it.
-                Removal::AlreadyGone => Ok(false),
-            }
-        };
-        let state = read_state();
-        remember(state.clone());
-        report(outcome);
-        finish_job(&state);
-    });
+            remember(state.clone());
+            report(outcome);
+            finish_job(&state);
+        },
+    )
+    // What `std::thread::spawn` said when the system refused a thread, kept word for word.
+    .expect("failed to spawn thread");
 }
 
 /// **The one exit every deployment takes** (review row R4-12).

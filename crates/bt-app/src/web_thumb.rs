@@ -759,9 +759,10 @@ impl PageShrinker {
     pub fn start(wake: impl Fn() + Send + 'static) -> Self {
         let (jobs, inbox) = mpsc::channel::<ShrinkJob>();
         let (finished, done) = mpsc::channel::<ShrunkPicture>();
-        std::thread::Builder::new()
-            .name("folio-web-thumb".to_owned())
-            .spawn(move || {
+        bt_platform::spawn_at_priority(
+            "folio-web-thumb",
+            bt_platform::ThreadPriority::Normal,
+            move |_ctx| {
                 for job in inbox {
                     let rgba = shrink(&job.png, job.target);
                     if finished
@@ -777,8 +778,9 @@ impl PageShrinker {
                     }
                     wake();
                 }
-            })
-            .expect("the thumbnail shrinker thread");
+            },
+        )
+        .expect("the thumbnail shrinker thread");
         Self { jobs, done }
     }
 
@@ -1647,5 +1649,39 @@ mod tests {
              ground under the scrim, which is this lane's answer everywhere \
              else too"
         );
+    }
+
+    /// RED (A1c) — **the thumbnail shrinker is a worker the thread door started: it finishes a
+    /// picture and wakes the window as `Worker("folio-web-thumb")`.**
+    ///
+    /// `bt-app`'s role witness for A1c, with the real producer: the real `PageShrinker::start`,
+    /// a real picture through its channel, and the `wake` it calls after every finished picture —
+    /// which runs on the shrinker's own thread — recording the role it runs under. The shrinker was
+    /// the known bypass of the thread door (a bare `std::thread::Builder`, ARCHITECTURE §6), and a
+    /// thread started that way is `Unset`: neither a worker nor the window.
+    ///
+    /// MUTATION: start the shrinker with
+    /// `std::thread::Builder::new().name("folio-web-thumb".to_owned()).spawn(move || …)` again and
+    /// the role the wake reads is `Unset`.
+    #[test]
+    fn the_shrinker_finishes_a_picture_as_a_worker_the_door_started() {
+        let (heard, woke) = std::sync::mpsc::channel();
+        let shrinker = PageShrinker::start(move || {
+            let _ = heard.send(bt_platform::admission::role());
+        });
+        shrinker.send(ShrinkJob {
+            leaf: seat(1),
+            ticket: 1,
+            png: a_real_png(8, 8),
+            target: Some((4, 4)),
+            product: Product::Card,
+        });
+        assert_eq!(
+            woke.recv_timeout(std::time::Duration::from_secs(10)).ok(),
+            Some(bt_platform::admission::Role::Worker("folio-web-thumb"))
+        );
+        let finished = shrinker.collect();
+        assert_eq!(finished.len(), 1, "the picture came back before the wake");
+        assert!(finished[0].rgba.is_some(), "and it decoded");
     }
 }
