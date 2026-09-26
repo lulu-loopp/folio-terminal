@@ -54188,69 +54188,6 @@ pub(crate) fn alone_in_a_process(selector: &str, stdin: &[u8]) -> bool {
     false
 }
 
-/// RED (A1c) — **every thread `bt-app` and `bt-platform` start comes from the thread door: the
-/// product names `std::thread::spawn`, `std::thread::Builder` and `std::thread::scope` in exactly
-/// one place, the door's own `admission::spawn_at_priority_with_stack`.**
-///
-/// A thread started any other way has no role — it is `Unset`, neither a worker nor the window —
-/// so a worker-only door does not compile on it and nothing says what kind of thread it is
-/// (`docs/ARCHITECTURE.md` §5.1 and §6). A1c moved the last eighteen such sites through the door;
-/// this is what keeps a nineteenth from arriving quietly. `bt-pty`'s four threads and `bt-term`'s
-/// resample pool stay outside by design (the design note 2026-09-26, §3.3 and revision (c)6) and
-/// are not in the universe asked: `bt-pty` does not depend on `bt-platform`.
-///
-/// Read through `bt_source` over each package's own product code (test items are dropped by
-/// `in_the_product`), by path, so `std::thread::spawn`, `thread::spawn` after `use std::thread`
-/// and a `use` that would let a bare `spawn(…)` or `Builder::new()` hide are all found — the
-/// last as an occurrence outside every callable, which is refused on its own. Written here as a
-/// plain test for now; A1e's source guard, which fences the door's other escapes, absorbs it.
-///
-/// MUTATION: start `folio-web-thumb` with `std::thread::Builder::new().name(…).spawn(…)` again
-/// and this names `PageShrinker::start`.
-#[test]
-fn every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door() {
-    use bt_source::{Index, Pattern, Search, View, needle};
-
-    let mut door = 0;
-    for package in ["bt-app", "bt-platform"] {
-        let index = Index::of_package(package);
-        for path in ["thread::spawn", "thread::Builder", "thread::scope"] {
-            let found = index
-                .search(&Search::new(
-                    needle!(Pattern::path(path)),
-                    View::Identifiers,
-                ))
-                .unwrap_or_else(|failure| panic!("{failure}"))
-                .in_the_product(index);
-            assert_eq!(
-                found.outside_items(index),
-                0,
-                "`{path}` is imported or named outside any function in {package}, where a bare \
-                 call can hide behind it:\n{}",
-                found.report(index)
-            );
-            for (owner, count) in found.owners(index) {
-                assert!(
-                    package == "bt-platform"
-                        && owner.module_path == "crate::admission"
-                        && owner.type_owner.is_none()
-                        && owner.name == "spawn_at_priority_with_stack"
-                        && path == "thread::Builder",
-                    "`{path}` starts a thread in {package}'s {owner} ({count}×), outside the \
-                     thread door — use `bt_platform::spawn_at_priority`:\n{}",
-                    found.report(index)
-                );
-                door += count;
-            }
-        }
-    }
-    assert_eq!(
-        door, 1,
-        "the thread door itself builds its threads with `std::thread::Builder`, once; if it no \
-         longer does, this guard is reading nothing"
-    );
-}
-
 // ── A1d: every owner-thread door takes a token (design note 2026-09-26, revision (e)2 as
 //    corrected by (f)1) ──────────────────────────────────────────────────────────────────────
 

@@ -14,6 +14,12 @@
 ##
 ## `# vocabulary` — the effects that wait (or are counted beside the waits), with the targets
 ## they exist on. A2 compares it with the lint's list.
+##
+## `# owners` — where the constructs a lint cannot see through may be written (budget note §C-3):
+## `msg_send!`/`msg_send_id!`, a raw `vtable(` call, `GetProcAddress`, an `extern` block, `#[link]`
+## and `#[macro_export]`, each by owner — the product item it is written in, or the module when it
+## is written in none (inside `define_class!`) — with its count. A construct or owner not listed
+## here is refused, and so is a listed one that is gone; counts taken from the code (A1e).
 
 # rows
 row	status	call	where	disposition
@@ -115,3 +121,37 @@ windows::Win32::System::Threading::SetEvent	windows	counted by call site, does n
 windows::Win32::Foundation::CloseHandle	windows	counted by call site, does not wait
 libc::write	macos	counted by call site, does not wait
 libc::close	macos	counted by call site, does not wait
+
+# owners
+construct	owner	count
+#[link]	bt-platform crate::hotkey::macos_hotkey	1
+#[link]	bt-platform crate::macos_app	1
+#[link]	bt-platform crate::macos_dialogs	1
+#[link]	bt-platform crate::macos_impl	1
+#[link]	bt-platform crate::macos_watch	1
+extern block	bt-platform crate::hotkey::macos_hotkey	1
+extern block	bt-platform crate::launch_pipe::peer_executable	1
+extern block	bt-platform crate::macos_app	1
+extern block	bt-platform crate::macos_dialogs	1
+extern block	bt-platform crate::macos_impl	1
+extern block	bt-platform crate::macos_watch	1
+msg_send!	bt-platform crate::http::DownloadTransport::new	1
+msg_send!	bt-platform crate::http::Transport::new	1
+msg_send!	bt-platform crate::macos_app::delegate_answers_the_dock_menu	1
+msg_send!	bt-platform crate::macos_app::delegate_answers_the_edit_menus_clipboard_rows	1
+msg_send!	bt-platform crate::macos_app::delegate_answers_the_four_selectors	1
+msg_send!	bt-platform crate::macos_compose	1
+msg_send!	bt-platform crate::macos_compose::Compositor::make_slot	1
+msg_send!	bt-platform crate::macos_dialogs::DeferredFormulaMenu::new	1
+msg_send!	bt-platform crate::macos_impl::SystemSettingsObserver::new	1
+msg_send!	bt-platform crate::macos_impl::WindowButtonsObserver::new	1
+msg_send!	bt-platform crate::macos_impl::folios_surface_view	1
+msg_send!	bt-platform crate::macos_menu::MenuTarget::new	1
+msg_send!	bt-platform crate::macos_notify::NotificationDelegate::new	1
+msg_send!	bt-platform crate::macos_services::ServicesProvider::new	1
+msg_send!	bt-platform crate::macos_services::services_provider_answers_open_in_folio	1
+msg_send!	bt-platform crate::video::macos_player::EndWatch::watching	1
+msg_send!	bt-platform crate::video::macos_player::alloc_off_the_window_thread	1
+msg_send!	bt-platform crate::webview::macos::Gate::new	1
+msg_send!	bt-platform crate::webview::macos::ask	1
+vtable(	bt-platform crate::video::engine::Machinery::take_frame	1
