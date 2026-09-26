@@ -23,7 +23,9 @@
 //!    - `destructive`, or the trial of another transaction, or no trial at all
 //!      → the rescue build is started detached with
 //!      `--update-recover --then-launch <this command line>`, and this process
-//!      leaves with one line;
+//!      leaves with one line — unless the rescue build is missing or cannot be
+//!      started, when one line names it and the start continues untouched
+//!      (coordinator ruling, 2026-09-27);
 //!    - `preparing` / `deferred` → continue, unless this start's own image is
 //!      not the rescue copy of the build that began the transaction (the
 //!      folder was replaced by hand): then `H\<txn>` and the journal are
@@ -209,7 +211,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
                 trial: None,
             }
         }
-        StartAction::HandToRescue => hand_to_rescue(start, &header, world),
+        StartAction::HandToRescue => hand_to_rescue(start, &header, admission, world),
     }
 }
 
@@ -287,7 +289,19 @@ fn retire(action: StartAction, header: &Header, home: &Home, world: &mut impl Wo
 
 /// The rescue build takes this start: it is started with this start's own
 /// command line after `--then-launch`, and this process leaves.
-fn hand_to_rescue(start: &Start<'_>, header: &Header, world: &mut impl World) -> Verdict {
+///
+/// **A rescue build that is missing or cannot be started never stops the
+/// start** (coordinator ruling, 2026-09-27): one line names the program and
+/// the transaction, and the start continues as a waiting transaction's does —
+/// no journal write, no deletion. The state is left for the recovery's
+/// `Stuck` handling (U-22, U-24) to read; an app that never opens again is not
+/// an answer.
+fn hand_to_rescue(
+    start: &Start<'_>,
+    header: &Header,
+    admission: Option<Held>,
+    world: &mut impl World,
+) -> Verdict {
     let program = start.home.rescue_program(&header.rescue);
     match world.spawn_detached(&program, &cli::recover_command_line(start.argv)) {
         Ok(()) => {
@@ -299,10 +313,14 @@ fn hand_to_rescue(start: &Start<'_>, header: &Header, world: &mut impl World) ->
         }
         Err(error) => {
             world.say(&format!(
-                "BT_UPDATE_START an update is unfinished and {} could not be started: {error}",
+                "BT_UPDATE_START transaction {} is unfinished and its rescue build {} could not be started ({error}); Folio starts without it",
+                header.txn,
                 program.display()
             ));
-            Verdict::Exit(1)
+            Verdict::Continue {
+                admission,
+                trial: None,
+            }
         }
     }
 }
@@ -407,7 +425,6 @@ mod tests {
             /// spawn (it must not: this start holds it shared).
             exclusive_free_at_spawn: Vec<bool>,
             admission: Option<PathBuf>,
-            refuse_spawn: bool,
         }
 
         impl World for Recorded {
@@ -424,10 +441,12 @@ mod tests {
                     );
                 }
                 self.spawned.push((program.to_path_buf(), args.to_vec()));
-                if self.refuse_spawn {
-                    Err(io::Error::other("refused by the test"))
-                } else {
+                // As the operating system answers: a program that is not there
+                // cannot be started.
+                if program.is_file() {
                     Ok(())
+                } else {
+                    Err(io::Error::from(io::ErrorKind::NotFound))
                 }
             }
 
@@ -576,8 +595,7 @@ mod tests {
         /// start after Restart waits). The install may be mid-change here, so the
         /// start must not read settings, claim the data directory or open a
         /// window: [`Verdict::Exit`] is `fn main` leaving before any of that
-        /// (`admission_is_taken_before_hand_over` pins where). A rescue build that
-        /// cannot be started is a failed launch, never a continued one.
+        /// (`admission_is_taken_before_hand_over` pins where).
         ///
         /// MUTATION: in `hand_to_rescue`, answer `Verdict::Continue { admission:
         /// None, trial: None }` after a successful spawn.
@@ -607,13 +625,42 @@ mod tests {
             assert_eq!(std::fs::read(scene.home.journal()).unwrap(), journal);
             assert_eq!(scene.listing(), before, "nothing is created or removed");
             assert!(world.entrances.is_empty());
+        }
 
-            let mut world = Recorded {
-                refuse_spawn: true,
-                ..Recorded::default()
+        /// RED (U-12, coordinator ruling 2026-09-27) — **a start that must hand
+        /// itself to a rescue build that is not there continues, with one line
+        /// naming the missing program and the transaction, and touches
+        /// nothing.**
+        ///
+        /// Exiting would leave a Folio that never opens again for as long as
+        /// the journal says `destructive`. The journal and the transaction's
+        /// folder stay exactly as they were, for the recovery's `Stuck`
+        /// handling (U-22, U-24) to read.
+        ///
+        /// MUTATION: in `hand_to_rescue`, answer `Verdict::Exit(1)` when the
+        /// spawn fails.
+        #[test]
+        fn a_missing_rescue_does_not_brick_the_start() {
+            let Some(scene) = Scene::new("missing-rescue") else {
+                return;
             };
-            assert_eq!(exited(scene.run(&[], None, &mut world)), 1);
-            assert_eq!(scene.listing(), before);
+            let journal = scene.journal(Class::Destructive);
+            std::fs::remove_file(&scene.rescue).unwrap();
+            let before = scene.listing();
+            let mut world = Recorded::default();
+            let (admission, trial) = continued(scene.run(&["--tab"], None, &mut world));
+            assert!(admission.is_some(), "the start keeps its admission");
+            assert_eq!(trial, None);
+            assert_eq!(world.said.len(), 1, "{:?}", world.said);
+            let line = &world.said[0];
+            assert!(
+                line.contains(&scene.rescue.display().to_string())
+                    && line.contains(&txn().to_string()),
+                "the line names the missing rescue build and the transaction: {line}"
+            );
+            assert_eq!(std::fs::read(scene.home.journal()).unwrap(), journal);
+            assert_eq!(scene.listing(), before, "nothing is written or removed");
+            assert!(world.entrances.is_empty());
         }
 
         /// RED (U-12) — **a terminal journal is retired at start: the entrance
