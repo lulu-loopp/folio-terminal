@@ -14,6 +14,9 @@ All notable changes to Folio are recorded here. The format follows
 - A build now records whether it may ever update itself, and only a release
   build says yes; `diagnostics.log` names it on each run's first line
   (`updater on` / `updater off`). Nothing uses it yet.
+- An updated Folio can take over the data directory from the copy it
+  replaces without a moment in which neither copy owns it. Nothing uses this
+  yet.
 
 ### Fixed
 

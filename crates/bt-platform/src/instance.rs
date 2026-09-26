@@ -110,16 +110,50 @@ unsafe impl Send for DataDirectoryClaim {}
 #[cfg(windows)]
 unsafe impl Sync for DataDirectoryClaim {}
 
-/// Take the claim on `directory`, or answer `None` because another live process
-/// already holds it.
+/// Why [`try_claim_data_directory`] did not hand this process the claim — **two
+/// answers, because they are two different facts** (`docs/plans/design/
+/// self-update-2026-09-16.md` §C.7 and its review row R-3).
+///
+/// A caller that waits for a claim — the updated build waiting for the old one
+/// to let go — has to tell "somebody live holds it" from "the platform would
+/// not say". The first is a reason to ask again; the second is not evidence
+/// that anybody holds anything, and retrying it for thirty seconds would be
+/// waiting on an answer that is never coming. Both mean *not the writer*, which
+/// is all [`claim_data_directory`] keeps of them.
+#[derive(Debug)]
+pub enum ClaimRefusal {
+    /// Another live process holds the claim: on Windows the name already
+    /// existed, on Unix the `flock` would have blocked.
+    Held,
+    /// The question was not answered. On Windows the kernel refused to create
+    /// or open the name (another kind of object under it, or a holder whose
+    /// security this session may not open); on Unix the runtime directory could
+    /// not be prepared, the lock file could not be opened, or `flock` failed for
+    /// a reason other than somebody else holding it.
+    QueryDenied(std::io::Error),
+}
+
+/// Take the claim on `directory`, or answer `None` because it was refused —
+/// [`try_claim_data_directory`] with the reason dropped, for every caller for
+/// which a refusal of either kind means the same thing.
 ///
 /// **The claim is not released when this returns** — it is released when the
 /// returned value is dropped, which for the product is when the process ends.
 /// Holding the returned value for less than the life of the process would be a
 /// claim that says nothing.
-#[cfg(windows)]
 #[must_use]
 pub fn claim_data_directory(directory: &Path) -> Option<DataDirectoryClaim> {
+    try_claim_data_directory(directory).ok()
+}
+
+/// Take the claim on `directory`, or say why not: [`ClaimRefusal::Held`]
+/// because another live process already holds it, or
+/// [`ClaimRefusal::QueryDenied`] because the kernel would not answer.
+///
+/// **The claim is not released when this returns** — see
+/// [`claim_data_directory`].
+#[cfg(windows)]
+pub fn try_claim_data_directory(directory: &Path) -> Result<DataDirectoryClaim, ClaimRefusal> {
     use std::os::windows::ffi::OsStrExt;
     use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
     use windows::Win32::System::Threading::CreateMutexW;
@@ -133,7 +167,8 @@ pub fn claim_data_directory(directory: &Path) -> Option<DataDirectoryClaim> {
     // it. What is being used is the *name*, whose existence is the claim, so
     // ownership — and with it the abandoned-mutex state a killed owner would
     // leave — is never entered at all.
-    let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }.ok()?;
+    let handle = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) }
+        .map_err(|refused| ClaimRefusal::QueryDenied(refused.into()))?;
     // `CreateMutexW` succeeds and hands back a handle to the *existing* object
     // when the name is taken, which is why the error has to be read even on the
     // success path. The handle is closed rather than kept: holding it would keep
@@ -143,9 +178,9 @@ pub fn claim_data_directory(directory: &Path) -> Option<DataDirectoryClaim> {
         unsafe {
             let _ = windows::Win32::Foundation::CloseHandle(handle);
         }
-        return None;
+        return Err(ClaimRefusal::Held);
     }
-    Some(DataDirectoryClaim { handle })
+    Ok(DataDirectoryClaim { handle })
 }
 
 /// **The digest every name for one directory is built out of.**
@@ -656,8 +691,10 @@ pub struct DataDirectoryClaim {
     lock: std::fs::File,
 }
 
-/// Take the claim on `directory`, or answer `None` because another live process
-/// already holds it.
+/// Take the claim on `directory`, or say why not: [`ClaimRefusal::Held`]
+/// because another live process already holds it, or
+/// [`ClaimRefusal::QueryDenied`] because the runtime directory, the lock file or
+/// `flock` itself would not answer.
 ///
 /// **`LOCK_NB`, so this asks rather than waits.** A blocking `flock` would turn
 /// a second launch into a process that hangs until the first one quits, which is
@@ -677,12 +714,11 @@ pub struct DataDirectoryClaim {
 /// **The claim is not released when this returns** — it is released when the
 /// returned value is dropped, which for the product is when the process ends.
 #[cfg(unix)]
-#[must_use]
-pub fn claim_data_directory(directory: &Path) -> Option<DataDirectoryClaim> {
+pub fn try_claim_data_directory(directory: &Path) -> Result<DataDirectoryClaim, ClaimRefusal> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
-    let runtime = prepare_runtime_directory().ok()?;
+    let runtime = prepare_runtime_directory().map_err(ClaimRefusal::QueryDenied)?;
     let tag = directory_tag(directory);
     let lock = std::fs::OpenOptions::new()
         .create(true)
@@ -690,12 +726,20 @@ pub fn claim_data_directory(directory: &Path) -> Option<DataDirectoryClaim> {
         .write(true)
         .mode(0o600)
         .open(lock_path_in(&runtime, &tag))
-        .ok()?;
+        .map_err(ClaimRefusal::QueryDenied)?;
     // SAFETY: the descriptor is this call's own and stays open for as long as
     // the value returned below lives.
     let taken = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
     if !taken {
-        return None;
+        // Read at once, before anything else can overwrite `errno`. Only
+        // `EWOULDBLOCK` says somebody holds the lock; anything else is `flock`
+        // declining to answer.
+        let why = std::io::Error::last_os_error();
+        return Err(if why.kind() == std::io::ErrorKind::WouldBlock {
+            ClaimRefusal::Held
+        } else {
+            ClaimRefusal::QueryDenied(why)
+        });
     }
     // **Both doors, and for one reason** (M4-7). The launch endpoint and the
     // attention endpoint are two socket files bound by this one process on the
@@ -712,7 +756,7 @@ pub fn claim_data_directory(directory: &Path) -> Option<DataDirectoryClaim> {
             let _ = std::fs::remove_file(&endpoint);
         }
     }
-    Some(DataDirectoryClaim { lock })
+    Ok(DataDirectoryClaim { lock })
 }
 
 /// A machine with neither a kernel object nor a descriptor to hold always
@@ -721,9 +765,8 @@ pub fn claim_data_directory(directory: &Path) -> Option<DataDirectoryClaim> {
 pub struct DataDirectoryClaim;
 
 #[cfg(all(not(windows), not(unix)))]
-#[must_use]
-pub fn claim_data_directory(_directory: &Path) -> Option<DataDirectoryClaim> {
-    Some(DataDirectoryClaim)
+pub fn try_claim_data_directory(_directory: &Path) -> Result<DataDirectoryClaim, ClaimRefusal> {
+    Ok(DataDirectoryClaim)
 }
 
 #[cfg(test)]
@@ -776,6 +819,94 @@ mod tests {
             claim_data_directory(&directory).is_some(),
             "and the claim is gone the moment its holder is"
         );
+    }
+
+    /// RED (U-5, self-update R-3) — **a held claim and an unanswered question
+    /// are two refusals, not one.**
+    ///
+    /// The updated build waits for the old one to let the data directory go
+    /// (`docs/plans/design/self-update-2026-09-16.md` §C.7), and the only thing
+    /// worth waiting on is a claim somebody live holds. A name the kernel will
+    /// not create — here another kind of object standing under it, which is what
+    /// `CreateMutexW` answers `ERROR_INVALID_HANDLE` to — is not somebody holding
+    /// the claim, and a waiter told it was would wait out its deadline for a
+    /// release that is never coming.
+    ///
+    /// MUTATION: answer `Held` from `CreateMutexW`'s error path, or
+    /// `QueryDenied` from the `ERROR_ALREADY_EXISTS` one, and one half goes red.
+    #[cfg(windows)]
+    #[test]
+    fn a_held_claim_and_a_denied_query_are_told_apart() {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::System::Threading::CreateEventW;
+        use windows::core::PCWSTR;
+
+        let held = scratch(line!());
+        let first = try_claim_data_directory(&held).expect("the first claim is taken");
+        assert!(
+            matches!(try_claim_data_directory(&held), Err(ClaimRefusal::Held)),
+            "a name a live claim holds is held, and says so"
+        );
+        drop(first);
+
+        let squatted = scratch(line!());
+        let name: Vec<u16> = std::ffi::OsStr::new(&claim_name(&squatted))
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let event = unsafe { CreateEventW(None, false, false, PCWSTR(name.as_ptr())) }
+            .expect("an event under the claim's name");
+        let answer = try_claim_data_directory(&squatted);
+        unsafe {
+            let _ = windows::Win32::Foundation::CloseHandle(event);
+        }
+        assert!(
+            matches!(answer, Err(ClaimRefusal::QueryDenied(_))),
+            "a name the kernel will not make a mutex of is a question it did not \
+             answer, not a claim somebody holds"
+        );
+        assert!(
+            try_claim_data_directory(&squatted).is_ok(),
+            "and with the other object gone the directory is free"
+        );
+    }
+
+    /// RED (U-5, self-update R-3) — **a held claim and an unanswered question
+    /// are two refusals, not one** — the Unix arm.
+    ///
+    /// Held is `flock` answering `EWOULDBLOCK`; a lock file that cannot be
+    /// opened — here a directory standing where it should be — is the question
+    /// not being answered, and a waiter told it was held would wait out its
+    /// deadline for a release that is never coming.
+    ///
+    /// MUTATION: answer `Held` for every `flock` or `open` failure and the
+    /// second half goes red.
+    #[cfg(unix)]
+    #[test]
+    fn a_held_claim_and_a_denied_query_are_told_apart() {
+        let held = scratch(line!());
+        std::fs::create_dir_all(&held).expect("make the data directory");
+        let first = try_claim_data_directory(&held).expect("the first claim is taken");
+        assert!(
+            matches!(try_claim_data_directory(&held), Err(ClaimRefusal::Held)),
+            "a lock a live claim holds is held, and says so"
+        );
+        drop(first);
+
+        let squatted = scratch(line!());
+        std::fs::create_dir_all(&squatted).expect("make the data directory");
+        let runtime = prepare_runtime_directory().expect("this user's runtime directory");
+        let lock = lock_path_in(&runtime, &directory_tag(&squatted));
+        std::fs::create_dir_all(&lock).expect("a directory where the lock file goes");
+        let answer = try_claim_data_directory(&squatted);
+        let _ = std::fs::remove_dir(&lock);
+        assert!(
+            matches!(answer, Err(ClaimRefusal::QueryDenied(_))),
+            "a lock file that cannot be opened is a question not answered, \
+             not a claim somebody holds"
+        );
+        let _ = std::fs::remove_dir_all(&held);
+        let _ = std::fs::remove_dir_all(&squatted);
     }
 
     /// **PIN — the launch socket fits in a `sockaddr_un` whatever the data
@@ -863,9 +994,9 @@ mod tests {
         );
 
         let take = source
-            .split("#[cfg(unix)]\n#[must_use]\npub fn claim_data_directory")
+            .split("#[cfg(unix)]\npub fn try_claim_data_directory")
             .nth(1)
-            .expect("the Unix arm has its own claim_data_directory");
+            .expect("the Unix arm has its own try_claim_data_directory");
         let take = take.split("\n}\n").next().unwrap_or_default();
         assert!(
             take.contains("libc::LOCK_EX | libc::LOCK_NB"),
@@ -1242,7 +1373,6 @@ mod tests {
 
     /// A directory no other test in this process is using, so two of them can
     /// run at once.
-    #[cfg(unix)]
     fn scratch(line: u32) -> PathBuf {
         std::env::temp_dir().join(format!(
             "bt-platform-instance-{}-{line}",
