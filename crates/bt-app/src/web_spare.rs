@@ -583,6 +583,9 @@ mod spare_lifecycle_tests {
         landed: Option<u64>,
         made_under: Option<u64>,
         waiting: Option<Instant>,
+        /// Whether `waiting` is a rebuild's wait for the old browser (`BrowserWait::Rebuild`)
+        /// rather than a close's.
+        rebuilding: bool,
         now: Instant,
     }
 
@@ -599,6 +602,7 @@ mod spare_lifecycle_tests {
                 landed: None,
                 made_under: None,
                 waiting: None,
+                rebuilding: false,
                 now: Instant::now(),
             };
             let _ = seat.machine.request(url);
@@ -676,8 +680,15 @@ mod spare_lifecycle_tests {
                     self.start_environment();
                     None
                 }
+                WebEffect::AwaitBrowserExitBeforeRebuild => {
+                    if !self.rebuilding {
+                        self.close_controller();
+                        self.waiting = Some(self.now + BROWSER_EXIT_DEADLINE);
+                        self.rebuilding = true;
+                    }
+                    None
+                }
                 WebEffect::RebuildForNewVersion => {
-                    self.close_controller();
                     self.engine.borrow_mut().environment.forget();
                     self.engine.borrow_mut().asked.push(Asked::Forget);
                     self.start_environment();
@@ -730,6 +741,13 @@ mod spare_lifecycle_tests {
                     }
                     WebEffect::Ignore
                 }
+                // `WebSeat::browser_is_gone`: the obituary of a browser a rebuild asked to go ends
+                // that wait.
+                Said::BrowserExited if self.rebuilding => {
+                    self.rebuilding = false;
+                    self.waiting = None;
+                    WebEffect::RebuildForNewVersion
+                }
                 Said::BrowserExited => self.machine.on_browser_process_exited(),
                 Said::NewVersion => self.machine.on_new_browser_version_available(),
             };
@@ -774,7 +792,9 @@ mod spare_lifecycle_tests {
             }
             if self.waiting.is_some_and(|at| now >= at) {
                 self.waiting = None;
-                if self.machine.on_cleanup_deadline() == WebEffect::ReleaseUserDataFolder {
+                if std::mem::take(&mut self.rebuilding) {
+                    self.step(WebEffect::RebuildForNewVersion);
+                } else if self.machine.on_cleanup_deadline() == WebEffect::ReleaseUserDataFolder {
                     outcomes.push(WebOutcome::Gone);
                 }
             }
@@ -1161,15 +1181,19 @@ mod spare_lifecycle_tests {
             }
             assert_eq!(page.machine.state(), WebState::Ready);
             let before = process.asked().len();
+            // A new version reaches each seat as two events: the notice, and then the obituary
+            // of the old browser every seat on it was asked to let go of (ticket 68).
             let said = || {
                 if event == 0 {
-                    Said::BrowserExited
+                    vec![Said::BrowserExited]
                 } else {
-                    Said::NewVersion
+                    vec![Said::NewVersion, Said::BrowserExited]
                 }
             };
             let deliver_to_page = |page: &mut Recorded| {
-                page.hear(said());
+                for said in said() {
+                    page.hear(said);
+                }
                 let queued: Vec<_> = page.queue.borrow_mut().drain(..).collect();
                 let mut outcomes = Vec::new();
                 for said in queued {
@@ -1180,7 +1204,9 @@ mod spare_lifecycle_tests {
                 deliver_to_page(&mut page);
             }
             if let Some((seat, _)) = process.spare.slot_mut().held_mut() {
-                seat.hear(said());
+                for said in said() {
+                    seat.hear(said);
+                }
             }
             process.spoke(now);
             if spare_first {
@@ -1207,7 +1233,14 @@ mod spare_lifecycle_tests {
                 after.contains(&Asked::Close("spare")),
                 "the spare closed its controller: {after:?}"
             );
-            assert_eq!(process.spare.phase(), SparePhase::Retiring);
+            // A new version's second event is the obituary of the browser the spare retired from,
+            // which ends its wait; a lone browser exit is what started the retirement.
+            let retired = if event == 0 {
+                SparePhase::Retiring
+            } else {
+                SparePhase::Retired
+            };
+            assert_eq!(process.spare.phase(), retired);
         }
     }
 
