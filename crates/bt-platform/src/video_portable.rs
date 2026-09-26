@@ -233,12 +233,14 @@ fn within_budget<T: Send + 'static>(
     work: impl FnOnce() -> Option<T> + Send + 'static,
 ) -> Option<T> {
     let (answer, wait) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("folio-video-frame".to_owned())
-        .spawn(move || {
+    crate::spawn_at_priority(
+        "folio-video-frame",
+        crate::ThreadPriority::Normal,
+        move |_ctx| {
             let _ = answer.send(work());
-        })
-        .ok()?;
+        },
+    )
+    .ok()?;
     wait.recv_timeout(budget).ok().flatten()
 }
 

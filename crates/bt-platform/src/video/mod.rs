@@ -281,12 +281,14 @@ fn within_budget<T: Send + 'static>(
     work: impl FnOnce() -> Option<T> + Send + 'static,
 ) -> Option<T> {
     let (answer, wait) = std::sync::mpsc::channel();
-    std::thread::Builder::new()
-        .name("folio-video-frame".to_owned())
-        .spawn(move || {
+    crate::spawn_at_priority(
+        "folio-video-frame",
+        crate::ThreadPriority::Normal,
+        move |_ctx| {
             let _ = answer.send(work());
-        })
-        .ok()?;
+        },
+    )
+    .ok()?;
     wait.recv_timeout(budget).ok().flatten()
 }
 
@@ -347,12 +349,14 @@ fn decode_from_url(
 /// lazily from the file column: the point of it is to spend the first question's
 /// ~200 ms somewhere nobody is waiting, and a hover is not that place.
 pub fn prewarm() {
-    let _ = std::thread::Builder::new()
-        .name("folio-video-prewarm".to_owned())
-        .spawn(|| {
+    let _ = crate::spawn_at_priority(
+        "folio-video-prewarm",
+        crate::ThreadPriority::Normal,
+        |_ctx| {
             let _inside = READERS.enter();
             media_session();
-        });
+        },
+    );
 }
 
 /// **How many threads are inside Media Foundation right now**, and the way to
