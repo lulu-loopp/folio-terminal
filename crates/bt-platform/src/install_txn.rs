@@ -20,6 +20,11 @@
 //!   same directory flush, on the destination's directory and on the source's
 //!   when it is another one. **A move never replaces a file** (see
 //!   [`durable_move`]).
+//! * **A durable remove** ([`durable_remove`]): a file or a whole directory
+//!   tree is removed, then the directory it was in is flushed, so a removal the
+//!   caller orders before another one reaches the device first (a retired
+//!   transaction's folder before its journal, U-12). Nothing there already is
+//!   an answer, not a failure.
 //! * **The registry flush** (Windows only, [`flush_current_user_key`]):
 //!   `RegFlushKey` on a key under `HKEY_CURRENT_USER`, for the entrance value a
 //!   later ticket writes (U-22).
@@ -45,6 +50,12 @@
 //! device), and [`hold_within`] sleeps until its deadline. None of it may run
 //! on a window thread. Today that is this sentence; the thread door's
 //! `WorkerCtx` (A1b) and its prohibitions (A1e) are what will make it a type.
+//! **The one exception is the start** (U-12, `bt-app::update_startup`): in
+//! `fn main`, before the event loop exists, the window thread takes the
+//! admission and asks for the transaction lock with [`try_hold`] (never
+//! [`hold_within`]) and retires a finished transaction with
+//! [`durable_remove`] — the design's startup-recovery row, whose reason is
+//! §5.3 row 18's: there is no loop yet to be blocked.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -76,6 +87,8 @@ pub enum Stage {
     OpenKey,
     /// Flushing a registry key.
     FlushKey,
+    /// Removing a file or a directory tree (a durable remove's).
+    Remove,
 }
 
 impl Stage {
@@ -93,6 +106,7 @@ impl Stage {
             Self::Lock => "lock",
             Self::OpenKey => "open-key",
             Self::FlushKey => "flush-key",
+            Self::Remove => "remove",
         }
     }
 }
@@ -163,6 +177,9 @@ trait Surface {
     /// Remove a temporary file this door made, on a failure. Best effort: the
     /// failure being reported is the one that matters.
     fn remove(&mut self, path: &Path);
+    /// Remove `path` — a file, or a directory with everything in it. Nothing
+    /// at `path` is `NotFound`.
+    fn remove_entry(&mut self, path: &Path) -> io::Result<()>;
 }
 
 /// **Write `bytes` to `target` so that after a power cut `target` holds either
@@ -200,6 +217,26 @@ pub fn durable_write(target: &Path, bytes: &[u8]) -> Result<(), Failure> {
 /// at [`Stage::Rename`] whose error is `Unsupported` and names this door.
 pub fn durable_move(from: &Path, to: &Path) -> Result<(), Failure> {
     durable_move_with(&mut arm::Os, from, to)
+}
+
+/// **Remove `path` — a file or a directory tree — and flush the directory it
+/// was in**, so that after a power cut the removal is either on the device or
+/// the entry is whole where it was, and a later removal the caller makes is
+/// never on the device before this one.
+///
+/// The contract that makes a retirement safe to repeat: **nothing at `path`
+/// is success** (the directory is still flushed, because an earlier removal
+/// may not have been). A tree that cannot be removed whole — a running
+/// executable inside it on Windows — is a failure at [`Stage::Remove`], and
+/// whatever part of it was removed stays removed; the caller removes nothing
+/// that depended on it and tries again at the next start.
+///
+/// # Errors
+/// A [`Failure`] at [`Stage::Remove`], [`Stage::OpenDirectory`] or
+/// [`Stage::FlushDirectory`]; on a platform with no arm, one at
+/// [`Stage::Remove`] whose error is `Unsupported` and names this door.
+pub fn durable_remove(path: &Path) -> Result<(), Failure> {
+    durable_remove_with(&mut arm::Os, path)
 }
 
 /// A temporary file's number within this process, so two writes to one
@@ -267,6 +304,15 @@ fn durable_move_with<S: Surface>(surface: &mut S, from: &Path, to: &Path) -> Res
         flush_directory(surface, source)?;
     }
     Ok(())
+}
+
+fn durable_remove_with<S: Surface>(surface: &mut S, path: &Path) -> Result<(), Failure> {
+    match surface.remove_entry(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Failure::at(Stage::Remove, path, error)),
+    }
+    flush_directory(surface, directory_of(path))
 }
 
 fn flush_directory<S: Surface>(surface: &mut S, directory: &Path) -> Result<(), Failure> {
@@ -378,6 +424,18 @@ fn hold_until(path: &Path, hold: Hold, deadline: Option<Instant>) -> Result<Opti
     }
 }
 
+/// The Windows and macOS removal: a directory goes with everything in it,
+/// anything else (a file, a link) alone — a link to a directory is removed,
+/// never followed.
+#[cfg(any(windows, target_os = "macos"))]
+fn remove_entry(path: &Path) -> io::Result<()> {
+    if std::fs::symlink_metadata(path)?.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
 /// **The Windows arm.**
 #[cfg(windows)]
 mod arm {
@@ -474,6 +532,10 @@ mod arm {
 
         fn remove(&mut self, path: &Path) {
             let _ = std::fs::remove_file(path);
+        }
+
+        fn remove_entry(&mut self, path: &Path) -> io::Result<()> {
+            super::remove_entry(path)
         }
     }
 
@@ -637,6 +699,10 @@ mod arm {
         fn remove(&mut self, path: &Path) {
             let _ = std::fs::remove_file(path);
         }
+
+        fn remove_entry(&mut self, path: &Path) -> io::Result<()> {
+            super::remove_entry(path)
+        }
     }
 
     pub(super) fn open_lock_file(path: &Path, hold: Hold) -> io::Result<File> {
@@ -723,6 +789,10 @@ mod arm {
         }
 
         fn remove(&mut self, _path: &Path) {}
+
+        fn remove_entry(&mut self, _path: &Path) -> io::Result<()> {
+            Err(refused("durable remove"))
+        }
     }
 
     pub(super) fn open_lock_file(_path: &Path, _hold: Hold) -> io::Result<File> {
@@ -751,6 +821,7 @@ mod tests {
         OpenDirectory(PathBuf),
         Rename(PathBuf, PathBuf, Replace),
         Remove(PathBuf),
+        RemoveEntry(PathBuf),
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -761,6 +832,10 @@ mod tests {
         Rename,
         OpenDirectory,
         FlushDirectory,
+        /// The entry to remove is not there (`NotFound`).
+        RemoveMissing,
+        /// The entry cannot be removed (any other error).
+        RemoveEntry,
     }
 
     struct FakeHandle {
@@ -844,6 +919,14 @@ mod tests {
 
         fn remove(&mut self, path: &Path) {
             self.calls.push(Call::Remove(path.to_path_buf()));
+        }
+
+        fn remove_entry(&mut self, path: &Path) -> io::Result<()> {
+            self.calls.push(Call::RemoveEntry(path.to_path_buf()));
+            if self.fail == Some(Fail::RemoveMissing) {
+                return Err(io::Error::from(io::ErrorKind::NotFound));
+            }
+            self.answer(Fail::RemoveEntry)
         }
     }
 
@@ -1028,6 +1111,53 @@ mod tests {
         }
     }
 
+    /// RED (U-12) — **a durable remove flushes the directory the entry was in,
+    /// after the removal, and nothing there already is done, not a failure.**
+    ///
+    /// A retired transaction's folder is removed before its journal (U-10's
+    /// "journal deleted last"): if the journal's removal reached the device
+    /// and the folder's did not, the folder would be left behind with nothing
+    /// that names it. Flushing the parent after each removal is what orders the
+    /// two on the device. A start that finds the folder already gone (an
+    /// earlier start removed it and stopped before the journal) must still be
+    /// able to finish, so `NotFound` is success — and the directory is flushed
+    /// anyway, because that earlier removal may not have been.
+    ///
+    /// MUTATION: in `durable_remove_with`, return `Ok(())` straight after the
+    /// removal, without `flush_directory`.
+    #[test]
+    fn a_durable_remove_flushes_the_directory_after_the_removal() {
+        let folder = home().join("00112233445566778899aabbccddeeff");
+        for fail in [None, Some(Fail::RemoveMissing)] {
+            let mut fake = Recorder {
+                calls: Vec::new(),
+                fail,
+            };
+            durable_remove_with(&mut fake, &folder).unwrap();
+            assert_eq!(
+                fake.calls,
+                vec![
+                    Call::RemoveEntry(folder.clone()),
+                    Call::OpenDirectory(home()),
+                    Call::Flush {
+                        path: home(),
+                        directory: true
+                    },
+                    Call::Close(home()),
+                ],
+                "{fail:?}"
+            );
+        }
+        let mut fake = Recorder::failing(Fail::RemoveEntry);
+        let failure = durable_remove_with(&mut fake, &folder).unwrap_err();
+        assert_eq!(failure.stage, Stage::Remove);
+        assert_eq!(
+            fake.calls,
+            vec![Call::RemoveEntry(folder)],
+            "a removal that failed flushes nothing"
+        );
+    }
+
     #[cfg(any(windows, target_os = "macos"))]
     fn scratch(tag: &str) -> PathBuf {
         let directory =
@@ -1069,6 +1199,34 @@ mod tests {
         assert_eq!(std::fs::read(&journal).unwrap(), JOURNAL);
         assert_eq!(names_in(&home), vec!["journal.json".to_string()]);
         let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// RED (U-12) — **a durable remove takes a whole tree, leaves its
+    /// siblings, and a second remove of the same path is done, not a
+    /// failure.**
+    ///
+    /// The real removal behind the fake's order: a transaction's folder holds
+    /// nested folders (`rescue`, `set`, `backup`), so the removal is of a tree,
+    /// and the journal and the two lock files beside it must survive it.
+    ///
+    /// MUTATION: make `remove_entry` call `std::fs::remove_dir` (the folder
+    /// alone, which refuses a folder that is not empty).
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn a_durable_remove_takes_a_whole_tree_and_leaves_its_siblings() {
+        let home = scratch("remove");
+        let folder = home.join("00112233445566778899aabbccddeeff");
+        std::fs::create_dir_all(folder.join("rescue")).unwrap();
+        std::fs::write(folder.join("rescue").join("folio.exe"), b"old").unwrap();
+        std::fs::write(folder.join("inventory"), b"x").unwrap();
+        std::fs::write(home.join("journal.json"), JOURNAL).unwrap();
+        std::fs::write(home.join("lock"), b"").unwrap();
+        durable_remove(&folder).unwrap();
+        assert_eq!(names_in(&home), vec!["journal.json", "lock"]);
+        durable_remove(&folder).unwrap();
+        durable_remove(&home.join("journal.json")).unwrap();
+        assert_eq!(names_in(&home), vec!["lock"]);
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     /// RED (U-11) — **a durable move never takes the name of an existing
@@ -1361,10 +1519,13 @@ mod tests {
         assert_eq!(moved.stage, Stage::Rename);
         let held = try_hold(&target, Hold::Shared).unwrap_err();
         assert_eq!(held.stage, Stage::OpenLockFile);
+        let removed = durable_remove(&target).unwrap_err();
+        assert_eq!(removed.stage, Stage::Remove);
         for (failure, operation) in [
             (write, "durable write"),
             (moved, "durable move"),
             (held, "lock"),
+            (removed, "durable remove"),
         ] {
             assert_eq!(failure.error.kind(), io::ErrorKind::Unsupported);
             assert!(
