@@ -67,6 +67,16 @@ pub const LIVE_MATH_STABLE_INTERVAL: Duration = Duration::from_millis(200);
 /// It is context, not an inference: an opener older than this tail is unknowable at this layer.
 const LIVE_FENCE_HISTORY_CONTEXT_LINES: usize = 1_024;
 const MAX_OFFSCREEN_RECORDS: usize = 128;
+/// How long a repaint transaction announced with DECTCEM (`\x1b[?25l` … `\x1b[?25h`) may stay open
+/// before this session stops holding the repaint window for it.
+///
+/// A producer that hides the cursor to rewrite the screen and never shows it again would otherwise
+/// suppress row invalidation and hold presentation for as long as it kept talking. This is the bound
+/// the parser puts on an unterminated DEC 2026 synchronized update (alacritty's
+/// `SYNC_UPDATE_TIMEOUT`), counted the same way, from the opening, because it is the same question
+/// about the same kind of producer. Split reads of one repaint arrive one or two milliseconds apart,
+/// two orders of magnitude inside it.
+const REPAINT_TRANSACTION_TIMEOUT: Duration = Duration::from_millis(150);
 /// **What the disk said about one path the terminal named** — the ledger's value, and the one
 /// authority on "is this a real, readable, local path" (§7.1.5j, audit 3 C-2).
 ///
@@ -1648,6 +1658,20 @@ pub struct DualPlaneSession {
     feed_turn: Option<FeedTurn>,
     alternate_repaint_snapshot: Option<AlternateRepaintSnapshot>,
     alternate_repaint_in_progress: bool,
+    /// Deadline of the repaint transaction a producer opened by hiding the cursor and has not
+    /// closed. While it is `Some`, a feed turn's end does not close the repaint window: the repaint
+    /// is still arriving. See [`Self::observe_repaint_transaction`].
+    repaint_transaction_deadline: Option<Instant>,
+    /// DECTCEM as the stream last set it. The hide that opens a repaint and the home that proves it
+    /// is one arrive in different reads often enough that this cannot be read off one slice.
+    cursor_hidden: bool,
+    /// Has this producer ever closed a DECTCEM bracket it opened? Only then is a hide read as "a
+    /// repaint is in progress" rather than as "this application does not want a cursor".
+    repaint_bracket_closes: bool,
+    /// The tail of the last reads, so the repaint scanners can see a sequence the operating system
+    /// split between two of them. See [`FeedSeam`].
+    feed_seam_carry: [u8; FEED_SEAM_CARRY],
+    feed_seam_carry_len: u8,
     /// True while a primary-screen in-stream transcript reprint is in flight (a clear+home /
     /// erase-storm / synchronized-update repaint boundary was seen and, for a DEC 2026 update, has
     /// not yet committed). It engages the same off-band preservation the resize path uses so a
@@ -2102,6 +2126,11 @@ impl DualPlaneSession {
             feed_turn: None,
             alternate_repaint_snapshot: None,
             alternate_repaint_in_progress: false,
+            repaint_transaction_deadline: None,
+            cursor_hidden: false,
+            repaint_bracket_closes: false,
+            feed_seam_carry: [0; FEED_SEAM_CARRY],
+            feed_seam_carry_len: 0,
             primary_repaint_in_progress: false,
             primary_repaint_snapshot: None,
             primary_repaint_dirty: false,
@@ -3457,7 +3486,9 @@ impl DualPlaneSession {
         if !bytes.is_empty() {
             self.screen_revision = self.screen_revision.wrapping_add(1);
         }
-        let cursor_memory_reprint_boundary = contains_clear_home_snapshot_boundary(bytes);
+        let seam = self.feed_seam(bytes);
+        self.remember_feed_seam(bytes);
+        let cursor_memory_reprint_boundary = contains_clear_home_snapshot_boundary(bytes, &seam);
         if cursor_memory_reprint_boundary {
             self.cursor_logical_line_memory = None;
         }
@@ -3469,8 +3500,14 @@ impl DualPlaneSession {
                 self.document.entries().keys().next_back().copied(),
             ));
         }
+        self.observe_repaint_transaction(bytes, &seam, observed_at);
+        // A repaint boundary is either evidence in the stream's own bytes, or the producer's open
+        // statement that it is rewriting the screen. The second is what carries a repaint whose
+        // evidence is spread over reads that each look like nothing in particular.
         if self.alternate_repaint_snapshot.is_none() {
-            self.alternate_repaint_snapshot = self.begin_alternate_repaint(bytes);
+            self.alternate_repaint_snapshot = self.begin_alternate_repaint(
+                cursor_memory_reprint_boundary || self.repaint_transaction_deadline.is_some(),
+            );
         }
         self.alternate_repaint_in_progress = self.alternate_repaint_snapshot.is_some();
         // Primary in-stream reprint preservation: a Codex transcript reflow/reprint would otherwise
@@ -3513,7 +3550,7 @@ impl DualPlaneSession {
         if self.resize_epoch.is_active() {
             self.resume_resize_staging();
         }
-        if self.terminal.modes().alternate_screen && contains_clear_home_snapshot_boundary(bytes) {
+        if self.terminal.modes().alternate_screen && cursor_memory_reprint_boundary {
             self.alternate_detection_context = DetectionContext::default();
         }
         let result = (|| {
@@ -3543,6 +3580,7 @@ impl DualPlaneSession {
         if result.is_err() {
             self.terminal.discard_paused_stream();
             self.cursor_logical_line_memory = None;
+            self.repaint_transaction_deadline = None;
             self.alternate_repaint_snapshot = None;
             self.alternate_repaint_in_progress = false;
             self.primary_repaint_in_progress = false;
@@ -3610,6 +3648,109 @@ impl DualPlaneSession {
             )
     }
 
+    /// The seam between the previous reads and this one, for the repaint scanners.
+    fn feed_seam(&self, bytes: &[u8]) -> FeedSeam {
+        let mut seam = FeedSeam {
+            at: self.feed_seam_carry_len as usize,
+            ..FeedSeam::default()
+        };
+        seam.bytes[..seam.at].copy_from_slice(&self.feed_seam_carry[..seam.at]);
+        let ahead = bytes.len().min(FEED_SEAM_CARRY);
+        seam.bytes[seam.at..seam.at + ahead].copy_from_slice(&bytes[..ahead]);
+        seam.len = seam.at + ahead;
+        seam
+    }
+
+    /// Keep this read's tail for the next one. A read shorter than the carry leaves the older bytes
+    /// in front of it, so a sequence spread over three or four one-byte reads is still seen whole.
+    fn remember_feed_seam(&mut self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        let kept = bytes.len().min(FEED_SEAM_CARRY);
+        let held = self.feed_seam_carry_len as usize;
+        let carried = held.min(FEED_SEAM_CARRY - kept);
+        self.feed_seam_carry.copy_within(held - carried..held, 0);
+        self.feed_seam_carry[carried..carried + kept].copy_from_slice(&bytes[bytes.len() - kept..]);
+        self.feed_seam_carry_len = (carried + kept) as u8;
+    }
+
+    /// Follow the producer's repaint transaction across reads.
+    ///
+    /// **The hide is the announcement.** A producer that brackets its repaints hides the cursor
+    /// *in order to* rewrite the screen, so the transaction opens at the read whose last DECTCEM
+    /// toggle hides it, and the read that shows it again closes it — that is the turn whose end
+    /// settles the repaint, on a whole grid, which is what an unsplit repaint gave us for free. A
+    /// read carrying no toggle at all says nothing either way and leaves an open transaction open:
+    /// that is a repaint's middle read, the case this exists for.
+    ///
+    /// A closed bracket is the only evidence worth trusting that this producer delimits repaints
+    /// this way. An application that hides the cursor for its whole run and never shows it again is
+    /// using DECTCEM as a mode, not as a bracket, and never has a window held on its behalf.
+    fn observe_repaint_transaction(&mut self, bytes: &[u8], seam: &FeedSeam, observed_at: Instant) {
+        if self
+            .repaint_transaction_deadline
+            .is_some_and(|deadline| observed_at >= deadline)
+        {
+            self.repaint_transaction_deadline = None;
+        }
+        let toggles = cursor_visibility_toggles(bytes, seam);
+        match toggles.last {
+            Some(true) => {
+                self.repaint_bracket_closes |= self.cursor_hidden || toggles.hid;
+                self.cursor_hidden = false;
+                self.repaint_transaction_deadline = None;
+            }
+            Some(false) => {
+                self.cursor_hidden = true;
+                if self.repaint_bracket_closes {
+                    self.repaint_transaction_deadline = Some(
+                        observed_at
+                            .checked_add(REPAINT_TRANSACTION_TIMEOUT)
+                            .unwrap_or(observed_at),
+                    );
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// Close a repaint transaction whose closer never came, and settle the window it was holding.
+    ///
+    /// The symmetry is with `finish_synchronized_update`, which commits a DEC 2026 update that ran
+    /// out its own deadline: a producer that says it is rewriting the screen and then stops talking
+    /// gets bounded patience, after which the window settles on the grid as it stands.
+    fn expire_repaint_transaction(&mut self, now: Instant) {
+        if self
+            .repaint_transaction_deadline
+            .is_none_or(|deadline| now < deadline)
+        {
+            return;
+        }
+        self.repaint_transaction_deadline = None;
+        if self.resize_epoch.is_active() || self.feed_turn.is_some() {
+            return;
+        }
+        self.settle_feed_turn(FeedTurn::default());
+    }
+
+    /// **A half-painted screen is not a frame.** A DEC 2026 update needs no help here: the parser
+    /// withholds its cells, so the frame published while it is open is the whole picture from before
+    /// it. A producer that brackets its repaint with DECTCEM instead writes its cells as they
+    /// arrive, so between two reads of one repaint the grid can hold the new copy of a block at its
+    /// new rows and the old copy at its old rows at the same time — and whichever of the two a
+    /// decoration is anchored to, the other is bare source on the glass. Presentation keeps the last
+    /// complete frame until the repaint closes, which is what the producer asked for by hiding the
+    /// cursor.
+    ///
+    /// Held only while a repaint window is actually open — only when this pane had a decoration to
+    /// preserve when the repaint began — so a pane with no formulas in it never holds a frame.
+    fn repaint_transaction_presentation_hold(&self) -> bool {
+        self.repaint_transaction_deadline.is_some()
+            && (self.alternate_repaint_snapshot.is_some()
+                || self.primary_repaint_snapshot.is_some())
+    }
+
     fn settle_feed_turn(&mut self, turn: FeedTurn) {
         // **A repaint window lives as long as the grid it snapshotted, not as long as some block is
         // buffering.** Both are true for the ordinary DEC 2026 repaint — the block withholds every
@@ -3630,10 +3771,20 @@ impl DualPlaneSession {
         // and a block that is still buffering afterwards opens a *new* window over the grid that
         // commit just settled. A carried record is then in the snapshot's coordinates by
         // construction, and no frame is published between a commit and its verification.
+        //
+        // **A repaint the producer brackets with DECTCEM closes when the repaint ends, not when the
+        // read does.** Its cells land as they are parsed, so its grid moves under the window by
+        // design, and a repaint that arrives in several reads is one repaint: settling at the end of
+        // the first of them reprojects and re-anchors against a grid that is half old and half new,
+        // where a block's source is either on screen twice or not yet at all, and the frame
+        // published for that turn shows source. macOS caps a pty read at 1 KiB, so every repaint of
+        // a few KiB is split there. The grid-moved rule above is the DEC 2026 update's, whose cells
+        // are withheld until a commit, so it is only asked while one is buffering.
         let revision = self.live_content_revision;
-        let settled = self.synchronized_update_deadline().is_none();
+        let synchronized = self.synchronized_update_deadline().is_some();
+        let settled = !synchronized && self.repaint_transaction_deadline.is_none();
         let outlived = |snapshot: &AlternateRepaintSnapshot| {
-            settled || snapshot.live_content_revision != revision
+            settled || (synchronized && snapshot.live_content_revision != revision)
         };
         if self
             .alternate_repaint_snapshot
@@ -3653,7 +3804,7 @@ impl DualPlaneSession {
         self.reconcile_live_image_paths(false, &vec![false; self.live_rows.len()]);
         self.restore_offscreen_decorations();
         self.reconcile_primary_reprint_presentation_hold(turn.primary_reprint_boundary);
-        if self.synchronized_update_deadline().is_none() {
+        if settled {
             self.primary_repaint_in_progress = false;
             self.primary_reprint_history_floor = None;
         }
@@ -4040,6 +4191,7 @@ impl DualPlaneSession {
             self.screen_revision = self.screen_revision.wrapping_add(1);
         }
         if let Err(error) = self.apply_events(events, observed_at) {
+            self.repaint_transaction_deadline = None;
             self.alternate_repaint_snapshot = None;
             self.alternate_repaint_in_progress = false;
             self.primary_repaint_in_progress = false;
@@ -4380,10 +4532,14 @@ impl DualPlaneSession {
         if self.resize_epoch.is_active() {
             return None;
         }
+        // A producer that opens a repaint transaction and then goes quiet must not hold the window,
+        // or presentation, for ever. Nothing else would wake the loop for a pane that has stopped
+        // talking, so the transaction's deadline is one of the times this pane needs seeing to.
         self.live_rows
             .iter()
             .filter(|row| row.settled_revision != Some(row.revision))
             .filter_map(|row| row.last_damage_at.map(|at| at + LIVE_MATH_STABLE_INTERVAL))
+            .chain(self.repaint_transaction_deadline)
             .min()
     }
 
@@ -4392,6 +4548,7 @@ impl DualPlaneSession {
     /// top of the context available now: the complete alternate screen, or a bounded primary
     /// transcript tail followed by the complete live grid.
     pub fn advance_live_stability(&mut self, now: Instant) -> usize {
+        self.expire_repaint_transaction(now);
         if self.resize_epoch.is_active() {
             return 0;
         }
@@ -6740,8 +6897,7 @@ impl DualPlaneSession {
             .collect()
     }
 
-    fn begin_alternate_repaint(&self, bytes: &[u8]) -> Option<AlternateRepaintSnapshot> {
-        let snapshot_boundary = contains_clear_home_snapshot_boundary(bytes);
+    fn begin_alternate_repaint(&self, snapshot_boundary: bool) -> Option<AlternateRepaintSnapshot> {
         snapshot_boundary
             .then(|| self.snapshot_alternate_repaint(snapshot_boundary))
             .flatten()
@@ -7460,8 +7616,13 @@ impl DualPlaneSession {
     /// producer might finish repainting. The off-band record remains available for a later exact
     /// re-anchor, but it no longer prevents the user's requested frame from being published.
     pub fn release_presentation_hold_for_user_input(&mut self) -> bool {
-        let released = self.primary_reprint_presentation_hold();
+        let released = self.primary_reprint_presentation_hold()
+            || self.repaint_transaction_presentation_hold();
         self.primary_reprint_hold_occurrences.clear();
+        // The producer's repaint bracket is a request about *its* picture, and it does not outrank
+        // the frame the user just asked for. Closing the transaction here also lets the next turn
+        // settle the repaint window instead of waiting for a closer the user has overtaken.
+        self.repaint_transaction_deadline = None;
         released
     }
 
@@ -9447,7 +9608,10 @@ impl DualPlaneSession {
         // only while a resize transaction is open; a user clear is not. The projection gates its
         // frame hold on this so a genuine clear still snaps to the (empty) bottom.
         projection.set_resize_reflow_active(self.resize_epoch.is_active());
-        projection.set_exact_source_reprint_hold(self.primary_reprint_presentation_hold());
+        projection.set_exact_source_reprint_hold(
+            self.primary_reprint_presentation_hold()
+                || self.repaint_transaction_presentation_hold(),
+        );
         projection.set_selection(self.view_selection());
         // The "Display formulas" gate, frozen plane (user ruling 2026-08-10). One of the two
         // points where a finished record becomes a viewport artifact; with the switch off the
@@ -15368,14 +15532,24 @@ fn anchor_shifted_right(start: &ContentAnchor, columns: u32) -> Option<ContentAn
 /// (Claude Code) repaint with a synchronized `\x1b[?2026h … \x1b[?2026l` block that homes and
 /// erases each line (`\x1b[K`) rather than emitting `\x1b[2J`; keying the boundary only on `2J`
 /// missed every one of those repaints, so a formula flashed back to source across them.
-fn contains_clear_home_snapshot_boundary(bytes: &[u8]) -> bool {
+///
+/// The bytes are read together with the [`FeedSeam`] in front of them, so a sequence the operating
+/// system split between two reads counts as if it had arrived whole at the start of this one.
+fn contains_clear_home_snapshot_boundary(bytes: &[u8], seam: &FeedSeam) -> bool {
     // Synchronized update: the parser withholds the intermediate state and commits one atomic
     // frame at ESU, which is exactly the repaint transaction boundary we must preserve across.
-    if bytes.windows(8).any(|window| window == b"\x1b[?2026h") {
+    if bytes.windows(8).any(|window| window == b"\x1b[?2026h") || seam.crosses(b"\x1b[?2026h") {
         return true;
     }
-    if let Some(clear) = bytes.windows(4).position(|window| window == b"\x1b[2J") {
-        let suffix = &bytes[clear + 4..];
+    // A sequence that crosses the seam ends at the front of this read, so `0` is where the scan
+    // for whatever must follow it begins.
+    let cleared = bytes
+        .windows(4)
+        .position(|window| window == b"\x1b[2J")
+        .map(|at| at + 4)
+        .or_else(|| seam.crosses(b"\x1b[2J").then_some(0));
+    if let Some(clear) = cleared {
+        let suffix = &bytes[clear..];
         if suffix.windows(3).any(|window| window == b"\x1b[H")
             || suffix.windows(6).any(|window| window == b"\x1b[1;1H")
         {
@@ -15383,17 +15557,93 @@ fn contains_clear_home_snapshot_boundary(bytes: &[u8]) -> bool {
         }
     }
     // A home followed by repeated erase-to-EOL line rewrites is a full repaint without 2J.
-    let homes_early = bytes.windows(3).take(8).any(|window| window == b"\x1b[H")
+    let homes_early = seam.crosses(b"\x1b[H")
+        || seam.crosses(b"\x1b[1;1H")
+        || bytes.windows(3).take(8).any(|window| window == b"\x1b[H")
         || bytes
             .windows(6)
             .take(8)
             .any(|window| window == b"\x1b[1;1H");
-    homes_early
-        && bytes
-            .windows(3)
-            .filter(|window| *window == b"\x1b[K")
-            .count()
-            >= 3
+    let erases = bytes
+        .windows(3)
+        .filter(|window| *window == b"\x1b[K")
+        .count()
+        + usize::from(seam.crosses(b"\x1b[K"));
+    homes_early && erases >= 3
+}
+
+/// One less than the longest escape sequence the repaint scanners match (`\x1b[?2026h`): how much of
+/// one read has to be remembered for the next, so that a sequence the operating system split between
+/// two reads is still seen whole.
+const FEED_SEAM_CARRY: usize = 7;
+
+/// **A control sequence belongs to the byte stream, not to the read that happened to carry it.**
+///
+/// macOS caps a pty read at 1 KiB and the applications this matters for repaint in several KiB, so a
+/// repaint is delivered in pieces and a piece boundary can land inside an escape sequence. A scanner
+/// that only ever sees one read at a time misses the repaint's `\x1b[H` — or its closing
+/// `\x1b[?25h` — precisely then. This carries the previous reads' last few bytes so the seam between
+/// them and this one can be read like any other stretch of the stream.
+///
+/// Only matches that *cross* the seam are reported: one lying wholly in the carried tail was already
+/// counted when that read arrived, and one lying wholly in the new bytes is found by the ordinary
+/// scan. So every sequence is seen exactly once however the reads fall.
+#[derive(Default)]
+struct FeedSeam {
+    bytes: [u8; 2 * FEED_SEAM_CARRY],
+    len: usize,
+    at: usize,
+}
+
+impl FeedSeam {
+    fn crosses(&self, needle: &[u8]) -> bool {
+        if needle.len() > self.len {
+            return false;
+        }
+        self.bytes[..self.len]
+            .windows(needle.len())
+            .enumerate()
+            .any(|(start, window)| {
+                window == needle && start < self.at && start + needle.len() > self.at
+            })
+    }
+}
+
+/// What the DECTCEM toggles in one read said, the seam in front of it included.
+///
+/// The answer is the *last* toggle, because a repaint that fits in one read carries both halves of
+/// its bracket and is finished when the read ends — which is why one read per repaint (a ConPTY read
+/// on Windows) rarely showed the split-repaint flash, while macOS, whose pty caps a read at 1 KiB,
+/// split every repaint of any size.
+struct CursorVisibilityToggles {
+    /// What the last DECTCEM toggle said: `Some(true)` shown, `Some(false)` hidden.
+    last: Option<bool>,
+    /// Whether the read hid the cursor at all — which, together with a later show, is one whole
+    /// repaint bracket inside a single read.
+    hid: bool,
+}
+
+fn cursor_visibility_toggles(bytes: &[u8], seam: &FeedSeam) -> CursorVisibilityToggles {
+    // A toggle that crosses the seam ends at the very start of this read, before anything the
+    // ordinary scan can find, so it is ordered as position zero and the rest one place later.
+    let last = |needle: &[u8]| {
+        bytes
+            .windows(needle.len())
+            .rposition(|window| window == needle)
+            .map(|at| at + 1)
+            .or_else(|| seam.crosses(needle).then_some(0))
+    };
+    let hidden = last(b"\x1b[?25l");
+    let shown = last(b"\x1b[?25h");
+    CursorVisibilityToggles {
+        last: match (hidden, shown) {
+            (None, None) => None,
+            (Some(_), None) => Some(false),
+            (None, Some(_)) => Some(true),
+            (Some(hidden), Some(shown)) => Some(shown > hidden),
+        },
+        hid: hidden.is_some(),
+    }
 }
 
 fn frame_row_history_id(frame: &ViewportFrame, row: u32) -> Option<TranscriptId> {

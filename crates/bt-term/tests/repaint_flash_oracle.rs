@@ -2162,3 +2162,324 @@ fn a_shell_marker_alone_re_asks_the_off_band_question() {
         "an unchanged screen re-asked a question whose answer cannot have changed"
     );
 }
+
+/// Observe the way presentation does: a frame is only looked at when the session is not holding the
+/// last complete one. Reading the grid through a hold would audit a picture nobody is shown.
+fn observe_unless_held(
+    session: &mut DualPlaneSession,
+    projection: &mut bt_viewport::ViewportProjection,
+    oracle: &mut FormulaFlashOracle,
+) -> Option<FormulaFrameState> {
+    session.refresh_projection(projection);
+    if projection.presentation_hold() {
+        return None;
+    }
+    let frame = session.viewport_frame(projection).unwrap();
+    Some(oracle.observe(&frame).state)
+}
+
+const SCROLL_BEFORE: &[&str] = &[
+    "filler 0",
+    "filler 1",
+    "filler 2",
+    "filler 3",
+    "$$",
+    r"\nabla \cdot \mathbf{E} = \frac{\rho}{\varepsilon_0}",
+    "$$",
+    "filler 4",
+    "filler 5",
+    "prompt> ",
+];
+
+const SCROLL_AFTER: &[&str] = &[
+    "$$",
+    r"\nabla \cdot \mathbf{E} = \frac{\rho}{\varepsilon_0}",
+    "$$",
+    "filler 4",
+    "filler 5",
+    "filler 6",
+    "filler 7",
+    "filler 8",
+    "filler 9",
+    "prompt> ",
+];
+
+/// What one repaint delivered in pieces did to the formula it moved.
+struct PiecesOutcome {
+    /// The proven sources a published frame showed as text.
+    flashed: Vec<String>,
+    /// The state of the last frame presentation actually showed.
+    last: Option<FormulaFrameState>,
+    /// Whether presentation was still holding a frame right after the last piece was fed, before
+    /// any deadline had a chance to pass.
+    held_after_last_piece: bool,
+}
+
+/// Drive one proven formula through `repaint`, delivered in pieces split at `splits`, two
+/// milliseconds apart. The screen before it is [`SCROLL_BEFORE`], painted by one cursor-bracketed
+/// repaint, so the producer has been seen to close a bracket.
+fn repaint_in_pieces(repaint: &[u8], splits: &[usize]) -> PiecesOutcome {
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(60), nz(10));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&unsynchronized_repaint(SCROLL_BEFORE));
+    session.feed_at(&first, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_unless_held(&mut session, &mut projection, &mut oracle),
+        Some(FormulaFrameState::Rendered),
+        "the fixture never rendered its formula"
+    );
+
+    let mut last = None;
+    let mut at = start + Duration::from_millis(400);
+    let mut from = 0;
+    for piece in splits.iter().copied().chain([repaint.len()]) {
+        session.feed_at(&repaint[from..piece], at).unwrap();
+        last = observe_unless_held(&mut session, &mut projection, &mut oracle).or(last);
+        from = piece;
+        at += Duration::from_millis(2);
+    }
+    let held_after_last_piece = projection.presentation_hold();
+    session.advance_live_stability(at + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    last = observe_unless_held(&mut session, &mut projection, &mut oracle).or(last);
+    PiecesOutcome {
+        flashed: oracle.flashed_sources().iter().cloned().collect(),
+        last,
+        held_after_last_piece,
+    }
+}
+
+/// [`repaint_in_pieces`] for the scroll an application without DEC 2026 writes
+/// ([`unsynchronized_repaint`]: hide the cursor, home, rewrite every row with erase-to-end-of-line,
+/// show the cursor). Answers with the sources that flashed and the state of the last frame
+/// presentation actually showed.
+fn scrolled_repaint_in_pieces(splits: &[usize]) -> (Vec<String>, Option<FormulaFrameState>) {
+    let outcome = repaint_in_pieces(&unsynchronized_repaint(SCROLL_AFTER), splits);
+    (outcome.flashed, outcome.last)
+}
+
+/// RED (70) — **A repaint split between two pty reads behaves exactly like an unsplit one, wherever
+/// the split falls.**
+///
+/// macOS caps a read from a pty at 1,024 bytes, so a repaint of a few KiB reaches the session in two
+/// or three pieces, while Windows hands over 6-9 KiB at a time and almost never splits one. The
+/// repaint scrolls its content up by four rows, which is what makes a split visible: for splits in
+/// the middle of it the grid holds the block's source twice at once (the new copy is painted and the
+/// old one is not overwritten yet), and for later splits it does not hold it at all yet. Every byte
+/// boundary is tried, because which one the operating system picks is not ours to choose.
+///
+/// On BASE (e68f05d7) 26 of the 211 splits flashed: every split from byte 86 to byte 111, the
+/// stretch in which the new copy of the block is painted and the old one not yet overwritten.
+///
+/// MUTATION: closing the repaint window at the end of the feed turn regardless of the producer's
+/// `\x1b[?25l` … `\x1b[?25h` bracket (`settled` in `settle_feed_turn` ignoring
+/// `repaint_transaction_deadline`) turns splits red again.
+#[test]
+fn scrolled_repaint_split_at_every_byte_boundary_keeps_the_formula_rendered() {
+    let total = unsynchronized_repaint(SCROLL_AFTER).len();
+    let (unsplit, unsplit_state) = scrolled_repaint_in_pieces(&[]);
+    assert!(
+        unsplit.is_empty(),
+        "the unsplit repaint flashed: {unsplit:?}"
+    );
+    assert_eq!(unsplit_state, Some(FormulaFrameState::Rendered));
+
+    let mut flashed = Vec::new();
+    let mut never_came_back = Vec::new();
+    for split in 1..total {
+        let (sources, state) = scrolled_repaint_in_pieces(&[split]);
+        if !sources.is_empty() {
+            flashed.push((split, sources));
+        }
+        if state != Some(FormulaFrameState::Rendered) {
+            never_came_back.push((split, state));
+        }
+    }
+    assert!(
+        flashed.is_empty() && never_came_back.is_empty(),
+        "of {} splits, {} flashed a proven formula and {} never showed it rendered again\n\
+         flashed: {flashed:#?}\nnever came back: {never_came_back:#?}",
+        total - 1,
+        flashed.len(),
+        never_came_back.len(),
+    );
+}
+
+/// RED (70) — **A repaint split into three reads keeps the formula rendered, even when the middle
+/// read carries neither end of the producer's bracket.**
+///
+/// This is the macOS shape exactly: nothing in the middle read says a repaint is in progress, which
+/// is the whole reason the window has to belong to the repaint and not to the read. Every seventh
+/// width of middle read is tried against every first split. On BASE (e68f05d7) 721 of the 3,075
+/// splits tried failed.
+///
+/// MUTATION: the same as the two-read test above.
+#[test]
+fn scrolled_repaint_split_into_three_reads_keeps_the_formula_rendered() {
+    let total = unsynchronized_repaint(SCROLL_AFTER).len();
+    let mut failed = Vec::new();
+    let mut tried = 0usize;
+    for first in 1..total - 1 {
+        for second in first + 1..total {
+            if (second - first) % 7 != 0 {
+                continue;
+            }
+            tried += 1;
+            let (flashed, state) = scrolled_repaint_in_pieces(&[first, second]);
+            if !flashed.is_empty() || state != Some(FormulaFrameState::Rendered) {
+                failed.push((first, second, flashed, state));
+            }
+        }
+    }
+    assert!(
+        failed.is_empty(),
+        "{} of {tried} three-read splits failed: {failed:#?}",
+        failed.len()
+    );
+}
+
+/// **A split repaint that puts different mathematics on the screen replaces the picture.**
+///
+/// The other half of the invariant: holding the window open across reads must not become a pin.
+/// The read that closes the repaint ends the hold at once, and once the new block is typeset the
+/// raster of the text that left is gone and the new formula is what is on the screen. Green on
+/// BASE, which had no hold; it guards the new one.
+///
+/// MUTATION: not clearing the transaction's deadline at the closing `\x1b[?25h` leaves
+/// presentation held after the closing read and turns the first assertion red.
+#[test]
+fn split_repaint_that_changes_the_formula_replaces_the_picture() {
+    const AFTER: &[&str] = &[
+        "filler 0",
+        "filler 1",
+        "filler 2",
+        "$$",
+        r"\oint \mathbf{B} \cdot d\ell = \mu_0 I",
+        "$$",
+        "filler 4",
+        "filler 5",
+        "filler 6",
+        "prompt> ",
+    ];
+
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(60), nz(10));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&unsynchronized_repaint(SCROLL_BEFORE));
+    session.feed_at(&first, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_unless_held(&mut session, &mut projection, &mut oracle),
+        Some(FormulaFrameState::Rendered)
+    );
+
+    let repaint = unsynchronized_repaint(AFTER);
+    let split = repaint.len() / 2;
+    let at = start + Duration::from_millis(400);
+    session.feed_at(&repaint[..split], at).unwrap();
+    observe_unless_held(&mut session, &mut projection, &mut oracle);
+    session
+        .feed_at(&repaint[split..], at + Duration::from_millis(2))
+        .unwrap();
+    session.refresh_projection(&mut projection);
+    assert!(
+        !projection.presentation_hold(),
+        "the repaint closed, so nothing may still be holding the last frame"
+    );
+    session.advance_live_stability(at + Duration::from_millis(2) + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+
+    session.refresh_projection(&mut projection);
+    assert!(!projection.presentation_hold());
+    let frame = session.viewport_frame(&mut projection).unwrap();
+    let rendered = bt_term::observe_formula_frame(&frame).rendered_sources;
+    assert_eq!(
+        rendered,
+        vec![r"\oint \mathbf{B} \cdot d\ell = \mu_0 I".to_owned()],
+        "the new mathematics must be what is on the screen, and the old raster must be gone"
+    );
+}
+
+/// RED (70) — **A half-painted repaint is held, and a repaint whose producer goes quiet releases
+/// presentation on its deadline.**
+///
+/// A producer that opens a repaint and then stops talking must not hold the last frame for ever.
+/// The bound is the one an unterminated DEC 2026 update gets, and the loop is woken for it by the
+/// same deadline that wakes it for live-math stability. Red on BASE at its first assertion: nothing
+/// held the half-painted frame at all.
+///
+/// MUTATION: leaving the transaction's deadline out of `live_stability_deadline` turns it red.
+#[test]
+fn a_repaint_whose_producer_goes_quiet_releases_presentation_on_its_deadline() {
+    let start = std::time::Instant::now();
+    let mut session = DualPlaneSession::new(nz(60), nz(10));
+    let mut projection = session.new_projection(session.layout_key());
+    let mut oracle = FormulaFlashOracle::default();
+
+    let mut first = b"\x1b[?1049h".to_vec();
+    first.extend_from_slice(&unsynchronized_repaint(SCROLL_BEFORE));
+    session.feed_at(&first, start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    complete_live_math(&mut session);
+    assert_eq!(
+        observe_unless_held(&mut session, &mut projection, &mut oracle),
+        Some(FormulaFrameState::Rendered)
+    );
+
+    // Half a repaint, and then silence: the closing `\x1b[?25h` never comes.
+    let repaint = unsynchronized_repaint(SCROLL_AFTER);
+    let at = start + Duration::from_millis(400);
+    session.feed_at(&repaint[..repaint.len() / 2], at).unwrap();
+    session.refresh_projection(&mut projection);
+    assert!(
+        projection.presentation_hold(),
+        "presentation must hold while the repaint is still arriving"
+    );
+    let deadline = session
+        .live_stability_deadline()
+        .expect("the unclosed repaint must ask the loop to come back for it");
+    assert!(deadline <= at + Duration::from_millis(150));
+
+    session.advance_live_stability(deadline);
+    session.refresh_projection(&mut projection);
+    assert!(
+        !projection.presentation_hold(),
+        "a repaint that never closed must release presentation on its deadline"
+    );
+}
+
+/// **A repaint whose closing `\x1b[?25h` is split between two reads ends with the read that
+/// completes it.**
+///
+/// The show that closes the producer's bracket is what lets presentation go back to publishing the
+/// grid. Split inside it, and neither read carries a whole `\x1b[?25h`, so without reading across
+/// the seam the transaction would stay open and presentation would keep the old frame until the
+/// transaction's deadline ran out, 150 ms later. Green on BASE, which had no hold to leave standing;
+/// it guards the seam for the hold this ticket adds.
+///
+/// MUTATION: `FeedSeam::crosses` answering `false` leaves presentation held after the last read.
+#[test]
+fn a_repaint_whose_closing_show_is_split_between_two_reads_ends_with_that_read() {
+    let repaint = unsynchronized_repaint(SCROLL_AFTER);
+    assert!(repaint.ends_with(b"\x1b[?25h"));
+    let show = repaint.len() - b"\x1b[?25h".len();
+    for split in show + 1..repaint.len() {
+        let outcome = repaint_in_pieces(&repaint, &[split]);
+        assert!(
+            !outcome.held_after_last_piece,
+            "the show split after byte {split} did not close the repaint"
+        );
+        assert!(outcome.flashed.is_empty(), "{:?}", outcome.flashed);
+        assert_eq!(outcome.last, Some(FormulaFrameState::Rendered));
+    }
+}
