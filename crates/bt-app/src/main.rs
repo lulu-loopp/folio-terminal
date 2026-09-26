@@ -41484,10 +41484,15 @@ impl Runtime<'_> {
         // anywhere the swapchain has not reached yet — before the first present,
         // and in the band a resize opens up — shows the class background brush
         // installed a few lines above, exactly as it did when the swapchain was
-        // the window's own.
-        let compositor = bt_platform::Compositor::new(native)
-            .map_err(|error| anyhow!(error))
-            .context("open the window's DirectComposition visual tree")?;
+        // the window's own. An owner-thread door (`doors::CompositorBirth`): a refusal is this
+        // road's own error.
+        let compositor = bt_platform::admission::admitted::<
+            bt_platform::admission::doors::CompositorBirth,
+            _,
+        >(|token| bt_platform::Compositor::new(token, native))
+        .unwrap_or_else(|refused| Err(refused.to_string()))
+        .map_err(|error| anyhow!(error))
+        .context("open the window's DirectComposition visual tree")?;
         // The floor's colour is settled with the tree and not with the first
         // page: a page can be born at launch (`BT_WEB_DEV`, a restored session),
         // and a floor that learned its colour only from the *next* theme flip
@@ -52305,7 +52310,15 @@ mod hold_station_tests {
                 .chars()
                 .filter(|character| !character.is_whitespace())
                 .collect();
-            let opened = format!("hang_watch::during(hang_watch::Station::{station},||");
+            // **Two of them are owner-thread doors since A1d** (`doors::WebEnvironment`,
+            // `doors::WebController`): their admission is what enters the station now — the
+            // meter's `enter` before the call, its `leave` after — so the scope that stands
+            // around the call is the admission's.
+            let opened = if matches!(station, "WebEnvironment" | "WebController") {
+                format!("admitted::<doors::{station},_>(|token|")
+            } else {
+                format!("hang_watch::during(hang_watch::Station::{station},||")
+            };
             assert_eq!(
                 body.matches(opened.as_str()).count(),
                 1,
@@ -66105,9 +66118,15 @@ mod resize_skirt_order_tests {
         let handler = body("resize");
         // Plain needles: `body` hands back one method's text, so this test's own
         // source is not among the things being searched.
+        // The call is admitted as an owner-thread door (A1d), so the statement that tells the
+        // compositor begins at its admission, and the call inside it carries the token.
+        assert!(
+            handler.contains(".set_window_size(token,physical.width,physical.height)"),
+            "the resize handler tells the compositor the window's new size: {handler}"
+        );
         let told = handler
-            .find(".set_window_size(physical.width,physical.height)")
-            .expect("the resize handler tells the compositor the window's new size");
+            .find("admitted::<doors::CompositorWindowSize,_>(")
+            .expect("through its admitted door");
         let solved = handler
             .find(".resize(&self.app.gpu,physical.width,physical.height)")
             .expect("and it also synchronizes the renderer's swapchain");
@@ -66142,7 +66161,7 @@ mod resize_skirt_order_tests {
             .find(".set_covered_size(covered_width,covered_height)")
             .expect("the funnel tells the compositor what the swapchain now covers");
         let published = funnel
-            .find(".commit()")
+            .find(".commit(token)")
             .expect("and the funnel is what publishes the frame");
         assert!(
             shrunk < published,

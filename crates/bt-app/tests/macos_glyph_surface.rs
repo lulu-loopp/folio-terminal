@@ -78,6 +78,22 @@ mod mac {
     use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
     use winit::window::{Window, WindowId};
 
+    /// **One admitted call of door `D` on this thread**, which is the window thread: a present
+    /// is an owner-thread door (design note 2026-09-26, revision (e)2). The first call enters the window thread and runs its loop.
+    fn admit<D: bt_platform::admission::Door, R>(
+        work: impl for<'scope> FnOnce(bt_platform::admission::WaitToken<'scope, D>) -> R,
+    ) -> R {
+        use bt_platform::admission::{Role, admitted, enter_window_thread, loop_running, role};
+        if role() != Role::Window {
+            assert!(
+                enter_window_thread(),
+                "this thread enters as the window thread"
+            );
+            assert!(loop_running(), "and its loop is running");
+        }
+        admitted::<D, R>(work).expect("admitted on the window thread")
+    }
+
     /// The drawable, in physical pixels — the same page size the offscreen gate
     /// next door draws, so the two runs' numbers are comparable line for line.
     const WIDTH: u32 = 900;
@@ -185,9 +201,10 @@ mod mac {
                 else {
                     return;
                 };
-                fixture
-                    .present(gpu, on_screen)
-                    .expect("the page draws into the swapchain")
+                admit::<bt_platform::admission::doors::PresentFrame, _>(|token| {
+                    fixture.present(token, gpu, on_screen)
+                })
+                .expect("the page draws into the swapchain")
             };
             self.drawn += 1;
             if self.drawn <= 2 {
@@ -234,9 +251,10 @@ mod mac {
             let mut offscreen =
                 WindowRenderer::offscreen(gpu, fixture.width, fixture.height, SCALE, format)
                     .expect("an offscreen window on the same device");
-            fixture
-                .present(gpu, &mut offscreen)
-                .expect("the page draws into the texture");
+            admit::<bt_platform::admission::doors::PresentFrame, _>(|token| {
+                fixture.present(token, gpu, &mut offscreen)
+            })
+            .expect("the page draws into the texture");
             let read_back = offscreen.read_back(gpu).expect("the texture reads back");
             let metrics = offscreen.base_metrics();
 

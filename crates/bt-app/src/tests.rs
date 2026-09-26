@@ -13842,7 +13842,7 @@ fn an_engine_page_alone_in_a_tab_reaches_the_glass_through_the_retained_present(
     );
     let funnel = squeezed_body("Runtime", "present_seats_and_commit");
     assert!(
-        funnel.contains(".commit()"),
+        funnel.contains(".commit(token)"),
         "and nothing else in this window publishes the composition tree the \
              page's visual lives in:\n{funnel}"
     );
@@ -54099,6 +54099,23 @@ fn under_reduced_motion_no_fade_offers_the_group_path() {
         cards.groups.iter().all(bt_render::OverlayGroup::at_rest),
         "a notice card on its first frame under reduced motion: {:?}",
         cards.groups
+    );
+}
+
+/// **This test's thread is the window thread, and its loop is running** — what every test that
+/// reaches an owner-thread door's minting statement calls first (design note 2026-09-26, revision
+/// (e)2's test protocol). The thread is metered as the window thread is, so a door's witness reads
+/// its admissions with `hang_watch::admissions_on_this_thread`. Test code: outside the universe in
+/// which the phase writers' product call sites are pinned.
+pub(crate) fn on_the_window_thread() {
+    crate::hang_watch::meter_this_test_thread();
+    assert!(
+        bt_platform::admission::enter_window_thread(),
+        "this test's thread enters as the window thread once"
+    );
+    assert!(
+        bt_platform::admission::loop_running(),
+        "and its loop takes its first turn"
     );
 }
 

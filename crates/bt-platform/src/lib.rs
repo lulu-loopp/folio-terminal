@@ -1678,10 +1678,10 @@ mod visual_layer_tests {
 
         let window = body(concat!(
             "pubfnset_window",
-            "_size(&self,width:u32,height:u32)"
+            "_size(&self,token:WaitToken<'_,doors::CompositorWindowSize>,width:u32,height:u32,)"
         ));
         assert!(
-            window.contains("self.place_skirt()?;self.commit()"),
+            window.contains("self.place_skirt()?;self.commit_now()"),
             "the window's own clock places the skirt and publishes it in the \
              same breath, or the strip is transparent until the next frame: {window}"
         );
@@ -1695,7 +1695,7 @@ mod visual_layer_tests {
             "the swapchain's clock places the skirt too: {covered}"
         );
         assert!(
-            !covered.contains(concat!("self.", "commit()")),
+            !covered.contains(concat!("self.", "commit")),
             "but it does not publish it — its caller's commit is the one that \
              has to carry both halves: {covered}"
         );
@@ -3578,6 +3578,7 @@ mod windows_impl {
         WheelScrollAmount, WindowRect, composition_visual_offset, custom_frame_hit_test,
         hold_pending_pos_to, logical_px_for_dpi, window_skirt,
     };
+    use crate::admission::{WaitToken, doors};
 
     /// GDI brush currently owned by this process and installed on winit's shared window class.
     /// The class itself outlives individual windows; theme switches replace this handle in place.
@@ -3869,7 +3870,14 @@ mod windows_impl {
 
     impl Compositor {
         /// Build the tree for one window. The window must already exist.
-        pub fn new(window: NativeWindow) -> Result<Self, String> {
+        ///
+        /// **A door** (`doors::CompositorBirth`, row 9): the device, the visuals and the one
+        /// commit that publishes the empty tree are one admitted batch.
+        pub fn new(
+            token: WaitToken<'_, doors::CompositorBirth>,
+            window: NativeWindow,
+        ) -> Result<Self, String> {
+            let _ = token;
             let hwnd = window.as_hwnd();
             // A null rendering device is the documented way to ask for a
             // composition device that only arranges visuals: this one never
@@ -3926,7 +3934,7 @@ mod windows_impl {
             // exactly like the window did a moment ago. Committing here anyway
             // keeps the invariant simple: at no point does this type hold
             // uncommitted structure it is relying on someone else to publish.
-            compositor.commit()?;
+            compositor.commit_now()?;
             Ok(compositor)
         }
 
@@ -4051,13 +4059,22 @@ mod windows_impl {
         /// Cheap when nothing moved, which is what makes it safe to call from a
         /// handler that fires all through a drag: a `WM_SIZE` that settles back
         /// on the same numbers costs one comparison and commits nothing.
-        pub fn set_window_size(&self, width: u32, height: u32) -> Result<(), String> {
+        ///
+        /// **A door** (`doors::CompositorWindowSize`, row 9): the skirt and its commit are one
+        /// admitted batch; a size that did not change commits nothing and is still admitted.
+        pub fn set_window_size(
+            &self,
+            token: WaitToken<'_, doors::CompositorWindowSize>,
+            width: u32,
+            height: u32,
+        ) -> Result<(), String> {
+            let _ = token;
             if self.window_size.get() == (width, height) {
                 return Ok(());
             }
             self.window_size.set((width, height));
             self.place_skirt()?;
-            self.commit()
+            self.commit_now()
         }
 
         /// **Tell the window's ground how much of it the swapchain covers, and
@@ -4703,7 +4720,22 @@ mod windows_impl {
         /// commits is a skirt and nothing else: the swapchain has not moved, so
         /// what reaches the glass is the same picture with the window's ground
         /// under the part of it the picture does not reach.
-        pub fn commit(&self) -> Result<(), String> {
+        ///
+        /// **The door** (`doors::CompositorCommit`, row 9): the only public road to a composition
+        /// commit. The commits this type and `webview` make inside their own admitted batches go
+        /// through [`Compositor::commit_now`].
+        pub fn commit(&self, token: WaitToken<'_, doors::CompositorCommit>) -> Result<(), String> {
+            let _ = token;
+            self.commit_now()
+        }
+
+        /// **The commit with no token**, for the batches that are already admitted as a whole.
+        /// Crate-visible so `webview` can reach it; its callers are exactly seven (design note
+        /// 2026-09-26, revision (f)1): the forwarding call in [`Compositor::commit`],
+        /// [`Compositor::new`] (`CompositorBirth`), [`Compositor::set_window_size`]
+        /// (`CompositorWindowSize`), and `WebHost::rehost`'s two and `WebHost::compensate`'s two
+        /// (`WebRehost`).
+        pub(crate) fn commit_now(&self) -> Result<(), String> {
             unsafe { self.device.Commit() }
                 .map_err(|error| compositor_failure("IDCompositionDevice2::Commit", &error))
         }
@@ -8881,8 +8913,15 @@ mod windows_impl {
     /// It does not decide which families belong in the picker; the walk does.
     /// A family with no monospaced face has no files by that derivation, and
     /// answers `None` here exactly as it is absent from the walk's list.
+    ///
+    /// **A door** (`doors::FontFamilyLookup`, row 5's residue): asked on the window thread at
+    /// launch, and only with the leave that admission gives.
     #[must_use]
-    pub fn monospace_family_named(name: &str) -> Option<super::MonospaceFamily> {
+    pub fn monospace_family_named(
+        token: crate::admission::WaitToken<'_, crate::admission::doors::FontFamilyLookup>,
+        name: &str,
+    ) -> Option<super::MonospaceFamily> {
+        let _ = token;
         let factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }.ok()?;
         let collection = collection_for_lookup(&factory).ok()??;
@@ -17433,10 +17472,20 @@ mod monospace_family_tests {
 /// on. Windows only, because there is nothing to enumerate elsewhere.
 #[cfg(all(test, windows))]
 mod monospace_enumeration_tests {
-    use super::{
-        DEFAULT_MONOSPACE_FAMILY, cjk_font_families, monospace_family_named,
-        monospace_font_families,
-    };
+    use super::{DEFAULT_MONOSPACE_FAMILY, cjk_font_families, monospace_font_families};
+
+    /// **The lookup by name through its admitted door**, on this test's thread entered as the
+    /// window thread with its loop running: `monospace_family_named` is an owner-thread door
+    /// (`doors::FontFamilyLookup`).
+    fn monospace_family_named(name: &str) -> Option<super::MonospaceFamily> {
+        use crate::admission::{Role, admitted, doors, enter_window_thread, loop_running, role};
+        if role() != Role::Window {
+            assert!(enter_window_thread());
+            assert!(loop_running());
+        }
+        admitted::<doors::FontFamilyLookup, _>(|token| super::monospace_family_named(token, name))
+            .expect("admitted on the window thread")
+    }
 
     /// RED (50) — **the lookup by name answers with the files the walk
     /// answers for the same family, in a fraction of the walk's time.**

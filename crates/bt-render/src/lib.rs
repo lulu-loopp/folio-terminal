@@ -31,6 +31,7 @@ use std::{
 };
 
 use bt_doc::{ContentAnchor, MathMode, ScreenId};
+use bt_platform::admission::{WaitToken, doors};
 use bt_transcript::{CapturedCell, CellFlags, CellStyle, CellText, TerminalColor};
 use bt_unicode::{cluster_width, graphemes};
 #[cfg(test)]
@@ -7950,13 +7951,18 @@ impl WindowRenderer {
     /// The surface is created from `gpu`'s own [`wgpu::Instance`], which is not
     /// a convenience — a surface created by any other instance cannot be
     /// presented on this device.
+    ///
+    /// **A door** (`doors::SurfaceBirth`, row 9): the surface's creation and its configure are
+    /// one admitted batch on the window thread.
     pub fn new(
+        token: WaitToken<'_, doors::SurfaceBirth>,
         gpu: &mut GpuContext,
         target: WindowTarget,
         width: u32,
         height: u32,
         scale_factor: f64,
     ) -> Result<Self, RenderError> {
+        let _ = token;
         let kind = target.kind();
         let surface = create_surface(&gpu.instance, target)?;
         Self::from_surface(gpu, surface, kind, width, height, scale_factor)
@@ -9488,14 +9494,16 @@ impl WindowRenderer {
     /// The N = 1 door into [`Self::present_frame`]. Kept as its own entry point
     /// because a lone terminal leaf is the shape this product opens in, and
     /// because every replay and probe path has exactly one shell by
-    /// construction.
+    /// construction. Under the `PresentFrame` door: it forwards its token.
     pub fn present(
         &mut self,
+        token: WaitToken<'_, doors::PresentFrame>,
         gpu: &mut GpuContext,
         frame: &ViewportFrame,
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome, RenderError> {
         self.present_frame(
+            token,
             gpu,
             &[SeatFrame {
                 seat: self.seat,
@@ -9543,24 +9551,33 @@ impl WindowRenderer {
     ///
     /// Making the pair a single call is how that is enforced rather than
     /// documented: there is no public `prepare` for a caller to hold open.
+    ///
+    /// Under the `PresentFrame` door: it forwards its token.
     pub fn present_frame(
         &mut self,
+        token: WaitToken<'_, doors::PresentFrame>,
         gpu: &mut GpuContext,
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
     ) -> Result<PresentOutcome, RenderError> {
-        self.present_frame_with_phases(gpu, seats, trigger, |_| {})
+        self.present_frame_with_phases(token, gpu, seats, trigger, |_| {})
     }
 
     /// [`Self::present_frame`], reporting only its real external-call
     /// boundaries to the caller's timing ledger.
+    ///
+    /// **The door** (`doors::PresentFrame`, row 9): one admission is one window's present — the
+    /// composition, the surface configure, the acquire, the submit and the present, a declared
+    /// batch. The `phase` callback still names the inner stations; they are not admissions.
     pub fn present_frame_with_phases(
         &mut self,
+        token: WaitToken<'_, doors::PresentFrame>,
         gpu: &mut GpuContext,
         seats: &[SeatFrame<'_>],
         trigger: FrameTrigger,
         mut phase: impl FnMut(PresentPhase),
     ) -> Result<PresentOutcome, RenderError> {
+        let _ = token;
         phase(PresentPhase::ComposeEncode);
         let outcome = self.compose_frame(gpu, seats, trigger, &mut phase);
         // **The one place the shared atlas is told the frame is over, and it is
@@ -24844,7 +24861,7 @@ mod tests {
     fn present_frame_source() -> String {
         let source = source_without_prose();
         let start = source
-            .find("pubfnpresent_frame(&mutself,gpu:&mutGpuContext,")
+            .find("pubfnpresent_frame(&mutself,token:WaitToken<'_,doors::PresentFrame>,gpu:&mutGpuContext,")
             .expect("present_frame");
         let end = source[start..]
             .find("fncompose_frame(")
@@ -25386,8 +25403,9 @@ mod tests {
             rasters: Vec::new(),
         }]);
 
-        let outcome = window
-            .present_frame(
+        let outcome = crate::admitted_present(|token| {
+            window.present_frame(
+                token,
                 &mut gpu,
                 &[SeatFrame {
                     metrics: window.base_metrics(),
@@ -25401,7 +25419,8 @@ mod tests {
                     source: FrameSource::Expose,
                 },
             )
-            .expect("one frame");
+        })
+        .expect("one frame");
         let record = window.preview_text_frame();
         assert!(
             !record.refused.is_empty(),
@@ -25464,8 +25483,9 @@ mod tests {
             }
         }
         window.set_chrome(Vec::new(), kept, Vec::new());
-        let retry = window
-            .present_frame(
+        let retry = crate::admitted_present(|token| {
+            window.present_frame(
+                token,
                 &mut gpu,
                 &[SeatFrame {
                     metrics: window.base_metrics(),
@@ -25479,7 +25499,8 @@ mod tests {
                     source: FrameSource::Expose,
                 },
             )
-            .expect("the frame after a textless one");
+        })
+        .expect("the frame after a textless one");
         let after = window.preview_text_frame();
         assert!(
             after.refused.is_empty(),
@@ -25851,8 +25872,9 @@ mod tests {
         window.set_modal_overlay(vec![fixture.cards], Vec::new());
         window.set_preview_bodies(vec![fixture.page]);
 
-        let outcome = window
-            .present_frame(
+        let outcome = crate::admitted_present(|token| {
+            window.present_frame(
+                token,
                 &mut gpu,
                 &[SeatFrame {
                     metrics: window.base_metrics(),
@@ -25866,7 +25888,8 @@ mod tests {
                     source: FrameSource::Expose,
                 },
             )
-            .expect("one frame");
+        })
+        .expect("one frame");
         let census = window
             .glyph_census()
             .expect("the census was asked for")
@@ -25968,8 +25991,9 @@ mod tests {
         }]);
 
         let frame = single_cell_cursor_frame(window.base_metrics());
-        window
-            .present_frame(
+        crate::admitted_present(|token| {
+            window.present_frame(
+                token,
                 &mut gpu,
                 &[SeatFrame {
                     metrics: window.base_metrics(),
@@ -25993,7 +26017,8 @@ mod tests {
                     source: FrameSource::Expose,
                 },
             )
-            .expect("one frame");
+        })
+        .expect("one frame");
         let census = window.glyph_census().expect("the census was asked for");
         let chrome = census.lane(TextLane::Chrome);
         let overlay_demand = census.lane(TextLane::Overlay);
@@ -26260,8 +26285,9 @@ mod tests {
 
         window.set_chrome(Vec::new(), labels, Vec::new());
         let frame = single_cell_cursor_frame(window.base_metrics());
-        window
-            .present_frame(
+        crate::admitted_present(|token| {
+            window.present_frame(
+                token,
                 &mut gpu,
                 &[SeatFrame {
                     metrics: window.base_metrics(),
@@ -26285,7 +26311,8 @@ mod tests {
                     source: FrameSource::Expose,
                 },
             )
-            .expect("one frame");
+        })
+        .expect("one frame");
         let census = window.glyph_census().expect("the census was asked for");
         let demand = census.lane(TextLane::Chrome);
         assert_eq!(
@@ -26386,8 +26413,9 @@ mod tests {
                 display_height_px: 8,
                 pan_px: [0.0, 0.0],
             }]);
-            window
-                .present_frame(
+            crate::admitted_present(|token| {
+                window.present_frame(
+                    token,
                     &mut gpu,
                     &[SeatFrame {
                         metrics: window.base_metrics(),
@@ -26401,7 +26429,8 @@ mod tests {
                         source: FrameSource::Expose,
                     },
                 )
-                .unwrap_or_else(|error| panic!("a frame clipped by {clip:?}: {error:?}"));
+            })
+            .unwrap_or_else(|error| panic!("a frame clipped by {clip:?}: {error:?}"));
         }
     }
 
@@ -26534,8 +26563,9 @@ mod tests {
                 rasters: Vec::new(),
             }]);
             let frame = single_cell_cursor_frame(metrics);
-            window
-                .present_frame(
+            crate::admitted_present(|token| {
+                window.present_frame(
+                    token,
                     &mut gpu,
                     &[SeatFrame {
                         metrics: window.base_metrics(),
@@ -26559,7 +26589,8 @@ mod tests {
                         source: FrameSource::Expose,
                     },
                 )
-                .expect("one frame");
+            })
+            .expect("one frame");
             let refused = window.preview_text_frame().refused;
             if !refused.is_empty() && worst.is_none() {
                 worst = Some((frame_index, refused.names()));
@@ -26829,8 +26860,9 @@ mod tests {
                 rasters: Vec::new(),
             }]);
             let frame = single_cell_cursor_frame(metrics);
-            window
-                .present_frame(
+            crate::admitted_present(|token| {
+                window.present_frame(
+                    token,
                     &mut gpu,
                     &[SeatFrame {
                         metrics: window.base_metrics(),
@@ -26854,7 +26886,8 @@ mod tests {
                         source: FrameSource::Expose,
                     },
                 )
-                .expect("one frame");
+            })
+            .expect("one frame");
             worst_occupancy = worst_occupancy.max(
                 window
                     .glyph_census()
@@ -27102,8 +27135,9 @@ mod tests {
                     focused: seat_index == 0,
                 })
                 .collect();
-            window
-                .present_frame(
+            crate::admitted_present(|token| {
+                window.present_frame(
+                    token,
                     gpu,
                     &seat_frames,
                     FrameTrigger {
@@ -27111,7 +27145,8 @@ mod tests {
                         source: FrameSource::Expose,
                     },
                 )
-                .expect("one frame")
+            })
+            .expect("one frame")
         };
         let mut refused_in_a_row = [0usize; 2];
         let mut longest = 0usize;
@@ -27269,8 +27304,9 @@ mod tests {
             }],
             Vec::new(),
         );
-        let outcome = window
-            .present_frame(
+        let outcome = crate::admitted_present(|token| {
+            window.present_frame(
+                token,
                 &mut gpu,
                 &[SeatFrame {
                     metrics: window.base_metrics(),
@@ -27284,7 +27320,8 @@ mod tests {
                     source: FrameSource::Expose,
                 },
             )
-            .expect("one frame");
+        })
+        .expect("one frame");
         assert!(
             matches!(outcome, PresentOutcome::Presented(_)),
             "the frame that first held the card owed nothing afterwards: {outcome:?}"
@@ -30567,8 +30604,9 @@ mod tests {
 
             let frame = single_cell_cursor_frame(window.base_metrics());
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
-            window
-                .present_frame(
+            crate::admitted_present(|token| {
+                window.present_frame(
+                    token,
                     &mut gpu,
                     &[SeatFrame {
                         metrics: window.base_metrics(),
@@ -30582,7 +30620,8 @@ mod tests {
                         source: FrameSource::Expose,
                     },
                 )
-                .expect("the frame that draws them both");
+            })
+            .expect("the frame that draws them both");
             let pixels = window.read_back(&gpu).expect("it reads back");
 
             let drawn_left = pixels_of(&pixels, LEFT);
@@ -30944,8 +30983,9 @@ mod tests {
         fn present(window: &mut WindowRenderer, gpu: &mut GpuContext) -> Vec<[u8; 4]> {
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
             let frame = single_cell_cursor_frame(window.base_metrics());
-            window
-                .present_frame(
+            crate::admitted_present(|token| {
+                window.present_frame(
+                    token,
                     gpu,
                     &[SeatFrame {
                         metrics: window.base_metrics(),
@@ -30959,7 +30999,8 @@ mod tests {
                         source: FrameSource::Expose,
                     },
                 )
-                .expect("one frame");
+            })
+            .expect("one frame");
             window.read_back(gpu).expect("the frame reads back")
         }
 
@@ -32038,8 +32079,9 @@ mod tests {
                 }],
                 Vec::new(),
             );
-            window
-                .present_frame(
+            crate::admitted_present(|token| {
+                window.present_frame(
+                    token,
                     &mut gpu,
                     &[SeatFrame {
                         metrics: window.base_metrics(),
@@ -32053,7 +32095,8 @@ mod tests {
                         source: FrameSource::Expose,
                     },
                 )
-                .expect("one frame");
+            })
+            .expect("one frame");
             let pixels = window.read_back(&gpu).expect("the frame reads back");
             // `[b, g, r, a]`: red ink over a dark ground, at whatever coverage
             // the antialiasing gave it.
@@ -32177,8 +32220,9 @@ mod tests {
                 radius_px: 60.0,
                 opacity: 1.0,
             }]);
-            window
-                .present_frame(
+            crate::admitted_present(|token| {
+                window.present_frame(
+                    token,
                     &mut gpu,
                     &[SeatFrame {
                         metrics: window.base_metrics(),
@@ -32192,7 +32236,8 @@ mod tests {
                         source: FrameSource::Expose,
                     },
                 )
-                .expect("one frame");
+            })
+            .expect("one frame");
             let pixels = window.read_back(&gpu).expect("the frame reads back");
             let at = |x: u32, y: u32| pixels[(y * WIDTH + x) as usize];
 
@@ -32272,8 +32317,9 @@ mod tests {
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
             let frame = single_cell_cursor_frame(window.base_metrics());
             let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
-                window
-                    .present_frame(
+                crate::admitted_present(|token| {
+                    window.present_frame(
+                        token,
                         gpu,
                         &[SeatFrame {
                             metrics: window.base_metrics(),
@@ -32287,7 +32333,8 @@ mod tests {
                             source: FrameSource::Expose,
                         },
                     )
-                    .expect("one frame");
+                })
+                .expect("one frame");
             };
             window.set_video_layers(vec![VideoLayer {
                 stage: VideoStage::Seat,
@@ -32362,8 +32409,9 @@ mod tests {
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
             let frame = single_cell_cursor_frame(window.base_metrics());
             let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
-                window
-                    .present_frame(
+                crate::admitted_present(|token| {
+                    window.present_frame(
+                        token,
                         gpu,
                         &[SeatFrame {
                             metrics: window.base_metrics(),
@@ -32377,7 +32425,8 @@ mod tests {
                             source: FrameSource::Expose,
                         },
                     )
-                    .expect("one frame");
+                })
+                .expect("one frame");
                 window.read_back(gpu).expect("the frame reads back")
             };
             // The pane on its own, with no recording anywhere near it.
@@ -32482,8 +32531,9 @@ mod tests {
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
             let frame = single_cell_cursor_frame(window.base_metrics());
             let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
-                window
-                    .present_frame(
+                crate::admitted_present(|token| {
+                    window.present_frame(
+                        token,
                         gpu,
                         &[SeatFrame {
                             metrics: window.base_metrics(),
@@ -32497,7 +32547,8 @@ mod tests {
                             source: FrameSource::Expose,
                         },
                     )
-                    .expect("one frame");
+                })
+                .expect("one frame");
                 window.read_back(gpu).expect("the frame reads back")
             };
             // One pixel of colour, stretched over the whole box — the two files
@@ -32585,8 +32636,9 @@ mod tests {
             let seat = SeatViewport::whole(WIDTH, HEIGHT);
             let frame = single_cell_cursor_frame(first.base_metrics());
             let present = |window: &mut WindowRenderer, gpu: &mut GpuContext| {
-                window
-                    .present_frame(
+                crate::admitted_present(|token| {
+                    window.present_frame(
+                        token,
                         gpu,
                         &[SeatFrame {
                             metrics: window.base_metrics(),
@@ -32600,7 +32652,8 @@ mod tests {
                             source: FrameSource::Expose,
                         },
                     )
-                    .expect("one frame");
+                })
+                .expect("one frame");
                 window.read_back(gpu).expect("the frame reads back")
             };
             // The same name in both windows, which is exactly what the two
@@ -32969,20 +33022,23 @@ mod tests {
             frame: &ViewportFrame,
         ) -> Result<PresentOutcome, RenderError> {
             let seat = SeatViewport::whole(window.config.width, window.config.height);
-            window.present_frame(
-                gpu,
-                &[SeatFrame {
-                    metrics: window.base_metrics(),
-                    seat,
-                    clip: seat,
-                    frame,
-                    focused: true,
-                }],
-                FrameTrigger {
-                    occurred_at: Instant::now(),
-                    source: FrameSource::Expose,
-                },
-            )
+            crate::admitted_present(|token| {
+                window.present_frame(
+                    token,
+                    gpu,
+                    &[SeatFrame {
+                        metrics: window.base_metrics(),
+                        seat,
+                        clip: seat,
+                        frame,
+                        focused: true,
+                    }],
+                    FrameTrigger {
+                        occurred_at: Instant::now(),
+                        source: FrameSource::Expose,
+                    },
+                )
+            })
         }
 
         /// PIN (user report, 2026-09-01) — **the whole of the fix, against a
@@ -33720,8 +33776,9 @@ mod tests {
             frame: &ViewportFrame,
         ) -> PresentOutcome {
             let seat = SeatViewport::whole(window.config.width, window.config.height);
-            window
-                .present_frame(
+            crate::admitted_present(|token| {
+                window.present_frame(
+                    token,
                     gpu,
                     &[SeatFrame {
                         metrics: window.base_metrics(),
@@ -33735,7 +33792,8 @@ mod tests {
                         source: FrameSource::Expose,
                     },
                 )
-                .expect("a frame")
+            })
+            .expect("a frame")
         }
 
         /// The ink inside columns `first..first + width` of the one row: the
@@ -34889,4 +34947,22 @@ mod cjk_picker_regressions {
             assert_eq!(families(&b, &fs), ["Test Other"]);
         }
     }
+}
+
+/// **One admitted present, for this crate's tests.** A present is an owner-thread door
+/// (`doors::PresentFrame`, design note 2026-09-26, revision (e)2), so the calling test's thread
+/// enters as the window thread with its loop running — once — and `work` gets the token.
+#[cfg(test)]
+pub(crate) fn admitted_present<R>(
+    work: impl for<'scope> FnOnce(WaitToken<'scope, doors::PresentFrame>) -> R,
+) -> R {
+    use bt_platform::admission::{Role, admitted, enter_window_thread, loop_running, role};
+    if role() != Role::Window {
+        assert!(
+            enter_window_thread(),
+            "this test's thread enters as the window thread"
+        );
+        assert!(loop_running(), "and its loop is running");
+    }
+    admitted::<doors::PresentFrame, R>(work).expect("admitted on the window thread")
 }

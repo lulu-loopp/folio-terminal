@@ -154,6 +154,24 @@ pub struct Refused {
     pub phase: Option<Phase>,
 }
 
+/// The words a caller that turns a refusal into its door's own error carries: the door, and the
+/// thread and phase it was asked on.
+impl std::fmt::Display for Refused {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "the {} door was refused on a {:?} thread",
+            self.door, self.role
+        )?;
+        match self.phase {
+            Some(phase) => write!(formatter, " in its {phase:?} phase"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl std::error::Error for Refused {}
+
 /// Every refusal of this process: admissions, and role and phase writes.
 static REFUSALS: AtomicU64 = AtomicU64::new(0);
 

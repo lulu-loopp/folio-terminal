@@ -11,6 +11,7 @@ use crate::{
 use crate::{apply_tabs_leaf_metrics, pane_cell_metrics};
 use anyhow::Context;
 use anyhow::{Result, anyhow};
+use bt_platform::admission::{admitted, doors};
 use bt_render::{FrameSource, FrameTrigger};
 use std::time::Instant;
 use winit::dpi::PhysicalSize;
@@ -323,12 +324,16 @@ impl Runtime<'_> {
         // honours the alpha of is the desktop. The compositor's own commit
         // owes nothing to a frame, so the window's ground is on the glass in
         // the same composition pass that made the window bigger. Costs one
-        // comparison when a `WM_SIZE` settles back onto the same numbers.
-        self.window
-            .compositor
-            .set_window_size(physical.width, physical.height)
-            .map_err(|error| anyhow!(error))
-            .context("put the window's own ground under the strip a resize opens")?;
+        // comparison when a `WM_SIZE` settles back onto the same numbers. An owner-thread door
+        // (`doors::CompositorWindowSize`): a refusal is this road's own error.
+        admitted::<doors::CompositorWindowSize, _>(|token| {
+            self.window
+                .compositor
+                .set_window_size(token, physical.width, physical.height)
+        })
+        .unwrap_or_else(|refused| Err(refused.to_string()))
+        .map_err(|error| anyhow!(error))
+        .context("put the window's own ground under the strip a resize opens")?;
         // Before anything solves: a rectangle this process did not ask for is the user's, and
         // from here on their minima are advice (user ruling 2026-08-08).
         self.defer_preview_resample(Instant::now());

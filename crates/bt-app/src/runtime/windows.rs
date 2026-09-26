@@ -22,6 +22,7 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bt_layout::{SeatId, SizePolicy, WorkAreaHint};
 use bt_persist::{SessionSidebarModeV1, SessionTabLayoutV1, SessionWindowV1, TabV1, WindowStateV1};
+use bt_platform::admission::{admitted, doors};
 use bt_render::{FrameSource, FrameTrigger, WindowRenderer};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -246,10 +247,14 @@ impl Runtime<'_> {
         let scale_factor = dpi_snapshot(&window)?.authoritative_scale;
         // The visual tree first, because the swapchain hangs off it — §2.3's
         // shape, once per window, because a `Compositor` is parameterised by the
-        // HWND it composes above.
-        let compositor = bt_platform::Compositor::new(native)
-            .map_err(|error| anyhow!(error))
-            .context("open the window's DirectComposition visual tree")?;
+        // HWND it composes above. An owner-thread door (`doors::CompositorBirth`): a refusal is
+        // this road's own error.
+        let compositor = admitted::<doors::CompositorBirth, _>(|token| {
+            bt_platform::Compositor::new(token, native)
+        })
+        .unwrap_or_else(|refused| Err(refused.to_string()))
+        .map_err(|error| anyhow!(error))
+        .context("open the window's DirectComposition visual tree")?;
         // Beside the first window's, and for its reason: a second window can be
         // opened straight onto a page (`Move pane to new window` on a web seat).
         install_page_ground_color(&compositor);
@@ -258,13 +263,21 @@ impl Runtime<'_> {
         // asked of the same adapter, which is the whole of the sharing contract;
         // the atlas, both pipelines and the one `FontSystem` come with it, and
         // that last is the saving that is not on the GPU at all.
-        let mut renderer = WindowRenderer::new(
-            &mut app.gpu,
-            window_surface_target(&window, &compositor),
-            physical.width,
-            physical.height,
-            scale_factor,
-        )
+        //
+        // The surface and its configure are one owner-thread door (`doors::SurfaceBirth`); a
+        // refusal is this road's own error.
+        let mut renderer = admitted::<doors::SurfaceBirth, _>(|token| {
+            WindowRenderer::new(
+                token,
+                &mut app.gpu,
+                window_surface_target(&window, &compositor),
+                physical.width,
+                physical.height,
+                scale_factor,
+            )
+            .map_err(anyhow::Error::from)
+        })
+        .unwrap_or_else(|refused| Err(anyhow::Error::from(refused)))
         .context("open the new window's surface on this application's device")?;
         let translucency_available = renderer
             .alpha_report()

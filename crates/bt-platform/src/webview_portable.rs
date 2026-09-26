@@ -20,6 +20,7 @@ use super::{
     WebColorScheme, WebDpiOwnership, WebEvent, WebInstallReport, WebMouseEvent,
     WebNavigationVerdict, WebRequestVerdict,
 };
+use crate::admission::{WaitToken, doors};
 use crate::{Compositor, EnvironmentAnswer, WebWarmUp};
 
 /// What every door of this host answers with.
@@ -117,18 +118,28 @@ impl WebHost {
     /// The first thing a seat asks for and the last thing that happens to it:
     /// `bt_app::webhost` turns the `Err` into the seat's fault state, which is
     /// a banner in the pane naming the reason rather than an empty rectangle.
-    pub fn request_environment(&mut self, folder: &Path, generation: u64) -> Result<(), String> {
-        let _ = (folder, generation);
+    ///
+    /// **A door** (`doors::WebEnvironment`), the same signature as the Windows arm's.
+    pub fn request_environment(
+        &mut self,
+        token: WaitToken<'_, doors::WebEnvironment>,
+        folder: &Path,
+        generation: u64,
+    ) -> Result<(), String> {
+        let _ = (token, folder, generation);
         Err(no_engine("the web preview"))
     }
 
     /// Ask for a controller on this window. Unreachable: no environment.
+    ///
+    /// **A door** (`doors::WebController`), the same signature as the Windows arm's.
     pub fn request_controller(
         &mut self,
+        token: WaitToken<'_, doors::WebController>,
         window: NativeWindow,
         generation: u64,
     ) -> Result<(), String> {
-        let _ = (window, generation);
+        let _ = (token, window, generation);
         Err(no_engine("the web preview"))
     }
 
@@ -148,14 +159,17 @@ impl WebHost {
     /// `KeptSource` and not `Lost`, because the two mean different things to
     /// the tear-out that asked: `Lost` says the page is gone and the tab may
     /// move anyway, and `KeptSource` says nothing moved — which is the truth.
+    ///
+    /// **A door** (`doors::WebRehost`), the same signature as the Windows arm's.
     pub fn rehost(
         &mut self,
+        token: WaitToken<'_, doors::WebRehost>,
         from: &RehostSide<'_>,
         to: &RehostSide<'_>,
         rect: (i32, i32, u32, u32),
         visible: bool,
     ) -> RehostOutcome {
-        let _ = (from, to, rect, visible);
+        let _ = (token, from, to, rect, visible);
         RehostOutcome::KeptSource {
             failed_at: RehostStep::Hide,
             error: no_engine("the web preview"),
@@ -347,7 +361,12 @@ impl SpareParent {
 }
 
 /// **Make the spare's parent**: nothing to make on this platform.
-pub fn spare_parent() -> Result<Option<SpareParent>, String> {
+///
+/// Under the `CompositorBirth` door, the same signature as the Windows arm's.
+pub fn spare_parent(
+    token: WaitToken<'_, doors::CompositorBirth>,
+) -> Result<Option<SpareParent>, String> {
+    let _ = token;
     Ok(None)
 }
 

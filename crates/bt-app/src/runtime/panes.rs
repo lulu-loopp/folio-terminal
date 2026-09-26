@@ -5286,10 +5286,17 @@ impl Runtime<'_> {
             // `BT_GLYPH_CENSUS` names a file to write it to; setting the flag is a
             // bool store and asking the gate is a `OnceLock` read.
             renderer.set_glyph_census(glyph_trace::wanted());
-            let present_parent = hang_watch::enter(hang_watch::Station::RenderCompose);
             attempt.outcome = present_diagnostics::Outcome::FailedRender;
-            let outcome =
-                renderer.present_frame_with_phases(gpu, seat_frames, trigger, |phase| {
+            // **One window's present is one admitted owner-thread door** (`doors::PresentFrame`,
+            // a declared batch: compose, configure, acquire, submit, present). The meter enters
+            // its station, `RenderCompose`, and puts the funnel's back when it returns — the pair
+            // this replaced. The inner phases stay stations. A refusal is the error a failed
+            // render takes.
+            let outcome = bt_platform::admission::admitted::<
+                bt_platform::admission::doors::PresentFrame,
+                _,
+            >(|token| {
+                renderer.present_frame_with_phases(token, gpu, seat_frames, trigger, |phase| {
                     attempt.render_phase(phase);
                     hang_watch::phase(match phase {
                         PresentPhase::SurfaceConfigure(_) => hang_watch::Station::SurfaceConfigure,
@@ -5302,11 +5309,11 @@ impl Runtime<'_> {
                         PresentPhase::Present => hang_watch::Station::SwapchainPresent,
                         PresentPhase::Complete => hang_watch::Station::RenderCompose,
                     });
-                })?;
+                })
+            })??;
             // **What this frame did with the documents on it** — the one funnel is
             // also the one place that can say it, and it says it only when the
             // answer moved (`BT_PREVIEW_TRACE`).
-            hang_watch::at(present_parent);
             preview_trace::frame(
                 preview_trace::global(),
                 preview,
@@ -5343,12 +5350,16 @@ impl Runtime<'_> {
                             .map_err(|error| anyhow!(error))
                             .context("tell the window's ground how much of it the swapchain covers")
                     })?;
-                    hang_watch::during(hang_watch::Station::CompositorCommit, || {
-                        compositor
-                            .commit()
-                            .map_err(|error| anyhow!(error))
-                            .context("publish the presented frame to the window's composition tree")
-                    })
+                    // The commit is its own owner-thread door, the present's sibling
+                    // (`doors::CompositorCommit`; the meter enters its station). A refusal takes
+                    // the failed commit's road.
+                    bt_platform::admission::admitted::<
+                        bt_platform::admission::doors::CompositorCommit,
+                        _,
+                    >(|token| compositor.commit(token))
+                    .unwrap_or_else(|refused| Err(refused.to_string()))
+                    .map_err(|error| anyhow!(error))
+                    .context("publish the presented frame to the window's composition tree")
                 })();
                 attempt.phase(None);
                 committed?;

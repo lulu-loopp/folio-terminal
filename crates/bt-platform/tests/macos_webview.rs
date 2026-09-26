@@ -77,6 +77,7 @@ mod mac {
     use std::ptr::NonNull;
     use std::time::Instant;
 
+    use bt_platform::admission::doors;
     use bt_platform::{
         Compositor, NativeWindow, PageVisual, WebEvent, WebHost, WebNavigationVerdict,
         WebRequestVerdict,
@@ -90,6 +91,23 @@ mod mac {
     use objc2_foundation::{
         NSDate, NSDefaultRunLoopMode, NSPoint, NSRect, NSRunLoop, NSSize, ns_string,
     };
+
+    /// **One admitted call of door `D` on this thread**, which is the window thread: the
+    /// composition's and the engine's doors are owner-thread doors (design note 2026-09-26,
+    /// revision (e)2). The first call enters the window thread and runs its loop.
+    fn admit<D: bt_platform::admission::Door, R>(
+        work: impl for<'scope> FnOnce(bt_platform::admission::WaitToken<'scope, D>) -> R,
+    ) -> R {
+        use bt_platform::admission::{Role, admitted, enter_window_thread, loop_running, role};
+        if role() != Role::Window {
+            assert!(
+                enter_window_thread(),
+                "this thread enters as the window thread"
+            );
+            assert!(loop_running(), "and its loop is running");
+        }
+        admitted::<D, R>(work).expect("admitted on the window thread")
+    }
 
     // ── the report ─────────────────────────────────────────────────────────
 
@@ -994,14 +1012,15 @@ function click(id) { document.getElementById(id).click(); }
         let window = a_window(mtm);
         let number = window.windowNumber() as u32;
         let handle = handle_of(&window);
-        let compositor = match Compositor::new(handle) {
-            Ok(compositor) => compositor,
-            Err(reason) => {
-                report.fail("the composition builds on a real window", &reason);
-                report.say("ALL_DONE");
-                return;
-            }
-        };
+        let compositor =
+            match admit::<doors::CompositorBirth, _>(|token| Compositor::new(token, handle)) {
+                Ok(compositor) => compositor,
+                Err(reason) => {
+                    report.fail("the composition builds on a real window", &reason);
+                    report.say("ALL_DONE");
+                    return;
+                }
+            };
         let page = PageVisual { tab: 1, seat: 1 };
         if let Err(reason) = compositor.attach_web_visual(page) {
             report.fail("the page gets a slot", &reason);
@@ -1011,7 +1030,9 @@ function click(id) { document.getElementById(id).click(); }
         let _ = compositor.place_web_visual(page, (0, 0), (0.0, 0.0, 1800.0, 1280.0));
 
         let store_folder = work.join("m4-2-rules");
-        if let Err(reason) = host.request_environment(&store_folder, 1) {
+        if let Err(reason) = admit::<doors::WebEnvironment, _>(|token| {
+            host.request_environment(token, &store_folder, 1)
+        }) {
             report.fail("the engine is asked for", &reason);
             report.say("ALL_DONE");
             return;
@@ -1033,7 +1054,9 @@ function click(id) { document.getElementById(id).click(); }
             "WebEvent::Environment for generation 1",
         );
 
-        if let Err(reason) = host.request_controller(handle, 1) {
+        if let Err(reason) =
+            admit::<doors::WebController, _>(|token| host.request_controller(token, handle, 1))
+        {
             report.fail("the page is asked for", &reason);
             report.say("ALL_DONE");
             return;
@@ -1364,7 +1387,10 @@ function click(id) { document.getElementById(id).click(); }
                     (0.0, 0.0, page_wide, page_tall),
                 )
                 .is_ok()
-            && browsing.request_environment(&store_folder, 2).is_ok()
+            && admit::<doors::WebEnvironment, _>(|token| {
+                browsing.request_environment(token, &store_folder, 2)
+            })
+            .is_ok()
             && until(&browsing, &mut net, 3.0, |events| {
                 events.iter().any(|event| {
                     matches!(
@@ -1376,7 +1402,10 @@ function click(id) { document.getElementById(id).click(); }
                     )
                 })
             })
-            && browsing.request_controller(handle, 2).is_ok()
+            && admit::<doors::WebController, _>(|token| {
+                browsing.request_controller(token, handle, 2)
+            })
+            .is_ok()
             && until(&browsing, &mut net, 8.0, |events| {
                 events
                     .iter()

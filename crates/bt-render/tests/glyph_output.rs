@@ -42,6 +42,23 @@ const WIDTH: u32 = 900;
 const HEIGHT: u32 = 760;
 const SCALE: f64 = 2.0;
 
+/// **One admitted call of door `D` on this thread**, which is the window thread: a present is
+/// an owner-thread door (design note 2026-09-26, revision (e)2). The first call enters the window
+/// thread and runs its loop.
+fn admit<D: bt_platform::admission::Door, R>(
+    work: impl for<'scope> FnOnce(bt_platform::admission::WaitToken<'scope, D>) -> R,
+) -> R {
+    use bt_platform::admission::{Role, admitted, enter_window_thread, loop_running, role};
+    if role() != Role::Window {
+        assert!(
+            enter_window_thread(),
+            "this thread enters as the window thread"
+        );
+        assert!(loop_running(), "and its loop is running");
+    }
+    admitted::<D, R>(work).expect("admitted on the window thread")
+}
+
 /// One drawn page, and the pixels it came out as.
 struct Drawn {
     pixels: Vec<[u8; 4]>,
@@ -53,9 +70,10 @@ fn draw(fixture: GlyphFixture) -> Drawn {
     let mut window =
         WindowRenderer::offscreen(&mut gpu, fixture.width, fixture.height, SCALE, FORMAT)
             .expect("an offscreen window");
-    fixture
-        .present(&mut gpu, &mut window)
-        .expect("the fixture draws");
+    admit::<bt_platform::admission::doors::PresentFrame, _>(|token| {
+        fixture.present(token, &mut gpu, &mut window)
+    })
+    .expect("the fixture draws");
     let pixels = window.read_back(&gpu).expect("the frame reads back");
     Drawn {
         pixels,

@@ -142,13 +142,26 @@ impl Compositor {
     /// Build the tree. **Never fails**, which is the point: this call is step
     /// 13 of the sixteen-step startup path and it is one of the seven that
     /// propagate with `?` (`backend-inventory-2026-09-12.md` §6 ⑥).
-    pub fn new(window: NativeWindow) -> Result<Self, String> {
+    ///
+    /// **A door** (`doors::CompositorBirth`), the same signature as the Windows arm's.
+    pub fn new(
+        token: crate::admission::WaitToken<'_, crate::admission::doors::CompositorBirth>,
+        window: NativeWindow,
+    ) -> Result<Self, String> {
+        let _ = token;
         Ok(Self { window })
     }
 
     /// The tree is told the window's new size. Nothing to tell.
-    pub fn set_window_size(&self, width: u32, height: u32) -> Result<(), String> {
-        let _ = (width, height);
+    ///
+    /// **A door** (`doors::CompositorWindowSize`), the same signature as the Windows arm's.
+    pub fn set_window_size(
+        &self,
+        token: crate::admission::WaitToken<'_, crate::admission::doors::CompositorWindowSize>,
+        width: u32,
+        height: u32,
+    ) -> Result<(), String> {
+        let _ = (token, width, height);
         Ok(())
     }
 
@@ -212,7 +225,18 @@ impl Compositor {
     }
 
     /// Everything said since the last commit becomes visible. Nothing was said.
-    pub fn commit(&self) -> Result<(), String> {
+    ///
+    /// **The door** (`doors::CompositorCommit`), the same signature as the Windows arm's.
+    pub fn commit(
+        &self,
+        token: crate::admission::WaitToken<'_, crate::admission::doors::CompositorCommit>,
+    ) -> Result<(), String> {
+        let _ = token;
+        self.commit_now()
+    }
+
+    /// The commit with no token, the Windows arm's pair; its one caller is [`Self::commit`].
+    pub(crate) fn commit_now(&self) -> Result<(), String> {
         Ok(())
     }
 }
@@ -1229,8 +1253,11 @@ pub fn monospace_font_families() -> Vec<crate::MonospaceFamily> {
 /// [`monospace_font_families`] gives here.
 #[cfg(not(target_os = "macos"))]
 #[must_use]
-pub fn monospace_family_named(name: &str) -> Option<crate::MonospaceFamily> {
-    let _ = name;
+pub fn monospace_family_named(
+    token: crate::admission::WaitToken<'_, crate::admission::doors::FontFamilyLookup>,
+    name: &str,
+) -> Option<crate::MonospaceFamily> {
+    let _ = (token, name);
     None
 }
 
@@ -1718,11 +1745,31 @@ mod refusal_tests {
         NativeWindow::stand_in(1)
     }
 
+    /// This test's thread is the window thread, and its loop is running: the composition's doors
+    /// are owner-thread doors and are admitted only there.
+    #[cfg(not(target_os = "macos"))]
+    fn on_the_window_thread() {
+        assert!(crate::admission::enter_window_thread());
+        assert!(crate::admission::loop_running());
+    }
+
+    /// The visual tree, built through its admitted door.
+    #[cfg(not(target_os = "macos"))]
+    fn compositor() -> Result<Compositor, String> {
+        crate::admission::admitted::<crate::admission::doors::CompositorBirth, _>(|token| {
+            Compositor::new(token, window())
+        })
+        .expect("admitted on the window thread")
+    }
+
     /// RED — **the startup path's constructors are harmless.**
     #[test]
     fn every_startup_constructor_builds_rather_than_refusing() {
         #[cfg(not(target_os = "macos"))]
-        assert!(Compositor::new(window()).is_ok(), "the visual tree");
+        {
+            on_the_window_thread();
+            assert!(compositor().is_ok(), "the visual tree");
+        }
         assert!(
             CustomWindowFrame::install(
                 window(),
@@ -1809,7 +1856,8 @@ mod refusal_tests {
         // `macos_compose`'s own suite and its `.app` proof.
         #[cfg(not(target_os = "macos"))]
         {
-            let compositor = Compositor::new(window()).expect("built above");
+            on_the_window_thread();
+            let compositor = compositor().expect("built above");
             let page = PageVisual { tab: 1, seat: 1 };
             assert!(
                 compositor.attach_web_visual(page).is_err(),
@@ -1818,12 +1866,19 @@ mod refusal_tests {
             // And the frame's own calls are the no-ops a frame makes, not
             // refusals: one line of stderr per present is not a diagnostic, it
             // is a fault.
+            use crate::admission::{admitted, doors};
             assert!(
-                compositor.commit().is_ok(),
+                admitted::<doors::CompositorCommit, _>(|token| compositor.commit(token))
+                    .expect("admitted on the window thread")
+                    .is_ok(),
                 "committing nothing costs nothing"
             );
             assert!(
-                compositor.set_window_size(800, 600).is_ok(),
+                admitted::<doors::CompositorWindowSize, _>(|token| {
+                    compositor.set_window_size(token, 800, 600)
+                })
+                .expect("admitted on the window thread")
+                .is_ok(),
                 "a resize tells the tree nothing and succeeds at it"
             );
         }

@@ -2603,6 +2603,8 @@ pub const ADMISSION_METER: Meter = Meter {
 };
 
 fn admitted_enter(door: DoorKey) -> Cookie {
+    #[cfg(test)]
+    ADMITTED_HERE.with(|admitted| admitted.borrow_mut().push(door.name()));
     let heart = meter_heart();
     heart.admitted_enter_at(Station::from_byte(door.station()), heart.now_ms())
 }
@@ -2627,6 +2629,31 @@ thread_local! {
     /// every test that runs at once.
     static TEST_HEART: std::cell::Cell<Option<&'static Heartbeat>> =
         const { std::cell::Cell::new(None) };
+    /// The doors the meter was told this thread entered, in order — what a door's witness reads
+    /// to say "one admission" (design note 2026-09-26, revision (e)2's witness column).
+    static ADMITTED_HERE: std::cell::RefCell<Vec<&'static str>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// **This test's thread is metered as the window thread is**: the process's one meter (the
+/// one [`start`] installs; installing it again is refused and changes nothing, it is the same
+/// meter), a heartbeat of the thread's own so the process's is not charged, and an empty list of
+/// admissions.
+#[cfg(test)]
+pub(crate) fn meter_this_test_thread() {
+    let _ = bt_platform::admission::install_meter(ADMISSION_METER);
+    let heart: &'static Heartbeat = Box::leak(Box::new(Heartbeat::sampling(|| None)));
+    heart.woke_at(0);
+    heart.at_station(Station::Event, 1);
+    TEST_HEART.with(|cell| cell.set(Some(heart)));
+    ADMITTED_HERE.with(|admitted| admitted.borrow_mut().clear());
+}
+
+/// **The doors admitted on this thread since it was metered**, by name, in order; taking them
+/// empties the list.
+#[cfg(test)]
+pub(crate) fn admissions_on_this_thread() -> Vec<&'static str> {
+    ADMITTED_HERE.with(|admitted| std::mem::take(&mut *admitted.borrow_mut()))
 }
 
 /// A cookie's saved node and scope are the call tree's indices, `0..=ROOT`, sixteen bits each; a

@@ -27,6 +27,7 @@ use std::time::Instant;
 use bt_persist::{
     PreviewSourceV1, RecentPreviewV1, RecentSeedV1, SessionV1, SettingsV1, WebPagesUsedV1,
 };
+use bt_platform::admission::{admitted, doors};
 use bt_platform::{SparePhase, SpareSlot};
 
 use crate::webhost::{self, WebOutcome, WebSeat};
@@ -84,8 +85,11 @@ impl SpareSeat<bt_platform::SpareParent> for WebSeat {
         let compositor = parent.compositor();
         let mut outcomes = self.drive(compositor);
         outcomes.extend(self.tick(now, compositor));
-        // The parent's tree is committed by nobody else: no frame is ever drawn for it.
-        if let Err(error) = compositor.commit() {
+        // The parent's tree is committed by nobody else: no frame is ever drawn for it. The
+        // commit is an owner-thread door, and a refusal is a fault like the commit's own.
+        if let Err(error) = admitted::<doors::CompositorCommit, _>(|token| compositor.commit(token))
+            .unwrap_or_else(|refused| Err(refused.to_string()))
+        {
             outcomes.push(WebOutcome::Fault(error));
         }
         outcomes
@@ -93,7 +97,7 @@ impl SpareSeat<bt_platform::SpareParent> for WebSeat {
 
     fn retire(&mut self, parent: &bt_platform::SpareParent) -> Vec<WebOutcome> {
         let outcomes = self.close(parent.compositor());
-        let _ = parent.compositor().commit();
+        let _ = admitted::<doors::CompositorCommit, _>(|token| parent.compositor().commit(token));
         outcomes
     }
 

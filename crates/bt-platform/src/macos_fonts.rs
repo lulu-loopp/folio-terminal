@@ -89,8 +89,14 @@ pub fn monospace_font_families() -> Vec<MonospaceFamily> {
 /// walk makes for every face it keeps, so a family is monospaced here exactly
 /// when it is a row of [`monospace_font_families`], and its `files` are empty
 /// for the reason this module's header gives.
+///
+/// **A door** (`doors::FontFamilyLookup`), the same signature as the Windows arm's.
 #[must_use]
-pub fn monospace_family_named(name: &str) -> Option<MonospaceFamily> {
+pub fn monospace_family_named(
+    token: crate::admission::WaitToken<'_, crate::admission::doors::FontFamilyLookup>,
+    name: &str,
+) -> Option<MonospaceFamily> {
+    let _ = token;
     let wanted = CFString::from_str(name);
     // SAFETY: a CoreText constant string, read for the length of the call that
     // copies it into the dictionary.
