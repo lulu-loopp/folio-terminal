@@ -257,6 +257,9 @@ pub fn disarm(agents: &Path, txn: &[u8; 16]) -> Result<(), Refusal> {
     install_txn::durable_remove(&agents.join(file_name(txn))).map_err(Refusal::Remove)
 }
 
+/// What [`sweep`] did: each plist of ours it found, with its removal's answer.
+pub type Swept = Vec<(PathBuf, Result<(), Refusal>)>;
+
 /// **Remove every entrance this door ever wrote in `agents`** — the
 /// `--uninstall-cleanup` row. Each plist whose name [`is_ours`] is removed
 /// through [`install_txn::durable_remove`], and its own answer is returned
@@ -265,7 +268,7 @@ pub fn disarm(agents: &Path, txn: &[u8; 16]) -> Result<(), Refusal> {
 ///
 /// # Errors
 /// [`Refusal::List`] when the folder exists but cannot be listed.
-pub fn sweep(agents: &Path) -> Result<Vec<(PathBuf, Result<(), Refusal>)>, Refusal> {
+pub fn sweep(agents: &Path) -> Result<Swept, Refusal> {
     let listed = match std::fs::read_dir(agents) {
         Ok(listed) => listed,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
