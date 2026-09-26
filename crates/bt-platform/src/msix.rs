@@ -92,6 +92,17 @@ pub const PACKAGE_EXECUTABLE: &str = "folio.exe";
 /// [`supports_primary_context_menu`] is asked before the row is even drawn.
 pub const PRIMARY_CONTEXT_MENU_BUILD: u32 = 22_000;
 
+/// A package version, `Identity/@Version`'s four numbers in order —
+/// major, minor, build, revision.
+///
+/// **Four numbers and compared as four numbers** (design note 2026-09-16,
+/// R-20): the manifest's version is `scripts/release/package.ps1`'s
+/// `major.minor.patch.0`, and a comparison against the three-part product
+/// version would call `0.4.6.0` and `0.4.6` two different things. An array
+/// orders lexicographically, which is exactly how Windows orders package
+/// versions.
+pub type PackageVersion = [u16; 4];
+
 /// Whether this Windows has the menu page a package is registered to reach.
 #[must_use]
 pub fn supports_primary_context_menu(build: u32) -> bool {
@@ -247,6 +258,11 @@ mod deployment {
         /// `None` for a package with no external location — which ours always
         /// has, so in practice it means an operating system that would not say.
         pub external_path: Option<PathBuf>,
+        /// The version that was registered (`PackageId::Version`), which is
+        /// the package file's `Identity/@Version` at the time it was
+        /// registered — what `bt_app::explorer_menu` compares against this
+        /// build's own to decide whether a start renews it (U-25).
+        pub version: super::PackageVersion,
     }
 
     /// What this user has registered under [`super::PACKAGE_NAME`], if anything.
@@ -276,11 +292,12 @@ mod deployment {
     }
 
     fn describe(package: &Package) -> Result<PackageRegistration, String> {
-        let full_name = package
-            .Id()
-            .and_then(|id| id.FullName())
+        let id = package.Id().map_err(|error| error.message())?;
+        let full_name = id
+            .FullName()
             .map_err(|error| error.message())?
             .to_string_lossy();
+        let version = id.Version().map_err(|error| error.message())?;
         // A package with no external location answers this with an error rather
         // than with an empty string, and that is not a failure of ours to report:
         // the caller's question is "where does this registration point", and "it
@@ -293,6 +310,12 @@ mod deployment {
         Ok(PackageRegistration {
             full_name,
             external_path,
+            version: [
+                version.Major,
+                version.Minor,
+                version.Build,
+                version.Revision,
+            ],
         })
     }
 
@@ -440,6 +463,8 @@ mod no_deployment {
         pub full_name: String,
         /// The folder the registration points its content at, when it has one.
         pub external_path: Option<PathBuf>,
+        /// The version that was registered.
+        pub version: super::PackageVersion,
     }
 
     /// What this user has registered. Nothing, and that is not a failure: the

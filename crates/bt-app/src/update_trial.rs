@@ -113,8 +113,9 @@ pub(crate) enum Writer {
     /// The launch's replacement of Folio's own older PSReadLine and its stamp
     /// (`psreadline::upgrade_recorded`, ticket 56).
     PsReadLineUpgrade,
-    /// The launch probe's repair of the Explorer package registration
-    /// (`explorer_menu::begin_probe`).
+    /// The launch probe's repair and renewal of the Explorer package
+    /// registration (`explorer_menu::begin_probe`; the gate is asked in
+    /// `explorer_menu::probe_at_start`, U-25).
     ExplorerRepair,
     /// The toast sender's identity in the registry (`NotificationDesk::show` →
     /// `bt_platform::Notifier::register_identity`).

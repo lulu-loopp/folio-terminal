@@ -93,6 +93,23 @@
 //! where the item is instead ([`description_for`]). The explicit switch is not
 //! routed through it, for the reason the classic entry's is not: a press names
 //! *this* Folio by hand.
+//!
+//! # The registration an update left behind (U-25)
+//!
+//! A registration records the package file's version at the moment it was
+//! registered, and an update replaces `folio.exe` and `folio.msix` under it
+//! without touching the deployment database. So every start of every copy asks
+//! one more question of the registration it read ([`renewal_wanted`]): does it
+//! serve **this** folder, and is its version older than this build's
+//! ([`this_package_version`])? Both, and the start registers the package beside
+//! it again; anything else, and it does nothing. It never retargets another
+//! copy's registration — that is the move repair's question, asked with its own
+//! rule — and it never creates one: the setting still decides whether there is a
+//! registration at all. It rides on the probe, so it takes the same latch as a
+//! press and waits for an update's trial to be committed as the repair does
+//! (design note 2026-09-16, F-18). Nothing is written down about it: the next
+//! start asks again, which is what makes a refused renewal repairable without a
+//! record of having been refused.
 
 use std::{
     path::{Path, PathBuf},
@@ -438,6 +455,28 @@ static OUTCOME: Mutex<Option<Result<bool, String>>> = Mutex::new(None);
 /// this off that Folio is registered for the first page.
 static REGISTERED_HERE: AtomicBool = AtomicBool::new(false);
 
+/// **Why this start's renewal was refused, when it was** (U-25).
+///
+/// The row's sentence while it is set ([`renewal_line`]): a renewal refused at
+/// start has nobody's press to answer with a card, and a row that went on
+/// describing a working registration would be reporting the start as one that
+/// changed nothing. Written by every probe and cleared by any press that
+/// worked, because either leaves the registration where somebody asked for it.
+static RENEWAL_REFUSED: Mutex<Option<String>> = Mutex::new(None);
+
+fn renewal_refused() -> Option<String> {
+    RENEWAL_REFUSED
+        .lock()
+        .expect("the renewal's refusal is not held across a panic")
+        .clone()
+}
+
+fn remember_renewal_refusal(reason: Option<String>) {
+    *RENEWAL_REFUSED
+        .lock()
+        .expect("the renewal's refusal is not held across a panic") = reason;
+}
+
 /// Whether a registration made in this session may still be waiting for
 /// Explorer to notice — see [`REGISTERED_HERE`].
 #[must_use]
@@ -523,26 +562,40 @@ fn read_state() -> PackageState {
     if !supported() {
         return PackageState::Unsupported;
     }
-    let registered = match msix::registered() {
-        Ok(Some(registered)) => registered,
-        Ok(None) => return PackageState::Absent,
+    state_of(
+        msix::registered(),
+        this_folder().as_deref(),
+        &is_this_executable,
+    )
+}
+
+/// The folder this executable is in.
+fn this_folder() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+}
+
+/// **What the deployment database's answer means for the row** — [`classify`]
+/// behind the two answers that are not a registration.
+fn state_of(
+    answer: Result<Option<msix::PackageRegistration>, String>,
+    here: Option<&Path>,
+    ours: &dyn Fn(&Path) -> bool,
+) -> PackageState {
+    match answer {
+        Ok(Some(registered)) => {
+            classify(registered.full_name, registered.external_path, here, ours)
+        }
+        Ok(None) => PackageState::Absent,
         // **Nothing registered and "Windows would not say" are two answers**
         // (R2-20). They used to be one, and the removal is where that cost
         // something: a press on `Off` reads this state to find the name it has to
         // hand `RemovePackageAsync`, and a refusal that reads as absence is a
         // removal that reports success over a package that is still registered
         // and a menu item still on the reader's first page.
-        Err(_) => return PackageState::Unreadable,
-    };
-    let here = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    classify(
-        registered.full_name,
-        registered.external_path,
-        here.as_deref(),
-        is_this_executable,
-    )
+        Err(_) => PackageState::Unreadable,
+    }
 }
 
 /// **Which of ours a registration is, from the folder it serves** — the whole of
@@ -1126,10 +1179,316 @@ fn cleanup_package() -> CleanupRegistration {
     }
 }
 
-/// Ask the machine, and repair a registration that names another folder.
+// ── the renewal at start (U-25) ─────────────────────────────────────────────
+
+/// **The deployment database, as the probe reaches it** — what it reads and the
+/// one call it writes with (U-25).
 ///
-/// Started at launch, on a thread of its own. Nothing on the path to the first
-/// frame waits for it.
+/// [`ThisMachine`] is `bt_platform::msix`; a test hands in a registration
+/// source of its own, because the machine a test runs on may have a real one
+/// that must not be touched.
+pub(crate) trait Deployment {
+    /// [`bt_platform::msix::registered`].
+    fn registered(&self) -> Result<Option<msix::PackageRegistration>, String>;
+    /// [`bt_platform::msix::register`].
+    fn register(&self, package: &Path, external: &Path) -> Result<(), String>;
+}
+
+/// This user's deployment database.
+struct ThisMachine;
+
+impl Deployment for ThisMachine {
+    fn registered(&self) -> Result<Option<msix::PackageRegistration>, String> {
+        msix::registered()
+    }
+
+    fn register(&self, package: &Path, external: &Path) -> Result<(), String> {
+        msix::register(package, external)
+    }
+}
+
+/// **This build's package version** — the four numbers
+/// `scripts/release/package.ps1` writes into the `folio.msix` shipped beside
+/// this executable: the workspace version's `major.minor.patch` and a `0`
+/// (design note 2026-09-16, R-20).
+///
+/// Read with the parser `build.rs` puts the version into `VERSIONINFO` with,
+/// which drops a pre-release suffix exactly as the packaging script does; a
+/// version it could not read never builds.
+#[must_use]
+pub fn this_package_version() -> msix::PackageVersion {
+    bt_winres::FileVersion::parse_semver(crate::version::VERSION)
+        .expect("build.rs refuses a workspace version this parser cannot read")
+        .0
+}
+
+/// **Whether a start renews this registration** (U-25; design note
+/// 2026-09-16, F-18): it serves this folder — compared the way [`same_path`]
+/// compares, canonicalised — and its version is older than this build's.
+///
+/// A registration with no external location is not this folder's. Equal or
+/// newer is left alone, which is also what keeps an older build from asking
+/// Windows for a downgrade.
+#[must_use]
+pub fn renewal_wanted(
+    registration: &msix::PackageRegistration,
+    here: &Path,
+    this_build: msix::PackageVersion,
+) -> bool {
+    serves_this_folder(registration, here) && registration.version < this_build
+}
+
+fn serves_this_folder(registration: &msix::PackageRegistration, here: &Path) -> bool {
+    registration
+        .external_path
+        .as_deref()
+        .is_some_and(|at| same_path(at, here))
+}
+
+/// **What one start did about the registration's version** (U-25) — the
+/// outcome `diagnostics.log` names once per start ([`Self::log_line`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Renewal {
+    /// Nothing is registered: the setting is off, and a start creates nothing.
+    NothingRegistered,
+    /// Windows would not say what is registered; the next start asks again.
+    Unreadable,
+    /// The registration serves another folder, or names none: not this copy's
+    /// to renew.
+    AnotherFolder,
+    /// This folder's, at this build's version or a newer one.
+    Current { registered: msix::PackageVersion },
+    /// Wanted — and, until the probe has the latch, only that. Left as the
+    /// outcome when a press held the latch: the reader is saying what the
+    /// machine should be, and the next start asks again.
+    Wanted { registered: msix::PackageVersion },
+    /// Wanted, but no `folio.msix` is beside the executable.
+    NoPackageFile { registered: msix::PackageVersion },
+    /// Registered again, from `registered` to this build's version.
+    Renewed { registered: msix::PackageVersion },
+    /// Windows refused the registration; `reason` is its own sentence.
+    Refused {
+        registered: msix::PackageVersion,
+        reason: String,
+    },
+}
+
+impl Renewal {
+    /// Why the renewal was refused, when it was — the row's sentence
+    /// ([`renewal_line`]).
+    #[must_use]
+    pub fn refusal(&self) -> Option<&str> {
+        match self {
+            Self::Refused { reason, .. } => Some(reason),
+            _ => None,
+        }
+    }
+
+    /// **The one `diagnostics.log` line a start writes about it.** Versions
+    /// only: no path and no account, and not Windows' refusal either — that
+    /// sentence can carry both, and the row shows it to the one reader it
+    /// belongs to.
+    #[must_use]
+    pub fn log_line(&self, this_build: msix::PackageVersion) -> String {
+        let build = dotted(this_build);
+        let said = match self {
+            Self::NothingRegistered => "nothing registered".to_owned(),
+            Self::Unreadable => "Windows would not say what is registered".to_owned(),
+            Self::AnotherFolder => "the registration serves another folder".to_owned(),
+            Self::Current { registered } => format!(
+                "not needed ({} registered, this build {build})",
+                dotted(*registered)
+            ),
+            Self::Wanted { registered } => format!(
+                "left to the press in flight ({} registered, this build {build})",
+                dotted(*registered)
+            ),
+            Self::NoPackageFile { registered } => format!(
+                "wanted, but {PACKAGE_FILE_NAME} is not beside the executable ({} registered, this build {build})",
+                dotted(*registered)
+            ),
+            Self::Renewed { registered } => format!("renewed {} -> {build}", dotted(*registered)),
+            Self::Refused { registered, .. } => {
+                format!("refused {} -> {build}", dotted(*registered))
+            }
+        };
+        format!("BT_EXPLORER_PACKAGE renewal: {said}")
+    }
+}
+
+fn dotted(version: msix::PackageVersion) -> String {
+    let [major, minor, build, revision] = version;
+    format!("{major}.{minor}.{build}.{revision}")
+}
+
+/// **The facts about this process a probe is asked with** —
+/// [`Start::this_process`] in the product, a folder of its own in a test.
+pub(crate) struct Start<'a> {
+    /// The folder this executable is in.
+    pub(crate) here: Option<PathBuf>,
+    /// `folio.msix` beside the executable, when it is there ([`package_file`]).
+    pub(crate) package: Option<PathBuf>,
+    /// Whether registering this folder would put this executable behind the
+    /// menu item — see [`reassert_wanted`].
+    pub(crate) here_serves_us: bool,
+    /// [`this_package_version`].
+    pub(crate) this_build: msix::PackageVersion,
+    /// Whether a path names this executable ([`is_this_executable`]).
+    pub(crate) ours: &'a dyn Fn(&Path) -> bool,
+}
+
+impl Start<'static> {
+    fn this_process() -> Self {
+        let here = this_folder();
+        Self {
+            here_serves_us: here
+                .as_deref()
+                .map(package_exe_in)
+                .is_some_and(|exe| is_this_executable(&exe)),
+            package: package_file(),
+            here,
+            this_build: this_package_version(),
+            ours: &is_this_executable,
+        }
+    }
+}
+
+/// What one probe found and did.
+#[derive(Debug)]
+pub(crate) struct Probed {
+    /// The row's state after it: read again after a registration that worked.
+    pub(crate) state: PackageState,
+    /// Whether it took the latch, which [`finish_job`] then owes.
+    pub(crate) latched: bool,
+    /// Whether the move repair registered this folder ([`REGISTERED_HERE`]).
+    pub(crate) repaired: bool,
+    /// What it did about the registration's version.
+    pub(crate) renewal: Renewal,
+}
+
+/// **One start's probe, unless an update's trial holds it back** (F-7, F-18).
+///
+/// `defer` is the trial gate's question ([`crate::update_trial::defer`]): the
+/// probe can write the registration, which is the old build's until the trial
+/// is committed, so during a trial this answers `None`, the gate records the
+/// writer as pending, and the commit runs the probe again
+/// ([`crate::update_trial::Writer::ExplorerRepair`]). Asked here rather than by
+/// the caller, so there is no road to the renewal that does not ask it.
+pub(crate) fn probe_at_start(
+    defer: impl FnOnce(crate::update_trial::Writer) -> bool,
+    deployment: &impl Deployment,
+    start: &Start<'_>,
+    latch: &AtomicBool,
+) -> Option<Probed> {
+    if defer(crate::update_trial::Writer::ExplorerRepair) {
+        return None;
+    }
+    Some(probe(deployment, start, latch))
+}
+
+/// **Read the registration once, then repair a moved one or renew an old one**
+/// — at most one registration, under the latch a press takes.
+///
+/// The two never both apply: the repair is for a registration serving another
+/// folder, the renewal for one serving this folder.
+fn probe(deployment: &impl Deployment, start: &Start<'_>, latch: &AtomicBool) -> Probed {
+    let answer = deployment.registered();
+    let state = state_of(answer.clone(), start.here.as_deref(), start.ours);
+    // Whether registering this folder would put this executable behind the
+    // menu item at all — see `reassert_wanted`.
+    let repair = reassert_wanted(
+        &state,
+        start.here_serves_us,
+        |exe| exe.is_file(),
+        start.ours,
+    );
+    let renewal = match (&answer, start.here.as_deref()) {
+        (Ok(None), _) => Renewal::NothingRegistered,
+        (Err(_), _) => Renewal::Unreadable,
+        (Ok(Some(registration)), Some(here))
+            if renewal_wanted(registration, here, start.this_build) =>
+        {
+            Renewal::Wanted {
+                registered: registration.version,
+            }
+        }
+        (Ok(Some(registration)), Some(here)) if serves_this_folder(registration, here) => {
+            Renewal::Current {
+                registered: registration.version,
+            }
+        }
+        (Ok(Some(_)), _) => Renewal::AnotherFolder,
+    };
+    let renewing = matches!(renewal, Renewal::Wanted { .. });
+    // **The repair and the renewal take the same latch a press does** (R2-20,
+    // F-18). Each is a deployment exactly like the one behind the switch, and
+    // until the latch existed the two could run at once: a reader who pressed
+    // `Off` in the first second of a launch had `RemovePackageAsync` and
+    // `AddPackageAsync` in flight against one package name, and whichever
+    // finished last decided what the machine ended up with — while the row was
+    // drawn from whichever read happened to run after that.
+    //
+    // The press wins ties by construction: it takes the latch on the window
+    // thread the instant it is pressed, and this runs seconds later on a thread
+    // of its own. A probe that finds the latch taken registers nothing, which is
+    // right — the reader is in the middle of saying what they want the machine
+    // to be, and a launch does not argue with that.
+    let latched = (repair || renewing) && !latch.swap(true, Ordering::AcqRel);
+    let mut probed = Probed {
+        state,
+        latched,
+        repaired: false,
+        renewal,
+    };
+    if !latched {
+        return probed;
+    }
+    // The file, and the folder to register it against. Either being absent is
+    // the same answer, so they are fetched as one.
+    let target = start
+        .package
+        .as_deref()
+        .and_then(|package| Some((package, package.parent()?)));
+    let read_again = |probed: &mut Probed| {
+        probed.state = state_of(deployment.registered(), start.here.as_deref(), start.ours);
+    };
+    if repair {
+        if let Some((package, here)) = target {
+            match deployment.register(package, here) {
+                Ok(()) => {
+                    probed.repaired = true;
+                    read_again(&mut probed);
+                }
+                // Silent to the user, on `reassert`'s footing: the entry that
+                // is there goes on being whatever it was, the next launch
+                // tries again, and there is no window yet to put a card on.
+                Err(error) => eprintln!("BT_EXPLORER_PACKAGE repair refused — {error}"),
+            }
+        }
+        return probed;
+    }
+    let Renewal::Wanted { registered } = probed.renewal else {
+        return probed;
+    };
+    probed.renewal = match target {
+        None => Renewal::NoPackageFile { registered },
+        Some((package, here)) => match deployment.register(package, here) {
+            Ok(()) => {
+                read_again(&mut probed);
+                Renewal::Renewed { registered }
+            }
+            Err(reason) => Renewal::Refused { registered, reason },
+        },
+    };
+    probed
+}
+
+/// Ask the machine, repair a registration that names another folder, and renew
+/// this folder's when an update left it older than this build (U-25).
+///
+/// Started at launch, on a thread of its own, and again when an update's trial
+/// is committed — [`probe_at_start`] asks the trial's gate. Nothing on the path
+/// to the first frame waits for it.
 pub fn begin_probe() {
     if !supported() {
         remember(PackageState::Unsupported);
@@ -1139,58 +1498,24 @@ pub fn begin_probe() {
         "folio-explorer-probe",
         bt_platform::ThreadPriority::Normal,
         |_ctx| {
-            let state = read_state();
-            // **The repair takes the same latch a press does** (R2-20). It is a
-            // deployment, exactly like the one behind the switch, and until this line
-            // existed the two could run at once: a reader who pressed `Off` in the
-            // first second of a launch had `RemovePackageAsync` and `AddPackageAsync`
-            // in flight against one package name, and whichever finished last decided
-            // what the machine ended up with — while the row was drawn from whichever
-            // `read_state` happened to run after that.
-            //
-            // The press wins ties by construction: it takes the latch on the window
-            // thread the instant it is pressed, and this runs seconds later on a
-            // thread of its own. A repair that finds the latch taken does nothing at
-            // all, which is right — the reader is in the middle of saying what they
-            // want the machine to be, and a launch does not argue with that.
-            // Whether registering this folder would put this executable behind the
-            // menu item at all — see `reassert_wanted`.
-            let here_serves_us = std::env::current_exe()
-                .ok()
-                .and_then(|exe| exe.parent().map(package_exe_in))
-                .is_some_and(|exe| is_this_executable(&exe));
-            let repairing = reassert_wanted(
-                &state,
-                here_serves_us,
-                |exe| exe.is_file(),
-                is_this_executable,
-            ) && !BUSY.swap(true, Ordering::AcqRel);
-            if repairing
-                && let Some(package) = package_file()
-                && let Some(here) = package.parent()
-            {
-                let outcome = msix::register(&package, here);
-                match outcome {
-                    Ok(()) => {
-                        REGISTERED_HERE.store(true, Ordering::Release);
-                        let state = read_state();
-                        remember(state.clone());
-                        finish_job(&state);
-                        wake();
-                        return;
-                    }
-                    Err(error) => {
-                        // Silent to the user, on `reassert`'s footing: the entry that
-                        // is there goes on being whatever it was, the next launch
-                        // tries again, and there is no window yet to put a card on.
-                        eprintln!("BT_EXPLORER_PACKAGE repair refused — {error}");
-                    }
-                }
+            let start = Start::this_process();
+            let Some(probed) =
+                probe_at_start(crate::update_trial::defer, &ThisMachine, &start, &BUSY)
+            else {
+                return;
+            };
+            if probed.repaired {
+                REGISTERED_HERE.store(true, Ordering::Release);
             }
-            if repairing {
-                finish_job(&state);
+            // Once per start, whatever it came to: the renewal is re-evaluated
+            // at every start, so the log is where a reader sees which way this
+            // one went.
+            eprintln!("{}", probed.renewal.log_line(start.this_build));
+            remember_renewal_refusal(probed.renewal.refusal().map(str::to_owned));
+            remember(probed.state.clone());
+            if probed.latched {
+                finish_job(&probed.state);
             }
-            remember(state);
             wake();
         },
     )
@@ -1314,6 +1639,12 @@ fn run_request(install: bool) {
                 }
             };
             let state = read_state();
+            // A press that worked left the registration where the reader asked
+            // for it, so a refusal of this start's renewal is no longer the
+            // row's news (U-25).
+            if outcome.is_ok() {
+                remember_renewal_refusal(None);
+            }
             remember(state.clone());
             report(outcome);
             finish_job(&state);
@@ -1383,14 +1714,39 @@ pub fn take_outcome() -> Option<Result<bool, String>> {
 #[must_use]
 pub fn row_description() -> &'static str {
     let state = state();
-    description_for(
+    let line = description_for(
         supported(),
         package_file().is_some(),
         matches!(state, PackageState::Elsewhere { .. }),
         shell_refresh_pending(),
         state == PackageState::Unreadable,
-    )
-    .text()
+    );
+    // Interned for `update::row_description`'s reason (see `i18n::intern`): at
+    // most one refusal per start.
+    renewal_line(line, renewal_refused().as_deref())
+        .map_or_else(|| line.text(), crate::i18n::intern)
+}
+
+/// **The row's sentence after a renewal Windows refused** (U-25): the words a
+/// refused registration already has ([`crate::i18n::explorer_first_page_failed`]),
+/// with Windows' own reason.
+///
+/// Over every sentence that describes a registration, and under the three that
+/// say the first page, the package file or the deployment database is out of
+/// reach — those are facts about the machine the refusal does not change. A row
+/// that went on saying the registration was fine would be reporting a start
+/// that changed nothing.
+#[must_use]
+pub fn renewal_line(line: Text, refused: Option<&str>) -> Option<String> {
+    let out_of_reach = matches!(
+        line,
+        Text::DescExplorerMenuNoFirstPage
+            | Text::DescExplorerMenuNoPackage
+            | Text::DescExplorerFirstPageUnreadable
+    );
+    refused
+        .filter(|_| !out_of_reach)
+        .map(crate::i18n::explorer_first_page_failed)
 }
 
 /// The same answer from the four facts, so a test can ask for a machine it is
@@ -2328,5 +2684,406 @@ mod tests {
             }),
             "the process's one entry is spent"
         );
+    }
+
+    // ── the renewal at start (U-25) ─────────────────────────────────────────
+
+    /// The version these tests build as, and the one older than it.
+    const THIS_BUILD: msix::PackageVersion = [0, 4, 6, 0];
+    const OLDER: msix::PackageVersion = [0, 4, 5, 0];
+
+    /// **A deployment database that is not this machine's**: one registration
+    /// (or none), a list of refusals answered in order before the calls start
+    /// working, and every `register` call written down. A call that works
+    /// leaves the registration naming the folder it was given at
+    /// [`THIS_BUILD`], which is what the real one does.
+    struct FakeDeployment {
+        registration: Mutex<Option<msix::PackageRegistration>>,
+        refusals: Mutex<Vec<String>>,
+        calls: Mutex<Vec<(PathBuf, PathBuf)>>,
+    }
+
+    impl FakeDeployment {
+        fn holding(registration: Option<msix::PackageRegistration>) -> Self {
+            Self {
+                registration: Mutex::new(registration),
+                refusals: Mutex::new(Vec::new()),
+                calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn refusing(self, reasons: &[&str]) -> Self {
+            *self.refusals.lock().unwrap() = reasons.iter().map(|r| (*r).to_owned()).collect();
+            self
+        }
+
+        fn calls(&self) -> Vec<(PathBuf, PathBuf)> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    impl Deployment for FakeDeployment {
+        fn registered(&self) -> Result<Option<msix::PackageRegistration>, String> {
+            Ok(self.registration.lock().unwrap().clone())
+        }
+
+        fn register(&self, package: &Path, external: &Path) -> Result<(), String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((package.to_path_buf(), external.to_path_buf()));
+            let mut refusals = self.refusals.lock().unwrap();
+            if !refusals.is_empty() {
+                return Err(refusals.remove(0));
+            }
+            *self.registration.lock().unwrap() = Some(registration_at(external, THIS_BUILD));
+            Ok(())
+        }
+    }
+
+    fn registration_at(folder: &Path, version: msix::PackageVersion) -> msix::PackageRegistration {
+        msix::PackageRegistration {
+            full_name: "WeiyiShi.Folio_test".to_owned(),
+            external_path: Some(folder.to_path_buf()),
+            version,
+        }
+    }
+
+    /// An install folder of its own: a `folio.exe` and the `folio.msix` beside
+    /// it.
+    fn install_folder(tag: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("bt-explorer-renewal-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private install folder");
+        std::fs::write(root.join(msix::PACKAGE_EXECUTABLE), b"exe").unwrap();
+        std::fs::write(root.join(PACKAGE_FILE_NAME), b"msix").unwrap();
+        root
+    }
+
+    /// A start of the copy in `here`, which is `ours`.
+    fn start_in<'a>(here: &Path, ours: &'a dyn Fn(&Path) -> bool) -> Start<'a> {
+        Start {
+            here: Some(here.to_path_buf()),
+            package: Some(here.join(PACKAGE_FILE_NAME)),
+            here_serves_us: true,
+            this_build: THIS_BUILD,
+            ours,
+        }
+    }
+
+    /// RED (U-25) — **a start never renews a registration that serves another
+    /// copy's folder, however old it is, and never creates one.**
+    ///
+    /// Two installs side by side, each with a live `folio.exe`: the
+    /// registration names the other one at an older version. Renewing it would
+    /// retarget the first page's item from a copy that is answering it to this
+    /// one — the move repair's question, which has its own rule and says no to
+    /// a live stranger. A registration that names no folder is not this one's
+    /// either, and a machine with nothing registered stays that way.
+    ///
+    /// MUTATION: drop the `serves_this_folder` half from `renewal_wanted`
+    /// (renew on the version alone) and the other copy's registration is
+    /// registered again at this folder.
+    #[test]
+    fn another_copys_registration_is_never_renewed() {
+        let here = install_folder("mine");
+        let other = install_folder("another");
+        let ours = |path: &Path| path.starts_with(&here);
+        let start = start_in(&here, &ours);
+
+        let deployment = FakeDeployment::holding(Some(registration_at(&other, OLDER)));
+        let latch = AtomicBool::new(false);
+        let probed = probe(&deployment, &start, &latch);
+        assert_eq!(probed.renewal, Renewal::AnotherFolder);
+        assert!(deployment.calls().is_empty(), "nothing is registered");
+        assert!(!latch.load(Ordering::Acquire), "and the latch is not taken");
+        assert!(matches!(probed.state, PackageState::Elsewhere { .. }));
+        assert!(!renewal_wanted(
+            &registration_at(&other, OLDER),
+            &here,
+            THIS_BUILD
+        ));
+
+        let nowhere = msix::PackageRegistration {
+            external_path: None,
+            ..registration_at(&here, OLDER)
+        };
+        let deployment = FakeDeployment::holding(Some(nowhere));
+        let probed = probe(&deployment, &start, &AtomicBool::new(false));
+        assert_eq!(probed.renewal, Renewal::AnotherFolder);
+        assert!(
+            deployment.calls().is_empty(),
+            "a registration naming no folder"
+        );
+
+        let deployment = FakeDeployment::holding(None);
+        let probed = probe(&deployment, &start, &AtomicBool::new(false));
+        assert_eq!(probed.renewal, Renewal::NothingRegistered);
+        assert!(deployment.calls().is_empty(), "nothing registered stays so");
+        assert_eq!(probed.state, PackageState::Absent);
+
+        let _ = std::fs::remove_dir_all(&here);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    /// RED (U-25) — **the renewal is asked again at every start: a start whose
+    /// renewal Windows refused leaves nothing that stops the next one trying.**
+    ///
+    /// Three starts over one registration of this folder at an older version,
+    /// each with the latch a new process has: the first is refused, the second
+    /// registers, and the third finds the registration current and does
+    /// nothing. And a start that finds a press holding the latch registers
+    /// nothing and leaves the question to the next start.
+    ///
+    /// MUTATION: make a refusal final — keep a `static` set by the first
+    /// `register` in `probe` and answer `Renewal::Current` while it is set, as
+    /// a "tried once" mark would — and the second start makes no call.
+    #[test]
+    fn renewal_is_re_evaluated_at_every_start() {
+        let here = install_folder("every-start");
+        let ours = |path: &Path| path.starts_with(&here);
+        let start = start_in(&here, &ours);
+        let deployment = FakeDeployment::holding(Some(registration_at(&here, OLDER)))
+            .refusing(&["the deployment service is busy"]);
+
+        let pressed = AtomicBool::new(true);
+        let probed = probe(&deployment, &start, &pressed);
+        assert_eq!(probed.renewal, Renewal::Wanted { registered: OLDER });
+        assert!(!probed.latched, "a press holds the latch");
+        assert!(
+            deployment.calls().is_empty(),
+            "and the start does not argue"
+        );
+
+        let first = probe(&deployment, &start, &AtomicBool::new(false));
+        assert_eq!(
+            first.renewal,
+            Renewal::Refused {
+                registered: OLDER,
+                reason: "the deployment service is busy".to_owned(),
+            }
+        );
+        assert!(
+            first.latched,
+            "the refusal still owes the latch its release"
+        );
+
+        let second = probe(&deployment, &start, &AtomicBool::new(false));
+        assert_eq!(second.renewal, Renewal::Renewed { registered: OLDER });
+        let calls = deployment.calls();
+        assert_eq!(calls.len(), 2, "one call per start that wanted it");
+        for (package, external) in &calls {
+            assert_eq!(
+                package,
+                &here.join(PACKAGE_FILE_NAME),
+                "the package beside us"
+            );
+            assert_eq!(external, &here, "registered against this folder");
+        }
+        assert_eq!(
+            second.state,
+            PackageState::Current {
+                full_name: "WeiyiShi.Folio_test".to_owned()
+            },
+            "the row is read again after a renewal that worked"
+        );
+
+        let third = probe(&deployment, &start, &AtomicBool::new(false));
+        assert_eq!(
+            third.renewal,
+            Renewal::Current {
+                registered: THIS_BUILD
+            }
+        );
+        assert_eq!(
+            deployment.calls().len(),
+            2,
+            "a current registration is left"
+        );
+        let _ = std::fs::remove_dir_all(&here);
+    }
+
+    /// RED (U-25) — **during an update's trial the renewal waits for the
+    /// commit, and runs when the commit releases the probe.**
+    ///
+    /// The registration is the old build's until the trial is committed (F-7):
+    /// a trial's start asks a real gate, which holds the probe back and records
+    /// its writer; a real watch then reads `Committed` from a journal on disk,
+    /// the gate releases `ExplorerRepair`, and the probe that release runs
+    /// renews.
+    ///
+    /// MUTATION: drop the `defer(…)` question from `probe_at_start` and the
+    /// trial's start registers before anything was committed.
+    #[test]
+    fn an_older_registration_is_renewed_only_after_the_trial_commits() {
+        use crate::update_trial::{Gate, Writer, watch};
+        use crate::update_txn::{Inventories, Journal, Layout, Phase, TxnId};
+
+        let here = install_folder("trial");
+        let ours = |path: &Path| path.starts_with(&here);
+        let start = start_in(&here, &ours);
+        let deployment = FakeDeployment::holding(Some(registration_at(&here, OLDER)));
+        let gate = Gate::new();
+
+        let held = probe_at_start(
+            |writer| gate.defer(true, writer),
+            &deployment,
+            &start,
+            &AtomicBool::new(false),
+        );
+        assert!(held.is_none(), "a trial's start holds the probe back");
+        assert!(deployment.calls().is_empty(), "nothing registered yet");
+        assert_eq!(gate.pending(), vec![Writer::ExplorerRepair]);
+
+        let txn = TxnId::new([0x25; 16]);
+        let mut journal = Journal::allocate(
+            txn,
+            "rescue".to_owned(),
+            Layout::Members(Inventories {
+                old_shipped: Vec::new(),
+                old_present: Vec::new(),
+                new: Vec::new(),
+            }),
+        );
+        journal.body.phase = Phase::Committed;
+        let path = here.join("journal.json");
+        std::fs::write(&path, journal.encode()).unwrap();
+        watch(&gate, &path, txn, Duration::from_millis(5), &|| {});
+        assert_eq!(gate.take_released(), vec![Writer::ExplorerRepair]);
+
+        let released = probe_at_start(
+            |writer| gate.defer(true, writer),
+            &deployment,
+            &start,
+            &AtomicBool::new(false),
+        )
+        .expect("a committed trial probes");
+        assert_eq!(released.renewal, Renewal::Renewed { registered: OLDER });
+        assert_eq!(deployment.calls().len(), 1);
+        let _ = std::fs::remove_dir_all(&here);
+    }
+
+    /// RED (U-25) — **a registration of this folder at this build's version or
+    /// a newer one is left alone.**
+    ///
+    /// Equal is the ordinary start of every copy that is not just updated; a
+    /// newer one is what an older build started in the same folder finds, and
+    /// asking Windows to register an older package over it would be asking for
+    /// a downgrade. The folder is compared as a folder: a trailing separator is
+    /// still this one.
+    ///
+    /// MUTATION: compare with `<=` in `renewal_wanted` and the equal
+    /// registration is registered again at every start.
+    #[test]
+    fn an_equal_or_newer_registration_is_left_alone() {
+        let here = install_folder("current");
+        let ours = |path: &Path| path.starts_with(&here);
+        let start = start_in(&here, &ours);
+        let mut spelled_with_a_separator = here.clone().into_os_string();
+        spelled_with_a_separator.push(std::path::MAIN_SEPARATOR_STR);
+        let spelled_with_a_separator = PathBuf::from(spelled_with_a_separator);
+        for (version, at) in [
+            (THIS_BUILD, &here),
+            ([0, 4, 7, 0], &here),
+            ([1, 0, 0, 0], &here),
+            (THIS_BUILD, &spelled_with_a_separator),
+        ] {
+            let deployment = FakeDeployment::holding(Some(registration_at(at, version)));
+            let latch = AtomicBool::new(false);
+            let probed = probe(&deployment, &start, &latch);
+            assert_eq!(
+                probed.renewal,
+                Renewal::Current {
+                    registered: version
+                },
+                "{version:?} at {}",
+                at.display()
+            );
+            assert!(deployment.calls().is_empty(), "{version:?}");
+            assert!(!latch.load(Ordering::Acquire), "{version:?}");
+        }
+        assert!(renewal_wanted(
+            &registration_at(&here, [0, 4, 5, 9]),
+            &here,
+            THIS_BUILD
+        ));
+        assert!(renewal_wanted(
+            &registration_at(&here, [0, 3, 99, 0]),
+            &here,
+            THIS_BUILD
+        ));
+        let _ = std::fs::remove_dir_all(&here);
+    }
+
+    /// RED (U-25) — **a renewal Windows refused shows on the Explorer row in
+    /// the words a refused registration has, and the start's log line says it
+    /// was refused — never that nothing was needed.**
+    ///
+    /// A start has no press to answer with a card, so the row is where the
+    /// refusal is seen: over every sentence that describes a registration, and
+    /// under the three that say the machine is out of reach. The log line
+    /// names the two versions and not Windows' sentence, which can carry a
+    /// path.
+    ///
+    /// MUTATIONS:
+    /// ① answer `None` from `renewal_line` and the row goes on saying what On
+    ///    does, over a registration that was just refused;
+    /// ② log `Renewal::Refused` with `Current`'s words and the log says the
+    ///    start needed nothing.
+    #[test]
+    fn a_failed_renewal_shows_on_the_row_and_is_not_nothing_changed() {
+        let here = install_folder("refused");
+        let ours = |path: &Path| path.starts_with(&here);
+        let start = start_in(&here, &ours);
+        let reason = r"0x80073CF3 X:\staging\folio.msix could not be registered";
+        let deployment =
+            FakeDeployment::holding(Some(registration_at(&here, OLDER))).refusing(&[reason]);
+
+        let probed = probe(&deployment, &start, &AtomicBool::new(false));
+        assert_eq!(probed.renewal.refusal(), Some(reason));
+
+        let failed = crate::i18n::explorer_first_page_failed(reason);
+        for line in [
+            Text::DescExplorerMenu,
+            Text::DescExplorerFirstPageAwaitingShell,
+            Text::DescExplorerFirstPageElsewhere,
+        ] {
+            assert_eq!(
+                renewal_line(line, probed.renewal.refusal()).as_deref(),
+                Some(failed.as_str()),
+                "{line:?}"
+            );
+            assert_ne!(failed, line.text());
+        }
+        for line in [
+            Text::DescExplorerMenuNoFirstPage,
+            Text::DescExplorerMenuNoPackage,
+            Text::DescExplorerFirstPageUnreadable,
+        ] {
+            assert_eq!(
+                renewal_line(line, probed.renewal.refusal()),
+                None,
+                "{line:?}"
+            );
+        }
+        assert_eq!(
+            renewal_line(Text::DescExplorerMenu, None),
+            None,
+            "a start that was not refused keeps the row's sentence"
+        );
+
+        let log = probed.renewal.log_line(THIS_BUILD);
+        assert_eq!(
+            log,
+            "BT_EXPLORER_PACKAGE renewal: refused 0.4.5.0 -> 0.4.6.0"
+        );
+        assert!(!log.contains("not needed"), "{log}");
+        assert!(!log.contains("staging"), "no path in the log: {log}");
+        assert!(
+            !log.contains(&*here.to_string_lossy()),
+            "no path in the log: {log}"
+        );
+        let _ = std::fs::remove_dir_all(&here);
     }
 }

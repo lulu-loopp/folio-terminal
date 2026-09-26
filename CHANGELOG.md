@@ -11,6 +11,10 @@ All notable changes to Folio are recorded here. The format follows
 - The macOS CI job now lints every crate with the same warnings-as-errors line
   as Windows, shows that line can fail, and runs the renderer's and the
   corpus's tests on a Mac.
+- After an update, the next start re-registers Folio's first-page Explorer
+  entry for the folder it runs from, so the entry matches the new version. It
+  never touches another copy's entry, and if Windows refuses, the Explorer row
+  says so and the next start tries again.
 - An update that is cut off can now leave itself a way back in: one
   `FolioUpdate-…` entry in the Windows startup list, written and checked
   before anything moves, and removed by `--uninstall-cleanup`. Nothing

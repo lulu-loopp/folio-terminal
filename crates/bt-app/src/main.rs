@@ -41258,13 +41258,13 @@ impl Runtime<'_> {
             });
         }
         taskbar_lane::request();
-        // **The probe can repair the package registration**, which is O's
-        // until an update's trial is committed (`update_trial`, F-7): a trial
-        // starts it at the commit instead, and the row reads `Unknown` until
-        // then, which it already treats as "not known yet".
-        if !update_trial::defer(update_trial::Writer::ExplorerRepair) {
-            explorer_menu::begin_probe();
-        }
+        // **The probe can repair and renew the package registration**, which
+        // is O's until an update's trial is committed (`update_trial`, F-7,
+        // F-18): the probe asks the trial's gate itself
+        // (`explorer_menu::probe_at_start`), a trial runs it at the commit
+        // instead, and the row reads `Unknown` until then, which it already
+        // treats as "not known yet".
+        explorer_menu::begin_probe();
         // **And an update's trial watches its journal** (`update_trial`): a
         // worker reads it until the transaction is decided, and a commit wakes
         // this loop to write what the trial held back. Nothing at all in any
