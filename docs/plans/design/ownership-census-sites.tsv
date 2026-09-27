@@ -134,6 +134,7 @@ App.gpu	access	crate::runtime::web	Runtime::web_sheet_layers	lend	2
 App.gpu	access	crate::runtime::windows	Runtime::answer_restore	lend	1
 App.gpu	access	crate::runtime::windows	Runtime::open_window	lend	2
 App.gpu	access	crate::runtime::windows	Runtime::reopen_recent	lend	1
+App.handoff_answer	write	crate	FolioApp::hand_the_update_over	assign	2
 App.handoff_lane	write	crate	FolioApp::answer_handoffs	call:answers	1
 App.handoff_lane	write	crate::runtime::handoff	Runtime::hand_off	call:refuse,call:submit	2
 App.ime_first_focus_seen	write	crate	Runtime::observe_ime_focus	assign	1
@@ -204,12 +205,19 @@ App.quake	write	crate::runtime::quake	Runtime::hide_quake_window	call:hidden	1
 App.quake	write	crate::runtime::quake	Runtime::remember_summoned_arrangement	call:remember	1
 App.quake	write	crate::runtime::windows	Runtime::open_window	call:adopt	1
 App.quit	write	crate	FolioApp::begin_quit_if_asked	assign	1
+App.quit	write	crate	FolioApp::hand_the_update_over	call:handed_off,call:handoff_sent	3
 App.quit	write	crate	FolioApp::settle_quit	assign	2
+App.quit	write	crate	FolioApp::update_session_answer	call:requested	1
 App.quit	write	crate	Runtime::answer_quit_card	call:answer	1
 App.quit	write	crate::runtime::mouse	Runtime::pointer_moved	call:set_hover	1
+App.quit	access	crate	FolioApp::deliver_the_quits_update_report	call:as_mut	1
+App.quit	access	crate	FolioApp::hand_the_update_over	call:as_mut	1
 App.quit	access	crate	FolioApp::report_to_quit	call:as_mut	1
+App.quit	access	crate	FolioApp::update_session_answer	call:as_mut	1
 App.quit	access	crate	Runtime::answer_quit_card	call:as_mut	1
 App.quit	access	crate::runtime::mouse	Runtime::pointer_moved	call:as_mut	1
+App.quit_reason	write	crate	App::restart_for_update	assign	1
+App.quit_reason	write	crate	FolioApp::begin_quit_if_asked	call:mem::replace	1
 App.quit_requested	write	crate	App::ask_to_quit	assign	1
 App.quit_requested	write	crate	FolioApp::begin_quit_if_asked	call:mem::take	1
 App.recent	write	crate	FolioApp::settle_restore_answer	call:record	1
@@ -233,7 +241,9 @@ App.session_fault	write	crate	Runtime::announce_persistence_faults	call:take	1
 App.session_store	write	crate	App::finish	call:close	1
 App.session_store	write	crate	App::record_session	call:record	1
 App.session_store	write	crate	App::release_trial_writes	call:release_trial	1
+App.session_store	write	crate	FolioApp::hand_the_update_over	call:hand_off	1
 App.session_store	write	crate	FolioApp::settle_quit	call:flush_judged	1
+App.session_store	write	crate	FolioApp::update_session_answer	call:hand_over_final,call:landing_of,call:receipt_overdue	3
 App.session_store	write	crate::runtime::frame	Runtime::redraw	call:write_receipt	1
 App.session_store	write	crate::runtime::frame	Runtime::turn	call:flush_if_due	1
 App.settings_fault	write	crate	Runtime::announce_persistence_faults	call:take	1
@@ -297,7 +307,9 @@ App.tab_ids	write	crate::runtime::windows	Runtime::answer_restore	call:mint	1
 App.tab_ids	write	crate::runtime::windows	Runtime::open_window	call:mint	1
 App.tab_ids	write	crate::runtime::windows	Runtime::reopen_recent	call:mint	1
 App.update_job	write	crate	<FolioApp as ApplicationHandler<AppEvent>>::user_event	call:drain_progress	1
+App.update_job	write	crate	App::restart_for_update	call:restart	1
 App.update_job	write	crate	FolioApp::consider_update_offer	call:consider	1
+App.update_job	write	crate	FolioApp::deliver_the_quits_update_report	call:apply	1
 App.update_job	write	crate	FolioApp::settle_update_card	call:hand_over	1
 App.update_job	write	crate	Runtime::apply_update_check	call:switch_off	1
 App.update_job	write	crate::runtime::update_card	Runtime::answer_update_card	call:answer_verb	1

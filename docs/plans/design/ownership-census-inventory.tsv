@@ -58,7 +58,7 @@ App.copilot_hooks_installed	bool	-	0	0	0	0	0	0	0	complete
 App.copilot_readiness	Readiness	-	n	2	2	0	0	0	0	complete
 App.powershell_integration_asked	bool	-	1	1	1	0	0	0	0	complete
 App.notifications	NotificationDesk	-	1	1	1	0	0	0	0	complete
-App.session_store	SessionStore	-	n	2	6	0	0	0	0	complete
+App.session_store	SessionStore	-	n	2	8	0	0	0	0	complete
 App.settings_store	SettingsStore	-	n	16	46	1	0	0	1	incomplete
 App.shortcuts	Shortcuts	-	n	3	3	0	0	0	0	complete
 App.keybindings_store	KeybindingsStore	-	n	2	2	0	0	0	0	complete
@@ -88,14 +88,16 @@ App.pending_new_windows	Vec<NewWindowPlan>	-	n	5	10	0	0	0	0	complete
 App.drag_broker	Option<DragBroker>	-	n	4	6	2	0	0	0	complete
 App.pending_handover	Option<DragHandover>	-	n	4	4	0	0	0	0	complete
 App.quit_requested	bool	-	1	1	2	0	0	0	0	complete
-App.quit	Option<Quit>	-	n	2	4	3	0	0	0	complete
+App.quit	Option<Quit>	-	n	2	6	6	0	0	0	complete
 App.windows_open	Vec<OpenWindow>	-	1	1	1	0	0	0	0	complete
 App.activated	Vec<WindowId>	-	n	2	4	0	0	0	0	complete
 App.window_ring	Option<WindowId>	-	1	1	1	0	0	0	0	complete
 App.window_ring_shown	Option<WindowId>	-	1	1	1	0	0	0	0	complete
 App.quake	Quake	-	n	4	9	0	0	0	4	incomplete
-App.update_job	Job<WindowId>	-	n	2	6	0	0	0	0	complete
+App.update_job	Job<WindowId>	-	n	2	8	0	0	0	0	complete
 App.update_shown	Shown<WindowId>	-	1	1	1	0	0	0	0	complete
+App.quit_reason	Reason	-	1	1	2	0	0	0	0	complete
+App.handoff_answer	Option<Receiver<HandedOff>>	-	1	1	1	0	0	0	0	complete
 WindowRuntime.ime_report	Report	-	n	3	4	0	0	0	0	complete
 WindowRuntime.ime_report_due	Option<Instant>	-	n	2	2	0	0	0	0	complete
 WindowRuntime.leaving	Option<Instant>	-	1	1	3	0	0	0	1	incomplete
