@@ -1465,6 +1465,35 @@ fn uninstall_update_rows_remove_only_ours() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// RED (U-27) — **the update home's row detaches an image still mounted inside
+/// the home before it removes the home**, so a leftover mount no longer leaves
+/// the home behind (macOS: the only platform that mounts an update's image).
+///
+/// U-17's debt 7, the coordinator's ruling: a durable removal descends into a
+/// read-only volume and fails. The image is attached the way a dead Prepare
+/// leaves it, under `H/<txn>/mnt`, with no record.
+///
+/// MUTATION: in `update_home`, drop the `detach_images_under` call.
+#[test]
+fn uninstall_update_home_detaches_before_removing() {
+    use crate::update_prepare_macos::tests::fixture;
+    if !fixture::on_macos() {
+        return;
+    }
+    let scratch = fixture::Scratch::new("uninstall-home");
+    let home = scratch.root.join(".Folio.app.folio-update");
+    let image = fixture::blank_image(&scratch.root.join("left.dmg"));
+    fixture::attach(&image, &home.join("0123456789abcdef0123456789abcdef/mnt"));
+    fs::write(home.join("journal.json"), b"{}").unwrap();
+    let entry = super::update_home("Update home beside the bundle (per-copy)", Some(&home));
+    assert!(matches!(entry.fate, Fate::Removed), "{}", entry.line());
+    assert!(
+        fixture::mounted(&scratch.root).is_empty(),
+        "the image is detached"
+    );
+    assert!(!home.exists(), "and the home removed");
+}
+
 /// PIN (U-26) — **each update row names the writer it undoes, and the writer is
 /// where the row says**: the entrance door writes its plist through the durable
 /// write and sweeps only its own names, and the home is the locator's.

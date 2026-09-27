@@ -34,7 +34,7 @@
 use std::path::PathBuf;
 
 use crate::i18n::{self, Lang, Text};
-use crate::update_job::{Bytes, Effect, Failure, Job, NotEligible, State, Verb};
+use crate::update_job::{Bytes, Effect, Failure, Job, NotEligible, State, Stop, Verb};
 
 // ── the verbs ──────────────────────────────────────────────────────────────
 
@@ -245,20 +245,30 @@ pub(crate) fn failed(reason: &str, outcome: &Outcome) -> Paint {
     }
 }
 
-/// The reason a failure gives, as the job knows it today.
+/// The reason a failure gives: one line per driver's reason (U-27 names the
+/// macOS Prepare's).
 fn reason(failure: &Failure) -> &'static str {
     match failure {
-        Failure::Unsupported => Text::UpdateFailedUnsupported,
-        Failure::Stopped => Text::UpdateFailedStopped,
+        Failure::Unsupported | Failure::Stopped(Stop::NotWritable | Stop::NotOurs) => {
+            Text::UpdateFailedUnsupported
+        }
+        Failure::Stopped(Stop::Busy) => Text::UpdateFailedBusy,
+        Failure::Stopped(Stop::Journal) => Text::UpdateFailedJournal,
+        Failure::Stopped(Stop::Download | Stop::Cancelled) => Text::UpdateFailedStopped,
+        Failure::Stopped(Stop::Sums) => Text::UpdateFailedSums,
+        Failure::Stopped(Stop::Mount) => Text::UpdateFailedMount,
+        Failure::Stopped(Stop::Identity) => Text::UpdateFailedIdentity,
+        Failure::Stopped(Stop::Copy) => Text::UpdateFailedCopy,
+        Failure::Stopped(Stop::Clone) => Text::UpdateFailedClone,
     }
     .text()
 }
 
-/// What each failure the job knows today did: both stop before anything
-/// installed moves (`update_job::Failure`'s own notes).
+/// What each failure the job knows today did: every one stops before
+/// anything installed moves (`update_job::Failure`'s own notes).
 const fn outcome(failure: &Failure) -> Outcome {
     match failure {
-        Failure::Unsupported | Failure::Stopped => Outcome::NothingChanged,
+        Failure::Unsupported | Failure::Stopped(_) => Outcome::NothingChanged,
     }
 }
 
@@ -549,8 +559,13 @@ mod tests {
     use crate::install_channel::{Channel, Manager};
     use crate::update_job::{
         Bytes, Driver, Effect, Gathered, Job, NoDownloadDoor, Offer, Poster, Presenters, Refused,
-        State, Step, Transport, Unsupported, Verb,
+        SharedTransport, State, Step, Unsupported, Verb,
     };
+
+    /// The transport the verbs below never ask for a file.
+    fn no_door() -> SharedTransport {
+        std::sync::Arc::new(NoDownloadDoor)
+    }
     use crate::update_txn::TxnId;
 
     /// Every fixture below runs this build and is offered a newer one.
@@ -598,7 +613,7 @@ mod tests {
     struct Starting(RefCell<Option<Poster>>);
 
     impl Driver for Starting {
-        fn prepare(&self, _: &Offer, _: &dyn Transport, post: &Poster) -> Result<(), Refused> {
+        fn prepare(&self, _: &Offer, _: &SharedTransport, post: &Poster) -> Result<(), Refused> {
             *self.0.borrow_mut() = Some(post.clone());
             Ok(())
         }
@@ -609,7 +624,7 @@ mod tests {
     fn downloading() -> (Job<u32>, Poster) {
         let mut job = considered("v0.4.7", Channel::Ours);
         let driver = Starting::default();
-        job.answer_verb(Verb::Press, &driver, &NoDownloadDoor)
+        job.answer_verb(Verb::Press, &driver, &no_door())
             .expect("the press is taken");
         let post = driver.0.borrow_mut().take().expect("a poster");
         (job, post)
@@ -762,7 +777,7 @@ mod tests {
     #[test]
     fn a_failure_that_changed_nothing_says_so_after_its_reason() {
         let mut job = considered("v0.4.7", Channel::Ours);
-        job.answer_verb(Verb::Press, &Unsupported, &NoDownloadDoor)
+        job.answer_verb(Verb::Press, &Unsupported, &no_door())
             .expect("the press is taken");
         let drawn = paint(job.state()).expect("a failed job has a card");
         assert_eq!(
@@ -833,7 +848,7 @@ mod tests {
         assert_eq!(paint(Job::<u32>::with_offers(true).state()), None);
         let mut quitting = verified();
         quitting
-            .answer_verb(Verb::Restart, &Unsupported, &NoDownloadDoor)
+            .answer_verb(Verb::Restart, &Unsupported, &no_door())
             .expect("Restart");
         assert!(matches!(quitting.state(), State::Quitting(_)));
         assert_eq!(paint(quitting.state()), None);
@@ -861,7 +876,7 @@ mod tests {
         let mut job = verified();
         assert_eq!(job.card_window(), Some(1), "the verified card is up");
         assert_eq!(
-            job.answer_verb(Verb::Later, &Unsupported, &NoDownloadDoor),
+            job.answer_verb(Verb::Later, &Unsupported, &no_door()),
             Ok(Effect::None)
         );
         assert!(matches!(job.state(), State::Verified(_)), "the job is kept");
@@ -976,7 +991,7 @@ mod tests {
 
         let mut job = considered("v0.4.7", Channel::Ours);
         let effect = job
-            .answer_verb(Verb::Skip, &Unsupported, &NoDownloadDoor)
+            .answer_verb(Verb::Skip, &Unsupported, &no_door())
             .expect("Skip is on the offer's card");
         spend(effect, |tag| owner.skip(tag)).expect("the Skip is written");
         assert_eq!(job.card_window(), None, "the card went with the Skip");

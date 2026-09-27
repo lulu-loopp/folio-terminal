@@ -839,10 +839,43 @@ fn update_home(label: &str, home: Option<&Path>) -> Entry {
     if fs::symlink_metadata(home).is_err_and(|e| e.kind() == io::ErrorKind::NotFound) {
         return Entry::new(label, Fate::Absent);
     }
+    if let Err(refused) = detach_images_under(home) {
+        return Entry::new(label, Fate::Refused(refused));
+    }
     match bt_platform::install_txn::durable_remove(home) {
         Ok(()) => Entry::new(label, Fate::Removed),
         Err(e) => Entry::new(label, Fate::Refused(e.to_string())),
     }
+}
+
+/// **Every update image still mounted under the home, detached before the home
+/// is removed** (U-17's debt 7, the coordinator's ruling in U-27): a read-only
+/// volume inside it would stop the removal halfway. The mount table is read
+/// first, which waits on nothing; only when it lists a mount is a worker
+/// started for the detach (`bt_platform::macos_update::detach_all_under` takes
+/// the worker's capability, and waits on `hdiutil`), and this cleanup — a
+/// process with no window — waits for it. Only macOS mounts an update's image.
+fn detach_images_under(home: &Path) -> Result<(), String> {
+    if bt_platform::host_platform() != HostPlatform::MacOs {
+        return Ok(());
+    }
+    let points =
+        bt_platform::macos_update::mounts_under(home).map_err(|refusal| refusal.to_string())?;
+    if points.is_empty() {
+        return Ok(());
+    }
+    let home = home.to_path_buf();
+    bt_platform::spawn_at_priority(
+        "folio-update-home-detach",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |worker| {
+            bt_platform::macos_update::detach_all_under(worker, &home)
+                .map_err(|refusal| refusal.to_string())
+        },
+    )
+    .map_err(|error| error.to_string())?
+    .join()
+    .map_err(|_| "the detach's worker stopped".to_owned())?
 }
 
 /// What the door cannot establish on this platform, and therefore does not claim.

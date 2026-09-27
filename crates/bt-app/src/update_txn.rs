@@ -605,6 +605,16 @@ pub(crate) enum Layout {
         old: BundleIdentity,
         new: BundleIdentity,
     },
+    /// **A macOS bundle transaction before its successor is verified** — what
+    /// O records at `Allocated` (F-17: "records each resource intent"): the
+    /// running bundle's identity and the version the offer names. The new
+    /// bundle's identity is known only once it is verified in `stage/`, so
+    /// [`Journal::prepare_with`] replaces this with [`Layout::Bundle`] as it
+    /// records `Prepared`; no later phase carries it.
+    BundleIntent {
+        old: BundleIdentity,
+        to_version: String,
+    },
 }
 
 // ───────────────────────────────────── phases ─────────────────────────────────────
@@ -867,6 +877,19 @@ impl Journal {
             rescue: header.rescue,
             body,
         })
+    }
+
+    /// **`Prepared`, with what was verified**: the journal after
+    /// [`Event::Prepared`], its layout replaced by `layout` — the members or
+    /// the bundle identities O measured under the transaction lock before this
+    /// write (F-8), in place of the intent it recorded at `Allocated`.
+    ///
+    /// # Errors
+    /// [`Event::Prepared`]'s refusal: only an `Allocated` journal is prepared.
+    pub(crate) fn prepare_with(&self, layout: Layout) -> Result<Self, Refusal> {
+        let mut prepared = self.advance(&Event::Prepared)?;
+        prepared.body.layout = layout;
+        Ok(prepared)
     }
 
     /// The journal after `event`, or why `event` cannot happen now.
@@ -1332,24 +1355,39 @@ pub(crate) struct Right {
 
 const HOLDERS_ROLLING_BACK: &[PhaseKind] = &[PhaseKind::RollbackIntent, PhaseKind::Stuck];
 const TERMINAL: &[PhaseKind] = &[PhaseKind::Abandoned, PhaseKind::Retired];
+/// Where O clears a transaction away: `Allocated` (M1's sweep) and the
+/// `Abandoned` it recorded itself before `Handoff` (U-27).
+const OLD_CLEARS: &[PhaseKind] = &[PhaseKind::Allocated, PhaseKind::Abandoned];
+/// Where an ordinary start deletes `H\<txn>` (a retirement, or a discard of a
+/// folder replaced by hand) — and so where it first detaches whatever image is
+/// still mounted under it (the coordinator's ruling, U-27).
+const START_DELETES: &[PhaseKind] = &[
+    PhaseKind::Allocated,
+    PhaseKind::Prepared,
+    PhaseKind::Abandoned,
+    PhaseKind::Retired,
+];
 
 /// The rights table. Anything it does not list, nobody may do.
 pub(crate) const EFFECT_RIGHTS: &[Right] = &[
-    // O, as the job owner, sweeps what a dead preparation left (W1, M1).
+    // O, as the job owner, sweeps what a dead preparation left (W1, M1), and
+    // clears away a transaction it abandoned itself — a Prepare that failed, a
+    // deferred one discarded at its second launch or on a failed revalidation
+    // (U-27): the image detached first, then `H/<txn>`, then the journal.
     Right {
         actor: Actor::Old,
         effect: Effect::DetachMount,
-        during: &[PhaseKind::Allocated],
+        during: OLD_CLEARS,
     },
     Right {
         actor: Actor::Old,
         effect: Effect::DeleteTxnDir,
-        during: &[PhaseKind::Allocated],
+        during: OLD_CLEARS,
     },
     Right {
         actor: Actor::Old,
         effect: Effect::DeleteJournal,
-        during: &[PhaseKind::Allocated],
+        during: OLD_CLEARS,
     },
     // The applier arms, admits and moves (W3–W6, M3–M6).
     Right {
@@ -1483,23 +1521,18 @@ pub(crate) const EFFECT_RIGHTS: &[Right] = &[
     },
     Right {
         actor: Actor::Start,
+        effect: Effect::DetachMount,
+        during: START_DELETES,
+    },
+    Right {
+        actor: Actor::Start,
         effect: Effect::DeleteTxnDir,
-        during: &[
-            PhaseKind::Allocated,
-            PhaseKind::Prepared,
-            PhaseKind::Abandoned,
-            PhaseKind::Retired,
-        ],
+        during: START_DELETES,
     },
     Right {
         actor: Actor::Start,
         effect: Effect::DeleteJournal,
-        during: &[
-            PhaseKind::Allocated,
-            PhaseKind::Prepared,
-            PhaseKind::Abandoned,
-            PhaseKind::Retired,
-        ],
+        during: START_DELETES,
     },
 ];
 
@@ -2209,12 +2242,20 @@ impl StartAction {
     pub(crate) fn effects(self) -> &'static [Effect] {
         match self {
             StartAction::Continue | StartAction::HandToRescue | StartAction::RunAsTrial => &[],
+            // A mount under `H/<txn>` is detached before the folder is
+            // deleted (U-17's debt 7, the coordinator's ruling in U-27): a
+            // read-only volume inside it would stop the deletion halfway.
             StartAction::Retire => &[
                 Effect::RemoveEntrance,
+                Effect::DetachMount,
                 Effect::DeleteTxnDir,
                 Effect::DeleteJournal,
             ],
-            StartAction::Discard => &[Effect::DeleteTxnDir, Effect::DeleteJournal],
+            StartAction::Discard => &[
+                Effect::DetachMount,
+                Effect::DeleteTxnDir,
+                Effect::DeleteJournal,
+            ],
         }
     }
 }
@@ -2659,7 +2700,7 @@ mod tests {
                 all.push(disk.located(inventories));
                 all
             }
-            Layout::Bundle { .. } => {
+            Layout::Bundle { .. } | Layout::BundleIntent { .. } => {
                 let sides = [None, Some(old_bundle()), Some(new_bundle())];
                 let mut all = Vec::new();
                 for live in &sides {
@@ -3220,7 +3261,9 @@ mod tests {
             );
             let located = match &journal.body.layout {
                 Layout::Members(_) => prepared_located(),
-                Layout::Bundle { .. } => bundle(Some(old_bundle()), Some(new_bundle())),
+                Layout::Bundle { .. } | Layout::BundleIntent { .. } => {
+                    bundle(Some(old_bundle()), Some(new_bundle()))
+                }
             };
             assert_eq!(decide(&holder(&journal, located.clone())), Action::Apply);
             assert_eq!(decide(&job_owner(&journal, located)), Action::Leave);

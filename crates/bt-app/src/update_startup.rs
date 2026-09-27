@@ -18,9 +18,11 @@
 //! 3. **The frozen header only** (`update_txn::Header::parse`), and the
 //!    ordinary start's rule (`update_txn::at_start`):
 //!    - `terminal` → the entrance (on Windows its `Run` value, removed and
-//!      flushed through `bt_platform::logon_hook`, U-22), then `H\<txn>`, then
-//!      the journal, each removed durably through `bt_platform::install_txn`,
-//!      all under the transaction lock; continue;
+//!      flushed through `bt_platform::logon_hook`, U-22), then on macOS any
+//!      image still mounted under `H/<txn>` (detached on a worker of its own,
+//!      which the start does not wait for — U-27), then `H\<txn>`, then the
+//!      journal, each removed durably through `bt_platform::install_txn`, all
+//!      under the transaction lock; continue;
 //!    - `destructive`, or the trial of another transaction, or no trial at all
 //!      → the rescue build is started detached with
 //!      `--update-recover --then-launch <this command line>`, and this process
@@ -29,9 +31,9 @@
 //!      (coordinator ruling, 2026-09-27);
 //!    - `preparing` / `deferred` → continue, unless this start's own image is
 //!      not the rescue copy of the build that began the transaction (the
-//!      folder was replaced by hand): then `H\<txn>` and the journal are
-//!      removed under the lock, nothing in the install, and the start
-//!      continues.
+//!      folder was replaced by hand): then `H\<txn>` (its image detached first,
+//!      as above) and the journal are removed under the lock, nothing in the
+//!      install, and the start continues.
 //!
 //! A journal this build cannot read, a lock somebody else holds, and a file
 //! that cannot be measured all leave everything as it is and continue.
@@ -49,7 +51,7 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use bt_platform::file_reads::{self, Lane};
@@ -114,7 +116,21 @@ pub(crate) trait World {
     /// Remove the transaction's logon entrance, if one is still there; a
     /// failure is said and stops the retirement.
     fn retire_entrance(&mut self, txn: TxnId) -> Result<(), String>;
+    /// **The mount points under `folder`**, from the mount table — which
+    /// waits on nothing (`bt_platform::macos_update::mounts_under`). None on a
+    /// platform with no disk images to mount; a table that cannot be read is
+    /// an error, never "nothing mounted", because a deletion follows.
+    fn mounts_under(&mut self, folder: &Path) -> Result<Vec<PathBuf>, String>;
+    /// **Run `job` on a worker of its own, and do not wait for it**: the rest
+    /// of a retirement that must first detach an image, since a detach waits
+    /// on `hdiutil` and the start's window thread waits on nothing it does not
+    /// have to. The job says, as its error, the one line a failure gets.
+    fn on_a_worker(&mut self, job: OffThread) -> io::Result<()>;
 }
+
+/// The rest of a retirement, handed to a worker ([`World::on_a_worker`]).
+pub(crate) type OffThread =
+    Box<dyn FnOnce(&bt_platform::admission::WorkerCtx) -> Result<(), String> + Send>;
 
 /// What one start is: its own executable, its installation home, its command
 /// line and its `--update-trial` values.
@@ -226,8 +242,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
         },
         StartAction::RunAsTrial => Verdict::Continue { admission, trial },
         action @ (StartAction::Retire | StartAction::Discard) => {
-            retire(action, &header, start.home, world);
-            drop(lock);
+            retire(action, &header, start.home, lock, world);
             Verdict::Continue {
                 admission,
                 trial: None,
@@ -288,14 +303,54 @@ fn image(program: &Path) -> Option<Digest> {
 /// stopping at the first that fails — the journal is removed only once
 /// `H\<txn>` is gone, so a start that is stopped halfway leaves a journal that
 /// still names what is left (U-10, "journal deleted last").
-fn retire(action: StartAction, header: &Header, home: &Home, world: &mut impl World) {
-    for effect in action.effects() {
+///
+/// **An image still mounted under `H/<txn>` is detached before the folder is
+/// deleted** (U-17's debt 7, the coordinator's ruling in U-27): a read-only
+/// volume inside the folder would stop the deletion halfway and keep the
+/// transaction for ever. The mount table is read here, which waits on nothing;
+/// when it lists a mount, the detach and every effect after it — holding the
+/// transaction lock — go to a worker ([`World::on_a_worker`]), because a
+/// detach waits on `hdiutil` and this is the window thread. The start goes on
+/// without waiting for it.
+fn retire(
+    action: StartAction,
+    header: &Header,
+    home: &Home,
+    mut lock: Option<Held>,
+    world: &mut impl World,
+) {
+    let effects = action.effects();
+    let folder = home.transaction(header.txn);
+    for (at, effect) in effects.iter().enumerate() {
         let done = match effect {
             Effect::RemoveEntrance => world.retire_entrance(header.txn),
-            Effect::DeleteTxnDir => install_txn::durable_remove(&home.transaction(header.txn))
-                .map_err(|failure| failure.to_string()),
-            Effect::DeleteJournal => {
-                install_txn::durable_remove(&home.journal()).map_err(|failure| failure.to_string())
+            Effect::DetachMount => match world.mounts_under(&folder) {
+                Ok(points) if points.is_empty() => Ok(()),
+                Ok(_) => {
+                    let rest = effects[at..].to_vec();
+                    let (txn, home, held) = (header.txn, home.clone(), lock.take());
+                    let job: OffThread = Box::new(move |worker| {
+                        // The lock goes with the effects it guards, and is
+                        // let go when they are done.
+                        let _held = held;
+                        for effect in rest {
+                            perform(worker, effect, txn, &home).map_err(|failure| {
+                                format!(
+                                    "BT_UPDATE_START transaction {txn} is kept for the next start: {failure}"
+                                )
+                            })?;
+                        }
+                        Ok(())
+                    });
+                    match world.on_a_worker(job) {
+                        Ok(()) => return,
+                        Err(error) => Err(format!("no worker to detach its image on: {error}")),
+                    }
+                }
+                Err(error) => Err(error),
+            },
+            Effect::DeleteTxnDir | Effect::DeleteJournal => {
+                delete(*effect, header.txn, home).map_err(|failure| failure.to_string())
             }
             other => unreachable!("a start's action has no {other:?}"),
         };
@@ -306,6 +361,34 @@ fn retire(action: StartAction, header: &Header, home: &Home, world: &mut impl Wo
             ));
             return;
         }
+    }
+}
+
+/// One of a retirement's effects on a worker: the detach of every image under
+/// `H/<txn>` (`bt_platform::macos_update::detach_all_under`), or a deletion.
+fn perform(
+    worker: &bt_platform::admission::WorkerCtx,
+    effect: Effect,
+    txn: TxnId,
+    home: &Home,
+) -> Result<(), String> {
+    match effect {
+        Effect::DetachMount => {
+            bt_platform::macos_update::detach_all_under(worker, &home.transaction(txn))
+                .map_err(|refusal| refusal.to_string())
+        }
+        Effect::DeleteTxnDir | Effect::DeleteJournal => {
+            delete(effect, txn, home).map_err(|failure| failure.to_string())
+        }
+        other => unreachable!("a start's action has no {other:?} after its detach"),
+    }
+}
+
+/// `H\<txn>` or the journal, removed durably.
+fn delete(effect: Effect, txn: TxnId, home: &Home) -> Result<(), install_txn::Failure> {
+    match effect {
+        Effect::DeleteTxnDir => install_txn::durable_remove(&home.transaction(txn)),
+        _ => install_txn::durable_remove(&home.journal()),
     }
 }
 
@@ -373,6 +456,27 @@ impl World for Machine {
             return Ok(());
         }
         bt_platform::logon_hook::disarm(txn.bytes()).map_err(|refusal| refusal.to_string())
+    }
+
+    fn mounts_under(&mut self, folder: &Path) -> Result<Vec<PathBuf>, String> {
+        // Only macOS mounts an update's image (U-17); elsewhere there is none.
+        if bt_platform::host_platform() != bt_platform::HostPlatform::MacOs {
+            return Ok(Vec::new());
+        }
+        bt_platform::macos_update::mounts_under(folder).map_err(|refusal| refusal.to_string())
+    }
+
+    fn on_a_worker(&mut self, job: OffThread) -> io::Result<()> {
+        bt_platform::spawn_at_priority(
+            "bt-update-sweep",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| {
+                if let Err(line) = job(worker) {
+                    bt_platform::write_std_error(format!("{line}\n").as_bytes());
+                }
+            },
+        )
+        .map(drop)
     }
 }
 
@@ -451,9 +555,30 @@ mod tests {
             /// spawn (it must not: this start holds it shared).
             exclusive_free_at_spawn: Vec<bool>,
             admission: Option<PathBuf>,
+            /// What each job handed to a worker answered; the test's world
+            /// waits for it, where the product's does not.
+            workers: Vec<Result<(), String>>,
         }
 
         impl World for Recorded {
+            fn mounts_under(&mut self, folder: &Path) -> Result<Vec<PathBuf>, String> {
+                Machine.mounts_under(folder)
+            }
+
+            fn on_a_worker(&mut self, job: OffThread) -> io::Result<()> {
+                let worker = bt_platform::spawn_at_priority(
+                    "bt-update-sweep-test",
+                    bt_platform::ThreadPriority::BelowNormal,
+                    job,
+                )?;
+                self.workers.push(
+                    worker
+                        .join()
+                        .expect("the retirement's worker does not panic"),
+                );
+                Ok(())
+            }
+
             fn say(&mut self, line: &str) {
                 self.said.push(line.to_owned());
             }
@@ -741,6 +866,53 @@ mod tests {
                     .is_some(),
                 "the transaction lock is released after the retirement"
             );
+        }
+
+        /// RED (U-27) — **a retirement and a discard detach an image still
+        /// mounted under `H/<txn>` before they delete it**, so a leftover
+        /// mount no longer wedges the deletion; the detach runs on a worker of
+        /// its own, never on the start's thread (macOS: the only platform that
+        /// mounts an update's image).
+        ///
+        /// U-17's debt 7, the coordinator's ruling: `remove_dir_all` descends
+        /// into a read-only volume and fails, and the transaction was then kept
+        /// at every start for ever. The image is attached here the way a dead
+        /// Prepare leaves it — no record, just a mount point under the folder.
+        ///
+        /// MUTATION: drop `Effect::DetachMount` from `StartAction::Retire`'s and
+        /// `StartAction::Discard`'s effects in `update_txn`.
+        #[test]
+        fn retire_and_discard_detach_before_deleting() {
+            use crate::update_prepare_macos::tests::fixture;
+            if !fixture::on_macos() {
+                return;
+            }
+            let scratch = fixture::Scratch::new("startup-detach");
+            let image = fixture::blank_image(&scratch.root.join("left.dmg"));
+            for (class, tag) in [(Class::Terminal, "retire"), (Class::Deferred, "discard")] {
+                let Some(scene) = Scene::new(&format!("detach-{tag}")) else {
+                    return;
+                };
+                scene.journal(class);
+                if class == Class::Deferred {
+                    // The folder was replaced by hand: the start's own image
+                    // is no longer the rescue copy, so the start discards.
+                    std::fs::write(&scene.own_exe, b"a folio.exe unpacked over it").unwrap();
+                }
+                let folder = scene.home.transaction(txn());
+                // Dropped before `scene`: whatever is still mounted comes off,
+                // on a failed assertion too.
+                let _detach = fixture::Detach(scene.root.clone());
+                fixture::attach(&image, &folder.join("mnt"));
+                let mut world = Recorded::default();
+                let (admission, _) = continued(scene.run(&[], None, &mut world));
+                assert!(admission.is_some(), "{tag}");
+                assert_eq!(world.workers, vec![Ok(())], "{tag}: {:?}", world.said);
+                assert!(fixture::mounted(&scene.root).is_empty(), "{tag}: detached");
+                assert!(!folder.exists(), "{tag}: H/<txn> is deleted");
+                assert!(!scene.home.journal().exists(), "{tag}: then the journal");
+                assert!(world.said.is_empty(), "{tag}: {:?}", world.said);
+            }
         }
 
         /// RED (U-12) — **a terminal journal whose lock somebody else holds is left

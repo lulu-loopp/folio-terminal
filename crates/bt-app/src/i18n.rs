@@ -2904,6 +2904,20 @@ pub enum Text {
     UpdateFailedUnsupported,
     /// The reason a driver that stopped gives (`update_job::Failure::Stopped`); U-20 names finer ones.
     UpdateFailedStopped,
+    /// Another update holds this installation (`update_job::Stop::Busy`).
+    UpdateFailedBusy,
+    /// The update's folder or journal could not be written (`update_job::Stop::Journal`).
+    UpdateFailedJournal,
+    /// The image is not the one the checksum document names (`update_job::Stop::Sums`).
+    UpdateFailedSums,
+    /// The image could not be attached (`update_job::Stop::Mount`).
+    UpdateFailedMount,
+    /// The new build is not the offered, signed Folio (`update_job::Stop::Identity`).
+    UpdateFailedIdentity,
+    /// The new build could not be copied off the image (`update_job::Stop::Copy`).
+    UpdateFailedCopy,
+    /// The rescue copy of the running build could not be made (`update_job::Stop::Clone`).
+    UpdateFailedClone,
     /// The General row's picker foot while a job waits at `Verified`: the card again.
     UpdateRowRestart,
     /// The General row's picker foot on a copy a package manager updates: the manager's command, to the clipboard.
@@ -5492,6 +5506,37 @@ impl Text {
                 "Folio cannot update itself here.",
             ),
             Self::UpdateFailedStopped => pick(lang, "Download stopped.", "Download stopped."),
+            Self::UpdateFailedBusy => pick(
+                lang,
+                "Another update is in progress.",
+                "Another update is in progress.",
+            ),
+            Self::UpdateFailedJournal => pick(
+                lang,
+                "The update could not be saved.",
+                "The update could not be saved.",
+            ),
+            Self::UpdateFailedSums => pick(lang, "Checksum mismatch.", "Checksum mismatch."),
+            Self::UpdateFailedMount => pick(
+                lang,
+                "The image could not be opened.",
+                "The image could not be opened.",
+            ),
+            Self::UpdateFailedIdentity => pick(
+                lang,
+                "The update is not verified.",
+                "The update is not verified.",
+            ),
+            Self::UpdateFailedCopy => pick(
+                lang,
+                "The update could not be copied.",
+                "The update could not be copied.",
+            ),
+            Self::UpdateFailedClone => pick(
+                lang,
+                "The current version could not be kept.",
+                "The current version could not be kept.",
+            ),
             Self::UpdateRowRestart => pick(lang, "Restart to update", "Restart to update"),
             Self::UpdateRowCopy => pick(lang, "Copy", "Copy"),
             Self::UpdateRowReady => pick(
@@ -5519,7 +5564,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 789] = [
+    pub const ALL: [Self; 796] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -6290,6 +6335,13 @@ impl Text {
         Self::UpdateCardIncomplete,
         Self::UpdateFailedUnsupported,
         Self::UpdateFailedStopped,
+        Self::UpdateFailedBusy,
+        Self::UpdateFailedJournal,
+        Self::UpdateFailedSums,
+        Self::UpdateFailedMount,
+        Self::UpdateFailedIdentity,
+        Self::UpdateFailedCopy,
+        Self::UpdateFailedClone,
         Self::UpdateRowRestart,
         Self::UpdateRowCopy,
         Self::UpdateRowReady,
@@ -6460,7 +6512,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 46] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 60] = [
         // Ticket 37's four, in both columns: written in English, Chinese owed by opus46.
         (Self::ShortcutTextLarger, HostPlatform::Windows),
         (Self::ShortcutTextLarger, HostPlatform::MacOs),
@@ -6501,6 +6553,20 @@ impl Text {
         (Self::UpdateFailedUnsupported, HostPlatform::MacOs),
         (Self::UpdateFailedStopped, HostPlatform::Windows),
         (Self::UpdateFailedStopped, HostPlatform::MacOs),
+        (Self::UpdateFailedBusy, HostPlatform::Windows),
+        (Self::UpdateFailedBusy, HostPlatform::MacOs),
+        (Self::UpdateFailedJournal, HostPlatform::Windows),
+        (Self::UpdateFailedJournal, HostPlatform::MacOs),
+        (Self::UpdateFailedSums, HostPlatform::Windows),
+        (Self::UpdateFailedSums, HostPlatform::MacOs),
+        (Self::UpdateFailedMount, HostPlatform::Windows),
+        (Self::UpdateFailedMount, HostPlatform::MacOs),
+        (Self::UpdateFailedIdentity, HostPlatform::Windows),
+        (Self::UpdateFailedIdentity, HostPlatform::MacOs),
+        (Self::UpdateFailedCopy, HostPlatform::Windows),
+        (Self::UpdateFailedCopy, HostPlatform::MacOs),
+        (Self::UpdateFailedClone, HostPlatform::Windows),
+        (Self::UpdateFailedClone, HostPlatform::MacOs),
         (Self::UpdateRowRestart, HostPlatform::Windows),
         (Self::UpdateRowRestart, HostPlatform::MacOs),
         (Self::UpdateRowCopy, HostPlatform::Windows),
