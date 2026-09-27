@@ -256,6 +256,31 @@ jobs:
           }
           exit 0
 
+      # `docs/plans/window-thread-bare-sites.tsv` stands in for the lint on raw
+      # effects until A2e, and only shrinks. A bare site added together with its
+      # row passes the equality test, so the historical half is what refuses it:
+      # plant the row and require red.
+      - name: the bare-site inventory gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/window-thread-bare-sites.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "bt-app`t-`tcrate::planted`tstd::thread::sleep`t1`n")
+            $failed = $false
+            try {
+              & ./scripts/ci/check-window-waits.ps1
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "the bare-site inventory accepted a row that is at neither the merge base nor the seed"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
   # ── everything that is decided by reading, not by hardware ────────────────
   logic:
     runs-on: windows-2025
@@ -368,6 +393,14 @@ jobs:
       - name: the migration-debt list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-migration-debt.ps1
+
+      # The window thread's bare sites (thread-door note, revision (j)): the
+      # inventory is no larger than at the merge base, or than the pinned seed
+      # when the merge base predates it. The equality half is a test in the
+      # suite above.
+      - name: the window thread's checks
+        shell: pwsh
+        run: ./scripts/ci/check-window-waits.ps1
 
       # `check-vendor-notices.ps1` reads upstream alacritty 0.26.0 out of the
       # registry to diff it against `vendor/`, so the sources have to be there.
@@ -584,7 +617,11 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
+      # Whole history, for `check-window-waits.ps1`: it compares the bare-site
+      # inventory with the merge base's, or with the pinned seed commit.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
 
       # **The release lane's four shell scripts, parsed on every push.** They
       # are `#!/bin/sh`, they are what `release.yml`'s macOS job is made of, and
@@ -674,6 +711,11 @@ jobs:
           cargo clippy --workspace --all-targets --locked
           --exclude mitex --exclude mitex-parser
           -- -D warnings
+
+      # `logic`'s window-thread checks, on the second platform (A2a).
+      - name: the window thread's checks
+        shell: pwsh
+        run: ./scripts/ci/check-window-waits.ps1
 
       # **The macOS lint line can actually fail** — `gates-can-fail`'s mechanism
       # (plant, demand red, put the file back), run here because the violation
