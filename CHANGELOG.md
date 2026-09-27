@@ -8,6 +8,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- The clean-machine VM checklist now covers the self-updater's power-cut
+  recovery: one step per state in the Windows and macOS state tables, with a
+  hard-reset harness that cuts the VM's virtual power at each boundary.
 - The macOS CI job now lints every crate with the same warnings-as-errors line
   as Windows, shows that line can fail, and runs the renderer's and the
   corpus's tests on a Mac.
