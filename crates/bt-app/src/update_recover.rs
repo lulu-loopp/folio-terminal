@@ -158,7 +158,7 @@ pub(crate) fn run(
 /// **Where the one line is kept**: the data directory's `diagnostics.log`
 /// when that directory exists, else `recover.log` beside the journal — and the
 /// words the line carries to say it went there instead.
-fn log_file(home: &Home, data: &Path) -> (PathBuf, String) {
+pub(crate) fn log_file(home: &Home, data: &Path) -> (PathBuf, String) {
     if data.is_dir() {
         (crate::diagnostics::log_path(data), String::new())
     } else {

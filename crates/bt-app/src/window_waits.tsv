@@ -31,6 +31,8 @@
 ## `expect` on each. Today it holds exactly the effect functions already inside a registered door;
 ## revision (k) allocates the rest. Held equal to the bodies by
 ## `hang_watch::window_waits_tests::the_effects_section_is_the_effect_functions_inside_the_doors`.
+## A `worker-door-body` row (revision (j)13, brought forward by U-28) is a worker's door: its function takes
+## a `WorkerCtx`, and its door column is empty, because the admission identities are the window thread's.
 ## `# doors` (admission identities) and `# owners` (FFI constructs) stay separate lists: neither is a
 ## list of `expect` holders, and no `# owners` module is exempt from the bare-site inventory.
 ##
@@ -150,6 +152,7 @@ bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv
 bt-app	-	crate::pty_door::resize	bt_pty::PtySession::resize 1	owner-door-body	WaitToken	PtyResize
 bt-app	-	crate::pty_door::spawn_shell	bt_pty::PtySession::spawn_shell_in 1	owner-door-body	WaitToken	PtyBirth
 bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	owner-door-body	WaitToken	PaneRetirementWait
+bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
 
 # owners

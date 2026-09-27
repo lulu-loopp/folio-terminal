@@ -449,13 +449,20 @@ impl World for Machine {
 
     fn retire_entrance(&mut self, txn: TxnId) -> Result<(), String> {
         // Windows: the `Run` value `FolioUpdate-<txn8>`, removed and flushed by
-        // its door (U-22); a value already gone is success. The macOS
-        // LaunchAgent and its door arrive with U-26; until then no macOS
-        // transaction has an entrance, and there is nothing to remove.
-        if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
-            return Ok(());
+        // its door (U-22). macOS: the LaunchAgent plist in
+        // `~/Library/LaunchAgents`, removed and its folder flushed by its door
+        // (U-26; wired here by U-28, the first ticket whose transactions reach
+        // `Armed`). An entrance already gone is success on both.
+        match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => {
+                bt_platform::logon_hook::disarm(txn.bytes()).map_err(|refusal| refusal.to_string())
+            }
+            bt_platform::HostPlatform::MacOs => crate::update_apply_macos::retire_entrance_in(
+                crate::update_apply_macos::launch_agents().as_deref(),
+                txn,
+            ),
+            bt_platform::HostPlatform::OtherUnix => Ok(()),
         }
-        bt_platform::logon_hook::disarm(txn.bytes()).map_err(|refusal| refusal.to_string())
     }
 
     fn mounts_under(&mut self, folder: &Path) -> Result<Vec<PathBuf>, String> {

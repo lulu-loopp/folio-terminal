@@ -3352,3 +3352,24 @@ count, and nothing on those arms the census lacked except the two
 `cfg(not(windows))` statement. What it cannot see, A2e's lint sees: A2e may
 find sites the inventory never listed, and each is routed through its door
 then, not added to the file.
+
+### (j)13 · A2c's first door, brought forward by U-28
+
+The coordinator's ruling of 2026-09-27 on U-28's stop: the macOS applier is a
+standalone process whose main thread is a worker, and it must poll twice (the
+old build's data-directory claim, and the trial's receipt); no door admitted a
+worker's sleep, and adding bare sites is refused. So the smallest worker door
+comes first: `bt_platform::wait::sleep_within(&WorkerCtx, Duration)`, whose
+body is one effect (`std::thread::sleep`) and nothing else — the module name
+A2c will extend. It is registered in `window_waits.tsv`'s `# effects` section
+as kind `worker-door-body`, authority `WorkerCtx`, **with no admission
+identity** (the door column empty: the `# doors` identities are the window
+thread's). The guard changes by one rule: a `worker-door-body` row may, and
+must, have an empty door column, and a function it lists whose parameters take
+a `WorkerCtx` is a door body, so its sites are door effects rather than
+inventory (`hang_watch::window_waits_tests::worker_door_functions`); an
+`owner-door-body` row still needs its door. The bare-site inventory did not
+grow: both of the applier's polls sleep only through this door. For (k): every
+existing worker sleep in the inventory (`update_trial::watch`,
+`take_the_claim_within`, `install_txn::hold_until`,
+`macos_update::{run_at, detach_point}`) is a candidate to route through it.

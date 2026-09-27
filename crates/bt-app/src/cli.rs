@@ -320,8 +320,10 @@ pub const UPDATE_RECOVER_FLAG: &str = bt_platform::logon_hook::RECOVER_FLAG;
 /// itself to the rescue build, verbatim, which the rescue build starts the
 /// installed Folio with once the transaction is finished.
 pub const THEN_LAUNCH_FLAG: &str = "--then-launch";
-/// `--update-apply`: the rescue build, as the applier. Reserved here; its
-/// grammar arrives with its door (the Windows apply ticket).
+/// `--update-apply <home> <txn> <nonce>`: the rescue build, as the applier
+/// ([`update_door`]). O writes it at the hand-over (`update_handoff`, U-21);
+/// its door is macOS's (`update_apply_macos`, U-28), and Windows answers it
+/// with one line until its own (U-23).
 pub const UPDATE_APPLY_FLAG: &str = "--update-apply";
 
 /// Turn a command line into a request, or into the fault that ends the launch.
@@ -841,9 +843,19 @@ pub enum UpdateDoor {
         /// logon started the rescue build.
         then_launch: Option<Vec<OsString>>,
     },
-    /// `--update-apply`, whatever follows it.
-    Apply,
+    /// `--update-apply <home> <txn> <nonce>`: the installation home, named
+    /// as `--update-recover <home>` names it, and the transaction and the
+    /// applier's nonce O handed over, as the journal writes them (lowercase
+    /// hex; judged by the door, not here).
+    Apply {
+        home: PathBuf,
+        txn: String,
+        nonce: String,
+    },
 }
+
+/// The one line `--update-apply` answers a malformed line with.
+pub const UPDATE_APPLY_USAGE: &str = "folio --update-apply <home> <txn> <nonce>";
 
 /// The one line `--update-recover` answers a malformed line with.
 pub const UPDATE_RECOVER_USAGE: &str =
@@ -860,16 +872,36 @@ pub const UPDATE_RECOVER_USAGE: &str =
 /// The one word `--update-recover` may take before `--then-launch` is the
 /// installation home: any argument that does not begin with `-`.
 ///
+/// `--update-apply` takes exactly three words after it, none beginning with
+/// `-`: the home, the transaction and the nonce.
+///
 /// # Errors
 /// [`UPDATE_RECOVER_USAGE`] when `--update-recover` (and its home) is
-/// followed by anything but `--then-launch`.
+/// followed by anything but `--then-launch`; [`UPDATE_APPLY_USAGE`] when
+/// `--update-apply` is not followed by exactly its three words.
 pub fn update_door(
     args: impl IntoIterator<Item = OsString>,
 ) -> Option<Result<UpdateDoor, &'static str>> {
     let mut args = args.into_iter();
     let first = args.next()?;
     match first.to_str()? {
-        UPDATE_APPLY_FLAG => Some(Ok(UpdateDoor::Apply)),
+        UPDATE_APPLY_FLAG => Some({
+            let words: Vec<OsString> = args.collect();
+            match words.as_slice() {
+                [home, txn, nonce]
+                    if words
+                        .iter()
+                        .all(|word| !word.to_string_lossy().starts_with('-')) =>
+                {
+                    Ok(UpdateDoor::Apply {
+                        home: PathBuf::from(home),
+                        txn: txn.to_string_lossy().into_owned(),
+                        nonce: nonce.to_string_lossy().into_owned(),
+                    })
+                }
+                _ => Err(UPDATE_APPLY_USAGE),
+            }
+        }),
         UPDATE_RECOVER_FLAG => Some({
             let mut next = args.next();
             let home = next
@@ -907,10 +939,9 @@ pub fn recover_command_line(then_launch: &[OsString]) -> Vec<OsString> {
     line
 }
 
-/// What this build answers `--update-apply` with **until its door exists**
-/// (the Windows apply ticket, U-23), and a malformed `--update-recover` line
-/// with: one line, never a window. `--update-recover` itself has its door
-/// (`update_recover`, U-22).
+/// What this build answers `--update-apply` with **where its door does not
+/// exist yet** (Windows, until U-23), and a malformed `--update-recover` or
+/// `--update-apply` line with: one line, never a window.
 #[must_use]
 pub fn update_door_refusal(usage: Option<&'static str>) -> String {
     match usage {
@@ -1907,6 +1938,53 @@ mod tests {
         );
     }
 
+    /// RED (U-28) — **`--update-apply` takes exactly the home, the
+    /// transaction and the nonce, and the hand-over writes exactly that
+    /// line.**
+    ///
+    /// The applier is the rescue clone, which cannot find its installation
+    /// home from its own path alone on macOS (`Home::of_rescue_named` needs
+    /// it named, as `--update-recover <home>` does); O knows all three when it
+    /// hands over. A missing, extra or flag-shaped word is the usage line.
+    ///
+    /// MUTATION: in `update_door`, accept the `Apply` arm with any number of
+    /// words (take the first three).
+    #[test]
+    fn the_apply_door_takes_the_home_the_transaction_and_the_nonce() {
+        let (home, txn, nonce) = (
+            "/Applications/.Folio.app.folio-update",
+            "7a".repeat(16),
+            "44".repeat(32),
+        );
+        let expected = UpdateDoor::Apply {
+            home: PathBuf::from(home),
+            txn: txn.clone(),
+            nonce: nonce.clone(),
+        };
+        assert_eq!(
+            update_door(args(&["--update-apply", home, &txn, &nonce])),
+            Some(Ok(expected.clone()))
+        );
+        let written = crate::update_handoff::apply_command_line(
+            Path::new(home),
+            crate::update_txn::TxnId::parse(&txn).unwrap(),
+            &crate::update_txn::Nonce::parse(&nonce).unwrap(),
+        );
+        assert_eq!(update_door(written), Some(Ok(expected)));
+        for line in [
+            vec!["--update-apply"],
+            vec!["--update-apply", home, &txn],
+            vec!["--update-apply", home, &txn, &nonce, "extra"],
+            vec!["--update-apply", "--cwd", &txn, &nonce],
+        ] {
+            assert_eq!(
+                update_door(args(&line)),
+                Some(Err(UPDATE_APPLY_USAGE)),
+                "{line:?}"
+            );
+        }
+    }
+
     /// RED (U-26) — **`--update-recover` takes the installation home as an
     /// optional first word: the macOS LaunchAgent names it, the Windows `Run`
     /// value does not.**
@@ -2001,7 +2079,7 @@ mod tests {
         );
         assert_eq!(
             update_door(args(&["--update-apply", "anything"])),
-            Some(Ok(UpdateDoor::Apply))
+            Some(Err(UPDATE_APPLY_USAGE))
         );
         assert_eq!(update_door(args(&[])), None);
         assert_eq!(

@@ -666,6 +666,8 @@ The twelve wholly-test files, by the declaration that makes each one:
 
 **An eighteenth since 2026-09-27** (0.4.6 ticket U-27): `update_prepare_macos.rs` declares `#[cfg(test)] #[path = "update_prepare_macos_tests.rs"] pub(crate) mod tests;` — the macOS Prepare's tests over real images and synthetic signed bundles, and the image fixtures `update_startup` and `uninstall` share — which makes `update_prepare_macos_tests.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_eighteen`.
 
+**A nineteenth since 2026-09-27** (0.4.6 ticket U-28): `update_apply_macos.rs` declares `#[cfg(test)] #[path = "update_apply_macos_tests.rs"] mod tests;` — the macOS applier's tests over real synthetic signed bundles, real locks, a real claim, a LaunchAgent plist in a folder of the test's own and real processes — which makes `update_apply_macos_tests.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_nineteen`.
+
 ---
 
 ## 7. The end measurement
