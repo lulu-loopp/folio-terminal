@@ -84,14 +84,15 @@ impl Spawner for Detached {
     }
 }
 
-/// **The applier's command line** after its program: `--update-apply <txn>
-/// <nonce>`. The apply door's grammar is U-23's (`cli::UPDATE_APPLY_FLAG` is
-/// reserved and refused until then); this is the line U-21's brief gives, the
-/// two values written as the journal writes them (lowercase hex).
+/// **The applier's command line** after its program: `--update-apply <home>
+/// <txn> <nonce>` (U-28's grammar, `cli::update_door`): the installation home,
+/// named because the macOS rescue clone cannot find it from its own path
+/// alone, then the two values as the journal writes them (lowercase hex).
 #[must_use]
-pub(crate) fn apply_command_line(txn: TxnId, applier: &Nonce) -> Vec<OsString> {
+pub(crate) fn apply_command_line(home: &Path, txn: TxnId, applier: &Nonce) -> Vec<OsString> {
     vec![
         OsString::from(cli::UPDATE_APPLY_FLAG),
+        home.as_os_str().to_os_string(),
         OsString::from(txn.to_string()),
         OsString::from(applier.to_string()),
     ]
@@ -126,7 +127,7 @@ impl HandoffJob {
             handoff: handoff.encode(),
             abandoned: abandoned.encode(),
             program: staged.home.rescue_program(&staged.journal.rescue),
-            args: apply_command_line(staged.journal.txn, &applier),
+            args: apply_command_line(staged.home.root(), staged.journal.txn, &applier),
             spawner,
         })
     }
@@ -433,7 +434,10 @@ mod tests {
             &staged.home.rescue_program(&staged.journal.rescue),
             "from the rescue copy the header names"
         );
-        assert_eq!(args, &apply_command_line(TxnId::new(TXN), &nonce()));
+        assert_eq!(
+            args,
+            &apply_command_line(staged.home.root(), TxnId::new(TXN), &nonce())
+        );
         let header = on_disk(&staged.home).header();
         assert_eq!(header.class, Class::Destructive);
         assert_eq!(

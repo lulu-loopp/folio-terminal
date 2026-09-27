@@ -929,6 +929,13 @@ pub(crate) enum Event {
     /// anyway"). Nothing has moved: the transaction is abandoned — terminal,
     /// outcome `none` — and the next start retires it (W13).
     ApplierNotStarted,
+    /// **The old build did not let go within the applier's wait** (U-28,
+    /// §C.4: "If 60 s pass, P journals `Failed`, deletes staging, and exits
+    /// without touching anything"): the applier held the transaction lock, but
+    /// the data directory's claim was still held when its wait ran out.
+    /// Nothing has moved: the transaction is abandoned — terminal, outcome
+    /// `none` — and cleared.
+    OldStayed,
     /// The entrance is written, flushed and read back (F-2, F-3). The proof is
     /// `bt_platform::install_txn::Armed`, one type for both platforms, which
     /// only the two entrance doors make, and only after their read-back
@@ -972,6 +979,7 @@ pub(crate) enum EventKind {
     Discarded,
     HandedOff,
     ApplierNotStarted,
+    OldStayed,
     Armed,
     EntranceFailed,
     Reverted,
@@ -985,13 +993,14 @@ pub(crate) enum EventKind {
 }
 
 impl EventKind {
-    pub(crate) const ALL: [EventKind; 16] = [
+    pub(crate) const ALL: [EventKind; 17] = [
         EventKind::Prepared,
         EventKind::PrepareFailed,
         EventKind::LaunchedWithoutResume,
         EventKind::Discarded,
         EventKind::HandedOff,
         EventKind::ApplierNotStarted,
+        EventKind::OldStayed,
         EventKind::Armed,
         EventKind::EntranceFailed,
         EventKind::Reverted,
@@ -1013,7 +1022,8 @@ impl EventKind {
             | EventKind::Discarded
             | EventKind::HandedOff
             | EventKind::ApplierNotStarted => &[Actor::Old],
-            EventKind::Armed
+            EventKind::OldStayed
+            | EventKind::Armed
             | EventKind::EntranceFailed
             | EventKind::Admitted
             | EventKind::TrialBegan => &[Actor::Applier],
@@ -1036,6 +1046,7 @@ impl Event {
             Event::Discarded => EventKind::Discarded,
             Event::HandedOff { .. } => EventKind::HandedOff,
             Event::ApplierNotStarted => EventKind::ApplierNotStarted,
+            Event::OldStayed => EventKind::OldStayed,
             Event::Armed(_) => EventKind::Armed,
             Event::EntranceFailed => EventKind::EntranceFailed,
             Event::Reverted => EventKind::Reverted,
@@ -1104,6 +1115,11 @@ pub(crate) const TRANSITIONS: &[(PhaseKind, EventKind, PhaseKind)] = &[
     (
         PhaseKind::Handoff,
         EventKind::ApplierNotStarted,
+        PhaseKind::Abandoned,
+    ),
+    (
+        PhaseKind::Handoff,
+        EventKind::OldStayed,
         PhaseKind::Abandoned,
     ),
     (PhaseKind::Handoff, EventKind::Armed, PhaseKind::Armed),
@@ -1205,9 +1221,10 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
                 Err(Refusal::EntranceForAnotherTransaction)
             }
         }
-        (Phase::Handoff { .. }, Event::EntranceFailed | Event::ApplierNotStarted) => {
-            Ok(Phase::Abandoned)
-        }
+        (
+            Phase::Handoff { .. },
+            Event::EntranceFailed | Event::ApplierNotStarted | Event::OldStayed,
+        ) => Ok(Phase::Abandoned),
         (Phase::Handoff { .. } | Phase::Armed | Phase::Moving, Event::Reverted) => {
             Ok(Phase::Prepared {
                 deferred_launches: 0,
@@ -2093,6 +2110,24 @@ impl Home {
         self.transaction(txn).join(Receipt::file_name(nonce))
     }
 
+    /// **The installed bundle this macOS home belongs to**:
+    /// `<parent>/<Bundle>.app`, the home's sibling — what the applier
+    /// exchanges with `stage/` (U-28). `None` for a Windows home.
+    pub(crate) fn installed_bundle(&self) -> Option<PathBuf> {
+        let name = self.bundle_name()?;
+        Some(self.root.parent()?.join(name))
+    }
+
+    /// **The installed bundle's main executable**, where this home's rescue
+    /// clone keeps its own inside it — the image a process of the installed
+    /// build runs (U-28). `None` for a Windows home.
+    pub(crate) fn installed_program(&self) -> Option<PathBuf> {
+        let RescueShape::Bundle { inside, .. } = &self.rescue else {
+            return None;
+        };
+        Some(self.installed_bundle()?.join(inside))
+    }
+
     /// The bundle's own name, for the members a macOS home keeps under it.
     fn bundle_name(&self) -> Option<&OsStr> {
         match &self.rescue {
@@ -2664,6 +2699,7 @@ mod tests {
                 applier: nonce(0x44),
             },
             Event::ApplierNotStarted,
+            Event::OldStayed,
             armed(),
             Event::EntranceFailed,
             Event::Reverted,

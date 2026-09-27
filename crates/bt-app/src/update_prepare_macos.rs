@@ -508,7 +508,7 @@ pub(crate) fn check(
 
 /// A signed bundle's identity as the journal records it: its main
 /// executable's cdhash and its `CFBundleShortVersionString`.
-fn identity(worker: &WorkerCtx, bundle: &Path) -> Result<BundleIdentity, String> {
+pub(crate) fn identity(worker: &WorkerCtx, bundle: &Path) -> Result<BundleIdentity, String> {
     let code = macos_update::code_identity(worker, bundle).map_err(|r| r.to_string())?;
     let version = macos_update::short_version(worker, bundle).map_err(|r| r.to_string())?;
     Ok(BundleIdentity {

@@ -90,6 +90,21 @@ Q6 of the plan, where they are also recorded.
 - Category `public.app-category.developer-tools`; display name `Folio`;
   executable `folio`.
 
+## What the updater does to an installed bundle (0.4.6, off until U-32)
+
+The bundle is replaced whole, in place, by one `renamex_np(RENAME_SWAP)` with
+the verified copy the updater staged in `.<Bundle>.app.folio-update/<txn>/stage/`
+beside it — the same folder, so the same volume. The launch path never holds
+no bundle, and a copy that is running keeps running from its own image. The
+new bundle is then started through LaunchServices (`open -n -a`) with
+`--update-trial <txn> <nonce>`; the old bundle stays in `stage/` until the new
+one has written its receipt, and a LaunchAgent
+(`~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<txn8>.plist`)
+exists only while the transaction is open. Nothing here changes what the
+release scripts produce: the updater relies on the bundle's own name, its
+`CFBundleExecutable` (`folio`) and its `CFBundleShortVersionString`, which
+`Info.plist.in` already fixes.
+
 ## The four scripts that read this directory
 
 They live in `scripts/release/macos/`, they are POSIX `sh`, and they take every

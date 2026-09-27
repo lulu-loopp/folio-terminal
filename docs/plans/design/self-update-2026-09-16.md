@@ -1954,3 +1954,28 @@ The macOS ordinary start still removes no LaunchAgent at a retirement
 (`update_startup::Machine::retire_entrance` answers only Windows); no macOS
 transaction reaches `Armed` before U-28, which should wire `launch_agent::disarm`
 there.
+
+**The macOS apply road as built (U-28), and the `--update-apply` grammar.**
+The applier's line is `--update-apply <home> <txn> <nonce>` (the home named,
+as `--update-recover <home>` names it; Windows keeps answering it with one line
+until U-23). The rescue clone, on its standalone main: O's lock
+(`install_txn::hold_within`, 60 s; not had → nothing written, M3); the data
+directory's claim tried until had and let go at once, sleeping only through the
+worker wait door `bt_platform::wait::sleep_within` (still held at 60 s → the
+applier event `OldStayed`, `Handoff` → `Abandoned`, cleared: this is C.4's
+"journals `Failed`"); the LaunchAgent → `Armed`; exclusive admission and no
+process running from the installed executable → `Admitted` (`Moving`, the
+M-table's `Exchanging`), else the plist removed and `Reverted`; both
+identities checked; one `renamex_np(RENAME_SWAP)` (`bt_platform::install_flip`);
+the admission let go; `open -n -a <bundle> --args --update-trial <txn> <nonce>`
+(C.5's `--update-health <journal>` is that frozen flag's old name); the trial's
+pid from the process list (a process of the installed executable started after
+the launch) or the receipt's own → `Trial`; a receipt the journal accepts →
+`Committed`, then the old bundle, the plist, `Retired{Committed}` and
+`H/<txn>` with the rescue clone. The journal is kept at `Retired{Committed}`
+for the trial's watch; the next ordinary start retires it. No receipt by 90 s,
+or a trial that died without one → `RollbackIntent{trial}` and the applier
+stops (U-29 swaps back). A re-entry at `Armed` continues; at `Moving` it is
+decided by the live identity (M5 revert, M6 rollback). An ordinary start's
+retirement now removes the LaunchAgent (U-27's finding 3). E-12's record is in
+the DESIGN entry of the same day.

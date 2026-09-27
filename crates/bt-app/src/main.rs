@@ -166,6 +166,8 @@ mod trace;
 mod trace_sink;
 mod uninstall;
 mod update;
+// The macOS applier, `--update-apply`: exchange, trial and commit (0.4.6 ticket U-28).
+mod update_apply_macos;
 // The updater's archive reader (0.4.6 ticket U-14); U-20's Prepare is its caller.
 mod update_archive;
 // The update card and the General row: what the reader sees of the update job
@@ -70883,14 +70885,20 @@ fn main() -> Result<()> {
     // doors above, and above the admission below for a reason of their own:
     // the rescue build is the one process that must never hold the admission
     // shared — it takes it exclusive to move files. `--update-recover` is the
-    // recovery door (`update_recover`, U-22); `--update-apply` is answered with
-    // one line until its door arrives (U-23).
+    // recovery door (`update_recover`, U-22); `--update-apply` is the macOS
+    // applier (`update_apply_macos`, U-28), and is answered with one line on
+    // Windows until its door arrives (U-23).
     if let Some(door) = cli::update_door(std::env::args_os().skip(1)) {
         let usage = match door {
             Ok(cli::UpdateDoor::Recover { home, then_launch }) => {
                 std::process::exit(update_recover::run_here(home, then_launch))
             }
-            Ok(cli::UpdateDoor::Apply) => None,
+            Ok(cli::UpdateDoor::Apply { home, txn, nonce })
+                if bt_platform::host_platform() == bt_platform::HostPlatform::MacOs =>
+            {
+                std::process::exit(update_apply_macos::run_here(&home, &txn, &nonce))
+            }
+            Ok(cli::UpdateDoor::Apply { .. }) => None,
             Err(usage) => Some(usage),
         };
         bt_platform::write_std_error(format!("{}\n", cli::update_door_refusal(usage)).as_bytes());

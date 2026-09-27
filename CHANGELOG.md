@@ -14,6 +14,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- On macOS, the coming updater can now apply a prepared update: after Folio
+  quits, a copy of the old app waits for it to be gone, swaps the new app into
+  place in one step, starts it, and keeps the old one until the new one has
+  opened a window with text in it; then the old copy is removed. If the new
+  one does not get that far in 90 seconds, the update is marked for rolling
+  back (the rollback itself comes next). Nothing can start an update yet.
 - The split inventory's census no longer tells a test that asks for a method by
   name to follow that method to a new file: only tests that read a file's text
   are listed as needing an edit when code moves.
