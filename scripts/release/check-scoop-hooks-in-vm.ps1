@@ -86,7 +86,15 @@ function Check([bool] $ok, [string] $what) {
 # scoop in a process of its own, as a person runs it: a hook's `throw` ends
 # that process, not this one.
 function Invoke-Scoop([string] $arguments) {
-    $said = & $Shell -NoProfile -ExecutionPolicy Bypass -Command "scoop $arguments" 2>&1 | Out-String
+    # Under Windows PowerShell 5.1, `2>&1` turns a native command's stderr into
+    # error records, and with `$ErrorActionPreference = 'Stop'` the door's own
+    # refusal line ("Folio: refused ...") would end this script instead of being
+    # the evidence it is. Collect both streams as text.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $said = (& $Shell -NoProfile -ExecutionPolicy Bypass -Command "scoop $arguments" 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    } finally { $ErrorActionPreference = $previous }
     Write-Host $said
     return $said
 }
@@ -138,8 +146,13 @@ try {
             $line = ($text -split "`r?`n") | Where-Object { $_ -like '*install channel*' } | Select-Object -First 1
         }
     }
-    Check ($null -ne $line -and $line -like '*install channel managed by scoop with an uninstall hook*') `
-        "install: diagnostics.log says '$line'"
+    if ([Version] $version -lt [Version] '0.4.6') {
+        # the install-channel line is 0.4.6 work (U-1); an older archive cannot write it
+        Write-Host "skip install: diagnostics.log's install-channel line needs a 0.4.6 build (this archive is $version)"
+    } else {
+        Check ($null -ne $line -and $line -like '*install channel managed by scoop with an uninstall hook*') `
+            "install: diagnostics.log says '$line'"
+    }
     # A moment more, for the data folder's claim the cleanup door asks about.
     Start-Sleep -Seconds 2
 
@@ -161,8 +174,14 @@ try {
 
     # ── 4. uninstall ──────────────────────────────────────────────────────────
     $said = Invoke-Scoop 'uninstall folio'
-    Check ($said -match 'Update entrance \(per-copy\)') 'uninstall: the door ran and scoop printed its lines'
-    Check (-not (Test-Planted)) 'uninstall: the planted entrance is gone'
+    if ([Version] $version -lt [Version] '0.4.6') {
+        # the door learns the update entrance (FolioUpdate-*) in 0.4.6 (U-22); an older archive's door cannot remove it
+        Write-Host "skip uninstall: the door's entrance lines and the planted entrance need a 0.4.6 build (this archive is $version)"
+        Remove-ItemProperty -LiteralPath $runKey -Name $planted -ErrorAction SilentlyContinue
+    } else {
+        Check ($said -match 'Update entrance \(per-copy\)') 'uninstall: the door ran and scoop printed its lines'
+        Check (-not (Test-Planted)) 'uninstall: the planted entrance is gone'
+    }
     Check (-not (Test-Path -LiteralPath $versionFolder)) 'uninstall: the app is gone'
 }
 finally {
