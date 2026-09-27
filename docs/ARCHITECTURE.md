@@ -823,6 +823,31 @@ four in rows 15–18 may be spent on the window thread.** A timeout does not
 cancel an uninterruptible call; a stuck operation needs outstanding-work
 accounting and a limit on further admissions.
 
+**Every turn is accounted, and every admitted wait is measured per call**
+(0.4.6 ticket A3; the budget note's §R-C and §C-7). The meter's `leave`
+(`hang_watch::ADMISSION_METER`) folds each admitted call's inclusive duration —
+the two instants `admitted` read around its work, in nanoseconds — into its
+door's histogram (count, sum, maximum, 24 power-of-two buckets). At `park`,
+before the slow-hold threshold and whatever any queue takes, the turn's wall
+time, the union of its admitted calls, its unexplained time (wall time less that
+union: a named station with no admitted call under it is unexplained too) and its
+scheduling delay (the turn's start less the wake the loop parked for) go into
+per-run atomics (`hang_watch::accounting`). The union is exact without a buffer:
+admitted calls nest on one thread, so it is the sum of the outermost calls, and
+the cookie carries the nesting depth. Four triggers each offer a budget line:
+the wall time past the turn's frame (`T − t₀`, the shortest frame among the
+visible windows that took a turn, else `TURN_BUDGET`, 16 ms), the union past
+`WAIT_BUDGET` (8 ms), a call past its row's bound (`WAIT_ALLOWANCE`, 4 ms; the
+registry rules no larger bound; the line names the turn's longest), and the
+unexplained time past `WAIT_BUDGET`. Each trigger writes at most one line a
+second (`COALESCE_WINDOW`, coordinator's ruling 2026-09-27); the turns inside
+that second are counted and the trigger's next line carries the count. The
+window thread `try_lock`s a ring of 16 lines and counts every refusal; the
+watchdog writes them (§10). `fn main` writes the exit summary from the atomics
+before the run's last line. The accounting reads no clock of its own, and a
+parked loop runs none of it. `hang_watch` reports and never intervenes: a line
+is a finding against its row, not a trigger for anything.
+
 ### 5.4 The shippable migration order
 
 1. **Before the move** — define request identity, resource ordering, capacity,
@@ -892,6 +917,13 @@ expected count the guard then takes from the registry); **the `file_writes` and
 design** — a capability checked at `open` would authorise the construction, not
 the reads that follow it; and **the transport doors inside `bt-pty`**, whose
 waits are fenced by owner and count, not by thread authority.
+
+**D-2's state** (`docs/plans/structural-debt.md`). A1 (A1a–A1e) and A3 have
+landed: every owner-thread wait is a registry door admitted with its token, and
+every turn and every admitted call is accounted (§5.3). A2 is pending — its
+survey counted 228 bare product sites on the Windows arms (the thread-door
+note's revision (i)), and it lands in five tickets with the lint last. By the
+owner's ruling of 2026-09-25 D-2 closes when A2 has landed.
 
 Each door is held by a pin: `bt_app::file_reads_source_tests` reads
 `file_reads_doors.txt` and fails the build when a product read appears outside
@@ -1142,6 +1174,40 @@ every settling of the check and the channel's arrival too — nor
 reports, which no other lane applies (`update_job::Job::drain_progress`). Each is
 charged to a station of its own, `Station::UpdateJobOffer` and
 `Station::UpdateJobProgress` (`STATION_COUNT` 222).
+
+**The window thread's budget lines** (0.4.6 A3; §5.3). Written to
+`diagnostics.log` by the watchdog, never by the window thread; durations in
+whole microseconds (nanoseconds until printed); `suppressed` is the turns that
+crossed the same trigger since its last line and wrote none (at most one line
+per trigger per second), `refused` the process's admission refusals and `lost`
+the budget lines the ring refused since the line before, all three on every
+line:
+
+```text
+Folio budget: turn=<n> wall us=<µs> frame_us=<µs> waits_us=<µs> unexplained_us=<µs> delay_us=<µs|none> suppressed=<n> refused=<n> lost=<n>
+Folio budget: turn=<n> waits us=<µs> budget_us=8000 calls=<n> suppressed=<n> refused=<n> lost=<n>
+Folio budget: turn=<n> call us=<µs> bound_us=4000 door=<Door> row=<row> station=<Station>[ more=<n>] suppressed=<n> refused=<n> lost=<n>
+Folio budget: turn=<n> unexplained us=<µs> target_us=8000 wall_us=<µs> suppressed=<n> refused=<n> lost=<n>
+```
+
+`wall` is the turn past its frame (`frame_us`), with the scheduling delay
+beside it and not in it; `waits` the union of its admitted calls past the budget;
+`call` the turn's longest admitted call past its row's bound (`more` counts the
+turn's other calls past their bound); `unexplained` its time outside every
+admitted call past the budget — never a wait. The exit summary, written by
+`fn main` through `trace_sink::stderr_line` just before the run's footer, is read
+from the run's atomics, so it is whole however many lines were lost:
+
+```text
+Folio budget summary: <wall|waits|unexplained|delay> count=<n> max_us=<µs> sum_us=<µs> hist=<bucket>:<n>,…
+Folio budget summary: door=<Door> row=<row> count=<n> max_us=<µs> sum_us=<µs> hist=<bucket>:<n>,…
+Folio budget summary: lost=<n> refused=<n>
+```
+
+A bucket is named by its lower edge (`<1us`, `1us`, `2us`, … `4194304us+`), and
+only non-empty buckets are printed (`hist=-` when none is). A door appears only
+once it has been called. The slow-hold line (`Folio: the window thread held
+control for …`) is unchanged in meaning and format.
 
 ---
 

@@ -63094,7 +63094,7 @@ fn parking(control_flow: ControlFlow, heart: &hang_watch::Heartbeat) -> hang_wat
     match control_flow {
         ControlFlow::Poll => hang_watch::Park::Running,
         ControlFlow::Wait => hang_watch::Park::Indefinite,
-        ControlFlow::WaitUntil(deadline) => hang_watch::Park::Until(heart.ms_at(deadline)),
+        ControlFlow::WaitUntil(deadline) => heart.until(deadline),
     }
 }
 
@@ -71166,6 +71166,12 @@ fn main() -> Result<()> {
             1
         }
     };
+    // **The run's budget, from its atomics** (0.4.6 A3): every turn's wall time, waits,
+    // unexplained time and scheduling delay, every door's calls, and the detail lines lost —
+    // whole however many of those lines the watchdog never got to write.
+    for line in hang_watch::budget_summary() {
+        trace_sink::stderr_line(line);
+    }
     trace_sink::stderr_line(diagnostics::run_footer(
         &hang_watch::utc_timestamp(std::time::SystemTime::now()),
         code,

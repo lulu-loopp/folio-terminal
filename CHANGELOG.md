@@ -8,6 +8,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- Every turn of Folio's window thread is now measured, and so is every call it
+  makes that waits on the system. A turn that runs past its frame, waits too
+  long in total, makes one call past its bound, or spends too long on
+  unexplained work writes a line to `diagnostics.log`, at most one a second
+  for each of the four, with a count of the turns it skipped; a summary for
+  the whole run is written when Folio exits. Lines that could not be queued
+  are counted, never silently dropped.
 - Which part of the code changes which piece of window and tab state is now
   worked out from the source and checked into the repository; a change that
   adds a new writer shows up as a changed line there.

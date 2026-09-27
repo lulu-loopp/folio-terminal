@@ -1649,6 +1649,11 @@ impl Runtime<'_> {
         // §5.3 row 13). The drain and the strip tick both decide what the reader is owed from
         // it, and the doors that fire inside the turn read it back; none of them asks again.
         self.observe_window_place();
+        // **This window's frame, for the turn's account** (0.4.6 A3): a turn is measured against
+        // the shortest frame among the windows on the glass (`T − t₀`); a hidden window owes none.
+        if !self.window.window_hidden {
+            hang_watch::frame_interval(self.window.frame_clock.interval());
+        }
         // First, because everything below it is allowed to assume the window is
         // where the hand last left it. This is the door the coalescing is *for*:
         // the queue has just run dry, so whatever the wheel collected while the
