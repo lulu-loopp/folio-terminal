@@ -20,6 +20,15 @@ two modes; C3a gains the shared web read boundary and T4 the comment read
 endpoint; I3, I4, I5 and I7 were reconciled; 0.5.8 promises P2's design only;
 §9's locators were finished. No slice moved. §10 records it.
 
+**Revision (d), 2026-09-27, the owner's rulings.** The owner's sentence of
+2026-09-27: *"go with your recommendations throughout; but if the browser can
+get several tabs early, do that; and agent conversation recovery is in 0.5,
+right?"* Q1, Q5 and Q10 are ruled (Q10 in direction); the browser's several
+pages are pulled forward as a new row **B1a** (0.5.1), and B1's design note
+moves to 0.5.0; S1 and S2 are confirmed as 0.5 scope where (c) put them; the
+D-41 cells (A10, I7) are aligned to the ledger's own words; §3 gains rows 22
+and 23. §10 records it cell by cell.
+
 The owner's ask (2026-09-27): *"Shouldn't all the feature increments 0.5 is to
 implement be gathered up, with their dependencies worked out, and written into
 one plan-and-schedule document?"* His leaning the same day: design once,
@@ -124,7 +133,7 @@ feature.
 | I4 | The thread door's remaining families and the lint | A11 = TD A2b–A2e | TD (i)1 | ruled 0.4.6; all four move together to 0.4.7 only if capacity requires, with the pending-lint statement kept | the lint established on both product jobs (A2e), the bare-site list empty and deleted. An empty list proves every listed effect goes through a door; it repays none of the effects the doors record. **The transport-authority residual** — `bt-pty`'s transport waits are fenced by owner and count, not by thread authority (TD (c)6 item 1, (i)5) — is carried as its own debt row, which TD's revision (k) opens, on the version (k) gives it |
 | I5 | The window-thread budget's remaining tickets | engineering A4 (the earliest window's allowance) and B4–B9 (the marks record and the stores on the storage lane, PSReadLine observation, the macOS locale, the macOS watcher's lifecycle, device recovery on a worker); B10 (the window thread's file observation), whose brief and allocation TD's revision (k) writes | WTB §R-F; its §C-8 ("the rest of (b)'s §R-F is unchanged"); TD §11 (B4, B7, B9 need A1b's `WorkerCtx`); TD (j)9, (j)10 (revision (k) owns B10's brief and the transport debt row) | ruled (0.4.6) | **Work, not bookkeeping:** A4's `TurnAllowance`, taken from the earliest active window's `FrameClock`, is implemented and the search walk and the idle calls consult it, *and* the aggregate-scheduling row it opens is written; B4–B9 land, repaying D-34, D-35, D-36, D-39, D-40, D-42, D-77 and D-47's store-writes half (its document half is I3's); B10 lands per (k), and every registry row it owes is repaid or carries a written disposition. A written debt row is a record, never a repayment |
 | I6 | The lane contract's declared failures | D-70…D-76 (they are declared failures, not closed by the contract's existence) | SD (A5, 2026-09-25) | ruled (0.4.6, with D-33) | `lane::EXPECTED_FAILURES` empty; D-33 repaid |
-| I7 | The presentation-lane decision | A10 = D-41 | WTB §R-E ("D-41, the decision restated", which replaces WTB §4's paragraph): the owner deferred construction on 2026-09-24 until the self-inflicted waits were fixed and measured. **This is the newer ruling** (revision (c)): SD's 0.4.5 cell was assigned earlier the same day, and SD's own later D-33 and D-42 notes acknowledge the deferral, so the cell is stale scheduling — flagged to the coordinator for alignment, not a reversal | open (construction and its version) | the owner's measurement-based decision: a version on the row, or `deferred →` with a reason. The deferral does not repay D-41. A conditional exception to I3's ledger-zero; it does not block 0.5.0 |
+| I7 | The presentation-lane decision | A10 = D-41 | WTB §R-E ("D-41, the decision restated", which replaces WTB §4's paragraph): the owner deferred construction on 2026-09-24 until the self-inflicted waits were fixed and measured. **This is the newer ruling** (revision (c)). **The ledger's row, as it reads on main** (revision (d)): version "0.4.5 — presenting off the input thread is the typing-stability work"; status "open — since ticket 37 a presented picture is a pair (frame and metrics: `SeatSignature::metrics`, `LeafSession::presented_metrics`), and the lane must carry both". The ledger itself records the deferral elsewhere: its by-version note (2026-09-25, A5) says "the owner deferred the presentation lane, its second client", and its D-42 row reads "independent of D-41 (budget note R8, 2026-09-26)". The 0.4.5 tag exists and the ledger's 0.4.5 line counts two rows open, D-41 one of them (D-64 the other). The version cell is the ledger's to change, not this plan's | open (construction and its version) | the owner's measurement-based decision: a version on the row, or `deferred →` with a reason. The deferral does not repay D-41. A conditional exception to I3's ledger-zero; it does not block 0.5.0 |
 
 ### 2.C Contracts that must precede their consumers
 
@@ -135,7 +144,7 @@ own note; its consumers may not ship before it.
 |---|---|---|---|---|---|---|---|
 | C1 | Session identity and lifecycle | Four distinct things: a stable **session id**; its **incarnation** (agent lifetime); the **view address** (tab, seat, window); the **vendor conversation / resume id**. A move changes the view binding, not the session; a replacement invalidates credentials and stale operations; a resume never resurrects grants. The rail's "one live row per pane" stays a presentation rule | OC §5.1 step 3 and (b)6; AR §12.1; SD D-1, D-54; TF review items 1–3 (owner, 2026-09-24); WB §13.2 (the earlier view address) | ruled (direction); note owed | — | M (a Codex-reviewed note; implemented by A3/A4) | A3, A4, L1, L3a, T1, T2, S1, S2, V10, R2 |
 | C2 | Typed-input admission | One admission mechanism for every text Folio types into a pane for someone, with **two modes each operation declares** (revision (c)): **paste-only** — the text lands on the input line, no Enter, the agent's own draft preserved (WB §13.3.1; V11); **paste-and-submit** — paste and submission admitted as one ordered operation on the session's transport, Enter outside the bracketed payload, only when that operation asks for it (comment Send, TF R1; TF's `send --no-enter` is the typing verb's paste-only form); readiness is WB §11.7's full predicate (a turn boundary, no permission or quota wait, disarmed by a new event); `Queued` is not consumed; a refused batch stays pending with its reason; a failed send is never a person's answer; the draft is the composer's, the sent batch is immutable and the target session's, with a stated retention; the envelope and read schema (labelled fields, a line saying source fields are untrusted reference data, escaping, bounds). It does not require PTY birth/resize off the window thread, and a person pressing Send grants no agent a typing tier | TF review items 2–6 and the owner's rulings (2026-09-24); WB §11.7.3, §12.4.7, §13.3.1; AR §12.3 | ruled (the adopted review); note owed | C1, A3 | M (note) + M (core) | T9a (paste-and-submit), V11 (paste-only), S2's reply and V10's input line (each declares its mode in its design; Q31), T5 and T3b (per verb), V6's terminal-bound input |
-| C3 | Web-page ownership and admission | Page identity and navigation revision; the owning pane versus a view; profile and grants; native thread affinity; rehost, close and crash; what happens to a late callback or DOM result. **C3a** is its narrow half — selection extraction and drawing above the native page, the search float's focus boundary, and (revision (c)) **the shared web read boundary**: page and navigation identity, access on the owning thread, and rejection of a stale DOM result — enough for adapters and readers over today's browser; **C3** whole precedes the browser's promotion | OC's census (`WindowRuntime.web`) and (b)3 (the download tool versus four failure states); SD D-54 (WebView2 generations); AR §5.2, §5.3 row 21; `webhost::WebSeat` (generation-checked asynchronous work, rehost, close/rebuild) | proposed by the review; note owed | C1 | S–M (C3a) + M (C3 note) | T8, T10, T11, T4's web readers (C3a); T12, B1, B2, B3 (C3) |
+| C3 | Web-page ownership and admission | Page identity and navigation revision; the owning pane versus a view; profile and grants; native thread affinity; rehost, close and crash; what happens to a late callback or DOM result. **C3a** is its narrow half — selection extraction and drawing above the native page, the search float's focus boundary, and (revision (c)) **the shared web read boundary**: page and navigation identity (revision (d): the page identity B1's note defines, since B1a gives a pane several pages before C3a lands), access on the owning thread, and rejection of a stale DOM result — enough for adapters and readers over today's browser; **C3** whole precedes the browser's promotion | OC's census (`WindowRuntime.web`) and (b)3 (the download tool versus four failure states); SD D-54 (WebView2 generations); AR §5.2, §5.3 row 21; `webhost::WebSeat` (generation-checked asynchronous work, rehost, close/rebuild) | proposed by the review; note owed | C1 | S–M (C3a) + M (C3 note) | T8, T10, T11, T4's web readers (C3a); T12, B1, B2, B3 (C3) |
 
 ### 2.A Foundations: ownership and the domain crate
 
@@ -151,7 +160,7 @@ own note; its consumers may not ship before it.
 | A7b | The second view's ownership design | Scroll, selection, IME composition, query responses, resize and the source pane closing, for a live second view of one pane (the list WB §13.3.3 leaves open) | WB §13.3.3 | ruled (drag-out is 0.5.x); no design | A7a | M (design) | §6 Q27 |
 | A8 | The rest of 0.4.7's closure the 0.5 code stands on | D-6 chains, D-16 the enumeration lane, D-49 the resize chain, D-51/D-55 observation and projection classes, D-56 the emergency journal, D-65/D-66 (see D3), D-78…D-83 the `Drop` inventory and the non-portable suites | SD (each row, 0.4.7) | ruled (0.4.7) | — | S–M each | — |
 | A9 | PTY birth and resize leave the window thread | D-43, D-44: "deferred → 0.5 toward 0.6 — needs D-1's session owner to keep input and resize order". Co-scheduled with the floats by preference, not by necessity (WB §11.7.4's float is one PTY, one size) | SD D-43, D-44; WTB rows 11–12 | ruled (0.5 toward 0.6) | A3, A4 | M each | §6 Q11 |
-| A10 | The presentation lane | D-41: acquire, submit, present off the window thread; the owner deferred building it on 2026-09-24 until the self-inflicted waits were fixed and measured; AR §5.4's migration order puts the presentation line in 0.5 | SD D-41; WTB §4 | open (the owner's decision after measurement) | A8 | L | §6 Q11 |
+| A10 | The presentation lane | D-41, in the ledger's words: "presentation on the window thread; the present mode has no owner"; acquire, submit, present off the window thread, and "since ticket 37 a presented picture is a pair (frame and metrics …), and the lane must carry both". The owner deferred building it on 2026-09-24 until the self-inflicted waits were fixed and measured (WTB §R-E); AR §5.4's migration order puts the presentation line in 0.5. The ledger's version cell still reads 0.4.5 (I7) | SD D-41 (the row on main, read for revision (d)); WTB §R-E (replaces §4's paragraph) | open (the owner's decision after measurement) | A8 | L | §6 Q11 |
 | A11 | The thread door's remaining families and the lint | A2b–A2e: file doors, wait doors, `bt-pty` transport doors, then the lint | TD (i)1 | ruled 0.4.6, or all four move to 0.4.7 ("the owner's call, flagged") | A2a (done) | M, M, S–M, M | §6 Q12 |
 | A12 | `bt-platform`'s first extraction; `bt-term → bt-math`'s first slice | D-12 (the read ledger, file primitives, process doors into one systems crate); D-15 "ahead of the 0.5 composition layer" | SD D-12, D-15 (0.4.7); mem:dependency-direction-and-split-0921 (2026-09-21) | ruled (0.4.7) | the `bt-app` move's end (D-32, 0.4.6) | M each | — |
 | A13 | The composition layer becomes a library crate | Grid plus formula compositing leaves `bt-app` (the split's Step 3); its hard acceptance is that the web demo (X2) can link it; the first `Runtime` block extracted in 0.5 | mem:dependency-direction-and-split-0921 (the 2026-09-21 "decoupling in two halves" entry the owner agreed to: existing `Runtime` blocks are extracted in 0.5, composition first); mem:bt-app-split-freshness-0918 (2026-09-20) | ruled (direction, 0.5); ticket scope and slice proposed | A12 | L | §6 Q19 |
@@ -183,7 +192,7 @@ own note; its consumers may not ship before it.
 | V8 | Agent facts on pane heads and tabs | The pane head's meta (state word, ring, sub-agent count, a drop order); tab status dots and the tab glance card listing its panes; the owner's 2026-09-18 ask that a tab with agents shows more | WB §4.6; PS 68b, 68c (owner-approved exploration, not ruled); mem:ui-agent-workbench-scope item 6 (2026-09-18) | proposed | L1, D1 | M | — |
 | V9a | Settings ▸ Agents: detected agents, accounts, notices | Detected agents (read-only: mark, name, how found, sessions), accounts, quota notices | PS 68a, 70 | proposed (an owner-approved exploration) | Q2, L1 | M | — |
 | V9b | Settings ▸ Agents: registration and grants | Add or remove Folio per agent; the live grants with Revoke | TF §3, §4 (owner R4, 2026-09-24) | ruled | V9a, T3a, T6 | S–M | — |
-| V10 | The agent floats | The tear-out float (a row dragged out becomes a live second view of that pane, expanded by default) and the zoom float (the tab's agent stays reachable over a zoomed pane, compact by default); one PTY, one size, never reflowed; the local rehearsal of 0.6. Whether a float is in the window or an OS window is open (Q5); the zoom float is an owner exploration, not ruled | WB §11.7.4, §13.3.3 (drag-out: 0.5.x); PS 28b, 35, 37, 40, 50, 56; mem:workbench-05-notification-model (2026-09-23) | ruled for 0.5.x (drag-out); the zoom float an exploration | A7a, A7b, L1, C2 (its input line) | L | §6 Q5 |
+| V10 | The agent float | The tear-out float (a row dragged out becomes a live second view of that pane, expanded by default); one PTY, one size, never reflowed; the local rehearsal of 0.6. **In the window first** (§6 Q5(a), ruled 2026-09-27: WB §12.4 Q2's recommendation). **The zoom float** (the tab's agent stays reachable over a zoomed pane, compact by default; PS 35) **stays an exploration outside 0.5** (§6 Q5(b), 2026-09-27: the coordinator's recommendation, taken under the owner's blanket "as recommended"; the owner did not speak to it by name) | WB §11.7.4, §12.4 Q2, §13.3.3 (drag-out: 0.5.x); PS 28b, 35, 37, 40, 50, 56; mem:workbench-05-notification-model (2026-09-23); the owner's sentence of 2026-09-27 | ruled for 0.5.x (drag-out, in the window); the zoom float out of 0.5 | A7a, A7b, L1, C2 (its input line) | L | — (§6 Q5 ruled) |
 | V11 | Reply in the notification and the list | One mechanism in C2's **paste-only** mode: no Enter, the agent's own draft preserved; offered only when the agent verifiably waits for free text; never for a permission prompt | WB §11.7.3, §13.3.1 (0.5.x); PS 28a | ruled (0.5.x) | V5, C2, A7a | M | — |
 | V12 | The work-in-progress hint | When a new agent is opened, "N waiting on you" is visible; it never blocks | mem:attention-bottleneck-idea (point 6, 2026-09-20) | proposed | V4 | S | §6 Q20 |
 | V13 | Pre-authorised answers | "Read-only commands always allowed", answered by Folio with a trace | WB §2.4; mem:attention-bottleneck-idea (point 4) | open: the delivery path was withdrawn (no hook can return a decision, WB §11.1–§11.2) | L2 | S (design) | §6 Q20 |
@@ -245,7 +254,8 @@ own note; its consumers may not ship before it.
 
 | id | title | what it is | source | state | depends on | size | open decisions |
 |---|---|---|---|---|---|---|---|
-| B1 | The browser pane's promotion | "Browser upgrade" (owner, 2026-09-27): the browser becomes its own class beside shell, files and preview, *"closer to a real browser"*, callable by agents; the 2026-08-19 web-preview rulings need re-ruling because their premise changed. **Several pages with a visible strip, and a link never replacing a page in use, are the coordinator's recommendation, not a ruling (Q10).** Designed together with B2, on C3. **No design note exists** | mem:ui-agent-workbench-scope item 2 (2026-09-18) and 2026-09-20 night; WB §9, §10 Q10; mem:rulings-evolve (2026-09-20); mem:preview-line-numbers-deferred (2026-09-18) | asked; no design | C3, D1, O1a | M–L (design), then L | §6 Q10 |
+| B1a | Several pages in the web pane | The owner, 2026-09-27: *"if the browser can get several tabs early, do that"*. A visible strip of pages in the **existing** web pane class: open a page in a new page, switch, close; a link from a page in use opens beside it, never over it. **No** promotion to a class of its own, **no** agent verbs, **no** profile change. Built to B1's design note, which is due at 0.5.0 for this reason. **Prerequisite:** today's web pane ownership, not C3a (§4.2 says why); the page identity it introduces is the one B1's note defines and C3a's note adopts | the owner's sentence of 2026-09-27; Q10 (ruled in direction, 2026-09-27); `webhost::WebSeat`, `WindowRuntime.web` (OC census row 130); DESIGN §7.9 ②, ⑦ | ruled (the owner, 2026-09-27); no design yet (B1's note) | B1's design note, D1 | S–M: each page is an existing `webhost::WebSeat` — its own controller, its own `WebMachine` generation and recovery, its own named visual (DESIGN §7.9 ②) and the hidden-seat rules (§7.9 ③) — so the work is `WindowRuntime.web` going from one seat per pane to an ordered set with one shown (census row 130: 22 functions in 9 modules, most of which keep asking for the shown page), the new-window door on both platform arms (today `NewWindowRequested` is handled and dropped, and WebKit's `targetFrame == nil` is cancelled) opening beside through `webnav`'s gate, and the strip; M if B1's note makes hidden pages persist as live pages rather than as the pool rows the session already keeps | — |
+| B1 | The browser pane's promotion | "Browser upgrade" (owner, 2026-09-27): the browser becomes its own class beside shell, files and preview, *"closer to a real browser"*, callable by agents; the 2026-08-19 web-preview rulings need re-ruling because their premise changed (§3 rows 11, 22, 23). **Several pages with a visible strip, and a link never replacing a page in use, are ruled (Q10, 2026-09-27) and arrive first as B1a**; B1 promotes the pane with its pages rather than rebuilding them. Designed together with B2, on C3. **No design note exists; it is due at 0.5.0** (revision (d)), so B1a is built to it | mem:ui-agent-workbench-scope item 2 (2026-09-18) and 2026-09-20 night; WB §9, §10 Q10; mem:rulings-evolve (2026-09-20); mem:preview-line-numbers-deferred (2026-09-18); the owner's sentence of 2026-09-27 | asked (the promotion); pages and links ruled; no design | B1a, C3, D1, O1a | M–L (design), then L | §6 Q10 (the rest of the note's scope) |
 | B2 | The browser's security model | A separate profile by default without the person's cookies; an agent reaches local addresses by default; sites granted one by one | mem:ui-agent-workbench-scope (2026-09-18, accepted by the owner); WB §8 row 7; mem:workbench-05-tab-scope-and-handoff (point 3) | ruled (direction) | B1, C3 | in B1's design | — |
 | B3 | Watching an agent drive a page | Its own visible cursor with the vendor's mark; the person's touch takes over; closing the pane sends it to the background with a row "driving a web page · domain" and Stop, never invisible (a change of close from retirement to background, which C3 must allow); WebView2 has CDP, WKWebView needs a second implementation | WB §8 row 7, §13.6 (0.5.x, last) | ruled (last) | B1, B2, T5, T3b, C3 | L | — |
 | B4 | Room for 0.6 in the browser | How a remote machine's dev server would be addressed in the local browser pane: a recorded design seam, not a reverse proxy built in 0.5 | mem:dinotty-reference (point 5, 2026-09-18) | proposed | B1 | S (a design section) | — |
@@ -324,7 +334,7 @@ own note; its consumers may not ship before it.
 | 8 | The translation card is the tab's agent's (the prototype's first build, 2026-09-25) | Offline dictionary plus the user's own key; never the agent (2026-09-26) | PS 83 |
 | 9 | The tool token extends `FOLIO_ATTENTION` (WB §11.9) | A distinct tool credential (2026-09-24) | TF review item 1 |
 | 10 | Allow / Deny on rows and in the list (the mock, WB rev 1) | None anywhere (2026-09-20, confirmed 2026-09-23) | WB §11.2; PS second round (2026-09-23) |
-| 11 | The web preview is one page per pane, no tabs (2026-08-19) | The browser becomes its own class, closer to a real browser (2026-09-18) — the details are unruled (B1) | WB §9 |
+| 11 | The web preview is one page per pane, no tabs (2026-08-19) | The browser becomes its own class, closer to a real browser (2026-09-18) — the pages and links were ruled on 2026-09-27 (rows 22, 23); the rest is unruled (B1) | WB §9 |
 | 12 | Crawling a vendor's session directory by a guessed layout is not done; a transcript path an agent handed over may be read (WB §14.4, 2026-09-20) | **Not a replacement — a boundary to reconcile** (revision (b)): the 2026-09-26 ruling chooses the agents' local transcripts over the screen and orders format research; it does not authorise broad discovery. Both hold until research says otherwise: render the known session's handed-over transcript, and use the vendor's own picker for other sessions (S2, Q22) | mem:ui-agent-workbench-scope (2026-09-26) |
 | 13 | The ledger is keyed by pane: `{TabId, SeatId, incarnation}` plus an agent-lifetime epoch (WB §13.2, 2026-09-20) | A stable session identity separate from the view address; `Site` names a session; routing sits beside the session registry (2026-09-25) — C1. The rail keeps one live row per pane as a presentation rule | OC §5.1 step 3, (b)6; AR §12.1 |
 | 14 | The agent card peeks after 350 ms, the `⌄` pins it, and the attention list's rows are the same component (WB §4.3, §4.4) | A 250 ms rest peeks it, a click inside the card pins it, a row click navigates; the attention list's rows carry no card (2026-09-23). The tab glance card keeps 350 ms | PS 18, 19 |
@@ -335,6 +345,8 @@ own note; its consumers may not ship before it.
 | 19 | Search: one pane per tab (item 83, 2026-09-25) | One floating window per tab, reused, with query history and focus return (2026-09-26) | PS 83 |
 | 20 | The waiting row sticks to the rail's top because the badge is hidden while the rail shows (WB §11.6, §11.11 Q1) | The badge is shown in every mode, so the sticky row is optional, not a remedy (2026-09-23) | PS first round |
 | 21 | Comment Send submits with Enter (TF R1, 2026-09-24), read in revision (b) as covering every typed input | R1 covers comment Send only; the notification reply stays paste-only with the agent's draft preserved (WB §13.3.1). C2 carries both modes (revision (c)) | TF R1, review item 4; WB §13.3.1 |
+| 22 | The web-preview form of 2026-08-19 (`docs/plans/web-preview/plan.md` §0, the line that makes the web page a preview pane's content): **no several pages inside the preview — several pages come from terminal-less tabs**; and its built form, DESIGN §7.9 ⑦, one page per tab (2026-08-22): a tab that already has a page takes a second address **as a navigation in that seat**, not a second pane or a second controller | Several pages with a visible strip in one web pane (Q10 ruled in direction, 2026-09-27), built first as B1a in the existing web pane class. What does **not** fall: the web page stays a preview buffer (§7.7 ①, §7.9) until B1's promotion (row 11), the preview-pane-per-tab singleton stays a rule about panes, and "history = the preview switcher" (2026-08-19) stays until B1's note scopes history | the owner's sentence of 2026-09-27; Q10; B1a |
+| 23 | `window.open` / `target=_blank` in the same form (plan §0's line on the external profile, a review-round addition to the 2026-08-19 form): **only a user-initiated new-window request becomes a navigation in the same pane**, a popup without a gesture is cancelled; as built (DESIGN §13.38 row ⑳), neither opens anything | A link from a page in use opens **beside it, never over it**, as a new page on the strip (Q10 ruled in direction, 2026-09-27; B1a). What does **not** fall: a popup without a gesture is still cancelled, and the target still passes `webnav`'s gate | the owner's sentence of 2026-09-27; Q10; B1a |
 
 ## 4. Dependencies (revised in (b))
 
@@ -390,6 +402,9 @@ flowchart LR
   L3a -.-> S2
   C1 --> A7a[A7a 0.6 decisions] --> A7b[A7b second-view design] --> V10[V10 floats]
   A9[A9 PTY lifecycle] -.-> V10
+  B1N[B1 design note, due 0.5.0] --> B1a[B1a several pages] --> B1
+  D1 --> B1a
+  B1N -.-> C3a
   C3[C3 web ownership] --> B1[B1 browser] --> B2[B2 security] --> B3[B3 agent drives a page]
   C3 --> T12[T12 elements]
   T5 --> B3
@@ -414,8 +429,24 @@ flowchart LR
 - **C2 before T9a, V11, S2's reply, T5, T3b and V10's input line.** Readiness
   before any reply or send (TF review items 2–6; WB §11.7.3).
 - **C3a before T8, T10, T11 and T4's web readers; C3 before T12, B1, B2, B3.** Web ownership before
-  selection adapters, and before several or background pages (OC's census; SD
-  D-54; AR §5.2).
+  selection adapters, and before background pages and the promotion (OC's
+  census; SD D-54; AR §5.2). Several pages in today's pane class are B1a, below
+  (revision (d)).
+- **B1's design note before B1a; D1 before B1a; B1a before B1** (revision (d)).
+  B1a changes an owner — `WindowRuntime.web` goes from one page per pane to
+  several (OC census row 130) — so it waits for a Codex-reviewed note
+  (CONVENTIONS rule 11), which is B1's note, due at 0.5.0; the strip is a new
+  surface dressed at birth (D1); B1 promotes the pane with the pages B1a gave it.
+  **C3a is not B1a's prerequisite.** B1a reads nothing from a page: no selection,
+  no DOM result, no search float. What it stands on already exists: each page
+  is a `webhost::WebSeat` with its own `WebMachine` generation (stale engine
+  callbacks are dropped per seat today), its own named visual (DESIGN §7.9 ②),
+  on the owning window thread; and D-54's WebView2 generations are in gate I1,
+  closed before 0.5 starts. The one thing B1a and C3a share is page identity:
+  B1's note defines it and C3a's note (also due at 0.5.0) adopts it, so C3a's
+  readers address a page, not a pane, from the start. That is coordination
+  between two notes, not an edge between two builds — B1a therefore lands in
+  0.5.1, before C3a (0.5.2).
 - **T1 → T2 → T3a → T4 → T5; T3b before T5; T4 before T9b** (the full envelope
   promises `folio comment`). **T1 before T6** and the release-pinned MCP survey
   before registration (TF review item 7).
@@ -449,21 +480,29 @@ The owner's leaning (2026-09-27): design once, implement in small versions;
 0.5.0 is the foundations plus the first visible surfaces. This is a proposal.
 **Moving quota and the read tools out of the first release departs from WB
 §13.6's first-0.5 order and needs the owner's approval (Q1)** — it is a proposed
-reslicing, not something the dependencies force.
+reslicing, not something the dependencies force. **Approved (revision (d)):**
+the owner ruled Q1 on 2026-09-27 — the slices as written, the departure from WB
+§13.6, V6's release and the "awaiting" dispositions of §5.1 — and in the same
+sentence pulled the browser's several pages forward (B1a, 0.5.1).
+
+**Agent recovery is 0.5 scope** (revision (d)): asked *"agent conversation
+recovery is in 0.5, right?"*, the owner confirmed on 2026-09-27 that S1 (agents
+come back after a restart, 0.5.4) and S2 (the conversation view, "this turn",
+reply from a notification, 0.5.5) are both 0.5. Nothing moved.
 
 **The gate.** 0.5 implementation starts when I1–I6 have closed (§2.I). A gate
 moved into 0.5 needs a dated owner ruling (Q23). I7 does not block.
 
 | version | what a user sees | what the engineering line gets | rows landing (a design row lands as its note) | design notes due here for later rows |
 |---|---|---|---|---|
-| **0.5.0** | The new look on the surfaces it ships; the six-item pane menu and the where × what panel; the Recent view of paths and opens; the Agent rail, rows and detail cards; the badge and its list; notifications that appear, expand and take you there | The ledger v2 with its log sink and its model contract; the tokens as a generated palette | D1, D2, D4a, D5, M2, O2, O1a, O3a, L1, L2, L3a, L4, L5, V1, V2, V3, V4, V5, G1 | C2, C3a, V6, O3b's adapter, S1, T10's research |
-| **0.5.1** | The quota chip, panel and toasts; Settings ▸ Agents (detected agents, accounts, notices); more agents recognised, Gemini CLI among them; agent facts on pane heads and tabs; notification cards that stay, queue, anchor and take input; Recent shows what agents wrote | The statusLine lane; the provider table; the Claude-shaped hook reader; the generic lane; the file-event adapter | Q1, Q2, Q3, Q4, V9a, V8, V6, O3b, G2, G3, G4, A7a | the tool face's note refreshed against C1/C2 (T1, T2, L3a), C3 |
+| **0.5.0** | The new look on the surfaces it ships; the six-item pane menu and the where × what panel; the Recent view of paths and opens; the Agent rail, rows and detail cards; the badge and its list; notifications that appear, expand and take you there | The ledger v2 with its log sink and its model contract; the tokens as a generated palette | D1, D2, D4a, D5, M2, O2, O1a, O3a, L1, L2, L3a, L4, L5, V1, V2, V3, V4, V5, G1 | C2, C3a, V6, O3b's adapter, S1, T10's research, **B1 with B2 and B4** (moved from 0.5.3 in revision (d), so B1a is built to it; it defines the page identity C3a adopts) |
+| **0.5.1** | The quota chip, panel and toasts; Settings ▸ Agents (detected agents, accounts, notices); more agents recognised, Gemini CLI among them; agent facts on pane heads and tabs; notification cards that stay, queue, anchor and take input; Recent shows what agents wrote; **several pages in the web pane, a link opening beside the page in use** | The statusLine lane; the provider table; the Claude-shaped hook reader; the generic lane; the file-event adapter; the web pane's page set | Q1, Q2, Q3, Q4, V9a, V8, V6, O3b, G2, G3, G4, A7a, B1a | the tool face's note refreshed against C1/C2 (T1, T2, L3a), C3 |
 | **0.5.2** | Select any text and Comment, Translate or Search; comments batched and typed to the agent | Typed-input admission; the web selection boundary | C3a, C2, T8, T10, T11, T9a, A7b | S2's research and note |
-| **0.5.3** | Agents can read what you are looking at through `folio` and MCP; Folio registers itself with them; comments carry a `folio comment` link | The tool endpoint, the tool credential, the read tiers; the outward serializer | L3b, T1, T2, T3a, T4, T6, V9b, T9b, R2 | B1 with B2 and B4 |
-| **0.5.4** | Agents come back after a restart, vendor by vendor; the panel's agent levels and resumable Recent | Session recovery on C1 | S1, O1b, S3a (if Q21 puts it in 0.5) | — |
-| **0.5.5** | The conversation view; "this turn"; reply from a notification | The transcript model, extending V5's | S2, S3b, Q5a, V11 | — |
-| **0.5.6** | The tear-out float (and the zoom float, if Q5 admits it) | PTY birth and resize under the session owner (co-scheduled) | V10, A9 | — |
-| **0.5.7** | The browser as its own class (several pages if Q10 rules so); agents that open, split, navigate and type; an agent driving a page you can watch | Web ownership in full; acting verbs; the send and operate-Folio tiers | C3, B1, B2, B4, T5, T3b, T12, B3 | — |
+| **0.5.3** | Agents can read what you are looking at through `folio` and MCP; Folio registers itself with them; comments carry a `folio comment` link | The tool endpoint, the tool credential, the read tiers; the outward serializer | L3b, T1, T2, T3a, T4, T6, V9b, T9b, R2 | — (B1's note moved to 0.5.0, revision (d)) |
+| **0.5.4** | Agents come back after a restart, vendor by vendor; the panel's agent levels and resumable Recent (0.5 scope, confirmed by the owner on 2026-09-27) | Session recovery on C1 | S1, O1b, S3a (if Q21 puts it in 0.5) | — |
+| **0.5.5** | The conversation view; "this turn"; reply from a notification (0.5 scope, confirmed by the owner on 2026-09-27) | The transcript model, extending V5's | S2, S3b, Q5a, V11 | — |
+| **0.5.6** | The tear-out float, in the window (§6 Q5(a), 2026-09-27); the zoom float is not in 0.5 (§6 Q5(b)) | PTY birth and resize under the session owner (co-scheduled) | V10, A9 | — |
+| **0.5.7** | The browser as its own class, keeping B1a's pages (Q10 ruled in direction, 2026-09-27); agents that open, split, navigate and type; an agent driving a page you can watch | Web ownership in full; acting verbs; the send and operate-Folio tiers | C3, B1, B2, B4, T5, T3b, T12, B3 | — |
 | **0.5.8** | Preview beauty and line numbers; the Mac's menu bar; the web demo | The composition crate; **the Markdown-conveniences design note (P2) — its build is deferred until the note scopes and sizes it** | P1, P2 (the note), M1, A13, X2 | — |
 
 0.5.7 is the largest; it may split into "browser" and "an agent drives it" at the
@@ -489,7 +528,7 @@ notification, jump to the exact pane, and answer in the agent's own terminal.
 | inherited gate, before 0.5 (§2.I) | I1, I2, I3, I4, I5, I6, C1, A1, A2, A3, A4, A5, A6, A8, A11, A12, D3 |
 | conditional on a measurement ruling | I7, A10 |
 | 0.5.0 | D1, D2, D4a, D5, M2, O2, O1a, O3a, L1, L2, L3a, L4, L5, V1, V2, V3, V4, V5, G1 |
-| 0.5.1 | Q1, Q2, Q3, Q4, V9a, V8, V6, O3b, G2, G3, G4, A7a |
+| 0.5.1 | Q1, Q2, Q3, Q4, V9a, V8, V6, O3b, G2, G3, G4, A7a, B1a |
 | 0.5.2 | C3a, C2, T8, T10, T11, T9a, A7b |
 | 0.5.3 | L3b, T1, T2, T3a, T4, T6, V9b, T9b, R2 |
 | 0.5.4 | S1, O1b, S3a |
@@ -503,6 +542,9 @@ notification, jump to the exact pane, and answer in the agent's own terminal.
 | in flight outside this repository | R1 |
 
 C3a is C3's narrow half (one row in §2.C) and lands in 0.5.2; C3 whole lands in 0.5.7.
+
+B1a is B1's first cut (its own row in §2.B, revision (d)) and lands in 0.5.1;
+B1, the promotion, lands in 0.5.7 with B2, B3 and B4.
 
 A design row (A7a, A7b, R2, B4) lands as its note in the version shown; B4 is built only as a seam.
 
@@ -530,7 +572,8 @@ proceed against (a)–(e) while they are built.
 | Remote: a backend owns session state and clients are views | 0.6 (owner, 2026-09-18) | (a)–(e) above |
 | Agents inside WSL, ssh or tmux | 0.6's forwarding lane | the lane named and reserved; `WIRE_VERSION` versions the grammar, not the transport (WB §11.8) |
 | The mobile app's implementation | after the remote protocol exists | R1's design project (already created); L3a; S2's model |
-| An OS-window float | 0.6, **if** Q5 rules the in-window float first (WB §12.4 Q2 is a recommendation) | — |
+| An OS-window float | 0.6: §6 Q5(a) ruled the in-window float first on 2026-09-27 (WB §12.4 Q2's recommendation) | — |
+| The zoom float (PS 35) | an exploration outside 0.5 (§6 Q5(b), 2026-09-27: the coordinator's recommendation, taken under the owner's blanket "as recommended") | V10's in-window float |
 | Folio as an ACP client | 0.6/0.7 | the ACP registry's per-agent icons (WB §13.5) |
 | An orchestrator, a built-in controller agent, a task board | refused (WB §2) | — |
 | VS Code extension compatibility, in-process plugins, dynamic loading | refused (WB §2, §6) | A14's recorded seams |
@@ -544,9 +587,10 @@ Each question is marked **answered by source** (with the citation; nothing to
 ask), **owner** (a genuine product decision), **research first** (a fact to
 measure before anything is asked), or **release owner** (scheduling).
 
-1. **Owner.** Approve the revised slices in §5, including the departure from WB
-   §13.6's first-0.5 list (quota and read tools later), V6's release and the
-   coverage table's "awaiting" dispositions. Recommendation: §5 as written.
+1. **Ruled (the owner, 2026-09-27: "go with your recommendations throughout").**
+   The slices of §5 as written, including the departure from WB §13.6's
+   first-0.5 list (quota and read tools later), V6's release and the coverage
+   table's "awaiting" dispositions. The same sentence added B1a (Q10).
 2. **Owner, on the real surface** (not an architecture blocker). The agent row's
    density: WB §11.3.3 (2026-09-20) ruled one line; the 1:1 port and PS 54 give a
    later two-line baseline. Decided at birth on a real window (WB §1).
@@ -557,9 +601,13 @@ measure before anything is asked), or **release owner** (scheduling).
    source** (PS 18).
 4. **Owner, optional.** A sticky waiting row: its old necessity is gone (§3 row
    20); creation order stays ruled.
-5. **Owner, two questions.** (a) An in-window float or an OS window (WB §12.4 Q2
-   is a recommendation: in-window first). (b) Does the zoom float (PS 35, an
-   exploration) enter 0.5?
+5. **Ruled (2026-09-27), in two halves of different standing.** (a) **An
+   in-window float first** — WB §12.4 Q2's recommendation, which the owner's
+   "go with your recommendations throughout" adopts. (b) **The zoom float (PS 35)
+   stays an exploration outside 0.5** — this half was the coordinator's
+   recommendation, taken under the owner's blanket "as recommended"; the owner
+   did not speak to the zoom float by name, so a later reader may reopen (b)
+   without reversing anything the owner said.
 6. **Owner, two questions.** (a) The quota control's form: the Q8 dial (the last
    explicit pick, PS 61), the number with a small ring (PS 77, a
    recommendation) or the gauge mark (PS 82, a variant). (b) Whether it follows
@@ -577,10 +625,14 @@ measure before anything is asked), or **release owner** (scheduling).
 9. **Answered by source.** The Recent view is the files column's third view, per
    tab (WB §4.8, §11.10). PS 14 left it as a switch for want of a ruling it did
    not find; the prototype's record is to be corrected.
-10. **Owner, after a browser design proposal (B1).** Several pages with a strip,
-    and protecting a page in use, are recommendations (WB §10 Q10). The proposal
-    scopes history, downloads and developer tools against existing code, and
-    page lifetime, profile and close semantics (C3).
+10. **Ruled in direction (2026-09-27).** Several pages with a visible strip, and
+    a link never replacing a page in use, are the ruling, no longer a
+    recommendation (WB §10 Q10; §3 rows 22, 23); the owner asked for them early,
+    so they arrive first as B1a (0.5.1) in the existing web pane class. B1's
+    design proposal, now due at 0.5.0, still scopes history, downloads and
+    developer tools against existing code, and page lifetime, profile and close
+    semantics (C3); it also defines the page identity B1a introduces and C3a
+    adopts.
 11. **Split.** A9: **answered by source** — "0.5 toward 0.6" (SD D-43, D-44);
     choosing its slice is scheduling (0.5.6 proposed), moving it to 0.6 would be
     a change. A10: **owner**, after the measurements (I7).
@@ -692,6 +744,9 @@ repository are named by file, never by location.
 | TF (`design-agent-tool-face-2026-09-24.md`, 2026-09-24: §§1–6, the folded Codex review, and the owner's rulings, which rule over §§1–6) | C1, C2, T1–T3b, T6, T9a, T9b, V9b, §3 rows 2, 9, 17 | Q3 "no persistent per-pane grants" is kept, not reopened |
 | D05-1 and M-0 briefs (`tickets-046`) | D1, R1 | — |
 | The Codex review of this plan (`tickets-046/P05-0-review-codex-2026-09-27.md`) | revision (b) throughout (§10) | — |
+| The owner's rulings of 2026-09-27 (one sentence, recorded in the revision (d) brief, `tickets-046/P05-0d-plan-revision-d.md`, the coordinator's records) | Q1, Q5, Q10 (ruled), B1a, the S1/S2 confirmation, §3 rows 22, 23 | — |
+| `docs/plans/web-preview/plan.md` §0; DESIGN §7.7 ①, §7.9 ②③⑦, §13.38 row ⑳ (read for revision (d)) | §3 rows 22, 23; B1a's size | the preview switcher as history and the pin as bookmark (2026-08-19): not touched by the 2026-09-27 rulings; B1's note scopes history |
+| Code read for B1a's size and prerequisite: `webhost::{WebSeat, WebMachine}`, `WindowRuntime.web` (OC census row 130), `bt-platform`'s `NewWindowRequested` handler and WebKit `createWebViewWithConfiguration:` | B1a; §4.2's B1a bullet | — |
 | mem:ui-agent-workbench-scope | B1, B2, O4, O5, P1, Q5a, Q5b, S1, S2, S3a, D4b, G5, V8, §1.5 | the herdr/Orca notes (unverified references); the "Agent group by company" sketch (withdrawn by the coordinator 2026-09-20) |
 | mem:workbench-05-notification-model | V5, V6, V10, V11 | "every notification appears" vs "the foreground one does not" — the owner's version was taken (WB §12.1) |
 | mem:workbench-05-where-what-panel | O1a, O1b, S1 | the two-word filter's visibility (a rough edge, WB §14.6) |
@@ -848,3 +903,65 @@ new findings are adopted; no source contradicts them. No slice moved.
 6. **Low, locators.** §0.1 and §9 name TF as `design-agent-tool-face-2026-09-24.md`
    (its closing rulings rule over §§1–6) and the replacement survey as
    `agent-coverage-survey-2026-09-22.md`, both in the coordinator's records.
+
+### Revision (d) — the owner's rulings of 2026-09-27
+
+Source for items 1–5: the owner's sentence of 2026-09-27, *"go with your
+recommendations throughout; but if the browser can get several tabs early, do
+that; and agent conversation recovery is in 0.5, right?"* (recorded in the
+revision (d) brief, the coordinator's records). Revisions (a)–(c) above stand as
+written; (d) edits only the live tables. Each item: ruling → the cells changed.
+
+1. **Q1 ruled** (the slices of §5 as written, the departure from WB §13.6's
+   first-0.5 list, V6's release, the "awaiting" dispositions). → §5's opening
+   paragraph (approved); §6 Q1. No row moved.
+2. **Q5 ruled, in two halves of different standing.** (a) In-window float first
+   (WB §12.4 Q2's recommendation). (b) The zoom float (PS 35) stays an
+   exploration outside 0.5 — the coordinator's recommendation, taken under the
+   owner's blanket "as recommended"; the owner did not name it. → V10's row
+   (title, text, state, open decisions); §5's 0.5.6 row; §5.2's OS-window row
+   and a new zoom-float row; §6 Q5.
+3. **Q10 ruled in direction** (several pages with a visible strip; a link never
+   replacing a page in use). B1's design proposal still scopes history,
+   downloads, developer tools, page lifetime, profile and close semantics (C3).
+   → B1's row; §5's 0.5.7 row; §6 Q10; §3 rows 11, 22, 23.
+4. **New row B1a, several pages in the web pane**, in the existing web pane
+   class, no promotion, no agent verbs, no profile change. → §2.B (new row; B1
+   now depends on B1a); §2.C C3a's page identity; §4.1 (B1's note → B1a → B1,
+   D1 → B1a, the note to C3a, dashed); §4.2 (a new bullet, and the C3 bullet no longer
+   claims "several pages"); §5 (B1a in 0.5.1; **B1's note, with B2 and B4, moved
+   from 0.5.3's design column to 0.5.0's**); §5.1 (B1a once, in 0.5.1, and a
+   line under the table); §6 Q10. **The prerequisite decision:** B1a stands on
+   today's web pane ownership, not on C3a. It reads nothing from a page, and each
+   page is an existing `webhost::WebSeat` with its own generation, named visual
+   and recovery, on the owning thread; D-54's WebView2 generations close in gate
+   I1. It does change an owner (`WindowRuntime.web`, one seat per pane → a page
+   set), so it waits for B1's Codex-reviewed note, now due at 0.5.0. The only
+   thing it shares with C3a is page identity, which B1's note defines and C3a's
+   note adopts. So B1a lands in **0.5.1**, not 0.5.2. **Size S–M**, reasoned in
+   the row against `webhost`, `WindowRuntime.web` (census row 130) and the two
+   platforms' new-window doors; M if hidden pages must persist as live pages.
+5. **Agent recovery confirmed in 0.5.** S1 stays at 0.5.4 and S2 at 0.5.5. →
+   one paragraph in §5 and a parenthesis in the 0.5.4 and 0.5.5 rows. Nothing
+   moved.
+6. **The D-41 cells aligned to the ledger on main.** Source:
+   `docs/plans/structural-debt.md` on main after the rebase, row D-41 unchanged
+   since before revision (c): version "0.4.5 — presenting off the input thread
+   is the typing-stability work"; status "open — since ticket 37 a presented
+   picture is a pair (frame and metrics: `SeatSignature::metrics`,
+   `LeafSession::presented_metrics`), and the lane must carry both"; the
+   ledger's by-version note (2026-09-25) "the owner deferred the presentation
+   lane, its second client"; D-42 "independent of D-41 (budget note R8,
+   2026-09-26)". → A10 now quotes the row, carries the frame-and-metrics pair as
+   scope and cites WTB §R-E (it cited §4, whose paragraph §R-E replaced); I7
+   quotes the row and records that the 0.4.5 tag exists with D-41 one of the
+   ledger's two open 0.4.5 rows. The plan does not change the ledger; its
+   version cell is the ledger's to realign.
+7. **§3 rows for rulings 3 and 4.** Row 22: the 2026-08-19 web-preview form's
+   "no several pages inside the preview — several pages come from terminal-less
+   tabs" (plan §0) and its built form, DESIGN §7.9 ⑦ (a second address navigates
+   the tab's one seat). Row 23: "only a user-initiated new-window request becomes
+   a navigation in the same pane" (plan §0) and the built refusal (DESIGN §13.38
+   row ⑳). Each row names what does not fall. Row 11 now says the pages and links
+   are ruled.
+
