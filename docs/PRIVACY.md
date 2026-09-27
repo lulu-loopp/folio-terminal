@@ -200,7 +200,7 @@ profile. Do not put a secret in one.
   (`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall`)
   and looks for the one winget wrote for Folio, to see whether it names this
   copy's folder. Other programs' entries are passed over. What it found is one
-  line of `diagnostics.log`, with the folder winget recorded.
+  line of `diagnostics.log`, naming winget's entry and no folder.
 - Several `BT_*` environment variables make Folio write terminal content to a
   file you name — `BT_PTY_DUMP` writes every byte of every pane. None is set
   unless you set it. `docs/BT-ENVIRONMENT.md` lists all of them.

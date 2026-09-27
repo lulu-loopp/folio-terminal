@@ -2138,7 +2138,7 @@ door — it is not file content and waits on nothing else) on the
 `portable` and `InstallLocation` contains the running executable — both sides
 through `bt_platform::instance::canonical_path`, compared component by component
 without case, never string equality. One such record → `Managed(Winget)`,
-`uninstall_hook: false`, and the channel line names the key and the location; a
+`uninstall_hook: false`, and the channel line names the key (no path, U-1's rule); a
 record for another location changes nothing; a read that fails, a value of
 Folio's record that is not a string, a missing or relative location, two
 records containing the executable, or a record beside a marker or receipt of

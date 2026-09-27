@@ -565,9 +565,7 @@ fn derive_fact(
 
 impl Fact {
     /// The one `diagnostics.log` line: the channel, then each piece of
-    /// evidence. No account name, and no path but the install location of a
-    /// winget record that names this copy — winget's own words, as the record
-    /// holds them.
+    /// evidence. No path and no account name.
     #[must_use]
     pub fn line(&self) -> String {
         let channel = match self.channel {
@@ -613,9 +611,7 @@ impl Fact {
                 };
                 let winget = match &evidence.winget {
                     WingetEvidence::None => "none".to_owned(),
-                    WingetEvidence::Record(record) => {
-                        format!("record {} at {}", record.key, record.location)
-                    }
+                    WingetEvidence::Record(record) => format!("record {}", record.key),
                     WingetEvidence::Several(count) => format!("{count} records"),
                     WingetEvidence::Unreadable(kind) => format!("unreadable ({kind:?})"),
                     WingetEvidence::NotApplicable => "not applicable".to_owned(),
@@ -831,11 +827,10 @@ mod tests {
         let line = fact.line();
         assert!(
             line.starts_with("Folio: install channel managed by winget — marker absent")
-                && line.ends_with(&format!(
-                    " · winget record WeiyiShi.Folio__DefaultSource at {spelled}"
-                )),
+                && line.ends_with(" · winget record WeiyiShi.Folio__DefaultSource"),
             "{line}"
         );
+        assert!(!line.contains(&*location.to_string_lossy()), "{line}");
         assert_eq!(derived_with(&exe, Vec::new()).channel, Channel::Ours);
         std::fs::remove_dir_all(&location).unwrap();
     }
