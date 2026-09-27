@@ -95,7 +95,9 @@ use crate::update_job::{
     Driver, NotEligible, Offer, Poster, Refused, SharedTransport, Step, Stop, Transport,
     Unsupported,
 };
-use crate::update_prepare::{WORKER, abandon, digest_of, discard, fetching, matches_its_sum};
+use crate::update_prepare::{
+    WORKER, abandon, digest_of, discard, fetching, finish, matches_its_sum,
+};
 use crate::update_txn::{Digest, Event, Home, Inventories, Journal, Layout, Member, Place, TxnId};
 
 /// The new release's executable, which carries its manifest.
@@ -227,17 +229,7 @@ impl Driver for WinPrepare {
                     channel,
                     policy: &policy,
                 };
-                match prepare_on(worker, &road) {
-                    Ok(staged) => {
-                        // Cancelled between the last look and the report: the
-                        // job has moved on, so the transaction is given up.
-                        if let Err(staged) = post.verified(staged) {
-                            let _ = discard(worker, *staged, &Event::Discarded);
-                        }
-                    }
-                    Err(Stop::Cancelled) => {}
-                    Err(stop) => post.post(Step::Stopped(stop)),
-                }
+                finish(worker, &post, prepare_on(worker, &road));
             },
         )
         .map(drop)

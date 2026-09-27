@@ -11,6 +11,9 @@
 //! * **the checksum**: the document's line for the offer's own asset
 //!   ([`sum_for`]) and the downloaded file held to it ([`matches_its_sum`]),
 //!   hashed a bounded chunk at a time ([`digest_of`]);
+//! * **the worker's last word** ([`finish`]): one report, posted once the
+//!   worker has let go of the transaction or handed it to the job — a Cancel
+//!   included, so its lock is known free when its report is read;
 //! * **giving a transaction up**: `Abandoned` recorded durably, then the
 //!   transaction cleared away in the protocol's order ([`abandon`],
 //!   [`discard`], [`clear`] — an image mounted under the transaction is
@@ -130,6 +133,31 @@ pub(crate) fn matches_its_sum(file: &Path, sums: &Path, asset: &str) -> Result<(
         Ok(())
     } else {
         Err(Stop::Sums)
+    }
+}
+
+// ── the worker's last word ──────────────────────────────────────────────────
+
+/// **End a Prepare's worker with its one last report**, posted only once the
+/// worker holds nothing of the transaction: `Verified` hands the staged
+/// transaction — lock and all — to the job; every other end has already let
+/// the lock go (`abandon`, then the lock dropped, in `prepare_on`), and says
+/// [`Step::Stopped`] with why. A Cancel ends the same way, with
+/// [`Stop::Cancelled`]: the job has moved on, so the report is stale to it and
+/// revives nothing, but whoever reads it knows the transaction is gone and its
+/// lock free — the journal's removal is not that sign, since the lock is let
+/// go only after it (the journal goes last, under the lock).
+pub(crate) fn finish(worker: &WorkerCtx, post: &Poster, prepared: Result<Staged, Stop>) {
+    match prepared {
+        Ok(staged) => {
+            // Cancelled between the last look and the report: the job has
+            // moved on, so the transaction is given up.
+            if let Err(staged) = post.verified(staged) {
+                let _ = discard(worker, *staged, &Event::Discarded);
+                post.post(Step::Stopped(Stop::Cancelled));
+            }
+        }
+        Err(stop) => post.post(Step::Stopped(stop)),
     }
 }
 
