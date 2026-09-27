@@ -2059,3 +2059,34 @@ describes any launch: a person's start during an apply hands itself to the
 rescue build, and after a rollback the one start that runs past a destructive
 header uncalled is the one the rescue build sends. The DESIGN entry of the same
 day has the rest.
+
+**Every phase opens Folio on macOS (U-29b).** §C.6's "recovery at start …
+any phase, any number of times" now holds for a bundle: the rescue build —
+from the LaunchAgent at login, or from an ordinary start that found a
+`destructive` header of any outcome — finishes whatever phase a dead applier
+left, as the new asker `Asker::Rescue` of `decide` (`update_apply_macos::
+recover`): `Handoff` and `Armed` (nothing exchanged) → the entrance removed,
+`Prepared`, unless a process of the rescue clone that started first may still
+be the applier; `Exchanging` decided by the live identity — the old one →
+`Prepared` (M5), the new one with the old in `stage/` → **R starts the trial**
+(the new action `BeginTrial`; `TrialBegan` and `Trial` are now R's too, so
+"R never writes `Trial`" above no longer holds), or `RollbackIntent` when it
+cannot start one; `Trial` without a receipt → waited for while its recorded
+process lives, until the deadline from `Trial.began_ms`, then `Committed` on a
+receipt with its nonce (W8/M8) or `RollbackIntent` (M9); later phases as U-29.
+**Exactly one build is started after it**: the old build plainly, or with
+`--update-failed <journal>` while the header is `destructive` or a retired
+rollback; the new build plainly only once `committed`, **before that only as a
+trial**; when recovery itself fails, the live build by the same rule with the
+word (so the card says *Update incomplete.* and names the folder), the journal
+kept. A start that carries the word continues past a `destructive` header of
+any outcome. **`Stuck` with the new bundle live** has the new build started as
+a trial over it, recorded as `RetrialBegan` (`Stuck` → `Stuck`, attempts
+unchanged, `Stuck.retrial`), and **its receipt commits forward** — `Stuck` +
+that receipt → `Committed`, the one road besides `Trial`'s; a `Stuck` without
+a retrial still refuses every receipt (F-14), and the bound still counts only
+failed swaps back. The trial's watch therefore reads a still-`destructive`
+rollback as undecided: only a `terminal` class without `committed` ends it.
+A macOS start whose rescue clone cannot be started runs the recovery with its
+own program instead (the ordinary start as R). The DESIGN entry of the same
+day has the phase table.

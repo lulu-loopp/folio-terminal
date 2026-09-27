@@ -27,33 +27,44 @@
 //! does not exist, the line goes to `recover.log` beside the journal, in the
 //! home, and says so.
 //!
-//! **A macOS bundle's rollback** (U-29): when the header is `destructive` with
-//! a decided outcome — `rolled_back` (`RollbackIntent`, `Stuck`, `RolledBack`)
-//! or `committed` (`Committed`, whose retirement was cut short) — the rescue
-//! build takes the transaction lock and performs M9–M11 as R
-//! (`update_apply_macos::recover`): the trial stopped, the swap back decided by
-//! the live identity, `RolledBack` and the retirement — or `Stuck`, with every
-//! line of it appended to the same file. Every other phase is left alone, as
-//! is everything on Windows until U-24.
+//! **A macOS bundle, in every phase** (U-29, U-29b): when the header is
+//! `destructive`, whatever its outcome, the rescue build takes the
+//! transaction lock and finishes, as R, whatever a dead applier left
+//! (`update_apply_macos::recover`, the coordinator's ruling 1): `Handoff` and
+//! `Armed` back to `Prepared`; `Exchanging` decided by the live identity (the
+//! old one back to `Prepared`, the new one decided by a trial it starts);
+//! `Trial` waited for while its recorded process lives, committed on its
+//! receipt, else rolled back; `RollbackIntent`, `Stuck` and `RolledBack` rolled
+//! back and retired (M9–M11); `Committed` retired. Every line of it is
+//! appended to the same file.
 //!
-//! Then, reading the header again:
+//! **Then exactly one start** (ruling 2), with the handed command line after
+//! its words: the old build plainly, or with `--update-failed <journal>` after
+//! a rollback or while the journal is still `destructive` (so the start
+//! continues instead of handing itself back, and its card says *Update
+//! incomplete.*); the new build plainly once `Committed`, and before that only
+//! as a trial (`--update-trial <txn> <nonce>`) — which, over a `Stuck`, this
+//! run starts itself, records and waits for, so that its receipt commits
+//! forward (ruling 3). A trial this run started is itself the start. When the
+//! recovery itself fails, the live build is started by the same rule. Only a
+//! lock another holder keeps — the applier at work — starts nothing: that
+//! holder opens Folio. At login (no command line), a start follows only a
+//! revert or a finished rollback (W11), or a trial the decision needed.
+//!
+//! **Any other home** (Windows until U-24), reading the header again:
 //!
 //! * handed a command line, and the transaction is no longer one an ordinary
 //!   start hands over — `terminal`, `preparing` or `deferred`, no journal, or
 //!   one this build cannot read — the installed Folio is started with the
-//!   original arguments, detached, and the door exits 0. The start that
-//!   handed itself over is thereby made (U-12's contract), and it cannot come
-//!   back here: the ordinary start hands over only a `destructive` class;
-//! * on a macOS bundle whose outcome is `rolled_back`, whatever the class, the
-//!   installed Folio is started with `--update-failed <journal>` first: the
-//!   card rises at `Failed` — *Previous version restored.*, or *Update
-//!   incomplete.* and the folder — and past a rollback that did not finish the
-//!   start continues instead of handing itself back (`update_txn::at_start`).
-//!   Without a command line, the build is started this way only after this
-//!   run finished the rollback (W11's relaunch);
-//! * any other `destructive` class: the update is not finished and this build
-//!   cannot finish it, so the line says so and the door exits 1, starting
-//!   nothing — starting the installed Folio would only hand it back here.
+//!   original arguments, detached, and the door exits 0 (on a macOS bundle
+//!   whose retired outcome is `rolled_back`, with `--update-failed <journal>`
+//!   first, for its card). The start that handed itself over is thereby made
+//!   (U-12's contract), and it cannot come back here: the ordinary start hands
+//!   over only a `destructive` class;
+//! * a `destructive` class on Windows: the update is not finished and this
+//!   build cannot finish it, so the line says so and the door exits 1,
+//!   starting nothing — starting the installed Folio would only hand it back
+//!   here.
 //!
 //! Headless, like the other argv doors: it runs before the parse and the
 //! admission in `fn main`, on a standalone main that is a worker
@@ -71,7 +82,7 @@ use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
-use crate::update_apply_macos::{self, Ended, Hands, Limits, Road};
+use crate::update_apply_macos::{self, Hands, Limits, Road};
 use crate::update_txn::{Class, Header, HeaderOutcome, Home};
 
 /// **The recovery door's effects**: a lock holder's (its lines, the exchange,
@@ -180,15 +191,14 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
     let home = door.home;
     let (log, whereabouts) = log_file(home, door.data);
     let first = header_of(home);
-    // A macOS bundle is the one layout this build rolls back (U-29); a
+    // A macOS bundle is the one layout this build recovers (U-29, U-29b); a
     // Windows home says what it always said until U-24.
-    let rolls_back_here = home.installed_bundle().is_some();
-    let decided = first.header.as_ref().filter(|header| {
-        rolls_back_here
-            && header.class == Class::Destructive
-            && header.outcome != HeaderOutcome::None
-    });
-    let (did, rolled) = match decided {
+    let recovers_here = home.installed_bundle().is_some();
+    let destructive = first
+        .header
+        .as_ref()
+        .filter(|header| recovers_here && header.class == Class::Destructive);
+    let (did, outcome, code) = match destructive {
         Some(header) => {
             let road = Road {
                 home: home.clone(),
@@ -202,54 +212,58 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
                 world: &mut *world,
                 log: &log,
             };
-            match update_apply_macos::recover(worker, &road, &mut logged) {
-                Some(ended) => (format!("recovery ended {ended:?}"), Some(ended)),
-                None => (String::from("this phase is not recovery's"), None),
-            }
+            let recovered =
+                update_apply_macos::recover(worker, &road, &mut logged, door.then_launch);
+            let did = format!(
+                "recovery ended {:?}, and opens {:?}",
+                recovered.ended, recovered.opens
+            );
+            let (outcome, code) = match recovered.opens.words(home) {
+                Some(mut words) => {
+                    words.extend_from_slice(door.then_launch.unwrap_or(&[]));
+                    spawn(world, door.installed, &words)
+                }
+                None => (
+                    String::from("nothing else was started"),
+                    recovered.ended.code(),
+                ),
+            };
+            (did, outcome, code)
         }
-        None if rolls_back_here => (String::from("nothing to recover"), None),
-        None => (String::from("recovery is not in this build yet"), None),
-    };
-    // Read again after any look under the lock: another holder may have
-    // moved the transaction on while this one waited for it.
-    let state = if decided.is_some() {
-        header_of(home).header
-    } else {
-        first.header.clone()
-    };
-    let failed = rolls_back_here
-        && state
-            .as_ref()
-            .is_some_and(|header| header.outcome == HeaderOutcome::RolledBack);
-    let unfinished = state
-        .as_ref()
-        .is_some_and(|header| header.class == Class::Destructive)
-        && !failed;
-    let finished_here = matches!(
-        rolled,
-        Some(Ended::RolledBack | Ended::RolledBackWithDebt(_))
-    );
-    let words = |argv: &[OsString]| {
-        let mut args = Vec::new();
-        if failed {
-            args.extend(update_apply_macos::failed_words(home));
+        None => {
+            let did = if recovers_here {
+                String::from("nothing to recover")
+            } else {
+                String::from("recovery is not in this build yet")
+            };
+            let failed = recovers_here
+                && first
+                    .header
+                    .as_ref()
+                    .is_some_and(|header| header.outcome == HeaderOutcome::RolledBack);
+            let unfinished = first
+                .header
+                .as_ref()
+                .is_some_and(|header| header.class == Class::Destructive);
+            let (outcome, code) = match door.then_launch {
+                None => (String::from("nothing was touched"), 0),
+                Some(_) if unfinished => (
+                    String::from(
+                        "the update is not finished and this build cannot finish it yet; Folio was not started",
+                    ),
+                    1,
+                ),
+                Some(argv) => {
+                    let mut words = Vec::new();
+                    if failed {
+                        words.extend(update_apply_macos::failed_words(home));
+                    }
+                    words.extend_from_slice(argv);
+                    spawn(world, door.installed, &words)
+                }
+            };
+            (did, outcome, code)
         }
-        args.extend_from_slice(argv);
-        args
-    };
-    let (outcome, code) = match door.then_launch {
-        None if finished_here => spawn(world, door.installed, &words(&[])),
-        None => (
-            String::from("nothing was touched"),
-            rolled.as_ref().map_or(0, Ended::code),
-        ),
-        Some(_) if unfinished => (
-            String::from(
-                "the update is not finished and this build cannot finish it yet; Folio was not started",
-            ),
-            1,
-        ),
-        Some(argv) => spawn(world, door.installed, &words(argv)),
     };
     let line = format!(
         "BT_UPDATE_RECOVER {}; {did}; {outcome}{whereabouts}",
@@ -296,6 +310,10 @@ impl<W: World> Hands for Logged<'_, W> {
     fn verify_restored(&mut self, worker: &WorkerCtx, bundle: &Path) -> Result<(), String> {
         self.world.verify_restored(worker, bundle)
     }
+
+    fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
+        self.world.launch_trial(bundle, args)
+    }
 }
 
 /// **Where the one line is kept**: the data directory's `diagnostics.log`
@@ -329,6 +347,10 @@ impl Hands for Machine {
 
     fn verify_restored(&mut self, _worker: &WorkerCtx, bundle: &Path) -> Result<(), String> {
         update_apply_macos::verify_restored_here(bundle)
+    }
+
+    fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
+        update_apply_macos::open_bundle(bundle, args)
     }
 }
 
@@ -371,6 +393,10 @@ mod tests {
 
         fn verify_restored(&mut self, _: &WorkerCtx, bundle: &Path) -> Result<(), String> {
             panic!("a Windows home is never verified: {bundle:?}")
+        }
+
+        fn launch_trial(&mut self, bundle: &Path, _: &[OsString]) -> io::Result<()> {
+            panic!("a Windows home never starts a trial: {bundle:?}")
         }
     }
 

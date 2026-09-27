@@ -85,27 +85,38 @@
 //!    lock holder (the LaunchAgent at login, or a start through the rescue
 //!    build), until [`update_txn::STUCK_ATTEMPT_LIMIT`] rollbacks have failed.
 //!
-//! **Relaunch** (the coordinator's ruling 1, U-29). The lock let go, the
-//! applier starts the installed bundle again through LaunchServices: after a
-//! rollback, finished or not, with `--update-failed <journal>` — the card
-//! rises at `Failed`, *Previous version restored.* or *Update incomplete.*
-//! and the journal's folder; after a revert (`Reverted` to `Prepared`: the
-//! old bundle is unchanged, and the transaction waits for the deferred rule)
-//! with no word at all. After `Abandoned` nothing is started: O never left,
-//! or the reader quit on purpose, and the next ordinary start retires it.
+//! **Relaunch** (the coordinator's ruling 1, U-29; rulings 2 and 3, U-29b).
+//! The lock let go, the applier starts the installed bundle again through
+//! LaunchServices: after a rollback, finished or not, with `--update-failed
+//! <journal>` — the card rises at `Failed`, *Previous version restored.* or
+//! *Update incomplete.* and the journal's folder; after a revert (`Reverted`
+//! to `Prepared`: the old bundle is unchanged, and the transaction waits for
+//! the deferred rule) with no word at all. After `Abandoned` nothing is
+//! started: O never left, or the reader quit on purpose, and the next ordinary
+//! start retires it. **The new bundle, live and not committed, is never
+//! started plainly**: a road that ends `Stuck` with it live starts it as a
+//! trial over `Stuck` before the lock is let go — recorded (`RetrialBegan`),
+//! so its receipt commits forward — and waits for it ([`Txn::retry_as_trial`]);
+//! where no such trial can be recorded, the start is a trial with a nonce no
+//! journal records ([`Opens::Trial`]).
 //!
 //! **Re-entry** (P started again over its own transaction): `Armed` continues
 //! from step 3. `Moving` is decided by the live identity, as recovery decides
 //! it (M5, M6): still the old bundle → the plist removed, `Reverted`; the new
-//! one → `RollbackIntent` and the rollback. Anything else is refused and
-//! nothing is touched.
+//! one with the old in `stage/` → the trial nobody started (U-29b), else
+//! `RollbackIntent` and the rollback. Anything else is refused and nothing is
+//! touched.
 //!
-//! **Recovery** ([`recover`], `--update-recover <home>`, U-29): the rescue
-//! build started by the LaunchAgent at login, or by an ordinary start that
-//! found a destructive journal, performs M9–M11 over the same code as R: a
-//! transaction at `RollbackIntent`, `Stuck` or `RolledBack` is rolled back and
-//! retired as above, and one at `Committed` is retired as after a commit (M11,
-//! "Committed-with-debt"). Every other phase is not R's here.
+//! **Recovery** ([`recover`], `--update-recover <home>`, U-29 and U-29b): the
+//! rescue build started by the LaunchAgent at login, or by an ordinary start
+//! that found a destructive journal, finishes **every** phase a dead applier
+//! can leave over the same code, each step `decide`'s answer for
+//! `Asker::Rescue` ([`Txn::settle`]): `Handoff` and `Armed` back to
+//! `Prepared`; `Moving` decided by the live identity (a trial when the new
+//! bundle is live); `Trial` waited for, committed on its receipt or rolled
+//! back; `RollbackIntent`, `Stuck` and `RolledBack` rolled back and retired as
+//! above; `Committed` retired as after a commit (M11, "Committed-with-debt").
+//! What opens after it is [`Recovered::opens`]: exactly one start.
 //!
 //! Every phase is recorded through `update_txn::Journal::advance` (which
 //! refuses what the protocol does not allow) and written with
@@ -128,8 +139,8 @@ use bt_platform::{HostPlatform, launch_agent};
 
 use crate::cli;
 use crate::update_txn::{
-    Action, Actor, Asker, BundleIdentity, Disk, Effect, Event, Home, Journal, Layout, Located,
-    Nonce, Phase, PhaseKind, Receipt, Restore, TrialProcess, TxnId, decide,
+    Action, Actor, Asker, BundleIdentity, Class, Disk, Effect, Event, HeaderOutcome, Home, Journal,
+    Layout, Located, Nonce, Phase, PhaseKind, Receipt, Restore, TrialProcess, TxnId, decide,
 };
 
 /// `open`, by its absolute path: LaunchServices starts the trial as it starts
@@ -208,16 +219,18 @@ pub(crate) trait Hands {
     /// # Errors
     /// Why not, as a sentence.
     fn verify_restored(&mut self, worker: &WorkerCtx, bundle: &Path) -> Result<(), String>;
-}
-
-/// **The applier's effects that a test stands in for**: a lock holder's, and
-/// the two starts through LaunchServices.
-pub(crate) trait World: Hands {
-    /// Start the trial: `open -n -a <bundle> --args <args>`, detached.
+    /// Start the trial: `open -n -a <bundle> --args <args>`, detached — the
+    /// applier's after its exchange, and a recovery's over an exchange or a
+    /// `Stuck` whose new bundle is live (U-29b).
     ///
     /// # Errors
     /// `open` could not be started.
     fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()>;
+}
+
+/// **The applier's effects that a test stands in for**: a lock holder's, and
+/// the start of the installed build after its road.
+pub(crate) trait World: Hands {
     /// Start the installed build again after a rollback or a revert: `open -n
     /// -a <bundle>` with `args` after `--args` when there are any, detached.
     ///
@@ -301,6 +314,76 @@ pub(crate) fn failed_words(home: &Home) -> [OsString; 2] {
     ]
 }
 
+/// **The words that start the installed build as the trial of `txn`**:
+/// `--update-trial <txn> <nonce>` (U-12's frozen v1 flag).
+pub(crate) fn trial_words(txn: TxnId, nonce: &Nonce) -> [OsString; 3] {
+    [
+        OsString::from(cli::UPDATE_TRIAL_FLAG),
+        OsString::from(txn.to_string()),
+        OsString::from(nonce.to_string()),
+    ]
+}
+
+/// **What opens once a lock holder has let the lock go** (the coordinator's
+/// rulings 2 and 3, U-29b): one start of the installed build, or none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Opens {
+    /// Nothing: a trial this holder started is the window, another holder is
+    /// at work, or nothing is owed.
+    Nothing,
+    /// The installed build as an ordinary start, with `--update-failed
+    /// <journal>` first when `failed`: the journal is still `destructive`
+    /// (the start must not hand itself back) or a retired rollback (its
+    /// card).
+    Installed { failed: bool },
+    /// The installed build — the new one, live and not committed — as a trial
+    /// of `txn` with a fresh nonce no journal records, then `--update-failed
+    /// <journal>`: its writes are held back and its receipt is never heard
+    /// (the new build is never started plainly before `Committed`, ruling 2).
+    Trial { txn: TxnId },
+}
+
+impl Opens {
+    /// The words the build is started with, before a handed command line;
+    /// `None` for [`Opens::Nothing`].
+    pub(crate) fn words(&self, home: &Home) -> Option<Vec<OsString>> {
+        match self {
+            Opens::Nothing => None,
+            Opens::Installed { failed: false } => Some(Vec::new()),
+            Opens::Installed { failed: true } => Some(failed_words(home).to_vec()),
+            Opens::Trial { txn } => {
+                let mut words = trial_words(*txn, &crate::update_job::mint_nonce()).to_vec();
+                words.extend(failed_words(home));
+                Some(words)
+            }
+        }
+    }
+}
+
+/// **Who starts the installed build once the lock is let go**, which decides
+/// what is owed (U-29b).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Opener {
+    /// P at the end of its road: what the restart it took over owes — the
+    /// old build after a revert, the live build after a rollback, nothing
+    /// after a commit (the trial is the window) or when it did not get that
+    /// far (U-29's ruling 1).
+    Applier,
+    /// R from the entrance at login: a start only after a revert or a
+    /// finished rollback (W11).
+    Login,
+    /// R handed a person's start (`--then-launch`): always one start, even
+    /// when the recovery itself failed (the coordinator's ruling 2).
+    Start,
+}
+
+/// **What recovery did, and what opens after it.**
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Recovered {
+    pub(crate) ended: Ended,
+    pub(crate) opens: Opens,
+}
+
 /// **The door, for this process**: this executable must be a macOS rescue
 /// clone, and `home` a locator's home.
 pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
@@ -379,27 +462,29 @@ pub(crate) fn retire_entrance_in(agents: Option<&Path>, txn: TxnId) -> Result<()
 /// **The applier, over any road** — see the module header.
 pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> Ended {
     let window = Instant::now() + road.limits.old_within;
-    let (mut txn, bundles) = match Txn::hold(road) {
+    let (mut txn, bundles) = match Txn::hold(road, Asker::LockHolder) {
         Ok(held) => held,
         Err(ended) => return ended,
     };
     let places = bundles.places();
-    let ended = txn.run(worker, &places, window, world);
+    let mut ended = txn.run(worker, &places, window, world);
+    if ended.rolled_back() {
+        ended = txn.retry_as_trial(worker, &places, world, ended, &[]);
+    }
     world.say(&format!(
         "BT_UPDATE_APPLY transaction {} wrote {:?}",
         road.txn, txn.written
     ));
+    let launched = txn.launched;
     // The lock is let go before the installed build starts: its own start
     // retires a finished transaction, which needs it.
     drop(txn);
-    let relaunch = if ended.rolled_back() {
-        Some(failed_words(&road.home).to_vec())
-    } else if ended == Ended::Reverted {
-        Some(Vec::new())
+    let opens = if launched {
+        Opens::Nothing
     } else {
-        None
+        opens_after(worker, road, &ended, Opener::Applier)
     };
-    if let Some(args) = relaunch
+    if let Some(args) = opens.words(&road.home)
         && let Err(error) = world.relaunch(places.installed, &args)
     {
         world.say(&format!(
@@ -410,30 +495,148 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
     ended
 }
 
-/// **The rescue build as recovery, over a macOS bundle's transaction** (M9–M11,
-/// U-29): the transaction lock within [`Limits::old_within`], then the
-/// journal; `RollbackIntent`, `Stuck` and `RolledBack` are rolled back and
-/// retired, `Committed` retired as after a commit. `None` when the journal is
-/// in a phase that is not recovery's here — nothing is touched, and the lock
-/// is let go.
-pub(crate) fn recover(worker: &WorkerCtx, road: &Road, hands: &mut impl Hands) -> Option<Ended> {
-    let (mut txn, bundles) = match Txn::hold(road) {
-        Ok(held) => held,
-        Err(ended) => return Some(ended),
+/// **The rescue build as recovery, over a macOS bundle's transaction in any
+/// phase a dead applier can leave** (U-29 and U-29b, the coordinator's
+/// ruling 1): the transaction lock within [`Limits::old_within`], then the
+/// journal, and each step `update_txn::decide`'s answer for
+/// [`Asker::Rescue`] from what is on disk:
+///
+/// - `Handoff` / `Armed` — nothing exchanged: the entrance removed, back to
+///   `Prepared` (unless a process that may still be the applier runs from
+///   the rescue clone, started before this one: then it is left to it, as
+///   [`Ended::LockHeld`]);
+/// - `Moving` — decided by the live identity: the old one → `Prepared`; the
+///   new one → the new build started as the trial, `Trial` recorded, and
+///   waited for as below; a trial that cannot be started → `RollbackIntent`;
+/// - `Trial` without a receipt — its recorded process, running from the new
+///   bundle's executable, waited for through the wait door until the
+///   deadline counted from `Trial.began_ms`; a receipt with its nonce →
+///   `Committed` and the cleanup (W8/M8); otherwise `RollbackIntent` and the
+///   rollback (M9);
+/// - `RollbackIntent`, `Stuck`, `RolledBack` rolled back and retired (M9–M11),
+///   `Committed` retired as after a commit (M11).
+///
+/// Handed a person's start (`start`), a `Stuck` left with the new bundle
+/// live has the new build started as a trial — recorded, and its receipt
+/// commits forward (ruling 3) — with `start` after its words. What opens
+/// after is [`Recovered::opens`].
+pub(crate) fn recover(
+    worker: &WorkerCtx,
+    road: &Road,
+    hands: &mut impl Hands,
+    start: Option<&[OsString]>,
+) -> Recovered {
+    let opener = if start.is_some() {
+        Opener::Start
+    } else {
+        Opener::Login
     };
-    let places = bundles.places();
-    let ended = match txn.phase() {
-        PhaseKind::RollbackIntent | PhaseKind::Stuck | PhaseKind::RolledBack => txn
-            .roll_back(worker, &places, Actor::Recovery, hands)
-            .unwrap_or_else(Ended::Failed),
-        PhaseKind::Committed => txn.commit(worker, &places, Actor::Recovery),
-        _ => return None,
+    let handed = start.unwrap_or(&[]);
+    let (ended, launched) = match Txn::hold(road, Asker::Rescue) {
+        Ok((mut txn, bundles)) => {
+            let places = bundles.places();
+            let mut ended = if txn.phase() == PhaseKind::Handoff
+                && let Some(pid) = an_applier_may_still_come(places.rescue_program)
+            {
+                hands.say(&format!(
+                    "BT_UPDATE_RECOVER {pid} runs from {} and may be the applier; the handed-off update is left to it",
+                    places.rescue_program.display()
+                ));
+                Ended::LockHeld
+            } else {
+                txn.settle(worker, &places, None, hands, handed)
+                    .unwrap_or_else(Ended::Failed)
+            };
+            if ended.rolled_back() && opener == Opener::Start {
+                ended = txn.retry_as_trial(worker, &places, hands, ended, handed);
+            }
+            hands.say(&format!(
+                "BT_UPDATE_RECOVER transaction {} wrote {:?}",
+                road.txn, txn.written
+            ));
+            (ended, txn.launched)
+        }
+        Err(ended) => (ended, false),
     };
-    hands.say(&format!(
-        "BT_UPDATE_RECOVER transaction {} wrote {:?}",
-        road.txn, txn.written
-    ));
-    Some(ended)
+    let opens = if launched {
+        Opens::Nothing
+    } else {
+        opens_after(worker, road, &ended, opener)
+    };
+    Recovered { ended, opens }
+}
+
+/// **A process other than this one running from the rescue clone's
+/// executable, started before this one** — the applier O started at
+/// `Handoff`, still waiting for the lock O held, or an earlier recovery: its
+/// pid. The applier takes the lock the moment it is free, so a `Handoff`
+/// found under the lock while it may still come is left to it. A list that
+/// cannot be read names none.
+fn an_applier_may_still_come(rescue_program: &Path) -> Option<u32> {
+    let own = std::process::id();
+    let mine = Running {
+        pid: own,
+        started: install_flip::started_of(own)?,
+    };
+    let listed = install_flip::running_from(rescue_program).ok()?;
+    an_earlier_holder(mine, &listed)
+}
+
+/// Of `listed`, a process that is not `mine` and started no later than it.
+fn an_earlier_holder(mine: Running, listed: &[Running]) -> Option<u32> {
+    listed
+        .iter()
+        .find(|other| other.pid != mine.pid && other.started <= mine.started)
+        .map(|other| other.pid)
+}
+
+/// **What opens after a road that ended `ended`**, read from the disk once the
+/// lock is let go (the coordinator's rulings 2 and 3, U-29b): nothing where
+/// nothing is owed (see [`Opener`]); else the installed build — as a trial
+/// while it is the new build and the transaction not `Committed` (or when no
+/// journal says which it is but the header is still `destructive`), and with
+/// `--update-failed` while the header is `destructive` or a retired rollback.
+fn opens_after(worker: &WorkerCtx, road: &Road, ended: &Ended, opener: Opener) -> Opens {
+    let owed = match (opener, ended) {
+        (_, Ended::LockHeld | Ended::Abandoned) => false,
+        (
+            Opener::Applier,
+            Ended::Refused(_) | Ended::Failed(_) | Ended::Committed | Ended::CommittedWithDebt(_),
+        ) => false,
+        (Opener::Login, ended) => matches!(
+            ended,
+            Ended::Reverted | Ended::RolledBack | Ended::RolledBackWithDebt(_)
+        ),
+        _ => true,
+    };
+    if !owed {
+        return Opens::Nothing;
+    }
+    let bytes = file_reads::read(Lane::UpdateJournal, road.home.journal()).ok();
+    let Some(header) = bytes
+        .as_deref()
+        .and_then(|bytes| crate::update_txn::Header::parse(bytes).ok())
+    else {
+        return Opens::Installed { failed: false };
+    };
+    let destructive = header.class == Class::Destructive;
+    let failed = destructive || header.outcome == HeaderOutcome::RolledBack;
+    let layout = bytes
+        .as_deref()
+        .and_then(|bytes| Journal::parse(bytes).ok())
+        .map(|journal| journal.body.layout);
+    let new_live = match (layout, road.home.installed_bundle()) {
+        (Some(Layout::Bundle { new, .. }), Some(installed)) => {
+            crate::update_prepare_macos::identity(worker, &installed).as_ref() == Ok(&new)
+        }
+        // Which build is live cannot be told: a trial is safe for either.
+        _ => destructive,
+    };
+    if new_live && header.outcome != HeaderOutcome::Committed {
+        Opens::Trial { txn: header.txn }
+    } else {
+        Opens::Installed { failed }
+    }
 }
 
 /// The paths and identities one road acts on, owned.
@@ -442,7 +645,7 @@ struct Bundles {
     program: PathBuf,
     stage: PathBuf,
     stage_program: PathBuf,
-    rescue: PathBuf,
+    rescue_program: PathBuf,
     old: BundleIdentity,
     new: BundleIdentity,
 }
@@ -454,7 +657,7 @@ impl Bundles {
             program: &self.program,
             stage: &self.stage,
             stage_program: &self.stage_program,
-            rescue: &self.rescue,
+            rescue_program: &self.rescue_program,
             old: &self.old,
             new: &self.new,
         }
@@ -469,7 +672,8 @@ struct Places<'a> {
     /// The staged bundle's executable: where the new build's image is after a
     /// swap back, and the old build's before it.
     stage_program: &'a Path,
-    rescue: &'a Path,
+    /// The rescue clone's executable: what the applier and recovery run from.
+    rescue_program: &'a Path,
     old: &'a BundleIdentity,
     new: &'a BundleIdentity,
 }
@@ -478,18 +682,25 @@ struct Places<'a> {
 /// every phase this process wrote, in order.
 struct Txn<'a> {
     road: &'a Road,
+    /// Who this holder is to `decide`: the applier, or the rescue build as
+    /// recovery.
+    asker: Asker,
     journal: Journal,
     /// Held for the whole road; let go when the value is dropped.
     _lock: Held,
     plist: Option<PathBuf>,
     written: Vec<PhaseKind>,
+    /// **A trial this holder started is the window**: set when `open`
+    /// started one, cleared when a rollback is declared on it — nothing else
+    /// is started after the road (U-29b, ruling 2's "exactly one").
+    launched: bool,
 }
 
 impl<'a> Txn<'a> {
     /// **The transaction lock within [`Limits::old_within`], then the
     /// journal** — this road's transaction, a bundle's.
-    fn hold(road: &'a Road) -> Result<(Self, Bundles), Ended> {
-        let (Some(installed), Some(program), Some(stage), Some(rescue)) = (
+    fn hold(road: &'a Road, asker: Asker) -> Result<(Self, Bundles), Ended> {
+        let (Some(installed), Some(program), Some(stage), Some(rescue_program)) = (
             road.home.installed_bundle(),
             road.home.installed_program(),
             road.home.stage_bundle(road.txn),
@@ -528,6 +739,7 @@ impl<'a> Txn<'a> {
         let stage_program = stage.join(inside);
         let txn = Txn {
             road,
+            asker,
             journal,
             _lock: lock,
             plist: road
@@ -535,6 +747,7 @@ impl<'a> Txn<'a> {
                 .as_ref()
                 .map(|agents| agents.join(launch_agent::file_name(road.txn.bytes()))),
             written: Vec::new(),
+            launched: false,
         };
         Ok((
             txn,
@@ -543,7 +756,7 @@ impl<'a> Txn<'a> {
                 program,
                 stage,
                 stage_program,
-                rescue,
+                rescue_program,
                 old,
                 new,
             },
@@ -640,7 +853,7 @@ impl<'a> Txn<'a> {
         match launch_agent::arm(
             agents,
             self.road.txn.bytes(),
-            places.rescue,
+            places.rescue_program,
             self.road.home.root(),
         ) {
             Ok(armed) => self.record(Actor::Applier, &Event::Armed(armed))?,
@@ -717,11 +930,13 @@ impl<'a> Txn<'a> {
         }
         // The trial takes its shared hold at its start.
         drop(admission);
-        self.trial(worker, places, world)
+        self.begin_trial(worker, places, Actor::Applier, world, &[])
     }
 
     /// M5 / M6, found by a process started again over its own transaction:
-    /// decided by the live identity, never by the phase.
+    /// decided by the live identity, never by the phase — as recovery decides
+    /// it (U-29b: the new bundle live and the old one in `stage/` is decided
+    /// by a trial).
     fn at_moving_again(
         &mut self,
         worker: &WorkerCtx,
@@ -729,108 +944,200 @@ impl<'a> Txn<'a> {
         world: &mut impl World,
     ) -> Result<Ended, String> {
         let live = crate::update_prepare_macos::identity(worker, places.installed);
+        let stage = crate::update_prepare_macos::identity(worker, places.stage);
         if live.as_ref() == Ok(places.old) {
             self.revert(Actor::Recovery)
+        } else if live.as_ref() == Ok(places.new) && stage.as_ref() == Ok(places.old) {
+            self.begin_trial(worker, places, Actor::Recovery, world, &[])
         } else {
             self.declare_rollback(worker, places, Actor::Recovery, world)
         }
     }
 
-    /// M6 → M7 → M8, or `RollbackIntent` and the rollback.
-    fn trial(
+    /// **Start the new build as the trial** (M6 → M7) — over `Moving` after
+    /// the exchange, or over a `Stuck` whose new bundle is live (the
+    /// coordinator's ruling 3, U-29b) — with `handed` after its words, then
+    /// wait for it ([`Txn::watch_trial`]). A receipt the journal accepts →
+    /// `Committed` and the cleanup (M8). None: over `Moving` or `Trial`,
+    /// `RollbackIntent` and the rollback (M9); over `Stuck`, nothing more —
+    /// the trial is left running, and the next holder decides.
+    fn begin_trial(
         &mut self,
         worker: &WorkerCtx,
         places: &Places<'_>,
-        world: &mut impl World,
+        actor: Actor,
+        hands: &mut impl Hands,
+        handed: &[OsString],
     ) -> Result<Ended, String> {
         let nonce = crate::update_job::mint_nonce();
         let began_ms = now_ms();
-        let args = [
-            OsString::from(cli::UPDATE_TRIAL_FLAG),
-            OsString::from(self.road.txn.to_string()),
-            OsString::from(nonce.to_string()),
-        ];
-        if let Err(error) = world.launch_trial(places.installed, &args) {
-            world.say(&format!("BT_UPDATE_APPLY {OPEN} did not start: {error}"));
-            return self.declare_rollback(worker, places, Actor::Applier, world);
+        let over_stuck = self.phase() == PhaseKind::Stuck;
+        let mut args = trial_words(self.road.txn, &nonce).to_vec();
+        if over_stuck {
+            // Its card says the update is incomplete, as `Stuck`'s start's
+            // always did (U-29).
+            args.extend(failed_words(&self.road.home));
         }
-        let deadline = began_ms.saturating_add(self.road.limits.trial_within_ms);
-        let receipt_path = self.road.home.receipt_path(self.road.txn, &nonce);
+        args.extend_from_slice(handed);
+        if let Err(error) = hands.launch_trial(places.installed, &args) {
+            hands.say(&format!("BT_UPDATE_APPLY {OPEN} did not start: {error}"));
+            return if over_stuck {
+                Ok(self.still_stuck())
+            } else {
+                self.declare_rollback(worker, places, actor, hands)
+            };
+        }
+        self.launched = true;
+        match self.watch_trial(worker, places, actor, hands, Some((nonce, began_ms)))? {
+            Some(ended) => Ok(ended),
+            None if self.phase() == PhaseKind::Stuck => Ok(self.still_stuck()),
+            None => self.declare_rollback(worker, places, actor, hands),
+        }
+    }
+
+    /// `Stuck`'s end as it stands: its last error.
+    fn still_stuck(&self) -> Ended {
+        match &self.journal.body.phase {
+            Phase::Stuck { last_error, .. } => Ended::Stuck(last_error.clone()),
+            other => Ended::Failed(format!("{:?} is not Stuck", other.kind())),
+        }
+    }
+
+    /// **The trial, waited for** (M7, W7): the one this holder just started
+    /// (`started`: its nonce and when), found in the process list — a process
+    /// of the installed executable that started after the launch, or the
+    /// receipt's own — and recorded (`Trial` over `Moving`, the retrial over
+    /// `Stuck`); or the one the journal records. Then, polling through the
+    /// wait door until the deadline counted from its start: a receipt the
+    /// journal accepts → `Committed` and the cleanup (`Some`); the process
+    /// gone from the new bundle's executable, or the deadline → `None`.
+    fn watch_trial(
+        &mut self,
+        worker: &WorkerCtx,
+        places: &Places<'_>,
+        actor: Actor,
+        hands: &mut impl Hands,
+        started: Option<(Nonce, u64)>,
+    ) -> Result<Option<Ended>, String> {
+        // The new build is live for the whole wait: nothing is exchanged
+        // under this lock meanwhile.
+        let images: Vec<&Path> = [
+            (places.installed, places.program),
+            (places.stage, places.stage_program),
+        ]
+        .into_iter()
+        .filter(|(bundle, _)| {
+            crate::update_prepare_macos::identity(worker, bundle).as_ref() == Ok(places.new)
+        })
+        .map(|(_, program)| program)
+        .collect();
         let mut said_refusal = false;
         loop {
+            let (nonce, began_ms, recorded) = match (&self.journal.body.phase, started) {
+                (
+                    Phase::Trial {
+                        nonce,
+                        process,
+                        began_ms,
+                    },
+                    _,
+                ) => (*nonce, *began_ms, Some(*process)),
+                (
+                    Phase::Stuck {
+                        retrial: Some(retrial),
+                        trial,
+                        ..
+                    },
+                    _,
+                ) if started.is_none_or(|(nonce, _)| nonce == retrial.nonce) => {
+                    (retrial.nonce, retrial.began_ms, *trial)
+                }
+                (_, Some((nonce, began_ms))) => (nonce, began_ms, None),
+                (other, None) => {
+                    return Err(format!("{:?} has no trial to wait for", other.kind()));
+                }
+            };
+            let deadline = began_ms.saturating_add(self.road.limits.trial_within_ms);
+            let receipt_path = self.road.home.receipt_path(self.road.txn, &nonce);
             let receipt = read_receipt(&receipt_path);
-            if self.phase() == PhaseKind::Moving {
-                let listed = install_flip::running_from(places.program)
-                    .ok()
-                    .and_then(|list| {
-                        list.into_iter()
-                            .filter(|process| process.started >= began_ms.saturating_mul(1000))
-                            .min_by_key(|process| process.started)
+            match recorded {
+                None => {
+                    let listed = install_flip::running_from(places.program)
+                        .ok()
+                        .and_then(|list| {
+                            list.into_iter()
+                                .filter(|process| process.started >= began_ms.saturating_mul(1000))
+                                .min_by_key(|process| process.started)
+                        });
+                    let process = listed.or_else(|| {
+                        receipt
+                            .as_ref()
+                            .and_then(|found| found.as_ref().ok())
+                            .map(|receipt| Running {
+                                pid: receipt.pid,
+                                started: install_flip::started_of(receipt.pid).unwrap_or(0),
+                            })
                     });
-                let process = listed.or_else(|| {
-                    receipt
-                        .as_ref()
-                        .and_then(|found| found.as_ref().ok())
-                        .map(|receipt| Running {
-                            pid: receipt.pid,
-                            started: install_flip::started_of(receipt.pid).unwrap_or(0),
-                        })
-                });
-                if let Some(process) = process {
-                    self.record(
-                        Actor::Applier,
-                        &Event::TrialBegan {
-                            nonce,
-                            process: TrialProcess {
-                                pid: process.pid,
-                                started: process.started,
-                            },
-                            began_ms,
-                        },
-                    )?;
+                    if let Some(process) = process {
+                        let process = TrialProcess {
+                            pid: process.pid,
+                            started: process.started,
+                        };
+                        let event = if self.phase() == PhaseKind::Stuck {
+                            Event::RetrialBegan {
+                                nonce,
+                                process,
+                                began_ms,
+                            }
+                        } else {
+                            Event::TrialBegan {
+                                nonce,
+                                process,
+                                began_ms,
+                            }
+                        };
+                        self.record(actor, &event)?;
+                        continue;
+                    }
                 }
-            }
-            if let Phase::Trial { process, .. } = self.journal.body.phase.clone() {
-                match receipt {
-                    Some(Ok(receipt)) => {
-                        let event = Event::ReceiptAccepted(receipt);
-                        match self.journal.advance(&event) {
-                            Ok(_) => {
-                                self.record(Actor::Applier, &event)?;
-                                return Ok(self.commit(worker, places, Actor::Applier));
+                Some(process) => {
+                    match receipt {
+                        Some(Ok(receipt)) => {
+                            let event = Event::ReceiptAccepted(receipt);
+                            match self.journal.advance(&event) {
+                                Ok(_) => {
+                                    self.record(actor, &event)?;
+                                    return Ok(Some(self.commit(worker, places, actor)));
+                                }
+                                Err(refusal) if !said_refusal => {
+                                    said_refusal = true;
+                                    hands.say(&format!(
+                                        "BT_UPDATE_APPLY the receipt at {} is refused: {refusal:?}",
+                                        receipt_path.display()
+                                    ));
+                                }
+                                Err(_) => {}
                             }
-                            Err(refusal) if !said_refusal => {
-                                said_refusal = true;
-                                world.say(&format!(
-                                    "BT_UPDATE_APPLY the receipt at {} is refused: {refusal:?}",
-                                    receipt_path.display()
-                                ));
-                            }
-                            Err(_) => {}
                         }
+                        Some(Err(error)) if !said_refusal => {
+                            said_refusal = true;
+                            hands.say(&format!("BT_UPDATE_APPLY the receipt: {error}"));
+                        }
+                        _ => {}
                     }
-                    Some(Err(error)) if !said_refusal => {
-                        said_refusal = true;
-                        world.say(&format!("BT_UPDATE_APPLY the receipt: {error}"));
+                    if !trial_runs(process, &images) {
+                        hands.say(&format!(
+                            "BT_UPDATE_APPLY the trial {} ended without a receipt",
+                            process.pid
+                        ));
+                        return Ok(None);
                     }
-                    _ => {}
-                }
-                let alive = install_flip::still_running(Running {
-                    pid: process.pid,
-                    started: process.started,
-                });
-                if !alive {
-                    world.say(&format!(
-                        "BT_UPDATE_APPLY the trial {} ended without a receipt",
-                        process.pid
-                    ));
-                    return self.declare_rollback(worker, places, Actor::Applier, world);
                 }
             }
             let now = now_ms();
             if now >= deadline {
-                world.say("BT_UPDATE_APPLY no receipt by the trial's deadline");
-                return self.declare_rollback(worker, places, Actor::Applier, world);
+                hands.say("BT_UPDATE_APPLY no receipt by the trial's deadline");
+                return Ok(None);
             }
             bt_platform::wait::sleep_within(
                 worker,
@@ -839,6 +1146,46 @@ impl<'a> Txn<'a> {
                     .poll
                     .min(Duration::from_millis(deadline - now)),
             );
+        }
+    }
+
+    /// **The coordinator's ruling 3 (U-29b)**: a road that left the
+    /// transaction `Stuck` with the new bundle live, and no trial of it
+    /// running, starts the new build as a trial over it — recorded, so its
+    /// receipt commits forward (W8/M8) — with `handed` after its words, and
+    /// waits for it under this lock. What the road ended as then: the commit,
+    /// or `ended` as it was.
+    fn retry_as_trial(
+        &mut self,
+        worker: &WorkerCtx,
+        places: &Places<'_>,
+        hands: &mut impl Hands,
+        ended: Ended,
+        handed: &[OsString],
+    ) -> Ended {
+        let Phase::Stuck { trial, .. } = &self.journal.body.phase else {
+            return ended;
+        };
+        if trial.is_some_and(|process| trial_runs(process, &[places.program])) {
+            // A trial of it runs already: it is the window.
+            return ended;
+        }
+        if crate::update_prepare_macos::identity(worker, places.installed).as_ref()
+            != Ok(places.new)
+        {
+            return ended;
+        }
+        let actor = match self.asker {
+            Asker::LockHolder => Actor::Applier,
+            _ => Actor::Recovery,
+        };
+        match self.begin_trial(worker, places, actor, hands, handed) {
+            Ok(committed @ (Ended::Committed | Ended::CommittedWithDebt(_))) => committed,
+            Ok(_) => ended,
+            Err(error) => {
+                hands.say(&format!("BT_UPDATE_ROLLBACK the trial over Stuck: {error}"));
+                ended
+            }
         }
     }
 
@@ -898,24 +1245,37 @@ impl<'a> Txn<'a> {
         hands: &mut impl Hands,
     ) -> Result<Ended, String> {
         self.record(actor, &Event::RollbackDeclared)?;
-        self.roll_back(worker, places, actor, hands)
+        // A trial a rollback is declared on is no longer the window.
+        self.launched = false;
+        self.settle(worker, places, Some(actor), hands, &[])
     }
 
-    /// **M9–M11** — see the module header, step 7. Each step is the one
-    /// `update_txn::decide` names from what is on disk now, so a rollback
-    /// begun by P and cut short is finished by R from wherever it stood.
-    fn roll_back(
+    /// **Every phase from what is on disk, one step at a time** (U-29b's one
+    /// recovery road, and M9–M11 — see the module header, step 7). Each step
+    /// is the one `update_txn::decide` names for this holder now, so a road
+    /// cut short anywhere is finished by the next holder from wherever it
+    /// stood. `tenure` is the actor every record is made as; `None` takes the
+    /// one the phase gives this holder's asker. `handed` goes after the
+    /// words of a trial started here.
+    fn settle(
         &mut self,
         worker: &WorkerCtx,
         places: &Places<'_>,
-        actor: Actor,
+        tenure: Option<Actor>,
         hands: &mut impl Hands,
+        handed: &[OsString],
     ) -> Result<Ended, String> {
-        // Stop the trial, swap back, declare, retire: at most four decisions.
-        for _ in 0..4 {
-            let trial = match &self.journal.body.phase {
-                Phase::RollbackIntent { trial } | Phase::Stuck { trial, .. } => *trial,
-                _ => None,
+        // Waits aside, at most: declare, stop the trial, swap back, declare,
+        // retire.
+        for _ in 0..8 {
+            let actor = tenure.unwrap_or_else(|| self.asker.actor(self.phase()));
+            let (trial, nonce) = match &self.journal.body.phase {
+                Phase::Trial { process, nonce, .. } => (Some(*process), Some(*nonce)),
+                Phase::RollbackIntent { trial } => (*trial, None),
+                Phase::Stuck { trial, retrial, .. } => {
+                    (*trial, retrial.map(|retrial| retrial.nonce))
+                }
+                _ => (None, None),
             };
             let live = crate::update_prepare_macos::identity(worker, places.installed).ok();
             let stage = crate::update_prepare_macos::identity(worker, places.stage).ok();
@@ -930,17 +1290,52 @@ impl<'a> Txn<'a> {
                 .plist
                 .as_ref()
                 .is_some_and(|plist| std::fs::symlink_metadata(plist).is_ok());
+            let receipt = nonce
+                .and_then(|nonce| read_receipt(&self.road.home.receipt_path(self.road.txn, &nonce)))
+                .and_then(Result::ok);
             let located = Located::Bundle { live, stage };
             let action = decide(&Disk {
                 journal: &self.journal,
-                asker: Asker::LockHolder,
+                asker: self.asker,
                 entrance,
                 located,
-                receipt: None,
+                receipt: receipt.clone(),
                 trial_alive,
                 now_ms: now_ms(),
             });
             match action {
+                Action::Revert { .. } => return self.revert(actor),
+                Action::BeginTrial => {
+                    return self.begin_trial(worker, places, actor, hands, handed);
+                }
+                Action::AwaitReceipt { .. } => {
+                    if let Some(ended) = self.watch_trial(worker, places, actor, hands, None)? {
+                        return Ok(ended);
+                    }
+                    if self.phase() == PhaseKind::Stuck {
+                        // The trial started over `Stuck` gave none: it is left
+                        // to the next holder, which stops it first.
+                        return Ok(self.still_stuck());
+                    }
+                    self.record(actor, &Event::RollbackDeclared)?;
+                }
+                Action::Commit => {
+                    let Some(receipt) = receipt else {
+                        return Err("a commit without its receipt".to_owned());
+                    };
+                    self.record(actor, &Event::ReceiptAccepted(receipt))?;
+                    return Ok(self.commit(worker, places, actor));
+                }
+                Action::DeclareRollback => {
+                    if let Some(process) = trial {
+                        hands.say(&format!(
+                            "BT_UPDATE_RECOVER the trial {} gave no receipt",
+                            process.pid
+                        ));
+                    }
+                    self.record(actor, &Event::RollbackDeclared)?;
+                }
+                Action::FinishCommit { .. } => return Ok(self.commit(worker, places, actor)),
                 Action::StopTrial(process) => {
                     self.may(actor, Effect::EndTrial)?;
                     if let Err(why) = stop_trial(worker, process, &images, &self.road.limits, hands)
@@ -987,9 +1382,10 @@ impl<'a> Txn<'a> {
                     return Ok(Ended::GaveUp(last_error));
                 }
                 Action::FinishRollback { .. } => return Ok(self.finish_rollback(actor)),
-                other => return Err(format!("the rollback met {other:?}")),
+                other => return Err(format!("the recovery met {other:?}")),
             }
         }
+        let actor = tenure.unwrap_or_else(|| self.asker.actor(self.phase()));
         self.stuck(actor, "the rollback did not settle".to_owned(), hands)
     }
 
@@ -1182,7 +1578,7 @@ pub(crate) fn verify_restored_here(bundle: &Path) -> Result<(), String> {
 /// `open -n -a <bundle> [--args <args>]`, detached, through the one door for
 /// a child: `open` returns once LaunchServices has the launch, and is not
 /// waited on.
-fn open_bundle(bundle: &Path, args: &[OsString]) -> io::Result<()> {
+pub(crate) fn open_bundle(bundle: &Path, args: &[OsString]) -> io::Result<()> {
     let mut open = bt_platform::quiet_command(OPEN);
     open.arg("-n").arg("-a").arg(bundle);
     if !args.is_empty() {
@@ -1213,13 +1609,13 @@ impl Hands for Machine {
     fn verify_restored(&mut self, _worker: &WorkerCtx, bundle: &Path) -> Result<(), String> {
         verify_restored_here(bundle)
     }
-}
 
-impl World for Machine {
     fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
         open_bundle(bundle, args)
     }
+}
 
+impl World for Machine {
     fn relaunch(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
         open_bundle(bundle, args)
     }

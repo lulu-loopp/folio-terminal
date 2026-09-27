@@ -27,16 +27,22 @@
 //!      → the rescue build is started detached with
 //!      `--update-recover [<home>] --then-launch <this command line>` (the
 //!      home named on macOS, whose rescue clone cannot find it from its own
-//!      path — U-29), and this process leaves with one line — unless the
-//!      rescue build is missing or cannot be started, when one line names it
-//!      and the start continues untouched (coordinator ruling, 2026-09-27);
-//!    - `destructive` with the outcome `rolled_back`, and this start carries
-//!      `--update-failed <journal>` → continue: the rescue build tried the
-//!      rollback and sent this start (U-29). Every start that carries the
-//!      word reads the card it raises from the header alone
-//!      (`update_txn::after_rollback`): *Previous version restored.* once the
-//!      transaction is retired, *Update incomplete.* and the journal's folder
-//!      while it is not ([`failed`]);
+//!      path — U-29), and this process leaves with one line. On a macOS
+//!      bundle whose rescue clone is missing or cannot be started, this
+//!      start's own program is started the same way instead — the ordinary
+//!      start as R (U-29b: recovery runs whatever build can run it) — and only
+//!      when that cannot be started either does the start continue, with one
+//!      line and the *Update incomplete.* card; elsewhere a missing rescue
+//!      build is named in one line and the start continues untouched
+//!      (coordinator ruling, 2026-09-27);
+//!    - `destructive`, whatever its outcome, and this start carries
+//!      `--update-failed <journal>` → continue: a lock holder sent this start
+//!      after a rollback, or after its own recovery failed (U-29, U-29b).
+//!      Every start that carries the word reads the card it raises from the
+//!      header alone (`update_txn::after_rollback`): *Previous version
+//!      restored.* once a rolled-back transaction is retired, *Update
+//!      incomplete.* and the journal's folder while the transaction is still
+//!      `destructive` ([`failed`]) — a trial's start included;
 //!    - `preparing` / `deferred` → continue, unless this start's own image is
 //!      not the rescue copy of the build that began the transaction (the
 //!      folder was replaced by hand): then `H\<txn>` (its image detached first,
@@ -290,7 +296,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
         StartAction::RunAsTrial => Verdict::Continue {
             admission,
             trial,
-            failed: None,
+            failed,
         },
         action @ (StartAction::Retire | StartAction::Discard) => {
             retire(action, &header, start.home, lock, world);
@@ -448,11 +454,15 @@ fn delete(effect: Effect, txn: TxnId, home: &Home) -> Result<(), install_txn::Fa
 /// command line after `--then-launch`, and this process leaves.
 ///
 /// **A rescue build that is missing or cannot be started never stops the
-/// start** (coordinator ruling, 2026-09-27): one line names the program and
-/// the transaction, and the start continues as a waiting transaction's does —
-/// no journal write, no deletion. The state is left for the recovery's
-/// `Stuck` handling (U-22, U-24) to read; an app that never opens again is not
-/// an answer.
+/// start** (coordinator ruling, 2026-09-27). On a macOS bundle this start's
+/// own program runs the recovery instead (U-29b: the recovery door takes the
+/// home from the line, and the installed build is a build of the same
+/// publisher), so every phase is still finished and exactly one start
+/// follows. Where that cannot be started either — or on Windows, until U-24 —
+/// one line names the program and the transaction, and the start continues as
+/// a waiting transaction's does — no journal write, no deletion — on a macOS
+/// bundle with the *Update incomplete.* card and the home's folder. An app
+/// that never opens again is not an answer.
 fn hand_to_rescue(
     start: &Start<'_>,
     header: &Header,
@@ -463,26 +473,45 @@ fn hand_to_rescue(
     // A macOS rescue clone is found from the home the line names (F-3); the
     // Windows rescue build derives its home from its own path (F-2).
     let named = start.home.installed_bundle().map(|_| start.home.root());
-    match world.spawn_detached(&program, &cli::recover_command_line(named, start.argv)) {
+    let line = cli::recover_command_line(named, start.argv);
+    let mut refused = match world.spawn_detached(&program, &line) {
         Ok(()) => {
             world.say(&format!(
                 "BT_UPDATE_START an update is being finished by {}; Folio opens when it is done",
                 program.display()
             ));
-            Verdict::Exit(0)
+            return Verdict::Exit(0);
         }
-        Err(error) => {
-            world.say(&format!(
-                "BT_UPDATE_START transaction {} is unfinished and its rescue build {} could not be started ({error}); Folio starts without it",
-                header.txn,
-                program.display()
-            ));
-            Verdict::Continue {
-                admission,
-                trial: None,
-                failed: None,
+        Err(error) => format!("its rescue build {} ({error})", program.display()),
+    };
+    if named.is_some() {
+        match world.spawn_detached(start.own_exe, &line) {
+            Ok(()) => {
+                world.say(&format!(
+                    "BT_UPDATE_START an update is being finished by {} in place of {}; Folio opens when it is done",
+                    start.own_exe.display(),
+                    program.display()
+                ));
+                return Verdict::Exit(0);
+            }
+            Err(error) => {
+                refused.push_str(&format!(
+                    " or this build {} ({error})",
+                    start.own_exe.display()
+                ));
             }
         }
+    }
+    world.say(&format!(
+        "BT_UPDATE_START transaction {} is unfinished and {refused} could not be started; Folio starts without it",
+        header.txn,
+    ));
+    Verdict::Continue {
+        admission,
+        trial: None,
+        failed: named.map(|home| Failure::Incomplete {
+            folder: home.to_path_buf(),
+        }),
     }
 }
 
@@ -1315,6 +1344,77 @@ mod tests {
                     then_launch: Some(argv.to_vec()),
                 }))
             );
+        }
+
+        /// RED (U-29b) — **a macOS start whose rescue clone cannot be started
+        /// runs the recovery with its own program instead, the same line and
+        /// the home named, and leaves; only when that cannot be started either
+        /// does it go on — with the *Update incomplete.* card and the home's
+        /// folder, touching nothing.**
+        ///
+        /// The coordinator's ruling 1 (U-29b): the recovery is run "by the
+        /// rescue entrance (`--update-recover`) and, when the rescue cannot be
+        /// reached, by the ordinary start itself as R"; ruling 2: when recovery
+        /// cannot run, the start still opens with the card. On BASE the start
+        /// went on as if nothing were unfinished.
+        ///
+        /// MUTATION: in `hand_to_rescue`, skip the start of this start's own
+        /// program.
+        #[test]
+        fn an_unreachable_rescue_leaves_the_recovery_to_the_start_itself() {
+            let Some(scene) = Scene::new("own-program") else {
+                return;
+            };
+            let bundle = scene.root.join("Applications").join("Folio.app");
+            let exe = bundle.join(crate::update_txn::MACOS_EXECUTABLE_INSIDE);
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            std::fs::write(&exe, RUNNING_BUILD).unwrap();
+            let home = Home::of(bt_platform::HostPlatform::MacOs, &exe).unwrap();
+            let rescue = home.rescue_bundle(txn()).unwrap();
+            std::fs::create_dir_all(home.root()).unwrap();
+            let journal = Header {
+                txn: txn(),
+                rescue: rescue.to_string_lossy().into_owned(),
+                class: Class::Destructive,
+                outcome: crate::update_txn::HeaderOutcome::None,
+            }
+            .encode();
+            std::fs::write(home.journal(), &journal).unwrap();
+            let argv = [OsString::from("--tab")];
+            let start = Start {
+                own_exe: &exe,
+                home: &home,
+                argv: &argv,
+                trial: None,
+                failed: None,
+            };
+            let line = cli::recover_command_line(Some(home.root()), &argv);
+            let program = home.rescue_executable(txn()).unwrap();
+
+            let mut world = Recorded::default();
+            assert_eq!(exited(run(&start, &mut world)), 0);
+            assert_eq!(
+                world.spawned,
+                vec![(program.clone(), line.clone()), (exe.clone(), line.clone())]
+            );
+            assert_eq!(world.said.len(), 1, "{:?}", world.said);
+
+            std::fs::remove_file(&exe).unwrap();
+            let mut world = Recorded::default();
+            let Verdict::Continue { trial, failed, .. } = run(&start, &mut world) else {
+                panic!("a start that can start nothing goes on");
+            };
+            assert_eq!(world.spawned.len(), 2);
+            assert_eq!(trial, None);
+            assert_eq!(
+                failed,
+                Some(Failure::Incomplete {
+                    folder: home.root().to_path_buf()
+                })
+            );
+            assert_eq!(world.said.len(), 1, "{:?}", world.said);
+            assert_eq!(std::fs::read(home.journal()).unwrap(), journal);
+            assert!(world.entrances.is_empty());
         }
 
         /// RED (U-12) — **a journal this build cannot read is left exactly as it

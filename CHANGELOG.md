@@ -14,6 +14,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- On macOS, the coming updater now finishes an update that was cut off at any
+  point — a crash or a power cut while it was swapping the app, waiting for the
+  new one, or putting the old one back — at the next login or start, and
+  starting Folio always opens it. A new version that has not yet proven it
+  starts is only ever opened as a trial whose changes are held back; if the
+  old one cannot be put back, that trial can still complete the update. If
+  finishing fails, Folio opens with the update-incomplete card. Nothing can
+  start an update yet.
 - On macOS, the coming updater can now put the previous version back when a new
   one does not start: the new copy is asked to quit, the old app is swapped
   back in one step and opened again, and its update card says the previous
