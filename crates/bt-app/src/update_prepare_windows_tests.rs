@@ -1066,7 +1066,7 @@ fn the_applier_copy_is_verified_and_never_moved() {
         "the new set is the release's"
     );
     drop(job);
-    let _ = on_a_worker({
+    on_a_worker({
         let home = home.clone();
         move |worker| {
             if let AtLaunch::Counted(staged) = at_launch(worker, &home).unwrap() {
