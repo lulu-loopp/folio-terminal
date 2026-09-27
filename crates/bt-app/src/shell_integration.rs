@@ -2976,7 +2976,10 @@ mod tests {
                 program.clone(),
                 &command.arguments,
                 &command.environment,
-                bt_pty::PtySize::cells(200, 24),
+                bt_pty::PtySize::cells(
+                    std::num::NonZeroU16::new(200).unwrap(),
+                    std::num::NonZeroU16::new(24).unwrap(),
+                ),
                 Arc::new(|| {}),
                 Some(home.clone()),
             )
@@ -3001,6 +3004,10 @@ mod tests {
                 seen.push_str(&String::from_utf8_lossy(&chunk));
             }
             assert!(seen.contains(argv), "{id}: expected {argv:?} in {seen:?}");
+            // The shell's own answer, for a reader running this with `--nocapture`.
+            for line in seen.lines().filter(|line| line.starts_with("argv=/")) {
+                eprintln!("{id}: {}", line.trim_end());
+            }
             assert!(
                 seen.contains(&format!("path={MARKER}:")),
                 "{id}: the login file's PATH reached the pane: {seen:?}"
