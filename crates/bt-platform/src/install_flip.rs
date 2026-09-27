@@ -18,6 +18,12 @@
 //!   reports no pid) are both this list.
 //! * **[`still_running`]**: whether a process recorded by its pid *and* its
 //!   start time still runs — a pid alone may have been reused (F-7).
+//! * **[`ask`]** (U-29): a signal to a recorded process — `SIGTERM` to ask it
+//!   to quit, `SIGKILL` to end it — sent only after the process list shows
+//!   that very process (pid *and* start instant) running from one of the
+//!   given executables. The rollback stops the trial this way (§(b).2 W9/M9):
+//!   the trial was started by LaunchServices, so its stopper is not its
+//!   parent and has only the journal's record to go by.
 //!
 //! Worker only: the exchange flushes to the device. Refused by name (or an
 //! empty answer, for the reads) off macOS.
@@ -72,9 +78,53 @@ pub fn started_of(pid: u32) -> Option<u64> {
     imp::started_of(pid)
 }
 
+/// **What [`ask`] asks of a process.**
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ask {
+    /// `SIGTERM`: the ordinary request to quit, which a process may answer
+    /// in its own time (or ignore).
+    Quit,
+    /// `SIGKILL`: the end, which no process can refuse.
+    End,
+}
+
+/// **Whether `process` is running from one of `images`**: the process list of
+/// each executable ([`running_from`]) names its pid with the same start
+/// instant. An executable that cannot be looked at (a bundle that is not
+/// there) names nothing.
+///
+/// # Errors
+/// The process list could not be read; `Unsupported` off macOS.
+pub fn runs_from(process: Running, images: &[&Path]) -> io::Result<bool> {
+    for image in images {
+        match running_from(image) {
+            Ok(list) if list.contains(&process) => return Ok(true),
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(false)
+}
+
+/// **Send `ask` to `process`, if it is still that process running from one of
+/// `images`** — see the module header. Answers whether the signal was sent:
+/// `false` when the process list does not show it (it has ended, its pid was
+/// reused, or it runs some other program), and nothing is sent then.
+///
+/// # Errors
+/// The process list could not be read, or the signal was refused for a reason
+/// other than the process having just ended; `Unsupported` off macOS.
+pub fn ask(process: Running, images: &[&Path], ask: Ask) -> io::Result<bool> {
+    if !runs_from(process, images)? {
+        return Ok(false);
+    }
+    imp::signal(process.pid, ask)
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::Running;
+    use super::{Ask, Running};
     use std::ffi::OsStr;
     use std::io;
     use std::os::unix::ffi::OsStrExt;
@@ -153,11 +203,31 @@ mod imp {
         };
         (written == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
     }
+
+    pub(super) fn signal(pid: u32, ask: Ask) -> io::Result<bool> {
+        let pid = libc::pid_t::try_from(pid)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a pid past pid_t"))?;
+        let signal = match ask {
+            Ask::Quit => libc::SIGTERM,
+            Ask::End => libc::SIGKILL,
+        };
+        // SAFETY: `kill` takes two integers and touches no memory of ours.
+        if unsafe { libc::kill(pid, signal) } == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ESRCH) {
+            // It ended between the look and the signal.
+            Ok(false)
+        } else {
+            Err(error)
+        }
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
 mod imp {
-    use super::Running;
+    use super::{Ask, Running};
     use std::io;
     use std::path::Path;
 
@@ -170,6 +240,13 @@ mod imp {
 
     pub(super) fn started_of(_pid: u32) -> Option<u64> {
         None
+    }
+
+    pub(super) fn signal(_pid: u32, _ask: Ask) -> io::Result<bool> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "install_flip signals a process on macOS only",
+        ))
     }
 }
 
@@ -278,6 +355,61 @@ mod tests {
         let elsewhere = std::env::temp_dir().join(format!("bt-flip-none-{pid}"));
         std::fs::write(&elsewhere, b"").unwrap();
         assert!(running_from(&elsewhere).unwrap().is_empty());
+        let _ = std::fs::remove_file(&elsewhere);
+    }
+
+    /// RED (U-29) — **a signal reaches a recorded process only while the
+    /// process list shows that very process running from one of the given
+    /// executables**: another start instant, another image or a process that
+    /// has ended gets nothing, and `Quit` is `SIGTERM`, `End` is `SIGKILL`.
+    ///
+    /// Coordinator ruling 2 (U-29): "never touch a process whose image is not
+    /// the trial's executable and whose start time is not the journal's". The
+    /// processes are `/bin/sleep`, started and reaped by this test.
+    ///
+    /// MUTATION: in `ask`, signal without asking `runs_from` first.
+    #[test]
+    fn a_process_is_signalled_only_while_its_image_and_start_instant_match() {
+        #[cfg(target_os = "macos")]
+        signals_reach_only_the_recorded_process();
+        #[cfg(not(target_os = "macos"))]
+        {
+            let nobody = Running { pid: 1, started: 0 };
+            assert!(ask(nobody, &[Path::new("/bin/sleep")], Ask::Quit).is_err());
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn signals_reach_only_the_recorded_process() {
+        use std::os::unix::process::ExitStatusExt;
+
+        let sleep = Path::new("/bin/sleep");
+        let mut quits = crate::quiet_command(sleep).arg("30").spawn().unwrap();
+        let pid = quits.id();
+        let started = started_of(pid).expect("a process just started has a start instant");
+        let me = Running { pid, started };
+        let other_start = Running {
+            pid,
+            started: started + 1,
+        };
+        let elsewhere = std::env::temp_dir().join(format!("bt-flip-image-{pid}"));
+        std::fs::write(&elsewhere, b"").unwrap();
+        assert!(!ask(other_start, &[sleep], Ask::Quit).unwrap());
+        assert!(!ask(me, &[&elsewhere], Ask::Quit).unwrap());
+        assert!(!ask(me, &[Path::new("/nowhere/at/all")], Ask::Quit).unwrap());
+        assert!(runs_from(me, &[&elsewhere, sleep]).unwrap());
+        assert!(ask(me, &[&elsewhere, sleep], Ask::Quit).unwrap());
+        assert_eq!(quits.wait().unwrap().signal(), Some(libc::SIGTERM));
+        assert!(!ask(me, &[sleep], Ask::End).unwrap(), "it has ended");
+
+        let mut ends = crate::quiet_command(sleep).arg("30").spawn().unwrap();
+        let pid = ends.id();
+        let me = Running {
+            pid,
+            started: started_of(pid).unwrap(),
+        };
+        assert!(ask(me, &[sleep], Ask::End).unwrap());
+        assert_eq!(ends.wait().unwrap().signal(), Some(libc::SIGKILL));
         let _ = std::fs::remove_file(&elsewhere);
     }
 }
