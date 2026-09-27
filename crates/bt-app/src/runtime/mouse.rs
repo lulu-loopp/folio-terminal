@@ -16,9 +16,9 @@ use crate::{
     press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity,
     profiles, protocol_mouse_button, recoverable_wheel_scroll_amount, release_verdict, restore,
     right_press_raises_terminal_menu, risen_frame, route_forwarded_mouse_button,
-    route_forwarded_mouse_motion, search, seats, settings, settling, toast, tooltip, upright_wheel,
-    web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
-    write_pty_input,
+    route_forwarded_mouse_motion, search, seats, settings, settling, toast, tooltip, update,
+    upright_wheel, web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route,
+    wheel_zoom_notches, write_pty_input,
 };
 use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
 use anyhow::Context;
@@ -3901,9 +3901,18 @@ impl Runtime<'_> {
             // shut, turns to the row's own category and scrolls the row into view.
             // A second way of opening this dialog on a page would be a second set
             // of rules about what "open the settings" means.
+            //
+            // **A marked gear opens the marked row** (0.4.6 T-GEAR-MARK-LANDS;
+            // owner, 2026-09-27: 「齿轮上有个小标记,但点进去又没显示标记在哪里」).
+            // While the gear wears the update mark, the press lands on `General`
+            // with the update row scrolled into view — through the same door —
+            // so the reader is shown the row the dot was about, wearing the same
+            // dot. An unlit gear opens the dialog exactly as it always has.
             seats::ChromeTarget::Settings => {
                 if self.is_quake_window() {
                     self.open_settings_on_row(settings::SettingsRow::QuakeHotkey)?;
+                } else if update::gear_mark_is_lit() {
+                    self.open_settings_on_row(settings::SettingsRow::UpdateCheck)?;
                 } else {
                     self.toggle_settings_panel()?;
                 }

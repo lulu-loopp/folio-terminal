@@ -11,6 +11,10 @@ All notable changes to Folio are recorded here. The format follows
 - The Chinese settings dialog reads as a settings page: the descriptions
   are written statements, refer to things as 此 / 该 rather than 这个, and
   use one word for each thing across every page.
+- When the settings gear wears its update dot, clicking it opens Settings at
+  the update row, which wears the same dot for as long as you stay on the page;
+  the About page's Version row names the newer version and carries the same
+  button as the update row.
 
 ### Fixed
 
