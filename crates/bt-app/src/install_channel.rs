@@ -927,4 +927,122 @@ mod tests {
         );
         std::fs::remove_dir_all(&root).unwrap();
     }
+
+    /// The scoop manifest and the cask this repository publishes (U-2): the
+    /// sources `scripts/release/update-manifests.ps1` renders for a release.
+    const SCOOP_MANIFEST: &str = include_str!("../../../packaging/scoop/folio.json");
+    const CASK: &str = include_str!("../../../packaging/homebrew/folio.rb");
+
+    /// The one single-quoted JSON object in `text` — the marker a hook writes,
+    /// quoted as PowerShell and Ruby both quote a literal.
+    fn quoted_marker(text: &str) -> &str {
+        let found: Vec<_> = text.match_indices("'{").collect();
+        assert_eq!(found.len(), 1, "one quoted marker in {text}");
+        let start = found[0].0 + 1;
+        let end = start
+            + text[start..]
+                .find("}'")
+                .expect("the marker's closing quote")
+            + 1;
+        &text[start..end]
+    }
+
+    /// One hook's lines, out of the scoop manifest as scoop reads it.
+    fn scoop_hook(name: &str) -> String {
+        let manifest: serde_json::Value = serde_json::from_str(SCOOP_MANIFEST).unwrap();
+        manifest[name]
+            .as_array()
+            .unwrap_or_else(|| panic!("the scoop manifest has a {name} block"))
+            .iter()
+            .map(|line| line.as_str().unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// RED (U-2) — **the marker each package manager writes is one this build
+    /// reads as that manager's, with the hook the manifest runs.**
+    ///
+    /// The marker is written by scoop's `post_install` into `$dir` and by the
+    /// cask's `postflight` onto the bundle, from a literal in each manifest; a
+    /// literal this parser refuses turns every managed copy into `Unknown`, and
+    /// one that claims a hook the manifest does not run pre-ticks the Explorer
+    /// row for a copy whose uninstall leaves it behind. So the literal is read
+    /// out of the published sources and handed to [`Marker::parse`], and it
+    /// must be [`Marker::encode`]'s own spelling. The cask says
+    /// `uninstall_hook: false`: Homebrew runs a cask's `uninstall` steps on
+    /// `brew upgrade` too (E-10), so its cleanup is in `zap` only.
+    ///
+    /// MUTATION: in `packaging/scoop/folio.json`'s `post_install`, write
+    /// `"uninstall_hook":false` (or any key U-1 does not know).
+    #[test]
+    fn the_marker_each_package_manager_writes_reads_as_that_manager() {
+        let post_install = scoop_hook("post_install");
+        assert!(post_install.contains(MARKER_FILE_NAME), "{post_install}");
+        let scoop = quoted_marker(&post_install);
+        assert_eq!(
+            Marker::parse(scoop.as_bytes()),
+            Ok(Marker {
+                manager: Manager::Scoop,
+                uninstall_hook: true,
+            })
+        );
+        assert_eq!(scoop.as_bytes(), SCOOP_MARKER);
+
+        let postflight = &CASK[CASK.find("postflight do").expect("a postflight block")..];
+        let postflight = &postflight[..postflight.find("\n  end").unwrap()];
+        assert!(postflight.contains(MARKER_ATTRIBUTE), "{postflight}");
+        let homebrew = Marker {
+            manager: Manager::Homebrew,
+            uninstall_hook: false,
+        };
+        let cask = quoted_marker(postflight);
+        assert_eq!(Marker::parse(cask.as_bytes()), Ok(homebrew));
+        assert_eq!(cask, homebrew.encode());
+        assert_eq!(scoop, Marker::parse(SCOOP_MARKER).unwrap().encode());
+    }
+
+    /// RED (U-2) — **the line each manifest hands Folio's cleanup door is one
+    /// the door's own grammar accepts as the cleanup, not as a usage error.**
+    ///
+    /// `cli::uninstall_cleanup` answers anything after `--uninstall-cleanup`
+    /// but `--purge` with its usage line and exit 1, and a hook maps exit 1 to
+    /// "the uninstall goes on": a manifest that passed one more word (a
+    /// `--quiet` the door does not have) would uninstall every copy having
+    /// cleaned nothing, and say so only in a line scoop scrolls past. So the
+    /// words are read out of the two hooks and handed to the grammar.
+    ///
+    /// MUTATION: in `packaging/scoop/folio.json`'s `pre_uninstall`, run
+    /// `folio.exe --uninstall-cleanup --quiet`.
+    #[test]
+    fn the_cleanup_line_each_package_manager_runs_is_the_doors_own() {
+        let pre_uninstall = scoop_hook("pre_uninstall");
+        let (_, after) = pre_uninstall
+            .split_once("folio.exe\"")
+            .expect("the hook runs folio.exe");
+        // The words end where the pipe the hook waits on begins.
+        let scoop: Vec<_> = after[..after.find('|').unwrap()]
+            .split_whitespace()
+            .map(std::ffi::OsString::from)
+            .collect();
+
+        let zap = &CASK[CASK.find("zap script:").expect("a zap script")..];
+        assert!(
+            zap.contains("executable:   \"Folio.app/Contents/MacOS/folio\""),
+            "{zap}"
+        );
+        let args = &zap[zap.find("args:").unwrap()..];
+        let args = &args[args.find('[').unwrap() + 1..args.find(']').unwrap()];
+        let homebrew: Vec<_> = args
+            .split(',')
+            .map(|word| std::ffi::OsString::from(word.trim().trim_matches('"')))
+            .collect();
+
+        for words in [scoop, homebrew] {
+            assert_eq!(
+                crate::cli::uninstall_cleanup(words.clone()),
+                Some(Ok(false)),
+                "{words:?}"
+            );
+        }
+    }
 }

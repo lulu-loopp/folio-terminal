@@ -189,6 +189,11 @@ profile. Do not put a secret in one.
   and it writes nothing on its own: pressing **Done** presses the same Settings rows listed
   above, and **Not now** presses none of them. The only thing the card itself
   records is that it has been shown.
+- **A copy installed with scoop or Homebrew carries a note of that**, written
+  by the package manager and not by Folio: `folio-install.json` in scoop's
+  version folder, or an extended attribute on `Folio.app` from Homebrew. It says
+  which manager installed the copy and whether it runs Folio's cleanup when it
+  uninstalls it, nothing else, and it goes with the folder or the app.
 - Several `BT_*` environment variables make Folio write terminal content to a
   file you name — `BT_PTY_DUMP` writes every byte of every pane. None is set
   unless you set it. `docs/BT-ENVIRONMENT.md` lists all of them.

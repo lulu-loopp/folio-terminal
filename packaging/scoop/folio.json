@@ -1,0 +1,59 @@
+{
+    "##": [
+        "The source of lulu-loopp/scoop-folio's bucket/folio.json. scripts/release/update-manifests.ps1 renders it for a release (version, url, hash, extract_dir) and commits the result to the bucket.",
+        "post_install writes folio-install.json, the install channel marker Folio reads at start: this copy is scoop's, and scoop runs Folio's cleanup when it uninstalls it. scoop runs post_install at every install and update, into the new version folder, so every version folder carries its own marker.",
+        "pre_uninstall runs 'folio --uninstall-cleanup' on 'scoop uninstall' only. scoop also runs pre_uninstall on 'scoop update', and the cleanup removes what Folio set up outside its folder (the right-click menu, agent hooks, the PowerShell profile line), which an update must keep; $cmd is scoop's own name for the command being run. Exit 2 means a Folio is running and nothing was changed: the hook throws, and scoop stops with the app intact. Exit 1 means one removal was refused: the uninstall goes on, and the lines above say what stayed."
+    ],
+    "version": "0.4.5",
+    "description": "Terminal that typesets formulas where a command prints them, with files previewed beside the prompt",
+    "homepage": "https://github.com/lulu-loopp/folio-terminal",
+    "license": "MIT|Apache-2.0",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.5-preview/folio-0.4.5-windows-x64.zip",
+            "hash": "91c1a8bf5e0c09500c44aea2a78fe51258377486084b62027896ef45ceed2c98",
+            "extract_dir": "folio-0.4.5"
+        }
+    },
+    "bin": "folio.exe",
+    "shortcuts": [
+        [
+            "folio.exe",
+            "Folio"
+        ]
+    ],
+    "post_install": [
+        "[IO.File]::WriteAllText(\"$dir\\folio-install.json\", '{\"v\":1,\"manager\":\"scoop\",\"uninstall_hook\":true}')"
+    ],
+    "pre_uninstall": [
+        "if ($cmd -eq 'uninstall') {",
+        "    $cleanup = @(& \"$dir\\folio.exe\" --uninstall-cleanup | Write-Output)",
+        "    $code = $LASTEXITCODE",
+        "    $cleanup | ForEach-Object { Write-Host $_ }",
+        "    if ($code -eq 2) { throw \"$($cleanup -join ' ') scoop did not uninstall Folio. Close Folio, then run 'scoop uninstall folio' again.\" }",
+        "    if ($code -ne 0) { Write-Host \"Folio's cleanup ended with exit code $code; the lines above say what stayed.\" }",
+        "}"
+    ],
+    "notes": [
+        "The Explorer right-click entry (\"Open in Folio\") is switched on from inside Folio:",
+        "the first-run card, or Settings > General. It keeps working across 'scoop update'.",
+        "'scoop uninstall folio' removes it, and everything else Folio set up outside its folder. Your settings are kept."
+    ],
+    "checkver": {
+        "url": "https://api.github.com/repos/lulu-loopp/folio-terminal/releases/latest",
+        "jsonpath": "$.tag_name",
+        "regex": "v([\\d.]+)-preview"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/lulu-loopp/folio-terminal/releases/download/v$version-preview/folio-$version-windows-x64.zip",
+                "extract_dir": "folio-$version",
+                "hash": {
+                    "url": "https://github.com/lulu-loopp/folio-terminal/releases/download/v$version-preview/SHA256SUMS.txt",
+                    "regex": "([a-fA-F0-9]{64})\\s+$basename"
+                }
+            }
+        }
+    }
+}

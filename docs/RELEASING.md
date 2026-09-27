@@ -674,9 +674,13 @@ are updated after the release page exists, because both name it:
 ./scripts/release/update-manifests.ps1 -Version <version> -FromRelease   # from the release page
 ```
 
-It reads the two manifests as they stand — from their repositories, so a `zap`
-path or a `notes` line somebody added since survives — and replaces only the
-values above, each of which has to be there exactly once or nothing is printed.
+**The two files are rendered from this repository**: `packaging/homebrew/folio.rb`
+and `packaging/scoop/folio.json` are the cask and the bucket file as they should
+be published, hooks included (below). It replaces only the values above, each of
+which has to be there exactly once or nothing is printed, and prints the result
+as a difference from the file each repository holds today — so a line somebody
+changed in the tap or the bucket by hand shows as a line this run takes away.
+Such a line belongs in `packaging/`; the tap and the bucket are outputs.
 **Every hash is copied out of `SHA256SUMS.txt` and `SHA256SUMS-macos.txt`**,
 which are the hashes over the bytes that were uploaded; nothing is recomputed
 from a second download, for the reason winget's `InstallerSha256` follows the
@@ -704,7 +708,68 @@ which of the two is wrong.
 
 `scripts/release/macos/cask.sh` remains the one-file route for the cask alone,
 and is what **macOS ▸ The Homebrew tap** below describes; it is the answer to
-"there is no tap yet" and to a cask being edited on the Mac.
+"there is no tap yet" and to a cask being edited on the Mac. Without `--file` it
+renders the same `packaging/homebrew/folio.rb`.
+
+### The hooks: the install marker and the cleanup (0.4.6, U-2)
+
+Both manifests write the **install channel marker** Folio reads at start
+(`install_channel.rs`; `docs/RULES.md` §41), and both run Folio's cleanup door,
+`folio --uninstall-cleanup`, which undoes everything Folio set up outside its
+folder and keeps the reader's settings and data.
+
+| | scoop (`bucket/folio.json`) | Homebrew (`Casks/folio.rb`) |
+| --- | --- | --- |
+| **marker** | `post_install` writes `folio-install.json` into `$dir`, the version folder: `{"v":1,"manager":"scoop","uninstall_hook":true}` | `postflight` writes the attribute `io.github.lulu-loopp.folio.install` on the installed `Folio.app`: `{"v":1,"manager":"homebrew","uninstall_hook":false}` |
+| **written again** | at every install and every `scoop update` (into the new version folder) | at every install, `brew upgrade` and `brew reinstall` — a copy made without extended attributes loses it, and the next of these puts it back |
+| **cleanup** | `pre_uninstall`, on `scoop uninstall` only | `zap`, on `brew uninstall --zap` only |
+| **the door's exit 2** (a Folio is running; nothing changed) | the hook throws and scoop stops with the app intact | cannot stop anything: Homebrew has already taken the app away before a zap step runs; the zap goes on |
+| **exit 1** (a removal was refused) | the uninstall goes on; scoop's output has the door's lines | the zap goes on (`must_succeed: false`) |
+
+**Why the cleanup is not run on an update.** scoop runs `pre_uninstall` on
+`scoop update` too, before the new version's `post_install`; the hook runs the
+door only when scoop's own `$cmd` is `uninstall`. The cleanup has no form that
+keeps the right-click menu, the agent hooks and the PowerShell profile line, and
+an update must keep them.
+
+**Why the cask has no uninstall hook (E-10).** Homebrew runs a cask's
+`uninstall` steps — `quit:`, `launchctl:`, `script:` and the rest — on
+`brew upgrade` and `brew reinstall` as well as on `brew uninstall`:
+`Cask::Upgrade` calls `Installer#start_upgrade`, which calls
+`#uninstall_artifacts` with the successor, and `Artifact::Uninstall#uninstall_phase`
+skips only `signal:` there (`UPGRADE_REINSTALL_SKIP_DIRECTIVES`); a `script:` is
+run with the arguments the cask wrote and nothing that says which command this
+is (`AbstractUninstall#uninstall_script`). `zap` runs only from
+`brew uninstall --zap` (and `brew reinstall --zap`), after `#uninstall_artifacts`
+has copied the app back into the Caskroom (`Moved#move_back`) — which is where
+the zap's relative `Folio.app/Contents/MacOS/folio` points. So the marker says
+`uninstall_hook: false`, and a plain `brew uninstall` leaves Folio's marks
+outside the app, as it did before; `brew uninstall --zap` removes them.
+
+**The hooks run the door with `--uninstall-cleanup` and nothing else**: the
+door's grammar answers any other word with its usage line and exit 1, which a
+hook reads as "go on" — a copy uninstalled with nothing cleaned.
+`install_channel::tests::the_cleanup_line_each_package_manager_runs_is_the_doors_own`
+reads the words out of both manifests and hands them to that grammar.
+
+**Checked here, with no installer**: `scripts/ci/check-manager-hooks.ps1`
+(`ci.yml`, `release-script-tests`) — the manifest's fields, the cask's syntax,
+the renderer keeping the hooks byte for byte, and
+`exit_2_aborts_and_exit_1_continues`: the manifest's `pre_uninstall` run the way
+scoop runs a hook, against a stub `folio.exe` that exits 2, 1 and 0, under
+PowerShell 7 and 5.1. The stub is a window-subsystem program like Folio: a hook
+that assigned the door's output to a variable instead of piping it would not
+wait for it and would read no exit code, which is why the hook pipes.
+
+**Checked installed, by hand, before the manifests are published with them:**
+
+| script | where | who |
+| --- | --- | --- |
+| `scripts/release/check-scoop-hooks-in-vm.ps1 -Archive <folio-<version>-windows-x64.zip>` | a Windows test VM with scoop and no Folio | the coordinator |
+| `scripts/release/check-cask-hooks.sh <Folio-<version>-macos-arm64.dmg>` | a Mac with Homebrew and no `folio` cask installed; everything runs under a scratch `HOME` and `--appdir` | the owner |
+
+Each says what it checks at its top. The first changes the VM's account as a
+real uninstall would; the second touches nothing of the account it runs in.
 
 ## The sparse MSIX package
 
@@ -1208,11 +1273,12 @@ same reason: a hash taken from a second download is a hash of that download.
 on it, and anything that is not 64 lower-case hexadecimal digits.
 
 With `--file` only those two lines are replaced and everything else in the cask
-is left exactly as the tap has it. Run without `--file`, it prints the whole
-cask from the shape this repository knows about, which is the answer to "there
-is no tap yet" and not the way to update one. The `-preview` in the URL is part
-of the **tag**, not the version; a release tagged any other way needs that line
-changed once, by hand, in the tap.
+is left exactly as the tap has it. Run without `--file`, it renders
+`packaging/homebrew/folio.rb` — the cask's source, hooks included (**Distribution
+manifests ▸ The hooks**) — which is the answer to "there is no tap yet", and
+since 0.4.6 the file the tap should match. The `-preview` in the URL is part of
+the **tag**, not the version; a release tagged any other way needs that line
+changed once, in `packaging/homebrew/folio.rb`.
 
 ### The lane, and its four secrets
 

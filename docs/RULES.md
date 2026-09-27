@@ -1027,7 +1027,12 @@ scoop's own receipt in the version folder (`install.json` with `manifest.json`)
 also says scoop. With neither, the copy is ours only if its folder's owner is the
 account running Folio. Every failed read, and every marker or receipt that is
 malformed, of another version, partial or in disagreement, is **unknown**, never
-ours (`install_channel::classify`, ticket U-1). **And every such mark keeps a
+ours (`install_channel::classify`, ticket U-1). scoop's `post_install` writes the
+marker with `uninstall_hook: true`, and its `pre_uninstall` runs the door on
+`scoop uninstall` only — never on `scoop update` — and stops the uninstall on
+the door's exit 2; the cask's `postflight` writes it with `uninstall_hook:
+false`, since Homebrew runs uninstall steps on every upgrade, and the door runs
+from `zap` only (ticket U-2). **And every such mark keeps a
 format the previous version also reads** — the PSReadLine module install, the
 Explorer registration, the toast identity, the PowerShell profile line and the
 agent hooks — so an update's rollback leaves nothing the old build cannot repair
