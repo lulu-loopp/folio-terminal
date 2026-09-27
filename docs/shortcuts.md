@@ -88,16 +88,16 @@ Every key here can be changed on the Shortcuts page in Settings. Changing one wr
 | Ctrl+Shift+B | Shift+Cmd+B | 文件列 |  | `files-pane` |
 | Ctrl+Shift+G | Shift+Cmd+R | 文件列切到 Git |  | `git-page` |
 | Ctrl+, | Cmd+, | 设置 |  | `open-settings` |
-| Ctrl+S | Cmd+S | 保存打开的文档 | 在预览里 | `save-preview` |
-| Ctrl+Z | Cmd+Z | 撤销上次改动 | 在预览里 | `undo-preview` |
-| Ctrl+Y | Shift+Cmd+Z | 重做上次改动 | 在预览里 | `redo-preview` |
+| Ctrl+S | Cmd+S | 保存打开的文档 | 在预览中 | `save-preview` |
+| Ctrl+Z | Cmd+Z | 撤销上次改动 | 在预览中 | `undo-preview` |
+| Ctrl+Y | Shift+Cmd+Z | 重做上次改动 | 在预览中 | `redo-preview` |
 | Ctrl+Shift+↑ | Shift+Cmd+↑ | 上一条命令 | 在终端回滚区中 | `prev-command-mark` |
 | Ctrl+Shift+↓ | Shift+Cmd+↓ | 下一条命令 | 在终端回滚区中 | `next-command-mark` |
 | Ctrl+F | Cmd+F | 在本窗格中查找 | 有内容可搜索的地方 | `open-search` |
 | F3 | Cmd+G | 下一处匹配 | 查找打开时 | `next-match` |
 | Shift+F3 | Shift+Cmd+G | 上一处匹配 | 查找打开时 | `prev-match` |
 | Esc | Esc | 关闭搜索 | 查找打开时 | `close-search` |
-| Ctrl+L | Cmd+L | 地址 | 在网页里时 | `web-address` |
+| Ctrl+L | Cmd+L | 地址 | 在网页中 | `web-address` |
 | Ctrl+Shift+L | Shift+Cmd+L | 打开地址 |  | `window-address` |
-| F12 | Shift+Cmd+I | 开发者工具 | 在网页里时 | `web-devtools` |
+| F12 | Shift+Cmd+I | 开发者工具 | 在网页中 | `web-devtools` |
 | Win+` | Ctrl+` | 唤出终端 |  | `summon-quake` |
