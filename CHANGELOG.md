@@ -14,6 +14,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- A copy installed with winget is now told apart from one unpacked by hand, by
+  the record winget itself keeps of the install, so the coming updater will
+  point it at `winget upgrade --id WeiyiShi.Folio --exact` instead of updating
+  it itself.
 - scoop and Homebrew now mark the copies they install, so Folio can tell it is
   theirs, and clean up after Folio when they uninstall it: scoop on
   `scoop uninstall` (and not while Folio is running), Homebrew on

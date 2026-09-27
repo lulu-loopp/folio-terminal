@@ -2100,3 +2100,54 @@ runs removes the app anyway, changes nothing else, and the zap goes on to trash
 the data folder. The installed checks are `check-scoop-hooks-in-vm.ps1` (the
 coordinator's VM) and `check-cask-hooks.sh` (the owner's Mac, under a scratch
 `HOME`); `docs/RELEASING.md` "Distribution manifests ▸ The hooks" has the rest.
+
+**winget's record as built (U-4): E2 answered, Q1 read.** E2 (2026-09-27, the
+coordinator's clean Windows 11 machine, winget 1.6, the 0.4.0 manifest installed
+with `--manifest` — the real package is still unmerged, so only the key's source
+suffix differs) found winget's PortableARPEntry in `HKCU` only, HKLM and
+WOW6432Node untouched:
+
+```
+[HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall\WeiyiShi.Folio__DefaultSource]
+"WinGetPackageIdentifier"="WeiyiShi.Folio"
+"WinGetSourceIdentifier"="*DefaultSource"
+"UninstallString"="winget uninstall --product-code WeiyiShi.Folio__DefaultSource"
+"WinGetInstallerType"="portable"
+"DisplayName"="Folio"
+"DisplayVersion"="0.4.0"
+"Publisher"="<the manifest's Publisher>"
+"InstallDate"="20260928"
+"URLInfoAbout"="https://github.com/lulu-loopp/folio-terminal"
+"HelpLink"="https://github.com/lulu-loopp/folio-terminal/issues"
+"InstallDirectoryCreated"=dword:00000001
+"InstallLocation"="C:\\Users\\<user>\\AppData\\Local\\Microsoft\\WinGet\\Packages\\WeiyiShi.Folio__DefaultSource"
+```
+
+The key is `<PackageIdentifier>_<SourceIdentifier>` (from the real source
+`WeiyiShi.Folio_Microsoft.Winget.Source_8wekyb3d8bbwe`); it is not matched on.
+`InstallLocation` is the package root and the zip's top folder is kept inside
+it, so the executable is `<InstallLocation>\folio-<version>\folio.exe`.
+`winget uninstall --product-code <key>` removes the key, the folder and the
+`Links` alias and runs nothing of the package's, so a winget copy's
+`uninstall_hook` is `false`. **The containment rule:** `install_channel::winget`
+reads the subkeys of that one key through `bt_platform::install_evidence::
+uninstall_records` (read-only, `REG_SZ` only, bounded; a registry read, with no
+door — it is not file content and waits on nothing else) on the
+`bt-install-channel` worker at start, and a record counts when
+`WinGetPackageIdentifier` is `WeiyiShi.Folio`, `WinGetInstallerType` is
+`portable` and `InstallLocation` contains the running executable — both sides
+through `bt_platform::instance::canonical_path`, compared component by component
+without case, never string equality. One such record → `Managed(Winget)`,
+`uninstall_hook: false`, and the channel line names the key and the location; a
+record for another location changes nothing; a read that fails, a value of
+Folio's record that is not a string, a missing or relative location, two
+records containing the executable, or a record beside a marker or receipt of
+another manager → `Unknown`. `update::begin` already refuses a managed copy and
+U-19's row names `winget upgrade --id WeiyiShi.Folio --exact` with **Copy**.
+**The stale-Defender caveat:** on that machine `winget install` refused the zip
+with *Archive scan detected malware* while Defender's detection list stayed
+empty and a scan of the same archive found nothing; its signatures were from
+2023 and would not update — a failed scan reported as a detection, not a
+detection. The override is `winget settings --enable
+LocalArchiveMalwareScanOverride` and `--ignore-local-archive-malware-scan`, or an
+updated Defender (`docs/RELEASING.md` ▸ winget ▸ Troubleshooting).

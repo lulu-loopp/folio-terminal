@@ -1037,6 +1037,23 @@ an installer. The trigger is the release
 event and not a tag push, because a tag push here only builds an unsigned
 rehearsal and the release page is made by a person from the signed machine.
 
+### Troubleshooting
+
+- **winget says *Archive scan detected malware* on a machine whose Defender
+  cannot update.** Not a detection: E2 (2026-09-27) met it on a clean Windows 11
+  machine whose Defender signatures were years old and would not update; the
+  detection list was empty before and after, and a scan of the same archive
+  found nothing. The scan failed on a stale engine and winget reported the
+  failure as malware. Update Defender, or run
+  `winget settings --enable LocalArchiveMalwareScanOverride` (elevated, once)
+  and then install with `--ignore-local-archive-malware-scan`.
+- **How Folio tells a winget copy** (0.4.6, U-4): by the record winget writes
+  under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\<id>_<source>`
+  (`WinGetPackageIdentifier` `WeiyiShi.Folio`, `WinGetInstallerType` `portable`,
+  `InstallLocation` the package folder the executable sits inside). A copy that
+  reads as unknown there is a record Folio could not read; its line in
+  `diagnostics.log` says which.
+
 ## macOS
 
 A macOS release is a short sequence on the Mac and one step of it needs a

@@ -2452,6 +2452,7 @@ mod tests {
                 &root,
                 HostPlatform::Windows,
                 Ok(&me),
+                install_channel::WingetEvidence::None,
             ));
             let owner = crate::update::OfferState::load(&data, true);
             let mut job = job();

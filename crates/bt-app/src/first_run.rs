@@ -2580,6 +2580,7 @@ mod tests {
                 &root,
                 HostPlatform::Windows,
                 Ok(&me),
+                install_channel::WingetEvidence::None,
             ));
             assert_eq!(
                 channel, expected,

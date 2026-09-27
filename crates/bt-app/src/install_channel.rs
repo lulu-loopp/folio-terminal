@@ -11,6 +11,15 @@
 //! | **the install marker** | the file [`MARKER_FILE_NAME`] beside `folio.exe` | the extended attribute [`MARKER_ATTRIBUTE`] on the `.app` bundle directory — never a file inside the sealed bundle |
 //! | **scoop's own receipt** | `install.json` and `manifest.json`, which scoop writes into every version folder it installs | — |
 //! | **the folder's owner** | the owner SID of the install folder, against the process token's user and default owner | the bundle's owning uid, against the effective uid |
+//! | **winget's own record** | a subkey of `HKCU\…\CurrentVersion\Uninstall` with `WinGetPackageIdentifier` [`WINGET_PACKAGE_ID`], `WinGetInstallerType` `portable`, and an `InstallLocation` that contains the running executable (U-4) | — |
+//!
+//! winget is the one manager with no hook (a zip with a portable installer), so
+//! it cannot write a marker; its own uninstall record, written at install time
+//! and removed by its uninstall, stands in for one. Its `InstallLocation` is the
+//! package root and the executable sits one folder below it
+//! (`<InstallLocation>\folio-<version>\folio.exe`, E2), so a record counts when
+//! the location **contains** the executable, both canonicalised and compared
+//! component by component without case — never when a string equals another.
 //!
 //! The marker is written by the package manager at install time (U-2), never
 //! by Folio, and it leaves with the folder or bundle it sits in. Its format,
@@ -37,6 +46,12 @@
 //! anything the updater does. With every read answered:
 //!
 //! * a marker → [`Channel::Managed`] by the manager it names;
+//! * winget's record naming this executable, with no marker or a winget one
+//!   and no scoop receipt → managed by winget, with no uninstall hook (winget
+//!   runs nothing of the package's when it uninstalls, E2); a record beside a
+//!   marker or receipt of another manager, or two records that both contain the
+//!   executable, is `Unknown`, and a record for another location changes
+//!   nothing;
 //! * no marker and scoop's receipt → managed by scoop, with no known uninstall
 //!   hook (a scoop install whose `post_install` never ran);
 //! * neither, and the folder is this account's → [`Channel::Ours`];
@@ -54,7 +69,7 @@ use std::sync::OnceLock;
 
 use bt_platform::HostPlatform;
 use bt_platform::file_reads::{self, Lane};
-use bt_platform::install_evidence::{self, Account};
+use bt_platform::install_evidence::{self, Account, RecordValue, UninstallRecord};
 
 /// The Windows marker's name, beside `folio.exe`.
 pub const MARKER_FILE_NAME: &str = "folio-install.json";
@@ -71,6 +86,19 @@ pub(crate) const SCOOP_INSTALL_RECEIPT: &str = "install.json";
 pub(crate) const SCOOP_MANIFEST_RECEIPT: &str = "manifest.json";
 /// A receipt longer than this is not scoop's.
 const RECEIPT_MAX_BYTES: u64 = 1 << 20;
+/// Folio's package identifier in winget's source, and in the record winget
+/// writes when it installs it (`packaging/winget/…/WeiyiShi.Folio.installer.yaml`).
+pub const WINGET_PACKAGE_ID: &str = "WeiyiShi.Folio";
+/// The installer type winget records for a zip it unpacks.
+pub const WINGET_PORTABLE: &str = "portable";
+/// The values of an uninstall record this reader asks for, in the order
+/// [`winget`] reads them: identifier, installer type, location, source.
+pub const WINGET_RECORD_VALUES: [&str; 4] = [
+    "WinGetPackageIdentifier",
+    "WinGetInstallerType",
+    "InstallLocation",
+    "WinGetSourceIdentifier",
+];
 
 /// The package managers a marker can name.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
@@ -191,6 +219,32 @@ pub enum ReceiptEvidence {
     NotApplicable,
 }
 
+/// **winget's record of this copy**: the subkey's name, the install location
+/// it names, and the source it came from when the record says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WingetRecord {
+    pub key: String,
+    pub location: String,
+    pub source: Option<String>,
+}
+
+/// What the winget read found.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WingetEvidence {
+    /// No record of Folio's names this executable (there may be records for
+    /// other locations: other copies).
+    None,
+    /// One record names it.
+    Record(WingetRecord),
+    /// This many records of Folio's each contain the executable.
+    Several(usize),
+    /// The records could not be read, or one of Folio's is not a record this
+    /// build reads (`InvalidData`).
+    Unreadable(io::ErrorKind),
+    /// winget installs only on Windows; nothing was read.
+    NotApplicable,
+}
+
 /// What the owner read found.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum OwnerEvidence {
@@ -201,11 +255,12 @@ pub enum OwnerEvidence {
 }
 
 /// **Everything that was read about one install folder, and what it said.**
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Evidence {
     pub marker: MarkerEvidence,
     pub receipt: ReceiptEvidence,
     pub owner: OwnerEvidence,
+    pub winget: WingetEvidence,
 }
 
 /// **How this copy was installed.**
@@ -247,6 +302,24 @@ pub fn classify(evidence: &Evidence) -> Channel {
         OwnerEvidence::AnotherAccount => false,
         OwnerEvidence::Unreadable(_) => return Channel::Unknown,
     };
+    let winget = match evidence.winget {
+        WingetEvidence::None | WingetEvidence::NotApplicable => false,
+        WingetEvidence::Record(_) => true,
+        WingetEvidence::Several(_) | WingetEvidence::Unreadable(_) => return Channel::Unknown,
+    };
+    if winget {
+        return match (marker, receipt) {
+            (None, false) => Channel::Managed {
+                manager: Manager::Winget,
+                uninstall_hook: false,
+            },
+            (Some(marker), false) if marker.manager == Manager::Winget => Channel::Managed {
+                manager: Manager::Winget,
+                uninstall_hook: marker.uninstall_hook,
+            },
+            _ => Channel::Unknown,
+        };
+    }
     match (marker, receipt) {
         (Some(marker), true) if marker.manager != Manager::Scoop => Channel::Unknown,
         (Some(marker), _) => Channel::Managed {
@@ -283,13 +356,20 @@ pub fn install_root(exe: &Path, platform: HostPlatform) -> Option<PathBuf> {
 }
 
 /// **The reads**, over one install folder: the marker where `platform` keeps
-/// it, scoop's receipt on Windows, and the folder's owner against `me`.
+/// it, scoop's receipt on Windows, and the folder's owner against `me`;
+/// `winget` is what [`winget`] found, which asks of the executable rather than
+/// of the folder.
 ///
 /// Takes the folder rather than finding it, so that a test reads a temporary
 /// folder through exactly the calls the product makes and never the real
 /// install.
 #[must_use]
-pub fn read(root: &Path, platform: HostPlatform, me: Result<&Account, io::ErrorKind>) -> Evidence {
+pub fn read(
+    root: &Path,
+    platform: HostPlatform,
+    me: Result<&Account, io::ErrorKind>,
+    winget: WingetEvidence,
+) -> Evidence {
     let marker = match platform {
         HostPlatform::Windows => match capped(&root.join(MARKER_FILE_NAME), MARKER_MAX_BYTES) {
             Ok(Some(bytes)) => marker_evidence(&bytes),
@@ -318,7 +398,90 @@ pub fn read(root: &Path, platform: HostPlatform, me: Result<&Account, io::ErrorK
         marker,
         receipt,
         owner,
+        winget,
     }
+}
+
+/// **winget's record of the executable at `exe`**, on Windows, from the
+/// records `records` reads — [`install_evidence::uninstall_records`] in the
+/// product, a list the test spells otherwise.
+///
+/// Only records whose `WinGetPackageIdentifier` is [`WINGET_PACKAGE_ID`] are
+/// judged; every other program's record is passed over whatever it holds. Of
+/// Folio's, one whose installer type is not [`WINGET_PORTABLE`] is not one this
+/// install could have made and is passed over too; one whose values are not
+/// strings, or whose location is missing or not absolute, is `Unreadable`,
+/// since nobody can say it is not this copy's. A location counts when it
+/// contains `exe`, both canonicalised through
+/// [`bt_platform::instance::canonical_path`] (a link to the executable —
+/// winget's own `Links\folio.exe` — resolves to the file inside the package)
+/// and compared component by component without case.
+#[must_use]
+pub fn winget(
+    exe: &Path,
+    platform: HostPlatform,
+    records: impl FnOnce() -> io::Result<Vec<UninstallRecord>>,
+) -> WingetEvidence {
+    if platform != HostPlatform::Windows {
+        return WingetEvidence::NotApplicable;
+    }
+    let records = match records() {
+        Ok(records) => records,
+        Err(error) => return WingetEvidence::Unreadable(error.kind()),
+    };
+    let malformed = WingetEvidence::Unreadable(io::ErrorKind::InvalidData);
+    let exe = bt_platform::instance::canonical_path(exe);
+    let mut found = Vec::new();
+    for record in records {
+        let [id, kind, location, source] = record.values.as_slice() else {
+            return malformed;
+        };
+        match id {
+            RecordValue::Text(id) if id == WINGET_PACKAGE_ID => {}
+            RecordValue::Absent | RecordValue::Text(_) => continue,
+            RecordValue::Malformed => return malformed,
+        }
+        match kind {
+            RecordValue::Text(kind) if kind == WINGET_PORTABLE => {}
+            RecordValue::Absent | RecordValue::Text(_) => continue,
+            RecordValue::Malformed => return malformed,
+        }
+        let RecordValue::Text(location) = location else {
+            return malformed;
+        };
+        if !Path::new(location).is_absolute() {
+            return malformed;
+        }
+        if contains(
+            &bt_platform::instance::canonical_path(Path::new(location)),
+            &exe,
+        ) {
+            found.push(WingetRecord {
+                key: record.key,
+                location: location.clone(),
+                source: match source {
+                    RecordValue::Text(source) => Some(source.clone()),
+                    RecordValue::Absent | RecordValue::Malformed => None,
+                },
+            });
+        }
+    }
+    match found.len() {
+        0 => WingetEvidence::None,
+        1 => WingetEvidence::Record(found.remove(0)),
+        several => WingetEvidence::Several(several),
+    }
+}
+
+/// Whether `inner` lies strictly inside `outer`, component by component, with
+/// case folded as the Windows file system folds it.
+fn contains(outer: &Path, inner: &Path) -> bool {
+    let fold = |component: std::path::Component<'_>| {
+        component.as_os_str().to_string_lossy().to_lowercase()
+    };
+    let outer: Vec<_> = outer.components().map(fold).collect();
+    let inner: Vec<_> = inner.components().map(fold).collect();
+    !outer.is_empty() && inner.len() > outer.len() && inner.starts_with(&outer)
 }
 
 fn marker_evidence(bytes: &[u8]) -> MarkerEvidence {
@@ -372,26 +535,39 @@ fn capped(path: &Path, cap: u64) -> Result<Option<Vec<u8>>, io::ErrorKind> {
 
 /// **The fact, and what it was derived from.** `evidence` is the executable's
 /// own path's error when there was no folder to read.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Fact {
     pub evidence: Result<Evidence, io::ErrorKind>,
     pub channel: Channel,
 }
 
-/// The derivation the product runs: the executable's install folder, read and
-/// classified.
-fn derive_fact(exe: io::Result<PathBuf>, platform: HostPlatform, me: io::Result<Account>) -> Fact {
-    let root = exe
-        .map_err(|error| error.kind())
-        .and_then(|exe| install_root(&exe, platform).ok_or(io::ErrorKind::NotFound));
-    let evidence = root.map(|root| read(&root, platform, me.as_ref().map_err(io::Error::kind)));
+/// The derivation the product runs: the executable's install folder, and
+/// winget's records of the executable, read and classified.
+fn derive_fact(
+    exe: io::Result<PathBuf>,
+    platform: HostPlatform,
+    me: io::Result<Account>,
+    records: impl FnOnce() -> io::Result<Vec<UninstallRecord>>,
+) -> Fact {
+    let evidence = exe.map_err(|error| error.kind()).and_then(|exe| {
+        let root = install_root(&exe, platform).ok_or(io::ErrorKind::NotFound)?;
+        let winget = winget(&exe, platform, records);
+        Ok(read(
+            &root,
+            platform,
+            me.as_ref().map_err(io::Error::kind),
+            winget,
+        ))
+    });
     let channel = evidence.as_ref().map_or(Channel::Unknown, classify);
     Fact { evidence, channel }
 }
 
 impl Fact {
     /// The one `diagnostics.log` line: the channel, then each piece of
-    /// evidence. No path and no account name.
+    /// evidence. No account name, and no path but the install location of a
+    /// winget record that names this copy — winget's own words, as the record
+    /// holds them.
     #[must_use]
     pub fn line(&self) -> String {
         let channel = match self.channel {
@@ -435,7 +611,18 @@ impl Fact {
                     OwnerEvidence::AnotherAccount => "another account".to_owned(),
                     OwnerEvidence::Unreadable(kind) => format!("unreadable ({kind:?})"),
                 };
-                format!("marker {marker} · scoop receipt {receipt} · folder owner {owner}")
+                let winget = match &evidence.winget {
+                    WingetEvidence::None => "none".to_owned(),
+                    WingetEvidence::Record(record) => {
+                        format!("record {} at {}", record.key, record.location)
+                    }
+                    WingetEvidence::Several(count) => format!("{count} records"),
+                    WingetEvidence::Unreadable(kind) => format!("unreadable ({kind:?})"),
+                    WingetEvidence::NotApplicable => "not applicable".to_owned(),
+                };
+                format!(
+                    "marker {marker} · scoop receipt {receipt} · folder owner {owner} · winget {winget}"
+                )
             }
         };
         format!("Folio: install channel {channel} — {evidence}")
@@ -488,6 +675,7 @@ pub fn begin() {
                     std::env::current_exe(),
                     bt_platform::host_platform(),
                     install_evidence::current_account(),
+                    || install_evidence::uninstall_records(&WINGET_RECORD_VALUES),
                 )
             });
             crate::diagnostics::note(&fact.line());
@@ -530,12 +718,300 @@ mod tests {
     /// The Windows reads, on any host: the marker is a file there, and a file
     /// reads the same everywhere.
     fn derived(root: &Path, me: &Account) -> (Evidence, Channel) {
-        let evidence = read(root, HostPlatform::Windows, Ok(me));
-        (evidence, classify(&evidence))
+        let evidence = read(root, HostPlatform::Windows, Ok(me), WingetEvidence::None);
+        let channel = classify(&evidence);
+        (evidence, channel)
     }
 
     /// The bytes scoop's `post_install` writes (U-2).
     const SCOOP_MARKER: &[u8] = br#"{"v":1,"manager":"scoop","uninstall_hook":true}"#;
+
+    /// A machine with no uninstall records at all.
+    #[allow(clippy::unnecessary_wraps)]
+    fn no_records() -> io::Result<Vec<UninstallRecord>> {
+        Ok(Vec::new())
+    }
+
+    /// **A winget package folder as E2 found one**: `<location>` holding the
+    /// zip's own top folder, `folio-0.4.6\folio.exe` — a temporary folder,
+    /// never winget's. Returns the location and the executable.
+    fn winget_package(tag: &str) -> (PathBuf, PathBuf) {
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let location = std::env::temp_dir().join(format!(
+            "bt-install-channel-winget-{tag}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&location);
+        let version = location.join("folio-0.4.6");
+        std::fs::create_dir_all(&version).unwrap();
+        let exe = version.join("folio.exe");
+        std::fs::write(&exe, b"").unwrap();
+        (location, exe)
+    }
+
+    /// One uninstall record as the reader hands it over, every value a string.
+    fn record(key: &str, id: &str, kind: &str, location: &str) -> UninstallRecord {
+        UninstallRecord {
+            key: key.to_owned(),
+            values: vec![
+                RecordValue::Text(id.to_owned()),
+                RecordValue::Text(kind.to_owned()),
+                RecordValue::Text(location.to_owned()),
+                RecordValue::Text("*DefaultSource".to_owned()),
+            ],
+        }
+    }
+
+    /// E2's record (2026-09-27) for a package at `location`.
+    fn folio_record(location: &Path) -> UninstallRecord {
+        record(
+            "WeiyiShi.Folio__DefaultSource",
+            WINGET_PACKAGE_ID,
+            WINGET_PORTABLE,
+            &location.to_string_lossy(),
+        )
+    }
+
+    /// The fact the product derives for `exe` on Windows, with `records` as
+    /// what the registry holds.
+    fn derived_with(exe: &Path, records: Vec<UninstallRecord>) -> Fact {
+        derive_fact(
+            Ok(exe.to_path_buf()),
+            HostPlatform::Windows,
+            Ok(me()),
+            || Ok(records),
+        )
+    }
+
+    /// RED (U-4) — **a winget record whose install location contains this
+    /// executable makes the copy managed by winget, with no uninstall hook.**
+    ///
+    /// winget has no hook to write a marker, so its own record — written when
+    /// it installs, removed when it uninstalls — is the evidence (the design
+    /// note's (b).1, Q1 settled by Codex). E2: the executable sits one folder
+    /// below `InstallLocation`, so the test is containment, not equality, and
+    /// the record's spelling of the location differs in case from the one the
+    /// file system answers. The folder is this account's own, so without the
+    /// record the copy is `Ours` — the record is what decides. Another
+    /// program's record, with values of any type, is passed over.
+    ///
+    /// MUTATION: in `classify`, `WingetEvidence::Record(_) => false`.
+    #[test]
+    fn a_winget_record_naming_this_target_is_managed() {
+        let (location, exe) = winget_package("managed");
+        let spelled = location.to_string_lossy().to_uppercase();
+        let another = UninstallRecord {
+            key: "Another program".to_owned(),
+            values: vec![
+                RecordValue::Absent,
+                RecordValue::Malformed,
+                RecordValue::Malformed,
+                RecordValue::Absent,
+            ],
+        };
+        let fact = derived_with(&exe, vec![another, folio_record(Path::new(&spelled))]);
+        assert_eq!(
+            fact.channel,
+            Channel::Managed {
+                manager: Manager::Winget,
+                uninstall_hook: false,
+            }
+        );
+        assert_eq!(
+            fact.evidence
+                .as_ref()
+                .map(|evidence| evidence.winget.clone()),
+            Ok(WingetEvidence::Record(WingetRecord {
+                key: "WeiyiShi.Folio__DefaultSource".to_owned(),
+                location: spelled.clone(),
+                source: Some("*DefaultSource".to_owned()),
+            }))
+        );
+        let line = fact.line();
+        assert!(
+            line.starts_with("Folio: install channel managed by winget — marker absent")
+                && line.ends_with(&format!(
+                    " · winget record WeiyiShi.Folio__DefaultSource at {spelled}"
+                )),
+            "{line}"
+        );
+        assert_eq!(derived_with(&exe, Vec::new()).channel, Channel::Ours);
+        std::fs::remove_dir_all(&location).unwrap();
+    }
+
+    /// RED (U-4) — **a record of Folio's for another location changes
+    /// nothing**: it is another copy, and this one is what it was without it.
+    ///
+    /// E2: "a record whose `InstallLocation` does not contain this executable
+    /// changes nothing". The locations are a sibling package, a folder whose
+    /// name merely begins with this package's name (a string prefix, not a
+    /// parent), and this executable's own path, which contains nothing; beside
+    /// them a record of this location from an installer that is not winget's
+    /// portable one.
+    ///
+    /// MUTATION: in `winget`, push every portable record of Folio's whatever
+    /// `contains` answers.
+    #[test]
+    fn a_record_for_another_target_changes_nothing() {
+        let (location, exe) = winget_package("this");
+        let (other, _) = winget_package("other");
+        let prefixed = PathBuf::from(format!("{}-2", location.to_string_lossy()));
+        let records = vec![
+            folio_record(&other),
+            folio_record(&prefixed),
+            folio_record(&exe),
+            record(
+                "WeiyiShi.Folio_msix",
+                WINGET_PACKAGE_ID,
+                "msix",
+                &location.to_string_lossy(),
+            ),
+        ];
+        let fact = derived_with(&exe, records);
+        assert_eq!(fact, derived_with(&exe, Vec::new()));
+        assert_eq!(
+            fact.evidence.map(|evidence| evidence.winget),
+            Ok(WingetEvidence::None)
+        );
+        assert_eq!(fact.channel, Channel::Ours);
+        std::fs::remove_dir_all(&location).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+    }
+
+    /// RED (U-4) — **winget's record beside a marker or receipt of another
+    /// manager, or two records that both contain the executable, is
+    /// `Unknown`**; a winget marker agreeing with the record is winget.
+    ///
+    /// The (b).5 row names this test. Two records for two locations are two
+    /// copies and only one contains the executable; two that both contain it
+    /// (a package nested in another's folder) say nothing about which manager
+    /// owns this copy, and neither does a scoop marker or scoop's receipt in
+    /// the folder winget's record claims.
+    ///
+    /// MUTATION: in `classify`, answer `Managed { Winget, false }` for a
+    /// record whatever the marker and the receipt say.
+    #[test]
+    fn conflicting_evidence_is_unknown() {
+        let (location, exe) = winget_package("two");
+        let folder = exe.parent().unwrap();
+        let fact = derived_with(&exe, vec![folio_record(&location), folio_record(folder)]);
+        assert_eq!(
+            fact.evidence
+                .as_ref()
+                .map(|evidence| evidence.winget.clone()),
+            Ok(WingetEvidence::Several(2))
+        );
+        assert_eq!(fact.channel, Channel::Unknown);
+        assert!(
+            fact.line().ends_with(" · winget 2 records"),
+            "{}",
+            fact.line()
+        );
+
+        std::fs::write(folder.join(MARKER_FILE_NAME), SCOOP_MARKER).unwrap();
+        assert_eq!(
+            derived_with(&exe, vec![folio_record(&location)]).channel,
+            Channel::Unknown
+        );
+        std::fs::remove_file(folder.join(MARKER_FILE_NAME)).unwrap();
+
+        std::fs::write(folder.join(SCOOP_INSTALL_RECEIPT), br#"{"bucket":"folio"}"#).unwrap();
+        std::fs::write(
+            folder.join(SCOOP_MANIFEST_RECEIPT),
+            br#"{"version":"0.4.6"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            derived_with(&exe, vec![folio_record(&location)]).channel,
+            Channel::Unknown
+        );
+        std::fs::remove_file(folder.join(SCOOP_INSTALL_RECEIPT)).unwrap();
+        std::fs::remove_file(folder.join(SCOOP_MANIFEST_RECEIPT)).unwrap();
+
+        std::fs::write(
+            folder.join(MARKER_FILE_NAME),
+            br#"{"v":1,"manager":"winget","uninstall_hook":false}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            derived_with(&exe, vec![folio_record(&location)]).channel,
+            Channel::Managed {
+                manager: Manager::Winget,
+                uninstall_hook: false,
+            }
+        );
+        std::fs::remove_dir_all(&location).unwrap();
+    }
+
+    /// RED (U-4) — **a registry read that fails, or a record of Folio's that
+    /// is not one this build reads, is `Unknown` — kept apart from "no
+    /// record", which would be `Ours`.**
+    ///
+    /// The coordinator's ruling 2 on E2: "A registry read that fails (access
+    /// denied, malformed value types) → `Unknown`, kept apart from 'no record'
+    /// in the evidence." Each case sits in this account's own folder. Off
+    /// Windows the reader is never asked.
+    ///
+    /// MUTATION: in `winget`, map an `Err` from `records()` to
+    /// `WingetEvidence::None`.
+    #[test]
+    fn an_unreadable_registry_is_unknown_not_none() {
+        let (location, exe) = winget_package("unreadable");
+        let fact = derive_fact(Ok(exe.clone()), HostPlatform::Windows, Ok(me()), || {
+            Err(io::Error::from(io::ErrorKind::PermissionDenied))
+        });
+        assert_eq!(
+            fact.evidence
+                .as_ref()
+                .map(|evidence| evidence.winget.clone()),
+            Ok(WingetEvidence::Unreadable(io::ErrorKind::PermissionDenied))
+        );
+        assert_eq!(fact.channel, Channel::Unknown);
+        assert!(
+            fact.line()
+                .ends_with(" · winget unreadable (PermissionDenied)"),
+            "{}",
+            fact.line()
+        );
+
+        let with = |location: RecordValue| UninstallRecord {
+            key: "WeiyiShi.Folio__DefaultSource".to_owned(),
+            values: vec![
+                RecordValue::Text(WINGET_PACKAGE_ID.to_owned()),
+                RecordValue::Text(WINGET_PORTABLE.to_owned()),
+                location,
+                RecordValue::Absent,
+            ],
+        };
+        for malformed in [
+            with(RecordValue::Malformed),
+            with(RecordValue::Absent),
+            with(RecordValue::Text(String::new())),
+            with(RecordValue::Text("folio-0.4.6".to_owned())),
+            UninstallRecord {
+                key: "WeiyiShi.Folio__DefaultSource".to_owned(),
+                values: vec![RecordValue::Malformed; 4],
+            },
+        ] {
+            let fact = derived_with(&exe, vec![malformed.clone()]);
+            assert_eq!(
+                fact.evidence.map(|evidence| evidence.winget),
+                Ok(WingetEvidence::Unreadable(io::ErrorKind::InvalidData)),
+                "{malformed:?}"
+            );
+            assert_eq!(fact.channel, Channel::Unknown, "{malformed:?}");
+        }
+
+        let fact = derive_fact(Ok(exe), HostPlatform::MacOs, Ok(me()), || {
+            panic!("the registry is asked only on Windows")
+        });
+        assert_eq!(
+            fact.evidence.map(|evidence| evidence.winget),
+            Ok(WingetEvidence::NotApplicable)
+        );
+        std::fs::remove_dir_all(&location).unwrap();
+    }
 
     /// RED (U-1) — **a well-formed marker makes this copy managed, by the
     /// manager it names and with the hook it states.**
@@ -657,6 +1133,7 @@ mod tests {
                 marker: MarkerEvidence::Absent,
                 receipt: ReceiptEvidence::Absent,
                 owner: OwnerEvidence::ThisAccount,
+                winget: WingetEvidence::None,
             }
         );
         assert_eq!(channel, Channel::Ours);
@@ -886,7 +1363,7 @@ mod tests {
         let root = install_folder("derive");
         std::fs::write(root.join(MARKER_FILE_NAME), SCOOP_MARKER).unwrap();
         let exe = root.join("folio.exe");
-        let fact = derive_fact(Ok(exe.clone()), HostPlatform::Windows, Ok(me()));
+        let fact = derive_fact(Ok(exe.clone()), HostPlatform::Windows, Ok(me()), no_records);
         assert_eq!(
             fact.channel,
             Channel::Managed {
@@ -903,12 +1380,18 @@ mod tests {
         );
         assert!(!line.contains(&*root.to_string_lossy()), "{line}");
 
-        let fact = derive_fact(Ok(exe.clone()), HostPlatform::OtherUnix, Ok(me()));
+        let fact = derive_fact(
+            Ok(exe.clone()),
+            HostPlatform::OtherUnix,
+            Ok(me()),
+            no_records,
+        );
         assert_eq!(fact.channel, Channel::Unknown);
         let fact = derive_fact(
             Ok(exe),
             HostPlatform::Windows,
             Err(io::Error::from(io::ErrorKind::PermissionDenied)),
+            no_records,
         );
         assert_eq!(
             fact.evidence.map(|evidence| evidence.owner),
@@ -919,6 +1402,7 @@ mod tests {
             Err(io::Error::from(io::ErrorKind::NotFound)),
             HostPlatform::Windows,
             Ok(me()),
+            no_records,
         );
         assert_eq!(fact.channel, Channel::Unknown);
         assert!(

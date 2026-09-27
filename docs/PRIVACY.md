@@ -194,6 +194,13 @@ profile. Do not put a secret in one.
   version folder, or an extended attribute on `Folio.app` from Homebrew. It says
   which manager installed the copy and whether it runs Folio's cleanup when it
   uninstalls it, nothing else, and it goes with the folder or the app.
+- **A copy installed with winget is told by winget's own record of it.** winget
+  writes no note into the folder; at start Folio reads, without changing
+  anything, the uninstall entries of your account in the Windows registry
+  (`HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Uninstall`)
+  and looks for the one winget wrote for Folio, to see whether it names this
+  copy's folder. Other programs' entries are passed over. What it found is one
+  line of `diagnostics.log`, with the folder winget recorded.
 - Several `BT_*` environment variables make Folio write terminal content to a
   file you name — `BT_PTY_DUMP` writes every byte of every pane. None is set
   unless you set it. `docs/BT-ENVIRONMENT.md` lists all of them.
