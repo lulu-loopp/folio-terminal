@@ -16,7 +16,8 @@
 #
 # Seeded 2026-09-26 from the note's §2 table (its dated TSV beside this file)
 # for the facts it lists; the thirteen it does not list were annotated by
-# reading their writers at census-1.
+# reading their writers at census-1; their notes say "proposed by census-1",
+# for the owner to confirm.
 fact	part	class	proposed_owner	note
 App.activated	-	LIFE	windows	the 2026-09-25 table
 App.copilot_readiness	-	OBS	first_run	the 2026-09-25 table
@@ -27,24 +28,24 @@ App.favicons_changed	-	PROJ	web	the 2026-09-25 table
 App.file_indexes	-	OBS	files	the 2026-09-25 table
 App.first_run_attempted	-	LIFE	first_run	the 2026-09-25 table
 App.handoff_lane	-	RES	handoff	the 2026-09-25 table
-App.keybindings_store	-	DUR	keyboard	census-1
+App.keybindings_store	-	DUR	keyboard	proposed by census-1
 App.pending_application_change	-	PROJ	diagnostics	the 2026-09-25 table
 App.pending_handover	-	LIFE	windows	the 2026-09-25 table
 App.pending_new_windows	-	LIFE	windows	the 2026-09-25 table
 App.pending_restore_answer	-	ASYNC	windows	the 2026-09-25 table
-App.pins_store	-	DUR	files	census-1
+App.pins_store	-	DUR	files	proposed by census-1
 App.profiles_store	-	DUR	profiles	the 2026-09-25 table
 App.quake	-	LIFE	quake	the 2026-09-25 table
 App.quit	-	LIFE	windows	the 2026-09-25 table
 App.recent	-	DUR	windows	the 2026-09-25 table
-App.recent_folders	-	DUR	files	census-1
+App.recent_folders	-	DUR	files	proposed by census-1
 App.restore_question	-	DUR	windows	the 2026-09-25 table
 App.session_store	-	DUR	windows	the 2026-09-25 table
 App.settings_store	-	DUR	main[settings]	the 2026-09-25 table
 App.shortcuts	-	DUR	keyboard	the 2026-09-25 table
 App.tab_ids	-	LIFE	tabs	the 2026-09-25 table
-App.web_spare	-	LIFE	web	census-1
-App.web_warmup	-	LIFE	web	census-1
+App.web_spare	-	LIFE	web	proposed by census-1
+App.web_warmup	-	LIFE	web	proposed by census-1
 LeafSession.attention	-	LIFE	attention (→ bt-workbench)	the 2026-09-25 table
 LeafSession.frame_image_references	-	PROJ	frame	the 2026-09-25 table
 LeafSession.integration_offer	-	OBS	terminal	the 2026-09-25 table
@@ -81,7 +82,7 @@ WindowRuntime.advanced_reveal_sample	-	PROJ	main[settings]	the 2026-09-25 table
 WindowRuntime.animations	-	PROJ	preview	the 2026-09-25 table
 WindowRuntime.cards	-	PROJ	main[focus]	the 2026-09-25 table
 WindowRuntime.chevrons	-	VIEW	floats	the 2026-09-25 table
-WindowRuntime.chrome_marks	-	PROJ	frame	census-1
+WindowRuntime.chrome_marks	-	PROJ	frame	proposed by census-1
 WindowRuntime.chrome_present_pending	-	PROJ	frame	the 2026-09-25 table
 WindowRuntime.command_flash	-	VIEW	terminal	the 2026-09-25 table
 WindowRuntime.command_rails	-	PROJ	panes	the 2026-09-25 table
@@ -100,8 +101,8 @@ WindowRuntime.float_drag	-	VIEW	floats	the 2026-09-25 table
 WindowRuntime.float_git_pages_shown	-	PROJ	git	the 2026-09-25 table
 WindowRuntime.float_head_press	-	VIEW	floats	the 2026-09-25 table
 WindowRuntime.float_hover	-	VIEW	floats	the 2026-09-25 table
-WindowRuntime.focus_mode	-	VIEW	focus	census-1
-WindowRuntime.focus_reveal	-	VIEW	focus	census-1
+WindowRuntime.focus_mode	-	VIEW	focus	proposed by census-1
+WindowRuntime.focus_reveal	-	VIEW	focus	proposed by census-1
 WindowRuntime.folder_pick	-	ASYNC	files	the 2026-09-25 table
 WindowRuntime.formula_overlay_owed	-	PROJ	math	the 2026-09-25 table
 WindowRuntime.frame_clock	-	PROJ	frame	the 2026-09-25 table
@@ -111,7 +112,7 @@ WindowRuntime.graph_filter_menu	-	VIEW	git	the 2026-09-25 table
 WindowRuntime.hover_pane	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.hyperlink_hover	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.image_pick_pending	-	ASYNC	the requester recorded with the pick	revision (b)4: background image, profile program or settings import, as FolderPick records its purpose; the single preview owner is withdrawn
-WindowRuntime.ime_cursor	-	VIEW	keyboard	census-1
+WindowRuntime.ime_cursor	-	VIEW	keyboard	proposed by census-1
 WindowRuntime.ime_report	-	PROJ	keyboard	the 2026-09-25 table
 WindowRuntime.ime_report_due	-	PROJ	keyboard	the 2026-09-25 table
 WindowRuntime.ime_system_caret	-	PROJ	keyboard	the 2026-09-25 table
@@ -136,9 +137,9 @@ WindowRuntime.pending_math_context_anchor	-	VIEW	math	the 2026-09-25 table
 WindowRuntime.placeholder_tab	-	LIFE	windows	the 2026-09-25 table
 WindowRuntime.preedit	-	VIEW	keyboard	the 2026-09-25 table
 WindowRuntime.present_diagnostics	-	PROJ	frame	the 2026-09-25 table
-WindowRuntime.preview_menu	-	VIEW	preview	census-1
+WindowRuntime.preview_menu	-	VIEW	preview	proposed by census-1
 WindowRuntime.preview_name_clicks	-	VIEW	preview	the 2026-09-25 table
-WindowRuntime.profile_menu	-	VIEW	profiles	census-1
+WindowRuntime.profile_menu	-	VIEW	profiles	proposed by census-1
 WindowRuntime.psreadline_invite	-	OBS	first_run	the 2026-09-25 table
 WindowRuntime.psreadline_size_changed	-	VIEW	first_run	the 2026-09-25 table
 WindowRuntime.pty_coalesce	-	PROJ	terminal	the 2026-09-25 table
@@ -147,9 +148,9 @@ WindowRuntime.rename	-	VIEW	tabs	the 2026-09-25 table
 WindowRuntime.rename_blink	-	VIEW	tabs	the 2026-09-25 table
 WindowRuntime.rename_caret_line	-	PROJ	tabs	the 2026-09-25 table
 WindowRuntime.renderer	-	RES	—	the 2026-09-25 table
-WindowRuntime.restore_prompt	-	VIEW	windows	census-1: the restore card, ruled a full-window gate on 2026-09-25
+WindowRuntime.restore_prompt	-	VIEW	windows	proposed by census-1: the restore card, ruled a full-window gate on 2026-09-25
 WindowRuntime.revealed_foot	-	ASYNC	handoff	the 2026-09-25 table
-WindowRuntime.root_menu	-	VIEW	profiles	census-1
+WindowRuntime.root_menu	-	VIEW	profiles	proposed by census-1
 WindowRuntime.row_press	-	VIEW	mouse	the 2026-09-25 table
 WindowRuntime.search	-	VIEW	search	the 2026-09-25 table
 WindowRuntime.search_scan	-	PROJ	search	the 2026-09-25 table

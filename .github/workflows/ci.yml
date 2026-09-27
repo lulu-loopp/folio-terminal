@@ -256,6 +256,42 @@ jobs:
           }
           exit 0
 
+      # The census's unknown list is compared by its total, so a row added by
+      # hand must go red and a row whose key moved (a function moved to another
+      # module, census-7's case) must stay green.
+      - name: the census-unknowns gate fails on a planted row and passes a moved key
+        shell: pwsh
+        run: |
+          $file = (Resolve-Path "docs/plans/design/ownership-census-unknowns.tsv").Path
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "?.title`tcrate::planted`tprobe`ta planted row`t1`n")
+            $failed = $false
+            try {
+              & ./scripts/ci/check-census-unknowns.ps1
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "the census's unknown list accepted a hand-added row"
+            }
+            $lines = $original -split "`n"
+            $header = $false
+            for ($at = 0; $at -lt $lines.Count; $at++) {
+              if ($lines[$at].Length -eq 0 -or $lines[$at].StartsWith("#")) { continue }
+              if (-not $header) { $header = $true; continue }
+              $columns = $lines[$at].Split("`t")
+              $columns[1] = "crate::moved"
+              $lines[$at] = $columns -join "`t"
+              break
+            }
+            [IO.File]::WriteAllText($file, ($lines -join "`n"))
+            & ./scripts/ci/check-census-unknowns.ps1
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
   # ── everything that is decided by reading, not by hardware ────────────────
   logic:
     runs-on: windows-2025
@@ -368,6 +404,13 @@ jobs:
       - name: the migration-debt list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-migration-debt.ps1
+
+      # The ownership census's unknown sites, the same rule across commits:
+      # bt-source's `census` test holds the code to the committed list, and
+      # this holds the list's total to the merge base's (or census-1's seed).
+      - name: the census's unknown sites only shrink
+        shell: pwsh
+        run: ./scripts/ci/check-census-unknowns.ps1
 
       # `check-vendor-notices.ps1` reads upstream alacritty 0.26.0 out of the
       # registry to diff it against `vendor/`, so the sources have to be there.
