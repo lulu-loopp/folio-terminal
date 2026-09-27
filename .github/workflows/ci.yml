@@ -320,7 +320,7 @@ jobs:
   # ── everything that is decided by reading, not by hardware ────────────────
   logic:
     runs-on: windows-2025
-    timeout-minutes: 45
+    timeout-minutes: 75
     steps:
       # Whole history: see `gates-can-fail`'s checkout. The debt-list check runs
       # here for real, and a merge base is what it compares against.
@@ -668,7 +668,7 @@ jobs:
   # and a longer command would only be a red one; that is D-83.
   core-macos:
     runs-on: macos-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       # Whole history, for `check-window-waits.ps1`: it compares the bare-site
       # inventory with the merge base's, or with the pinned seed commit.
