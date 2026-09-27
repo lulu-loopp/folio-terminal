@@ -14,6 +14,12 @@ place and keep their ids; rows that the review asked to split carry a letter
 (V9a/V9b …). §3 gained rows; §4, §5 and §6 were rewritten. Where this header and
 the text below disagree with revision (a), revision (b) rules.
 
+**Revision (c), 2026-09-27, after Codex's scoped check of (b)** (*one more
+pass*: 11 findings closed, 4 partly; six new findings, all adopted). C2 gains
+two modes; C3a gains the shared web read boundary and T4 the comment read
+endpoint; I3, I4, I5 and I7 were reconciled; 0.5.8 promises P2's design only;
+§9's locators were finished. No slice moved. §10 records it.
+
 The owner's ask (2026-09-27): *"Shouldn't all the feature increments 0.5 is to
 implement be gathered up, with their dependencies worked out, and written into
 one plan-and-schedule document?"* His leaning the same day: design once,
@@ -59,7 +65,7 @@ not by location):
 |---|---|
 | IDX | the 0.4.4–0.4.7 ticket index (`tickets-044/00-INDEX.md`) |
 | PS n | the prototype's status file (`proto/STATUS.md`), owner review item *n* |
-| TF | the agent tool-face design note, 2026-09-24, with its Codex review and the owner's rulings |
+| TF | `design-agent-tool-face-2026-09-24.md` (the coordinator's records): the tool-face design note, its folded Codex review and the owner's rulings; the rulings at its end rule over its original §§1–6 |
 | mem:*name* | the coordinator memory note whose file is exactly `name.md`, cited with the date of the line used |
 
 `docs/handoff/HANDOFF-2026-08-21.md` was read and holds nothing about 0.5 later
@@ -80,7 +86,10 @@ did not finish" rides in 0.5.0) is withdrawn.
 1. **The architecture ledger reads zero at the end of 0.4.7** (SD header,
    2026-09-23; versions ruled 2026-09-24). 0.4.7 carries the first slices the
    owner wanted before 0.5: D-1, D-9, D-12, D-15, D-17 (SD, "The versions").
-   Only D-43, D-44 and D-59 stay deferred.
+   Only D-43, D-44 and D-59 stay deferred — and D-41, whose construction the
+   owner deferred pending a measurement-based decision (WTB §R-E; gate I7,
+   revision (c)). D-41 is not repaid; it is a conditional exception, not a
+   prerequisite.
 2. **`docs/design/UI-DEVIATIONS.md` is empty before 0.5 starts** (owner
    2026-09-22/23; IDX §0.4.5 exit criterion). "UI unification is finished in
    0.4; 0.5 only adds new things" (mem:ui-design-05-approach-0922, 2026-09-23).
@@ -111,11 +120,11 @@ feature.
 |---|---|---|---|---|---|
 | I1 | The first slices the owner wanted before 0.5 | A3 (D-1), A4 (D-54), A5 (D-17), A6 (D-9), A12 (D-12, D-15); C1 is their note | SD "The versions" (owner, 2026-09-24) | ruled (0.4.7) | each row repaid on the ledger |
 | I2 | `docs/design/UI-DEVIATIONS.md` at zero | 0.4.5 tickets 23–31 | IDX 0.4.5 exit criterion (owner, 2026-09-22/23) | ruled | the file's Totals line reads 0 |
-| I3 | The rest of the architecture ledger | A1 (census-4: D-57, D-48), A2 (census-5a/5b: D-8), A8 (the other 0.4.7 rows), D3 (D-65, D-66) | SD header and table | ruled (0.4.6 / 0.4.7) | the ledger reads zero at the end of 0.4.7, except D-43, D-44 and D-59 (deferred with reasons) |
-| I4 | The thread door's remaining families and the lint | A11 = TD A2b–A2e | TD (i)1 | ruled 0.4.6; all four move together to 0.4.7 only if capacity requires, with the pending-lint statement kept | the bare-site list is empty and deleted (A2e) |
-| I5 | The window-thread budget's remaining tickets | engineering A4 (the earliest window's allowance) and B4–B9 (the marks record and the stores on the storage lane, PSReadLine observation, the macOS locale, the macOS watcher's lifecycle, device recovery on a worker); B10 once A2b opens it | WTB §R-F; its §C-8 ("the rest of (b)'s §R-F is unchanged"); TD §11 (B4, B7, B9 need A1b's `WorkerCtx`) | ruled (0.4.6) | D-34, D-35, D-36, D-39, D-40, D-42, D-47 and D-77 repaid; the aggregate-scheduling row A4 opens is written |
+| I3 | The rest of the architecture ledger | A1 (census-4: D-57, D-48), A2 (census-5a/5b: D-8), A8 (the other 0.4.7 rows), D3 (D-65, D-66) | SD header and table | ruled (0.4.6 / 0.4.7) | the ledger reads zero at the end of 0.4.7, except D-43, D-44 and D-59 (deferred with reasons) and D-41 (I7's conditional exception); **D-47's document half** — row 20's preserving save, which WTB §R-F leaves separately designed and which B8 does not repay — closes by its own reviewed design, on the version the ledger gives it |
+| I4 | The thread door's remaining families and the lint | A11 = TD A2b–A2e | TD (i)1 | ruled 0.4.6; all four move together to 0.4.7 only if capacity requires, with the pending-lint statement kept | the lint established on both product jobs (A2e), the bare-site list empty and deleted. An empty list proves every listed effect goes through a door; it repays none of the effects the doors record. **The transport-authority residual** — `bt-pty`'s transport waits are fenced by owner and count, not by thread authority (TD (c)6 item 1, (i)5) — is carried as its own debt row, which TD's revision (k) opens, on the version (k) gives it |
+| I5 | The window-thread budget's remaining tickets | engineering A4 (the earliest window's allowance) and B4–B9 (the marks record and the stores on the storage lane, PSReadLine observation, the macOS locale, the macOS watcher's lifecycle, device recovery on a worker); B10 (the window thread's file observation), whose brief and allocation TD's revision (k) writes | WTB §R-F; its §C-8 ("the rest of (b)'s §R-F is unchanged"); TD §11 (B4, B7, B9 need A1b's `WorkerCtx`); TD (j)9, (j)10 (revision (k) owns B10's brief and the transport debt row) | ruled (0.4.6) | **Work, not bookkeeping:** A4's `TurnAllowance`, taken from the earliest active window's `FrameClock`, is implemented and the search walk and the idle calls consult it, *and* the aggregate-scheduling row it opens is written; B4–B9 land, repaying D-34, D-35, D-36, D-39, D-40, D-42, D-77 and D-47's store-writes half (its document half is I3's); B10 lands per (k), and every registry row it owes is repaid or carries a written disposition. A written debt row is a record, never a repayment |
 | I6 | The lane contract's declared failures | D-70…D-76 (they are declared failures, not closed by the contract's existence) | SD (A5, 2026-09-25) | ruled (0.4.6, with D-33) | `lane::EXPECTED_FAILURES` empty; D-33 repaid |
-| I7 | The presentation-lane decision | A10 = D-41 | SD D-41 still reads 0.4.5; WTB §4 records the owner's deferral of construction (2026-09-24) until measurement — **the two sources disagree; this plan reports it and does not resolve it** | open | the owner's decision after the measurement: a version on the row, or `deferred →` with a reason. Does not block 0.5.0 |
+| I7 | The presentation-lane decision | A10 = D-41 | WTB §R-E ("D-41, the decision restated", which replaces WTB §4's paragraph): the owner deferred construction on 2026-09-24 until the self-inflicted waits were fixed and measured. **This is the newer ruling** (revision (c)): SD's 0.4.5 cell was assigned earlier the same day, and SD's own later D-33 and D-42 notes acknowledge the deferral, so the cell is stale scheduling — flagged to the coordinator for alignment, not a reversal | open (construction and its version) | the owner's measurement-based decision: a version on the row, or `deferred →` with a reason. The deferral does not repay D-41. A conditional exception to I3's ledger-zero; it does not block 0.5.0 |
 
 ### 2.C Contracts that must precede their consumers
 
@@ -125,8 +134,8 @@ own note; its consumers may not ship before it.
 | id | contract | what it fixes | source | state | depends on | size | dependents |
 |---|---|---|---|---|---|---|---|
 | C1 | Session identity and lifecycle | Four distinct things: a stable **session id**; its **incarnation** (agent lifetime); the **view address** (tab, seat, window); the **vendor conversation / resume id**. A move changes the view binding, not the session; a replacement invalidates credentials and stale operations; a resume never resurrects grants. The rail's "one live row per pane" stays a presentation rule | OC §5.1 step 3 and (b)6; AR §12.1; SD D-1, D-54; TF review items 1–3 (owner, 2026-09-24); WB §13.2 (the earlier view address) | ruled (direction); note owed | — | M (a Codex-reviewed note; implemented by A3/A4) | A3, A4, L1, L3a, T1, T2, S1, S2, V10, R2 |
-| C2 | Typed-input admission | One contract for every text Folio types into a pane for someone: paste and submission admitted as one ordered operation on the session's transport, Enter outside the bracketed payload; readiness is WB §11.7's full predicate (a turn boundary, no permission or quota wait, disarmed by a new event); `Queued` is not consumed; a refused batch stays pending with its reason; a failed send is never a person's answer; the draft is the composer's, the sent batch is immutable and the target session's, with a stated retention; the envelope and read schema (labelled fields, a line saying source fields are untrusted reference data, escaping, bounds). It does not require PTY birth/resize off the window thread, and a person pressing Send grants no agent a typing tier | TF review items 2–6 and the owner's rulings (2026-09-24); WB §11.7.3, §12.4.7, §13.3.1; AR §12.3 | ruled (the adopted review); note owed | C1, A3 | M (note) + M (core) | T9, V11, S2's reply, T5, T3b, V10's input line |
-| C3 | Web-page ownership and admission | Page identity and navigation revision; the owning pane versus a view; profile and grants; native thread affinity; rehost, close and crash; what happens to a late callback or DOM result. **C3a** is its narrow half — selection extraction and drawing above the native page, and the search float's focus boundary — enough for adapters over today's browser; **C3** whole precedes the browser's promotion | OC's census (`WindowRuntime.web`) and (b)3 (the download tool versus four failure states); SD D-54 (WebView2 generations); AR §5.2, §5.3 row 21; `webhost::WebSeat` (generation-checked asynchronous work, rehost, close/rebuild) | proposed by the review; note owed | C1 | S–M (C3a) + M (C3 note) | T8, T11 (C3a); T12, B1, B2, B3 (C3) |
+| C2 | Typed-input admission | One admission mechanism for every text Folio types into a pane for someone, with **two modes each operation declares** (revision (c)): **paste-only** — the text lands on the input line, no Enter, the agent's own draft preserved (WB §13.3.1; V11); **paste-and-submit** — paste and submission admitted as one ordered operation on the session's transport, Enter outside the bracketed payload, only when that operation asks for it (comment Send, TF R1; TF's `send --no-enter` is the typing verb's paste-only form); readiness is WB §11.7's full predicate (a turn boundary, no permission or quota wait, disarmed by a new event); `Queued` is not consumed; a refused batch stays pending with its reason; a failed send is never a person's answer; the draft is the composer's, the sent batch is immutable and the target session's, with a stated retention; the envelope and read schema (labelled fields, a line saying source fields are untrusted reference data, escaping, bounds). It does not require PTY birth/resize off the window thread, and a person pressing Send grants no agent a typing tier | TF review items 2–6 and the owner's rulings (2026-09-24); WB §11.7.3, §12.4.7, §13.3.1; AR §12.3 | ruled (the adopted review); note owed | C1, A3 | M (note) + M (core) | T9a (paste-and-submit), V11 (paste-only), S2's reply and V10's input line (each declares its mode in its design; Q31), T5 and T3b (per verb), V6's terminal-bound input |
+| C3 | Web-page ownership and admission | Page identity and navigation revision; the owning pane versus a view; profile and grants; native thread affinity; rehost, close and crash; what happens to a late callback or DOM result. **C3a** is its narrow half — selection extraction and drawing above the native page, the search float's focus boundary, and (revision (c)) **the shared web read boundary**: page and navigation identity, access on the owning thread, and rejection of a stale DOM result — enough for adapters and readers over today's browser; **C3** whole precedes the browser's promotion | OC's census (`WindowRuntime.web`) and (b)3 (the download tool versus four failure states); SD D-54 (WebView2 generations); AR §5.2, §5.3 row 21; `webhost::WebSeat` (generation-checked asynchronous work, rehost, close/rebuild) | proposed by the review; note owed | C1 | S–M (C3a) + M (C3 note) | T8, T10, T11, T4's web readers (C3a); T12, B1, B2, B3 (C3) |
 
 ### 2.A Foundations: ownership and the domain crate
 
@@ -169,13 +178,13 @@ own note; its consumers may not ship before it.
 | V3 | The detail card (the agent row's glance card) | On a rail row: a **250 ms** rest peeks the card and moving into it keeps it; a click **inside the card** pins it; Esc or a click outside closes a pinned card; a click on the row goes to the pane. One card at a time, its row keeps the hover fill; fields only, clamped lines, placed by one shared function. **The attention list's rows have no card.** The tab glance card keeps 350 ms | WB §4.3, §11.3.5, §13.3.5; PS 18, 19, 29, 75 | ruled, except its actions | V1 | S–M | §6 Q3 |
 | V4 | The attention badge and its list | One dot and one number: the number is the total of every window's dots, the colour the most urgent class; the list is the same component as the notification; it stays in every tab mode | WB §4.4, §11.6, §13.3.7; PS first round (2026-09-23), 76 | ruled | L1, D1 | M | — |
 | V5 | The notification | Appears for every agent that needs the person (the focused pane included), expands to the latest reply, a click goes there. **Mute per agent silences the notification only — never the dot, and never Failed.** Where it appears: the focused Folio window, else a system notification, else every window; one notification is one object, handled anywhere and gone everywhere. The reply text comes from Claude Code's transcript path the Stop hook hands over (a bounded tail read, as `attention_words` does today), else the pane's own screen tail; S2 extends this domain model rather than replacing it | WB §11.7.2, §12.1, §13.3.6, §13.3.7; PS 45 | ruled | L1, A2 | M | §6 Q17 |
-| V6 | The notification card grows up | The owner's target for 0.5: it can become a small window, stay, be clicked, offer several choices, take input; queue rather than evict; anchor to terminal panes; the pane strips and the preview pills migrate into it; the PowerShell invitation becomes a notification. Its migration scope is distinct from V5's first agent notification | mem:workbench-05-notification-model (owner, 2026-09-21); OC owner ruling 3 (2026-09-25) | asked (the invitation's move is ruled) | A2, V5 | M (design) + M–L | §6 Q17, Q26 |
+| V6 | The notification card grows up | The owner's target for 0.5: it can become a small window, stay, be clicked, offer several choices, take input (generic input may ship with V6; any input that goes to a terminal depends on C2's core, 0.5.2); queue rather than evict; anchor to terminal panes; the pane strips and the preview pills migrate into it; the PowerShell invitation becomes a notification. Its migration scope is distinct from V5's first agent notification | mem:workbench-05-notification-model (owner, 2026-09-21); OC owner ruling 3 (2026-09-25) | asked (the invitation's move is ruled) | A2, V5 | M (design) + M–L | §6 Q17, Q26 |
 | V7 | A waiting row sticks to the rail's top | Optional. Its original necessity — a wait scrolled out of view while the badge was hidden (WB §11.6) — was withdrawn when the badge stayed in every tab mode; creation order remains ruled | WB §11.11 Q1, §12.4; PS first round (2026-09-23) | open (an optional owner choice) | V1 | S | §6 Q4 |
 | V8 | Agent facts on pane heads and tabs | The pane head's meta (state word, ring, sub-agent count, a drop order); tab status dots and the tab glance card listing its panes; the owner's 2026-09-18 ask that a tab with agents shows more | WB §4.6; PS 68b, 68c (owner-approved exploration, not ruled); mem:ui-agent-workbench-scope item 6 (2026-09-18) | proposed | L1, D1 | M | — |
 | V9a | Settings ▸ Agents: detected agents, accounts, notices | Detected agents (read-only: mark, name, how found, sessions), accounts, quota notices | PS 68a, 70 | proposed (an owner-approved exploration) | Q2, L1 | M | — |
 | V9b | Settings ▸ Agents: registration and grants | Add or remove Folio per agent; the live grants with Revoke | TF §3, §4 (owner R4, 2026-09-24) | ruled | V9a, T3a, T6 | S–M | — |
 | V10 | The agent floats | The tear-out float (a row dragged out becomes a live second view of that pane, expanded by default) and the zoom float (the tab's agent stays reachable over a zoomed pane, compact by default); one PTY, one size, never reflowed; the local rehearsal of 0.6. Whether a float is in the window or an OS window is open (Q5); the zoom float is an owner exploration, not ruled | WB §11.7.4, §13.3.3 (drag-out: 0.5.x); PS 28b, 35, 37, 40, 50, 56; mem:workbench-05-notification-model (2026-09-23) | ruled for 0.5.x (drag-out); the zoom float an exploration | A7a, A7b, L1, C2 (its input line) | L | §6 Q5 |
-| V11 | Reply in the notification and the list | One paste-only mechanism, offered only when the agent verifiably waits for free text; never for a permission prompt | WB §11.7.3, §13.3.1 (0.5.x); PS 28a | ruled (0.5.x) | V5, C2, A7a | M | — |
+| V11 | Reply in the notification and the list | One mechanism in C2's **paste-only** mode: no Enter, the agent's own draft preserved; offered only when the agent verifiably waits for free text; never for a permission prompt | WB §11.7.3, §13.3.1 (0.5.x); PS 28a | ruled (0.5.x) | V5, C2, A7a | M | — |
 | V12 | The work-in-progress hint | When a new agent is opened, "N waiting on you" is visible; it never blocks | mem:attention-bottleneck-idea (point 6, 2026-09-20) | proposed | V4 | S | §6 Q20 |
 | V13 | Pre-authorised answers | "Read-only commands always allowed", answered by Folio with a trace | WB §2.4; mem:attention-bottleneck-idea (point 4) | open: the delivery path was withdrawn (no hook can return a decision, WB §11.1–§11.2) | L2 | S (design) | §6 Q20 |
 
@@ -221,7 +230,7 @@ own note; its consumers may not ship before it.
 | T2 | A distinct tool credential | One per tool-enabled session incarnation (e.g. `FOLIO_TOOL_CAP`); `FOLIO_ATTENTION` stays attention-only; grants are central in-memory records, revalidated at admission | TF review item 1; owner 2026-09-24 (supersedes WB §11.9's "extend the same token") | ruled | T1 | M | — |
 | T3a | Permission tiers: read, read other, notify | Read its own tab (default) · read other tabs (asked once per agent per session) · notify; not a sandbox, and no string may imply one | TF §3; WB §6 | ruled | T2, A2 (the grant ask is an asking surface) | M | — |
 | T3b | Permission tiers: send and operate Folio | Send (per target pane, shown on that pane, non-persistent) · **operate Folio** (the top tier, per agent, explicit, revocable in Settings ▸ Agents) | TF §3; owner 2026-09-24 | ruled | T3a, C2 | M | §6 Q15 |
-| T4 | Read verbs first | What the person is looking at (focused pane, file and line, selection, working folder), pane list and text, the ledger; every read returns a revision; an agent reads the live buffer, not the disk | WB §13.6 row 8, §12.4.7; mem:oxide-borrowable-ideas (2026-09-18, points 2–3); mem:dinotty-reference (point 3) | ruled | T1, T3, A5 | M | — |
+| T4 | Read verbs first | What the person is looking at (focused pane, file and line, selection, working folder), pane list and text, the ledger; every read returns a revision; an agent reads the live buffer, not the disk; web page text and web selections through C3a's read boundary; **the comment read endpoint** (`folio comment <id>`, revision (c)): it reads an immutable sent batch, says whether its context is captured or live, and keeps TF review item 5's bounds and screenshot-access rules | WB §13.6 row 8, §12.4.7; mem:oxide-borrowable-ideas (2026-09-18, points 2–3); mem:dinotty-reference (point 3) | ruled | T1, T3a, A5, C3a | M | — |
 | T5 | Acting verbs and the typing tier | Open a file at a line (with a brief highlight), split, open or navigate a page, type into another pane (agent-to-agent), complete enough to drive Folio; a write names the revision it read and a stale write is refused | WB §13.6 (0.5.x), §12.4.7; AR §12.3; TF owner ruling 2026-09-24; mem:workbench-05-tab-scope-and-handoff (2026-09-24) | ruled (0.5.x) | T4, C2, T3b | M–L | — |
 | T6 | Registration | Settings ▸ Agents adds and removes Folio from each agent (the vendor's own `mcp add`/`remove` only where it proves a byte-preserving round trip; one uninstall mark each); registration does **not** add allow rules to the agent's permission list (TF Q4); first a release-pinned MCP/CLI survey per agent (stdio support, add/remove grammar and scope, environment forwarding, reload, behaviour outside Folio) — G1's hook survey does not cover MCP | TF §4, Q4, review item 7; owner R4 | ruled | T1 | S (documentary inventory) or M / per-vendor (a verified matrix) + M | — |
 | T7 | Instruction snippets for agents | Folio ships the lines that tell an agent when to use its tools; appended, never overwriting, and only with consent | mem:oxide-borrowable-ideas (point 5) | proposed | T4 | S | — |
@@ -246,7 +255,7 @@ own note; its consumers may not ship before it.
 | id | title | what it is | source | state | depends on | size | open decisions |
 |---|---|---|---|---|---|---|---|
 | P1 | Preview beauty and line numbers | Highlighting where there is none (`.ps1`) and readability where there is; line numbers for code, plain text and diffs (two columns), the Markdown source face only; a click on a number selects the line; "copy as reference" (`path:324-329`) for agents; the prototype's first round (a 42 em measure, growing margins, the type ladder, a Line numbers menu row) | mem:ui-agent-workbench-scope item 7 (2026-09-18); mem:preview-line-numbers-deferred (2026-09-18); PS 53, 59 | asked; explored, not ruled | D1 | M–L | — |
-| P2 | Markdown editing conveniences | "Markdown editing conveniences, the preview's completion and the UI restyle go together in 0.5" | mem:ui-design-05-approach-0922 (owner, 2026-09-23) | asked; unspecified | A5, D1 | S–M (design) | — |
+| P2 | Markdown editing conveniences | "Markdown editing conveniences, the preview's completion and the UI restyle go together in 0.5" | mem:ui-design-05-approach-0922 (owner, 2026-09-23) | asked; unspecified | A5, D1 | S–M (design); the build is sized and scheduled only after the note (revision (c)) | — |
 | P3 | The formula renderer as a separate process | A render has no time or memory ceiling today (worst measured ~5.4 s); "the correct answer is a separate process that can be killed, in 0.5" | mem:roadmap-2026-09-15 (2026-09-17) | proposed | — | M–L | §6 Q19 |
 
 ### 2.D The design system
@@ -325,6 +334,7 @@ own note; its consumers may not ship before it.
 | 18 | A dictionary miss falls through to the AI (item 83's first build) | A miss shows "Not found" with no AI call; lookup is contextual (2026-09-26 late) | PS 83 corrections |
 | 19 | Search: one pane per tab (item 83, 2026-09-25) | One floating window per tab, reused, with query history and focus return (2026-09-26) | PS 83 |
 | 20 | The waiting row sticks to the rail's top because the badge is hidden while the rail shows (WB §11.6, §11.11 Q1) | The badge is shown in every mode, so the sticky row is optional, not a remedy (2026-09-23) | PS first round |
+| 21 | Comment Send submits with Enter (TF R1, 2026-09-24), read in revision (b) as covering every typed input | R1 covers comment Send only; the notification reply stays paste-only with the agent's draft preserved (WB §13.3.1). C2 carries both modes (revision (c)) | TF R1, review item 4; WB §13.3.1 |
 
 ## 4. Dependencies (revised in (b))
 
@@ -370,6 +380,7 @@ flowchart LR
   A6[A6 fourth entrance] --> T1[T1 tool face]
   A4 --> T1
   L3a --> T1 --> T2[T2 credential] --> T3a[T3a read tiers] --> T4[T4 read verbs] --> T5
+  C3a --> T4
   T3a --> T3b --> T5
   T4 --> T9b[T9b full envelope]
   T1 --> T6[T6 registration] --> V9b[V9b grants UI]
@@ -402,7 +413,7 @@ flowchart LR
   S1's observed sessions): one fact, one owner (WB §3.2, §13.2).
 - **C2 before T9a, V11, S2's reply, T5, T3b and V10's input line.** Readiness
   before any reply or send (TF review items 2–6; WB §11.7.3).
-- **C3a before T8, T10, T11; C3 before T12, B1, B2, B3.** Web ownership before
+- **C3a before T8, T10, T11 and T4's web readers; C3 before T12, B1, B2, B3.** Web ownership before
   selection adapters, and before several or background pages (OC's census; SD
   D-54; AR §5.2).
 - **T1 → T2 → T3a → T4 → T5; T3b before T5; T4 before T9b** (the full envelope
@@ -453,7 +464,7 @@ moved into 0.5 needs a dated owner ruling (Q23). I7 does not block.
 | **0.5.5** | The conversation view; "this turn"; reply from a notification | The transcript model, extending V5's | S2, S3b, Q5a, V11 | — |
 | **0.5.6** | The tear-out float (and the zoom float, if Q5 admits it) | PTY birth and resize under the session owner (co-scheduled) | V10, A9 | — |
 | **0.5.7** | The browser as its own class (several pages if Q10 rules so); agents that open, split, navigate and type; an agent driving a page you can watch | Web ownership in full; acting verbs; the send and operate-Folio tiers | C3, B1, B2, B4, T5, T3b, T12, B3 | — |
-| **0.5.8** | Preview beauty and line numbers, Markdown conveniences; the Mac's menu bar; the web demo | The composition crate | P1, P2, M1, A13, X2 | — |
+| **0.5.8** | Preview beauty and line numbers; the Mac's menu bar; the web demo | The composition crate; **the Markdown-conveniences design note (P2) — its build is deferred until the note scopes and sizes it** | P1, P2 (the note), M1, A13, X2 | — |
 
 0.5.7 is the largest; it may split into "browser" and "an agent drives it" at the
 owner's choice.
@@ -485,7 +496,7 @@ notification, jump to the exact pane, and answer in the agent's own terminal.
 | 0.5.5 | S2, S3b, Q5a, V11 |
 | 0.5.6 | V10, A9 |
 | 0.5.7 | C3, B1, B2, B4, T5, T3b, T12, B3 |
-| 0.5.8 | P1, P2, M1, A13, X2 |
+| 0.5.8 | P1, P2 (design note only; build unscheduled), M1, A13, X2 |
 | standing acceptance rule (applies to every version) | A14, D7, D4b, X4 |
 | awaiting the owner's scope ruling (proposals and asks not scheduled) | V7, V12, V13, G5, K1, O4, L6, S4, T7, P3, Q5b, Q6, D6, X1, X3 |
 | deliberately deferred out of 0.5 | O5 |
@@ -636,6 +647,13 @@ Added in revision (b):
     (X3) accepted? Revision (a)'s question about what "minor" means is withdrawn:
     the source says 0.5, not each 0.5.x.
 
+Added in revision (c):
+
+31. **Owner, when S2's and A7b's designs propose it.** Which C2 mode the
+    conversation view's reply and the float's input line use. WB §13.3.1 rules
+    the notification reply paste-only; the prototype's tear-out float sends its
+    line with Enter (PS 28b, an exploration). Recommendation recorded: none.
+
 ## 7. What this plan does not decide
 
 **Dates.** It gives sizes and order only; the release cadence is the owner's. It
@@ -665,13 +683,13 @@ repository are named by file, never by location.
 | AR §12.1–§12.3 | C1, L3a, L3b, T1, A7a, §5.2 (a)–(e) | — |
 | TD (i)1, §11 | I4, I5, A11 | the lint's internal mechanics (0.4.6) |
 | WTB §R-F, §C-8, §4, open-rows table | I5, I7, A9, A10 | — |
-| SURVEY (agent survey 2026-09-20) and the 2026-09-22 fifteen-vendor table (coordinator record) | G1–G4, WB §13.5 rows | an upstream allowlist PR now (owner 2026-09-23: "once we have a few hundred stars") |
+| SURVEY (`docs/plans/agents/agent-survey-2026-09-20.md`) and its replacement `agent-coverage-survey-2026-09-22.md` (the coordinator's records; the whole file: fifteen vendors — adoption, permission hooks, turn-end hooks, screen text and notification protocols, each with a source and a date) | G1–G4, WB §13.5 rows | an upstream allowlist PR now (owner 2026-09-23: "once we have a few hundred stars") |
 | `docs/plans/remote/research-2026-09-10.md` | R2 (starting point only) | its version framing (remote was then 0.4) |
 | `CHANGELOG.md` *Unreleased* | — | 0.4.6 updater pieces, the ownership census and three fixes: not 0.5 |
 | `docs/plans/release/plan.md`, `docs/handoff/HANDOFF-2026-08-21.md` | — | the 0.1 release gates; handoff text last updated 2026-09-15 |
 | IDX (`tickets-044/00-INDEX.md`) | I2, D1 (D05-1), R1 (M-0), S3a, D1's Apple palette | 0.4.6 small tickets (spare replenishment, font lists, D2-2c, swash issue), ticket 71's CJK autolink (owner: left as is) |
 | PS (`proto/STATUS.md`), rounds 1–26 and the states-and-glyphs rules | V1–V3, V8, V9a, V10, Q3, Q6, O1a, O1b, O2, O3a, T8–T12, P1, D1, D4a, D4b, D5, M2, §3 rows 1, 3, 4, 6–8, 14–20 | pixel values (the plan cites rulings, not measurements); the style-full and "always light" drafts are D6 (an exploration) |
-| TF (the tool-face note 2026-09-24, its folded Codex review and owner rulings; the ending rules over its original §§1–6) | C1, C2, T1–T3b, T6, T9a, T9b, V9b, §3 rows 2, 9, 17 | Q3 "no persistent per-pane grants" is kept, not reopened |
+| TF (`design-agent-tool-face-2026-09-24.md`, 2026-09-24: §§1–6, the folded Codex review, and the owner's rulings, which rule over §§1–6) | C1, C2, T1–T3b, T6, T9a, T9b, V9b, §3 rows 2, 9, 17 | Q3 "no persistent per-pane grants" is kept, not reopened |
 | D05-1 and M-0 briefs (`tickets-046`) | D1, R1 | — |
 | The Codex review of this plan (`tickets-046/P05-0-review-codex-2026-09-27.md`) | revision (b) throughout (§10) | — |
 | mem:ui-agent-workbench-scope | B1, B2, O4, O5, P1, Q5a, Q5b, S1, S2, S3a, D4b, G5, V8, §1.5 | the herdr/Orca notes (unverified references); the "Agent group by company" sketch (withdrawn by the coordinator 2026-09-20) |
@@ -793,3 +811,40 @@ source, owner, research first or release owner; Q16 and Q20 are split into
 their separate topics; Q22–Q30 are the missing questions the review listed; the
 revision (a) audit-frequency ambiguity is withdrawn (Q30 asks only whether the
 proposal was accepted).
+
+### Revision (c), after Codex's scoped check of (b) (2026-09-27)
+
+Check: `tickets-046/P05-0-review-codex-2026-09-27-b.md` (the coordinator's
+records), against `4fbb7e3d`; verdict *one more pass*. Its closure table: 11 of
+revision (b)'s fifteen findings closed, findings 2, 3, 4 and 15 partly. Its six
+new findings are adopted; no source contradicts them. No slice moved.
+
+1. **High, C2's two modes.** C2 now has a paste-only mode (no Enter, the draft
+   preserved; V11, per WB §13.3.1) and a paste-and-submit mode (only when the
+   operation asks; comment Send, TF R1). T9a, V11, T5 and T3b name their mode;
+   S2's reply and V10's input line declare theirs in their designs (new Q31). V6's
+   "take input" is qualified: terminal-bound input waits for C2's core (0.5.2).
+   New §3 row 21 records that TF R1 did not reverse WB §13.3.1.
+2. **Medium, early web readers and the comment endpoint.** C3a gains the shared
+   web read boundary (page and navigation identity, owning-thread access,
+   stale DOM-result rejection); T4 depends on C3a and T3a (it named the split
+   T3); T4's acceptance gains the comment read endpoint (immutable sent batch,
+   captured versus live context, TF review item 5's bounds and screenshot
+   rules); C3's dependents list T4 and T10; the graph adds C3a → T4. C3a lands
+   in 0.5.2, before T4 in 0.5.3, so no slice moves.
+3. **Medium, D-41.** I7 now names WTB §R-E's deferral as the newer ruling and
+   flags SD's 0.4.5 cell as stale scheduling for the coordinator; §1 item 1 and
+   I3 carry D-41 as a conditional exception to ledger-zero, not repaid and not
+   a prerequisite; its eventual construction and version stay open.
+4. **Medium, I5 and the thread-door residue.** I5's closure requires A4's
+   `TurnAllowance` implemented and consulted, not only its row written; D-47's
+   document half moves to I3 with its own design and closure; B10 follows TD
+   (j)9/(j)10 (revision (k) writes its brief and allocation) and its owed
+   registry rows need repayment or a disposition; I4 carries TD (c)6 item 1's
+   transport-authority residual as the debt row (k) opens. An empty bare-site
+   list and a written debt row are stated not to be repayments.
+5. **Medium, P2.** 0.5.8 promises P2's design note only; its build is deferred
+   until the note scopes and sizes it (the P2 row, §5 and §5.1 say so).
+6. **Low, locators.** §0.1 and §9 name TF as `design-agent-tool-face-2026-09-24.md`
+   (its closing rulings rule over §§1–6) and the replacement survey as
+   `agent-coverage-survey-2026-09-22.md`, both in the coordinator's records.
