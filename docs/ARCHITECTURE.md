@@ -135,7 +135,8 @@ claim on the first ask and remembers the answer, a refusal included; and
 `persist::adopt_claim`, which puts a claim already taken with
 `persist::try_claim` (asks now, remembers nothing) into the same row before
 anything asks — the updated build's road (`docs/plans/design/self-update-2026-09-16.md`
-§C.7, R-3). A second process hands its argv down the launch pipe
+§C.7, R-3). A process that never has a window never writes the table (§4.2, *who may
+take the data directory's claim*). A second process hands its argv down the launch pipe
 (`launch_wire::hand_over`) and leaves through `bt_platform::leave_process`.
 
 ### 2.2 The eighteen kinds of child process
@@ -416,6 +417,23 @@ renewal in the words a refused registration has (`renewal_line`), and the
 cached `PackageState` (`state()`), which the probe writes after a renewal as it
 did after a repair; `diagnostics.log` gets one `BT_EXPLORER_PACKAGE renewal:`
 line per start.
+
+**Who may take the data directory's claim** (ticket B-EXPLORER-CLAIM,
+2026-09-27; class *identity, admission and lifecycle*). The claim table
+(`persist::is_writer_of`, `persist::adopt_claim`) is written only by the
+process that will be the resident Folio: `main`'s `is_writer_of(&storage)`,
+and before it `update_trial::take_the_claim` for an update's trial. A process
+with no window never asks it: `--explorer-command` (`explorer_menu::serve`) and
+the front door's refusal (`say_at_the_front_door`, which carries `--version`
+and `--help`) read their language through `main::door_language` →
+`persist::SettingsStore::peek_language` over
+`persist::storage_dir_as_it_stands()` — bytes on the settings lane, no claim,
+no folder made or moved, no refused file kept. `--uninstall-cleanup` takes the
+kernel claim outside the table (to refuse while a Folio runs) and lets it go
+when it exits; the update doors (`--update-apply`, and `--update-recover`
+through the macOS applier's steps) ask only through `persist::try_claim`,
+which remembers nothing, and let go at once. `attention`,
+`--remove-shell-integration` and `--remove-explorer-menu` never ask.
 
 ### 4.3 The `Deref` trap
 

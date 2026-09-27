@@ -120,7 +120,6 @@ crates/bt-app/src/file_reads_doors.txt	attention_words.rs: lede_in_tail: .read_t
 crates/bt-app/src/file_reads_doors.txt	attention_words.rs: transcript_lede: File::open	ledger key naming a file	transcript_lede (1 site(s), File::open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	clipboard_picture.rs: reserve: .open	ledger key naming a file	reserve (1 site(s), .open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	diagnostics.rs: append_note: .open	ledger key naming a file	append_note (1 site(s), .open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	explorer_menu.rs: serve: crate::persist::SettingsStore::open	ledger key naming a file	serve (1 site(s), crate::persist::SettingsStore::open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	files_watch.rs: sync_with: open	ledger key naming a file	sync_with (1 site(s), open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	git.rs: drain: .read_to_end	ledger key naming a file	drain (1 site(s), .read_to_end)	P16	no
 crates/bt-app/src/file_reads_doors.txt	git_watch.rs: sync_with: open	ledger key naming a file	sync_with (1 site(s), open)	P16	no
@@ -132,7 +131,6 @@ crates/bt-app/src/file_reads_doors.txt	main.rs: dump_overlay_frame: .open	ledger
 crates/bt-app/src/file_reads_doors.txt	main.rs: new_window_runtime: .open	ledger key naming a file	new_window_runtime (1 site(s), .open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	main.rs: open_the_data_directorys_endpoints: attention_wire::open	ledger key naming a file	open_the_data_directorys_endpoints (1 site(s), attention_wire::open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	main.rs: open_the_data_directorys_endpoints: launch_wire::open	ledger key naming a file	open_the_data_directorys_endpoints (1 site(s), launch_wire::open)	P16	no
-crates/bt-app/src/file_reads_doors.txt	main.rs: say_at_the_front_door: persist::SettingsStore::open	ledger key naming a file	say_at_the_front_door (1 site(s), persist::SettingsStore::open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	pdf.rs: count_pages: .read	ledger key naming a file	count_pages (1 site(s), .read)	P16	no
 crates/bt-app/src/file_reads_doors.txt	pdf.rs: read_capped: .read_to_end	ledger key naming a file	read_capped (1 site(s), .read_to_end)	P16	no
 crates/bt-app/src/file_reads_doors.txt	persist.rs: open: SessionWriter::open	ledger key naming a file	open (1 site(s), SessionWriter::open)	P16	no

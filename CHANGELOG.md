@@ -11,6 +11,9 @@ All notable changes to Folio are recorded here. The format follows
 - macOS: the shipped shells start as login shells, so tools whose PATH is set
   in .zprofile — Homebrew's — are found; a profile can turn login on or off;
   a profile with arguments no longer reads as not installed.
+- Windows: opening Folio from Explorer's right-click menu, or running
+  `folio --version` while another Folio starts, no longer leaves the new
+  window unable to save its settings and tabs.
 
 ### Internal
 
