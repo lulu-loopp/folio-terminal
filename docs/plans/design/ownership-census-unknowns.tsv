@@ -67,23 +67,3 @@ site	module	function	reason	sites
 ?.window	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call `reset` through a receiver that does not resolve: `hang_watch::during`	1
 ?.window	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call:mem::take through a receiver that does not resolve: `hang_watch::during`	1
 ?.window_close_requested	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call:mem::take through a receiver that does not resolve: `hang_watch::during`	1
-WindowRuntime.modifiers	crate	Runtime::settings_field_key	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::git	Runtime::git_menu_key	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::git	Runtime::graph_search_key	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::keyboard	Runtime::keyboard_input	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::mouse	Runtime::mouse_wheel	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	3
-WindowRuntime.modifiers	crate::runtime::mouse	Runtime::queue_wheel	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::mouse	Runtime::wheel_columns	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::palette	Runtime::palette_key	call `alt_key`: `ModifiersState::alt_key`, a type outside the workspace	2
-WindowRuntime.modifiers	crate::runtime::palette	Runtime::palette_key	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	4
-WindowRuntime.modifiers	crate::runtime::preview	Runtime::press_preview_body	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::preview	Runtime::press_preview_text	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::preview	Runtime::preview_browse_key	call `alt_key`: `ModifiersState::alt_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::preview	Runtime::preview_browse_key	call `control_key`: `ModifiersState::control_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::preview	Runtime::preview_browse_key	call `super_key`: `ModifiersState::super_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::preview	Runtime::scroll_preview_body	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::search	Runtime::search_field_key	call `alt_key`: `ModifiersState::alt_key`, a type outside the workspace	1
-WindowRuntime.modifiers	crate::runtime::search	Runtime::search_field_key	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1
-WindowRuntime.modifiers_held	crate::runtime::mouse	Runtime::mouse_wheel	call `alt_key`: `ModifiersState::alt_key`, a type outside the workspace	1
-WindowRuntime.modifiers_held	crate::runtime::mouse	Runtime::mouse_wheel	call `control_key`: `ModifiersState::control_key`, a type outside the workspace	1
-WindowRuntime.modifiers_held	crate::runtime::mouse	Runtime::mouse_wheel	call `shift_key`: `ModifiersState::shift_key`, a type outside the workspace	1

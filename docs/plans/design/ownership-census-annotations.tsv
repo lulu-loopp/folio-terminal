@@ -174,3 +174,5 @@ WindowRuntime.web	-	LIFE	web	the 2026-09-25 table
 WindowRuntime.web_cursor	-	PROJ	web	the 2026-09-25 table
 WindowRuntime.web_pointer_inside	-	VIEW	web	the 2026-09-25 table
 WindowRuntime.web_thumbs	-	PROJ	web	the 2026-09-25 table
+App.update_job	-	ASYNC	the application (update_job)	proposed at the census-1 merge (2026-09-26): U-19's card and row press the job on the window thread; the job stays the application's
+WindowRuntime.update_card	-	VIEW	update_card	proposed at the census-1 merge (2026-09-26): U-19's card state, written by the card module and by the window's pointer and settle roads

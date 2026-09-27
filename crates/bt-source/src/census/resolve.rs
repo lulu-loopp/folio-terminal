@@ -6,7 +6,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::types::{
     Class, Declarations, Method, Named, Place, Receiver, Std, Ty, TypeDecl, builds_itself,
-    closures_by_position, entry_method, iterator_method, prelude_method, std_kind, std_method,
+    closures_by_position, entry_method, external_method, iterator_method, prelude_method, std_kind,
+    std_method,
 };
 
 /// One field of the four: where it is declared and whether it is a hub.
@@ -716,8 +717,8 @@ impl<'d> Resolver<'d> {
                         if let Some(found) = found {
                             return Ok(answer(found, false, shared));
                         }
-                        return self
-                            .prelude(method, &current)
+                        return external_method(&named.name, method)
+                            .or_else(|| self.prelude(method, &current))
                             .map(|found| answer(found, false, shared))
                             .ok_or_else(|| {
                                 fail(

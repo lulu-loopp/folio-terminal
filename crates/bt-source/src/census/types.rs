@@ -1507,6 +1507,22 @@ pub(crate) fn entry_method(value: &Ty, name: &str) -> Option<Method> {
 /// The standard prelude traits' methods, which hold for every type: the
 /// fallback when a type declares no method of that name. `receiver` is the
 /// type the method is found on, which `clone` returns.
+/// A method of a type from a dependency the census knows by name, as the std
+/// list is known by type: `winit::keyboard::ModifiersState`'s readers. A name
+/// that is not on the list is unresolved, never guessed.
+pub(crate) fn external_method(type_name: &str, name: &str) -> Option<Method> {
+    Some(match (type_name, name) {
+        (
+            "ModifiersState",
+            "shift_key" | "control_key" | "alt_key" | "super_key" | "state" | "is_empty"
+            | "contains" | "intersects" | "bits" | "lshift_state" | "rshift_state"
+            | "lcontrol_state" | "rcontrol_state" | "lalt_state" | "ralt_state" | "lsuper_state"
+            | "rsuper_state",
+        ) => method(Class::Read, unknown_ret(name)),
+        _ => return None,
+    })
+}
+
 pub(crate) fn prelude_method(name: &str, receiver: &Ty) -> Option<Method> {
     Some(match name {
         "clone" | "to_owned" => method(Class::Read, receiver.clone()),

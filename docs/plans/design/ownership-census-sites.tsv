@@ -129,6 +129,7 @@ App.gpu	access	crate::runtime::terminal	Runtime::adopt_terminal_font	lend	1
 App.gpu	access	crate::runtime::terminal	Runtime::restart_shell	lend	1
 App.gpu	access	crate::runtime::terminal	Runtime::step_pane_text_scale	lend	1
 App.gpu	access	crate::runtime::tooltips	Runtime::tooltip_layer	lend	1
+App.gpu	access	crate::runtime::update_card	Runtime::update_card_layout	lend	1
 App.gpu	access	crate::runtime::web	Runtime::web_sheet_layers	lend	2
 App.gpu	access	crate::runtime::windows	Runtime::answer_restore	lend	1
 App.gpu	access	crate::runtime::windows	Runtime::open_window	lend	2
@@ -297,7 +298,11 @@ App.tab_ids	write	crate::runtime::windows	Runtime::open_window	call:mint	1
 App.tab_ids	write	crate::runtime::windows	Runtime::reopen_recent	call:mint	1
 App.update_job	write	crate	<FolioApp as ApplicationHandler<AppEvent>>::user_event	call:drain_progress	1
 App.update_job	write	crate	FolioApp::consider_update_offer	call:consider	1
+App.update_job	write	crate	FolioApp::settle_update_card	call:hand_over	1
 App.update_job	write	crate	Runtime::apply_update_check	call:switch_off	1
+App.update_job	write	crate::runtime::update_card	Runtime::answer_update_card	call:answer_verb	1
+App.update_job	write	crate::runtime::update_card	Runtime::press_update_row_foot	call:reopen	1
+App.update_shown	write	crate	FolioApp::settle_update_card	call:mem::replace	1
 App.web_pages_open	write	crate	FolioApp::about_to_wait_inner	assign	1
 App.web_spare	write	crate	<FolioApp as ApplicationHandler<AppEvent>>::exiting	call:abandon	1
 App.web_spare	write	crate	<FolioApp as ApplicationHandler<AppEvent>>::user_event	call:advance	1
@@ -1511,6 +1516,7 @@ WindowRuntime.renderer	access	crate::runtime::tabs	Runtime::tab_menu_layer	lend	
 WindowRuntime.renderer	access	crate::runtime::tabs	Runtime::tab_menu_layout	lend	1
 WindowRuntime.renderer	access	crate::runtime::terminal	Runtime::adopt_terminal_font	lend	1
 WindowRuntime.renderer	access	crate::runtime::tooltips	Runtime::tooltip_layer	lend	1
+WindowRuntime.renderer	access	crate::runtime::update_card	Runtime::update_card_layout	lend	1
 WindowRuntime.renderer	access	crate::runtime::web	Runtime::web_sheet_layers	lend	1
 WindowRuntime.resize_trace_logged_events	write	crate::runtime::dpi	Runtime::flush_resize_trace	assign	2
 WindowRuntime.resize_trace_logged_transaction	write	crate::runtime::dpi	Runtime::flush_resize_trace	assign	1
@@ -1854,6 +1860,9 @@ WindowRuntime.underlined_image_reference	write	crate::runtime::tabs	Runtime::act
 WindowRuntime.unpainted_pane_output	write	crate	Runtime::finish_synchronized_update_if_due	compound	1
 WindowRuntime.unpainted_pane_output	write	crate::runtime::frame	Runtime::redraw	assign	1
 WindowRuntime.unpainted_pane_output	write	crate::runtime::terminal	Runtime::drain_pty	compound	1
+WindowRuntime.update_card	write	crate	FolioApp::settle_update_card	call:reset	2
+WindowRuntime.update_card	write	crate::runtime::mouse	Runtime::pointer_moved	call:set_hover	1
+WindowRuntime.update_card	access	crate::runtime::update_card	Runtime::press_update_card_key	lend	1
 WindowRuntime.video	write	crate::runtime::mouse	Runtime::chrome_mouse_input	call:release	1
 WindowRuntime.video	write	crate::runtime::panes	Runtime::carry_the_recordings_of_moved_panes	call:put,call:take	2
 WindowRuntime.video	write	crate::runtime::peek	Runtime::hide_file_peek	call:close	1
