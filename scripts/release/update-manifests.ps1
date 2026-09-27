@@ -22,14 +22,18 @@
     `cask.sh` says it about the cask, for the same reason: a hash recomputed
     from a second download is a hash of that download.
 
-    **The manifests are edited rather than regenerated.** Each one is read as it
-    stands today — from its repository, or from a local copy with `-CaskFile` /
-    `-ScoopFile` — and only the lines that carry a version, a URL or a hash are
-    replaced, each of which must be there exactly once or nothing is printed at
-    all. A cask that has grown a `zap` path and a bucket file that has grown a
-    `notes` line keep them; a file this script does not recognise is a file a
-    person should look at. That is `cask.sh --file`'s rule, one repository
-    wider.
+    **The manifests are edited rather than regenerated, and their source is this
+    repository.** `packaging/homebrew/folio.rb` and `packaging/scoop/folio.json`
+    are the two files as they should be published — the install marker and the
+    uninstall hooks live there (0.4.6 ticket U-2) — and only the lines that
+    carry a version, a URL or a hash are replaced, each of which must be there
+    exactly once or nothing is printed at all. A file this script does not
+    recognise is a file a person should look at. That is `cask.sh --file`'s
+    rule, one repository wider. The published file is read too, from its
+    repository, and what is printed is the difference from it: a line somebody
+    changed in the tap or the bucket by hand shows as a line this run takes
+    away, and belongs in `packaging/` if it is to stay. `-CaskFile` /
+    `-ScoopFile` render some other copy instead, and read nothing from GitHub.
 
     **And the new values are the manifest's own.** scoop's `autoupdate` block
     already declares how the URL and the extract directory are spelled for a
@@ -60,10 +64,12 @@
     checking that what is on the page is what this would have written.
 
 .PARAMETER CaskFile
-    Read the cask from this path instead of from `lulu-loopp/homebrew-folio`.
+    Render the cask from this path instead of from `packaging/homebrew/folio.rb`,
+    and read nothing from `lulu-loopp/homebrew-folio`.
 
 .PARAMETER ScoopFile
-    Read the bucket file from this path instead of from `lulu-loopp/scoop-folio`.
+    Render the bucket file from this path instead of from
+    `packaging/scoop/folio.json`, and read nothing from `lulu-loopp/scoop-folio`.
 
 .PARAMETER OutDirectory
     Also write the two rendered files here, under their own names, so they can
@@ -187,18 +193,23 @@ Write-Host "Folio $Version, tagged $Tag"
 Write-Host "  $archiveName  $archiveHash"
 Write-Host "  $imageName  $imageHash"
 
-# ── the two files as they stand ──────────────────────────────────────────────
+# ── the two files: this repository's source, and what is published ────────────
 
+# The text rendered is `packaging/`'s, or a local copy's. The published file is
+# read beside it, for two things only: the difference this run prints, and the
+# blob `-Apply` writes over. A local copy reads nothing published, so it can
+# be printed and diffed but not applied.
 function Get-Manifest {
-    param([string] $Local, [string] $Repo, [string] $Path)
+    param([string] $Local, [string] $Packaged, [string] $Repo, [string] $Path)
 
     if ($Local) {
         $Local = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Local)
         if (-not (Test-Path -LiteralPath $Local -PathType Leaf)) { throw "no manifest at $Local" }
         return [pscustomobject]@{
-            Text   = [System.IO.File]::ReadAllText($Local)
-            Blob   = $null
-            Source = $Local
+            Text      = [System.IO.File]::ReadAllText($Local)
+            Published = $null
+            Blob      = $null
+            Source    = $Local
         }
     }
     $encoded = & gh api "repos/$Repo/contents/$Path" --jq '.content'
@@ -207,9 +218,10 @@ function Get-Manifest {
     if ($LASTEXITCODE -ne 0) { throw "gh api exited $LASTEXITCODE reading $Repo/$Path" }
     $bytes = [Convert]::FromBase64String(($encoded -join '').Trim())
     return [pscustomobject]@{
-        Text   = [System.Text.Encoding]::UTF8.GetString($bytes)
-        Blob   = $blob.Trim()
-        Source = "$Repo/$Path"
+        Text      = [System.IO.File]::ReadAllText($Packaged)
+        Published = [System.Text.Encoding]::UTF8.GetString($bytes)
+        Blob      = $blob.Trim()
+        Source    = "$Packaged, published as $Repo/$Path"
     }
 }
 
@@ -249,7 +261,8 @@ function Set-Literal {
 
 # ── the cask: two lines, and the URL builds itself out of one of them ─────────
 
-$cask = Get-Manifest -Local $CaskFile -Repo $CaskRepository -Path $caskName
+$cask = Get-Manifest -Local $CaskFile -Packaged (Join-Path $root 'packaging/homebrew/folio.rb') `
+    -Repo $CaskRepository -Path $caskName
 $caskText = $cask.Text
 $caskText = Set-Once -Text $caskText -Pattern '(?m)^([ \t]*version )"[^"]*"' `
     -Replacement "`${1}`"$Version`"" -What 'version' -Where $cask.Source
@@ -258,7 +271,8 @@ $caskText = Set-Once -Text $caskText -Pattern '(?m)^([ \t]*sha256 )"[^"]*"' `
 
 # ── the bucket file: four values, three of them rendered from its own templates
 
-$scoop = Get-Manifest -Local $ScoopFile -Repo $ScoopRepository -Path $scoopName
+$scoop = Get-Manifest -Local $ScoopFile -Packaged (Join-Path $root 'packaging/scoop/folio.json') `
+    -Repo $ScoopRepository -Path $scoopName
 $scoopText = $scoop.Text
 $current = $scoopText | ConvertFrom-Json
 $architecture = $current.architecture.'64bit'
@@ -329,8 +343,14 @@ function Show-File {
     Write-Host $After
 }
 
-Show-File -Name $caskName -Source $cask.Source -Before $cask.Text -After $caskText
-Show-File -Name $scoopName -Source $scoop.Source -Before $scoop.Text -After $scoopText
+# The difference printed is from what is published, where it was read: that is
+# what the release changes for a reader of the tap or the bucket.
+foreach ($shown in @(
+        @($caskName, $cask, $caskText),
+        @($scoopName, $scoop, $scoopText))) {
+    $before = if ($null -ne $shown[1].Published) { $shown[1].Published } else { $shown[1].Text }
+    Show-File -Name $shown[0] -Source $shown[1].Source -Before $before -After $shown[2]
+}
 
 if ($OutDirectory) {
     $OutDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutDirectory)

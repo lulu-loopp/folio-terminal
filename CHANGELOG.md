@@ -14,6 +14,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- scoop and Homebrew now mark the copies they install, so Folio can tell it is
+  theirs, and clean up after Folio when they uninstall it: scoop on
+  `scoop uninstall` (and not while Folio is running), Homebrew on
+  `brew uninstall --zap`. The bucket and the tap receive this at the next release.
 - On macOS, the coming updater can now put the previous version back when a new
   one does not start: the new copy is asked to quit, the old app is swapped
   back in one step and opened again, and its update card says the previous

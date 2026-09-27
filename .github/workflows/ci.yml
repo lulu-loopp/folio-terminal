@@ -41,6 +41,12 @@ jobs:
       - name: Offline release build verification
         shell: pwsh
         run: ./scripts/release/ci-build-tests.ps1
+      # The scoop and Homebrew hooks (0.4.6 U-2): the manifests' fields, the
+      # cask's syntax, the renderer keeping the hooks, and the scoop hook run
+      # against a stub folio.exe — exit 2 stops the uninstall, 1 and 0 go on.
+      - name: Package-manager hooks, rendered and run against a stub
+        shell: pwsh
+        run: ./scripts/ci/check-manager-hooks.ps1
 
   # ── the three gates that prove themselves ──────────────────────────────────
   #

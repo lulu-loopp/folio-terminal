@@ -2059,3 +2059,44 @@ describes any launch: a person's start during an apply hands itself to the
 rescue build, and after a rollback the one start that runs past a destructive
 header uncalled is the one the rescue build sends. The DESIGN entry of the same
 day has the rest.
+
+**The package managers' hooks as built (U-2): E-10 answered, E-16 mapped, the
+marker's write points.** The manifests' sources are `packaging/scoop/folio.json`
+and `packaging/homebrew/folio.rb`; `update-manifests.ps1` renders them (version,
+URL, hash) instead of rewriting whatever the bucket and the tap hold, so the
+hooks reach both at the first release after this. **Where the marker is
+written:** scoop's `post_install`, into `$dir` (at install the `current`
+junction, so the version folder) at every install and every `scoop update`;
+the cask's `postflight`, onto `#{appdir}/Folio.app` with `xattr -w` at every
+install, `brew upgrade` and `brew reinstall`. The lost-attribute case of E1
+(`rsync -a`, `tar` without extended attributes, `ditto --noextattr`, `cp -X`)
+is not answered here: such a bundle reads as `Ours` by U-1's rules (no marker,
+this account's folder), not `Unknown`, until the next `brew upgrade` or
+`reinstall` writes the attribute again; (b).1's second mark was not added.
+**E-16 mapped:** `pre_uninstall` runs the door only when scoop's `$cmd` is
+`uninstall` (scoop's `exec` in `lib/commands.ps1` holds it; `scoop-update.ps1`
+runs `pre_uninstall` too), and before scoop's own running-process check
+(`scoop-uninstall.ps1`), so the door is what answers a running Folio: exit 2 →
+`throw` (the door's own line in the message), and scoop stops with the app
+intact; 1 and 0 → the uninstall goes on. The door's output is piped: PowerShell
+waits for a window-subsystem program only when its output goes down a pipe, and
+an assignment would have read no exit code at all (the stub check found it).
+The door is run with `--uninstall-cleanup` alone — C3's `--quiet` does not exist,
+and the grammar answers it with usage and exit 1, which the hook would read as
+"go on". **E-10 answered from Homebrew's source:** `Cask::Upgrade` →
+`Installer#start_upgrade` → `#uninstall_artifacts(successor:)` runs the
+`uninstall` stanza on `brew upgrade` (and `#uninstall_existing_cask` on
+`brew reinstall`), skipping only `signal:` (`Artifact::Uninstall`,
+`UPGRADE_REINSTALL_SKIP_DIRECTIVES`); `uninstall_preflight` runs likewise, and a
+`script:` gets no word saying which command it is. So C3's
+`uninstall_preflight` is not built: the cask's marker says
+`uninstall_hook: false`, and the door runs from `zap` (`brew uninstall --zap`,
+`brew reinstall --zap`), whose steps run after `#uninstall_artifacts` has copied
+the bundle back into the Caskroom (`Moved#move_back`) — the relative executable
+resolves there. A cask step can stop an uninstall only by failing
+(`must_succeed: true`), which cannot tell exit 2 from exit 1, and a zap step
+runs after the app is gone: with `must_succeed: false`, exit 2 while a Folio
+runs removes the app anyway, changes nothing else, and the zap goes on to trash
+the data folder. The installed checks are `check-scoop-hooks-in-vm.ps1` (the
+coordinator's VM) and `check-cask-hooks.sh` (the owner's Mac, under a scratch
+`HOME`); `docs/RELEASING.md` "Distribution manifests ▸ The hooks" has the rest.

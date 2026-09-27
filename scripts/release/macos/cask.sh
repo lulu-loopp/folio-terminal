@@ -30,10 +30,11 @@
 # nothing is printed: a cask this script does not recognise is a cask a person
 # should look at.
 #
-# Without `--file` the built-in text below is printed, which is the shape the
-# tap carries today. It is the answer to "there is no tap yet" and to "what is
-# this file meant to look like", and it is deliberately the second-choice path:
-# it can only ever say what was true when it was written.
+# Without `--file` the cask is rendered from `packaging/homebrew/folio.rb`,
+# which is the source of the tap's file (0.4.6 ticket U-2: the install marker
+# and the `zap` cleanup live there) and the one `update-manifests.ps1` renders
+# too — one template, not two. It is the answer to "there is no tap yet" and to
+# "what is this file meant to look like".
 #
 # The URL's `-preview` is part of the tag and not part of the version — every
 # release so far has been tagged `v<version>-preview` over a manifest with no
@@ -120,35 +121,14 @@ if [ -n "$file" ]; then
 	done
 fi
 
+# The template, found from this script's own place in the checkout.
+template="$(cd "$(dirname "$0")/../../.." && pwd)/packaging/homebrew/folio.rb"
+
 render() {
-	if [ -z "$file" ]; then
-		cat <<CASK
-cask "folio" do
-  version "$version"
-  sha256 "$sha"
-
-  url "https://github.com/lulu-loopp/folio-terminal/releases/download/v#{version}-preview/Folio-#{version}-macos-arm64.dmg"
-  name "Folio"
-  desc "Terminal that typesets formulas where a command prints them, with files previewed beside the prompt"
-  homepage "https://github.com/lulu-loopp/folio-terminal"
-
-  depends_on arch: :arm64
-  depends_on macos: ">= :sonoma"
-
-  app "Folio.app"
-
-  zap trash: [
-    "~/Library/Application Support/Folio",
-  ]
-end
-CASK
-		return 0
-	fi
-
 	sed -E \
 		-e "s|^([[:space:]]*version )\"[^\"]*\"|\1\"$version\"|" \
 		-e "s|^([[:space:]]*sha256 )\"[^\"]*\"|\1\"$sha\"|" \
-		"$file"
+		"${file:-$template}"
 }
 
 if [ "$in_place" = "1" ]; then
