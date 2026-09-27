@@ -42019,7 +42019,8 @@ impl Runtime<'_> {
             window_ring: None,
             window_ring_shown: None,
             quake: quake::Quake::default(),
-            update_job: update_job::Job::default(),
+            // A launch a rollback sent raises its card at `Failed` (U-29).
+            update_job: update_job::Job::default().after_rollback(update_startup::failed()),
             update_shown: update_card::Shown::default(),
             quit_reason: quit::Reason::Asked,
             handoff_answer: None,

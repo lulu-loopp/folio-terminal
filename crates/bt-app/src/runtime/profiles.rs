@@ -39,6 +39,7 @@ impl Runtime<'_> {
                 tab: request.tab,
                 origin: request.origin,
                 update_trial: None,
+                update_failed: None,
             },
             self.default_profile(),
             cli::machine_path_kind,

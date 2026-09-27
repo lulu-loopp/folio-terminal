@@ -1,64 +1,96 @@
 //! **`folio --update-recover [<home>] [--then-launch <argument>...]`: the rescue
-//! build's recovery door** (0.4.6 ticket U-22;
-//! `docs/plans/design/self-update-2026-09-16.md` revision (b), F-2 and F-6).
+//! build's recovery door** (0.4.6 tickets U-22 and U-29;
+//! `docs/plans/design/self-update-2026-09-16.md` revision (b), F-2, F-6 and
+//! M9–M11).
 //!
 //! Two things start the rescue build this way: the entrance at logon
-//! (`bt_platform::logon_hook`, `"<H>\<txn>\rescue\folio.exe" --update-recover`),
-//! and an ordinary start that found a transaction it may not continue through
-//! (`update_startup`, which adds `--then-launch` and its own command line).
-//! On Windows the rescue build finds everything from its own path: the
-//! installation home `H` is three folders up, the journal is
+//! (`bt_platform::logon_hook`, `"<H>\<txn>\rescue\folio.exe" --update-recover`;
+//! on macOS the LaunchAgent, `--update-recover <home>`), and an ordinary start
+//! that found a transaction it may not continue through (`update_startup`,
+//! which adds `--then-launch` and its own command line, and on macOS the home
+//! before it). On Windows the rescue build finds everything from its own path:
+//! the installation home `H` is three folders up, the journal is
 //! `H\journal.json`, and the installed program is `<install>\<its own name>`
-//! (`update_txn::Home::of_rescue`). On macOS the LaunchAgent names the home
-//! (`bt_platform::launch_agent`, `--update-recover <home>`, U-26): the journal
-//! is in it, and the installed bundle is the one the home's name is made of
+//! (`update_txn::Home::of_rescue`). On macOS the line names the home
+//! (`bt_platform::launch_agent`, U-26): the journal is in it, and the installed
+//! bundle is the one the home's name is made of
 //! (`update_txn::Home::of_rescue_named`).
 //!
-//! **What it does today, until recovery itself arrives (U-23, U-24).** It
-//! reads the journal's frozen header — nothing else, and it moves and removes
-//! nothing — and says one diagnostics line, naming the transaction and its
-//! class, on its standard error **and** appended to a file, because the run
-//! the entrance starts at logon has no console and a line only on stderr would
-//! be lost (coordinator ruling, 2026-09-27). The file is the `diagnostics.log`
-//! of the data directory (`persist::storage_dir_unmoved`: the installed
-//! program's storage rule, without the relocation or creation an ordinary
-//! start may do; the log is append-only and outside the trial's write gate).
-//! When that directory does not exist, the line goes to `recover.log` beside
-//! the journal, in the home, and says so. Then, only when it was handed a
-//! command line:
+//! **What it does.** It reads the journal's frozen header and says one
+//! diagnostics line, naming the transaction and its class, on its standard
+//! error **and** appended to a file, because the run the entrance starts at
+//! logon has no console and a line only on stderr would be lost (coordinator
+//! ruling, 2026-09-27). The file is the `diagnostics.log` of the data
+//! directory (`persist::storage_dir_unmoved`: the installed program's storage
+//! rule, without the relocation or creation an ordinary start may do; the log
+//! is append-only and outside the trial's write gate). When that directory
+//! does not exist, the line goes to `recover.log` beside the journal, in the
+//! home, and says so.
 //!
-//! * the transaction is no longer one an ordinary start hands over — its
-//!   class is `terminal`, `preparing` or `deferred`, or there is no journal,
-//!   or one this build cannot read — so the installed Folio is started with
-//!   the original arguments, detached, and the door exits 0. The start that
+//! **A macOS bundle's rollback** (U-29): when the header is `destructive` with
+//! a decided outcome — `rolled_back` (`RollbackIntent`, `Stuck`, `RolledBack`)
+//! or `committed` (`Committed`, whose retirement was cut short) — the rescue
+//! build takes the transaction lock and performs M9–M11 as R
+//! (`update_apply_macos::recover`): the trial stopped, the swap back decided by
+//! the live identity, `RolledBack` and the retirement — or `Stuck`, with every
+//! line of it appended to the same file. Every other phase is left alone, as
+//! is everything on Windows until U-24.
+//!
+//! Then, reading the header again:
+//!
+//! * handed a command line, and the transaction is no longer one an ordinary
+//!   start hands over — `terminal`, `preparing` or `deferred`, no journal, or
+//!   one this build cannot read — the installed Folio is started with the
+//!   original arguments, detached, and the door exits 0. The start that
 //!   handed itself over is thereby made (U-12's contract), and it cannot come
 //!   back here: the ordinary start hands over only a `destructive` class;
-//! * the class is `destructive`: the update is not finished and this build
+//! * on a macOS bundle whose outcome is `rolled_back`, whatever the class, the
+//!   installed Folio is started with `--update-failed <journal>` first: the
+//!   card rises at `Failed` — *Previous version restored.*, or *Update
+//!   incomplete.* and the folder — and past a rollback that did not finish the
+//!   start continues instead of handing itself back (`update_txn::at_start`).
+//!   Without a command line, the build is started this way only after this
+//!   run finished the rollback (W11's relaunch);
+//! * any other `destructive` class: the update is not finished and this build
 //!   cannot finish it, so the line says so and the door exits 1, starting
 //!   nothing — starting the installed Folio would only hand it back here.
 //!
 //! Headless, like the other argv doors: it runs before the parse and the
-//! admission in `fn main`, never opens a window, and never holds the admission
-//! (the rescue build is the one process that takes it exclusive, to move
-//! files). The read goes through `file_reads` on `Lane::Install`; the start
-//! through `bt_platform::quiet_command`, never waited on.
+//! admission in `fn main`, on a standalone main that is a worker
+//! (`admission::enter_standalone_main`), never opens a window, and never holds
+//! the admission shared (the rescue build is the one process that takes it
+//! exclusive, to move files). The reads go through `file_reads` on
+//! `Lane::Install`; the start through `bt_platform::quiet_command`, never
+//! waited on.
 
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
-use crate::update_txn::{Class, Header, Home};
+use crate::update_apply_macos::{self, Ended, Hands, Limits, Road};
+use crate::update_txn::{Class, Header, HeaderOutcome, Home};
 
-/// **The recovery door's effects**: its one line, and the start of the
-/// installed Folio.
-pub(crate) trait World {
-    /// The one diagnostics line.
-    fn say(&mut self, line: &str);
+/// **The recovery door's effects**: a lock holder's (its lines, the exchange,
+/// the check of a restored bundle), and the start of the installed Folio.
+pub(crate) trait World: Hands {
     /// Start `program` with `args`, detached: never waited on.
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()>;
+}
+
+/// **What one run of the door is over**: the home, the installed program, the
+/// command line it was handed, the data directory whose log it writes to, the
+/// LaunchAgents folder and the limits a rollback waits within.
+pub(crate) struct Door<'a> {
+    pub(crate) home: &'a Home,
+    pub(crate) installed: &'a Path,
+    pub(crate) then_launch: Option<&'a [OsString]>,
+    pub(crate) data: &'a Path,
+    pub(crate) agents: Option<&'a Path>,
+    pub(crate) limits: Limits,
 }
 
 /// **The door, for this process**: this executable must be a rescue build.
@@ -87,63 +119,141 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
         return 2;
     };
     let data = crate::persist::storage_dir_unmoved();
-    run(&home, &installed, then_launch.as_deref(), &data, &mut world)
+    let agents = update_apply_macos::launch_agents();
+    let door = Door {
+        home: &home,
+        installed: &installed,
+        then_launch: then_launch.as_deref(),
+        data: &data,
+        agents: agents.as_deref(),
+        limits: Limits::PRODUCT,
+    };
+    match bt_platform::admission::enter_standalone_main("folio-update-recover", |worker| {
+        run(worker, &door, &mut world)
+    }) {
+        Ok(code) => code,
+        Err(refused) => {
+            world.say(&format!("BT_UPDATE_RECOVER {refused:?}"));
+            2
+        }
+    }
 }
 
-/// **The door over any home** — see the module header. Answers the exit
-/// code.
-pub(crate) fn run(
-    home: &Home,
-    installed: &Path,
-    then_launch: Option<&[OsString]>,
-    data: &Path,
-    world: &mut impl World,
-) -> i32 {
+/// What the header says, for the line and for the decisions after it.
+struct Read {
+    state: String,
+    header: Option<Header>,
+}
+
+fn header_of(home: &Home) -> Read {
     let journal = home.journal();
-    let (state, unfinished) = match file_reads::read(Lane::Install, &journal) {
+    match file_reads::read(Lane::Install, &journal) {
         Ok(bytes) => match Header::parse(&bytes) {
-            Ok(header) => (
-                format!(
+            Ok(header) => Read {
+                state: format!(
                     "transaction {} is {:?} in {}",
                     header.txn,
                     header.class,
                     home.root().display()
                 ),
-                header.class == Class::Destructive,
-            ),
-            Err(refusal) => (
-                format!("{} is left as it is: {refusal}", journal.display()),
-                false,
-            ),
+                header: Some(header),
+            },
+            Err(refusal) => Read {
+                state: format!("{} is left as it is: {refusal}", journal.display()),
+                header: None,
+            },
         },
-        Err(error) if error.kind() == io::ErrorKind::NotFound => (
-            format!("no transaction in {}", home.root().display()),
-            false,
-        ),
-        Err(error) => (
-            format!("{} could not be read: {error}", journal.display()),
-            false,
-        ),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Read {
+            state: format!("no transaction in {}", home.root().display()),
+            header: None,
+        },
+        Err(error) => Read {
+            state: format!("{} could not be read: {error}", journal.display()),
+            header: None,
+        },
+    }
+}
+
+/// **The door over any home** — see the module header. Answers the exit
+/// code.
+pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -> i32 {
+    let home = door.home;
+    let (log, whereabouts) = log_file(home, door.data);
+    let first = header_of(home);
+    // A macOS bundle is the one layout this build rolls back (U-29); a
+    // Windows home says what it always said until U-24.
+    let rolls_back_here = home.installed_bundle().is_some();
+    let decided = first.header.as_ref().filter(|header| {
+        rolls_back_here
+            && header.class == Class::Destructive
+            && header.outcome != HeaderOutcome::None
+    });
+    let (did, rolled) = match decided {
+        Some(header) => {
+            let road = Road {
+                home: home.clone(),
+                txn: header.txn,
+                nonce: None,
+                data: door.data.to_path_buf(),
+                agents: door.agents.map(Path::to_path_buf),
+                limits: door.limits,
+            };
+            let mut logged = Logged {
+                world: &mut *world,
+                log: &log,
+            };
+            match update_apply_macos::recover(worker, &road, &mut logged) {
+                Some(ended) => (format!("recovery ended {ended:?}"), Some(ended)),
+                None => (String::from("this phase is not recovery's"), None),
+            }
+        }
+        None if rolls_back_here => (String::from("nothing to recover"), None),
+        None => (String::from("recovery is not in this build yet"), None),
     };
-    let (outcome, code) = match then_launch {
-        None => (String::from("nothing was touched"), 0),
+    // Read again after any look under the lock: another holder may have
+    // moved the transaction on while this one waited for it.
+    let state = if decided.is_some() {
+        header_of(home).header
+    } else {
+        first.header.clone()
+    };
+    let failed = rolls_back_here
+        && state
+            .as_ref()
+            .is_some_and(|header| header.outcome == HeaderOutcome::RolledBack);
+    let unfinished = state
+        .as_ref()
+        .is_some_and(|header| header.class == Class::Destructive)
+        && !failed;
+    let finished_here = matches!(
+        rolled,
+        Some(Ended::RolledBack | Ended::RolledBackWithDebt(_))
+    );
+    let words = |argv: &[OsString]| {
+        let mut args = Vec::new();
+        if failed {
+            args.extend(update_apply_macos::failed_words(home));
+        }
+        args.extend_from_slice(argv);
+        args
+    };
+    let (outcome, code) = match door.then_launch {
+        None if finished_here => spawn(world, door.installed, &words(&[])),
+        None => (
+            String::from("nothing was touched"),
+            rolled.as_ref().map_or(0, Ended::code),
+        ),
         Some(_) if unfinished => (
             String::from(
                 "the update is not finished and this build cannot finish it yet; Folio was not started",
             ),
             1,
         ),
-        Some(argv) => match world.spawn_detached(installed, argv) {
-            Ok(()) => (format!("started {}", installed.display()), 0),
-            Err(error) => (
-                format!("{} could not be started: {error}", installed.display()),
-                1,
-            ),
-        },
+        Some(argv) => spawn(world, door.installed, &words(argv)),
     };
-    let (log, whereabouts) = log_file(home, data);
     let line = format!(
-        "BT_UPDATE_RECOVER {state}; recovery is not in this build yet; {outcome}{whereabouts}"
+        "BT_UPDATE_RECOVER {}; {did}; {outcome}{whereabouts}",
+        first.state
     );
     world.say(&line);
     if !crate::diagnostics::append_note(&log, &line) {
@@ -153,6 +263,39 @@ pub(crate) fn run(
         ));
     }
     code
+}
+
+/// Start the installed Folio with `args`; the words of the line, and the code.
+fn spawn(world: &mut impl World, installed: &Path, args: &[OsString]) -> (String, i32) {
+    match world.spawn_detached(installed, args) {
+        Ok(()) => (format!("started {}", installed.display()), 0),
+        Err(error) => (
+            format!("{} could not be started: {error}", installed.display()),
+            1,
+        ),
+    }
+}
+
+/// **A world whose every line is also appended to the log** — the
+/// rollback's lines, which the run at logon would otherwise lose.
+struct Logged<'w, W> {
+    world: &'w mut W,
+    log: &'w Path,
+}
+
+impl<W: World> Hands for Logged<'_, W> {
+    fn say(&mut self, line: &str) {
+        self.world.say(line);
+        let _ = crate::diagnostics::append_note(self.log, line);
+    }
+
+    fn exchange(&mut self, live: &Path, staged: &Path) -> Result<(), String> {
+        self.world.exchange(live, staged)
+    }
+
+    fn verify_restored(&mut self, worker: &WorkerCtx, bundle: &Path) -> Result<(), String> {
+        self.world.verify_restored(worker, bundle)
+    }
 }
 
 /// **Where the one line is kept**: the data directory's `diagnostics.log`
@@ -175,11 +318,21 @@ pub(crate) fn log_file(home: &Home, data: &Path) -> (PathBuf, String) {
 /// This process's own world.
 struct Machine;
 
-impl World for Machine {
+impl Hands for Machine {
     fn say(&mut self, line: &str) {
         bt_platform::write_std_error(format!("{line}\n").as_bytes());
     }
 
+    fn exchange(&mut self, live: &Path, staged: &Path) -> Result<(), String> {
+        bt_platform::install_flip::exchange(live, staged).map_err(|failure| failure.to_string())
+    }
+
+    fn verify_restored(&mut self, _worker: &WorkerCtx, bundle: &Path) -> Result<(), String> {
+        update_apply_macos::verify_restored_here(bundle)
+    }
+}
+
+impl World for Machine {
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
         // `quiet_command` is the one door for a child; the child is dropped at
         // once, never waited on or ended.
@@ -207,11 +360,21 @@ mod tests {
         spawned: Vec<(PathBuf, Vec<OsString>)>,
     }
 
-    impl World for Recorded {
+    impl Hands for Recorded {
         fn say(&mut self, line: &str) {
             self.said.push(line.to_owned());
         }
 
+        fn exchange(&mut self, live: &Path, staged: &Path) -> Result<(), String> {
+            panic!("a Windows home is never exchanged: {live:?} {staged:?}")
+        }
+
+        fn verify_restored(&mut self, _: &WorkerCtx, bundle: &Path) -> Result<(), String> {
+            panic!("a Windows home is never verified: {bundle:?}")
+        }
+    }
+
+    impl World for Recorded {
         fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
             self.spawned.push((program.to_path_buf(), args.to_vec()));
             Ok(())
@@ -258,6 +421,38 @@ mod tests {
         (root, rescue)
     }
 
+    /// **The door on a worker the thread door lends**, over `home` with the
+    /// product's limits and no LaunchAgents folder: its exit code and what it
+    /// asked of `world`.
+    fn run_over(
+        home: &Home,
+        installed: &Path,
+        then_launch: Option<Vec<OsString>>,
+        data: &Path,
+    ) -> (i32, Recorded) {
+        let (home, installed, data) = (home.clone(), installed.to_path_buf(), data.to_path_buf());
+        bt_platform::spawn_at_priority(
+            "bt-update-recover-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| {
+                let mut world = Recorded::default();
+                let door = Door {
+                    home: &home,
+                    installed: &installed,
+                    then_launch: then_launch.as_deref(),
+                    data: &data,
+                    agents: None,
+                    limits: Limits::PRODUCT,
+                };
+                let code = run(worker, &door, &mut world);
+                (code, world)
+            },
+        )
+        .expect("the thread door starts a thread")
+        .join()
+        .expect("the door does not panic")
+    }
+
     /// A data directory of the test's own, beside the installation.
     fn data_root(root: &Path) -> PathBuf {
         let data = root.join("roaming").join("Folio");
@@ -289,11 +484,8 @@ mod tests {
         assert_eq!(installed, root.join("install").join("folio.exe"));
         let journal = std::fs::read(home.journal()).unwrap();
         let data = data_root(&root);
-        let mut world = Recorded::default();
-        assert_eq!(
-            run(&home, &installed, Some(&handed()), &data, &mut world),
-            0
-        );
+        let (code, world) = run_over(&home, &installed, Some(handed()), &data);
+        assert_eq!(code, 0);
         assert_eq!(world.spawned, vec![(installed.clone(), handed())]);
         assert_eq!(world.said.len(), 1, "{:?}", world.said);
         assert!(world.said[0].starts_with("BT_UPDATE_RECOVER transaction 7a7a"));
@@ -313,17 +505,14 @@ mod tests {
         let (root, rescue) = installation("destructive", Some(Phase::Moving));
         let (home, installed) = Home::of_rescue(HostPlatform::Windows, &rescue).unwrap();
         let data = data_root(&root);
-        let mut world = Recorded::default();
-        assert_eq!(
-            run(&home, &installed, Some(&handed()), &data, &mut world),
-            1
-        );
+        let (code, world) = run_over(&home, &installed, Some(handed()), &data);
+        assert_eq!(code, 1);
         assert!(world.spawned.is_empty());
         assert!(world.said[0].contains("Destructive"), "{:?}", world.said);
         assert!(world.said[0].contains("Folio was not started"));
 
-        let mut world = Recorded::default();
-        assert_eq!(run(&home, &installed, None, &data, &mut world), 0);
+        let (code, world) = run_over(&home, &installed, None, &data);
+        assert_eq!(code, 0);
         assert!(world.spawned.is_empty());
         assert_eq!(world.said.len(), 1);
         assert!(world.said[0].ends_with("nothing was touched"));
@@ -332,11 +521,8 @@ mod tests {
         let (root, rescue) = installation("absent", None);
         let (home, installed) = Home::of_rescue(HostPlatform::Windows, &rescue).unwrap();
         let data = data_root(&root);
-        let mut world = Recorded::default();
-        assert_eq!(
-            run(&home, &installed, Some(&handed()), &data, &mut world),
-            0
-        );
+        let (code, world) = run_over(&home, &installed, Some(handed()), &data);
+        assert_eq!(code, 0);
         assert_eq!(world.spawned, vec![(installed, handed())]);
         assert!(world.said[0].contains("no transaction in"));
         let _ = std::fs::remove_dir_all(&root);
@@ -358,16 +544,16 @@ mod tests {
         let data = data_root(&root);
         let log = crate::diagnostics::log_path(&data);
         std::fs::write(&log, "an earlier run's line\n").unwrap();
-        let mut world = Recorded::default();
-        assert_eq!(run(&home, &installed, None, &data, &mut world), 0);
+        let (code, world) = run_over(&home, &installed, None, &data);
+        assert_eq!(code, 0);
         let kept = std::fs::read_to_string(&log).unwrap();
         assert_eq!(kept, format!("an earlier run's line\n{}\n", world.said[0]));
         assert!(world.said[0].starts_with("BT_UPDATE_RECOVER transaction 7a7a"));
         assert!(!home.root().join("recover.log").exists());
 
         let missing = root.join("nobody").join("Folio");
-        let mut world = Recorded::default();
-        assert_eq!(run(&home, &installed, None, &missing, &mut world), 0);
+        let (code, world) = run_over(&home, &installed, None, &missing);
+        assert_eq!(code, 0);
         assert_eq!(world.said.len(), 1, "{:?}", world.said);
         assert!(world.said[0].contains("so this line is in"));
         assert_eq!(

@@ -2924,6 +2924,8 @@ pub enum Text {
     UpdateFailedCopy,
     /// The rescue copy of the running build could not be made (`update_job::Stop::Clone`).
     UpdateFailedClone,
+    /// The new build did not prove itself and a rollback followed (`update_job::Failure::RolledBack`, `Incomplete`; U-29).
+    UpdateFailedTrial,
     /// The General row's picker foot while a job waits at `Verified`: the card again.
     UpdateRowRestart,
     /// The General row's picker foot on a copy a package manager updates: the manager's command, to the clipboard.
@@ -5554,6 +5556,11 @@ impl Text {
                 "The current version could not be kept.",
                 "The current version could not be kept.",
             ),
+            Self::UpdateFailedTrial => pick(
+                lang,
+                "The new version did not start.",
+                "The new version did not start.",
+            ),
             Self::UpdateRowRestart => pick(lang, "Restart to update", "Restart to update"),
             Self::UpdateRowCopy => pick(lang, "Copy", "Copy"),
             Self::UpdateRowReady => pick(
@@ -5581,7 +5588,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 799] = [
+    pub const ALL: [Self; 800] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -6362,6 +6369,7 @@ impl Text {
         Self::UpdateFailedIdentity,
         Self::UpdateFailedCopy,
         Self::UpdateFailedClone,
+        Self::UpdateFailedTrial,
         Self::UpdateRowRestart,
         Self::UpdateRowCopy,
         Self::UpdateRowReady,
@@ -6532,7 +6540,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 66] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 68] = [
         // Ticket 37's four, in both columns: written in English, Chinese owed by opus46.
         (Self::ShortcutTextLarger, HostPlatform::Windows),
         (Self::ShortcutTextLarger, HostPlatform::MacOs),
@@ -6587,6 +6595,8 @@ impl Text {
         (Self::UpdateFailedCopy, HostPlatform::MacOs),
         (Self::UpdateFailedClone, HostPlatform::Windows),
         (Self::UpdateFailedClone, HostPlatform::MacOs),
+        (Self::UpdateFailedTrial, HostPlatform::Windows),
+        (Self::UpdateFailedTrial, HostPlatform::MacOs),
         (Self::UpdateRowRestart, HostPlatform::Windows),
         (Self::UpdateRowRestart, HostPlatform::MacOs),
         (Self::UpdateRowCopy, HostPlatform::Windows),

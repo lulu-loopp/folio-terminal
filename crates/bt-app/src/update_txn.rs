@@ -69,6 +69,14 @@ pub(crate) const TRIAL_DEADLINE_MS: u64 = 90_000;
 /// does not resume, discards at 2".
 pub(crate) const DEFERRED_LAUNCH_LIMIT: u8 = 2;
 
+/// **How many rollbacks a `Stuck` transaction gets** — the coordinator's
+/// ruling 4 for U-29: W10/M10's "again at every logon and every start",
+/// bounded. `Stuck` counts the failed attempts it has recorded
+/// ([`Phase::Stuck`]'s `attempts`); at this many, a lock holder tries no more
+/// and the transaction stays `Stuck`, its journal, rollback material and
+/// entrance kept, for a person to finish from the folder the card names.
+pub(crate) const STUCK_ATTEMPT_LIMIT: u8 = 3;
+
 /// The receipt's file name is this prefix and the trial's nonce
 /// (`H\<txn>\health-<nonce>`, (b).2's objects table).
 pub(crate) const RECEIPT_FILE_PREFIX: &str = "health-";
@@ -667,6 +675,9 @@ pub(crate) enum Phase {
     Stuck {
         trial: Option<TrialProcess>,
         last_error: String,
+        /// The rollbacks that failed, this one included: 1 at the first
+        /// `Stuck`, one more at each failed retry ([`STUCK_ATTEMPT_LIMIT`]).
+        attempts: u8,
     },
     RolledBack,
     Abandoned,
@@ -1262,12 +1273,20 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
         (Phase::RollbackIntent { .. } | Phase::Stuck { .. }, Event::RolledBack) => {
             Ok(Phase::RolledBack)
         }
+        (Phase::RollbackIntent { trial }, Event::RollbackFailed { error }) => Ok(Phase::Stuck {
+            trial: *trial,
+            last_error: error.clone(),
+            attempts: 1,
+        }),
         (
-            Phase::RollbackIntent { trial } | Phase::Stuck { trial, .. },
+            Phase::Stuck {
+                trial, attempts, ..
+            },
             Event::RollbackFailed { error },
         ) => Ok(Phase::Stuck {
             trial: *trial,
             last_error: error.clone(),
+            attempts: attempts.saturating_add(1),
         }),
         (Phase::Committed, Event::Retired) => Ok(Phase::Retired {
             outcome: Outcome::Committed,
@@ -1671,8 +1690,14 @@ pub(crate) enum Action {
     /// `Stuck`, keep it). The journal, the rollback material and the entrance
     /// all stay.
     StayStuck { reason: String },
-    /// W11: remove the entrance if `remove_entrance`, relaunch the installed
-    /// build with `--update-failed`, then record [`Event::Retired`].
+    /// W10, M10 at the bound: `Stuck` has failed [`STUCK_ATTEMPT_LIMIT`]
+    /// rollbacks, and this holder tries no more — it records nothing, keeps
+    /// everything, and says `last_error` with the journal's folder.
+    GiveUp { last_error: String },
+    /// W11: remove the entrance if `remove_entrance`, record
+    /// [`Event::Retired`], then relaunch the installed build with
+    /// `--update-failed` — after the retirement, so that the start it makes
+    /// finds a terminal journal and not one it would hand back (U-29).
     FinishRollback { remove_entrance: bool },
     /// W8 after the commit, W12, M8: delete exactly these recorded old files
     /// from `backup\` (or the old bundle from `stage/`), remove the entrance if
@@ -1710,7 +1735,8 @@ impl Action {
             | Action::AwaitReceipt { .. }
             | Action::Commit
             | Action::DeclareRolledBack
-            | Action::StayStuck { .. } => Vec::new(),
+            | Action::StayStuck { .. }
+            | Action::GiveUp { .. } => Vec::new(),
             Action::Sweep => vec![
                 Effect::DetachMount,
                 Effect::DeleteTxnDir,
@@ -1798,6 +1824,13 @@ pub(crate) fn decide(disk: &Disk<'_>) -> Action {
                 Action::DeclareRollback
             }
         }
+        Phase::Stuck {
+            last_error,
+            attempts,
+            ..
+        } if *attempts >= STUCK_ATTEMPT_LIMIT && !disk.trial_alive => Action::GiveUp {
+            last_error: last_error.clone(),
+        },
         Phase::RollbackIntent { trial } | Phase::Stuck { trial, .. } => match trial {
             Some(process) if disk.trial_alive => Action::StopTrial(*process),
             _ => match restore(&journal.body.layout, &disk.located) {
@@ -2239,8 +2272,9 @@ pub(crate) enum JournalRead {
 
 /// **A description of what an ordinary start sees**, built by the caller:
 /// the header, whether the transaction lock was free, the digest of its own
-/// image and of the rescue build the header names, and the transaction its
-/// own `--update-trial` names, if it was started as a trial.
+/// image and of the rescue build the header names, the transaction its own
+/// `--update-trial` names, if it was started as a trial, and whether it
+/// carries `--update-failed`.
 ///
 /// `own_image` is `None` when the start did not or could not measure itself:
 /// it then cannot tell a replaced install from its own, and replaces nothing.
@@ -2251,6 +2285,13 @@ pub(crate) struct StartView {
     pub(crate) own_image: Option<Digest>,
     pub(crate) rescue_image: Option<Digest>,
     pub(crate) trial_of: Option<TxnId>,
+    /// **This start was sent by a lock holder after a rollback** — it carries
+    /// `--update-failed <journal>` (U-29): it raises the card at `Failed`, and
+    /// past an unfinished rollback it continues instead of handing itself
+    /// back. The word decides, not the spelling of the path after it: a start
+    /// that the rescue build sent and then handed back would come straight
+    /// back with the word twice, which the command line refuses.
+    pub(crate) sent_by_rollback: bool,
 }
 
 /// What an ordinary start does about the transaction before anything else.
@@ -2306,6 +2347,14 @@ pub(crate) fn at_start(view: &StartView) -> StartAction {
         Class::Terminal if view.lock_free => StartAction::Retire,
         Class::Terminal => StartAction::Continue,
         Class::Destructive if view.trial_of == Some(header.txn) => StartAction::RunAsTrial,
+        // The rescue build tried the rollback (or could not start it) and sent
+        // this start to show so: handing it back would only send it here
+        // again. The next start without the word hands over as usual (M10).
+        Class::Destructive
+            if view.sent_by_rollback && header.outcome == HeaderOutcome::RolledBack =>
+        {
+            StartAction::Continue
+        }
         Class::Destructive => StartAction::HandToRescue,
         Class::Preparing | Class::Deferred => {
             let replaced = matches!(
@@ -2318,6 +2367,29 @@ pub(crate) fn at_start(view: &StartView) -> StartAction {
                 StartAction::Continue
             }
         }
+    }
+}
+
+/// **What a start sent with `--update-failed` tells the reader**, from the
+/// frozen header alone (U-29).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AfterRollback {
+    /// `rolled_back` and `terminal`: the old build is back and the
+    /// transaction retired — *Previous version restored.*
+    Restored,
+    /// `rolled_back` and still `destructive`: the rollback did not finish
+    /// (`Stuck`, or not begun) — *Update incomplete.* and the journal's
+    /// folder.
+    Incomplete,
+}
+
+/// **The card a rolled-back transaction's header asks for**, or `None` for a
+/// header whose outcome is not `rolled_back`.
+pub(crate) fn after_rollback(header: &Header) -> Option<AfterRollback> {
+    match (header.outcome, header.class) {
+        (HeaderOutcome::RolledBack, Class::Terminal) => Some(AfterRollback::Restored),
+        (HeaderOutcome::RolledBack, _) => Some(AfterRollback::Incomplete),
+        _ => None,
     }
 }
 
@@ -2603,6 +2675,7 @@ mod tests {
             own_image: Some(digest(0x01)),
             rescue_image: Some(digest(0x01)),
             trial_of: None,
+            sent_by_rollback: false,
         }
     }
 
@@ -2677,6 +2750,7 @@ mod tests {
             Phase::Stuck {
                 trial: Some(TRIAL),
                 last_error: "a file is held open".to_owned(),
+                attempts: 1,
             },
             Phase::RolledBack,
             Phase::Abandoned,
@@ -2874,6 +2948,7 @@ mod tests {
             Phase::Stuck {
                 trial: None,
                 last_error: String::new(),
+                attempts: 1,
             },
             members_layout(),
         );
@@ -3218,6 +3293,7 @@ mod tests {
             Phase::Stuck {
                 trial: None,
                 last_error: String::new(),
+                attempts: 1,
             },
         ] {
             assert_eq!(
@@ -3256,6 +3332,7 @@ mod tests {
                 Phase::Stuck {
                     trial: Some(TRIAL),
                     last_error: "a file is held open".to_owned(),
+                    attempts: 1,
                 },
                 layout,
             );
@@ -3722,6 +3799,7 @@ mod tests {
             Phase::Stuck {
                 trial: None,
                 last_error: "a file was held open".to_owned(),
+                attempts: 1,
             },
             members_layout(),
         );
@@ -4031,6 +4109,7 @@ mod tests {
             Phase::Stuck {
                 trial: None,
                 last_error: "the exchange was refused".to_owned(),
+                attempts: 1,
             },
             bundle_layout(),
         );
@@ -4041,6 +4120,119 @@ mod tests {
         );
         let view = start(JournalRead::Read(journal.header()), true);
         assert_eq!(at_start(&view), StartAction::HandToRescue);
+    }
+
+    /// RED (U-29) — **`Stuck` counts its failed rollbacks: each failure adds
+    /// one, a holder retries below [`STUCK_ATTEMPT_LIMIT`] and gives up at it
+    /// — recording nothing, keeping everything — while a trial that still
+    /// lives is stopped first all the same.**
+    ///
+    /// The coordinator's ruling 4 (U-29): "add `Stuck{attempts}` and stop after
+    /// 3 with the sentence naming the folder".
+    ///
+    /// MUTATION: drop the `attempts >= STUCK_ATTEMPT_LIMIT` arm of `decide`.
+    #[test]
+    fn stuck_counts_its_attempts_and_gives_up_at_the_bound() {
+        let swapped = bundle(Some(new_bundle()), Some(old_bundle()));
+        let mut journal = journal(Phase::RollbackIntent { trial: None }, bundle_layout());
+        for attempt in 1..=STUCK_ATTEMPT_LIMIT {
+            assert!(matches!(
+                decide(&holder(&journal, swapped.clone())),
+                Action::RollBack(Restore::SwapBack)
+            ));
+            journal = journal
+                .advance(&Event::RollbackFailed {
+                    error: format!("refused {attempt}"),
+                })
+                .expect("a failed rollback is recorded");
+            let Phase::Stuck { attempts, .. } = &journal.body.phase else {
+                panic!("{:?}", journal.body.phase);
+            };
+            assert_eq!(*attempts, attempt);
+        }
+        let given_up = decide(&holder(&journal, swapped.clone()));
+        assert_eq!(
+            given_up,
+            Action::GiveUp {
+                last_error: format!("refused {STUCK_ATTEMPT_LIMIT}")
+            }
+        );
+        assert!(given_up.effects().is_empty());
+        let mut living = journal.clone();
+        if let Phase::Stuck { trial, .. } = &mut living.body.phase {
+            *trial = Some(TRIAL);
+        }
+        let alive = Disk {
+            trial_alive: true,
+            ..holder(&living, swapped)
+        };
+        assert_eq!(decide(&alive), Action::StopTrial(TRIAL));
+        let view = start(JournalRead::Read(journal.header()), true);
+        assert_eq!(at_start(&view), StartAction::HandToRescue);
+    }
+
+    /// RED (U-29) — **a start sent with `--update-failed` continues past a
+    /// rolled-back transaction that is not retired
+    /// — and only such a start, and only past such a transaction; the header
+    /// alone says which card it raises.**
+    ///
+    /// The rescue build that could not finish a rollback starts the installed
+    /// build with `--update-failed <journal>` (U-29): handing that start back
+    /// to the rescue would send it straight here again, and Folio would never
+    /// open ("an app that never opens again is not an answer", U-12's
+    /// ruling). A destructive journal of any other outcome is an apply in
+    /// flight, and the word changes nothing there.
+    ///
+    /// MUTATION: drop the `sent_by_rollback` arm of `at_start`.
+    #[test]
+    fn a_start_sent_with_update_failed_continues_past_an_unfinished_rollback() {
+        let sent = |phase: Phase| StartView {
+            sent_by_rollback: true,
+            ..start_on(phase)
+        };
+        let stuck = Phase::Stuck {
+            trial: None,
+            last_error: "the exchange was refused".to_owned(),
+            attempts: 2,
+        };
+        for phase in [
+            stuck.clone(),
+            Phase::RollbackIntent { trial: None },
+            Phase::RolledBack,
+        ] {
+            assert_eq!(at_start(&sent(phase.clone())), StartAction::Continue);
+            assert_eq!(at_start(&start_on(phase)), StartAction::HandToRescue);
+        }
+        for phase in [Phase::Moving, trial_phase(), Phase::Committed] {
+            assert_eq!(at_start(&sent(phase)), StartAction::HandToRescue);
+        }
+        let retired = Phase::Retired {
+            outcome: Outcome::RolledBack,
+        };
+        assert_eq!(at_start(&sent(retired.clone())), StartAction::Retire);
+
+        let header = |phase: Phase| journal(phase, bundle_layout()).header();
+        assert_eq!(
+            after_rollback(&header(retired)),
+            Some(AfterRollback::Restored)
+        );
+        assert_eq!(
+            after_rollback(&header(stuck)),
+            Some(AfterRollback::Incomplete)
+        );
+        assert_eq!(
+            after_rollback(&header(Phase::RolledBack)),
+            Some(AfterRollback::Incomplete)
+        );
+        for phase in [
+            Phase::Abandoned,
+            Phase::Retired {
+                outcome: Outcome::Committed,
+            },
+            trial_phase(),
+        ] {
+            assert_eq!(after_rollback(&header(phase)), None);
+        }
     }
 
     /// RED (U-10) — **M11: `RolledBack`, `Abandoned` and `Committed` with debt

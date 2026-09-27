@@ -4,27 +4,35 @@
 //!
 //! Every bundle is built here: an `arm64` executable compiled from a few lines
 //! of C (`/usr/bin/cc`) — with an argument it stays up for twenty seconds (a
-//! trial, or a process started by hand), without one it answers each line of
-//! its standard input (the running old build of E5) — an `Info.plist` with
-//! `LSUIElement` (no Dock icon, no window), ad-hoc signed with `codesign -s -`.
-//! Everything lives under the test's own temporary folder (`TMPDIR`), the
-//! LaunchAgents folder included; no real `~/Library/LaunchAgents`, no
-//! `/Applications`, no Folio. The trial's launch is a stand-in ([`Fake`]) that
-//! starts the new bundle's executable directly or nothing at all, except in
-//! E-12's one real run through `open`. Every process a test starts is ended by
-//! the handle or the pid it recorded ([`Children`]).
+//! trial, or a process started by hand), and quits at `SIGTERM` as any process
+//! does; with `stubborn <file>` it writes `term` into that file at each
+//! `SIGTERM` and stays (a trial that will not quit, U-29); without one it
+//! answers each line of its standard input (the running old build of E5) — an
+//! `Info.plist` with `LSUIElement` (no Dock icon, no window), ad-hoc signed
+//! with `codesign -s -`. Everything lives under the test's own temporary
+//! folder (`TMPDIR`), the LaunchAgents folder included; no real
+//! `~/Library/LaunchAgents`, no `/Applications`, no Folio. The trial's launch
+//! and the relaunch after a rollback are stand-ins ([`Fake`]) that start the
+//! new bundle's executable directly, record the words, or nothing at all,
+//! except in E-12's one real run through `open`. Every process a test starts
+//! is reaped by a thread of the test's and ended by the pid it recorded, while
+//! it is not yet reaped ([`Children`]). The check of a restored bundle's
+//! signature is a stand-in too: an ad-hoc bundle satisfies no Developer ID
+//! requirement (U-16).
 
 use super::*;
 
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use crate::update_prepare_macos::tests::fixture::{Scratch, on_macos, run, sign, version_of};
-use crate::update_txn::{Body, HeaderOutcome, Outcome};
+use crate::update_txn::{
+    Body, Class, Header, HeaderOutcome, Outcome, STUCK_ATTEMPT_LIMIT, StartAction, TrialSight,
+};
 
 /// The synthetic bundles' identifier.
 const IDENTIFIER: &str = "io.github.lulu-loopp.folio.u28-test";
@@ -33,10 +41,19 @@ const IDENTIFIER: &str = "io.github.lulu-loopp.folio.u28-test";
 const EXE: &str = "Contents/MacOS/folio";
 
 /// The synthetic executable (see the module header).
-const SOURCE: &str = "#include <stdio.h>\n#include <unistd.h>\n\
+const SOURCE: &str = "#include <fcntl.h>\n#include <signal.h>\n#include <stdio.h>\n\
+#include <string.h>\n#include <unistd.h>\n\
+static const char *mark;\n\
+static void on_term(int signal_number) {\n\
+  int fd = open(mark, O_WRONLY | O_CREAT | O_TRUNC, 0644);\n\
+  (void)signal_number;\n\
+  if (fd >= 0) { if (write(fd, \"term\", 4) < 0) {} close(fd); }\n\
+}\n\
 int main(int argc, char **argv) {\n\
   char line[256];\n\
-  (void)argv;\n\
+  if (argc > 2 && strcmp(argv[1], \"stubborn\") == 0) {\n\
+    mark = argv[2]; signal(SIGTERM, on_term); for (;;) pause();\n\
+  }\n\
   if (argc > 1) { sleep(20); return 0; }\n\
   while (fgets(line, sizeof line, stdin)) { printf(\"ok %s\", line); fflush(stdout); }\n\
   return 0;\n\
@@ -80,27 +97,74 @@ fn bundle(parent: &Path, name: &str, version: &str) -> PathBuf {
     bundle
 }
 
-/// **Every process a test started**, ended by its own handle (or recorded pid)
-/// when the test is over, pass or fail.
+/// **Every process a test started**: each reaped by a thread of its own the
+/// moment it ends (so a process that has ended leaves the process list, as a
+/// trial LaunchServices started does), its exit status kept, and every one
+/// still unreaped ended by its recorded pid when the test is over, pass or
+/// fail.
 #[derive(Clone, Default)]
 struct Children {
-    handles: Arc<Mutex<Vec<Child>>>,
+    started: Arc<Mutex<Vec<u32>>>,
+    ended: Arc<Mutex<Vec<(u32, ExitStatus)>>>,
     pids: Arc<Mutex<Vec<u32>>>,
 }
 
 impl Children {
     /// Start `bundle`'s executable with one argument: it stays up.
     fn start(&self, bundle: &Path, word: &str) -> u32 {
-        let child = bt_platform::quiet_command(bundle.join(EXE))
-            .arg(word)
+        self.start_with(bundle, &[OsStr::new(word)])
+    }
+
+    /// Start `bundle`'s executable with `words`.
+    fn start_with(&self, bundle: &Path, words: &[&OsStr]) -> u32 {
+        let mut child: Child = bt_platform::quiet_command(bundle.join(EXE))
+            .args(words)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("the synthetic executable starts");
         let pid = child.id();
-        self.handles.lock().unwrap().push(child);
+        self.started.lock().unwrap().push(pid);
+        let ended = self.ended.clone();
+        std::thread::spawn(move || {
+            if let Ok(status) = child.wait() {
+                ended.lock().unwrap().push((pid, status));
+            }
+        });
         pid
+    }
+
+    /// How `pid` ended, once it has.
+    fn status(&self, pid: u32) -> Option<ExitStatus> {
+        self.ended
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(ended, _)| *ended == pid)
+            .map(|(_, status)| *status)
+    }
+
+    /// How `pid` ended, waiting up to 20 s for it.
+    fn ended(&self, pid: u32) -> Option<ExitStatus> {
+        let give_up = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < give_up {
+            if let Some(status) = self.status(pid) {
+                return Some(status);
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        None
+    }
+
+    /// End `pid`, one this test started and has not reaped yet.
+    fn end(&self, pid: u32) {
+        if self.status(pid).is_none() {
+            let _ = bt_platform::quiet_command("/bin/kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .status();
+        }
     }
 
     /// A process this test caused to start without a handle (through `open`).
@@ -111,12 +175,11 @@ impl Children {
 
 impl Drop for Children {
     fn drop(&mut self) {
-        if Arc::strong_count(&self.handles) > 1 {
+        if Arc::strong_count(&self.started) > 1 {
             return;
         }
-        for child in self.handles.lock().unwrap().iter_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
+        for pid in self.started.lock().unwrap().clone() {
+            self.end(pid);
         }
         for pid in self.pids.lock().unwrap().iter() {
             // A process this test started through `open`, by the pid the
@@ -132,28 +195,62 @@ type LaunchHook = Box<dyn FnMut(&Path, &[OsString]) -> io::Result<()> + Send>;
 type ExchangeHook = Box<dyn FnMut(&Path, &Path) + Send>;
 
 /// **The stand-in world**: its lines kept, the real exchange after an
-/// optional look, and a launch that does what the test says.
-#[derive(Default)]
+/// optional look (or a refusal, from the `refuse_from`-th on), a check of the
+/// restored bundle that passes unless the test says why not, a launch that
+/// does what the test says, and relaunches recorded.
 struct Fake {
     said: Vec<String>,
     launched: Arc<Mutex<Vec<Vec<OsString>>>>,
+    relaunched: Vec<(PathBuf, Vec<OsString>)>,
     on_launch: Option<LaunchHook>,
     on_exchange: Option<ExchangeHook>,
     real_open: bool,
+    /// Exchanges performed or refused so far.
+    exchanges: usize,
+    /// The first exchange (counted from 0) that is refused.
+    refuse_from: usize,
+    unverified: Option<String>,
 }
 
-impl World for Fake {
+impl Default for Fake {
+    fn default() -> Self {
+        Self {
+            said: Vec::new(),
+            launched: Arc::default(),
+            relaunched: Vec::new(),
+            on_launch: None,
+            on_exchange: None,
+            real_open: false,
+            exchanges: 0,
+            refuse_from: usize::MAX,
+            unverified: None,
+        }
+    }
+}
+
+impl Hands for Fake {
     fn say(&mut self, line: &str) {
         self.said.push(line.to_owned());
     }
 
     fn exchange(&mut self, live: &Path, staged: &Path) -> Result<(), String> {
+        let this = self.exchanges;
+        self.exchanges += 1;
+        if this >= self.refuse_from {
+            return Err("the exchange is refused (test)".to_owned());
+        }
         if let Some(look) = &mut self.on_exchange {
             look(live, staged);
         }
         install_flip::exchange(live, staged).map_err(|failure| failure.to_string())
     }
 
+    fn verify_restored(&mut self, _worker: &WorkerCtx, _bundle: &Path) -> Result<(), String> {
+        self.unverified.clone().map_or(Ok(()), Err)
+    }
+}
+
+impl World for Fake {
     fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
         self.launched.lock().unwrap().push(args.to_vec());
         if self.real_open {
@@ -164,6 +261,11 @@ impl World for Fake {
             None => Ok(()),
         }
     }
+
+    fn relaunch(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
+        self.relaunched.push((bundle.to_path_buf(), args.to_vec()));
+        Ok(())
+    }
 }
 
 /// A stand-in world whose launch is `launch`.
@@ -172,6 +274,11 @@ fn launching(launch: LaunchHook) -> Fake {
         on_launch: Some(launch),
         ..Fake::default()
     }
+}
+
+/// Whether `world` said a line containing `words`.
+fn said(world: &Fake, words: &str) -> bool {
+    world.said.iter().any(|line| line.contains(words))
 }
 
 impl Fake {
@@ -276,10 +383,40 @@ impl Install {
         Road {
             home: self.home.clone(),
             txn: self.txn,
-            nonce: self.applier,
+            nonce: Some(self.applier),
             data: self.data.clone(),
             agents: Some(self.agents.clone()),
             limits,
+        }
+    }
+
+    /// The rescue build's road, as recovery: no applier's nonce.
+    fn recovery(&self, limits: Limits) -> Road {
+        Road {
+            nonce: None,
+            ..self.road(limits)
+        }
+    }
+
+    /// The LaunchAgent the applier arms, armed by its door.
+    fn arm(&self) {
+        let rescue = self.home.rescue_executable(self.txn).unwrap();
+        let _armed =
+            launch_agent::arm(&self.agents, self.txn.bytes(), &rescue, self.home.root()).unwrap();
+    }
+
+    /// The installation after the exchange: the new bundle live, the old one
+    /// in `stage/`.
+    fn exchanged(&self) {
+        install_flip::exchange(&self.installed, &self.stage()).unwrap();
+    }
+
+    /// The new build's executable wherever it is now.
+    fn new_program(&self) -> PathBuf {
+        if version_of(&self.installed) == "2.0" {
+            self.installed.clone()
+        } else {
+            self.stage()
         }
     }
 
@@ -311,7 +448,17 @@ fn limits(old_within_ms: u64, trial_within_ms: u64) -> Limits {
         old_within: Duration::from_millis(old_within_ms),
         trial_within_ms,
         poll: Duration::from_millis(40),
+        quit_within: Duration::from_millis(1_000),
+        end_within: Duration::from_millis(5_000),
     }
+}
+
+/// The rescue build as recovery on its own worker, over `road`.
+fn recovered(road: Road, mut hands: Fake) -> (Option<Ended>, Fake) {
+    on_a_worker(move |worker| {
+        let ended = recover(worker, &road, &mut hands);
+        (ended, hands)
+    })
 }
 
 /// The trial's nonce, from the arguments the launch was given.
@@ -558,7 +705,7 @@ fn p_waits_for_o_and_releases_the_claim() {
         .unwrap();
     let (ended, _) = applied(install.road(limits(800, 10_000)), Fake::default());
     drop(lock);
-    assert_eq!(ended, Ended::OldHeldTheLock);
+    assert_eq!(ended, Ended::LockHeld);
     assert_eq!(std::fs::read(install.home.journal()).unwrap(), before);
     assert_eq!(version_of(&install.stage()), "2.0");
 }
@@ -621,7 +768,7 @@ fn armed_is_durable_before_exchanging() {
 
 /// RED (U-28) — **a receipt at the trial's name that carries another nonce
 /// is refused, and the deadline then declares the rollback**: nothing is
-/// committed and the old bundle stays in `stage/`.
+/// committed, the trial is stopped and the old bundle comes back (U-29).
 ///
 /// (b).2: "`Committed` … only on a receipt whose `txn` and `nonce` match."
 ///
@@ -640,27 +787,24 @@ fn a_receipt_for_another_nonce_is_refused() {
         Some(Nonce::new([0x99; 32])),
     ));
     let (ended, world) = applied(install.road(limits(5_000, 1_500)), world);
-    assert_eq!(ended, Ended::RollbackIntent, "{:?}", world.said);
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert!(world.said.iter().any(|line| line.contains("is refused")));
-    let journal = install.on_disk().unwrap();
-    let Phase::RollbackIntent { trial: Some(trial) } = journal.body.phase else {
-        panic!("{:?}", journal.body.phase);
-    };
     assert!(
-        children
-            .handles
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|child| child.id() == trial.pid)
+        world
+            .wrote()
+            .contains("[Armed, Moving, Trial, RollbackIntent, RolledBack, Retired]"),
+        "{}",
+        world.wrote()
     );
+    let trial = children.started.lock().unwrap()[0];
+    assert!(children.ended(trial).is_some(), "the trial is gone");
+    assert!(said(&world, "is asked to quit"), "{:?}", world.said);
+    assert!(!said(&world, "is asked to end"), "it quit when asked");
     assert_eq!(
-        version_of(&install.stage()),
+        version_of(&install.installed),
         "1.0",
-        "the old bundle is kept"
+        "the old bundle is back"
     );
-    assert_eq!(version_of(&install.installed), "2.0", "U-29 swaps back");
-    assert!(install.plist().exists());
 }
 
 /// RED (U-28) — **`Committed` is written only while the journal says
@@ -763,83 +907,6 @@ fn the_old_bundle_is_removed_only_after_committed() {
         install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
             .unwrap()
             .is_some()
-    );
-}
-
-/// RED (U-28, M7) — **no pid and no receipt by the deadline, or a trial that
-/// ends without one, journals `RollbackIntent` and stops**: nothing is
-/// swapped back (U-29's), the plist stays armed, and the lock is let go.
-///
-/// W7/M7: "Then → `RollbackIntent`." The trial of the second half is started
-/// and ended by the test before it can answer.
-///
-/// MUTATION: in `trial`, at the deadline, answer `Ended::RollbackIntent`
-/// without recording `RollbackDeclared`.
-#[test]
-fn the_deadline_journals_rollback_intent_and_stops() {
-    if !on_macos() {
-        return;
-    }
-    let install = Install::new("deadline");
-    let (ended, world) = applied(install.road(limits(5_000, 1_200)), Fake::default());
-    assert_eq!(ended, Ended::RollbackIntent, "{:?}", world.said);
-    assert_eq!(
-        install.on_disk().unwrap().body.phase,
-        Phase::RollbackIntent { trial: None }
-    );
-    assert_eq!(
-        install.on_disk().unwrap().header().outcome,
-        HeaderOutcome::RolledBack
-    );
-    assert_eq!(version_of(&install.installed), "2.0");
-    assert_eq!(version_of(&install.stage()), "1.0");
-    assert!(install.plist().exists());
-    assert!(
-        install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
-            .unwrap()
-            .is_some()
-    );
-
-    let install = Install::new("died");
-    let children = Children::default();
-    let started = children.clone();
-    let world = launching(Box::new(move |bundle, _| {
-        started.start(bundle, "trial");
-        Ok(())
-    }));
-    let killer = {
-        let children = children.clone();
-        let install_journal = install.home.journal();
-        std::thread::spawn(move || {
-            let give_up = Instant::now() + Duration::from_secs(20);
-            while Instant::now() < give_up {
-                let trial = std::fs::read(&install_journal)
-                    .ok()
-                    .and_then(|bytes| Journal::parse(&bytes).ok())
-                    .is_some_and(|journal| journal.body.phase.kind() == PhaseKind::Trial);
-                if trial {
-                    for child in children.handles.lock().unwrap().iter_mut() {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                    }
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        })
-    };
-    let (ended, world) = applied(install.road(limits(5_000, 10_000)), world);
-    killer.join().unwrap();
-    assert_eq!(ended, Ended::RollbackIntent, "{:?}", world.said);
-    assert!(matches!(
-        install.on_disk().unwrap().body.phase,
-        Phase::RollbackIntent { trial: Some(_) }
-    ));
-    assert!(
-        world
-            .said
-            .iter()
-            .any(|line| line.contains("ended without a receipt"))
     );
 }
 
@@ -959,23 +1026,26 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
     assert_eq!(version_of(&install.installed), "1.0");
     assert_eq!(version_of(&install.stage()), "2.0");
 
-    // M6.
+    // M6, and M9 after it (U-29).
     let install = Install::new("m6");
     install.write(Phase::Moving);
     install_flip::exchange(&install.installed, &install.stage()).unwrap();
     let (ended, world) = applied(install.road(limits(5_000, 5_000)), Fake::default());
-    assert_eq!(ended, Ended::RollbackIntent, "{:?}", world.said);
-    assert_eq!(
-        install.on_disk().unwrap().body.phase,
-        Phase::RollbackIntent { trial: None }
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(
+        world
+            .wrote()
+            .contains("[RollbackIntent, RolledBack, Retired]"),
+        "{}",
+        world.wrote()
     );
-    assert_eq!(version_of(&install.installed), "2.0", "no swap back here");
+    assert_eq!(version_of(&install.installed), "1.0", "swapped back");
 
     // Another applier's hand-over.
     let install = Install::new("other");
     let before = std::fs::read(install.home.journal()).unwrap();
     let mut road = install.road(limits(5_000, 5_000));
-    road.nonce = Nonce::new([0x45; 32]);
+    road.nonce = Some(Nonce::new([0x45; 32]));
     let (ended, _) = applied(road, Fake::default());
     assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
     assert_eq!(std::fs::read(install.home.journal()).unwrap(), before);
@@ -1061,4 +1131,620 @@ fn an_ordinary_start_retires_the_macos_entrance() {
     assert!(!plist.exists());
     retire_entrance_in(Some(&agents), txn).unwrap();
     retire_entrance_in(None, txn).unwrap();
+}
+
+// ── U-29: the rollback, `Stuck`, and the relaunch ─────────────────────────────
+
+/// The recovery door (`update_recover`) answers its start with this world.
+impl crate::update_recover::World for Fake {
+    fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
+        self.relaunched.push((program.to_path_buf(), args.to_vec()));
+        Ok(())
+    }
+}
+
+/// **The recovery door over `install`** on a worker, handed `then_launch`:
+/// its exit code and what it asked of `hands`.
+fn recover_door(install: &Install, then_launch: Vec<OsString>, hands: Fake) -> (i32, Fake) {
+    let (home, installed, data, agents) = (
+        install.home.clone(),
+        install.installed.join(EXE),
+        install.data.clone(),
+        install.agents.clone(),
+    );
+    on_a_worker(move |worker| {
+        let mut hands = hands;
+        let door = crate::update_recover::Door {
+            home: &home,
+            installed: &installed,
+            then_launch: Some(&then_launch),
+            data: &data,
+            agents: Some(&agents),
+            limits: limits(5_000, 5_000),
+        };
+        let code = crate::update_recover::run(worker, &door, &mut hands);
+        (code, hands)
+    })
+}
+
+/// A journal at `Stuck` after `attempts` failed rollbacks.
+fn stuck(attempts: u8) -> Phase {
+    Phase::Stuck {
+        trial: None,
+        last_error: "the exchange is refused (test)".to_owned(),
+        attempts,
+    }
+}
+
+/// The words after a rollback, then `rest`.
+fn failed_then(install: &Install, rest: &[&str]) -> Vec<OsString> {
+    let mut words = failed_words(&install.home).to_vec();
+    words.extend(rest.iter().map(OsString::from));
+    words
+}
+
+/// A running process of `program`, by its pid, as the journal records a trial.
+fn recorded(program: &Path, pid: u32) -> TrialProcess {
+    let listed = install_flip::running_from(program)
+        .unwrap()
+        .into_iter()
+        .find(|running| running.pid == pid)
+        .expect("the process runs from the program");
+    TrialProcess {
+        pid,
+        started: listed.started,
+    }
+}
+
+/// RED (U-29, M9) — **a trial that sends no receipt by the deadline is asked
+/// to quit, the old bundle is swapped back and verified, `RolledBack` and the
+/// retirement follow, and the old build is started again with
+/// `--update-failed <journal>`.**
+///
+/// §C.5: "N exits, crashes, or the deadline passes → P journals
+/// `RollingBack` and reverses the flip from what is on disk (macOS: the same
+/// `RENAME_SWAP` back). It then relaunches the restored old build with
+/// `--update-failed <journal>`"; the revision's U-21 section names this test.
+/// The journal is kept at `Retired{RolledBack}` for the relaunched build's
+/// card; the plist and `H/<txn>` are gone.
+///
+/// MUTATION: in `declare_rollback`, answer `Ok(Ended::Stuck(..))` right after
+/// recording `RollbackDeclared` (the rollback never runs).
+#[test]
+fn a_failed_health_swaps_back() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("health");
+    let children = Children::default();
+    let started = children.clone();
+    let world = launching(Box::new(move |bundle, _| {
+        started.start(bundle, "trial");
+        Ok(())
+    }));
+    let (ended, world) = applied(install.road(limits(5_000, 1_500)), world);
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(
+        world
+            .wrote()
+            .contains("[Armed, Moving, Trial, RollbackIntent, RolledBack, Retired]"),
+        "{}",
+        world.wrote()
+    );
+    assert!(said(&world, "no receipt by the trial's deadline"));
+    assert!(said(&world, "is asked to quit"), "{:?}", world.said);
+    assert_eq!(
+        version_of(&install.installed),
+        "1.0",
+        "the old bundle is back"
+    );
+    let journal = install.on_disk().expect("kept for the relaunched card");
+    assert_eq!(
+        journal.body.phase,
+        Phase::Retired {
+            outcome: Outcome::RolledBack
+        }
+    );
+    assert_eq!(journal.header().outcome, HeaderOutcome::RolledBack);
+    assert!(!install.plist().exists());
+    assert!(!install.home.transaction(install.txn).exists());
+    assert_eq!(
+        world.relaunched,
+        vec![(install.installed.clone(), failed_then(&install, &[]))]
+    );
+    assert!(
+        install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+            .unwrap()
+            .is_some(),
+        "the lock is let go before the relaunch"
+    );
+}
+
+/// RED (U-29, M7 → M9) — **a trial that dies without a receipt is rolled back
+/// at once**, not at the deadline, and nothing is signalled: there is no
+/// process left to stop.
+///
+/// W7: "P alive: P waits for the receipt until the deadline" — only while the
+/// recorded trial process lives. The test ends the trial as soon as `Trial`
+/// is durable; the deadline is twenty seconds away.
+///
+/// MUTATION: in `trial`, treat the recorded process as alive whatever
+/// `still_running` answers (the rollback waits for the deadline).
+#[test]
+fn a_dead_trial_rolls_back_at_once() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("dead");
+    let children = Children::default();
+    let started = children.clone();
+    let world = launching(Box::new(move |bundle, _| {
+        started.start(bundle, "trial");
+        Ok(())
+    }));
+    let killer = {
+        let children = children.clone();
+        let journal = install.home.journal();
+        std::thread::spawn(move || {
+            let give_up = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < give_up {
+                let trial = std::fs::read(&journal)
+                    .ok()
+                    .and_then(|bytes| Journal::parse(&bytes).ok())
+                    .is_some_and(|journal| journal.body.phase.kind() == PhaseKind::Trial);
+                if trial {
+                    for pid in children.started.lock().unwrap().clone() {
+                        children.end(pid);
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })
+    };
+    let began = Instant::now();
+    let (ended, world) = applied(install.road(limits(5_000, 20_000)), world);
+    killer.join().unwrap();
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(
+        began.elapsed() < Duration::from_secs(12),
+        "rolled back {:?} after the start: it waited for the deadline",
+        began.elapsed()
+    );
+    assert!(said(&world, "ended without a receipt"));
+    assert!(!said(&world, "is asked to"), "{:?}", world.said);
+    assert_eq!(version_of(&install.installed), "1.0");
+}
+
+/// RED (U-29, M9) — **the swap back is decided by the live identity**: with
+/// the new bundle live, recovery exchanges once; with the old bundle already
+/// live (the exchange never happened, or a swap back happened and the power
+/// went before `RolledBack`), it exchanges nothing — and both end
+/// `RolledBack` with the old bundle live and the entrance removed.
+///
+/// M9: "If the live identity is new, `RENAME_SWAP` back. If it is already
+/// old, do not swap."
+///
+/// MUTATION: in `update_txn::restore`, answer `SwapBack` whenever the
+/// staged bundle is the old one or the new one (whatever is live).
+#[test]
+fn rollback_from_the_new_live_swaps_and_from_the_old_live_does_not() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("new-live");
+    install.exchanged();
+    install.write(Phase::RollbackIntent { trial: None });
+    install.arm();
+    let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
+    assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
+    assert_eq!(hands.exchanges, 1);
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert!(!install.plist().exists());
+    assert_eq!(
+        install.on_disk().unwrap().body.phase,
+        Phase::Retired {
+            outcome: Outcome::RolledBack
+        }
+    );
+
+    let install = Install::new("old-live");
+    install.write(Phase::RollbackIntent { trial: None });
+    install.arm();
+    let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
+    assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
+    assert_eq!(hands.exchanges, 0, "the old bundle was already live");
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert!(!install.plist().exists());
+}
+
+/// RED (U-29, M9 → M10) — **a swap back that fails is `Stuck{last_error,
+/// attempts: 1}`, with everything kept** — both bundles where they are, the
+/// rescue clone, the entrance, the journal — and the live build is started
+/// with `--update-failed`, whose start then continues past the unfinished
+/// rollback with the card at *Update incomplete.*
+///
+/// §C.5: "Rollback itself fails → journal `Failed` with `last_error`, backups
+/// kept, the RunOnce entry kept … a third outcome, named"; (b).2 W10/M10.
+///
+/// MUTATION: in `stuck`, answer `Ended::Stuck` without recording
+/// `RollbackFailed`.
+#[test]
+fn a_failed_swap_back_is_stuck_with_everything_kept() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("stuck");
+    let world = Fake {
+        refuse_from: 1,
+        ..Fake::default()
+    };
+    let (ended, world) = applied(install.road(limits(5_000, 1_000)), world);
+    assert!(
+        matches!(ended, Ended::Stuck(_)),
+        "{ended:?}: {:?}",
+        world.said
+    );
+    let journal = install.on_disk().unwrap();
+    let Phase::Stuck {
+        last_error,
+        attempts,
+        ..
+    } = &journal.body.phase
+    else {
+        panic!("{:?}", journal.body.phase);
+    };
+    assert_eq!(*attempts, 1);
+    assert!(last_error.contains("refused"), "{last_error}");
+    assert_eq!(version_of(&install.installed), "2.0", "nothing moved back");
+    assert_eq!(
+        version_of(&install.stage()),
+        "1.0",
+        "the old bundle is kept"
+    );
+    assert!(install.home.rescue_bundle(install.txn).unwrap().exists());
+    assert!(install.plist().exists(), "the entrance is kept");
+    assert!(said(&world, &install.home.root().display().to_string()));
+    assert_eq!(
+        world.relaunched,
+        vec![(install.installed.clone(), failed_then(&install, &[]))]
+    );
+    let header = journal.header();
+    assert_eq!(header.class, Class::Destructive);
+    let sent = crate::update_txn::StartView {
+        journal: crate::update_txn::JournalRead::Read(header),
+        lock_free: true,
+        own_image: None,
+        rescue_image: None,
+        trial_of: None,
+        sent_by_rollback: true,
+    };
+    assert_eq!(crate::update_txn::at_start(&sent), StartAction::Continue);
+}
+
+/// RED (U-29, M10) — **`Stuck` is tried again by the next lock holder — the
+/// rescue build that a start handed itself to — and each failure counts; at
+/// the bound nothing more is tried and the line names the journal's folder;
+/// a retry below the bound that can finish does.** Each run starts the
+/// installed build with `--update-failed` and the handed command line.
+///
+/// The coordinator's ruling 4 (U-29): "the rescue retries M9 at every
+/// login/start, bounded … add `Stuck{attempts}` and stop after 3 with the
+/// sentence naming the folder".
+///
+/// MUTATION: drop the `attempts >= STUCK_ATTEMPT_LIMIT` arm of
+/// `update_txn::decide`.
+#[test]
+fn stuck_is_retried_on_the_next_start_and_stops_after_the_bound() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("bound");
+    install.exchanged();
+    install.write(stuck(1));
+    install.arm();
+    let handed = vec![OsString::from("--tab")];
+    for attempts in 2..=STUCK_ATTEMPT_LIMIT {
+        let refusing = Fake {
+            refuse_from: 0,
+            ..Fake::default()
+        };
+        let (code, hands) = recover_door(&install, handed.clone(), refusing);
+        assert_eq!(code, 0, "{:?}", hands.said);
+        assert_eq!(hands.exchanges, 1, "tried again");
+        let Phase::Stuck { attempts: now, .. } = install.on_disk().unwrap().body.phase else {
+            panic!("still Stuck");
+        };
+        assert_eq!(now, attempts);
+        assert_eq!(
+            hands.relaunched,
+            vec![(
+                install.installed.join(EXE),
+                failed_then(&install, &["--tab"])
+            )]
+        );
+    }
+    let before = std::fs::read(install.home.journal()).unwrap();
+    let (code, hands) = recover_door(&install, handed.clone(), Fake::default());
+    assert_eq!(code, 0);
+    assert_eq!(hands.exchanges, 0, "nothing is tried at the bound");
+    assert_eq!(std::fs::read(install.home.journal()).unwrap(), before);
+    assert!(
+        hands
+            .said
+            .iter()
+            .any(|line| line.contains("after 3 attempts")
+                && line.contains(&*install.home.root().to_string_lossy())),
+        "{:?}",
+        hands.said
+    );
+    assert_eq!(version_of(&install.installed), "2.0");
+    assert!(install.plist().exists());
+    let log = std::fs::read_to_string(crate::diagnostics::log_path(&install.data)).unwrap();
+    assert!(log.contains("after 3 attempts"), "the line is in the log");
+
+    let install = Install::new("retry");
+    install.exchanged();
+    install.write(stuck(1));
+    install.arm();
+    let (code, hands) = recover_door(&install, handed, Fake::default());
+    assert_eq!(code, 0, "{:?}", hands.said);
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert!(!install.plist().exists());
+    assert_eq!(
+        hands.relaunched,
+        vec![(
+            install.installed.join(EXE),
+            failed_then(&install, &["--tab"])
+        )]
+    );
+}
+
+/// **The ordinary start, over a macOS home, with the start's effects
+/// performed for real where they are files** (the entrance through its door,
+/// in the test's LaunchAgents folder).
+struct StartWorld {
+    agents: PathBuf,
+    said: Vec<String>,
+}
+
+impl crate::update_startup::World for StartWorld {
+    fn say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+
+    fn spawn_detached(&mut self, program: &Path, _args: &[OsString]) -> io::Result<()> {
+        panic!("a retired transaction hands nothing to {program:?}")
+    }
+
+    fn retire_entrance(&mut self, txn: TxnId) -> Result<(), String> {
+        retire_entrance_in(Some(&self.agents), txn)
+    }
+
+    fn mounts_under(&mut self, _folder: &Path) -> Result<Vec<PathBuf>, String> {
+        Ok(Vec::new())
+    }
+
+    fn on_a_worker(&mut self, _job: crate::update_startup::OffThread) -> io::Result<()> {
+        panic!("nothing is mounted")
+    }
+}
+
+/// RED (U-29, M11) — **a transaction found at `RolledBack` is retired by the
+/// next lock holder — the entrance removed, `Retired{RolledBack}`, `H/<txn>`
+/// gone — and the next ordinary start, sent with `--update-failed`, reads
+/// *Previous version restored.* from the header and retires the journal.**
+///
+/// M11: "`RolledBack` … as W11–W13; the plist is removed after the terminal
+/// state is durable." The power went after `RolledBack` was durable.
+///
+/// MUTATION: in `finish_rollback`, skip `disarm`.
+#[test]
+fn rolled_back_is_retired_at_the_next_start() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("m11");
+    install.write(Phase::RolledBack);
+    install.arm();
+    let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
+    assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
+    assert_eq!(hands.exchanges, 0);
+    assert!(!install.plist().exists(), "the entrance is removed");
+    assert!(!install.home.transaction(install.txn).exists());
+    let journal = install.home.journal();
+    assert_eq!(
+        install.on_disk().unwrap().body.phase,
+        Phase::Retired {
+            outcome: Outcome::RolledBack
+        }
+    );
+
+    let exe = install.installed.join(EXE);
+    let argv = failed_words(&install.home).to_vec();
+    let mut world = StartWorld {
+        agents: install.agents.clone(),
+        said: Vec::new(),
+    };
+    let verdict = crate::update_startup::run(
+        &crate::update_startup::Start {
+            own_exe: &exe,
+            home: &install.home,
+            argv: &argv,
+            trial: None,
+            failed: Some(&journal),
+        },
+        &mut world,
+    );
+    let crate::update_startup::Verdict::Continue { failed, .. } = verdict else {
+        panic!("the start continues: {:?}", world.said);
+    };
+    assert_eq!(failed, Some(crate::update_job::Failure::RolledBack));
+    assert!(!journal.exists(), "the start retired the journal");
+}
+
+/// RED (U-29) — **the trial is asked to quit before it is ended**: a trial
+/// that ignores `SIGTERM` gets it first (it writes a mark), is given
+/// [`Limits::quit_within`], and only then `SIGKILL`; a recorded process whose
+/// image is not the new build's is never signalled at all.
+///
+/// The coordinator's ruling 2 (U-29): "Ask it to quit … wait a bounded time
+/// … then `SIGKILL`; never touch a process whose image is not the trial's
+/// executable".
+///
+/// MUTATION: in `stop_trial`, ask `Ask::End` first.
+#[test]
+fn the_trial_is_asked_to_quit_before_it_is_killed() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("stubborn");
+    install.exchanged();
+    let children = Children::default();
+    let mark = install.data.join("term-mark");
+    let pid = children.start_with(
+        &install.new_program(),
+        &[OsStr::new("stubborn"), mark.as_os_str()],
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    let trial = recorded(&install.installed.join(EXE), pid);
+    install.write(Phase::RollbackIntent { trial: Some(trial) });
+    let began = Instant::now();
+    let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
+    assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
+    assert!(
+        began.elapsed() >= Duration::from_millis(1_000),
+        "ended before its grace ran out"
+    );
+    assert_eq!(std::fs::read_to_string(&mark).unwrap(), "term");
+    let quit = hands
+        .said
+        .iter()
+        .position(|line| line.contains("is asked to quit"));
+    let end = hands
+        .said
+        .iter()
+        .position(|line| line.contains("is asked to end"));
+    assert!(quit.is_some() && quit < end, "{:?}", hands.said);
+    assert!(children.ended(pid).is_some(), "the stubborn trial is gone");
+
+    // A process of the old build, recorded as the trial: not the new build's
+    // image, so nothing is sent and the rollback goes on around it.
+    let install = Install::new("stranger");
+    install.exchanged();
+    let children = Children::default();
+    let stranger = children.start(&install.stage(), "by-hand");
+    std::thread::sleep(Duration::from_millis(200));
+    let trial = recorded(&install.stage().join(EXE), stranger);
+    install.write(Phase::RollbackIntent { trial: Some(trial) });
+    let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
+    assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
+    assert!(!hands.said.iter().any(|line| line.contains("is asked to")));
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(children.status(stranger), None, "the stranger still runs");
+}
+
+/// RED (U-29) — **after `Abandoned` nothing is started again; after a revert
+/// the old build is started again with no word at all.**
+///
+/// The coordinator's ruling 1 (U-29): "After `Abandoned` at the applier (O
+/// never left, or the claim stayed held) no relaunch … After a revert at
+/// admission (`Moving` → back to `Prepared`) the applier relaunches the old
+/// build without a flag (it is unchanged; the transaction waits `Prepared` for
+/// the deferred rule)."
+///
+/// MUTATION: in `apply`, give the revert's relaunch the words
+/// `failed_words` gives a rollback's.
+#[test]
+fn no_relaunch_after_abandoned_and_a_plain_relaunch_after_a_revert() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("abandoned");
+    let claim = bt_platform::instance::claim_data_directory(&install.data).unwrap();
+    let (ended, world) = applied(install.road(limits(1_000, 5_000)), Fake::default());
+    drop(claim);
+    assert_eq!(ended, Ended::Abandoned, "{:?}", world.said);
+    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+
+    let install = Install::new("reverted");
+    std::fs::write(install.home.admission(), b"").unwrap();
+    let copy = install_txn::try_hold(&install.home.admission(), Hold::Shared)
+        .unwrap()
+        .unwrap();
+    let (ended, world) = applied(install.road(limits(1_000, 5_000)), Fake::default());
+    drop(copy);
+    assert_eq!(ended, Ended::Reverted, "{:?}", world.said);
+    assert_eq!(
+        world.relaunched,
+        vec![(install.installed.clone(), Vec::new())]
+    );
+    assert_eq!(
+        install.on_disk().unwrap().body.phase,
+        Phase::Prepared {
+            deferred_launches: 0
+        }
+    );
+}
+
+/// RED (U-29, the owner's ruling of 2026-09-27) — **a finished rollback
+/// leaves only what the old build reads**: the old bundle live with its own
+/// identity; in the home the journal, the lock and the admission and nothing
+/// else; a journal whose frozen v1 header the old build's parser reads as
+/// `terminal` / `rolled_back` — its start retires it, and a trial reading it
+/// knows its transaction ended; and no entrance of this transaction.
+///
+/// "Everything Folio writes outside its own data root … keeps a format the
+/// previous version also reads, so a rollback leaves nothing the old build
+/// cannot repair on its next start." The rescue clone is a copy of the old
+/// build, and wrote every byte here; the header is U-10's frozen format
+/// (`update_txn::tests`' frozen-header cases).
+///
+/// MUTATION: in `retire`, skip the removal of `H/<txn>`.
+#[test]
+fn rolled_back_leaves_only_what_the_old_build_reads() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("leaves");
+    let (ended, world) = applied(install.road(limits(5_000, 1_000)), Fake::default());
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    let (installed, old) = (install.installed.clone(), install.old.clone());
+    let live = on_a_worker(move |worker| {
+        crate::update_prepare_macos::identity(worker, &installed).unwrap()
+    });
+    assert_eq!(live, old);
+    let mut left: Vec<String> = std::fs::read_dir(install.home.root())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(left, ["admission", "journal.json", "lock"]);
+    let bytes = std::fs::read(install.home.journal()).unwrap();
+    let header = Header::parse(&bytes).expect("the frozen v1 header");
+    assert_eq!(
+        (header.class, header.outcome),
+        (Class::Terminal, HeaderOutcome::RolledBack)
+    );
+    let view = crate::update_txn::StartView {
+        journal: crate::update_txn::JournalRead::Read(header),
+        lock_free: true,
+        own_image: None,
+        rescue_image: None,
+        trial_of: None,
+        sent_by_rollback: false,
+    };
+    assert_eq!(crate::update_txn::at_start(&view), StartAction::Retire);
+    assert_eq!(
+        crate::update_txn::trial_sight(Some(&bytes), &install.txn),
+        TrialSight::Ended
+    );
+    let ours: Vec<_> = std::fs::read_dir(&install.agents)
+        .unwrap()
+        .filter_map(|entry| {
+            let name = entry.unwrap().file_name();
+            launch_agent::is_ours(&name).then_some(name)
+        })
+        .collect();
+    assert!(ours.is_empty(), "{ours:?}");
 }

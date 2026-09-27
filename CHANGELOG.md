@@ -14,6 +14,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- On macOS, the coming updater can now put the previous version back when a new
+  one does not start: the new copy is asked to quit, the old app is swapped
+  back in one step and opened again, and its update card says the previous
+  version was restored. If putting it back fails, everything is kept, the card
+  says the update is incomplete and shows the folder, and the next login or
+  start tries again, three times at most. Nothing can start an update yet.
 - On macOS, the coming updater can now apply a prepared update: after Folio
   quits, a copy of the old app waits for it to be gone, swaps the new app into
   place in one step, starts it, and keeps the old one until the new one has

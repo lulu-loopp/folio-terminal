@@ -25,10 +25,18 @@
 //!      under the transaction lock; continue;
 //!    - `destructive`, or the trial of another transaction, or no trial at all
 //!      → the rescue build is started detached with
-//!      `--update-recover --then-launch <this command line>`, and this process
-//!      leaves with one line — unless the rescue build is missing or cannot be
-//!      started, when one line names it and the start continues untouched
-//!      (coordinator ruling, 2026-09-27);
+//!      `--update-recover [<home>] --then-launch <this command line>` (the
+//!      home named on macOS, whose rescue clone cannot find it from its own
+//!      path — U-29), and this process leaves with one line — unless the
+//!      rescue build is missing or cannot be started, when one line names it
+//!      and the start continues untouched (coordinator ruling, 2026-09-27);
+//!    - `destructive` with the outcome `rolled_back`, and this start carries
+//!      `--update-failed <journal>` → continue: the rescue build tried the
+//!      rollback and sent this start (U-29). Every start that carries the
+//!      word reads the card it raises from the header alone
+//!      (`update_txn::after_rollback`): *Previous version restored.* once the
+//!      transaction is retired, *Update incomplete.* and the journal's folder
+//!      while it is not ([`failed`]);
 //!    - `preparing` / `deferred` → continue, unless this start's own image is
 //!      not the rescue copy of the build that began the transaction (the
 //!      folder was replaced by hand): then `H\<txn>` (its image detached first,
@@ -58,9 +66,10 @@ use bt_platform::file_reads::{self, Lane};
 use bt_platform::install_txn::{self, Held, Hold};
 
 use crate::cli;
+use crate::update_job::Failure;
 use crate::update_txn::{
-    Class, Digest, Effect, Header, Home, JournalRead, Nonce, StartAction, StartView, TxnId,
-    at_start,
+    AfterRollback, Class, Digest, Effect, Header, Home, JournalRead, Nonce, StartAction, StartView,
+    TxnId, after_rollback, at_start,
 };
 
 /// **The pass has run.** Only [`pass`] makes one, and `launch_wire::hand_over`
@@ -81,6 +90,18 @@ struct Trial {
     txn: TxnId,
     nonce: Nonce,
     home: Home,
+}
+
+/// **The failure a rollback sent this start to report**, set only by
+/// [`pass`] (U-29).
+static FAILED: OnceLock<Failure> = OnceLock::new();
+
+/// **What the card of this launch says about an earlier launch's update**:
+/// set when this start carried `--update-failed` and its home's journal says
+/// `rolled_back` — the job starts at `Failed` with it
+/// (`update_job::Job::after_rollback`). `None` for every other start.
+pub(crate) fn failed() -> Option<Failure> {
+    FAILED.get().cloned()
 }
 
 /// **Whether this start is an update's trial, and its nonce** — the fact the
@@ -133,20 +154,23 @@ pub(crate) type OffThread =
     Box<dyn FnOnce(&bt_platform::admission::WorkerCtx) -> Result<(), String> + Send>;
 
 /// What one start is: its own executable, its installation home, its command
-/// line and its `--update-trial` values.
+/// line, its `--update-trial` values and its `--update-failed` journal.
 pub(crate) struct Start<'a> {
     pub(crate) own_exe: &'a Path,
     pub(crate) home: &'a Home,
     pub(crate) argv: &'a [OsString],
     pub(crate) trial: Option<&'a cli::UpdateTrialArg>,
+    pub(crate) failed: Option<&'a Path>,
 }
 
 /// What the pass decided.
 pub(crate) enum Verdict {
-    /// Start as usual, holding `admission` for the life of the process.
+    /// Start as usual, holding `admission` for the life of the process, with
+    /// the card a rollback sent this start to raise.
     Continue {
         admission: Option<Held>,
         trial: Option<(TxnId, Nonce)>,
+        failed: Option<Failure>,
     },
     /// Leave now, with this exit code: the rescue build has this start.
     Exit(i32),
@@ -168,15 +192,23 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
         home: &home,
         argv: &argv,
         trial: request.update_trial.as_ref(),
+        failed: request.update_failed.as_deref(),
     };
     match run(&start, &mut Machine) {
         Verdict::Exit(code) => bt_platform::leave_process(code),
-        Verdict::Continue { admission, trial } => {
+        Verdict::Continue {
+            admission,
+            trial,
+            failed,
+        } => {
             if let Some(held) = admission {
                 let _ = ADMISSION.set(held);
             }
             if let Some((txn, nonce)) = trial {
                 let _ = TRIAL.set(Trial { txn, nonce, home });
+            }
+            if let Some(failure) = failed {
+                let _ = FAILED.set(failure);
             }
             Admitted(())
         }
@@ -207,6 +239,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             return Verdict::Continue {
                 admission,
                 trial: None,
+                failed: None,
             };
         }
     };
@@ -214,10 +247,22 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
         return Verdict::Continue {
             admission,
             trial: None,
+            failed: None,
         };
     };
     let header = header.clone();
     let trial = trial_of(start.trial, world);
+    // The card is read before a retirement removes the journal it is read
+    // from; the folder is the one the rollback named.
+    let failed = start
+        .failed
+        .and_then(|journal| Some((journal, after_rollback(&header)?)))
+        .map(|(journal, after)| match after {
+            AfterRollback::Restored => Failure::RolledBack,
+            AfterRollback::Incomplete => Failure::Incomplete {
+                folder: journal.parent().unwrap_or(journal).to_path_buf(),
+            },
+        });
     // The transaction lock is asked for only where its answer decides
     // something: a retirement or a discard needs it; a destructive class is
     // never the start's to touch, and asking would contend with the applier.
@@ -234,18 +279,25 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             .then(|| image(&start.home.rescue_program(&header.rescue)))
             .flatten(),
         trial_of: trial.map(|(txn, _)| txn),
+        sent_by_rollback: start.failed.is_some(),
     };
     match at_start(&view) {
         StartAction::Continue => Verdict::Continue {
             admission,
             trial: None,
+            failed,
         },
-        StartAction::RunAsTrial => Verdict::Continue { admission, trial },
+        StartAction::RunAsTrial => Verdict::Continue {
+            admission,
+            trial,
+            failed: None,
+        },
         action @ (StartAction::Retire | StartAction::Discard) => {
             retire(action, &header, start.home, lock, world);
             Verdict::Continue {
                 admission,
                 trial: None,
+                failed,
             }
         }
         StartAction::HandToRescue => hand_to_rescue(start, &header, admission, world),
@@ -408,7 +460,10 @@ fn hand_to_rescue(
     world: &mut impl World,
 ) -> Verdict {
     let program = start.home.rescue_program(&header.rescue);
-    match world.spawn_detached(&program, &cli::recover_command_line(start.argv)) {
+    // A macOS rescue clone is found from the home the line names (F-3); the
+    // Windows rescue build derives its home from its own path (F-2).
+    let named = start.home.installed_bundle().map(|_| start.home.root());
+    match world.spawn_detached(&program, &cli::recover_command_line(named, start.argv)) {
         Ok(()) => {
             world.say(&format!(
                 "BT_UPDATE_START an update is being finished by {}; Folio opens when it is done",
@@ -425,6 +480,7 @@ fn hand_to_rescue(
             Verdict::Continue {
                 admission,
                 trial: None,
+                failed: None,
             }
         }
     }
@@ -665,15 +721,42 @@ mod tests {
             }
 
             fn journal(&self, class: Class) -> Vec<u8> {
+                self.journal_of(class, crate::update_txn::HeaderOutcome::None)
+            }
+
+            fn journal_of(
+                &self,
+                class: Class,
+                outcome: crate::update_txn::HeaderOutcome,
+            ) -> Vec<u8> {
                 let bytes = Header {
                     txn: txn(),
                     rescue: self.rescue.to_string_lossy().into_owned(),
                     class,
-                    outcome: crate::update_txn::HeaderOutcome::None,
+                    outcome,
                 }
                 .encode();
                 std::fs::write(self.home.journal(), &bytes).unwrap();
                 bytes
+            }
+
+            /// The pass for a start that carries `--update-failed <journal>`.
+            fn run_sent(&self, journal: &Path, world: &mut Recorded) -> Verdict {
+                let argv = [
+                    OsString::from(cli::UPDATE_FAILED_FLAG),
+                    journal.as_os_str().to_owned(),
+                ];
+                world.admission = Some(self.home.admission());
+                run(
+                    &Start {
+                        own_exe: &self.own_exe,
+                        home: &self.home,
+                        argv: &argv,
+                        trial: None,
+                        failed: Some(journal),
+                    },
+                    world,
+                )
             }
 
             fn run(
@@ -690,6 +773,7 @@ mod tests {
                         home: &self.home,
                         argv: &argv,
                         trial,
+                        failed: None,
                     },
                     world,
                 )
@@ -733,7 +817,9 @@ mod tests {
 
         fn continued(verdict: Verdict) -> (Option<Held>, Option<(TxnId, Nonce)>) {
             match verdict {
-                Verdict::Continue { admission, trial } => (admission, trial),
+                Verdict::Continue {
+                    admission, trial, ..
+                } => (admission, trial),
                 Verdict::Exit(code) => panic!("the start left with {code} instead of continuing"),
             }
         }
@@ -773,7 +859,10 @@ mod tests {
                 world.spawned,
                 vec![(
                     scene.rescue.clone(),
-                    cli::recover_command_line(&["--cwd", "D:\\x", "--tab"].map(OsString::from))
+                    cli::recover_command_line(
+                        None,
+                        &["--cwd", "D:\\x", "--tab"].map(OsString::from)
+                    )
                 )]
             );
             assert_eq!(
@@ -1108,6 +1197,124 @@ mod tests {
                 assert_eq!(world.spawned.len(), 1);
                 assert_eq!(world.said.len(), lines, "{:?}", world.said);
             }
+        }
+
+        /// RED (U-29) — **a start that a rollback sent continues past the
+        /// transaction it rolled back and carries the card the header asks
+        /// for: `Update incomplete.` with the named journal's folder while the
+        /// journal is still destructive, `Previous version restored.` once it
+        /// is retired (and the start retires it, after reading it).** Without
+        /// the word, the same destructive journal hands the start over.
+        ///
+        /// The rescue build that could not finish sends the start with
+        /// `--update-failed <journal>` so that Folio opens at all; handing it
+        /// back would send it round again.
+        ///
+        /// MUTATION: in `run`, build the view with `sent_by_rollback: false`.
+        #[test]
+        fn a_start_sent_after_a_rollback_continues_with_its_card() {
+            use crate::update_txn::HeaderOutcome;
+            let Some(scene) = Scene::new("sent") else {
+                return;
+            };
+            let journal = scene.journal_of(Class::Destructive, HeaderOutcome::RolledBack);
+            let mut world = Recorded::default();
+            let verdict = scene.run_sent(&scene.home.journal(), &mut world);
+            let Verdict::Continue {
+                admission, failed, ..
+            } = verdict
+            else {
+                panic!("a start the rollback sent must continue");
+            };
+            assert_eq!(
+                failed,
+                Some(Failure::Incomplete {
+                    folder: scene.home.root().to_path_buf()
+                })
+            );
+            assert!(world.spawned.is_empty(), "{:?}", world.spawned);
+            assert_eq!(std::fs::read(scene.home.journal()).unwrap(), journal);
+            drop(admission);
+
+            let mut world = Recorded::default();
+            assert_eq!(exited(scene.run(&[], None, &mut world)), 0);
+            assert_eq!(world.spawned.len(), 1, "without the word it hands over");
+
+            scene.journal_of(Class::Terminal, HeaderOutcome::RolledBack);
+            let mut world = Recorded::default();
+            let Verdict::Continue { failed, .. } =
+                scene.run_sent(&scene.home.journal(), &mut world)
+            else {
+                panic!("a retired transaction never stops a start");
+            };
+            assert_eq!(failed, Some(Failure::RolledBack));
+            assert!(!scene.home.journal().exists(), "and it is retired");
+
+            let mut world = Recorded::default();
+            let Verdict::Continue { failed, .. } =
+                scene.run_sent(&scene.home.journal(), &mut world)
+            else {
+                panic!("no journal never stops a start");
+            };
+            assert_eq!(failed, None, "no journal, no card");
+        }
+
+        /// RED (U-29) — **a start in a macOS bundle hands itself to the rescue
+        /// clone with the installation home named on the line**: the clone
+        /// cannot find the home from its own path, and `--update-recover`
+        /// without one is refused there (`Home::of_rescue` is Windows' only).
+        /// A Windows start's line names none, as before.
+        ///
+        /// MUTATION: in `hand_to_rescue`, pass `None` for the home.
+        #[test]
+        fn a_macos_start_names_the_home_when_it_hands_over() {
+            let Some(scene) = Scene::new("named") else {
+                return;
+            };
+            let bundle = scene.root.join("Applications").join("Folio.app");
+            let exe = bundle.join(crate::update_txn::MACOS_EXECUTABLE_INSIDE);
+            std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+            std::fs::write(&exe, RUNNING_BUILD).unwrap();
+            let home = Home::of(bt_platform::HostPlatform::MacOs, &exe).unwrap();
+            let rescue = home.rescue_bundle(txn()).unwrap();
+            let program = home.rescue_executable(txn()).unwrap();
+            std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+            std::fs::write(&program, RUNNING_BUILD).unwrap();
+            std::fs::write(
+                home.journal(),
+                Header {
+                    txn: txn(),
+                    rescue: rescue.to_string_lossy().into_owned(),
+                    class: Class::Destructive,
+                    outcome: crate::update_txn::HeaderOutcome::None,
+                }
+                .encode(),
+            )
+            .unwrap();
+            let argv = [OsString::from("--tab")];
+            let mut world = Recorded::default();
+            let verdict = run(
+                &Start {
+                    own_exe: &exe,
+                    home: &home,
+                    argv: &argv,
+                    trial: None,
+                    failed: None,
+                },
+                &mut world,
+            );
+            assert_eq!(exited(verdict), 0);
+            assert_eq!(
+                world.spawned,
+                vec![(program, cli::recover_command_line(Some(home.root()), &argv))]
+            );
+            assert_eq!(
+                cli::update_door(world.spawned[0].1.clone()),
+                Some(Ok(cli::UpdateDoor::Recover {
+                    home: Some(home.root().to_path_buf()),
+                    then_launch: Some(argv.to_vec()),
+                }))
+            );
         }
 
         /// RED (U-12) — **a journal this build cannot read is left exactly as it

@@ -66,6 +66,7 @@
     )
 )]
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -463,6 +464,15 @@ pub(crate) enum Failure {
     /// The driver stopped before the files were verified, for this reason;
     /// nothing installed was changed.
     Stopped(Stop),
+    /// **The new version did not prove itself and the previous one was put
+    /// back** (U-29): a start sent with `--update-failed` found its
+    /// transaction retired with the outcome `rolled_back`.
+    RolledBack,
+    /// **The new version did not prove itself and putting the previous one
+    /// back did not finish** (U-29): the transaction is still `rolled_back`
+    /// and destructive — `Stuck`, or not begun — and `folder` is where its
+    /// journal is, which the card names.
+    Incomplete { folder: PathBuf },
 }
 
 /// **Why a driver stopped** (U-18 decision 11, grown by the macOS Prepare,
@@ -541,8 +551,10 @@ pub(crate) enum State {
     Quitting(Offer),
     /// The session landed; the process is handing over and exiting.
     Committing(Offer),
-    /// The job stopped, and says why.
-    Failed(Offer, Failure),
+    /// The job stopped, and says why: this launch's offer, or none when the
+    /// failure is an earlier launch's transaction, reported by the rollback
+    /// that sent this one (`--update-failed`, U-29).
+    Failed(Option<Offer>, Failure),
 }
 
 /// A state's name, for the table.
@@ -601,8 +613,8 @@ impl State {
             | Self::Staged(offer)
             | Self::Verified(offer)
             | Self::Quitting(offer)
-            | Self::Committing(offer)
-            | Self::Failed(offer, _) => Some(offer),
+            | Self::Committing(offer) => Some(offer),
+            Self::Failed(offer, _) => offer.as_ref(),
         }
     }
 }
@@ -1154,6 +1166,19 @@ impl<W: Copy + Eq> Job<W> {
         drop(left);
     }
 
+    /// **A launch that a rollback sent** (`--update-failed`, U-29;
+    /// `update_startup::failed`): the card stands at `Failed` from the start
+    /// with `failure` and no offer — the transaction was an earlier launch's —
+    /// and this launch offers nothing else. `None` is every other launch.
+    #[must_use]
+    pub(crate) fn after_rollback(mut self, failure: Option<Failure>) -> Self {
+        if let Some(failure) = failure {
+            self.state = State::Failed(None, failure);
+            self.offered_this_launch = true;
+        }
+        self
+    }
+
     /// A job standing at `Verified` with `offer` — a test's way to the quit
     /// barrier without a driver (none exists before U-20).
     #[cfg(test)]
@@ -1259,7 +1284,8 @@ impl<W: Copy + Eq> Job<W> {
     /// window moves, the reader's answer does not. Answers whether the
     /// presenter changed.
     pub(crate) fn hand_over(&mut self, presenters: &Presenters<'_, W>) -> bool {
-        if self.state.offer().is_none()
+        let has_a_card = self.state.offer().is_some() || matches!(self.state, State::Failed(..));
+        if !has_a_card
             || self
                 .presenter
                 .is_some_and(|window| presenters.open.contains(&window))
@@ -1375,9 +1401,10 @@ impl<W: Copy + Eq> Job<W> {
                 }
                 (State::Verified(offer), Applied::Moved)
             }
-            (State::Downloading(offer, _) | State::Staged(offer), Step::Stopped(why)) => {
-                (State::Failed(offer, Failure::Stopped(why)), Applied::Moved)
-            }
+            (State::Downloading(offer, _) | State::Staged(offer), Step::Stopped(why)) => (
+                State::Failed(Some(offer), Failure::Stopped(why)),
+                Applied::Moved,
+            ),
             (State::Quitting(offer), Step::QuitAbandoned(why)) => {
                 self.abandoned = Some(why);
                 (State::Verified(offer), Applied::Moved)
@@ -1437,9 +1464,10 @@ impl<W: Copy + Eq> Job<W> {
                     }
                     // A driver with no thread to run on is, to the reader, a
                     // copy that cannot update itself now: nothing moved.
-                    Err(Refused::Unsupported | Refused::NoWorker) => {
-                        (State::Failed(offer, Failure::Unsupported), Ok(Effect::None))
-                    }
+                    Err(Refused::Unsupported | Refused::NoWorker) => (
+                        State::Failed(Some(offer), Failure::Unsupported),
+                        Ok(Effect::None),
+                    ),
                 }
             }
             (state @ State::Available(_), Verb::Cancel | Verb::Restart)
@@ -1497,6 +1525,7 @@ fn line(answer: &Result<Eligible, NotEligible>, offers: bool) -> String {
 mod tests {
     use std::cell::RefCell;
     use std::collections::HashSet;
+    use std::path::PathBuf;
 
     use bt_persist::UpdateCheckV1;
     use bt_platform::HostPlatform;
@@ -1880,7 +1909,7 @@ mod tests {
         );
         assert_eq!(
             stopped.state(),
-            &State::Failed(offer, Failure::Stopped(Stop::Download))
+            &State::Failed(Some(offer), Failure::Stopped(Stop::Download))
         );
     }
 
@@ -1897,7 +1926,7 @@ mod tests {
             Kind::Verified => State::Verified(offer),
             Kind::Quitting => State::Quitting(offer),
             Kind::Committing => State::Committing(offer),
-            Kind::Failed => State::Failed(offer, Failure::Unsupported),
+            Kind::Failed => State::Failed(Some(offer), Failure::Unsupported),
         };
         job
     }
@@ -1990,7 +2019,10 @@ mod tests {
             job.answer_verb(Verb::Press, &Unsupported, &transport.shared()),
             Ok(Effect::None)
         );
-        assert_eq!(job.state(), &State::Failed(offer, Failure::Unsupported));
+        assert_eq!(
+            job.state(),
+            &State::Failed(Some(offer), Failure::Unsupported)
+        );
         assert!(
             transport.requests().is_empty(),
             "the press fetched {:?}",
@@ -2637,5 +2669,53 @@ mod tests {
         let mut idle = self::job();
         assert!(!idle.hand_over(&one_gone));
         assert_eq!(idle.presenter(), None);
+    }
+
+    /// RED (U-29) — **a launch a rollback sent stands at `Failed` from the
+    /// start, with no offer: the card goes to the first ordinary window that
+    /// opens, the evidence that lands later offers nothing, and Close puts it
+    /// away.**
+    ///
+    /// §C.5: the restored old build is relaunched "with `--update-failed
+    /// <journal>`, which raises the card at `Failed`". The failed transaction
+    /// was an earlier launch's, so there is no offer to carry, and the card is
+    /// this launch's one update card.
+    ///
+    /// MUTATION: in `Job::hand_over`, seat a card only for a state that
+    /// carries an offer (the card never rises).
+    #[test]
+    fn a_launch_sent_by_a_rollback_raises_the_failed_card() {
+        let folder = PathBuf::from("/Applications/.Folio.app.folio-update");
+        let mut job = job().after_rollback(Some(Failure::Incomplete {
+            folder: folder.clone(),
+        }));
+        assert_eq!(
+            job.state(),
+            &State::Failed(None, Failure::Incomplete { folder })
+        );
+        assert_eq!(job.card_window(), None, "no window yet");
+        let first = Presenters {
+            visited: &[],
+            open: &[4],
+            quake: None,
+        };
+        assert!(job.hand_over(&first));
+        assert_eq!(job.card_window(), Some(4));
+        assert_eq!(
+            job.consider(
+                gathered("v0.4.7", None, Some(Channel::Ours)),
+                &first,
+                || { txn(1) }
+            ),
+            None
+        );
+        assert!(matches!(job.state(), State::Failed(None, _)));
+        job.answer_verb(Verb::Later, &Unsupported, &Recording::default().shared())
+            .expect("Close is Later");
+        assert_eq!(job.state(), &State::Idle);
+        assert_eq!(job.card_window(), None);
+
+        let plain = self::job().after_rollback(None);
+        assert_eq!(plain.state(), &State::Pending(Pending::AwaitingBoth));
     }
 }
