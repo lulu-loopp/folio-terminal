@@ -354,7 +354,7 @@ jobs:
           --package bt-layout --package bt-math --package bt-pty
           --package bt-platform --package bt-persist --package bt-unicode
           --package bt-render --package bt-winres --package bt-source
-          --package bt-workbench --package bt-app
+          --package bt-workbench --package bt-app --package bt-lint-probe
           -- --check
 
       # The two excluded packages are still *linted* — their libraries are
@@ -401,6 +401,14 @@ jobs:
       - name: the window thread's checks
         shell: pwsh
         run: ./scripts/ci/check-window-waits.ps1
+
+      # The positive control (thread-door note, revisions (j)4 and (j)11.3): the
+      # probe is what the registry generates, and the lint reports each entry
+      # assigned to this target on its line - a separate invocation from the
+      # clippy line above, which stays as it is.
+      - name: the lint probe's positive control
+        shell: pwsh
+        run: ./scripts/ci/check-lint-probe.ps1
 
       # `check-vendor-notices.ps1` reads upstream alacritty 0.26.0 out of the
       # registry to diff it against `vendor/`, so the sources have to be there.
@@ -716,6 +724,12 @@ jobs:
       - name: the window thread's checks
         shell: pwsh
         run: ./scripts/ci/check-window-waits.ps1
+
+      # The lint probe's positive control on this target: the macOS entries
+      # (`libc::write`, `libc::close`) are proven here and only here.
+      - name: the lint probe's positive control
+        shell: pwsh
+        run: ./scripts/ci/check-lint-probe.ps1
 
       # **The macOS lint line can actually fail** — `gates-can-fail`'s mechanism
       # (plant, demand red, put the file back), run here because the violation

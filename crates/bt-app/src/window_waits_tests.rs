@@ -280,7 +280,7 @@ fn the_architecture_table_is_the_registry() {
 
 /// The first-party packages that are not in `folio.exe`: development tools. Every other
 /// workspace member outside `vendor/` must be one `bt-app` depends on.
-const NOT_THE_PRODUCT: [&str; 2] = ["bt-corpus", "bt-source"];
+const NOT_THE_PRODUCT: [&str; 3] = ["bt-corpus", "bt-lint-probe", "bt-source"];
 
 /// The first-party packages a manifest depends on (`[dependencies]` and the per-target tables).
 fn manifest_dependencies(manifest: &str) -> Vec<String> {

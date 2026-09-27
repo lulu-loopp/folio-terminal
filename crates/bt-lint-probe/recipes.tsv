@@ -1,0 +1,38 @@
+## How the lint probe calls each vocabulary entry (thread-door note, revision (j)11.2): the
+## function's generic parameters, its parameters, and the call, written on one line. Keyed by the
+## entry's path exactly as `crates/bt-app/src/window_waits.tsv`'s `# vocabulary` spells it; the
+## generator refuses an entry without a recipe and a recipe without an entry.
+path	generics	params	call
+std::thread::sleep		d: std::time::Duration	std::thread::sleep(d)
+std::thread::JoinHandle::join		h: std::thread::JoinHandle<()>	h.join()
+std::sync::mpsc::Receiver::recv		r: &std::sync::mpsc::Receiver<()>	r.recv()
+std::sync::mpsc::Receiver::recv_timeout		r: &std::sync::mpsc::Receiver<()>, d: std::time::Duration	r.recv_timeout(d)
+std::sync::Condvar::wait	<'a>	c: &std::sync::Condvar, g: std::sync::MutexGuard<'a, ()>	c.wait(g)
+std::sync::Condvar::wait_timeout	<'a>	c: &std::sync::Condvar, g: std::sync::MutexGuard<'a, ()>, d: std::time::Duration	c.wait_timeout(g, d)
+std::fs::rename		a: &std::path::Path, b: &std::path::Path	std::fs::rename(a, b)
+std::fs::write		p: &std::path::Path, b: &[u8]	std::fs::write(p, b)
+std::fs::copy		a: &std::path::Path, b: &std::path::Path	std::fs::copy(a, b)
+std::fs::canonicalize		p: &std::path::Path	std::fs::canonicalize(p)
+std::fs::metadata		p: &std::path::Path	std::fs::metadata(p)
+std::fs::read_dir		p: &std::path::Path	std::fs::read_dir(p)
+std::fs::create_dir_all		p: &std::path::Path	std::fs::create_dir_all(p)
+std::fs::File::create		p: &std::path::Path	std::fs::File::create(p)
+std::fs::File::sync_data		f: &std::fs::File	f.sync_data()
+std::fs::File::sync_all		f: &std::fs::File	f.sync_all()
+std::io::Write::write_fmt		w: &mut dyn std::io::Write	w.write_fmt(format_args!("probe"))
+std::process::Command::output		c: &mut std::process::Command	c.output()
+std::process::Command::status		c: &mut std::process::Command	c.status()
+std::process::Child::wait		c: &mut std::process::Child	c.wait()
+portable_pty::Child::try_wait		c: &mut dyn portable_pty::Child	c.try_wait()
+pollster::block_on		f: std::future::Ready<()>	pollster::block_on(f)
+wgpu::Queue::submit		q: &wgpu::Queue, b: wgpu::CommandBuffer	q.submit([b])
+wgpu::Queue::present		q: &wgpu::Queue, t: wgpu::SurfaceTexture	q.present(t)
+bt_render::GpuContext::open		t: bt_render::WindowTarget	bt_render::GpuContext::open(t, 1, 1, 1.0)
+bt_pty::PtySession::spawn_shell_in		size: bt_pty::PtySize, wake: bt_pty::OutputWake	bt_pty::PtySession::spawn_shell_in("probe", &[], &[], size, wake, None)
+bt_pty::PtySession::resize		s: &bt_pty::PtySession, size: bt_pty::PtySize	s.resize(size)
+bt_pty::wait_for_retirements		d: std::time::Duration	bt_pty::wait_for_retirements(d)
+windows::Win32::UI::Shell::ShellExecuteW		o: windows::core::PCWSTR, n: windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD	unsafe { windows::Win32::UI::Shell::ShellExecuteW(None, o, o, o, o, n) }
+windows::Win32::System::Threading::SetEvent		h: windows::Win32::Foundation::HANDLE	unsafe { windows::Win32::System::Threading::SetEvent(h) }
+windows::Win32::Foundation::CloseHandle		h: windows::Win32::Foundation::HANDLE	unsafe { windows::Win32::Foundation::CloseHandle(h) }
+libc::write		fd: i32, b: &[u8]	unsafe { libc::write(fd, b.as_ptr().cast(), b.len()) }
+libc::close		fd: i32	unsafe { libc::close(fd) }
