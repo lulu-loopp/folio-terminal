@@ -1,6 +1,8 @@
-//! **The macOS exchange of an installed bundle, and the processes that run
-//! from one** (0.4.6 ticket U-28; `docs/plans/design/self-update-2026-09-16.md`
-//! §C.4, revision (b) §(b).2's M4–M8 and experiment E-12).
+//! **The installed program's replacement: the macOS exchange of a bundle, the
+//! processes that run from an executable, and whether another process holds a
+//! file open** (0.4.6 tickets U-28 and U-23;
+//! `docs/plans/design/self-update-2026-09-16.md` §C.4, revision (b) §(b).2's
+//! M4–M8 and W3–W8, experiments E-7 and E-12).
 //!
 //! * **[`exchange`]**: one `renamex_np(live, staged, RENAME_SWAP)` — the
 //!   installed bundle and the staged one trade places in a single call, so
@@ -9,33 +11,51 @@
 //!   [`crate::install_txn`]'s durable steps. Both names must exist and sit on
 //!   one volume, which the installation home beside the bundle gives by
 //!   construction (C.1). Windows has no such call and refuses it; so does
-//!   every platform without an arm.
-//! * **[`running_from`]**: the processes whose image is a given executable —
-//!   `proc_listallpids`, then `proc_pidpath` of each, matched by the file
-//!   itself (device and inode), never by spelling — read only. The applier's
-//!   process check before the exchange (M4: nothing runs from the live bundle)
-//!   and the trial's pid after its launch through LaunchServices (`open`
-//!   reports no pid) are both this list.
+//!   every platform without an arm. (The Windows flip is one
+//!   `install_txn::durable_move` per file.)
+//! * **[`running_from`]**: the processes whose image is a given executable,
+//!   matched by the file itself, never by spelling — read only. macOS:
+//!   `proc_listallpids`, then `proc_pidpath` of each, compared by device and
+//!   inode. Windows: `K32EnumProcesses`, then `QueryFullProcessImageNameW` of
+//!   each, compared by volume serial number and file index. The macOS
+//!   applier's process check before the exchange (M4), the trial's pid after
+//!   its launch through LaunchServices (`open` reports no pid), and the
+//!   Windows recovery's look for an applier still alive (W3) are this list.
 //! * **[`still_running`]**: whether a process recorded by its pid *and* its
-//!   start time still runs — a pid alone may have been reused (F-7).
+//!   start time still runs — a pid alone may have been reused (F-7). The start
+//!   time is `proc_pidinfo`'s on macOS (microseconds since the epoch) and
+//!   `GetProcessTimes`'s creation time on Windows (100 ns since 1601); a
+//!   Windows process that has exited while a handle keeps its record is not
+//!   running.
 //! * **[`ask`]** (U-29): a signal to a recorded process — `SIGTERM` to ask it
 //!   to quit, `SIGKILL` to end it — sent only after the process list shows
 //!   that very process (pid *and* start instant) running from one of the
 //!   given executables. The rollback stops the trial this way (§(b).2 W9/M9):
 //!   the trial was started by LaunchServices, so its stopper is not its
-//!   parent and has only the journal's record to go by.
+//!   parent and has only the journal's record to go by. macOS only; on
+//!   Windows the signal is refused by name (the Windows rollback is U-24's).
+//! * **[`held_open`]** (Windows): whether another process holds a file open,
+//!   asked by opening it for reading and writing with no sharing at all —
+//!   E-7's process check before the first move. Any other handle on the file
+//!   refuses that open, and so does a running image or a loaded library (the
+//!   section the loader maps refuses a writer), with a sharing violation. A
+//!   rename alone would not find a running image: Windows lets one be moved.
+//!   Nothing is written, and the handle is closed at once, so the check never
+//!   stands in a move's way. Refused by name elsewhere.
 //!
 //! Worker only: the exchange flushes to the device. Refused by name (or an
-//! empty answer, for the reads) off macOS.
+//! empty answer, for the reads) where there is no arm.
 
 use std::io;
 use std::path::Path;
 
 use crate::install_txn::{self, Failure};
 
-/// **A process, by its pid and the instant it started** (microseconds since
-/// the epoch, as `proc_pidinfo`'s `PROC_PIDTBSDINFO` reports it): together
-/// they name one process for its whole life, where a pid alone may be reused.
+/// **A process, by its pid and the instant it started** (macOS: microseconds
+/// since the epoch, as `proc_pidinfo`'s `PROC_PIDTBSDINFO` reports it;
+/// Windows: the creation time `GetProcessTimes` reports, in 100 ns since
+/// 1601): together they name one process for its whole life, where a pid alone
+/// may be reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Running {
     pub pid: u32,
@@ -65,14 +85,14 @@ pub fn running_from(executable: &Path) -> io::Result<Vec<Running>> {
 }
 
 /// **Whether `process` still runs**: its pid names a live process that started
-/// at the same instant. `false` off macOS.
+/// at the same instant. `false` where there is no arm.
 #[must_use]
 pub fn still_running(process: Running) -> bool {
     imp::started_of(process.pid) == Some(process.started)
 }
 
 /// **The start instant of the live process `pid`**, or `None` when there is
-/// none (or off macOS).
+/// none (or no arm).
 #[must_use]
 pub fn started_of(pid: u32) -> Option<u64> {
     imp::started_of(pid)
@@ -120,6 +140,16 @@ pub fn ask(process: Running, images: &[&Path], ask: Ask) -> io::Result<bool> {
         return Ok(false);
     }
     imp::signal(process.pid, ask)
+}
+
+/// **Whether another process holds the file at `path` open** — see the module
+/// header. `Ok(false)`: it was opened with no sharing, and closed again.
+///
+/// # Errors
+/// The file could not be opened for another reason (it is not there, access
+/// is denied); `Unsupported` off Windows.
+pub fn held_open(path: &Path) -> io::Result<bool> {
+    imp::held_open(path)
 }
 
 #[cfg(target_os = "macos")]
@@ -223,9 +253,161 @@ mod imp {
             Err(error)
         }
     }
+
+    pub(super) fn held_open(_path: &Path) -> io::Result<bool> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "install_flip asks whether a file is held open on Windows only",
+        ))
+    }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(windows)]
+mod imp {
+    use super::Running;
+    use std::ffi::OsStr;
+    use std::fs::{File, OpenOptions};
+    use std::io;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use std::path::Path;
+    use windows::Win32::Foundation::{ERROR_SHARING_VIOLATION, FILETIME, HANDLE, STILL_ACTIVE};
+    use windows::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+    };
+    use windows::Win32::System::ProcessStatus::K32EnumProcesses;
+    use windows::Win32::System::Threading::{
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    /// Room for the processes that start between two asks.
+    const SLACK: usize = 256;
+
+    pub(super) fn running_from(executable: &Path) -> io::Result<Vec<Running>> {
+        let wanted = identity(executable)?;
+        let name = lowered(executable.file_name());
+        let mut found = Vec::new();
+        for pid in all_pids()? {
+            let Some(path) = crate::process_image_path(pid) else {
+                continue;
+            };
+            // The name first, so only the few candidates are opened.
+            if lowered(path.file_name()) != name {
+                continue;
+            }
+            if identity(&path).ok() != Some(wanted) {
+                continue;
+            }
+            if let Some(started) = started_of(pid) {
+                found.push(Running { pid, started });
+            }
+        }
+        Ok(found)
+    }
+
+    fn lowered(name: Option<&OsStr>) -> Option<String> {
+        name.map(|name| name.to_string_lossy().to_lowercase())
+    }
+
+    /// The file's own identity: its volume's serial number and its index.
+    fn identity(path: &Path) -> io::Result<(u32, u32, u32)> {
+        let file = File::open(path)?;
+        let mut info = BY_HANDLE_FILE_INFORMATION::default();
+        // SAFETY: `file` owns a live handle for the call; `info` is writable.
+        unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &raw mut info) }
+            .map_err(|_| io::Error::last_os_error())?;
+        Ok((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ))
+    }
+
+    fn all_pids() -> io::Result<Vec<u32>> {
+        let mut pids: Vec<u32> = vec![0; 1024];
+        loop {
+            let bytes = u32::try_from(pids.len() * size_of::<u32>())
+                .map_err(|_| io::Error::other("the process list does not fit a u32"))?;
+            let mut returned = 0u32;
+            // SAFETY: the buffer is `bytes` long and lives across the call,
+            // which writes at most that many bytes and says how many.
+            unsafe { K32EnumProcesses(pids.as_mut_ptr(), bytes, &raw mut returned) }
+                .ok()
+                .map_err(|_| io::Error::last_os_error())?;
+            let listed = returned as usize / size_of::<u32>();
+            if listed < pids.len() {
+                pids.truncate(listed);
+                pids.retain(|pid| *pid != 0);
+                return Ok(pids);
+            }
+            pids.resize(pids.len() * 2 + SLACK, 0);
+        }
+    }
+
+    pub(super) fn started_of(pid: u32) -> Option<u64> {
+        // SAFETY: a call taking two flags and an integer; it answers an error
+        // for a pid that has gone or that this token may not open.
+        let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+        // SAFETY: the handle was opened here, is owned by nothing else, and is
+        // closed when `owned` is dropped.
+        let owned = unsafe { OwnedHandle::from_raw_handle(process.0) };
+        creation_of(HANDLE(owned.as_raw_handle()))
+    }
+
+    /// The creation time of the live process behind `process`, or `None` once
+    /// it has exited (its record outlives it while any handle is open).
+    fn creation_of(process: HANDLE) -> Option<u64> {
+        let mut code = 0u32;
+        // SAFETY: `process` is live for the call; `code` is writable.
+        unsafe { GetExitCodeProcess(process, &raw mut code) }.ok()?;
+        if code != STILL_ACTIVE.0.cast_unsigned() {
+            return None;
+        }
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        // SAFETY: `process` is live for the call; the four are writable.
+        unsafe {
+            GetProcessTimes(
+                process,
+                &raw mut created,
+                &raw mut exited,
+                &raw mut kernel,
+                &raw mut user,
+            )
+        }
+        .ok()?;
+        Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    }
+
+    pub(super) fn signal(_pid: u32, _ask: super::Ask) -> io::Result<bool> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "install_flip signals a process on macOS only",
+        ))
+    }
+
+    pub(super) fn held_open(path: &Path) -> io::Result<bool> {
+        match OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(path)
+        {
+            Ok(file) => {
+                drop(file);
+                Ok(false)
+            }
+            Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION.0.cast_signed()) => {
+                Ok(true)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", windows)))]
 mod imp {
     use super::{Ask, Running};
     use std::io;
@@ -234,7 +416,7 @@ mod imp {
     pub(super) fn running_from(_executable: &Path) -> io::Result<Vec<Running>> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "install_flip reads the process list on macOS only",
+            "install_flip reads the process list on macOS and Windows only",
         ))
     }
 
@@ -246,6 +428,13 @@ mod imp {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "install_flip signals a process on macOS only",
+        ))
+    }
+
+    pub(super) fn held_open(_path: &Path) -> io::Result<bool> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "install_flip asks whether a file is held open on Windows only",
         ))
     }
 }
@@ -327,14 +516,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (U-28) — **the process list finds this very test process by its
-    /// image, and only while it runs**; a pid with another start instant is
-    /// not it.
+    /// RED (U-28; Windows by U-23) — **the process list finds this very test
+    /// process by its image, and only while it runs**; a pid with another
+    /// start instant is not it.
     ///
     /// MUTATION: `still_running` answers from the pid alone.
     #[test]
     fn the_process_list_finds_a_process_by_its_image() {
-        if crate::host_platform() != crate::HostPlatform::MacOs {
+        if crate::host_platform() == crate::HostPlatform::OtherUnix {
             assert!(running_from(Path::new("anything")).is_err());
             assert!(!still_running(Running { pid: 1, started: 0 }));
             return;
@@ -374,8 +563,14 @@ mod tests {
         signals_reach_only_the_recorded_process();
         #[cfg(not(target_os = "macos"))]
         {
+            // No signal is sent: refused by name where there is no process
+            // list, and on Windows (a real list since U-23) the program is not
+            // there, so nothing runs from it.
             let nobody = Running { pid: 1, started: 0 };
-            assert!(ask(nobody, &[Path::new("/bin/sleep")], Ask::Quit).is_err());
+            assert!(!matches!(
+                ask(nobody, &[Path::new("/bin/sleep")], Ask::Quit),
+                Ok(true)
+            ));
         }
     }
 
@@ -411,5 +606,134 @@ mod tests {
         assert!(ask(me, &[sleep], Ask::End).unwrap());
         assert_eq!(ends.wait().unwrap().signal(), Some(libc::SIGKILL));
         let _ = std::fs::remove_file(&elsewhere);
+    }
+
+    /// A folder of a test's own under the temporary directory, removed when
+    /// dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "bt-u23-flip-{tag}-{}-{}",
+                std::process::id(),
+                crate::attention_pipe::unguessable_bits() % 1_000_000
+            ));
+            std::fs::create_dir_all(&root).unwrap();
+            Self(root)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// RED (U-23) — **a synthetic program started from a folder of the
+    /// test's own is found by its image while it runs, by its pid and start
+    /// time, and is gone from both once it is ended**; a copy of it at
+    /// another path, never started, lists nothing.
+    ///
+    /// The Windows recovery tells an applier that is still alive from one that
+    /// died by this list (W3), and waits on a recorded trial by its pid and
+    /// start time (W7).
+    ///
+    /// MUTATION: in the Windows arm, `creation_of` answers the creation time
+    /// without asking whether the process is still active.
+    #[test]
+    fn a_started_program_is_listed_while_it_runs_and_not_after() {
+        if crate::host_platform() != crate::HostPlatform::Windows {
+            return;
+        }
+        let scratch = Scratch::new("list");
+        let program = scratch.0.join("folio.exe");
+        crate::trust_harness::program(
+            &program,
+            crate::trust::FileVersion([0, 4, 7, 0]),
+            crate::trust_harness::Behaviour::StaysUp,
+        )
+        .unwrap();
+        let unstarted = scratch.0.join("copy").join("folio.exe");
+        std::fs::create_dir_all(unstarted.parent().unwrap()).unwrap();
+        std::fs::copy(&program, &unstarted).unwrap();
+        let mut child = crate::quiet_command(&program)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the synthetic program starts");
+        let pid = child.id();
+        let found = running_from(&program).unwrap();
+        let listed = found.iter().find(|running| running.pid == pid).copied();
+        let ended = child.kill().and_then(|()| child.wait());
+        let listed = listed.expect("the running program is listed by its image");
+        assert_eq!(started_of(pid), None, "an ended process has no start time");
+        assert!(!still_running(listed), "an ended process does not run");
+        ended.unwrap();
+        assert!(running_from(&program).unwrap().is_empty());
+        assert!(running_from(&unstarted).unwrap().is_empty());
+    }
+
+    /// RED (U-23) — **a file whose image a running process maps is held open,
+    /// and the same file is not once the process is ended; a file nobody has
+    /// open is not held open, and the look leaves it as it was.**
+    ///
+    /// E-7's process check, on a real held-open file: the Windows applier
+    /// refuses before its first move when any file it would move is held
+    /// open by another process.
+    ///
+    /// MUTATION: in the Windows arm, open for reading only (a running image
+    /// then opens: the loader keeps no handle, only its section).
+    #[test]
+    fn a_file_a_running_process_maps_is_held_open() {
+        let scratch = Scratch::new("held");
+        let quiet = scratch.0.join("uninstall.cmd");
+        std::fs::write(&quiet, b"@rem nobody has this open").unwrap();
+        if crate::host_platform() != crate::HostPlatform::Windows {
+            assert_eq!(
+                held_open(&quiet).unwrap_err().kind(),
+                io::ErrorKind::Unsupported
+            );
+            return;
+        }
+        assert!(!held_open(&quiet).unwrap());
+        assert_eq!(std::fs::read(&quiet).unwrap(), b"@rem nobody has this open");
+        let program = scratch.0.join("folio.exe");
+        crate::trust_harness::program(
+            &program,
+            crate::trust::FileVersion([0, 4, 6, 0]),
+            crate::trust_harness::Behaviour::StaysUp,
+        )
+        .unwrap();
+        let mut child = crate::quiet_command(&program)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("the synthetic program starts");
+        let while_running = held_open(&program);
+        let ended = child.kill().and_then(|()| child.wait());
+        drop(child);
+        assert!(while_running.unwrap(), "a running image is held open");
+        ended.unwrap();
+        // The loader's section goes with the process's last reference, a
+        // moment after the process is signalled.
+        let ended_at = std::time::Instant::now();
+        while held_open(&program).unwrap() {
+            assert!(
+                ended_at.elapsed() < std::time::Duration::from_secs(10),
+                "an ended process's image is let go"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        println!(
+            "U-23: the image was let go {:?} after the process ended",
+            ended_at.elapsed()
+        );
+        assert_eq!(
+            held_open(&scratch.0.join("absent")).unwrap_err().kind(),
+            io::ErrorKind::NotFound
+        );
     }
 }
