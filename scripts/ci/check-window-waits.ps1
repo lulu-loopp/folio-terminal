@@ -52,7 +52,7 @@
 param(
     # The seed: the commit that wrote the inventory first (A2a S1). Pinned, never
     # computed.
-    [string]$Seed = "2cc59a833f22cf462a8a7b11b4a48609624b1930",
+    [string]$Seed = "7f87f463574757de444638f05d459a8cee94e3ac",
     # The level `disallowed_methods` stands at in the two lint tables that may name it: none
     # until A2e writes `deny` in both (budget note C-2 item 1, as revision (i)5 narrows it). The
     # one place these values are said.

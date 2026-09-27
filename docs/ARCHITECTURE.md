@@ -907,7 +907,7 @@ sites** — every vocabulary effect in the product outside a registered door's
 body, by crate, `cfg` arm, item and entry — in
 `docs/plans/window-thread-bare-sites.tsv`, held equal to the code by
 `window_waits_tests::every_bare_site_is_a_row_and_every_row_a_site` and held to
-shrinking against the merge base (or the pinned seed `2cc59a83`) by
+shrinking against the merge base (or the pinned seed `7f87f463`) by
 `scripts/ci/check-window-waits.ps1`, which prints the total in its footer.
 **The count is a reading of the source, not the compiler's** (note (j)12): a
 method call counts when its receiver's type is written somewhere on its road,
