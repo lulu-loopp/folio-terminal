@@ -2225,7 +2225,15 @@ mod tests {
             let mut owners: Vec<String> = found
                 .owners(platform)
                 .into_keys()
-                .map(|identity| identity.to_string())
+                .map(|identity| {
+                    let owner = identity.type_owner.map(|owner| format!("{owner}::"));
+                    format!(
+                        "{}::{}{}",
+                        identity.module_path,
+                        owner.unwrap_or_default(),
+                        identity.name
+                    )
+                })
                 .collect();
             owners.sort();
             owners
