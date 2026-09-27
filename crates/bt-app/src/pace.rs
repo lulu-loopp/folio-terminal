@@ -318,6 +318,19 @@ impl FrameClock {
         self.owed
     }
 
+    /// **This window's frame, for the turn's allowance for deferrable work** (0.4.6 A4): its
+    /// last present and its interval while it is on the glass and its clock is running — a
+    /// journey mid-flight at its last turn, or a refused frame still owed — and nothing
+    /// otherwise, so a hidden window, and a window with nothing moving, set no allowance.
+    #[must_use]
+    pub fn allowance_frame(
+        &self,
+        last_present: Option<Instant>,
+        on_glass: bool,
+    ) -> Option<(Option<Instant>, Duration)> {
+        (on_glass && (self.running.any() || self.owed)).then_some((last_present, self.interval))
+    }
+
     /// **Open a turn**, and decide once for all of it whether the animations in
     /// this window may draw.
     ///

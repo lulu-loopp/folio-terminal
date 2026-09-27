@@ -248,6 +248,25 @@ impl WebWarmup {
         self.quiet_at(restore_card_up).is_some_and(|at| now >= at)
     }
 
+    /// **Whether the environment's turn is due at `now`**: it has not fired, the restore card is
+    /// down, and the grace and the quiet stretch have both run out. What [`Self::turn`] asks
+    /// first.
+    fn environment_due(&self, now: Instant, restore_card_up: bool) -> bool {
+        self.stage == Stage::Environment
+            && !restore_card_up
+            && self.ready_at().is_some_and(|ready| now >= ready)
+    }
+
+    /// **Whether the spare's turn is due at `now`**: the environment's has fired and the spare's
+    /// has not, the restore card is down, and its quiet stretch has run out. What
+    /// [`Self::spare_turn`] asks first, and what the turn asks before spending a unit of its
+    /// allowance on it (A4).
+    pub(crate) fn spare_due(&self, now: Instant, restore_card_up: bool) -> bool {
+        self.stage == Stage::Spare
+            && !restore_card_up
+            && self.spare_ready_at().is_some_and(|ready| now >= ready)
+    }
+
     /// **The spare's turn** (ticket 60): `Some` on the first quiet turn after the environment's
     /// turn — `Make` when `pages_used` (the profile's receipt) and no window holds a page,
     /// `Declined` otherwise — and `None` on every other turn. Either answer ends the clock: at
@@ -259,10 +278,7 @@ impl WebWarmup {
         pages_used: bool,
         page_open: bool,
     ) -> Option<SpareDue> {
-        if self.stage != Stage::Spare || restore_card_up {
-            return None;
-        }
-        if now < self.spare_ready_at()? {
+        if !self.spare_due(now, restore_card_up) {
             return None;
         }
         self.stage = Stage::Done;
@@ -289,10 +305,7 @@ impl WebWarmup {
         door: &mut dyn EngineDoor,
         say: fn(&str),
     ) -> Option<Result<WebWarmUp, String>> {
-        if self.stage != Stage::Environment || restore_card_up {
-            return None;
-        }
-        if now < self.ready_at()? {
+        if !self.environment_due(now, restore_card_up) {
             return None;
         }
         let asked = door.warm(Box::new(move |error| {
@@ -311,6 +324,26 @@ impl WebWarmup {
         };
         self.environment_turn_at = Some(now);
         Some(asked)
+    }
+
+    /// **[`Self::turn`], as one unit of the turn's deferrable work** (0.4.6 A4; budget note
+    /// §R-B): when the environment's turn is due, the ask is made only while `allowance` — the
+    /// turn's heartbeat — has time left. A turn that has spent it asks nothing and leaves the
+    /// clock where it was, so the next turn asks instead; nothing is lost.
+    pub(crate) fn deferred_turn(
+        &mut self,
+        now: Instant,
+        restore_card_up: bool,
+        allowance: &crate::hang_watch::Heartbeat,
+        door: &mut dyn EngineDoor,
+        say: fn(&str),
+    ) -> Option<Result<WebWarmUp, String>> {
+        if !self.environment_due(now, restore_card_up) {
+            return None;
+        }
+        allowance
+            .deferrable(|| self.turn(now, restore_card_up, door, say))
+            .flatten()
     }
 }
 
@@ -451,6 +484,61 @@ mod web_warmup_tests {
             None,
             "and no wake-up is booked after it"
         );
+        assert!(said().is_empty());
+    }
+
+    /// RED (A4) — **An idle call yields before its unit when the turn's allowance has nothing
+    /// left, and makes it on the next turn: nothing is lost.**
+    ///
+    /// The warm-up's ask is one unit of deferrable work (budget note §R-B). Its clock comes due
+    /// on a turn that has already run 17 ms of its 16: the ask is not made — no creation call,
+    /// the environment untouched, the clock still owing its turn — and the next turn, with its
+    /// allowance whole, makes it once. The door is the real `EnvironmentSlot`, the allowance the
+    /// real heartbeat on the test clock.
+    ///
+    /// MUTATION: call `self.turn` directly in `WebWarmup::deferred_turn` instead of through
+    /// `allowance.deferrable` and the spent turn makes the creation call.
+    #[test]
+    fn an_idle_call_yields_before_its_unit_when_nothing_remains() {
+        use crate::hang_watch::{Heartbeat, Park, set_test_clock_ns};
+
+        let heart = Heartbeat::on_test_clock();
+        let start = Instant::now();
+        let mut clock = WebWarmup::default();
+        let mut door = Recorded::default();
+        clock.saw_frame(Some(start));
+        let due = start + WEB_ENGINE_WARMUP_AFTER;
+
+        heart.woke();
+        set_test_clock_ns(17_000_000);
+        assert_eq!(
+            clock.deferred_turn(due, false, &heart, &mut door, say),
+            None
+        );
+        assert!(door.creations.is_empty(), "the unit was not started");
+        assert_eq!(door.phase(), WebEnvironmentPhase::None);
+        assert_eq!(
+            clock.deadline(false),
+            Some(due),
+            "and the clock still owes its turn"
+        );
+        assert_eq!(
+            heart.ms_at(heart.deferred_until(start)),
+            16,
+            "asked again at the frame boundary it yielded to"
+        );
+        heart.park(Park::Indefinite);
+
+        set_test_clock_ns(20_000_000);
+        heart.woke();
+        set_test_clock_ns(21_000_000);
+        assert_eq!(
+            clock.deferred_turn(due + ms(20), false, &heart, &mut door, say),
+            Some(Ok(WebWarmUp::Asked))
+        );
+        assert_eq!(door.creations.len(), 1, "made once, on the next turn");
+        assert_eq!(door.phase(), WebEnvironmentPhase::Requested);
+        heart.park(Park::Indefinite);
         assert!(said().is_empty());
     }
 

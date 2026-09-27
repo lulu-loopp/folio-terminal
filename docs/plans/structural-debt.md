@@ -57,10 +57,10 @@ they answer "what does this machine do" — not by debt.
 |---|---:|---:|---:|
 | 0.4.5 | 10 | 2 | 8 |
 | 0.4.6 | 49 | 45 | 4 |
-| 0.4.7 | 15 | 15 | 0 |
+| 0.4.7 | 21 | 21 | 0 |
 | deferred (reason on the row) | 3 | 3 | 0 |
 | already repaid | 1 | 0 | 1 |
-| **total** | **78** | **65** | **13** |
+| **total** | **84** | **71** | **13** |
 
 (2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
 presentation lane, its second client, and revision (b) R8 of
@@ -75,6 +75,9 @@ the already-repaid D-58.)
 
 (2026-09-26, ticket 72: D-63 and D-67 repaid; D-83 added to 0.4.7, the version
 proposed by the ticket for the coordinator to confirm.)
+
+(2026-09-27, A4: D-84 added to 0.4.7. Recounted from the table below: the 0.4.7
+line before this one read 15 rows, which did not count A1e's D-78…D-82.)
 
 Parts already repaid inside open rows, by the 0.4.4 tickets: ticket 10
 (`2657e5e3`) — §5.3 row 1, the OS hand-off lane, and the first instance of the
@@ -185,6 +188,13 @@ see around the doors — `unsafe`, a second constructor, a writer called where n
 transition was ruled, a lowered lint, a macro or FFI construct outside its owner, a
 door that returns its effect, a `Drop` that waits — are fenced by one source guard.
 
+0.4.6 ticket A4 repaid no row. It advanced D-2: each turn fixes one
+`TurnAllowance` from the earliest next frame of the windows on the glass whose
+clocks are running, and the search walk's slice and the idle calls (the web
+engine's warm-up ask, the spare controller's making and its drain) ask it before
+each unit and yield when it is spent (the budget note's §R-B, Codex's Q2). It
+added D-84, the part of aggregate scheduling the allowance does not reach (§R-G).
+
 ## The ledger
 
 "§" alone means a section of `docs/ARCHITECTURE.md`. "Split prep" is
@@ -196,7 +206,7 @@ ledger's.
 | ID | what | source | ticket | version | status |
 |---|---|---|---|---|---|
 | D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 | open |
-| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid); the thread door lends every worker a `WorkerCtx` and the hand-off door takes it (A1b, 2026-09-26: advanced, not repaid); every owner-thread door takes its token and each listed wait happens only admitted (A1d, 2026-09-26: advanced, not repaid); the escapes the compiler cannot see are fenced by one source guard, and every `Drop` that may wait is a row of a closed inventory (A1e, 2026-09-27: advanced, not repaid); every raw effect outside a door is a row of `docs/plans/window-thread-bare-sites.tsv`, which only shrinks — 248 sites, seeded at 263 on `2cc59a83` — and the configuration the lint will need is fenced and its probe proven per target (A2a, 2026-09-26: advanced, not repaid); every turn is accounted and every admitted call measured per call, with a budget line for each of the four triggers and an exit summary from the run's atomics (A3, 2026-09-27: advanced, not repaid — A1 and A3 have landed, and by the owner's ruling of 2026-09-25 D-2 closes when A2 lands too) |
+| D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid); the thread door lends every worker a `WorkerCtx` and the hand-off door takes it (A1b, 2026-09-26: advanced, not repaid); every owner-thread door takes its token and each listed wait happens only admitted (A1d, 2026-09-26: advanced, not repaid); the escapes the compiler cannot see are fenced by one source guard, and every `Drop` that may wait is a row of a closed inventory (A1e, 2026-09-27: advanced, not repaid); every raw effect outside a door is a row of `docs/plans/window-thread-bare-sites.tsv`, which only shrinks — 248 sites, seeded at 263 on `2cc59a83` — and the configuration the lint will need is fenced and its probe proven per target (A2a, 2026-09-26: advanced, not repaid); every turn is accounted and every admitted call measured per call, with a budget line for each of the four triggers and an exit summary from the run's atomics (A3, 2026-09-27: advanced, not repaid — A1 and A3 have landed, and by the owner's ruling of 2026-09-25 D-2 closes when A2 lands too); deferrable work yields to the earliest window's deadline — the search walk's slice and the idle calls ask one `TurnAllowance` a turn (A4, 2026-09-27: advanced, not repaid — A1, A3 and A4 have landed; what the allowance leaves of aggregate scheduling is D-84) |
 | D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
 | D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
 | D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not) |
@@ -278,6 +288,7 @@ ledger's.
 | D-81 | `PtySession`'s `Drop` finishes the input dump (a write, two `sync_data`) and runs `shutdown` (a bounded reap, a bounded join) | thread-door note (c)4, (e)3; A1e | none yet — *A shell is taken apart only through `retire_within`, never by a drop on the window thread* | 0.4.7 | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); on `pty-retirement`, and on the caller only when that thread cannot start |
 | D-82 | WinHTTP's `http::Request` waits up to `CLOSE_WAIT` (5 s) on a `Condvar` in `Drop` for its handle's closing callback | thread-door note (g)2; A1e | none yet — *A download's request is closed through its own bounded door, not by its drop* | 0.4.7 | open — a row of the closed `Drop` inventory (A1e, 2026-09-27); no product caller of `https_download` yet |
 | D-83 | the `bt-app` and `bt-term` suites are not portable: on macOS 294 of `bt-app`'s 4,600 tests (282 after ticket 72) and 43 of `bt-term`'s fail, each asserting a Windows fact on every host | ticket 72's report (Mac mini, 2026-09-26) | none yet | 0.4.7 — proposed by ticket 72 | open |
+| D-84 | aggregate turn scheduling beyond deferrable work: a turn's deadline is one number shared by every window, and only deferrable work is scheduled against it | budget note §R-B, §R-G (Codex's Q2; the owner's ruling of 2026-09-25, 1); A4 | none yet — owed a 0.4.7 ticket, *The window thread's turn is scheduled across windows and sources*, after B4–B9 | 0.4.7 | open — opened by A4 (2026-09-27) |
 
 ---
 
@@ -1467,3 +1478,28 @@ wait on some road, and none has a ruling that it may.
   question its claim is about on the host it runs on, or states its platform
   with a gate, the D-61 way; then the two crates join `core-macos`'s test line.
   0.4.7, proposed by ticket 72.
+
+## D-84 — the row added on 2026-09-27 by A4
+
+- **D-84 · aggregate turn scheduling beyond deferrable work.** A4 gave the window
+  thread's turn one shared deadline, `TurnAllowance` (`hang_watch::accounting`):
+  the earliest next frame boundary of the windows on the glass whose `FrameClock`
+  is running, less `PRESENT_RESERVE` (2 ms), else `TURN_BUDGET` (16 ms) from the
+  turn's start. The search walk's slice and the idle calls ask it and yield; that
+  is the whole of what is scheduled. Still open, each named so the next ticket
+  can take it: **per-window fairness** — the deadline is one number, so a window
+  walking a search yields to another window's frame and to every other window's
+  work in the same turn, and no window has an allowance of its own; **the phase
+  of several animating windows** — only the earliest boundary is read, so a second
+  window on another phase can miss its frame with nothing recorded against it;
+  **the scheduling delay by source** — A3 measures it against the loop's own
+  `WaitUntil`, the fold of every obligation, and does not say whether the wake was
+  owed to input, a frame clock or a timer; **a ruled bound per registry row** —
+  every row's per-call bound is `WAIT_ALLOWANCE` (4 ms) until the registry has a
+  bound column, its generator and its guard; and **the non-deferrable terms** of
+  §R-B's inequality — events, the drain's fixed `DRAIN_TURN_BUDGET` (at 120 Hz it
+  consumes the frame; a finding, not a scaling rule), preparation and admitted
+  waits — which are observed by A3 and scheduled by nothing. Owed: a 0.4.7 ticket,
+  *The window thread's turn is scheduled across windows and sources*, drafted
+  after B4–B9 have moved their waits. Opened by A4 per §R-G; by the owner's ruling
+  of 2026-09-25 it is one of the two rows D-2 leaves behind when it closes.

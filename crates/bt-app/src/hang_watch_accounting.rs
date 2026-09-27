@@ -46,6 +46,18 @@
 //! The watchdog formats and writes them; the exit summary is written from the atomics, so it is
 //! whole however many lines were lost.
 //!
+//! # The turn's allowance for deferrable work (A4)
+//!
+//! A turn also carries a [`TurnAllowance`]: the time deferrable work may take before the turn
+//! should be done (budget note §R-B). It is fixed once per turn, from the turn's start: the next
+//! frame boundary of the earliest visible window whose clock is running, less
+//! [`PRESENT_RESERVE`], or [`TURN_BUDGET`] from the start when no such window exists. The search
+//! walk and the idle calls ask it before each unit of their work
+//! ([`super::Heartbeat::deferrable`]) and yield the turn when nothing remains; input, the drain
+//! and the present never ask. It never moves a deadline. Every turn that offered deferrable work
+//! records what that work took into a histogram, with the allowance it had; the turns that
+//! yielded are counted; both reach the exit summary. No trigger reads them.
+//!
 //! # What it costs
 //!
 //! No clock read of its own. The turn's two ends are the heartbeat's own reads (`woke`, `park`),
@@ -87,6 +99,17 @@ pub(super) const COALESCE_WINDOW: Duration = Duration::from_secs(1);
 
 /// The four triggers, one coalescing window each.
 const TRIGGERS: usize = 4;
+
+/// **What a turn keeps back for the present it owes**, when a window's frame sets the allowance
+/// (A4, budget note §R-B `H`): the allowance ends this long before that window's next frame
+/// boundary. Two milliseconds: an eighth of a 60 Hz frame and a quarter of a 120 Hz one.
+pub(super) const PRESENT_RESERVE: Duration = Duration::from_millis(2);
+
+/// A turn's deferrable work ran at least one unit, or asked for one and yielded.
+const OFFERED: u64 = 1;
+
+/// A turn's deferrable work asked for a unit and found no allowance left.
+const YIELDED: u64 = 2;
 
 /// A histogram's buckets: under 1 µs, then one per power of two of microseconds, the last open
 /// above (4.19 s and up).
@@ -317,6 +340,80 @@ pub(super) fn said(
         .collect()
 }
 
+/// **The time a turn's deferrable work may take** (A4; budget note §R-B, §R-F): fixed once per
+/// turn from the turn's start, read-only after that, and never a deadline anything wakes for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TurnAllowance {
+    /// The turn's start, on the heartbeat's clock.
+    began_ns: u64,
+    /// When deferrable work must stop asking: the frame boundary less [`PRESENT_RESERVE`], or
+    /// the start plus [`TURN_BUDGET`].
+    ends_ns: u64,
+    /// The boundary it was taken from (`T`): when a yielded unit may be asked for again.
+    frame_ns: u64,
+}
+
+impl TurnAllowance {
+    /// **No visible window's clock is running**: [`TURN_BUDGET`] from the turn's start.
+    pub(super) fn budget(began_ns: u64) -> Self {
+        let ends_ns = began_ns.saturating_add(nanos(TURN_BUDGET));
+        Self {
+            began_ns,
+            ends_ns,
+            frame_ns: ends_ns,
+        }
+    }
+
+    /// **From the frames of the visible windows whose clocks are running**: each frame is its
+    /// last present (none if it has not presented) and its interval, in nanoseconds on the
+    /// heartbeat's clock. The earliest next boundary among them, less [`PRESENT_RESERVE`], ends
+    /// the allowance; with none, [`Self::budget`].
+    pub(super) fn from_frames(
+        began_ns: u64,
+        frames: impl IntoIterator<Item = (Option<u64>, u64)>,
+    ) -> Self {
+        frames
+            .into_iter()
+            .map(|(last_present_ns, interval_ns)| {
+                next_boundary(began_ns, last_present_ns, interval_ns)
+            })
+            .min()
+            .map_or_else(
+                || Self::budget(began_ns),
+                |frame_ns| Self {
+                    began_ns,
+                    ends_ns: frame_ns
+                        .saturating_sub(nanos(PRESENT_RESERVE))
+                        .max(began_ns),
+                    frame_ns,
+                },
+            )
+    }
+
+    /// **What is left at `now_ns`**: zero once the allowance has ended.
+    #[must_use]
+    pub fn remaining(&self, now_ns: u64) -> Duration {
+        Duration::from_nanos(self.ends_ns.saturating_sub(now_ns))
+    }
+
+    /// The whole allowance, from the turn's start.
+    fn length_ns(&self) -> u64 {
+        self.ends_ns - self.began_ns
+    }
+}
+
+/// **A window's next frame boundary after `began_ns`**, on its own phase: its last present plus
+/// the fewest whole intervals that land after the turn's start. A window that has not presented
+/// is owed its first frame now, so its next boundary is one interval on.
+fn next_boundary(began_ns: u64, last_present_ns: Option<u64>, interval_ns: u64) -> u64 {
+    let interval_ns = interval_ns.max(1);
+    match last_present_ns {
+        None => began_ns.saturating_add(interval_ns),
+        Some(last) if last.saturating_add(interval_ns) > began_ns => last + interval_ns,
+        Some(last) => last + ((began_ns - last) / interval_ns + 1) * interval_ns,
+    }
+}
+
 /// **The run's accounts, and the turn in progress.** Owned by the heartbeat; every writer is the
 /// window thread and every field is a relaxed atomic, for the heartbeat's own reason — the writer
 /// is the thread this exists to diagnose.
@@ -352,6 +449,20 @@ pub(super) struct Accounts {
     delay: Histogram,
     /// Per registry line, in `doors::ALL`'s order.
     doors: [Histogram; DOORS],
+    /// This turn's [`TurnAllowance`], field by field.
+    allowance_began_ns: AtomicU64,
+    allowance_ends_ns: AtomicU64,
+    allowance_frame_ns: AtomicU64,
+    /// What this turn's deferrable units took.
+    deferred_ns: AtomicU64,
+    /// [`OFFERED`] and [`YIELDED`], for this turn.
+    deferrable: AtomicU64,
+    /// Per turn that offered deferrable work, what it took.
+    allowance_used: Histogram,
+    /// Those turns' allowances, summed: what the used time is a share of.
+    allowance_ns: AtomicU64,
+    /// Turns whose deferrable work yielded.
+    yielded_turns: AtomicU64,
     /// Detail lines waiting for the watchdog. Only ever `try_lock`ed by the window thread.
     lines: Mutex<Vec<BudgetLine>>,
     /// Pushes that found [`Self::lines`] held or full, for the run.
@@ -377,6 +488,14 @@ impl Accounts {
             unexplained: Histogram::new(),
             delay: Histogram::new(),
             doors: std::array::from_fn(|_| Histogram::new()),
+            allowance_began_ns: AtomicU64::new(0),
+            allowance_ends_ns: AtomicU64::new(nanos(TURN_BUDGET)),
+            allowance_frame_ns: AtomicU64::new(nanos(TURN_BUDGET)),
+            deferred_ns: AtomicU64::new(0),
+            deferrable: AtomicU64::new(0),
+            allowance_used: Histogram::new(),
+            allowance_ns: AtomicU64::new(0),
+            yielded_turns: AtomicU64::new(0),
             lines: Mutex::new(Vec::with_capacity(BUDGET_LINES_KEPT)),
             lost: AtomicU64::new(0),
         }
@@ -408,6 +527,60 @@ impl Accounts {
         self.delay_ns.store(delay, Ordering::Relaxed);
         self.frame_ns.store(NO_FRAME, Ordering::Relaxed);
         self.depth.store(0, Ordering::Relaxed);
+        self.set_allowance(TurnAllowance::budget(now_ns));
+    }
+
+    /// **This turn's allowance, from the frames of the visible windows whose clocks are running**
+    /// (see [`TurnAllowance::from_frames`]), taken from the turn's start.
+    pub(super) fn allow(&self, frames: impl IntoIterator<Item = (Option<u64>, u64)>) {
+        let began = self.allowance_began_ns.load(Ordering::Relaxed);
+        self.set_allowance(TurnAllowance::from_frames(began, frames));
+    }
+
+    fn set_allowance(&self, allowance: TurnAllowance) {
+        self.allowance_began_ns
+            .store(allowance.began_ns, Ordering::Relaxed);
+        self.allowance_ends_ns
+            .store(allowance.ends_ns, Ordering::Relaxed);
+        self.allowance_frame_ns
+            .store(allowance.frame_ns, Ordering::Relaxed);
+    }
+
+    /// This turn's allowance, read.
+    pub(super) fn allowance(&self) -> TurnAllowance {
+        TurnAllowance {
+            began_ns: self.allowance_began_ns.load(Ordering::Relaxed),
+            ends_ns: self.allowance_ends_ns.load(Ordering::Relaxed),
+            frame_ns: self.allowance_frame_ns.load(Ordering::Relaxed),
+        }
+    }
+
+    /// **May a deferrable unit start at `now_ns`?** Yes while the allowance has time left; no
+    /// once it has none, and the turn is marked as having yielded. Either way the turn offered
+    /// deferrable work.
+    pub(super) fn unit_may_start(&self, now_ns: u64) -> bool {
+        if self.allowance().remaining(now_ns).is_zero() {
+            self.deferrable
+                .fetch_or(OFFERED | YIELDED, Ordering::Relaxed);
+            false
+        } else {
+            self.deferrable.fetch_or(OFFERED, Ordering::Relaxed);
+            true
+        }
+    }
+
+    /// **A deferrable unit ran from `start_ns` to `end_ns`**: the turn's deferrable work took
+    /// that much more of its allowance.
+    pub(super) fn unit_took(&self, start_ns: u64, end_ns: u64) {
+        self.deferred_ns
+            .fetch_add(end_ns.saturating_sub(start_ns), Ordering::Relaxed);
+    }
+
+    /// **The boundary deferrable work may ask again at**, if this turn's yielded: the allowance's
+    /// frame boundary (`T`), on the heartbeat's clock.
+    pub(super) fn yielded_until(&self) -> Option<u64> {
+        (self.deferrable.load(Ordering::Relaxed) & YIELDED != 0)
+            .then(|| self.allowance_frame_ns.load(Ordering::Relaxed))
     }
 
     /// **A visible window's frame is `interval_ns` long.** The turn's frame is the shortest.
@@ -485,6 +658,16 @@ impl Accounts {
         self.unexplained.record(unexplained_ns);
         if let Some(delay) = delay_ns {
             self.delay.record(delay);
+        }
+        let deferred_ns = self.deferred_ns.swap(0, Ordering::Relaxed);
+        let deferrable = self.deferrable.swap(0, Ordering::Relaxed);
+        if deferrable & OFFERED != 0 {
+            self.allowance_used.record(deferred_ns);
+            self.allowance_ns
+                .fetch_add(self.allowance().length_ns(), Ordering::Relaxed);
+        }
+        if deferrable & YIELDED != 0 {
+            self.yielded_turns.fetch_add(1, Ordering::Relaxed);
         }
         if wall_ns > frame_ns {
             self.offer(
@@ -587,6 +770,12 @@ impl Accounts {
                 histogram.tally().fields()
             ));
         }
+        lines.push(format!(
+            "Folio budget summary: allowance_used {} allowance_us={} yielded={}",
+            self.allowance_used.tally().fields(),
+            micros(self.allowance_ns.load(Ordering::Relaxed)),
+            self.yielded_turns.load(Ordering::Relaxed)
+        ));
         for (door, histogram) in doors::ALL.iter().zip(&self.doors) {
             let tally = histogram.tally();
             if tally.count > 0 {
@@ -642,8 +831,12 @@ mod tests {
 
     use bt_platform::admission::{Door, DoorKey, doors};
 
-    use super::super::{HangWatch, Heartbeat, Park, Station, Verdict};
-    use super::{BUDGET_LINES_KEPT, Budget, BudgetLine, COALESCE_WINDOW, nanos, said};
+    use super::super::{HangWatch, Heartbeat, Park, Station, Verdict, set_test_clock_ns};
+    use super::{
+        BUDGET_LINES_KEPT, Budget, BudgetLine, COALESCE_WINDOW, PRESENT_RESERVE, TurnAllowance,
+        nanos, said,
+    };
+    use crate::pace::{FrameClock, Lanes};
 
     const US: u64 = 1_000;
     const MS: u64 = 1_000_000;
@@ -951,6 +1144,8 @@ mod tests {
                 "Folio budget summary: unexplained count=20 max_us=1000 sum_us=20000 \
                  hist=512us:20",
                 "Folio budget summary: delay count=0 max_us=0 sum_us=0 hist=-",
+                "Folio budget summary: allowance_used count=0 max_us=0 sum_us=0 hist=- \
+                 allowance_us=0 yielded=0",
                 "Folio budget summary: door=PtyResize row=12 count=20 max_us=5000 \
                  sum_us=100000 hist=4096us:20",
                 "Folio budget summary: lost=4 refused=3",
@@ -1252,6 +1447,252 @@ mod tests {
         assert_eq!(heart.accounts.door(key).count, 1);
         assert_eq!(heart.accounts.turns()[0].count, 1);
         super::super::TEST_HEART.with(|cell| cell.set(None));
+    }
+
+    /// Two frame clocks' worth of setup: a clock following `millihertz`, running or still.
+    fn frame_clock(millihertz: u32, running: bool) -> FrameClock {
+        let mut clock = FrameClock::default();
+        let _ = clock.follow(Some(millihertz));
+        clock.note_running(Lanes {
+            chrome: running,
+            overlay: false,
+        });
+        clock
+    }
+
+    /// RED (A4) — **a turn's allowance ends at the earliest next frame of the windows on the
+    /// glass whose clocks are running, less the present's reserve.**
+    ///
+    /// One shared deadline (budget note §R-B, Codex's Q2): a 60 Hz and a 120 Hz window, both
+    /// animating, both last presented at 5 ms; the turn opens at 10 ms. The 120 Hz window's next
+    /// frame is at 13.33 ms and rules; the allowance ends [`PRESENT_RESERVE`] before it. A hidden
+    /// window and a still one, whose next frames would be earlier, set nothing. The boundary is
+    /// on each window's own phase: a 120 Hz window that presented at 0 and whose frame came due
+    /// before the turn opened at 30 ms is next due at 33.33 ms, not at the turn's start.
+    ///
+    /// MUTATION: take the latest boundary (`max` for `min`) in `TurnAllowance::from_frames` and
+    /// the 60 Hz window rules: the allowance ends at 19.67 ms.
+    #[test]
+    fn the_allowance_is_the_earliest_visible_frames_deadline_less_the_reserve() {
+        let heart = Heartbeat::on_test_clock();
+        let at = |ns: u64| heart.origin + Duration::from_nanos(ns);
+        set_test_clock_ns(10 * MS);
+        heart.woke();
+        let windows = [
+            (frame_clock(60_000, true), true),
+            (frame_clock(120_000, true), true),
+            // Due at 6 ms after its 5 ms present, then every millisecond — earlier than both
+            // above, and not counted: hidden, and still.
+            (frame_clock(1_000_000, true), false),
+            (frame_clock(1_000_000, false), true),
+        ];
+        heart.allow_turn(
+            windows
+                .iter()
+                .filter_map(|(clock, on_glass)| clock.allowance_frame(Some(at(5 * MS)), *on_glass)),
+        );
+        let boundary = 5 * MS + 8_333_333;
+        assert_eq!(
+            heart.accounts.allowance(),
+            TurnAllowance {
+                began_ns: 10 * MS,
+                ends_ns: boundary - nanos(PRESENT_RESERVE),
+                frame_ns: boundary,
+            }
+        );
+        assert_eq!(heart.remaining(), Duration::from_nanos(1_333_333));
+        set_test_clock_ns(12 * MS);
+        assert_eq!(heart.remaining(), Duration::ZERO, "inside the reserve");
+        heart.park(Park::Indefinite);
+
+        set_test_clock_ns(30 * MS);
+        heart.woke();
+        heart.allow_turn(frame_clock(120_000, true).allowance_frame(Some(at(0)), true));
+        let boundary = 4 * 8_333_333;
+        assert_eq!(
+            heart.accounts.allowance().frame_ns,
+            boundary,
+            "on its own phase"
+        );
+        assert_eq!(
+            heart.remaining(),
+            Duration::from_nanos(boundary - nanos(PRESENT_RESERVE) - 30 * MS)
+        );
+    }
+
+    /// RED (A4) — **with no window on the glass whose clock is running, the allowance is the
+    /// turn budget from the turn's start.**
+    ///
+    /// A hidden window that is animating, a hidden window that owes a refused frame, and a
+    /// visible window with nothing moving set no allowance: the turn has [`super::TURN_BUDGET`]
+    /// from its start, as a turn nobody tells has. The same owed frame on the glass does set it,
+    /// one default frame on from a window that has not presented.
+    ///
+    /// MUTATION: drop `on_glass` from `FrameClock::allowance_frame` and the hidden animating
+    /// window's next frame ends the allowance.
+    #[test]
+    fn no_visible_window_means_the_turn_budget() {
+        let heart = Heartbeat::on_test_clock();
+        let at = |ns: u64| heart.origin + Duration::from_nanos(ns);
+        let hidden = frame_clock(120_000, true);
+        let mut owed = FrameClock::default();
+        owed.refuse();
+        let still = frame_clock(120_000, false);
+        set_test_clock_ns(3 * MS);
+        heart.woke();
+        heart.allow_turn(
+            [
+                hidden.allowance_frame(Some(at(MS)), false),
+                owed.allowance_frame(None, false),
+                still.allowance_frame(Some(at(MS)), true),
+            ]
+            .into_iter()
+            .flatten(),
+        );
+        assert_eq!(heart.accounts.allowance(), TurnAllowance::budget(3 * MS));
+        assert_eq!(heart.remaining(), super::TURN_BUDGET);
+        heart.park(Park::Indefinite);
+
+        set_test_clock_ns(40 * MS);
+        heart.woke();
+        assert_eq!(
+            heart.accounts.allowance(),
+            TurnAllowance::budget(40 * MS),
+            "a turn nobody tells"
+        );
+        heart.allow_turn(owed.allowance_frame(None, true));
+        assert_eq!(
+            heart.accounts.allowance(),
+            TurnAllowance {
+                began_ns: 40 * MS,
+                ends_ns: 56 * MS - nanos(PRESENT_RESERVE),
+                frame_ns: 56 * MS,
+            },
+            "a visible window owing a frame"
+        );
+    }
+
+    /// RED (A4) — **work that is not deferrable ignores the allowance: only the search walk and
+    /// the idle calls ask it.**
+    ///
+    /// On a turn whose allowance is spent, a deferrable unit does not run and the turn counts as
+    /// yielded — while an admitted wait and a station's work in the same turn run and are
+    /// accounted as before. And the product asks the allowance in exactly the places A4 lists:
+    /// the walk's slice, the warm-up's ask, the spare's making and the spare's drain, through
+    /// the heartbeat's one verb. Input, the drain and the present are not among them.
+    ///
+    /// MUTATION: wrap the drain in `turn` in `hang_watch::deferrable` and `Runtime::turn` joins
+    /// the askers.
+    #[test]
+    fn non_deferrable_work_ignores_the_allowance() {
+        use bt_source::{Index, Pattern, Search, View, needle};
+
+        let heart = Heartbeat::on_test_clock();
+        heart.woke();
+        set_test_clock_ns(20 * MS);
+        assert_eq!(
+            heart.deferrable(|| unreachable!("the allowance is spent")),
+            None::<()>
+        );
+        heart.at_station(Station::Drain, 20);
+        call(&heart, key::<doors::PtyResize>(), 20 * MS, 21 * MS);
+        set_test_clock_ns(22 * MS);
+        heart.park(Park::Indefinite);
+        let [wall, waits, _, _] = heart.accounts.turns();
+        assert_eq!((wall.sum_ns, waits.sum_ns), (22 * MS, MS));
+        assert_eq!(heart.accounts.door(key::<doors::PtyResize>()).count, 1);
+        assert!(
+            heart.accounts.summary(0).contains(&String::from(
+                "Folio budget summary: allowance_used count=1 max_us=0 sum_us=0 hist=<1us:1 \
+                 allowance_us=16000 yielded=1"
+            )),
+            "{:#?}",
+            heart.accounts.summary(0)
+        );
+
+        let index = Index::of_package("bt-app");
+        let asks = index
+            .search(&Search::new(
+                needle!(Pattern::call("deferrable")),
+                View::Identifiers,
+            ))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+            .in_the_product(index);
+        let mut askers: Vec<(String, usize)> = asks
+            .owners(index)
+            .into_iter()
+            .map(|(identity, count)| {
+                (
+                    identity.type_owner.map_or_else(
+                        || identity.name.clone(),
+                        |owner| format!("{owner}::{}", identity.name),
+                    ),
+                    count,
+                )
+            })
+            .collect();
+        askers.sort();
+        assert_eq!(
+            askers,
+            [
+                (String::from("Runtime::advance_search_scan"), 1),
+                (String::from("Runtime::warm_web_engine"), 2),
+                (String::from("WebWarmup::deferred_turn"), 1),
+                (String::from("deferrable"), 1),
+            ],
+            "the walk's slice, the spare's two units, the warm-up's ask, and the free verb that \
+             is the heartbeat's"
+        );
+    }
+
+    /// RED (A4) — **the exit summary counts the turns whose deferrable work yielded, and what
+    /// that work took of the allowances it had.**
+    ///
+    /// Three turns: one whose walk took 3 ms of its 16, one that found its allowance spent and
+    /// yielded, and one with no deferrable work at all, which the line does not count. The
+    /// yielded turn books its work again at the frame boundary it yielded to, and a turn that did
+    /// not yield books it where it was.
+    ///
+    /// MUTATION: skip the `yielded_turns` count in `Accounts::close` and the line says
+    /// `yielded=0`.
+    #[test]
+    fn the_summary_counts_yielding_turns_and_allowance_used() {
+        let heart = Heartbeat::on_test_clock();
+        let at = |ns: u64| heart.origin + Duration::from_nanos(ns);
+        heart.woke();
+        set_test_clock_ns(MS);
+        assert_eq!(heart.deferrable(|| set_test_clock_ns(4 * MS)), Some(()));
+        assert_eq!(heart.deferred_until(at(0)), at(0), "nothing yielded");
+        set_test_clock_ns(5 * MS);
+        heart.park(Park::Indefinite);
+
+        set_test_clock_ns(100 * MS);
+        heart.woke();
+        set_test_clock_ns(117 * MS);
+        assert_eq!(heart.deferrable(|| unreachable!("spent")), None::<()>);
+        assert_eq!(
+            heart.deferred_until(at(100 * MS)),
+            at(116 * MS),
+            "not before the boundary it yielded to"
+        );
+        heart.park(Park::Indefinite);
+
+        set_test_clock_ns(200 * MS);
+        heart.woke();
+        set_test_clock_ns(201 * MS);
+        heart.park(Park::Indefinite);
+        assert_eq!(
+            heart.deferred_until(at(0)),
+            at(0),
+            "a new turn has not yielded"
+        );
+
+        let summary = heart.accounts.summary(0);
+        assert_eq!(
+            summary[4],
+            "Folio budget summary: allowance_used count=2 max_us=3000 sum_us=3000 \
+             hist=<1us:1,2048us:1 allowance_us=32000 yielded=1"
+        );
     }
 
     /// RED (A3) — **the slow-hold line keeps its meaning and its format.**

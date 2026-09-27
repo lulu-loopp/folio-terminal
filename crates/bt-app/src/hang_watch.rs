@@ -2035,6 +2035,66 @@ impl Heartbeat {
         self.accounts.frame(accounting::nanos(interval));
     }
 
+    /// **This turn's allowance for deferrable work** (A4, budget note §R-B), from the frames of
+    /// the visible windows whose clocks are running: each window's last present and its frame
+    /// interval. Taken from the turn's start, once a turn, before any window takes its turn; no
+    /// clock read. A turn that is not told keeps [`accounting::TURN_BUDGET`] from its start.
+    pub fn allow_turn(&self, frames: impl IntoIterator<Item = (Option<Instant>, Duration)>) {
+        self.accounts
+            .allow(frames.into_iter().map(|(last_present, interval)| {
+                (
+                    last_present.map(|at| self.ns_at(at)),
+                    accounting::nanos(interval),
+                )
+            }));
+    }
+
+    /// **What this turn's allowance has left**, on this heartbeat's clock: one read. Product code
+    /// asks through [`Self::deferrable`], which reads it on the unit's own start instant.
+    #[cfg(test)]
+    #[must_use]
+    pub fn remaining(&self) -> Duration {
+        self.accounts.allowance().remaining(self.now_ns())
+    }
+
+    /// **One unit of deferrable work, if the turn's allowance has time left for it** (A4).
+    ///
+    /// The unit runs, and what it took is charged to the turn's deferrable work, while
+    /// [`Self::remaining`] is above zero; once it is zero the unit does not run, the turn is
+    /// marked as having yielded, and the caller keeps its work for the next turn. Two clock reads
+    /// when the unit runs, one when it yields, none when nothing is asked. Only the search walk
+    /// and the idle calls ask; input, the drain and the present never do.
+    pub fn deferrable<T>(&self, work: impl FnOnce() -> T) -> Option<T> {
+        let start = self.now_ns();
+        if !self.accounts.unit_may_start(start) {
+            return None;
+        }
+        let done = work();
+        self.accounts.unit_took(start, self.now_ns());
+        Some(done)
+    }
+
+    /// **When deferrable work booked for `at` may be asked again**: `at`, unless this turn's
+    /// deferrable work yielded, and then not before the frame boundary its allowance was taken
+    /// from — so a yielded unit is not woken for again inside the reserve it yielded to. No
+    /// clock read.
+    #[must_use]
+    pub fn deferred_until(&self, at: Instant) -> Instant {
+        self.accounts.yielded_until().map_or(at, |frame_ns| {
+            at.max(self.origin + Duration::from_nanos(frame_ns))
+        })
+    }
+
+    /// **A heartbeat on the test clock**, which reads what [`set_test_clock_ns`] last set on
+    /// this thread, in nanoseconds from this heartbeat's origin. One per thread at a time.
+    #[cfg(test)]
+    pub(crate) fn on_test_clock() -> Self {
+        let mut heart = Self::sampling(|| None);
+        heart.clock = test_clock;
+        TEST_CLOCK.with(|clock| clock.set((Some(heart.origin), 0)));
+        heart
+    }
+
     /// `instant` on this heartbeat's own clock.
     ///
     /// How a `ControlFlow::WaitUntil` deadline — an `Instant` the loop computed
@@ -2717,8 +2777,27 @@ fn meter_heart() -> &'static Heartbeat {
     &HEARTBEAT
 }
 
+/// The test clock's reading: its heartbeat's origin plus the nanoseconds last set.
+#[cfg(test)]
+fn test_clock() -> Instant {
+    TEST_CLOCK.with(|clock| {
+        let (origin, ns) = clock.get();
+        origin.expect("a heartbeat on the test clock was made on this thread")
+            + Duration::from_nanos(ns)
+    })
+}
+
+/// **The test clock reads `ns`** from its heartbeat's origin, on this thread.
+#[cfg(test)]
+pub(crate) fn set_test_clock_ns(ns: u64) {
+    TEST_CLOCK.with(|clock| clock.set((clock.get().0, ns)));
+}
+
 #[cfg(test)]
 thread_local! {
+    /// The origin of this thread's heartbeat on the test clock, and the nanoseconds it reads.
+    static TEST_CLOCK: std::cell::Cell<(Option<Instant>, u64)> =
+        const { std::cell::Cell::new((None, 0)) };
     /// A test's own heartbeat for the meter on its thread; the process's heartbeat is shared by
     /// every test that runs at once.
     static TEST_HEART: std::cell::Cell<Option<&'static Heartbeat>> =
@@ -2866,6 +2945,23 @@ pub fn woke() {
 /// A visible window's frame is `interval` long this turn. See [`Heartbeat::frame_interval`].
 pub fn frame_interval(interval: Duration) {
     HEARTBEAT.frame_interval(interval);
+}
+
+/// This turn's allowance for deferrable work. See [`Heartbeat::allow_turn`].
+pub fn allow_turn(frames: impl IntoIterator<Item = (Option<Instant>, Duration)>) {
+    HEARTBEAT.allow_turn(frames);
+}
+
+/// One unit of deferrable work, if the turn's allowance has time left. See
+/// [`Heartbeat::deferrable`].
+pub fn deferrable<T>(work: impl FnOnce() -> T) -> Option<T> {
+    HEARTBEAT.deferrable(work)
+}
+
+/// When deferrable work booked for `at` may be asked again. See [`Heartbeat::deferred_until`].
+#[must_use]
+pub fn deferred_until(at: Instant) -> Instant {
+    HEARTBEAT.deferred_until(at)
 }
 
 /// **The run's budget summary** — every turn's wall time, waits, unexplained time and scheduling

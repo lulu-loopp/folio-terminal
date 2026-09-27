@@ -1688,3 +1688,40 @@ questions in §R-G stand.
 
 1. D-2 closes as repaid when A1, A2 and A3 have landed; the two rows the note names (aggregate scheduling; the unlisted third-party waits) are opened at the same time, dated, each with its own version.
 2. A preview save may show "saved" only when the storage lane's receipt lands, one turn later than today; quit waits for saves still in progress.
+
+## A4 as built (2026-09-27)
+
+§R-B's `TurnAllowance` is `hang_watch::accounting::TurnAllowance`, fixed once per
+turn from the turn's start `t₀` (the heartbeat's own wake reading, so no clock is
+read for it). `T` is phase-aligned: for each window on the glass whose
+`FrameClock` is running (a journey mid-flight at its last turn, or a refused
+frame still owed — `FrameClock::allowance_frame`), its last present plus the
+fewest whole intervals that land after `t₀`, or `t₀` plus one interval for a
+window that has not presented; the earliest of them is `T`. The allowance ends
+at `T − PRESENT_RESERVE`, **`PRESENT_RESERVE` = 2 ms** (§R-B's `H`). With no such
+window it ends at `t₀ + TURN_BUDGET` (16 ms). It is told by
+`FolioApp::about_to_wait_inner` before any window's turn
+(`hang_watch::allow_turn`) and moves no deadline. The phase-aligned reading
+answers A3's decision 1: a turn woken at a window's frame deadline is measured to
+that window's *next* boundary, not to the one it woke for, so the animation's own
+turns are not all spent at `t₀`.
+
+The consulting sites, each through `hang_watch::deferrable` (one unit: run while
+`remaining() > 0`, else not run and the turn counted as yielded):
+
+| site | unit | station |
+|---|---|---|
+| `Runtime::advance_search_scan` | one slice of the walk (`SearchRefresh::Walk`) | `SearchScan` |
+| `WebWarmup::deferred_turn` (from `Runtime::warm_web_engine`) | the environment's ask | `WebWarmup` |
+| `Runtime::warm_web_engine`, the spare's turn | the spare controller made | `WebWarmup`, `WebSpare` inside |
+| `Runtime::warm_web_engine`, the spare's clock | the drain of a spare being made, on a quiet turn | `WebSpare` |
+
+A yielded unit keeps its work where it was (the walk's cursor, the warm-up's
+stage, the spare's clock), and its deadline in the wake fold is not earlier than
+`T` on the turn it yielded (`hang_watch::deferred_until`), so it is not woken for
+again inside the reserve. The drain, events, preparation, the present and
+admitted waits never ask. The accounts gain `allowance_used` (what deferrable
+work took, per turn that offered any, with the allowances it had) and `yielded`
+(the turns that yielded), in the exit summary; no trigger reads them. What the
+allowance does not reach is D-84.
+
