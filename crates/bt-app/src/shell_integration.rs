@@ -3005,7 +3005,10 @@ mod tests {
             }
             assert!(seen.contains(argv), "{id}: expected {argv:?} in {seen:?}");
             // The shell's own answer, for a reader running this with `--nocapture`.
-            for line in seen.lines().filter(|line| line.starts_with("argv=/")) {
+            for line in seen
+                .lines()
+                .filter_map(|line| line.find("argv=/").map(|at| &line[at..]))
+            {
                 eprintln!("{id}: {}", line.trim_end());
             }
             assert!(
