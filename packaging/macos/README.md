@@ -107,7 +107,15 @@ started again with `--update-failed <journal>` so its card says the previous
 version was restored. A swap back that fails keeps both bundles, the LaunchAgent
 and the journal; the copy in `.<Bundle>.app.folio-update/<txn>/rescue/` tries it
 again at the next login or start, three times at most, and the card names the
-`.folio-update` folder. Nothing here changes what the release scripts produce:
+`.folio-update` folder. If the copy doing any of this is stopped part way — a
+crash, a power cut — the next login or the next start of Folio finishes it: an
+update that had swapped nothing goes back to waiting, one that had is decided
+by starting the new bundle as a trial, and a start always opens a window. The
+new bundle is never started as an ordinary copy before its receipt is in;
+while the old one cannot be put back, each start opens the new one as a trial,
+and its receipt completes the update. Nothing here asks anyone to delete the
+folder by hand: `--uninstall-cleanup` is the only removal. Nothing here changes
+what the release scripts produce:
 the updater relies on the bundle's own name, its `CFBundleExecutable` (`folio`)
 and its `CFBundleShortVersionString`, which `Info.plist.in` already fixes.
 

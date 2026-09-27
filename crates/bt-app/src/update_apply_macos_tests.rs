@@ -5,8 +5,9 @@
 //! Every bundle is built here: an `arm64` executable compiled from a few lines
 //! of C (`/usr/bin/cc`) — with an argument it stays up for twenty seconds (a
 //! trial, or a process started by hand), and quits at `SIGTERM` as any process
-//! does; with `stubborn <file>` it writes `term` into that file at each
-//! `SIGTERM` and stays (a trial that will not quit, U-29); without one it
+//! does; with `stubborn <file>` it writes `ready` into that file once it keeps
+//! `SIGTERM`, then `term` at each `SIGTERM`, and stays (a trial that will not
+//! quit, U-29); without one it
 //! answers each line of its standard input (the running old build of E5) — an
 //! `Info.plist` with `LSUIElement` (no Dock icon, no window), ad-hoc signed
 //! with `codesign -s -`. Everything lives under the test's own temporary
@@ -44,15 +45,18 @@ const EXE: &str = "Contents/MacOS/folio";
 const SOURCE: &str = "#include <fcntl.h>\n#include <signal.h>\n#include <stdio.h>\n\
 #include <string.h>\n#include <unistd.h>\n\
 static const char *mark;\n\
-static void on_term(int signal_number) {\n\
+static void put(const char *word) {\n\
   int fd = open(mark, O_WRONLY | O_CREAT | O_TRUNC, 0644);\n\
+  if (fd >= 0) { if (write(fd, word, strlen(word)) < 0) {} close(fd); }\n\
+}\n\
+static void on_term(int signal_number) {\n\
   (void)signal_number;\n\
-  if (fd >= 0) { if (write(fd, \"term\", 4) < 0) {} close(fd); }\n\
+  put(\"term\");\n\
 }\n\
 int main(int argc, char **argv) {\n\
   char line[256];\n\
   if (argc > 2 && strcmp(argv[1], \"stubborn\") == 0) {\n\
-    mark = argv[2]; signal(SIGTERM, on_term); for (;;) pause();\n\
+    mark = argv[2]; signal(SIGTERM, on_term); put(\"ready\"); for (;;) pause();\n\
   }\n\
   if (argc > 1) { sleep(20); return 0; }\n\
   while (fgets(line, sizeof line, stdin)) { printf(\"ok %s\", line); fflush(stdout); }\n\
@@ -248,9 +252,7 @@ impl Hands for Fake {
     fn verify_restored(&mut self, _worker: &WorkerCtx, _bundle: &Path) -> Result<(), String> {
         self.unverified.clone().map_or(Ok(()), Err)
     }
-}
 
-impl World for Fake {
     fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
         self.launched.lock().unwrap().push(args.to_vec());
         if self.real_open {
@@ -261,7 +263,9 @@ impl World for Fake {
             None => Ok(()),
         }
     }
+}
 
+impl World for Fake {
     fn relaunch(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
         self.relaunched.push((bundle.to_path_buf(), args.to_vec()));
         Ok(())
@@ -354,7 +358,12 @@ impl Install {
 
     /// The journal, durably at `phase`, with both identities.
     fn write(&self, phase: Phase) {
-        let journal = Journal {
+        install_txn::durable_write(&self.home.journal(), &self.journal_at(phase).encode()).unwrap();
+    }
+
+    /// This installation's journal at `phase`, with both identities.
+    fn journal_at(&self, phase: Phase) -> Journal {
+        Journal {
             txn: self.txn,
             rescue: self
                 .home
@@ -369,8 +378,7 @@ impl Install {
                     new: self.new.clone(),
                 },
             },
-        };
-        install_txn::durable_write(&self.home.journal(), &journal.encode()).unwrap();
+        }
     }
 
     fn on_disk(&self) -> Option<Journal> {
@@ -456,8 +464,8 @@ fn limits(old_within_ms: u64, trial_within_ms: u64) -> Limits {
 /// The rescue build as recovery on its own worker, over `road`.
 fn recovered(road: Road, mut hands: Fake) -> (Option<Ended>, Fake) {
     on_a_worker(move |worker| {
-        let ended = recover(worker, &road, &mut hands);
-        (ended, hands)
+        let ended = recover(worker, &road, &mut hands, None).ended;
+        (Some(ended), hands)
     })
 }
 
@@ -959,12 +967,14 @@ fn a_manual_launch_of_the_new_version_completes_the_transaction() {
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
 }
 
-/// RED (U-28, M4–M6) — **an applier started again over its own transaction
-/// goes on from what is live**: at `Armed` it admits, exchanges and commits;
-/// at `Moving` with the old bundle live it removes the plist and reverts to
-/// `Prepared` (M5); at `Moving` with the new bundle live it declares the
-/// rollback without swapping (M6). A hand-over to another applier is refused
-/// and nothing is touched.
+/// RED (U-28, M4–M6; U-29b) — **an applier started again over its own
+/// transaction goes on from what is live**: at `Armed` it admits, exchanges
+/// and commits; at `Moving` with the old bundle live it removes the plist and
+/// reverts to `Prepared` (M5); at `Moving` with the new bundle live it starts
+/// the trial nobody started and commits on its receipt, or rolls back when it
+/// cannot start one (M6, as the coordinator's ruling 1 of U-29b decides it
+/// for recovery too). A hand-over to another applier is refused and nothing
+/// is touched.
 ///
 /// M5/M6: "recovery decides by reading the installed bundle's version, not by
 /// trusting the phase" (§C.4).
@@ -1026,11 +1036,27 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
     assert_eq!(version_of(&install.installed), "1.0");
     assert_eq!(version_of(&install.stage()), "2.0");
 
-    // M6, and M9 after it (U-29).
+    // M6 as U-29b rules it: decided by a trial, which commits here; and a
+    // trial that cannot start is rolled back (M9, U-29).
     let install = Install::new("m6");
     install.write(Phase::Moving);
     install_flip::exchange(&install.installed, &install.stage()).unwrap();
-    let (ended, world) = applied(install.road(limits(5_000, 5_000)), Fake::default());
+    let children = Children::default();
+    let world = launching(a_healthy_trial(&install, &children, None));
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), world);
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert!(
+        world.wrote().contains("[Trial, Committed, Retired]"),
+        "{}",
+        world.wrote()
+    );
+    assert_eq!(version_of(&install.installed), "2.0", "kept");
+
+    let install = Install::new("m6-no-trial");
+    install.write(Phase::Moving);
+    install_flip::exchange(&install.installed, &install.stage()).unwrap();
+    let world = launching(Box::new(|_, _| Err(io::Error::other("no open (test)"))));
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), world);
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert!(
         world
@@ -1173,6 +1199,7 @@ fn stuck(attempts: u8) -> Phase {
         trial: None,
         last_error: "the exchange is refused (test)".to_owned(),
         attempts,
+        retrial: None,
     }
 }
 
@@ -1405,10 +1432,14 @@ fn a_failed_swap_back_is_stuck_with_everything_kept() {
     assert!(install.home.rescue_bundle(install.txn).unwrap().exists());
     assert!(install.plist().exists(), "the entrance is kept");
     assert!(said(&world, &install.home.root().display().to_string()));
-    assert_eq!(
-        world.relaunched,
-        vec![(install.installed.clone(), failed_then(&install, &[]))]
-    );
+    // The new bundle is live and not committed: it is started again only as
+    // a trial, with the card's words after the trial's (U-29b, ruling 3),
+    // and never plainly.
+    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+    let launched = world.launched.lock().unwrap().clone();
+    assert_eq!(launched.len(), 2, "the trial, then the one over Stuck");
+    assert_eq!(launched[1][0], OsString::from(cli::UPDATE_TRIAL_FLAG));
+    assert_eq!(launched[1][3..].to_vec(), failed_then(&install, &[]));
     let header = journal.header();
     assert_eq!(header.class, Class::Destructive);
     let sent = crate::update_txn::StartView {
@@ -1426,7 +1457,9 @@ fn a_failed_swap_back_is_stuck_with_everything_kept() {
 /// rescue build that a start handed itself to — and each failure counts; at
 /// the bound nothing more is tried and the line names the journal's folder;
 /// a retry below the bound that can finish does.** Each run starts the
-/// installed build with `--update-failed` and the handed command line.
+/// installed build with `--update-failed` and the handed command line — the
+/// new build, still live, only as a trial (U-29b): here `open` refuses the
+/// trial this run would record, so the door starts one no journal records.
 ///
 /// The coordinator's ruling 4 (U-29): "the rescue retries M9 at every
 /// login/start, bounded … add `Stuck{attempts}` and stop after 3 with the
@@ -1444,9 +1477,11 @@ fn stuck_is_retried_on_the_next_start_and_stops_after_the_bound() {
     install.write(stuck(1));
     install.arm();
     let handed = vec![OsString::from("--tab")];
+    let no_open = || -> LaunchHook { Box::new(|_, _| Err(io::Error::other("no open (test)"))) };
     for attempts in 2..=STUCK_ATTEMPT_LIMIT {
         let refusing = Fake {
             refuse_from: 0,
+            on_launch: Some(no_open()),
             ..Fake::default()
         };
         let (code, hands) = recover_door(&install, handed.clone(), refusing);
@@ -1456,16 +1491,18 @@ fn stuck_is_retried_on_the_next_start_and_stops_after_the_bound() {
             panic!("still Stuck");
         };
         assert_eq!(now, attempts);
-        assert_eq!(
-            hands.relaunched,
-            vec![(
-                install.installed.join(EXE),
-                failed_then(&install, &["--tab"])
-            )]
-        );
+        assert_eq!(hands.relaunched.len(), 1, "{:?}", hands.relaunched);
+        let (program, words) = &hands.relaunched[0];
+        assert_eq!(program, &install.installed.join(EXE));
+        assert_eq!(words[0], OsString::from(cli::UPDATE_TRIAL_FLAG));
+        assert_eq!(words[3..].to_vec(), failed_then(&install, &["--tab"]));
     }
     let before = std::fs::read(install.home.journal()).unwrap();
-    let (code, hands) = recover_door(&install, handed.clone(), Fake::default());
+    let at_the_bound = Fake {
+        on_launch: Some(no_open()),
+        ..Fake::default()
+    };
+    let (code, hands) = recover_door(&install, handed.clone(), at_the_bound);
     assert_eq!(code, 0);
     assert_eq!(hands.exchanges, 0, "nothing is tried at the bound");
     assert_eq!(std::fs::read(install.home.journal()).unwrap(), before);
@@ -1606,7 +1643,16 @@ fn the_trial_is_asked_to_quit_before_it_is_killed() {
         &install.new_program(),
         &[OsStr::new("stubborn"), mark.as_os_str()],
     );
-    std::thread::sleep(Duration::from_millis(200));
+    // It keeps `SIGTERM` only once it says so: a signal before that would end
+    // it at once, however loaded the machine.
+    let give_up = Instant::now() + Duration::from_secs(20);
+    while std::fs::read_to_string(&mark).ok().as_deref() != Some("ready") {
+        assert!(
+            Instant::now() < give_up,
+            "the stubborn trial never got ready"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
     let trial = recorded(&install.installed.join(EXE), pid);
     install.write(Phase::RollbackIntent { trial: Some(trial) });
     let began = Instant::now();
@@ -1747,4 +1793,813 @@ fn rolled_back_leaves_only_what_the_old_build_reads() {
         })
         .collect();
     assert!(ours.is_empty(), "{ours:?}");
+}
+
+// ── U-29b: whatever the journal says, a start opens Folio ─────────────────────
+
+/// **An ordinary start's world over a macOS home**: the entrance removed
+/// through its door in the test's LaunchAgents folder, nothing mounted, and
+/// the hand-over recorded — the test runs the door the line names itself.
+struct Starting {
+    agents: PathBuf,
+    said: Vec<String>,
+    spawned: Vec<(PathBuf, Vec<OsString>)>,
+}
+
+impl crate::update_startup::World for Starting {
+    fn say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+
+    fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
+        self.spawned.push((program.to_path_buf(), args.to_vec()));
+        // As the operating system answers: a program that is not there cannot
+        // be started.
+        if program.is_file() {
+            Ok(())
+        } else {
+            Err(io::Error::from(io::ErrorKind::NotFound))
+        }
+    }
+
+    fn retire_entrance(&mut self, txn: TxnId) -> Result<(), String> {
+        retire_entrance_in(Some(&self.agents), txn)
+    }
+
+    fn mounts_under(&mut self, _folder: &Path) -> Result<Vec<PathBuf>, String> {
+        Ok(Vec::new())
+    }
+
+    fn on_a_worker(&mut self, _job: crate::update_startup::OffThread) -> io::Result<()> {
+        panic!("nothing is mounted")
+    }
+}
+
+/// **What one person's start opened**: the start itself going on (with its
+/// card), or — once it handed itself over — what the recovery door started:
+/// the installed program with its words, and trials through `open`.
+struct Opened {
+    continued: Option<Option<crate::update_job::Failure>>,
+    started: Vec<(PathBuf, Vec<OsString>)>,
+    trials: Vec<Vec<OsString>>,
+    hands: Fake,
+}
+
+impl Opened {
+    /// Every start that happened: the start's own, the door's, the trials.
+    fn launches(&self) -> usize {
+        usize::from(self.continued.is_some()) + self.started.len() + self.trials.len()
+    }
+}
+
+/// **A person's start over `install` with `argv`, then the recovery it handed
+/// itself to**: the ordinary start's own pass, the line it wrote read back by
+/// the command line's own parser and the rescue clone's own home finder, and
+/// the recovery door run on a worker with `hands` within `limits`. No
+/// applier runs.
+fn start_then_recover(install: &Install, argv: &[&str], hands: Fake, limits: Limits) -> Opened {
+    let exe = install.installed.join(EXE);
+    let argv: Vec<OsString> = argv.iter().map(OsString::from).collect();
+    let mut starting = Starting {
+        agents: install.agents.clone(),
+        said: Vec::new(),
+        spawned: Vec::new(),
+    };
+    let verdict = crate::update_startup::run(
+        &crate::update_startup::Start {
+            own_exe: &exe,
+            home: &install.home,
+            argv: &argv,
+            trial: None,
+            failed: None,
+        },
+        &mut starting,
+    );
+    match verdict {
+        crate::update_startup::Verdict::Continue { failed, .. } => {
+            assert!(starting.spawned.is_empty(), "{:?}", starting.spawned);
+            return Opened {
+                continued: Some(failed),
+                started: Vec::new(),
+                trials: Vec::new(),
+                hands,
+            };
+        }
+        crate::update_startup::Verdict::Exit(code) => assert_eq!(code, 0, "{:?}", starting.said),
+    }
+    assert_eq!(starting.spawned.len(), 1, "{:?}", starting.said);
+    let (program, line) = starting.spawned.remove(0);
+    assert_eq!(
+        program,
+        install.home.rescue_executable(install.txn).unwrap()
+    );
+    let Some(Ok(cli::UpdateDoor::Recover {
+        home: Some(named),
+        then_launch: Some(then_launch),
+    })) = cli::update_door(line.clone())
+    else {
+        panic!("the hand-over line {line:?}");
+    };
+    let (home, installed) = Home::of_rescue_named(HostPlatform::MacOs, &program, &named)
+        .expect("the rescue clone finds the home the line names");
+    let (data, agents) = (install.data.clone(), install.agents.clone());
+    let (_code, hands) = on_a_worker(move |worker| {
+        let mut hands = hands;
+        let door = crate::update_recover::Door {
+            home: &home,
+            installed: &installed,
+            then_launch: Some(&then_launch),
+            data: &data,
+            agents: Some(&agents),
+            limits,
+        };
+        let code = crate::update_recover::run(worker, &door, &mut hands);
+        (code, hands)
+    });
+    let trials = hands.launched.lock().unwrap().clone();
+    Opened {
+        continued: None,
+        started: hands.relaunched.clone(),
+        trials,
+        hands,
+    }
+}
+
+/// **A trial recorded in `install`'s journal, as a dead applier leaves it**:
+/// the new bundle live, the entrance armed, the new build's process started
+/// and recorded by its pid and start instant, `Trial` begun now — its receipt
+/// on disk when `answered`, and the process ended again unless `alive`.
+fn a_recorded_trial(install: &Install, children: &Children, alive: bool, answered: bool) {
+    install.exchanged();
+    install.arm();
+    let pid = children.start(&install.installed, "trial");
+    std::thread::sleep(Duration::from_millis(200));
+    let process = recorded(&install.installed.join(EXE), pid);
+    let nonce = Nonce::new([0x6e; 32]);
+    install.write(Phase::Trial {
+        nonce,
+        process,
+        began_ms: now_ms(),
+    });
+    if answered {
+        install.receipt(nonce, nonce, pid);
+    }
+    if !alive {
+        children.end(pid);
+        assert!(children.ended(pid).is_some(), "the trial is gone");
+    }
+}
+
+/// **What `decide` leaves a holder to do over `install` now**, from its disk
+/// as the door reads it; `None` with no journal.
+fn left_to_do(install: &Install) -> Option<Action> {
+    let journal = install.on_disk()?;
+    let (installed, stage) = (install.installed.clone(), install.stage());
+    let (live, staged) = on_a_worker(move |worker| {
+        (
+            crate::update_prepare_macos::identity(worker, &installed).ok(),
+            crate::update_prepare_macos::identity(worker, &stage).ok(),
+        )
+    });
+    let trial_alive = match &journal.body.phase {
+        Phase::Trial { process, .. }
+        | Phase::Stuck {
+            trial: Some(process),
+            ..
+        } => install_flip::still_running(Running {
+            pid: process.pid,
+            started: process.started,
+        }),
+        _ => false,
+    };
+    Some(decide(&Disk {
+        journal: &journal,
+        asker: Asker::Rescue,
+        entrance: install.plist().exists(),
+        located: Located::Bundle {
+            live,
+            stage: staged,
+        },
+        receipt: None,
+        trial_alive,
+        now_ms: now_ms(),
+    }))
+}
+
+/// What the table expects one start to open.
+#[derive(Clone, Copy, Debug)]
+enum Expect {
+    /// The start went on itself: it retired a terminal journal.
+    ItselfWent,
+    /// The installed program, with `--update-failed <journal>` first when
+    /// `failed`, then the handed `--tab`.
+    Installed { failed: bool },
+    /// The new build as a trial through `open`, its words then
+    /// `--update-failed <journal>` when `failed`, then `--tab`.
+    Trial { failed: bool },
+}
+
+/// RED (U-29b) — **every phase a dead applier can leave still opens Folio:
+/// the start runs, exactly one launch follows — the old build plainly or
+/// with `--update-failed`, the committed new build plainly, the new build
+/// before `Committed` only as a trial — and the disk ends where `decide` has
+/// nothing left for a holder but to leave, retire, or wait for a live
+/// trial.**
+///
+/// The coordinator's rulings 1 and 2 (U-29b): "One recovery function for
+/// every phase"; "A window always opens … exactly one bundle is started". On
+/// BASE the ordinary start handed `Handoff`, `Armed`, `Exchanging` and
+/// `Trial` to a rescue build that answered "not recovery's" and started
+/// nothing. Real synthetic bundles, a real trial process, the real start's
+/// pass, its line parsed back, and the real recovery door; the one
+/// stand-in is `open` (a trial through it starts the new executable here).
+///
+/// MUTATION: in `update_recover::run`, recover only a `destructive` header
+/// whose outcome is decided (`&& header.outcome != HeaderOutcome::None`).
+#[test]
+fn every_phase_left_by_a_dead_applier_still_opens_folio() {
+    if !on_macos() {
+        return;
+    }
+    type Setup = fn(&Install, &Children);
+    let healthy = |install: &Install, children: &Children| {
+        launching(a_healthy_trial(install, children, None))
+    };
+    let plain = |_: &Install, _: &Children| Fake::default();
+    let refusing_then_healthy = |install: &Install, children: &Children| Fake {
+        refuse_from: 0,
+        ..launching(a_healthy_trial(install, children, None))
+    };
+    type MakeHands = fn(&Install, &Children) -> Fake;
+    let cases: Vec<(&str, Setup, MakeHands, Expect, &str)> = vec![
+        (
+            "handoff",
+            |_, _| {},
+            plain,
+            Expect::Installed { failed: false },
+            "1.0",
+        ),
+        (
+            "armed",
+            |install, _| {
+                install.write(Phase::Armed);
+                install.arm();
+            },
+            plain,
+            Expect::Installed { failed: false },
+            "1.0",
+        ),
+        (
+            "exchanging-old-live",
+            |install, _| {
+                install.write(Phase::Moving);
+                install.arm();
+            },
+            plain,
+            Expect::Installed { failed: false },
+            "1.0",
+        ),
+        (
+            "exchanging-new-live",
+            |install, _| {
+                install.write(Phase::Moving);
+                install.arm();
+                install.exchanged();
+            },
+            healthy,
+            Expect::Trial { failed: false },
+            "2.0",
+        ),
+        (
+            "trial-alive-receipt",
+            |install, children| a_recorded_trial(install, children, true, true),
+            plain,
+            Expect::Installed { failed: false },
+            "2.0",
+        ),
+        (
+            "trial-alive-none",
+            |install, children| a_recorded_trial(install, children, true, false),
+            plain,
+            Expect::Installed { failed: true },
+            "1.0",
+        ),
+        (
+            "trial-dead-receipt",
+            |install, children| a_recorded_trial(install, children, false, true),
+            plain,
+            Expect::Installed { failed: false },
+            "2.0",
+        ),
+        (
+            "trial-dead-none",
+            |install, children| a_recorded_trial(install, children, false, false),
+            plain,
+            Expect::Installed { failed: true },
+            "1.0",
+        ),
+        (
+            "rollback-intent",
+            |install, _| {
+                install.exchanged();
+                install.write(Phase::RollbackIntent { trial: None });
+                install.arm();
+            },
+            plain,
+            Expect::Installed { failed: true },
+            "1.0",
+        ),
+        (
+            "stuck-old-live",
+            |install, _| {
+                install.write(stuck(1));
+                install.arm();
+            },
+            plain,
+            Expect::Installed { failed: true },
+            "1.0",
+        ),
+        (
+            "stuck-new-live",
+            |install, _| {
+                install.exchanged();
+                install.write(stuck(1));
+                install.arm();
+            },
+            refusing_then_healthy,
+            Expect::Trial { failed: true },
+            "2.0",
+        ),
+        (
+            "rolled-back",
+            |install, _| {
+                install.write(Phase::RolledBack);
+                install.arm();
+            },
+            plain,
+            Expect::Installed { failed: true },
+            "1.0",
+        ),
+        (
+            "committed-with-debt",
+            |install, _| {
+                install.exchanged();
+                install.write(Phase::Committed);
+                install.arm();
+            },
+            plain,
+            Expect::Installed { failed: false },
+            "2.0",
+        ),
+        (
+            "abandoned",
+            |install, _| {
+                install.write(Phase::Abandoned);
+                install.arm();
+            },
+            plain,
+            Expect::ItselfWent,
+            "1.0",
+        ),
+    ];
+    for (tag, setup, hands, expect, live) in cases {
+        let install = Install::new(&format!("every-{tag}"));
+        let children = Children::default();
+        setup(&install, &children);
+        let opened = start_then_recover(
+            &install,
+            &["--tab"],
+            hands(&install, &children),
+            limits(5_000, 1_500),
+        );
+        let said = &opened.hands.said;
+        assert_eq!(opened.launches(), 1, "{tag}: one launch: {said:?}");
+        let tab = OsString::from("--tab");
+        let with_card = |failed: bool| {
+            let mut words = if failed {
+                failed_words(&install.home).to_vec()
+            } else {
+                Vec::new()
+            };
+            words.push(tab.clone());
+            words
+        };
+        match expect {
+            Expect::ItselfWent => assert!(opened.continued.is_some(), "{tag}"),
+            Expect::Installed { failed } => assert_eq!(
+                opened.started,
+                vec![(install.installed.join(EXE), with_card(failed))],
+                "{tag}: {said:?}"
+            ),
+            Expect::Trial { failed } => {
+                let words = &opened.trials[0];
+                assert_eq!(
+                    words[..2].to_vec(),
+                    [
+                        OsString::from(cli::UPDATE_TRIAL_FLAG),
+                        OsString::from(install.txn.to_string())
+                    ],
+                    "{tag}"
+                );
+                assert_eq!(words[3..].to_vec(), with_card(failed), "{tag}");
+            }
+        }
+        assert_eq!(version_of(&install.installed), live, "{tag}: {said:?}");
+        assert!(!install.plist().exists(), "{tag}: the entrance is gone");
+        match left_to_do(&install) {
+            None => assert!(matches!(expect, Expect::ItselfWent), "{tag}"),
+            Some(action) => assert!(
+                matches!(
+                    action,
+                    Action::Leave | Action::Retire { .. } | Action::AwaitReceipt { .. }
+                ),
+                "{tag}: {action:?} is left to do: {said:?}"
+            ),
+        }
+    }
+}
+
+/// RED (U-29b) — **the new bundle, live and not committed, is never started
+/// plainly**: at `Stuck`'s bound with `open` refusing, while a running copy
+/// keeps the rollback waiting, after the applier's own swap back failed, and
+/// when the recovery cannot read the journal's body — every start of it
+/// carries the trial's words.
+///
+/// The coordinator's rulings 2 and 3: "never the new build as an ordinary
+/// start before `Committed`"; "`Stuck` with the new bundle live starts the
+/// new build as a trial (rule 2), not plainly". U-29's report, open point 1:
+/// `Stuck` relaunched whatever was live, the untrialled new build included,
+/// its writers not held back.
+///
+/// MUTATION: in `opens_after`, answer `Opens::Installed { failed }` whatever
+/// is live.
+#[test]
+fn a_new_live_bundle_is_never_started_plainly_before_committed() {
+    if !on_macos() {
+        return;
+    }
+    let is_trial =
+        |words: &[OsString]| words.first() == Some(&OsString::from(cli::UPDATE_TRIAL_FLAG));
+    let no_open = || -> LaunchHook { Box::new(|_, _| Err(io::Error::other("no open (test)"))) };
+
+    // `Stuck` at its bound: nothing is tried, and `open` refuses the trial
+    // this run would record — the door's own start is one.
+    let install = Install::new("plain-bound");
+    install.exchanged();
+    install.write(stuck(STUCK_ATTEMPT_LIMIT));
+    install.arm();
+    let hands = Fake {
+        on_launch: Some(no_open()),
+        ..Fake::default()
+    };
+    let opened = start_then_recover(&install, &["--tab"], hands, limits(5_000, 1_000));
+    assert_eq!(opened.launches(), 2, "the refused trial, then the door's");
+    assert_eq!(opened.started.len(), 1, "{:?}", opened.hands.said);
+    assert!(is_trial(&opened.started[0].1), "{:?}", opened.started);
+    assert_eq!(opened.hands.exchanges, 0);
+
+    // A running copy keeps the admission: the swap back waits.
+    let install = Install::new("plain-waits");
+    install.exchanged();
+    install.write(Phase::RollbackIntent { trial: None });
+    install.arm();
+    std::fs::write(install.home.admission(), b"").unwrap();
+    let copy = install_txn::try_hold(&install.home.admission(), Hold::Shared)
+        .unwrap()
+        .unwrap();
+    let opened = start_then_recover(&install, &["--tab"], Fake::default(), limits(500, 1_000));
+    drop(copy);
+    assert!(
+        opened
+            .hands
+            .said
+            .iter()
+            .any(|line| line.contains("RollbackWaits")),
+        "{:?}",
+        opened.hands.said
+    );
+    assert_eq!(opened.launches(), 1);
+    assert!(is_trial(&opened.started[0].1), "{:?}", opened.started);
+    assert_eq!(version_of(&install.installed), "2.0");
+
+    // The applier itself: no receipt, and its swap back refused.
+    let install = Install::new("plain-applier");
+    let world = Fake {
+        refuse_from: 1,
+        ..Fake::default()
+    };
+    let (ended, world) = applied(install.road(limits(5_000, 800)), world);
+    assert!(matches!(ended, Ended::Stuck(_)), "{ended:?}");
+    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+    let launched = world.launched.lock().unwrap().clone();
+    assert_eq!(launched.len(), 2);
+    assert!(launched.iter().all(|words| is_trial(words)), "{launched:?}");
+
+    // A body this build cannot read: which bundle is live cannot be told,
+    // and a trial is safe for either.
+    let install = Install::new("plain-unread");
+    install.exchanged();
+    install.arm();
+    let bytes = String::from_utf8(install.journal_at(Phase::Moving).encode()).unwrap();
+    let unread = bytes.replace("\"layout\":\"Bundle\"", "\"layout\":\"Later\"");
+    assert_ne!(unread, bytes);
+    install_txn::durable_write(&install.home.journal(), unread.as_bytes()).unwrap();
+    let opened = start_then_recover(&install, &["--tab"], Fake::default(), limits(5_000, 1_000));
+    assert_eq!(opened.launches(), 1);
+    assert!(is_trial(&opened.started[0].1), "{:?}", opened.started);
+}
+
+/// RED (U-29b) — **a receipt that recovery finds commits the transaction
+/// forward** — the trial's own, after the applier died with it on disk; and
+/// the one of a trial started over a `Stuck` whose new bundle is live — then
+/// the old bundle, the entrance and `H/<txn>` go (W8/M8); a receipt of
+/// another trial commits nothing and the rollback follows.
+///
+/// The coordinator's rulings 1 and 3: "`Trial` without a receipt … a receipt
+/// with the matching nonce → `Committed` and the W8 cleanup"; "if that trial
+/// then produces a receipt, the lock holder writes `Committed` (the
+/// transaction recovers forward, W8/M8)". On BASE `Trial` was not recovery's,
+/// and a receipt in `Stuck` was refused by rule.
+///
+/// MUTATION: in `update_txn::decide`, drop the `Commit` arm of a `Stuck`
+/// with a retrial.
+#[test]
+fn a_receipt_found_by_recovery_commits_forward() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("forward-trial");
+    let children = Children::default();
+    a_recorded_trial(&install, &children, false, true);
+    let opened = start_then_recover(&install, &["--tab"], Fake::default(), limits(5_000, 1_000));
+    let said = &opened.hands.said;
+    assert!(
+        said.iter()
+            .any(|line| line.contains("wrote [Committed, Retired]")),
+        "{said:?}"
+    );
+    assert_eq!(version_of(&install.installed), "2.0");
+    assert!(
+        !install.home.transaction(install.txn).exists(),
+        "the old bundle and H/<txn>"
+    );
+    assert!(!install.plist().exists());
+    let bytes = std::fs::read(install.home.journal()).unwrap();
+    assert_eq!(
+        crate::update_txn::trial_sight(Some(&bytes), &install.txn),
+        TrialSight::Committed,
+        "a trial still watching is released"
+    );
+
+    // Another trial's receipt: nothing is committed on it.
+    let install = Install::new("forward-other");
+    let children = Children::default();
+    a_recorded_trial(&install, &children, false, false);
+    let Phase::Trial { nonce, process, .. } = install.on_disk().unwrap().body.phase else {
+        panic!("a trial");
+    };
+    install.receipt(nonce, Nonce::new([0x99; 32]), process.pid);
+    let opened = start_then_recover(&install, &["--tab"], Fake::default(), limits(5_000, 1_000));
+    assert_eq!(
+        version_of(&install.installed),
+        "1.0",
+        "{:?}",
+        opened.hands.said
+    );
+    assert_eq!(
+        install.on_disk().unwrap().body.phase,
+        Phase::Retired {
+            outcome: Outcome::RolledBack
+        }
+    );
+
+    // The trial started over `Stuck`, found answered by the next holder.
+    let install = Install::new("forward-stuck");
+    install.exchanged();
+    install.arm();
+    let children = Children::default();
+    let pid = children.start(&install.installed, "trial");
+    std::thread::sleep(Duration::from_millis(200));
+    let process = recorded(&install.installed.join(EXE), pid);
+    let retrial = Nonce::new([0x72; 32]);
+    let stuck = install
+        .journal_at(stuck(STUCK_ATTEMPT_LIMIT))
+        .advance(&Event::RetrialBegan {
+            nonce: retrial,
+            process,
+            began_ms: now_ms(),
+        })
+        .unwrap();
+    install_txn::durable_write(&install.home.journal(), &stuck.encode()).unwrap();
+    install.receipt(retrial, retrial, pid);
+    // It answered and quit before the next holder came: only its receipt is
+    // left to go on.
+    children.end(pid);
+    assert!(children.ended(pid).is_some());
+    let opened = start_then_recover(&install, &["--tab"], Fake::default(), limits(5_000, 1_000));
+    let said = &opened.hands.said;
+    assert!(
+        said.iter()
+            .any(|line| line.contains("wrote [Committed, Retired]")),
+        "{said:?}"
+    );
+    assert_eq!(opened.hands.exchanges, 0, "never swapped back");
+    assert_eq!(version_of(&install.installed), "2.0");
+    assert_eq!(
+        opened.started,
+        vec![(install.installed.join(EXE), vec![OsString::from("--tab")])],
+        "the committed build, plainly"
+    );
+}
+
+/// RED (U-29b) — **a recovery that fails still opens Folio, and the start it
+/// makes says *Update incomplete.* and names the folder**: a transaction
+/// lock that cannot be opened (the old build live: it is started with
+/// `--update-failed`), and a journal body it cannot read (a trial, with the
+/// same card); the journal is kept.
+///
+/// The coordinator's ruling 2: "If recovery itself fails (any error road),
+/// the bundle that is live is started under that same rule with
+/// `--update-failed <journal>` so the card says *Update incomplete* and names
+/// the folder; the journal is kept." The start the door makes is run through
+/// the command line's own parser and the ordinary start's pass.
+///
+/// MUTATION: in `opens_after`, owe nothing after `Ended::Failed` and
+/// `Ended::Refused`.
+#[test]
+fn recovery_failure_still_opens_with_the_incomplete_card() {
+    if !on_macos() {
+        return;
+    }
+    let card_of = |install: &Install, words: &[OsString]| {
+        let request = cli::parse(words.to_vec()).expect("the words parse");
+        let exe = install.installed.join(EXE);
+        let mut starting = Starting {
+            agents: install.agents.clone(),
+            said: Vec::new(),
+            spawned: Vec::new(),
+        };
+        let verdict = crate::update_startup::run(
+            &crate::update_startup::Start {
+                own_exe: &exe,
+                home: &install.home,
+                argv: words,
+                trial: request.update_trial.as_ref(),
+                failed: request.update_failed.as_deref(),
+            },
+            &mut starting,
+        );
+        let crate::update_startup::Verdict::Continue { failed, trial, .. } = verdict else {
+            panic!("the start it makes goes on: {:?}", starting.said);
+        };
+        (failed, trial)
+    };
+    let incomplete = |install: &Install| crate::update_job::Failure::Incomplete {
+        folder: install.home.root().to_path_buf(),
+    };
+
+    // A folder where the transaction lock should be: the lock cannot be
+    // opened, so nothing can be recorded.
+    let install = Install::new("fail-unlockable");
+    let journal = std::fs::read(install.home.journal()).unwrap();
+    std::fs::create_dir(install.home.lock()).unwrap();
+    let opened = start_then_recover(&install, &["--tab"], Fake::default(), limits(5_000, 1_000));
+    assert!(
+        opened.hands.said.iter().any(|line| line.contains("Failed")),
+        "{:?}",
+        opened.hands.said
+    );
+    assert_eq!(opened.launches(), 1);
+    let (program, words) = &opened.started[0];
+    assert_eq!(program, &install.installed.join(EXE));
+    assert_eq!(*words, failed_then(&install, &["--tab"]));
+    assert_eq!(
+        std::fs::read(install.home.journal()).unwrap(),
+        journal,
+        "kept"
+    );
+    let (card, trial) = card_of(&install, words);
+    assert_eq!(card, Some(incomplete(&install)));
+    assert_eq!(trial, None, "the old build, plainly");
+
+    let install = Install::new("fail-unread");
+    let bytes = String::from_utf8(install.journal_at(Phase::Armed).encode()).unwrap();
+    let unread = bytes.replace("\"layout\":\"Bundle\"", "\"layout\":\"Later\"");
+    install_txn::durable_write(&install.home.journal(), unread.as_bytes()).unwrap();
+    let opened = start_then_recover(&install, &["--tab"], Fake::default(), limits(5_000, 1_000));
+    assert!(
+        opened
+            .hands
+            .said
+            .iter()
+            .any(|line| line.contains("Refused")),
+        "{:?}",
+        opened.hands.said
+    );
+    assert_eq!(opened.launches(), 1);
+    let words = &opened.started[0].1;
+    assert_eq!(
+        std::fs::read(install.home.journal()).unwrap(),
+        unread.as_bytes()
+    );
+    let (card, trial) = card_of(&install, words);
+    assert_eq!(card, Some(incomplete(&install)));
+    assert_eq!(trial.map(|(txn, _)| txn), Some(install.txn), "held back");
+}
+
+/// RED (U-29b) — **`Stuck`'s bound still holds when the new bundle is live**:
+/// at three failed rollbacks nothing is swapped back again, however many
+/// starts come; each start has the new build started as a trial over it
+/// (recorded, so its receipt could still commit forward), and the count
+/// stays where it was.
+///
+/// The coordinator's ruling 3 with U-29's ruling 4: the trial started over
+/// `Stuck` is not a rollback attempt, and it gives the bound no way round.
+///
+/// MUTATION: in `update_txn::next`, let `RetrialBegan` record `attempts: 0`.
+#[test]
+fn the_stuck_bound_still_holds_when_the_new_bundle_is_live() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("bound-new-live");
+    install.exchanged();
+    install.write(stuck(STUCK_ATTEMPT_LIMIT));
+    install.arm();
+    let children = Children::default();
+    let silent = |children: &Children| -> LaunchHook {
+        let children = children.clone();
+        Box::new(move |bundle, _| {
+            children.start(bundle, "trial");
+            Ok(())
+        })
+    };
+    let attempts_now = |install: &Install| match install.on_disk().unwrap().body.phase {
+        Phase::Stuck { attempts, .. } => attempts,
+        other => panic!("{other:?}"),
+    };
+    for run in 0..3 {
+        if run == 2 {
+            // The trials the first run started are gone before the third.
+            for pid in children.started.lock().unwrap().clone() {
+                children.end(pid);
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let hands = launching(silent(&children));
+        let opened = start_then_recover(&install, &["--tab"], hands, limits(5_000, 1_000));
+        let said = &opened.hands.said;
+        assert_eq!(
+            opened.hands.exchanges, 0,
+            "run {run}: never swapped back: {said:?}"
+        );
+        assert_eq!(attempts_now(&install), STUCK_ATTEMPT_LIMIT, "run {run}");
+        assert_eq!(opened.launches(), 1, "run {run}: {said:?}");
+        let words = opened
+            .trials
+            .first()
+            .or_else(|| opened.started.first().map(|(_, words)| words))
+            .unwrap();
+        assert_eq!(
+            words[0],
+            OsString::from(cli::UPDATE_TRIAL_FLAG),
+            "run {run}"
+        );
+        assert_eq!(version_of(&install.installed), "2.0");
+        assert!(install.plist().exists(), "run {run}: the entrance is kept");
+    }
+    let Phase::Stuck { retrial, .. } = install.on_disk().unwrap().body.phase else {
+        panic!("still Stuck");
+    };
+    assert!(retrial.is_some(), "the trial over Stuck is recorded");
+}
+
+/// RED (U-29b) — **a `Handoff` found under the lock is left to a process of
+/// the rescue clone that started before this one** — the applier O started,
+/// still waiting for the lock O held — and taken by this recovery otherwise.
+///
+/// The coordinator's ruling 1 reverts a `Handoff` a dead applier left; an
+/// applier that is alive takes the lock the moment O lets it go, and a start
+/// that won the race must not undo the restart it is part of (the owner's
+/// ruling of 2026-09-25, 3: a start during an apply waits).
+///
+/// MUTATION: in `an_earlier_holder`, drop the `other.started <= mine.started`
+/// comparison.
+#[test]
+fn a_handoff_is_left_to_an_applier_that_started_first() {
+    let mine = Running {
+        pid: 20,
+        started: 5_000,
+    };
+    let earlier = Running {
+        pid: 10,
+        started: 4_000,
+    };
+    let later = Running {
+        pid: 30,
+        started: 6_000,
+    };
+    assert_eq!(an_earlier_holder(mine, &[mine, earlier, later]), Some(10));
+    assert_eq!(an_earlier_holder(mine, &[mine, later]), None);
+    assert_eq!(an_earlier_holder(mine, &[]), None);
 }

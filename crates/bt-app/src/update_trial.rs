@@ -28,8 +28,8 @@
 //! one read of `H\journal.json` every [`WATCH_INTERVAL`] through `file_reads`
 //! on [`Lane::UpdateJournal`], never a write, until the transaction is decided
 //! ([`update_txn::trial_sight`]), from the frozen header alone: `outcome`
-//! `committed` releases; `rolled_back`, a `terminal` class, the journal gone or
-//! naming another transaction **drops** the
+//! `committed` releases; a `terminal` class, the journal gone or naming
+//! another transaction **drops** the
 //! pending writes, and the gate stays shut for the rest of the process: the
 //! process runs on, writing nothing, until the applier ends it (F-7's live-child
 //! policy; nothing here ends a process). `diagnostics.log` is exempt (F-7), and
@@ -51,7 +51,11 @@
 //! **The journal has one writer, the lock holder.** N writes only its receipt;
 //! turning it into `Committed` is the applier's. A receipt that lands after the
 //! journal says `RollbackIntent` is ignored **by rule** — the lock holder's rule
-//! (`update_txn::next` refuses it; U-18/U-21 hold it), not this module's.
+//! (`update_txn::next` refuses it; U-18/U-21 hold it), not this module's. A
+//! rollback that is still `destructive` is therefore not an end here: its
+//! trial holds its writes, and the one trial whose receipt can still count —
+//! the one a lock holder starts over a `Stuck` transaction whose new bundle is
+//! live (U-29b) — writes it and is released if that commits forward.
 
 use std::collections::BTreeSet;
 use std::io;
@@ -608,17 +612,23 @@ mod tests {
         }
     }
 
-    /// RED (U-13) — **a trial reads `Committed` only where the journal says
-    /// it, and reads every other decision and every disappearance as an end.**
+    /// RED (U-13, U-29b) — **a trial reads `Committed` only where the journal
+    /// says it, reads every retirement without a commit and every
+    /// disappearance as an end, and a rollback still `destructive` as not
+    /// decided yet.**
     ///
     /// From the frozen header alone (F-8, coordinator ruling 2026-09-27):
     /// `outcome` says committed or rolled back, since the class cannot —
     /// `Trial`, `Committed` and `RollbackIntent` share `destructive`, both
     /// retirements `terminal`. A bare header, with no body at all, decides the
-    /// same way.
+    /// same way. A `Stuck` whose new bundle is live recovers forward on the
+    /// receipt of the trial its holder starts over it (U-29b, the
+    /// coordinator's ruling 3), so a `destructive` rollback cannot end a
+    /// trial's watch: the writes stay held, never written, until the
+    /// transaction retires one way or the other.
     ///
-    /// MUTATION: in `update_txn::trial_sight`, answer `Committed` for a
-    /// `terminal` class whatever its outcome.
+    /// MUTATION: in `update_txn::trial_sight`, answer `Ended` for the outcome
+    /// `rolled_back` whatever the class.
     #[test]
     fn a_trial_reads_committed_only_where_the_journal_says_it() {
         let cases = [
@@ -635,17 +645,18 @@ mod tests {
                 Phase::RollbackIntent {
                     trial: Some(TrialProcess { pid: 1, started: 2 }),
                 },
-                TrialSight::Ended,
+                TrialSight::Undecided,
             ),
             (
                 Phase::Stuck {
                     trial: None,
                     last_error: "held".to_owned(),
                     attempts: 1,
+                    retrial: None,
                 },
-                TrialSight::Ended,
+                TrialSight::Undecided,
             ),
-            (Phase::RolledBack, TrialSight::Ended),
+            (Phase::RolledBack, TrialSight::Undecided),
             (Phase::Abandoned, TrialSight::Ended),
             (
                 Phase::Retired {
@@ -765,8 +776,8 @@ mod tests {
         for ending in [
             Some(journal_bytes(
                 TXN,
-                Phase::RollbackIntent {
-                    trial: Some(TrialProcess { pid: 1, started: 2 }),
+                Phase::Retired {
+                    outcome: Outcome::RolledBack,
                 },
             )),
             None,

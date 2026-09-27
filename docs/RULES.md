@@ -913,8 +913,13 @@ read off the update job* (U-19); trailing entry 2026-09-27 *on macOS a failed
 trial is rolled back … the rescue build finishes it at the next login or start,
 three times at most* (U-29: the old build started again with `--update-failed`
 after a rollback, with no word after a revert, and not at all after
-`Abandoned`). The fold is the enabling tickets', U-31 / U-32, per the design
-note's (b).5 table.
+`Abandoned`); trailing entry 2026-09-27 *on macOS, whatever the journal says, a
+start opens Folio: the recovery finishes every phase a dead applier can leave,
+exactly one build is started after it, and the new build is started before
+`Committed` only as a trial* (U-29b: `Stuck` with the new bundle live commits
+forward on the receipt of the trial started over it; a start carrying
+`--update-failed` continues past any `destructive` header). The fold is the
+enabling tickets', U-31 / U-32, per the design note's (b).5 table.
 
 ### 37. The Explorer and Finder verbs — `folded`
 **Rule.** On Windows there is one verb in two registrations: the classic trees

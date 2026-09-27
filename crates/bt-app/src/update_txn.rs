@@ -636,6 +636,20 @@ pub(crate) struct TrialProcess {
     pub(crate) started: u64,
 }
 
+/// **A trial the lock holder started over a `Stuck` transaction whose new
+/// bundle is live** (U-29b, the coordinator's ruling 3): the new build is never
+/// started plainly before `Committed`, so it is started as a trial, and its
+/// receipt — this nonce's — commits the transaction forward (W8/M8). The
+/// process it runs as is the phase's `trial`, stopped first by any later
+/// rollback attempt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct Retrial {
+    pub(crate) nonce: Nonce,
+    /// Wall-clock milliseconds when the holder started it; the trial's
+    /// deadline counts from it.
+    pub(crate) began_ms: u64,
+}
+
 /// How a transaction that reached a decided outcome ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) enum Outcome {
@@ -678,6 +692,10 @@ pub(crate) enum Phase {
         /// The rollbacks that failed, this one included: 1 at the first
         /// `Stuck`, one more at each failed retry ([`STUCK_ATTEMPT_LIMIT`]).
         attempts: u8,
+        /// The trial started over this `Stuck` with the new bundle live, if
+        /// one was ([`Event::RetrialBegan`]); a failed retry clears it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retrial: Option<Retrial>,
     },
     RolledBack,
     Abandoned,
@@ -969,6 +987,14 @@ pub(crate) enum Event {
         process: TrialProcess,
         began_ms: u64,
     },
+    /// **The lock holder started the new build as a trial over a `Stuck`
+    /// transaction whose new bundle is live** (U-29b, ruling 3): the nonce it
+    /// gave, the process the list found, and when it began.
+    RetrialBegan {
+        nonce: Nonce,
+        process: TrialProcess,
+        began_ms: u64,
+    },
     /// The lock holder holds a receipt.
     ReceiptAccepted(Receipt),
     /// The trial failed, timed out, or never began.
@@ -996,6 +1022,7 @@ pub(crate) enum EventKind {
     Reverted,
     Admitted,
     TrialBegan,
+    RetrialBegan,
     ReceiptAccepted,
     RollbackDeclared,
     RolledBack,
@@ -1004,7 +1031,7 @@ pub(crate) enum EventKind {
 }
 
 impl EventKind {
-    pub(crate) const ALL: [EventKind; 17] = [
+    pub(crate) const ALL: [EventKind; 18] = [
         EventKind::Prepared,
         EventKind::PrepareFailed,
         EventKind::LaunchedWithoutResume,
@@ -1017,6 +1044,7 @@ impl EventKind {
         EventKind::Reverted,
         EventKind::Admitted,
         EventKind::TrialBegan,
+        EventKind::RetrialBegan,
         EventKind::ReceiptAccepted,
         EventKind::RollbackDeclared,
         EventKind::RolledBack,
@@ -1036,9 +1064,13 @@ impl EventKind {
             EventKind::OldStayed
             | EventKind::Armed
             | EventKind::EntranceFailed
-            | EventKind::Admitted
-            | EventKind::TrialBegan => &[Actor::Applier],
-            EventKind::Reverted
+            | EventKind::Admitted => &[Actor::Applier],
+            // R starts N too (U-29b): an exchange a dead applier left with the
+            // new bundle live is decided by a trial, and a `Stuck` one with
+            // the new bundle live is started only as one.
+            EventKind::TrialBegan
+            | EventKind::RetrialBegan
+            | EventKind::Reverted
             | EventKind::ReceiptAccepted
             | EventKind::RollbackDeclared
             | EventKind::RolledBack
@@ -1063,6 +1095,7 @@ impl Event {
             Event::Reverted => EventKind::Reverted,
             Event::Admitted => EventKind::Admitted,
             Event::TrialBegan { .. } => EventKind::TrialBegan,
+            Event::RetrialBegan { .. } => EventKind::RetrialBegan,
             Event::ReceiptAccepted(_) => EventKind::ReceiptAccepted,
             Event::RollbackDeclared => EventKind::RollbackDeclared,
             Event::RolledBack => EventKind::RolledBack,
@@ -1155,6 +1188,12 @@ pub(crate) const TRANSITIONS: &[(PhaseKind, EventKind, PhaseKind)] = &[
         PhaseKind::Committed,
     ),
     (
+        PhaseKind::Stuck,
+        EventKind::ReceiptAccepted,
+        PhaseKind::Committed,
+    ),
+    (PhaseKind::Stuck, EventKind::RetrialBegan, PhaseKind::Stuck),
+    (
         PhaseKind::Trial,
         EventKind::RollbackDeclared,
         PhaseKind::RollbackIntent,
@@ -1188,19 +1227,13 @@ pub(crate) const TRANSITIONS: &[(PhaseKind, EventKind, PhaseKind)] = &[
 ];
 
 /// The refusals that are not merely [`Refusal::Illegal`], by `(from, event)`.
-/// A mismatched receipt in `Trial` is refused by value and is not listed.
-pub(crate) const NAMED_REFUSALS: &[(PhaseKind, EventKind, Refusal)] = &[
-    (
-        PhaseKind::RollbackIntent,
-        EventKind::ReceiptAccepted,
-        Refusal::ReceiptAfterRollbackIntent,
-    ),
-    (
-        PhaseKind::Stuck,
-        EventKind::ReceiptAccepted,
-        Refusal::ReceiptAfterRollbackIntent,
-    ),
-];
+/// A mismatched receipt in `Trial` or in a `Stuck` with a retrial, and any
+/// receipt in a `Stuck` without one, are refused by value and are not listed.
+pub(crate) const NAMED_REFUSALS: &[(PhaseKind, EventKind, Refusal)] = &[(
+    PhaseKind::RollbackIntent,
+    EventKind::ReceiptAccepted,
+    Refusal::ReceiptAfterRollbackIntent,
+)];
 
 /// **The phase after `event`**, total over every `(phase, event)`: a pair
 /// [`TRANSITIONS`] does not list is a refusal, never a panic. `txn` is the
@@ -1254,18 +1287,54 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
             process: *process,
             began_ms: *began_ms,
         }),
-        (Phase::Trial { .. }, Event::ReceiptAccepted(receipt)) if receipt.txn != *txn => {
-            Err(Refusal::ReceiptForAnotherTransaction)
-        }
-        (Phase::Trial { nonce, .. }, Event::ReceiptAccepted(receipt))
-            if receipt.nonce != *nonce =>
-        {
-            Err(Refusal::ReceiptForAnotherTrial)
-        }
-        (Phase::Trial { .. }, Event::ReceiptAccepted(_)) => Ok(Phase::Committed),
+        (
+            Phase::Trial { .. }
+            | Phase::Stuck {
+                retrial: Some(_), ..
+            },
+            Event::ReceiptAccepted(receipt),
+        ) if receipt.txn != *txn => Err(Refusal::ReceiptForAnotherTransaction),
+        (
+            Phase::Trial { nonce, .. }
+            | Phase::Stuck {
+                retrial: Some(Retrial { nonce, .. }),
+                ..
+            },
+            Event::ReceiptAccepted(receipt),
+        ) if receipt.nonce != *nonce => Err(Refusal::ReceiptForAnotherTrial),
+        // A `Stuck` whose new bundle is live recovers forward on the receipt
+        // of the trial its holder started over it (U-29b, ruling 3); the
+        // trial the rollback was declared on is never heard again (F-14).
+        (
+            Phase::Trial { .. }
+            | Phase::Stuck {
+                retrial: Some(_), ..
+            },
+            Event::ReceiptAccepted(_),
+        ) => Ok(Phase::Committed),
         (Phase::RollbackIntent { .. } | Phase::Stuck { .. }, Event::ReceiptAccepted(_)) => {
             Err(Refusal::ReceiptAfterRollbackIntent)
         }
+        (
+            Phase::Stuck {
+                last_error,
+                attempts,
+                ..
+            },
+            Event::RetrialBegan {
+                nonce,
+                process,
+                began_ms,
+            },
+        ) => Ok(Phase::Stuck {
+            trial: Some(*process),
+            last_error: last_error.clone(),
+            attempts: *attempts,
+            retrial: Some(Retrial {
+                nonce: *nonce,
+                began_ms: *began_ms,
+            }),
+        }),
         (Phase::Moving, Event::RollbackDeclared) => Ok(Phase::RollbackIntent { trial: None }),
         (Phase::Trial { process, .. }, Event::RollbackDeclared) => Ok(Phase::RollbackIntent {
             trial: Some(*process),
@@ -1277,6 +1346,7 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
             trial: *trial,
             last_error: error.clone(),
             attempts: 1,
+            retrial: None,
         }),
         (
             Phase::Stuck {
@@ -1287,6 +1357,7 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
             trial: *trial,
             last_error: error.clone(),
             attempts: attempts.saturating_add(1),
+            retrial: None,
         }),
         (Phase::Committed, Event::Retired) => Ok(Phase::Retired {
             outcome: Outcome::Committed,
@@ -1311,8 +1382,9 @@ pub(crate) enum Actor {
     /// A lock holder whose tenure began in `Handoff` or `Armed`, and so
     /// performs the apply: P, or the rescue build taking P's place.
     Applier,
-    /// A lock holder whose tenure began in any later phase: R. It never writes
-    /// `Trial`, because it never starts N.
+    /// A lock holder whose tenure began in any later phase: R. It writes
+    /// `Trial` when it starts N over an exchange a dead applier left with the
+    /// new bundle live (U-29b).
     Recovery,
     /// N: the new build started with the trial's nonce.
     Trial,
@@ -1331,7 +1403,7 @@ pub(crate) const JOURNAL_WRITERS: &[(PhaseKind, &[Actor])] = &[
     (PhaseKind::Handoff, &[Actor::Old]),
     (PhaseKind::Armed, &[Actor::Applier]),
     (PhaseKind::Moving, &[Actor::Applier]),
-    (PhaseKind::Trial, &[Actor::Applier]),
+    (PhaseKind::Trial, &[Actor::Applier, Actor::Recovery]),
     (PhaseKind::Committed, &[Actor::Applier, Actor::Recovery]),
     (
         PhaseKind::RollbackIntent,
@@ -1587,8 +1659,16 @@ pub(crate) enum Asker {
     /// The in-app job owner of a start that continued past a preparing or
     /// deferred header.
     JobOwner,
-    /// The rescue build: P, or R from the entrance or a `--then-launch`.
+    /// The applier P, or a lock holder that performs the apply in its place
+    /// (U-24's Windows rescue).
     LockHolder,
+    /// **The rescue build as recovery** (`--update-recover`, U-29b): R, from
+    /// the entrance at login or from an ordinary start. It finishes whatever
+    /// phase a dead applier left and applies nothing: a `Handoff` or an
+    /// `Armed` it finds — nothing exchanged — goes back to `Prepared` (the
+    /// coordinator's ruling 1); every later phase is decided as a lock
+    /// holder's.
+    Rescue,
 }
 
 impl Asker {
@@ -1597,8 +1677,10 @@ impl Asker {
     pub(crate) fn actor(self, phase: PhaseKind) -> Actor {
         match (self, phase) {
             (Asker::JobOwner, _) => Actor::Old,
-            (Asker::LockHolder, PhaseKind::Handoff | PhaseKind::Armed) => Actor::Applier,
-            (Asker::LockHolder, _) => Actor::Recovery,
+            (Asker::LockHolder | Asker::Rescue, PhaseKind::Handoff | PhaseKind::Armed) => {
+                Actor::Applier
+            }
+            (Asker::LockHolder | Asker::Rescue, _) => Actor::Recovery,
         }
     }
 }
@@ -1670,8 +1752,14 @@ pub(crate) enum Action {
     /// the install; record [`Event::Admitted`], or on a refusal remove the
     /// entrance and record [`Event::Reverted`].
     Admit,
-    /// W6, M6, W7: record [`Event::RollbackDeclared`].
+    /// W6, W7: record [`Event::RollbackDeclared`].
     DeclareRollback,
+    /// **M6 as U-29b rules it**: the exchange was performed — the new
+    /// identity live, the old one in `stage/` — and nobody started the trial.
+    /// Start the new build as the trial and record [`Event::TrialBegan`]; the
+    /// trial is then waited for as M7. A trial that cannot be started records
+    /// [`Event::RollbackDeclared`] (M9).
+    BeginTrial,
     /// W7: the trial lives and its deadline has not passed; look again.
     AwaitReceipt { until_ms: u64 },
     /// W8, M8: record [`Event::ReceiptAccepted`] with the receipt in hand.
@@ -1732,6 +1820,7 @@ impl Action {
             | Action::CountDeferredLaunch
             | Action::Admit
             | Action::DeclareRollback
+            | Action::BeginTrial
             | Action::AwaitReceipt { .. }
             | Action::Commit
             | Action::DeclareRolledBack
@@ -1791,6 +1880,10 @@ pub(crate) fn decide(disk: &Disk<'_>) -> Action {
     }
     match phase {
         Phase::Allocated | Phase::Prepared { .. } => Action::Leave,
+        // Nothing was exchanged: `Admitted` is recorded before the exchange.
+        Phase::Handoff { .. } | Phase::Armed if disk.asker == Asker::Rescue => Action::Revert {
+            remove_entrance: disk.entrance,
+        },
         Phase::Handoff { .. } if disk.entrance => Action::Revert {
             remove_entrance: true,
         },
@@ -1803,6 +1896,11 @@ pub(crate) fn decide(disk: &Disk<'_>) -> Action {
                 Action::Revert {
                     remove_entrance: disk.entrance,
                 }
+            }
+            (Layout::Bundle { old, new }, Located::Bundle { live, stage })
+                if live.as_ref() == Some(new) && stage.as_ref() == Some(old) =>
+            {
+                Action::BeginTrial
             }
             _ => Action::DeclareRollback,
         },
@@ -1822,6 +1920,32 @@ pub(crate) fn decide(disk: &Disk<'_>) -> Action {
                 Action::AwaitReceipt { until_ms }
             } else {
                 Action::DeclareRollback
+            }
+        }
+        // The trial started over this `Stuck` (U-29b, ruling 3): its receipt
+        // commits forward, and while it lives within its deadline it is
+        // waited for, as `Trial` is (W7, W8).
+        Phase::Stuck {
+            retrial: Some(_), ..
+        } if disk.receipt.as_ref().is_some_and(|receipt| {
+            next(
+                &journal.txn,
+                phase,
+                &Event::ReceiptAccepted(receipt.clone()),
+            )
+            .is_ok()
+        }) =>
+        {
+            Action::Commit
+        }
+        Phase::Stuck {
+            retrial: Some(retrial),
+            ..
+        } if disk.trial_alive
+            && disk.now_ms < retrial.began_ms.saturating_add(TRIAL_DEADLINE_MS) =>
+        {
+            Action::AwaitReceipt {
+                until_ms: retrial.began_ms.saturating_add(TRIAL_DEADLINE_MS),
             }
         }
         Phase::Stuck {
@@ -2253,15 +2377,18 @@ fn bundle_of(exe: &Path) -> Option<(&Path, &Path)> {
 /// journal" (U-13, `update_trial`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrialSight {
-    /// Not decided yet (`Trial`, or a phase before it), or not readable by this
-    /// build: the trial keeps its writes pending and looks again.
+    /// Not decided yet (`Trial`, or a phase before it), a rollback not
+    /// finished (`RollbackIntent`, `Stuck`, `RolledBack` — a `Stuck` whose new
+    /// bundle is live still recovers forward on its retrial's receipt, U-29b),
+    /// or not readable by this build: the trial keeps its writes pending and
+    /// looks again.
     Undecided,
     /// `Committed` is durable (or the transaction retired after it): the trial's
     /// writes may land.
     Committed,
-    /// Decided otherwise — `RollbackIntent`, `Stuck`, `RolledBack`,
-    /// `Abandoned`, retired without a commit — or gone: the journal is absent,
-    /// or names another transaction. Nothing it held back will ever be written.
+    /// Decided otherwise and retired — `Abandoned`, retired without a commit —
+    /// or gone: the journal is absent, or names another transaction. Nothing it
+    /// held back will ever be written.
     Ended,
 }
 
@@ -2269,9 +2396,12 @@ pub(crate) enum TrialSight {
 /// journal at all.
 ///
 /// The frozen header alone (F-8): `outcome == committed` releases the trial's
-/// writes; `outcome == rolled_back` or a `terminal` class ends them; anything
-/// else — or a header this build cannot read — is not decided yet. A journal
-/// naming another transaction, or none, means this trial's is gone.
+/// writes; a `terminal` class without it ends them; anything else — a
+/// rollback still `destructive` included (U-29b: a `Stuck` whose new bundle is
+/// live commits forward on the receipt of the trial started over it, so that
+/// trial must be able to write one), or a header this build cannot read — is
+/// not decided yet. A journal naming another transaction, or none, means this
+/// trial's is gone.
 pub(crate) fn trial_sight(journal: Option<&[u8]>, txn: &TxnId) -> TrialSight {
     let Some(bytes) = journal else {
         return TrialSight::Ended;
@@ -2284,7 +2414,7 @@ pub(crate) fn trial_sight(journal: Option<&[u8]>, txn: &TxnId) -> TrialSight {
     }
     match (header.outcome, header.class) {
         (HeaderOutcome::Committed, _) => TrialSight::Committed,
-        (HeaderOutcome::RolledBack, _) | (_, Class::Terminal) => TrialSight::Ended,
+        (_, Class::Terminal) => TrialSight::Ended,
         _ => TrialSight::Undecided,
     }
 }
@@ -2376,14 +2506,11 @@ pub(crate) fn at_start(view: &StartView) -> StartAction {
         Class::Terminal if view.lock_free => StartAction::Retire,
         Class::Terminal => StartAction::Continue,
         Class::Destructive if view.trial_of == Some(header.txn) => StartAction::RunAsTrial,
-        // The rescue build tried the rollback (or could not start it) and sent
-        // this start to show so: handing it back would only send it here
-        // again. The next start without the word hands over as usual (M10).
-        Class::Destructive
-            if view.sent_by_rollback && header.outcome == HeaderOutcome::RolledBack =>
-        {
-            StartAction::Continue
-        }
+        // A lock holder sent this start after a rollback it could not finish,
+        // or after its own recovery failed (U-29b, the coordinator's ruling
+        // 2): handing it back would only send it here again. The next start
+        // without the word hands over as usual (M10).
+        Class::Destructive if view.sent_by_rollback => StartAction::Continue,
         Class::Destructive => StartAction::HandToRescue,
         Class::Preparing | Class::Deferred => {
             let replaced = matches!(
@@ -2400,24 +2527,25 @@ pub(crate) fn at_start(view: &StartView) -> StartAction {
 }
 
 /// **What a start sent with `--update-failed` tells the reader**, from the
-/// frozen header alone (U-29).
+/// frozen header alone (U-29, U-29b).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AfterRollback {
     /// `rolled_back` and `terminal`: the old build is back and the
     /// transaction retired — *Previous version restored.*
     Restored,
-    /// `rolled_back` and still `destructive`: the rollback did not finish
-    /// (`Stuck`, or not begun) — *Update incomplete.* and the journal's
-    /// folder.
+    /// Still `destructive`, whatever its outcome: the rollback did not finish
+    /// (`Stuck`, or not begun), or recovery itself failed and started the
+    /// live build this way (U-29b, the coordinator's ruling 2) — *Update
+    /// incomplete.* and the journal's folder.
     Incomplete,
 }
 
-/// **The card a rolled-back transaction's header asks for**, or `None` for a
-/// header whose outcome is not `rolled_back`.
+/// **The card a start sent with `--update-failed` raises**, or `None` for a
+/// header that is neither a retired rollback nor still `destructive`.
 pub(crate) fn after_rollback(header: &Header) -> Option<AfterRollback> {
     match (header.outcome, header.class) {
         (HeaderOutcome::RolledBack, Class::Terminal) => Some(AfterRollback::Restored),
-        (HeaderOutcome::RolledBack, _) => Some(AfterRollback::Incomplete),
+        (_, Class::Destructive) => Some(AfterRollback::Incomplete),
         _ => None,
     }
 }
@@ -2780,6 +2908,10 @@ mod tests {
                 trial: Some(TRIAL),
                 last_error: "a file is held open".to_owned(),
                 attempts: 1,
+                retrial: Some(Retrial {
+                    nonce: nonce(TRIAL_NONCE),
+                    began_ms: BEGAN,
+                }),
             },
             Phase::RolledBack,
             Phase::Abandoned,
@@ -2808,6 +2940,11 @@ mod tests {
             Event::Reverted,
             Event::Admitted,
             Event::TrialBegan {
+                nonce: nonce(TRIAL_NONCE),
+                process: TRIAL,
+                began_ms: BEGAN,
+            },
+            Event::RetrialBegan {
                 nonce: nonce(TRIAL_NONCE),
                 process: TRIAL,
                 began_ms: BEGAN,
@@ -2857,7 +2994,7 @@ mod tests {
             Some(receipt(TxnId::new([0x01; 16]), nonce(TRIAL_NONCE))),
         ];
         let mut disks = Vec::new();
-        for asker in [Asker::JobOwner, Asker::LockHolder] {
+        for asker in [Asker::JobOwner, Asker::LockHolder, Asker::Rescue] {
             for located in &locations {
                 for entrance in [false, true] {
                     for receipt in &receipts {
@@ -2978,6 +3115,7 @@ mod tests {
                 trial: None,
                 last_error: String::new(),
                 attempts: 1,
+                retrial: None,
             },
             members_layout(),
         );
@@ -3167,7 +3305,9 @@ mod tests {
     ///
     /// (b).2: O writes `Allocated`, `Prepared`, `Handoff` and `Abandoned`; the
     /// lock holder the rest and the revert; N no phase at all, only its
-    /// receipt; R never `Trial`.
+    /// receipt. R writes `Trial` since U-29b: it starts N over an exchange a
+    /// dead applier left with the new bundle live (the coordinator's ruling
+    /// 1).
     #[test]
     fn every_phase_is_recorded_only_by_the_writers_the_table_names() {
         // The one phase no transition writes is the first: O creates the
@@ -3197,7 +3337,7 @@ mod tests {
                 "a start records {phase:?}"
             );
         }
-        assert!(!may_record(Actor::Recovery, PhaseKind::Trial));
+        assert!(may_record(Actor::Recovery, PhaseKind::Trial));
         let trial_rights: Vec<(Effect, &[PhaseKind])> = EFFECT_RIGHTS
             .iter()
             .filter(|right| right.actor == Actor::Trial)
@@ -3256,9 +3396,11 @@ mod tests {
     /// ever becomes `Committed`.**
     ///
     /// F-1: rev 2 let recovery "write health" because it merely *was* the new
-    /// version, and deleted the rollback source on that. Here the only road
-    /// to `Committed` is `ReceiptAccepted` in `Trial`, and `decide` answers
-    /// `Commit` only where `next` would accept the receipt.
+    /// version, and deleted the rollback source on that. Here the only roads
+    /// to `Committed` are `ReceiptAccepted` in `Trial`, and in a `Stuck` whose
+    /// holder started a trial over it (U-29b, ruling 3) — each on a receipt
+    /// with that trial's own nonce — and `decide` answers `Commit` only where
+    /// `next` would accept the receipt.
     ///
     /// MUTATION: delete the `receipt.nonce != *nonce` arm of `next`, and a
     /// receipt from another trial commits.
@@ -3270,11 +3412,18 @@ mod tests {
             .collect();
         assert_eq!(
             into_committed,
-            vec![&(
-                PhaseKind::Trial,
-                EventKind::ReceiptAccepted,
-                PhaseKind::Committed
-            )]
+            vec![
+                &(
+                    PhaseKind::Trial,
+                    EventKind::ReceiptAccepted,
+                    PhaseKind::Committed
+                ),
+                &(
+                    PhaseKind::Stuck,
+                    EventKind::ReceiptAccepted,
+                    PhaseKind::Committed
+                )
+            ]
         );
         assert_eq!(
             next(
@@ -3295,8 +3444,14 @@ mod tests {
         for journal in journals() {
             for disk in disks_for(&journal) {
                 let committed = decide(&disk) == Action::Commit;
-                let entitled = matches!(journal.body.phase, Phase::Trial { .. })
-                    && disk.asker == Asker::LockHolder
+                let entitled = matches!(
+                    journal.body.phase,
+                    Phase::Trial { .. }
+                        | Phase::Stuck {
+                            retrial: Some(_),
+                            ..
+                        }
+                ) && disk.asker != Asker::JobOwner
                     && disk.receipt == Some(valid_receipt());
                 assert_eq!(
                     committed, entitled,
@@ -3323,6 +3478,7 @@ mod tests {
                 trial: None,
                 last_error: String::new(),
                 attempts: 1,
+                retrial: None,
             },
         ] {
             assert_eq!(
@@ -3362,6 +3518,7 @@ mod tests {
                     trial: Some(TRIAL),
                     last_error: "a file is held open".to_owned(),
                     attempts: 1,
+                    retrial: None,
                 },
                 layout,
             );
@@ -3829,6 +3986,7 @@ mod tests {
                 trial: None,
                 last_error: "a file was held open".to_owned(),
                 attempts: 1,
+                retrial: None,
             },
             members_layout(),
         );
@@ -4039,19 +4197,161 @@ mod tests {
         );
     }
 
-    /// RED (U-10) — **M6: an exchange performed — the new identity is live — is
-    /// rolled back, decided by identity and never by the phase.**
+    /// RED (U-10, U-29b) — **M6: an exchange performed — the new identity is
+    /// live, the old one in `stage/` — is decided by a trial the holder
+    /// starts, by identity and never by the phase; a trial that cannot start
+    /// is rolled back, and so is an exchange whose bundles are anywhere
+    /// else.**
+    ///
+    /// The coordinator's ruling 1 (U-29b): "`Exchanging` → decided by the
+    /// live identity (… new live: → `Trial` road, or `RollbackIntent` if the
+    /// trial cannot be started)". The recovery writes `Trial` for it.
+    ///
+    /// MUTATION: drop the `BeginTrial` arm of `decide`'s `Moving`.
     #[test]
-    fn m6_an_exchange_performed_rolls_back() {
+    fn m6_an_exchange_performed_is_decided_by_a_trial() {
         let journal = journal(Phase::Moving, bundle_layout());
         let located = bundle(Some(new_bundle()), Some(old_bundle()));
-        assert_eq!(decide(&holder(&journal, located)), Action::DeclareRollback);
+        for asker in [Asker::LockHolder, Asker::Rescue] {
+            let disk = Disk {
+                asker,
+                ..holder(&journal, located.clone())
+            };
+            assert_eq!(decide(&disk), Action::BeginTrial);
+            assert_eq!(asker.actor(PhaseKind::Moving), Actor::Recovery);
+        }
+        assert!(may_record(Actor::Recovery, PhaseKind::Trial));
+        let trial = journal
+            .advance(&Event::TrialBegan {
+                nonce: nonce(TRIAL_NONCE),
+                process: TRIAL,
+                began_ms: BEGAN,
+            })
+            .expect("R starts N");
+        assert_eq!(trial.body.phase, trial_phase());
         assert_eq!(
             journal
                 .advance(&Event::RollbackDeclared)
                 .map(|j| j.body.phase),
             Ok(Phase::RollbackIntent { trial: None })
         );
+        let nowhere = bundle(Some(new_bundle()), None);
+        assert_eq!(decide(&holder(&journal, nowhere)), Action::DeclareRollback);
+    }
+
+    /// RED (U-29b) — **the rescue build puts back what a dead applier never
+    /// exchanged — `Handoff` and `Armed` go to `Prepared`, the entrance
+    /// removed — and waits for, then commits on, the trial it started over a
+    /// `Stuck` whose new bundle is live; the bound still holds for everything
+    /// else.**
+    ///
+    /// The coordinator's rulings 1 and 3: "`Handoff`/`Armed` (nothing
+    /// exchanged) → remove the entrance, → `Prepared`"; "`Stuck` with the new
+    /// bundle live starts the new build as a trial … if that trial then
+    /// produces a receipt, the lock holder writes `Committed`". The applier
+    /// itself still applies a `Handoff` (W3).
+    ///
+    /// MUTATION: drop the `Asker::Rescue` arm of `decide`'s `Handoff | Armed`.
+    #[test]
+    fn the_rescue_reverts_what_was_never_exchanged_and_waits_for_its_retrial() {
+        let located = bundle(Some(old_bundle()), Some(new_bundle()));
+        for phase in [
+            Phase::Handoff {
+                applier: nonce(0x44),
+            },
+            Phase::Armed,
+        ] {
+            let journal = journal(phase, bundle_layout());
+            for entrance in [false, true] {
+                let disk = Disk {
+                    asker: Asker::Rescue,
+                    entrance,
+                    ..holder(&journal, located.clone())
+                };
+                assert_eq!(
+                    decide(&disk),
+                    Action::Revert {
+                        remove_entrance: entrance
+                    }
+                );
+            }
+            assert_eq!(
+                journal.advance(&Event::Reverted).map(|j| j.body.phase),
+                Ok(Phase::Prepared {
+                    deferred_launches: 0
+                })
+            );
+        }
+        let swapped = bundle(Some(new_bundle()), Some(old_bundle()));
+        let stuck = journal(
+            Phase::Stuck {
+                trial: None,
+                last_error: "the exchange was refused".to_owned(),
+                attempts: STUCK_ATTEMPT_LIMIT,
+                retrial: None,
+            },
+            bundle_layout(),
+        );
+        let retried = stuck
+            .advance(&Event::RetrialBegan {
+                nonce: nonce(TRIAL_NONCE),
+                process: TRIAL,
+                began_ms: BEGAN,
+            })
+            .expect("the holder records the trial it started");
+        let Phase::Stuck {
+            trial, attempts, ..
+        } = &retried.body.phase
+        else {
+            panic!("{:?}", retried.body.phase);
+        };
+        assert_eq!((*trial, *attempts), (Some(TRIAL), STUCK_ATTEMPT_LIMIT));
+        assert_eq!(retried.header().class, Class::Destructive);
+        let waiting = Disk {
+            asker: Asker::Rescue,
+            trial_alive: true,
+            ..holder(&retried, swapped.clone())
+        };
+        assert_eq!(
+            decide(&waiting),
+            Action::AwaitReceipt {
+                until_ms: BEGAN + TRIAL_DEADLINE_MS
+            }
+        );
+        let answered = Disk {
+            receipt: Some(valid_receipt()),
+            ..waiting.clone()
+        };
+        assert_eq!(decide(&answered), Action::Commit);
+        assert_eq!(
+            retried
+                .advance(&Event::ReceiptAccepted(valid_receipt()))
+                .map(|j| j.body.phase),
+            Ok(Phase::Committed)
+        );
+        assert_eq!(
+            retried.advance(&Event::ReceiptAccepted(receipt(txn(), nonce(0x99)))),
+            Err(Refusal::ReceiptForAnotherTrial)
+        );
+        let late = Disk {
+            now_ms: BEGAN + TRIAL_DEADLINE_MS,
+            ..waiting
+        };
+        assert_eq!(decide(&late), Action::StopTrial(TRIAL));
+        let gone = Disk {
+            trial_alive: false,
+            ..late
+        };
+        assert!(matches!(decide(&gone), Action::GiveUp { .. }));
+        let failed_again = retried
+            .advance(&Event::RollbackFailed {
+                error: "refused".to_owned(),
+            })
+            .expect("recorded");
+        assert!(matches!(
+            failed_again.body.phase,
+            Phase::Stuck { retrial: None, .. }
+        ));
     }
 
     /// RED (U-10) — **M7: as W7 — waited for while alive, rolled back when not.**
@@ -4139,6 +4439,7 @@ mod tests {
                 trial: None,
                 last_error: "the exchange was refused".to_owned(),
                 attempts: 1,
+                retrial: None,
             },
             bundle_layout(),
         );
@@ -4200,17 +4501,17 @@ mod tests {
         assert_eq!(at_start(&view), StartAction::HandToRescue);
     }
 
-    /// RED (U-29) — **a start sent with `--update-failed` continues past a
-    /// rolled-back transaction that is not retired
-    /// — and only such a start, and only past such a transaction; the header
-    /// alone says which card it raises.**
+    /// RED (U-29, U-29b) — **a start sent with `--update-failed` continues
+    /// past any transaction that is not retired — and only such a start; the
+    /// header alone says which card it raises.**
     ///
     /// The rescue build that could not finish a rollback starts the installed
     /// build with `--update-failed <journal>` (U-29): handing that start back
     /// to the rescue would send it straight here again, and Folio would never
     /// open ("an app that never opens again is not an answer", U-12's
-    /// ruling). A destructive journal of any other outcome is an apply in
-    /// flight, and the word changes nothing there.
+    /// ruling). Since U-29b a recovery that fails on any road starts the live
+    /// build the same way (the coordinator's ruling 2), whatever the phase:
+    /// the word decides, and the card is *Update incomplete.*
     ///
     /// MUTATION: drop the `sent_by_rollback` arm of `at_start`.
     #[test]
@@ -4223,17 +4524,21 @@ mod tests {
             trial: None,
             last_error: "the exchange was refused".to_owned(),
             attempts: 2,
+            retrial: None,
         };
         for phase in [
             stuck.clone(),
             Phase::RollbackIntent { trial: None },
             Phase::RolledBack,
+            Phase::Handoff {
+                applier: nonce(0x44),
+            },
+            Phase::Moving,
+            trial_phase(),
+            Phase::Committed,
         ] {
             assert_eq!(at_start(&sent(phase.clone())), StartAction::Continue);
             assert_eq!(at_start(&start_on(phase)), StartAction::HandToRescue);
-        }
-        for phase in [Phase::Moving, trial_phase(), Phase::Committed] {
-            assert_eq!(at_start(&sent(phase)), StartAction::HandToRescue);
         }
         let retired = Phase::Retired {
             outcome: Outcome::RolledBack,
@@ -4253,12 +4558,20 @@ mod tests {
             after_rollback(&header(Phase::RolledBack)),
             Some(AfterRollback::Incomplete)
         );
+        for phase in [Phase::Armed, trial_phase(), Phase::Committed] {
+            assert_eq!(
+                after_rollback(&header(phase)),
+                Some(AfterRollback::Incomplete)
+            );
+        }
         for phase in [
             Phase::Abandoned,
             Phase::Retired {
                 outcome: Outcome::Committed,
             },
-            trial_phase(),
+            Phase::Prepared {
+                deferred_launches: 0,
+            },
         ] {
             assert_eq!(after_rollback(&header(phase)), None);
         }
