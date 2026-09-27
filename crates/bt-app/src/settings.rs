@@ -18316,7 +18316,16 @@ mod tests {
         let button = COMBO_MIN_WIDTH_LOGICAL_PX;
         let rows = flat_rows();
         let held = content(&rows, &[]);
-        let editing = editing_content(&rows, &[], editor_subject(true));
+        // A shell row, so that the `Login shell` switch (0.4.6 ticket 74) is on
+        // the page this walk measures.
+        let editing = editing_content(
+            &rows,
+            &[],
+            EditorSubject {
+                login: Some(true),
+                ..editor_subject(true)
+            },
+        );
         // **Every offender, not the first one.** A pin that stops at the first
         // over-long sentence turns one report into a queue of runs, and what the
         // reader of this failure wants is the list of sentences to shorten.
@@ -18563,7 +18572,7 @@ mod tests {
     /// read off this machine, so their length is a fact about the machine rather
     /// than about the copy. What is held here instead is the entry each of them
     /// falls back to when there is no version to name.
-    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 25] = {
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 26] = {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
@@ -18664,6 +18673,13 @@ mod tests {
             // The folder a reader's own schemes go in, which is a different
             // folder on each machine (0.4.4 ticket 07).
             (SettingsRow::DarkScheme, Text::DescDarkScheme, MacOs),
+            // What the `Program` row says in place of its own sentence while it is
+            // refusing a command line (0.4.6 ticket 74).
+            (
+                SettingsRow::ProfileProgram,
+                Text::ProfilesProgramHasArguments,
+                Windows,
+            ),
         ]
     };
 
@@ -19177,7 +19193,16 @@ mod tests {
         let span = metrics.row_span(dialog_width());
         let rows = flat_rows();
         let held = content(&rows, &[]);
-        let editing = editing_content(&rows, &[], editor_subject(true));
+        // A shell row, so that the `Login shell` switch (0.4.6 ticket 74) is on
+        // the page this walk measures.
+        let editing = editing_content(
+            &rows,
+            &[],
+            EditorSubject {
+                login: Some(true),
+                ..editor_subject(true)
+            },
+        );
         let dialog_pages = pages(held, editing);
         // Every offender, not the first one — `no_settings_sentence_needs_a_
         // fourth_line`'s reason: what the reader of this failure wants is the
