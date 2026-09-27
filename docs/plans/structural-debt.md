@@ -56,11 +56,11 @@ they answer "what does this machine do" — not by debt.
 | version | rows | open | repaid |
 |---|---:|---:|---:|
 | 0.4.5 | 10 | 2 | 8 |
-| 0.4.6 | 49 | 47 | 2 |
+| 0.4.6 | 49 | 46 | 3 |
 | 0.4.7 | 15 | 15 | 0 |
 | deferred (reason on the row) | 3 | 3 | 0 |
 | already repaid | 1 | 0 | 1 |
-| **total** | **78** | **67** | **11** |
+| **total** | **78** | **66** | **12** |
 
 (2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
 presentation lane, its second client, and revision (b) R8 of
@@ -70,6 +70,8 @@ the line before this read 68 rows and 8 repaid, which counted neither D-69 nor
 the already-repaid D-58.)
 
 (2026-09-26, A1a: D-77 added to 0.4.6.)
+
+(2026-09-26, census-1: D-11 repaid.)
 
 (2026-09-26, ticket 72: D-63 and D-67 repaid; D-83 added to 0.4.7, the version
 proposed by the ticket for the coordinator to confirm.)
@@ -203,7 +205,7 @@ ledger's.
 | D-8 | the asking/telling family has no taxonomy | K-3 · C-4 | census-5a (note) and census-5b, after the ruling | 0.4.6 — the owner rules the table first | open — 28 surfaces inventoried and seven kinds proposed for the ruling in `docs/plans/design/ownership-census-2026-09-25.md` §3–§4 (2026-09-25) |
 | D-9 | configuration entrances: the fourth row | K-4 · C-4 | none yet | 0.4.7 — the fourth entrance's design, the tool face; the entrance itself arrives with 0.5's outward interface | open — §9 table written; export ruled not an entrance on `5f433943` |
 | D-10 | diagnostics have plumbing but no event model | K-5 · C-4 | none yet | 0.4.6 — the operation vocabulary; its event carrier waits for a subscriber | open |
-| D-11 | the split fixes file size, not coupling — the ownership census | K-7 · C-4 | census-1 | 0.4.6, with D-32 | open — positive evidence taken at `f7826bd4` (`docs/plans/design/ownership-census-2026-09-25.md` §2 and its TSV: 170 facts with write-shaped sites in two or more modules); not an exhaustive authority (Codex review, revision (b)); census-1's proven inventory with listed unknowns repays it |
+| D-11 | the split fixes file size, not coupling — the ownership census | K-7 · C-4 | census-1 | 0.4.6, with D-32 | repaid (census-1) — the census is `bt_source::FieldCensus` over `bt-app`, its inventory, site rows and unknowns committed under `docs/plans/design/ownership-census-*.tsv` and held by `bt-source`'s `census` test; the unknowns are listed and shrink-only, so a fact with one is `incomplete`, never single-writer. D-32 (census-7) is what the census was taken for, and stays open |
 | D-12 | `bt-platform` is a drawer | K-11 | none yet | 0.4.7 — the first extraction, after the `bt-app` move ends with D-32 in 0.4.6 | open |
 | D-13 | the `bt-pty → bt-term` edge | K-12 · C-4 · split prep P21 | P21 | 0.4.6 | open |
 | D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | none yet | 0.4.6 | open |
@@ -713,7 +715,9 @@ in the tree.
 **Version.** With the move. **Status.** decided (the move and its preparation);
 the census is open.
 
-**Ledger.** source: K-7 · C-4 · ticket: none yet · version: 0.4.6, with D-32 · status: open.
+**Ledger.** source: K-7 · C-4 · ticket: census-1 · version: 0.4.6, with D-32 · status: repaid (census-1).
+
+**Repaid (2026-09-26, census-1).** The census the smallest change asked for is a query, `bt_source::FieldCensus`, over `bt-app`'s product items. Every `self.` access resolves to `Runtime`, `WindowRuntime`, or through `Deref` to `TabState` by stated rules (the census note's revision (b)2 §3); every field of `App`, `WindowRuntime`, `TabState` and `LeafSession` has a committed inventory row, with proven writers, mutable access, hub membership and inner mutability in separate columns, and every site the rules cannot resolve is listed with its item and reason. `bt-source`'s `census` test is the diff gate. What it is for — drafting the unassigned methods' destinations against owners rather than name clusters — is D-32, census-7.
 
 ---
 

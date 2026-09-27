@@ -396,7 +396,14 @@ on the active tab. **Any method may therefore reach the active tab with no
   field of `Runtime` or `WindowRuntime` is wrong for every field that belongs to
   `TabState`, and wrong in the direction that makes `Runtime` look like the
   owner of state it only borrows. Every `self.` access must be resolved to
-  `Runtime`, to `WindowRuntime`, or through `Deref` to `TabState`.
+  `Runtime`, to `WindowRuntime`, or through `Deref` to `TabState`. Since
+  0.4.6 census-1 that resolution is `bt_source::FieldCensus`, and its output is
+  committed: `docs/plans/design/ownership-census-inventory.tsv` (one row per
+  field of the four structs), `-sites.tsv` (who writes, lends, changes
+  membership, or mutates inside, per module and function), `-unknowns.tsv`
+  (the sites it could not resolve, shrink-only) and the hand-edited
+  `-annotations.tsv`. `bt-source`'s `census` test is the gate; a ticket that
+  adds a writer of a fact changes a committed row and names it in its (c′).
 - `Runtime` grants every one of its methods mutable access to both `App` and
   `WindowRuntime`. Moving those methods into `runtime/*.rs` does not narrow
   that access. The file move is navigation and merge relief; it is **not** an

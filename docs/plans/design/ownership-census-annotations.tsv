@@ -1,0 +1,176 @@
+# The ownership census's annotations (census-1): the class and the proposed
+# sole writer of every proven multi-writer fact — a field of App, WindowRuntime,
+# TabState or LeafSession with proven writes in more than one module
+# (docs/plans/design/ownership-census-inventory.tsv, proven_writers = n).
+#
+# Hand-edited, and the only hand-edited file of the census. The code cannot
+# regenerate these columns (the census note's revision (b)2 §7); the gate
+# (bt-source's census test, the_committed_census_is_what_the_code_says) checks
+# only that every proven multi-writer fact has at least one row here and that
+# no row names a fact that is not one. Keyed by fact; a coarse field is split
+# into its parts, one row each (revision (b)4).
+#
+# class: OBS, ASYNC, DUR, LIFE, PROJ (ARCHITECTURE §4.2) and VIEW, HUB, RES (the
+# census note §2). proposed_owner: the module the note proposes as sole writer
+# (a bare name is crate::runtime::<name>). note: where the row came from.
+#
+# Seeded 2026-09-26 from the note's §2 table (its dated TSV beside this file)
+# for the facts it lists; the thirteen it does not list were annotated by
+# reading their writers at census-1; their notes say "proposed by census-1",
+# for the owner to confirm.
+fact	part	class	proposed_owner	note
+App.activated	-	LIFE	windows	the 2026-09-25 table
+App.copilot_readiness	-	OBS	first_run	the 2026-09-25 table
+App.device_loss_pilot	-	LIFE	frame	the 2026-09-25 table
+App.drag_broker	-	VIEW	the application (FolioApp)	revision (b)4: a cross-window interaction the application owns, not a surface module
+App.explorer_package_asked_by	-	ASYNC	first_run	the 2026-09-25 table
+App.favicons_changed	-	PROJ	web	the 2026-09-25 table
+App.file_indexes	-	OBS	files	the 2026-09-25 table
+App.first_run_attempted	-	LIFE	first_run	the 2026-09-25 table
+App.handoff_lane	-	RES	handoff	the 2026-09-25 table
+App.keybindings_store	-	DUR	keyboard	proposed by census-1
+App.pending_application_change	-	PROJ	diagnostics	the 2026-09-25 table
+App.pending_handover	-	LIFE	windows	the 2026-09-25 table
+App.pending_new_windows	-	LIFE	windows	the 2026-09-25 table
+App.pending_restore_answer	-	ASYNC	windows	the 2026-09-25 table
+App.pins_store	-	DUR	files	proposed by census-1
+App.profiles_store	-	DUR	profiles	the 2026-09-25 table
+App.quake	-	LIFE	quake	the 2026-09-25 table
+App.quit	-	LIFE	windows	the 2026-09-25 table
+App.recent	-	DUR	windows	the 2026-09-25 table
+App.recent_folders	-	DUR	files	proposed by census-1
+App.restore_question	-	DUR	windows	the 2026-09-25 table
+App.session_store	-	DUR	windows	the 2026-09-25 table
+App.settings_store	-	DUR	main[settings]	the 2026-09-25 table
+App.shortcuts	-	DUR	keyboard	the 2026-09-25 table
+App.tab_ids	-	LIFE	tabs	the 2026-09-25 table
+App.web_spare	-	LIFE	web	proposed by census-1
+App.web_warmup	-	LIFE	web	proposed by census-1
+LeafSession.attention	-	LIFE	attention (→ bt-workbench)	the 2026-09-25 table
+LeafSession.frame_image_references	-	PROJ	frame	the 2026-09-25 table
+LeafSession.integration_offer	-	OBS	terminal	the 2026-09-25 table
+LeafSession.projection	-	PROJ	frame	the 2026-09-25 table
+LeafSession.pty	-	LIFE	panes	the 2026-09-25 table
+LeafSession.session	-	HUB	terminal	the 2026-09-25 table
+TabState.file_trees	-	OBS	files	the 2026-09-25 table
+TabState.files	-	VIEW	files	the 2026-09-25 table
+TabState.flip	-	PROJ	tabs	the 2026-09-25 table
+TabState.focused_leaf	-	VIEW	panes	the 2026-09-25 table
+TabState.git_graph_view	-	VIEW	git	the 2026-09-25 table
+TabState.git_graphs	-	OBS	git	the 2026-09-25 table
+TabState.git_scroll	-	VIEW	git	the 2026-09-25 table
+TabState.git_trees	-	OBS	git	the 2026-09-25 table
+TabState.pending_keyboard_at	-	PROJ	keyboard	the 2026-09-25 table
+TabState.preview_block_drag	-	VIEW	preview	the 2026-09-25 table
+TabState.preview_block_hover	-	VIEW	preview	the 2026-09-25 table
+TabState.preview_body_drag	-	VIEW	preview	the 2026-09-25 table
+TabState.preview_edit_focus	-	VIEW	preview	the 2026-09-25 table
+TabState.preview_image_drag	-	VIEW	preview	the 2026-09-25 table
+TabState.preview_panes	-	VIEW	preview	the 2026-09-25 table
+TabState.preview_pool	-	DUR	preview	the 2026-09-25 table
+TabState.preview_selecting	-	VIEW	preview	the 2026-09-25 table
+TabState.preview_views	-	VIEW	preview	the 2026-09-25 table
+TabState.resize_present_owed	-	PROJ	frame	the 2026-09-25 table
+TabState.seat_layout	-	VIEW	panes	the 2026-09-25 table
+TabState.seat_overflow	-	PROJ	panes	the 2026-09-25 table
+TabState.seats	-	HUB	panes	the 2026-09-25 table
+TabState.terminal_column_drag	-	VIEW	mouse	the 2026-09-25 table
+TabState.terminal_column_hover	-	VIEW	mouse	the 2026-09-25 table
+TabState.terminal_thumb_drag	-	VIEW	mouse	the 2026-09-25 table
+WindowRuntime.active_tab	-	HUB	tabs	the 2026-09-25 table
+WindowRuntime.advanced_reveal_sample	-	PROJ	main[settings]	the 2026-09-25 table
+WindowRuntime.animations	-	PROJ	preview	the 2026-09-25 table
+WindowRuntime.cards	-	PROJ	main[focus]	the 2026-09-25 table
+WindowRuntime.chevrons	-	VIEW	floats	the 2026-09-25 table
+WindowRuntime.chrome_marks	-	PROJ	frame	proposed by census-1
+WindowRuntime.chrome_present_pending	-	PROJ	frame	the 2026-09-25 table
+WindowRuntime.command_flash	-	VIEW	terminal	the 2026-09-25 table
+WindowRuntime.command_rails	-	PROJ	panes	the 2026-09-25 table
+WindowRuntime.composing	-	VIEW	keyboard	the 2026-09-25 table
+WindowRuntime.cursor_blink	-	VIEW	keyboard	the 2026-09-25 table
+WindowRuntime.dirty_gate	the pending destructive request	DUR	windows	revision (b)4 split
+WindowRuntime.dirty_gate	hover over the gate's card	VIEW	mouse	revision (b)4 split
+WindowRuntime.divider_drag	-	VIEW	panes	the 2026-09-25 table
+WindowRuntime.drag	-	VIEW	mouse	the 2026-09-25 table
+WindowRuntime.file_menu	-	VIEW	floats	the 2026-09-25 table
+WindowRuntime.files_notice	-	PROJ	files	the 2026-09-25 table
+WindowRuntime.files_row_clicks	-	VIEW	files	the 2026-09-25 table
+WindowRuntime.first_run	-	VIEW	first_run	the 2026-09-25 table
+WindowRuntime.float	-	VIEW	floats	the 2026-09-25 table
+WindowRuntime.float_drag	-	VIEW	floats	the 2026-09-25 table
+WindowRuntime.float_git_pages_shown	-	PROJ	git	the 2026-09-25 table
+WindowRuntime.float_head_press	-	VIEW	floats	the 2026-09-25 table
+WindowRuntime.float_hover	-	VIEW	floats	the 2026-09-25 table
+WindowRuntime.focus_mode	-	VIEW	focus	proposed by census-1
+WindowRuntime.focus_reveal	-	VIEW	focus	proposed by census-1
+WindowRuntime.folder_pick	-	ASYNC	files	the 2026-09-25 table
+WindowRuntime.formula_overlay_owed	-	PROJ	math	the 2026-09-25 table
+WindowRuntime.frame_clock	-	PROJ	frame	the 2026-09-25 table
+WindowRuntime.git_graphs_shown	-	PROJ	git	the 2026-09-25 table
+WindowRuntime.git_menu	-	VIEW	git	the 2026-09-25 table
+WindowRuntime.graph_filter_menu	-	VIEW	git	the 2026-09-25 table
+WindowRuntime.hover_pane	-	VIEW	mouse	the 2026-09-25 table
+WindowRuntime.hyperlink_hover	-	VIEW	mouse	the 2026-09-25 table
+WindowRuntime.image_pick_pending	-	ASYNC	the requester recorded with the pick	revision (b)4: background image, profile program or settings import, as FolderPick records its purpose; the single preview owner is withdrawn
+WindowRuntime.ime_cursor	-	VIEW	keyboard	proposed by census-1
+WindowRuntime.ime_report	-	PROJ	keyboard	the 2026-09-25 table
+WindowRuntime.ime_report_due	-	PROJ	keyboard	the 2026-09-25 table
+WindowRuntime.ime_system_caret	-	PROJ	keyboard	the 2026-09-25 table
+WindowRuntime.last_presented_frame	-	PROJ	frame	the 2026-09-25 table
+WindowRuntime.layout_peek	-	VIEW	peek	the 2026-09-25 table
+WindowRuntime.local_wheel_subpixel_remainder	-	VIEW	mouse	the 2026-09-25 table
+WindowRuntime.math_tool_pressed	-	VIEW	math	the 2026-09-25 table
+WindowRuntime.mouse_route	-	VIEW	mouse	the 2026-09-25 table
+WindowRuntime.palette	-	VIEW	palette	the 2026-09-25 table
+WindowRuntime.palette_layout	-	PROJ	palette	the 2026-09-25 table
+WindowRuntime.pane_menu	-	VIEW	panes	the 2026-09-25 table
+WindowRuntime.pane_motion	-	PROJ	tabs	the 2026-09-25 table
+WindowRuntime.pane_motion_revision	-	PROJ	tabs	the 2026-09-25 table
+WindowRuntime.pane_press	-	VIEW	mouse	the 2026-09-25 table
+WindowRuntime.paste_card_hover	-	VIEW	clipboard	the 2026-09-25 table
+WindowRuntime.peek_buffer	-	ASYNC	peek	the 2026-09-25 table
+WindowRuntime.peek_cache	-	PROJ	peek	the 2026-09-25 table
+WindowRuntime.peek_facts	-	ASYNC	peek	the 2026-09-25 table
+WindowRuntime.peek_hover	-	VIEW	peek	the 2026-09-25 table
+WindowRuntime.pending_frames	-	PROJ	frame	the 2026-09-25 table
+WindowRuntime.pending_math_context_anchor	-	VIEW	math	the 2026-09-25 table
+WindowRuntime.placeholder_tab	-	LIFE	windows	the 2026-09-25 table
+WindowRuntime.preedit	-	VIEW	keyboard	the 2026-09-25 table
+WindowRuntime.present_diagnostics	-	PROJ	frame	the 2026-09-25 table
+WindowRuntime.preview_menu	-	VIEW	preview	proposed by census-1
+WindowRuntime.preview_name_clicks	-	VIEW	preview	the 2026-09-25 table
+WindowRuntime.profile_menu	-	VIEW	profiles	proposed by census-1
+WindowRuntime.psreadline_invite	-	OBS	first_run	the 2026-09-25 table
+WindowRuntime.psreadline_size_changed	-	VIEW	first_run	the 2026-09-25 table
+WindowRuntime.pty_coalesce	-	PROJ	terminal	the 2026-09-25 table
+WindowRuntime.rail_scroll	-	VIEW	panes	the 2026-09-25 table
+WindowRuntime.rename	-	VIEW	tabs	the 2026-09-25 table
+WindowRuntime.rename_blink	-	VIEW	tabs	the 2026-09-25 table
+WindowRuntime.rename_caret_line	-	PROJ	tabs	the 2026-09-25 table
+WindowRuntime.renderer	-	RES	—	the 2026-09-25 table
+WindowRuntime.restore_prompt	-	VIEW	windows	proposed by census-1: the restore card, ruled a full-window gate on 2026-09-25
+WindowRuntime.revealed_foot	-	ASYNC	handoff	the 2026-09-25 table
+WindowRuntime.root_menu	-	VIEW	profiles	proposed by census-1
+WindowRuntime.row_press	-	VIEW	mouse	the 2026-09-25 table
+WindowRuntime.search	-	VIEW	search	the 2026-09-25 table
+WindowRuntime.search_scan	-	PROJ	search	the 2026-09-25 table
+WindowRuntime.seat_pointer	-	VIEW	mouse	the 2026-09-25 table
+WindowRuntime.settings	-	VIEW	main[settings]	the 2026-09-25 table
+WindowRuntime.settings_scroll	-	VIEW	main[settings]	the 2026-09-25 table
+WindowRuntime.settling	-	PROJ	frame	the 2026-09-25 table
+WindowRuntime.tab_clicks	-	VIEW	tabs	the 2026-09-25 table
+WindowRuntime.tab_menu	-	VIEW	tabs	the 2026-09-25 table
+WindowRuntime.tab_press	-	VIEW	mouse	the 2026-09-25 table
+WindowRuntime.tab_scroll	-	VIEW	tabs	the 2026-09-25 table
+WindowRuntime.term_menu	-	VIEW	floats	the 2026-09-25 table
+WindowRuntime.textless_frames	-	PROJ	frame	the 2026-09-25 table
+WindowRuntime.tooltip	-	VIEW	tooltips	the 2026-09-25 table
+WindowRuntime.tooltip_anchors	-	PROJ	tooltips	the 2026-09-25 table
+WindowRuntime.underlined_image_reference	-	PROJ	frame	the 2026-09-25 table
+WindowRuntime.unpainted_pane_output	-	PROJ	terminal	the 2026-09-25 table
+WindowRuntime.video	-	LIFE	preview	the 2026-09-25 table
+WindowRuntime.video_bar_drag	-	VIEW	preview	the 2026-09-25 table
+WindowRuntime.web	-	LIFE	web	the 2026-09-25 table
+WindowRuntime.web_cursor	-	PROJ	web	the 2026-09-25 table
+WindowRuntime.web_pointer_inside	-	VIEW	web	the 2026-09-25 table
+WindowRuntime.web_thumbs	-	PROJ	web	the 2026-09-25 table
