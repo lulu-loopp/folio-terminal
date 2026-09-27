@@ -94,6 +94,7 @@ bt-app	-	crate::trace_sink::flush_sink	std::thread::JoinHandle::join	1
 bt-app	-	crate::trace_sink::flush_sink	std::thread::sleep	2
 bt-app	-	crate::trace_sink::run_to	std::sync::mpsc::Receiver::recv_timeout	1
 bt-app	-	crate::trace_sink::write_here	std::io::Write::write_fmt	1
+bt-app	-	crate::uninstall::detach_images_under	std::thread::JoinHandle::join	1
 bt-app	-	crate::uninstall::inspect_tree	std::fs::read_dir	1
 bt-app	-	crate::uninstall::usable_recorded_directory	std::fs::metadata	1
 bt-app	-	crate::update::Claim::take	std::fs::File::create	1
