@@ -19,9 +19,7 @@ fn expectation(subject: &str, oid: &str) -> Expectation {
     }
 }
 
-const SUBJECT: &str = "CN=Folio Test Publisher, O=Folio Test Publisher, L=Example City, S=mi, C=US";
-const IDENTITY: &str = "1.3.6.1.4.1.311.97.11111111.22222222.33333333.44444444";
-const OTHER_IDENTITY: &str = "1.3.6.1.4.1.311.97.55555555.66666666.77777777.88888888";
+use crate::trust_harness::{IDENTITY, OTHER_IDENTITY, SUBJECT};
 
 /// PIN (U-15) — **the identity OID is the one Artifact Signing EKU that is not
 /// the Public Trust marker**; none, or two, is no identity.

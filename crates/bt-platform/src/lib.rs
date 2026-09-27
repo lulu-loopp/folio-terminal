@@ -3424,6 +3424,14 @@ pub mod pe_resource;
 /// offer's. In process, no child; worker only. Refused by name off Windows.
 pub mod trust;
 
+/// **The test certificate world of [`trust`]** (U-15's E-13 harness, shared by
+/// U-20): tests only — this crate's own, and those of a crate that turns on the
+/// `trust-harness` feature on its dev-dependency on this one. A build of the
+/// shipped program never has it.
+#[cfg(any(test, feature = "trust-harness"))]
+#[doc(hidden)]
+pub mod trust_harness;
+
 /// **The effects of an update transaction** — durable writes and moves, the
 /// registry flush and the two locks on the installation home (ticket U-11;
 /// `docs/plans/design/self-update-2026-09-16.md` revision (b), §(b).2, F-6,

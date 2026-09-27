@@ -678,7 +678,7 @@ pub fn capability_of(path: &Path, flagged: bool, policy: &Policy) -> Capability 
 
 #[cfg(windows)]
 #[path = "trust_windows.rs"]
-mod arm;
+pub(crate) mod arm;
 
 #[cfg(not(windows))]
 mod arm {
