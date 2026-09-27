@@ -1,79 +1,91 @@
 name	light	dark	role	surface	contrast
 surface-band	#f7f7f5	#252525	ground	title band	n/a
-surface-chrome	#f7f7f5	#252525	ground	sidebar, files column, gutter between panes	n/a
-surface-pane	#ffffff	#1b1b1b	ground	terminal grid, pane head	n/a
-surface-popover	#ffffff	#2a2a2a	ground	menus, where x what, quota panel, cards, toast	n/a
+surface-chrome	#f7f7f5	#252525	ground	sidebar; the window ground under the cards (rounded); the gutter between panes (airy)	n/a
+surface-pane	#ffffff	#1b1b1b	ground	terminal grid, pane head, files column body	n/a
+surface-popover	#ffffff	#2a2a2a	ground	menus, where x what, quota panel, glance cards, toast, selection pill	n/a
 surface-dialog	#ffffff	#202020	ground	Settings, first-run card	n/a
-row-hover	rgba(55,53,47,.055)	rgba(255,255,255,.055)	state: row hover	rail tab row, agent row, AGENT head (#ececea / #313131 on chrome)	n/a
-row-selected	#e6e6e3	#393939	state: row selected	active rail row, the here row	n/a
-row-selected-files	#ededec	#303030	state: row selected	files row, where x what chosen folder	n/a
-menu-row-hover	#f4f4f4	#363636	state: menu row hover/open	menu rows	n/a
-caption-plate	#ececea	#313131	state: control hover/open	Windows caption cells (gear, + box)	n/a
+row-hover	rgba(55,53,47,.055)	rgba(255,255,255,.055)	state: row hover (sRGB alpha)	agent row, AGENT head, ordinary button (#ececea / #313131 on chrome); the rail tab row draws caption-plate, the same pixels	n/a
+row-hover-files	#f4f4f4	#282828	state: files row hover	files row under the pointer or keyboard-lit	n/a
+row-selected	#e6e6e3	#393939	state: row selected	active rail row; agent row here or pinned	n/a
+row-selected-files	#ededec	#303030	state: row selected	selected files row; where x what selected folder (item 31)	n/a
+menu-row-hover	#f4f4f4	#363636	state: menu row hover/open	menu, where x what and selection-pill rows under the pointer, keyboard-lit or with submenu open	n/a
+dialog-hover	#f4f4f4	#2c2c2c	state: control hover/open	combo hover/open; Settings close hover; Settings nav row selected (full) and hovered (at .5)	n/a
+caption-plate	#ececea	#313131	state: control hover/open	Windows caption cells (gear, min, max); + box, + New tab and its chevron; rail tab row hover	n/a
 tool-plate	#ededec	#303030	state: control hover/open	pane-head tools 22 r5	n/a
-dialog-hover	#f4f4f4	#2c2c2c	state: control hover/open	combo, dialog row	n/a
-divider	#e9e9e9	#353535	line	pane divider, rail edge, pane-head edge	n/a
-divider-hover	#c2c1bf	#515151	line: hover	divider under the pointer	n/a
-divider-active	= mark-blue	= mark-blue	line: held	divider held	n/a
-hairline	rgba(0,0,0,.088)	rgba(255,255,255,.094)	line	popover and card edge	n/a
-hairline-soft	rgba(0,0,0,.055)	rgba(255,255,255,.06)	line	rules inside a popover	n/a
-scrim	#0f0f0f @ 89/255	#0f0f0f @ 89/255	overlay	behind Settings and first-run	n/a
-ink-primary	#37352f	rgba(255,255,255,.87)	text	titles, selected rows, values	L 11.43/12.26/9.80; D 11.94/11.18/13.17/9.17
-ink-secondary	rgba(55,53,47,.65)	rgba(255,255,255,.55)	text	second lines, resting tab text, meta	L 4.07/4.18/3.80; D 5.65/5.42/5.97/4.74
-ink-muted	rgba(55,53,47,.45)	rgba(255,255,255,.38)	text	section labels, reset columns	L 2.44/2.49/2.37; D 3.47/3.39/3.58/3.09
-ink-title	#7a7974	#9d9d9d	text/glyph	gear, badge, quota control at rest	L 4.07/4.36/3.49; D 5.65/5.29/6.35/4.26
-ink-title-hover	#37352f	#e3e3e3	text/glyph: hover/open	the same on hover/open	L 11.43/12.26/9.80; D 11.94/11.18/13.42/9.00
-ink-menu	#777672	#9f9f9f	text	menu row at rest	L 4.24/4.55/3.64; D 5.79/5.42/6.51/4.36
-ink-hint	#a5a4a1	#7b7b7b	text	hint column, dimmed parent, placeholder	L 2.32/2.49/1.99; D 3.62/3.39/4.07/2.73
-ink-disabled	#d2d2d0	#525252	text: disabled	unavailable menu row (exempt)	L 1.41/1.51/1.21; D 1.96/1.84/2.20/1.48
+divider	#e9e9e9	#353535	line	pane divider line (square panels); 2x2 hairlines	n/a
+divider-hover	#c2c1bf	#515151	line: hover	divider line and grip under the pointer; rounded gutter grip on hover	n/a
+divider-active	= accent	= accent	line: held	divider line and grip while held	n/a
+rail-edge	#e9e9e8	#323232	line	every card edge under rounded panels, all four sides; sidebar right edge under compact	n/a
+pane-head-edge	#f1f1f1	#292929	line	separator under every pane head and the files head (SEAT_TITLE_EDGE); stays under rounded	n/a
+edge-float	#f5f5f5	#5f5f5f	line (linear-light overlay; value on the popover, dark #5c5c5c on the dialog)	menus, combo lists, combos, fields, selection pill, Settings nav edge	n/a
+rule-menu	#f9f9f9	#515151	line (linear-light overlay; value on the popover)	menu separators; where x what column line; selection-pill action separators	n/a
+hairline	rgba(0,0,0,.088)	rgba(255,255,255,.094)	line (sRGB alpha)	the mock's popover and glance-card edge; ordinary button edge	n/a
+hairline-soft	rgba(0,0,0,.055)	rgba(255,255,255,.06)	line (sRGB alpha)	the mock's rules inside a popover (quota panel)	n/a
+scrim	#0f0f0f @ 89/255	#0f0f0f @ 89/255	overlay (linear light)	behind Settings and first-run	n/a
+picker-wash-hover	rgba(48,89,216,.15)	rgba(122,153,255,.15)	overlay (linear light; = accent at .15)	where x what picker zone under the pointer (#eeeffa / #3e4972 on the popover)	n/a
+picker-wash-chosen	rgba(48,89,216,.22)	rgba(122,153,255,.22)	overlay (linear light; = accent at .22)	the picker's chosen side, item 21a (#e5e7f7 / #465486 on the popover)	n/a
+ink-primary	#37352f	rgba(255,255,255,.87)	text	titles, values, selected row text, focused pane title, hovered menu row text	L 11.43/12.26/9.80; D 11.94/11.18/13.17/9.17
+ink-secondary	rgba(55,53,47,.65)	rgba(255,255,255,.55)	text	a row's second line, card replies and meta, quota rows, identifiers	L 4.07/4.18/3.80; D 5.65/5.42/5.97/4.74
+ink-muted	rgba(55,53,47,.45)	rgba(255,255,255,.38)	text	ages, context %, todo counts, meta; in dark also section labels and reset columns (via ink-section)	L 2.44/2.49/2.37; D 3.47/3.39/3.58/3.09
+ink-title	#7a7974	#9d9d9d	text/glyph	gear, badge, quota control at rest; rail and native tab text at rest; + New tab and + box at rest	L 4.07/4.36/3.49; D 5.65/5.29/6.35/4.26
+ink-title-hover	#37352f	#e3e3e3	text/glyph: hover/open	the same on hover/open; Windows min/max/close glyphs at rest; native tab hover and active text	L 11.43/12.26/9.80; D 11.94/11.18/13.42/9.00
+ink-menu	#777672	#9f9f9f	text (raised to 4.5:1 on the menu by raise_against)	menu, combo-list and where x what rows at rest; selection-pill actions; address and float field text; SPLIT outline	L 4.24/4.55/3.64; D 5.79/5.42/6.51/4.36
+ink-hint	#a5a4a1	#7b7b7b	text	menu hint column and submenu arrow; where x what dimmed parent and ages; field placeholder	L 2.32/2.49/1.99; D 3.62/3.39/4.07/2.73
+ink-pane-title	#a5a4a1	#727272	text	unfocused pane and files head title and breadcrumbs; pane-head tool glyphs at rest; files segments at rest	L 2.32/2.49/1.99; D 3.19/2.98/3.58/2.40
+ink-disabled	#d2d2d0	#525252	text: disabled (exempt)	unavailable menu row: product baseline contract (menu_item_unavailable_text); not drawn in the prototype	L 1.41/1.51/1.21; D 1.96/1.84/2.20/1.48
+ink-section	= text-gray	= ink-muted	alias: section label (owner 2026-09-27: no new grey tier; B default, C = ink-secondary)	AGENT head and its count, quota group labels and compact account head, where x what column captions and Recent, SPLIT caption; quota reset columns	L 3.04/3.26/2.61; D 3.47/3.39/3.58/3.09
 ink-vendor	#37352f	#e4e4e4	mark	monochrome vendor/profile marks (item 81)	L 11.43/12.26/9.80; D 12.06/11.29/13.55/9.08
-ink-pane-title	#a5a4a1	#727272	text	unfocused pane title	L 2.32/2.49/1.99; D 3.19/2.98/3.58/2.40
-mark-red	#FF3B30	#fb7185	mark: Failed	dots, bars, rings, badge dot, lanes	L 3.31/3.55/2.84 †; D 5.70/5.33/6.40/4.29
-text-red	#FF3B30	#fb7185	coloured text (= mark)	state words, counts, links	L 3.31/3.55/2.84 †; D 5.70/5.33/6.40/4.29
-mark-orange	#FF9500	#d9822b	mark: Waiting, Limited, quota >=80% and used up	dots, bars, rings, badge dot, lanes	L 2.05/2.20/1.76 †; D 5.24/4.91/5.89/3.95
-text-orange	#FF9500	#d9822b	coloured text (= mark)	state words, counts, links	L 2.05/2.20/1.76 †; D 5.24/4.91/5.89/3.95
-mark-yellow	#FFCC00	#c19c00	mark: paused	dots, bars, rings, badge dot, lanes	L 1.41/1.51/1.21 †; D 5.86/5.48/6.58/4.41
-text-yellow	#FFCC00	#c19c00	coloured text (= mark)	state words, counts, links	L 1.41/1.51/1.21 †; D 5.86/5.48/6.58/4.41
-mark-green	#28CD41	#57ab5a	mark: ok	dots, bars, rings, badge dot, lanes	L 1.98/2.12/1.70 †; D 5.39/5.04/6.05/4.06
-text-green	#28CD41	#57ab5a	coloured text (= mark)	state words, counts, links	L 1.98/2.12/1.70 †; D 5.39/5.04/6.05/4.06
-mark-mint	#00C7BE	(none today)	mark: -	dots, bars, rings, badge dot, lanes	L 1.97/2.12/1.69 †
-text-mint	#00C7BE	(none today)	coloured text (= mark)	state words, counts, links	L 1.97/2.12/1.69 †
-mark-teal	#59ADC4	(none today)	mark: -	dots, bars, rings, badge dot, lanes	L 2.39/2.56/2.05 †
-text-teal	#59ADC4	(none today)	coloured text (= mark)	state words, counts, links	L 2.39/2.56/2.05 †
-mark-cyan	#55BEF0	#7bc6d5	mark: -	dots, bars, rings, badge dot, lanes	L 1.96/2.10/1.68 †; D 7.94/7.44/8.92/5.98
-text-cyan	#55BEF0	#7bc6d5	coloured text (= mark)	state words, counts, links	L 1.96/2.10/1.68 †; D 7.94/7.44/8.92/5.98
-mark-blue	#007AFF	#7A99FF	mark: accent: focus ring, Done/unread, links, current branch, check mark, picker zone	dots, bars, rings, badge dot, lanes	L 3.74/4.02/3.21 †; D 5.71/5.35/6.42/4.31
-text-blue	#007AFF	#7A99FF	coloured text (= mark)	state words, counts, links	L 3.74/4.02/3.21 †; D 5.71/5.35/6.42/4.31
-mark-indigo	#5856D6	(none today)	mark: -	dots, bars, rings, badge dot, lanes	L 5.27/5.65/4.52 †
-text-indigo	#5856D6	(none today)	coloured text (= mark)	state words, counts, links	L 5.27/5.65/4.52 †
-mark-purple	#AF52DE	#a17bd5	mark: -	dots, bars, rings, badge dot, lanes	L 3.85/4.13/3.30 †; D 4.61/4.31/5.18/3.47
-text-purple	#AF52DE	#a17bd5	coloured text (= mark)	state words, counts, links	L 3.85/4.13/3.30 †; D 4.61/4.31/5.18/3.47
-mark-pink	#FF2D55	#d57bce	mark: -	dots, bars, rings, badge dot, lanes	L 3.40/3.65/2.92 †; D 5.51/5.16/6.20/4.15
-text-pink	#FF2D55	#d57bce	coloured text (= mark)	state words, counts, links	L 3.40/3.65/2.92 †; D 5.51/5.16/6.20/4.15
-mark-brown	#A2845E	(none today)	mark: -	dots, bars, rings, badge dot, lanes	L 3.26/3.50/2.80 †
-text-brown	#A2845E	(none today)	coloured text (= mark)	state words, counts, links	L 3.26/3.50/2.80 †
-mark-gray	#8E8E93	rgba(255,255,255,.38)	mark: neutral marks (bar fill, ring sweep, in-use dot, here-dot)	dots, bars, rings, badge dot, lanes	L 3.04/3.26/2.61 †; D 3.47/3.39/3.58/3.09
-text-gray	#8E8E93	rgba(255,255,255,.38)	coloured text (= mark)	state words, counts, links	L 3.04/3.26/2.61 †; D 3.47/3.39/3.58/3.09
-lane-0	= mark-blue	#7b92d5	graph lane blue	commit graph lanes, nodes, ref pills	D 5.05/4.73/5.67/3.80
-lane-1	= mark-purple	#a17bd5	graph lane purple	commit graph lanes, nodes, ref pills	D 4.61/4.31/5.18/3.47
-lane-2	= mark-pink	#d57bce	graph lane pink	commit graph lanes, nodes, ref pills	D 5.51/5.16/6.20/4.15
-lane-3	= mark-red	#d57b8a	graph lane red	commit graph lanes, nodes, ref pills	D 5.13/4.80/5.77/3.87
-lane-4	= mark-orange	#d5b07b	graph lane orange	commit graph lanes, nodes, ref pills	D 7.54/7.06/8.47/5.68
-lane-5	= mark-yellow	#bfd57b	graph lane yellow	commit graph lanes, nodes, ref pills	D 9.50/8.90/10.68/7.16
-lane-6	= mark-green	#7bd5a1	graph lane green	commit graph lanes, nodes, ref pills	D 8.67/8.12/9.74/6.53
-lane-7	= mark-cyan	#7bc6d5	graph lane cyan	commit graph lanes, nodes, ref pills	D 7.94/7.44/8.92/5.98
-press-red	#ff1609	mark x brightness(1.446)	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 3.65/3.91/3.13
-press-orange	#de8200	mark x brightness(1.446)	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 2.68/2.88/2.30
-press-yellow	#deb100	mark x brightness(1.446)	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 1.88/2.02/1.62
-press-green	#23b239	mark x brightness(1.446)	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 2.61/2.80/2.24
-press-mint	#00ada5	-	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 2.60/2.79/2.23
-press-teal	#419eb7	-	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 2.88/3.09/2.47
-press-cyan	#2eafed	mark x brightness(1.446)	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 2.31/2.48/1.98
-press-blue	#006ade	mark x brightness(1.446)	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 4.76/5.10/4.08
-press-indigo	#3937ce	-	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 7.50/8.04/6.43
-press-purple	#a031d8	mark x brightness(1.446)	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 4.99/5.35/4.28
-press-pink	#ff0635	mark x brightness(1.446)	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 3.67/3.94/3.15
-press-brown	#8d7352	-	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 4.16/4.46/3.57
-press-gray	#7b7b81	mark x brightness(1.446)	state: coloured glyph hover/open (round 24)	badge dot/count, quota ring/figure, Back to main	L 3.92/4.21/3.36
+ink-inverse	#ffffff	#ffffff	text on a fill	the word on fill-primary; the glyph on caption-close-hover	on fill-primary: L 5.92; D 2.68
+accent	#3059d8	#7a99ff	identity accent (round 26: never remapped)	focus ring; links; folder and menu glyphs; menu/combo/Git-filter check; picker zone edge and wash; divider-active; open tool and + box glyph; files segment underline; comment count and marks; zoom and outline marks; gear dot; primary button fill	L 5.52/5.92/4.74; D 5.71/5.35/6.42/4.31
+fill-primary	= accent	= accent	fill under ink-inverse (current baseline; treatment open)	primary button	white on it: L 5.92; D 2.68
+mark-red	#FF3B30	#fb7185	mark: Failed	Failed dots (unreaddot.fail, tab-state.fail), badge error dot	L 3.31/3.55/2.84 †; D 5.70/5.33/6.40/4.29
+text-red	= mark-red	= mark-red	coloured text (= mark)	Failed words and counts; badge count when red	L 3.31/3.55/2.84 †; D 5.70/5.33/6.40/4.29
+mark-orange	#FF9500	#d9822b	mark: Waiting, Limited, quota >=80% and used up (item 78)	waiting/bell dots, badge warn dot, quota ring and bar from 80% and used up, Git detached HEAD / HEAD pill / Back to main edges	L 2.05/2.20/1.76 †; D 5.24/4.91/5.89/3.95
+text-orange	= mark-orange	= mark-orange	coloured text (= mark)	waiting/quota words, AGENT wait count and account ring, used-up row % and reset times and the used-up word (target), badge count when orange, band quota figure from 80%, Git detached HEAD / Back to main / HEAD pill	L 2.05/2.20/1.76 †; D 5.24/4.91/5.89/3.95
+mark-yellow	#FFCC00	#c19c00	mark: paused (status value reserved)	reserved, not drawn (no surface draws a paused state)	L 1.41/1.51/1.21 †; D 5.86/5.48/6.58/4.41
+text-yellow	= mark-yellow	= mark-yellow	coloured text (= mark)	reserved, not drawn (ref pill names use lane-5)	L 1.41/1.51/1.21 †; D 5.86/5.48/6.58/4.41
+mark-green	#28CD41	#57ab5a	mark: ok (status value)	Git view merge road (git-mini-merge)	L 1.98/2.12/1.70 †; D 5.39/5.04/6.05/4.06
+text-green	= mark-green	= mark-green	coloured text (= mark)	reserved, not drawn (ref pill names use lane-6)	L 1.98/2.12/1.70 †; D 5.39/5.04/6.05/4.06
+mark-mint	#00C7BE	-	mark	reserved, not drawn	L 1.97/2.12/1.69 †
+text-mint	= mark-mint	= mark-mint	coloured text (= mark)	reserved, not drawn	L 1.97/2.12/1.69 †
+mark-teal	#59ADC4	-	mark	reserved, not drawn	L 2.39/2.56/2.05 †
+text-teal	= mark-teal	= mark-teal	coloured text (= mark)	reserved, not drawn	L 2.39/2.56/2.05 †
+mark-cyan	#55BEF0	= lane-7	mark (dark: lane value only)	none beyond lane 7	L 1.96/2.10/1.68 †; D 7.94/7.44/8.92/5.98
+text-cyan	= mark-cyan	= mark-cyan	coloured text (= mark)	reserved, not drawn (ref pill names use lane-7)	L 1.96/2.10/1.68 †; D 7.94/7.44/8.92/5.98
+mark-blue	#007AFF	#7a99ff	mark: state blue (round 26)	Done/unread dots, badge accent dot, recovered-quota toast dot, Recent unread dot, Git current-branch and commit dots, main pill	L 3.74/4.02/3.21 †; D 5.71/5.35/6.42/4.31
+text-blue	= mark-blue	= mark-blue	coloured text (= mark)	Done / in-use words, badge count when blue, Git main pill (links are accent, not this)	L 3.74/4.02/3.21 †; D 5.71/5.35/6.42/4.31
+mark-indigo	#5856D6	-	mark	reserved, not drawn	L 5.27/5.65/4.52 †
+text-indigo	= mark-indigo	= mark-indigo	coloured text (= mark)	reserved, not drawn	L 5.27/5.65/4.52 †
+mark-purple	#AF52DE	= lane-1	mark (dark: lane value only)	none beyond lane 1	L 3.85/4.13/3.30 †; D 4.61/4.31/5.18/3.47
+text-purple	= mark-purple	= mark-purple	coloured text (= mark)	reserved, not drawn (ref pill names use lane-1)	L 3.85/4.13/3.30 †; D 4.61/4.31/5.18/3.47
+mark-pink	#FF2D55	= lane-2	mark (dark: lane value only)	none beyond lane 2	L 3.40/3.65/2.92 †; D 5.51/5.16/6.20/4.15
+text-pink	= mark-pink	= mark-pink	coloured text (= mark)	reserved, not drawn (ref pill names use lane-2)	L 3.40/3.65/2.92 †; D 5.51/5.16/6.20/4.15
+mark-brown	#A2845E	-	mark	reserved, not drawn	L 3.26/3.50/2.80 †
+text-brown	= mark-brown	= mark-brown	coloured text (= mark)	reserved, not drawn	L 3.26/3.50/2.80 †
+mark-gray	#8E8E93	rgba(255,255,255,.38)	mark: neutral	quota bar neutral fill, ring neutral sweep, quota in-use dot	L 3.04/3.26/2.61 †; D 3.47/3.39/3.58/3.09
+text-gray	= mark-gray	= mark-gray	coloured text (= mark)	light: ink-section (section labels) by the 2026-09-27 reassignment; no other word	L 3.04/3.26/2.61 †; D 3.47/3.39/3.58/3.09
+mark-gray-here	= mark-gray	= ink-hint	mark: neutral (here-dot)	where x what here-dot (ww-here)	L 3.04/3.26/2.61; D 3.62/3.39/4.07/2.73
+lane-0	= mark-blue	#7b92d5	graph lane blue (dark: GRAPH_LANES_DARK, distinct from the status value)	commit graph lanes and nodes; ref pill edge, 10% tint and name	L 3.74/4.02/3.21; D 5.05/4.73/5.67/3.80
+lane-1	= mark-purple	#a17bd5	graph lane purple (dark: GRAPH_LANES_DARK, distinct from the status value)	commit graph lanes and nodes; ref pill edge, 10% tint and name	L 3.85/4.13/3.30; D 4.61/4.31/5.18/3.47
+lane-2	= mark-pink	#d57bce	graph lane pink (dark: GRAPH_LANES_DARK, distinct from the status value)	commit graph lanes and nodes; ref pill edge, 10% tint and name	L 3.40/3.65/2.92; D 5.51/5.16/6.20/4.15
+lane-3	= mark-red	#d57b8a	graph lane red (dark: GRAPH_LANES_DARK, distinct from the status value)	commit graph lanes and nodes; ref pill edge, 10% tint and name	L 3.31/3.55/2.84; D 5.13/4.80/5.77/3.87
+lane-4	= mark-orange	#d5b07b	graph lane orange (dark: GRAPH_LANES_DARK, distinct from the status value)	commit graph lanes and nodes; ref pill edge, 10% tint and name	L 2.05/2.20/1.76; D 7.54/7.06/8.47/5.68
+lane-5	= mark-yellow	#bfd57b	graph lane yellow (dark: GRAPH_LANES_DARK, distinct from the status value)	commit graph lanes and nodes; ref pill edge, 10% tint and name	L 1.41/1.51/1.21; D 9.50/8.90/10.68/7.16
+lane-6	= mark-green	#7bd5a1	graph lane green (dark: GRAPH_LANES_DARK, distinct from the status value)	commit graph lanes and nodes; ref pill edge, 10% tint and name	L 1.98/2.12/1.70; D 8.67/8.12/9.74/6.53
+lane-7	= mark-cyan	#7bc6d5	graph lane cyan (dark: GRAPH_LANES_DARK, distinct from the status value)	commit graph lanes and nodes; ref pill edge, 10% tint and name	L 1.96/2.10/1.68; D 7.94/7.44/8.92/5.98
+press-red	#ff1609	#ffa3c0	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	badge dot and count when red (title band, hover/open)	L 3.65/3.91/3.13; D 8.21/7.69/9.23/6.19
+press-orange	#de8200	#ffbc3e	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	badge dot and count when orange; quota control ring, sweep and figure; Git Back to main (hover/open)	L 2.68/2.88/2.30; D 9.13/8.55/10.26/6.88
+press-yellow	#deb100	#ffe200	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	reserved, not drawn	L 1.88/2.02/1.62; D 11.77/11.03/13.23/8.87
+press-green	#23b239	#7ef782	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	reserved, not drawn	L 2.61/2.80/2.24; D 11.32/10.60/12.72/8.53
+press-mint	#00ada5	-	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	reserved, not drawn	L 2.60/2.79/2.23
+press-teal	#419eb7	-	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	reserved, not drawn	L 2.88/3.09/2.47
+press-cyan	#2eafed	-	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	reserved, not drawn	L 2.31/2.48/1.98
+press-blue	#006ade	#b0ddff	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	badge dot and count when blue (hover/open)	L 4.76/5.10/4.08; D 10.68/10.00/12.00/8.05
+press-indigo	#3937ce	-	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	reserved, not drawn	L 7.50/8.04/6.43
+press-purple	#a031d8	-	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	reserved, not drawn	L 4.99/5.35/4.28
+press-pink	#ff0635	-	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	reserved, not drawn	L 3.67/3.94/3.15
+press-brown	#8d7352	-	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	reserved, not drawn	L 4.16/4.46/3.57
+press-gray	#7b7b81	-	state: coloured glyph hover/open (round 24; light HSL L x .87, dark mark x brightness(1.446))	reserved, not drawn	L 3.92/4.21/3.36
 deep-red	#cf0b00	-	comparison only (round 22; round 23 hover, superseded by round 24)	none by default	L 5.29/5.67/4.54 †
 deep-orange	#975800	-	comparison only (round 22; round 23 hover, superseded by round 24)	none by default	L 5.27/5.66/4.52 †
 deep-yellow	#7d6400	-	comparison only (round 22; round 23 hover, superseded by round 24)	none by default	L 5.30/5.68/4.54 †
@@ -87,6 +99,5 @@ deep-purple	#9c2ad6	-	comparison only (round 22; round 23 hover, superseded by r
 deep-pink	#d00028	-	comparison only (round 22; round 23 hover, superseded by round 24)	none by default	L 5.27/5.66/4.52 †
 deep-brown	#7a6347	-	comparison only (round 22; round 23 hover, superseded by round 24)	none by default	L 5.29/5.67/4.53 †
 deep-gray	#66666b	-	comparison only (round 22; round 23 hover, superseded by round 24)	none by default	L 5.32/5.71/4.57 †
-fill-primary	#005ee1	#005ee1	fill under a white word	primary button (open, section 6 #8)	white on it 5.69 †
 vendor-claude	#D97757	#D97757	brand (never remapped)	Claude glyph U+2733	L 2.91/3.12/2.50; D 4.91/4.60/5.52/3.70
-caption-close-hover	#e5484d	#e5484d	platform (never remapped)	Windows close button hover, glyph #ffffff	n/a
+caption-close-hover	#e5484d	#e5484d	platform (never remapped)	Windows close button hover; glyph ink-inverse	glyph #ffffff on it 3.91
