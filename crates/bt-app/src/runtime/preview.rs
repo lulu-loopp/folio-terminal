@@ -653,6 +653,9 @@ impl Runtime<'_> {
                 };
                 if let Some(editor) = self.window.settings.editor_mut() {
                     editor.program = text_field::TextField::holding(&path.to_string_lossy());
+                    // A chosen file is a program, so whatever the field was
+                    // refusing a moment ago is no longer what it holds.
+                    editor.program_refusal = None;
                 }
                 profiles::set_program_path(index, &path);
                 self.store_profiles()?;

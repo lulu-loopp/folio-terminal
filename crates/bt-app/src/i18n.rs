@@ -1197,6 +1197,12 @@ pub enum Text {
     ProfilesRowNameDesc,
     ProfilesRowProgram,
     ProfilesRowProgramDesc,
+    /// The `Login shell` switch under the program (0.4.6 ticket 74, issue #12).
+    ProfilesRowLogin,
+    ProfilesRowLoginDesc,
+    /// Why the `Program` field is refusing: what was typed is a program and its
+    /// arguments, and only the program goes there (0.4.6 ticket 74).
+    ProfilesProgramHasArguments,
     ProfilesRowStartingDir,
     ProfilesRowStartingDirDesc,
     ProfilesRowColour,
@@ -3842,6 +3848,17 @@ impl Text {
                 "The program a new tab of this profile starts.",
                 "这个配置新建标签时启动的程序。",
             ),
+            Self::ProfilesRowLogin => pick(lang, "Login shell", "Login shell"),
+            Self::ProfilesRowLoginDesc => pick(
+                lang,
+                "Starts the shell as a login shell. It reads your login files, such as .zprofile, first.",
+                "Starts the shell as a login shell. It reads your login files, such as .zprofile, first.",
+            ),
+            Self::ProfilesProgramHasArguments => pick(
+                lang,
+                "Only the program goes here. Arguments have their own row.",
+                "Only the program goes here. Arguments have their own row.",
+            ),
             Self::ProfilesRowStartingDir => pick(lang, "Starting directory", "起始目录"),
             Self::ProfilesRowStartingDirDesc => pick(
                 lang,
@@ -5564,7 +5581,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 796] = [
+    pub const ALL: [Self; 799] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -5860,6 +5877,9 @@ impl Text {
         Self::ProfilesRowNameDesc,
         Self::ProfilesRowProgram,
         Self::ProfilesRowProgramDesc,
+        Self::ProfilesRowLogin,
+        Self::ProfilesRowLoginDesc,
+        Self::ProfilesProgramHasArguments,
         Self::ProfilesRowStartingDir,
         Self::ProfilesRowStartingDirDesc,
         Self::ProfilesRowColour,
@@ -6512,7 +6532,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 60] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 66] = [
         // Ticket 37's four, in both columns: written in English, Chinese owed by opus46.
         (Self::ShortcutTextLarger, HostPlatform::Windows),
         (Self::ShortcutTextLarger, HostPlatform::MacOs),
@@ -6575,6 +6595,13 @@ impl Text {
         (Self::UpdateRowReady, HostPlatform::MacOs),
         (Self::UpdateRowManaged, HostPlatform::Windows),
         (Self::UpdateRowManaged, HostPlatform::MacOs),
+        // 0.4.6 ticket 74: the profile editor's login switch and the Program field's refusal.
+        (Self::ProfilesRowLogin, HostPlatform::Windows),
+        (Self::ProfilesRowLogin, HostPlatform::MacOs),
+        (Self::ProfilesRowLoginDesc, HostPlatform::Windows),
+        (Self::ProfilesRowLoginDesc, HostPlatform::MacOs),
+        (Self::ProfilesProgramHasArguments, HostPlatform::Windows),
+        (Self::ProfilesProgramHasArguments, HostPlatform::MacOs),
     ];
 }
 

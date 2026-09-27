@@ -17,6 +17,17 @@
 //! is stated rather than hidden — an app launched from Finder inherits almost no environment, so
 //! a `PATH` that only `.zprofile` sets will not be there, and the answer to that is a shipped
 //! profile that asks for a login shell (M1-5), not a default that quietly re-logs everybody in.
+//!
+//! **Superseded for Folio's panes on macOS, 2026-09-26** (owner ruling (A), issue #12). The
+//! cost named above turned out to be every Homebrew user's: Homebrew's installer writes
+//! `eval "$(/opt/homebrew/bin/brew shellenv)"` into `.zprofile`, not `.zshrc`, which is why
+//! Terminal.app, iTerm2, Kitty and WezTerm all start login shells there. A pane never starts
+//! through this module's resolution — every pane starts through a profile row, and on macOS the
+//! shipped `zsh`, `bash` and `sh` rows now carry `login` and are handed `-l` (`--login` for
+//! bash) by `bt_app::profiles::launch_args`; Linux rows stay non-login, which is what its
+//! terminals do. **This resolution itself stays interactive and non-login** on every platform:
+//! its callers are `spawn_default` and the tests that want *a* real shell, and a login shell
+//! would run the login files of whichever account happens to run them.
 
 use std::{
     env,
@@ -69,9 +80,10 @@ const POWERSHELL_INTERACTIVE_ARGS: &[&str] = &["-NoLogo"];
 /// input is a pipe or a file and the shell would otherwise run in batch. Every terminal on this
 /// platform starts the shell the same way: Terminal.app, iTerm2, xterm and gnome-terminal pass
 /// no `-i`, and the only argument any of them adds is the `-` in front of argv\[0\] that means
-/// *login*, which Q8 rules out. Adding `-i` would buy nothing on the three shells we pick
-/// ourselves and would be a **guess about a program the user named** on `$SHELL` — `pwsh` reads
-/// `-i` as an abbreviation of `-InputFormat` and refuses to start.
+/// *login*, which Q8 kept out of this resolution (a pane's login shell is its profile row's
+/// `login` since 2026-09-26 — see the module doc). Adding `-i` would buy nothing on the three
+/// shells we pick ourselves and would be a **guess about a program the user named** on `$SHELL`
+/// — `pwsh` reads `-i` as an abbreviation of `-InputFormat` and refuses to start.
 ///
 /// Non-login is the other half and it is spelled by what is absent twice over: no `-l`, and
 /// argv\[0\] left as the program's own path. `portable_pty`'s `CommandBuilder` only prefixes

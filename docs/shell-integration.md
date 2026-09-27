@@ -241,6 +241,17 @@ keep your startup files somewhere other than `$HOME`, that directory reaches the
 the one failure indistinguishable from a shell that has no integration, so the profile says so
 outright and the capability row reads `No shell integration`.
 
+**Whether a row is a login shell is the row's own switch** (`login` in `profiles.json`,
+`Login shell` in Settings > Profiles; 2026-09-26, issue #12). Folio spells it on the command line
+the way each shell's manual does — `--login` for bash, `-l` for zsh, `sh`, `dash` and the
+rest — in front of the row's own arguments, and never as a `-` in front of the program's name.
+**On macOS the shipped `zsh`, `bash` and `sh` rows are login shells**, as in Terminal.app,
+iTerm2, Kitty and WezTerm, because Homebrew's installer puts `PATH` in `~/.zprofile`, which
+only a login shell reads. On Linux the shipped rows are not, which is what its terminals do. Each
+row goes through its door as above: a login zsh is started `zsh -l` with `ZDOTDIR` pointed at
+Folio's copy, whose `.zprofile` sources yours; a login bash trades `--login` for the init file
+with `BT_SHELL_INTEGRATION=login`; a login `sh` is `sh -l`.
+
 `-e` rather than `--`, and it is load-bearing: `wsl.exe --` joins everything after it into one
 command line and gives *that* to the login shell, which re-parses it — a question full of spaces,
 quotes, `$`, `|` and `;` comes apart on the way in. `wsl.exe -e` executes the program directly,

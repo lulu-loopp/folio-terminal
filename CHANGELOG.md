@@ -6,6 +6,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Fixed
+
+- macOS: the shipped shells start as login shells, so tools whose PATH is set
+  in .zprofile — Homebrew's — are found; a profile can turn login on or off;
+  a profile with arguments no longer reads as not installed.
+
 ### Internal
 
 - The split inventory's census no longer tells a test that asks for a method by

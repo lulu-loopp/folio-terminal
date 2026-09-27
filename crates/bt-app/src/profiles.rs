@@ -338,7 +338,28 @@ pub struct Profile {
     /// coded", which was true only while every shell this terminal could start
     /// was a PowerShell. It is a PowerShell flag: `cmd.exe` would take it as the
     /// name of a batch file to run, and `bash` as a filename to open.
+    ///
+    /// **The login flag is not in here** (0.4.6 ticket 74): it is [`Self::login`],
+    /// and [`launch_args`] is what puts the two together for a spawn.
     pub args: Vec<String>,
+    /// Whether this row starts its program as a **login shell** (0.4.6 ticket 74,
+    /// issue #12) — one switch in the editor, spelled on the command line by
+    /// [`login_flag`] and put in front of [`Self::args`] by [`launch_args`].
+    ///
+    /// A field and not a word in the arguments, because the spelling is the
+    /// program's (`--login` for bash, `-l` for zsh and the rest) and the reader's
+    /// question is only *whether*. It is read only for a program that has a login
+    /// spelling at all: a PowerShell, `cmd.exe`, `wsl.exe` or an agent has none,
+    /// carries `false`, and is offered no switch.
+    ///
+    /// **On macOS the shipped shell rows carry `true`** (owner ruling (A),
+    /// 2026-09-26, superseding the Mac port's Q8 for macOS): Homebrew's installer
+    /// writes `PATH` into `.zprofile`, which only a login shell reads, and every
+    /// other terminal on that platform starts one. Another Unix keeps `false`,
+    /// where distributions set `PATH` in files a non-login shell already has. On
+    /// Windows only Git Bash carries `true`, which is the `--login` its shortcut
+    /// always passed.
+    pub login: bool,
     /// What this profile sets in its sessions' environment, over what the
     /// terminal sets for itself.
     ///
@@ -1127,6 +1148,7 @@ fn windows_shipped() -> Vec<Profile> {
             // The flag this terminal has always passed, now said by the profile that
             // means it rather than by the spawn path every profile goes through.
             args: vec!["-NoLogo".to_owned()],
+            login: false,
             env: Vec::new(),
             starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
@@ -1161,6 +1183,7 @@ fn windows_shipped() -> Vec<Profile> {
                 tail: r"System32\WindowsPowerShell\v1.0\powershell.exe".to_owned(),
             }]),
             args: vec!["-NoLogo".to_owned()],
+            login: false,
             env: Vec::new(),
             starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
@@ -1201,6 +1224,7 @@ fn windows_shipped() -> Vec<Profile> {
                 tail: r"System32\wsl.exe".to_owned(),
             }]),
             args: Vec::new(),
+            login: false,
             env: Vec::new(),
             // The one profile whose home is not a Windows directory.
             starting_dir: StartingDir::LauncherFlag {
@@ -1255,7 +1279,12 @@ fn windows_shipped() -> Vec<Profile> {
             // and `--login -i` is that shortcut's own argument list: `--login` is
             // what sources `/etc/profile` and puts `git` on the path, and without it
             // this would be a bash that cannot find the tool it is named after.
-            args: vec!["--login".to_owned(), "-i".to_owned()],
+            //
+            // **The `--login` is the row's `login` since 0.4.6 ticket 74** and the
+            // command line is byte for byte what it was: [`login_flag`] spells a
+            // bash's login as `--login` and [`launch_args`] puts it first.
+            args: vec!["-i".to_owned()],
+            login: true,
             env: Vec::new(),
             // Git for Windows' MSYS layer maps `$HOME` onto `%USERPROFILE%` by
             // default, so the Windows home *is* this shell's home — one directory
@@ -1289,6 +1318,7 @@ fn windows_shipped() -> Vec<Profile> {
             // None. `cmd.exe` has no logo to suppress, and every switch it does take
             // (`/c`, `/k`) would end the session rather than start one.
             args: Vec::new(),
+            login: false,
             env: Vec::new(),
             starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
@@ -1366,6 +1396,7 @@ fn windows_shipped() -> Vec<Profile> {
                 },
             ]),
             args: Vec::new(),
+            login: false,
             env: Vec::new(),
             starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
@@ -1403,6 +1434,7 @@ fn windows_shipped() -> Vec<Profile> {
                 },
             ]),
             args: Vec::new(),
+            login: false,
             env: Vec::new(),
             starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
@@ -1439,6 +1471,7 @@ fn windows_shipped() -> Vec<Profile> {
                 },
             ]),
             args: Vec::new(),
+            login: false,
             env: Vec::new(),
             starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
@@ -1490,6 +1523,7 @@ fn windows_shipped() -> Vec<Profile> {
                 },
             ]),
             args: Vec::new(),
+            login: false,
             env: Vec::new(),
             starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
@@ -1532,6 +1566,7 @@ fn windows_shipped() -> Vec<Profile> {
                 },
             ]),
             args: Vec::new(),
+            login: false,
             env: Vec::new(),
             starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
@@ -1578,6 +1613,7 @@ fn windows_shipped() -> Vec<Profile> {
                 },
             ]),
             args: Vec::new(),
+            login: false,
             env: Vec::new(),
             starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
@@ -1619,6 +1655,7 @@ fn windows_shipped() -> Vec<Profile> {
                 },
             ]),
             args: Vec::new(),
+            login: false,
             env: Vec::new(),
             starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
@@ -1714,29 +1751,36 @@ fn unix_system_shells(
 /// table as though it had been unset, which is the same answer resolution gives
 /// one layer down.
 ///
-/// # Arguments: none, and that is the answer rather than an omission
+/// # Arguments: none, and the login switch is not an argument
 ///
-/// `bt_pty::shell`'s `UNIX_INTERACTIVE_ARGS` is the empty list and says why at
-/// length: a shell whose standard input is a terminal is interactive by its own
-/// rule, `-i` is the flag for the other case, and non-login is spelled by what is
-/// absent twice over — no `-l`, and argv\[0\] left as the program's own path.
-/// Every terminal on this platform starts a shell this way. Two rows do add
-/// something later and neither is an argument this table wrote: the `bash` row is
-/// handed `--init-file` and `-i` by [`crate::shell_integration`], which is the
-/// door that installs OSC 133 into a bash, and the `zsh` row is handed no
-/// argument at all because zsh's door is `ZDOTDIR`, an environment variable.
+/// No `-i`: a shell whose standard input is a terminal is interactive by its own
+/// rule, and `-i` is the flag for the other case (`bt_pty::shell`'s
+/// `UNIX_INTERACTIVE_ARGS` says so at length). Whether the shell is a **login**
+/// shell is [`Profile::login`], and [`launch_args`] spells it as a flag in front
+/// of the row's own words — never as a `-` in front of argv\[0\], for the reason
+/// [`login_flag`] gives. Two rows are handed more later and neither is an
+/// argument this table wrote: the `bash` row gets `--init-file` and `-i` from
+/// [`crate::shell_integration`], which is the door that installs OSC 133 into a
+/// bash (and, for a login row, trades the login flag for the script replaying
+/// the login chain), and the `zsh` row gets no argument at all because zsh's
+/// door is `ZDOTDIR`, an environment variable.
 ///
-/// # `PATH` is the reader's and this table does not repair it
+/// # `PATH` is the reader's, and on macOS it is in the login files
 ///
 /// An app launched from Finder inherits `launchd`'s environment, where `PATH` is
 /// `/usr/bin:/bin:/usr/sbin:/sbin` and nothing a package manager installed is on
-/// it. A non-login interactive zsh then reads `.zshrc`, which is where a macOS
-/// reader's `PATH` actually comes from — so the pane gets their path from their
-/// own file, one layer inside the shell, and this terminal never edits it. The
-/// alternative is a login shell, which would re-run `.zprofile` for a session the
-/// reader already logged into, and Q8 ruled it out: the cost is written down
-/// rather than paid silently, and a reader who wants Terminal.app's behaviour
-/// puts `--login` in the row's own arguments.
+/// it. This table still never edits `PATH`; it starts the shell that reads the
+/// reader's own file. **On macOS that is a login shell** (owner ruling (A),
+/// 2026-09-26, issue #12, superseding the Mac port's Q8 for macOS): Homebrew's
+/// installer writes `eval "$(/opt/homebrew/bin/brew shellenv)"` into
+/// `.zprofile`, which a non-login zsh never reads, and Terminal.app, iTerm2,
+/// Kitty and WezTerm all start login shells there. The claim this note used to
+/// make — that a non-login zsh's `.zshrc` is where a macOS reader's `PATH` comes
+/// from — was wrong for exactly the readers who install tools with Homebrew.
+/// **Another Unix keeps non-login**, which is what its terminals do: a
+/// distribution sets `PATH` in `/etc/profile` and `.profile` for the session the
+/// reader logged into, and every shell below it inherits it. Every row can be
+/// switched either way in the editor.
 fn unix_shipped(platform: SeedPlatform, environment: &dyn ShellEnvironment) -> Vec<Profile> {
     let system = unix_system_shells(platform);
     let own = users_shell(environment);
@@ -1762,6 +1806,10 @@ fn unix_shipped(platform: SeedPlatform, environment: &dyn ShellEnvironment) -> V
             // one chassis from another is its colour, so no two rows on one
             // table may wear the same one.
             MarkColour::Teal,
+            // The ruling names the three system shells, and this row is none of
+            // them: a `fish` or a `nu` keeps its `PATH` in its own config, which
+            // it reads login or not. Its switch is there for a reader who wants it.
+            false,
         ));
     }
     for (id, path, colour) in system {
@@ -1774,6 +1822,10 @@ fn unix_shipped(platform: SeedPlatform, environment: &dyn ShellEnvironment) -> V
             (*id).to_owned(),
             program,
             *colour,
+            // Owner ruling (A), 2026-09-26 (issue #12): on macOS the shipped
+            // `zsh`, `bash` and `sh` rows are login shells, because `.zprofile` is
+            // where Homebrew puts `PATH`; another Unix keeps its terminals' answer.
+            platform == SeedPlatform::MacOs,
         ));
     }
     rows
@@ -1797,12 +1849,13 @@ fn users_shell(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
 }
 
 /// One row of [`unix_shipped`] — every field the schema wants, and every one of
-/// them the same answer for all four rows except the three that differ.
+/// them the same answer for all four rows except the four that differ.
 fn unix_shell_row(
     id: String,
     display_title: String,
     program: PathBuf,
     colour: MarkColour,
+    login: bool,
 ) -> Profile {
     Profile {
         id,
@@ -1820,6 +1873,7 @@ fn unix_shell_row(
         // file whose address is already known.
         program: ProgramSource::Path(program),
         args: Vec::new(),
+        login,
         env: Vec::new(),
         starting_dir: StartingDir::AccountHome,
         start_at: StartAt::Inherit,
@@ -2176,6 +2230,17 @@ impl Registry {
         NameVerdict::Written
     }
 
+    /// [`set_login`]'s body.
+    fn set_login(&self, index: usize, login: bool) -> bool {
+        self.edit(index, |profile| {
+            if profile.login == login {
+                return false;
+            }
+            profile.login = login;
+            true
+        })
+    }
+
     /// [`set_colour`]'s body.
     fn set_colour(&self, index: usize, colour: MarkColour) -> bool {
         self.edit(index, |profile| {
@@ -2454,6 +2519,7 @@ fn compose_on(
             mark: ChromeMark::ProfileCmd,
             program: entry.program.as_ref().map(program_from_file)?,
             args: Vec::new(),
+            login: false,
             env: Vec::new(),
             starting_dir: StartingDir::AccountHome,
             start_at: StartAt::Inherit,
@@ -2483,6 +2549,12 @@ fn compose_on(
     }
     if let Some(args) = &entry.args {
         profile.args.clone_from(args);
+    }
+    // Absent is the seed's answer — a login shell on the three shipped macOS
+    // rows — which is what lets a file written before the key existed start the
+    // shell this build ships (`ProfileEntryV1::login`: no schema step).
+    if let Some(login) = entry.login {
+        profile.login = login;
     }
     if let Some(env) = &entry.env {
         profile.env = env
@@ -2794,6 +2866,7 @@ fn entry_for(profile: &Profile, seed: Option<&Profile>) -> ProfileEntryV1 {
             paste_paths_as: profile.paste_paths_as.clone(),
             program: (profile.program != seed.program).then(|| program_to_file(&profile.program)),
             args: (profile.args != seed.args).then(|| profile.args.clone()),
+            login: (profile.login != seed.login).then_some(profile.login),
             env,
             starting_dir: (profile.starting_dir != seed.starting_dir)
                 .then(|| starting_dir_to_file(&profile.starting_dir)),
@@ -2813,6 +2886,9 @@ fn entry_for(profile: &Profile, seed: Option<&Profile>) -> ProfileEntryV1 {
             paste_paths_as: profile.paste_paths_as.clone(),
             program: Some(program_to_file(&profile.program)),
             args: (!profile.args.is_empty()).then(|| profile.args.clone()),
+            // A row of the reader's own is not a login shell until it says so, so
+            // only the `true` is worth a key.
+            login: profile.login.then_some(true),
             env,
             starting_dir: Some(starting_dir_to_file(&profile.starting_dir)),
             start_at: Some(start_at_to_file(&profile.start_at)),
@@ -2970,6 +3046,146 @@ pub fn set_start_at(index: usize, start_at: StartAt) -> bool {
 /// hand-edited file walks around.
 pub fn set_colour(index: usize, colour: MarkColour) -> bool {
     registry().set_colour(index, colour)
+}
+
+/// How `program` is told to start as a **login shell**, or `None` for a program
+/// that has no such thing (0.4.6 ticket 74).
+///
+/// **A flag in the arguments, and argv\[0\] left as the program's own path.**
+/// The other spelling — a `-` in front of argv\[0\], which is what `login(1)` and
+/// Terminal.app use — is not available through the door every pane is born
+/// through: `portable_pty`'s `CommandBuilder` prefixes argv\[0\] only for a
+/// builder made by `new_default_prog`, which runs the account's `$SHELL` and
+/// takes no program, and `bt_pty` builds every pane with a named program. Both
+/// spellings make a login shell by each shell's own manual, so the one the door
+/// allows is the one used, and it is one way for every row.
+///
+/// **`--login` for bash and `-l` for the rest.** Every shell here takes `-l`, but
+/// bash reads its multi-character options only *before* any single-character
+/// one, and the login flag is put first: a bash row whose own arguments carry
+/// `--noediting` would lose it behind a `-l` and keeps it behind a `--login`. It
+/// is also the spelling Git Bash's shortcut has always used, which keeps that
+/// row's command line byte for byte what it was. `dash` — `/bin/sh` on many
+/// Linux machines and a choice for it on macOS — takes `-l` and refuses
+/// `--login`, which is why the short form is the default.
+///
+/// The families named are the ones whose manuals document a login mode; a
+/// PowerShell on Windows, `cmd.exe`, `wsl.exe`, an agent or a program this list
+/// has not heard of gets `None`, carries no login flag whatever its row says, and
+/// is offered no switch.
+#[must_use]
+pub fn login_flag(program: &ProgramSource) -> Option<&'static str> {
+    match program_stem(program).as_deref()? {
+        "bash" => Some("--login"),
+        "zsh" | "sh" | "dash" | "ksh" | "mksh" | "fish" | "nu" | "tcsh" | "csh" => Some("-l"),
+        _ => None,
+    }
+}
+
+/// **The words this row hands its program**: the login flag when the row asks
+/// for a login shell, then the row's own [`Profile::args`] (0.4.6 ticket 74).
+///
+/// What every reader of "what does this row run" asks — the spawn
+/// ([`crate::shell_integration::shell_command`]) and the Profiles page's
+/// command line — so that the two cannot disagree about a login shell.
+///
+/// The flag is **not added twice**: a row whose own arguments already ask for a
+/// login shell (a `profiles.json` written before the switch existed, whose Git
+/// Bash arguments still read `--login -i`, or a reader who typed `-l`) is
+/// already a login shell, and saying so again would put `--login` behind a
+/// single-character option where bash no longer reads it.
+#[must_use]
+pub fn launch_args(profile: &Profile) -> Vec<String> {
+    let flag = login_flag(&profile.program)
+        .filter(|_| profile.login)
+        .filter(|_| !crate::shell_integration::asks_for_login(&profile.args));
+    flag.map(str::to_owned)
+        .into_iter()
+        .chain(profile.args.iter().cloned())
+        .collect()
+}
+
+/// Whether one row starts a login shell — the editor's `Login shell` switch —
+/// or `None` for a row whose program has no login spelling, which is offered
+/// no switch at all.
+#[must_use]
+pub fn login(index: usize) -> Option<bool> {
+    with_table(|table| {
+        let profile = table.get(index)?;
+        login_flag(&profile.program).map(|_| profile.login)
+    })
+}
+
+/// Turn one row's login shell on or off — the editor's `Login shell` switch.
+pub fn set_login(index: usize, login: bool) -> bool {
+    registry().set_login(index, login)
+}
+
+/// What the editor's `Program` field is holding, read as a program.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProgramVerdict {
+    /// Nothing typed yet. The row keeps the program it has.
+    Blank,
+    /// A program, to be written to the row — whether or not it is on this
+    /// machine yet: a path to something not installed is still a program, and
+    /// the row greys exactly as a missing built-in does.
+    Program(PathBuf),
+    /// **A command line and not a program** — a program this machine has,
+    /// followed by more words (0.4.6 ticket 74, issue #12). The row keeps the
+    /// program it has and the field says why.
+    CarriesArguments,
+}
+
+/// Read the `Program` field's text the way the row will use it — **as one
+/// program and never as a command line** (0.4.6 ticket 74).
+///
+/// Issue #12's road: the only place a reader could ask for a login shell was
+/// this field, and `/bin/zsh -l` typed here became a program *named*
+/// `/bin/zsh -l`, which is on no machine — so the row read "not installed"
+/// while `which zsh` answered. What that text is, is a program followed by an
+/// argument; the argument has a row of its own and a login shell has a switch
+/// of its own, so the text is **refused** with a sentence rather than split: a
+/// split would rewrite a second field while the reader is still typing in the
+/// first.
+///
+/// The test for "a program followed by words" is the one the probe itself
+/// would answer: the whole text is not a program here, it splits
+/// ([`split_arguments`]) into more than one word, and the first word *is* a
+/// program here — a path the probe finds, or a bare name found on `PATH`, which
+/// is how `zsh -l` is written as often as `/bin/zsh -l`. A path with a space in
+/// it that is there (`C:\Program Files\…`) is a program and is written; one that
+/// is not there and whose first word is not a program either is written too, and
+/// greys the row as any missing program does.
+#[must_use]
+pub fn program_field_verdict(text: &str, environment: &dyn ShellEnvironment) -> ProgramVerdict {
+    if text.is_empty() {
+        return ProgramVerdict::Blank;
+    }
+    let whole = PathBuf::from(text);
+    if environment.is_file(&whole) {
+        return ProgramVerdict::Program(whole);
+    }
+    let words = split_arguments(text);
+    let found = |word: &str| {
+        let path = Path::new(word);
+        if path.components().count() > 1 {
+            environment.is_file(path)
+        } else {
+            search_path(environment, word).is_some()
+        }
+    };
+    // `pwsh -NoLogo` names `pwsh.exe` on Windows, where the loader supplies the
+    // extension a reader leaves off; nowhere else does a program gain one.
+    let names_a_program = |word: &str| {
+        found(word)
+            || (bt_platform::host_platform() == HostPlatform::Windows
+                && Path::new(word).extension().is_none()
+                && found(&format!("{word}.exe")))
+    };
+    match words.as_slice() {
+        [first, _, ..] if names_a_program(first) => ProgramVerdict::CarriesArguments,
+        _ => ProgramVerdict::Program(whole),
+    }
 }
 
 /// The words handed to the program ahead of anything the shell reads.
@@ -3695,7 +3911,9 @@ fn command_line(profile: &Profile, resolved: Option<&OsStr>) -> String {
             |name| name.to_string_lossy().into_owned(),
         );
     let mut words = vec![program];
-    words.extend(profile.args.iter().cloned());
+    // The login flag included: the line says what the spawn runs, and `zsh -l`
+    // is what a login row runs (0.4.6 ticket 74).
+    words.extend(launch_args(profile));
     if let StartingDir::LauncherFlag { flag, home } = &profile.starting_dir {
         words.push(flag.clone());
         words.push(home.clone());
@@ -15795,10 +16013,15 @@ mod tests {
             );
         }
         assert_eq!(args(index_of_id("cmd")), &[] as &[&str]);
+        let gitbash = shipped_rows()
+            .into_iter()
+            .find(|row| row.id == "gitbash")
+            .unwrap();
         assert_eq!(
-            args(index_of_id("gitbash")),
+            launch_args(&gitbash),
             &["--login", "-i"],
-            "without --login this is a bash that cannot find git"
+            "without --login this is a bash that cannot find git — the row's \
+             `login` since 0.4.6 ticket 74, and the same command line"
         );
     }
 
@@ -16320,14 +16543,14 @@ mod tests {
     }
 
     /// PIN — **the shell a first pane on a Mac starts** (M1-5, plan §2 M1 and §8
-    /// Q8). Three rows, in this order, at these paths, each an interactive
-    /// non-login shell with no arguments at all.
+    /// Q8). Three rows, in this order, at these paths, each with no arguments of
+    /// its own. Whether each is a login shell is the row's `login` switch since
+    /// 0.4.6 ticket 74 — see `the_shipped_macos_rows_default_to_login`.
     ///
     /// RED GATE: hand a macOS build the Windows table — which is what it had
     /// until this ticket, and what left M1-1's first pane empty — and every
-    /// assertion here names what is missing. Add `-i`, or `--login`, or a
-    /// `-NoLogo` that reached zsh as `no such option: Logo`, and the argument
-    /// check fails.
+    /// assertion here names what is missing. Add `-i`, or a `-NoLogo` that
+    /// reached zsh as `no such option: Logo`, and the argument check fails.
     #[test]
     fn the_shipped_profiles_on_macos_are_zsh_bash_and_sh() {
         let machine = bare_macos();
@@ -16426,6 +16649,285 @@ mod tests {
             WINDOWS_SHIPPED_ORDER.to_vec(),
             "the Windows table is what it was, and reads no `$SHELL` to be it"
         );
+    }
+
+    /// RED (74) — **on macOS the shipped `zsh`, `bash` and `sh` rows start a login
+    /// shell, and nowhere else does a shipped row change what it runs.**
+    ///
+    /// Owner ruling (A), 2026-09-26, issue #12: Homebrew's installer writes `PATH`
+    /// into `.zprofile`, which only a login shell reads, so a Folio pane on a Mac
+    /// could not find `nvim` while Terminal.app, Kitty and WezTerm could. The flag
+    /// is each shell's own (`--login` for bash, `-l` for the rest) and goes first;
+    /// another Unix keeps its terminals' non-login answer; `$SHELL`'s own row is not
+    /// one of the three the ruling names; and on Windows the only login row is Git
+    /// Bash, whose command line is byte for byte the `--login -i` it always was.
+    ///
+    /// MUTATION: in `unix_shipped`, hand the system rows `false` instead of
+    /// `platform == SeedPlatform::MacOs` — the macOS half goes red.
+    #[test]
+    fn the_shipped_macos_rows_default_to_login() {
+        let spoken = |rows: &[Profile]| -> Vec<(String, Vec<String>)> {
+            rows.iter()
+                .map(|row| (row.id.clone(), launch_args(row)))
+                .collect()
+        };
+        let words = |list: &[&str]| list.iter().map(|it| (*it).to_owned()).collect::<Vec<_>>();
+
+        let mac = shipped_for(SeedPlatform::MacOs, &bare_macos());
+        assert!(mac.iter().all(|row| row.login), "{mac:?}");
+        assert_eq!(
+            spoken(&mac),
+            [
+                ("zsh".to_owned(), words(&["-l"])),
+                ("bash".to_owned(), words(&["--login"])),
+                ("sh".to_owned(), words(&["-l"])),
+            ]
+        );
+        for row in &mac {
+            assert!(
+                row.args.is_empty(),
+                "{}: the flag is the switch, not an argument",
+                row.id
+            );
+        }
+
+        let fish = bare_macos()
+            .with_var("SHELL", "/opt/homebrew/bin/fish")
+            .with_file("/opt/homebrew/bin/fish");
+        let own = shipped_for(SeedPlatform::MacOs, &fish);
+        assert_eq!(own[0].id, USER_SHELL_ID);
+        assert!(
+            !own[0].login && launch_args(&own[0]).is_empty(),
+            "the account's own fish is not one of the three the ruling names"
+        );
+
+        let linux = FakeMachine::default()
+            .with_file("/bin/bash")
+            .with_file("/bin/sh");
+        for row in shipped_for(SeedPlatform::OtherUnix, &linux) {
+            assert!(!row.login, "{}: another Unix keeps non-login", row.id);
+            assert!(launch_args(&row).is_empty(), "{}", row.id);
+        }
+
+        let windows = shipped_for(SeedPlatform::Windows, &FakeMachine::default());
+        for row in &windows {
+            assert_eq!(row.login, row.id == "gitbash", "{}", row.id);
+        }
+        let gitbash = windows.iter().find(|row| row.id == "gitbash").unwrap();
+        assert_eq!(
+            launch_args(gitbash),
+            words(&["--login", "-i"]),
+            "Git Bash starts exactly as its shortcut always has"
+        );
+        let pwsh = windows.iter().find(|row| row.id == "pwsh").unwrap();
+        assert_eq!(launch_args(pwsh), words(&["-NoLogo"]));
+        assert_eq!(
+            login_flag(&pwsh.program),
+            None,
+            "a PowerShell on Windows has no login shell and is offered no switch"
+        );
+    }
+
+    /// RED (74) — **a login row whose own words already ask for a login shell is
+    /// not told twice.**
+    ///
+    /// A `profiles.json` written before the switch existed can carry a Git Bash
+    /// override that still reads `--login -i …`, and a reader who followed the old
+    /// advice typed `-l` into a zsh row's arguments. Both rows are login shells on
+    /// the switch's default; adding the flag again would put `--login` behind a
+    /// single-character option, where bash no longer reads it.
+    ///
+    /// MUTATION: drop the `asks_for_login` filter in `launch_args` — the first
+    /// assertion reads `--login --login -i --noediting`.
+    #[test]
+    fn a_login_row_whose_arguments_already_say_login_is_not_told_twice() {
+        let windows = shipped_for(SeedPlatform::Windows, &FakeMachine::default());
+        let mut gitbash = windows.into_iter().find(|row| row.id == "gitbash").unwrap();
+        gitbash.args = ["--login", "-i", "--noediting"].map(str::to_owned).to_vec();
+        assert_eq!(launch_args(&gitbash), gitbash.args);
+
+        let mut zsh = shipped_for(SeedPlatform::MacOs, &bare_macos()).remove(0);
+        zsh.args = vec!["-l".to_owned()];
+        assert_eq!(launch_args(&zsh), ["-l"]);
+        zsh.login = false;
+        assert_eq!(
+            launch_args(&zsh),
+            ["-l"],
+            "the reader's own words are passed as written, switch or no switch"
+        );
+    }
+
+    /// RED (74) — **a row with arguments, or a login row, on a shell this machine
+    /// has is installed: the probe reads the program and never the arguments.**
+    ///
+    /// Issue #12's reader switched their zsh row to a login shell and the row read
+    /// "not installed" while `which zsh` answered. The switch and the arguments are
+    /// words handed *to* the program; which program that is, and whether this
+    /// machine has it, is the same question with or without them.
+    ///
+    /// MUTATION: in `ProfilePrograms::resolve_row`, probe
+    /// `path.join(launch_args(profile).join(" "))` for a `Path` row — every row
+    /// here greys.
+    #[test]
+    fn a_row_with_arguments_is_still_installed() {
+        let machine = bare_macos();
+        let mut rows = shipped_for(SeedPlatform::MacOs, &machine);
+        rows[0].args = vec!["--no-rcs".to_owned(), "-o".to_owned(), "vi".to_owned()];
+        rows[1].login = false;
+        rows[1].args = vec!["--login".to_owned(), "-i".to_owned()];
+        let programs = ProfilePrograms::probe_rows(&rows, &machine);
+        for (row, program) in rows.iter().zip(["/bin/zsh", "/bin/bash", "/bin/sh"]) {
+            assert_eq!(
+                programs.program(&row.id),
+                Some(OsStr::new(program)),
+                "{} with {:?} is the program it names",
+                row.id,
+                launch_args(row)
+            );
+        }
+    }
+
+    /// RED (74) — **a command line typed into the `Program` field is refused, and
+    /// a program — with or without a space in its path — is written.**
+    ///
+    /// What the reader in issue #12 hit: `/bin/zsh -l` (or `zsh -l`) typed where
+    /// the program goes became a program *named* that, on no machine, and the row
+    /// read "not installed". The field now reads its text the way the probe
+    /// would: the whole text is not a program here, it is more than one word, and
+    /// its first word is a program here (a path, or a bare name on `PATH`).
+    ///
+    /// MUTATION: return `ProgramVerdict::Program(whole)` unconditionally after the
+    /// first probe in `program_field_verdict` — the three command lines are
+    /// written as programs and the first assertion goes red.
+    #[test]
+    fn a_command_with_arguments_in_the_editor_is_split_or_refused() {
+        // `PATH` is read by the rules of the machine the test runs on, as the
+        // product reads it: `std::env::split_paths` splits on `;` on Windows and
+        // `:` elsewhere, and `search_path` takes only absolute directories, which
+        // `/bin` is not on Windows. So the directory and the list are spelled in
+        // this host's own terms, and `zsh` is put in it.
+        let bin = if bt_platform::host_platform() == HostPlatform::Windows {
+            PathBuf::from(r"C:\bin")
+        } else {
+            PathBuf::from("/bin")
+        };
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        let bare_zsh = bin.join("zsh");
+        let machine = bare_macos()
+            .with_var("PATH", path.to_str().unwrap())
+            .with_file(bare_zsh.to_str().unwrap())
+            .with_file("/Applications/My Tools/shell");
+        for typed in ["/bin/zsh -l", "zsh -l", "/bin/bash --login -i"] {
+            assert_eq!(
+                program_field_verdict(typed, &machine),
+                ProgramVerdict::CarriesArguments,
+                "{typed:?} is a program and its arguments"
+            );
+        }
+        for (typed, program) in [
+            ("/bin/zsh", "/bin/zsh"),
+            (
+                "/Applications/My Tools/shell",
+                "/Applications/My Tools/shell",
+            ),
+            // Not on this machine, and not a program followed by words either: a
+            // program that is not installed yet, which greys the row as a
+            // missing built-in does.
+            ("/opt/homebrew/bin/fish", "/opt/homebrew/bin/fish"),
+            ("/nowhere/at all", "/nowhere/at all"),
+        ] {
+            assert_eq!(
+                program_field_verdict(typed, &machine),
+                ProgramVerdict::Program(PathBuf::from(program)),
+                "{typed:?}"
+            );
+        }
+        assert_eq!(program_field_verdict("", &machine), ProgramVerdict::Blank);
+    }
+
+    /// RED (74) — **`Restore all defaults` puts a row's login switch back to what
+    /// this build ships**, on every row whose program has one.
+    ///
+    /// Read off this build's own seed, so it asks the question of whichever table
+    /// the platform running it ships: Git Bash on Windows, the three shells on a
+    /// Mac, `bash` and `sh` elsewhere.
+    ///
+    /// MUTATION: have `Registry::restore_defaults` keep `login` beside `hidden` —
+    /// every row checked here stays on the flipped value.
+    #[test]
+    fn restore_returns_the_shipped_login_value() {
+        let registry = Registry::shipped();
+        let seed = shipped();
+        let mut checked = 0;
+        for (index, shipped_row) in seed.iter().enumerate() {
+            if login_flag(&shipped_row.program).is_none() {
+                continue;
+            }
+            assert!(registry.set_login(index, !shipped_row.login));
+            assert_eq!(
+                registry.table().get(index).unwrap().login,
+                !shipped_row.login
+            );
+            assert!(registry.restore_defaults(index));
+            assert_eq!(
+                registry.table().get(index).unwrap().login,
+                shipped_row.login,
+                "{}",
+                shipped_row.id
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "every build ships at least one shell with a login mode"
+        );
+    }
+
+    /// RED (74) — **a `profiles.json` from before the switch starts the shell this
+    /// build ships, and the switch is written only where it departs from it.**
+    ///
+    /// The reporter's own file — three bare ids — is the case: every row it names
+    /// takes the seed's `login`, so on macOS all three become login shells with no
+    /// migration step (`ProfileEntryV1::login`). A row switched off writes
+    /// `"login": false`; a row left on the seed writes no key at all; a profile of
+    /// the reader's own writes only a `true`.
+    ///
+    /// MUTATION: in `compose_on`, ignore the file's `login` — the reader's `false`
+    /// comes back as the seed's `true` and the round-trip assertion goes red.
+    #[test]
+    fn an_old_file_takes_the_shipped_login_and_only_a_departure_is_written() {
+        let seed = shipped_for(SeedPlatform::MacOs, &bare_macos());
+        let old = ProfilesV1 {
+            schema_version: PROFILES_SCHEMA_VERSION,
+            profiles: ["zsh", "bash", "sh"].map(named).to_vec(),
+        };
+        let (built, faults) = merge_on(seed.clone(), &old, SeedPlatform::MacOs);
+        assert!(faults.is_empty(), "{faults:?}");
+        assert!(built.iter().all(|row| row.login), "{built:?}");
+
+        let mut switched = built[0].clone();
+        switched.login = false;
+        assert_eq!(entry_for(&switched, Some(&seed[0])).login, Some(false));
+        assert_eq!(entry_for(&built[1], Some(&seed[1])).login, None);
+
+        let file = ProfilesV1 {
+            schema_version: PROFILES_SCHEMA_VERSION,
+            profiles: vec![ProfileEntryV1 {
+                login: Some(false),
+                ..named("zsh")
+            }],
+        };
+        let (read, _) = merge_on(seed.clone(), &file, SeedPlatform::MacOs);
+        assert!(
+            !read[0].login,
+            "the reader's `false` survives the round trip"
+        );
+
+        let mut mine = built[0].clone();
+        mine.origin = Origin::User;
+        assert_eq!(entry_for(&mine, None).login, Some(true));
+        mine.login = false;
+        assert_eq!(entry_for(&mine, None).login, None);
     }
 
     /// PIN — **`$SHELL` is the answer, and the profile table and

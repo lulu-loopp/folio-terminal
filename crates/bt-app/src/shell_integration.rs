@@ -308,7 +308,11 @@ fn without_login_flag(argument: &OsStr) -> Option<OsString> {
 /// The **profile's** words and not the whole command line: a
 /// [`profiles::SpawnPlace`] argument says where to stand and never which mode to
 /// start in, and the question here is what the row asked for.
-fn asks_for_login(arguments: &[String]) -> bool {
+///
+/// `pub(crate)` for [`profiles::launch_args`] (0.4.6 ticket 74), which asks it
+/// before adding the row's login flag, so that a row whose own words already say
+/// `--login` is not told twice.
+pub(crate) fn asks_for_login(arguments: &[String]) -> bool {
     arguments.iter().any(|argument| {
         without_login_flag(OsStr::new(argument)).as_deref() != Some(OsStr::new(argument))
     })
@@ -482,9 +486,11 @@ pub fn shell_command(
     scripts: Scripts<'_>,
     environment: &dyn ShellEnvironment,
 ) -> ShellCommand {
+    // The row's login flag and then its own words (0.4.6 ticket 74): what the row
+    // asks the program for, before any door below trades a word for its script.
+    let words = profiles::launch_args(profile);
     let own = || {
-        profile
-            .args
+        words
             .iter()
             .map(OsString::from)
             .chain(place_arguments.iter().cloned())
@@ -676,7 +682,7 @@ fn shell_command_for(
                 };
                 let mut arguments = vec![OsString::from("--init-file"), script.into()];
                 let mut interactive = false;
-                let login = asks_for_login(&profile.args);
+                let login = asks_for_login(&profiles::launch_args(profile));
                 for argument in own().iter().filter_map(|it| without_login_flag(it)) {
                     interactive |= argument == *"-i" || argument == *"--interactive";
                     arguments.push(argument);
@@ -2768,8 +2774,11 @@ mod tests {
             Some(MODE_LOGIN),
             "the shipped Git Bash row says `--login`"
         );
+        // A row switched off its login shell (0.4.6 ticket 74: the switch, and no
+        // login word left in its arguments).
         let plain = Profile {
             args: vec!["-i".to_owned()],
+            login: false,
             ..row("gitbash")
         };
         let plain = shell_command(
@@ -2850,6 +2859,167 @@ mod tests {
         }
     }
 
+    /// RED (74) — **the three shipped macOS rows are handed their login flag
+    /// through each one's own door**: `-l` beside zsh's `ZDOTDIR`, bash's
+    /// `--login` traded for the init file and the login chain it owes, `-l` to a
+    /// `sh` that has no door.
+    ///
+    /// The portable half of `a_login_row_starts_a_login_shell`, asserted on every
+    /// runner: what the spawn is told, for the rows a Mac ships.
+    ///
+    /// MUTATION: build `own` from `profile.args` again in `shell_command` — the
+    /// zsh and sh rows lose their `-l` and bash is told `interactive`.
+    #[test]
+    fn the_shipped_macos_rows_are_handed_their_login_flag_through_their_own_door() {
+        struct Mac;
+        impl ShellEnvironment for Mac {
+            fn var_os(&self, key: &str) -> Option<OsString> {
+                (key == "SHELL").then(|| OsString::from("/bin/zsh"))
+            }
+            fn is_file(&self, path: &Path) -> bool {
+                ["/bin/zsh", "/bin/bash", "/bin/sh"]
+                    .iter()
+                    .any(|shell| path == Path::new(shell))
+            }
+        }
+        let rows = profiles::shipped_for(profiles::SeedPlatform::MacOs, &Mac);
+        let scripts = both("/F/folio.bash", "/F/zdotdir");
+        let zsh = shell_command(&rows[0], &[], scripts, &bare());
+        assert_eq!(args(&zsh), ["-l"]);
+        assert_eq!(value_of(&zsh, "ZDOTDIR").as_deref(), Some("/F/zdotdir"));
+        let bash = shell_command(&rows[1], &[], scripts, &bare());
+        assert_eq!(args(&bash), ["--init-file", "/F/folio.bash", "-i"]);
+        assert_eq!(
+            value_of(&bash, INSTALLED_MARKER).as_deref(),
+            Some(MODE_LOGIN),
+            "the script replays the login chain bash will not run beside an init file"
+        );
+        let sh = shell_command(&rows[2], &[], scripts, &bare());
+        assert_eq!(args(&sh), ["-l"]);
+    }
+
+    /// RED (74) — **a login row starts a login shell: `ps` shows it, and the
+    /// `.zprofile` Homebrew writes its `PATH` into reaches the pane** (issue #12).
+    ///
+    /// The real producer end to end: this build's macOS seed, through
+    /// [`shell_command`] with the real scripts written into a sandbox, spawned
+    /// over a real pty, and asked by the shell itself. The reader's home is a
+    /// sandbox under `std::env::temp_dir()` — `TMPDIR` decides where, so a run on
+    /// a shared machine points it inside its own work tree — holding a
+    /// `.zprofile`, a `.bash_profile` and a `.profile` that each put a marker at
+    /// the front of `PATH`. No file of the account running the test is read or
+    /// written: `HOME` is the sandbox and `ZDOTDIR` is Folio's copy in it.
+    ///
+    /// `ps -ww -o command= -p $$` is the reporter's own question, widened so a
+    /// long init-file path is not cut at the terminal's width. zsh and sh answer
+    /// with their `-l`; bash answers with the init file, because its login chain
+    /// is replayed by `folio.bash` rather than by `--login`
+    /// (`docs/shell-integration.md`), and the marker is how that is seen.
+    ///
+    /// MUTATION: in `unix_shipped`, hand the system rows `false` — zsh prints
+    /// `argv=/bin/zsh` and no marker.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_login_row_starts_a_login_shell() {
+        use std::{
+            sync::Arc,
+            time::{Duration, Instant},
+        };
+
+        struct Mac;
+        impl ShellEnvironment for Mac {
+            fn var_os(&self, key: &str) -> Option<OsString> {
+                (key == "SHELL").then(|| OsString::from("/bin/zsh"))
+            }
+            fn is_file(&self, path: &Path) -> bool {
+                bt_pty::SystemShellEnvironment.is_file(path)
+            }
+        }
+
+        const MARKER: &str = "/folio-login-marker-74";
+        let sandbox =
+            std::env::temp_dir().join(format!("folio-login-shell-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&sandbox);
+        let home = sandbox.join("home");
+        let zdotdir = sandbox.join("zdotdir");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&zdotdir).unwrap();
+        for name in [".zprofile", ".bash_profile", ".profile"] {
+            std::fs::write(home.join(name), format!("export PATH=\"{MARKER}:$PATH\"\n")).unwrap();
+        }
+        for name in ZDOTDIR_FILES {
+            std::fs::write(zdotdir.join(name), SCRIPT_ZSH).unwrap();
+        }
+        let script = sandbox.join(SCRIPT_FILE);
+        std::fs::write(&script, SCRIPT).unwrap();
+        let scripts = Scripts {
+            bash: Some(&script),
+            zdotdir: Some(&zdotdir),
+        };
+
+        let rows = profiles::shipped_for(profiles::SeedPlatform::MacOs, &Mac);
+        let expected = [
+            ("zsh", "argv=/bin/zsh -l"),
+            ("bash", "argv=/bin/bash --init-file "),
+            ("sh", "argv=/bin/sh -l"),
+        ];
+        for (row, (id, argv)) in rows.iter().zip(expected) {
+            assert_eq!(row.id, id);
+            let profiles::ProgramSource::Path(program) = &row.program else {
+                panic!("{id} names one path");
+            };
+            let mut command = shell_command(row, &[], scripts, &bare());
+            command
+                .environment
+                .push((OsString::from("HOME"), home.clone().into_os_string()));
+            let mut session = bt_pty::PtySession::spawn_shell_in(
+                program.clone(),
+                &command.arguments,
+                &command.environment,
+                bt_pty::PtySize::cells(
+                    std::num::NonZeroU16::new(200).unwrap(),
+                    std::num::NonZeroU16::new(24).unwrap(),
+                ),
+                Arc::new(|| {}),
+                Some(home.clone()),
+            )
+            .unwrap();
+            session
+                .write(
+                    b"printf 'argv=%s\\n' \"$(ps -ww -o command= -p $$)\"; \
+                      printf 'path=%s\\n' \"$PATH\"; echo folio-done-$((6*7))\n",
+                )
+                .unwrap();
+            let mut seen = String::new();
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while !seen.contains("folio-done-42") {
+                assert!(
+                    Instant::now() < deadline,
+                    "{id} never answered; it printed {seen:?}"
+                );
+                let chunk = session.read_output();
+                if chunk.is_empty() {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                seen.push_str(&String::from_utf8_lossy(&chunk));
+            }
+            assert!(seen.contains(argv), "{id}: expected {argv:?} in {seen:?}");
+            // The shell's own answer, for a reader running this with `--nocapture`.
+            for line in seen
+                .lines()
+                .filter_map(|line| line.find("argv=/").map(|at| &line[at..]))
+            {
+                eprintln!("{id}: {}", line.trim_end());
+            }
+            assert!(
+                seen.contains(&format!("path={MARKER}:")),
+                "{id}: the login file's PATH reached the pane: {seen:?}"
+            );
+            session.shutdown().unwrap();
+        }
+        let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
     /// PIN — **a Bourne shell is told it has no integration rather than handed
     /// one it will ignore** (review row R3-6).
     ///
@@ -2872,6 +3042,7 @@ mod tests {
         let theirs = Profile {
             program: ProgramSource::Path(PathBuf::from("/bin/sh")),
             args: vec!["-i".to_owned()],
+            login: false,
             ..row("gitbash")
         };
         let command = shell_command(
@@ -3285,7 +3456,12 @@ mod tests {
             let command = shell_command(&shut, &[], bash_only(Path::new(r"C:\s.bash")), &bare());
             assert_eq!(
                 command.arguments,
-                shut.args.iter().map(OsString::from).collect::<Vec<_>>(),
+                // The row's own words, its login switch spelled among them
+                // (0.4.6 ticket 74: Git Bash's `--login` is that switch now).
+                profiles::launch_args(&shut)
+                    .iter()
+                    .map(OsString::from)
+                    .collect::<Vec<_>>(),
                 "{id}: the profile's own words and no flag of ours"
             );
             assert_eq!(value_of(&command, "PROMPT"), None, "{id}");
