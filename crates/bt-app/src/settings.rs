@@ -3847,6 +3847,15 @@ pub enum SettingsRow {
     /// `C:\Users\me\.local\bin\claude.exe` is an ellipsis with a drive letter in
     /// front of it.
     ProfileProgram,
+    /// **Whether the program starts as a login shell** (0.4.6 ticket 74, issue #12):
+    /// `profiles::Profile::login`, as the `On`/`Off` pair every switch here is.
+    ///
+    /// **Directly under the program and above the disclosure**, because on a Mac it is
+    /// the answer to "my Homebrew tools are not found", and a switch behind a
+    /// disclosure is a switch that reader does not find. Only a row whose program has
+    /// a login spelling (`profiles::login_flag`) shows it: a PowerShell, `cmd.exe` or
+    /// `wsl.exe` has no login shell to switch on.
+    ProfileLogin,
     /// Where a new tab of this profile opens — the three answers of
     /// `profiles::StartAt`.
     ProfileStartAt,
@@ -3997,6 +4006,7 @@ impl SettingsRow {
             // The editor's eight, which are the Profiles page's second view.
             Self::ProfileName
             | Self::ProfileProgram
+            | Self::ProfileLogin
             | Self::ProfileStartAt
             | Self::ProfileColour
             | Self::ProfileArgs
@@ -4129,6 +4139,7 @@ impl SettingsRow {
             Self::PsReadLine => Text::RowPsReadLine.text(),
             Self::ProfileName => Text::ProfilesRowName.text(),
             Self::ProfileProgram => Text::ProfilesRowProgram.text(),
+            Self::ProfileLogin => Text::ProfilesRowLogin.text(),
             Self::ProfileStartAt => Text::ProfilesRowStartingDir.text(),
             Self::ProfileColour => Text::ProfilesRowColour.text(),
             Self::ProfileArgs => Text::ProfilesRowArgs.text(),
@@ -4376,7 +4387,14 @@ impl SettingsRow {
                 .editor
                 .and_then(|editor| editor.refusal)
                 .unwrap_or_else(|| Text::ProfilesRowNameDesc.text()),
-            Self::ProfileProgram => Text::ProfilesRowProgramDesc.text(),
+            // **The `Name` row's idiom, for the `Program` field** (0.4.6 ticket 74): a
+            // command line typed where a program goes is refused, and the refusal is the
+            // sentence the reader is standing in, in place of the row's own.
+            Self::ProfileProgram => values
+                .editor
+                .and_then(|editor| editor.program_refusal)
+                .unwrap_or_else(|| Text::ProfilesRowProgramDesc.text()),
+            Self::ProfileLogin => Text::ProfilesRowLoginDesc.text(),
             Self::ProfileStartAt => Text::ProfilesRowStartingDirDesc.text(),
             // **The row's sentence becomes the reason** on a built-in, which is
             // this dialog's own idiom for a control that is not the reader's to
@@ -4667,6 +4685,7 @@ impl SettingsRow {
             // colour names it.
             | Self::ProfileName
             | Self::ProfileProgram
+            | Self::ProfileLogin
             | Self::ProfileStartAt
             | Self::ProfileColour
             // Nothing on the About page is behind a disclosure: the page has no
@@ -4797,6 +4816,7 @@ impl SettingsRow {
             // about the machine and is said in the row's line, not in a third
             // item nobody could press.
             | Self::ContextMenu
+            | Self::ProfileLogin
             | Self::LineWrapping => FORMULA_OPTIONS.len(),
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::Scrollback => SCROLLBACK_OPTIONS.len(),
@@ -4893,6 +4913,7 @@ impl SettingsRow {
             | Self::CopilotHooks
             | Self::UpdateCheck
             | Self::ContextMenu
+            | Self::ProfileLogin
             | Self::LineWrapping => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             // The one item that is a word goes through the i18n table and the
             // three that are quantities do not — the table's own header lists
@@ -5503,6 +5524,10 @@ impl SettingsRow {
                 .position(|it| *it == values.quake_restore),
             Self::QuakeProfile => Some(values.quake_profile),
             Self::ProfileStartAt => values.editor.map(|editor| editor.start_at),
+            Self::ProfileLogin => values
+                .editor
+                .and_then(|editor| editor.login)
+                .and_then(|login| FORMULA_OPTIONS.iter().position(|it| *it == login)),
             Self::ProfileColour => values.editor.and_then(|editor| editor.colour),
             Self::ProfileHyperlink => values.editor.map(|editor| editor.hyperlink),
             Self::ProfileIntegration => values.editor.map(|editor| editor.integration),
@@ -6131,9 +6156,14 @@ pub struct SettingsContent<'a> {
 /// answers "what has this build got", and the answer for Profiles is a table of
 /// profiles. The order is the mock-up's — what it is called, what it runs, where
 /// it starts, what colour names it, and then the four the disclosure exists for.
-const EDITOR_ROWS: [SettingsRow; 8] = [
+///
+/// `ProfileLogin` sits under the program it switches (0.4.6 ticket 74) and is
+/// held back by [`SettingsContent::editor_rows`] on a row whose program has no
+/// login shell.
+const EDITOR_ROWS: [SettingsRow; 9] = [
     SettingsRow::ProfileName,
     SettingsRow::ProfileProgram,
+    SettingsRow::ProfileLogin,
     SettingsRow::ProfileStartAt,
     SettingsRow::ProfileColour,
     SettingsRow::ProfileArgs,
@@ -6152,10 +6182,18 @@ impl SettingsContent<'_> {
     /// the profile being edited between the profiles that are not, in one
     /// scroll, with an environment table in the middle of it.
     fn editor_rows(&self, category: SettingsCategory) -> Vec<SettingsRow> {
-        if category != SettingsCategory::Profiles || self.editor.is_none() {
+        let Some(editor) = self
+            .editor
+            .filter(|_| category == SettingsCategory::Profiles)
+        else {
             return Vec::new();
-        }
-        EDITOR_ROWS.to_vec()
+        };
+        // A program with no login shell has no switch for one: not a greyed row,
+        // because there is nothing about it a reader could do (`profiles::login`).
+        EDITOR_ROWS
+            .into_iter()
+            .filter(|row| *row != SettingsRow::ProfileLogin || editor.login.is_some())
+            .collect()
     }
     /// The rows of one page **that are showing**, in the order [`visible_rows`]
     /// put them.
@@ -6791,6 +6829,14 @@ pub struct EditorSubject {
     /// One copy, read by [`SettingsRow::description`], and therefore by the
     /// height, the boxes and the ink alike.
     pub refusal: Option<&'static str>,
+    /// **Why the `Program` field is refusing**, when it is — a command line typed
+    /// where a program goes (0.4.6 ticket 74). [`Self::refusal`]'s shape, on the
+    /// `Program` row.
+    pub program_refusal: Option<&'static str>,
+    /// Whether the row starts a login shell, or `None` when its program has no
+    /// login spelling and the `Login shell` row is not on the page
+    /// (`profiles::login`).
+    pub login: Option<bool>,
     /// Which of [`START_AT_OPTIONS`] the starting directory is on.
     pub start_at: usize,
     /// The fixed folder's own path, when the row is on one. It is what the
@@ -6957,6 +7003,8 @@ pub struct ProfileEditor {
     pub env: Vec<(TextField, TextField)>,
     /// Why the name field is refusing, when it is.
     pub refusal: Option<Text>,
+    /// Why the program field is refusing, when it is (0.4.6 ticket 74).
+    pub program_refusal: Option<Text>,
 }
 
 impl ProfileEditor {
@@ -30734,6 +30782,10 @@ mod tests {
             // Nothing typed and nothing refused, which is what the mock-up draws.
             // The pins that are *about* a refusal put one here.
             refusal: None,
+            program_refusal: None,
+            // A `claude` has no login shell, so its page has no `Login shell` row;
+            // the pins about that row stand a shell here.
+            login: None,
             start_at: 0,
             fixed_folder: None,
             hyperlink: 0,
@@ -30841,9 +30893,82 @@ mod tests {
             0,
             "the breadcrumb takes the heading's slot rather than standing under it"
         );
-        for row in EDITOR_ROWS {
+        // Every row but the login switch, which a `claude` has no use for — see
+        // `a_shell_row_offers_a_login_switch_under_its_program_and_nothing_else_does`.
+        for row in EDITOR_ROWS
+            .into_iter()
+            .filter(|row| *row != SettingsRow::ProfileLogin)
+        {
             assert!(editing.row(row).is_some(), "{row:?} is on the page");
         }
+    }
+
+    /// RED (74) — **a shell row's editor has a `Login shell` switch directly under
+    /// its program, outside the disclosure, ticked on the row's own answer; a row
+    /// with no login shell has no such row at all.**
+    ///
+    /// Issue #12's reader went looking for a way to start zsh as a login shell and
+    /// the only place to say it was the `Program` field. One switch is the whole
+    /// answer; it is where the program is, because it is how the program starts,
+    /// and it is not greyed on a `claude` — it is absent, because there is nothing
+    /// about it a reader could do.
+    ///
+    /// MUTATION: drop the `ProfileLogin` filter in `SettingsContent::editor_rows` —
+    /// the `claude` page grows a row and the last assertion goes red.
+    #[test]
+    fn a_shell_row_offers_a_login_switch_under_its_program_and_nothing_else_does() {
+        for login in [true, false] {
+            let subject = EditorSubject {
+                login: Some(login),
+                ..editor_subject(false)
+            };
+            let placed = editor_page(subject);
+            let values = editing_values(subject);
+            let program = placed.row(SettingsRow::ProfileProgram).expect("program");
+            let switch = placed
+                .row(SettingsRow::ProfileLogin)
+                .expect("a shell row has the switch");
+            let start = placed.row(SettingsRow::ProfileStartAt).expect("start");
+            assert!(
+                program.band[3] <= switch.band[1] && switch.band[3] <= start.band[1],
+                "under the program and above where it starts"
+            );
+            assert!(!SettingsRow::ProfileLogin.advanced());
+            assert_eq!(
+                SettingsRow::ProfileLogin.selected_index(&values),
+                FORMULA_OPTIONS.iter().position(|it| *it == login),
+                "ticked on the row's own answer"
+            );
+        }
+        let claude = editor_page(editor_subject(true));
+        assert!(
+            claude.row(SettingsRow::ProfileLogin).is_none(),
+            "a program with no login shell is offered no switch"
+        );
+    }
+
+    /// RED (74) — **a command line typed into `Program` is refused with a sentence
+    /// in place of the row's own, and the row keeps its program.**
+    ///
+    /// The refusal is the `Name` field's idiom: a state the reader is standing in,
+    /// carried on the subject so that the layout measures the sentence it draws.
+    ///
+    /// MUTATION: make `SettingsRow::ProfileProgram`'s description ignore
+    /// `program_refusal` — the first assertion goes red.
+    #[test]
+    fn a_refused_program_says_why_in_the_rows_own_sentence() {
+        let refused = editing_values(EditorSubject {
+            program_refusal: Some(Text::ProfilesProgramHasArguments.text()),
+            ..editor_subject(true)
+        });
+        assert_eq!(
+            SettingsRow::ProfileProgram.description(&refused),
+            Text::ProfilesProgramHasArguments.text()
+        );
+        assert_eq!(
+            SettingsRow::ProfileProgram.description(&editing_values(editor_subject(true))),
+            Text::ProfilesRowProgramDesc.text()
+        );
     }
 
     /// PIN — **Esc walks editor → list → closed: three presses, three states**

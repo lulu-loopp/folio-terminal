@@ -351,6 +351,7 @@ impl Runtime<'_> {
                 })
                 .collect(),
             refusal: None,
+            program_refusal: None,
         });
         self.window.settings_scroll = 0.0;
         Ok(())

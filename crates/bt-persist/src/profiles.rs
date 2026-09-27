@@ -184,6 +184,21 @@ pub struct ProfileEntryV1 {
     /// Which shell-integration script serves it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub integration: Option<String>,
+    /// Whether the program starts as a **login** shell (0.4.6 ticket 74, issue #12).
+    ///
+    /// A key of its own rather than a word in `args`, because it is one switch a reader
+    /// throws and the spelling of it is the program's (`--login` for bash, `-l` for the
+    /// rest), which `bt-app` derives. Absent means whatever this build ships for the row:
+    /// on macOS the shipped `zsh`, `bash` and `sh` rows are login shells, and a profile of
+    /// the reader's own is not one until it says so.
+    ///
+    /// **No `schema_version` step**, on [`CandidateV1::OnPath`]'s precedent and this
+    /// document's own rule: an absent key already reads as the shipped answer, so every
+    /// file on every disk parses exactly as it did, and an older build reading a file
+    /// this one wrote ignores the key and starts the shell the way it always did —
+    /// where a version step would make that build refuse the whole table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub login: Option<bool>,
     /// Insertion grammar: powershell, cmd, posix, fish, nu, or agent. The app refuses unknown values.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paste_as: Option<String>,
@@ -438,6 +453,7 @@ mod tests {
                         colour: "amber".to_owned(),
                     }),
                     integration: Some("powershell_opt_in".to_owned()),
+                    login: Some(true),
                     paste_as: None,
                     paste_paths_as: None,
                     hidden: false,
@@ -633,5 +649,42 @@ mod tests {
         let text = serde_json::to_string(&one).unwrap();
         assert_eq!(text, serde_json::to_string(&other).unwrap());
         assert!(text.contains(r#""env":{"A":"1","B":"2"}"#), "{text}");
+    }
+
+    /// RED (74) — **a file written before `login` existed reads exactly as it did, and the
+    /// new key is one more field that says nothing until it is set.**
+    ///
+    /// The document's own migration rule, held for the key issue #12 adds: no
+    /// `schema_version` step, because the absent key already reads as "whatever this build
+    /// ships" and an older build reading a newer file ignores the key rather than refusing
+    /// the table. The v1 file below is the reporter's own shape, three bare ids.
+    ///
+    /// MUTATION: drop `skip_serializing_if` from `ProfileEntryV1::login` — an untouched
+    /// row writes `"login": null` and the second half goes red.
+    #[test]
+    fn a_file_from_before_the_login_key_reads_unchanged_and_the_key_round_trips() {
+        let old: ProfilesV1 = serde_json::from_str(
+            r#"{ "schema_version": 1,
+                 "profiles": [ { "id": "zsh" }, { "id": "bash" }, { "id": "sh" } ] }"#,
+        )
+        .unwrap();
+        assert_eq!(old.schema_version, PROFILES_SCHEMA_VERSION);
+        assert!(
+            old.profiles.iter().all(|row| row.login.is_none()),
+            "absent is the shipped answer, not `false`"
+        );
+        let untouched = serde_json::to_value(&old.profiles[0]).unwrap();
+        assert_eq!(untouched.as_object().unwrap().len(), 1, "{untouched}");
+
+        for said in [true, false] {
+            let row = ProfileEntryV1 {
+                id: "zsh".to_owned(),
+                login: Some(said),
+                ..ProfileEntryV1::default()
+            };
+            let wire = serde_json::to_value(&row).unwrap();
+            assert_eq!(wire["login"], serde_json::Value::from(said));
+            assert_eq!(serde_json::from_value::<ProfileEntryV1>(wire).unwrap(), row);
+        }
     }
 }

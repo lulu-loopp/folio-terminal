@@ -798,7 +798,10 @@ record writes `Used` through the receipt's one writer; nothing writes `Never`).
 ### 32. Profiles — `not yet folded`
 Entries: §7.1.6c-6 *profiles as data*; §7.1.6c-6d *`profiles.json` is followed
 live*, which reverses §7.1.6c-6's explicit statement that the file is not watched;
-§7.27 *the best shell out of the box, and the invitation bar asks once per run*.
+§7.27 *the best shell out of the box, and the invitation bar asks once per run*;
+the 2026-09-26 entry *on macOS the shipped `zsh`, `bash` and `sh` rows start a login
+shell* (issue #12), which supersedes the Mac port's Q8 for macOS: a login shell is a
+row's `login` switch, and the `Program` field takes a program and never a command line.
 
 ### 33. The three configuration entrances — `folded`
 **Rule.** Three entrances, each with a declared audience, and **a configuration

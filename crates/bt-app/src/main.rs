@@ -42772,6 +42772,9 @@ impl Runtime<'_> {
             // replaces that row's sentence, a sentence is a number of lines and a number of lines
             // is a row's height, so the layout has to be able to read it.
             refusal: editor.refusal.map(i18n::Text::text),
+            // And the `Program` field's, for the same reason (0.4.6 ticket 74).
+            program_refusal: editor.program_refusal.map(i18n::Text::text),
+            login: profiles::login(index),
             start_at: match start_at {
                 profiles::StartAt::Inherit => 0,
                 profiles::StartAt::Home => 1,
@@ -43968,6 +43971,7 @@ impl Runtime<'_> {
             // reset a subset would be two answers to "put this back".
             | Row::ProfileName
             | Row::ProfileProgram
+            | Row::ProfileLogin
             | Row::ProfileStartAt
             | Row::ProfileColour
             | Row::ProfileArgs
@@ -44290,6 +44294,15 @@ impl Runtime<'_> {
                         None => return Ok(()),
                     }
                 }
+                // **Whether the program starts as a login shell** (0.4.6 ticket 74).
+                settings::SettingsRow::ProfileLogin => {
+                    let Some(login) = settings::FORMULA_OPTIONS.get(item).copied() else {
+                        return Ok(());
+                    };
+                    if !profiles::set_login(index, login) {
+                        return Ok(());
+                    }
+                }
                 settings::SettingsRow::ProfileColour => {
                     let Some(colour) = marks::MarkColour::ALL.get(item).copied() else {
                         return Ok(());
@@ -44482,11 +44495,29 @@ impl Runtime<'_> {
                     return Ok(());
                 }
             }
+            // **A program and never a command line** (0.4.6 ticket 74, issue #12):
+            // `/bin/zsh -l` typed here used to become a program of that name, on no
+            // machine, and the row read `not installed`. Such a text is refused with a
+            // sentence and the row keeps its program; the argument has a row of its
+            // own and a login shell a switch of its own.
             settings::SettingsTarget::Field(settings::SettingsRow::ProfileProgram) => {
-                let path = PathBuf::from(editor.program.text());
-                if path.as_os_str().is_empty() {
-                    return Ok(());
+                let verdict = profiles::program_field_verdict(
+                    editor.program.text(),
+                    &bt_pty::SystemShellEnvironment,
+                );
+                let refusal = (verdict == profiles::ProgramVerdict::CarriesArguments)
+                    .then_some(i18n::Text::ProfilesProgramHasArguments);
+                if let Some(editor) = self.window.settings.editor_mut() {
+                    editor.program_refusal = refusal;
                 }
+                let profiles::ProgramVerdict::Program(path) = verdict else {
+                    // Nothing reached the table, but the row's sentence may have
+                    // changed, so the frame is owed.
+                    if self.refresh_chrome() {
+                        self.present_chrome_change()?;
+                    }
+                    return Ok(());
+                };
                 profiles::set_program_path(index, &path);
             }
             settings::SettingsTarget::Field(settings::SettingsRow::ProfileArgs) => {
