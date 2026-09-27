@@ -653,6 +653,95 @@ $env:BT_WEB_DEV = 'mailto:someone@example.com'   # 外部 scheme
 出现的卡面记进证据;如果某一条出的不是拒绝卡而是别的东西,那本身就是门 5 该抓的发现,不是脚本的
 bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
 
+### 4.4 更新器(0.4.6)
+
+自更新的断电验收:给虚机安上一个有更新能力的签名候选版,让它下载并应用第二个候选版,在
+每一个持久化边界上硬断电,观察重启后的恢复行为。
+`self-update-2026-09-16.md` (b).2 的 W 表(Windows)与 M 表(macOS)定义了每一行的持久状态、
+磁盘内容和下一位操作者的动作。这一节把每一行变成一个可执行的步骤。
+
+驱动工具在 `scripts/release/cleanvm/`:
+
+| 文件 | 干什么 |
+| --- | --- |
+| `hard-reset-in-vm.ps1` | 宿主端驱动:等客户机到达指定行 → `vmrun stop … hard` → 重新开机 → 拷出证据 |
+| `in-guest-updater.ps1` | 客户机端:监视日志的阶段标记,到达目标行时写哨兵文件 |
+
+宿主用的是 VMware Workstation 的 `vmrun`(和 `run-smoke-in-vm.ps1` 同一套探测与调用方式),
+不是 Hyper-V。设计笔记 E-7 写的是 Hyper-V;实际的客户机是 VMware,硬断电等价于
+`vmrun stop <vmx> hard`(切断虚拟电源,不发 ACPI 关机请求)。
+
+#### 前提
+
+1. 两个候选版(A 和 B)都已签名、公证、带更新能力(`FOLIO_UPDATER=on`),发布为
+   GitHub draft release(runner 的令牌能看到 draft)。
+2. A 版已经通过普通 zip 路径装进客户机的 `C:\folio-vm\folio\`(§4.1 的 `unpack` 阶段)。
+3. 后继版本 B 的注入:待 U-31 提供的注入口。`update.rs` 和 `update_job.rs` 当前没有
+   环境变量或命令行参数来覆盖检查地址或下载源;`RELEASES_HOST` 和 `RELEASES_PATH`
+   是编译期常量,`OFFERS_ENABLED` 为 `false`。注入口落地后在此补写具体步骤。
+4. 客户机回到 `clean` 快照后再装候选版,每一行从同一个起点开始。
+
+#### Windows 步骤(W1–W13)
+
+跑法:
+
+```powershell
+# 先看一遍(-WhatIf 不碰虚机)
+pwsh -File scripts/release/cleanvm/hard-reset-in-vm.ps1 `
+    -Vmx <win11.vmx> -VmPassword <口令> -Row W1 -WhatIf
+
+# 真跑
+pwsh -File scripts/release/cleanvm/hard-reset-in-vm.ps1 `
+    -Vmx <win11.vmx> -VmPassword <口令> -Row W1
+```
+
+证据落在 `target/cleanvm/<虚机名>-<时间戳>/updater/W1/`。
+
+| ✓ | 行 | 到达方式 | 断电时机 | 重启后检查 | 预期结果 |
+| --- | --- | --- | --- | --- | --- |
+| ☐ | W1 | 触发下载,不等下载完成 | 日志阶段为 `Allocated` | `H\<txn>` 是否被清理;旧安装完整;`diagnostics.log` 无更新条目 | 锁空闲时删除 `H\<txn>` 和日志,旧版正常启动 |
+| ☐ | W2 | 下载并校验完成,不按「更新」 | 日志阶段为 `Prepared` | `set\` 和 `rescue\` 存在且完整;旧安装不变 | 启动时不做任何事;作业持有者重新校验后可恢复或在第 2 次启动后丢弃 |
+| ☐ | W3 | 退出 Folio(触发 Handoff) | 日志阶段为 `Handoff` | 与 W2 相同;检查锁持有者是否发起 W4 的动作 | 第一个锁持有者从 W4 开始应用;若 admission 被拒则回退到 `Prepared` 并重新启动 |
+| ☐ | W4 | Handoff 后,Run 值已写但 `Armed` 未持久化 | Run 值写入后、`Armed` 写入前 | Run 值是否存在;`set\` 和 `backup\` 未被改动 | R 删除 Run 值,回退到 `Prepared`;无文件被移动 |
+| ☐ | W5 | `Armed` 已持久化 | 日志阶段为 `Armed` | Run 值持久;检查 admission 独占锁和进程检查 | 锁持有者取得独占 admission 并运行进程检查;被拒则删除入口、回退到 `Prepared` |
+| ☐ | W6 | 文件移动进行中 | 日志阶段为 `Moving`(部分文件已移) | 每个旧文件恰好在 install 或 backup 之一;每个新文件恰好在 set 或 install 之一(I1′) | 回退到 `RollbackIntent`(无 trial,无 receipt),然后执行 W9 的回滚 |
+| ☐ | W7 | 新版已安装、备份完成,trial 启动但无 receipt | 日志阶段为 `Trial`,无 receipt 文件 | 新版在安装目录;备份完整;trial 进程状态 | P 存活时等待 receipt 直到超时;P 已死时 R 等待;超时后进入 `RollbackIntent`(W9) |
+| ☐ | W8 | Trial 完成,receipt 存在 | 日志阶段为 `Trial`,receipt 文件已写 | receipt 的 `txn` 和 `nonce` 与日志匹配 | 锁持有者写 `Committed`,然后删除 Run 值、删除 `backup\`、标记为 `terminal` |
+| ☐ | W9 | 回滚进行中 | 日志阶段为 `RollbackIntent` | I1′ 不变式成立;trial 进程已停止 | 停止 trial 进程;取得独占 admission;将新文件移到 `rolledout\`;将备份移回;校验旧版清单 → `RolledBack`;失败 → `Stuck` |
+| ☐ | W10 | 回滚失败 | 日志阶段为 `Stuck` | I1′ 成立;日志、备份和 Run 值均保留 | 每次登录和每次启动重试 W9;卡片显示「Update incomplete.」并指出文件夹 |
+| ☐ | W11 | 回滚完成 | 日志阶段为 `RolledBack` | 旧安装已通过摘要校验 | 删除 Run 值;用 `--update-failed` 重新启动旧版;标记为 `terminal`;后续启动删除 `H\<txn>` |
+| ☐ | W12 | 提交完成,清理未完成 | 日志阶段为 `Committed`,部分清理已做 | 新版在安装目录;部分残留(backup、Run 值、rescue) | 完成剩余删除(debt);rescue 文件夹由下一次普通启动删除 |
+| ☐ | W13 | 更新被取消 | 日志阶段为 `Abandoned` | 旧安装不变,无文件被移动 | 删除入口(如有);删除 `H\<txn>`;标记为 `terminal` |
+
+#### macOS 步骤(M1–M11)
+
+macOS 的断电验收需要一台可处置的 macOS 虚机(见 §8 已知空白)。步骤格式与 Windows 相同,
+`hard` 等价于虚机级别的强制关机。
+
+| ✓ | 行 | 到达方式 | 断电时机 | 重启后检查 | 预期结果 |
+| --- | --- | --- | --- | --- | --- |
+| ☐ | M1 | 触发下载(dmg),不等完成 | 日志阶段为 `Allocated` | 旧 bundle 完整;`H/<txn>` 下的部分下载和可能的挂载点 | 锁空闲时卸载 `H` 下的挂载,删除 `H/<txn>` 和日志 |
+| ☐ | M2 | 下载校验完成 | 日志阶段为 `Prepared` | `stage/Folio.app`(新版)和 `rescue/Folio.app`(旧版克隆)存在 | 与 W2 相同 |
+| ☐ | M3 | 退出 Folio | 日志阶段为 `Handoff` | 与 M2 相同 | 与 W3 相同 |
+| ☐ | M4 | LaunchAgent plist 已持久化 | 日志阶段为 `Armed` | plist 存在;检查 admission 独占锁 | 与 W5 相同,然后以两份身份进入 `Exchanging` |
+| ☐ | M5 | 交换未执行 | 日志阶段为 `Exchanging`,活跃身份为旧版 | 旧 bundle 未变 | 删除 plist,回退到 `Prepared` |
+| ☐ | M6 | 交换已执行 | 日志阶段为 `Exchanging`,活跃身份为新版 | `stage` 里是旧 bundle | 进入 `RollbackIntent`,然后执行 M9 |
+| ☐ | M7 | Trial 启动,无 receipt | 日志阶段为 `Trial`,无 receipt | 新版活跃,旧版在 `stage` | 与 W7 相同 |
+| ☐ | M8 | Trial 完成,receipt 存在 | 日志阶段为 `Trial`,receipt 已写 | receipt 匹配 | `Committed`,然后删除 plist、删除 `stage/Folio.app` 和 rescue 克隆 |
+| ☐ | M9 | 回滚进行中 | 日志阶段为 `RollbackIntent` | 检查活跃身份是新还是旧 | 停止 trial;若活跃为新版则 `RENAME_SWAP` 换回;校验 → `RolledBack`;失败 → `Stuck` |
+| ☐ | M10 | 回滚失败 | 日志阶段为 `Stuck` | 一个完整 bundle 活跃,另一个在 `stage` | 每次登录(plist)和每次启动重试 M9 |
+| ☐ | M11 | 回滚完成 / 取消 / 提交后残留 | 日志阶段为 `RolledBack` / `Abandoned` / `Committed`-with-debt | 与 W11–W13 对应 | 与 W11–W13 相同;plist 在 terminal 状态持久化后删除 |
+
+#### 每一行检查什么(通用)
+
+对每一行,重启后收集以下证据:
+
+1. **日志头部/阶段**:`H\<txn>\journal.json`(或 `H/<txn>/journal.json`)的当前阶段。
+2. **安装目录文件集**:`dir /s`(Windows)或 `find`(macOS)的输出。
+3. **`diagnostics.log`** 尾部:启动时的恢复动作记录(`BT_UPDATE_START` 行)。
+4. **Run 值**(Windows):`reg export HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`。
+5. **LaunchAgent plist**(macOS):`~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-*.plist`。
+
 ---
 
 ## 5. 截图清单
@@ -976,6 +1065,9 @@ Error: Cannot read the virtual machine configuration file
 | 已验证:`new-vm.ps1` 的幂等拒绝与 `-Stage install` 的前置检查 | 本机跑过(用临时目录) |
 | **已验证**:两台机的 `clean` 快照已回到出厂 `Restricted`(五个作用域全 `Undefined`) | 2026-08-30 逐台实测,§3.4d |
 | **已验证**:加密机上 `deleteSnapshot` 报「Cannot read the virtual machine configuration file」并退 `-1`,而快照确实删掉了 | 同上;判据用 `listSnapshots` |
+| §4.4 更新器:后继版本注入口 | **不存在** —— `update.rs` 的 `RELEASES_HOST`/`RELEASES_PATH` 和 `update_job.rs` 的 `RELEASE_HOST`/`RELEASE_DOWNLOAD_PATH` 均为编译期常量,无环境变量或命令行覆盖;`OFFERS_ENABLED` 为 `false`;匿名请求看不到 draft release。待 U-31 提供注入机制后补写 §4.4 的第 3 条前提 |
+| §4.4 更新器:macOS 断电验收虚机 | **不存在** —— Mac mini 无可处置的 macOS 客户机(见 §Clean-machine coverage 的数字);Mac mini 本身不做断电;`kill -9` 不等价于断电(进程死后文件系统缓存仍会落盘,内核不断电)。待硬件条件或 M 表近似方案裁决后补 |
+| §4.4 更新器:`hard-reset-in-vm.ps1` 和 `in-guest-updater.ps1` | **未验证** —— 脚本已写,`-WhatIf` 已跑通;未在真虚机上跑过 |
 
 ### 参考链接(全部 2026-08-27 抓取)
 

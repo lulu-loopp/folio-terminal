@@ -1410,3 +1410,9 @@ first open. Nothing else in § M6 depends on it.
 Revisit when the machine changes — more memory, or a second Mac — or when a
 defect arrives that a development install would have masked. Until then the gap
 is the accepted one, and it is this paragraph.
+
+### Updater power-cut acceptance (0.4.6)
+
+The self-updater's recovery contract is tested by hard-resetting the VM at each
+durable boundary. The checklist is `docs/plans/release/clean-vm.md` §4.4; the
+harness is `scripts/release/cleanvm/hard-reset-in-vm.ps1`.
