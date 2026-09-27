@@ -651,6 +651,7 @@ pub(crate) fn channel_of(exe: &Path) -> Channel {
         Ok(exe.to_path_buf()),
         bt_platform::host_platform(),
         install_evidence::current_account(),
+        || install_evidence::uninstall_records(&WINGET_RECORD_VALUES),
     )
     .channel
 }
