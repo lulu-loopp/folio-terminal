@@ -16801,8 +16801,21 @@ mod tests {
     /// written as programs and the first assertion goes red.
     #[test]
     fn a_command_with_arguments_in_the_editor_is_split_or_refused() {
+        // `PATH` is read by the rules of the machine the test runs on, as the
+        // product reads it: `std::env::split_paths` splits on `;` on Windows and
+        // `:` elsewhere, and `search_path` takes only absolute directories, which
+        // `/bin` is not on Windows. So the directory and the list are spelled in
+        // this host's own terms, and `zsh` is put in it.
+        let bin = if bt_platform::host_platform() == HostPlatform::Windows {
+            PathBuf::from(r"C:\bin")
+        } else {
+            PathBuf::from("/bin")
+        };
+        let path = std::env::join_paths([bin.clone()]).unwrap();
+        let bare_zsh = bin.join("zsh");
         let machine = bare_macos()
-            .with_var("PATH", "/usr/bin:/bin")
+            .with_var("PATH", path.to_str().unwrap())
+            .with_file(bare_zsh.to_str().unwrap())
             .with_file("/Applications/My Tools/shell");
         for typed in ["/bin/zsh -l", "zsh -l", "/bin/bash --login -i"] {
             assert_eq!(
