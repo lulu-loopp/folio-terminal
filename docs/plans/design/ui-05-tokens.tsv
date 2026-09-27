@@ -24,7 +24,7 @@ hairline-soft	rgba(0,0,0,.055)	rgba(255,255,255,.06)	line (sRGB alpha)	the mock'
 scrim	#0f0f0f @ 89/255	#0f0f0f @ 89/255	overlay (linear light)	behind Settings and first-run	n/a
 picker-wash-hover	rgba(48,89,216,.15)	rgba(122,153,255,.15)	overlay (linear light; = accent at .15)	where x what picker zone under the pointer (#eeeffa / #3e4972 on the popover)	n/a
 picker-wash-chosen	rgba(48,89,216,.22)	rgba(122,153,255,.22)	overlay (linear light; = accent at .22)	the picker's chosen side, item 21a (#e5e7f7 / #465486 on the popover)	n/a
-ink-primary	#37352f	rgba(255,255,255,.87)	text	titles, values, selected row text, focused pane title, hovered menu row text	L 11.43/12.26/9.80; D 11.94/11.18/13.17/9.17
+ink-primary	#37352f	rgba(255,255,255,.87)	text	titles, values; the semantic level of selected/hovered row text and the focused pane title, drawn through generated roles computed on their base ground (menu_item_text_selected, dialog_title_text, files_row_text_selected, rail_tab_active_text, pane_title_focus), not recomposited on the plate	L 11.43/12.26/9.80; D 11.94/11.18/13.17/9.17
 ink-secondary	rgba(55,53,47,.65)	rgba(255,255,255,.55)	text	a row's second line, card replies and meta, quota rows, identifiers	L 4.07/4.18/3.80; D 5.65/5.42/5.97/4.74
 ink-muted	rgba(55,53,47,.45)	rgba(255,255,255,.38)	text	ages, context %, todo counts, meta; section labels and reset columns (via ink-section)	L 2.44/2.49/2.37; D 3.47/3.39/3.58/3.09
 ink-title	#7a7974	#9d9d9d	text/glyph	gear, badge, quota control at rest; rail and native tab text at rest; + New tab and + box at rest	L 4.07/4.36/3.49; D 5.65/5.29/6.35/4.26
