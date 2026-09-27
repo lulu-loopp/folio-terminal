@@ -2128,6 +2128,35 @@ impl Home {
         Some(self.installed_bundle()?.join(inside))
     }
 
+    /// **Windows `H\<txn>\<place>\`**: `set\` (the verified new files,
+    /// before they move in), `backup\` (the old files, moved out) and
+    /// `rolledout\` ((b).2's objects table, [`Place`]). `None` for
+    /// [`Place::Install`], which is the install folder itself, and for a macOS
+    /// home, whose transaction is a bundle.
+    pub(crate) fn members_folder(&self, txn: TxnId, place: Place) -> Option<PathBuf> {
+        if self.bundle_name().is_some() {
+            return None;
+        }
+        let name = match place {
+            Place::Install => return None,
+            Place::Set => "set",
+            Place::Backup => "backup",
+            Place::RolledOut => "rolledout",
+        };
+        Some(self.transaction(txn).join(name))
+    }
+
+    /// **Windows `H\<txn>\rescue\<name>`**: the copy of the running
+    /// executable the applier and recovery run from (F-8), and what the
+    /// header's `rescue` names — [`Home::of_rescue`]'s inverse. `None` for a
+    /// macOS home, whose rescue is a bundle ([`Home::rescue_bundle`]).
+    pub(crate) fn rescue_copy(&self, txn: TxnId, name: &OsStr) -> Option<PathBuf> {
+        if self.bundle_name().is_some() {
+            return None;
+        }
+        Some(self.transaction(txn).join("rescue").join(name))
+    }
+
     /// The bundle's own name, for the members a macOS home keeps under it.
     fn bundle_name(&self) -> Option<&OsStr> {
         match &self.rescue {

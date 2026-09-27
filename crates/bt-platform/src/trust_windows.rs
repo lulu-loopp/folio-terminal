@@ -86,7 +86,7 @@ fn code_of(error: &windows::core::Error) -> i32 {
 // ── owned handles ───────────────────────────────────────────────────────────
 
 /// A certificate store this module opened; closed on drop.
-pub(super) struct Store(pub(super) HCERTSTORE);
+pub(crate) struct Store(pub(crate) HCERTSTORE);
 
 impl Store {
     /// **A new memory store** — the only kind this module ever creates. It
@@ -107,7 +107,7 @@ impl Store {
     }
 
     /// A memory store holding `certificates` (DER).
-    fn of_certificates(certificates: &[Vec<u8>]) -> Result<Self, Refusal> {
+    pub(crate) fn of_certificates(certificates: &[Vec<u8>]) -> Result<Self, Refusal> {
         let store = Self::memory()?;
         for der in certificates {
             // SAFETY: the store is the memory store just opened; the bytes are

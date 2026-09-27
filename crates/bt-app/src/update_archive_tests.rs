@@ -42,7 +42,7 @@ fn expected() -> Expected<'static> {
 /// One entry of an archive under construction, with every field a test may
 /// make lie.
 #[derive(Clone)]
-struct Item {
+pub(crate) struct Item {
     entry: String,
     data: Vec<u8>,
     method: u16,
@@ -58,8 +58,15 @@ struct Item {
 }
 
 fn item(name: &str, data: &[u8]) -> Item {
+    item_under(ROOT, name, data)
+}
+
+/// **One member of an archive under `root`** (`folio-<version>`), in the
+/// layout [`zip_of`] writes — shared with the Windows Prepare's tests (U-20),
+/// whose releases are archives of files signed by the test root.
+pub(crate) fn item_under(root: &str, name: &str, data: &[u8]) -> Item {
     Item {
-        entry: format!("{ROOT}/{name}"),
+        entry: format!("{root}/{name}"),
         data: data.to_vec(),
         // `ZipFile.CreateFromDirectory` stores an empty file and deflates the
         // rest.
@@ -77,7 +84,7 @@ fn item(name: &str, data: &[u8]) -> Item {
 /// central directory, then the end record; no data descriptors, no extra
 /// fields, no comment, forward slashes, version 2.0 made on MS-DOS
 /// (`0x0014`), as read back from a real one (report U-14).
-fn zip_of(items: &[Item]) -> Vec<u8> {
+pub(crate) fn zip_of(items: &[Item]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut central = Vec::new();
     for item in items {

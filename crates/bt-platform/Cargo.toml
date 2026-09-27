@@ -1151,6 +1151,15 @@ libc = "0.2"
 
 # This crate is the deliberately narrow unsafe boundary for native Win32 APIs. All other
 # first-party crates continue inheriting the workspace-wide `unsafe_code = "deny"` policy.
+[features]
+# **The test certificate world of `trust`** (`src/trust_harness.rs`; 0.4.6
+# tickets U-15 and U-20): a root, leaves and a time-stamp authority made with
+# ephemeral keys, and small PE files signed and time-stamped under them. For
+# tests only: `bt-app` names it on its *dev-dependency* on this crate, so its
+# tests can verify a release signed here, and a build of the shipped program
+# never has it. It adds no package.
+trust-harness = []
+
 [lints.clippy]
 todo = "deny"
 unimplemented = "deny"

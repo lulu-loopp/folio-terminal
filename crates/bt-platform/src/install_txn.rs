@@ -31,6 +31,13 @@
 //! * **A durable directory create** ([`durable_create_dir`]): a folder that
 //!   must not exist yet is created, then the folder it is in is flushed — the
 //!   macOS installation home and a transaction's folders (U-27).
+//! * **A durable copy** ([`durable_copy`]): a durable create whose bytes are
+//!   streamed from a reader rather than held in memory — the Windows Prepare's
+//!   staged set and its rescue copy of the running executable (U-20), each
+//!   flushed before its name appears and its directory flushed after.
+//! * **The space left** ([`available_bytes`]): what the volume a folder is on
+//!   still has for this account (`GetDiskFreeSpaceExW` / `statvfs`), for the
+//!   Windows Prepare's reservation (U-20).
 //! * **The registry flush** (Windows only, [`flush_current_user_key`]):
 //!   `RegFlushKey` on a key under `HKEY_CURRENT_USER`, for the entrance value a
 //!   later ticket writes (U-22).
@@ -100,6 +107,10 @@ pub enum Stage {
     Remove,
     /// Creating a directory (a durable directory create's).
     CreateDirectory,
+    /// Reading the source of a durable copy.
+    Read,
+    /// Asking the volume how much space is left.
+    Space,
 }
 
 impl Stage {
@@ -119,6 +130,8 @@ impl Stage {
             Self::FlushKey => "flush-key",
             Self::Remove => "remove",
             Self::CreateDirectory => "create-directory",
+            Self::Read => "read",
+            Self::Space => "space",
         }
     }
 }
@@ -295,6 +308,42 @@ pub fn durable_create_dir(path: &Path) -> Result<(), Failure> {
     durable_create_dir_with(&mut arm::Os, path)
 }
 
+/// **Copy what `source` reads into `target`, durably, and only if nothing is
+/// there yet** — a file of the Windows Prepare's staged set, and its rescue
+/// copy of the running executable (0.4.6 ticket U-20; §C.2 step 6: "flush
+/// every file and the directory").
+///
+/// [`durable_create`]'s steps in its order, with the bytes streamed from
+/// `source` a bounded chunk at a time: a temporary beside the target, every
+/// byte `source` gives until it ends, a flush of the file, a rename that
+/// **never replaces**, and a flush of the directory. The target's name
+/// appears only once its bytes are on the device, and a failure at any step
+/// before the rename leaves nothing under it (the temporary is removed).
+/// Answers how many bytes were copied.
+///
+/// # Errors
+/// A [`Failure`] naming the stage that failed — [`Stage::Read`] when `source`
+/// refuses; on a platform with no arm, one at [`Stage::CreateTemp`] whose error
+/// is `Unsupported` and names this door.
+pub fn durable_copy(source: &mut dyn io::Read, target: &Path) -> Result<u64, Failure> {
+    durable_copy_with(&mut arm::Os, source, target)
+}
+
+/// **How many bytes the volume `folder` is on still has for this account**
+/// (`GetDiskFreeSpaceExW`'s "available to the caller", which counts a quota;
+/// `statvfs`'s `f_bavail` blocks on macOS) — the Windows Prepare's reservation
+/// (U-20; §C.2 step 3).
+///
+/// # Errors
+/// A [`Failure`] at [`Stage::Space`]; on a platform with no arm, one whose
+/// error is `Unsupported` and names this door.
+pub fn available_bytes(folder: &Path) -> Result<u64, Failure> {
+    arm::available_bytes(folder).map_err(|error| Failure::at(Stage::Space, folder, error))
+}
+
+/// One chunk of a durable copy.
+const COPY_CHUNK: usize = 64 * 1024;
+
 /// A temporary file's number within this process, so two writes to one
 /// target from two threads never share a temporary name.
 static TEMP_SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -327,17 +376,62 @@ pub(crate) fn durable_write_with<S: Surface>(
     bytes: &[u8],
     replace: Replace,
 ) -> Result<(), Failure> {
+    durable_fill_with(surface, target, replace, |surface, file, temporary| {
+        surface
+            .write_all(file, bytes)
+            .map_err(|error| Failure::at(Stage::Write, temporary, error))
+    })
+}
+
+pub(crate) fn durable_copy_with<S: Surface>(
+    surface: &mut S,
+    source: &mut dyn io::Read,
+    target: &Path,
+) -> Result<u64, Failure> {
+    let mut copied = 0u64;
+    let mut chunk = vec![0u8; COPY_CHUNK];
+    durable_fill_with(
+        surface,
+        target,
+        Replace::Never,
+        |surface, file, temporary| {
+            loop {
+                let read = match source.read(&mut chunk) {
+                    Ok(0) => return Ok(()),
+                    Ok(read) => read,
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(Failure::at(Stage::Read, target, error)),
+                };
+                surface
+                    .write_all(file, &chunk[..read])
+                    .map_err(|error| Failure::at(Stage::Write, temporary, error))?;
+                copied += read as u64;
+            }
+        },
+    )?;
+    Ok(copied)
+}
+
+/// **The one order every durable file write keeps**: a temporary beside the
+/// target, `fill` writing into it, a flush of the file, the rename (`replace`
+/// saying whether it may take an existing name), a flush of the directory.
+/// The temporary is removed on every failure before the rename takes it.
+fn durable_fill_with<S: Surface>(
+    surface: &mut S,
+    target: &Path,
+    replace: Replace,
+    fill: impl FnOnce(&mut S, &mut S::Handle, &Path) -> Result<(), Failure>,
+) -> Result<(), Failure> {
     let temporary =
         temporary_beside(target).map_err(|error| Failure::at(Stage::CreateTemp, target, error))?;
     let mut file = surface
         .create_new(&temporary)
         .map_err(|error| Failure::at(Stage::CreateTemp, &temporary, error))?;
-    let written = match surface.write_all(&mut file, bytes) {
-        Err(error) => Err(Failure::at(Stage::Write, &temporary, error)),
-        Ok(()) => surface
+    let written = fill(surface, &mut file, &temporary).and_then(|()| {
+        surface
             .flush(&mut file)
-            .map_err(|error| Failure::at(Stage::FlushFile, &temporary, error)),
-    };
+            .map_err(|error| Failure::at(Stage::FlushFile, &temporary, error))
+    });
     surface.close(file);
     if let Err(failure) = written {
         surface.remove(&temporary);
@@ -771,6 +865,17 @@ mod arm {
             ))
         }
     }
+
+    pub(super) fn available_bytes(folder: &Path) -> io::Result<u64> {
+        use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+        let name = wide(folder.as_os_str())?;
+        let mut available = 0u64;
+        // SAFETY: the name is NUL-terminated and lives across the call; the one
+        // output asked for is a live `u64`.
+        unsafe { GetDiskFreeSpaceExW(PCWSTR(name.as_ptr()), Some(&raw mut available), None, None) }
+            .map_err(|error| os_error(&error))?;
+        Ok(available)
+    }
 }
 
 /// **The macOS arm.**
@@ -890,6 +995,17 @@ mod arm {
             libc::flock(file.as_raw_fd(), libc::LOCK_UN);
         }
     }
+
+    pub(super) fn available_bytes(folder: &Path) -> io::Result<u64> {
+        let name = c_path(folder)?;
+        // SAFETY: an all-zero `statvfs` is a valid value for the call to fill.
+        let mut volume: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: the name is NUL-terminated and `volume` is live for the call.
+        if unsafe { libc::statvfs(name.as_ptr(), &raw mut volume) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(u64::from(volume.f_bavail).saturating_mul(volume.f_frsize))
+    }
 }
 
 /// **The arm of every other platform: each effect is refused by name.**
@@ -957,6 +1073,10 @@ mod arm {
     }
 
     pub(super) fn unlock(_file: &File) {}
+
+    pub(super) fn available_bytes(_folder: &Path) -> io::Result<u64> {
+        Err(refused("space query"))
+    }
 }
 
 /// **The recording fake of [`Surface`]**, shared by this door's tests and by
@@ -1214,6 +1334,107 @@ mod tests {
         let again = durable_create_dir(&made).unwrap_err();
         assert_eq!(again.stage, Stage::CreateDirectory);
         assert_eq!(again.error.kind(), io::ErrorKind::AlreadyExists);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-20) — **a staged copy's name appears only after its bytes are
+    /// flushed, never over an existing file, and a copy that fails anywhere
+    /// before the rename leaves nothing under the name.**
+    ///
+    /// §C.2 step 6: the verified tree is copied into `set\`, every file and
+    /// the directory flushed, then re-verified in place. A name that appeared
+    /// before its flush could hold a torn file after a power cut that the
+    /// journal's `Prepared` then vouches for; a copy that replaced a name
+    /// would destroy a file the inventories count. A source that stops reading
+    /// (the disk it is on refused) or a flush the device refuses leaves no
+    /// file under the target's name — the temporary is removed.
+    ///
+    /// MUTATION: in `durable_fill_with`, rename before the file's flush (move
+    /// the `surface.rename` above the `fill(…).and_then(flush)`).
+    #[test]
+    fn a_staged_copy_is_named_only_after_its_flush_and_never_over_a_file() {
+        let target = home().join("set").join("folio.exe");
+        let set = home().join("set");
+        let bytes: Vec<u8> = (0..COPY_CHUNK + 7).map(|at| (at % 251) as u8).collect();
+        let mut fake = Recorder::default();
+        let copied = durable_copy_with(&mut fake, &mut bytes.as_slice(), &target).unwrap();
+        assert_eq!(copied, bytes.len() as u64);
+        let temporary = temporary_of(&fake.calls);
+        assert_eq!(temporary.parent(), Some(set.as_path()), "same directory");
+        assert_eq!(
+            fake.calls,
+            vec![
+                Call::Create(temporary.clone()),
+                Call::Write(temporary.clone(), bytes[..COPY_CHUNK].to_vec()),
+                Call::Write(temporary.clone(), bytes[COPY_CHUNK..].to_vec()),
+                Call::Flush {
+                    path: temporary.clone(),
+                    directory: false
+                },
+                Call::Close(temporary.clone()),
+                Call::Rename(temporary, target.clone(), Replace::Never),
+                Call::OpenDirectory(set.clone()),
+                Call::Flush {
+                    path: set.clone(),
+                    directory: true
+                },
+                Call::Close(set),
+            ],
+        );
+
+        for fail in [Fail::Write, Fail::FlushFile, Fail::Rename] {
+            let mut refusing = Recorder::failing(fail);
+            durable_copy_with(&mut refusing, &mut bytes.as_slice(), &target).unwrap_err();
+            let temporary = temporary_of(&refusing.calls);
+            assert_eq!(
+                refusing.calls.last(),
+                Some(&Call::Remove(temporary)),
+                "{fail:?}: the temporary is removed and nothing is named"
+            );
+            assert!(
+                !refusing
+                    .calls
+                    .iter()
+                    .any(|call| matches!(call, Call::OpenDirectory(_))),
+                "{fail:?}: no directory flush follows a copy that did not land"
+            );
+        }
+
+        struct Refusing;
+        impl io::Read for Refusing {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("the source's disk refused"))
+            }
+        }
+        let mut fake = Recorder::default();
+        let failure = durable_copy_with(&mut fake, &mut Refusing, &target).unwrap_err();
+        assert_eq!(failure.stage, Stage::Read);
+        assert!(matches!(fake.calls.last(), Some(Call::Remove(_))));
+
+        if crate::host_platform() == crate::HostPlatform::OtherUnix {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "bt-install-txn-copy-{}-{}",
+            std::process::id(),
+            crate::attention_pipe::unguessable_bits()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let made = root.join("copied.bin");
+        assert_eq!(
+            durable_copy(&mut bytes.as_slice(), &made).unwrap(),
+            bytes.len() as u64
+        );
+        assert_eq!(std::fs::read(&made).unwrap(), bytes);
+        let again = durable_copy(&mut &b"other"[..], &made).unwrap_err();
+        assert_eq!(again.stage, Stage::Rename, "never over an existing file");
+        assert_eq!(std::fs::read(&made).unwrap(), bytes, "left byte for byte");
+        assert_eq!(
+            std::fs::read_dir(&root).unwrap().count(),
+            1,
+            "and no temporary is left beside it"
+        );
+        assert!(available_bytes(&root).unwrap() > 0, "the volume has room");
         let _ = std::fs::remove_dir_all(&root);
     }
 

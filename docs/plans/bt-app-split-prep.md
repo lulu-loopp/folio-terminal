@@ -668,6 +668,10 @@ The twelve wholly-test files, by the declaration that makes each one:
 
 **A nineteenth since 2026-09-27** (0.4.6 ticket U-28): `update_apply_macos.rs` declares `#[cfg(test)] #[path = "update_apply_macos_tests.rs"] mod tests;` — the macOS applier's tests over real synthetic signed bundles, real locks, a real claim, a LaunchAgent plist in a folder of the test's own and real processes — which makes `update_apply_macos_tests.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_nineteen`.
 
+**A nineteenth since 2026-09-27** (0.4.6 ticket U-20): `update_prepare_windows.rs` declares `#[cfg(test)] #[path = "update_prepare_windows_tests.rs"] pub(crate) mod tests;` — the Windows Prepare's tests over real install folders and release archives signed by U-15's test root — which makes `update_prepare_windows_tests.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_nineteen`.
+
+**Twenty at the merge of both (2026-09-27):** U-28's `update_apply_macos_tests.rs` and U-20's `update_prepare_windows_tests.rs` both joined, so the test is `the_wholly_test_files_of_bt_app_are_the_twenty`.
+
 ---
 
 ## 7. The end measurement

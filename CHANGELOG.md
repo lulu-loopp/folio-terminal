@@ -20,6 +20,12 @@ All notable changes to Folio are recorded here. The format follows
   opened a window with text in it; then the old copy is removed. If the new
   one does not get that far in 90 seconds, the update is marked for rolling
   back (the rollback itself comes next). Nothing can start an update yet.
+- On Windows, the coming updater can now prepare an update end to end, inside
+  the install folder: it downloads the release, makes sure the disk has room
+  (and says how much more it needs if not), checks that the new `folio.exe`
+  is signed by the same publisher as the running one, stages a checked copy of
+  the release beside a copy of the running build, and removes everything again
+  if any step fails or the update is cancelled. Nothing is offered yet.
 - The split inventory's census no longer tells a test that asks for a method by
   name to follow that method to a new file: only tests that read a file's text
   are listed as needing an edit when code moves.

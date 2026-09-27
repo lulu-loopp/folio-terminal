@@ -43,16 +43,20 @@
 //! tag, no newer release, a managed copy) leaves the gate unspent, so a newer
 //! tag arriving later in the same launch still gets its card.
 //!
-//! # No driver yet, and offers off
+//! # The drivers, and offers off
 //!
 //! A press reaches a [`Driver`] ([`driver_for_this_copy`]). On macOS it is the
 //! Prepare (`update_prepare_macos`, U-27): the offer's two files downloaded
 //! through the download door ([`ReleaseDownload`]), the image attached and its
 //! bundle checked, copied and checked again, the rescue clone, the journal at
-//! `Prepared`, each refusal a named [`Stop`]. Elsewhere it is [`Unsupported`],
+//! `Prepared`, each refusal a named [`Stop`]. On Windows it is the Prepare of
+//! `update_prepare_windows` (U-20): the archive and its checksum document into
+//! the installation's own folder, the space reserved, the archive expanded and
+//! its signed files held to the running build's identity, the set copied into
+//! `set\` and checked again there, the rescue copy of the running executable,
+//! the inventories, the journal at `Prepared`. Elsewhere it is [`Unsupported`],
 //! which refuses before any network, staging, flush or wait: the job goes
-//! straight to [`State::Failed`]. Windows' driver is U-20; the quit
-//! barrier is U-21 ([`Job::restart`], and the two answers the quit delivers
+//! straight to [`State::Failed`]. The quit barrier is U-21 ([`Job::restart`], and the two answers the quit delivers
 //! to [`Job::apply`] on the window thread). And no user sees any of this: [`Job::offers_enabled`] is a
 //! constant `false` until the enabling tickets (U-31, U-32) turn it on, so the
 //! job never leaves `Idle` in a shipped build. What it does do is decide, and
@@ -496,8 +500,12 @@ pub(crate) enum Stop {
     Identity,
     /// The bundle could not be copied off the image.
     Copy,
-    /// The rescue copy of the running bundle could not be made.
+    /// The rescue copy of the running build could not be made.
     Clone,
+    /// The volume the installation is on has too little space for the
+    /// expanded release, its staged copy and the rescue copy (Windows, §C.2
+    /// step 3): this many bytes more are needed. Nothing was expanded.
+    Space { short_by: u64 },
     /// The reader cancelled; the job has already moved on.
     Cancelled,
 }
@@ -517,6 +525,7 @@ impl Stop {
             Self::Identity => "the new build is not the offered, signed Folio",
             Self::Copy => "the new build could not be copied",
             Self::Clone => "the running build could not be kept aside",
+            Self::Space { .. } => "the disk has too little space for the update",
             Self::Cancelled => "the update was cancelled",
         }
     }
@@ -840,8 +849,10 @@ pub(crate) trait Driver {
 
 /// **The driver of a build or a copy that has none**: it refuses before any
 /// network, staging, flush or wait — it does not look at its arguments at all.
-/// Windows' driver until U-20; and a macOS process that is not running from a
-/// bundle (`update_prepare_macos::MacPrepare::of_this_copy`).
+/// A platform with no release, a macOS process that is not running from a
+/// bundle (`update_prepare_macos::MacPrepare::of_this_copy`), and a Windows
+/// process that cannot name its own executable
+/// (`update_prepare_windows::WinPrepare::of_this_copy`).
 pub(crate) struct Unsupported;
 
 impl Driver for Unsupported {
@@ -868,18 +879,21 @@ impl Transport for NoDownloadDoor {
     }
 }
 
-/// **The driver and the transport a press is handed on this copy**: on macOS
-/// the Prepare of the running bundle (U-27) and the download door; everywhere
-/// else, [`Unsupported`] until its driver lands (Windows: U-20).
+/// **The driver and the transport a press is handed on this copy**: the
+/// Prepare of the running bundle on macOS (U-27) and of the running install
+/// folder on Windows (U-20), each with the download door; [`Unsupported`]
+/// everywhere else.
 pub(crate) fn driver_for_this_copy() -> (Box<dyn Driver>, SharedTransport) {
     match bt_platform::host_platform() {
         HostPlatform::MacOs => (
             crate::update_prepare_macos::MacPrepare::of_this_copy(),
             Arc::new(ReleaseDownload),
         ),
-        HostPlatform::Windows | HostPlatform::OtherUnix => {
-            (Box::new(Unsupported), Arc::new(NoDownloadDoor))
-        }
+        HostPlatform::Windows => (
+            crate::update_prepare_windows::WinPrepare::of_this_copy(),
+            Arc::new(ReleaseDownload),
+        ),
+        HostPlatform::OtherUnix => (Box::new(Unsupported), Arc::new(NoDownloadDoor)),
     }
 }
 

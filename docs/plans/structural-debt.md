@@ -207,7 +207,7 @@ ledger's.
 |---|---|---|---|---|---|
 | D-1 | session state has no owner independent of the window | structure review C-1 · K-1 | none yet | 0.4.7 — the first slice: a view-owned configuration boundary and the session registry; its 0.4.6 first step is D-57; the backend stays 0.6 | open |
 | D-2 | the window thread's blocking set is a list, not a budget | C-2 · K-6 | through D-33…D-47 | 0.4.6 — closes when its rows close | open — §5.3 row 1 repaid on `2657e5e3`; rows 13 and 14 repaid by tickets 48 and 49 (D-45, D-46); row 5 repaid by ticket 50 (D-37); row 6 repaid by ticket 51 (D-38); the taskbar probe left inside row 13 repaid by ticket 62 (D-68); row 22 repaid by ticket 63 (D-69); the list is one registry with a generated §5.3, each owner-thread wait a door type held to it (A1a, 2026-09-26: advanced, not repaid); the thread door lends every worker a `WorkerCtx` and the hand-off door takes it (A1b, 2026-09-26: advanced, not repaid); every owner-thread door takes its token and each listed wait happens only admitted (A1d, 2026-09-26: advanced, not repaid); the escapes the compiler cannot see are fenced by one source guard, and every `Drop` that may wait is a row of a closed inventory (A1e, 2026-09-27: advanced, not repaid); every raw effect outside a door is a row of `docs/plans/window-thread-bare-sites.tsv`, which only shrinks — 248 sites, seeded at 263 on `2cc59a83` — and the configuration the lint will need is fenced and its probe proven per target (A2a, 2026-09-26: advanced, not repaid); every turn is accounted and every admitted call measured per call, with a budget line for each of the four triggers and an exit summary from the run's atomics (A3, 2026-09-27: advanced, not repaid — A1 and A3 have landed, and by the owner's ruling of 2026-09-25 D-2 closes when A2 lands too); deferrable work yields to the earliest window's deadline — the search walk's slice and the idle calls ask one `TurnAllowance` a turn (A4, 2026-09-27: advanced, not repaid — A1, A3 and A4 have landed; what the allowance leaves of aggregate scheduling is D-84) |
-| D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open |
+| D-3 | ten one-shot probes with no common contract | K-9 · C-2 | none yet | 0.4.6 | open — the update job's worker `bt-update-job` added to the list (U-20, 2026-09-27; its two drivers U-27 and U-20) |
 | D-4 | controlled failure loses dirty preview edits | C-3 · K-8 | none yet | 0.4.6 — ruled for 0.4.4 and never ticketed; unsaved edits are a hard requirement | open |
 | D-5 | the rules existed only as history — 35 `docs/RULES.md` rows not yet folded | K-2 · C-4 | the ticket that depends on each row | 0.4.6; a row a 0.4.5 ticket depends on (resize, PTY, IME, keyboard and mouse routing, fonts, GPU lifecycle) folds in that ticket | open — 19 folded; row 28's wheel half folded by ticket 37 (the press half is not); row 25's font-list half folded by ticket 50 (the glyph atlas half is not) |
 | D-6 | cross-crate chains are visible nowhere | K-10 · C-4 | through D-48…D-50 | 0.4.7 | open — printed path written; its hand-off hop updated on `2657e5e3` and `5d4c7aff` |
@@ -443,6 +443,16 @@ rather than probes, and that **blocking on one machine probe must not delay an
 unrelated operation the user asked for** — a common contract, yes; one serial
 worker, no. The PSReadLine debt named by the 2026-09-21 history entry is the
 natural first passenger either way.
+
+**Added to the list (0.4.6 ticket U-20, 2026-09-27).** The update job's
+worker, `bt-update-job` — one per press, started by the Windows Prepare
+(`update_prepare_windows`, U-20) and the macOS Prepare (`update_prepare_macos`,
+U-27) — is one more of the set: its own report inbox and wake
+(`update_job::Poster`, `install_progress_wake`, its own `AppEvent` and
+station), its own cancel flag, and no deadline of its own beyond the download
+door's and the archive expansion's. The common contract has not landed, so the
+worker keeps this shape until it does; it is a mutation of the install folder's
+`.folio-update\`, not a probe, which is the depth review's point above.
 
 **Version.** 0.4.4. **Status.** open.
 
