@@ -248,6 +248,21 @@ Windows one immediately below, the macOS one in the macOS section further down.
 | **Windows** | `folio.exe` and `folio.msix`, signed through Microsoft's Artifact Signing service. The service holds the key, there is no `.pfx` in this project, and every signature carries a countersigned time stamp because the certificate is valid for three days. The subject is `CN=Weiyi Shi, O=Weiyi Shi, L=Ann Arbor, S=mi, C=US`, the same holder the executable's own `LegalCopyright` names. |
 | **macOS** | `Folio.app` and the disk image around it, signed with a **Developer ID Application** certificate issued to the same holder, with the hardened runtime, a secure timestamp and the entitlements in `packaging/macos/entitlements.plist` — every key in that file `false`, no exceptions taken. Both are then **notarized** by Apple and the ticket **stapled** to each, so a reader's machine can check the signature with the network off. `Folio.app.dSYM` is built beside the bundle and archived with the tag; it is not published and never goes inside the application. |
 
+**The Windows identity is what in-app updates check, so changing it breaks
+them.** From 0.4.6 a running Folio accepts a downloaded `folio.exe` or
+`folio.msix` only when its signer carries the **same subject** (compared as a
+parsed name, value case and order kept) and the **same Artifact Signing
+certificate-profile EKU** — the one `1.3.6.1.4.1.311.97.…` usage that is not the
+Public Trust marker `1.3.6.1.4.1.311.97.1.0` — as the running build's own
+signature, with a valid RFC 3161 time stamp and a revocation check that
+answered (`bt_platform::trust`). Nothing is pinned to a certificate, a
+thumbprint or a key: the daily three-day certificates renew freely. But
+renaming the subject, or deleting and recreating the certificate profile (which
+gives it a new EKU), makes every installed copy refuse the next release. The
+only migration is by hand: that release's notes tell readers to download it
+from the releases page, and the copies it installs accept the new identity from
+then on.
+
 Neither chain puts a key, a password or a team identifier in this repository.
 The Windows one holds the key in a service the owner signs in to; the macOS one
 holds it in a keychain on the owner's machine, and `packaging/macos/.gitignore`

@@ -24,6 +24,12 @@ All notable changes to Folio are recorded here. The format follows
   Cancelling, a failed save, or a session that takes too long to write keeps
   the update for later; the last one still closes Folio. Nothing can press
   Restart yet.
+- The coming Windows updater can tell whether a downloaded `folio.exe` or
+  `folio.msix` is the same publisher's Folio: Windows' own signature check, a
+  required time stamp, a revocation check that must answer, and the signer's
+  name and Artifact Signing identity equal to the running copy's. A copy that
+  is not signed, or not built as a release, cannot update itself. Nothing calls
+  it yet.
 - The macOS CI job now lints every crate with the same warnings-as-errors line
   as Windows, shows that line can fail, and runs the renderer's and the
   corpus's tests on a Mac.

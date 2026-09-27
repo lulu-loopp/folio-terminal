@@ -141,7 +141,10 @@ the private folder `bt-app`'s `update_trial` tests set on the copy of their own
 test binary that runs a start's writers in a process of its own (the trial is a
 fact once per process), with `APPDATA`, `LOCALAPPDATA`, `HOME`, `XDG_DATA_HOME`
 and `BT_POWERSHELL_PROFILE` pointed inside that folder. Only the child half of
-those two tests reads them.
+those two tests reads them. `BT_TRUST_RELEASE_TAG` names the release (`v0.4.5-preview`)
+`bt-platform`'s ignored `trust::tests::the_released_windows_assets_carry_an_identity_oid`
+downloads to read real signatures from (E-6); unset or empty, it asks GitHub for the
+latest release. It downloads into the temporary folder and writes nothing else.
 
 | Variable | Value | What it does | What can end up in the file | Default |
 | --- | --- | --- | --- | --- |

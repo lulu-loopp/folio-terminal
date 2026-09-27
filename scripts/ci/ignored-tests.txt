@@ -122,3 +122,13 @@ shell_literal::tests::direct_crt_receives_the_exact_literal_after_the_program_to
 # The decision itself is pinned everywhere by the injected-facts test
 # attention_a_link_is_followed_only_inside_the_agents_own_folder.
 attention_ownership::tests::attention_a_linked_config_is_edited_at_its_target_inside_the_agents_folder
+
+# U-15 (E-6): downloads the latest release (or BT_TRUST_RELEASE_TAG) from GitHub,
+# checks it against SHA256SUMS.txt, and reads the real Artifact Signing signatures
+# of folio.exe, folio.msix and the two ConPTY sidecars online (revocation is
+# checked). A network fetch of a published asset, and a signed Folio names its
+# publisher, so nothing is committed; the policy it measures is pinned in the
+# normal suite by the test-signed files of trust::tests. Run it with
+# `cargo test -p bt-platform --lib the_released_windows_assets -- --ignored --nocapture`.
+# Expiry: when the updater's Windows acceptance (U-20) reads a real release in CI.
+trust::tests::the_released_windows_assets_carry_an_identity_oid
