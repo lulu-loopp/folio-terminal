@@ -54,6 +54,9 @@
 
 use std::time::{Duration, Instant};
 
+use crate::update_job::{Abandon, Progress, Step};
+use crate::update_txn::TxnId;
+
 /// How long the process will wait for the hosted pages to let go before it
 /// leaves anyway.
 ///
@@ -74,6 +77,94 @@ use std::time::{Duration, Instant};
 /// the last seat's own door plus one turn of the loop to carry the answer.
 pub const PAGE_TEARDOWN_DEADLINE: Duration =
     crate::webhost::BROWSER_EXIT_DEADLINE.saturating_add(Duration::from_secs(2));
+
+/// **How long an update's quit waits for its session's receipt** (0.4.6 U-21,
+/// `docs/plans/design/self-update-2026-09-16.md` §C.3): three seconds.
+///
+/// **The store's own [`crate::persist::SESSION_SAVE_BUDGET`], derived from it
+/// rather than written beside it**: it is the same document handed to the same
+/// writer over the same storage, and the ordinary quit already gives that write
+/// exactly this long. Two things differ. The window thread does not stand still
+/// for it — the document is a named generation, the loop keeps turning, and the
+/// bound is a clock read on each turn ([`Quit::receipt_is_overdue`]), never a
+/// wait. And expiry means something else for each half: for the update it is
+/// **abandonment, never success** — a restart that did not see its session land
+/// must not hand the installation to an applier — while for the quit it is the
+/// ordinary [`WriteVerdict::TimedOut`], which leaves.
+pub(crate) const UPDATE_RECEIPT_DEADLINE: Duration = crate::persist::SESSION_SAVE_BUDGET;
+
+/// **How long the way out waits for the hand-over's answer** (U-21): three
+/// seconds.
+///
+/// What it waits for is one journal of a few hundred bytes written durably (a
+/// flush of the file and of its folder) and one process started, on the
+/// storage worker — the same order of work as one session write, so the same
+/// bound. The windows are hidden by then, and past it the process leaves
+/// anyway: whatever the journal holds at that instant, `Prepared` or
+/// `Handoff`, is a row the recovery table names (W2, W3).
+pub(crate) const HANDOFF_DEADLINE: Duration = Duration::from_secs(3);
+
+/// **How often the loop comes back to look for an answer the quit is waiting
+/// on** — the session's receipt, the hand-over's (U-21).
+///
+/// Neither worker wakes the loop when it answers, so the loop wakes itself:
+/// about once a frame, only while such an answer is owed, and never past the
+/// bound the answer is held to. A look is a `try_recv`; nothing here waits.
+pub(crate) const ANSWER_LOOK: Duration = Duration::from_millis(15);
+
+/// **Why a quit began** (0.4.6 U-21, §C.3). The transaction is the same either
+/// way — every cancelable step runs unchanged, the card, the save, the
+/// photograph, the write — and the reason says only what else rides on it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Reason {
+    /// A person asked: the chord, the menu bar's Quit row, the system's quit.
+    Asked,
+    /// **Restart**, on the update's verified card: the ordinary quit run to
+    /// completion, and then the applier of transaction `txn`.
+    UpdateRestart { txn: TxnId },
+}
+
+/// Where the update a quit is running for has got to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Leg {
+    /// Nothing decided yet.
+    Live,
+    /// The session's receipt came back: the transaction is handed to its
+    /// applier on the way out.
+    Landed,
+    /// Given up; the quit itself goes wherever the reader sent it.
+    Abandoned,
+}
+
+/// The update riding on a quit, and the one report the job is owed about it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Update {
+    txn: TxnId,
+    leg: Leg,
+    owed: Option<Step>,
+}
+
+/// **What the way out owes the update** once the pages have gone (U-21).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Handoff {
+    /// Nothing: no update rides on this quit, or it was given up.
+    NotOwed,
+    /// The session landed: hand the transaction to its applier, then leave.
+    Owed,
+    /// The hand-over is on the storage worker; leave when it answers, or at
+    /// `until` ([`HANDOFF_DEADLINE`]).
+    Sent { until: Instant },
+    /// Answered, or out of time: leave.
+    Done,
+}
+
+/// The session document an update's quit has handed over and is waiting to
+/// hear about.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Receipt {
+    generation: u64,
+    until: Instant,
+}
 
 /// What a press on the summary card answers.
 ///
@@ -205,6 +296,8 @@ impl WriteVerdict {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Quit {
     phase: Phase,
+    /// The update this quit is running for, if it is one (U-21).
+    update: Option<Update>,
     /// What the card names, collected once when the question was put.
     ///
     /// **Once, and not re-derived per frame** like the dirty gate's list is. The
@@ -222,14 +315,30 @@ enum Phase {
     Saving,
     Discarding,
     Photographing,
-    Writing,
+    /// The write. An update's quit hands a named generation over and waits for
+    /// its receipt across turns (`receipt`); every other quit is one call.
+    Writing {
+        receipt: Option<Receipt>,
+    },
     Retiring,
-    Waiting { until: Instant },
-    Leaving,
+    Waiting {
+        until: Instant,
+    },
+    Leaving {
+        handoff: Handoff,
+    },
     Abandoned,
 }
 
 impl Quit {
+    /// A person's quit — [`Self::begin_for`] with [`Reason::Asked`], for the
+    /// tests that walk one.
+    #[cfg(test)]
+    #[must_use]
+    pub fn begin(names: Vec<String>) -> Self {
+        Self::begin_for(names, Reason::Asked)
+    }
+
     /// Begin one. `names` is everything dirty across every window; an empty list
     /// is a quit with nothing to ask about.
     ///
@@ -237,17 +346,63 @@ impl Quit {
     /// is true exactly here and nowhere else in this transaction: a quit that put
     /// up 「确定退出?」 over a clean application would be asking a question whose
     /// only honest answer is "nothing is lost either way".
+    ///
+    /// **And the same quit whatever its `reason`** (0.4.6 U-21): an update's
+    /// Restart begins exactly the quit a person's chord begins — the same card
+    /// over the same names — and carries its transaction beside it.
     #[must_use]
-    pub fn begin(names: Vec<String>) -> Self {
+    pub(crate) fn begin_for(names: Vec<String>, reason: Reason) -> Self {
         let phase = if names.is_empty() {
             Phase::Photographing
         } else {
             Phase::Asking
         };
+        let update = match reason {
+            Reason::Asked => None,
+            Reason::UpdateRestart { txn } => Some(Update {
+                txn,
+                leg: Leg::Live,
+                owed: None,
+            }),
+        };
         Self {
             phase,
+            update,
             names,
             hover: None,
+        }
+    }
+
+    /// Why this quit began.
+    #[must_use]
+    pub(crate) fn reason(&self) -> Reason {
+        self.update
+            .map_or(Reason::Asked, |update| Reason::UpdateRestart {
+                txn: update.txn,
+            })
+    }
+
+    /// **The report the update job is owed**, taken once (U-21): the quit gave
+    /// the update up and why ([`Step::QuitAbandoned`]), or the session landed
+    /// ([`Step::SessionLanded`]) — under the transaction the quit began for,
+    /// so a job that has moved on drops it as stale.
+    pub(crate) fn take_update_report(&mut self) -> Option<Progress> {
+        let update = self.update.as_mut()?;
+        let step = update.owed.take()?;
+        Some(Progress {
+            txn: update.txn,
+            step,
+        })
+    }
+
+    /// Give the update up, once, and owe the job the reason. Nothing else
+    /// about the quit changes here: it goes on wherever the reader sent it.
+    fn give_up_the_update(&mut self, why: Abandon) {
+        if let Some(update) = self.update.as_mut()
+            && update.leg == Leg::Live
+        {
+            update.leg = Leg::Abandoned;
+            update.owed = Some(Step::QuitAbandoned(why));
         }
     }
 
@@ -259,10 +414,10 @@ impl Quit {
             Phase::Saving => QuitStep::Save,
             Phase::Discarding => QuitStep::Discard,
             Phase::Photographing => QuitStep::Photograph,
-            Phase::Writing => QuitStep::Write,
+            Phase::Writing { .. } => QuitStep::Write,
             Phase::Retiring => QuitStep::Retire,
             Phase::Waiting { .. } => QuitStep::WaitForPages,
-            Phase::Leaving => QuitStep::Exit,
+            Phase::Leaving { .. } => QuitStep::Exit,
             Phase::Abandoned => QuitStep::Abandon,
         }
     }
@@ -279,7 +434,31 @@ impl Quit {
     /// this point the windows are hidden and there is nothing to compose.
     #[must_use]
     pub fn is_retiring(&self) -> bool {
-        matches!(self.phase, Phase::Waiting { .. } | Phase::Leaving)
+        matches!(self.phase, Phase::Waiting { .. } | Phase::Leaving { .. })
+    }
+
+    /// **Whether a second launch may still be promised a window** (§7.59,
+    /// review C-2; U-21): only while the card is still asking, which is a quit
+    /// the reader can cancel. From the answer on, and so from the photograph
+    /// on, `launch_wire` refuses with its existing `NotServing`.
+    #[must_use]
+    pub(crate) fn admits_launches(&self) -> bool {
+        self.phase == Phase::Asking
+    }
+
+    /// **Whether the document is fixed, so that no change to the session is
+    /// admitted** (U-21, §C.3: "from `Photograph` onward no new session
+    /// mutation is admitted").
+    ///
+    /// From the moment the photograph has been taken — the write, an update's
+    /// wait for its receipt, and every phase [`Self::document_is_written`]
+    /// names — and never for [`Phase::Abandoned`], whose application carries
+    /// on. An update's quit keeps the windows up and the loop turning while its
+    /// receipt is owed, and this is what makes the document that landed the
+    /// document that comes back.
+    #[must_use]
+    pub(crate) fn document_is_frozen(&self) -> bool {
+        matches!(self.phase, Phase::Writing { .. }) || self.document_is_written()
     }
 
     /// **Whether the document has already landed, so that nothing this run does
@@ -310,7 +489,7 @@ impl Quit {
     pub fn document_is_written(&self) -> bool {
         matches!(
             self.phase,
-            Phase::Retiring | Phase::Waiting { .. } | Phase::Leaving
+            Phase::Retiring | Phase::Waiting { .. } | Phase::Leaving { .. }
         )
     }
 
@@ -344,7 +523,10 @@ impl Quit {
         self.phase = match answer {
             QuitAnswer::Save => Phase::Saving,
             QuitAnswer::Discard => Phase::Discarding,
-            QuitAnswer::Cancel => Phase::Abandoned,
+            QuitAnswer::Cancel => {
+                self.give_up_the_update(Abandon::Cancelled);
+                Phase::Abandoned
+            }
         };
         self.step()
     }
@@ -362,6 +544,7 @@ impl Quit {
         self.phase = if report.is_complete() {
             Phase::Photographing
         } else {
+            self.give_up_the_update(Abandon::SaveIncomplete);
             Phase::Abandoned
         };
         self.step()
@@ -381,8 +564,51 @@ impl Quit {
         if self.phase != Phase::Photographing {
             return self.step();
         }
-        self.phase = Phase::Writing;
+        self.phase = Phase::Writing { receipt: None };
         self.step()
+    }
+
+    /// **Whether this quit's write is judged by a receipt the loop waits for
+    /// across turns** (U-21) rather than by one call: an update's, while its
+    /// update is still live. Every other quit writes as it always has.
+    #[must_use]
+    pub(crate) fn writes_by_receipt(&self) -> bool {
+        self.update.is_some_and(|update| update.leg == Leg::Live)
+    }
+
+    /// The generation an update's quit handed over and is waiting to hear
+    /// about, once it has.
+    #[must_use]
+    pub(crate) fn awaited_generation(&self) -> Option<u64> {
+        match self.phase {
+            Phase::Writing {
+                receipt: Some(receipt),
+            } => Some(receipt.generation),
+            _ => None,
+        }
+    }
+
+    /// The final document went to the writer as `generation`: wait for its
+    /// receipt until [`UPDATE_RECEIPT_DEADLINE`] from `now`.
+    pub(crate) fn requested(&mut self, generation: u64, now: Instant) -> QuitStep {
+        if self.phase == (Phase::Writing { receipt: None }) {
+            self.phase = Phase::Writing {
+                receipt: Some(Receipt {
+                    generation,
+                    until: now + UPDATE_RECEIPT_DEADLINE,
+                }),
+            };
+        }
+        self.step()
+    }
+
+    /// Whether the receipt's bound has run out — the clock read on the turn.
+    #[must_use]
+    pub(crate) fn receipt_is_overdue(&self, now: Instant) -> bool {
+        matches!(
+            self.phase,
+            Phase::Writing { receipt: Some(receipt) } if now >= receipt.until
+        )
     }
 
     /// What became of the document.
@@ -399,9 +625,27 @@ impl Quit {
     /// [`WriteVerdict::TimedOut`] retires exactly as a landing does, and the
     /// sentinel it leaves behind is not this transaction's to drop: the store
     /// keeps it precisely because nobody here saw the save finish.
+    ///
+    /// **And for an update's quit, the update's half of the verdict** (U-21,
+    /// §C.3): only a landing hands the transaction on. A refusal abandons the
+    /// update with the quit; a budget that ran out abandons the update and
+    /// **not** the quit, which leaves as any other timed-out quit does — the
+    /// journal stays `Prepared`, and the next start offers it again.
     pub fn written(&mut self, verdict: WriteVerdict) -> QuitStep {
-        if self.phase != Phase::Writing {
+        if !matches!(self.phase, Phase::Writing { .. }) {
             return self.step();
+        }
+        match verdict {
+            WriteVerdict::Landed => {
+                if let Some(update) = self.update.as_mut()
+                    && update.leg == Leg::Live
+                {
+                    update.leg = Leg::Landed;
+                    update.owed = Some(Step::SessionLanded);
+                }
+            }
+            WriteVerdict::TimedOut => self.give_up_the_update(Abandon::SessionTimedOut),
+            WriteVerdict::Refused => self.give_up_the_update(Abandon::SessionRefused),
         }
         self.phase = if verdict.leaves() {
             Phase::Retiring
@@ -428,25 +672,100 @@ impl Quit {
         let Phase::Waiting { until } = self.phase else {
             return self.step();
         };
+        // An update whose session landed is handed to its applier on the way
+        // out, and only then does the process leave (§C.3).
+        let handoff = if self.update.is_some_and(|update| update.leg == Leg::Landed) {
+            Handoff::Owed
+        } else {
+            Handoff::NotOwed
+        };
         if all_gone {
-            self.phase = Phase::Leaving;
+            self.phase = Phase::Leaving { handoff };
         } else if now >= until {
             // Said out loud rather than swallowed: a browser that outlived the
             // bound is a fact about this machine, and the picture on disk is
             // already safe either way.
             eprintln!("BT_WEB quit left with a page still holding its browser process");
-            self.phase = Phase::Leaving;
+            self.phase = Phase::Leaving { handoff };
         }
         self.step()
+    }
+
+    /// What the way out still owes the update, at [`QuitStep::Exit`].
+    #[must_use]
+    pub(crate) fn handoff(&self) -> Handoff {
+        match self.phase {
+            Phase::Leaving { handoff } => handoff,
+            _ => Handoff::NotOwed,
+        }
+    }
+
+    /// The hand-over went to the storage worker at `now`.
+    pub(crate) fn handoff_sent(&mut self, now: Instant) {
+        if self.phase
+            == (Phase::Leaving {
+                handoff: Handoff::Owed,
+            })
+        {
+            self.phase = Phase::Leaving {
+                handoff: Handoff::Sent {
+                    until: now + HANDOFF_DEADLINE,
+                },
+            };
+        }
+    }
+
+    /// Whether the hand-over's bound has run out — the clock read on the turn.
+    #[must_use]
+    pub(crate) fn handoff_is_overdue(&self, now: Instant) -> bool {
+        matches!(
+            self.phase,
+            Phase::Leaving { handoff: Handoff::Sent { until } } if now >= until
+        )
+    }
+
+    /// The hand-over answered, ran out of time, or could not be sent: leave.
+    pub(crate) fn handed_off(&mut self) {
+        if let Phase::Leaving { handoff } = &mut self.phase
+            && matches!(handoff, Handoff::Owed | Handoff::Sent { .. })
+        {
+            *handoff = Handoff::Done;
+        }
     }
 
     /// When the loop has to come back and look at the clock, if it does.
     #[must_use]
     pub fn deadline(&self) -> Option<Instant> {
         match self.phase {
-            Phase::Waiting { until } => Some(until),
+            Phase::Waiting { until }
+            | Phase::Writing {
+                receipt: Some(Receipt { until, .. }),
+            }
+            | Phase::Leaving {
+                handoff: Handoff::Sent { until },
+            } => Some(until),
             _ => None,
         }
+    }
+
+    /// **When the loop has to come back**, at the latest: the bound, and —
+    /// while an answer from a worker is owed — [`ANSWER_LOOK`] from `now`,
+    /// because neither worker wakes the loop itself (U-21).
+    #[must_use]
+    pub(crate) fn wake_at(&self, now: Instant) -> Option<Instant> {
+        let deadline = self.deadline()?;
+        let waiting_for_an_answer = matches!(
+            self.phase,
+            Phase::Writing { receipt: Some(_) }
+                | Phase::Leaving {
+                    handoff: Handoff::Sent { .. }
+                }
+        );
+        Some(if waiting_for_an_answer {
+            deadline.min(now + ANSWER_LOOK)
+        } else {
+            deadline
+        })
     }
 }
 
@@ -720,6 +1039,119 @@ mod tests {
             !abandoned.document_is_written(),
             "a quit that could not write leaves an application with everything still to say"
         );
+    }
+
+    /// RED (0.4.6 U-21) — **from the photograph on, the document is fixed: nothing a turn does
+    /// is a change to the session, until the quit is over or abandoned.**
+    ///
+    /// The restore card's reader and the one door onto the document ask this. An update's quit
+    /// keeps the windows up while its receipt is owed, so "after the write" (M3-4's
+    /// `document_is_written`) is not early enough: the rule starts at the photograph. A quit
+    /// that is abandoned carries on with everything still to say.
+    ///
+    /// MUTATION: answer `document_is_written` alone from `document_is_frozen` — the wait for the
+    /// receipt is then open to changes.
+    #[test]
+    fn the_document_is_fixed_from_the_photograph_until_the_quit_is_over() {
+        let txn = TxnId::new([0x21; 16]);
+        let now = Instant::now();
+        let mut quit = Quit::begin_for(names(), Reason::UpdateRestart { txn });
+        assert!(!quit.document_is_frozen(), "with the card up");
+        assert_eq!(quit.answer(QuitAnswer::Discard), QuitStep::Discard);
+        assert!(!quit.document_is_frozen(), "while the changes are dropped");
+        assert_eq!(quit.discarded(), QuitStep::Photograph);
+        assert!(!quit.document_is_frozen(), "while the pictures are taken");
+        assert_eq!(quit.photographed(), QuitStep::Write);
+        assert!(quit.document_is_frozen(), "once they have been");
+        assert_eq!(quit.requested(9, now), QuitStep::Write);
+        assert!(
+            quit.document_is_frozen(),
+            "and while the receipt is awaited"
+        );
+        assert!(!quit.document_is_written(), "which is not yet written");
+        assert_eq!(quit.written(WriteVerdict::Landed), QuitStep::Retire);
+        assert!(quit.document_is_frozen());
+        assert_eq!(quit.retired(now), QuitStep::WaitForPages);
+        assert_eq!(quit.pages(true, now), QuitStep::Exit);
+        assert!(quit.document_is_frozen(), "all the way out");
+
+        let mut abandoned = Quit::begin_for(Vec::new(), Reason::UpdateRestart { txn });
+        abandoned.photographed();
+        abandoned.requested(9, now);
+        assert_eq!(abandoned.written(WriteVerdict::Refused), QuitStep::Abandon);
+        assert!(
+            !abandoned.document_is_frozen(),
+            "a quit given up leaves the application with everything still to say"
+        );
+    }
+
+    /// RED (0.4.6 U-21) — **a person's quit carries no update, and an update's quit owes the
+    /// job exactly one answer and the way out one hand-over, only after its session landed.**
+    ///
+    /// MUTATION: in `Quit::pages`, owe the hand-over whatever the update's leg — a quit whose
+    /// session timed out then hands the installation on.
+    #[test]
+    fn only_a_landed_update_is_handed_over_on_the_way_out() {
+        let now = Instant::now();
+        let mut asked = Quit::begin(Vec::new());
+        assert_eq!(asked.reason(), Reason::Asked);
+        assert!(
+            !asked.writes_by_receipt(),
+            "a person's quit writes as it always has"
+        );
+        asked.photographed();
+        asked.written(WriteVerdict::Landed);
+        asked.retired(now);
+        assert_eq!(asked.pages(true, now), QuitStep::Exit);
+        assert_eq!(asked.handoff(), Handoff::NotOwed);
+        assert_eq!(asked.take_update_report(), None);
+
+        let txn = TxnId::new([0x21; 16]);
+        for (verdict, owed) in [
+            (WriteVerdict::Landed, Handoff::Owed),
+            (WriteVerdict::TimedOut, Handoff::NotOwed),
+        ] {
+            let mut quit = Quit::begin_for(Vec::new(), Reason::UpdateRestart { txn });
+            assert_eq!(quit.reason(), Reason::UpdateRestart { txn });
+            assert!(quit.writes_by_receipt());
+            quit.photographed();
+            quit.requested(3, now);
+            assert_eq!(quit.awaited_generation(), Some(3));
+            assert_eq!(
+                quit.deadline(),
+                Some(now + UPDATE_RECEIPT_DEADLINE),
+                "the receipt is held to its bound"
+            );
+            assert_eq!(quit.written(verdict), QuitStep::Retire);
+            let report = quit.take_update_report().expect("one answer for the job");
+            assert_eq!(report.txn, txn);
+            assert_eq!(
+                report.step,
+                if verdict == WriteVerdict::Landed {
+                    Step::SessionLanded
+                } else {
+                    Step::QuitAbandoned(Abandon::SessionTimedOut)
+                }
+            );
+            assert_eq!(quit.take_update_report(), None, "and only one");
+            quit.retired(now);
+            assert_eq!(quit.pages(true, now), QuitStep::Exit);
+            assert_eq!(quit.handoff(), owed, "{verdict:?}");
+            if owed == Handoff::Owed {
+                quit.handoff_sent(now);
+                assert_eq!(
+                    quit.handoff(),
+                    Handoff::Sent {
+                        until: now + HANDOFF_DEADLINE
+                    }
+                );
+                assert_eq!(quit.wake_at(now), Some(now + ANSWER_LOOK));
+                assert!(quit.handoff_is_overdue(now + HANDOFF_DEADLINE));
+                quit.handed_off();
+                assert_eq!(quit.handoff(), Handoff::Done);
+            }
+            assert_eq!(quit.step(), QuitStep::Exit);
+        }
     }
 
     /// Walk `quit` from `step` as `FolioApp::settle_quit` walks it, writing the window thread's

@@ -18,6 +18,12 @@ All notable changes to Folio are recorded here. The format follows
 - The clean-machine VM checklist now covers the self-updater's power-cut
   recovery: one step per state in the Windows and macOS state tables, with a
   hard-reset harness that cuts the VM's virtual power at each boundary.
+- The coming updater's Restart runs the ordinary quit to the end: every
+  unsaved-file question is asked as usual, and only once the session is
+  safely written does Folio hand the update to its installer and close.
+  Cancelling, a failed save, or a session that takes too long to write keeps
+  the update for later; the last one still closes Folio. Nothing can press
+  Restart yet.
 - The macOS CI job now lints every crate with the same warnings-as-errors line
   as Windows, shows that line can fail, and runs the renderer's and the
   corpus's tests on a Mac.

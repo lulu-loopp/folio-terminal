@@ -877,10 +877,21 @@ impl Runtime<'_> {
     /// the keyboard (0.4.5 ticket 57): [`restore::RestorePrompt::is_asking`], read of this
     /// window's prompt and the application's one question. [`Self::restore_layout`] draws the card
     /// on the same reading.
+    ///
+    /// **Never while a quit has fixed the document** (0.4.6 U-21): an update's quit keeps the
+    /// windows up while its session lands, and a card answered then would open windows into a
+    /// document that has already been photographed. The question is not spent — it is folded
+    /// into the document that lands, as any unanswered question is — so the card comes back only
+    /// if the quit is abandoned.
     pub(crate) fn restore_card_is_up(&self) -> bool {
         self.window
             .restore_prompt
             .is_asking(self.app.restore_question.len())
+            && !self
+                .app
+                .quit
+                .as_ref()
+                .is_some_and(crate::quit::Quit::document_is_frozen)
     }
 
     /// The restore prompt's placement, or `None` when it is not asking.
