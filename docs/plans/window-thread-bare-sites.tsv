@@ -120,8 +120,11 @@ bt-platform	-	crate::https_download::Partial::finish	std::fs::rename	1
 bt-platform	-	crate::install_txn::hold_until	std::thread::sleep	1
 bt-platform	-	crate::instance::canonical_path	std::fs::canonicalize	1
 bt-platform	-	crate::launch_agent::sweep	std::fs::read_dir	1
-bt-platform	-	crate::macos_update::run	std::process::Child::wait	1
-bt-platform	-	crate::macos_update::run	std::thread::sleep	1
+bt-platform	-	crate::macos_update::attach_with	std::fs::canonicalize	3
+bt-platform	-	crate::macos_update::detach_point	std::thread::sleep	1
+bt-platform	-	crate::macos_update::points_under	std::fs::canonicalize	1
+bt-platform	-	crate::macos_update::run_at	std::process::Child::wait	1
+bt-platform	-	crate::macos_update::run_at	std::thread::sleep	1
 bt-platform	-	crate::macos_update::verify_clone	std::fs::canonicalize	1
 bt-platform	[all(windows, target_arch = "x86_64")]	crate::hang::capture_thread_stack	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[not(windows)]	crate::file_replace::replace_file_preserving	std::fs::File::sync_all	1
