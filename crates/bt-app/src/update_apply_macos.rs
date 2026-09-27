@@ -133,11 +133,13 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
-use bt_platform::install_flip::{self, Ask, Running};
+use bt_platform::install_flip::{self, Running};
 use bt_platform::install_txn::{self, Held, Hold};
 use bt_platform::{HostPlatform, launch_agent};
 
 use crate::cli;
+pub(crate) use crate::update_apply::{Opener, Opens, failed_words, trial_words};
+use crate::update_apply::{Recording, Watch, Watched, an_earlier_holder, stop_trial, trial_runs};
 use crate::update_txn::{
     Action, Actor, Asker, BundleIdentity, Class, Disk, Effect, Event, HeaderOutcome, Home, Journal,
     Layout, Located, Nonce, Phase, PhaseKind, Receipt, Restore, TrialProcess, TxnId, decide,
@@ -303,78 +305,6 @@ impl Ended {
                 | Ended::RollbackWaits(_)
         )
     }
-}
-
-/// **The words the build started after a rollback carries**: `--update-failed`
-/// and the journal (the coordinator's ruling 3, U-29).
-pub(crate) fn failed_words(home: &Home) -> [OsString; 2] {
-    [
-        OsString::from(cli::UPDATE_FAILED_FLAG),
-        home.journal().into_os_string(),
-    ]
-}
-
-/// **The words that start the installed build as the trial of `txn`**:
-/// `--update-trial <txn> <nonce>` (U-12's frozen v1 flag).
-pub(crate) fn trial_words(txn: TxnId, nonce: &Nonce) -> [OsString; 3] {
-    [
-        OsString::from(cli::UPDATE_TRIAL_FLAG),
-        OsString::from(txn.to_string()),
-        OsString::from(nonce.to_string()),
-    ]
-}
-
-/// **What opens once a lock holder has let the lock go** (the coordinator's
-/// rulings 2 and 3, U-29b): one start of the installed build, or none.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Opens {
-    /// Nothing: a trial this holder started is the window, another holder is
-    /// at work, or nothing is owed.
-    Nothing,
-    /// The installed build as an ordinary start, with `--update-failed
-    /// <journal>` first when `failed`: the journal is still `destructive`
-    /// (the start must not hand itself back) or a retired rollback (its
-    /// card).
-    Installed { failed: bool },
-    /// The installed build — the new one, live and not committed — as a trial
-    /// of `txn` with a fresh nonce no journal records, then `--update-failed
-    /// <journal>`: its writes are held back and its receipt is never heard
-    /// (the new build is never started plainly before `Committed`, ruling 2).
-    Trial { txn: TxnId },
-}
-
-impl Opens {
-    /// The words the build is started with, before a handed command line;
-    /// `None` for [`Opens::Nothing`].
-    pub(crate) fn words(&self, home: &Home) -> Option<Vec<OsString>> {
-        match self {
-            Opens::Nothing => None,
-            Opens::Installed { failed: false } => Some(Vec::new()),
-            Opens::Installed { failed: true } => Some(failed_words(home).to_vec()),
-            Opens::Trial { txn } => {
-                let mut words = trial_words(*txn, &crate::update_job::mint_nonce()).to_vec();
-                words.extend(failed_words(home));
-                Some(words)
-            }
-        }
-    }
-}
-
-/// **Who starts the installed build once the lock is let go**, which decides
-/// what is owed (U-29b).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Opener {
-    /// P at the end of its road: what the restart it took over owes — the
-    /// old build after a revert, the live build after a rollback, nothing
-    /// after a commit (the trial is the window) or when it did not get that
-    /// far (U-29's ruling 1).
-    Applier,
-    /// R from the entrance at login: a start only after a revert or a
-    /// finished rollback (W11).
-    Login,
-    /// R handed a person's start (`--then-launch`): always one start, even
-    /// when the recovery itself failed (the coordinator's ruling 2).
-    Start,
 }
 
 /// **What recovery did, and what opens after it.**
@@ -580,14 +510,6 @@ fn an_applier_may_still_come(rescue_program: &Path) -> Option<u32> {
     };
     let listed = install_flip::running_from(rescue_program).ok()?;
     an_earlier_holder(mine, &listed)
-}
-
-/// Of `listed`, a process that is not `mine` and started no later than it.
-fn an_earlier_holder(mine: Running, listed: &[Running]) -> Option<u32> {
-    listed
-        .iter()
-        .find(|other| other.pid != mine.pid && other.started <= mine.started)
-        .map(|other| other.pid)
 }
 
 /// **What opens after a road that ended `ended`**, read from the disk once the
@@ -1031,122 +953,48 @@ impl<'a> Txn<'a> {
         })
         .map(|(_, program)| program)
         .collect();
-        let mut said_refusal = false;
-        loop {
-            let (nonce, began_ms, recorded) = match (&self.journal.body.phase, started) {
-                (
-                    Phase::Trial {
-                        nonce,
-                        process,
-                        began_ms,
-                    },
-                    _,
-                ) => (*nonce, *began_ms, Some(*process)),
-                (
-                    Phase::Stuck {
-                        retrial: Some(retrial),
-                        trial,
-                        ..
-                    },
-                    _,
-                ) if started.is_none_or(|(nonce, _)| nonce == retrial.nonce) => {
-                    (retrial.nonce, retrial.began_ms, *trial)
-                }
-                (_, Some((nonce, began_ms))) => (nonce, began_ms, None),
-                (other, None) => {
-                    return Err(format!("{:?} has no trial to wait for", other.kind()));
-                }
-            };
-            let deadline = began_ms.saturating_add(self.road.limits.trial_within_ms);
-            let receipt_path = self.road.home.receipt_path(self.road.txn, &nonce);
-            let receipt = read_receipt(&receipt_path);
-            match recorded {
-                None => {
-                    let listed = install_flip::running_from(places.program)
-                        .ok()
-                        .and_then(|list| {
-                            list.into_iter()
-                                .filter(|process| process.started >= began_ms.saturating_mul(1000))
-                                .min_by_key(|process| process.started)
-                        });
-                    let process = listed.or_else(|| {
-                        receipt
-                            .as_ref()
-                            .and_then(|found| found.as_ref().ok())
-                            .map(|receipt| Running {
-                                pid: receipt.pid,
-                                started: install_flip::started_of(receipt.pid).unwrap_or(0),
-                            })
-                    });
-                    if let Some(process) = process {
-                        let process = TrialProcess {
-                            pid: process.pid,
-                            started: process.started,
-                        };
-                        let event = if self.phase() == PhaseKind::Stuck {
-                            Event::RetrialBegan {
-                                nonce,
-                                process,
-                                began_ms,
-                            }
-                        } else {
-                            Event::TrialBegan {
-                                nonce,
-                                process,
-                                began_ms,
-                            }
-                        };
-                        self.record(actor, &event)?;
-                        continue;
-                    }
-                }
-                Some(process) => {
-                    match receipt {
-                        Some(Ok(receipt)) => {
-                            let event = Event::ReceiptAccepted(receipt);
-                            match self.journal.advance(&event) {
-                                Ok(_) => {
-                                    self.record(actor, &event)?;
-                                    return Ok(Some(self.commit(worker, places, actor)));
-                                }
-                                Err(refusal) if !said_refusal => {
-                                    said_refusal = true;
-                                    hands.say(&format!(
-                                        "BT_UPDATE_APPLY the receipt at {} is refused: {refusal:?}",
-                                        receipt_path.display()
-                                    ));
-                                }
-                                Err(_) => {}
-                            }
-                        }
-                        Some(Err(error)) if !said_refusal => {
-                            said_refusal = true;
-                            hands.say(&format!("BT_UPDATE_APPLY the receipt: {error}"));
-                        }
-                        _ => {}
-                    }
-                    if !trial_runs(process, &images) {
-                        hands.say(&format!(
-                            "BT_UPDATE_APPLY the trial {} ended without a receipt",
-                            process.pid
-                        ));
-                        return Ok(None);
-                    }
-                }
-            }
-            let now = now_ms();
-            if now >= deadline {
-                hands.say("BT_UPDATE_APPLY no receipt by the trial's deadline");
-                return Ok(None);
-            }
-            bt_platform::wait::sleep_within(
-                worker,
-                self.road
-                    .limits
-                    .poll
-                    .min(Duration::from_millis(deadline - now)),
-            );
-        }
+        let road = self.road;
+        let watch = Watch {
+            home: &road.home,
+            actor,
+            started,
+            poll: road.limits.poll,
+            trial_within_ms: road.limits.trial_within_ms,
+        };
+        // LaunchServices reports no pid: the trial is the process of the
+        // installed executable that started after the launch, or the
+        // receipt's own.
+        let program = places.program;
+        let mut find = |began_ms: u64, receipt: Option<&Receipt>| {
+            let listed = install_flip::running_from(program).ok().and_then(|list| {
+                list.into_iter()
+                    .filter(|process| process.started >= began_ms.saturating_mul(1000))
+                    .min_by_key(|process| process.started)
+            });
+            listed
+                .or_else(|| {
+                    receipt.map(|receipt| Running {
+                        pid: receipt.pid,
+                        started: install_flip::started_of(receipt.pid).unwrap_or(0),
+                    })
+                })
+                .map(|process| TrialProcess {
+                    pid: process.pid,
+                    started: process.started,
+                })
+        };
+        let watched = crate::update_apply::watch_trial(
+            worker,
+            self,
+            &watch,
+            &mut find,
+            &mut |process| trial_runs(process, &images),
+            &mut |line| hands.say(line),
+        )?;
+        Ok(match watched {
+            Watched::Committed => Some(self.commit(worker, places, actor)),
+            Watched::NoReceipt => None,
+        })
     }
 
     /// **The coordinator's ruling 3 (U-29b)**: a road that left the
@@ -1338,8 +1186,14 @@ impl<'a> Txn<'a> {
                 Action::FinishCommit { .. } => return Ok(self.commit(worker, places, actor)),
                 Action::StopTrial(process) => {
                     self.may(actor, Effect::EndTrial)?;
-                    if let Err(why) = stop_trial(worker, process, &images, &self.road.limits, hands)
-                    {
+                    let limits = &self.road.limits;
+                    if let Err(why) = stop_trial(
+                        worker,
+                        process,
+                        &images,
+                        (limits.quit_within, limits.end_within, limits.poll),
+                        &mut |line| hands.say(line),
+                    ) {
                         return self.stuck(actor, why, hands);
                     }
                 }
@@ -1454,68 +1308,14 @@ impl<'a> Txn<'a> {
     }
 }
 
-/// **Whether the recorded trial still runs as the new build**: its pid, with
-/// its start instant, in the process list of the new bundle's executable
-/// (`images`: at the launch path, or at `stage/` once a swap back has moved it
-/// there — whichever holds the new identity). A list that cannot be read says
-/// it does not (the rollback then goes on, and no signal is sent:
-/// [`install_flip::ask`] reads the list itself).
-fn trial_runs(process: TrialProcess, images: &[&Path]) -> bool {
-    install_flip::runs_from(
-        Running {
-            pid: process.pid,
-            started: process.started,
-        },
-        images,
-    )
-    .unwrap_or(false)
-}
-
-/// **Stop the trial** (W9/M9; the coordinator's ruling 2, U-29): ask it to
-/// quit, wait up to [`Limits::quit_within`] for it to leave the list, then end
-/// it and wait up to [`Limits::end_within`]. Each signal goes through
-/// [`install_flip::ask`], which sends nothing to a process that is not that
-/// very trial running from the new build.
-fn stop_trial(
-    worker: &WorkerCtx,
-    process: TrialProcess,
-    images: &[&Path],
-    limits: &Limits,
-    hands: &mut impl Hands,
-) -> Result<(), String> {
-    let running = Running {
-        pid: process.pid,
-        started: process.started,
-    };
-    for (ask, within) in [
-        (Ask::Quit, limits.quit_within),
-        (Ask::End, limits.end_within),
-    ] {
-        match install_flip::ask(running, images, ask) {
-            Ok(true) => hands.say(&format!(
-                "BT_UPDATE_ROLLBACK the trial {} is asked to {}",
-                process.pid,
-                match ask {
-                    Ask::Quit => "quit",
-                    Ask::End => "end",
-                }
-            )),
-            Ok(false) => return Ok(()),
-            Err(error) => return Err(format!("the trial {}: {error}", process.pid)),
-        }
-        let until = Instant::now() + within;
-        loop {
-            if !trial_runs(process, images) {
-                return Ok(());
-            }
-            let left = until.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                break;
-            }
-            bt_platform::wait::sleep_within(worker, limits.poll.min(left));
-        }
+impl Recording for Txn<'_> {
+    fn journal(&self) -> &Journal {
+        &self.journal
     }
-    Err(format!("the trial {} did not end", process.pid))
+
+    fn record(&mut self, actor: Actor, event: &Event) -> Result<(), String> {
+        Txn::record(self, actor, event)
+    }
 }
 
 /// **§C.4's authoritative test that O is gone**: the data directory's claim,

@@ -29,6 +29,15 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- On Windows, the coming updater can now put the previous version back when a
+  new one does not start: the new copy is asked to close, then ended, the new
+  files are moved aside and the old ones back, and the old build opens again
+  with its update card saying the previous version was restored. If putting it
+  back fails, everything is kept, the card says the update is incomplete and
+  shows the folder, and the next login or start tries again, three times at
+  most. A cut-off update now always opens the old build or, while the new one
+  is still unproven, the new one only as a trial — on Windows as on macOS.
+  Nothing can start an update yet.
 - A copy installed with winget is now told apart from one unpacked by hand, by
   the record winget itself keeps of the install, so the coming updater will
   point it at `winget upgrade --id WeiyiShi.Folio --exact` instead of updating

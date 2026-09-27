@@ -2235,3 +2235,31 @@ empty and a scan of the same archive found nothing; its signatures were from
 detection. The override is `winget settings --enable
 LocalArchiveMalwareScanOverride` and `--ignore-local-archive-malware-scan`, or an
 updated Defender (`docs/RELEASING.md` ▸ winget ▸ Troubleshooting).
+
+**The Windows rollback as built (U-24).** P — after a trial with no receipt
+by its deadline, a trial that died, a failed move or a trial that did not
+start — and R — at logon or from an ordinary start — roll back by
+`update_txn::decide` from the disk (W9): the trial stopped while the process
+list shows the journal's pid, with its creation time, running from
+`<install>\folio.exe` (`install_flip::ask`'s Windows arm: the creation time
+read again from the handle it opens; `WM_CLOSE` to the windows a person could
+close, 5 s, then `TerminateProcess`); exclusive admission (not had → nothing
+recorded, the next holder tries); `rolledout\` made; every install file at a
+new digest to `rolledout\`, then every old file back from `backup\`
+(`rollback_moves`; I1′ after every move; a file at neither digest is never
+moved); the old inventory verified by digest → `RolledBack`; the `Run` value
+removed and flushed → `Retired{RolledBack}`; `H\<txn>` is the next start's
+(W11). Any failure → `Stuck{last_error, attempts}`, everything kept, tried
+again at every logon and start until the bound (W10). **Which build opens is
+U-29b's rule on Windows too**: the old build plainly after a revert, with
+`--update-failed` after a rollback or while `destructive` with the old set
+installed; the new set before `Committed` only as a trial — over a `Stuck`
+with every new file installed, one the holder starts (`RetrialBegan`), whose
+receipt commits forward; the rescue copy with `--update-failed` only where the
+install holds neither whole set. The rescue copy U-23 opened for every
+`destructive` journal is retired. **A live applier at `Handoff`**: on both
+platforms a process of the rescue executable started no later than R has the
+transaction; R writes nothing, waits for nothing and opens nothing (U-23's
+180 s wait is removed). `Asker::Rescue` drives the Windows recovery; the
+trial's wait (`update_apply::watch_trial`) and stop (`stop_trial`) are both
+platforms'.

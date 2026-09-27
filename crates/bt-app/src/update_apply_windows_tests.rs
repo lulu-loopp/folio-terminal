@@ -1,9 +1,10 @@
-//! **The Windows applier and recovery over real install folders, real signed
-//! synthetic programs, real locks, a real claim, real moves and real
-//! processes** (Windows); off Windows nothing here runs.
+//! **The Windows applier, its rollback and recovery over real install
+//! folders, real signed synthetic programs, real locks, a real claim, real
+//! moves and real processes** (Windows); off Windows nothing here runs but the
+//! pure half of the rule for a live applier.
 //!
 //! Every file is made here, under the test's own temporary folder
-//! (`%TEMP%\bt-u23-*`, removed when the test is over): an install folder
+//! (`%TEMP%\bt-u24-*`, removed when the test is over): an install folder
 //! holding the running 0.4.6 build and a staged 0.4.7 set in its home's
 //! `set\`, both written by U-20's release writer
 //! (`update_prepare_windows::tests::build_that`) and signed by U-15's test root
@@ -12,8 +13,11 @@
 //! opens no window and stays up until it is ended: the trial, the old build
 //! still running (E-7) and an applier still alive are real processes of it,
 //! and every one this test starts is ended by the handle it recorded
-//! ([`Children`]). No Folio is ever started: a start the applier or the
-//! recovery asks for is recorded ([`Fake::opened`]).
+//! ([`Children`]) — or, the trial a rollback stops, by the product's own
+//! `install_flip::ask`, which touches only a process whose pid, creation time
+//! and image are the recorded ones. No Folio is ever started: a start the
+//! applier or the recovery asks for is recorded ([`Fake::opened`]), and the
+//! programs open no window.
 //!
 //! The entrance goes through the real `bt_platform::logon_hook::arm_in` and
 //! `disarm_in` over a registry held in memory ([`Memory`]), under a key of
@@ -25,14 +29,18 @@ use std::collections::BTreeMap;
 use std::process::{Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 
 use bt_platform::logon_hook::{self, Registry};
 use bt_platform::trust::FileVersion;
 use bt_platform::trust_harness::{Behaviour, IDENTITY, TestCa};
 use bt_winres::digest::sha256;
 
+use crate::update_apply::an_earlier_holder;
 use crate::update_prepare_windows::tests::build_that;
-use crate::update_txn::{Body, Class, Header, HeaderOutcome, Member, Outcome, PhaseKind, Receipt};
+use crate::update_txn::{
+    Body, Class, Header, HeaderOutcome, Member, Outcome, PhaseKind, Receipt, STUCK_ATTEMPT_LIMIT,
+};
 
 /// The running build's `VERSIONINFO`, and the staged one's.
 const RUNNING: FileVersion = FileVersion([0, 4, 6, 0]);
@@ -135,6 +143,8 @@ enum Trial {
     AnswersWithAnotherNonce,
     /// Writes nothing.
     Silent,
+    /// Ends at once, writing nothing.
+    Dies,
 }
 
 type MoveHook = Box<dyn FnMut(&Move) + Send>;
@@ -191,6 +201,10 @@ impl World for Fake {
         let nonce = Nonce::parse(&args[2].to_string_lossy()).unwrap();
         let carried = match self.trial {
             Trial::Silent => return Ok(pid),
+            Trial::Dies => {
+                self.children.end(pid);
+                return Ok(pid);
+            }
             Trial::Answers => nonce,
             Trial::AnswersWithAnotherNonce => Nonce::new([0x99; 32]),
         };
@@ -252,7 +266,7 @@ impl Install {
     fn new(tag: &str) -> Option<Self> {
         let ca = TestCa::new().ok()?;
         let root = std::env::temp_dir().join(format!(
-            "bt-u23-{tag}-{}-{}",
+            "bt-u24-{tag}-{}-{}",
             std::process::id(),
             bt_platform::attention_pipe::unguessable_bits() % 1_000_000
         ));
@@ -356,7 +370,6 @@ impl Install {
             policy: self.ca.policy(),
             channel: Some(Channel::Ours),
             limits,
-            recover_within: Duration::from_secs(30),
             me: Running {
                 pid: std::process::id(),
                 started: 0,
@@ -456,14 +469,19 @@ impl Install {
 }
 
 /// Short limits for a test: `old_within_ms` for the old build, `trial_ms`
-/// for the trial.
+/// for the trial, [`GRACE`] for a trial asked to quit.
 fn limits(old_within_ms: u64, trial_ms: u64) -> Limits {
     Limits {
         old_within: Duration::from_millis(old_within_ms),
         trial_within_ms: trial_ms,
         poll: Duration::from_millis(40),
+        quit_within: GRACE,
+        end_within: Duration::from_secs(10),
     }
 }
+
+/// A test's grace for a trial asked to quit (the product's is 5 s).
+const GRACE: Duration = Duration::from_millis(600);
 
 fn start_on_a_worker<T: Send + 'static>(
     body: impl FnOnce(&WorkerCtx) -> T + Send + 'static,
@@ -553,6 +571,58 @@ fn nothing_moved(install: &Install) {
             .all(Option::is_none),
         "nothing is in backup\\"
     );
+}
+
+/// **The old set is installed again, byte for byte, and the new one is out**
+/// — in `rolledout\` or still in `set\`, each new file in exactly one.
+fn rolled_back_on_disk(install: &Install) {
+    assert!(
+        install.holds(Place::Install, &install.old),
+        "the install is the old build again"
+    );
+    for (name, bytes) in &install.new {
+        let places = [Place::Set, Place::RolledOut]
+            .iter()
+            .filter(|place| {
+                std::fs::read(install.folder(**place).join(name))
+                    .ok()
+                    .as_ref()
+                    == Some(bytes)
+            })
+            .count();
+        assert_eq!(places, 1, "the new `{name}` is out, once");
+    }
+}
+
+/// The words a build started after a rollback carries, then `handed`.
+fn failed_then(install: &Install, handed: &[OsString]) -> Vec<OsString> {
+    let mut words = failed_words(&install.home).to_vec();
+    words.extend_from_slice(handed);
+    words
+}
+
+/// Whether `pid`, recorded at `started`, still runs.
+fn runs(process: TrialProcess) -> bool {
+    install_flip::still_running(Running {
+        pid: process.pid,
+        started: process.started,
+    })
+}
+
+/// The first line that contains `needle`, by its index.
+fn said_at(world: &Fake, needle: &str) -> Option<usize> {
+    world.said.iter().position(|line| line.contains(needle))
+}
+
+/// **A foreign file at every new name in `rolledout\`**: a move out there is
+/// refused (a move never replaces), so a rollback stops at its first move
+/// with the new set still installed.
+fn block_rolledout(install: &Install) {
+    let rolledout = install.folder(Place::RolledOut);
+    std::fs::create_dir_all(&rolledout).unwrap();
+    for (name, _) in &install.new {
+        std::fs::write(rolledout.join(name), b"somebody else's file").unwrap();
+    }
 }
 
 // ── the tests ───────────────────────────────────────────────────────────────
@@ -779,16 +849,21 @@ fn moving_keeps_i1_prime_at_every_instant() {
     assert!(install.holds(Place::Install, &install.new));
 }
 
-/// RED (U-23) — **a move that fails leaves the disk in I1′, and the applier
-/// journals `RollbackIntent` and stops**: no trial, the entrance kept for the
-/// rollback, nothing started.
+/// RED (U-23; U-24) — **a move that fails leaves the disk in I1′ and the
+/// applier journals `RollbackIntent` — then rolls back from what is on disk,
+/// which never moves a file the journal does not know**: somebody else's file
+/// at `folio.exe`'s name stops the rollback at `Stuck`, everything kept — the
+/// old files in `backup\`, the new ones in `set\`, the entrance — and, the
+/// install holding neither whole set, the rescue copy opens with
+/// `--update-failed` (the fallback).
 ///
-/// (b).2 W6 and the coordinator's ruling 3: "a move that fails leaves the
-/// disk in I1′ and the applier journals `RollbackIntent` and stops".
+/// (b).2 W6: "a move that fails leaves the disk in I1′"; W9: "move install
+/// files with new digests"; W10: "`Stuck` … journal, backup and Run value
+/// kept".
 ///
 /// MUTATION: in `at_armed`, go on to the next move after a failed one.
 #[test]
-fn a_failed_move_journals_rollback_intent_and_stops() {
+fn a_failed_move_is_declared_and_a_foreign_file_leaves_the_rollback_stuck() {
     let Some(install) = Install::new("failed") else {
         return;
     };
@@ -804,12 +879,18 @@ fn a_failed_move_journals_rollback_intent_and_stops() {
         }
     }));
     let (ended, world) = applied(&install, limits(20_000, 20_000), world);
-    assert_eq!(ended, Ended::RollbackIntent, "{:?}", world.said);
-    assert_eq!(
-        install.on_disk().body.phase,
-        Phase::RollbackIntent { trial: None }
+    assert!(
+        matches!(ended, Ended::Stuck(_)),
+        "{ended:?} {:?}",
+        world.said
+    );
+    assert!(
+        wrote(&world).ends_with("[Armed, Moving, RollbackIntent, Stuck]"),
+        "{:?}",
+        world.said
     );
     assert_eq!(install.header().outcome, HeaderOutcome::RolledBack);
+    assert_eq!(install.header().class, Class::Destructive);
     assert!(
         install.holds(Place::Backup, &install.old),
         "every old file is in backup\\"
@@ -818,11 +899,20 @@ fn a_failed_move_journals_rollback_intent_and_stops() {
         install.holds(Place::Set, &install.new),
         "every new file is still in set\\"
     );
+    assert_eq!(
+        std::fs::read(&install.installed).unwrap(),
+        b"somebody else's file",
+        "the foreign file is left as it is"
+    );
     assert!(world.launched.is_empty(), "no trial");
-    assert!(world.opened.is_empty(), "nothing started");
     assert!(
         install.registry.holds(install.txn),
-        "the entrance stays for the rollback"
+        "the entrance stays for the next attempt"
+    );
+    assert_eq!(
+        world.opened,
+        vec![(install.rescue.clone(), failed_then(&install, &[]))],
+        "neither whole set is installed: the rescue copy opens"
     );
 }
 
@@ -844,24 +934,19 @@ fn a_receipt_for_another_nonce_is_refused() {
         limits(20_000, 1_500),
         install.world(Trial::AnswersWithAnotherNonce),
     );
-    assert_eq!(ended, Ended::RollbackIntent, "{:?}", world.said);
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     let said = world
         .said
         .iter()
         .filter(|line| line.contains("is refused"))
         .count();
     assert_eq!(said, 1, "{:?}", world.said);
-    let Phase::RollbackIntent { trial: Some(trial) } = install.on_disk().body.phase else {
-        panic!("{:?}", install.on_disk().body.phase);
-    };
     assert!(
-        install_flip::still_running(Running {
-            pid: trial.pid,
-            started: trial.started
-        }),
-        "the trial it recorded is the process it started"
+        wrote(&world).ends_with("[Armed, Moving, Trial, RollbackIntent, RolledBack, Retired]"),
+        "{:?}",
+        world.said
     );
-    assert!(wrote(&world).ends_with("[Armed, Moving, Trial, RollbackIntent]"));
+    rolled_back_on_disk(&install);
 }
 
 /// RED (U-23) — **`Committed` is written after `Trial`, on the receipt of
@@ -972,7 +1057,8 @@ fn backup_is_deleted_only_after_committed_and_the_run_value_is_gone_first() {
 /// from the disk**: `Handoff` with an entrance already there (W4) removes it
 /// and reverts, nothing moved, the old build started again; `Armed` (W5)
 /// admits and goes on to `Committed`; `Moving` with some moves done (W6)
-/// declares the rollback and moves nothing more.
+/// declares the rollback, moves nothing further forward, and rolls back
+/// (U-24).
 ///
 /// MUTATION: in `Txn::apply`, send `Armed` to `recover_from` (which reverts).
 #[test]
@@ -1010,26 +1096,27 @@ fn reentry_at_w4_w5_w6_continues_from_the_disk() {
     install.arm();
     install.move_first(2);
     install.write(Phase::Moving);
-    let before: Vec<_> = [Place::Install, Place::Backup, Place::Set]
-        .iter()
-        .map(|place| install.in_place(*place, &install.old))
-        .collect();
     let (ended, world) = applied(
         &install,
         limits(20_000, 20_000),
         install.world(Trial::Answers),
     );
-    assert_eq!(ended, Ended::RollbackIntent, "{:?}", world.said);
-    assert_eq!(
-        install.on_disk().body.phase,
-        Phase::RollbackIntent { trial: None }
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(
+        wrote(&world).ends_with("[RollbackIntent, RolledBack, Retired]"),
+        "{:?}",
+        world.said
     );
-    let after: Vec<_> = [Place::Install, Place::Backup, Place::Set]
-        .iter()
-        .map(|place| install.in_place(*place, &install.old))
-        .collect();
-    assert_eq!(before, after, "nothing more is moved");
+    assert!(install.holds(Place::Install, &install.old));
+    assert!(
+        install.holds(Place::Set, &install.new),
+        "nothing new was moved in"
+    );
     assert!(world.launched.is_empty());
+    assert_eq!(
+        world.opened,
+        vec![(install.installed.clone(), failed_then(&install, &[]))]
+    );
 }
 
 /// RED (U-23) — **`Committed` with its cleanup cut short is finished — the
@@ -1139,136 +1226,785 @@ fn a_changed_set_is_refused_before_the_entrance() {
     assert!(world.launched.is_empty());
 }
 
-/// RED (U-23) — **a recovery that finds `Handoff` while an applier may still
-/// be alive — a process of the rescue image started before it — lets the
-/// lock go and waits; once that process is gone, `Handoff` is a dead
-/// applier's and is reverted.**
+/// The recovery door as the entrance at logon starts it — no command line —
+/// run to its end: its exit code, and the world.
+fn recovered_at_logon(install: &Install, limits: Limits, mut world: Fake) -> (i32, Fake) {
+    let road = install.road(limits);
+    on_a_worker(move |worker| {
+        let code = crate::update_recover::run_windows(worker, &road, None, &mut world);
+        (code, world)
+    })
+}
+
+/// Every forward move done by hand, the entrance armed, and the journal at
+/// `phase`: a dead applier's road past its last move.
+fn flipped_at(install: &Install, phase: Phase) {
+    install.arm();
+    install.move_first(install.inventories.forward_moves().len());
+    install.write(phase);
+}
+
+/// `Stuck` after `attempts` failed rollbacks, no trial recorded.
+fn stuck(attempts: u8) -> Phase {
+    Phase::Stuck {
+        trial: None,
+        last_error: "an earlier attempt".to_owned(),
+        attempts,
+        retrial: None,
+    }
+}
+
+/// The name of a new member other than `folio.exe`.
+fn a_new_name_besides_the_program(install: &Install) -> String {
+    install
+        .new
+        .iter()
+        .map(|(name, _)| name.clone())
+        .find(|name| name != "folio.exe")
+        .expect("the new set has a file besides folio.exe")
+}
+
+/// RED (U-24) — **a trial that gives no receipt by its deadline is stopped —
+/// asked to quit, then, its grace run out, ended — and the moves are reversed:
+/// every install file with a new digest to `rolledout\`, every old file back
+/// from `backup\`; `RolledBack` is durable, the `Run` value is removed,
+/// `Retired{RolledBack}` makes the class `terminal`, and the old build is
+/// started again with `--update-failed <journal>`.**
 ///
-/// The owner's ruling of 2026-09-25 (3): a start during an apply waits for
-/// it; the coordinator's of 2026-09-27: a dead applier's `Handoff` goes back
-/// to `Prepared`.
+/// §C.5: "No health → `RollingBack`"; (b).2 W9 and W11; the coordinator's
+/// ruling 1: "relaunch the installed old build `folio.exe --update-failed
+/// <journal>`". On BASE the applier stopped at `RollbackIntent` and started
+/// nothing.
 ///
-/// MUTATION: `applier_alive` answers `false`.
+/// MUTATION: in `Txn::declare_rollback`, return after recording
+/// `RollbackDeclared` instead of settling (U-23's stop).
 #[test]
-fn a_live_applier_is_waited_for_and_a_dead_one_reverted() {
-    let Some(install) = Install::new("alive") else {
+fn a_failed_health_reverses_the_moves_and_relaunches_the_old_build() {
+    let Some(install) = Install::new("health") else {
         return;
     };
-    let applier = install.children.start(&install.rescue, &[]);
-    let mut road = install.road(limits(20_000, 20_000));
-    road.me = Running {
-        pid: std::process::id(),
-        started: u64::MAX,
-    };
-    let world = install.world(Trial::Silent);
-    let recovery = start_on_a_worker(move |worker| {
-        let mut world = world;
-        let code = crate::update_recover::run_windows(worker, &road, Some(&handed()), &mut world);
-        (code, world)
-    });
-    std::thread::sleep(Duration::from_millis(800));
-    assert_eq!(
-        install.on_disk().body.phase.kind(),
-        PhaseKind::Handoff,
-        "the live applier's transaction is left to it"
+    let began = Instant::now();
+    let (ended, world) = applied(
+        &install,
+        limits(20_000, 1_500),
+        install.world(Trial::Silent),
     );
-    install.children.end(applier);
-    let (code, world) = recovery.join().unwrap();
-    assert_eq!(code, 0, "{:?}", world.said);
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert!(
-        world.said.iter().any(|line| line.contains("still alive")),
+        began.elapsed() >= Duration::from_millis(1_500),
+        "the trial had its deadline"
+    );
+    assert!(
+        wrote(&world).ends_with("[Armed, Moving, Trial, RollbackIntent, RolledBack, Retired]"),
+        "{:?}",
+        world.said
+    );
+    let quit = said_at(&world, "is asked to quit").expect("the trial is asked to quit");
+    let end = said_at(&world, "is asked to end").expect("the silent trial is ended");
+    assert!(quit < end, "{:?}", world.said);
+    rolled_back_on_disk(&install);
+    assert!(
+        install.holds(Place::RolledOut, &install.new),
+        "every new file went to rolledout\\"
+    );
+    assert!(
+        install
+            .in_place(Place::Backup, &install.old)
+            .iter()
+            .all(Option::is_none),
+        "every old file came back from backup\\"
+    );
+    assert!(
+        !install.registry.holds(install.txn),
+        "the Run value is removed"
+    );
+    assert_eq!(
+        install.on_disk().body.phase,
+        Phase::Retired {
+            outcome: Outcome::RolledBack
+        }
+    );
+    let header = install.header();
+    assert_eq!(header.class, Class::Terminal);
+    assert_eq!(header.outcome, HeaderOutcome::RolledBack);
+    assert_eq!(
+        world.opened,
+        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        "the old build is started again with --update-failed"
+    );
+}
+
+/// RED (U-24) — **a trial that dies without a receipt is rolled back at
+/// once**, long before its deadline, and nothing is asked of a process that is
+/// gone.
+///
+/// (b).2 W7: "the trial gone … → `RollbackIntent`"; W9.
+///
+/// MUTATION: in `Txn::watch`, answer the trial alive whatever the process list
+/// says (the applier then waits out the 60 s deadline).
+#[test]
+fn a_dead_trial_rolls_back_at_once() {
+    let Some(install) = Install::new("dead") else {
+        return;
+    };
+    let began = Instant::now();
+    let (ended, world) = applied(&install, limits(20_000, 60_000), install.world(Trial::Dies));
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(
+        began.elapsed() < Duration::from_secs(30),
+        "rolled back at once, not at the deadline: {:?}",
+        began.elapsed()
+    );
+    assert!(
+        said_at(&world, "ended without a receipt").is_some(),
+        "{:?}",
+        world.said
+    );
+    assert!(said_at(&world, "is asked to").is_none(), "{:?}", world.said);
+    rolled_back_on_disk(&install);
+    assert_eq!(
+        world.opened,
+        vec![(install.installed.clone(), failed_then(&install, &[]))]
+    );
+}
+
+/// RED (U-24) — **between every two moves of the rollback, every old file is
+/// in exactly one of the install and `backup\`, and every new file in exactly
+/// one of `set\`, the install and `rolledout\`** (I1′), by their bytes; and
+/// the watcher saw every move back.
+///
+/// (b).2 W9: "every step I1′"; `update_txn::Restore::Moves`: "the new files out
+/// to `rolledout\` first, then the old files back from `backup\` — the new set
+/// is never destroyed before the old is restored (F-7)".
+///
+/// MUTATION: in `update_txn::rollback_moves`, put the old files back before
+/// the new ones go out.
+#[test]
+fn rollback_keeps_i1_prime_at_every_instant() {
+    let Some(install) = Install::new("i1back") else {
+        return;
+    };
+    let folders = [
+        install.folder(Place::Install),
+        install.folder(Place::Backup),
+        install.folder(Place::Set),
+        install.folder(Place::RolledOut),
+    ];
+    let (old, new) = (install.old.clone(), install.new.clone());
+    let broken = Arc::new(Mutex::new(Vec::<String>::new()));
+    let backs = Arc::new(Mutex::new(0usize));
+    let (seen, counted) = (Arc::clone(&broken), Arc::clone(&backs));
+    let mut world = install.world(Trial::Silent);
+    world.on_move = Some(Box::new(move |done| {
+        if done.to == Place::RolledOut || done.from == Place::Backup {
+            *counted.lock().unwrap() += 1;
+        }
+        let count = |files: &Files, places: &[&PathBuf]| -> Vec<usize> {
+            files
+                .iter()
+                .map(|(name, bytes)| {
+                    places
+                        .iter()
+                        .filter(|place| {
+                            std::fs::read(place.join(name)).ok().as_ref() == Some(bytes)
+                        })
+                        .count()
+                })
+                .collect()
+        };
+        let olds = count(&old, &[&folders[0], &folders[1]]);
+        let news = count(&new, &[&folders[2], &folders[0], &folders[3]]);
+        if olds.iter().chain(&news).any(|places| *places != 1) {
+            seen.lock().unwrap().push(format!(
+                "after `{}` {:?} → {:?}: old {olds:?}, new {news:?}",
+                done.name, done.from, done.to
+            ));
+        }
+    }));
+    let (ended, world) = applied(&install, limits(20_000, 1_000), world);
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(
+        broken.lock().unwrap().is_empty(),
+        "{:?}",
+        broken.lock().unwrap()
+    );
+    assert_eq!(
+        *backs.lock().unwrap(),
+        install.old.len() + install.new.len(),
+        "every move back was watched"
+    );
+    rolled_back_on_disk(&install);
+}
+
+/// RED (U-24) — **a rollback begins from what the disk holds, never from the
+/// phase**: whatever prefix of the flip a dead applier left — old files out
+/// and none in, some new files in, or the whole flip — and whichever phase the
+/// journal names for it (`Moving`, a `Trial` whose process is gone, or
+/// `RollbackIntent`), the recovery moves out exactly the install files at new
+/// digests and back exactly the old files `backup\` holds, and the old build
+/// opens with `--update-failed`.
+///
+/// (b).2 W6: "`Moving`, any number of moves done … → `RollbackIntent`, then
+/// row W9"; F-7: "reconciled by digest against the recorded inventories".
+///
+/// MUTATION: in `update_txn::rollback_moves`, put an old file back only where
+/// the install holds the new one (a name moved out and not yet replaced is then
+/// never restored).
+#[test]
+fn rollback_from_a_half_moved_install_uses_the_digests_not_the_phase() {
+    let Some(probe) = Install::new("half-probe") else {
+        return;
+    };
+    let old_count = probe.inventories.old_present.len();
+    let all = probe.inventories.forward_moves().len();
+    drop(probe);
+    let nonce = Nonce::new([0x66; 32]);
+    for (moved, phase) in [
+        (2, "moving"),
+        (old_count + 1, "moving"),
+        (old_count + 1, "trial"),
+        (all, "intent"),
+    ] {
+        let Some(install) = Install::new(&format!("half-{moved}-{phase}")) else {
+            return;
+        };
+        install.arm();
+        install.move_first(moved);
+        let journal_phase = match phase {
+            "moving" => Phase::Moving,
+            "trial" => {
+                let trial = install.start_trial();
+                install.children.end(trial.pid);
+                Phase::Trial {
+                    nonce,
+                    process: trial,
+                    began_ms: now_ms(),
+                }
+            }
+            _ => Phase::RollbackIntent { trial: None },
+        };
+        install.write(journal_phase);
+        let (code, world) = recovered(
+            &install,
+            limits(20_000, 20_000),
+            install.world(Trial::Silent),
+        );
+        let case = format!("{moved} moves, {phase}");
+        assert_eq!(code, 0, "{case}: {:?}", world.said);
+        assert_eq!(
+            install.on_disk().body.phase,
+            Phase::Retired {
+                outcome: Outcome::RolledBack
+            },
+            "{case}: {:?}",
+            world.said
+        );
+        rolled_back_on_disk(&install);
+        let moved_in = moved.saturating_sub(old_count);
+        for (at, (name, bytes)) in install.new.iter().enumerate() {
+            let place = if at < moved_in {
+                Place::RolledOut
+            } else {
+                Place::Set
+            };
+            assert_eq!(
+                std::fs::read(install.folder(place).join(name))
+                    .ok()
+                    .as_ref(),
+                Some(bytes),
+                "{case}: the new `{name}` is in {place:?}"
+            );
+        }
+        assert_eq!(
+            world.opened,
+            vec![(install.installed.clone(), failed_then(&install, &handed()))],
+            "{case}"
+        );
+    }
+}
+
+/// RED (U-24) — **a move back that fails is `Stuck`, with everything kept**:
+/// the failure recorded (`Stuck{last_error, attempts: 1}`), the journal still
+/// `destructive`, the `Run` value in place, every old file in exactly one of
+/// the install and `backup\`, every new file in exactly one of the install and
+/// `rolledout\`, the file in the way untouched — and, the install holding
+/// neither whole set, the rescue copy opens with `--update-failed` and the
+/// handed line.
+///
+/// §C.5: "rollback fails → `Stuck`, backups kept, entrance kept"; (b).2 W10.
+///
+/// MUTATION: in `Txn::move_back`, answer a failed move with `Ended::Stuck`
+/// without recording `RollbackFailed`.
+#[test]
+fn a_failed_move_back_is_stuck_with_everything_kept() {
+    let Some(install) = Install::new("stuck") else {
+        return;
+    };
+    flipped_at(&install, Phase::RollbackIntent { trial: None });
+    let mut world = install.world(Trial::Silent);
+    let folder = install.install();
+    let taken = Arc::new(Mutex::new(None::<String>));
+    let keep = Arc::clone(&taken);
+    world.on_move = Some(Box::new(move |done| {
+        let mut kept = keep.lock().unwrap();
+        if done.to == Place::RolledOut && kept.is_none() {
+            // The new file is out; something takes its name before the old
+            // one comes back.
+            std::fs::write(folder.join(&done.name), b"somebody else's file").unwrap();
+            *kept = Some(done.name.clone());
+        }
+    }));
+    let (code, world) = recovered(&install, limits(20_000, 20_000), world);
+    assert_eq!(code, 0, "{:?}", world.said);
+    let name = taken.lock().unwrap().clone().expect("a new file went out");
+    let Phase::Stuck {
+        attempts,
+        last_error,
+        ..
+    } = install.on_disk().body.phase
+    else {
+        panic!("{:?} {:?}", install.on_disk().body.phase, world.said);
+    };
+    assert_eq!(attempts, 1);
+    assert!(last_error.contains(&name), "{last_error}");
+    assert_eq!(install.header().class, Class::Destructive);
+    assert!(install.registry.holds(install.txn), "the Run value is kept");
+    assert_eq!(
+        std::fs::read(install.install().join(&name)).unwrap(),
+        b"somebody else's file"
+    );
+    for (name, bytes) in &install.old {
+        let places = [Place::Install, Place::Backup]
+            .iter()
+            .filter(|place| {
+                std::fs::read(install.folder(**place).join(name))
+                    .ok()
+                    .as_ref()
+                    == Some(bytes)
+            })
+            .count();
+        assert_eq!(places, 1, "the old `{name}` is kept, once");
+    }
+    for (name, bytes) in &install.new {
+        let places = [Place::Install, Place::RolledOut]
+            .iter()
+            .filter(|place| {
+                std::fs::read(install.folder(**place).join(name))
+                    .ok()
+                    .as_ref()
+                    == Some(bytes)
+            })
+            .count();
+        assert_eq!(places, 1, "the new `{name}` is kept, once");
+    }
+    assert!(said_at(&world, "the update is incomplete").is_some());
+    assert_eq!(
+        world.opened,
+        vec![(install.rescue.clone(), failed_then(&install, &handed()))]
+    );
+}
+
+/// RED (U-24) — **`Stuck` is tried again by every start, each failure counted,
+/// and after the bound nothing more is tried**: two starts record attempts 2
+/// and 3, the third records nothing and says the update is incomplete; the
+/// `Run` value stays throughout, and every start still opens a Folio (the
+/// rescue copy: the install holds neither whole set).
+///
+/// (b).2 W10: "W9 again at every logon and every start"; U-29's bound, 3.
+///
+/// MUTATION: in `update_txn::decide`, drop the `GiveUp` arm.
+#[test]
+fn stuck_is_retried_at_the_next_start_and_stops_after_the_bound() {
+    let Some(install) = Install::new("bound") else {
+        return;
+    };
+    flipped_at(&install, stuck(1));
+    // Somebody else's file where a new one was: never moved, so every
+    // rollback stops there.
+    let foreign = install
+        .install()
+        .join(a_new_name_besides_the_program(&install));
+    std::fs::write(&foreign, b"somebody else's file").unwrap();
+    for expected in 2..=STUCK_ATTEMPT_LIMIT {
+        let (code, world) = recovered(
+            &install,
+            limits(20_000, 20_000),
+            install.world(Trial::Silent),
+        );
+        assert_eq!(code, 0, "{:?}", world.said);
+        let Phase::Stuck { attempts, .. } = install.on_disk().body.phase else {
+            panic!("{:?}", install.on_disk().body.phase);
+        };
+        assert_eq!(attempts, expected, "{:?}", world.said);
+        assert!(install.registry.holds(install.txn));
+        assert_eq!(
+            world.opened,
+            vec![(install.rescue.clone(), failed_then(&install, &handed()))]
+        );
+    }
+    let journal = std::fs::read(install.home.journal()).unwrap();
+    let (code, world) = recovered(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Silent),
+    );
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert_eq!(
+        std::fs::read(install.home.journal()).unwrap(),
+        journal,
+        "at the bound nothing is recorded"
+    );
+    assert!(
+        said_at(&world, "incomplete after 3 attempts").is_some(),
+        "{:?}",
+        world.said
+    );
+    assert!(install.registry.holds(install.txn));
+    assert_eq!(
+        std::fs::read(&foreign).unwrap(),
+        b"somebody else's file",
+        "never moved"
+    );
+    assert_eq!(
+        world.opened,
+        vec![(install.rescue.clone(), failed_then(&install, &handed()))]
+    );
+}
+
+/// RED (U-24) — **a rollback that leaves `Stuck` with every new file still
+/// installed starts the new build only as a trial over `Stuck` — recorded as
+/// `RetrialBegan`, with `--update-failed` and the handed line after its words
+/// — and that trial's receipt commits the transaction forward**: `Committed`,
+/// the entrance removed, `Retired{Committed}`, the new set installed; nothing
+/// else is started (the trial is the window).
+///
+/// U-29b's ruling 3, adopted on Windows (the coordinator's ruling 3 of U-24):
+/// "`Stuck` with the new set live → the new build as a trial
+/// (`RetrialBegan`), its receipt commits forward (W8)".
+///
+/// MUTATION: in `Txn::retry_as_trial`, return `ended` without starting the
+/// trial.
+#[test]
+fn stuck_with_the_new_set_live_starts_it_as_a_trial_and_its_receipt_commits() {
+    let Some(install) = Install::new("retrial") else {
+        return;
+    };
+    flipped_at(&install, stuck(1));
+    block_rolledout(&install);
+    let (_, world) = recovered(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Answers),
+    );
+    assert!(
+        wrote(&world).ends_with("[Stuck, Stuck, Committed, Retired]"),
         "{:?}",
         world.said
     );
     assert_eq!(
         install.on_disk().body.phase,
-        Phase::Prepared {
-            deferred_launches: 0
+        Phase::Retired {
+            outcome: Outcome::Committed
         }
     );
-    assert_eq!(world.opened, vec![(install.installed.clone(), handed())]);
+    assert!(install.holds(Place::Install, &install.new));
+    assert!(!install.registry.holds(install.txn));
+    assert!(world.opened.is_empty(), "the trial is the window");
+    assert_eq!(world.launched.len(), 1, "{:?}", world.said);
+    let args = &world.launched[0];
+    assert_eq!(args[0], OsString::from(cli::UPDATE_TRIAL_FLAG));
+    assert_eq!(args[1], OsString::from(install.txn.to_string()));
+    assert_eq!(args[3..], failed_then(&install, &handed())[..]);
 }
 
-/// RED (U-23, the coordinator's requirement of 2026-09-27) — **whatever
-/// phase a dead applier left the journal in, a double-click of Folio opens a
-/// window**: the ordinary start hands itself to the rescue build
-/// (`--update-recover --then-launch`), which recovers what it may and starts a
-/// Folio with the handed command line —
+/// A start's world: its lines, and the entrance through the real door over
+/// the test's registry.
+struct StartWorld {
+    said: Vec<String>,
+    registry: Memory,
+}
+
+impl crate::update_startup::World for StartWorld {
+    fn say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+
+    fn spawn_detached(&mut self, program: &Path, _args: &[OsString]) -> io::Result<()> {
+        panic!("a start that retires hands nothing over: {program:?}")
+    }
+
+    fn retire_entrance(&mut self, txn: TxnId) -> Result<(), String> {
+        logon_hook::disarm_in(&mut self.registry, KEY, txn.bytes())
+            .map_err(|refusal| refusal.to_string())
+    }
+
+    fn mounts_under(&mut self, _folder: &Path) -> Result<Vec<PathBuf>, String> {
+        Ok(Vec::new())
+    }
+
+    fn on_a_worker(&mut self, _job: crate::update_startup::OffThread) -> io::Result<()> {
+        panic!("nothing is mounted on Windows")
+    }
+}
+
+/// RED (U-24) — **`RolledBack` left by a dead holder is retired by the next
+/// lock holder — the `Run` value removed, `Retired{RolledBack}` — and the old
+/// build is started with `--update-failed <journal>`; the start that makes
+/// then retires the terminal journal and deletes `H\<txn>`, and its card says
+/// the previous version is restored.**
+///
+/// (b).2 W11: "remove the Run value (flushed); relaunch the installed
+/// `folio.exe` with `--update-failed`; class `terminal`; later starts delete
+/// `H\<txn>`".
+///
+/// MUTATION: in `Txn::finish_rollback`, skip removing the entrance.
+#[test]
+fn rolled_back_is_retired_at_the_next_start() {
+    let Some(install) = Install::new("retired") else {
+        return;
+    };
+    install.arm();
+    install.write(Phase::RolledBack);
+    let (code, world) = recovered_at_logon(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Silent),
+    );
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert_eq!(
+        install.on_disk().body.phase,
+        Phase::Retired {
+            outcome: Outcome::RolledBack
+        }
+    );
+    assert!(
+        !install.registry.holds(install.txn),
+        "the Run value is gone"
+    );
+    assert_eq!(
+        world.opened,
+        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        "at logon, after a finished rollback, the old build opens with its card"
+    );
+    let folder = install.home.transaction(install.txn);
+    assert!(folder.is_dir(), "the rescue folder is the next start's");
+
+    let journal = install.home.journal();
+    let argv = failed_then(&install, &[]);
+    let start = crate::update_startup::Start {
+        own_exe: &install.installed,
+        home: &install.home,
+        argv: &argv,
+        trial: None,
+        failed: Some(&journal),
+    };
+    let mut starting = StartWorld {
+        said: Vec::new(),
+        registry: install.registry.clone(),
+    };
+    let verdict = crate::update_startup::run(&start, &mut starting);
+    let crate::update_startup::Verdict::Continue { failed, .. } = verdict else {
+        panic!("the start continues: {:?}", starting.said);
+    };
+    assert!(
+        matches!(failed, Some(crate::update_job::Failure::RolledBack)),
+        "{failed:?}"
+    );
+    assert!(!folder.exists(), "H\\<txn> is deleted by the start");
+    assert!(!journal.exists(), "and the journal after it");
+}
+
+/// RED (U-24) — **the trial is asked to quit before it is ended, and only the
+/// process whose pid, creation time and image are all the journal's is asked
+/// anything**: the recorded trial is asked to quit, given its grace, then
+/// ended; another process of the same image, one recorded with another
+/// creation time, and one running the same bytes from another path all run on
+/// — and the rollback goes on around them.
+///
+/// The journal says `RollbackIntent` over an install where nothing was moved,
+/// so the trial runs from `<install>\folio.exe` and the rollback moves nothing:
+/// what is pinned is who is asked. (A scanner holds a just-started image for a
+/// moment, and a move of it is then refused — the moves are pinned by
+/// `a_failed_health_reverses_the_moves_and_relaunches_the_old_build`.)
+///
+/// The coordinator's ruling 1: "the process is identified by pid **and**
+/// creation time **and** image path = `<install>\folio.exe` … never touch a
+/// process whose identity does not match all three". The synthetic programs
+/// open no window, so the ask reaches no window and the grace runs out.
+///
+/// MUTATION: in `update_apply::stop_trial`, ask `Ask::End` first (part A
+/// red); in `install_flip::runs_from`, answer from the pid and start time
+/// alone (part C red: the stranger is then asked and ended — the image is
+/// checked both where the trial is judged alive and inside `ask`, and both
+/// read `runs_from`).
+#[test]
+fn the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity() {
+    // A: the recorded trial, beside another process of the same image.
+    let Some(install) = Install::new("ask") else {
+        return;
+    };
+    install.arm();
+    let trial = install.start_trial();
+    let beside = install.start_trial();
+    install.write(Phase::RollbackIntent { trial: Some(trial) });
+    let began = Instant::now();
+    let (code, world) = recovered(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Silent),
+    );
+    assert_eq!(code, 0, "{:?}", world.said);
+    let quit = said_at(&world, &format!("trial {} is asked to quit", trial.pid));
+    let end = said_at(&world, &format!("trial {} is asked to end", trial.pid));
+    assert!(
+        quit.is_some() && end.is_some() && quit < end,
+        "{:?}",
+        world.said
+    );
+    assert!(began.elapsed() >= GRACE, "the grace ran before the end");
+    assert!(!runs(trial), "the trial is ended");
+    assert!(runs(beside), "the other process of its image runs on");
+    rolled_back_on_disk(&install);
+
+    // B: the journal's pid with another creation time.
+    let Some(install) = Install::new("ask-time") else {
+        return;
+    };
+    install.arm();
+    let running = install.start_trial();
+    install.write(Phase::RollbackIntent {
+        trial: Some(TrialProcess {
+            pid: running.pid,
+            started: running.started + 1,
+        }),
+    });
+    let (code, world) = recovered(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Silent),
+    );
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert!(said_at(&world, "is asked to").is_none(), "{:?}", world.said);
+    assert!(
+        runs(running),
+        "a process with another creation time runs on"
+    );
+    rolled_back_on_disk(&install);
+
+    // C: the journal's pid and creation time, running the same bytes from
+    // another path.
+    let Some(install) = Install::new("ask-image") else {
+        return;
+    };
+    install.arm();
+    let elsewhere = install.install().join("elsewhere").join("folio.exe");
+    std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+    std::fs::copy(&install.installed, &elsewhere).unwrap();
+    let pid = install.children.start(&elsewhere, &[]);
+    let stranger = TrialProcess {
+        pid,
+        started: install_flip::started_of(pid).expect("it runs"),
+    };
+    install.write(Phase::RollbackIntent {
+        trial: Some(stranger),
+    });
+    let (code, world) = recovered(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Silent),
+    );
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert!(said_at(&world, "is asked to").is_none(), "{:?}", world.said);
+    assert!(runs(stranger), "a process of another image runs on");
+    rolled_back_on_disk(&install);
+}
+
+/// What a case of [`every_phase_left_by_a_dead_applier_still_opens_folio`]
+/// expects to be started.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Opened {
+    /// The installed build, with the handed line only.
+    Installed,
+    /// The installed build with `--update-failed <journal>` first.
+    InstalledFailed,
+    /// Nothing but the trial over `Stuck` this recovery started.
+    TrialOnly,
+    /// The installed build — the new set, not committed — as a trial with a
+    /// nonce no journal records, then `--update-failed <journal>`.
+    Trial,
+    /// The rescue copy with `--update-failed <journal>`: the fallback.
+    Rescue,
+}
+
+/// RED (U-23; U-24, the coordinator's rulings 3 and 1) — **whatever phase a
+/// dead applier left the journal in, a double-click of Folio opens a window,
+/// by U-29b's rules**: the ordinary start hands itself to the rescue build
+/// (`--update-recover --then-launch`), which finishes the transaction and
+/// starts exactly one Folio with the handed command line —
 ///
 /// | left at | recovery | opens |
 /// |---|---|---|
 /// | `Handoff` | → `Prepared` | the installed (old) build |
 /// | `Armed`, the `Run` value there | value removed, → `Prepared` | the installed (old) build |
-/// | `Moving`, some moves done | → `RollbackIntent` | the rescue copy (the old build), with `--update-failed` |
-/// | `Trial`, the trial gone, no receipt | → `RollbackIntent` | the rescue copy |
-/// | `Trial`, the trial alive, no receipt | waits to its deadline, → `RollbackIntent` | the rescue copy |
+/// | `Moving`, some moves done | rolled back → `Retired{RolledBack}` | the installed (old) build, `--update-failed` |
+/// | `Trial`, the trial gone, no receipt | rolled back | the installed (old) build, `--update-failed` |
+/// | `Trial`, the trial alive, no receipt | waits to its deadline, stops it, rolls back | the installed (old) build, `--update-failed` |
 /// | `Trial`, a matching receipt | → `Committed` → `Retired` | the installed (new) build |
 /// | `Committed` | → `Retired` | the installed (new) build |
+/// | `RollbackIntent` | rolled back | the installed (old) build, `--update-failed` |
+/// | `RolledBack` | retired | the installed (old) build, `--update-failed` |
+/// | `Stuck`, the new set installed, the rollback refused | a trial over `Stuck` | that trial only |
+/// | `Stuck`, a foreign file in the install | `Stuck` again | the rescue copy, `--update-failed` (the fallback) |
+/// | `RollbackIntent`, the new set installed, a running copy holding the admission | nothing recorded (`RollbackWaits`) | the installed (new) build **only as a trial**, `--update-failed` |
+/// | `Stuck` at its bound, the old set whole | nothing tried (`GaveUp`) | the installed (old) build, `--update-failed` |
 ///
-/// On BASE the rescue build said "the update is not finished" for every
-/// destructive phase and started nothing.
+/// U-23 opened the rescue copy for every still-`destructive` phase; now that
+/// the rollback exists it opens only where the install holds neither whole
+/// set.
 ///
-/// MUTATION: in `update_recover::opens`, answer `None` for a `destructive`
-/// header (the rollback phases then open nothing).
+/// MUTATION: in `opens_after`, answer `Opens::Rescue` for every `destructive`
+/// header (U-23's rule).
 #[test]
 fn every_phase_left_by_a_dead_applier_still_opens_folio() {
-    struct Case {
-        tag: &'static str,
-        ends: PhaseKind,
-        opens_rescue: bool,
-        installed_is_new: bool,
-    }
-    let cases = [
-        Case {
-            tag: "handoff",
-            ends: PhaseKind::Prepared,
-            opens_rescue: false,
-            installed_is_new: false,
-        },
-        Case {
-            tag: "armed",
-            ends: PhaseKind::Prepared,
-            opens_rescue: false,
-            installed_is_new: false,
-        },
-        Case {
-            tag: "moving",
-            ends: PhaseKind::RollbackIntent,
-            opens_rescue: true,
-            installed_is_new: false,
-        },
-        Case {
-            tag: "trial-gone",
-            ends: PhaseKind::RollbackIntent,
-            opens_rescue: true,
-            installed_is_new: true,
-        },
-        Case {
-            tag: "trial-alive",
-            ends: PhaseKind::RollbackIntent,
-            opens_rescue: true,
-            installed_is_new: true,
-        },
-        Case {
-            tag: "trial-answered",
-            ends: PhaseKind::Retired,
-            opens_rescue: false,
-            installed_is_new: true,
-        },
-        Case {
-            tag: "committed",
-            ends: PhaseKind::Retired,
-            opens_rescue: false,
-            installed_is_new: true,
-        },
+    use Opened::{Installed, InstalledFailed, Rescue, Trial as AsTrial, TrialOnly};
+    let rolled_back = Some(Outcome::RolledBack);
+    let committed = Some(Outcome::Committed);
+    let cases: [(&str, PhaseKind, Option<Outcome>, Opened); 13] = [
+        ("handoff", PhaseKind::Prepared, None, Installed),
+        ("armed", PhaseKind::Prepared, None, Installed),
+        ("moving", PhaseKind::Retired, rolled_back, InstalledFailed),
+        (
+            "trial-gone",
+            PhaseKind::Retired,
+            rolled_back,
+            InstalledFailed,
+        ),
+        (
+            "trial-alive",
+            PhaseKind::Retired,
+            rolled_back,
+            InstalledFailed,
+        ),
+        ("trial-answered", PhaseKind::Retired, committed, Installed),
+        ("committed", PhaseKind::Retired, committed, Installed),
+        ("intent", PhaseKind::Retired, rolled_back, InstalledFailed),
+        (
+            "rolled-back",
+            PhaseKind::Retired,
+            rolled_back,
+            InstalledFailed,
+        ),
+        ("stuck-new", PhaseKind::Stuck, None, TrialOnly),
+        ("stuck-mix", PhaseKind::Stuck, None, Rescue),
+        ("waits", PhaseKind::RollbackIntent, None, AsTrial),
+        ("bound-old", PhaseKind::Stuck, None, InstalledFailed),
     ];
-    for case in cases {
-        let Some(install) = Install::new(case.tag) else {
+    for (tag, ends, outcome, opens) in cases {
+        let Some(install) = Install::new(tag) else {
             return;
         };
-        let all = install.inventories.forward_moves().len();
         let nonce = Nonce::new([0x55; 32]);
-        match case.tag {
+        match tag {
             "handoff" => {}
             "armed" => {
                 install.arm();
@@ -1281,12 +2017,12 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
             }
             "trial-gone" | "trial-alive" | "trial-answered" => {
                 install.arm();
-                install.move_first(all);
+                install.move_first(install.inventories.forward_moves().len());
                 let trial = install.start_trial();
-                if case.tag == "trial-gone" {
+                if tag == "trial-gone" {
                     install.children.end(trial.pid);
                 }
-                if case.tag == "trial-answered" {
+                if tag == "trial-answered" {
                     install.receipt(nonce, nonce, trial.pid);
                 }
                 install.write(Phase::Trial {
@@ -1295,52 +2031,159 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
                     began_ms: now_ms(),
                 });
             }
-            _ => {
+            "committed" => flipped_at(&install, Phase::Committed),
+            "intent" => flipped_at(&install, Phase::RollbackIntent { trial: None }),
+            "rolled-back" => {
                 install.arm();
-                install.move_first(all);
-                install.write(Phase::Committed);
+                install.write(Phase::RolledBack);
+            }
+            "stuck-new" => {
+                flipped_at(&install, stuck(1));
+                block_rolledout(&install);
+            }
+            "waits" => flipped_at(&install, Phase::RollbackIntent { trial: None }),
+            "bound-old" => {
+                install.arm();
+                install.write(stuck(STUCK_ATTEMPT_LIMIT));
+            }
+            _ => {
+                flipped_at(&install, stuck(1));
+                let name = a_new_name_besides_the_program(&install);
+                std::fs::write(install.install().join(name), b"somebody else's file").unwrap();
             }
         }
-        let began = Instant::now();
+        // A running copy holds the admission shared: the rollback waits for
+        // it, briefly here, and records nothing.
+        let copy = (tag == "waits").then(|| {
+            std::fs::write(install.home.admission(), b"").unwrap();
+            install_txn::try_hold(&install.home.admission(), Hold::Shared)
+                .unwrap()
+                .unwrap()
+        });
+        let old_within = if copy.is_some() { 1_500 } else { 20_000 };
         let (code, world) = recovered(
             &install,
-            limits(20_000, 1_500),
+            limits(old_within, 1_500),
             install.world(Trial::Silent),
         );
-        assert_eq!(code, 0, "{}: {:?}", case.tag, world.said);
-        assert_eq!(
-            install.on_disk().body.phase.kind(),
-            case.ends,
-            "{}: {:?}",
-            case.tag,
-            world.said
-        );
-        let opened = if case.opens_rescue {
-            let mut words = crate::update_apply_macos::failed_words(&install.home).to_vec();
-            words.extend(handed());
-            (install.rescue.clone(), words)
-        } else {
-            (install.installed.clone(), handed())
-        };
-        assert_eq!(world.opened, vec![opened], "{}: {:?}", case.tag, world.said);
-        let expected = if case.installed_is_new {
-            &install.new
-        } else {
-            &install.old
-        };
-        assert!(
-            case.tag == "moving" || install.holds(Place::Install, expected),
-            "{}",
-            case.tag
-        );
-        if case.tag == "trial-alive" {
-            assert!(
-                began.elapsed() >= Duration::from_millis(1_000),
-                "the recovery waited while the trial lived"
-            );
+        drop(copy);
+        let phase = install.on_disk().body.phase;
+        assert_eq!(phase.kind(), ends, "{tag}: {:?}", world.said);
+        if let Some(outcome) = outcome {
+            assert_eq!(phase, Phase::Retired { outcome }, "{tag}");
         }
-        if matches!(case.ends, PhaseKind::Prepared | PhaseKind::Retired) {
-            assert!(!install.registry.holds(install.txn), "{}", case.tag);
+        let expected = match opens {
+            Installed => vec![(install.installed.clone(), handed())],
+            InstalledFailed => vec![(install.installed.clone(), failed_then(&install, &handed()))],
+            Rescue => vec![(install.rescue.clone(), failed_then(&install, &handed()))],
+            TrialOnly | AsTrial => Vec::new(),
+        };
+        if opens == AsTrial {
+            assert_eq!(world.opened.len(), 1, "{tag}: {:?}", world.said);
+            let (program, args) = &world.opened[0];
+            assert_eq!(program, &install.installed, "{tag}");
+            assert_eq!(args[0], OsString::from(cli::UPDATE_TRIAL_FLAG), "{tag}");
+            assert_eq!(args[1], OsString::from(install.txn.to_string()), "{tag}");
+            assert_eq!(args[3..], failed_then(&install, &handed())[..], "{tag}");
+        } else {
+            assert_eq!(world.opened, expected, "{tag}: {:?}", world.said);
+        }
+        if opens == TrialOnly {
+            assert_eq!(world.launched.len(), 1, "{tag}: {:?}", world.said);
+            assert_eq!(world.launched[0][0], OsString::from(cli::UPDATE_TRIAL_FLAG));
+        } else {
+            assert_eq!(code, 0, "{tag}: {:?}", world.said);
+            assert!(world.launched.is_empty(), "{tag}");
+        }
+        match (outcome, opens) {
+            (Some(Outcome::Committed), _) | (None, AsTrial) => {
+                assert!(install.holds(Place::Install, &install.new), "{tag}");
+            }
+            (Some(Outcome::RolledBack), _) | (None, Installed | InstalledFailed) => {
+                assert!(install.holds(Place::Install, &install.old), "{tag}");
+            }
+            _ => {}
+        }
+        if matches!(ends, PhaseKind::Prepared | PhaseKind::Retired) {
+            assert!(!install.registry.holds(install.txn), "{tag}");
+        } else {
+            assert!(install.registry.holds(install.txn), "{tag}");
         }
     }
+}
+
+/// RED (U-24, the coordinator's ruling 3) — **one rule for a live applier at
+/// `Handoff`, on both platforms**: a process of the rescue executable that
+/// started no later than the recovery may be the applier O started, and the
+/// recovery leaves the handed-off transaction to it — nothing written, nothing
+/// waited for, nothing started (that applier opens Folio); a process that
+/// started after it is not one.
+///
+/// The pure half is `update_apply::an_earlier_holder`, which both the macOS and
+/// the Windows recovery ask; the Windows half runs a real process of the
+/// rescue copy. U-23 let the lock go and waited up to 180 s instead; that wait
+/// is removed.
+///
+/// MUTATION: in `update_apply::an_earlier_holder`, count only a process that
+/// started strictly before (`<`).
+#[test]
+fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
+    let mine = Running {
+        pid: 10,
+        started: 500,
+    };
+    let earlier = Running {
+        pid: 7,
+        started: 400,
+    };
+    let same_instant = Running {
+        pid: 8,
+        started: 500,
+    };
+    let later = Running {
+        pid: 9,
+        started: 600,
+    };
+    assert_eq!(an_earlier_holder(mine, &[mine, later, earlier]), Some(7));
+    assert_eq!(an_earlier_holder(mine, &[mine, same_instant]), Some(8));
+    assert_eq!(an_earlier_holder(mine, &[mine, later]), None);
+    assert_eq!(an_earlier_holder(mine, &[]), None);
+
+    let Some(install) = Install::new("alive") else {
+        return;
+    };
+    let journal = std::fs::read(install.home.journal()).unwrap();
+    let applier = install.children.start(&install.rescue, &[]);
+    let mut road = install.road(limits(20_000, 20_000));
+    road.me = Running {
+        pid: std::process::id(),
+        started: u64::MAX,
+    };
+    let began = Instant::now();
+    let (code, world) = on_a_worker({
+        let mut world = install.world(Trial::Silent);
+        move |worker| {
+            let code =
+                crate::update_recover::run_windows(worker, &road, Some(&handed()), &mut world);
+            (code, world)
+        }
+    });
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "nothing is waited for: {:?}",
+        began.elapsed()
+    );
+    assert_eq!(code, 1, "{:?}", world.said);
+    assert!(
+        said_at(&world, &format!("{applier} runs from")).is_some(),
+        "{:?}",
+        world.said
+    );
+    assert_eq!(
+        std::fs::read(install.home.journal()).unwrap(),
+        journal,
+        "the live applier's transaction is left to it"
+    );
+    assert!(world.opened.is_empty(), "that applier opens Folio");
+    nothing_moved(&install);
 }

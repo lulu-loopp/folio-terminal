@@ -918,7 +918,12 @@ start opens Folio: the recovery finishes every phase a dead applier can leave,
 exactly one build is started after it, and the new build is started before
 `Committed` only as a trial* (U-29b: `Stuck` with the new bundle live commits
 forward on the receipt of the trial started over it; a start carrying
-`--update-failed` continues past any `destructive` header). The fold is the
+`--update-failed` continues past any `destructive` header); trailing entry
+2026-09-27 *on Windows a failed trial is rolled back by digest …, and U-29b's
+opening rules hold on Windows too* (U-24: the trial stopped only by its pid,
+creation time and image; the rescue copy opens only where the install holds
+neither whole set; one rule for a live applier at `Handoff` on both
+platforms — left to it, nothing waited for, nothing opened). The fold is the
 enabling tickets', U-31 / U-32, per the design note's (b).5 table.
 
 ### 37. The Explorer and Finder verbs — `folded`
