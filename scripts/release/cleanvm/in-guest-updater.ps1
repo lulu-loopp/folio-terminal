@@ -22,6 +22,13 @@
 .PARAMETER GuestHome
     The working directory in the guest.
 
+.PARAMETER FeedUrl
+    When given, the installed Folio is started with `--update-feed <FeedUrl>`
+    before the watch begins, so its update check and download read the
+    successor from that local release feed instead of github.com
+    (clean-vm.md §4.4, precondition 3). Without it nothing is started and a
+    person starts Folio.
+
 .PARAMETER PollIntervalSeconds
     How often to check the journal.
 
@@ -35,6 +42,7 @@ param(
     [ValidatePattern('^[WM]\d{1,2}$')]
     [string] $Row,
     [string] $GuestHome = 'C:\folio-vm',
+    [string] $FeedUrl,
     [int] $PollIntervalSeconds = 2,
     [int] $TimeoutSeconds = 600
 )
@@ -172,6 +180,15 @@ function Test-RowReached {
             return ($p -eq $targetPhase)
         }
     }
+}
+
+# ── Start Folio on the release feed ──────────────────────────────────────────
+
+# The one start that reads the successor from the feed; the flag holds for
+# this process only, and nothing the update starts later needs it.
+if ($FeedUrl) {
+    $folio = Join-Path $installDir 'folio.exe'
+    Start-Process -FilePath $folio -ArgumentList @('--update-feed', $FeedUrl) | Out-Null
 }
 
 # ── Poll ─────────────────────────────────────────────────────────────────────

@@ -58,6 +58,14 @@
 .PARAMETER GuestHome
     The working directory inside the guest.
 
+.PARAMETER Feed
+    A release feed folder on the host (clean-vm.md §4.4, precondition 3):
+    `releases.json` and the successor's files it names as `file:///C:/feed/…`.
+    When given, every file in it is copied into the guest's `C:\feed\` and the
+    guest-side watcher starts the installed Folio with
+    `--update-feed file:///C:/feed/` before it watches. Without it nothing
+    starts Folio in the guest; a person does.
+
 .PARAMETER MarkerTimeoutSeconds
     How long to wait for the guest to reach the target row.
 
@@ -84,6 +92,7 @@ param(
     [string] $Results,
     [string] $VmrunPath,
     [string] $GuestHome = 'C:\folio-vm',
+    [string] $Feed,
     [int] $MarkerTimeoutSeconds = 600,
     [int] $SettleTimeoutSeconds = 300
 )
@@ -261,15 +270,38 @@ $guestDest = "$GuestHome\in-guest-updater.ps1"
 Invoke-Vmrun -Step 'copy in' -InGuest `
     -Arguments @('copyFileFromHostToGuest', $Vmx, $guestScript, $guestDest) | Out-Null
 
+# ── 4a. Copy in the release feed ────────────────────────────────────────────
+
+# The successor, as a local release feed (clean-vm.md §4.4, precondition 3):
+# every file of the host folder into the guest's feed folder, whose URL the
+# watcher starts Folio with.
+$guestFeed = 'C:\feed'
+$guestFeedUrl = 'file:///C:/feed/'
+if ($Feed) {
+    if (-not (Test-Path -LiteralPath (Join-Path $Feed 'releases.json') -PathType Leaf)) {
+        throw "no releases.json in $Feed"
+    }
+    Invoke-Vmrun -Step 'feed folder' -InGuest -Tolerant `
+        -Arguments @('createDirectoryInGuest', $Vmx, $guestFeed) | Out-Null
+    foreach ($file in Get-ChildItem -LiteralPath $Feed -File) {
+        Invoke-Vmrun -Step 'copy feed' -InGuest -Arguments @(
+            'copyFileFromHostToGuest', $Vmx, $file.FullName, "$guestFeed\$($file.Name)"
+        ) | Out-Null
+    }
+}
+
 # ── 5. Start the guest-side watcher ─────────────────────────────────────────
 
 # The watcher runs in the background: it monitors the journal phase and writes
-# the marker file when the target row is reached. It exits after writing.
-Invoke-GuestPowerShell -Step 'watcher' -PowerShellArguments @(
+# the marker file when the target row is reached. It exits after writing. Given
+# a feed, it first starts the installed Folio on it.
+$watcherArguments = @(
     '-File', $guestDest,
     '-Row', $Row,
     '-GuestHome', $GuestHome
-) | Out-Null
+)
+if ($Feed) { $watcherArguments += @('-FeedUrl', $guestFeedUrl) }
+Invoke-GuestPowerShell -Step 'watcher' -PowerShellArguments $watcherArguments | Out-Null
 
 # ── 6. Wait for the marker file ─────────────────────────────────────────────
 

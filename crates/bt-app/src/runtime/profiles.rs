@@ -40,6 +40,7 @@ impl Runtime<'_> {
                 origin: request.origin,
                 update_trial: None,
                 update_failed: None,
+                update_feed: None,
             },
             self.default_profile(),
             cli::machine_path_kind,

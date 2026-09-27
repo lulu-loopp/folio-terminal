@@ -19,6 +19,11 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- The coming updater can be rehearsed on a clean machine before a release:
+  `folio --update-feed file:///C:/feed/` makes that one start look for updates
+  in a local folder instead of GitHub, and copy the new version from there. What
+  it delivers must still be signed by the same publisher, and nothing is kept:
+  the next start without the flag asks GitHub again.
 - scoop and Homebrew now mark the copies they install, so Folio can tell it is
   theirs, and clean up after Folio when they uninstall it: scoop on
   `scoop uninstall` (and not while Folio is running), Homebrew on

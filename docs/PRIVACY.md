@@ -39,6 +39,11 @@ revocation checking your machine already has, and Folio carries no HTTP client
 and no certificates of its own. On macOS the session is an ephemeral one that is
 cancelled after each check, so nothing of the request is cached between them.
 
+A command-line flag can point the update check at a local folder instead
+(`--update-feed <file-URL>`, for rehearsing an update before a release); that
+start asks GitHub nothing, and what the folder delivers must still be signed by
+the same signer.
+
 There is nothing to download on either platform: what the answer can do is draw
 a mark on the settings gear and a line in Settings. On macOS that line carries a
 button which opens the releases page in your browser, and that is the whole of

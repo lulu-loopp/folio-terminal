@@ -31,7 +31,8 @@ pub enum Lane {
     /// executable, read once at start (`install_channel`, ticket U-1).
     Install,
     /// The downloaded release archive the updater reads, and the manifest
-    /// read out of the new `folio.exe` in it (`update_archive`, ticket U-14).
+    /// read out of the new `folio.exe` in it (`update_archive`, ticket U-14);
+    /// and a release feed's list and files (`--update-feed`, ticket U-30b).
     Update,
     /// The update journal's header and phase, read again and again by a trial's
     /// watch until its transaction is decided (`update_trial`, ticket U-13).

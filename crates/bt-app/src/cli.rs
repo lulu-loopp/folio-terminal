@@ -136,6 +136,16 @@ pub struct CliRequest {
     /// incomplete.* and the folder), and past a rollback that did not finish
     /// the start continues instead of handing itself back to the rescue build.
     pub update_failed: Option<PathBuf>,
+    /// `--update-feed <file-URL>` — **this process's update check and
+    /// download read a local release feed instead of github.com** (0.4.6
+    /// U-30b; `crate::update::Feed`).
+    ///
+    /// Kept as given; `crate::update::use_feed` takes it at start and the
+    /// diagnostics log says `update feed: <url>`. It holds for this process
+    /// only: nothing writes it, a start without it asks github.com, and a
+    /// launch handed over to a running Folio does not carry it. What a feed
+    /// delivers must still be signed by the same signer as the running build.
+    pub update_feed: Option<String>,
 }
 
 /// The two values of `--update-trial`, as the command line gave them.
@@ -341,6 +351,14 @@ pub const UPDATE_APPLY_FLAG: &str = "--update-apply";
 /// rises at `Failed` ([`CliRequest::update_failed`], U-29). Written first on
 /// the line, before whatever the start that handed itself over was given.
 pub const UPDATE_FAILED_FLAG: &str = "--update-failed";
+/// `--update-feed <file-URL>`: an ordinary start whose update check and
+/// download read a local release feed (U-30b, [`CliRequest::update_feed`]) —
+/// typed by the person rehearsing an update on a clean machine
+/// (`docs/plans/release/clean-vm.md` §4.4), never written by another build.
+/// Beside the update's words for its grammar (exact, one value); like them,
+/// not in the usage block. The rescue build's doors refuse it: their grammar
+/// has no room for it.
+pub const UPDATE_FEED_FLAG: &str = "--update-feed";
 
 /// Turn a command line into a request, or into the fault that ends the launch.
 ///
@@ -467,6 +485,15 @@ where
                 }
                 let journal = value_for(UPDATE_FAILED_FLAG, flag, &arg, &mut args)?;
                 request.update_failed = Some(PathBuf::from(journal));
+            }
+            // The same rule once more: the word and the feed's URL are two
+            // arguments.
+            Some(flag) if flag == UPDATE_FEED_FLAG => {
+                if request.update_feed.is_some() {
+                    return Err(CliFault::Repeated(UPDATE_FEED_FLAG));
+                }
+                let url = value_for(UPDATE_FEED_FLAG, flag, &arg, &mut args)?;
+                request.update_feed = Some(url.to_string_lossy().into_owned());
             }
             Some(flag) if is_flag(flag, CWD_FLAG) => {
                 if request.cwd.is_some() {
@@ -1377,6 +1404,7 @@ mod tests {
                 origin: LaunchOrigin::Plain,
                 update_trial: None,
                 update_failed: None,
+                update_feed: None,
             }
         );
     }
@@ -2167,5 +2195,86 @@ mod tests {
             update_door_refusal(Some(UPDATE_RECOVER_USAGE)),
             UPDATE_RECOVER_USAGE
         );
+    }
+
+    /// RED (U-30b) — **`--update-feed <file-URL>` is one value on an ordinary
+    /// start, and the verbs that never open a window refuse it.**
+    ///
+    /// The flag says where this process's update check and download read
+    /// from; a process with no window has neither. The rescue build's two
+    /// doors (the trial, the applier and recovery need no feed — the download
+    /// happened at Prepare), the agents' doorbell and the uninstall hook each
+    /// have a grammar with no room for it, and each answers the line with its
+    /// own refusal rather than running with the word dropped. A line handed
+    /// over after `--then-launch` is another start's and carries it verbatim.
+    ///
+    /// MUTATION: drop the `UPDATE_FEED_FLAG` arm of `parse` (the word is an
+    /// unknown flag); or let `update_door` skip a word it does not know.
+    #[test]
+    fn the_flag_is_refused_on_the_no_window_verbs() {
+        let url = "file:///C:/feed/";
+        let request = parsed(&["--update-feed", url, "--cwd", "/x"]);
+        assert_eq!(request.update_feed.as_deref(), Some(url));
+        assert_eq!(request.cwd, Some(PathBuf::from("/x")));
+        assert_eq!(parsed(&[]).update_feed, None);
+        assert_eq!(
+            refused(&["--update-feed"]),
+            CliFault::MissingValue(UPDATE_FEED_FLAG)
+        );
+        assert_eq!(
+            refused(&["--update-feed", "--tab"]),
+            CliFault::MissingValue(UPDATE_FEED_FLAG)
+        );
+        assert_eq!(
+            refused(&["--update-feed", url, "--update-feed", url]),
+            CliFault::Repeated(UPDATE_FEED_FLAG)
+        );
+
+        let (txn, nonce) = ("a".repeat(32), "b".repeat(64));
+        assert_eq!(
+            update_door(args(&[
+                "--update-apply",
+                "H",
+                &txn,
+                &nonce,
+                "--update-feed",
+                url
+            ])),
+            Some(Err(UPDATE_APPLY_USAGE))
+        );
+        assert_eq!(
+            update_door(args(&["--update-recover", "--update-feed", url])),
+            Some(Err(UPDATE_RECOVER_USAGE))
+        );
+        assert_eq!(
+            update_door(args(&["--update-recover", "H", "--update-feed", url])),
+            Some(Err(UPDATE_RECOVER_USAGE))
+        );
+        assert_eq!(
+            update_door(args(&[
+                "--update-recover",
+                "--then-launch",
+                "--update-feed",
+                url
+            ])),
+            Some(Ok(UpdateDoor::Recover {
+                home: None,
+                then_launch: Some(args(&["--update-feed", url])),
+            })),
+            "a handed-over line is another start's, verbatim"
+        );
+        assert!(matches!(
+            attention(args(&[
+                "attention",
+                "claude-code:Stop",
+                "--update-feed",
+                url
+            ])),
+            Some(Err(_))
+        ));
+        assert!(matches!(
+            uninstall_cleanup(args(&["--uninstall-cleanup", "--update-feed", url])),
+            Some(Err(_))
+        ));
     }
 }

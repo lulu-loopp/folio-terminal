@@ -2130,3 +2130,32 @@ rollback as undecided: only a `terminal` class without `committed` ends it.
 A macOS start whose rescue clone cannot be started runs the recovery with its
 own program instead (the ordinary start as R). The DESIGN entry of the same
 day has the phase table.
+
+**The successor's injection door (U-30b): `--update-feed <file-URL>`.** The
+clean-VM checklist (`docs/plans/release/clean-vm.md` §4.4) needs a machine to
+be offered a build that has not shipped; before this, nothing could inject one
+(`RELEASES_HOST`/`RELEASES_PATH` and `RELEASE_HOST`/`RELEASE_DOWNLOAD_PATH` were
+the only roads, U-30's report). The door is a command-line flag on an ordinary
+start and nothing else — no environment variable, no settings key, nothing
+persisted: `update::use_feed` holds it for the process, the diagnostics log says
+`update feed: <url>`, and a start without it asks github.com again. The URL
+names a folder holding `releases.json` (the GitHub releases list's shape; each
+release requires `tag_name`, `name`, `draft`, `prerelease` and
+`assets[]{name, browser_download_url, size}`, drafts left out as the
+unauthenticated list leaves them out) and the assets beside it, their
+`browser_download_url`s `file:` URLs; `SHA256SUMS.txt` (or
+`SHA256SUMS-macos.txt`) is an asset like on the release page. Exactly two roads
+move behind the value: the check reads the list through `file_reads` on
+`Lane::Update` instead of `GitHubReleases` (`update::check_source`), and a
+press copies the offer's two files instead of `https_download`
+(`update_job::transport_for` → `FeedCopy`). **Everything after the fetch is
+unchanged** — the checksum document, the archive reader, and U-15's signer
+requirement on `folio.exe` and its sidecars (the bundle's identity on macOS) —
+so a feed can deliver only a build signed by the same signer as the running
+one; that is why a visible flag is safe. A feed that cannot be read is a failed
+check or a failed Prepare, never a fall-back to the network. The processes an
+update starts — the trial, the applier, recovery — do not need the flag: the
+download happened at Prepare. The rescue build's doors refuse it, and the trial's
+line is written without it. The flag does not
+turn offers on (`OFFERS_ENABLED` stays false); the checklist runs a build whose
+gate is on (U-31/U-32) started with the flag.
