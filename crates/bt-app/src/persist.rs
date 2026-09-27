@@ -3022,10 +3022,8 @@ mod tests {
     /// first, and this goes red in either order.
     #[test]
     fn a_front_door_refusal_does_not_cache_a_refusal_for_the_launch() {
-        let (root, home) = a_home_that_speaks(
-            "front-door-beside-launch",
-            bt_persist::LanguageV1::English,
-        );
+        let (root, home) =
+            a_home_that_speaks("front-door-beside-launch", bt_persist::LanguageV1::English);
         let start = Arc::new(std::sync::Barrier::new(2));
 
         let refusal = {
