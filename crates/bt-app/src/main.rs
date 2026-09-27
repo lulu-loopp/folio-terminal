@@ -173,6 +173,8 @@ mod update_job;
 // `build.rs` reaches the same file by `#[path]`, and nothing of it ships.
 #[cfg(test)]
 mod update_eligibility;
+// The update's hand-over to its applier, at the quit's way out (0.4.6 ticket U-21).
+mod update_handoff;
 mod update_recover;
 mod update_startup;
 mod update_trial;
@@ -12810,6 +12812,13 @@ struct App {
     /// the offer outlives the window it was raised in and a download belongs to
     /// the copy, not to a window of it. See [`update_job::Job`].
     update_job: update_job::Job<WindowId>,
+    /// **Why the quit asked for next begins** (0.4.6 U-21): [`quit::Reason::Asked`] unless the
+    /// update's Restart asked for it ([`Self::restart_for_update`]). Spent, and put back to
+    /// `Asked`, where the debt is spent ([`FolioApp::begin_quit_if_asked`]).
+    quit_reason: quit::Reason,
+    /// **The hand-over's answer**, while the quit's way out waits for it (U-21): the storage
+    /// worker writes `Handoff` and starts the applier, and this thread looks on its turns.
+    handoff_answer: Option<std::sync::mpsc::Receiver<update_handoff::HandedOff>>,
 }
 
 /// **The way a message from outside every window asks for a turn.**
@@ -41992,6 +42001,8 @@ impl Runtime<'_> {
             window_ring_shown: None,
             quake: quake::Quake::default(),
             update_job: update_job::Job::default(),
+            quit_reason: quit::Reason::Asked,
+            handoff_answer: None,
         };
         // **The rest of the file's windows, queued at the door.** A window that
         // held a pinned tab opens straight away, through the very same door
@@ -50654,11 +50665,15 @@ impl App {
     /// about what this run leaves behind; the teardown that follows them closes
     /// every pane, and a pane closing is an edit like any other. One door for
     /// every writer, so one place to say it.
+    ///
+    /// **And from the photograph on** (0.4.6 U-21, `quit::Quit::document_is_frozen`): an
+    /// update's quit keeps the windows up and the loop turning while it waits for its session's
+    /// receipt, and nothing done in that time is a change to the document that is landing.
     fn record_session(&mut self, now: Instant) {
         if self
             .quit
             .as_ref()
-            .is_some_and(quit::Quit::document_is_written)
+            .is_some_and(quit::Quit::document_is_frozen)
         {
             return;
         }
@@ -50695,6 +50710,29 @@ impl App {
     /// are three places for a fourth door to be written differently.
     fn ask_to_quit(&mut self) {
         self.quit_requested = true;
+    }
+
+    /// **Restart, on the update's verified card** (0.4.6 U-21,
+    /// `docs/plans/design/self-update-2026-09-16.md` §C.3): the job moves to `Quitting`, and the
+    /// ordinary quit is asked for through the one door every quit goes through, carrying the
+    /// update's reason.
+    ///
+    /// A quit already asked for or under way owns the windows: the answer is the job's own
+    /// refusal for that state ([`update_job::Refusal::TheQuitAnswers`]), and nothing moves.
+    ///
+    /// # Errors
+    /// That refusal, or the job's for Restart in its state.
+    #[expect(
+        dead_code,
+        reason = "U-19's card presses Restart; offers stay off until U-31 / U-32 (U-21 drives the road from tests)"
+    )]
+    fn restart_for_update(&mut self) -> Result<(), update_job::Refusal> {
+        if self.quit.is_some() || self.quit_requested {
+            return Err(update_job::Refusal::TheQuitAnswers);
+        }
+        self.quit_reason = self.update_job.restart()?;
+        self.ask_to_quit();
+        Ok(())
     }
 }
 
@@ -57500,6 +57538,59 @@ mod quit_transaction_tests {
         );
     }
 
+    /// RED (0.4.6 U-21) — **from the photograph on, neither of the two readers
+    /// that assumed only a person quits is served: no launch is taken and the
+    /// restore card neither rises nor is answered.**
+    ///
+    /// The update's Restart is a new trigger of the quit, and the first that keeps
+    /// the windows up and the loop turning after the photograph, while its session
+    /// lands. `launch_wire::admit` is refused from the photograph's own arm — the
+    /// turn's head says it only on the next turn, and a quit with nothing to ask
+    /// photographs in the turn it began — and requests already parked are not
+    /// opened while the document is fixed. The restore card is not up and its
+    /// answer is not spent while the document is fixed: an answer would open
+    /// windows into a document that has already been photographed. The pure
+    /// rules are `quit::Quit::admits_launches` and
+    /// `quit::Quit::document_is_frozen`, walked in `launch_wire`'s
+    /// `no_launch_is_admitted_after_the_photograph` and in `quit.rs`; this holds
+    /// that the window thread asks them where it has to.
+    ///
+    /// MUTATION: drop the `document_is_frozen` clause from
+    /// `Runtime::restore_card_is_up` — the card rises over a quit whose document
+    /// is landing.
+    #[test]
+    fn the_photograph_stops_the_launches_and_the_restore_card() {
+        let settle = method_body("FolioApp", "settle_quit");
+        let refused = settle
+            .find("launch_wire::set_admitting(false)")
+            .expect("the photograph's arm refuses launches");
+        let photographed = settle
+            .find("photograph_for_quit()")
+            .expect("the photograph is taken");
+        assert!(
+            refused < photographed,
+            "launches are refused before the picture is taken"
+        );
+        let frozen = concat!("quit::Quit::document_is", "_frozen");
+        for (owner, name) in [
+            ("FolioApp", "settle_launch_requests"),
+            ("FolioApp", "settle_restore_answer"),
+            ("Runtime", "restore_card_is_up"),
+        ] {
+            assert!(
+                method_body(owner, name).contains(frozen),
+                "`{owner}::{name}` does not ask whether a quit has fixed the document"
+            );
+        }
+        assert!(
+            source()
+                .body_of(&ItemQuery::method("FolioApp", "about_to_wait_inner"))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .contains("quit::Quit::admits_launches"),
+            "the turn's head mirrors the quit's own answer into the listener's flag"
+        );
+    }
+
     /// PIN (審 #7) — **a quit does not go through `exiting`, and `exiting` is
     /// unchanged.**
     ///
@@ -60723,6 +60814,18 @@ impl FolioApp {
     /// `bt_platform::launch_pipe`'s four steps — and it is asked for through the
     /// recipe §7.54 already uses rather than a second one.
     fn settle_launch_requests(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
+        // **Not while a quit has fixed the document** (0.4.6 U-21, §C.3): from the photograph on
+        // `launch_wire` refuses, and a request parked a moment before that is left where it is —
+        // spent if the quit is abandoned, gone with the process if it is not, as a request parked
+        // behind any quit's retirement is.
+        if self
+            .app
+            .as_ref()
+            .and_then(|app| app.quit.as_ref())
+            .is_some_and(quit::Quit::document_is_frozen)
+        {
+            return Ok(());
+        }
         for request in launch_wire::take() {
             self.land_one_launch_request(event_loop, &request)?;
         }
@@ -62085,6 +62188,17 @@ impl FolioApp {
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
+        // **Not while a quit has fixed the document** (0.4.6 U-21): an answer opens windows and
+        // records the session, and an update's quit is waiting for the document it photographed
+        // to land. The card is not up then either (`Runtime::restore_card_is_up`); an answer
+        // already given waits, and is spent if the quit is abandoned.
+        if app
+            .quit
+            .as_ref()
+            .is_some_and(quit::Quit::document_is_frozen)
+        {
+            return Ok(());
+        }
         let Some(restore) = app.pending_restore_answer.take() else {
             return Ok(());
         };
@@ -62133,6 +62247,7 @@ impl FolioApp {
     fn settle_quit(&mut self, event_loop: &ActiveEventLoop) -> Result<()> {
         self.begin_quit_if_asked()?;
         loop {
+            self.deliver_the_quits_update_report();
             let Some(step) = self
                 .app
                 .as_ref()
@@ -62161,16 +62276,44 @@ impl FolioApp {
                 }
                 // **Read-only, over every window, before anything else happens.**
                 quit::QuitStep::Photograph => {
+                    // **And no launch is promised a window from here on** (0.4.6 U-21, §C.3),
+                    // said now rather than at the next turn's head: a quit with nothing to ask
+                    // photographs in the turn it began, and an update's quit then goes on turning
+                    // while it waits for its receipt.
+                    launch_wire::set_admitting(false);
                     self.for_each_window(|runtime| runtime.photograph_for_quit())?;
                     self.report_to_quit(quit::Quit::photographed);
                 }
                 quit::QuitStep::Write => {
-                    // The way out begins with the write (§5.3 rows 15–17 are admitted from here);
-                    // a refused write comes back at `Abandon`.
-                    bt_platform::admission::exiting();
-                    let landed = match self.app.as_mut() {
-                        Some(app) => app.session_store.flush_judged(),
-                        None => return Ok(()),
+                    let by_receipt = self
+                        .app
+                        .as_ref()
+                        .and_then(|app| app.quit.as_ref())
+                        .is_some_and(quit::Quit::writes_by_receipt);
+                    let landed = if by_receipt {
+                        // **An update's quit does not stand still for its write** (0.4.6 U-21,
+                        // §C.3): the photograph goes to the writer as a named generation, the
+                        // loop keeps turning, and the receipt for that generation is looked for
+                        // on each turn under `quit::UPDATE_RECEIPT_DEADLINE` — a clock, not a
+                        // wait. Only a verdict that leaves begins the way out.
+                        let Some(landed) = self.update_session_answer(Instant::now()) else {
+                            return Ok(());
+                        };
+                        if landed
+                            .as_ref()
+                            .map_or_else(persist::SaveRefusal::quit_may_proceed, |()| true)
+                        {
+                            bt_platform::admission::exiting();
+                        }
+                        landed
+                    } else {
+                        // The way out begins with the write (§5.3 rows 15–17 are admitted from
+                        // here); a refused write comes back at `Abandon`.
+                        bt_platform::admission::exiting();
+                        match self.app.as_mut() {
+                            Some(app) => app.session_store.flush_judged(),
+                            None => return Ok(()),
+                        }
                     };
                     // **A save that ran out of its budget leaves anyway**
                     // (release review X-8). The reader asked to go, the disk
@@ -62253,6 +62396,13 @@ impl FolioApp {
                     self.report_to_quit(|quit| quit.retired(now));
                 }
                 quit::QuitStep::Exit => {
+                    // **The update's applier first, and only then the ordinary way out** (0.4.6
+                    // U-21, §C.3): an update whose session landed is handed over — `Handoff`
+                    // durable, then the applier started, on the storage worker — and the loop
+                    // comes back for the answer rather than waiting for it.
+                    if !self.hand_the_update_over(Instant::now()) {
+                        return Ok(());
+                    }
                     // The run's sentinel, dropped once — `App::finish`, spent
                     // here for the reason `FolioApp::close` spends it there: this
                     // is where "there are no windows left" becomes true.
@@ -62316,7 +62466,8 @@ impl FolioApp {
         let Some(app) = self.app.as_mut() else {
             return Ok(());
         };
-        app.quit = Some(quit::Quit::begin(names));
+        let reason = std::mem::replace(&mut app.quit_reason, quit::Reason::Asked);
+        app.quit = Some(quit::Quit::begin_for(names, reason));
         // The card, on every window — one question, and no window left taking
         // keys behind it. A quit with nothing to ask about raises none, so this
         // costs a rebuilt overlay stack only when there is something to draw.
@@ -62340,6 +62491,132 @@ impl FolioApp {
     fn report_to_quit(&mut self, report: impl FnOnce(&mut quit::Quit) -> quit::QuitStep) {
         if let Some(quit) = self.app.as_mut().and_then(|app| app.quit.as_mut()) {
             report(quit);
+        }
+    }
+
+    /// **The update's half of a quit's answer, handed to the job on this thread** (0.4.6 U-21;
+    /// U-18's open decision 12).
+    ///
+    /// Directly, and not through the job's inbox and a wake: the answer is born here, on the
+    /// window thread, in the turn the quit moved, and a report that went round the loop would
+    /// leave one turn in which the quit had moved on and the job had not — a way out reached with
+    /// the job still `Quitting`. The job still refuses it as stale unless it names the job's own
+    /// transaction (`update_job::Job::apply`).
+    fn deliver_the_quits_update_report(&mut self) {
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        let Some(report) = app.quit.as_mut().and_then(quit::Quit::take_update_report) else {
+            return;
+        };
+        if let update_job::Step::QuitAbandoned(why) = report.step {
+            diagnostics::note(&format!(
+                "Folio: update {} was not applied: {}",
+                report.txn,
+                why.why()
+            ));
+        }
+        app.update_job.apply(report);
+    }
+
+    /// **What became of an update's session document**, if anything has yet (0.4.6 U-21).
+    ///
+    /// The first ask hands the photograph over as a named generation and answers `None`; every
+    /// later one reads the receipt for that generation, and past `quit::UPDATE_RECEIPT_DEADLINE`
+    /// books the write as one whose budget ran out — never as a landing. `None` is "look again
+    /// next turn".
+    fn update_session_answer(&mut self, now: Instant) -> Option<Result<(), persist::SaveRefusal>> {
+        let app = self.app.as_mut()?;
+        let quit = app.quit.as_mut()?;
+        let Some(generation) = quit.awaited_generation() else {
+            return match app.session_store.hand_over_final(now) {
+                Ok(Some(generation)) => {
+                    quit.requested(generation, now);
+                    None
+                }
+                Ok(None) => Some(Ok(())),
+                Err(refusal) => Some(Err(refusal)),
+            };
+        };
+        match app.session_store.landing_of(generation, now) {
+            Some(answer) => Some(answer),
+            None if quit.receipt_is_overdue(now) => {
+                Some(Err(app.session_store.receipt_overdue(generation, now)))
+            }
+            None => None,
+        }
+    }
+
+    /// **Hand an update whose session landed to its applier** (0.4.6 U-21, §C.3, (b).2) and
+    /// answer whether the way out may go on now.
+    ///
+    /// The first ask builds the hand-over from the job's staged transaction — the journal at
+    /// `Prepared`, the lock this process still holds — and sends it to the storage worker, which
+    /// writes `Handoff` durably and then starts the applier; later asks look for its answer. The
+    /// answer, or [`quit::HANDOFF_DEADLINE`] without one, lets the process leave: whatever the
+    /// journal says then is a row of the recovery table.
+    fn hand_the_update_over(&mut self, now: Instant) -> bool {
+        let Some(app) = self.app.as_mut() else {
+            return true;
+        };
+        let Some(quit) = app.quit.as_mut() else {
+            return true;
+        };
+        let quit::Reason::UpdateRestart { txn } = quit.reason() else {
+            return true;
+        };
+        match quit.handoff() {
+            quit::Handoff::NotOwed | quit::Handoff::Done => true,
+            quit::Handoff::Owed => {
+                let sent = app
+                    .update_job
+                    .staged()
+                    .ok_or_else(|| "no transaction is staged".to_owned())
+                    .and_then(|staged| {
+                        update_handoff::HandoffJob::new(
+                            staged,
+                            update_job::mint_nonce(),
+                            Box::new(update_handoff::Detached),
+                        )
+                        .map_err(|refusal| format!("{refusal:?}"))
+                    })
+                    .and_then(|job| {
+                        app.session_store
+                            .hand_off(job)
+                            .ok_or_else(|| "there is no storage worker".to_owned())
+                    });
+                match sent {
+                    Ok(answer) => {
+                        app.handoff_answer = Some(answer);
+                        quit.handoff_sent(now);
+                        false
+                    }
+                    Err(why) => {
+                        diagnostics::note(&format!(
+                            "Folio: update {txn} was not handed over, and stays prepared: {why}"
+                        ));
+                        quit.handed_off();
+                        true
+                    }
+                }
+            }
+            quit::Handoff::Sent { .. } => {
+                let answered = app
+                    .handoff_answer
+                    .as_ref()
+                    .and_then(|answer| answer.try_recv().ok());
+                match answered {
+                    Some(handed) => diagnostics::note(&handed.line(txn)),
+                    None if quit.handoff_is_overdue(now) => diagnostics::note(&format!(
+                        "Folio: update {txn}'s hand-over did not answer in time; Folio leaves, \
+                         and the next start reads the journal"
+                    )),
+                    None => return false,
+                }
+                app.handoff_answer = None;
+                quit.handed_off();
+                true
+            }
         }
     }
 
@@ -62536,7 +62813,7 @@ impl FolioApp {
         // so it goes on admitting; a quit that has been answered is not, and neither is one that
         // has already hidden the windows.
         let quit = self.app.as_ref().and_then(|app| app.quit.as_ref());
-        launch_wire::set_admitting(quit.is_none_or(quit::Quit::is_asking));
+        launch_wire::set_admitting(quit.is_none_or(quit::Quit::admits_launches));
         // **The retirement's own turn, and nothing else's** (multiwindow slice
         // E2 phase ④). Past this point every window is hidden, its shells are
         // shut and its picture is on the disk; the only thing the loop is still
@@ -62567,7 +62844,7 @@ impl FolioApp {
                 .app
                 .as_ref()
                 .and_then(|app| app.quit.as_ref())
-                .and_then(quit::Quit::deadline);
+                .and_then(|quit| quit.wake_at(now));
             event_loop.set_control_flow(
                 earliest_deadline([waking, bound])
                     .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
@@ -62703,6 +62980,15 @@ impl FolioApp {
                 }
             }
         }
+        // **And the quit's, while it waits for an answer across turns** (0.4.6 U-21): an update's
+        // quit looks for its session's receipt with the windows still up, and neither the writer
+        // nor anything else wakes the loop when it comes.
+        let quit_wake = self
+            .app
+            .as_ref()
+            .and_then(|app| app.quit.as_ref())
+            .and_then(|quit| quit.wake_at(now));
+        let wake_deadline = earliest_deadline([wake_deadline, quit_wake]);
         event_loop
             .set_control_flow(wake_deadline.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
@@ -67342,7 +67628,10 @@ mod floated_page_tests {
     /// quit has already written one.**
     ///
     /// `quit::Quit::document_is_written` is where the rule lives and where it is
-    /// tested; what this holds is that the rule is *asked* — at the one place
+    /// tested — asked, since 0.4.6 U-21, through `quit::Quit::document_is_frozen`,
+    /// which is that rule widened back to the photograph for a quit that goes on
+    /// turning while its document lands; what this holds is that the rule is
+    /// *asked* — at the one place
     /// every writer goes through (§2.7: 整份文件只在 `App::session_document`
     /// 一处被组装), rather than at the forty call sites of
     /// `mark_session_dirty`, any one of which could be added tomorrow without
@@ -67358,7 +67647,7 @@ mod floated_page_tests {
         // the first `\n    fn record_session(` in the file and could not tell.
         let door = method_body("App", "record_session");
         assert!(
-            door.contains(concat!("quit::Quit::document_is", "_written")),
+            door.contains(concat!("quit::Quit::document_is", "_frozen")),
             "the one door onto the document does not ask whether the quit has \
              already written one:\n{door}"
         );

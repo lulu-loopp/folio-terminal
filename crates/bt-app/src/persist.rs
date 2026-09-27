@@ -337,7 +337,7 @@ const SESSION_DEBOUNCE: Duration = Duration::from_millis(1_500);
 /// can state. Three seconds is far longer than an honest local write and short enough that a
 /// quit does not look wedged; past it the answer is "this did not land", which is a fact the
 /// caller acts on rather than a wait it cannot leave.
-const SESSION_SAVE_BUDGET: Duration = Duration::from_secs(3);
+pub(crate) const SESSION_SAVE_BUDGET: Duration = Duration::from_secs(3);
 
 /// How often a bounded join asks whether the writer thread has finished.
 const SESSION_JOIN_POLL: Duration = Duration::from_millis(2);
@@ -348,6 +348,10 @@ const SESSION_JOIN_POLL: Duration = Duration::from_millis(2);
 /// operating system refusing a thread — which is a state, not a verdict about the disk. The
 /// document stays owed and the next hand-over asks for a thread again.
 const NO_WRITER_THREAD: &str = "the session writer could not be started";
+
+/// What a store whose writer thread has gone says about a document it was
+/// waiting to hear about: nothing is on its way, so this is a refusal.
+const WRITER_STOPPED: &str = "the session writer stopped before this document reached the disk";
 
 /// What a save that ran out of budget says, on `stderr` and to the caller.
 ///
@@ -416,8 +420,8 @@ struct SessionWriteReceipt {
     result: Result<(), String>,
 }
 
-/// **One job for the storage worker**: a session document, or an update
-/// trial's receipt (U-13).
+/// **One job for the storage worker**: a session document, an update
+/// trial's receipt (U-13), or an update's hand-over to its applier (U-21).
 enum StorageJob {
     Session(SessionWriteRequest),
     /// Written create-new through the `install_txn` door, and answered on its
@@ -425,6 +429,14 @@ enum StorageJob {
     Receipt {
         job: crate::update_trial::ReceiptJob,
         answer: mpsc::Sender<ReceiptWritten>,
+    },
+    /// `Handoff` written durably through the `install_txn` door, then the
+    /// applier started (`update_handoff::perform`), answered on its own
+    /// channel. Here and not on the window thread, because a durable write
+    /// waits for the device.
+    Handoff {
+        job: crate::update_handoff::HandoffJob,
+        answer: mpsc::Sender<crate::update_handoff::HandedOff>,
     },
 }
 
@@ -498,6 +510,10 @@ struct SessionWriter {
     /// The newest request a receipt has come back for. `sent > landed` is "a document is still
     /// in flight", which is the question a quit has to ask even when nothing is dirty.
     landed: u64,
+    /// **The answer for the newest request**, once it has come back: its generation and what
+    /// became of it (U-21). An update's quit waits for one named generation across turns, and
+    /// the autosave's own turn may be the one that reads its receipt.
+    answered: Option<(u64, Result<(), String>)>,
     /// **A wait on this writer has already run out of budget** (T-QUIT-HAS-A-DEADLINE).
     ///
     /// Once one has, the thread is inside a call nobody in this process can bound, and every
@@ -518,6 +534,7 @@ impl SessionWriter {
             thread: None,
             sent: 0,
             landed: 0,
+            answered: None,
             stalled: false,
         };
         writer.start();
@@ -555,6 +572,10 @@ impl SessionWriter {
                         StorageJob::Session(request) => request,
                         StorageJob::Receipt { job, answer } => {
                             let _ = answer.send(write_receipt(&job));
+                            continue;
+                        }
+                        StorageJob::Handoff { job, answer } => {
+                            let _ = answer.send(crate::update_handoff::perform(job));
                             continue;
                         }
                     };
@@ -623,9 +644,35 @@ impl SessionWriter {
         Some(answered)
     }
 
+    /// Hand an update's hand-over to the writer thread (U-21): the durable
+    /// `Handoff`, then the applier's start. `None` when there is no writer
+    /// thread: then nothing is written and nothing started.
+    fn send_handoff(
+        &mut self,
+        job: crate::update_handoff::HandoffJob,
+    ) -> Option<mpsc::Receiver<crate::update_handoff::HandedOff>> {
+        if !self.start() {
+            return None;
+        }
+        let (answer, answered) = mpsc::channel();
+        self.requests
+            .send(StorageJob::Handoff { job, answer })
+            .ok()?;
+        Some(answered)
+    }
+
     /// Every receipt that has arrived, newest-relevant last. Never waits.
     fn collect(&self) -> Vec<SessionWriteReceipt> {
         self.receipts.try_iter().collect()
+    }
+
+    /// Whether the writer thread has gone, so that no receipt will ever come again. Never
+    /// waits; asked only after [`Self::collect`] has taken whatever had arrived.
+    fn gone(&self) -> bool {
+        matches!(
+            self.receipts.try_recv(),
+            Err(mpsc::TryRecvError::Disconnected)
+        )
     }
 
     /// Wait for one named generation to land — **the one place this store blocks**, and the one
@@ -676,10 +723,7 @@ impl SessionWriter {
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return (
                         earlier,
-                        Err(SaveRefusal::Refused(
-                            "the session writer stopped before this document reached the disk"
-                                .to_string(),
-                        )),
+                        Err(SaveRefusal::Refused(WRITER_STOPPED.to_string())),
                     );
                 }
             }
@@ -1002,6 +1046,7 @@ impl SessionStore {
         if receipt.generation < self.writer.sent {
             return;
         }
+        self.writer.answered = Some((receipt.generation, receipt.result.clone()));
         self.report_write(receipt.result, now);
     }
 
@@ -1102,6 +1147,90 @@ impl SessionStore {
             self.debouncer.mark_flushed();
         }
         landed
+    }
+
+    /// **Hand the final document over as a named generation, and do not wait for it** — an
+    /// update's quit (0.4.6 U-21, `docs/plans/design/self-update-2026-09-16.md` §C.3).
+    ///
+    /// The same writer and the same road as [`Self::flush_judged`], and one difference that is
+    /// the whole point: the window thread goes on turning, and the answer is read by
+    /// [`Self::landing_of`] on a later turn, under a deadline the quit keeps as a clock rather
+    /// than a wait. **Always a new generation**, clean or not: the update is handed on only on a
+    /// receipt for *this* document — the photograph the quit just took — and never on an older
+    /// one that happens to have landed.
+    ///
+    /// `Ok(None)` when this process owes the disk nothing ([`Self::flush_judged`]'s second Folio
+    /// over this directory): there is no document to wait for, and none is this quit's.
+    ///
+    /// # Errors
+    /// The document could not be serialised, or there is no writer thread: a refusal, as
+    /// [`Self::flush_judged`] reports it.
+    pub(crate) fn hand_over_final(&mut self, now: Instant) -> Result<Option<u64>, SaveRefusal> {
+        if !self.writes_to_disk() {
+            self.debouncer.mark_flushed();
+            return Ok(None);
+        }
+        self.take_receipts(now);
+        let bytes = bt_persist::serialize_session(&self.session).map_err(|error| {
+            let error = error.to_string();
+            self.report_write(Err(error.clone()), now);
+            SaveRefusal::Refused(error)
+        })?;
+        let Some(generation) = self.writer.send(&self.session_path, bytes) else {
+            self.report_write(Err(NO_WRITER_THREAD.to_string()), now);
+            return Err(SaveRefusal::Refused(NO_WRITER_THREAD.to_string()));
+        };
+        self.debouncer.mark_flushed();
+        Ok(Some(generation))
+    }
+
+    /// **What became of generation `generation`, if the writer has said** — never waits (U-21).
+    ///
+    /// Only the receipt for that generation answers: an older one is somebody else's document.
+    /// A writer thread that has gone answers a refusal, as [`SessionWriter::wait_for`] does:
+    /// nothing is on its way.
+    pub(crate) fn landing_of(
+        &mut self,
+        generation: u64,
+        now: Instant,
+    ) -> Option<Result<(), SaveRefusal>> {
+        self.take_receipts(now);
+        if let Some((answered, result)) = &self.writer.answered
+            && *answered == generation
+        {
+            return Some(result.clone().map_err(SaveRefusal::Refused));
+        }
+        self.writer
+            .gone()
+            .then(|| Err(SaveRefusal::Refused(WRITER_STOPPED.to_string())))
+    }
+
+    /// **The receipt for `generation` did not come back in time** (U-21): the same answer, and
+    /// the same bookkeeping, as a synchronous wait whose budget ran out — the writer is marked
+    /// stalled, so the close does not spend the budget again and leaves `session.lock` standing,
+    /// and the one line is said.
+    pub(crate) fn receipt_overdue(&mut self, generation: u64, now: Instant) -> SaveRefusal {
+        self.writer.stalled = true;
+        report_save_did_not_finish();
+        let refusal = SaveRefusal::TimedOut(save_did_not_finish());
+        self.apply_receipt(
+            SessionWriteReceipt {
+                generation,
+                result: Err(refusal.message().to_string()),
+            },
+            now,
+        );
+        refusal
+    }
+
+    /// **Hand an update's hand-over to the storage worker** (U-21): `Handoff` written durably
+    /// there, then the applier started — never on the calling thread, which is the window's. The
+    /// answer comes back on the channel this returns; `None` when there is no worker.
+    pub(crate) fn hand_off(
+        &mut self,
+        job: crate::update_handoff::HandoffJob,
+    ) -> Option<mpsc::Receiver<crate::update_handoff::HandedOff>> {
+        self.writer.send_handoff(job)
     }
 
     /// Stand still until one named document has an answer, and book every answer that arrives on
@@ -1916,6 +2045,89 @@ mod tests {
     /// enough time passed" — see CONVENTIONS §三.
     const RECEIPT_CEILING: Duration = Duration::from_secs(60);
 
+    /// RED (0.4.6 U-21) — **an update's quit is answered only by the receipt for the document it
+    /// photographed.**
+    ///
+    /// §C.3: the session write is a named generation, the window thread keeps turning, and it
+    /// acts on the receipt. The autosave hands documents to the same writer all the time, so the
+    /// store has usually heard *a* landing a moment before the quit hands its own over — and that
+    /// landing is somebody else's document. Only the receipt for the quit's own generation may
+    /// answer, and a stale one arriving late does not either; what then lands is the photograph,
+    /// byte for byte.
+    ///
+    /// The writer is the real thread and the file the real `atomic_write`'s. Its receipt for the
+    /// photograph is relayed through a channel this test holds, so the moment the quit hears it is
+    /// decided here and not by the thread's timing.
+    ///
+    /// MUTATION: in `SessionStore::landing_of`, answer whatever the newest receipt said (drop
+    /// `*answered == generation`) — the autosave's earlier landing then answers for the
+    /// photograph.
+    #[test]
+    fn session_receipt_matches_the_final_snapshot() {
+        let root = appdata("final-snapshot");
+        let mut store = SessionStore::at(root.join("session.json"), root.join("session.lock"));
+        let earlier = SessionV1 {
+            windows: vec![bt_persist::SessionWindowV1::default()],
+            ..SessionV1::default()
+        };
+        let mut photograph = earlier.clone();
+        photograph
+            .windows
+            .push(bt_persist::SessionWindowV1::default());
+
+        store.record(earlier, Instant::now());
+        let first = store
+            .hand_over_final(Instant::now())
+            .expect("handed over")
+            .expect("this store writes");
+        let until = Instant::now() + RECEIPT_CEILING;
+        let landed = loop {
+            if let Some(answer) = store.landing_of(first, Instant::now()) {
+                break answer;
+            }
+            assert!(Instant::now() < until, "the writer never answered");
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        assert_eq!(landed, Ok(()), "an earlier document has landed");
+
+        store.record(photograph.clone(), Instant::now());
+        let (relay, held) = mpsc::channel();
+        let real = std::mem::replace(&mut store.writer.receipts, held);
+        let second = store
+            .hand_over_final(Instant::now())
+            .expect("handed over")
+            .expect("this store writes");
+        assert!(second > first, "the photograph is a generation of its own");
+        assert_eq!(
+            store.landing_of(second, Instant::now()),
+            None,
+            "the earlier landing is not the photograph's"
+        );
+        relay
+            .send(SessionWriteReceipt {
+                generation: first,
+                result: Ok(()),
+            })
+            .expect("the relay");
+        assert_eq!(
+            store.landing_of(second, Instant::now()),
+            None,
+            "nor is an older receipt arriving late"
+        );
+        let receipt = real
+            .recv_timeout(RECEIPT_CEILING)
+            .expect("the writer answers for the photograph");
+        assert_eq!(receipt.generation, second);
+        relay.send(receipt).expect("the relay");
+        assert_eq!(store.landing_of(second, Instant::now()), Some(Ok(())));
+        assert_eq!(
+            std::fs::read(root.join("session.json")).expect("the file"),
+            bt_persist::serialize_session(&photograph).expect("the photograph serialises"),
+            "and what landed is the photograph"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// RED — **the autosave leaves the window thread before it is known to have landed**
     /// (window-thread unbounded-call sweep, 2026-08-24).
     ///
@@ -2209,6 +2421,7 @@ mod tests {
             thread: Some(thread),
             sent: 0,
             landed: 0,
+            answered: None,
             stalled: false,
         };
         (writer, release)

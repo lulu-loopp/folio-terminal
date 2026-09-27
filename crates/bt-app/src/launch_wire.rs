@@ -1006,6 +1006,63 @@ mod tests {
         assert_eq!(take().len(), 0, "and it reaches it once");
     }
 
+    /// RED (0.4.6 U-21) — **no launch is admitted after the photograph of an update's quit.**
+    ///
+    /// An update's Restart is a new trigger of the quit, and it is the first one that keeps the
+    /// windows up and the loop turning after the photograph: it waits across turns for its
+    /// session's receipt. `launch_wire::admit` is one of the two readers that assumed a person
+    /// quits (the restore card is the other), and it is held here to the quit's own answer at
+    /// every step of that walk — admitting while the card is still asking, and refusing with the
+    /// existing `NotServing` from the answer on. The two places the window thread says it — the
+    /// turn's head and the photograph's own arm, which runs in the turn the quit began — are held
+    /// by `the_photograph_stops_the_launches_and_the_restore_card` in `main.rs`.
+    ///
+    /// MUTATION: make `Quit::admits_launches` answer `true` for the write
+    /// (`Phase::Writing { .. }`) — a launch is then promised a window while the document lands.
+    #[test]
+    fn no_launch_is_admitted_after_the_photograph() {
+        use crate::quit::{Quit, QuitAnswer, QuitStep, Reason, WriteVerdict};
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = take();
+        let asks = |quit: &Quit| {
+            set_admitting(quit.admits_launches());
+            let admitted = admit(LaunchRequest::default(), true);
+            set_admitting(true);
+            admitted.is_some()
+        };
+        let txn = crate::update_txn::TxnId::new([0x21; 16]);
+        let mut quit = Quit::begin_for(vec!["notes.md".to_owned()], Reason::UpdateRestart { txn });
+        assert!(
+            asks(&quit),
+            "a quit still asking can be cancelled, and admits"
+        );
+        let now = std::time::Instant::now();
+        let mut seen = Vec::new();
+        let mut step = quit.answer(QuitAnswer::Discard);
+        loop {
+            seen.push(step);
+            assert!(!asks(&quit), "a launch was admitted at {step:?}: {seen:?}");
+            step = match step {
+                QuitStep::Discard => quit.discarded(),
+                QuitStep::Photograph => quit.photographed(),
+                QuitStep::Write if quit.awaited_generation().is_none() => quit.requested(4, now),
+                QuitStep::Write => quit.written(WriteVerdict::Landed),
+                QuitStep::Retire => quit.retired(now),
+                QuitStep::WaitForPages => quit.pages(true, now),
+                QuitStep::Ask | QuitStep::Save | QuitStep::Exit | QuitStep::Abandon => break,
+            };
+        }
+        assert!(
+            seen.contains(&QuitStep::Photograph) && seen.contains(&QuitStep::Exit),
+            "the whole road: {seen:?}"
+        );
+        assert!(
+            admit(LaunchRequest::default(), true).is_some(),
+            "and an ordinary run admits again"
+        );
+        let _ = take();
+    }
+
     /// **RED (review C-2) — a Folio that is leaving refuses launches rather than swallowing them.**
     ///
     /// The retirement hole: the endpoint is a `OnceLock` and goes on answering after Quit has

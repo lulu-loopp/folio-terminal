@@ -48,7 +48,8 @@
 //! A press reaches a [`Driver`]. The only one is [`Unsupported`], which refuses
 //! before any network, staging, flush or wait: the job goes straight to
 //! [`State::Failed`]. The drivers are U-20 (Windows) and U-27 (macOS); the quit
-//! barrier is U-21. And no user sees any of this: [`Job::offers_enabled`] is a
+//! barrier is U-21 ([`Job::restart`], and the two answers the quit delivers
+//! to [`Job::apply`] on the window thread). And no user sees any of this: [`Job::offers_enabled`] is a
 //! constant `false` until the enabling tickets (U-31, U-32) turn it on, so the
 //! job never leaves `Idle` in a shipped build. What it does do is decide, and
 //! say what it decided once per launch in `diagnostics.log`.
@@ -68,7 +69,8 @@ use bt_platform::HostPlatform;
 
 use crate::install_channel::{Channel, Manager};
 use crate::update::{Version, newer_than, should_offer};
-use crate::update_txn::TxnId;
+use crate::update_handoff::Staged;
+use crate::update_txn::{Nonce, TxnId};
 
 /// **Whether a reader may be offered an update at all** (U-18: off).
 ///
@@ -690,6 +692,37 @@ impl Driver for Unsupported {
 
 // ── progress, and the stale-event rule ─────────────────────────────────────
 
+/// **Why the quit gave the update up** (0.4.6 U-21, §C.3 and R-4): the reason
+/// the verified card names when it comes back. The card's words are U-19's;
+/// this is the fact they are drawn from, and [`Abandon::why`] is the line
+/// `diagnostics.log` gets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Abandon {
+    /// The reader answered the quit's card with Cancel.
+    Cancelled,
+    /// **Save** was chosen and not everything it named reached the disk.
+    SaveIncomplete,
+    /// The session document was refused by the disk.
+    SessionRefused,
+    /// The session's receipt did not come back inside
+    /// [`crate::quit::UPDATE_RECEIPT_DEADLINE`]. The quit went on; the update
+    /// did not, because nobody saw the document land.
+    SessionTimedOut,
+}
+
+impl Abandon {
+    /// The reason, as the one line `diagnostics.log` gets.
+    #[must_use]
+    pub(crate) const fn why(self) -> &'static str {
+        match self {
+            Self::Cancelled => "the quit was cancelled",
+            Self::SaveIncomplete => "not every unsaved file could be saved",
+            Self::SessionRefused => "the session could not be written",
+            Self::SessionTimedOut => "the session write did not finish in time",
+        }
+    }
+}
+
 /// What a driver (or the quit barrier) reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
@@ -701,8 +734,8 @@ pub(crate) enum Step {
     Verified,
     /// The driver stopped; nothing installed was changed.
     Stopped,
-    /// The quit was cancelled or its save failed: back to `Verified` (§B).
-    QuitAbandoned,
+    /// The quit gave the update up, and why: back to `Verified` (§B).
+    QuitAbandoned(Abandon),
     /// The session landed: the process hands over (§B `Committing`).
     SessionLanded,
 }
@@ -749,15 +782,32 @@ pub(crate) fn evidence_landed() {
     }
 }
 
+/// Where a driver leaves the staged transaction for the job, until the job
+/// reads its `Verified` report: the transaction it belongs to, and the value.
+type StagedSlot = Arc<Mutex<Option<(TxnId, Staged)>>>;
+
 /// **A driver's way back to the job**: reports carry the transaction they
 /// belong to, wait in the job's inbox, and wake the loop.
 #[derive(Clone)]
 pub(crate) struct Poster {
     txn: TxnId,
     inbox: Arc<Mutex<Vec<Progress>>>,
+    staged: StagedSlot,
 }
 
 impl Poster {
+    /// **Report `Verified`, handing the job what Prepare leaves behind** —
+    /// the home, the journal at `Prepared` and the transaction lock (U-21's
+    /// seam for U-20 / U-27): the quit's hand-over writes `Handoff` from it,
+    /// under that lock, at the way out.
+    pub(crate) fn verified(&self, staged: Staged) {
+        *self
+            .staged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((self.txn, staged));
+        self.post(Step::Verified);
+    }
+
     /// Report `step` for this poster's transaction.
     pub(crate) fn post(&self, step: Step) {
         self.inbox
@@ -778,6 +828,16 @@ impl Poster {
 #[must_use]
 pub(crate) fn mint_txn() -> TxnId {
     TxnId::new(bt_platform::attention_pipe::unguessable_bits().to_le_bytes())
+}
+
+/// **The applier's nonce** O records in `Handoff` and hands P (U-21): 256
+/// bits nobody can guess, two draws of the same source.
+#[must_use]
+pub(crate) fn mint_nonce() -> Nonce {
+    let mut bytes = [0u8; 32];
+    bytes[..16].copy_from_slice(&bt_platform::attention_pipe::unguessable_bits().to_le_bytes());
+    bytes[16..].copy_from_slice(&bt_platform::attention_pipe::unguessable_bits().to_le_bytes());
+    Nonce::new(bytes)
 }
 
 // ── the job ─────────────────────────────────────────────────────────────────
@@ -808,6 +868,14 @@ pub(crate) struct Job<W> {
     offers: bool,
     /// Reports from a driver, waiting for the window thread.
     inbox: Arc<Mutex<Vec<Progress>>>,
+    /// What a driver left with its `Verified` report, until the job takes it.
+    staged_slot: StagedSlot,
+    /// **The staged transaction** — its home, its journal and the lock O holds
+    /// on it — from `Verified` until the process leaves (U-21).
+    staged: Option<Staged>,
+    /// Why the last quit gave the update up, while the card is back at
+    /// `Verified` (U-21; U-19 names it).
+    abandoned: Option<Abandon>,
 }
 
 impl<W: Copy + Eq> Default for Job<W> {
@@ -834,7 +902,52 @@ impl<W: Copy + Eq> Job<W> {
             said: false,
             offers,
             inbox: Arc::new(Mutex::new(Vec::new())),
+            staged_slot: Arc::new(Mutex::new(None)),
+            staged: None,
+            abandoned: None,
         }
+    }
+
+    /// A job standing at `Verified` with `offer` — a test's way to the quit
+    /// barrier without a driver (none exists before U-20).
+    #[cfg(test)]
+    pub(crate) fn verified_for_test(offer: Offer) -> Self {
+        let mut job = Self::with_offers(true);
+        job.state = State::Verified(offer);
+        job
+    }
+
+    /// **Why the last quit gave the update up**, while the job is back at
+    /// `Verified` — the reason the card names (§C.3, R-4).
+    #[must_use]
+    pub(crate) const fn quit_abandoned(&self) -> Option<Abandon> {
+        self.abandoned
+    }
+
+    /// **The staged transaction** the quit hands to its applier: present from
+    /// a driver's `Verified` report on, for as long as the process runs.
+    #[must_use]
+    pub(crate) const fn staged(&self) -> Option<&Staged> {
+        self.staged.as_ref()
+    }
+
+    /// **Restart** on the verified card (§C.3): the job moves to `Quitting`
+    /// and answers the reason the ordinary quit begins with — the quit
+    /// carries the offer's transaction, so its two answers are refused as
+    /// stale by any job that is not this one.
+    ///
+    /// # Errors
+    /// [`TABLE`]'s refusal for Restart in the job's state; nothing moves.
+    pub(crate) fn restart(&mut self) -> Result<crate::quit::Reason, Refusal> {
+        // Restart's row never reaches a driver, so the one there is serves.
+        self.answer_verb(Verb::Restart, &Unsupported, &Unfetched)?;
+        let txn = self
+            .state
+            .offer()
+            .map(Offer::txn)
+            .expect("Restart moves only a verified job, to Quitting, which carries its offer");
+        self.abandoned = None;
+        Ok(crate::quit::Reason::UpdateRestart { txn })
     }
 
     /// The job's state.
@@ -940,11 +1053,23 @@ impl<W: Copy + Eq> Job<W> {
                 (State::Downloading(offer, bytes), Applied::Moved)
             }
             (State::Downloading(offer, _), Step::Staged) => (State::Staged(offer), Applied::Moved),
-            (State::Staged(offer), Step::Verified) => (State::Verified(offer), Applied::Moved),
+            (State::Staged(offer), Step::Verified) => {
+                let staged = self
+                    .staged_slot
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take_if(|(txn, _)| *txn == offer.txn)
+                    .map(|(_, staged)| staged);
+                if staged.is_some() {
+                    self.staged = staged;
+                }
+                (State::Verified(offer), Applied::Moved)
+            }
             (State::Downloading(offer, _) | State::Staged(offer), Step::Stopped) => {
                 (State::Failed(offer, Failure::Stopped), Applied::Moved)
             }
-            (State::Quitting(offer), Step::QuitAbandoned) => {
+            (State::Quitting(offer), Step::QuitAbandoned(why)) => {
+                self.abandoned = Some(why);
                 (State::Verified(offer), Applied::Moved)
             }
             (State::Quitting(offer), Step::SessionLanded) => {
@@ -979,6 +1104,7 @@ impl<W: Copy + Eq> Job<W> {
                 let post = Poster {
                     txn: offer.txn,
                     inbox: Arc::clone(&self.inbox),
+                    staged: Arc::clone(&self.staged_slot),
                 };
                 match driver.prepare(&offer, transport, &post) {
                     Ok(()) => (
@@ -1014,6 +1140,16 @@ impl<W: Copy + Eq> Job<W> {
         }
         self.state = next;
         outcome
+    }
+}
+
+/// A transport for the verbs that never fetch: Restart's row reaches no
+/// driver, so this is never asked.
+struct Unfetched;
+
+impl Transport for Unfetched {
+    fn fetch(&self, _: &Request) -> Result<(), String> {
+        Err("this verb fetches nothing".to_owned())
     }
 }
 
@@ -1135,6 +1271,89 @@ mod tests {
             *self.0.borrow_mut() = Some(post.clone());
             Ok(())
         }
+    }
+
+    /// RED (0.4.6 U-21) — **a driver's `Verified` report hands the job the
+    /// staged transaction, and Restart begins the quit for that transaction.**
+    ///
+    /// The seam U-20 / U-27 report through: the home, the journal at
+    /// `Prepared` and the transaction lock cross from the driver's thread with
+    /// the report, and stay with the job — the lock held — until the quit's
+    /// way out writes `Handoff` from them. Restart answers the reason the
+    /// ordinary quit begins with, carrying the offer's transaction.
+    ///
+    /// MUTATION: in `Job::apply`'s `Verified` arm, leave the slot where it is —
+    /// the job reaches `Verified` holding nothing to hand over.
+    #[test]
+    fn a_verified_report_hands_the_job_its_staged_transaction() {
+        use bt_platform::install_txn::{self, Hold};
+
+        use crate::update_handoff::Staged;
+        use crate::update_txn::{Event, Home, Inventories, Journal, Layout, PhaseKind};
+
+        let folder = std::env::temp_dir().join(format!(
+            "bt-update-job-staged-{}-{}",
+            std::process::id(),
+            bt_platform::attention_pipe::unguessable_bits()
+        ));
+        let home = Home::at(folder.join(".folio-update"));
+        std::fs::create_dir_all(home.root()).expect("the home");
+        let mut job = available("v0.4.7");
+        let driver = Starting::default();
+        job.answer_verb(Verb::Press, &driver, &Recording::default())
+            .expect("the press is taken");
+        let offer = job.state().offer().cloned().expect("an offer");
+        let post = driver
+            .0
+            .borrow_mut()
+            .take()
+            .expect("the driver kept its poster");
+        let journal = Journal::allocate(
+            offer.txn(),
+            folder.join("rescue.exe").to_string_lossy().into_owned(),
+            Layout::Members(Inventories {
+                old_shipped: Vec::new(),
+                old_present: Vec::new(),
+                new: Vec::new(),
+            }),
+        )
+        .advance(&Event::Prepared)
+        .expect("Allocated → Prepared");
+        let lock = install_txn::try_hold(&home.lock(), Hold::Exclusive)
+            .expect("the lock file opens")
+            .expect("nobody else holds it");
+        std::thread::scope(|threads| {
+            threads.spawn(|| {
+                post.post(Step::Staged);
+                post.verified(Staged {
+                    home: home.clone(),
+                    journal,
+                    lock,
+                });
+            });
+        });
+        assert_eq!(job.drain_progress(), 0, "no report is stale");
+        assert!(matches!(job.state(), State::Verified(_)));
+        let staged = job.staged().expect("the job holds the staged transaction");
+        assert_eq!(staged.journal.txn, offer.txn());
+        assert_eq!(staged.journal.body.phase.kind(), PhaseKind::Prepared);
+        assert!(
+            install_txn::try_hold(&home.lock(), Hold::Exclusive)
+                .expect("the lock file opens")
+                .is_none(),
+            "and the transaction lock is still held"
+        );
+        assert_eq!(
+            job.restart(),
+            Ok(crate::quit::Reason::UpdateRestart { txn: offer.txn() })
+        );
+        assert!(matches!(job.state(), State::Quitting(_)));
+        assert!(
+            job.staged().is_some(),
+            "the quit hands it over, not Restart"
+        );
+        drop(job);
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// RED (U-18) — **an offer is captured once and a later answer does not
@@ -1273,7 +1492,10 @@ mod tests {
         assert_eq!(job.state(), &State::Verified(offer.clone()));
         job.answer_verb(Verb::Restart, &Unsupported, &Recording::default())
             .expect("Restart");
-        assert_eq!(job.apply(report(Step::QuitAbandoned)), Applied::Moved);
+        assert_eq!(
+            job.apply(report(Step::QuitAbandoned(super::Abandon::Cancelled))),
+            Applied::Moved
+        );
         assert_eq!(job.state(), &State::Verified(offer.clone()));
         job.answer_verb(Verb::Restart, &Unsupported, &Recording::default())
             .expect("Restart");

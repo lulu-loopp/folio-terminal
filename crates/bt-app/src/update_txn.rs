@@ -901,6 +901,11 @@ pub(crate) enum Event {
     Discarded,
     /// The quit landed and O hands the transaction to its applier (F-6).
     HandedOff { applier: Nonce },
+    /// **O could not start the applier it had just handed the transaction
+    /// to** (U-21, §C.3: "a spawn failure there journals `Failed` and exits
+    /// anyway"). Nothing has moved: the transaction is abandoned — terminal,
+    /// outcome `none` — and the next start retires it (W13).
+    ApplierNotStarted,
     /// The entrance is written, flushed and read back (F-2, F-3). The proof is
     /// `bt_platform::install_txn::Armed`, one type for both platforms, which
     /// only the two entrance doors make, and only after their read-back
@@ -943,6 +948,7 @@ pub(crate) enum EventKind {
     LaunchedWithoutResume,
     Discarded,
     HandedOff,
+    ApplierNotStarted,
     Armed,
     EntranceFailed,
     Reverted,
@@ -956,12 +962,13 @@ pub(crate) enum EventKind {
 }
 
 impl EventKind {
-    pub(crate) const ALL: [EventKind; 15] = [
+    pub(crate) const ALL: [EventKind; 16] = [
         EventKind::Prepared,
         EventKind::PrepareFailed,
         EventKind::LaunchedWithoutResume,
         EventKind::Discarded,
         EventKind::HandedOff,
+        EventKind::ApplierNotStarted,
         EventKind::Armed,
         EventKind::EntranceFailed,
         EventKind::Reverted,
@@ -981,7 +988,8 @@ impl EventKind {
             | EventKind::PrepareFailed
             | EventKind::LaunchedWithoutResume
             | EventKind::Discarded
-            | EventKind::HandedOff => &[Actor::Old],
+            | EventKind::HandedOff
+            | EventKind::ApplierNotStarted => &[Actor::Old],
             EventKind::Armed
             | EventKind::EntranceFailed
             | EventKind::Admitted
@@ -1004,6 +1012,7 @@ impl Event {
             Event::LaunchedWithoutResume => EventKind::LaunchedWithoutResume,
             Event::Discarded => EventKind::Discarded,
             Event::HandedOff { .. } => EventKind::HandedOff,
+            Event::ApplierNotStarted => EventKind::ApplierNotStarted,
             Event::Armed(_) => EventKind::Armed,
             Event::EntranceFailed => EventKind::EntranceFailed,
             Event::Reverted => EventKind::Reverted,
@@ -1068,6 +1077,11 @@ pub(crate) const TRANSITIONS: &[(PhaseKind, EventKind, PhaseKind)] = &[
         PhaseKind::Prepared,
         EventKind::HandedOff,
         PhaseKind::Handoff,
+    ),
+    (
+        PhaseKind::Handoff,
+        EventKind::ApplierNotStarted,
+        PhaseKind::Abandoned,
     ),
     (PhaseKind::Handoff, EventKind::Armed, PhaseKind::Armed),
     (
@@ -1168,7 +1182,9 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
                 Err(Refusal::EntranceForAnotherTransaction)
             }
         }
-        (Phase::Handoff { .. }, Event::EntranceFailed) => Ok(Phase::Abandoned),
+        (Phase::Handoff { .. }, Event::EntranceFailed | Event::ApplierNotStarted) => {
+            Ok(Phase::Abandoned)
+        }
         (Phase::Handoff { .. } | Phase::Armed | Phase::Moving, Event::Reverted) => {
             Ok(Phase::Prepared {
                 deferred_launches: 0,
@@ -2606,6 +2622,7 @@ mod tests {
             Event::HandedOff {
                 applier: nonce(0x44),
             },
+            Event::ApplierNotStarted,
             armed(),
             Event::EntranceFailed,
             Event::Reverted,
