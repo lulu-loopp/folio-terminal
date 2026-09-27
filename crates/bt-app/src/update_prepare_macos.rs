@@ -84,7 +84,7 @@ use crate::update_job::{
 };
 #[cfg(test)]
 pub(crate) use crate::update_prepare::{AtLaunch, at_launch, sum_for};
-use crate::update_prepare::{WORKER, abandon, discard, fetching, matches_its_sum};
+use crate::update_prepare::{WORKER, abandon, discard, fetching, finish, matches_its_sum};
 use crate::update_txn::{BundleIdentity, Cdhash, Event, Home, Journal, Layout, TxnId};
 
 /// **The bundle's name on the release image** (`scripts/release/macos/dmg.sh`
@@ -230,17 +230,7 @@ impl Driver for MacPrepare {
                     tools: tools.as_ref(),
                     channel,
                 };
-                match prepare_on(worker, &road) {
-                    Ok(staged) => {
-                        // Cancelled between the last look and the report: the
-                        // job has moved on, so the transaction is given up.
-                        if let Err(staged) = post.verified(staged) {
-                            let _ = discard(worker, *staged, &Event::Discarded);
-                        }
-                    }
-                    Err(Stop::Cancelled) => {}
-                    Err(stop) => post.post(Step::Stopped(stop)),
-                }
+                finish(worker, &post, prepare_on(worker, &road));
             },
         )
         .map(drop)

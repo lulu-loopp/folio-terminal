@@ -1376,6 +1376,19 @@ impl<W: Copy + Eq> Job<W> {
         }
     }
 
+    /// **The reports waiting for the window thread, taken without applying
+    /// them** — a test's way to read a driver's last word, which a job that
+    /// has moved on drops as stale ([`Self::apply`] them after).
+    #[cfg(test)]
+    pub(crate) fn take_reports(&mut self) -> Vec<Progress> {
+        std::mem::take(
+            &mut *self
+                .inbox
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
     /// **Apply what the drivers reported**, in order — the handler of
     /// `AppEvent::UpdateJobProgress`. Returns how many were stale.
     pub(crate) fn drain_progress(&mut self) -> usize {

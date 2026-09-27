@@ -25,7 +25,7 @@ use bt_winres::release_manifest::{PROTOCOL, RESOURCE_NAME, archive_root};
 use crate::i18n::Text;
 use crate::update_archive::tests::{item_under, zip_of};
 use crate::update_job::{
-    Bytes, Failure, Fetching, Gathered, Job, Presenters, Request, State, Verb,
+    Applied, Bytes, Failure, Fetching, Gathered, Job, Presenters, Progress, Request, State, Verb,
 };
 use crate::update_prepare::{AtLaunch, at_launch, sum_for};
 use crate::update_txn::{Class, Header, HeaderOutcome, Phase};
@@ -403,6 +403,29 @@ fn press(driver: &WinPrepare, transport: Arc<Release>, txn: u8) -> Job<u32> {
     }
 }
 
+/// **Wait for the cancelled Prepare of transaction `txn` to say its last
+/// word** (`Stopped(Cancelled)`, `update_prepare::finish`), reading the job's
+/// inbox without applying it, and answer every report taken, in order. The
+/// last word is the sign the worker holds nothing of the transaction; the
+/// journal's removal is not (the lock is let go after it).
+fn last_word(job: &mut Job<u32>, txn: u8) -> Vec<Progress> {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut taken = Vec::new();
+    loop {
+        taken.extend(job.take_reports());
+        if taken.iter().any(|report| {
+            report.txn == TxnId::new([txn; 16]) && report.step == Step::Stopped(Stop::Cancelled)
+        }) {
+            return taken;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the cancelled Prepare never said its last word: {taken:?}"
+        );
+        std::thread::yield_now();
+    }
+}
+
 /// A job that offers `v0.4.7` under transaction `txn`.
 fn offered(txn: u8) -> Job<u32> {
     let mut job = Job::with_offers(true);
@@ -694,8 +717,8 @@ fn staging_is_always_on_the_destination_volume() {
 ///
 /// §C.2: "every failure here deletes the transaction directory, releases the
 /// lock". A Cancel is the job's word, not a failure the driver reports, so
-/// it takes the same road at the driver's next step without a report — and
-/// must still leave nothing: a journal at `Allocated` left behind would be
+/// it takes the same road at the driver's next step — its only report the
+/// last word, stale to the job — and must still leave nothing: a journal at `Allocated` left behind would be
 /// swept at the next launch, but the lock and the folder would stand until
 /// then.
 ///
@@ -730,23 +753,67 @@ fn cancel_leaves_no_transaction() {
     assert_eq!(job.state(), &State::Idle);
     go.send(()).unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(60);
-    let home = scene.home();
-    while home.journal().exists() || home.transaction(TxnId::new([1; 16])).exists() {
-        assert!(
-            Instant::now() < deadline,
-            "the cancelled Prepare left its transaction"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    let reports = last_word(&mut job, 1);
     scene.left_nothing(1);
     assert_eq!(scene.installed(), before);
-    job.drain_progress();
+    for report in reports {
+        assert_eq!(job.apply(report), Applied::Stale, "{report:?}");
+    }
     assert_eq!(
         job.state(),
         &State::Idle,
         "no report revives a cancelled job"
     );
+}
+
+/// RED (cancel-lock) — **a cancelled Prepare says its last word only once it
+/// holds nothing: when the report is read, the folder and the journal are
+/// gone and the transaction lock is free.**
+///
+/// The journal goes last under the lock and the lock is let go after it, a
+/// directory flush later, so a reader that took the journal's removal as the
+/// sign found the lock still held — 160 times in 160 on a quiet machine when
+/// looked at at once, and once on main's CI (847b65c3) through a 20 ms poll.
+/// The worker's one report (`update_prepare::finish`) is the sign; every round
+/// here looks at the lock the instant the report is read.
+///
+/// MUTATION: in `update_prepare::finish`, post nothing for
+/// `Err(Stop::Cancelled)` (the last word never comes), or post it before
+/// `prepare_on` returns (the lock is still held when it is read).
+#[test]
+fn a_cancelled_prepare_reports_only_after_it_lets_the_lock_go() {
+    let Some(scene) = Scene::new("lastword") else {
+        return refused_off_windows();
+    };
+    let driver = scene.driver(TestTools::real());
+    let home = scene.home();
+    for txn in 1..=12u8 {
+        let (entered, entered_seen) = mpsc::channel();
+        let (go, go_seen) = mpsc::channel();
+        let release = Arc::new(Release {
+            gate: Some((entered, Mutex::new(go_seen))),
+            ..Release::of(scene.archive.clone())
+        });
+        let mut job = offered(txn);
+        let transport: SharedTransport = release;
+        job.answer_verb(Verb::Press, &driver, &transport)
+            .expect("the press is taken");
+        entered_seen
+            .recv_timeout(Duration::from_secs(60))
+            .expect("the archive's fetch began");
+        job.answer_verb(Verb::Cancel, &driver, &transport)
+            .expect("Cancel is on the download's card");
+        go.send(()).unwrap();
+
+        last_word(&mut job, txn);
+        assert!(
+            install_txn::try_hold(&home.lock(), Hold::Exclusive)
+                .unwrap()
+                .is_some(),
+            "round {txn}: the lock is let go before the last word"
+        );
+        scene.left_nothing(txn);
+    }
 }
 
 /// RED (U-20) — **a `Prepared` transaction survives the first launch that does
