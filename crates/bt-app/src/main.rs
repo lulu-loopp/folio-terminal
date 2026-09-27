@@ -50863,6 +50863,11 @@ impl<K: Copy + Eq + std::hash::Hash, W> Windows<K, W> {
         self.open.contains_key(&key)
     }
 
+    /// Every window, in no particular order: for a question whose answer does not depend on it.
+    fn values(&self) -> impl Iterator<Item = &W> {
+        self.open.values()
+    }
+
     /// The key of the window at `index` in the opening order.
     fn key_at(&self, index: usize) -> Option<K> {
         self.order.get(index).copied()
@@ -62923,6 +62928,17 @@ impl FolioApp {
         // reaping one, or rebuilding the menu bar was reported as a wake that
         // named no lane. See [`hang_watch::Station::AppTurn`].
         hang_watch::at(hang_watch::Station::AppTurn);
+        // **This turn's allowance for deferrable work** (0.4.6 A4; budget note §R-B): one shared
+        // deadline — the earliest next frame of the windows on the glass whose clocks are running,
+        // less the present's reserve — taken from the turn's start, before any window takes its
+        // turn. The search walk and the idle calls ask it before each unit and yield when it is
+        // spent; input, the drain and the present never ask, and it moves no deadline.
+        hang_watch::allow_turn(self.windows.values().filter_map(|window| {
+            window.frame_clock.allowance_frame(
+                window.last_present_at,
+                window.leaving.is_none() && !window.window_hidden,
+            )
+        }));
         // **Whether a second launch may still be promised anything** (§7.59, review C-2
         // 2026-09-11), mirrored into the listener thread's own flag once a turn and **above the
         // retirement arm's early return**, which is the whole reason it is here: that arm is the

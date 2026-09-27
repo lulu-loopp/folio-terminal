@@ -2451,25 +2451,31 @@ impl Runtime<'_> {
             // quiet stretch, whichever is later, until it has fired once — so an idle
             // window that nothing else wakes still reaches the turn the clock is due
             // on. Absent once it has fired, before the first frame, and while the
-            // restore card stands (the gesture that answers it books the next one).
+            // restore card stands (the gesture that answers it books the next one). On a turn whose
+            // deferrable work yielded, not before the frame boundary it yielded to (0.4.6 A4).
             application_clocks
                 .then(|| {
                     self.app
                         .web_warmup
                         .deadline(self.web_warmup_waits_for_the_restore_card())
+                        .map(hang_watch::deferred_until)
                 })
                 .flatten(),
             // **The spare web controller** (ticket 60): while it is being made and its engine has
             // spoken, the next quiet instant (absent while the restore card stands); otherwise its
             // own clocks — the engine's start deadline, its browser-exit wait. Absent for a
-            // profile that never gets one, which is most turns of most runs.
+            // profile that never gets one, which is most turns of most runs. The quiet instant is
+            // a deferrable unit's, so on a turn whose deferrable work yielded it is not before the
+            // frame boundary it yielded to (0.4.6 A4).
             application_clocks
                 .then(|| {
                     let quiet = self
                         .app
                         .web_warmup
                         .quiet_at(self.web_warmup_waits_for_the_restore_card());
-                    self.app.web_spare.deadline(quiet.map(|at| at.max(now)))
+                    self.app
+                        .web_spare
+                        .deadline(quiet.map(|at| hang_watch::deferred_until(at.max(now))))
                 })
                 .flatten(),
         ];

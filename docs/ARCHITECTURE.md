@@ -867,6 +867,15 @@ before the run's last line. The accounting reads no clock of its own, and a
 parked loop runs none of it. `hang_watch` reports and never intervenes: a line
 is a finding against its row, not a trigger for anything.
 
+**Deferrable work yields to the earliest window's deadline** (0.4.6 ticket A4;
+the budget note's §R-B): each turn fixes one `TurnAllowance` from its start — the
+earliest next frame boundary among the windows on the glass whose `FrameClock`
+is running, less `PRESENT_RESERVE` (2 ms), else `TURN_BUDGET` from the start —
+and the search walk's slice, the web engine's warm-up ask and the spare web
+controller's making and drain each ask `hang_watch::deferrable` before their
+unit and keep their work for a later turn when nothing is left; input, the drain
+and the present never ask, and the allowance moves no deadline.
+
 ### 5.4 The shippable migration order
 
 1. **Before the move** — define request identity, resource ordering, capacity,
@@ -958,9 +967,11 @@ two lint tables, the vocabulary in the root `clippy.toml`, one `expect` per
 `# effects` row); **the `file_writes` and `wait::*` doors**; **`file_reads`'
 execution-level design**; and **the transport doors inside `bt-pty`**.
 
-**D-2's state** (`docs/plans/structural-debt.md`). A1 (A1a–A1e) and A3 have
-landed: every owner-thread wait is a registry door admitted with its token, and
-every turn and every admitted call is accounted (§5.3). A2 is pending — its
+**D-2's state** (`docs/plans/structural-debt.md`). A1 (A1a–A1e), A3 and A4 have
+landed: every owner-thread wait is a registry door admitted with its token,
+every turn and every admitted call is accounted, and deferrable work yields to
+the earliest window's deadline (§5.3). What A4 leaves of aggregate scheduling is
+D-84. A2 is pending — its
 survey counted 228 bare product sites on the Windows arms (the thread-door
 note's revision (i)), and it lands in five tickets with the lint last. By the
 owner's ruling of 2026-09-25 D-2 closes when A2 has landed.
@@ -1240,12 +1251,17 @@ from the run's atomics, so it is whole however many lines were lost:
 
 ```text
 Folio budget summary: <wall|waits|unexplained|delay> count=<n> max_us=<µs> sum_us=<µs> hist=<bucket>:<n>,…
+Folio budget summary: allowance_used count=<n> max_us=<µs> sum_us=<µs> hist=<bucket>:<n>,… allowance_us=<µs> yielded=<n>
 Folio budget summary: door=<Door> row=<row> count=<n> max_us=<µs> sum_us=<µs> hist=<bucket>:<n>,…
 Folio budget summary: lost=<n> refused=<n>
 ```
 
 A bucket is named by its lower edge (`<1us`, `1us`, `2us`, … `4194304us+`), and
-only non-empty buckets are printed (`hist=-` when none is). A door appears only
+only non-empty buckets are printed (`hist=-` when none is). `allowance_used`
+(0.4.6 A4) is, per turn that offered deferrable work (a unit ran, or one was
+asked for and yielded), what that work took; `allowance_us` is those turns'
+allowances summed, so `sum_us / allowance_us` is the share taken; `yielded` counts
+the turns whose deferrable work found its allowance spent. A door appears only
 once it has been called. The slow-hold line (`Folio: the window thread held
 control for …`) is unchanged in meaning and format.
 

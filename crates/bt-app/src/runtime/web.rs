@@ -32,32 +32,43 @@ impl Runtime<'_> {
         self.app.web_warmup.saw_frame(self.window.last_present_at);
         let restore_card_up = self.web_warmup_waits_for_the_restore_card();
         // What the door answered is already said where it matters: a failure is the
-        // clock's one `diagnostics.log` line, and the ask's cost is this station's.
-        let _ = self.app.web_warmup.turn(
+        // clock's one `diagnostics.log` line, and the ask's cost is this station's. **The ask is
+        // one unit of deferrable work** (0.4.6 A4): on a turn whose allowance is spent it is not
+        // made, and the clock asks again on the next.
+        let _ = self.app.web_warmup.deferred_turn(
             now,
             restore_card_up,
+            hang_watch::heartbeat(),
             &mut web_warmup::ThisProcess,
             crate::diagnostics::note,
         );
         // **The clock's second stage: the spare web controller** (0.4.5 ticket 60, D-64) — on its
         // own quiet turn after the environment's, for a profile whose history holds a page, while
-        // no window holds one. At most once per process.
+        // no window holds one. At most once per process. **One unit of deferrable work** (A4):
+        // the clock is not asked on a turn whose allowance is spent, so its turn is not used up.
         let pages_used =
             self.app.settings_store.loaded().web_pages_used == bt_persist::WebPagesUsedV1::Used;
-        if let Some(due) = self.app.web_warmup.spare_turn(
-            now,
-            restore_card_up,
-            pages_used,
-            self.app.web_pages_open,
-        ) {
-            web_trace::line(|| format!("spare turn due={due:?}"));
-            if due == web_warmup::SpareDue::Make {
-                let began = Instant::now();
-                hang_watch::during(hang_watch::Station::WebSpare, || {
-                    self.make_spare_web_controller();
-                });
-                web_trace::line(|| format!("spare made held_us={}", began.elapsed().as_micros()));
-            }
+        if self.app.web_warmup.spare_due(now, restore_card_up) {
+            let _ = hang_watch::deferrable(|| {
+                let due = self.app.web_warmup.spare_turn(
+                    now,
+                    restore_card_up,
+                    pages_used,
+                    self.app.web_pages_open,
+                );
+                if let Some(due) = due {
+                    web_trace::line(|| format!("spare turn due={due:?}"));
+                    if due == web_warmup::SpareDue::Make {
+                        let began = Instant::now();
+                        hang_watch::during(hang_watch::Station::WebSpare, || {
+                            self.make_spare_web_controller();
+                        });
+                        web_trace::line(|| {
+                            format!("spare made held_us={}", began.elapsed().as_micros())
+                        });
+                    }
+                }
+            });
         }
         // **And its clock** (SW-6): a spare still being made is drained only on a quiet turn, so
         // its controller call never lands inside a burst of typing. A run that is retiring turns
@@ -66,26 +77,34 @@ impl Runtime<'_> {
             let quiet = self.app.web_warmup.is_quiet(now, restore_card_up);
             let creating = self.app.web_spare.phase() == bt_platform::SparePhase::Creating;
             let epoch = bt_platform::web_environment_epoch();
-            let spare = &mut self.app.web_spare;
-            let mut advance = || {
-                let _ = spare.advance(now, quiet, epoch, None, &mut |line| {
+            let advance = |spare: &mut crate::web_spare::WebSpare, drain_creating: bool| {
+                let _ = spare.advance(now, drain_creating, epoch, None, &mut |line| {
                     crate::diagnostics::note(line);
                 });
             };
             if creating && quiet {
                 // The quiet-gated turns that carry the controller call and the install burst:
-                // their hold is written down, which is the whole of what the stage is for.
-                let began = Instant::now();
-                hang_watch::during(hang_watch::Station::WebSpare, advance);
-                let held = began.elapsed();
-                let phase = self.app.web_spare.phase();
-                if held.as_micros() >= 1_000 || phase != bt_platform::SparePhase::Creating {
-                    web_trace::line(|| {
-                        format!("spare advance held_us={} phase={phase:?}", held.as_micros())
+                // their hold is written down, which is the whole of what the stage is for. **The
+                // drain is one unit of deferrable work** (A4); on a turn whose allowance is spent
+                // the clock turns without it, as on a turn that is not quiet.
+                let drained = hang_watch::deferrable(|| {
+                    let began = Instant::now();
+                    hang_watch::during(hang_watch::Station::WebSpare, || {
+                        advance(&mut self.app.web_spare, true);
                     });
+                    let held = began.elapsed();
+                    let phase = self.app.web_spare.phase();
+                    if held.as_micros() >= 1_000 || phase != bt_platform::SparePhase::Creating {
+                        web_trace::line(|| {
+                            format!("spare advance held_us={} phase={phase:?}", held.as_micros())
+                        });
+                    }
+                });
+                if drained.is_none() {
+                    advance(&mut self.app.web_spare, false);
                 }
             } else {
-                advance();
+                advance(&mut self.app.web_spare, quiet);
             }
         }
     }

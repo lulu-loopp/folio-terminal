@@ -78,7 +78,7 @@ App.recent_folders	RecentFolders	-	n	2	2	0	0	0	0	complete
 App.window_pictures	Vec<(WindowId, SessionWindowV1)>	-	1	1	2	1	0	0	0	complete
 App.restore_question	Vec<TabV1>	-	n	2	3	0	0	0	0	complete
 App.web_warmup	WebWarmup	-	n	4	4	0	0	0	0	complete
-App.web_spare	WebSpare	-	n	3	9	2	0	0	0	complete
+App.web_spare	WebSpare	-	n	3	8	2	0	0	0	complete
 App.run_retiring_until	Option<Instant>	-	0	0	0	2	0	0	0	complete
 App.web_pages_open	bool	-	1	1	1	0	0	0	0	complete
 App.pending_restore_windows	Vec<SessionWindowV1>	-	1	1	2	0	0	0	0	complete

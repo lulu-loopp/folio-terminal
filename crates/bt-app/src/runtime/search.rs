@@ -418,17 +418,21 @@ impl Runtime<'_> {
         {
             return Ok(());
         }
-        self.refresh_search(SearchRefresh::Walk)
+        // **One slice is one unit of deferrable work** (0.4.6 A4): read only while the turn's
+        // allowance has time left. A turn that has spent it reads nothing; the cache keeps the
+        // walk's cursor, so the next turn reads the same slice this one would have.
+        hang_watch::deferrable(|| self.refresh_search(SearchRefresh::Walk)).unwrap_or(Ok(()))
     }
 
     /// `now`, while a walk is in progress, so the loop turns again at once and the next slice is
-    /// read; nothing otherwise. See [`Self::advance_search_scan`].
+    /// read — or, on a turn whose deferrable work yielded, the frame boundary it yielded to
+    /// ([`hang_watch::deferred_until`]); nothing otherwise. See [`Self::advance_search_scan`].
     pub(in crate::runtime) fn search_walk_deadline(&self, now: Instant) -> Option<Instant> {
         self.window
             .search_scan
             .as_ref()
             .is_some_and(SearchScanCache::walking)
-            .then_some(now)
+            .then(|| hang_watch::deferred_until(now))
     }
 
     /// Which of the two roads a finished rebuild takes back to the glass.

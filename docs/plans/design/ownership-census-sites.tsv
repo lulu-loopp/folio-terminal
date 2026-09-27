@@ -324,13 +324,12 @@ App.web_spare	write	crate	FolioApp::fail	call:abandon	1
 App.web_spare	write	crate	FolioApp::settle_quit	call:retire	1
 App.web_spare	write	crate::runtime::frame	Runtime::turn	call:deadline	1
 App.web_spare	write	crate::runtime::web	Runtime::make_spare_web_controller	call:created	1
-App.web_spare	write	crate::runtime::web	Runtime::warm_web_engine	call:advance	1
 App.web_spare	access	crate::runtime::web	Runtime::adopt_spare_web_page	lend	1
-App.web_spare	access	crate::runtime::web	Runtime::warm_web_engine	lend	1
+App.web_spare	access	crate::runtime::web	Runtime::warm_web_engine	lend	3
 App.web_warmup	write	crate	<FolioApp as ApplicationHandler<AppEvent>>::window_event	call:stir	1
 App.web_warmup	write	crate::runtime::frame	Runtime::turn	call:stir	1
 App.web_warmup	write	crate::runtime::terminal	Runtime::drain_pty	call:stir	1
-App.web_warmup	write	crate::runtime::web	Runtime::warm_web_engine	call:saw_frame,call:spare_turn,call:turn	3
+App.web_warmup	write	crate::runtime::web	Runtime::warm_web_engine	call:deferred_turn,call:saw_frame,call:spare_turn	3
 App.window_pictures	write	crate	App::forget_window	call:retain	1
 App.window_pictures	write	crate	App::record_window	assign,call:push	2
 App.window_pictures	access	crate	App::record_window	call:iter_mut	1

@@ -38,6 +38,11 @@ All notable changes to Folio are recorded here. The format follows
   for each of the four, with a count of the turns it skipped; a summary for
   the whole run is written when Folio exits. Lines that could not be queued
   are counted, never silently dropped.
+- Work Folio can put off (reading more of a long history for a search, and
+  warming up the web engine in the background) now stops for the moment when
+  the window is about to owe the screen its next frame, and carries on
+  afterwards; the run's summary says how often that happened and how much of
+  each turn it took.
 - Which part of the code changes which piece of window and tab state is now
   worked out from the source and checked into the repository; a change that
   adds a new writer shows up as a changed line there.

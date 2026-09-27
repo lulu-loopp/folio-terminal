@@ -53908,6 +53908,87 @@ fn a_keystroke_in_the_find_box_reads_at_most_one_slice_of_history() {
     assert_eq!(cache.history.hits().len(), found.len());
 }
 
+/// RED (A4) — **A search walk stops when the turn's allowance is spent and resumes on the next
+/// turn, with its progress kept and nothing dropped.**
+///
+/// A slice is one unit of deferrable work (budget note §R-B): a turn that has run past its 16 ms
+/// when the walk asks reads nothing, and the cache keeps the walk's cursor, so the next turn
+/// reads the slice this one would have. Every other turn here is spent. The walk ends on the
+/// answer a scan from scratch gives, in exactly as many slices as it would have taken without
+/// the yields. The real leaf, the real `rescan_leaf_for_search`, the real heartbeat on the test
+/// clock — and `advance_search_scan` asks through the heartbeat's verb.
+///
+/// MUTATION: run the unit in `Heartbeat::deferrable` whatever `unit_may_start` answers and no
+/// turn yields.
+#[test]
+fn the_search_walk_stops_when_the_allowance_is_spent_and_resumes_next_turn() {
+    let before_the_heart = Instant::now();
+    let leaf = pane_with_history(4 * search::SEARCH_HISTORY_SLICE, |index| {
+        format!("worker {index} ok")
+    });
+    let compiled = search::engine(search::SearchFlags::default(), "worker 1").unwrap();
+    let seat = SeatId(1);
+    let asked =
+        rescan_leaf_for_search(&compiled, &leaf, seat, 1, None, SearchRefresh::Asked, false);
+    let heart = hang_watch::Heartbeat::on_test_clock();
+    let mut cache = asked.cache;
+    let (mut walked, mut yielded) = (0, 0);
+    let mut turn_ns = 0;
+    while cache.walking() {
+        hang_watch::set_test_clock_ns(turn_ns);
+        heart.woke();
+        heart.allow_turn(std::iter::empty());
+        let spent = (walked + yielded) % 2 == 0;
+        hang_watch::set_test_clock_ns(turn_ns + if spent { 17_000_000 } else { 1_000_000 });
+        let kept = cache.clone();
+        match heart.deferrable(|| {
+            rescan_leaf_for_search(
+                &compiled,
+                &leaf,
+                seat,
+                1,
+                Some(&cache),
+                SearchRefresh::Walk,
+                false,
+            )
+        }) {
+            None => {
+                assert!(spent, "a turn with time left reads its slice");
+                assert_eq!(cache, kept, "the walk's progress is kept");
+                assert_eq!(
+                    heart.ms_at(heart.deferred_until(before_the_heart)),
+                    (turn_ns + 16_000_000) / 1_000_000,
+                    "and asked for again at the turn's boundary"
+                );
+                yielded += 1;
+            }
+            Some(walk) => {
+                assert!(!spent, "a spent turn reads nothing");
+                assert!(walk.lines_scanned <= search::SEARCH_HISTORY_SLICE);
+                cache = walk.cache;
+                walked += 1;
+            }
+        }
+        heart.park(hang_watch::Park::Indefinite);
+        turn_ns += 100_000_000;
+    }
+    let frozen = leaf.session.transcript().frozen().len();
+    assert_eq!(walked, (frozen - 1) / search::SEARCH_HISTORY_SLICE);
+    assert_eq!(yielded, walked, "every other turn yielded");
+    let found: std::collections::BTreeSet<_> = cache
+        .history
+        .hits()
+        .iter()
+        .map(|hit| (hit.line, hit.start, hit.end))
+        .collect();
+    assert_eq!(found, whole_answer(&compiled, &leaf), "nothing dropped");
+    assert!(
+        method_body("Runtime", "advance_search_scan")
+            .contains("hang_watch::deferrable(|| self.refresh_search(SearchRefresh::Walk))"),
+        "the turn's slice is asked for through the allowance"
+    );
+}
+
 /// RED (51) — **A new question abandons the walk of the old one.**
 ///
 /// A walk for `ab` is under way when `c` is typed. The new question has its own revision, and
