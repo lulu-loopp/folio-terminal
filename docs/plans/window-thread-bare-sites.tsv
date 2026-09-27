@@ -14,7 +14,6 @@ crate	arm	item	entry	count
 bt-app	-	crate::<TheDeviceAndItsWindows as LostDevice>::rebuild	pollster::block_on	1
 bt-app	-	crate::App::release_trial_writes	std::fs::create_dir_all	1
 bt-app	-	crate::FolioApp::recovered_from_a_lost_device	std::thread::sleep	1
-bt-app	-	crate::Runtime::create	bt_platform::Compositor::new	1
 bt-app	-	crate::animation::AnimationStamp::of	std::fs::metadata	1
 bt-app	-	crate::append_panic_report	std::io::Write::write_fmt	1
 bt-app	-	crate::attention_hooks::Config::land	std::fs::create_dir_all	1
@@ -67,20 +66,14 @@ bt-app	-	crate::revived_page_of	std::fs::canonicalize	1
 bt-app	-	crate::run_decoration_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::run_path_verify_worker	std::sync::mpsc::Receiver::recv	1
 bt-app	-	crate::run_scale_worker	std::sync::mpsc::Receiver::recv	1
-bt-app	-	crate::runtime::dpi::Runtime::resize	bt_platform::Compositor::set_window_size	1
 bt-app	-	crate::runtime::files::Runtime::rename_files_row	std::fs::rename	1
-bt-app	-	crate::runtime::panes::Runtime::present_seats_and_commit	bt_platform::Compositor::commit	1
-bt-app	-	crate::runtime::panes::Runtime::present_seats_and_commit	bt_render::WindowRenderer::present_frame_with_phases	1
 bt-app	-	crate::runtime::preview::Runtime::open_preview_web_file_on	std::fs::canonicalize	1
 bt-app	-	crate::runtime::preview::Runtime::rename_preview_file	std::fs::rename	1
 bt-app	-	crate::runtime::profiles::Runtime::toggle_root_menu	std::fs::metadata	1
-bt-app	-	crate::runtime::windows::Runtime::open_window	bt_platform::Compositor::new	1
-bt-app	-	crate::runtime::windows::Runtime::open_window	bt_render::WindowRenderer::new	1
 bt-app	-	crate::schemes::read_scheme_file	std::fs::metadata	1
 bt-app	-	crate::schemes::user_dir	std::fs::create_dir_all	1
 bt-app	-	crate::schemes::user_sources	std::fs::read_dir	1
 bt-app	-	crate::schemes::write_custom_copy	std::fs::write	1
-bt-app	-	crate::settings::monospace_family_files	bt_platform::monospace_family_named	1
 bt-app	-	crate::shell_integration::cached_profile_answer	std::fs::canonicalize	1
 bt-app	-	crate::shell_integration::install_script_at	std::fs::create_dir_all	1
 bt-app	-	crate::shell_integration::install_script_at	std::fs::write	1
@@ -107,14 +100,7 @@ bt-app	-	crate::update::Claim::take	std::fs::File::create	1
 bt-app	-	crate::update::Claim::take	std::io::Write::write_fmt	2
 bt-app	-	crate::update_trial::take_the_claim_within	std::thread::sleep	1
 bt-app	-	crate::update_trial::watch	std::thread::sleep	2
-bt-app	-	crate::web_spare::<WebSeat as SpareSeat<bt_platform::SpareParent>>::advance	bt_platform::Compositor::commit	1
-bt-app	-	crate::web_spare::<WebSeat as SpareSeat<bt_platform::SpareParent>>::retire	bt_platform::Compositor::commit	1
-bt-app	-	crate::webhost::WebSeat::adopt	bt_platform::Compositor::commit	1
 bt-app	-	crate::webhost::WebSeat::go_to	std::fs::canonicalize	1
-bt-app	-	crate::webhost::WebSeat::rehost	bt_platform::WebHost::rehost	1
-bt-app	-	crate::webhost::WebSeat::stand_parked	bt_platform::Compositor::commit	1
-bt-app	-	crate::webhost::WebSeat::start_environment	bt_platform::WebHost::request_environment	1
-bt-app	-	crate::webhost::WebSeat::step	bt_platform::WebHost::request_controller	1
 bt-app	[debug_assertions]	crate::hang_watch::run_selftest_if_due	std::thread::sleep	1
 bt-app	[windows]	crate::attention_copilot::run_probe	std::process::Command::output	1
 bt-app	[windows]	crate::psreadline::run_probe	std::process::Command::output	1
@@ -137,7 +123,6 @@ bt-platform	-	crate::launch_agent::sweep	std::fs::read_dir	1
 bt-platform	-	crate::macos_update::run	std::process::Child::wait	1
 bt-platform	-	crate::macos_update::run	std::thread::sleep	1
 bt-platform	-	crate::macos_update::verify_clone	std::fs::canonicalize	1
-bt-platform	-	crate::system_locale_declaration	bt_platform::read_system_locale_declaration	1
 bt-platform	[all(windows, target_arch = "x86_64")]	crate::hang::capture_thread_stack	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[not(windows)]	crate::file_replace::replace_file_preserving	std::fs::File::sync_all	1
 bt-platform	[not(windows)]	crate::file_replace::replace_file_preserving	std::fs::rename	1
@@ -161,13 +146,10 @@ bt-platform	[target_os = "macos"]	crate::macos_files::recycle	std::fs::metadata	
 bt-platform	[target_os = "macos"]	crate::macos_identity::arm::run	std::process::Child::wait	1
 bt-platform	[target_os = "macos"]	crate::macos_identity::arm::run	std::thread::sleep	1
 bt-platform	[target_os = "macos"]	crate::macos_watch::<DirWatch as Drop>::drop	std::thread::JoinHandle::join	1
-bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start	bt_platform::DirWatch::start_scoped	1
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::fs::canonicalize	1
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::fs::metadata	1
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::sync::mpsc::Receiver::recv	1
 bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_scoped	std::thread::JoinHandle::join	2
-bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_shallow	bt_platform::DirWatch::start_scoped	1
-bt-platform	[target_os = "macos"]	crate::macos_watch::DirWatch::start_shallow_named	bt_platform::DirWatch::start_scoped	1
 bt-platform	[target_os = "macos"]	crate::quiet_command_text	std::process::Command::output	1
 bt-platform	[unix]	crate::attention_pipe::<AttentionPipe as Drop>::drop	libc::close	1
 bt-platform	[unix]	crate::attention_pipe::<AttentionPipe as Drop>::drop	libc::write	1
@@ -217,11 +199,8 @@ bt-platform	[windows]	crate::video::engine::can_play_types	std::thread::JoinHand
 bt-platform	[windows]	crate::video::within_budget	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[windows]	crate::windows_impl::<DirWatch as Drop>::drop	std::thread::JoinHandle::join	1
 bt-platform	[windows]	crate::windows_impl::<DirWatch as Drop>::drop	windows::Win32::System::Threading::SetEvent	1
-bt-platform	[windows]	crate::windows_impl::DirWatch::start	bt_platform::DirWatch::start_scoped	1
 bt-platform	[windows]	crate::windows_impl::DirWatch::start_scoped	std::sync::mpsc::Receiver::recv	1
 bt-platform	[windows]	crate::windows_impl::DirWatch::start_scoped	std::thread::JoinHandle::join	1
-bt-platform	[windows]	crate::windows_impl::DirWatch::start_shallow	bt_platform::DirWatch::start_scoped	1
-bt-platform	[windows]	crate::windows_impl::DirWatch::start_shallow_named	bt_platform::DirWatch::start_scoped	1
 bt-platform	[windows]	crate::windows_impl::close	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::windows_impl::directory_folds_case	windows::Win32::Foundation::CloseHandle	1
 bt-platform	[windows]	crate::windows_impl::open_clipboard_with_retry	std::thread::sleep	1

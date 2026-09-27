@@ -2930,6 +2930,117 @@ fn every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door() -> 
     failures
 }
 
+// ── assertion 9: the typed entrances ((j)5, (j)11.1) ──────────────────────────────────────
+
+const ENTRANCE_COLUMNS: [&str; 2] = ["path", "door"];
+
+/// A parameter's type as one string, qualifiers before `WaitToken` and `doors` dropped and every
+/// lifetime written `'l`: `WaitToken<'l,doors::PresentFrame>`.
+fn capability_spelling(src: &Src, toks: &[Tok]) -> String {
+    const QUALIFIERS: [&str; 5] = ["crate", "admission", "bt_platform", "self", "super"];
+    let mut out = String::new();
+    for (at, tok) in toks.iter().enumerate() {
+        let qualifier = tok.kind == Kind::Ident
+            && QUALIFIERS.contains(&src.text(*tok))
+            && src.is(toks.get(at + 1), "::");
+        let its_colons = src.is(Some(tok), "::")
+            && at >= 1
+            && toks[at - 1].kind == Kind::Ident
+            && QUALIFIERS.contains(&src.text(toks[at - 1]));
+        if qualifier || its_colons {
+            continue;
+        }
+        match tok.kind {
+            Kind::Lifetime => out.push_str("'l"),
+            _ => out.push_str(src.text(*tok)),
+        }
+    }
+    out
+}
+
+/// **Every entrance that left the vocabulary takes its capability, on every arm** (revision (j)5
+/// with (j)11.1): each `# entrances` line names a first-party function or method that is not in
+/// `# vocabulary`, whose door is a `# doors` line, and every product declaration of it — one per
+/// `cfg` arm — has a parameter whose type is exactly `WaitToken<'_, doors::<door>>`. Not an
+/// `Option` of one, not another door's: a caller cannot reach the effect without the admission
+/// that door's token comes from, which is what makes listing the entrance in the vocabulary
+/// redundant. The mint behind the token is fenced by assertion 2.
+fn every_entrance_left_the_vocabulary_takes_its_capability(world: &World) -> Vec<String> {
+    let mut failures = Vec::new();
+    let vocabulary: BTreeSet<&str> = section("vocabulary", &VOCABULARY_COLUMNS)
+        .into_iter()
+        .map(|cells| cells[0])
+        .collect();
+    let doors: BTreeSet<&str> = section("doors", &DOOR_COLUMNS)
+        .into_iter()
+        .map(|cells| cells[0])
+        .collect();
+    let entrances = section("entrances", &ENTRANCE_COLUMNS);
+    if entrances.is_empty() {
+        failures.push("the registry's `# entrances` section is empty: this reads nothing".into());
+    }
+    for cells in entrances {
+        let (path, door) = (cells[0], cells[1]);
+        if vocabulary.contains(path) {
+            failures.push(format!(
+                "`{path}` is both an entrance and a vocabulary entry: an entrance leaves the \
+                 vocabulary"
+            ));
+        }
+        if !doors.contains(door) {
+            failures.push(format!(
+                "`{path}` names door `{door}`, which is not a `# doors` line"
+            ));
+        }
+        let segments: Vec<&str> = path.split("::").collect();
+        let package = segments[0].replace('_', "-");
+        let name = segments[segments.len() - 1];
+        let owner = (segments.len() >= 3).then(|| segments[segments.len() - 2]);
+        let wanted = format!("WaitToken<'l,doors::{door}>");
+        let declarations: Vec<&Callable> = world
+            .callables
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|callable| {
+                world.srcs[callable.src].package == package
+                    && callable.type_owner.as_deref() == owner
+                    && callable.trait_name.is_none()
+                    && callable.record.is_some()
+            })
+            .collect();
+        if declarations.is_empty() {
+            failures.push(format!(
+                "`{path}` is declared nowhere in the product: an entrance names a function"
+            ));
+        }
+        for callable in declarations {
+            let src = &world.srcs[callable.src];
+            let record = callable.record.expect("filtered to declared items");
+            let toks = src.lex(record.declaration().start(), record.declaration().end());
+            let Some((_, open, close)) = signature(src, &toks) else {
+                continue;
+            };
+            let params: Vec<String> = split_commas(src, &toks[open + 1..close])
+                .iter()
+                .filter_map(|param| {
+                    let colon = param.iter().position(|t| src.is(Some(t), ":"))?;
+                    Some(capability_spelling(src, &param[colon + 1..]))
+                })
+                .collect();
+            if !params.contains(&wanted) {
+                failures.push(format!(
+                    "`{}` is the entrance `{path}` and takes no `WaitToken<'_, doors::{door}>` — \
+                     its parameters are {params:?}: an entrance without its capability goes \
+                     back into the vocabulary",
+                    key_of(src, record)
+                ));
+            }
+        }
+    }
+    failures
+}
+
 // ── the guard ──────────────────────────────────────────────────────────────────────────────
 
 /// RED (A1e, design note 2026-09-26 §9.1 and revisions (c)4, (c)8, (d)4, (e)3, (f)1–(f)2, (g))
@@ -2955,7 +3066,7 @@ fn every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door() -> 
 fn every_door_is_where_the_registry_says() {
     let world = World::new();
     let words = vocabulary();
-    let assertions: [(&str, Vec<String>); 9] = [
+    let assertions: [(&str, Vec<String>); 10] = [
         (
             "the_universe_is_the_product_and_its_tools_are_declared",
             the_universe_is_the_product_and_its_tools_are_declared(&world),
@@ -2991,6 +3102,10 @@ fn every_door_is_where_the_registry_says() {
         (
             "every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door",
             every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door(),
+        ),
+        (
+            "every_entrance_left_the_vocabulary_takes_its_capability",
+            every_entrance_left_the_vocabulary_takes_its_capability(&world),
         ),
     ];
     let mut report = String::new();
