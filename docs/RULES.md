@@ -918,8 +918,12 @@ start opens Folio: the recovery finishes every phase a dead applier can leave,
 exactly one build is started after it, and the new build is started before
 `Committed` only as a trial* (U-29b: `Stuck` with the new bundle live commits
 forward on the receipt of the trial started over it; a start carrying
-`--update-failed` continues past any `destructive` header). The fold is the
-enabling tickets', U-31 / U-32, per the design note's (b).5 table.
+`--update-failed` continues past any `destructive` header); trailing entry
+2026-09-27 *`--update-feed <file-URL>` makes one start's update check and
+download read a local release feed instead of github.com* (U-30b: a
+command-line flag only, never persisted; the checksum and the signer checks
+unchanged). The fold is the enabling tickets', U-31 / U-32, per the design
+note's (b).5 table.
 
 ### 37. The Explorer and Finder verbs — `folded`
 **Rule.** On Windows there is one verb in two registrations: the classic trees

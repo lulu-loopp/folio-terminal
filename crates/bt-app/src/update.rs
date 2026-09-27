@@ -11,7 +11,8 @@
 //!
 //! * **One address.** [`RELEASES_HOST`] and [`RELEASES_PATH`] are constants; no
 //!   part of the answer can redirect the next question, because there is no next
-//!   question.
+//!   question. A process started with `--update-feed <file-URL>` reads a local
+//!   folder's list instead, and then never asks the address ([`Feed`], U-30b).
 //! * **Once a day, across windows.** The stamp in `update-check.json` answers
 //!   *is it time yet*; a claim file beside it answers *is another window already
 //!   asking*. Two windows opened together make one request, and the second one
@@ -347,10 +348,20 @@ pub fn newest_tag(body: &str) -> Option<String> {
     struct Release {
         tag_name: String,
     }
-    serde_json::from_str::<Vec<Release>>(body)
-        .ok()?
-        .into_iter()
-        .filter_map(|release| Version::parse(&release.tag_name).map(|it| (it, release.tag_name)))
+    newest(
+        serde_json::from_str::<Vec<Release>>(body)
+            .ok()?
+            .into_iter()
+            .map(|release| release.tag_name),
+    )
+}
+
+/// **The greatest of `tags` by precedence**, skipping any that is not a
+/// version — [`newest_tag`]'s rule, shared with the release feed's list
+/// ([`Feed`]), so the two sources cannot come to disagree about which tag is
+/// the newest.
+fn newest(tags: impl Iterator<Item = String>) -> Option<String> {
+    tags.filter_map(|tag| Version::parse(&tag).map(|it| (it, tag)))
         .max_by(|left, right| left.0.cmp(&right.0))
         .map(|(_, tag)| tag)
 }
@@ -468,6 +479,162 @@ impl Releases for GitHubReleases {
             cap: BODY_CAP_BYTES,
         })?;
         newest_tag(&body).ok_or_else(|| "the answer carries no version".to_owned())
+    }
+}
+
+// ── the release feed: a local folder in place of the releases page ──────────
+
+/// The file a release feed's folder holds its list in.
+pub const FEED_LIST: &str = "releases.json";
+
+/// **A release feed** (0.4.6 ticket U-30b): `--update-feed <file-URL>`, a
+/// folder standing in for the releases page, so the first self-update can be
+/// rehearsed on a clean machine before it ships (`docs/plans/release/
+/// clean-vm.md` §4.4).
+///
+/// The folder holds [`FEED_LIST`] — the GitHub releases list's shape, each
+/// release with at least `tag_name`, `name`, `draft`, `prerelease` and
+/// `assets[]{name, browser_download_url, size}` — and the assets beside it,
+/// each `browser_download_url` a `file:` URL. The check reads the list here
+/// instead of asking [`RELEASES_HOST`], and a press copies the offer's two
+/// files instead of downloading them (`update_job::FeedCopy`); **everything
+/// after the fetch is the release page's road**: the checksum document, the
+/// archive reader and the signer the running build requires. A feed can
+/// therefore only deliver a build signed by the same signer, which is what
+/// makes a visible flag safe to have.
+///
+/// **One process's input, never a fact.** Given on the command line and held
+/// in [`FEED`] for this process only: no environment variable, no settings
+/// key, nothing written. A start without the flag asks github.com again. The
+/// processes an update starts (the trial, the applier, recovery) never need
+/// it: the download happened at Prepare.
+///
+/// A drafted release is left out of the list, as the releases page leaves it
+/// out of the unauthenticated list the check asks for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Feed {
+    /// The URL as the command line gave it — what the diagnostics line says.
+    url: String,
+    /// The folder it names; `None` when it names no local folder, which makes
+    /// every read of the feed fail rather than fall back to the network.
+    folder: Option<PathBuf>,
+}
+
+/// One release as the feed lists it. Every field is required: a list shaped
+/// otherwise is a failed check, as a malformed answer from the page is.
+#[derive(serde::Deserialize)]
+struct FeedRelease {
+    tag_name: String,
+    #[expect(
+        dead_code,
+        reason = "required of the feed's shape (the releases list's); the check does not read it"
+    )]
+    name: String,
+    draft: bool,
+    #[expect(
+        dead_code,
+        reason = "required of the feed's shape (the releases list's); the check offers pre-releases as the page's list does"
+    )]
+    prerelease: bool,
+    assets: Vec<FeedAsset>,
+}
+
+/// One file of a release, as the feed lists it.
+#[derive(serde::Deserialize)]
+struct FeedAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
+}
+
+impl Feed {
+    /// The feed `url` names: a `file:` URL to a folder, with or without its
+    /// trailing slash.
+    #[must_use]
+    pub fn at(url: &str) -> Self {
+        Self {
+            url: url.to_owned(),
+            folder: local_path(url.strip_suffix('/').unwrap_or(url)),
+        }
+    }
+
+    /// The URL as it was given.
+    #[must_use]
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// **The list, read once per question** through `file_reads` on
+    /// [`bt_platform::file_reads::Lane::Update`] — a file read, not a network
+    /// one — without its drafts.
+    fn releases(&self) -> Result<Vec<FeedRelease>, String> {
+        let folder = self
+            .folder
+            .as_deref()
+            .ok_or_else(|| format!("{} names no local folder", self.url))?;
+        let list = folder.join(FEED_LIST);
+        let text =
+            bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Update, &list)
+                .map_err(|error| format!("{}: {error}", list.display()))?;
+        let releases: Vec<FeedRelease> =
+            serde_json::from_str(&text).map_err(|error| format!("{}: {error}", list.display()))?;
+        Ok(releases
+            .into_iter()
+            .filter(|release| !release.draft)
+            .collect())
+    }
+
+    /// **Where the feed keeps `name` of release `tag`**, and the length the
+    /// list gives it.
+    ///
+    /// # Errors
+    /// The list cannot be read, names no such release or file, or gives the
+    /// file an address that is not a local `file:` URL.
+    pub fn asset(&self, tag: &str, name: &str) -> Result<(PathBuf, u64), String> {
+        let release = self
+            .releases()?
+            .into_iter()
+            .find(|release| release.tag_name == tag)
+            .ok_or_else(|| format!("the feed lists no release {tag}"))?;
+        let asset = release
+            .assets
+            .into_iter()
+            .find(|asset| asset.name == name)
+            .ok_or_else(|| format!("the feed's {tag} has no {name}"))?;
+        let path = local_path(&asset.browser_download_url).ok_or_else(|| {
+            format!(
+                "the feed's {name} is at {}, which is not a local file",
+                asset.browser_download_url
+            )
+        })?;
+        Ok((path, asset.size))
+    }
+}
+
+/// The local path a `file:` URL names, without a query or a fragment — the
+/// web pane's one parser (`webnav::LocalFileUrl`).
+fn local_path(url: &str) -> Option<PathBuf> {
+    crate::webnav::LocalFileUrl::parse(url)
+        .filter(|parsed| parsed.tail().is_empty())
+        .map(|parsed| parsed.path().to_path_buf())
+}
+
+impl Releases for Feed {
+    /// The newest tag the list names, by [`newest_tag`]'s rule.
+    fn latest_tag(&self) -> Result<String, String> {
+        newest(self.releases()?.into_iter().map(|release| release.tag_name))
+            .ok_or_else(|| "the feed lists no version".to_owned())
+    }
+}
+
+/// **Where the check asks**: the feed when this process was given one, the
+/// releases page otherwise. Never both — a feed that cannot be read is a
+/// failed check, not a reason to ask the network.
+#[must_use]
+pub fn check_source<'a>(feed: Option<&'a Feed>, page: &'a dyn Releases) -> &'a dyn Releases {
+    match feed {
+        Some(feed) => feed,
+        None => page,
     }
 }
 
@@ -919,6 +1086,31 @@ static OWNER: OnceLock<OfferState> = OnceLock::new();
 /// How a finished check asks for a frame — [`install_wake`].
 static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 
+/// **This process's release feed**, when its command line gave one
+/// ([`use_feed`], U-30b). Never written anywhere, so it ends with the process.
+static FEED: OnceLock<Feed> = OnceLock::new();
+
+/// **`--update-feed <url>`, taken**: the check and the download of this
+/// process read the feed at `url` ([`Feed`]). Answers the diagnostics line
+/// that says so, `update feed: <url>`.
+///
+/// Once per process, at start, before [`begin`]; a second call changes
+/// nothing.
+pub fn use_feed(url: &str) -> String {
+    feed_line(FEED.get_or_init(|| Feed::at(url)).url())
+}
+
+/// The diagnostics line a start given the feed at `url` writes.
+fn feed_line(url: &str) -> String {
+    format!("update feed: {url}")
+}
+
+/// This process's release feed, if its command line gave one.
+#[must_use]
+pub fn feed() -> Option<&'static Feed> {
+    FEED.get()
+}
+
 /// Install the repaint the answer needs, once per process.
 ///
 /// The same shape as `psreadline::install_wake` and for the same reason: the
@@ -1058,7 +1250,8 @@ pub fn begin() {
         bt_platform::ThreadPriority::BelowNormal,
         move |_ctx| {
             let now_ms = unix_epoch_ms();
-            if matches!(owner.run(now_ms, &GitHubReleases), Outcome::Answered(_))
+            let source = check_source(feed(), &GitHubReleases);
+            if matches!(owner.run(now_ms, source), Outcome::Answered(_))
                 && let Some(wake) = WAKE.get()
             {
                 wake();
@@ -2269,5 +2462,235 @@ mod tests {
         ] {
             assert_eq!(owners_of(forbidden), Vec::<String>::new(), "{forbidden}");
         }
+    }
+
+    // ── the release feed (U-30b) ────────────────────────────────────────────
+
+    use super::{FEED_LIST, Feed, check_source};
+
+    /// The `file:` URL of `path`, as the product mints one (`webnav`).
+    fn url_of(path: &Path) -> String {
+        crate::webnav::file_url_of_local_path(&path.to_string_lossy()).expect("an absolute path")
+    }
+
+    /// **A feed folder at `folder`** listing `releases` — each a tag and
+    /// whether it is a draft, with one asset beside the list — in the GitHub
+    /// releases list's shape; answers the feed its folder's URL names, as the
+    /// command line gives it (with the trailing slash).
+    fn feed_in(folder: &Path, releases: &[(&str, bool)]) -> Feed {
+        std::fs::create_dir_all(folder).expect("the feed's folder");
+        let list: Vec<_> = releases
+            .iter()
+            .map(|(tag, draft)| {
+                let name = format!("folio-{tag}.zip");
+                std::fs::write(folder.join(&name), tag.as_bytes()).expect("an asset");
+                serde_json::json!({
+                    "tag_name": tag,
+                    "name": format!("Folio {tag}"),
+                    "draft": draft,
+                    "prerelease": false,
+                    "assets": [{
+                        "name": name,
+                        "browser_download_url": url_of(&folder.join(&name)),
+                        "size": tag.len(),
+                    }],
+                })
+            })
+            .collect();
+        std::fs::write(
+            folder.join(FEED_LIST),
+            serde_json::Value::Array(list).to_string(),
+        )
+        .expect("the list");
+        Feed::at(&format!("{}/", url_of(folder)))
+    }
+
+    /// RED (U-30b) — **a process given `--update-feed` asks the feed's list,
+    /// and github.com is never contacted.**
+    ///
+    /// The check's whole road runs — the claim, the stamp, the answer written
+    /// to `update-check.json` — with the feed as its source, and the page's
+    /// stand-in counts zero calls. The newest tag wins by precedence, as it
+    /// does on the page's list, and a draft is not listed (the page's
+    /// unauthenticated list never carries one). The URL is the command line's,
+    /// through the real parser, and the diagnostics line names it.
+    ///
+    /// MUTATION: make `check_source` answer `page` whatever `feed` is (or call
+    /// `owner.run` with `&GitHubReleases` in `begin`): the page is asked.
+    #[test]
+    fn a_feed_flag_makes_the_check_read_the_local_list() {
+        let home = dir("feed-check");
+        let feed = feed_in(
+            &home.join("feed"),
+            &[("v0.4.6", false), ("v0.4.7", false), ("v9.0.0", true)],
+        );
+        let request =
+            crate::cli::parse(["--update-feed", feed.url()].map(std::ffi::OsString::from))
+                .expect("an ordinary start");
+        let given = request.update_feed.as_deref().expect("the flag's value");
+        assert_eq!(Feed::at(given), feed);
+        assert_eq!(super::feed_line(given), format!("update feed: {given}"));
+
+        let page = Counting::ok("v0.0.1");
+        let owner = OfferState::load(&home, true);
+        assert_eq!(
+            owner.run(CHECK_INTERVAL_MS, check_source(Some(&feed), &page)),
+            Outcome::Answered("v0.4.7".to_owned())
+        );
+        assert_eq!(page.calls(), 0, "github.com was contacted");
+        assert_eq!(state_of(&home).latest_tag.as_deref(), Some("v0.4.7"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// RED (U-30b) — **the flag holds for its process only: nothing on the
+    /// disk names the feed, and the next start without it asks github.com.**
+    ///
+    /// What the feed answered is the check's answer like any other (the tag
+    /// in `update-check.json`); the feed itself — its URL, its folder — is
+    /// written nowhere, so a start without the flag has no way to find it.
+    ///
+    /// MUTATION: keep the last feed in a static that `check_source` answers
+    /// when it is given none — the next start reads the feed and the page is
+    /// never asked.
+    #[test]
+    fn the_flag_is_not_persisted_and_the_next_start_uses_github() {
+        let home = dir("feed-not-kept");
+        let folder = home.join("feed");
+        let feed = feed_in(&folder, &[("v0.4.7", false)]);
+        let page = Counting::ok("v0.4.8");
+        assert_eq!(
+            OfferState::load(&home, true).run(CHECK_INTERVAL_MS, check_source(Some(&feed), &page)),
+            Outcome::Answered("v0.4.7".to_owned())
+        );
+        let folder_text = folder.to_string_lossy().into_owned();
+        for entry in std::fs::read_dir(&home).expect("the data directory") {
+            let path = entry.expect("an entry").path();
+            if path == folder {
+                continue;
+            }
+            let text = String::from_utf8_lossy(&std::fs::read(&path).expect("a file")).into_owned();
+            assert!(
+                !text.contains(feed.url())
+                    && !text.contains(&folder_text)
+                    && !text.contains("feed"),
+                "{} names the feed: {text}",
+                path.display()
+            );
+        }
+
+        let next = crate::cli::parse(Vec::<std::ffi::OsString>::new()).expect("a plain start");
+        assert_eq!(next.update_feed, None);
+        let given = next.update_feed.as_deref().map(Feed::at);
+        assert_eq!(
+            OfferState::load(&home, true)
+                .run(2 * CHECK_INTERVAL_MS, check_source(given.as_ref(), &page)),
+            Outcome::Answered("v0.4.8".to_owned())
+        );
+        assert_eq!(page.calls(), 1, "the next start asks github.com");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// RED (U-30b) — **a feed that cannot be read, or whose list is not the
+    /// releases list's shape, is a failed check — the stamp advances, nothing
+    /// is offered, nothing panics — and never a reason to ask github.com.**
+    ///
+    /// Each case: a URL that names no local folder, a folder that is not
+    /// there, a list that is not JSON, an object where the list goes, a
+    /// release without `assets`, an asset without `size`, a list of drafts
+    /// only, and tags that are not versions. The same feeds give the download
+    /// nothing: a file the list does not name, or names at an address that is
+    /// not a local file, is the copy's refusal, with nothing left behind.
+    ///
+    /// MUTATION: `unwrap` the list's parse in `Feed::releases` (a malformed
+    /// list panics), or let `check_source` fall back to the page when the feed
+    /// fails (the page is asked).
+    #[test]
+    fn an_unreadable_or_malformed_feed_is_a_failed_check_not_a_panic() {
+        let home = dir("feed-malformed");
+        let page = Counting::ok("v0.4.8");
+        let release = |extra: &str| {
+            format!(
+                r#"[{{"tag_name":"v0.4.7","name":"Folio","draft":false,"prerelease":false{extra}}}]"#
+            )
+        };
+        let lists = [
+            ("not-json", "this is not a list".to_owned()),
+            ("object", r#"{"tag_name":"v0.4.7"}"#.to_owned()),
+            ("no-assets", release("")),
+            (
+                "no-size",
+                release(r#","assets":[{"name":"a.zip","browser_download_url":"file:///C:/a.zip"}]"#),
+            ),
+            (
+                "drafts-only",
+                r#"[{"tag_name":"v0.4.7","name":"F","draft":true,"prerelease":false,"assets":[]}]"#
+                    .to_owned(),
+            ),
+            (
+                "not-versions",
+                r#"[{"tag_name":"nightly","name":"F","draft":false,"prerelease":false,"assets":[]}]"#
+                    .to_owned(),
+            ),
+        ];
+        let mut feeds = vec![
+            Feed::at("https://example.invalid/feed/"),
+            Feed::at(&format!("{}/", url_of(&home.join("absent")))),
+        ];
+        for (case, list) in lists {
+            let folder = home.join(case);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join(FEED_LIST), list).unwrap();
+            feeds.push(Feed::at(&url_of(&folder)));
+        }
+        for (at, feed) in feeds.iter().enumerate() {
+            let now = (u64::try_from(at).unwrap() + 1) * CHECK_INTERVAL_MS;
+            let owner = OfferState::load(&home, true);
+            assert_eq!(
+                owner.run(now, check_source(Some(feed), &page)),
+                Outcome::Refused,
+                "{}",
+                feed.url()
+            );
+            assert_eq!(state_of(&home).checked_at_ms, now, "the stamp advances");
+            assert!(feed.asset("v0.4.7", "a.zip").is_err(), "{}", feed.url());
+        }
+        assert_eq!(page.calls(), 0, "github.com was contacted");
+
+        // The copy: a name the list does not give, and an address that is not
+        // a local file.
+        let folder = home.join("remote-asset");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join(FEED_LIST),
+            release(
+                r#","assets":[{"name":"a.zip","browser_download_url":"https://example.invalid/a.zip","size":1}]"#,
+            ),
+        )
+        .unwrap();
+        let feed = Feed::at(&url_of(&folder));
+        let into = home.join("into");
+        std::fs::create_dir_all(&into).unwrap();
+        let transport = crate::update_job::transport_for(
+            Some(&feed),
+            std::sync::Arc::new(crate::update_job::NoDownloadDoor),
+        );
+        let fetching = crate::update_job::Fetching {
+            report: std::sync::Arc::new(|_| {}),
+            cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        for name in ["a.zip", "b.zip"] {
+            let request = crate::update_job::Request {
+                host: crate::update_job::RELEASE_HOST,
+                path: String::new(),
+                tag: "v0.4.7".to_owned(),
+                file_name: name.to_owned(),
+            };
+            assert!(
+                transport.fetch(&request, &into, &fetching).is_err(),
+                "{name}"
+            );
+            assert!(!into.join(name).exists(), "{name}: nothing is left");
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 }

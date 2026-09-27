@@ -248,7 +248,9 @@ checked against the source by a test.
   releases list at most once a day across every window, carrying a `User-Agent`
   of `Folio` and nothing else. What it can do with the answer is draw a mark on
   the settings gear; it downloads nothing. Settings > General > **Update check**,
-  or `"update_check": false` in `settings.json`, switches it off. The only other
+  or `"update_check": false` in `settings.json`, switches it off. A
+  command-line flag (`--update-feed <file-URL>`) can point the update check at a
+  local folder; what it delivers must still be signed by the same signer. The only other
   thing that reaches the network is a page you asked the preview to open, fetched
   by WebView2 — and a link you `Ctrl`/`⌘`+click, which Folio hands to the system:
   a web address to your browser, a network share (`\\server\share\…`) to Windows,

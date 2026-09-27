@@ -70,6 +70,7 @@
     )
 )]
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -183,6 +184,7 @@ impl Offer {
         [&self.asset, &self.hash_doc].map(|name| Request {
             host: RELEASE_HOST,
             path: format!("{RELEASE_DOWNLOAD_PATH}/{}/{name}", self.tag),
+            tag: self.tag.clone(),
             file_name: name.clone(),
         })
     }
@@ -201,11 +203,15 @@ fn released_version(tag: &str) -> Option<String> {
     well_formed.then(|| version.to_owned())
 }
 
-/// One file a press fetches: `https://{host}{path}` into `file_name`.
+/// One file a press fetches: `https://{host}{path}` into `file_name` — or,
+/// from a release feed, the file the feed lists as `file_name` of release
+/// `tag` ([`FeedCopy`], U-30b).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Request {
     pub(crate) host: &'static str,
     pub(crate) path: String,
+    /// The offer's tag, which `path` also spells.
+    pub(crate) tag: String,
     pub(crate) file_name: String,
 }
 
@@ -833,6 +839,99 @@ impl Transport for ReleaseDownload {
     }
 }
 
+/// **A release feed's file, copied** (U-30b): the file the feed
+/// (`update::Feed`, `--update-feed`) lists under the request's tag and name,
+/// read through `file_reads` on [`bt_platform::file_reads::Lane::Update`] and
+/// copied durably into `into` under the file's own name — in place of
+/// [`ReleaseDownload`], and nothing else changes: the driver holds what it
+/// copied to the checksum document and to the running build's signer exactly
+/// as it holds a download. Bytes are reported as they are copied, and a
+/// cancelled job stops the copy and removes what it wrote.
+pub(crate) struct FeedCopy(crate::update::Feed);
+
+impl Transport for FeedCopy {
+    fn fetch(
+        &self,
+        request: &Request,
+        into: &std::path::Path,
+        fetching: &Fetching,
+    ) -> Result<std::path::PathBuf, String> {
+        let (source, size) = self.0.asset(&request.tag, &request.file_name)?;
+        let target = into.join(&request.file_name);
+        copy_feed_file(&source, &target, size, fetching).map(|()| target)
+    }
+}
+
+/// [`FeedCopy`]'s copy of `source` to `target`: the durable-copy door
+/// (`install_txn::durable_copy` — a temporary beside the target, flushed,
+/// renamed, nothing left under the name on a failure), fed by [`FeedBytes`].
+fn copy_feed_file(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    size: u64,
+    fetching: &Fetching,
+) -> Result<(), String> {
+    let from = bt_platform::file_reads::open(bt_platform::file_reads::Lane::Update, source)
+        .map_err(|error| format!("{}: {error}", source.display()))?;
+    let mut bytes = FeedBytes {
+        from,
+        received: 0,
+        size,
+        fetching,
+    };
+    bt_platform::install_txn::durable_copy(&mut bytes, target)
+        .map(drop)
+        .map_err(|failure| failure.to_string())
+}
+
+/// **A feed's file as the copy reads it**: the bytes so far reported as they
+/// pass, and a cancelled job's word turned into a refused read, which ends the
+/// copy with nothing left.
+struct FeedBytes<'a> {
+    from: bt_platform::file_reads::Reader<'a, std::fs::File>,
+    received: u64,
+    size: u64,
+    fetching: &'a Fetching,
+}
+
+impl Read for FeedBytes<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.fetching.cancelled.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("cancelled"));
+        }
+        let read = feed_chunk(&mut self.from, buffer)?;
+        self.received += read as u64;
+        (self.fetching.report)(Bytes {
+            received: self.received,
+            total: Some(self.size),
+        });
+        Ok(read)
+    }
+}
+
+/// One chunk of a feed's file, through the `file_reads` reader it was opened
+/// with.
+fn feed_chunk(
+    from: &mut bt_platform::file_reads::Reader<'_, std::fs::File>,
+    buffer: &mut [u8],
+) -> std::io::Result<usize> {
+    from.read(buffer)
+}
+
+/// **The transport a press fetches with**: the feed's copy when this process
+/// was given a release feed (U-30b), `page` — the download door — otherwise.
+/// Never both: a feed that cannot deliver a file is a failed Prepare, not a
+/// reason to ask the network.
+pub(crate) fn transport_for(
+    feed: Option<&crate::update::Feed>,
+    page: SharedTransport,
+) -> SharedTransport {
+    match feed {
+        Some(feed) => Arc::new(FeedCopy(feed.clone())),
+        None => page,
+    }
+}
+
 /// Why a driver would not start.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refused {
@@ -893,17 +992,19 @@ impl Transport for NoDownloadDoor {
 
 /// **The driver and the transport a press is handed on this copy**: the
 /// Prepare of the running bundle on macOS (U-27) and of the running install
-/// folder on Windows (U-20), each with the download door; [`Unsupported`]
-/// everywhere else.
+/// folder on Windows (U-20), each with the download door — or with the
+/// release feed's copy when this process was given one ([`transport_for`],
+/// U-30b); [`Unsupported`] everywhere else.
 pub(crate) fn driver_for_this_copy() -> (Box<dyn Driver>, SharedTransport) {
+    let transport = || transport_for(crate::update::feed(), Arc::new(ReleaseDownload));
     match bt_platform::host_platform() {
         HostPlatform::MacOs => (
             crate::update_prepare_macos::MacPrepare::of_this_copy(),
-            Arc::new(ReleaseDownload),
+            transport(),
         ),
         HostPlatform::Windows => (
             crate::update_prepare_windows::WinPrepare::of_this_copy(),
-            Arc::new(ReleaseDownload),
+            transport(),
         ),
         HostPlatform::OtherUnix => (Box::new(Unsupported), Arc::new(NoDownloadDoor)),
     }

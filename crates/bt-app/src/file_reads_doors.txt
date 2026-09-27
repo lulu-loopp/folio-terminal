@@ -117,6 +117,10 @@
 # member or the running image, opened on Lane::Update (`file_reads::open`) and
 # hashed a bounded chunk at a time by `update_prepare::digest_of`.
 1 digest_of: .read
+# A release feed's file (U-30b, `--update-feed`): opened on Lane::Update
+# (`file_reads::open`) and read by the durable-copy door through
+# `update_job::FeedBytes` (`feed_chunk`), in place of the download door.
+1 feed_chunk: .read
 # The Windows Prepare's expansion folder (U-20): held open by handle
 # (`exclusive_create::Directory::open`) for the archive reader to create each
 # member in — a write-only open of a folder, not a content read.

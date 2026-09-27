@@ -71180,6 +71180,13 @@ fn main() -> Result<()> {
             channel.label()
         ));
     }
+    // **A release feed, for this process only** (`--update-feed`, 0.4.6
+    // U-30b): the update check and the download read a local folder instead of
+    // github.com, and the log says so. After the log exists, before the check
+    // begins (`update::begin`, once the first window stands).
+    if let Some(url) = request.update_feed.as_deref() {
+        diagnostics::note(&update::use_feed(url));
+    }
     // **And the witness to the day this thread stops answering** (§1.5).
     // Started from here, on the window thread, before the loop exists: it needs
     // this thread's id, and it needs `%APPDATA%` resolved by the thread that is

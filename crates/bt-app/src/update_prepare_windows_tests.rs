@@ -407,8 +407,12 @@ impl Tools for TestTools {
 /// the job to reach `Verified` or `Failed` — reading the reports the way the
 /// window thread does (`Job::drain_progress`).
 fn press(driver: &WinPrepare, transport: Arc<Release>, txn: u8) -> Job<u32> {
+    press_with(driver, transport, txn)
+}
+
+/// [`press`], with any transport.
+fn press_with(driver: &WinPrepare, transport: SharedTransport, txn: u8) -> Job<u32> {
     let mut job = offered(txn);
-    let transport: SharedTransport = transport;
     job.answer_verb(Verb::Press, driver, &transport)
         .expect("the press is taken");
     let deadline = Instant::now() + Duration::from_secs(300);
@@ -1172,4 +1176,193 @@ fn the_applier_copy_is_verified_and_never_moved() {
     );
     failed_with(&job, 2, Stop::Clone);
     scene.left_nothing(2);
+}
+
+// ── a release feed (U-30b) ──────────────────────────────────────────────────
+
+/// **The page's stand-in**: a transport that counts every request and
+/// fetches nothing — a press that reaches it has contacted github.com.
+#[derive(Default)]
+struct Page(std::sync::atomic::AtomicU32);
+
+impl Page {
+    fn calls(&self) -> u32 {
+        self.0.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Transport for Page {
+    fn fetch(&self, request: &Request, _: &Path, _: &Fetching) -> Result<PathBuf, String> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(format!("the page was asked for {}", request.file_name))
+    }
+}
+
+/// The `file:` URL of `path`, as the product mints one (`webnav`).
+fn url_of(path: &Path) -> String {
+    crate::webnav::file_url_of_local_path(&path.to_string_lossy()).expect("an absolute path")
+}
+
+/// **A release feed in `folder`**: `archive` under the offer's asset name and
+/// `sums` as `SHA256SUMS.txt`, beside a `releases.json` in the GitHub
+/// releases list's shape naming them as release [`TAG`] by their `file:`
+/// URLs; answers the feed the folder's URL names, as the command line gives
+/// it.
+fn feed_of(folder: &Path, archive: &[u8], sums: &str) -> crate::update::Feed {
+    std::fs::create_dir_all(folder).unwrap();
+    let asset = offer(0).asset().to_owned();
+    std::fs::write(folder.join(&asset), archive).unwrap();
+    std::fs::write(folder.join("SHA256SUMS.txt"), sums).unwrap();
+    let list = serde_json::json!([{
+        "tag_name": TAG,
+        "name": format!("Folio {TO}"),
+        "draft": false,
+        "prerelease": false,
+        "assets": [
+            {
+                "name": asset,
+                "browser_download_url": url_of(&folder.join(&asset)),
+                "size": archive.len(),
+            },
+            {
+                "name": "SHA256SUMS.txt",
+                "browser_download_url": url_of(&folder.join("SHA256SUMS.txt")),
+                "size": sums.len(),
+            },
+        ],
+    }]);
+    std::fs::write(folder.join(crate::update::FEED_LIST), list.to_string()).unwrap();
+    crate::update::Feed::at(&format!("{}/", url_of(folder)))
+}
+
+/// RED (U-30b) — **with a release feed, a press copies the feed's asset and
+/// its checksum document instead of downloading them, and the Prepare holds
+/// the copy to its sum exactly as it holds a download.**
+///
+/// First the copy alone, on every platform: the asset lands in the download
+/// folder byte for byte, its bytes reported against the length the list
+/// gives. Then, where a test root can sign, the whole Windows Prepare over a
+/// feed of the genuine release reaches `Verified`, and over the same archive
+/// with a checksum line that is not its own stops at `Sums` with *Nothing
+/// changed*. The page's stand-in is never asked.
+///
+/// MUTATION: make `transport_for` answer `page` whatever `feed` is (the page
+/// is asked and the press fails at `Download`); or skip `matches_its_sum` in
+/// the Windows `fetch` (the wrong sum is `Verified`).
+#[test]
+fn the_download_copies_the_feed_asset_and_verifies_its_sum() {
+    let root = std::env::temp_dir().join(format!(
+        "bt-u30b-copy-{}-{}",
+        std::process::id(),
+        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
+    ));
+    let _scratch = Scratch(root.clone());
+    let archive = b"a release archive, by the feed".repeat(5_000);
+    let feed = feed_of(&root.join("feed"), &archive, &sums_for(&archive));
+    let page = Arc::new(Page::default());
+    let transport = crate::update_job::transport_for(Some(&feed), page.clone());
+    let into = root.join("download");
+    std::fs::create_dir_all(&into).unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let fetching = Fetching {
+        report: Arc::new({
+            let seen = Arc::clone(&seen);
+            move |bytes| seen.lock().unwrap().push(bytes)
+        }),
+        cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    };
+    let [asset, _] = offer(0).requests();
+    let copied = transport
+        .fetch(&asset, &into, &fetching)
+        .expect("the feed's asset is copied");
+    assert_eq!(copied, into.join(offer(0).asset()));
+    assert_eq!(std::fs::read(&copied).unwrap(), archive);
+    let length = archive.len() as u64;
+    assert_eq!(
+        seen.lock().unwrap().last(),
+        Some(&Bytes {
+            received: length,
+            total: Some(length),
+        })
+    );
+    assert_eq!(page.calls(), 0, "github.com was contacted");
+
+    let Some(scene) = Scene::new("feed-sum") else {
+        return;
+    };
+    let before = scene.installed();
+    let genuine = feed_of(
+        &scene.scratch.0.join("feed"),
+        &scene.archive,
+        &sums_for(&scene.archive),
+    );
+    let job = press_with(
+        &scene.driver(TestTools::real()),
+        crate::update_job::transport_for(Some(&genuine), page.clone()),
+        1,
+    );
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "the feed's genuine release passes: {:?}",
+        job.state()
+    );
+    drop(job);
+    on_a_worker({
+        let home = scene.home();
+        move |worker| {
+            if let AtLaunch::Counted(staged) = at_launch(worker, &home).unwrap() {
+                let _ = crate::update_prepare::discard(worker, *staged, &Event::Discarded);
+            }
+        }
+    });
+    scene.left_nothing(1);
+
+    let wrong = feed_of(
+        &scene.scratch.0.join("wrong-sum"),
+        &scene.archive,
+        &sums_for(b"another archive"),
+    );
+    let job = press_with(
+        &scene.driver(TestTools::real()),
+        crate::update_job::transport_for(Some(&wrong), page.clone()),
+        2,
+    );
+    failed_with(&job, 2, Stop::Sums);
+    scene.left_nothing(2);
+    assert_eq!(scene.installed(), before, "nothing installed was changed");
+    assert_eq!(page.calls(), 0, "github.com was contacted");
+}
+
+/// RED (U-30b) — **a feed cannot deliver a build the running build's signer
+/// did not sign: an archive signed by another identity, with its own
+/// consistent checksum line, is refused as `Identity`.**
+///
+/// The reason a visible flag is acceptable (the coordinator's ruling 2): the
+/// feed replaces only where the two files come from. U-20's counterexample,
+/// delivered through a feed — a `folio.exe` validly signed under the same
+/// trusted root for another identity, its sums agreeing — stops at the
+/// identity check with *Nothing changed*, before any installed file is
+/// touched; the page is never asked.
+///
+/// MUTATION: in `verify_set`, skip `trust::verify_release_file_under` for
+/// `folio.exe` — the feed's foreign build is `Verified`.
+#[test]
+fn a_feed_asset_signed_by_another_signer_is_refused_as_identity() {
+    let Some(scene) = Scene::new("feed-identity") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+    let foreign =
+        archive_of(&scene.another_release("foreign", OTHER_IDENTITY, "another signer's command"));
+    let feed = feed_of(&scene.scratch.0.join("feed"), &foreign, &sums_for(&foreign));
+    let page = Arc::new(Page::default());
+    let job = press_with(
+        &scene.driver(TestTools::real()),
+        crate::update_job::transport_for(Some(&feed), page.clone()),
+        1,
+    );
+    failed_with(&job, 1, Stop::Identity);
+    scene.left_nothing(1);
+    assert_eq!(scene.installed(), before, "nothing installed was changed");
+    assert_eq!(page.calls(), 0, "github.com was contacted");
 }

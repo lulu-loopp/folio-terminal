@@ -673,12 +673,58 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
 
 #### 前提
 
-1. 两个候选版(A 和 B)都已签名、公证、带更新能力(`FOLIO_UPDATER=on`),发布为
-   GitHub draft release(runner 的令牌能看到 draft)。
+1. 两个候选版(A 和 B)都已签名、公证、带更新能力(`FOLIO_UPDATER=on`);A 还必须是更新
+   卡已打开的构建(`OFFERS_ENABLED`,U-31 Windows / U-32 macOS 之后)——`--update-feed`
+   只换来源,不打开卡片。B 不必发布到 GitHub,见第 3 条。
 2. A 版已经通过普通 zip 路径装进客户机的 `C:\folio-vm\folio\`(§4.1 的 `unpack` 阶段)。
-3. 后继版本 B 的注入:待 U-31 提供的注入口。`update.rs` 和 `update_job.rs` 当前没有
-   环境变量或命令行参数来覆盖检查地址或下载源;`RELEASES_HOST` 和 `RELEASES_PATH`
-   是编译期常量,`OFFERS_ENABLED` 为 `false`。注入口落地后在此补写具体步骤。
+3. 后继版本 B 经命令行参数 `--update-feed <file-URL>` 注入(U-30b)。带这个参数启动的那个
+   进程,检查新版时读本地文件夹里的 `releases.json`,按「更新」时从同一文件夹拷贝两个文件,
+   不连 github.com;之后的校验和、归档读取与签名者检查一概不变——B 必须与 A 同一签名者签名,
+   测试根签的包在 Prepare 的身份检查被拒(`Stop::Identity`)。参数不落盘:不带它重启就回到
+   github.com。宿主端步骤:
+   1. **构建 B**(版本号高于 A):按 `docs/WINDOWS-CI-RELEASE.md` 第 1–3 步——
+      `gh workflow run build-release.yml --ref <分支> -f ref=<B 的完整提交> -f updater=true`;
+      在所有者本机用 `scripts/release/fetch-ci-build.ps1 … -Apply` 取回,再
+      `scripts/release/package.ps1 -Binary target/ci-signing -Sign`(内部调用 `sign.ps1`,
+      用所有者本机的签名会话)。产物在 `target/release-package/`:
+      `folio-<B>-windows-x64.zip` 和 `SHA256SUMS.txt`。
+   2. **建源文件夹**:宿主上新建 `feed\`,放入上面两个文件,再写 `feed\releases.json`
+      (GitHub 发布列表的形状,以下字段缺一不可;`size` 是文件字节数;`draft: true` 的条目
+      不算):
+
+      ```json
+      [
+        {
+          "tag_name": "v<B>",
+          "name": "Folio <B>",
+          "draft": false,
+          "prerelease": false,
+          "assets": [
+            { "name": "folio-<B>-windows-x64.zip",
+              "browser_download_url": "file:///C:/feed/folio-<B>-windows-x64.zip",
+              "size": 12345678 },
+            { "name": "SHA256SUMS.txt",
+              "browser_download_url": "file:///C:/feed/SHA256SUMS.txt",
+              "size": 1234 }
+          ]
+        }
+      ]
+      ```
+   3. **拷进客户机** `C:\feed\`:`hard-reset-in-vm.ps1 -Feed <宿主上的 feed 文件夹>` 逐个文件拷入。
+   4. **带参数启动 A**:`C:\folio-vm\folio\folio.exe --update-feed file:///C:/feed/`。
+      `hard-reset-in-vm.ps1` 给了 `-Feed` 时,`in-guest-updater.ps1 -FeedUrl file:///C:/feed/`
+      就这样启动它,然后开始盯日志阶段。
+
+   **看什么**:`diagnostics.log` 启动段有一行 `update feed: file:///C:/feed/`;更新卡在最近
+   活动的普通窗口弹出,写 v<B>;按「更新」后日志 `H\journal.json` 经过 `Allocated` →
+   `Prepared`(作业到 `Verified`);退出 Folio 后 `Handoff` → `Armed` → `Moving` → `Trial` →
+   `Committed`,安装目录里的文件换成 B 的(`folio.exe --version` 报 B)——这些阶段就是下表
+   各行的断电点。Windows 的应用(`Handoff` 之后)要等 U-23 落地。试运行、应用者、恢复进程
+   都不带这个参数,也不需要:下载在 Prepare 就完成了。
+
+   macOS 同理:资产是 `Folio-<B>-macos-arm64.dmg` 和 `SHA256SUMS-macos.txt`,URL 形如
+   `file:///Users/folio/feed/Folio-<B>-macos-arm64.dmg`,用
+   `open -n -a /Applications/Folio.app --args --update-feed file:///Users/folio/feed/` 启动。
 4. 客户机回到 `clean` 快照后再装候选版,每一行从同一个起点开始。
 
 #### Windows 步骤(W1–W13)
@@ -690,10 +736,13 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
 pwsh -File scripts/release/cleanvm/hard-reset-in-vm.ps1 `
     -Vmx <win11.vmx> -VmPassword <口令> -Row W1 -WhatIf
 
-# 真跑
+# 真跑(-Feed:宿主上按前提 3 建好的源文件夹;拷进客户机 C:\feed\,
+# 并以 --update-feed file:///C:/feed/ 启动已安装的 Folio)
 pwsh -File scripts/release/cleanvm/hard-reset-in-vm.ps1 `
-    -Vmx <win11.vmx> -VmPassword <口令> -Row W1
+    -Vmx <win11.vmx> -VmPassword <口令> -Row W1 -Feed <feed 文件夹>
 ```
+
+不给 `-Feed` 时脚本不启动 Folio,由人在客户机里按前提 3 第 4 步启动。
 
 证据落在 `target/cleanvm/<虚机名>-<时间戳>/updater/W1/`。
 
@@ -1065,7 +1114,7 @@ Error: Cannot read the virtual machine configuration file
 | 已验证:`new-vm.ps1` 的幂等拒绝与 `-Stage install` 的前置检查 | 本机跑过(用临时目录) |
 | **已验证**:两台机的 `clean` 快照已回到出厂 `Restricted`(五个作用域全 `Undefined`) | 2026-08-30 逐台实测,§3.4d |
 | **已验证**:加密机上 `deleteSnapshot` 报「Cannot read the virtual machine configuration file」并退 `-1`,而快照确实删掉了 | 同上;判据用 `listSnapshots` |
-| §4.4 更新器:后继版本注入口 | **不存在** —— `update.rs` 的 `RELEASES_HOST`/`RELEASES_PATH` 和 `update_job.rs` 的 `RELEASE_HOST`/`RELEASE_DOWNLOAD_PATH` 均为编译期常量,无环境变量或命令行覆盖;`OFFERS_ENABLED` 为 `false`;匿名请求看不到 draft release。待 U-31 提供注入机制后补写 §4.4 的第 3 条前提 |
+| §4.4 更新器:后继版本注入口 | **已有(U-30b)** —— `--update-feed <file-URL>`,只在带它启动的进程里生效,校验和与签名者检查不变;见 §4.4 前提 3。仍待:`OFFERS_ENABLED` 由 U-31/U-32 打开;`hard-reset-in-vm.ps1 -Feed` 未在真虚机上跑过 |
 | §4.4 更新器:macOS 断电验收虚机 | **不存在** —— Mac mini 无可处置的 macOS 客户机(见 §Clean-machine coverage 的数字);Mac mini 本身不做断电;`kill -9` 不等价于断电(进程死后文件系统缓存仍会落盘,内核不断电)。待硬件条件或 M 表近似方案裁决后补 |
 | §4.4 更新器:`hard-reset-in-vm.ps1` 和 `in-guest-updater.ps1` | **未验证** —— 脚本已写,`-WhatIf` 已跑通;未在真虚机上跑过 |
 
