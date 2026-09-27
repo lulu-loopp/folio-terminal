@@ -62,7 +62,8 @@
 //! (still the one the journal names), and the staged bundle (the identity
 //! check, and the version and cdhash the journal recorded); a failure
 //! discards. Neither has a product caller yet: the card that resumes a
-//! staged job at a later launch is U-28's.
+//! staged job at a later launch is U-19's, with U-32 (U-28 decided the
+//! place and left it unwired: a counted job has no offer to show).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -647,7 +648,7 @@ pub(crate) fn clear(
     not(test),
     expect(
         dead_code,
-        reason = "the launch pass and the resume are wired with the staged card of a later launch (U-28)"
+        reason = "the launch pass and the resume are wired with the staged card of a later launch (U-19, with U-32; U-28 left them unwired: a counted job has no offer)"
     )
 )]
 pub(crate) enum AtLaunch {
@@ -676,7 +677,7 @@ pub(crate) enum AtLaunch {
     not(test),
     expect(
         dead_code,
-        reason = "the launch pass and the resume are wired with the staged card of a later launch (U-28)"
+        reason = "the launch pass and the resume are wired with the staged card of a later launch (U-19, with U-32; U-28 left them unwired: a counted job has no offer)"
     )
 )]
 pub(crate) fn at_launch(worker: &WorkerCtx, home: &Home) -> Result<AtLaunch, String> {
@@ -751,7 +752,7 @@ pub(crate) fn at_launch(worker: &WorkerCtx, home: &Home) -> Result<AtLaunch, Str
     not(test),
     expect(
         dead_code,
-        reason = "the launch pass and the resume are wired with the staged card of a later launch (U-28)"
+        reason = "the launch pass and the resume are wired with the staged card of a later launch (U-19, with U-32; U-28 left them unwired: a counted job has no offer)"
     )
 )]
 pub(crate) fn revalidate(
