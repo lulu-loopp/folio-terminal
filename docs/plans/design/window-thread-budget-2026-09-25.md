@@ -1460,6 +1460,23 @@ script also checks that every entry is assigned to at least one target, and that
 each assigned target's job lints it. An entry nothing lints is red. Skipping an
 entry silently is never coverage.
 
+**Amended 2026-09-26 (thread-door note, revisions (j)2–(j)4 and (j)11; landed by
+A2a).** This section and C-2 are not rewritten; where they differ, the note
+rules. **C-2 item 1** holds in two lint tables, the workspace's and
+`bt-platform`'s, both checked by `scripts/ci/check-window-waits.ps1`, which also
+refuses `-A`/`-W`/`--cap-lints` in workflows, `.cargo/config.toml` and
+`RUSTFLAGS`/`CLIPPY_FLAGS`. **C-2 item 2**'s "these forms appear nowhere" admits
+exactly two spellings, by Cargo target root ((j)2): the product roots carry
+`#![cfg_attr(test, allow(clippy::disallowed_methods))]`, the excluded roots
+(tests, examples, benchmarks, build scripts, development binaries)
+`#![allow(clippy::disallowed_methods)]`. **C-4**'s per-target `CLIPPY_CONF_DIR`
+is withdrawn ((j)3, (j)4): one root `clippy.toml` inside a closed fence of five
+files (three shields `disallowed-methods = []`, the lint probe's), no
+`.clippy.toml`, no `.cargo/config`, no `CLIPPY_CONF_DIR`; and the resolution
+question is answered by a positive control per target — `crates/bt-lint-probe`
+calls every entry assigned to the target and CI requires the lint on each call
+((j)11.3). The lint itself, and its vocabulary in the root file, are A2e's.
+
 ### C-5. The capabilities: who may mint, what a door accepts
 
 The token needs authority as well as scope. Worker-only doors need a guarantee

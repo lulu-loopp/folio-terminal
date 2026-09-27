@@ -169,3 +169,16 @@ holds it to shrinking: each row's count is no larger than at the merge base with
 predates the file. A missing merge base is exit 2, not a pass. `core-macos`
 therefore checks out with full history (`fetch-depth: 0`), as `logic` and
 `gates-can-fail` already did; `gates-can-fail` plants a row and requires red.
+
+The same script is the configuration fence: it pins the five `clippy.toml`
+files (root, `vendor/`, `crates/bt-corpus/`, `crates/bt-source/`, and the lint
+probe's generated one), refuses any other `clippy.toml` or `.clippy.toml`, any
+`.cargo/config`, `CLIPPY_CONF_DIR` anywhere a build could read it or set in the
+job, and any `-A`/`-W`/`--cap-lints` touching the lint in a workflow, a
+`.cargo/config.toml` or a script's `RUSTFLAGS`. A second step on both jobs,
+**the lint probe's positive control** (`scripts/ci/check-lint-probe.ps1`),
+regenerates `crates/bt-lint-probe` from the registry, requires it unchanged and
+tracked, then runs `cargo clippy -p bt-lint-probe --all-targets --
+--force-warn clippy::disallowed_methods` and requires one report per vocabulary
+entry assigned to the runner's platform. `bt-lint-probe` is on `logic`'s fmt
+line.
