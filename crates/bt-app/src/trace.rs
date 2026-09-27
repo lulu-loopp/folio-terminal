@@ -62,7 +62,14 @@ impl TraceFile {
     /// Only the writer calls this in a resident run. Tests without a sink keep
     /// their synchronous behavior. Failed opens are remembered, not retried on
     /// every frame, and their diagnostic is emitted on this same writer thread.
-    fn open(&self) -> Option<&Mutex<File>> {
+    ///
+    /// **The diagnostic goes to `report`, never to [`std::io::stderr`]** (X-7):
+    /// the sink hands in the writer it puts its own batches through, which
+    /// writes past Rust's shared `Stderr` lock, so a failed open neither waits
+    /// for another thread's `eprintln!` nor holds that lock while the write is
+    /// stalled. Written straight to `report` and not queued, so the report can
+    /// never come back round to the destination that just failed.
+    fn open(&self, report: &mut impl Write) -> Option<&Mutex<File>> {
         self.file
             .get_or_init(|| {
                 let opened = (|| -> std::io::Result<File> {
@@ -80,7 +87,7 @@ impl TraceFile {
                     Err(error) => {
                         // Ignore stderr failures too: a trace must not panic.
                         let _ = writeln!(
-                            std::io::stderr(),
+                            report,
                             "{} could not be opened for the trace: {error}",
                             self.path.display()
                         );
@@ -91,8 +98,10 @@ impl TraceFile {
             .as_ref()
     }
 
-    pub fn append(&self, line: &str) {
-        if let Some(file) = self.open() {
+    /// Append one line, with a failed open reported to `report` — the sink's
+    /// own writer, so the report lands where its batches land and in order.
+    pub fn append(&self, line: &str, report: &mut impl Write) {
+        if let Some(file) = self.open(report) {
             let mut file = file
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -127,7 +136,7 @@ impl Trace {
         // Standalone users keep the immediate header, even when no events
         // follow. In a resident run, all file I/O belongs to the sink instead.
         if !trace_sink::started() {
-            let _ = file.open();
+            let _ = file.open(&mut trace_sink::ProcessStderr);
         }
         Self {
             file,
@@ -272,8 +281,14 @@ mod tests {
     fn a_trace_file_writes_the_line_it_was_given_and_one_newline() {
         let path = scratch("verbatim");
         let file = TraceFile::new(&path, None);
-        file.append("Instant { t: 1 } Preedit(\"ni\")");
-        file.append("focus-thumb visible=3 projections=1");
+        file.append(
+            "Instant { t: 1 } Preedit(\"ni\")",
+            &mut trace_sink::ProcessStderr,
+        );
+        file.append(
+            "focus-thumb visible=3 projections=1",
+            &mut trace_sink::ProcessStderr,
+        );
         assert_eq!(
             body(&path),
             "Instant { t: 1 } Preedit(\"ni\")\nfocus-thumb visible=3 projections=1\n"

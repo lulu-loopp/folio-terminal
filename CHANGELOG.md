@@ -11,6 +11,8 @@ All notable changes to Folio are recorded here. The format follows
 - macOS: the shipped shells start as login shells, so tools whose PATH is set
   in .zprofile — Homebrew's — are found; a profile can turn login on or off;
   a profile with arguments no longer reads as not installed.
+- A trace file that cannot be opened is now reported without waiting behind
+  other output, so a trace pointed at a bad path can no longer stall tracing.
 
 ### Internal
 

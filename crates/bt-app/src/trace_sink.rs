@@ -22,6 +22,9 @@
 //! ([`bt_platform::write_std_error`]): a thread stuck for seconds inside one
 //! `WriteFile` must not also be holding the mutex every `eprintln!` in the
 //! workspace goes through, which would reinstate the very hang one layer out.
+//! That includes the error path: a trace file that cannot be opened, or whose
+//! header cannot be written, is reported through the same writer
+//! ([`TraceFile`]'s open takes it as an argument), once, and never re-queued.
 
 use std::fmt::Write as _;
 use std::io::Write as _;
@@ -276,7 +279,7 @@ fn write_here(destination: &Destination, text: &str) {
         Destination::Stderr => {
             let _ = writeln!(std::io::stderr(), "{text}");
         }
-        Destination::File(file) => file.append(text),
+        Destination::File(file) => file.append(text, &mut ProcessStderr),
     }
 }
 
@@ -344,7 +347,7 @@ fn run(lines: &Receiver<Line>, dropped: &AtomicU64) {
 ///
 /// Unbuffered, so [`std::io::Write::flush`] has nothing to do: the batching
 /// this module wants is [`run_to`]'s `String`, which is bounded on purpose.
-struct ProcessStderr;
+pub(crate) struct ProcessStderr;
 
 impl std::io::Write for ProcessStderr {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -385,7 +388,7 @@ fn run_to(lines: &Receiver<Line>, dropped: &AtomicU64, stderr: &mut impl std::io
                 }
                 Destination::File(file) => {
                     put(&mut batch, stderr);
-                    file.append(&text);
+                    file.append(&text, stderr);
                 }
             }
             // Bound the batch too: a continuously replenished queue must not
@@ -741,6 +744,90 @@ mod tests {
             ended.is_ok(),
             "the writer waited for a lock another thread was holding"
         );
+    }
+
+    /// RED (B-TRACE-STDERR) — **a trace file that cannot be opened is reported
+    /// by the sink's own writer, once, without waiting for the lock every other
+    /// writer of `stderr` shares.**
+    ///
+    /// The error road of the test above. A directory given as the trace file
+    /// fails to open on every platform. First the production body — [`run`],
+    /// with the real [`ProcessStderr`] — while another thread holds Rust's
+    /// `Stderr` lock: the writer has to reach the end of its body inside the
+    /// shutdown bound, which it cannot if the report takes that lock. Then the
+    /// same body with a writer the test can read: the report arrives there,
+    /// exactly once for two lines (the failure is remembered), and nothing is
+    /// written to the directory's name.
+    ///
+    /// MUTATION: in `TraceFile::open`, write the report to `std::io::stderr()`
+    /// instead of `report`; the writer waits for the holder past
+    /// [`FLUSH_TIMEOUT`], and the captured output holds no report.
+    #[test]
+    fn a_failed_trace_open_reports_without_the_process_stderr_lock() {
+        let folder = std::env::temp_dir().join(format!(
+            "bt-sink-{}-a-folder-not-a-file",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&folder).expect("the scratch folder");
+        let offer_two = |queue: &Queue, file: &Arc<TraceFile>| {
+            for text in ["first", "second"] {
+                assert!(queue.offer(Line {
+                    destination: Destination::File(Arc::clone(file)),
+                    text: text.into(),
+                }));
+            }
+        };
+
+        let (release, released) = sync_channel::<()>(0);
+        let (locked, holding) = sync_channel::<()>(1);
+        let holder = std::thread::spawn(move || {
+            let _guard = std::io::stderr().lock();
+            let _ = locked.send(());
+            let _ = released.recv();
+        });
+        holding
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the holder took the process lock");
+        let failing = Arc::new(TraceFile::new(&folder, Some("# header")));
+        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
+        let dropped = Arc::new(AtomicU64::new(0));
+        let counted = Arc::clone(&dropped);
+        let (done, finished) = sync_channel::<()>(1);
+        let writer = std::thread::spawn(move || {
+            run(&waiting, &counted);
+            let _ = done.send(());
+        });
+        let queue = Queue::new(lines, dropped);
+        offer_two(&queue, &failing);
+        assert!(queue.close());
+        let ended = finished.recv_timeout(FLUSH_TIMEOUT);
+        drop(release);
+        holder.join().unwrap();
+        writer.join().unwrap();
+        assert!(
+            ended.is_ok(),
+            "the failed open's report waited for a lock another thread was holding"
+        );
+
+        let failing = Arc::new(TraceFile::new(&folder, Some("# header")));
+        let (lines, waiting) = sync_channel(QUEUE_DEPTH);
+        let queue = Queue::new(lines, Arc::new(AtomicU64::new(0)));
+        offer_two(&queue, &failing);
+        assert!(queue.close());
+        let mut output = Vec::new();
+        run_to(&waiting, &queue.dropped, &mut output);
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(
+            output.matches("could not be opened for the trace").count(),
+            1,
+            "one report on the sink's writer for a failure that is remembered: {output:?}"
+        );
+        assert!(
+            output.contains(&folder.display().to_string()),
+            "the report names the trace: {output:?}"
+        );
+        assert!(folder.is_dir(), "the folder is still a folder");
+        let _ = std::fs::remove_dir(&folder);
     }
 
     #[test]
