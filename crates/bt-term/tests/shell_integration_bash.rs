@@ -17,6 +17,7 @@
 use std::{
     path::{Path, PathBuf},
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -75,13 +76,20 @@ fn git_bash() -> PathBuf {
 /// A directory whose name carries a space and CJK, so the script's own
 /// percent-encoder is exercised on the byte that must become `%20` and on
 /// multi-byte characters that must become their UTF-8 escapes.
+///
+/// The three tests of this file share one process and start together, and a
+/// coarse clock hands two of them the same instant (a CI runner did, once:
+/// `AlreadyExists` at the `create_dir`), so the name carries a counter as
+/// well as the clock.
 fn temporary_directory() -> PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
+    let ordinal = NEXT.fetch_add(1, Ordering::Relaxed);
     let directory = std::env::temp_dir().join(format!(
-        "betterterminal 图 片-{}-{unique}",
+        "betterterminal 图 片-{}-{unique}-{ordinal}",
         std::process::id()
     ));
     std::fs::create_dir(&directory).unwrap();
