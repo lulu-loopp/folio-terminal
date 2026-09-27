@@ -6,6 +6,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- The Chinese settings dialog reads as a settings page: the descriptions
+  are written statements, refer to things as 此 / 该 rather than 这个, and
+  use one word for each thing across every page.
+
 ### Fixed
 
 - macOS: the shipped shells start as login shells, so tools whose PATH is set
