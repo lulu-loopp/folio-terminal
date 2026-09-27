@@ -1,0 +1,1086 @@
+//! **The Windows Prepare, over real folders, real archives and real signed
+//! files** (Windows), and what it does elsewhere.
+//!
+//! Every file is made here, under the test's own temporary folder: an install
+//! folder holding the running build — a small x64 program carrying its own
+//! release manifest, signed and time-stamped by U-15's test root
+//! (`bt_platform::trust_harness`) — and a release archive in `package.ps1`'s
+//! layout (`update_archive`'s own test writer) whose `folio.exe` and sidecars
+//! the same root signed, with its checksum document. The product's trust
+//! checks run for real under that root's exclusive-root policy; the download
+//! is a stand-in transport that writes the file it is asked for ([`Release`]);
+//! nothing leaves this machine, and nothing is installed anywhere.
+
+use super::*;
+
+use std::sync::Mutex;
+use std::sync::mpsc;
+
+use bt_persist::UpdateCheckV1;
+use bt_platform::HostPlatform;
+use bt_platform::trust_harness::{IDENTITY, OTHER_IDENTITY, SUBJECT, TestCa};
+use bt_winres::digest::{hex, sha256};
+use bt_winres::release_manifest::{PROTOCOL, RESOURCE_NAME, archive_root};
+
+use crate::i18n::Text;
+use crate::update_archive::tests::{item_under, zip_of};
+use crate::update_job::{
+    Bytes, Failure, Fetching, Gathered, Job, Presenters, Request, State, Verb,
+};
+use crate::update_prepare::{AtLaunch, at_launch, sum_for};
+use crate::update_txn::{Class, Header, HeaderOutcome, Phase};
+
+/// The running build's `VERSIONINFO`, and the offer's.
+const RUNNING: FileVersion = FileVersion([0, 4, 6, 0]);
+const OFFERED: FileVersion = FileVersion([0, 4, 7, 0]);
+/// The tag every test offers, and the version it names.
+const TAG: &str = "v0.4.7";
+const TO: &str = "0.4.7";
+
+/// The text members of a test release, after the two sidecars.
+const TEXT_MEMBERS: [&str; 3] = ["folio-here.cmd", "uninstall.cmd", "LICENSE-MIT"];
+
+/// The offer every test presses: `v0.4.7`, for Windows.
+fn offer(txn: u8) -> Offer {
+    Offer::mint(TxnId::new([txn; 16]), TAG, HostPlatform::Windows).expect("a release tag")
+}
+
+/// Run `body` on a worker the thread door started, and wait for it.
+fn on_a_worker<T: Send + 'static>(body: impl FnOnce(&WorkerCtx) -> T + Send + 'static) -> T {
+    let worker = bt_platform::spawn_at_priority(
+        "bt-u20-test",
+        bt_platform::ThreadPriority::BelowNormal,
+        body,
+    )
+    .expect("the thread door starts a thread");
+    match worker.join() {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
+
+// ── the files ───────────────────────────────────────────────────────────────
+
+/// **One build's files, written into `folder`**: the two sidecars (small
+/// programs the test root signed), the text members saying `says`, and
+/// `folio.exe` — a program at `version`, signed for the test publisher under
+/// `identity`, carrying the release manifest of the others (F-4). Answers
+/// every file with its bytes, `folio.exe` first.
+fn build(
+    ca: &TestCa,
+    folder: &Path,
+    version: FileVersion,
+    spelled: &str,
+    identity: &str,
+    says: &str,
+) -> Vec<(String, Vec<u8>)> {
+    let mut members = Vec::new();
+    for sidecar in SIDECARS {
+        let path = folder.join(sidecar);
+        ca.signed_program(&path, FileVersion([1, 0, 0, 0]), SUBJECT, IDENTITY, &[]);
+        members.push((sidecar.to_owned(), std::fs::read(&path).unwrap()));
+    }
+    for name in TEXT_MEMBERS {
+        let bytes = format!("@rem {name}: {says}\r\n").repeat(20).into_bytes();
+        std::fs::write(folder.join(name), &bytes).unwrap();
+        members.push((name.to_owned(), bytes));
+    }
+    let manifest = Manifest {
+        product: release_manifest::PRODUCT.to_owned(),
+        version: spelled.to_owned(),
+        arch: release_manifest::archive_arch(std::env::consts::ARCH).to_owned(),
+        archive_root: archive_root(spelled),
+        protocol: PROTOCOL,
+        min_updater: crate::version::VERSION.to_owned(),
+        members: members
+            .iter()
+            .map(|(name, bytes)| release_manifest::Member {
+                name: name.clone(),
+                sha256: hex(&sha256(bytes)),
+                size: bytes.len() as u64,
+            })
+            .collect(),
+    };
+    let exe = folder.join(EXECUTABLE);
+    ca.signed_program(
+        &exe,
+        version,
+        SUBJECT,
+        identity,
+        &[(RESOURCE_NAME, manifest.encode().as_bytes())],
+    );
+    let mut files = vec![(EXECUTABLE.to_owned(), std::fs::read(&exe).unwrap())];
+    files.extend(members);
+    files
+}
+
+/// **The release archive of `files`** under the offer's root, in the layout
+/// `package.ps1` writes.
+fn archive_of(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let root = archive_root(TO);
+    let items: Vec<_> = files
+        .iter()
+        .map(|(name, bytes)| item_under(&root, name, bytes))
+        .collect();
+    zip_of(&items)
+}
+
+/// `SHA256SUMS.txt` for `archive` under the offer's asset name, beside another
+/// file's line.
+fn sums_for(archive: &[u8]) -> String {
+    format!(
+        "{}  Folio-0.4.7-macos-arm64.dmg\n{}  {}\n",
+        "0".repeat(64),
+        hex(&sha256(archive)),
+        offer(0).asset()
+    )
+}
+
+/// A folder of the test's own under the temporary directory, removed when
+/// dropped.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// **An install folder running 0.4.6, and a release of 0.4.7**, both signed by
+/// one test root.
+struct Scene {
+    scratch: Scratch,
+    ca: TestCa,
+    install: PathBuf,
+    exe: PathBuf,
+    archive: Vec<u8>,
+}
+
+impl Scene {
+    /// The scene, or `None` off Windows, where no test root can sign.
+    fn new(tag: &str) -> Option<Self> {
+        let ca = TestCa::new().ok()?;
+        let root = std::env::temp_dir().join(format!(
+            "bt-u20-{tag}-{}-{}",
+            std::process::id(),
+            bt_platform::attention_pipe::unguessable_bits() % 1_000_000
+        ));
+        let scratch = Scratch(root.clone());
+        let install = root.join("Folio");
+        let release = root.join("release");
+        std::fs::create_dir_all(&install).unwrap();
+        std::fs::create_dir_all(&release).unwrap();
+        build(
+            &ca,
+            &install,
+            RUNNING,
+            "0.4.6",
+            IDENTITY,
+            "the running build",
+        );
+        let archive = archive_of(&build(
+            &ca,
+            &release,
+            OFFERED,
+            TO,
+            IDENTITY,
+            "the new build",
+        ));
+        Some(Self {
+            exe: install.join(EXECUTABLE),
+            scratch,
+            ca,
+            install,
+            archive,
+        })
+    }
+
+    /// Another build of 0.4.7, in a folder of its own, signed by the same root
+    /// for `identity`, its text members saying `says`.
+    fn another_release(&self, folder: &str, identity: &str, says: &str) -> Vec<(String, Vec<u8>)> {
+        let path = self.scratch.0.join(folder);
+        std::fs::create_dir_all(&path).unwrap();
+        build(&self.ca, &path, OFFERED, TO, identity, says)
+    }
+
+    fn home(&self) -> Home {
+        Home::of(HostPlatform::Windows, &self.exe).expect("an executable in a folder")
+    }
+
+    fn driver(&self, tools: TestTools) -> WinPrepare {
+        WinPrepare::with(
+            self.exe.clone(),
+            Some(Channel::Ours),
+            self.ca.policy(),
+            Arc::new(tools),
+        )
+    }
+
+    /// Every file of the install folder but the installation home, with its
+    /// bytes, by name.
+    fn installed(&self) -> Vec<(String, Vec<u8>)> {
+        let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&self.install)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.file_name() != Some(OsStr::new(crate::update_txn::WINDOWS_HOME)))
+            .map(|path| {
+                (
+                    path.file_name().unwrap().to_string_lossy().into_owned(),
+                    std::fs::read(&path).unwrap(),
+                )
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    /// **Nothing of transaction `txn` is left**: no folder, no journal, and
+    /// the transaction lock free.
+    fn left_nothing(&self, txn: u8) {
+        let home = self.home();
+        assert!(
+            !home.transaction(TxnId::new([txn; 16])).exists(),
+            "the transaction's folder is removed"
+        );
+        assert!(!home.journal().exists(), "the journal is removed");
+        assert!(
+            install_txn::try_hold(&home.lock(), Hold::Exclusive)
+                .unwrap()
+                .is_some(),
+            "the lock is let go"
+        );
+    }
+}
+
+// ── the stand-ins ───────────────────────────────────────────────────────────
+
+/// **The release, as a stand-in transport**: the archive's bytes and its
+/// checksum document, written under the name each request asks for.
+struct Release {
+    archive: Vec<u8>,
+    sums: String,
+    /// The file name whose fetch fails.
+    refuse: Option<String>,
+    /// Where each file was asked to go.
+    into: Mutex<Vec<PathBuf>>,
+    /// Told when the archive's fetch begins, and waited on before it goes on.
+    gate: Option<(mpsc::Sender<()>, Mutex<mpsc::Receiver<()>>)>,
+}
+
+impl Release {
+    fn of(archive: Vec<u8>) -> Self {
+        Self {
+            sums: sums_for(&archive),
+            archive,
+            refuse: None,
+            into: Mutex::new(Vec::new()),
+            gate: None,
+        }
+    }
+}
+
+impl Transport for Release {
+    fn fetch(
+        &self,
+        request: &Request,
+        into: &Path,
+        fetching: &Fetching,
+    ) -> Result<PathBuf, String> {
+        self.into.lock().unwrap().push(into.to_path_buf());
+        if self.refuse.as_deref() == Some(request.file_name.as_str()) {
+            return Err("the stand-in server said no".to_owned());
+        }
+        let target = into.join(&request.file_name);
+        if request.file_name.ends_with(".zip") {
+            if let Some((entered, go)) = &self.gate {
+                entered.send(()).unwrap();
+                go.lock().unwrap().recv().unwrap();
+            }
+            std::fs::write(&target, &self.archive).map_err(|e| e.to_string())?;
+            let length = self.archive.len() as u64;
+            (fetching.report)(Bytes {
+                received: length,
+                total: Some(length),
+            });
+        } else {
+            std::fs::write(&target, &self.sums).map_err(|e| e.to_string())?;
+        }
+        Ok(target)
+    }
+}
+
+/// How the stand-in effects copy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Copying {
+    /// The product's durable copy.
+    Real,
+    /// A disk that took half of this member's bytes and said it took them all.
+    ShortWrite(&'static str),
+    /// A disk that is full: the copy is refused and nothing is left.
+    DiskFull,
+    /// A device that refuses the file's flush: the durable copy removes its
+    /// temporary and refuses, and nothing is left.
+    FlushRefused,
+    /// The rescue copy is refused.
+    RescueRefused,
+    /// The rescue copy lands, and one byte of it is not the running image's.
+    RescueAltered,
+}
+
+/// **The effects a test holds a Prepare to**: the space the volume reports
+/// (the real answer unless a test says otherwise) and the copy, which a test
+/// may tell to lie or to fail.
+struct TestTools {
+    available: Option<u64>,
+    copying: Copying,
+}
+
+impl TestTools {
+    fn real() -> Self {
+        Self {
+            available: None,
+            copying: Copying::Real,
+        }
+    }
+
+    fn copying(copying: Copying) -> Self {
+        Self {
+            copying,
+            ..Self::real()
+        }
+    }
+}
+
+impl Tools for TestTools {
+    fn available(&self, folder: &Path) -> Result<u64, String> {
+        self.available.map_or_else(|| System.available(folder), Ok)
+    }
+
+    fn copy(&self, from: &Path, to: &Path) -> Result<(), String> {
+        let rescue = to.parent().and_then(Path::file_name) == Some(OsStr::new("rescue"));
+        match self.copying {
+            Copying::ShortWrite(name) if to.file_name() == Some(OsStr::new(name)) => {
+                let bytes = std::fs::read(from).map_err(|e| e.to_string())?;
+                std::fs::write(to, &bytes[..bytes.len() / 2]).map_err(|e| e.to_string())
+            }
+            Copying::DiskFull => {
+                Err("There is not enough space on the disk. (os error 112)".into())
+            }
+            Copying::FlushRefused => Err("install_txn flush-file: the device refused".into()),
+            Copying::RescueRefused if rescue => Err("the stand-in copy refuses".into()),
+            Copying::RescueAltered if rescue => {
+                System.copy(from, to)?;
+                let mut bytes = std::fs::read(to).map_err(|e| e.to_string())?;
+                let last = bytes.len() - 1;
+                bytes[last] ^= 0xFF;
+                std::fs::write(to, bytes).map_err(|e| e.to_string())
+            }
+            _ => System.copy(from, to),
+        }
+    }
+}
+
+/// **Press Update on a job offering `v0.4.7` with `driver`**, and wait for
+/// the job to reach `Verified` or `Failed` — reading the reports the way the
+/// window thread does (`Job::drain_progress`).
+fn press(driver: &WinPrepare, transport: Arc<Release>, txn: u8) -> Job<u32> {
+    let mut job = offered(txn);
+    let transport: SharedTransport = transport;
+    job.answer_verb(Verb::Press, driver, &transport)
+        .expect("the press is taken");
+    let deadline = Instant::now() + Duration::from_secs(300);
+    loop {
+        job.drain_progress();
+        if matches!(job.state(), State::Verified(_) | State::Failed(..)) {
+            return job;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the Prepare did not finish: {:?}",
+            job.state()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// A job that offers `v0.4.7` under transaction `txn`.
+fn offered(txn: u8) -> Job<u32> {
+    let mut job = Job::with_offers(true);
+    job.consider(
+        Gathered {
+            check: Some((
+                UpdateCheckV1 {
+                    latest_tag: Some(TAG.to_owned()),
+                    ..UpdateCheckV1::default()
+                },
+                true,
+            )),
+            channel: Some(Channel::Ours),
+            running: "0.4.6",
+            capable: true,
+            trial: false,
+            platform: HostPlatform::Windows,
+        },
+        &Presenters {
+            visited: &[1],
+            open: &[1],
+            quake: None,
+        },
+        || TxnId::new([txn; 16]),
+    );
+    assert!(
+        matches!(job.state(), State::Available(_)),
+        "{:?}",
+        job.state()
+    );
+    job
+}
+
+/// What the Prepare left behind for the job, read off the disk.
+fn journal_on_disk(home: &Home) -> Journal {
+    Journal::parse(&std::fs::read(home.journal()).expect("a journal")).expect("a whole journal")
+}
+
+/// The inventories a `Prepared` journal carries.
+fn inventories(journal: &Journal) -> &Inventories {
+    match &journal.body.layout {
+        Layout::Members(inventories) => inventories,
+        other => panic!("a Windows transaction records members, not {other:?}"),
+    }
+}
+
+/// **The job failed with `stop`, and its card says so and that nothing
+/// changed.**
+fn failed_with(job: &Job<u32>, txn: u8, stop: Stop) {
+    assert_eq!(
+        job.state(),
+        &State::Failed(offer(txn), Failure::Stopped(stop)),
+    );
+    let paint = crate::update_card::paint(job.state()).expect("a failed card");
+    assert_eq!(
+        paint.detail.as_deref(),
+        Some(Text::UpdateCardNothingChanged.text()),
+        "{stop:?}: the card says nothing changed"
+    );
+}
+
+/// Off Windows there is no test root: **the Windows Prepare refuses before it
+/// writes anything** — the running build's identity cannot be read there
+/// (`trust` refuses by name), so no home is made.
+fn refused_off_windows() {
+    assert_ne!(bt_platform::host_platform(), HostPlatform::Windows);
+    let root = std::env::temp_dir().join(format!(
+        "bt-u20-elsewhere-{}-{}",
+        std::process::id(),
+        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
+    ));
+    let _scratch = Scratch(root.clone());
+    std::fs::create_dir_all(&root).unwrap();
+    let exe = root.join(EXECUTABLE);
+    std::fs::write(&exe, b"not a program").unwrap();
+    let driver = WinPrepare::with(
+        exe,
+        Some(Channel::Ours),
+        Policy::System,
+        Arc::new(TestTools::real()),
+    );
+    let job = press(&driver, Arc::new(Release::of(Vec::new())), 1);
+    assert_eq!(
+        job.state(),
+        &State::Failed(offer(1), Failure::Stopped(Stop::Identity))
+    );
+    assert!(
+        !root.join(crate::update_txn::WINDOWS_HOME).exists(),
+        "nothing was written"
+    );
+}
+
+// ── the tests ───────────────────────────────────────────────────────────────
+
+/// RED (U-20) — **an archive and a checksum document replaced together,
+/// consistently, still do not pass: hash agreement alone never admits a
+/// release; the identity of the running build's signer does.**
+///
+/// The review's counterexample (F-4, F-16): `SHA256SUMS.txt` is unsigned, so
+/// whoever can replace the archive can replace its line too. Here the attacker
+/// ships a `folio.exe` validly signed under the same trusted root — a valid
+/// signature, a trusted chain, a time stamp — but for another identity, and it
+/// carries a manifest that lists a changed `uninstall.cmd`, so the archive
+/// reader's own checks all agree with it. The Prepare stops at the identity
+/// check with *Nothing changed*, and before any file of the install is
+/// touched. Beside it, the genuine `folio.exe` with that changed `.cmd` is
+/// refused by the manifest it signs (F-4), and the genuine release passes —
+/// the fixture is not refused for a reason of its own.
+///
+/// MUTATION: in `verify_set`, skip `trust::verify_release_file_under` for
+/// `folio.exe` — the attacker's release is `Verified`.
+#[test]
+fn mutated_asset_hash_pair_refuses_before_swap() {
+    let Some(scene) = Scene::new("mutated") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+
+    let attacker = scene.another_release("attacker", OTHER_IDENTITY, "the attacker's command");
+    let replaced = Release::of(archive_of(&attacker));
+    assert_eq!(
+        sum_for(&replaced.sums, offer(0).asset()),
+        Some(hex(&sha256(&replaced.archive))),
+        "the pair agrees: the checksum line is the replaced archive's"
+    );
+    let job = press(&scene.driver(TestTools::real()), Arc::new(replaced), 1);
+    failed_with(&job, 1, Stop::Identity);
+    scene.left_nothing(1);
+    assert_eq!(scene.installed(), before, "nothing installed was changed");
+
+    // The genuine executable, with the attacker's `.cmd`: its own manifest
+    // refuses the member.
+    let mut genuine = std::fs::read_dir(scene.scratch.0.join("release"))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            (
+                path.file_name().unwrap().to_string_lossy().into_owned(),
+                std::fs::read(&path).unwrap(),
+            )
+        })
+        .collect::<Vec<_>>();
+    genuine.sort_by_key(|(name, _)| name != EXECUTABLE);
+    let cmd = attacker
+        .iter()
+        .find(|(name, _)| name == "uninstall.cmd")
+        .unwrap()
+        .clone();
+    for file in &mut genuine {
+        if file.0 == cmd.0 {
+            file.1.clone_from(&cmd.1);
+        }
+    }
+    let job = press(
+        &scene.driver(TestTools::real()),
+        Arc::new(Release::of(archive_of(&genuine))),
+        2,
+    );
+    failed_with(&job, 2, Stop::Identity);
+    scene.left_nothing(2);
+    assert_eq!(scene.installed(), before);
+
+    let job = press(
+        &scene.driver(TestTools::real()),
+        Arc::new(Release::of(scene.archive.clone())),
+        3,
+    );
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "the genuine release passes: {:?}",
+        job.state()
+    );
+    assert_eq!(
+        scene.installed(),
+        before,
+        "a Prepare changes nothing installed"
+    );
+}
+
+/// RED (U-20) — **a copy that lands short, a disk that is full and a flush
+/// the device refuses never reach `Prepared`: the transaction is removed and
+/// the card says nothing changed.**
+///
+/// §C.2 step 6: the verified tree is copied into `set\`, flushed, and
+/// re-verified where it lies, because what gets installed must be what was
+/// checked. A disk that accepted half of `uninstall.cmd` and said it took it
+/// all leaves a file whose signature nobody checks — only its digest against
+/// the one measured before the copy tells. A full disk and a refused flush are
+/// refusals of the copy itself (`install_txn`'s own test holds that a refused
+/// flush leaves no file under the name).
+///
+/// MUTATION: in `still_staged`, skip the digest comparison — the short write
+/// is `Verified`.
+#[test]
+fn short_write_disk_full_and_flush_failure_never_verify() {
+    let Some(scene) = Scene::new("short") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+    for (txn, copying, stop) in [
+        (1, Copying::ShortWrite("uninstall.cmd"), Stop::Identity),
+        (2, Copying::DiskFull, Stop::Copy),
+        (3, Copying::FlushRefused, Stop::Copy),
+    ] {
+        let job = press(
+            &scene.driver(TestTools::copying(copying)),
+            Arc::new(Release::of(scene.archive.clone())),
+            txn,
+        );
+        failed_with(&job, txn, stop);
+        scene.left_nothing(txn);
+        assert_eq!(scene.installed(), before, "nothing installed was changed");
+    }
+}
+
+/// RED (U-20) — **every file a Prepare writes is inside the installation's
+/// own folder, on its volume: the download, the expansion, the staged set and
+/// the rescue copy — nothing lands in the roaming profile or the system's
+/// temporary folder.**
+///
+/// R-6 and C6: the flip is a rename only if the staged set is on the
+/// destination volume, and a download cache under `persist::storage_dir()`
+/// would put the release in the roaming profile. The transport is asked to
+/// write into `H\<txn>\download\`; after `Prepared` only `set\` and `rescue\`
+/// remain under `H\<txn>`, and every path under the home resolves to the
+/// install folder's volume.
+///
+/// MUTATION: in `acquire`, fetch into `std::env::temp_dir()` instead of
+/// `folders.download`.
+#[test]
+fn staging_is_always_on_the_destination_volume() {
+    let Some(scene) = Scene::new("volume") else {
+        return refused_off_windows();
+    };
+    let release = Arc::new(Release::of(scene.archive.clone()));
+    let job = press(&scene.driver(TestTools::real()), Arc::clone(&release), 1);
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+
+    let home = scene.home();
+    let transaction = home.transaction(TxnId::new([1; 16]));
+    assert!(
+        home.root().starts_with(&scene.install),
+        "H is in the install folder"
+    );
+    for into in release.into.lock().unwrap().iter() {
+        assert_eq!(into, &transaction.join("download"), "the download is H's");
+    }
+    let mut left: Vec<String> = std::fs::read_dir(&transaction)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        ["rescue", "set"],
+        "the download and expansion are gone"
+    );
+
+    let volume = |path: &Path| {
+        std::fs::canonicalize(path)
+            .unwrap()
+            .components()
+            .next()
+            .map(|component| component.as_os_str().to_ascii_lowercase())
+    };
+    let install_volume = volume(&scene.install);
+    let mut stack = vec![home.root().to_path_buf()];
+    let mut seen = 0;
+    while let Some(path) = stack.pop() {
+        assert_eq!(volume(&path), install_volume, "{}", path.display());
+        seen += 1;
+        if path.is_dir() {
+            stack.extend(std::fs::read_dir(&path).unwrap().map(|e| e.unwrap().path()));
+        }
+    }
+    assert!(
+        seen > 10,
+        "the home and the transaction were walked ({seen})"
+    );
+}
+
+/// RED (U-20) — **a Cancel while the archive downloads leaves no
+/// transaction**: no `H\<txn>`, no journal, the lock free, the install as it
+/// was, and the job idle.
+///
+/// §C.2: "every failure here deletes the transaction directory, releases the
+/// lock". A Cancel is the job's word, not a failure the driver reports, so
+/// it takes the same road at the driver's next step without a report — and
+/// must still leave nothing: a journal at `Allocated` left behind would be
+/// swept at the next launch, but the lock and the folder would stand until
+/// then.
+///
+/// MUTATION: in `prepare_on`'s error arm, skip `abandon` when the stop is
+/// `Stop::Cancelled`.
+#[test]
+fn cancel_leaves_no_transaction() {
+    let Some(scene) = Scene::new("cancel") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+    let (entered, entered_seen) = mpsc::channel();
+    let (go, go_seen) = mpsc::channel();
+    let release = Arc::new(Release {
+        gate: Some((entered, Mutex::new(go_seen))),
+        ..Release::of(scene.archive.clone())
+    });
+    let driver = scene.driver(TestTools::real());
+    let mut job = offered(1);
+    let transport: SharedTransport = release;
+    job.answer_verb(Verb::Press, &driver, &transport)
+        .expect("the press is taken");
+    entered_seen
+        .recv_timeout(Duration::from_secs(60))
+        .expect("the archive's fetch began");
+    assert!(
+        scene.home().journal().exists(),
+        "the transaction exists while it downloads"
+    );
+    job.answer_verb(Verb::Cancel, &driver, &transport)
+        .expect("Cancel is on the download's card");
+    assert_eq!(job.state(), &State::Idle);
+    go.send(()).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let home = scene.home();
+    while home.journal().exists() || home.transaction(TxnId::new([1; 16])).exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the cancelled Prepare left its transaction"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    scene.left_nothing(1);
+    assert_eq!(scene.installed(), before);
+    job.drain_progress();
+    assert_eq!(
+        job.state(),
+        &State::Idle,
+        "no report revives a cancelled job"
+    );
+}
+
+/// RED (U-20) — **a `Prepared` transaction survives the first launch that does
+/// not resume it, counted, and is discarded at the second** — its set, its
+/// rescue copy and its journal all gone, the install untouched.
+///
+/// (b).1 F-17 and W2: startup never deletes `Prepared`; the job owner counts
+/// `deferred_launches` at each launch that does not resume and discards at
+/// [`crate::update_txn::DEFERRED_LAUNCH_LIMIT`]. The pass is the one
+/// `update_prepare::at_launch` both platforms share, over a Windows journal
+/// the real Prepare wrote.
+///
+/// MUTATION: set `DEFERRED_LAUNCH_LIMIT` to 1 — the first relaunch discards.
+#[test]
+fn a_deferred_transaction_survives_the_first_relaunch() {
+    let Some(scene) = Scene::new("deferred") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+    let job = press(
+        &scene.driver(TestTools::real()),
+        Arc::new(Release::of(scene.archive.clone())),
+        1,
+    );
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+    drop(job);
+
+    let home = scene.home();
+    let first = {
+        let home = home.clone();
+        on_a_worker(move |worker| match at_launch(worker, &home).unwrap() {
+            AtLaunch::Counted(staged) => staged.journal.body.phase,
+            _ => panic!("the first launch counts"),
+        })
+    };
+    assert_eq!(
+        first,
+        Phase::Prepared {
+            deferred_launches: 1
+        }
+    );
+    let on_disk = journal_on_disk(&home);
+    assert_eq!(
+        on_disk.body.phase,
+        Phase::Prepared {
+            deferred_launches: 1
+        }
+    );
+    assert_eq!(on_disk.header().class, Class::Deferred);
+    let set = home
+        .members_folder(TxnId::new([1; 16]), Place::Set)
+        .unwrap();
+    assert!(set.join(EXECUTABLE).exists(), "the staged set survives");
+
+    let second = {
+        let home = home.clone();
+        on_a_worker(move |worker| matches!(at_launch(worker, &home).unwrap(), AtLaunch::Discarded))
+    };
+    assert!(second, "the second launch discards");
+    scene.left_nothing(1);
+    assert_eq!(scene.installed(), before);
+}
+
+/// RED (U-20) — **before a staged set is resumed it is checked again, and a
+/// set that changed since `Prepared` is refused and discarded**; an unchanged
+/// one passes.
+///
+/// (b).1 F-17: "revalidates (hash, signature, manifest, classification)
+/// before any resume". Between the Prepare and a resume the files in `set\`
+/// sat in a folder anyone who can write the install folder can write; a
+/// resume that trusted the journal's word for them would install whatever is
+/// there now.
+///
+/// MUTATION: in `still_valid`, skip `still_staged`.
+#[test]
+fn revalidation_before_resume_refuses_a_changed_set() {
+    let Some(scene) = Scene::new("revalidate") else {
+        return refused_off_windows();
+    };
+    let job = press(
+        &scene.driver(TestTools::real()),
+        Arc::new(Release::of(scene.archive.clone())),
+        1,
+    );
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+    drop(job);
+
+    // One later launch: the transaction is counted, then revalidated twice
+    // before any resume — unchanged, and after one staged file changed.
+    let home = scene.home();
+    let set = home
+        .members_folder(TxnId::new([1; 16]), Place::Set)
+        .unwrap();
+    let (unchanged, kept, changed) = {
+        let (home, exe, policy) = (home.clone(), scene.exe.clone(), scene.ca.policy());
+        on_a_worker(move |worker| {
+            let AtLaunch::Counted(staged) = at_launch(worker, &home).unwrap() else {
+                panic!("a prepared transaction is counted");
+            };
+            let resume = Resume {
+                exe: &exe,
+                channel: Some(Channel::Ours),
+                policy: &policy,
+                to_version: TO,
+            };
+            let staged = revalidate(worker, *staged, &resume);
+            let unchanged = staged.as_ref().map(drop).map_err(|stop| *stop);
+            let kept = home.journal().exists();
+            std::fs::write(
+                set.join("uninstall.cmd"),
+                b"@rem changed after the Prepare\r\n",
+            )
+            .unwrap();
+            let changed = match staged {
+                Ok(staged) => revalidate(worker, staged, &resume).map(drop),
+                Err(stop) => Err(stop),
+            };
+            (unchanged, kept, changed)
+        })
+    };
+    assert_eq!(unchanged, Ok(()), "an unchanged set passes");
+    assert!(kept, "and is kept");
+    assert_eq!(changed, Err(Stop::Identity), "a changed one is refused");
+    scene.left_nothing(1);
+}
+
+/// RED (U-20) — **every road a Prepare can fail by removes its transaction,
+/// lets the lock go, leaves the install as it was, and has the card say which
+/// reason and that nothing changed** — a refused download, a checksum
+/// mismatch, too little space (the card naming the shortfall), an archive
+/// that is not a release, a refused copy and a refused rescue copy.
+///
+/// §C.2's last paragraph and W1: "Every failure here deletes the transaction
+/// directory, releases the lock, and reports `Failed(…)` with *Nothing
+/// installed was changed.*, which is true."
+///
+/// MUTATION: in `update_prepare::abandon`, record `Abandoned` and return
+/// without `clear`.
+#[test]
+fn every_failure_road_removes_the_transaction_and_says_nothing_changed() {
+    let Some(scene) = Scene::new("roads") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+    let genuine = || Release::of(scene.archive.clone());
+    let roads: Vec<(u8, Release, TestTools, Stop)> = vec![
+        (
+            1,
+            Release {
+                refuse: Some(offer(0).asset().to_owned()),
+                ..genuine()
+            },
+            TestTools::real(),
+            Stop::Download,
+        ),
+        (
+            2,
+            Release {
+                sums: sums_for(b"another archive"),
+                ..genuine()
+            },
+            TestTools::real(),
+            Stop::Sums,
+        ),
+        (
+            3,
+            genuine(),
+            TestTools {
+                available: Some(1_000),
+                copying: Copying::Real,
+            },
+            Stop::Space {
+                short_by: 2 * declared(&scene.archive)
+                    + std::fs::metadata(&scene.exe).unwrap().len()
+                    - 1_000,
+            },
+        ),
+        (
+            4,
+            Release::of(b"not an archive".to_vec()),
+            TestTools::real(),
+            Stop::Identity,
+        ),
+        (
+            5,
+            genuine(),
+            TestTools::copying(Copying::DiskFull),
+            Stop::Copy,
+        ),
+        (
+            6,
+            genuine(),
+            TestTools::copying(Copying::RescueRefused),
+            Stop::Clone,
+        ),
+    ];
+    for (txn, release, tools, stop) in roads {
+        let job = press(&scene.driver(tools), Arc::new(release), txn);
+        failed_with(&job, txn, stop);
+        scene.left_nothing(txn);
+        assert_eq!(
+            scene.installed(),
+            before,
+            "{stop:?}: nothing installed was changed"
+        );
+        if let Stop::Space { short_by } = stop {
+            let paint = crate::update_card::paint(job.state()).unwrap();
+            assert_eq!(
+                paint.heading,
+                Some(crate::i18n::update_failed_space(
+                    &short_by.div_ceil(1_000_000).to_string()
+                )),
+                "the card names the shortfall"
+            );
+        }
+    }
+}
+
+/// What the scene's archive declares its members add up to.
+fn declared(archive: &[u8]) -> u64 {
+    let root = std::env::temp_dir().join(format!(
+        "bt-u20-declared-{}-{}",
+        std::process::id(),
+        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
+    ));
+    let _scratch = Scratch(root.clone());
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("release.zip");
+    std::fs::write(&path, archive).unwrap();
+    update_archive::declared_bytes(&path, TO).unwrap()
+}
+
+/// RED (U-20) — **the applier's copy is the running build, checked, named by
+/// the journal, and never one of the files the flip moves**; a copy that is
+/// not byte for byte the running image stops the Prepare.
+///
+/// C5 as F-8 replaced it: the applier and recovery run from
+/// `H\<txn>\rescue\folio.exe`, a copy of the running build that no step moves
+/// and that is deleted only with the transaction — so the Run entrance and the
+/// journal's `rescue` always name a program that is there, whatever the flip
+/// has moved. The header's `rescue` names it, and `Home::of_rescue` finds the
+/// home and the installed program from it (F-2); the flip's moves are between
+/// the install folder, `backup\` and `set\`, never `rescue\`.
+///
+/// MUTATION: make `rescue_is_the_running_build` answer `Ok(())` — the altered
+/// copy is `Verified`.
+#[test]
+fn the_applier_copy_is_verified_and_never_moved() {
+    let Some(scene) = Scene::new("applier") else {
+        return refused_off_windows();
+    };
+    let job = press(
+        &scene.driver(TestTools::real()),
+        Arc::new(Release::of(scene.archive.clone())),
+        1,
+    );
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+    let home = scene.home();
+    let txn = TxnId::new([1; 16]);
+    let rescue = home.rescue_copy(txn, OsStr::new(EXECUTABLE)).unwrap();
+    assert_eq!(
+        std::fs::read(&rescue).unwrap(),
+        std::fs::read(&scene.exe).unwrap(),
+        "the rescue copy is the running image"
+    );
+    let journal = journal_on_disk(&home);
+    let header = Header::parse(&std::fs::read(home.journal()).unwrap()).unwrap();
+    assert_eq!(
+        header.rescue,
+        rescue.to_str().unwrap(),
+        "the header names it"
+    );
+    assert_eq!(header.outcome, HeaderOutcome::None);
+    assert_eq!(
+        journal.body.phase,
+        Phase::Prepared {
+            deferred_launches: 0
+        }
+    );
+    assert_eq!(
+        Home::of_rescue(HostPlatform::Windows, &rescue),
+        Some((home.clone(), scene.exe.clone())),
+        "and the rescue build finds the home and the install from its own path"
+    );
+    let inventories = inventories(&journal);
+    let rescue_folder = rescue.parent().unwrap();
+    for step in inventories.forward_moves() {
+        for place in [step.from, step.to] {
+            let folder = home
+                .members_folder(txn, place)
+                .unwrap_or_else(|| scene.install.clone());
+            assert_ne!(folder, rescue_folder, "{step:?} moves the rescue copy");
+        }
+    }
+    assert!(
+        inventories
+            .old_present
+            .iter()
+            .any(|member| member.name == EXECUTABLE),
+        "the running executable is in the old inventory"
+    );
+    assert_eq!(
+        inventories.new.len(),
+        1 + SIDECARS.len() + TEXT_MEMBERS.len(),
+        "the new set is the release's"
+    );
+    drop(job);
+    let _ = on_a_worker({
+        let home = home.clone();
+        move |worker| {
+            if let AtLaunch::Counted(staged) = at_launch(worker, &home).unwrap() {
+                let _ = crate::update_prepare::discard(worker, *staged, &Event::Discarded);
+            }
+        }
+    });
+    scene.left_nothing(1);
+
+    let job = press(
+        &scene.driver(TestTools::copying(Copying::RescueAltered)),
+        Arc::new(Release::of(scene.archive.clone())),
+        2,
+    );
+    failed_with(&job, 2, Stop::Clone);
+    scene.left_nothing(2);
+}

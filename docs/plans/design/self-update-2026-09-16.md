@@ -1954,3 +1954,49 @@ The macOS ordinary start still removes no LaunchAgent at a retirement
 (`update_startup::Machine::retire_entrance` answers only Windows); no macOS
 transaction reaches `Armed` before U-28, which should wire `launch_agent::disarm`
 there.
+
+**The Windows road** (`update_prepare_windows`, U-20, on the same worker).
+The road checked before anything is written: channel `Ours` (on Windows the
+channel already says the folder is this account's and writable), the home
+`<install>\.folio-update\` beside the running executable, and the running build
+— its signature and identity (an unsigned build is not an updater, owner
+ruling 1), its image's digest, and the names it shipped, read out of its own
+release manifest (F-4, F-8). Then the lock and the journal at `Allocated` with
+the old shipped list, **before** `H\<txn>\` and its `download\`, `expand\`,
+`set\` and `rescue\` exist (F-17, as on macOS). Everything is inside the
+install folder (R-6, C6): the two files by the offer's tag into `download\`,
+the archive hashed against its line in `SHA256SUMS.txt`. The reservation
+(§C.2 step 3) is the archive's declared expansion twice (`expand\` and `set\`)
+plus the running image (`rescue\`); a shortfall is refused with the megabytes
+it lacks. The backup costs nothing: the flip moves the old files on the same
+volume. The archive is expanded by U-14's reader into `expand\`, and the new
+`folio.exe` is held to the running build's subject and identity OID at the
+offer's version and this machine, `folio.msix` to its own signer and version
+when the release carries one, and both sidecars' signatures (U-15 decision 6)
+— so an archive and a checksum document replaced together, consistently, stop
+here. Every member is copied into `set\` durably (`install_txn::durable_copy`)
+and `set\` is checked again where it lies — digests and identity. C5's second
+copy of the new executable is F-8's instead: the running `folio.exe` is copied
+to `rescue\folio.exe`, held to the running image's digest and signer; the
+applier and recovery run from it and no step moves it. `Prepared` carries the
+inventories O measured under the lock (old shipped, present, new). Every
+refusal records `Abandoned`, removes `H\<txn>` and then the journal, and lets
+the lock go: *Nothing changed*.
+
+**What the two drivers share** is `update_prepare`: the worker, the progress
+reports, the checksum, the abandonment and its clearing, and the job owner's
+pass at a later launch (`at_launch`, W1/M1 and W2/M2, which reads the phase
+alone). Revalidation before a resume is each platform's; the Windows one holds
+the staged set to its recorded digests and identity, the running image and the
+rescue copy to the journal's old `folio.exe`, and the channel and home.
+
+**Decided here, for U-23.** (1) Revalidation has no product caller: the
+Restart that resumes a staged set, in this launch or a later one, calls
+`update_prepare_windows::revalidate` with the offer's version (the journal does
+not record the tag). (2) A name the old build shipped that is held by a folder
+or a link is left out of `old_present`; the flip moves files and must refuse to
+move into such a name. (3) A collision — a present file at a new name the old
+build did not ship — is recorded like any old file and carried to `backup\`, as
+`Inventories` says; §C.4's "fails before any move" is not applied at Prepare.
+(4) `folio.msix` is verified when the release carries one and not required
+(C4 names `folio.exe` and the two sidecars).

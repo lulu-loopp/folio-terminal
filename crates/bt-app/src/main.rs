@@ -179,8 +179,13 @@ mod update_job;
 mod update_eligibility;
 // The update's hand-over to its applier, at the quit's way out (0.4.6 ticket U-21).
 mod update_handoff;
+// What the two Prepares share: the worker, the checksum, the abandonment and
+// the job owner's pass at a later launch (0.4.6 tickets U-27, U-20).
+mod update_prepare;
 // The update job's macOS driver: Prepare, from the press to `Prepared` (0.4.6 ticket U-27).
 mod update_prepare_macos;
+// The update job's Windows driver: Prepare, from the press to `Prepared` (0.4.6 ticket U-20).
+mod update_prepare_windows;
 mod update_recover;
 mod update_startup;
 mod update_trial;

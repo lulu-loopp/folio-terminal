@@ -73,15 +73,9 @@
 //! durability belongs to Prepare's journal write (U-11's door), which follows
 //! it.
 //!
-//! **Nothing here is called from the product yet**: U-20's Windows Prepare is
-//! its caller.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the reader lands before its caller: U-20's Windows Prepare calls it ((b).5)"
-    )
-)]
+//! **Its caller is the Windows Prepare** (`update_prepare_windows`, U-20):
+//! [`declared_bytes`] for the space it reserves, then [`expand`] into the
+//! transaction's own folder.
 
 use std::fmt;
 use std::fs::File;
@@ -557,6 +551,7 @@ impl Deadline<'static> {
 
 impl<'a> Deadline<'a> {
     /// `at`, on the clock `now` — a test's.
+    #[cfg(test)]
     pub(crate) fn on(at: Instant, now: &'a dyn Fn() -> Instant) -> Self {
         Self { at, now }
     }
@@ -598,6 +593,25 @@ pub(crate) fn expand(
     expand_from(file, expected, staging, manifest, deadline, &mut || {
         Box::new(Miniz::new())
     })
+}
+
+/// **What the release's members add up to, expanded, as the archive's own
+/// directory declares them** — steps 1 to 3 of the module (the records, the
+/// names and the bounds), and nothing inflated. The Windows Prepare reserves
+/// space for this before it expands anything (U-20, §C.2 step 3); what
+/// [`expand`] then writes is held to these same declared sizes, a byte at a
+/// time.
+///
+/// # Errors
+/// The [`Refusal`] steps 1 to 3 give.
+pub(crate) fn declared_bytes(archive: &Path, version: &str) -> Result<u64, Refusal> {
+    let mut file = file_reads::open(Lane::Update, archive)
+        .map_err(|error| refused(Reason::Unreadable(error.to_string())))?;
+    let members = directory(&mut file, &release_manifest::archive_root(version))?;
+    Ok(members
+        .iter()
+        .map(|member| u64::from(member.central.size))
+        .sum())
 }
 
 /// One entry of the archive that is a member, with where its data is.
@@ -1134,4 +1148,4 @@ impl Sink<'_> {
 
 #[cfg(test)]
 #[path = "update_archive_tests.rs"]
-mod tests;
+pub(crate) mod tests;

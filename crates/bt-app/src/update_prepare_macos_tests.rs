@@ -21,8 +21,10 @@ use std::sync::Mutex;
 use bt_persist::UpdateCheckV1;
 use bt_platform::HostPlatform;
 
-use crate::update_job::{Failure, Gathered, Job, Offer, Presenters, Request, State, Verb};
-use crate::update_txn::{HeaderOutcome, Phase};
+use crate::update_job::{
+    Bytes, Failure, Fetching, Gathered, Job, Offer, Presenters, Request, State, Verb,
+};
+use crate::update_txn::{Actor, Effect, HeaderOutcome, Phase, PhaseKind, may};
 
 /// Real images, bundles and mounts, shared with `update_startup`'s tests.
 pub(crate) mod fixture {

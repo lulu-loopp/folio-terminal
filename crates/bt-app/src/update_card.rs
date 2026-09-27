@@ -218,7 +218,7 @@ pub(crate) fn paint(state: &State) -> Option<Paint> {
             heading: Some(Text::UpdateCardReady.text().to_owned()),
             ..bare(vec![CardVerb::Restart, CardVerb::Later])
         }),
-        State::Failed(_, failure) => Some(failed(reason(failure), &outcome(failure))),
+        State::Failed(_, failure) => Some(failed(&reason(failure), &outcome(failure))),
     }
 }
 
@@ -246,9 +246,9 @@ pub(crate) fn failed(reason: &str, outcome: &Outcome) -> Paint {
 }
 
 /// The reason a failure gives: one line per driver's reason (U-27 names the
-/// macOS Prepare's).
-fn reason(failure: &Failure) -> &'static str {
-    match failure {
+/// macOS Prepare's, U-20 the Windows Prepare's shortfall).
+fn reason(failure: &Failure) -> String {
+    let text = match failure {
         Failure::Unsupported | Failure::Stopped(Stop::NotWritable | Stop::NotOurs) => {
             Text::UpdateFailedUnsupported
         }
@@ -260,8 +260,18 @@ fn reason(failure: &Failure) -> &'static str {
         Failure::Stopped(Stop::Identity) => Text::UpdateFailedIdentity,
         Failure::Stopped(Stop::Copy) => Text::UpdateFailedCopy,
         Failure::Stopped(Stop::Clone) => Text::UpdateFailedClone,
-    }
-    .text()
+        Failure::Stopped(Stop::Space { short_by }) => {
+            return i18n::update_failed_space(&needed_megabytes(*short_by));
+        }
+    };
+    text.text().to_owned()
+}
+
+/// **A shortfall in whole megabytes, rounded up** — the decimal unit the
+/// progress line counts in ([`MEGABYTE`]); a shortfall of a single byte still
+/// reads `1`, because it is still a shortfall.
+fn needed_megabytes(bytes: u64) -> String {
+    bytes.div_ceil(MEGABYTE).max(1).to_string()
 }
 
 /// What each failure the job knows today did: every one stops before

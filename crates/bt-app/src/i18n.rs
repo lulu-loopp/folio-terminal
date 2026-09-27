@@ -2924,6 +2924,9 @@ pub enum Text {
     UpdateFailedCopy,
     /// The rescue copy of the running build could not be made (`update_job::Stop::Clone`).
     UpdateFailedClone,
+    /// The installation's disk is short of space for the update (`update_job::Stop::Space`);
+    /// `{size}` is the shortfall in megabytes, rounded up.
+    UpdateFailedSpace,
     /// The General row's picker foot while a job waits at `Verified`: the card again.
     UpdateRowRestart,
     /// The General row's picker foot on a copy a package manager updates: the manager's command, to the clipboard.
@@ -5554,6 +5557,11 @@ impl Text {
                 "The current version could not be kept.",
                 "The current version could not be kept.",
             ),
+            Self::UpdateFailedSpace => pick(
+                lang,
+                "{size} MB more disk space needed.",
+                "{size} MB more disk space needed.",
+            ),
             Self::UpdateRowRestart => pick(lang, "Restart to update", "Restart to update"),
             Self::UpdateRowCopy => pick(lang, "Copy", "Copy"),
             Self::UpdateRowReady => pick(
@@ -5581,7 +5589,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 799] = [
+    pub const ALL: [Self; 800] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -6362,6 +6370,7 @@ impl Text {
         Self::UpdateFailedIdentity,
         Self::UpdateFailedCopy,
         Self::UpdateFailedClone,
+        Self::UpdateFailedSpace,
         Self::UpdateRowRestart,
         Self::UpdateRowCopy,
         Self::UpdateRowReady,
@@ -6532,7 +6541,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 66] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 68] = [
         // Ticket 37's four, in both columns: written in English, Chinese owed by opus46.
         (Self::ShortcutTextLarger, HostPlatform::Windows),
         (Self::ShortcutTextLarger, HostPlatform::MacOs),
@@ -6587,6 +6596,8 @@ impl Text {
         (Self::UpdateFailedCopy, HostPlatform::MacOs),
         (Self::UpdateFailedClone, HostPlatform::Windows),
         (Self::UpdateFailedClone, HostPlatform::MacOs),
+        (Self::UpdateFailedSpace, HostPlatform::Windows),
+        (Self::UpdateFailedSpace, HostPlatform::MacOs),
         (Self::UpdateRowRestart, HostPlatform::Windows),
         (Self::UpdateRowRestart, HostPlatform::MacOs),
         (Self::UpdateRowCopy, HostPlatform::Windows),
@@ -6849,6 +6860,15 @@ pub fn update_row_managed_in(lang: Lang, version: &str, command: &str) -> String
         .in_lang(lang)
         .replace("{version}", version)
         .replace("{command}", command)
+}
+
+/// **The failed card's reason when the installation's disk is short of space**
+/// — `120 MB more disk space needed.` (0.4.6 U-20, §C.2 step 3: "refuse with a
+/// sentence naming the shortfall"), filled from [`Text::UpdateFailedSpace`] so
+/// the missing Chinese stays on the pending list.
+#[must_use]
+pub fn update_failed_space(megabytes: &str) -> String {
+    Text::UpdateFailedSpace.text().replace("{size}", megabytes)
 }
 
 /// **The line beside the update card's determinate bar** — `12 / 41 MB`
