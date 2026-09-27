@@ -8,6 +8,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- On macOS, the updater can now mount a downloaded disk image inside its own
+  folder beside the app and unmount it again on every path, even when a step
+  fails; a mount that a stopped update left behind can be found there and
+  removed later. Nothing uses this yet.
 - The macOS CI job now lints every crate with the same warnings-as-errors line
   as Windows, shows that line can fail, and runs the renderer's and the
   corpus's tests on a Mac.

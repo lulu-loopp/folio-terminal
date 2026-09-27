@@ -3449,7 +3449,9 @@ pub mod launch_agent;
 /// **The rescue clone of a macOS bundle** — `clonefile(2)`, or `ditto` where
 /// the file system cannot clone, verified with `codesign` against the old
 /// bundle's designated requirement and cdhash (0.4.6 ticket U-26; revision
-/// (b), F-3, F-8, E-11). Refused by name off macOS.
+/// (b), F-3, F-8, E-11) — and the update image's mount under `H/<txn>/mnt`,
+/// attached and detached through `hdiutil`, bounded, and found from the mount
+/// table without a record (U-17). Refused by name off macOS.
 pub mod macos_update;
 
 mod web_environment;
