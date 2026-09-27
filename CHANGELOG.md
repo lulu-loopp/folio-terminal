@@ -8,6 +8,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- The split inventory's census no longer tells a test that asks for a method by
+  name to follow that method to a new file: only tests that read a file's text
+  are listed as needing an edit when code moves.
 - Which part of the code changes which piece of window and tab state is now
   worked out from the source and checked into the repository; a change that
   adds a new writer shows up as a changed line there.

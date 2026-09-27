@@ -56,11 +56,11 @@ they answer "what does this machine do" — not by debt.
 | version | rows | open | repaid |
 |---|---:|---:|---:|
 | 0.4.5 | 10 | 2 | 8 |
-| 0.4.6 | 49 | 46 | 3 |
+| 0.4.6 | 49 | 45 | 4 |
 | 0.4.7 | 15 | 15 | 0 |
 | deferred (reason on the row) | 3 | 3 | 0 |
 | already repaid | 1 | 0 | 1 |
-| **total** | **78** | **66** | **12** |
+| **total** | **78** | **65** | **13** |
 
 (2026-09-25, A5: D-33 moved from 0.4.5 to 0.4.6 — the owner deferred the
 presentation lane, its second client, and revision (b) R8 of
@@ -212,7 +212,7 @@ ledger's.
 | D-15 | `bt-term → bt-math` is real coupling | C-4 · K-11 | recorded by D-27 | 0.4.7 — the first slice, ahead of the 0.5 composition layer | open (recorded debt) |
 | D-16 | the door pattern: the enumeration lane and the thumbnail thread's band | K-13 | A1c (the thread door's bypass) | 0.4.7 | open — rule stated; the thread door's bypass (`folio-web-thumb` and five unnamed spawns) repaid by A1c in 0.4.6; the enumeration lane and the observation threads' band (`folio-web-thumb` among them, RULES 53's 0.4.7 ticket) remain |
 | D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | 0.4.7 — the first slice, with D-1's first slice | open |
-| D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | census-2 (the census note's revision (b)) | 0.4.6 — D-29…D-32 need a true census | open |
+| D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | census-2 (the census note's revision (b)) | 0.4.6 — D-29…D-32 need a true census | repaid (census-2, 0.4.6) — each subject is item-bound or file-bound by how the test reads it (`ITEM_QUERIES` and the helpers derived from it); only a file-bound subject read out of `main.rs` is a reader 2a must retarget; `--self-check` holds the fixture |
 | D-19 | MIGRATION-DEBT class P0 — the documentation generators (3 rows) | `docs/plans/MIGRATION-DEBT.tsv`; split prep §6 | P0 | 0.4.6 | open |
 | D-20 | MIGRATION-DEBT class P10 — the portable-core walk (1 row) | same | P10 | 0.4.6 | open |
 | D-21 | MIGRATION-DEBT class P12 — `bt-platform`'s walkers and the `stand_in` guard (5 rows) | same | P12 | 0.4.6 | open |
@@ -989,7 +989,9 @@ content before their plate*, §4), beside D-65. **All six are fixed by ticket
 
 `scripts/dev/bt-app-split-freshness.py`'s census extracts a reader's subjects lexically, so a migrated body pin such as `method_body("Runtime", "apply_psreadline")` is counted as if the test still read `apply_psreadline` out of a file, and the row's impact reads *subject moves: retarget atomically* although the reading follows the item. This is §2.6's "a reader's own needle is not an occurrence" one level up, in subject extraction rather than search exclusion, and it will misclassify every migrated pin that names a `Runtime` method. The generator also bound a subject by bare name until 2026-09-22 (`add_to_profile`, `graph_filter_branches` — each declared twice); it now refuses a name whose declarations disagree about the move. Owed: subject extraction that tells a `bt-source` query argument from a file reading's needle, or a census that asks `bt-source` for the reader's subjects instead of scanning text.
 
-**Ledger.** source: split prep, 2026-09-22 · ticket: none yet · version: 0.4.6 — D-29…D-32 need a true census · status: open.
+**Repaid by census-2 (0.4.6).** The census tells two kinds of subject apart by how the test reads. A literal in the item-naming position of a `bt-source` query — the constructors listed in the script's `ITEM_QUERIES` (`ItemQuery::{function, method, type_item, field, variant}`, `Scope::Impls`), or a test helper or closure the script derives from them (`method_body(owner, name)`, `method_body(name)`, `let body = |name| method_body("Runtime", name)`, a `for` over a literal array fed to one) — is **item-bound**: its witnesses are resolved by the query's own kind and owner type, and when 2a moves it the row says *subject moves: follows the item*, not *retarget*. Every other literal stays **file-bound** with today's reading; a literal spelled both ways is both. A test whose only source reading is an item query is now a census row (it was invisible before, so a migrated pin dropped out of the inventory the moment it stopped naming a file). Ten of the eleven hand-written overrides were removed: each audited a `main.rs` text reading that no tree the script runs on still makes. Evidence: the script's `--self-check` fixture, and the relocation `7edfd12a` (census-2's report).
+
+**Ledger.** source: split prep, 2026-09-22 · ticket: census-2 · version: 0.4.6 — D-29…D-32 need a true census · status: repaid (census-2).
 
 ---
 

@@ -644,3 +644,27 @@ What the first run says, at `3e657f9e`: 154 fields have proven writers in more t
 **For census-7.** A fact is multi-writer when it has proven writes in more than one module; lends, other mutable access and hub membership are their own columns and do not count. census-7 drafts destinations from the write column **and reads the access column too**: `WindowRuntime.tabs`, `TabState.sessions`, `App.gpu` and `WindowRuntime.attention_next_place` are reached mutably from many modules while proving few or no writes. The thirteen annotations census-1 wrote for facts §2 did not list are marked "proposed by census-1".
 
 **Added at the census-1 merge (2026-09-26).** The receiver rule gains a fixed list for one dependency type, keyed by type as the std list is: `winit::keyboard::ModifiersState`'s readers (`shift_key`, `control_key`, `alt_key`, `super_key`, `state`, `bits`, …) resolve as reads; a name not on the list stays unknown. This took 20 of the 101 unknown sites out of the list at the merge, and U-19's two new multi-writer facts (`App.update_job`, `WindowRuntime.update_card`) received proposed annotation rows.
+
+## Revision 2026-09-27 (d): two kinds of subject (census-2)
+
+Ticket census-2 repaid D-18 in `scripts/dev/bt-app-split-freshness.py`'s `census`. **A reader's subject is now one of two kinds, told apart by how the test reads it**, and the pins table carries the kind per subject (`subject_bindings`), the queries the test makes (`item_queries`), and which moving subjects must be retargeted (`retarget`) and which follow the item (`follows`):
+
+- **Item-bound** — a literal in the item-naming position of a `bt-source` query. The query answers with the item wherever it is written, so a relocation needs nothing from the reader: the row's impact is *subject moves: follows the item*, and the subject is not among the readers 2a must retarget. Its witnesses are resolved by the query's kind and owner type, not by the bare name (`ItemQuery::method("Runtime", "apply_psreadline")` answers to the method, never to a free `apply_psreadline` elsewhere). A field or a variant is named with its type (`App::psreadline_installed`).
+- **File-bound** — every other literal: a needle matched against text, a signature string, an `include_str!` path. Today's reading, today's impact; *retarget atomically* only when the text is `main.rs`'s, the one file 2a moves out of.
+
+A literal spelled both ways is both. **The query-function table** (`ITEM_QUERIES`, in the script, read by hand from `crates/bt-source/src/query.rs` — the census reads no new source):
+
+| Constructor | Item | Name at | Owner at |
+| --- | --- | ---: | ---: |
+| `ItemQuery::function` | free function | 0 | — |
+| `ItemQuery::method` | method of a type's inherent `impl` | 1 | 0 |
+| `ItemQuery::type_item` | `struct` / `enum` / `union` | 0 | — |
+| `ItemQuery::field` | field | 1 | 0 |
+| `ItemQuery::variant` | variant | 1 | 0 |
+| `Scope::Impls` | every `impl` of one type | 0 | — |
+
+The readers that take a built query (`Index::body_of`, `declaration_of`, `one`, `find`, `owners_of`, `Scope::Item`) name no item themselves. Deliberately absent: `Scope::Module`, `ModuleSpec::{exact, tree}` and `ItemQuery::in_module`, which name a module — a relocation between modules changes what those cover, a coverage question and not a subject one — and the `Pattern` constructors, which are needles. A test's own helpers are derived, not listed: a function or `let` closure that passes one of its parameters into a named position is a helper with that position (to a fixed point, so a helper over a helper inherits it), and a `for` over a literal array passes each literal.
+
+**Also changed.** A test whose only source reading is an item query is a census row (255 rows at the census-2 base became 615; no row left). The overrides are keyed by the test's module path, and a key naming no test is refused; ten of the eleven were removed as restatements of what the item queries now say (each audited a `main.rs` text reading at `1f1d2daa` that no later tree makes), and the one kept records a selector reading. The dated 2026-09-21 tables are not regenerated: `1f1d2daa` is refused by the script since `e5c7d090`, before and after this change.
+
+**For census-7.** A file-bound needle matched inside an item-bound text (`method_body(..).contains("self.x(")`) or searched through `Search` over the universe is still recorded as file-bound; it makes no *retarget* row, because only a `main.rs` reading does, but its binding is lexical. Reading the receiver of each needle is the next step if census-7 needs needle subjects bound; census-2 did not need it to separate its two kinds.

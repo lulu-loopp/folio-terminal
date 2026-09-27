@@ -242,6 +242,11 @@ elsewhere is not. `bt-source` carries a real-tree test for each case —
 self-exclusion from a `#[path]`-reached file, and non-resolution from an
 integration-test target in another package.
 
+The same rule one level up, in the freshness census's subject extraction: a
+literal that names an item to a `bt-source` query is not a needle either, and
+since census-2 the census counts it as an item-bound subject that follows the
+item (the ownership-census note's revision (d); D-18).
+
 ### 2.7 Macros: an explicit lexical traversal, loud about what it cannot do
 
 The parser's visitor does not descend into macro token trees: the token-stream
