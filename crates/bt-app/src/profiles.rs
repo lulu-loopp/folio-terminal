@@ -16879,8 +16879,8 @@ mod tests {
     /// `"login": false`; a row left on the seed writes no key at all; a profile of
     /// the reader's own writes only a `true`.
     ///
-    /// MUTATION: in `compose_on`, read an absent `login` as `false` — the macOS
-    /// rows come back non-login and the first assertion goes red.
+    /// MUTATION: in `compose_on`, ignore the file's `login` — the reader's `false`
+    /// comes back as the seed's `true` and the round-trip assertion goes red.
     #[test]
     fn an_old_file_takes_the_shipped_login_and_only_a_departure_is_written() {
         let seed = shipped_for(SeedPlatform::MacOs, &bare_macos());
