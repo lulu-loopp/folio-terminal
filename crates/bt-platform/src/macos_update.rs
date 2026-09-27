@@ -43,6 +43,13 @@
 //! mount table (`getfsstat`) with no record at all, and [`detach_all_under`]
 //! is M1's step before `H/<txn>` is deleted. The same door, absolute path and
 //! bounded wait as the clone's children; worker only (`&WorkerCtx`).
+//!
+//! **The Prepare's reads and copy** (0.4.6 ticket U-27; C7 steps 1 and 3):
+//! [`item_replacement_directory`] is where the image is downloaded,
+//! [`copy_bundle`] is the `ditto` of the mounted bundle into `stage/`, and
+//! [`code_identity`], [`short_version`] (`/usr/bin/plutil`) and
+//! [`architectures`] are what the new bundle is compared with the offer and
+//! the journal by.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -120,6 +127,10 @@ pub enum Refusal {
         cause: Box<Refusal>,
         sweep: Box<Refusal>,
     },
+    /// The file is not a Mach-O file, or could not be read as one.
+    NotMachO { path: PathBuf, detail: String },
+    /// The system gave no item-replacement directory, and said why.
+    ItemReplacement(String),
 }
 
 impl fmt::Display for Refusal {
@@ -174,6 +185,14 @@ impl fmt::Display for Refusal {
             }
             Self::Undetached { cause, sweep } => {
                 write!(f, "{cause}; and what it may have mounted: {sweep}")
+            }
+            Self::NotMachO { path, detail } => write!(
+                f,
+                "macos_update: {} is not a Mach-O file: {detail}",
+                path.display()
+            ),
+            Self::ItemReplacement(detail) => {
+                write!(f, "macos_update: no item-replacement directory: {detail}")
             }
         }
     }
@@ -869,6 +888,254 @@ fn mounted() -> io::Result<Vec<PathBuf>> {
     ))
 }
 
+// ───────────────────────── the Prepare's reads (U-27) ─────────────────────────
+//
+// C7 step 3: the mounted bundle is verified, copied out with `ditto`, and the
+// copy verified again — the version and the architecture against the offer's,
+// the code against the running bundle's designated requirement
+// (`crate::macos_identity`). These are the reads and the copy that road needs
+// beside the identity check, each through the same bounded child door.
+
+/// The system's property-list tool, for the one key of a bundle's
+/// `Info.plist` the Prepare compares with the offer.
+pub const PLUTIL: &str = "/usr/bin/plutil";
+
+/// How long one `plutil` read may take: it reads one small file.
+pub const PLIST_WITHIN: Duration = Duration::from_secs(10);
+
+/// How many bytes of a Mach-O file are read for its architectures: the fat
+/// header and every one of its entries (twenty or thirty-two bytes each) fit
+/// many times over.
+pub const MACH_O_HEADER_BYTES: u64 = 4096;
+
+/// **A signed bundle's code identity**: its code-directory hash, lowercase
+/// hex, and its main executable as `codesign` names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeIdentity {
+    pub cdhash: String,
+    pub executable: PathBuf,
+}
+
+/// **The code identity of the signed bundle at `bundle`** — `codesign
+/// --display --verbose=3 -r-`, read as [`rescue_clone`] reads it.
+///
+/// # Errors
+/// [`Refusal::NotHere`] off macOS; [`Refusal::NoIdentity`] for a bundle that
+/// is not signed; the child's refusal otherwise.
+pub fn code_identity(
+    _worker: &crate::admission::WorkerCtx,
+    bundle: &Path,
+) -> Result<CodeIdentity, Refusal> {
+    if crate::host_platform() != HostPlatform::MacOs {
+        return Err(Refusal::NotHere);
+    }
+    let found = identity_of(bundle)?;
+    Ok(CodeIdentity {
+        cdhash: found.cdhash,
+        executable: found.executable,
+    })
+}
+
+/// **`CFBundleShortVersionString` of the bundle at `bundle`** — `plutil
+/// -extract CFBundleShortVersionString raw -o - <bundle>/Contents/Info.plist`,
+/// which reads the XML and the binary form alike, within [`PLIST_WITHIN`].
+///
+/// # Errors
+/// [`Refusal::NotHere`] off macOS; [`Refusal::Program`] when `plutil` refuses
+/// (no such file, no such key) or answers nothing.
+pub fn short_version(
+    _worker: &crate::admission::WorkerCtx,
+    bundle: &Path,
+) -> Result<String, Refusal> {
+    if crate::host_platform() != HostPlatform::MacOs {
+        return Err(Refusal::NotHere);
+    }
+    let plist = bundle.join("Contents").join("Info.plist");
+    let output = run(
+        PLUTIL,
+        &[
+            OsStr::new("-extract"),
+            OsStr::new("CFBundleShortVersionString"),
+            OsStr::new("raw"),
+            OsStr::new("-o"),
+            OsStr::new("-"),
+            plist.as_os_str(),
+        ],
+        PLIST_WITHIN,
+    )?;
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if output.status.success() && !version.is_empty() {
+        Ok(version)
+    } else {
+        Err(Refusal::Program {
+            program: PLUTIL,
+            detail: said(&output),
+        })
+    }
+}
+
+/// **Copy the bundle at `from` to `to` with `/usr/bin/ditto`**, within
+/// [`COPY_WITHIN`] — the copy C7 step 3 makes of the mounted bundle. `ditto`
+/// carries the bundle as it is: the code signature and its seal, a stapled
+/// ticket, extended attributes (the quarantine among them), resource forks and
+/// modes; nothing is added, stripped or changed. `to` must not exist; its
+/// parent must.
+///
+/// # Errors
+/// [`Refusal::NotHere`] off macOS; [`Refusal::Exists`] when something stands
+/// at `to`; the child's refusal otherwise.
+pub fn copy_bundle(
+    _worker: &crate::admission::WorkerCtx,
+    from: &Path,
+    to: &Path,
+) -> Result<(), Refusal> {
+    if crate::host_platform() != HostPlatform::MacOs {
+        return Err(Refusal::NotHere);
+    }
+    if std::fs::symlink_metadata(to).is_ok() {
+        return Err(Refusal::Exists(to.to_path_buf()));
+    }
+    let output = run(DITTO, &[from.as_os_str(), to.as_os_str()], COPY_WITHIN)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(Refusal::Program {
+            program: DITTO,
+            detail: said(&output),
+        })
+    }
+}
+
+/// **The architectures of the Mach-O file at `executable`**, read from its
+/// first [`MACH_O_HEADER_BYTES`] bytes on `file_reads`' `Lane::Update`
+/// ([`mach_o_architectures`]).
+///
+/// # Errors
+/// [`Refusal::NotMachO`] when the file cannot be read or is not a Mach-O file.
+pub fn architectures(executable: &Path) -> Result<Vec<String>, Refusal> {
+    use std::io::Read;
+    let not_mach_o = |detail: String| Refusal::NotMachO {
+        path: executable.to_path_buf(),
+        detail,
+    };
+    let mut header = Vec::new();
+    file_reads::open(Lane::Update, executable)
+        .map_err(|error| not_mach_o(error.to_string()))?
+        .take(MACH_O_HEADER_BYTES)
+        .read_to_end(&mut header)
+        .map_err(|error| not_mach_o(error.to_string()))?;
+    mach_o_architectures(&header).ok_or_else(|| not_mach_o("no Mach-O header".to_owned()))
+}
+
+/// `<mach/machine.h>`'s `CPU_TYPE_ARM64`.
+const CPU_TYPE_ARM64: u32 = 0x0100_000c;
+/// `<mach/machine.h>`'s `CPU_TYPE_X86_64`.
+const CPU_TYPE_X86_64: u32 = 0x0100_0007;
+/// `<mach/machine.h>`'s `CPU_SUBTYPE_ARM64E`, under the capability mask.
+const CPU_SUBTYPE_ARM64E: u32 = 2;
+/// The capability bits of a `cpusubtype`, which name no architecture.
+const CPU_SUBTYPE_MASK: u32 = 0xff00_0000;
+
+/// **The architectures a Mach-O header names**, as `lipo -archs` spells them
+/// (`arm64`, `arm64e`, `x86_64`, and `cputype <n>` for any other), or `None`
+/// for bytes that are not a Mach-O header.
+///
+/// A thin file begins with `MH_MAGIC_64` or `MH_MAGIC` in the file's own byte
+/// order (little-endian on both of Apple's architectures), followed by its
+/// `cputype` and `cpusubtype`; a universal file begins with `FAT_MAGIC` or
+/// `FAT_MAGIC_64`, big-endian, then the number of entries and one entry per
+/// architecture (`cputype`, `cpusubtype`, then offsets: twenty bytes each, or
+/// thirty-two in the 64-bit form).
+#[must_use]
+pub fn mach_o_architectures(header: &[u8]) -> Option<Vec<String>> {
+    let word = |at: usize, big: bool| -> Option<u32> {
+        let bytes: [u8; 4] = header.get(at..at + 4)?.try_into().ok()?;
+        Some(if big {
+            u32::from_be_bytes(bytes)
+        } else {
+            u32::from_le_bytes(bytes)
+        })
+    };
+    let name = |cputype: u32, subtype: u32| match (cputype, subtype & !CPU_SUBTYPE_MASK) {
+        (CPU_TYPE_ARM64, CPU_SUBTYPE_ARM64E) => "arm64e".to_owned(),
+        (CPU_TYPE_ARM64, _) => "arm64".to_owned(),
+        (CPU_TYPE_X86_64, _) => "x86_64".to_owned(),
+        (other, _) => format!("cputype {other}"),
+    };
+    match word(0, true)? {
+        0xcafe_babe | 0xcafe_babf => {
+            let entry = if word(0, true)? == 0xcafe_babe {
+                20
+            } else {
+                32
+            };
+            let count = usize::try_from(word(4, true)?).ok()?;
+            if count == 0 {
+                return None;
+            }
+            (0..count)
+                .map(|index| {
+                    let at = 8 + index * entry;
+                    Some(name(word(at, true)?, word(at + 4, true)?))
+                })
+                .collect()
+        }
+        0xcffa_edfe | 0xcefa_edfe => Some(vec![name(word(4, false)?, word(8, false)?)]),
+        _ => None,
+    }
+}
+
+/// **A fresh folder in the system's temporary space on the volume `near` is
+/// on** — `-[NSFileManager URLForDirectory:NSItemReplacementDirectory
+/// inDomain:NSUserDomainMask appropriateForURL:<near> create:YES error:]` (C7
+/// step 1, revision (b) F-3: "the item-replacement directory keeps only the
+/// downloaded image"). Each call makes a new folder; the caller removes it.
+///
+/// # Errors
+/// [`Refusal::NotHere`] off macOS; [`Refusal::ItemReplacement`] with the
+/// system's sentence otherwise.
+pub fn item_replacement_directory(near: &Path) -> Result<PathBuf, Refusal> {
+    if crate::host_platform() != HostPlatform::MacOs {
+        return Err(Refusal::NotHere);
+    }
+    item_replacement_near(near).map_err(Refusal::ItemReplacement)
+}
+
+#[cfg(target_os = "macos")]
+fn item_replacement_near(near: &Path) -> Result<PathBuf, String> {
+    use objc2_foundation::{NSFileManager, NSSearchPathDirectory, NSSearchPathDomainMask};
+    use std::os::unix::ffi::OsStrExt;
+    let url = crate::macos_files::file_url(near, true)?;
+    let manager = NSFileManager::defaultManager();
+    let folder = manager
+        .URLForDirectory_inDomain_appropriateForURL_create_error(
+            NSSearchPathDirectory::ItemReplacementDirectory,
+            NSSearchPathDomainMask::UserDomainMask,
+            Some(&url),
+            true,
+        )
+        .map_err(|error| {
+            format!(
+                "{} ({} {})",
+                error.localizedDescription(),
+                error.domain(),
+                error.code()
+            )
+        })?;
+    let representation = folder.fileSystemRepresentation();
+    // SAFETY: `fileSystemRepresentation` answers a NUL-terminated C string
+    // owned by `folder`, which lives until the end of this function; the bytes
+    // are copied out before it goes.
+    let bytes = unsafe { std::ffi::CStr::from_ptr(representation.as_ptr()) }.to_bytes();
+    Ok(PathBuf::from(OsStr::from_bytes(bytes)))
+}
+
+/// Off macOS [`item_replacement_directory`] refuses before it would be asked.
+#[cfg(not(target_os = "macos"))]
+fn item_replacement_near(_near: &Path) -> Result<PathBuf, String> {
+    Err("macos_update has no item-replacement directory on this platform".to_owned())
+}
+
 #[cfg(test)]
 #[path = "macos_update_mount_tests.rs"]
 mod mount_tests;
@@ -941,6 +1208,77 @@ mod tests {
         assert!(!cannot_clone_here(&io::Error::from(
             io::ErrorKind::AlreadyExists
         )));
+    }
+
+    /// RED (U-27) — **a Mach-O header names its architectures: a thin arm64
+    /// file one, a universal file each of its entries (arm64e told from
+    /// arm64), and anything else none.**
+    ///
+    /// The macOS Prepare compares the new bundle's main executable with the
+    /// offer's `arm64`; an `arm64e`-only or an Intel-only executable is not
+    /// that, and a file that is not Mach-O at all has no architecture.
+    ///
+    /// MUTATION: in `mach_o_architectures`, name every `CPU_TYPE_ARM64` entry
+    /// `arm64` (drop the `arm64e` arm).
+    #[test]
+    fn a_mach_o_header_names_its_architectures() {
+        let mut thin = vec![0xcf, 0xfa, 0xed, 0xfe];
+        thin.extend_from_slice(&CPU_TYPE_ARM64.to_le_bytes());
+        thin.extend_from_slice(&0u32.to_le_bytes());
+        assert_eq!(mach_o_architectures(&thin), Some(vec!["arm64".to_owned()]));
+
+        let mut fat = vec![0xca, 0xfe, 0xba, 0xbe];
+        fat.extend_from_slice(&2u32.to_be_bytes());
+        for (cputype, subtype) in [(CPU_TYPE_X86_64, 3u32), (CPU_TYPE_ARM64, 0x8000_0002)] {
+            fat.extend_from_slice(&cputype.to_be_bytes());
+            fat.extend_from_slice(&subtype.to_be_bytes());
+            fat.extend_from_slice(&[0; 12]);
+        }
+        assert_eq!(
+            mach_o_architectures(&fat),
+            Some(vec!["x86_64".to_owned(), "arm64e".to_owned()])
+        );
+        assert_eq!(mach_o_architectures(&fat[..30]), None, "a cut entry");
+        assert_eq!(mach_o_architectures(b"#!/bin/sh\nexit 0\n"), None);
+        assert_eq!(mach_o_architectures(&[]), None);
+    }
+
+    /// RED (U-27) — **off macOS the Prepare's reads and copy are refused by
+    /// name.**
+    ///
+    /// MUTATION: drop the platform check at the top of `short_version`.
+    #[test]
+    fn off_macos_the_prepares_reads_are_refused_by_name() {
+        if crate::host_platform() == HostPlatform::MacOs {
+            return;
+        }
+        let worker = crate::spawn_at_priority(
+            "bt-u27-test",
+            crate::ThreadPriority::BelowNormal,
+            |worker| {
+                let bundle = Path::new("Folio.app");
+                assert!(matches!(
+                    short_version(worker, bundle),
+                    Err(Refusal::NotHere)
+                ));
+                assert!(matches!(
+                    code_identity(worker, bundle),
+                    Err(Refusal::NotHere)
+                ));
+                assert!(matches!(
+                    copy_bundle(worker, bundle, Path::new("copy.app")),
+                    Err(Refusal::NotHere)
+                ));
+            },
+        )
+        .expect("the thread door starts a thread");
+        if let Err(panic) = worker.join() {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(matches!(
+            item_replacement_directory(Path::new("Folio.app")),
+            Err(Refusal::NotHere)
+        ));
     }
 
     /// RED (U-26) — **off macOS the rescue clone is refused by name.**

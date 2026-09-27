@@ -11,6 +11,14 @@ All notable changes to Folio are recorded here. The format follows
 - The split inventory's census no longer tells a test that asks for a method by
   name to follow that method to a new file: only tests that read a file's text
   are listed as needing an edit when code moves.
+- On macOS, the coming updater can now prepare an update end to end: it
+  downloads the new version's disk image and checksum, checks the app inside
+  against the running copy's signature, version and architecture, copies it
+  beside the app and checks the copy again, and keeps a copy of the running
+  app to fall back on. Any failure puts everything back and unmounts the
+  image, and a copy run from a read-only place is sent to the releases page.
+  A leftover mounted image no longer stops Folio's own clean-up. Nothing can
+  start an update yet.
 - Which part of the code changes which piece of window and tab state is now
   worked out from the source and checked into the repository; a change that
   adds a new writer shows up as a changed line there.

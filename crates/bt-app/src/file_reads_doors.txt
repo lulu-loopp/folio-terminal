@@ -115,3 +115,6 @@
 # and each member's data a bounded chunk at a time by `expand_member`.
 1 read_at: .read_exact
 1 expand_member: .read_exact
+# The macOS Prepare's checksum (U-27): the downloaded image, opened on Lane::Update
+# (`file_reads::open`) and hashed a bounded chunk at a time by `matches_its_sum`.
+1 update_prepare_macos.rs: matches_its_sum: .read

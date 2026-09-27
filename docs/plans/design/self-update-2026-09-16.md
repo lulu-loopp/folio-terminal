@@ -1912,3 +1912,45 @@ ticket removed while offline (an explicit rejection), and `spctl --status` and
 `--assess` while assessments are off (`sudo spctl --global-disable`, then
 *Anywhere* in System Settings, which macOS 15 and later require). The exact
 commands are in U-16's report.
+
+## Revision 2026-09-27 (c) — the macOS Prepare as built (U-27), and detach before delete
+
+**The coordinator's ruling on U-17's open decision 7.** Every road that deletes
+`H/<txn>` or the home first detaches whatever image the mount table lists under
+it: the Prepare's own abandonment, the job owner's sweep (M1) and its discard
+of a deferred transaction (M2), an ordinary start's retirement and discard
+(`StartAction::Retire` / `Discard` now carry `DetachMount` before
+`DeleteTxnDir`), and `--uninstall-cleanup`'s home row. A read-only volume left
+inside the folder no longer stops the deletion halfway. The start reads the
+mount table, which waits on nothing, and hands the detach and the deletions
+after it — with the lock — to a worker it does not wait for; the rights table
+grants `DetachMount` to O in `Allocated` and `Abandoned` (with `DeleteTxnDir`
+and `DeleteJournal`, since O now clears what it abandoned itself) and to an
+ordinary start wherever it deletes `H/<txn>`. The note's "R during M1" is the
+start: in `update_txn` a start is `Actor::Start`, and R (the lock holder)
+leaves `Allocated` to the job owner.
+
+**The driver's road** (`update_prepare_macos`, on the `bt-update-job` worker):
+the road checked before anything is written (the home by the bundle's own name,
+channel `Ours`, the bundle's folder writable and not on a read-only mount —
+translocated → `NotWritable`, the releases page); the home and its lock; the
+journal at `Allocated` **before** `H/<txn>` and its folders are made (F-17: the
+journal records the intent — the running bundle's identity and the offer's
+version, `Layout::BundleIntent` — before any resource exists); the two files by
+the offer's tag into a fresh item-replacement folder, the image hashed against
+the document's line for its own asset; the image attached under `H/<txn>/mnt`,
+its `Folio.app` checked, `ditto`'d into `stage/<Bundle>.app` and checked again
+there (identity against the running bundle's designated requirement and
+Developer ID, version, the main executable's `arm64` slice); the download
+removed; the rescue clone; `Prepared` with both identities
+(`Journal::prepare_with`). Each refusal is a named `Stop`; after `Allocated` it
+records `Abandoned` and clears the transaction (detach, `H/<txn>`, journal).
+The deferred rule and the revalidation before a resume are functions with tests
+and no product caller: U-28's card resumes a staged job at a later launch.
+
+**Decided here, for U-28.** The downloaded image does not outlive the Prepare:
+"hash" at revalidation is the staged bundle's cdhash against the journal's.
+The macOS ordinary start still removes no LaunchAgent at a retirement
+(`update_startup::Machine::retire_entrance` answers only Windows); no macOS
+transaction reaches `Armed` before U-28, which should wire `launch_agent::disarm`
+there.

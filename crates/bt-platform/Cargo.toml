@@ -822,6 +822,13 @@ objc2-foundation = { version = "0.3", default-features = false, features = [
     "NSError",
     "NSFileManager",
     "NSURL",
+    # U-27: `NSSearchPathDirectory::ItemReplacementDirectory` and
+    # `NSSearchPathDomainMask`, the two arguments of
+    # `-[NSFileManager URLForDirectory:inDomain:appropriateForURL:create:error:]`
+    # — the system's temporary folder on a bundle's own volume, where the macOS
+    # updater downloads its image. **Not a package**: it turns on
+    # `objc2-foundation`'s `bitflags` edge, which `Cargo.lock` already lists.
+    "NSPathUtilities",
     # `NSLocale.preferredLanguages` — the language the system is read in.
     "NSLocale",
     # The notification an accessibility-display change arrives as.

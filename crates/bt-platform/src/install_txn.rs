@@ -28,6 +28,9 @@
 //!   caller orders before another one reaches the device first (a retired
 //!   transaction's folder before its journal, U-12). Nothing there already is
 //!   an answer, not a failure.
+//! * **A durable directory create** ([`durable_create_dir`]): a folder that
+//!   must not exist yet is created, then the folder it is in is flushed — the
+//!   macOS installation home and a transaction's folders (U-27).
 //! * **The registry flush** (Windows only, [`flush_current_user_key`]):
 //!   `RegFlushKey` on a key under `HKEY_CURRENT_USER`, for the entrance value a
 //!   later ticket writes (U-22).
@@ -95,6 +98,8 @@ pub enum Stage {
     FlushKey,
     /// Removing a file or a directory tree (a durable remove's).
     Remove,
+    /// Creating a directory (a durable directory create's).
+    CreateDirectory,
 }
 
 impl Stage {
@@ -113,6 +118,7 @@ impl Stage {
             Self::OpenKey => "open-key",
             Self::FlushKey => "flush-key",
             Self::Remove => "remove",
+            Self::CreateDirectory => "create-directory",
         }
     }
 }
@@ -189,6 +195,8 @@ pub(crate) trait Surface {
     /// Remove `path` — a file, or a directory with everything in it. Nothing
     /// at `path` is `NotFound`.
     fn remove_entry(&mut self, path: &Path) -> io::Result<()>;
+    /// Create the directory `path`, which must not exist; its parent must.
+    fn create_directory(&mut self, path: &Path) -> io::Result<()>;
 }
 
 /// **Write `bytes` to `target` so that after a power cut `target` holds either
@@ -265,6 +273,24 @@ pub fn durable_remove(path: &Path) -> Result<(), Failure> {
     durable_remove_with(&mut arm::Os, path)
 }
 
+/// **Create the directory `path`, which must not exist yet, and flush the
+/// directory it is in** — the installation home and a transaction's folders
+/// (the macOS Prepare, U-27: `H/`, `H/<txn>/` and its `stage/`, `rescue/` and
+/// `mnt/`), each on the device before anything is put in it, so that after a
+/// power cut the journal never names a folder that is not there.
+///
+/// Something already at `path` is a refusal at [`Stage::CreateDirectory`]
+/// with the operating system's "already exists" error: a folder this door
+/// creates is one nobody else made.
+///
+/// # Errors
+/// A [`Failure`] at [`Stage::CreateDirectory`], [`Stage::OpenDirectory`] or
+/// [`Stage::FlushDirectory`]; on a platform with no arm, one at
+/// [`Stage::CreateDirectory`] whose error is `Unsupported` and names this door.
+pub fn durable_create_dir(path: &Path) -> Result<(), Failure> {
+    durable_create_dir_with(&mut arm::Os, path)
+}
+
 /// A temporary file's number within this process, so two writes to one
 /// target from two threads never share a temporary name.
 static TEMP_SERIAL: AtomicU64 = AtomicU64::new(0);
@@ -339,6 +365,16 @@ pub(crate) fn durable_remove_with<S: Surface>(surface: &mut S, path: &Path) -> R
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(Failure::at(Stage::Remove, path, error)),
     }
+    flush_directory(surface, directory_of(path))
+}
+
+pub(crate) fn durable_create_dir_with<S: Surface>(
+    surface: &mut S,
+    path: &Path,
+) -> Result<(), Failure> {
+    surface
+        .create_directory(path)
+        .map_err(|error| Failure::at(Stage::CreateDirectory, path, error))?;
     flush_directory(surface, directory_of(path))
 }
 
@@ -606,6 +642,10 @@ mod arm {
         fn remove_entry(&mut self, path: &Path) -> io::Result<()> {
             super::remove_entry(path)
         }
+
+        fn create_directory(&mut self, path: &Path) -> io::Result<()> {
+            std::fs::create_dir(path)
+        }
     }
 
     pub(super) fn open_lock_file(path: &Path, hold: Hold) -> io::Result<File> {
@@ -772,6 +812,10 @@ mod arm {
         fn remove_entry(&mut self, path: &Path) -> io::Result<()> {
             super::remove_entry(path)
         }
+
+        fn create_directory(&mut self, path: &Path) -> io::Result<()> {
+            std::fs::create_dir(path)
+        }
     }
 
     pub(super) fn open_lock_file(path: &Path, hold: Hold) -> io::Result<File> {
@@ -862,6 +906,10 @@ mod arm {
         fn remove_entry(&mut self, _path: &Path) -> io::Result<()> {
             Err(refused("durable remove"))
         }
+
+        fn create_directory(&mut self, _path: &Path) -> io::Result<()> {
+            Err(refused("durable directory create"))
+        }
     }
 
     pub(super) fn open_lock_file(_path: &Path, _hold: Hold) -> io::Result<File> {
@@ -901,6 +949,7 @@ pub(crate) mod recording {
         RemoveEntry(PathBuf),
         /// A read of a file's bytes back (the LaunchAgent's read-back, U-26).
         Read(PathBuf),
+        CreateDirectory(PathBuf),
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -915,6 +964,8 @@ pub(crate) mod recording {
         RemoveMissing,
         /// The entry cannot be removed (any other error).
         RemoveEntry,
+        /// The directory cannot be created.
+        CreateDirectory,
     }
 
     pub(crate) struct FakeHandle {
@@ -1007,6 +1058,11 @@ pub(crate) mod recording {
             }
             self.answer(Fail::RemoveEntry)
         }
+
+        fn create_directory(&mut self, path: &Path) -> io::Result<()> {
+            self.calls.push(Call::CreateDirectory(path.to_path_buf()));
+            self.answer(Fail::CreateDirectory)
+        }
     }
 }
 
@@ -1070,6 +1126,59 @@ mod tests {
                 Call::Close(home()),
             ],
         );
+    }
+
+    /// RED (U-27) — **a folder of the installation home is created, then the
+    /// folder it is in is flushed; a folder that cannot be created is not
+    /// flushed for.**
+    ///
+    /// The macOS Prepare creates `H/`, `H/<txn>/` and its three folders before
+    /// it journals `Allocated` naming them. A creation that is not on the device
+    /// when the journal is could leave a journal naming a folder a power cut
+    /// took away — harmless for a sweep, but a folder this door says it made
+    /// must be one the device holds. And the real arm refuses a folder that is
+    /// already there, so the Prepare never adopts one it did not make.
+    ///
+    /// MUTATION: in `durable_create_dir_with`, return right after
+    /// `create_directory` without `flush_directory`.
+    #[test]
+    fn a_home_folder_is_created_then_its_parent_flushed() {
+        let folder = home().join("txn");
+        let mut fake = Recorder::default();
+        durable_create_dir_with(&mut fake, &folder).unwrap();
+        assert_eq!(
+            fake.calls,
+            vec![
+                Call::CreateDirectory(folder.clone()),
+                Call::OpenDirectory(home()),
+                Call::Flush {
+                    path: home(),
+                    directory: true
+                },
+                Call::Close(home()),
+            ],
+        );
+        let mut refusing = Recorder::failing(Fail::CreateDirectory);
+        let failure = durable_create_dir_with(&mut refusing, &folder).unwrap_err();
+        assert_eq!(failure.stage, Stage::CreateDirectory);
+        assert_eq!(refusing.calls, vec![Call::CreateDirectory(folder)]);
+
+        if crate::host_platform() == crate::HostPlatform::OtherUnix {
+            return;
+        }
+        let root = std::env::temp_dir().join(format!(
+            "bt-install-txn-mkdir-{}-{}",
+            std::process::id(),
+            crate::attention_pipe::unguessable_bits()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let made = root.join("made");
+        durable_create_dir(&made).unwrap();
+        assert!(made.is_dir());
+        let again = durable_create_dir(&made).unwrap_err();
+        assert_eq!(again.stage, Stage::CreateDirectory);
+        assert_eq!(again.error.kind(), io::ErrorKind::AlreadyExists);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// RED (U-11) — **the directory flush opens the target's directory and

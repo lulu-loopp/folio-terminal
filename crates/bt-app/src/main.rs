@@ -179,6 +179,8 @@ mod update_job;
 mod update_eligibility;
 // The update's hand-over to its applier, at the quit's way out (0.4.6 ticket U-21).
 mod update_handoff;
+// The update job's macOS driver: Prepare, from the press to `Prepared` (0.4.6 ticket U-27).
+mod update_prepare_macos;
 mod update_recover;
 mod update_startup;
 mod update_trial;

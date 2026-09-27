@@ -11,9 +11,12 @@
 //!   on Windows (`GetNamedSecurityInfoW`), the owning uid on Unix (`stat`);
 //! * **the marker attribute** — on macOS the install marker is an extended
 //!   attribute on the bundle directory (`getxattr`), never a file inside the
-//!   sealed bundle.
+//!   sealed bundle;
+//! * **whether a folder may be written** ([`may_write_into`], U-27) — the
+//!   read-only mount flag and the process's write access, on Unix: the macOS
+//!   updater's test of the folder its bundle stands in.
 //!
-//! Both are read-only. Neither takes a lock, creates a file or follows a
+//! All are read-only. Neither takes a lock, creates a file or follows a
 //! decision: they answer, and the error they meet is returned, never folded into
 //! an answer — an unreadable owner is not "somebody else", and an unreadable
 //! attribute is not "no marker". The caller turns every error into `Unknown`.
@@ -101,6 +104,28 @@ pub fn attribute(path: &Path, name: &str) -> io::Result<Option<Vec<u8>>> {
     Ok(value)
 }
 
+/// **Whether this process may create entries in the folder at `path`** — the
+/// updater's "not writable" test of the folder a bundle stands in (0.4.6 U-27,
+/// C7: "a translocated bundle … sits on a read-only randomized mount: Not
+/// writable").
+///
+/// Two questions, both answered by the system without writing anything: is the
+/// file system the folder is on mounted read-only (`statvfs`'s `ST_RDONLY` — a
+/// translocated bundle's nullfs mount, a disk image attached read-only), and
+/// does the folder grant this process write access (`access(2)` with `W_OK`,
+/// which reads the permissions and the ACL for the real ids). `false` for
+/// either; `true` only when both say yes. A read-only mount or a refused access
+/// (`EROFS`, `EACCES`, `EPERM`) is an answer, `false`; any other error is
+/// returned — a folder that cannot be asked is not "writable", and the caller
+/// does not treat it as one.
+///
+/// # Errors
+/// The folder could not be asked (it is missing, or the call failed);
+/// `ErrorKind::Unsupported` off Unix.
+pub fn may_write_into(path: &Path) -> io::Result<bool> {
+    imp::may_write_into(path)
+}
+
 #[cfg(windows)]
 mod imp {
     use super::{Account, Principal};
@@ -118,6 +143,15 @@ mod imp {
         System::Threading::{GetCurrentProcess, OpenProcessToken},
     };
     use windows::core::PCWSTR;
+
+    /// The Windows updater asks its own question of its install folder (U-20);
+    /// this one is the macOS road's.
+    pub(super) fn may_write_into(_path: &Path) -> io::Result<bool> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "install_evidence asks whether a folder may be written only on Unix",
+        ))
+    }
 
     pub(super) fn current_account() -> io::Result<Account> {
         let mut token = HANDLE::default();
@@ -251,6 +285,33 @@ mod imp {
         std::fs::metadata(path).map(|metadata| uid(metadata.uid()))
     }
 
+    pub(super) fn may_write_into(path: &Path) -> io::Result<bool> {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let c_path = CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+        // SAFETY: an all-zero `statvfs` is a valid value for the call to
+        // overwrite.
+        let mut volume: libc::statvfs = unsafe { std::mem::zeroed() };
+        // SAFETY: the path is NUL-terminated and outlives the call; `volume`
+        // is a live local the call fills.
+        if unsafe { libc::statvfs(c_path.as_ptr(), &raw mut volume) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if volume.f_flag & libc::ST_RDONLY != 0 {
+            return Ok(false);
+        }
+        // SAFETY: as above; `access` reads the path and the process's ids.
+        if unsafe { libc::access(c_path.as_ptr(), libc::W_OK) } == 0 {
+            return Ok(true);
+        }
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(libc::EROFS | libc::EACCES | libc::EPERM) => Ok(false),
+            _ => Err(error),
+        }
+    }
+
     #[cfg(target_os = "macos")]
     pub(super) fn attribute(path: &Path, name: &str) -> io::Result<Option<Vec<u8>>> {
         use std::ffi::CString;
@@ -309,6 +370,9 @@ mod imp {
     pub(super) fn attribute(_path: &Path, _name: &str) -> io::Result<Option<Vec<u8>>> {
         Err(io::Error::from(io::ErrorKind::Unsupported))
     }
+    pub(super) fn may_write_into(_path: &Path) -> io::Result<bool> {
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
 }
 
 #[cfg(test)]
@@ -337,6 +401,34 @@ mod tests {
         let owner = owner_of(&dir).unwrap();
         assert!(current_account().unwrap().owns(&owner));
         assert!(!Account::named(["not this account".to_owned()]).owns(&owner));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// RED (U-27) — **a folder this process made may be written into; a folder
+    /// whose permissions refuse it may not; a missing folder is an error, never
+    /// an answer.**
+    ///
+    /// The read-only-mount half runs against a real read-only disk image in
+    /// `bt-app`'s `update_prepare_macos` tests
+    /// (`a_translocated_bundle_is_not_writable`).
+    ///
+    /// MUTATION: answer `Ok(true)` when `access` refuses in `may_write_into`.
+    #[cfg(unix)]
+    #[test]
+    fn install_evidence_a_folder_may_be_written_only_where_the_system_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = scratch("writable");
+        assert!(may_write_into(&dir).unwrap());
+        let closed = dir.join("closed");
+        std::fs::create_dir(&closed).unwrap();
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // SAFETY: `geteuid` has no preconditions. Root is granted write access
+        // whatever the mode says, so the refusal is only asserted for others.
+        if unsafe { libc::geteuid() } != 0 {
+            assert!(!may_write_into(&closed).unwrap());
+        }
+        std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(may_write_into(&dir.join("missing")).is_err());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

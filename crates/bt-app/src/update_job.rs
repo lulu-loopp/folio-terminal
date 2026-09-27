@@ -45,9 +45,13 @@
 //!
 //! # No driver yet, and offers off
 //!
-//! A press reaches a [`Driver`]. The only one is [`Unsupported`], which refuses
-//! before any network, staging, flush or wait: the job goes straight to
-//! [`State::Failed`]. The drivers are U-20 (Windows) and U-27 (macOS); the quit
+//! A press reaches a [`Driver`] ([`driver_for_this_copy`]). On macOS it is the
+//! Prepare (`update_prepare_macos`, U-27): the offer's two files downloaded
+//! through the download door ([`ReleaseDownload`]), the image attached and its
+//! bundle checked, copied and checked again, the rescue clone, the journal at
+//! `Prepared`, each refusal a named [`Stop`]. Elsewhere it is [`Unsupported`],
+//! which refuses before any network, staging, flush or wait: the job goes
+//! straight to [`State::Failed`]. Windows' driver is U-20; the quit
 //! barrier is U-21 ([`Job::restart`], and the two answers the quit delivers
 //! to [`Job::apply`] on the window thread). And no user sees any of this: [`Job::offers_enabled`] is a
 //! constant `false` until the enabling tickets (U-31, U-32) turn it on, so the
@@ -62,6 +66,7 @@
     )
 )]
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use bt_persist::UpdateCheckV1;
@@ -87,6 +92,12 @@ pub(crate) const RELEASE_HOST: &str = "github.com";
 /// Where a release's files are, by tag: `<this>/<tag>/<name>` (C11). **Never
 /// `/releases/latest/download/`**: "latest" can move under an open offer.
 pub(crate) const RELEASE_DOWNLOAD_PATH: &str = "/lulu-loopp/folio-terminal/releases/download";
+
+/// **The one architecture a macOS release is built for** (`docs/RELEASING.md`:
+/// `Folio-<version>-macos-arm64.dmg`): the name the image's asset carries, and
+/// the slice the new bundle's main executable must have (C7: "the architecture
+/// must match the offer").
+pub(crate) const MACOS_ARCHITECTURE: &str = "arm64";
 
 // ── the offer ───────────────────────────────────────────────────────────────
 
@@ -122,7 +133,7 @@ impl Offer {
                 "SHA256SUMS.txt".to_owned(),
             ),
             HostPlatform::MacOs => (
-                format!("Folio-{to_version}-macos-arm64.dmg"),
+                format!("Folio-{to_version}-macos-{MACOS_ARCHITECTURE}.dmg"),
                 "SHA256SUMS-macos.txt".to_owned(),
             ),
             HostPlatform::OtherUnix => return None,
@@ -152,6 +163,12 @@ impl Offer {
     #[must_use]
     pub(crate) fn to_version(&self) -> &str {
         &self.to_version
+    }
+
+    /// The archive or disk image, by its versioned name.
+    #[must_use]
+    pub(crate) fn asset(&self) -> &str {
+        &self.asset
     }
 
     /// **The two files a press fetches, and nothing else** (C11): the asset and
@@ -311,6 +328,11 @@ pub(crate) enum NotEligible {
     NotUpdaterBuild,
     /// The release grammar names no file for this tag on this platform.
     NoAsset { tag: String },
+    /// This copy's folder cannot be written — a translocated bundle run from
+    /// its read-only randomized mount, or a folder this account may not write
+    /// (C7): the releases page. The macOS Prepare asks it first, on its
+    /// worker, before it writes anything (U-27).
+    NotWritable,
 }
 
 /// Where a reader who is not offered an update is sent (§D's behaviour column).
@@ -333,9 +355,11 @@ impl NotEligible {
                 Route::Nothing
             }
             Self::Managed { command, .. } => Route::Command(command),
-            Self::NotOurs | Self::Unknown | Self::NotUpdaterBuild | Self::NoAsset { .. } => {
-                Route::ReleasesPage
-            }
+            Self::NotOurs
+            | Self::Unknown
+            | Self::NotUpdaterBuild
+            | Self::NoAsset { .. }
+            | Self::NotWritable => Route::ReleasesPage,
         }
     }
 
@@ -354,6 +378,7 @@ impl NotEligible {
             Self::Unknown => "how this copy was installed is unknown".to_owned(),
             Self::NotUpdaterBuild => "this build was made without the updater flag".to_owned(),
             Self::NoAsset { tag } => format!("no release file is named for {tag} here"),
+            Self::NotWritable => Stop::NotWritable.why().to_owned(),
         }
     }
 }
@@ -435,9 +460,66 @@ pub(crate) enum Failure {
     /// No driver exists for this build yet: nothing was fetched, staged or
     /// changed.
     Unsupported,
-    /// The driver stopped before the files were verified; nothing installed
-    /// was changed.
-    Stopped,
+    /// The driver stopped before the files were verified, for this reason;
+    /// nothing installed was changed.
+    Stopped(Stop),
+}
+
+/// **Why a driver stopped** (U-18 decision 11, grown by the macOS Prepare,
+/// U-27): each is a reason the failed card names, and each stops before
+/// anything installed moves — the transaction is abandoned, its image detached
+/// and its folder removed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stop {
+    /// This copy cannot be written where it stands — a translocated bundle on
+    /// its read-only mount, or a folder this account may not write
+    /// ([`NotEligible::NotWritable`]): the releases page. Nothing was written.
+    NotWritable,
+    /// How this copy was installed does not let Folio update it (the channel
+    /// is not [`Channel::Ours`]): nothing was written.
+    NotOurs,
+    /// Another transaction holds this installation: its lock is taken, or its
+    /// journal is still there. Nothing was written.
+    Busy,
+    /// The installation home, the transaction's folders or its journal could
+    /// not be written.
+    Journal,
+    /// A file of the offer did not arrive.
+    Download,
+    /// The image is not the one the checksum document names, or the document
+    /// names none.
+    Sums,
+    /// The image could not be attached.
+    Mount,
+    /// The bundle on the image, or its copy, is not this publisher's Folio of
+    /// the offered version for this machine's architecture.
+    Identity,
+    /// The bundle could not be copied off the image.
+    Copy,
+    /// The rescue copy of the running bundle could not be made.
+    Clone,
+    /// The reader cancelled; the job has already moved on.
+    Cancelled,
+}
+
+impl Stop {
+    /// The reason, in a few words, for a log (no path, no account).
+    #[must_use]
+    pub(crate) const fn why(self) -> &'static str {
+        match self {
+            Self::NotWritable => "this copy's folder cannot be written",
+            Self::NotOurs => "this copy is not updated by Folio",
+            Self::Busy => "another update holds this installation",
+            Self::Journal => "the update's folder or journal could not be written",
+            Self::Download => "a file did not download",
+            Self::Sums => "the image does not match its checksum",
+            Self::Mount => "the image could not be attached",
+            Self::Identity => "the new build is not the offered, signed Folio",
+            Self::Copy => "the new build could not be copied",
+            Self::Clone => "the running build could not be kept aside",
+            Self::Cancelled => "the update was cancelled",
+        }
+    }
 }
 
 /// **The job's state** (§B).
@@ -648,14 +730,86 @@ pub(crate) enum Effect {
 
 // ── the driver seam ─────────────────────────────────────────────────────────
 
-/// How a driver fetches a file. The real one is the download door
-/// (`bt_platform::https_download`), wired by the first driver (U-20).
-pub(crate) trait Transport {
-    /// Fetch one file.
+/// **How a driver fetches a file** — on the driver's own worker, so it is
+/// shared with that thread ([`SharedTransport`]). The real one is the download
+/// door ([`ReleaseDownload`], `bt_platform::http::https_download`, wired by the
+/// first driver that fetches, U-27); a test's is a stand-in that writes the
+/// file it is asked for.
+pub(crate) trait Transport: Send + Sync {
+    /// Fetch one file into the folder `into`, which exists; answer where it
+    /// is. Bytes are reported through `fetching` as they arrive, and the fetch
+    /// stops when `fetching` says the job was cancelled.
     ///
     /// # Errors
-    /// The door's refusal, as a sentence.
-    fn fetch(&self, request: &Request) -> Result<(), String>;
+    /// The door's refusal, as a sentence; nothing of the file is left.
+    fn fetch(
+        &self,
+        request: &Request,
+        into: &std::path::Path,
+        fetching: &Fetching,
+    ) -> Result<std::path::PathBuf, String>;
+}
+
+/// A transport, as the job hands it to a driver that takes it to its worker.
+pub(crate) type SharedTransport = Arc<dyn Transport>;
+
+/// **What a fetch reports to, and asks**: the bytes of the file so far, and
+/// whether the job the fetch is for was cancelled.
+pub(crate) struct Fetching {
+    pub(crate) report: Arc<dyn Fn(Bytes) + Send + Sync>,
+    pub(crate) cancelled: Arc<AtomicBool>,
+}
+
+/// **The download door, for a release file** (C11): one `GET` of
+/// `https://{host}{path}` through `bt_platform::http::https_download`, into
+/// `into` under the file's own name, under the door's own ceiling and
+/// deadlines, with the check's `User-Agent`. Its monitor's wake reports the
+/// bytes so far and passes a cancelled job's word on to the door, which stops
+/// within its cancel latency and removes what it wrote.
+pub(crate) struct ReleaseDownload;
+
+impl Transport for ReleaseDownload {
+    fn fetch(
+        &self,
+        request: &Request,
+        into: &std::path::Path,
+        fetching: &Fetching,
+    ) -> Result<std::path::PathBuf, String> {
+        use bt_platform::https_download::{
+            DOWNLOAD_BUDGET, DOWNLOAD_CEILING_LIMIT, DOWNLOAD_IDLE_TIMEOUT, DownloadMonitor,
+            HttpsDownload,
+        };
+        let report = Arc::clone(&fetching.report);
+        let cancelled = Arc::clone(&fetching.cancelled);
+        let monitor = Arc::new_cyclic(|me: &std::sync::Weak<DownloadMonitor>| {
+            let me = me.clone();
+            DownloadMonitor::new(move || {
+                if let Some(monitor) = me.upgrade() {
+                    if cancelled.load(Ordering::SeqCst) {
+                        monitor.cancel();
+                    }
+                    let seen = monitor.take();
+                    report(Bytes {
+                        received: seen.received,
+                        total: seen.expected,
+                    });
+                }
+            })
+        });
+        bt_platform::http::https_download(&HttpsDownload {
+            host: request.host,
+            path: &request.path,
+            user_agent: crate::update::USER_AGENT,
+            directory: into,
+            file_name: &request.file_name,
+            ceiling: DOWNLOAD_CEILING_LIMIT,
+            idle_timeout: DOWNLOAD_IDLE_TIMEOUT,
+            budget: DOWNLOAD_BUDGET,
+            monitor: &monitor,
+        })
+        .map(|downloaded| downloaded.path)
+        .map_err(|error| error.to_string())
+    }
 }
 
 /// Why a driver would not start.
@@ -663,6 +817,9 @@ pub(crate) trait Transport {
 pub(crate) enum Refused {
     /// This build has no driver.
     Unsupported,
+    /// The driver's worker could not be started (the system refused a
+    /// thread): nothing was fetched, staged or changed.
+    NoWorker,
 }
 
 /// **What a press hands the offer to** — Prepare: fetch, stage, verify
@@ -676,33 +833,53 @@ pub(crate) trait Driver {
     fn prepare(
         &self,
         offer: &Offer,
-        transport: &dyn Transport,
+        transport: &SharedTransport,
         post: &Poster,
     ) -> Result<(), Refused>;
 }
 
-/// **The only driver there is**: it refuses before any network, staging,
-/// flush or wait — it does not look at its arguments at all.
+/// **The driver of a build or a copy that has none**: it refuses before any
+/// network, staging, flush or wait — it does not look at its arguments at all.
+/// Windows' driver until U-20; and a macOS process that is not running from a
+/// bundle (`update_prepare_macos::MacPrepare::of_this_copy`).
 pub(crate) struct Unsupported;
 
 impl Driver for Unsupported {
-    fn prepare(&self, _: &Offer, _: &dyn Transport, _: &Poster) -> Result<(), Refused> {
+    fn prepare(&self, _: &Offer, _: &SharedTransport, _: &Poster) -> Result<(), Refused> {
         Err(Refused::Unsupported)
     }
 }
 
-/// **The transport the card's press hands the driver today** (U-19): none.
-/// The download door (`bt_platform::https_download`) is wired with the first
-/// driver that fetches (U-20); until then the only driver, [`Unsupported`],
-/// refuses without asking for a file, and this says so if anything ever did.
+/// **A transport that fetches nothing** — for the verbs and the tests whose
+/// driver never asks for a file; it says so if anything ever did.
 pub(crate) struct NoDownloadDoor;
 
 impl Transport for NoDownloadDoor {
-    fn fetch(&self, request: &Request) -> Result<(), String> {
+    fn fetch(
+        &self,
+        request: &Request,
+        _into: &std::path::Path,
+        _fetching: &Fetching,
+    ) -> Result<std::path::PathBuf, String> {
         Err(format!(
-            "no download door is wired in this build ({})",
+            "no download door is wired here ({})",
             request.file_name
         ))
+    }
+}
+
+/// **The driver and the transport a press is handed on this copy**: on macOS
+/// the Prepare of the running bundle (U-27) and the download door; everywhere
+/// else, [`Unsupported`] until its driver lands (Windows: U-20).
+pub(crate) fn driver_for_this_copy() -> (Box<dyn Driver>, SharedTransport) {
+    match bt_platform::host_platform() {
+        HostPlatform::MacOs => (
+            crate::update_prepare_macos::MacPrepare::of_this_copy(),
+            Arc::new(ReleaseDownload),
+        ),
+        HostPlatform::Windows | HostPlatform::OtherUnix => {
+            (Box::new(Unsupported), Arc::new(NoDownloadDoor))
+        }
     }
 }
 
@@ -748,8 +925,8 @@ pub(crate) enum Step {
     Staged,
     /// Both files passed verification.
     Verified,
-    /// The driver stopped; nothing installed was changed.
-    Stopped,
+    /// The driver stopped, for this reason; nothing installed was changed.
+    Stopped(Stop),
     /// The quit gave the update up, and why: back to `Verified` (§B).
     QuitAbandoned(Abandon),
     /// The session landed: the process hands over (§B `Committing`).
@@ -809,6 +986,9 @@ pub(crate) struct Poster {
     txn: TxnId,
     inbox: Arc<Mutex<Vec<Progress>>>,
     staged: StagedSlot,
+    /// Set by the job when the reader cancels this transaction's download (or
+    /// turns the check off under it): the driver stops at its next step.
+    cancelled: Arc<AtomicBool>,
 }
 
 impl Poster {
@@ -816,12 +996,34 @@ impl Poster {
     /// the home, the journal at `Prepared` and the transaction lock (U-21's
     /// seam for U-20 / U-27): the quit's hand-over writes `Handoff` from it,
     /// under that lock, at the way out.
-    pub(crate) fn verified(&self, staged: Staged) {
-        *self
+    ///
+    /// # Errors
+    /// The job was cancelled first: the staged transaction comes back, for the
+    /// driver to abandon — a job that has moved on never holds it.
+    pub(crate) fn verified(&self, staged: Staged) -> Result<(), Box<Staged>> {
+        let mut slot = self
             .staged
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((self.txn, staged));
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.cancelled() {
+            return Err(Box::new(staged));
+        }
+        *slot = Some((self.txn, staged));
+        drop(slot);
         self.post(Step::Verified);
+        Ok(())
+    }
+
+    /// Whether the job has cancelled this poster's transaction.
+    #[must_use]
+    pub(crate) fn cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+
+    /// The flag [`Self::cancelled`] reads, for a fetch to pass on to its door.
+    #[must_use]
+    pub(crate) fn cancel_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.cancelled)
     }
 
     /// Report `step` for this poster's transaction.
@@ -898,6 +1100,9 @@ pub(crate) struct Job<W> {
     /// Why the last quit gave the update up, while the card is back at
     /// `Verified` (U-21; U-19 names it).
     abandoned: Option<Abandon>,
+    /// The cancel flag of the driver working for this job's offer, from the
+    /// press until the download ends ([`Poster::cancelled`]).
+    running: Option<Arc<AtomicBool>>,
 }
 
 impl<W: Copy + Eq> Default for Job<W> {
@@ -928,7 +1133,25 @@ impl<W: Copy + Eq> Job<W> {
             staged_slot: Arc::new(Mutex::new(None)),
             staged: None,
             abandoned: None,
+            running: None,
         }
+    }
+
+    /// **The download is given up** (Cancel, or the switch turned off under
+    /// it): the driver is told to stop at its next step, and a staged
+    /// transaction it may already have left is let go — its lock released, its
+    /// journal left at `Prepared` for a later launch to count or resume
+    /// ((b).1 F-17). A job that has moved on holds nothing of it.
+    fn stop_the_driver(&mut self) {
+        if let Some(flag) = self.running.take() {
+            flag.store(true, Ordering::SeqCst);
+        }
+        let left = self
+            .staged_slot
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        drop(left);
     }
 
     /// A job standing at `Verified` with `offer` — a test's way to the quit
@@ -963,7 +1186,8 @@ impl<W: Copy + Eq> Job<W> {
     /// [`TABLE`]'s refusal for Restart in the job's state; nothing moves.
     pub(crate) fn restart(&mut self) -> Result<crate::quit::Reason, Refusal> {
         // Restart's row never reaches a driver, so the one there is serves.
-        self.answer_verb(Verb::Restart, &Unsupported, &Unfetched)?;
+        let unfetched: SharedTransport = Arc::new(NoDownloadDoor);
+        self.answer_verb(Verb::Restart, &Unsupported, &unfetched)?;
         let txn = self
             .state
             .offer()
@@ -1105,6 +1329,7 @@ impl<W: Copy + Eq> Job<W> {
             self.state,
             State::Available(_) | State::Downloading(..) | State::Staged(_)
         ) {
+            self.stop_the_driver();
             self.state = State::Idle;
             self.presenter = None;
             self.put_away = false;
@@ -1150,8 +1375,8 @@ impl<W: Copy + Eq> Job<W> {
                 }
                 (State::Verified(offer), Applied::Moved)
             }
-            (State::Downloading(offer, _) | State::Staged(offer), Step::Stopped) => {
-                (State::Failed(offer, Failure::Stopped), Applied::Moved)
+            (State::Downloading(offer, _) | State::Staged(offer), Step::Stopped(why)) => {
+                (State::Failed(offer, Failure::Stopped(why)), Applied::Moved)
             }
             (State::Quitting(offer), Step::QuitAbandoned(why)) => {
                 self.abandoned = Some(why);
@@ -1168,6 +1393,8 @@ impl<W: Copy + Eq> Job<W> {
         // `Failed` — and only on that move, so no state raises it twice.
         if applied == Applied::Moved && matches!(next, State::Verified(_) | State::Failed(..)) {
             self.put_away = false;
+            // The driver is done: nothing is left to cancel.
+            self.running = None;
         }
         self.state = next;
         applied
@@ -1183,7 +1410,7 @@ impl<W: Copy + Eq> Job<W> {
         &mut self,
         verb: Verb,
         driver: &dyn Driver,
-        transport: &dyn Transport,
+        transport: &SharedTransport,
     ) -> Result<Effect, Refusal> {
         let state = std::mem::replace(&mut self.state, State::Idle);
         let (next, outcome) = match (state, verb) {
@@ -1193,17 +1420,24 @@ impl<W: Copy + Eq> Job<W> {
                 (State::Idle, Ok(Effect::RecordSkip(offer.tag)))
             }
             (State::Available(offer), Verb::Press) => {
+                let cancelled = Arc::new(AtomicBool::new(false));
                 let post = Poster {
                     txn: offer.txn,
                     inbox: Arc::clone(&self.inbox),
                     staged: Arc::clone(&self.staged_slot),
+                    cancelled: Arc::clone(&cancelled),
                 };
                 match driver.prepare(&offer, transport, &post) {
-                    Ok(()) => (
-                        State::Downloading(offer, Bytes::default()),
-                        Ok(Effect::None),
-                    ),
-                    Err(Refused::Unsupported) => {
+                    Ok(()) => {
+                        self.running = Some(cancelled);
+                        (
+                            State::Downloading(offer, Bytes::default()),
+                            Ok(Effect::None),
+                        )
+                    }
+                    // A driver with no thread to run on is, to the reader, a
+                    // copy that cannot update itself now: nothing moved.
+                    Err(Refused::Unsupported | Refused::NoWorker) => {
                         (State::Failed(offer, Failure::Unsupported), Ok(Effect::None))
                     }
                 }
@@ -1219,6 +1453,7 @@ impl<W: Copy + Eq> Job<W> {
                 Verb::Skip | Verb::Press | Verb::Cancel | Verb::Restart,
             ) => (state, Err(Refusal::NotOnThisCard)),
             (State::Downloading(..) | State::Staged(_), Verb::Cancel) => {
+                self.stop_the_driver();
                 (State::Idle, Ok(Effect::None))
             }
             // **Later on a card whose work goes on puts the card away** and
@@ -1246,16 +1481,6 @@ impl<W: Copy + Eq> Job<W> {
     }
 }
 
-/// A transport for the verbs that never fetch: Restart's row reaches no
-/// driver, so this is never asked.
-struct Unfetched;
-
-impl Transport for Unfetched {
-    fn fetch(&self, _: &Request) -> Result<(), String> {
-        Err("this verb fetches nothing".to_owned())
-    }
-}
-
 /// The one `diagnostics.log` line: the decision, with no path and no account.
 fn line(answer: &Result<Eligible, NotEligible>, offers: bool) -> String {
     match answer {
@@ -1277,12 +1502,14 @@ mod tests {
     use bt_platform::HostPlatform;
 
     use super::{
-        Applied, Bytes, Driver, Effect, Evidence, Failure, Gathered, Handling, Job, Kind,
-        NotEligible, Offer, Pending, Poster, Presenters, Refused, Request, Route, State, Step,
-        TABLE, Transport, Unsupported, Verb,
+        Applied, Bytes, Driver, Effect, Evidence, Failure, Fetching, Gathered, Handling, Job, Kind,
+        NotEligible, Offer, Pending, Poster, Presenters, Refused, Request, Route, SharedTransport,
+        State, Step, Stop, TABLE, Transport, Unsupported, Verb,
     };
     use crate::install_channel::{self, Channel, Manager};
     use crate::update_txn::TxnId;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
 
     /// The running build every fixture below is older than a tag it offers.
     const RUNNING: &str = "0.4.6";
@@ -1343,14 +1570,40 @@ mod tests {
         job
     }
 
-    /// A transport that records every request and fetches nothing.
-    #[derive(Default)]
-    struct Recording(RefCell<Vec<Request>>);
+    /// A transport that records every request and fetches nothing; a clone
+    /// shares the record, so the test keeps one while the job hands the other
+    /// to its driver.
+    #[derive(Clone, Default)]
+    struct Recording(Arc<Mutex<Vec<Request>>>);
+
+    impl Recording {
+        /// This recording, as the job hands a transport to a driver.
+        fn shared(&self) -> SharedTransport {
+            Arc::new(self.clone())
+        }
+
+        fn requests(&self) -> Vec<Request> {
+            self.0.lock().unwrap().clone()
+        }
+    }
 
     impl Transport for Recording {
-        fn fetch(&self, request: &Request) -> Result<(), String> {
-            self.0.borrow_mut().push(request.clone());
-            Ok(())
+        fn fetch(
+            &self,
+            request: &Request,
+            into: &std::path::Path,
+            _fetching: &Fetching,
+        ) -> Result<std::path::PathBuf, String> {
+            self.0.lock().unwrap().push(request.clone());
+            Ok(into.join(&request.file_name))
+        }
+    }
+
+    /// What a test's driver hands a fetch: no one listening, never cancelled.
+    fn fetching() -> Fetching {
+        Fetching {
+            report: Arc::new(|_| {}),
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -1363,12 +1616,12 @@ mod tests {
         fn prepare(
             &self,
             offer: &Offer,
-            transport: &dyn Transport,
+            transport: &SharedTransport,
             post: &Poster,
         ) -> Result<(), Refused> {
             for request in offer.requests() {
                 transport
-                    .fetch(&request)
+                    .fetch(&request, std::path::Path::new("."), &fetching())
                     .expect("the recording transport fetches");
             }
             *self.0.borrow_mut() = Some(post.clone());
@@ -1403,7 +1656,7 @@ mod tests {
         std::fs::create_dir_all(home.root()).expect("the home");
         let mut job = available("v0.4.7");
         let driver = Starting::default();
-        job.answer_verb(Verb::Press, &driver, &Recording::default())
+        job.answer_verb(Verb::Press, &driver, &Recording::default().shared())
             .expect("the press is taken");
         let offer = job.state().offer().cloned().expect("an offer");
         let post = driver
@@ -1428,11 +1681,15 @@ mod tests {
         std::thread::scope(|threads| {
             threads.spawn(|| {
                 post.post(Step::Staged);
-                post.verified(Staged {
-                    home: home.clone(),
-                    journal,
-                    lock,
-                });
+                assert!(
+                    post.verified(Staged {
+                        home: home.clone(),
+                        journal,
+                        lock,
+                    })
+                    .is_ok(),
+                    "the job was not cancelled"
+                );
             });
         });
         assert_eq!(job.drain_progress(), 0, "no report is stale");
@@ -1487,7 +1744,7 @@ mod tests {
 
         // And under a download too: the job fetches the tag it offered.
         let driver = Starting::default();
-        job.answer_verb(Verb::Press, &driver, &Recording::default())
+        job.answer_verb(Verb::Press, &driver, &Recording::default().shared())
             .expect("the press is taken");
         job.consider(
             gathered("v0.4.9", None, Some(Channel::Ours)),
@@ -1517,7 +1774,7 @@ mod tests {
     fn stale_progress_cannot_revive_a_cancelled_job() {
         let mut job = available("v0.4.7");
         let driver = Starting::default();
-        job.answer_verb(Verb::Press, &driver, &Recording::default())
+        job.answer_verb(Verb::Press, &driver, &Recording::default().shared())
             .expect("the press is taken");
         let post = driver
             .0
@@ -1530,7 +1787,7 @@ mod tests {
         }));
         assert_eq!(job.drain_progress(), 0, "a report for this job is applied");
         assert_eq!(
-            job.answer_verb(Verb::Cancel, &Unsupported, &Recording::default()),
+            job.answer_verb(Verb::Cancel, &Unsupported, &Recording::default().shared()),
             Ok(Effect::None)
         );
         assert_eq!(job.state(), &State::Idle);
@@ -1547,8 +1804,12 @@ mod tests {
 
         // Another transaction's report does not move a live download either.
         let mut live = available("v0.4.7");
-        live.answer_verb(Verb::Press, &Starting::default(), &Recording::default())
-            .expect("the press is taken");
+        live.answer_verb(
+            Verb::Press,
+            &Starting::default(),
+            &Recording::default().shared(),
+        )
+        .expect("the press is taken");
         let foreign = super::Progress {
             txn: txn(9),
             step: Step::Staged,
@@ -1570,10 +1831,10 @@ mod tests {
         let mut job = available("v0.4.7");
         let driver = Starting::default();
         let transport = Recording::default();
-        job.answer_verb(Verb::Press, &driver, &transport)
+        job.answer_verb(Verb::Press, &driver, &transport.shared())
             .expect("the press is taken");
         assert_eq!(
-            transport.0.borrow().len(),
+            transport.requests().len(),
             2,
             "a driver fetches the offer's two files"
         );
@@ -1593,24 +1854,34 @@ mod tests {
         assert_eq!(job.state(), &State::Staged(offer.clone()));
         assert_eq!(job.apply(report(Step::Verified)), Applied::Moved);
         assert_eq!(job.state(), &State::Verified(offer.clone()));
-        job.answer_verb(Verb::Restart, &Unsupported, &Recording::default())
+        job.answer_verb(Verb::Restart, &Unsupported, &Recording::default().shared())
             .expect("Restart");
         assert_eq!(
             job.apply(report(Step::QuitAbandoned(super::Abandon::Cancelled))),
             Applied::Moved
         );
         assert_eq!(job.state(), &State::Verified(offer.clone()));
-        job.answer_verb(Verb::Restart, &Unsupported, &Recording::default())
+        job.answer_verb(Verb::Restart, &Unsupported, &Recording::default().shared())
             .expect("Restart");
         assert_eq!(job.apply(report(Step::SessionLanded)), Applied::Moved);
         assert_eq!(job.state(), &State::Committing(offer.clone()));
 
         let mut stopped = available("v0.4.7");
         stopped
-            .answer_verb(Verb::Press, &Starting::default(), &Recording::default())
+            .answer_verb(
+                Verb::Press,
+                &Starting::default(),
+                &Recording::default().shared(),
+            )
             .expect("the press is taken");
-        assert_eq!(stopped.apply(report(Step::Stopped)), Applied::Moved);
-        assert_eq!(stopped.state(), &State::Failed(offer, Failure::Stopped));
+        assert_eq!(
+            stopped.apply(report(Step::Stopped(Stop::Download))),
+            Applied::Moved
+        );
+        assert_eq!(
+            stopped.state(),
+            &State::Failed(offer, Failure::Stopped(Stop::Download))
+        );
     }
 
     /// A job standing in `kind`, with an offer where the state carries one.
@@ -1660,7 +1931,7 @@ mod tests {
             let mut job = standing_in(kind);
             let before = job.state().clone();
             let transport = Recording::default();
-            let outcome = job.answer_verb(verb, &Unsupported, &transport);
+            let outcome = job.answer_verb(verb, &Unsupported, &transport.shared());
             match handling {
                 Handling::Refused(reason) => {
                     assert_eq!(outcome, Err(reason), "{kind:?} × {verb:?}");
@@ -1685,7 +1956,7 @@ mod tests {
                     );
                     let mut started = standing_in(kind);
                     started
-                        .answer_verb(verb, &Starting::default(), &transport)
+                        .answer_verb(verb, &Starting::default(), &transport.shared())
                         .expect("a driver that starts");
                     assert_eq!(started.state().kind(), Kind::Downloading);
                 }
@@ -1694,7 +1965,7 @@ mod tests {
         // Skip is the one verb that asks the check's owner to write.
         let mut job = standing_in(Kind::Available);
         assert_eq!(
-            job.answer_verb(Verb::Skip, &Unsupported, &Recording::default()),
+            job.answer_verb(Verb::Skip, &Unsupported, &Recording::default().shared()),
             Ok(Effect::RecordSkip("v0.4.7".to_owned()))
         );
     }
@@ -1716,14 +1987,14 @@ mod tests {
         let offer = job.state().offer().cloned().expect("an offer");
         let transport = Recording::default();
         assert_eq!(
-            job.answer_verb(Verb::Press, &Unsupported, &transport),
+            job.answer_verb(Verb::Press, &Unsupported, &transport.shared()),
             Ok(Effect::None)
         );
         assert_eq!(job.state(), &State::Failed(offer, Failure::Unsupported));
         assert!(
-            transport.0.borrow().is_empty(),
+            transport.requests().is_empty(),
             "the press fetched {:?}",
-            transport.0.borrow()
+            transport.requests()
         );
         assert_eq!(job.drain_progress(), 0);
         assert!(matches!(job.state(), State::Failed(..)), "nothing reported");
@@ -1772,7 +2043,7 @@ mod tests {
             "the newer tag got no card: {:?}",
             job.state()
         );
-        job.answer_verb(Verb::Later, &Unsupported, &Recording::default())
+        job.answer_verb(Verb::Later, &Unsupported, &Recording::default().shared())
             .expect("Later");
         job.consider(
             gathered("v0.4.9", None, Some(Channel::Ours)),
@@ -2211,12 +2482,12 @@ mod tests {
     fn escape_during_download_hides_the_card_and_keeps_the_job() {
         let mut job = available("v0.4.7");
         let driver = Starting::default();
-        job.answer_verb(Verb::Press, &driver, &Recording::default())
+        job.answer_verb(Verb::Press, &driver, &Recording::default().shared())
             .expect("the press is taken");
         let post = driver.0.borrow_mut().take().expect("a poster");
         assert_eq!(job.card_window(), Some(1), "the download's card is up");
         assert_eq!(
-            job.answer_verb(Verb::Later, &Unsupported, &Recording::default()),
+            job.answer_verb(Verb::Later, &Unsupported, &Recording::default().shared()),
             Ok(Effect::None)
         );
         assert!(
@@ -2239,7 +2510,7 @@ mod tests {
         assert!(matches!(job.state(), State::Staged(_)));
         assert_eq!(job.card_window(), None);
         assert_eq!(
-            job.answer_verb(Verb::Later, &Unsupported, &Recording::default()),
+            job.answer_verb(Verb::Later, &Unsupported, &Recording::default().shared()),
             Ok(Effect::None),
             "Later on the staged card is the same"
         );
@@ -2260,10 +2531,10 @@ mod tests {
     fn the_card_is_re_presented_once_at_verified() {
         let mut job = available("v0.4.7");
         let driver = Starting::default();
-        job.answer_verb(Verb::Press, &driver, &Recording::default())
+        job.answer_verb(Verb::Press, &driver, &Recording::default().shared())
             .expect("the press is taken");
         let post = driver.0.borrow_mut().take().expect("a poster");
-        job.answer_verb(Verb::Later, &Unsupported, &Recording::default())
+        job.answer_verb(Verb::Later, &Unsupported, &Recording::default().shared())
             .expect("Later hides the download's card");
         post.post(Step::Staged);
         job.drain_progress();
@@ -2272,7 +2543,7 @@ mod tests {
         job.drain_progress();
         assert!(matches!(job.state(), State::Verified(_)));
         assert_eq!(job.card_window(), Some(1), "re-presented, in its window");
-        job.answer_verb(Verb::Later, &Unsupported, &Recording::default())
+        job.answer_verb(Verb::Later, &Unsupported, &Recording::default().shared())
             .expect("Later on the verified card");
         assert!(matches!(job.state(), State::Verified(_)), "the job is kept");
         assert_eq!(job.card_window(), None);
@@ -2284,13 +2555,13 @@ mod tests {
         let mut failing = available("v0.4.7");
         let driver = Starting::default();
         failing
-            .answer_verb(Verb::Press, &driver, &Recording::default())
+            .answer_verb(Verb::Press, &driver, &Recording::default().shared())
             .expect("the press is taken");
         let post = driver.0.borrow_mut().take().expect("a poster");
         failing
-            .answer_verb(Verb::Later, &Unsupported, &Recording::default())
+            .answer_verb(Verb::Later, &Unsupported, &Recording::default().shared())
             .expect("Later hides the download's card");
-        post.post(Step::Stopped);
+        post.post(Step::Stopped(Stop::Download));
         failing.drain_progress();
         assert!(matches!(failing.state(), State::Failed(..)));
         assert_eq!(failing.card_window(), Some(1), "the failure is said");
@@ -2355,9 +2626,9 @@ mod tests {
 
         // A hidden card moves hidden.
         let driver = Starting::default();
-        job.answer_verb(Verb::Press, &driver, &Recording::default())
+        job.answer_verb(Verb::Press, &driver, &Recording::default().shared())
             .expect("the press is taken");
-        job.answer_verb(Verb::Later, &Unsupported, &Recording::default())
+        job.answer_verb(Verb::Later, &Unsupported, &Recording::default().shared())
             .expect("Later hides the download's card");
         assert!(job.hand_over(&one_gone), "window 3 closed");
         assert_eq!(job.presenter(), Some(2));

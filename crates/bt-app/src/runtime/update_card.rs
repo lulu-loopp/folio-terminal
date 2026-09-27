@@ -85,10 +85,12 @@ impl Runtime<'_> {
 
     /// **Spend a verb of the card.**
     ///
-    /// A job verb goes to the job (`Job::answer_verb`), with the only driver
-    /// there is and no download door (U-20 brings both), and Skip's write is
-    /// handed to the check's one owner ([`update::skip`], coordinator ruling
-    /// 10). `Releases` and `Show folder` leave the window through the doors
+    /// A job verb goes to the job (`Job::answer_verb`), with this copy's
+    /// driver and transport (`update_job::driver_for_this_copy`: the macOS
+    /// Prepare and the download door, U-27; Windows' driver is U-20's), and
+    /// Skip's write is handed to the check's one owner ([`update::skip`],
+    /// coordinator ruling 10). Offers are off (`Job::offers_enabled`), so no
+    /// card carries a press yet. `Releases` and `Show folder` leave the window through the doors
     /// every such press uses and move nothing. The repaint is the loop's
     /// (`FolioApp::settle_update_card`), which sees what the job now shows.
     pub(in crate::runtime) fn answer_update_card(
@@ -97,11 +99,11 @@ impl Runtime<'_> {
     ) -> Result<()> {
         match verb.job_verb() {
             Some(job_verb) => {
-                let answered = self.app.update_job.answer_verb(
-                    job_verb,
-                    &update_job::Unsupported,
-                    &update_job::NoDownloadDoor,
-                );
+                let (driver, transport) = update_job::driver_for_this_copy();
+                let answered =
+                    self.app
+                        .update_job
+                        .answer_verb(job_verb, driver.as_ref(), &transport);
                 if let Ok(effect) = answered
                     && let Err(error) = update_card::spend(effect, update::skip)
                 {
