@@ -32,6 +32,17 @@
 //! with if it overruns. **Off macOS the call is refused by name**
 //! ([`Refusal::NotHere`]). Worker only: a clone and a verification read the
 //! whole bundle.
+//!
+//! **The image mount** (0.4.6 ticket U-17; C7 step 2, revision (b) F-17 and
+//! M1): [`attach`] mounts the downloaded image read-only with
+//! `/usr/bin/hdiutil attach -nobrowse -readonly -noautoopen -mountrandom
+//! <H>/<txn>/mnt`, bounded, and answers a [`Mount`] that only [`detach`]
+//! consumes; [`with_image`] is the road that attaches, hands the mount point
+//! to its body and detaches whatever the body answers. Because the mount
+//! point lies under the installation home, [`mounts_under`] finds it from the
+//! mount table (`getfsstat`) with no record at all, and [`detach_all_under`]
+//! is M1's step before `H/<txn>` is deleted. The same door, absolute path and
+//! bounded wait as the clone's children; worker only (`&WorkerCtx`).
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -63,7 +74,7 @@ const POLL: Duration = Duration::from_millis(20);
 /// **Why no verified rescue clone was made.**
 #[derive(Debug)]
 pub enum Refusal {
-    /// This platform has no bundles to clone.
+    /// This platform has no bundles to clone and no disk images to mount.
     NotHere,
     /// Something already stands where the clone would go.
     Exists(PathBuf),
@@ -81,12 +92,43 @@ pub enum Refusal {
     NoIdentity { bundle: PathBuf, detail: String },
     /// The clone verified, but it is not the same code as the old bundle.
     Differs { old: String, clone: String },
+    /// A child did not finish within its deadline and was ended by the pid
+    /// this call started it with.
+    TimedOut {
+        program: &'static str,
+        within: Duration,
+    },
+    /// The directory an image was to be mounted under could not be resolved
+    /// (it must exist: `hdiutil -mountrandom` makes its mount point inside it).
+    MountDir { path: PathBuf, error: io::Error },
+    /// `hdiutil attach` succeeded, but not exactly one of the mount points it
+    /// reported lies under `mount_dir`. An image already attached elsewhere is
+    /// answered with its existing mount point, which is somebody else's and is
+    /// never detached here.
+    MountPoints {
+        mount_dir: PathBuf,
+        reported: Vec<PathBuf>,
+    },
+    /// The mount table could not be read.
+    MountTable(io::Error),
+    /// These mount points are still mounted: their detach was refused. They
+    /// lie under the installation home, so the next sweep finds them again.
+    LeftMounted(Vec<PathBuf>),
+    /// An attach failed (`cause`), and detaching what it may have mounted
+    /// under its mount directory failed too (`sweep`).
+    Undetached {
+        cause: Box<Refusal>,
+        sweep: Box<Refusal>,
+    },
 }
 
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotHere => write!(f, "macos_update: no bundle to clone on this platform"),
+            Self::NotHere => write!(
+                f,
+                "macos_update: no bundle to clone and no disk image to mount on this platform"
+            ),
             Self::Exists(path) => {
                 write!(f, "macos_update: {} already exists", path.display())
             }
@@ -104,6 +146,35 @@ impl fmt::Display for Refusal {
                 f,
                 "macos_update: the clone's cdhash {clone} is not the old bundle's {old}"
             ),
+            Self::TimedOut { program, within } => {
+                write!(
+                    f,
+                    "macos_update {program}: did not finish within {within:?}"
+                )
+            }
+            Self::MountDir { path, error } => write!(
+                f,
+                "macos_update: no mount directory at {}: {error}",
+                path.display()
+            ),
+            Self::MountPoints {
+                mount_dir,
+                reported,
+            } => write!(
+                f,
+                "macos_update hdiutil: not exactly one of the mount points {reported:?} lies under {}",
+                mount_dir.display()
+            ),
+            Self::MountTable(error) => write!(f, "macos_update: the mount table: {error}"),
+            Self::LeftMounted(points) => {
+                write!(
+                    f,
+                    "macos_update: still mounted after a refused detach: {points:?}"
+                )
+            }
+            Self::Undetached { cause, sweep } => {
+                write!(f, "{cause}; and what it may have mounted: {sweep}")
+            }
         }
     }
 }
@@ -153,8 +224,22 @@ fn identity(said: &str) -> Option<Identity> {
 /// it by the pid this call started if it overruns. The output is charged to
 /// `file_reads`' `Lane::Update`.
 fn run(program: &'static str, arguments: &[&OsStr], within: Duration) -> Result<Output, Refusal> {
-    let refused = |detail: String| Refusal::Program { program, detail };
-    let mut child = crate::quiet_command(program)
+    run_at(program, Path::new(program), arguments, within)
+}
+
+/// [`run`], for a program named `name` in refusals and found at `at` — the
+/// system's place, or a test's stand-in.
+fn run_at(
+    name: &'static str,
+    at: &Path,
+    arguments: &[&OsStr],
+    within: Duration,
+) -> Result<Output, Refusal> {
+    let refused = |detail: String| Refusal::Program {
+        program: name,
+        detail,
+    };
+    let mut child = crate::quiet_command(at)
         .args(arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -170,7 +255,10 @@ fn run(program: &'static str, arguments: &[&OsStr], within: Duration) -> Result<
                 // Only the child this call started is ended.
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(refused(format!("did not finish within {within:?}")));
+                return Err(Refusal::TimedOut {
+                    program: name,
+                    within,
+                });
             }
             Err(error) => return Err(refused(format!("could not be waited for: {error}"))),
         }
@@ -370,6 +458,420 @@ fn verify_clone(old: &Identity, clone: &Path) -> Result<PathBuf, Refusal> {
         }),
     }
 }
+
+// ───────────────────────── the image mount (U-17) ─────────────────────────
+//
+// C7 step 2 and revision (b) F-17: the downloaded image is attached with
+// `hdiutil attach -nobrowse -readonly -noautoopen -mountrandom <H>/<txn>/mnt`,
+// so its mount point lies under the installation home. **A mount under the
+// home is ours even when the attach result was never recorded**: the mount
+// table lists it, and M1's next actor detaches it from there before it deletes
+// `H/<txn>`.
+
+/// The system's disk-image tool.
+pub const HDIUTIL: &str = "/usr/bin/hdiutil";
+
+/// How long one `hdiutil attach` may take. It checksums every block of a
+/// compressed image before it mounts it, which for the release image (some
+/// tens of megabytes) takes seconds, not minutes.
+pub const ATTACH_WITHIN: Duration = Duration::from_secs(120);
+
+/// How long one `hdiutil detach` may take.
+pub const DETACH_WITHIN: Duration = Duration::from_secs(30);
+
+/// How long a detach refused as busy waits before its one `-force` retry.
+pub const BUSY_RETRY_AFTER: Duration = Duration::from_secs(2);
+
+/// `hdiutil detach`'s exit status when a file on the volume is still open
+/// (`EBUSY`; the message beside it is in the system's language).
+const BUSY: i32 = 16;
+
+/// **An image attached by [`attach`], and the one thing that detaches it.**
+///
+/// No `Clone`, no public constructor, and **no `Drop`** (A1e's closed `Drop`
+/// inventory: a detach waits on a child, and no new `Drop` may wait). It is
+/// consumed by [`detach`] on every road; [`with_image`] is the road that does
+/// so by construction, and `macos_update::mount_tests` drives each of its exit
+/// roads with a stand-in `hdiutil` that records every attach and detach. A
+/// `Mount` lost anyway (a panic) leaves its mount point under the home, where
+/// [`mounts_under`] finds it.
+#[must_use = "an attached image is detached by `detach`, on every road"]
+#[derive(Debug, PartialEq, Eq)]
+pub struct Mount {
+    /// The mount point, as `hdiutil` reported it.
+    point: PathBuf,
+}
+
+impl Mount {
+    /// Where the image's volume is mounted.
+    #[must_use]
+    pub fn point(&self) -> &Path {
+        &self.point
+    }
+}
+
+/// **What [`with_image`] did**: the body's answer or why the image never
+/// reached it, and whether the image came off again.
+#[must_use = "an image's use says both what the body answered and whether the image came off again"]
+#[derive(Debug)]
+pub struct Used<T, E> {
+    /// What the body answered, or the attach's refusal.
+    pub outcome: Result<T, Failed<E>>,
+    /// Whether the image was detached afterwards. `Ok` when the attach itself
+    /// failed (it detaches what it may have mounted before it answers). A
+    /// refusal here is debt (R-11), never a reason to undo the body's work:
+    /// the mount point lies under the mount directory, so the next sweep of the
+    /// home finds it in the mount table.
+    pub detached: Result<(), Refusal>,
+}
+
+/// Why [`with_image`]'s body gave no answer.
+#[derive(Debug)]
+pub enum Failed<E> {
+    /// The image was not attached (anything it may have mounted is detached).
+    Attach(Refusal),
+    /// The body refused (the image is detached afterwards all the same).
+    Body(E),
+}
+
+/// The deadlines one mount road runs under.
+#[derive(Clone, Copy, Debug)]
+struct Within {
+    attach: Duration,
+    detach: Duration,
+    busy: Duration,
+}
+
+/// The system's deadlines.
+const SYSTEM_WITHIN: Within = Within {
+    attach: ATTACH_WITHIN,
+    detach: DETACH_WITHIN,
+    busy: BUSY_RETRY_AFTER,
+};
+
+/// Where the mount road finds its tool and its mount table: the system's, or
+/// a test's stand-ins.
+struct Tools<'a> {
+    hdiutil: &'a Path,
+    table: &'a dyn Fn(&Path) -> Result<Vec<PathBuf>, Refusal>,
+    within: Within,
+}
+
+/// The system's tools.
+fn system() -> Tools<'static> {
+    Tools {
+        hdiutil: Path::new(HDIUTIL),
+        table: &points_under,
+        within: SYSTEM_WITHIN,
+    }
+}
+
+/// **Attach `image` read-only, mounted at a fresh directory inside
+/// `mount_dir`** (`update_txn::Home::mount_point(txn)` = `H/<txn>/mnt`), with
+/// `hdiutil attach -nobrowse -readonly -noautoopen -mountrandom <mount_dir>
+/// <image>`, both paths resolved to absolute ones first, within
+/// [`ATTACH_WITHIN`].
+///
+/// `mount_dir` must exist (`hdiutil` refuses a missing one). The answer is
+/// the one mount point `hdiutil` reported under `mount_dir`. **Every refusal
+/// after the child started first detaches whatever is mounted under
+/// `mount_dir`, found in the mount table** — `hdiutil` that failed, overran
+/// its deadline (it is ended by its pid, and may have mounted before it was),
+/// or said something this does not read — so an attach that is refused leaves
+/// nothing mounted there; a detach that is refused too is named in
+/// [`Refusal::Undetached`].
+///
+/// A worker's call (`&WorkerCtx`): it waits on a child.
+///
+/// # Errors
+/// [`Refusal::NotHere`] off macOS; otherwise the step that refused.
+pub fn attach(
+    _worker: &crate::admission::WorkerCtx,
+    image: &Path,
+    mount_dir: &Path,
+) -> Result<Mount, Refusal> {
+    if crate::host_platform() != HostPlatform::MacOs {
+        return Err(Refusal::NotHere);
+    }
+    attach_with(&system(), image, mount_dir)
+}
+
+/// **Detach `mount`** with `hdiutil detach <mount point>`, within
+/// [`DETACH_WITHIN`]; refused as busy (exit 16), it waits
+/// [`BUSY_RETRY_AFTER`] and tries once more with `-force`. `hdiutil` detaches
+/// the whole image a mount point belongs to.
+///
+/// # Errors
+/// [`Refusal::NotHere`] off macOS; otherwise the detach's refusal — debt
+/// (R-11): the mount point is still under the home, where [`mounts_under`]
+/// finds it.
+pub fn detach(_worker: &crate::admission::WorkerCtx, mount: Mount) -> Result<(), Refusal> {
+    if crate::host_platform() != HostPlatform::MacOs {
+        return Err(Refusal::NotHere);
+    }
+    detach_with(&system(), mount)
+}
+
+/// **Every mount point strictly below `root`**, from the mount table
+/// (`getfsstat(2)`, the table `getmntinfo(3)` reads, with `MNT_NOWAIT` so a
+/// file system that does not answer cannot hold the call), compared with
+/// `root`'s real path. A `root` that does not exist has nothing under it.
+///
+/// No record is needed: M1's next actor finds the mount an attach left even
+/// when the attach's answer was never written down.
+///
+/// # Errors
+/// [`Refusal::NotHere`] off macOS; [`Refusal::MountTable`] when the table or
+/// `root` cannot be read.
+pub fn mounts_under(root: &Path) -> Result<Vec<PathBuf>, Refusal> {
+    if crate::host_platform() != HostPlatform::MacOs {
+        return Err(Refusal::NotHere);
+    }
+    points_under(root)
+}
+
+/// **Detach every mount below `root`** — M1's step before `H/<txn>` is
+/// deleted: each mount point [`mounts_under`] lists, detached as [`detach`]
+/// does.
+///
+/// # Errors
+/// [`Refusal::NotHere`] off macOS; [`Refusal::MountTable`]; or
+/// [`Refusal::LeftMounted`] naming every mount point whose detach was refused
+/// (the others are detached all the same).
+pub fn detach_all_under(_worker: &crate::admission::WorkerCtx, root: &Path) -> Result<(), Refusal> {
+    if crate::host_platform() != HostPlatform::MacOs {
+        return Err(Refusal::NotHere);
+    }
+    detach_all_with(&system(), root)
+}
+
+/// **Attach `image` under `mount_dir`, hand its mount point to `body`, and
+/// detach it again — whatever `body` answers.** The road the macOS Prepare
+/// (U-27) takes for C7 step 3: verify the mounted bundle, copy it out, verify
+/// the copy. The [`Mount`] never leaves this function.
+pub fn with_image<T, E>(
+    _worker: &crate::admission::WorkerCtx,
+    image: &Path,
+    mount_dir: &Path,
+    body: impl FnOnce(&Path) -> Result<T, E>,
+) -> Used<T, E> {
+    if crate::host_platform() != HostPlatform::MacOs {
+        return Used {
+            outcome: Err(Failed::Attach(Refusal::NotHere)),
+            detached: Ok(()),
+        };
+    }
+    with_image_with(&system(), image, mount_dir, body)
+}
+
+fn with_image_with<T, E>(
+    tools: &Tools<'_>,
+    image: &Path,
+    mount_dir: &Path,
+    body: impl FnOnce(&Path) -> Result<T, E>,
+) -> Used<T, E> {
+    let mount = match attach_with(tools, image, mount_dir) {
+        Ok(mount) => mount,
+        Err(refusal) => {
+            return Used {
+                outcome: Err(Failed::Attach(refusal)),
+                detached: Ok(()),
+            };
+        }
+    };
+    let outcome = body(mount.point()).map_err(Failed::Body);
+    Used {
+        outcome,
+        detached: detach_with(tools, mount),
+    }
+}
+
+/// **The mount points in `hdiutil attach`'s answer** (its standard output,
+/// without `-plist`). Measured on macOS 26: before the table come the
+/// checksum lines, in the system's language; the table has one line per
+/// device, `<device><spaces>\t<content hint><spaces>\t<mount point>`, and the
+/// third column is empty for a device with no file system mounted. So a line
+/// that begins `/dev/` and has a third tab-separated column beginning `/`
+/// names a mount point: that column to the end of the line, unpadded (a tab
+/// or a space inside the path is kept). An APFS image lists a synthesized
+/// container disk as well; only its volume has a mount point.
+fn mount_points(said: &str) -> Vec<PathBuf> {
+    said.lines()
+        .filter(|line| line.starts_with("/dev/"))
+        .filter_map(|line| line.splitn(3, '\t').nth(2))
+        .filter(|point| point.starts_with('/'))
+        .map(PathBuf::from)
+        .collect()
+}
+
+/// Whether `point` is strictly below `root` (both real paths).
+fn is_below(point: &Path, root: &Path) -> bool {
+    point != root && point.starts_with(root)
+}
+
+fn attach_with(tools: &Tools<'_>, image: &Path, mount_dir: &Path) -> Result<Mount, Refusal> {
+    let dir = std::fs::canonicalize(mount_dir).map_err(|error| Refusal::MountDir {
+        path: mount_dir.to_path_buf(),
+        error,
+    })?;
+    let image = std::fs::canonicalize(image).map_err(|error| Refusal::Program {
+        program: HDIUTIL,
+        detail: format!("no image at {}: {error}", image.display()),
+    })?;
+    let answered = run_at(
+        HDIUTIL,
+        tools.hdiutil,
+        &[
+            OsStr::new("attach"),
+            OsStr::new("-nobrowse"),
+            OsStr::new("-readonly"),
+            OsStr::new("-noautoopen"),
+            OsStr::new("-mountrandom"),
+            dir.as_os_str(),
+            image.as_os_str(),
+        ],
+        tools.within.attach,
+    );
+    // Every refusal from here on first detaches what is mounted under `dir`.
+    let refused = |cause: Refusal| match detach_all_with(tools, &dir) {
+        Ok(()) => cause,
+        Err(sweep) => Refusal::Undetached {
+            cause: Box::new(cause),
+            sweep: Box::new(sweep),
+        },
+    };
+    let output = answered.map_err(refused)?;
+    if !output.status.success() {
+        return Err(refused(Refusal::Program {
+            program: HDIUTIL,
+            detail: said(&output),
+        }));
+    }
+    let reported = mount_points(&String::from_utf8_lossy(&output.stdout));
+    let ours: Vec<&PathBuf> = reported
+        .iter()
+        .filter(|point| std::fs::canonicalize(point).is_ok_and(|real| is_below(&real, &dir)))
+        .collect();
+    if let [point] = ours.as_slice() {
+        return Ok(Mount {
+            point: PathBuf::clone(point),
+        });
+    }
+    Err(refused(Refusal::MountPoints {
+        mount_dir: dir.clone(),
+        reported,
+    }))
+}
+
+fn detach_with(tools: &Tools<'_>, mount: Mount) -> Result<(), Refusal> {
+    detach_point(tools, &mount.point)
+}
+
+fn detach_point(tools: &Tools<'_>, point: &Path) -> Result<(), Refusal> {
+    let detach = |force: bool| {
+        let mut arguments = vec![OsStr::new("detach")];
+        if force {
+            arguments.push(OsStr::new("-force"));
+        }
+        arguments.push(point.as_os_str());
+        run_at(HDIUTIL, tools.hdiutil, &arguments, tools.within.detach)
+    };
+    let mut output = detach(false)?;
+    if output.status.code() == Some(BUSY) {
+        std::thread::sleep(tools.within.busy);
+        output = detach(true)?;
+    }
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(Refusal::Program {
+            program: HDIUTIL,
+            detail: said(&output),
+        })
+    }
+}
+
+fn detach_all_with(tools: &Tools<'_>, root: &Path) -> Result<(), Refusal> {
+    let left: Vec<PathBuf> = (tools.table)(root)?
+        .into_iter()
+        .filter(|point| detach_point(tools, point).is_err())
+        .collect();
+    if left.is_empty() {
+        Ok(())
+    } else {
+        Err(Refusal::LeftMounted(left))
+    }
+}
+
+/// [`mounts_under`] without the platform check: the table's mount points
+/// strictly below `root`'s real path.
+fn points_under(root: &Path) -> Result<Vec<PathBuf>, Refusal> {
+    let root = match std::fs::canonicalize(root) {
+        Ok(root) => root,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(Refusal::MountTable(error)),
+    };
+    Ok(mounted()
+        .map_err(Refusal::MountTable)?
+        .into_iter()
+        .filter(|point| is_below(point, &root))
+        .collect())
+}
+
+/// **Every mount point in the mount table**, from `getfsstat(2)` into a
+/// buffer this call owns (`getmntinfo(3)` reads the same table into one it
+/// keeps between calls). A table that grew between the count and the read is
+/// read again.
+#[cfg(target_os = "macos")]
+fn mounted() -> io::Result<Vec<PathBuf>> {
+    use std::os::unix::ffi::OsStrExt;
+    loop {
+        // SAFETY: a null buffer of size 0 asks only for the number of mounts;
+        // nothing is written.
+        let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+        let count = usize::try_from(count).map_err(|_| io::Error::last_os_error())?;
+        let room = count + 4;
+        let bytes = libc::c_int::try_from(room * std::mem::size_of::<libc::statfs>())
+            .map_err(|_| io::Error::other("the mount table does not fit a buffer size"))?;
+        let mut table: Vec<libc::statfs> = Vec::with_capacity(room);
+        // SAFETY: `table` has room for `room` records and `bytes` is exactly
+        // that many records' size; the call writes at most that and answers
+        // how many it wrote.
+        let filled = unsafe { libc::getfsstat(table.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+        let filled = usize::try_from(filled).map_err(|_| io::Error::last_os_error())?;
+        if filled >= room {
+            continue;
+        }
+        // SAFETY: the call initialised the first `filled` records, and
+        // `filled` is below the capacity `room`.
+        unsafe { table.set_len(filled) };
+        return Ok(table
+            .iter()
+            .map(|record| {
+                let name: Vec<u8> = record
+                    .f_mntonname
+                    .iter()
+                    .map(|&c| c as u8)
+                    .take_while(|&byte| byte != 0)
+                    .collect();
+                PathBuf::from(OsStr::from_bytes(&name))
+            })
+            .collect());
+    }
+}
+
+/// Off macOS [`mounts_under`] refuses before it would be asked.
+#[cfg(not(target_os = "macos"))]
+fn mounted() -> io::Result<Vec<PathBuf>> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "macos_update has no mount table on this platform",
+    ))
+}
+
+#[cfg(test)]
+#[path = "macos_update_mount_tests.rs"]
+mod mount_tests;
 
 #[cfg(test)]
 mod tests {
