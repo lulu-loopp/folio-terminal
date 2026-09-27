@@ -55,10 +55,10 @@ they answer "what does this machine do" — not by debt.
 
 | version | rows | open | repaid |
 |---|---:|---:|---:|
-| 0.4.5 | 10 | 2 | 8 |
+| 0.4.5 | 9 | 1 | 8 |
 | 0.4.6 | 49 | 45 | 4 |
 | 0.4.7 | 21 | 21 | 0 |
-| deferred (reason on the row) | 3 | 3 | 0 |
+| deferred (reason on the row) | 4 | 4 | 0 |
 | already repaid | 1 | 0 | 1 |
 | **total** | **84** | **71** | **13** |
 
@@ -68,6 +68,8 @@ presentation lane, its second client, and revision (b) R8 of
 D-70…D-76 were added to 0.4.6. The totals are recounted from the table below:
 the line before this read 68 rows and 8 repaid, which counted neither D-69 nor
 the already-repaid D-58.)
+
+(2026-09-27: D-41 moved from 0.4.5 to deferred — its cell had kept the 0.4.5 assignment after the owner deferred the presentation lane on 2026-09-24 (§R-E); the 0.5 plan's A10/I7 quote the row. Bookkeeping, not a repayment: 0.4.5 is 9 rows / 1 open, deferred 4 / 4.)
 
 (2026-09-26, A1a: D-77 added to 0.4.6.)
 
@@ -245,7 +247,7 @@ ledger's.
 | D-38 | §5.3 row 6 — the find box re-scans every frozen line per keystroke | §5.3 | 51 | 0.4.5 — a per-keystroke cost | repaid (ticket 51) |
 | D-39 | §5.3 row 7 — macOS locale children on the pane-birth road | §5.3 | none yet | 0.4.6 | open |
 | D-40 | §5.3 row 8 — macOS `DirWatch` start and drop wait without a bound | §5.3 | none yet | 0.4.6 | open — both platforms' `DirWatch::drop` are rows of the closed `Drop` inventory the source guard holds (A1e, 2026-09-27); B7 repays them |
-| D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | 0.4.5 — presenting off the input thread is the typing-stability work | open — since ticket 37 a presented picture is a pair (frame and metrics: `SeatSignature::metrics`, `LeafSession::presented_metrics`), and the lane must carry both |
+| D-41 | §5.3 row 9 — presentation on the window thread; the present mode has no owner | §5.3; §5.4 step 4 | none yet | deferred → unassigned — construction awaits the owner's measurement-based decision after the self-inflicted waits are fixed and measured (owner, 2026-09-24; `docs/plans/design/window-thread-budget-2026-09-25.md` §R-E, replacing §4); a release is assigned only after that ruling, and this deferral does not repay D-41 | open — since ticket 37 a presented picture is a pair (frame and metrics: `SeatSignature::metrics`, `LeafSession::presented_metrics`), and the lane must carry both |
 | D-42 | §5.3 row 10 — device recovery blocks and sleeps on the window thread | §5.3; §5.4 step 4 | none yet | 0.4.6 — independent of D-41 (budget note R8, 2026-09-26): no frame is admitted while recovering, so B9 does not wait for the presentation lane | open |
 | D-43 | §5.3 row 11 — PTY birth on the window thread | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — needs D-1's session owner to keep input and resize order | open — admitted where it stands through `pty_door::spawn_shell`, minted in `create_leaf_session` (A1d, 2026-09-26: its door, not its move) |
 | D-44 | §5.3 row 12 — the synchronous `ResizePseudoConsole` round trip | §5.3; §5.4 step 5 | none yet | deferred → 0.5 toward 0.6 — as D-43 | open — admitted where it stands through `pty_door::resize`, minted in `commit_leaf_resize`, one admission per leaf (A1d, 2026-09-26: its door, not its move) |
