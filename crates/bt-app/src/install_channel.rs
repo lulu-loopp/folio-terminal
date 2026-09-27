@@ -457,6 +457,21 @@ pub fn channel() -> Option<Channel> {
     FACT.get().map(|fact| fact.channel)
 }
 
+/// **How the copy whose executable is `exe` was installed**, derived now on
+/// the calling thread: the Windows applier's, which runs from the rescue copy
+/// and asks about the installed `folio.exe` it is about to replace (U-23,
+/// before the moves: `update_prepare_windows::staged_as_verified`). The start's
+/// own fact is [`channel`]'s.
+#[must_use]
+pub(crate) fn channel_of(exe: &Path) -> Channel {
+    derive_fact(
+        Ok(exe.to_path_buf()),
+        bt_platform::host_platform(),
+        install_evidence::current_account(),
+    )
+    .channel
+}
+
 /// Install the event loop's wake, before [`begin`]: the first-run card waits a
 /// turn for the fact, and a window with a modal due and nothing else happening
 /// gets no turn unless the worker asks for one.

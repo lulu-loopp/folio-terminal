@@ -51,7 +51,19 @@
 //! holder opens Folio. At login (no command line), a start follows only a
 //! revert or a finished rollback (W11), or a trial the decision needed.
 //!
-//! **Any other home** (Windows until U-24), reading the header again:
+//! **A Windows member set** (U-23, [`run_windows`]): whatever the header
+//! says, the rescue build takes the transaction lock and finishes what a dead
+//! applier left, by the applier's own code (`update_apply_windows::recover`):
+//! `Handoff` or `Armed` — nothing moved — back to `Prepared`, the entrance
+//! removed; `Moving` to `RollbackIntent`; `Trial` waited on while its recorded
+//! trial lives and its deadline has not passed, then `Committed` and its
+//! retirement or `RollbackIntent`; `Committed` retired. A `Handoff` whose
+//! applier may still be alive is waited for. The Windows rollback itself
+//! (`RollbackIntent`, `Stuck`, `RolledBack`) is U-24's and is left as it is.
+//! Every line of it is appended to the same file. Then, as for any other home:
+//!
+//! **Any other home, and a Windows one after its recovery**, reading the
+//! header again:
 //!
 //! * handed a command line, and the transaction is no longer one an ordinary
 //!   start hands over — `terminal`, `preparing` or `deferred`, no journal, or
@@ -61,10 +73,15 @@
 //!   first, for its card). The start that handed itself over is thereby made
 //!   (U-12's contract), and it cannot come back here: the ordinary start hands
 //!   over only a `destructive` class;
-//! * a `destructive` class on Windows: the update is not finished and this
-//!   build cannot finish it, so the line says so and the door exits 1,
-//!   starting nothing — starting the installed Folio would only hand it back
-//!   here.
+//! * a `destructive` class on Windows (a rollback not in this build yet, or a
+//!   lock another holder kept past the wait): **the rescue copy** is started,
+//!   with `--update-failed <journal>` and then the original arguments — the
+//!   old build's own executable, held to the running image at the Prepare,
+//!   whose own home (inside `rescue\`) holds no journal, so its card says
+//!   *Update incomplete.* and it cannot hand itself back. The installed Folio
+//!   would only hand itself back here, and the install folder may hold some
+//!   of each set (the coordinator's rule of 2026-09-27: a start always opens a
+//!   window; U-29b's ruling 2 for macOS: exactly one start).
 //!
 //! Headless, like the other argv doors: it runs before the parse and the
 //! admission in `fn main`, on a standalone main that is a worker
@@ -83,7 +100,7 @@ use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
 use crate::update_apply_macos::{self, Hands, Limits, Road};
-use crate::update_txn::{Class, Header, HeaderOutcome, Home};
+use crate::update_txn::{Class, Header, HeaderOutcome, Home, Place};
 
 /// **The recovery door's effects**: a lock holder's (its lines, the exchange,
 /// the check of a restored bundle), and the start of the installed Folio.
@@ -129,6 +146,11 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
         ));
         return 2;
     };
+    // One standalone main for both roads: a Windows member set is recovered
+    // by the applier's own code (U-23), a macOS bundle by U-29/U-29b's.
+    let windows = (platform == bt_platform::HostPlatform::Windows).then(|| {
+        crate::update_apply_windows::Road::of_this_copy(home.clone(), installed.clone(), exe)
+    });
     let data = crate::persist::storage_dir_unmoved();
     let agents = update_apply_macos::launch_agents();
     let door = Door {
@@ -140,7 +162,15 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
         limits: Limits::PRODUCT,
     };
     match bt_platform::admission::enter_standalone_main("folio-update-recover", |worker| {
-        run(worker, &door, &mut world)
+        match &windows {
+            Some(road) => run_windows(
+                worker,
+                road,
+                then_launch.as_deref(),
+                &mut crate::update_apply_windows::Machine { log: None },
+            ),
+            None => run(worker, &door, &mut world),
+        }
     }) {
         Ok(code) => code,
         Err(refused) => {
@@ -188,6 +218,17 @@ fn header_of(home: &Home) -> Read {
 /// **The door over any home** — see the module header. Answers the exit
 /// code.
 pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -> i32 {
+    run_after(worker, door, None, world)
+}
+
+/// [`run`], after a Windows recovery that did `recovered` (U-23; `None`: none
+/// ran).
+fn run_after(
+    worker: &WorkerCtx,
+    door: &Door<'_>,
+    recovered: Option<&str>,
+    world: &mut impl World,
+) -> i32 {
     let home = door.home;
     let (log, whereabouts) = log_file(home, door.data);
     let first = header_of(home);
@@ -231,10 +272,10 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
             (did, outcome, code)
         }
         None => {
-            let did = if recovers_here {
-                String::from("nothing to recover")
-            } else {
-                String::from("recovery is not in this build yet")
+            let did = match recovered {
+                Some(recovered) => recovered.to_owned(),
+                None if recovers_here => String::from("nothing to recover"),
+                None => String::from("nothing was recovered"),
             };
             let failed = recovers_here
                 && first
@@ -247,12 +288,19 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
                 .is_some_and(|header| header.class == Class::Destructive);
             let (outcome, code) = match door.then_launch {
                 None => (String::from("nothing was touched"), 0),
-                Some(_) if unfinished => (
-                    String::from(
-                        "the update is not finished and this build cannot finish it yet; Folio was not started",
+                Some(argv) if unfinished => match rescue_copy(home, first.header.as_ref()) {
+                    Some(rescue) => {
+                        let mut words = update_apply_macos::failed_words(home).to_vec();
+                        words.extend_from_slice(argv);
+                        spawn(world, &rescue, &words)
+                    }
+                    None => (
+                        String::from(
+                            "the update is not finished and this build cannot finish it yet; Folio was not started",
+                        ),
+                        1,
                     ),
-                    1,
-                ),
+                },
                 Some(argv) => {
                     let mut words = Vec::new();
                     if failed {
@@ -277,6 +325,123 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
         ));
     }
     code
+}
+
+/// **The rescue copy a still-`destructive` Windows transaction opens** (U-23):
+/// the program the header's `rescue` names, for a Windows member set's home;
+/// `None` for a macOS bundle's, and with no header.
+fn rescue_copy(home: &Home, header: Option<&Header>) -> Option<PathBuf> {
+    let header = header?;
+    home.members_folder(header.txn, Place::Set)
+        .map(|_| home.rescue_program(&header.rescue))
+}
+
+/// **The Windows door** (U-23): what a dead applier left, recovered by the
+/// applier's own code (`update_apply_windows::recover`, each of its lines kept
+/// in the same file as the door's own), then [`run`]'s header and start over
+/// what the journal says now — a Folio opens with a handed command line
+/// whatever it says.
+pub(crate) fn run_windows(
+    worker: &WorkerCtx,
+    road: &crate::update_apply_windows::Road,
+    then_launch: Option<&[OsString]>,
+    world: &mut impl crate::update_apply_windows::World,
+) -> i32 {
+    let (log, _) = log_file(&road.home, &road.data);
+    let recovered = crate::update_apply_windows::recover(
+        worker,
+        road,
+        &mut LoggedWindows {
+            world: &mut *world,
+            log: &log,
+        },
+    );
+    let did = format!("recovery {recovered:?}");
+    let door = Door {
+        home: &road.home,
+        installed: &road.installed,
+        then_launch,
+        data: &road.data,
+        agents: None,
+        limits: Limits::PRODUCT,
+    };
+    run_after(worker, &door, Some(&did), &mut Bridge(world))
+}
+
+/// **A Windows world as the door's**: its lines and its starts; a Windows
+/// home has no bundle to exchange, verify or open as a trial, and [`run`]
+/// asks for none of them over one.
+struct Bridge<'w, W>(&'w mut W);
+
+impl<W: crate::update_apply_windows::World> Hands for Bridge<'_, W> {
+    fn say(&mut self, line: &str) {
+        self.0.say(line);
+    }
+
+    fn exchange(&mut self, _live: &Path, _staged: &Path) -> Result<(), String> {
+        Err("a Windows home has no bundle to exchange".to_owned())
+    }
+
+    fn verify_restored(&mut self, _worker: &WorkerCtx, _bundle: &Path) -> Result<(), String> {
+        Err("a Windows home has no bundle to verify".to_owned())
+    }
+
+    fn launch_trial(&mut self, _bundle: &Path, _args: &[OsString]) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "a Windows home's trial is started by its applier",
+        ))
+    }
+}
+
+impl<W: crate::update_apply_windows::World> World for Bridge<'_, W> {
+    fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
+        self.0.spawn_detached(program, args)
+    }
+}
+
+/// **A Windows world whose every line is also appended to the log** — the
+/// recovery's lines, which the run at logon would otherwise lose.
+struct LoggedWindows<'w, W> {
+    world: &'w mut W,
+    log: &'w Path,
+}
+
+impl<W: crate::update_apply_windows::World> crate::update_apply_windows::World
+    for LoggedWindows<'_, W>
+{
+    fn say(&mut self, line: &str) {
+        self.world.say(line);
+        let _ = crate::diagnostics::append_note(self.log, line);
+    }
+
+    fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
+        self.world.spawn_detached(program, args)
+    }
+
+    fn arm(
+        &mut self,
+        txn: crate::update_txn::TxnId,
+        rescue: &Path,
+    ) -> Result<bt_platform::install_txn::Armed, String> {
+        self.world.arm(txn, rescue)
+    }
+
+    fn disarm(&mut self, txn: crate::update_txn::TxnId) -> Result<(), String> {
+        self.world.disarm(txn)
+    }
+
+    fn is_armed(&mut self, txn: crate::update_txn::TxnId) -> Result<bool, String> {
+        self.world.is_armed(txn)
+    }
+
+    fn launch_trial(&mut self, program: &Path, args: &[OsString]) -> io::Result<u32> {
+        self.world.launch_trial(program, args)
+    }
+
+    fn moved(&mut self, done: &crate::update_txn::Move) {
+        self.world.moved(done);
+    }
 }
 
 /// Start the installed Folio with `args`; the words of the line, and the code.
@@ -520,22 +685,27 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (U-22) — **an unfinished transaction is never relaunched into**:
-    /// the installed Folio would only hand itself back. The door says so in
-    /// one line and exits 1; with no command line to launch it says one line
-    /// and exits 0; with no journal at all the handed line is launched.
+    /// RED (U-22; U-23) — **an unfinished Windows transaction is never
+    /// relaunched into, and still a Folio opens**: the installed one would
+    /// only hand itself back, so the rescue copy — the old build — is started
+    /// with `--update-failed <journal>` and the original arguments, and the
+    /// door exits 0; with no command line to launch it says one line and exits
+    /// 0; with no journal at all the handed line is launched into the
+    /// installed Folio.
     ///
-    /// MUTATION: drop the `unfinished` arm in `run`.
+    /// MUTATION: in `rescue_copy`, answer `None`.
     #[test]
-    fn a_destructive_journal_starts_nothing_and_says_so() {
+    fn a_destructive_journal_opens_the_rescue_copy_and_never_the_installed_folio() {
         let (root, rescue) = installation("destructive", Some(Phase::Moving));
         let (home, installed) = Home::of_rescue(HostPlatform::Windows, &rescue).unwrap();
         let data = data_root(&root);
         let (code, world) = run_over(&home, &installed, Some(handed()), &data);
-        assert_eq!(code, 1);
-        assert!(world.spawned.is_empty());
+        assert_eq!(code, 0);
+        let mut words = update_apply_macos::failed_words(&home).to_vec();
+        words.extend(handed());
+        assert_eq!(world.spawned, vec![(rescue.clone(), words)]);
         assert!(world.said[0].contains("Destructive"), "{:?}", world.said);
-        assert!(world.said[0].contains("Folio was not started"));
+        assert!(world.said[0].contains("started"), "{:?}", world.said);
 
         let (code, world) = run_over(&home, &installed, None, &data);
         assert_eq!(code, 0);

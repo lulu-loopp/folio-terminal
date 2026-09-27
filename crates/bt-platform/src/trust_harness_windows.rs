@@ -7,6 +7,7 @@
 //! ephemeral (`NCryptCreatePersistedKey` with no name), every store is a memory
 //! store made by `trust`'s own `Store`, and nothing is installed.
 
+use crate::trust_harness::Behaviour;
 use std::ffi::c_void;
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -717,13 +718,53 @@ fn version_block(version: FileVersion) -> Vec<u8> {
 }
 
 /// **The smallest x64 program Windows loads**: one page of headers and one
-/// `.text` section holding `xor eax, eax; ret` — a PE32+ image a kilobyte
-/// long, which `UpdateResourceW` gives resources, `SignerSignEx3` signs and
-/// `WinVerifyTrust`, `GetFileVersionInfoW` and `LoadLibraryExW` read like any
-/// other. Written, never run.
-fn small_program() -> Vec<u8> {
+/// section, a PE32+ image a kilobyte long, which `UpdateResourceW` gives
+/// resources, `SignerSignEx3` signs and `WinVerifyTrust`,
+/// `GetFileVersionInfoW` and `LoadLibraryExW` read like any other. It opens no
+/// window. [`Behaviour::Returns`]: `xor eax, eax; ret`, importing nothing — the
+/// process exits at once. [`Behaviour::StaysUp`]: `Sleep(INFINITE)` in a loop,
+/// importing that one function from `KERNEL32.dll` — the process waits in the
+/// kernel, using no processor, until it is ended. (A loop that spins instead
+/// keeps a scanner's emulator busy until its own time limit whenever the file
+/// is written, which costs seconds per program.)
+fn small_program(behaviour: Behaviour) -> Vec<u8> {
     const HEADERS: u32 = 0x200;
     const TEXT_RVA: u32 = 0x1000;
+    // `StaysUp`'s section: the code at 0x00, the import descriptors at 0x40
+    // (one and the terminator), the lookup table at 0x68, the address table
+    // at 0x78, `Sleep`'s hint and name at 0x88, the library's name at 0x90.
+    const IMPORTS: u32 = 0x40;
+    const LOOKUP: u32 = 0x68;
+    const ADDRESSES: u32 = 0x78;
+    const HINT_NAME: u32 = 0x88;
+    const LIBRARY: u32 = 0x90;
+    let section: Vec<u8> = match behaviour {
+        Behaviour::Returns => vec![0x31, 0xC0, 0xC3],
+        Behaviour::StaysUp => {
+            let mut section = vec![0u8; 0xA0];
+            // sub rsp, 0x28; mov ecx, INFINITE; call [rip + (ADDRESSES - 0x0F)];
+            // jmp back to the `mov`.
+            let call = (ADDRESSES - 0x0F).to_le_bytes();
+            section[..0x11].copy_from_slice(&[
+                0x48, 0x83, 0xEC, 0x28, 0xB9, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x15, call[0], call[1],
+                call[2], call[3], 0xEB, 0xF3,
+            ]);
+            let at = |offset: u32| offset as usize;
+            let rva = |offset: u32| (TEXT_RVA + offset).to_le_bytes();
+            // The descriptor: lookup table, no time stamp, no forwarder, the
+            // library's name, the address table.
+            section[at(IMPORTS)..at(IMPORTS) + 4].copy_from_slice(&rva(LOOKUP));
+            section[at(IMPORTS) + 12..at(IMPORTS) + 16].copy_from_slice(&rva(LIBRARY));
+            section[at(IMPORTS) + 16..at(IMPORTS) + 20].copy_from_slice(&rva(ADDRESSES));
+            for table in [LOOKUP, ADDRESSES] {
+                section[at(table)..at(table) + 4].copy_from_slice(&rva(HINT_NAME));
+            }
+            section[at(HINT_NAME) + 2..at(HINT_NAME) + 7].copy_from_slice(b"Sleep");
+            section[at(LIBRARY)..at(LIBRARY) + 12].copy_from_slice(b"KERNEL32.dll");
+            section
+        }
+    };
+    let section_size = u32::try_from(section.len()).expect("a page at most");
     let mut image = vec![0u8; 0x400];
     let mut at = 0usize;
     let put = |image: &mut Vec<u8>, at: &mut usize, bytes: &[u8]| {
@@ -770,30 +811,54 @@ fn small_program() -> Vec<u8> {
     for field in [0u32, 16] {
         put(&mut image, &mut at, &field.to_le_bytes());
     }
+    // The sixteen data directories: the import table (1) and the import
+    // address table (12) for `StaysUp`, nothing else.
+    let directories = at;
     put(&mut image, &mut at, &[0; 16 * 8]);
-    // The one section.
+    if behaviour == Behaviour::StaysUp {
+        for (index, rva, size) in [(1, IMPORTS, 40u32), (12, ADDRESSES, 16)] {
+            let entry = directories + index * 8;
+            image[entry..entry + 4].copy_from_slice(&(TEXT_RVA + rva).to_le_bytes());
+            image[entry + 4..entry + 8].copy_from_slice(&size.to_le_bytes());
+        }
+    }
+    // The one section: code, readable and executable — and writable for
+    // `StaysUp`, whose address table the loader fills.
     put(&mut image, &mut at, b".text\0\0\0");
-    for field in [3u32, TEXT_RVA, HEADERS, HEADERS, 0, 0] {
+    for field in [section_size, TEXT_RVA, HEADERS, HEADERS, 0, 0] {
         put(&mut image, &mut at, &field.to_le_bytes());
     }
     put(&mut image, &mut at, &[0; 4]);
-    put(&mut image, &mut at, &0x6000_0020u32.to_le_bytes());
+    let characteristics: u32 = match behaviour {
+        Behaviour::Returns => 0x6000_0020,
+        Behaviour::StaysUp => 0xE000_0060,
+    };
+    put(&mut image, &mut at, &characteristics.to_le_bytes());
     assert!(at <= HEADERS as usize, "the headers fit their page");
-    // `xor eax, eax; ret`.
-    image[HEADERS as usize..HEADERS as usize + 3].copy_from_slice(&[0x31, 0xC0, 0xC3]);
+    image[HEADERS as usize..HEADERS as usize + section.len()].copy_from_slice(&section);
     image
 }
 
-/// **A PE file at `path`**, which must not exist: [`small_program`], carrying
-/// `version` as its `VERSIONINFO` and each of `resources` as an `RCDATA`
-/// resource of that name. Unsigned.
+/// **A PE file at `path`**, which must not exist: [`small_program`] that
+/// returns at once, carrying `version` as its `VERSIONINFO` and each of
+/// `resources` as an `RCDATA` resource of that name. Unsigned.
 pub fn program_at(path: &Path, version: FileVersion, resources: &[(&str, &[u8])]) {
+    program_doing(path, version, resources, Behaviour::Returns);
+}
+
+/// [`program_at`], whose code is `behaviour`'s.
+pub fn program_doing(
+    path: &Path,
+    version: FileVersion,
+    resources: &[(&str, &[u8])],
+    behaviour: Behaviour,
+) {
     let mut file = std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)
         .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
-    file.write_all(&small_program()).unwrap();
+    file.write_all(&small_program(behaviour)).unwrap();
     drop(file);
     let block = version_block(version);
     let file = wide(path.as_os_str());

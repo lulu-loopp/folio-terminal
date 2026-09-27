@@ -2130,3 +2130,57 @@ rollback as undecided: only a `terminal` class without `committed` ends it.
 A macOS start whose rescue clone cannot be started runs the recovery with its
 own program instead (the ordinary start as R). The DESIGN entry of the same
 day has the phase table.
+
+**The Windows apply road as built (U-23).** The applier is the rescue copy
+`H\<txn>\rescue\folio.exe` with `--update-apply <home> <txn> <nonce>`
+(U-28's grammar), on a standalone main (`update_apply_windows`): O's lock
+(60 s; not had → nothing written, W3 stays), O's claim tried until had and let
+go at once (`OldStayed` → `Abandoned`, nothing moved); a `Run` value already
+there → removed, `Reverted` (W4); the staged set revalidated (below) —
+refused → the new applier event `Unverified`, `Handoff` → `Abandoned`; the
+`Run` value armed and read back → `Armed`; exclusive admission; before any
+move every old file still a regular file at its name, no name only the new set
+brings taken, and no old file held open by another process (E-7:
+`install_flip::held_open`, an open for reading and writing with no sharing,
+asked again each poll until the 60 s run out) — any refusal → the value
+removed, `Reverted`, the old build started again with no argument; `Moving`
+durable before the first move; one `MoveFileExW(…, MOVEFILE_WRITE_THROUGH)`
+per file (`install_txn::durable_move`), old files to `backup\` first, then new
+files in from `set\` (I1′ after every move; a failed move → `RollbackIntent`,
+stop); the admission let go; `<install>\folio.exe --update-trial <txn> <nonce>`
+through `quiet_command`, pid from the child, creation time from
+`GetProcessTimes` → `Trial`; the matching receipt → `Committed`; no receipt by
+90 s or the trial gone → `RollbackIntent` and stop (U-24 rolls back). After
+`Committed`: the `Run` value removed and flushed, the recorded old files in
+`backup\` deleted by digest, then `Retired{Committed}`; `H\<txn>` with the
+rescue folder is the next ordinary start's (U-12's `Retire`), because a running
+executable cannot be deleted. The relaunch rules mirror U-29's ruling 1: after
+`Committed` nothing (the trial runs), after `Abandoned` nothing, after a revert
+the old build with no flag.
+
+**Recovery on Windows (U-23).** `--update-recover` runs the same code as R
+under the lock: `Handoff` or `Armed` (a dead applier; nothing moved) → the
+value removed, `Prepared`; `Moving` → `RollbackIntent`; `Trial` → the receipt
+awaited while the recorded trial lives and its deadline has not passed, then
+`Committed` and its retirement, or `RollbackIntent`; `Committed` → the
+retirement finished (W12). A `Handoff` while a process of the rescue image
+older than R lives is the applier's: R lets the lock go and waits. With
+`--then-launch`, a Folio then opens whatever the journal says: the installed
+build unless the class is still `destructive`, and then the rescue copy (the
+old build, with `--update-failed <journal>` first, whose own home holds no
+journal) — so a double-click always opens a
+window, and never loops through the rescue build.
+
+**U-20's four decisions, as taken.** (1) Revalidation runs in the applier,
+under the lock, after O has let go and before the entrance is written
+(`update_prepare_windows::staged_as_verified`; O's later-launch resume,
+`revalidate`, is the card's, U-19 with U-32). The version is read from the
+staged `folio.exe`'s own `VERSIONINFO`, not from a body field: the journal's
+recorded digests were taken when the set had just been verified at the
+offer's version and bind it to that offer; a field would grow the rescue
+build's format for a value the digests already fix, and a later-launch resume
+has no offer to take it from. (2) A name the journal records as an old file
+that is now a folder, a link or nothing refuses the flip before any move
+(`Reverted`, the old build started again). (3) Collisions are kept: carried to
+`backup\` like any old file and put back by a rollback. (4) `folio.msix` is
+moved when the set has one and not required.

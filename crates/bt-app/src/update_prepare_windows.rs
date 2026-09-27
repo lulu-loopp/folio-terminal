@@ -70,11 +70,13 @@
 //!
 //! **A later launch** is `update_prepare::at_launch`, shared with macOS (W1's
 //! sweep, W2's count and its discard at the second launch). **Before any
-//! resume** ([`revalidate`]): the channel and the home, the running image still
-//! the one the journal recorded, every staged member still its recorded digest,
-//! the staged executable's identity again, and the rescue copy still the old
-//! image; a failure discards. It has no product caller yet: the Restart that
-//! resumes a staged transaction is U-23's.
+//! resume, and before the apply** ([`staged_as_verified`]): the channel and
+//! the home, the installed image still the one the journal recorded, every
+//! staged member still its recorded digest, the staged executable's identity again at
+//! its own version, and the rescue copy still the old image. The applier runs
+//! it after O has let go and before the entrance is written (U-23); O's resume
+//! at a later launch ([`revalidate`], which discards on a failure) is the
+//! card's (U-19 with U-32).
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -627,24 +629,26 @@ fn present(install: &Path, shipped: &[String], new: &[Member]) -> Result<Vec<Mem
     Ok(present)
 }
 
-// ── before a resume ─────────────────────────────────────────────────────────
+// ── before a resume, and before the apply ────────────────────────────────────
 
-/// **What a resume is checked against**: the running executable, how this copy
-/// was installed, the trust policy, and the version the staged set is.
+/// **What a staged transaction is checked against**: the installed executable
+/// (the running one, for a resume in O; `<install>\folio.exe`, for the
+/// applier), how that copy was installed, and the trust policy. The version
+/// the staged set is held to is read from the staged `folio.exe`'s own
+/// `VERSIONINFO` (U-23's decision on U-20's decision 1): the journal records
+/// no tag and no `to_version`, and needs neither — every staged member's
+/// digest was recorded when it had just been verified at the offer's version,
+/// and it is those digests that bind the set to that offer now.
 pub(crate) struct Resume<'a> {
     pub(crate) exe: &'a Path,
     pub(crate) channel: Option<Channel>,
     pub(crate) policy: &'a Policy,
-    pub(crate) to_version: &'a str,
 }
 
-/// **Revalidate a staged transaction before it is resumed** ((b).1 F-17:
-/// hash, signature, manifest, classification): this copy's channel and home
-/// ([`eligible`]); the running image still the `folio.exe` the journal
-/// recorded as present; every staged member of `set\` still its recorded
-/// digest and length, and the staged set's identity checks again at
-/// `to_version`; the rescue copy still the old image. A failure discards the
-/// transaction (`Discarded`, then `update_prepare::clear`) and says why.
+/// **Revalidate a staged transaction before O resumes it** ((b).1 F-17: hash,
+/// signature, manifest, classification) — [`staged_as_verified`]; a failure
+/// discards the transaction (`Discarded`, then `update_prepare::clear`) and
+/// says why.
 ///
 /// # Errors
 /// The [`Stop`] that failed; the transaction is gone.
@@ -652,7 +656,7 @@ pub(crate) struct Resume<'a> {
     not(test),
     expect(
         dead_code,
-        reason = "the resume at Restart and at a later launch is wired with the apply (U-23)"
+        reason = "O's resume at a later launch is the card's (U-19 with U-32); the applier revalidates through `staged_as_verified` (U-23)"
     )
 )]
 pub(crate) fn revalidate(
@@ -660,7 +664,7 @@ pub(crate) fn revalidate(
     staged: Staged,
     resume: &Resume<'_>,
 ) -> Result<Staged, Stop> {
-    match still_valid(&staged, resume) {
+    match staged_as_verified(&staged.home, &staged.journal, resume) {
         Ok(()) => Ok(staged),
         Err(stop) => {
             let _ = discard(worker, staged, &Event::Discarded);
@@ -669,44 +673,58 @@ pub(crate) fn revalidate(
     }
 }
 
-fn still_valid(staged: &Staged, resume: &Resume<'_>) -> Result<(), Stop> {
-    let Layout::Members(inventories) = &staged.journal.body.layout else {
+/// **The staged transaction `journal` of `home` is still what was verified**
+/// — the check a resume in O and the applier both run, the applier under the
+/// transaction lock after O has let go and before it writes the entrance
+/// (U-23): this copy's channel and home ([`eligible`]); the installed image
+/// still the `folio.exe` the journal recorded as present; every staged member of `set\`
+/// still its recorded digest and length, and the staged set's identity checks
+/// again at the staged `folio.exe`'s own version; the rescue copy still the
+/// old image.
+///
+/// # Errors
+/// The [`Stop`] that failed. Nothing is written.
+pub(crate) fn staged_as_verified(
+    home: &Home,
+    journal: &Journal,
+    resume: &Resume<'_>,
+) -> Result<(), Stop> {
+    let Layout::Members(inventories) = &journal.body.layout else {
         return Err(Stop::Journal);
     };
-    let home = eligible(resume.exe, resume.channel).map_err(|why| stop_for(&why))?;
-    if home != staged.home {
+    let found = eligible(resume.exe, resume.channel).map_err(|why| stop_for(&why))?;
+    if &found != home {
         return Err(Stop::NotOurs);
     }
     let name = resume.exe.file_name().ok_or(Stop::NotWritable)?;
-    let recorded = |wanted: &OsStr| {
-        inventories
-            .old_present
-            .iter()
-            .find(|member| OsStr::new(&member.name) == wanted)
-    };
-    let old = recorded(name).ok_or(Stop::Identity)?;
-    let is_old = |path: &Path| {
+    let is = |path: &Path, member: &Member| {
         digest_of(path).is_ok_and(|(digest, size)| {
-            Digest::parse(&digest).ok() == Some(old.digest) && size == old.size
+            Digest::parse(&digest).ok() == Some(member.digest) && size == member.size
         })
     };
-    if !is_old(resume.exe) {
+    let old = inventories
+        .old_present
+        .iter()
+        .find(|member| OsStr::new(&member.name) == name)
+        .ok_or(Stop::Identity)?;
+    if !is(resume.exe, old) {
         return Err(Stop::Identity);
     }
     let running = trust::identity_of(resume.exe, resume.policy).map_err(|_| Stop::Identity)?;
-    let expectation = file_version(resume.to_version)
-        .map(|offered| running.for_offer(offered))
-        .ok_or(Stop::Identity)?;
-    let set = staged
-        .home
-        .members_folder(staged.journal.txn, Place::Set)
+    let set = home
+        .members_folder(journal.txn, Place::Set)
         .ok_or(Stop::Journal)?;
-    still_staged(&set, &inventories.new, &expectation, resume.policy)?;
-    let rescue = staged
-        .home
-        .rescue_copy(staged.journal.txn, name)
-        .ok_or(Stop::Journal)?;
-    if !is_old(&rescue) {
+    let staged_version = trust::identity_of(&set.join(EXECUTABLE), resume.policy)
+        .map_err(|_| Stop::Identity)?
+        .version;
+    still_staged(
+        &set,
+        &inventories.new,
+        &running.for_offer(staged_version),
+        resume.policy,
+    )?;
+    let rescue = home.rescue_copy(journal.txn, name).ok_or(Stop::Journal)?;
+    if !is(&rescue, old) {
         return Err(Stop::Clone);
     }
     Ok(())

@@ -29,6 +29,41 @@ pub const IDENTITY: &str = "1.3.6.1.4.1.311.97.11111111.22222222.33333333.444444
 /// Another identity OID under the same prefix.
 pub const OTHER_IDENTITY: &str = "1.3.6.1.4.1.311.97.55555555.66666666.77777777.88888888";
 
+/// **What a program the harness writes does when it is run** (0.4.6 ticket
+/// U-23: the Windows applier's tests start the installed build, the trial and
+/// the rescue copy as real processes). Neither imports anything or opens a
+/// window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Behaviour {
+    /// `xor eax, eax; ret`: the process exits at once, with 0.
+    Returns,
+    /// `Sleep(INFINITE)` in a loop: the process stays up, using no processor,
+    /// until it is ended — by the test that started it, by its handle or its
+    /// recorded pid.
+    StaysUp,
+}
+
+/// **Write an unsigned program at `path`**, which must not exist: `behaviour`'s
+/// code, carrying `version` as its `VERSIONINFO`.
+///
+/// # Errors
+/// `Unsupported` off Windows.
+pub fn program(path: &Path, version: FileVersion, behaviour: Behaviour) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        world::program_doing(path, version, &[], behaviour);
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (path, version, behaviour);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "the harness writes Windows programs only",
+        ))
+    }
+}
+
 #[cfg(windows)]
 #[path = "trust_harness_windows.rs"]
 pub mod world;
@@ -89,9 +124,29 @@ impl TestCa {
         identity: &str,
         resources: &[(&str, &[u8])],
     ) {
+        self.signed_program_that(
+            path,
+            version,
+            subject,
+            identity,
+            resources,
+            Behaviour::Returns,
+        );
+    }
+
+    /// [`TestCa::signed_program`], whose code is `behaviour`'s.
+    pub fn signed_program_that(
+        &self,
+        path: &Path,
+        version: FileVersion,
+        subject: &str,
+        identity: &str,
+        resources: &[(&str, &[u8])],
+        behaviour: Behaviour,
+    ) {
         #[cfg(windows)]
         {
-            world::program_at(path, version, resources);
+            world::program_doing(path, version, resources, behaviour);
             let leaf = self.0.leaf(subject, identity);
             world::sign(
                 path,
@@ -102,7 +157,7 @@ impl TestCa {
         }
         #[cfg(not(windows))]
         {
-            let _ = (path, version, subject, identity, resources);
+            let _ = (path, version, subject, identity, resources, behaviour);
             match self.0 {}
         }
     }

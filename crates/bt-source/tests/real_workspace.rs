@@ -173,7 +173,8 @@ fn expected_unreached() -> BTreeMap<String, Vec<String>> {
 /// nineteen with `update_apply_macos_tests.rs` (0.4.6 ticket U-28), the macOS
 /// applier's tests over real bundles, locks and processes.
 /// twenty with `update_prepare_windows_tests.rs` (0.4.6 ticket U-20), the
-/// Windows Prepare's tests.
+/// Windows Prepare's tests; twenty-one with `update_apply_windows_tests.rs`
+/// (0.4.6 ticket U-23), the Windows applier's and recovery's tests.
 ///
 /// `scripts/dev/bt-app-graph.py` carries this set as a hand-written literal of
 /// five names, and §6.6 of the plan is about the seven it is missing — four of
@@ -184,7 +185,7 @@ fn expected_unreached() -> BTreeMap<String, Vec<String>> {
 /// MUTATION: take `#[cfg(test)]` off `mod tests;` in `main.rs` and the set loses
 /// `tests.rs`; put one on `mod quake;` and it gains `quake.rs`.
 #[test]
-fn the_wholly_test_files_of_bt_app_are_the_twenty() {
+fn the_wholly_test_files_of_bt_app_are_the_twenty_one() {
     let workspace = workspace();
     let package = workspace.package("bt-app").expect("bt-app");
     let universe = universes::crate_sources(package, Vendor::Excluded).expect("bt-app's own src");
@@ -212,13 +213,14 @@ fn the_wholly_test_files_of_bt_app_are_the_twenty() {
             "text_size_tests.rs",
             "uninstall_tests.rs",
             "update_apply_macos_tests.rs",
+            "update_apply_windows_tests.rs",
             "update_archive_tests.rs",
             "update_eligibility.rs",
             "update_prepare_macos_tests.rs",
             "update_prepare_windows_tests.rs",
             "window_waits_tests.rs",
         ],
-        "the twenty of `docs/plans/bt-app-split-prep.md` §6.6"
+        "the twenty-one of `docs/plans/bt-app-split-prep.md` §6.6"
     );
     println!("bt-app: {} files reached", enumeration.files().len());
     assert!(

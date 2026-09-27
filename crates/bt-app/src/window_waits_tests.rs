@@ -1708,9 +1708,10 @@ const LANDMARKS: [(&str, &[&str]); 4] = [
 /// in `fn main` after the parse (and so before the hand-over); `loop_running` on
 /// `StartCause::Init`; `exiting` at the head of `App::finish`, in `settle_quit`'s `Write` arm, in
 /// `main`'s build-error arm and after `run_app`; `quit_abandoned` in the `Abandon` arm; and the
-/// five standalone entries (the fourth, the macOS applier's, U-28; the fifth, the recovery
-/// door's, which rolls a macOS bundle back on a worker since U-29).
-const PINS: [Pin; 12] = [
+/// six standalone entries (the fourth, the macOS applier's, U-28; the fifth, the recovery
+/// door's, which rolls a macOS bundle back on a worker since U-29 and recovers a Windows
+/// transaction since U-23; the sixth, the Windows applier's, U-23).
+const PINS: [Pin; 13] = [
     Pin {
         writer: "enter_window_thread",
         owner: "bt-app crate::main",
@@ -1764,6 +1765,11 @@ const PINS: [Pin; 12] = [
     Pin {
         writer: "enter_standalone_main",
         owner: "bt-app crate::update_apply_macos::run_here",
+        after: None,
+    },
+    Pin {
+        writer: "enter_standalone_main",
+        owner: "bt-app crate::update_apply_windows::run_here",
         after: None,
     },
     Pin {
