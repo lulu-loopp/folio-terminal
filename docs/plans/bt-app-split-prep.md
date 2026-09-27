@@ -672,6 +672,8 @@ The twelve wholly-test files, by the declaration that makes each one:
 
 **Twenty at the merge of both (2026-09-27):** U-28's `update_apply_macos_tests.rs` and U-20's `update_prepare_windows_tests.rs` both joined, so the test is `the_wholly_test_files_of_bt_app_are_the_twenty`.
 
+**A twenty-first since 2026-09-27** (0.4.6 ticket U-23): `update_apply_windows.rs` declares `#[cfg(test)] #[path = "update_apply_windows_tests.rs"] mod tests;` — the Windows applier's and recovery's tests over real install folders, programs signed by U-15's test root, real locks, a real claim, real moves and real synthetic processes — which makes `update_apply_windows_tests.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_twenty_one`.
+
 ---
 
 ## 7. The end measurement

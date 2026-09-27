@@ -18,7 +18,7 @@ use std::sync::mpsc;
 
 use bt_persist::UpdateCheckV1;
 use bt_platform::HostPlatform;
-use bt_platform::trust_harness::{IDENTITY, OTHER_IDENTITY, SUBJECT, TestCa};
+use bt_platform::trust_harness::{Behaviour, IDENTITY, OTHER_IDENTITY, SUBJECT, TestCa};
 use bt_winres::digest::{hex, sha256};
 use bt_winres::release_manifest::{PROTOCOL, RESOURCE_NAME, archive_root};
 
@@ -74,6 +74,28 @@ fn build(
     identity: &str,
     says: &str,
 ) -> Vec<(String, Vec<u8>)> {
+    build_that(
+        ca,
+        folder,
+        version,
+        spelled,
+        identity,
+        says,
+        Behaviour::Returns,
+    )
+}
+
+/// [`build`], whose `folio.exe` does what `behaviour` says when it is run —
+/// the Windows applier's tests start it (U-23).
+pub(crate) fn build_that(
+    ca: &TestCa,
+    folder: &Path,
+    version: FileVersion,
+    spelled: &str,
+    identity: &str,
+    says: &str,
+    behaviour: Behaviour,
+) -> Vec<(String, Vec<u8>)> {
     let mut members = Vec::new();
     for sidecar in SIDECARS {
         let path = folder.join(sidecar);
@@ -102,12 +124,13 @@ fn build(
             .collect(),
     };
     let exe = folder.join(EXECUTABLE);
-    ca.signed_program(
+    ca.signed_program_that(
         &exe,
         version,
         SUBJECT,
         identity,
         &[(RESOURCE_NAME, manifest.encode().as_bytes())],
+        behaviour,
     );
     let mut files = vec![(EXECUTABLE.to_owned(), std::fs::read(&exe).unwrap())];
     files.extend(members);
@@ -891,7 +914,7 @@ fn a_deferred_transaction_survives_the_first_relaunch() {
 /// resume that trusted the journal's word for them would install whatever is
 /// there now.
 ///
-/// MUTATION: in `still_valid`, skip `still_staged`.
+/// MUTATION: in `staged_as_verified`, skip `still_staged`.
 #[test]
 fn revalidation_before_resume_refuses_a_changed_set() {
     let Some(scene) = Scene::new("revalidate") else {
@@ -925,7 +948,6 @@ fn revalidation_before_resume_refuses_a_changed_set() {
                 exe: &exe,
                 channel: Some(Channel::Ours),
                 policy: &policy,
-                to_version: TO,
             };
             let staged = revalidate(worker, *staged, &resume);
             let unchanged = staged.as_ref().map(drop).map_err(|stop| *stop);

@@ -79,7 +79,7 @@ pub fn exchange(live: &Path, staged: &Path) -> Result<(), Failure> {
 ///
 /// # Errors
 /// The process list could not be read, or `executable` cannot be looked at;
-/// `Unsupported` off macOS.
+/// `Unsupported` where there is no arm (neither macOS nor Windows).
 pub fn running_from(executable: &Path) -> io::Result<Vec<Running>> {
     imp::running_from(executable)
 }
@@ -114,7 +114,7 @@ pub enum Ask {
 /// there) names nothing.
 ///
 /// # Errors
-/// The process list could not be read; `Unsupported` off macOS.
+/// The process list could not be read; `Unsupported` where there is no arm.
 pub fn runs_from(process: Running, images: &[&Path]) -> io::Result<bool> {
     for image in images {
         match running_from(image) {

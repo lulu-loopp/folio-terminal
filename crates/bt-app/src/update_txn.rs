@@ -965,6 +965,14 @@ pub(crate) enum Event {
     /// Nothing has moved: the transaction is abandoned — terminal, outcome
     /// `none` — and cleared.
     OldStayed,
+    /// **The staged set is no longer what was verified** (U-23, (b).1 F-17):
+    /// the Windows applier, holding the lock after the old build let go and
+    /// before it writes the entrance, found an old file, a staged member or
+    /// the rescue copy changed since `Prepared`
+    /// (`update_prepare_windows::staged_as_verified`). Nothing has moved: the
+    /// transaction is abandoned — terminal, outcome `none` — and the next
+    /// ordinary start retires it (W13).
+    Unverified,
     /// The entrance is written, flushed and read back (F-2, F-3). The proof is
     /// `bt_platform::install_txn::Armed`, one type for both platforms, which
     /// only the two entrance doors make, and only after their read-back
@@ -1017,6 +1025,7 @@ pub(crate) enum EventKind {
     HandedOff,
     ApplierNotStarted,
     OldStayed,
+    Unverified,
     Armed,
     EntranceFailed,
     Reverted,
@@ -1031,7 +1040,7 @@ pub(crate) enum EventKind {
 }
 
 impl EventKind {
-    pub(crate) const ALL: [EventKind; 18] = [
+    pub(crate) const ALL: [EventKind; 19] = [
         EventKind::Prepared,
         EventKind::PrepareFailed,
         EventKind::LaunchedWithoutResume,
@@ -1039,6 +1048,7 @@ impl EventKind {
         EventKind::HandedOff,
         EventKind::ApplierNotStarted,
         EventKind::OldStayed,
+        EventKind::Unverified,
         EventKind::Armed,
         EventKind::EntranceFailed,
         EventKind::Reverted,
@@ -1062,6 +1072,7 @@ impl EventKind {
             | EventKind::HandedOff
             | EventKind::ApplierNotStarted => &[Actor::Old],
             EventKind::OldStayed
+            | EventKind::Unverified
             | EventKind::Armed
             | EventKind::EntranceFailed
             | EventKind::Admitted => &[Actor::Applier],
@@ -1090,6 +1101,7 @@ impl Event {
             Event::HandedOff { .. } => EventKind::HandedOff,
             Event::ApplierNotStarted => EventKind::ApplierNotStarted,
             Event::OldStayed => EventKind::OldStayed,
+            Event::Unverified => EventKind::Unverified,
             Event::Armed(_) => EventKind::Armed,
             Event::EntranceFailed => EventKind::EntranceFailed,
             Event::Reverted => EventKind::Reverted,
@@ -1164,6 +1176,11 @@ pub(crate) const TRANSITIONS: &[(PhaseKind, EventKind, PhaseKind)] = &[
     (
         PhaseKind::Handoff,
         EventKind::OldStayed,
+        PhaseKind::Abandoned,
+    ),
+    (
+        PhaseKind::Handoff,
+        EventKind::Unverified,
         PhaseKind::Abandoned,
     ),
     (PhaseKind::Handoff, EventKind::Armed, PhaseKind::Armed),
@@ -1267,7 +1284,7 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
         }
         (
             Phase::Handoff { .. },
-            Event::EntranceFailed | Event::ApplierNotStarted | Event::OldStayed,
+            Event::EntranceFailed | Event::ApplierNotStarted | Event::OldStayed | Event::Unverified,
         ) => Ok(Phase::Abandoned),
         (Phase::Handoff { .. } | Phase::Armed | Phase::Moving, Event::Reverted) => {
             Ok(Phase::Prepared {
@@ -2935,6 +2952,7 @@ mod tests {
             },
             Event::ApplierNotStarted,
             Event::OldStayed,
+            Event::Unverified,
             armed(),
             Event::EntranceFailed,
             Event::Reverted,

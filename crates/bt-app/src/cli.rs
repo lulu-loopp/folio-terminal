@@ -966,8 +966,9 @@ pub fn recover_command_line(home: Option<&Path>, then_launch: &[OsString]) -> Ve
 }
 
 /// What this build answers `--update-apply` with **where its door does not
-/// exist yet** (Windows, until U-23), and a malformed `--update-recover` or
-/// `--update-apply` line with: one line, never a window.
+/// exist** (a platform with no applier: neither macOS, U-28, nor Windows,
+/// U-23), and a malformed `--update-recover` or `--update-apply` line with:
+/// one line, never a window.
 #[must_use]
 pub fn update_door_refusal(usage: Option<&'static str>) -> String {
     match usage {

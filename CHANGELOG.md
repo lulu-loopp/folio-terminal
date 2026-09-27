@@ -37,6 +37,15 @@ All notable changes to Folio are recorded here. The format follows
   version was restored. If putting it back fails, everything is kept, the card
   says the update is incomplete and shows the folder, and the next login or
   start tries again, three times at most. Nothing can start an update yet.
+- On Windows, the coming updater can now apply a prepared update: after Folio
+  quits, a copy of the old build waits for it to be gone, checks the prepared
+  files again, makes sure no file of the install folder is still in use, moves
+  the old files aside and the new ones in, starts the new build, and keeps the
+  old files until the new one has opened a window with text in it; then they
+  are removed. If the new build does not get that far in 90 seconds, the update
+  is marked for rolling back (the rollback itself comes next). Starting Folio
+  while an update was cut short always opens a window: the old build, or the
+  new one once it has proved itself. Nothing can start an update yet.
 - On macOS, the coming updater can now apply a prepared update: after Folio
   quits, a copy of the old app waits for it to be gone, swaps the new app into
   place in one step, starts it, and keeps the old one until the new one has
