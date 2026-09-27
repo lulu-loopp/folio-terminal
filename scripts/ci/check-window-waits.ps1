@@ -52,7 +52,7 @@
 param(
     # The seed: the commit that wrote the inventory first (A2a S1). Pinned, never
     # computed.
-    [string]$Seed = "7f87f463574757de444638f05d459a8cee94e3ac",
+    [string]$Seed = "11b9da8a0ef051d3835786715607bd588fd72e1e",
     # The level `disallowed_methods` stands at in the two lint tables that may name it: none
     # until A2e writes `deny` in both (budget note C-2 item 1, as revision (i)5 narrows it). The
     # one place these values are said.
@@ -246,14 +246,25 @@ try {
         exit 2
     }
 
-    $text = (& git show "${base}:${relative}" 2>$null) | Out-String
-    $against = "the merge base $($base.Substring(0, 12))"
-    if ($LASTEXITCODE -ne 0) {
+    # The baseline is the merge base's file, unless the pinned seed is newer than the merge
+    # base (the seed commit is not among its ancestors): then the seed's file is the baseline,
+    # because a re-seed is exactly the one moment the inventory may grow, and it is committed
+    # with its own pin. Once the seed is on main, the merge base carries it and rules again.
+    & git merge-base --is-ancestor $Seed $base *> $null
+    $seedIsNewer = ($LASTEXITCODE -ne 0)
+    $text = $null
+    if (-not $seedIsNewer) {
+        $text = (& git show "${base}:${relative}" 2>$null) | Out-String
+        $against = "the merge base $($base.Substring(0, 12))"
+        if ($LASTEXITCODE -ne 0) { $text = $null }
+    }
+    if ($null -eq $text) {
         $text = (& git show "${Seed}:${relative}" 2>$null) | Out-String
         if ($LASTEXITCODE -ne 0) {
             throw "$relative is not at the merge base $base, and the pinned seed $Seed cannot be read: fetch the history that holds it"
         }
-        $against = "the seed $($Seed.Substring(0, 12)) (the merge base $($base.Substring(0, 12)) predates the inventory)"
+        $why = if ($seedIsNewer) { "the seed is newer than the merge base $($base.Substring(0, 12))" } else { "the merge base $($base.Substring(0, 12)) predates the inventory" }
+        $against = "the seed $($Seed.Substring(0, 12)) ($why)"
     }
     $before = Read-Inventory ($text -split "`r?`n") "$relative at $against"
 
