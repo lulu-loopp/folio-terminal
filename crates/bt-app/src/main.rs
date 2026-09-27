@@ -42598,7 +42598,15 @@ impl Runtime<'_> {
         // Idempotent, and a disk write on exactly one frame — see
         // `update::answer_mark`, which is also where the gear's own repaint is
         // argued about.
+        //
+        // **The row keeps the mark for the rest of this visit** (0.4.6
+        // T-GEAR-MARK-LANDS): the panel is told the gear was lit before the
+        // answer puts it out, so the update row wears the dot the gear led the
+        // reader to until they leave the page — `seen_tag` stays the one answer.
         if self.window.settings.category() == settings::SettingsCategory::General {
+            self.window
+                .settings
+                .carry_update_mark(update::gear_mark_is_lit());
             update::answer_mark();
         }
         let inputs = settings::geometry::Inputs::new(
@@ -42890,6 +42898,15 @@ impl Runtime<'_> {
             update_check: self.app.settings_store.loaded().update_check,
             // What the row ends with is the update job's to say (0.4.6 U-19).
             update_row: update_card::row_foot(&self.app.update_job),
+            // The offer the gear and the General row read, for the About page's
+            // `Version` row; and whether the update row wears the gear's mark —
+            // the gear's own answer, or the visit it led to (0.4.6
+            // T-GEAR-MARK-LANDS).
+            update_offer: update::offer(),
+            update_mark: self
+                .window
+                .settings
+                .update_row_marked(update::gear_mark_is_lit()),
             key_hints: self.app.settings_store.loaded().key_hints,
             option_sends_alt: self.app.settings_store.loaded().option_sends_alt,
             // The machine's own answer, cached at the three moments it can
@@ -68033,6 +68050,114 @@ mod floated_page_tests {
                  what they came for"
             );
         }
+    }
+
+    /// The gear's arm of the caption press, cut out of the body it belongs to —
+    /// `the_gear_on_the_summoned_terminal_opens_the_page_about_it`'s own cut.
+    fn gear_arm() -> &'static str {
+        let press = method_body("Runtime", "chrome_mouse_input");
+        let arm = press
+            .split("seats::ChromeTarget::Settings => {")
+            .nth(1)
+            .expect("the gear's arm is in the press it belongs to");
+        &arm[..arm
+            .find("seats::ChromeTarget::PanelToggle")
+            .unwrap_or(arm.len())]
+    }
+
+    /// RED (0.4.6 T-GEAR-MARK-LANDS; owner, 2026-09-27) — **a lit gear opens
+    /// Settings on the row its mark is about.**
+    ///
+    /// The gear wore the update mark, the press opened the dialog at the top of
+    /// its first page, and nothing there said what the mark had meant. While
+    /// `update::gear_mark_is_lit` answers yes, the press goes through
+    /// `open_settings_on_row` with `UpdateCheck` — the door that turns to the
+    /// row's page and scrolls it into view (its geometry is pinned by
+    /// `settings::tests::a_lit_gear_lands_on_general_with_the_update_row_in_view`),
+    /// and the layout it asks for is the one that answers the mark. The summoned
+    /// terminal's gear keeps its own page, and the question is asked after it.
+    ///
+    /// **No page is remembered or overwritten**: the dialog has never reopened
+    /// where it was left (`SettingsPanel::toggle`, "it opens on the first page"),
+    /// so the jump has no memory to disturb, and the next unlit press opens the
+    /// first page at its top exactly as before
+    /// (`an_unlit_gear_opens_the_first_page_as_it_always_has`).
+    ///
+    /// MUTATION: delete the `else if update::gear_mark_is_lit()` branch — the
+    /// lit gear toggles the dialog open on the first page's top and this goes red.
+    #[test]
+    fn a_lit_gear_opens_settings_on_the_marked_row() {
+        let arm = gear_arm();
+        let quake = arm
+            .find("if self.is_quake_window()")
+            .expect("the summoned terminal's gear is asked first");
+        let lit = arm
+            .find("} else if update::gear_mark_is_lit() {")
+            .expect("a lit gear is asked about before the dialog is toggled");
+        let lands = arm
+            .find("self.open_settings_on_row(settings::SettingsRow::UpdateCheck)?")
+            .expect("and it opens the dialog on the update row");
+        let toggle = arm
+            .find("self.toggle_settings_panel()?")
+            .expect("the unlit gear keeps its door");
+        assert!(
+            quake < lit && lit < lands && lands < toggle,
+            "the lit branch is the second question and the toggle the last:\n{arm}"
+        );
+        assert_eq!(
+            crate::settings::SettingsRow::UpdateCheck.category(),
+            crate::settings::SettingsCategory::General,
+            "the row the lit gear names is on the page the mark is answered on"
+        );
+    }
+
+    /// PIN (0.4.6 T-GEAR-MARK-LANDS) — **an unlit gear opens the dialog exactly
+    /// as it always has**: the toggle, on the first page, at its top.
+    ///
+    /// Unchanged behaviour pinned beside the change. The brief asked for "the
+    /// last page"; the dialog has no last-page memory to return to — it opens on
+    /// its first page by ruling (`SettingsPanel::toggle`) — so what is pinned is
+    /// that ruling, untouched by the lit branch.
+    ///
+    /// MUTATION: route the unlit press through `open_settings_on_row` as well —
+    /// the arm's last branch is no longer the toggle and this goes red; stop
+    /// `toggle_settings_panel` resetting the scroll and the second assertion
+    /// does.
+    #[test]
+    fn an_unlit_gear_opens_the_first_page_as_it_always_has() {
+        let arm = gear_arm();
+        let last = arm
+            .rfind("} else {")
+            .expect("the arm ends in the unlit press");
+        assert!(
+            arm[last..].contains("self.toggle_settings_panel()?")
+                && !arm[last..].contains("open_settings_on_row"),
+            "an unlit gear toggles the dialog and names no row:\n{arm}"
+        );
+        assert!(
+            method_body("Runtime", "toggle_settings_panel")
+                .contains("self.window.settings_scroll = 0.0;"),
+            "and the dialog it opens is at the top of its page"
+        );
+        let rows = crate::settings::visible_rows(crate::seats::TabLayoutMode::Horizontal);
+        let values = crate::settings::SettingsValues::sample();
+        let content = crate::settings::SettingsContent {
+            rows: &rows,
+            shortcuts: &[],
+            profiles: &[],
+            scheme_files: &[],
+            advanced: crate::settings::AdvancedOpen::default(),
+            advanced_reveal: None,
+            editor: None,
+            values: &values,
+        };
+        let mut panel = crate::settings::SettingsPanel::default();
+        panel.toggle(content);
+        assert_eq!(
+            panel.category(),
+            content.first_category(),
+            "on the first page, whatever page was open before"
+        );
     }
 
     /// RED (§7.54e ①, user ruling 2026-09-05) — **a run ends with the last window a person can

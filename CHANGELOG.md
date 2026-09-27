@@ -6,6 +6,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- When the settings gear wears its update dot, clicking it opens Settings at
+  the update row, which wears the same dot for as long as you stay on the page;
+  the About page's Version row names the newer version and carries the same
+  button as the update row.
+
 ### Fixed
 
 - macOS: the shipped shells start as login shells, so tools whose PATH is set

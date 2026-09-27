@@ -190,6 +190,10 @@ const ROW_DESC_FONT_LOGICAL_PX: f32 = 12.0;
 /// The 12px line box, measured in the mock-up.
 const ROW_DESC_LINE_LOGICAL_PX: f32 = 14.5;
 const ROW_DESC_MARGIN_TOP_LOGICAL_PX: f32 = 1.0;
+/// The gap between a row's title and the update mark after it (0.4.6
+/// T-GEAR-MARK-LANDS) — the mark is the gear's 6px disc, set a little more than
+/// a space off the word it follows.
+const ROW_MARK_GAP_LOGICAL_PX: f32 = 6.0;
 /// **How many lines a row's sentence may take** (user ruling 2026-08-25, which
 /// revises 0817's fixed row height).
 ///
@@ -4474,7 +4478,19 @@ impl SettingsRow {
             Self::QuakeCommand => Text::DescQuakeCommand.text(),
             Self::QuakeTopGap => Text::DescQuakeTopGap.text(),
             Self::QuakeRestore => Text::DescQuakeRestore.text(),
-            Self::AboutVersion => Text::DescAboutVersion.text(),
+            // **And the offer while an update is offered** (0.4.6
+            // T-GEAR-MARK-LANDS): a reader who comes to the version to see whether
+            // it is the newest is told which one is, on the row they came to. In
+            // place of the row's own sentence, which with it would take a third
+            // line — see `i18n::about_version_offer_in`. Interned for
+            // `update::row_description`'s reason.
+            Self::AboutVersion => match values.update_offer.as_deref() {
+                None => Text::DescAboutVersion.text(),
+                Some(tag) => crate::i18n::intern(crate::i18n::about_version_offer_in(
+                    crate::i18n::current(),
+                    tag,
+                )),
+            },
             Self::AboutPlatform => Text::DescAboutPlatform.text(),
             Self::AboutReleaseNotes => Text::DescAboutReleaseNotes.text(),
             Self::AboutIssues => Text::DescAboutIssues.text(),
@@ -5618,6 +5634,41 @@ impl SettingsRow {
     pub fn leaves_the_window(self) -> bool {
         matches!(self.control(), SettingsControl::Link) && !self.opens_a_dialog()
     }
+
+    /// **The update row's verb, on the About page's `Version` row** (0.4.6
+    /// T-GEAR-MARK-LANDS): while an update is offered, the version row carries
+    /// the General row's foot — `Open releases page`, `Restart to update` or
+    /// `Copy`, whichever the update job says ([`SettingsValues::update_row`]) —
+    /// as a door under its fact, and whether that door leaves the window (the
+    /// `↗` the General row's picker puts on the releases page).
+    ///
+    /// One verb for two rows: a press on this door is
+    /// [`SettingsTarget::Link`] of this row, and [`update_row_foot_requested`]
+    /// answers it exactly as it answers the General row's foot. `None` on every
+    /// other row, and on this one while nothing is offered.
+    #[must_use]
+    pub fn update_door(self, values: &SettingsValues) -> Option<(&'static str, bool)> {
+        (self == Self::AboutVersion && values.update_offer.is_some()).then(|| {
+            (
+                values.update_row.text(),
+                matches!(values.update_row, crate::update_card::RowFoot::ReleasesPage),
+            )
+        })
+    }
+
+    /// **The verb on this row's door button and whether it leaves the window**
+    /// — a link row's own, or the update door above; `None` for a row with no
+    /// door. The one reader the door width is solved from and the draw prints.
+    #[must_use]
+    fn door_verb(self, values: &SettingsValues) -> Option<(&'static str, bool)> {
+        if matches!(self.control(), SettingsControl::Link) {
+            return Some((
+                self.stated_value().unwrap_or_default(),
+                self.leaves_the_window(),
+            ));
+        }
+        self.update_door(values)
+    }
 }
 
 /// **Where one of the About page's doors leads** (owner ruling 2026-09-15).
@@ -6533,6 +6584,16 @@ pub struct SettingsValues {
     /// `agent_config_refusals`' reason: the job is the application's, and the
     /// row reads what it already knows.
     pub update_row: crate::update_card::RowFoot,
+    /// **The tag this reader is offered**, if any — `update::offer`, the one
+    /// decision the gear and the General row already read (0.4.6
+    /// T-GEAR-MARK-LANDS). The About page's `Version` row names it and carries
+    /// the General row's verb while it is `Some`.
+    pub update_offer: Option<String>,
+    /// **Whether the update row wears the gear's mark** (0.4.6
+    /// T-GEAR-MARK-LANDS) — `SettingsPanel::update_row_marked` over
+    /// `update::gear_mark_is_lit`: the gear's dot, and the rest of the visit it
+    /// led to.
+    pub update_mark: bool,
     /// Which way a split with no direction of its own cuts.
     pub split_direction: SplitDirectionV1,
     /// Where a web preview's address field sends a non-address.
@@ -6743,6 +6804,8 @@ impl SettingsValues {
             agent_config_refusals: [None; 3],
             update_check: true,
             update_row: crate::update_card::RowFoot::ReleasesPage,
+            update_offer: None,
+            update_mark: false,
             split_direction: SplitDirectionV1::Auto,
             search_engine: SearchEngineV1::DuckDuckGo,
             launch_opens: LaunchOpensV1::NewWindow,
@@ -6909,6 +6972,17 @@ pub struct SettingsPanel {
     /// is one this build will not edit, so a press cannot be what notices that the reader has
     /// unpicked the link or cleared the read-only bit — opening the page is (re-review, round 3).
     agents_visit_read: bool,
+    /// **The gear's update mark, carried onto the page it led to** (0.4.6
+    /// T-GEAR-MARK-LANDS). Set by [`Self::carry_update_mark`] on the frame this
+    /// visit to `General` shows the update row while the gear is lit — the frame
+    /// the mark is answered on (`update::answer_mark`, DESIGN §7.52) — and reset
+    /// by every road off the page, the two latches above' three roads.
+    ///
+    /// Not a second state of the mark: `seen_tag` stays the one answer, and this
+    /// only says that *this visit* began with the gear lit. Without it the row's
+    /// dot would read the owner, which is answered by the very layout that first
+    /// draws the row, and go out on the next frame.
+    update_mark_carried: bool,
     /// **Which page is up** (user ruling Q3 = A, 2026-08-17). One page per
     /// category, so this is the whole of "where am I" — and it is state on the
     /// panel rather than on the runtime because the panel is what a key press
@@ -7226,6 +7300,23 @@ impl SettingsPanel {
         !std::mem::replace(&mut self.agents_visit_read, true)
     }
 
+    /// **The update row is being shown while the gear is `lit`** (0.4.6
+    /// T-GEAR-MARK-LANDS): keep the mark on the row for the rest of this visit
+    /// to `General`. Called on the door that answers the mark, just before it
+    /// answers it; a closed dialog or another page carries nothing.
+    pub fn carry_update_mark(&mut self, lit: bool) {
+        if self.open && self.category == SettingsCategory::General && lit {
+            self.update_mark_carried = true;
+        }
+    }
+
+    /// **Whether the update row wears the gear's mark** — while the gear is
+    /// `gear_lit`, and for the rest of the visit the lit gear led to.
+    #[must_use]
+    pub fn update_row_marked(&self, gear_lit: bool) -> bool {
+        gear_lit || self.update_mark_carried
+    }
+
     /// Which line of the shortcut page is listening for a chord, if one is.
     #[must_use]
     pub fn recording_row(&self) -> Option<usize> {
@@ -7266,6 +7357,7 @@ impl SettingsPanel {
         self.category = category;
         self.psreadline_visit_read = false;
         self.agents_visit_read = false;
+        self.update_mark_carried = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.recording = None;
@@ -7297,6 +7389,7 @@ impl SettingsPanel {
         self.open = !self.open;
         self.psreadline_visit_read = false;
         self.agents_visit_read = false;
+        self.update_mark_carried = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.hover = None;
@@ -7370,6 +7463,7 @@ impl SettingsPanel {
         self.open = false;
         self.psreadline_visit_read = false;
         self.agents_visit_read = false;
+        self.update_mark_carried = false;
         self.menu = None;
         self.menu_scroll = 0.0;
         self.hover = None;
@@ -7643,6 +7737,7 @@ impl SettingsPanel {
             self.category = content.first_category();
             self.psreadline_visit_read = false;
             self.agents_visit_read = false;
+            self.update_mark_carried = false;
             self.menu = None;
             self.recording = None;
             self.focus = None;
@@ -8675,7 +8770,15 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
             // a press does something here, and on these two rows nothing does.
             // The three link rows below them are stops, because opening a page
             // is an action.
-            PageItem::Row(row) if matches!(row.control(), SettingsControl::Text) => Vec::new(),
+            //
+            // **Except the update door under the version** (0.4.6
+            // T-GEAR-MARK-LANDS): while an update is offered that row carries the
+            // General row's verb, and a verb is a stop.
+            PageItem::Row(row) if matches!(row.control(), SettingsControl::Text) => row
+                .update_door(content.values)
+                .map(|_| SettingsTarget::Link(row))
+                .into_iter()
+                .collect(),
             PageItem::Row(row) => vec![row.control_target()],
             // **The disclosure is a focus stop** (user ruling 2026-08-17): Enter
             // and Space turn it, which is the whole of "keyboard focusable".
@@ -9434,6 +9537,10 @@ pub struct SettingsLayout {
     crumb: Option<CrumbLayout>,
     /// `Browse…`, the verb beside the `Program` field.
     browse: Option<[f32; 4]>,
+    /// **The update door under the About page's version** (0.4.6
+    /// T-GEAR-MARK-LANDS) — [`SettingsRow::update_door`]'s box while an update
+    /// is offered, answering [`SettingsTarget::Link`] of `AboutVersion`.
+    update_door: Option<[f32; 4]>,
     /// The environment table's lines, ghosts first, in the order they are drawn.
     env_rows: Vec<EnvRowLayout>,
     /// The `Add` under the table.
@@ -10317,7 +10424,13 @@ pub fn update_check_requested(target: SettingsTarget) -> Option<bool> {
 /// [`SettingsRow::menu_action`] already says so.
 #[must_use]
 pub fn update_row_foot_requested(target: SettingsTarget) -> bool {
-    matches!(target, SettingsTarget::MenuAction(SettingsRow::UpdateCheck))
+    matches!(
+        target,
+        SettingsTarget::MenuAction(SettingsRow::UpdateCheck)
+            // The same verb on the About page's `Version` row (0.4.6
+            // T-GEAR-MARK-LANDS) — see [`SettingsRow::update_door`].
+            | SettingsTarget::Link(SettingsRow::AboutVersion)
+    )
 }
 
 /// The Git panel's master switch, as a press on its picker.
@@ -11177,6 +11290,7 @@ pub fn layout_for_menus(
     // right edge — see `door_button_width`.
     let door = door_button_width(
         &content_of.category_rows(category),
+        content_of.values,
         metrics.scale,
         metrics.border,
         button,
@@ -11203,6 +11317,7 @@ pub fn layout_for_menus(
     let mut placed_advanced: Option<AdvancedLayout> = None;
     let mut placed_crumb: Option<CrumbLayout> = None;
     let mut placed_browse: Option<[f32; 4]> = None;
+    let mut placed_update_door: Option<[f32; 4]> = None;
     let mut placed_env: Vec<EnvRowLayout> = Vec::new();
     let mut placed_env_add: Option<[f32; 4]> = None;
     let mut editor_foot: Option<[f32; 4]> = None;
@@ -11326,11 +11441,17 @@ pub fn layout_for_menus(
             }
             PageItem::Row(row) => {
                 let lines = metrics.desc_lines(row, content_of.values, row_span, button, measure);
-                let height = metrics.row_height_for(lines);
+                let height = metrics.row_band_height(row, content_of.values, lines);
                 let band = [row_left, cursor, row_right, cursor + height];
                 let top = cursor + px(ROW_PADDING_Y_LOGICAL_PX);
                 cursor += height;
-                let combo_top = top + (metrics.row_content_height_for(lines) - combo_height) / 2.0;
+                // The control column is centred as one stack: a single control,
+                // or the version fact over its update door.
+                let combo_top = top
+                    + (height
+                        - 2.0 * px(ROW_PADDING_Y_LOGICAL_PX)
+                        - metrics.control_stack_height(row, content_of.values))
+                        / 2.0;
                 // A door is a button, not the column: its box is what is drawn,
                 // pressed and ringed, so all three are one rectangle.
                 let control_width = if matches!(row.control(), SettingsControl::Link) {
@@ -11344,6 +11465,18 @@ pub fn layout_for_menus(
                     row_right,
                     combo_top + combo_height,
                 ];
+                // **The update door stands under the version**, at the page's
+                // door width and flush with the column's right edge, where every
+                // other door on the page stands (0.4.6 T-GEAR-MARK-LANDS).
+                if row.update_door(content_of.values).is_some() {
+                    let door_top = combo[3] + px(STACKED_GAP_LOGICAL_PX);
+                    placed_update_door = Some([
+                        row_right - door,
+                        door_top,
+                        row_right,
+                        door_top + px(BUTTON_HEIGHT_LOGICAL_PX),
+                    ]);
+                }
                 // `.row .text` is `flex: 1` beside a `flex: none` control, one gap
                 // apart — and `min-width: 0`, which is why the control's own cap
                 // (`COMBO_MAX_ROW_SHARE`) is what keeps this column off zero. The
@@ -11949,6 +12082,7 @@ pub fn layout_for_menus(
         row_menu,
         crumb: placed_crumb,
         browse: placed_browse,
+        update_door: placed_update_door,
         env_rows: placed_env,
         env_add: placed_env_add,
         editor_foot,
@@ -12212,6 +12346,28 @@ impl StackMetrics {
         2.0 * (ROW_PADDING_Y_LOGICAL_PX * self.scale) + self.row_content_height_for(lines)
     }
 
+    /// **What this row's control column holds, top to bottom**: one control,
+    /// or — on the About page's `Version` row while an update is offered — its
+    /// fact with the update door under it (0.4.6 T-GEAR-MARK-LANDS).
+    fn control_stack_height(self, row: SettingsRow, values: &SettingsValues) -> f32 {
+        let px = |value: f32| value * self.scale;
+        if row.update_door(values).is_some() {
+            px(COMBO_HEIGHT_LOGICAL_PX + STACKED_GAP_LOGICAL_PX + BUTTON_HEIGHT_LOGICAL_PX)
+        } else {
+            px(COMBO_HEIGHT_LOGICAL_PX)
+        }
+    }
+
+    /// **The band one row of `lines` stands in**, with its own control column —
+    /// [`Self::row_height_for`] for every row but one whose column holds two
+    /// things, which is as tall as that column needs.
+    fn row_band_height(self, row: SettingsRow, values: &SettingsValues, lines: usize) -> f32 {
+        2.0 * (ROW_PADDING_Y_LOGICAL_PX * self.scale)
+            + self
+                .row_content_height_for(lines)
+                .max(self.control_stack_height(row, values))
+    }
+
     /// **The row band, from the left edge of a title to the right edge of a
     /// picker**, for a dialog this wide.
     ///
@@ -12278,9 +12434,11 @@ impl StackMetrics {
                 content.editor,
                 self.desc_lines(row, content.values, span, button, measure),
             ),
-            PageItem::Row(row) => {
-                self.row_height_for(self.desc_lines(row, content.values, span, button, measure))
-            }
+            PageItem::Row(row) => self.row_band_height(
+                row,
+                content.values,
+                self.desc_lines(row, content.values, span, button, measure),
+            ),
             PageItem::EditorFoot => self.foot_advance,
             PageItem::Disclosure(_) => self.disclosure_height,
             PageItem::Reset => self.foot_advance,
@@ -12579,20 +12737,20 @@ fn page_combo_width(
 /// than any control on it is meant to be.
 fn door_button_width(
     rows: &[SettingsRow],
+    values: &SettingsValues,
     scale: f32,
     border: f32,
     column: f32,
     measure: &mut dyn FnMut(&str, f32) -> f32,
 ) -> f32 {
     let px = |value: f32| value * scale;
+    // The `Version` row's update door is one of the page's doors while it is
+    // there (0.4.6 T-GEAR-MARK-LANDS), so the column of buttons stays one width.
     rows.iter()
-        .filter(|row| matches!(row.control(), SettingsControl::Link))
-        .map(|row| {
-            let verb = measure(
-                row.stated_value().unwrap_or_default(),
-                px(BUTTON_FONT_LOGICAL_PX),
-            );
-            let mark = if row.leaves_the_window() {
+        .filter_map(|row| row.door_verb(values))
+        .map(|(verb, leaves_the_window)| {
+            let verb = measure(verb, px(BUTTON_FONT_LOGICAL_PX));
+            let mark = if leaves_the_window {
                 px(COMBO_GAP_LOGICAL_PX + COMBO_CHEVRON_BOX_LOGICAL_PX)
             } else {
                 0.0
@@ -13094,6 +13252,12 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
     {
         return SettingsTarget::EditorBrowse;
     }
+    if let Some(door) = layout.update_door
+        && layout.shows(door)
+        && contains(door, x, y)
+    {
+        return SettingsTarget::Link(SettingsRow::AboutVersion);
+    }
     // **The environment table stands inside the editor's Advanced group**, so
     // every cell of it answers on that group's terms as well as the page's: asked
     // per box rather than per table, because the table is taller than most of
@@ -13477,6 +13641,26 @@ pub fn build(
             tabular_numerals: false,
             clip: None,
         });
+        // **The gear's mark, on the row it was about** (0.4.6
+        // T-GEAR-MARK-LANDS; owner, 2026-09-27: 「齿轮上有个小标记,但点进去又没
+        // 显示标记在哪里」). The same accent disc at the same size the gear wears
+        // (`marks::dirty_dot_sprite`, `seats::window_chrome`), just after the
+        // title's last glyph and centred on its line, for as long as
+        // `SettingsValues::update_mark` says the gear led here.
+        if placed.row == SettingsRow::UpdateCheck && values.update_mark {
+            let dot = (crate::marks::DIRTY_DOT_LOGICAL_PX * scale)
+                .round()
+                .max(1.0);
+            let left = (placed.title[0]
+                + measure(placed.row.title(), title_font)
+                + px(ROW_MARK_GAP_LOGICAL_PX))
+            .round();
+            content_stack.sprites.push(crate::marks::dirty_dot_sprite(
+                [left, placed.title[1], left + dot, placed.title[3]],
+                palette.accent,
+                scale,
+            ));
+        }
         // **The sentence stops where its column does** (§7.1.6c-5). `.row .text`
         // is `flex: 1; min-width: 0` beside a `flex: none` control, so the text
         // column is the row less the button and the gap — and a label longer
@@ -13646,6 +13830,30 @@ pub fn build(
                     palette,
                     measure,
                 );
+                // **And the update door under the version** (0.4.6
+                // T-GEAR-MARK-LANDS): the General row's verb in the chassis every
+                // door on this page stands in, ringed as they are.
+                if let Some((verb, leaves_the_window)) = placed.row.update_door(values)
+                    && let Some(door) = layout.update_door
+                {
+                    let target = SettingsTarget::Link(placed.row);
+                    push_door_button(
+                        &mut content_stack,
+                        door,
+                        verb,
+                        leaves_the_window,
+                        hover == Some(target),
+                        scale,
+                        border,
+                        palette,
+                        measure,
+                    );
+                    if focus == Some(target) {
+                        content_stack
+                            .quads
+                            .extend(focus_ring(door, scale, palette.accent));
+                    }
+                }
             }
             // **A door is a button** (owner question 2026-09-23): the `.btn`
             // chassis every other verb in this dialog stands in, one width for
@@ -19271,6 +19479,16 @@ mod tests {
             let lines = count(row, sentence);
             if lines > SETTINGS_DESCRIPTION_MAX_LINES {
                 over.push((row, lines, sentence.to_owned()));
+            }
+        }
+        // **And the About page's `Version` row while an update is offered**
+        // (0.4.6 T-GEAR-MARK-LANDS), with the same over-long tag.
+        {
+            let row = SettingsRow::AboutVersion;
+            let sentence = crate::i18n::about_version_offer_in(Lang::English, "v10.10.10-preview");
+            let lines = count(row, &sentence);
+            if lines > SETTINGS_DESCRIPTION_MAX_LINES {
+                over.push((row, lines, sentence));
             }
         }
         assert!(
@@ -31838,6 +32056,383 @@ mod tests {
             drawable_font_size(bt_persist::DEFAULT_TERMINAL_FONT_SIZE),
             bt_persist::DEFAULT_TERMINAL_FONT_SIZE
         );
+    }
+
+    // ── 0.4.6 T-GEAR-MARK-LANDS: the mark on the gear leads to the marked row ──
+
+    /// An update source that always answers with a release far newer than this
+    /// build, for the owner the gear reads.
+    struct NewerRelease;
+
+    impl crate::update::Releases for NewerRelease {
+        fn latest_tag(&self) -> Result<String, String> {
+            Ok("v99.0.0".to_owned())
+        }
+    }
+
+    /// The update-check owner over a fresh scratch directory, its one check
+    /// answered with [`NewerRelease`] — the gear's own state, lit.
+    fn lit_owner(name: &str) -> (std::path::PathBuf, crate::update::OfferState) {
+        let dir =
+            std::env::temp_dir().join(format!("folio-gear-mark-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a scratch data directory");
+        let owner = crate::update::OfferState::load(&dir, true);
+        // Ten days after the epoch, so the empty stamp is due.
+        let _ = owner.run(10 * 86_400_000, &NewerRelease);
+        (dir, owner)
+    }
+
+    /// The sprites drawn on the update row's title line that are the gear's
+    /// mark: its disc, its size, its ink.
+    fn update_row_marks(placed: &SettingsLayout, values: &SettingsValues) -> Vec<ChromeSprite> {
+        let title = placed
+            .row(SettingsRow::UpdateCheck)
+            .expect("General holds the update row")
+            .title;
+        let gear_mark =
+            crate::marks::dirty_dot_sprite([0.0, 0.0, 6.0, 6.0], chrome_palette().accent, 1.0);
+        sprites_of(placed, None, values)
+            .into_iter()
+            .filter(|sprite| {
+                sprite.mark == gear_mark.mark
+                    && sprite.color == gear_mark.color
+                    && sprite.rect[2] - sprite.rect[0] == gear_mark.rect[2] - gear_mark.rect[0]
+                    && sprite.rect[1] >= title[1]
+                    && sprite.rect[3] <= title[3]
+                    && sprite.rect[0] >= title[0]
+            })
+            .collect()
+    }
+
+    /// RED (0.4.6 T-GEAR-MARK-LANDS) — **the update row wears the gear's mark —
+    /// the same disc, at the same size, in the same ink — for the visit the lit
+    /// gear led to, and when that visit ends the gear's and the row's are out
+    /// together.**
+    ///
+    /// The owner, 2026-09-27: the gear wore a mark, and the page it opened did
+    /// not say where the mark was. The mark is answered by the layout that first
+    /// shows `General` (`update::answer_mark`, DESIGN §7.52), so a row that read
+    /// the owner alone would lose its dot one frame after it was first drawn.
+    /// The panel is told on that same door that the gear was lit, and keeps it
+    /// for the visit; the owner's `seen_tag` stays the one answer. This runs the
+    /// real owner (`update::OfferState` over a scratch directory and an answering
+    /// source), the real panel and the real draw.
+    ///
+    /// MUTATION: draw no disc on the update row (or draw it when
+    /// `values.update_mark` is false) — the drawn-mark assertions go red; make
+    /// `carry_update_mark` a no-op — the row goes out with the answer and the
+    /// in-visit assertion goes red; keep the latch across `close` — the
+    /// out-together assertion goes red.
+    #[test]
+    fn the_update_row_wears_the_mark_while_the_gear_does_and_both_go_out_together() {
+        let running = crate::version::VERSION;
+        let (dir, owner) = lit_owner("wears");
+        assert!(
+            owner.mark_is_lit(running),
+            "an offer this reader has not been shown lights the gear"
+        );
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let mut panel = SettingsPanel::default();
+        panel.toggle(held);
+        assert_eq!(panel.category(), SettingsCategory::General);
+        assert!(
+            panel.update_row_marked(owner.mark_is_lit(running)),
+            "while the gear is lit the row wears its mark"
+        );
+
+        // The door (`Runtime::settings_layout` on `General`): carry, then answer.
+        panel.carry_update_mark(owner.mark_is_lit(running));
+        let tag = owner.offer(running).expect("the offer the gear was lit by");
+        owner.mark_seen(&tag).expect("the answer is written");
+        assert!(
+            !owner.mark_is_lit(running),
+            "the gear's mark is answered on the page"
+        );
+        let in_visit = panel.update_row_marked(owner.mark_is_lit(running));
+        assert!(in_visit, "and the row keeps it for the rest of this visit");
+
+        let marked = SettingsValues {
+            update_mark: in_visit,
+            ..values()
+        };
+        // Scrolled to the row, as the lit gear's door scrolls it: a row below the
+        // viewport is not drawn at all.
+        let layout_at = |scroll: f32| {
+            layout_for_menu(
+                SURFACE.0,
+                SURFACE.1,
+                1.0,
+                None,
+                None,
+                SettingsContent {
+                    values: &marked,
+                    ..held
+                },
+                SettingsCategory::General,
+                scroll,
+                MENU_UNSCROLLED,
+                &mut measure,
+            )
+            .expect("the settings dialog fits")
+        };
+        let placed = layout_at(
+            layout_at(UNSCROLLED)
+                .scroll_to_show(SettingsTarget::Field(SettingsRow::UpdateCheck), UNSCROLLED),
+        );
+        let marks = update_row_marks(&placed, &marked);
+        assert_eq!(
+            marks.len(),
+            1,
+            "the row wears one disc, the gear's own, on its title line"
+        );
+        let title = placed.row(SettingsRow::UpdateCheck).expect("the row").title;
+        let dot = marks[0].rect;
+        assert!(
+            dot[0]
+                >= title[0] + measure(SettingsRow::UpdateCheck.title(), ROW_TITLE_FONT_LOGICAL_PX),
+            "after the title's last glyph, not over it: title {title:?}, dot {dot:?}"
+        );
+        let unmarked = SettingsValues {
+            update_mark: false,
+            ..values()
+        };
+        assert!(
+            update_row_marks(&placed, &unmarked).is_empty(),
+            "a row whose gear was not lit wears nothing"
+        );
+
+        // The visit ends: both are out, and neither comes back.
+        panel.close();
+        assert!(
+            !panel.update_row_marked(owner.mark_is_lit(running)),
+            "the gear and the row go out together"
+        );
+        panel.toggle(held);
+        panel.carry_update_mark(owner.mark_is_lit(running));
+        assert!(
+            !panel.update_row_marked(owner.mark_is_lit(running)),
+            "the next visit finds both answered"
+        );
+
+        // A visit that turns to another page leaves the mark behind it.
+        panel.carry_update_mark(true);
+        assert!(panel.update_row_marked(false));
+        assert!(panel.select_category(SettingsCategory::About));
+        assert!(
+            !panel.update_row_marked(false),
+            "another page is a road off the page, like a close"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// PIN (0.4.6 T-GEAR-MARK-LANDS) — **a lit gear lands on `General` with the
+    /// update row in view.** The runtime's half is `Runtime::open_settings_on_row`
+    /// with `UpdateCheck` (the RED pin is `main.rs`'s
+    /// `a_lit_gear_opens_settings_on_the_marked_row`); this is the panel's and
+    /// the geometry's: the dialog the gear opens is on the row's page, and the
+    /// scroll that door computes brings the row's whole band inside the viewport
+    /// of a dialog too short to hold the page.
+    ///
+    /// MUTATION: file the update row under another page and the page assertion
+    /// goes red; scroll to a different row and the band is not shown.
+    #[test]
+    fn a_lit_gear_lands_on_general_with_the_update_row_in_view() {
+        let rows = flat_rows();
+        let held = content(&rows, &[]);
+        let mut panel = SettingsPanel::default();
+        panel.toggle(held);
+        let row = SettingsRow::UpdateCheck;
+        panel.select_category(row.category());
+        assert_eq!(panel.category(), SettingsCategory::General);
+        let category = panel.category();
+        let layout_at = |scroll: f32| {
+            layout_for_menu(
+                SURFACE.0,
+                480.0,
+                1.0,
+                None,
+                None,
+                held,
+                category,
+                scroll,
+                MENU_UNSCROLLED,
+                &mut measure,
+            )
+            .expect("the settings dialog fits")
+        };
+        let target = SettingsTarget::Field(row);
+        let scroll = layout_at(UNSCROLLED).scroll_to_show(target, UNSCROLLED);
+        let placed = layout_at(scroll);
+        let band = placed.row(row).expect("the update row is on the page").band;
+        assert!(
+            placed.shows(band),
+            "the update row is in view: band {band:?}, viewport {:?}",
+            placed.clip
+        );
+    }
+
+    /// RED (0.4.6 T-GEAR-MARK-LANDS) — **while an update is offered, the About
+    /// page's `Version` row says which version, and carries the General row's
+    /// verb as a door under its fact: one verb, one press, two rows.**
+    ///
+    /// The owner landed on the About page looking for what the gear meant. The
+    /// sentence names the offer (`Text::AboutVersionOffer`, its Chinese pending)
+    /// in place of the row's own, which with it would take a third line; the
+    /// door's word and its `↗` are the General row's
+    /// picker foot for every foot the update job can say, and a press on it is
+    /// the same request (`update_row_foot_requested`), so there is nothing on
+    /// this row to drift from that one. With nothing offered the row is what it
+    /// always was.
+    ///
+    /// MUTATIONS: drop the sentence — the description assertion goes red; give
+    /// the door a word of its own — the shared-verb loop goes red; leave
+    /// `Link(AboutVersion)` out of `update_row_foot_requested` — the press
+    /// assertion goes red; place the door at the column width — the one-width
+    /// assertion goes red; leave it out of `hit` — the centre press lands
+    /// elsewhere.
+    #[test]
+    fn the_about_page_names_the_offer_and_shares_the_row_verb() {
+        use crate::i18n::Lang;
+        use crate::update_card::RowFoot;
+
+        let rows = flat_rows();
+        let lines = shortcut_lines();
+        let quiet = values();
+        assert_eq!(SettingsRow::AboutVersion.update_door(&quiet), None);
+        assert_eq!(
+            SettingsRow::AboutVersion.description(&quiet),
+            Text::DescAboutVersion.text(),
+            "nothing offered, nothing said"
+        );
+
+        let offered = SettingsValues {
+            update_offer: Some("v0.4.7".to_owned()),
+            update_row: RowFoot::Restart {
+                tag: "v0.4.7".to_owned(),
+            },
+            ..values()
+        };
+        assert_eq!(
+            crate::i18n::about_version_offer_in(Lang::English, "v0.4.7"),
+            "v0.4.7 is available.",
+            "the offer, naming the version"
+        );
+        assert_eq!(
+            SettingsRow::AboutVersion.description(&offered),
+            crate::i18n::about_version_offer_in(crate::i18n::current(), "v0.4.7")
+        );
+
+        for foot in [
+            RowFoot::ReleasesPage,
+            RowFoot::Restart {
+                tag: "v0.4.7".to_owned(),
+            },
+            RowFoot::Copy {
+                command: crate::update_job::manager_command(crate::install_channel::Manager::Scoop),
+            },
+        ] {
+            let values = SettingsValues {
+                update_row: foot.clone(),
+                ..offered.clone()
+            };
+            let (verb, leaves) = SettingsRow::AboutVersion
+                .update_door(&values)
+                .expect("an offered update puts a door on the version row");
+            assert_eq!(
+                Some(verb),
+                SettingsRow::UpdateCheck.menu_action(&values),
+                "{foot:?}: the General row's word"
+            );
+            assert_eq!(
+                leaves,
+                SettingsRow::UpdateCheck.menu_action_mark(&values) == MENU_ACTION_MARK_AWAY,
+                "{foot:?}: and its mark"
+            );
+        }
+        assert!(update_row_foot_requested(SettingsTarget::MenuAction(
+            SettingsRow::UpdateCheck
+        )));
+        assert!(
+            update_row_foot_requested(SettingsTarget::Link(SettingsRow::AboutVersion)),
+            "a press on the version row's door is the General row's press"
+        );
+        assert!(
+            SettingsRow::AboutVersion.link_destination().is_none(),
+            "and it has no destination of its own to go to instead"
+        );
+
+        let held = SettingsContent {
+            values: &offered,
+            ..content(&rows, &lines)
+        };
+        let placed = layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            None,
+            None,
+            held,
+            SettingsCategory::About,
+            UNSCROLLED,
+            MENU_UNSCROLLED,
+            &mut measure,
+        )
+        .expect("the settings dialog fits");
+        let door = placed
+            .update_door
+            .expect("the version row carries the door");
+        let version = *placed
+            .row(SettingsRow::AboutVersion)
+            .expect("the version row");
+        assert!(within(door, version.band), "inside the version row");
+        assert!(
+            door[1] >= version.combo[3],
+            "under the version, not over it"
+        );
+        assert_eq!(door[2], version.combo[2], "flush with the control column");
+        let release = combo_of(&placed, SettingsRow::AboutReleaseNotes);
+        assert_eq!(
+            door[2] - door[0],
+            release[2] - release[0],
+            "one width for every door on the page"
+        );
+        assert_eq!(
+            hit(
+                &placed,
+                &offered,
+                f64::from((door[0] + door[2]) / 2.0),
+                f64::from((door[1] + door[3]) / 2.0)
+            ),
+            SettingsTarget::Link(SettingsRow::AboutVersion)
+        );
+        assert_eq!(
+            page_order(held, SettingsCategory::About).first(),
+            Some(&SettingsTarget::Link(SettingsRow::AboutVersion)),
+            "the door is the page's first stop"
+        );
+        assert!(
+            labels_of(&placed, None, &offered)
+                .iter()
+                .any(|label| label.text == "Restart to update"),
+            "the door says the General row's word"
+        );
+
+        let still = layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            None,
+            None,
+            content(&rows, &lines),
+            SettingsCategory::About,
+            UNSCROLLED,
+            MENU_UNSCROLLED,
+            &mut measure,
+        )
+        .expect("the settings dialog fits");
+        assert_eq!(still.update_door, None, "nothing offered, no door");
     }
 }
 
