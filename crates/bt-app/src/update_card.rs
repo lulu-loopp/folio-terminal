@@ -1013,6 +1013,67 @@ mod tests {
         assert_eq!(written.into_inner(), 0);
     }
 
+    /// RED (U-4) — **a copy winget's own record names is offered no card, and
+    /// its row names `winget upgrade --id WeiyiShi.Folio --exact` with one
+    /// `Copy`.**
+    ///
+    /// The 0.4.6 gate (the owner's ruling 2026-09-20: managed installs do not
+    /// self-update) holds for winget only if a winget copy is ever classified
+    /// as one. So the channel here is not spelled: a package folder shaped as
+    /// E2 found it, winget's record of it, and the executable inside go through
+    /// `install_channel`'s own read and classification, and the channel that
+    /// comes out goes through the real job to the row.
+    ///
+    /// MUTATION: in `install_channel::classify`, `WingetEvidence::Record(_) =>
+    /// false` — the copy reads as ours and is offered the card.
+    #[test]
+    fn the_managed_winget_row_names_the_upgrade_command() {
+        use bt_platform::install_evidence::{RecordValue, UninstallRecord};
+
+        use crate::install_channel::{self, WINGET_PACKAGE_ID, WINGET_PORTABLE};
+
+        let location =
+            std::env::temp_dir().join(format!("bt-update-card-winget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&location);
+        let version = location.join("folio-0.4.6");
+        std::fs::create_dir_all(&version).unwrap();
+        let exe = version.join("folio.exe");
+        std::fs::write(&exe, b"").unwrap();
+        let record = UninstallRecord {
+            key: "WeiyiShi.Folio_Microsoft.Winget.Source_8wekyb3d8bbwe".to_owned(),
+            values: vec![
+                RecordValue::Text(WINGET_PACKAGE_ID.to_owned()),
+                RecordValue::Text(WINGET_PORTABLE.to_owned()),
+                RecordValue::Text(location.to_string_lossy().into_owned()),
+                RecordValue::Text("Microsoft.Winget.Source_8wekyb3d8bbwe".to_owned()),
+            ],
+        };
+        let me = bt_platform::install_evidence::current_account().unwrap();
+        let winget = install_channel::winget(&exe, HostPlatform::Windows, || Ok(vec![record]));
+        let channel = install_channel::classify(&install_channel::read(
+            &version,
+            HostPlatform::Windows,
+            Ok(&me),
+            winget,
+        ));
+        assert_eq!(
+            channel,
+            Channel::Managed {
+                manager: Manager::Winget,
+                uninstall_hook: false,
+            }
+        );
+
+        let job = considered("v0.4.7", channel);
+        assert_eq!(job.card_window(), None);
+        let command = "winget upgrade --id WeiyiShi.Folio --exact";
+        let foot = row_foot(&job);
+        assert_eq!(foot, RowFoot::Copy { command });
+        let sentence = row_description_in(Lang::English, &foot, Some("v0.4.7"));
+        assert!(sentence.contains(command), "{sentence}");
+        std::fs::remove_dir_all(&location).unwrap();
+    }
+
     /// RED (U-19) — **Skip on the card records the tag through the check's
     /// one owner.**
     ///

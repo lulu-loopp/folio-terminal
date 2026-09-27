@@ -1029,8 +1029,16 @@ beside `folio.exe`, on macOS the extended attribute
 `{"v":1,"manager":"scoop"|"homebrew"|"winget","uninstall_hook":true|false}`
 (exactly those keys; a byte-order mark and surrounding whitespace allowed).
 scoop's own receipt in the version folder (`install.json` with `manifest.json`)
-also says scoop. With neither, the copy is ours only if its folder's owner is the
-account running Folio. Every failed read, and every marker or receipt that is
+also says scoop. **The one exception to "a marker written by a hook" is winget**,
+which runs no hook and so writes no marker: its own uninstall record stands in —
+a subkey of `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall` with
+`WinGetPackageIdentifier` `WeiyiShi.Folio`, `WinGetInstallerType` `portable` and
+an `InstallLocation` that **contains** the running executable (both canonicalised,
+compared by component without case, never by string equality) makes the copy
+winget's, with no uninstall hook; a record for another location changes nothing,
+and a registry read that fails, or two records containing the executable, is
+unknown (ticket U-4, E2). With none of these, the copy is ours only if its
+folder's owner is the account running Folio. Every failed read, and every marker or receipt that is
 malformed, of another version, partial or in disagreement, is **unknown**, never
 ours (`install_channel::classify`, ticket U-1). scoop's `post_install` writes the
 marker with `uninstall_hook: true`, and its `pre_uninstall` runs the door on

@@ -910,13 +910,19 @@ names the extracted folder as the program's external location. A link in a
 different directory is a `folio.exe` with no ConPTY and a package that
 registers against nothing.
 
-`ArchiveBinariesDependOnPath: true` is what turns that off. With it, winget
+`ArchiveBinariesDependOnPath: true` is meant to turn that off. With it, winget
 extracts the whole archive into one real folder under
 `%LOCALAPPDATA%\Microsoft\WinGet\Packages\` and puts **that folder** on the
 user's `PATH`, so all ten files sit beside each other exactly as they do for
 somebody who unzipped the release by hand. It arrived in winget-cli 1.9 and is
-carried by manifest schema 1.9.0 onward; leaving it unset does not fail
-validation, it just quietly reintroduces the symlink. Do not remove it.
+carried by manifest schema 1.9.0 onward; do not remove it. **An older winget
+still makes the symlink:** E2 (2026-09-27, winget 1.6, this manifest) found
+`%LOCALAPPDATA%\Microsoft\WinGet\Links\folio.exe` pointing at
+`<package folder>\folio-<version>\folio.exe`, with the `Links` folder on
+`PATH`. It does not matter for how Folio tells a winget copy
+(0.4.6, U-4): Folio resolves the executable's canonical path before comparing it
+with winget's record, and a start through the link resolves to the file inside
+the package.
 
 `RelativeFilePath` names the folder **inside** the archive, which is
 `folio-<version>\folio.exe` — `package.ps1` zips the staging folder rather than
@@ -1036,6 +1042,23 @@ also carries the bill of materials and `SHA256SUMS.txt`, and neither of those is
 an installer. The trigger is the release
 event and not a tag push, because a tag push here only builds an unsigned
 rehearsal and the release page is made by a person from the signed machine.
+
+### Troubleshooting
+
+- **winget says *Archive scan detected malware* on a machine whose Defender
+  cannot update.** Not a detection: E2 (2026-09-27) met it on a clean Windows 11
+  machine whose Defender signatures were years old and would not update; the
+  detection list was empty before and after, and a scan of the same archive
+  found nothing. The scan failed on a stale engine and winget reported the
+  failure as malware. Update Defender, or run
+  `winget settings --enable LocalArchiveMalwareScanOverride` (elevated, once)
+  and then install with `--ignore-local-archive-malware-scan`.
+- **How Folio tells a winget copy** (0.4.6, U-4): by the record winget writes
+  under `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\<id>_<source>`
+  (`WinGetPackageIdentifier` `WeiyiShi.Folio`, `WinGetInstallerType` `portable`,
+  `InstallLocation` the package folder the executable sits inside). A copy that
+  reads as unknown there is a record Folio could not read; its line in
+  `diagnostics.log` says which.
 
 ## macOS
 
