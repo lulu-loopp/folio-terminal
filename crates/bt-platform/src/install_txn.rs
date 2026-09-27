@@ -167,6 +167,10 @@ pub(crate) enum Replace {
     Existing,
     /// A durable move or a durable create: an existing destination is a refusal.
     Never,
+    /// **An exchange** (`crate::install_flip`, U-28): both names must exist,
+    /// and each takes the other's entry in one call — macOS
+    /// `renamex_np(…, RENAME_SWAP)`. Windows has no such call and refuses it.
+    Swap,
 }
 
 /// **The operating system calls a durable write and a durable move are made
@@ -355,6 +359,27 @@ fn durable_move_with<S: Surface>(surface: &mut S, from: &Path, to: &Path) -> Res
     let source = directory_of(from);
     if source != destination {
         flush_directory(surface, source)?;
+    }
+    Ok(())
+}
+
+/// **Exchange the entries at `a` and `b` in one call, then flush both
+/// directories** — `crate::install_flip::exchange`'s steps (U-28): the
+/// exchange, the flush of `a`'s directory, then of `b`'s when it is another
+/// one. A refused exchange changes neither name and flushes nothing.
+pub(crate) fn durable_exchange_with<S: Surface>(
+    surface: &mut S,
+    a: &Path,
+    b: &Path,
+) -> Result<(), Failure> {
+    surface
+        .rename(a, b, Replace::Swap)
+        .map_err(|error| Failure::at(Stage::Rename, a, error))?;
+    let first = directory_of(a);
+    flush_directory(surface, first)?;
+    let second = directory_of(b);
+    if second != first {
+        flush_directory(surface, second)?;
     }
     Ok(())
 }
@@ -629,6 +654,14 @@ mod arm {
             let flags = match replace {
                 Replace::Existing => MOVEFILE_WRITE_THROUGH | MOVEFILE_REPLACE_EXISTING,
                 Replace::Never => MOVEFILE_WRITE_THROUGH,
+                // NTFS has no atomic exchange of two names (§C.4: "Windows has
+                // no atomic multi-file exchange").
+                Replace::Swap => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "install_txn has no exchange of two names on Windows",
+                    ));
+                }
             };
             // SAFETY: both strings are NUL-terminated and live across the call.
             unsafe { MoveFileExW(PCWSTR(from.as_ptr()), PCWSTR(to.as_ptr()), flags) }
@@ -790,14 +823,17 @@ mod arm {
         fn rename(&mut self, from: &Path, to: &Path, replace: Replace) -> io::Result<()> {
             match replace {
                 Replace::Existing => std::fs::rename(from, to),
-                Replace::Never => {
+                Replace::Never | Replace::Swap => {
+                    let flag = if replace == Replace::Swap {
+                        libc::RENAME_SWAP
+                    } else {
+                        libc::RENAME_EXCL
+                    };
                     let from = c_path(from)?;
                     let to = c_path(to)?;
                     // SAFETY: both strings are NUL-terminated and live across
                     // the call.
-                    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) }
-                        == -1
-                    {
+                    if unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), flag) } == -1 {
                         return Err(io::Error::last_os_error());
                     }
                     Ok(())

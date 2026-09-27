@@ -5074,12 +5074,56 @@ fn bare_sites_observed(world: &World) -> BTreeMap<BareKey, usize> {
 /// A door function's effects: the door it serves, and its vocabulary entries counted.
 type DoorEffects = BTreeMap<(String, String, String), (String, BTreeMap<String, usize>)>;
 
+/// **A worker's door functions** (revision (j)13, brought forward by U-28): the product functions
+/// the registry's `# effects` section lists as `worker-door-body` whose parameters take a
+/// `WorkerCtx` — the capability only the thread door and `enter_standalone_main` lend. Their
+/// bodies are doors with no admission identity (the `# doors` identities are the window thread's),
+/// so their sites are door effects, never inventory. A listed function that takes no `WorkerCtx`
+/// is no door, and its sites stay bare.
+fn worker_door_functions(world: &World) -> BTreeSet<(usize, usize)> {
+    let listed: BTreeSet<(String, String, String)> = section("effects", &EFFECT_COLUMNS)
+        .into_iter()
+        .filter(|cells| cells[4] == "worker-door-body")
+        .map(|cells| {
+            (
+                cells[0].to_owned(),
+                cells[1].to_owned(),
+                cells[2].to_owned(),
+            )
+        })
+        .collect();
+    let mut out = BTreeSet::new();
+    for (at, src) in world.srcs.iter().enumerate() {
+        for record in src.index.items() {
+            if !record.kind().is_callable() || !src.product_item(record) {
+                continue;
+            }
+            let (item, arm) = item_and_arm(record);
+            if !listed.contains(&(src.package.to_owned(), arm, item)) {
+                continue;
+            }
+            let toks = src.lex(record.declaration().start(), record.declaration().end());
+            let Some((_, open, close)) = signature(src, &toks) else {
+                continue;
+            };
+            if toks[open..=close]
+                .iter()
+                .any(|t| src.text(*t) == "WorkerCtx")
+            {
+                out.insert((at, record.whole().start()));
+            }
+        }
+    }
+    out
+}
+
 /// Every vocabulary site in the product, split at the doors: those outside a registered door
 /// function's body, by `(crate, arm, item, entry)`; and, for each door function whose body holds
-/// any, the door it serves and its entries counted, by `(crate, arm, item)`.
+/// any, the door it serves (empty for a worker's door) and its entries counted, by
+/// `(crate, arm, item)`.
 fn vocabulary_sites(world: &World) -> (BTreeMap<BareKey, usize>, DoorEffects) {
     let reader = Reader::new(world);
-    let doors: BTreeMap<(usize, usize), String> = door_functions(world)
+    let mut doors: BTreeMap<(usize, usize), String> = door_functions(world)
         .iter()
         .map(|door| {
             (
@@ -5088,6 +5132,9 @@ fn vocabulary_sites(world: &World) -> (BTreeMap<BareKey, usize>, DoorEffects) {
             )
         })
         .collect();
+    for key in worker_door_functions(world) {
+        doors.entry(key).or_default();
+    }
     let mut bare = BTreeMap::new();
     let mut in_doors: DoorEffects = BTreeMap::new();
     for (src, s) in world.srcs.iter().enumerate() {
@@ -5158,7 +5205,10 @@ fn effects_spelled(effects: &BTreeMap<String, usize>) -> String {
 /// effect is itself an error, so the holders have to be known by name, arm and count before the
 /// lint exists. Until revision (k) allocates the rest, the only rows are the effect functions that
 /// already sit inside a door: kind `owner-door-body`, authority `WaitToken`, the door their token
-/// names. A door that forwards to a separately defined helper (`trace_sink::flush` →
+/// names — and, from U-28 ((j)13), a worker's door body: kind `worker-door-body`, authority
+/// `WorkerCtx`, **with no admission identity** (the door column empty), since the `# doors`
+/// identities are the window thread's and a worker's door is authorised by the `WorkerCtx` it
+/// takes. A door that forwards to a separately defined helper (`trace_sink::flush` →
 /// `flush_sink`) does not make the helper in-door; the helper's sites are inventory. The door
 /// `expect` count stays 0 (assertion 4) until A2e.
 ///
@@ -5204,12 +5254,20 @@ fn the_effects_section_is_the_effect_functions_inside_the_doors() {
             }
         }
         // What A2a can say from the code: an effect inside a door is that door's owner-thread body,
-        // admitted by its token. Other kinds wait for revision (k).
-        if (cells[4], cells[5]) != ("owner-door-body", "WaitToken") {
+        // admitted by its token — or, since U-28 brought (j)13 forward, a worker's door body,
+        // authorised by the `WorkerCtx` it takes, with no admission identity (the `# doors`
+        // identities are the window thread's). Other kinds wait for revision (k).
+        let shape_ok = match (cells[4], cells[5]) {
+            ("owner-door-body", "WaitToken") => !cells[6].is_empty(),
+            ("worker-door-body", "WorkerCtx") => cells[6].is_empty(),
+            _ => false,
+        };
+        if !shape_ok {
             failures.push(format!(
-                "{} {}: `{}` / `{}` — until revision (k) allocates the rest, a row is an effect \
-                 function inside a registered door: `owner-door-body` / `WaitToken`",
-                cells[0], cells[2], cells[4], cells[5]
+                "{} {}: `{}` / `{}` / door `{}` — until revision (k) allocates the rest, a row \
+                 is an effect function inside a registered door: `owner-door-body` / `WaitToken` \
+                 with its door, or `worker-door-body` / `WorkerCtx` with none ((j)13)",
+                cells[0], cells[2], cells[4], cells[5], cells[6]
             ));
         }
         if listed.insert(key, (cells[6].to_owned(), effects)).is_some() {

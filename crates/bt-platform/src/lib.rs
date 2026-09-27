@@ -3465,6 +3465,18 @@ pub mod launch_agent;
 /// table without a record (U-17). Refused by name off macOS.
 pub mod macos_update;
 
+/// **The macOS exchange of an installed bundle, and the processes running from
+/// one** — `renamex_np(RENAME_SWAP)` of the installed and the staged bundle,
+/// both directories flushed, and a read-only process list matched by image
+/// (0.4.6 ticket U-28; `docs/plans/design/self-update-2026-09-16.md` §C.4,
+/// M4–M8, E-12). Refused by name off macOS.
+pub mod install_flip;
+
+/// **A worker's waits** — `sleep_within`, the one sleep a worker that polls
+/// may take, asked for with the worker's own `WorkerCtx`
+/// (`docs/plans/design/thread-door-2026-09-26.md` (j)13; U-28).
+pub mod wait;
+
 mod web_environment;
 mod webview;
 
