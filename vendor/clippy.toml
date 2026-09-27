@@ -1,0 +1,5 @@
+# **A shield** (thread-door note 2026-09-26, revision (j)3): clippy reads the nearest
+# clippy.toml and no other, so this empty vocabulary keeps the lint on raw effects away from
+# the packages below this directory, which are not the product. One of the five files of the
+# configuration fence; scripts/ci/check-window-waits.ps1 pins its bytes.
+disallowed-methods = []

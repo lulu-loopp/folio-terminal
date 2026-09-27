@@ -394,10 +394,12 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-migration-debt.ps1
 
-      # The window thread's bare sites (thread-door note, revision (j)): the
+      # The window thread's checks (thread-door note, revision (j)): the bare-site
       # inventory is no larger than at the merge base, or than the pinned seed
-      # when the merge base predates it. The equality half is a test in the
-      # suite above.
+      # when the merge base predates it (the equality half is a test in the suite
+      # above); the configuration fence, which is also this job's assertion that
+      # no clippy configuration directory is set; nothing lowers the lint outside
+      # the source; no registry row is added without a ruling.
       - name: the window thread's checks
         shell: pwsh
         run: ./scripts/ci/check-window-waits.ps1
