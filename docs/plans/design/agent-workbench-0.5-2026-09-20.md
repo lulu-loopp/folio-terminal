@@ -650,3 +650,7 @@ The panel is wide and must not cover the pane it is about to split (13d places i
 
 - A focused pane whose agent starts Waiting gets **no** one-shot flash in 0.4.x; the 0.5 notification answers it (§12.1).
 - Measured on the owner's machine: with Folio's hooks off, the dot he took for "turn finished" was the *unread output* dot, and the orange ring was a **bell** (his agents ring at turn end; Codex rings by default in a terminal it does not recognise — the survey's finding, observed). With hooks on, a Waiting claim on the focused tab is withheld until focus leaves (`refuse … reason=watched`), which he experienced as the notification "arriving a beat late". All three are the shipped design working as ruled; §12.1 is what changes the last one.
+
+## 15. Next revision: the 0.5 tokens (pointer, 2026-09-27)
+
+The tokens and state rules the owner ruled on 2026-09-26/27 (colour per theme, spacing scale, type, controls, hover/open/focus/selected/disabled per control class) are specified in `ui-05-tokens-2026-09-27.md` beside this note; the surfaces named here are specified one at a time after sign-off.
