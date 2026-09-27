@@ -29,6 +29,13 @@ moves to 0.5.0; S1 and S2 are confirmed as 0.5 scope where (c) put them; the
 D-41 cells (A10, I7) are aligned to the ledger's own words; §3 gains rows 22
 and 23. §10 records it cell by cell.
 
+**Revision (e), 2026-09-27, after Codex's scoped check of (d)** (*merge with
+edits*; findings 1–4 adopted, 5 and 6 pass, 7 is the ledger's and goes to main
+separately). B1a keeps 0.5.1, but its prerequisite is now a page-set lifecycle
+contract in B1's 0.5.0 note, which C3a consumes too; B1a is M, provisional, and
+states its lifetime and link promises; §3 gains row 24 (DESIGN §7.12, and the
+§7.9 ① and ⑧ assumptions, extended rather than repealed). §10 records it.
+
 The owner's ask (2026-09-27): *"Shouldn't all the feature increments 0.5 is to
 implement be gathered up, with their dependencies worked out, and written into
 one plan-and-schedule document?"* His leaning the same day: design once,
@@ -144,7 +151,7 @@ own note; its consumers may not ship before it.
 |---|---|---|---|---|---|---|---|
 | C1 | Session identity and lifecycle | Four distinct things: a stable **session id**; its **incarnation** (agent lifetime); the **view address** (tab, seat, window); the **vendor conversation / resume id**. A move changes the view binding, not the session; a replacement invalidates credentials and stale operations; a resume never resurrects grants. The rail's "one live row per pane" stays a presentation rule | OC §5.1 step 3 and (b)6; AR §12.1; SD D-1, D-54; TF review items 1–3 (owner, 2026-09-24); WB §13.2 (the earlier view address) | ruled (direction); note owed | — | M (a Codex-reviewed note; implemented by A3/A4) | A3, A4, L1, L3a, T1, T2, S1, S2, V10, R2 |
 | C2 | Typed-input admission | One admission mechanism for every text Folio types into a pane for someone, with **two modes each operation declares** (revision (c)): **paste-only** — the text lands on the input line, no Enter, the agent's own draft preserved (WB §13.3.1; V11); **paste-and-submit** — paste and submission admitted as one ordered operation on the session's transport, Enter outside the bracketed payload, only when that operation asks for it (comment Send, TF R1; TF's `send --no-enter` is the typing verb's paste-only form); readiness is WB §11.7's full predicate (a turn boundary, no permission or quota wait, disarmed by a new event); `Queued` is not consumed; a refused batch stays pending with its reason; a failed send is never a person's answer; the draft is the composer's, the sent batch is immutable and the target session's, with a stated retention; the envelope and read schema (labelled fields, a line saying source fields are untrusted reference data, escaping, bounds). It does not require PTY birth/resize off the window thread, and a person pressing Send grants no agent a typing tier | TF review items 2–6 and the owner's rulings (2026-09-24); WB §11.7.3, §12.4.7, §13.3.1; AR §12.3 | ruled (the adopted review); note owed | C1, A3 | M (note) + M (core) | T9a (paste-and-submit), V11 (paste-only), S2's reply and V10's input line (each declares its mode in its design; Q31), T5 and T3b (per verb), V6's terminal-bound input |
-| C3 | Web-page ownership and admission | Page identity and navigation revision; the owning pane versus a view; profile and grants; native thread affinity; rehost, close and crash; what happens to a late callback or DOM result. **C3a** is its narrow half — selection extraction and drawing above the native page, the search float's focus boundary, and (revision (c)) **the shared web read boundary**: page and navigation identity (revision (d): the page identity B1's note defines, since B1a gives a pane several pages before C3a lands), access on the owning thread, and rejection of a stale DOM result — enough for adapters and readers over today's browser; **C3** whole precedes the browser's promotion | OC's census (`WindowRuntime.web`) and (b)3 (the download tool versus four failure states); SD D-54 (WebView2 generations); AR §5.2, §5.3 row 21; `webhost::WebSeat` (generation-checked asynchronous work, rehost, close/rebuild) | proposed by the review; note owed | C1 | S–M (C3a) + M (C3 note) | T8, T10, T11, T4's web readers (C3a); T12, B1, B2, B3 (C3) |
+| C3 | Web-page ownership and admission | Page identity and navigation revision; the owning pane versus a view; profile and grants; native thread affinity; rehost, close and crash; what happens to a late callback or DOM result. **C3a** is its narrow half — selection extraction and drawing above the native page, the search float's focus boundary, and (revision (c)) **the shared web read boundary**: page and navigation identity (revision (d), sharpened in (e): C3a consumes the page-set owner, lifetime and navigation-invalidation contract of B1's note, since B1a gives a pane several pages before C3a lands; its DOM-result revision checks stay C3a's own work, because an engine incarnation is not a document-navigation revision), access on the owning thread, and rejection of a stale DOM result — enough for adapters and readers over today's browser; **C3** whole precedes the browser's promotion | OC's census (`WindowRuntime.web`) and (b)3 (the download tool versus four failure states); SD D-54 (WebView2 generations); AR §5.2, §5.3 row 21; `webhost::WebSeat` (generation-checked asynchronous work, rehost, close/rebuild) | proposed by the review; note owed | C1 | S–M (C3a) + M (C3 note) | T8, T10, T11, T4's web readers (C3a); T12, B1, B2, B3 (C3) |
 
 ### 2.A Foundations: ownership and the domain crate
 
@@ -254,8 +261,8 @@ own note; its consumers may not ship before it.
 
 | id | title | what it is | source | state | depends on | size | open decisions |
 |---|---|---|---|---|---|---|---|
-| B1a | Several pages in the web pane | The owner, 2026-09-27: *"if the browser can get several tabs early, do that"*. A visible strip of pages in the **existing** web pane class: open a page in a new page, switch, close; a link from a page in use opens beside it, never over it. **No** promotion to a class of its own, **no** agent verbs, **no** profile change. Built to B1's design note, which is due at 0.5.0 for this reason. **Prerequisite:** today's web pane ownership, not C3a (§4.2 says why); the page identity it introduces is the one B1's note defines and C3a's note adopts | the owner's sentence of 2026-09-27; Q10 (ruled in direction, 2026-09-27); `webhost::WebSeat`, `WindowRuntime.web` (OC census row 130); DESIGN §7.9 ②, ⑦ | ruled (the owner, 2026-09-27); no design yet (B1's note) | B1's design note, D1 | S–M: each page is an existing `webhost::WebSeat` — its own controller, its own `WebMachine` generation and recovery, its own named visual (DESIGN §7.9 ②) and the hidden-seat rules (§7.9 ③) — so the work is `WindowRuntime.web` going from one seat per pane to an ordered set with one shown (census row 130: 22 functions in 9 modules, most of which keep asking for the shown page), the new-window door on both platform arms (today `NewWindowRequested` is handled and dropped, and WebKit's `targetFrame == nil` is cancelled) opening beside through `webnav`'s gate, and the strip; M if B1's note makes hidden pages persist as live pages rather than as the pool rows the session already keeps | — |
-| B1 | The browser pane's promotion | "Browser upgrade" (owner, 2026-09-27): the browser becomes its own class beside shell, files and preview, *"closer to a real browser"*, callable by agents; the 2026-08-19 web-preview rulings need re-ruling because their premise changed (§3 rows 11, 22, 23). **Several pages with a visible strip, and a link never replacing a page in use, are ruled (Q10, 2026-09-27) and arrive first as B1a**; B1 promotes the pane with its pages rather than rebuilding them. Designed together with B2, on C3. **No design note exists; it is due at 0.5.0** (revision (d)), so B1a is built to it | mem:ui-agent-workbench-scope item 2 (2026-09-18) and 2026-09-20 night; WB §9, §10 Q10; mem:rulings-evolve (2026-09-20); mem:preview-line-numbers-deferred (2026-09-18); the owner's sentence of 2026-09-27 | asked (the promotion); pages and links ruled; no design | B1a, C3, D1, O1a | M–L (design), then L | §6 Q10 (the rest of the note's scope) |
+| B1a | Several pages in the web pane | The owner, 2026-09-27: *"if the browser can get several tabs early, do that"*. A visible strip of pages in the **existing** web pane class: open a page in a new page, switch, close; a link from a page in use opens beside it, never over it. **No** promotion to a class of its own, **no** agent verbs, **no** profile change. **What it promises about lifetime** (revision (e)): a hidden page of the strip stays a live page for the session (its engine and document kept, sized but not shown, as hidden seats are today); after a restart the ordered list of open pages and the active one come back, each loaded at its last committed URL — document state (scroll, form input, script state) does not survive a restart. **The link promise** (revision (e)) covers ordinary same-frame user-link navigation on both platforms as well as `target=_blank` and user-initiated new-window requests; deliberate address entry, back/forward, reload, redirects and script navigation without a gesture stay navigations in the same page, classified so none becomes a new page; a request routed to a new page keeps the source page's navigation and mint admission (`webnav`), not only the destination's address-bar gate; request forms an engine cannot attribute to a user gesture are named in the note as unsupported. B1's note defines "page in use". **Prerequisite:** the page-set lifecycle contract in B1's Codex-reviewed note, due at 0.5.0 (§4.2) — not C3a's selection and DOM readers | the owner's sentence of 2026-09-27; Q10 (ruled in direction, 2026-09-27); `webhost::WebSeat`, `WindowRuntime.web` (OC census row 130), `bt_platform::PageVisual`, `webnav::Origin`; DESIGN §7.9 ①②③⑦⑧, §7.12; the Codex check of (d), findings 1–4 | ruled (the owner, 2026-09-27); no design yet (B1's note) | B1's design note (its page-set lifecycle contract), D1 | **M, provisional** — decomposed and re-estimated after B1's 0.5.0 note, in two parts. (i) **The owner and lifecycle migration:** a live-page key distinct from the pane (`WindowRuntime.web` is keyed by `LeafId` and `bt_platform::PageVisual` is `{tab, seat}`, so two pages in one pane need distinct native visual keys); the census row's 22 functions in 9 modules, many of them all-page or addressed lifecycle work — retirement, cross-window transfer, DPI, capture, docking and pane moves, local-file refresh, blank-page withdrawal, window shutdown, placement, event draining, scheme propagation — not reads of the shown page; outcome, commit and focus routing by page rather than by pane; the pool and current-buffer projection; restart restoration of the page list (a session schema addition). (ii) **The strip and the navigation entrances:** the link classification above on both platform arms (Windows `NavigationStarting` and `NewWindowRequested`, handled and dropped today; WebKit's main-frame policy and `targetFrame == nil`, cancelled today) and their validation on both platforms | — |
+| B1 | The browser pane's promotion | "Browser upgrade" (owner, 2026-09-27): the browser becomes its own class beside shell, files and preview, *"closer to a real browser"*, callable by agents; the 2026-08-19 web-preview rulings need re-ruling because their premise changed (§3 rows 11, 22–24). **Several pages with a visible strip, and a link never replacing a page in use, are ruled (Q10, 2026-09-27) and arrive first as B1a**; B1 promotes the pane with its pages rather than rebuilding them. **B1's note carries the page-set lifecycle contract B1a and C3a both consume** (revision (e); §4.2). Designed together with B2, on C3. **No design note exists; it is due at 0.5.0** (revision (d)), so B1a is built to it | mem:ui-agent-workbench-scope item 2 (2026-09-18) and 2026-09-20 night; WB §9, §10 Q10; mem:rulings-evolve (2026-09-20); mem:preview-line-numbers-deferred (2026-09-18); the owner's sentence of 2026-09-27 | asked (the promotion); pages and links ruled; no design | B1a, C3, D1, O1a | M–L (design), then L | §6 Q10 (the rest of the note's scope) |
 | B2 | The browser's security model | A separate profile by default without the person's cookies; an agent reaches local addresses by default; sites granted one by one | mem:ui-agent-workbench-scope (2026-09-18, accepted by the owner); WB §8 row 7; mem:workbench-05-tab-scope-and-handoff (point 3) | ruled (direction) | B1, C3 | in B1's design | — |
 | B3 | Watching an agent drive a page | Its own visible cursor with the vendor's mark; the person's touch takes over; closing the pane sends it to the background with a row "driving a web page · domain" and Stop, never invisible (a change of close from retirement to background, which C3 must allow); WebView2 has CDP, WKWebView needs a second implementation | WB §8 row 7, §13.6 (0.5.x, last) | ruled (last) | B1, B2, T5, T3b, C3 | L | — |
 | B4 | Room for 0.6 in the browser | How a remote machine's dev server would be addressed in the local browser pane: a recorded design seam, not a reverse proxy built in 0.5 | mem:dinotty-reference (point 5, 2026-09-18) | proposed | B1 | S (a design section) | — |
@@ -334,7 +341,7 @@ own note; its consumers may not ship before it.
 | 8 | The translation card is the tab's agent's (the prototype's first build, 2026-09-25) | Offline dictionary plus the user's own key; never the agent (2026-09-26) | PS 83 |
 | 9 | The tool token extends `FOLIO_ATTENTION` (WB §11.9) | A distinct tool credential (2026-09-24) | TF review item 1 |
 | 10 | Allow / Deny on rows and in the list (the mock, WB rev 1) | None anywhere (2026-09-20, confirmed 2026-09-23) | WB §11.2; PS second round (2026-09-23) |
-| 11 | The web preview is one page per pane, no tabs (2026-08-19) | The browser becomes its own class, closer to a real browser (2026-09-18) — the pages and links were ruled on 2026-09-27 (rows 22, 23); the rest is unruled (B1) | WB §9 |
+| 11 | The web preview is one page per pane, no tabs (2026-08-19) | The browser becomes its own class, closer to a real browser (2026-09-18) — the pages and links were ruled on 2026-09-27 (rows 22–24); the rest is unruled (B1) | WB §9 |
 | 12 | Crawling a vendor's session directory by a guessed layout is not done; a transcript path an agent handed over may be read (WB §14.4, 2026-09-20) | **Not a replacement — a boundary to reconcile** (revision (b)): the 2026-09-26 ruling chooses the agents' local transcripts over the screen and orders format research; it does not authorise broad discovery. Both hold until research says otherwise: render the known session's handed-over transcript, and use the vendor's own picker for other sessions (S2, Q22) | mem:ui-agent-workbench-scope (2026-09-26) |
 | 13 | The ledger is keyed by pane: `{TabId, SeatId, incarnation}` plus an agent-lifetime epoch (WB §13.2, 2026-09-20) | A stable session identity separate from the view address; `Site` names a session; routing sits beside the session registry (2026-09-25) — C1. The rail keeps one live row per pane as a presentation rule | OC §5.1 step 3, (b)6; AR §12.1 |
 | 14 | The agent card peeks after 350 ms, the `⌄` pins it, and the attention list's rows are the same component (WB §4.3, §4.4) | A 250 ms rest peeks it, a click inside the card pins it, a row click navigates; the attention list's rows carry no card (2026-09-23). The tab glance card keeps 350 ms | PS 18, 19 |
@@ -346,7 +353,8 @@ own note; its consumers may not ship before it.
 | 20 | The waiting row sticks to the rail's top because the badge is hidden while the rail shows (WB §11.6, §11.11 Q1) | The badge is shown in every mode, so the sticky row is optional, not a remedy (2026-09-23) | PS first round |
 | 21 | Comment Send submits with Enter (TF R1, 2026-09-24), read in revision (b) as covering every typed input | R1 covers comment Send only; the notification reply stays paste-only with the agent's draft preserved (WB §13.3.1). C2 carries both modes (revision (c)) | TF R1, review item 4; WB §13.3.1 |
 | 22 | The web-preview form of 2026-08-19 (`docs/plans/web-preview/plan.md` §0, the line that makes the web page a preview pane's content): **no several pages inside the preview — several pages come from terminal-less tabs**; and its built form, DESIGN §7.9 ⑦, one page per tab (2026-08-22): a tab that already has a page takes a second address **as a navigation in that seat**, not a second pane or a second controller | Several pages with a visible strip in one web pane (Q10 ruled in direction, 2026-09-27), built first as B1a in the existing web pane class. What does **not** fall: the web page stays a preview buffer (§7.7 ①, §7.9) until B1's promotion (row 11), the preview-pane-per-tab singleton stays a rule about panes, and "history = the preview switcher" (2026-08-19) stays until B1's note scopes history | the owner's sentence of 2026-09-27; Q10; B1a |
-| 23 | `window.open` / `target=_blank` in the same form (plan §0's line on the external profile, a review-round addition to the 2026-08-19 form): **only a user-initiated new-window request becomes a navigation in the same pane**, a popup without a gesture is cancelled; as built (DESIGN §13.38 row ⑳), neither opens anything | A link from a page in use opens **beside it, never over it**, as a new page on the strip (Q10 ruled in direction, 2026-09-27; B1a). What does **not** fall: a popup without a gesture is still cancelled, and the target still passes `webnav`'s gate | the owner's sentence of 2026-09-27; Q10; B1a |
+| 23 | `window.open` / `target=_blank` in the same form (plan §0's line on the external profile, a review-round addition to the 2026-08-19 form): **only a user-initiated new-window request becomes a navigation in the same pane**, a popup without a gesture is cancelled; as built (DESIGN §13.38 row ⑳), neither opens anything | A link from a page in use opens **beside it, never over it**, as a new page on the strip (Q10 ruled in direction, 2026-09-27; B1a). What does **not** fall: a popup without a gesture is still cancelled, and the target still passes `webnav`'s gate — together with the source page's navigation and mint admission (revision (e)). The promise also covers ordinary same-frame user links, which take neither new-window door (B1a) | the owner's sentence of 2026-09-27; Q10; B1a |
+| 24 | One engine, one thumbnail and one visual per pane: DESIGN §7.12 (2026-08-23, the correction to §7.9 ②), whose three window tables — `WindowRuntime::web`, `WindowRuntime::web_thumbs` and the compositor's visual table — are keyed by `LeafId{tab,seat}`, with `bt_platform::PageVisual{tab,seat}` as the native name | **Extended, not repealed** (revision (e), Codex's check of (d), finding 4): for B1a a pane holds an ordered set of live pages, so each table is keyed by a live-page identity and the native visual name gains the page; §7.12's rule that two pages alive in one window never share a name stays, now per page. Two further assumptions are extended the same way: **§7.9 ①'s committed-URL key** (`switcher_key`) stays the pool, switcher and history identity, but it is not a live-page identity — two open pages on the same URL are two pages; **§7.9 ⑧'s restored pool rows** are history, not an ordered set of open pages — B1a adds that set (and its restoration, B1a's lifetime promise) beside the pool. The pool, the switcher as history, the preview-buffer classification (§7.9) and the one-preview-pane-per-tab policy stay | the owner's sentence of 2026-09-27; Q10; B1a; B1's note |
 
 ## 4. Dependencies (revised in (b))
 
@@ -402,9 +410,9 @@ flowchart LR
   L3a -.-> S2
   C1 --> A7a[A7a 0.6 decisions] --> A7b[A7b second-view design] --> V10[V10 floats]
   A9[A9 PTY lifecycle] -.-> V10
-  B1N[B1 design note, due 0.5.0] --> B1a[B1a several pages] --> B1
+  B1N[B1 note with the page-set lifecycle contract, due 0.5.0] --> B1a[B1a several pages] --> B1
   D1 --> B1a
-  B1N -.-> C3a
+  B1N -->|"shared contract: owner, lifetime, navigation invalidation (no B1a build edge)"| C3a
   C3[C3 web ownership] --> B1[B1 browser] --> B2[B2 security] --> B3[B3 agent drives a page]
   C3 --> T12[T12 elements]
   T5 --> B3
@@ -429,24 +437,34 @@ flowchart LR
 - **C2 before T9a, V11, S2's reply, T5, T3b and V10's input line.** Readiness
   before any reply or send (TF review items 2–6; WB §11.7.3).
 - **C3a before T8, T10, T11 and T4's web readers; C3 before T12, B1, B2, B3.** Web ownership before
-  selection adapters, and before background pages and the promotion (OC's
-  census; SD D-54; AR §5.2). Several pages in today's pane class are B1a, below
-  (revision (d)).
-- **B1's design note before B1a; D1 before B1a; B1a before B1** (revision (d)).
-  B1a changes an owner — `WindowRuntime.web` goes from one page per pane to
-  several (OC census row 130) — so it waits for a Codex-reviewed note
-  (CONVENTIONS rule 11), which is B1's note, due at 0.5.0; the strip is a new
-  surface dressed at birth (D1); B1 promotes the pane with the pages B1a gave it.
-  **C3a is not B1a's prerequisite.** B1a reads nothing from a page: no selection,
-  no DOM result, no search float. What it stands on already exists: each page
-  is a `webhost::WebSeat` with its own `WebMachine` generation (stale engine
-  callbacks are dropped per seat today), its own named visual (DESIGN §7.9 ②),
-  on the owning window thread; and D-54's WebView2 generations are in gate I1,
-  closed before 0.5 starts. The one thing B1a and C3a share is page identity:
-  B1's note defines it and C3a's note (also due at 0.5.0) adopts it, so C3a's
-  readers address a page, not a pane, from the start. That is coordination
-  between two notes, not an edge between two builds — B1a therefore lands in
-  0.5.1, before C3a (0.5.2).
+  selection adapters, and before the promotion and **background pages in B3's
+  sense** — agent-controlled pages that survive their pane's closure (revision
+  (e)); ordinary hidden members of B1a's page set arrive earlier, under B1's
+  note (OC's census; SD D-54; AR §5.2). Several pages in today's pane class are
+  B1a, below (revision (d)).
+- **B1's note, with its page-set lifecycle contract, before B1a and before C3a;
+  D1 before B1a; B1a before B1** (revision (d), rewritten in (e) after Codex's
+  check of (d), finding 1). B1a changes an owner — `WindowRuntime.web` goes from
+  one page per pane to an ordered set (OC census row 130) — so it waits for a
+  Codex-reviewed note (CONVENTIONS rule 11): B1's, due at 0.5.0. Today's
+  `webhost::WebSeat` is reusable machinery (its own engine, mint, `WebMachine`
+  generations, hidden-seat sizing apart from presence, rehost outcomes), **not**
+  a many-pages-per-pane owner: the map is keyed by `LeafId`,
+  `bt_platform::PageVisual` is `{tab, seat}`, and outcomes, commits, `Gone` and
+  focus receipts are routed by pane — choosing another element of a list cannot
+  make a late commit, close or focus event name the right page. So the note
+  brings forward the necessary part of C3's lifecycle design and settles: a
+  stable **live-page identity**, distinct from the pane and view address and
+  from the URL and history identity (§3 row 24); ownership of the ordered set
+  and the active page; callback, commit and focus routing across switches;
+  hidden-page sizing and presence; closing one page versus the pane or the
+  window; move, rehost and crash. Agent grants, the promotion and DOM readers
+  stay in their later cuts. **C3a consumes the same owner, lifetime and
+  navigation-invalidation contract**, not merely a page id's spelling; its
+  DOM-result revision checks stay its own. That is a hard shared-contract edge
+  from the note to both consumers, and no edge from B1a's build to C3a's — so
+  B1a lands in 0.5.1, before C3a (0.5.2). The strip is a new surface dressed at
+  birth (D1); B1 promotes the pane with the pages B1a gave it.
 - **T1 → T2 → T3a → T4 → T5; T3b before T5; T4 before T9b** (the full envelope
   promises `folio comment`). **T1 before T6** and the release-pinned MCP survey
   before registration (TF review item 7).
@@ -495,7 +513,7 @@ moved into 0.5 needs a dated owner ruling (Q23). I7 does not block.
 
 | version | what a user sees | what the engineering line gets | rows landing (a design row lands as its note) | design notes due here for later rows |
 |---|---|---|---|---|
-| **0.5.0** | The new look on the surfaces it ships; the six-item pane menu and the where × what panel; the Recent view of paths and opens; the Agent rail, rows and detail cards; the badge and its list; notifications that appear, expand and take you there | The ledger v2 with its log sink and its model contract; the tokens as a generated palette | D1, D2, D4a, D5, M2, O2, O1a, O3a, L1, L2, L3a, L4, L5, V1, V2, V3, V4, V5, G1 | C2, C3a, V6, O3b's adapter, S1, T10's research, **B1 with B2 and B4** (moved from 0.5.3 in revision (d), so B1a is built to it; it defines the page identity C3a adopts) |
+| **0.5.0** | The new look on the surfaces it ships; the six-item pane menu and the where × what panel; the Recent view of paths and opens; the Agent rail, rows and detail cards; the badge and its list; notifications that appear, expand and take you there | The ledger v2 with its log sink and its model contract; the tokens as a generated palette | D1, D2, D4a, D5, M2, O2, O1a, O3a, L1, L2, L3a, L4, L5, V1, V2, V3, V4, V5, G1 | C2, C3a, V6, O3b's adapter, S1, T10's research, **B1 with B2 and B4** (moved from 0.5.3 in revision (d), so B1a is built to it; revision (e): it carries the page-set lifecycle contract B1a and C3a both consume) |
 | **0.5.1** | The quota chip, panel and toasts; Settings ▸ Agents (detected agents, accounts, notices); more agents recognised, Gemini CLI among them; agent facts on pane heads and tabs; notification cards that stay, queue, anchor and take input; Recent shows what agents wrote; **several pages in the web pane, a link opening beside the page in use** | The statusLine lane; the provider table; the Claude-shaped hook reader; the generic lane; the file-event adapter; the web pane's page set | Q1, Q2, Q3, Q4, V9a, V8, V6, O3b, G2, G3, G4, A7a, B1a | the tool face's note refreshed against C1/C2 (T1, T2, L3a), C3 |
 | **0.5.2** | Select any text and Comment, Translate or Search; comments batched and typed to the agent | Typed-input admission; the web selection boundary | C3a, C2, T8, T10, T11, T9a, A7b | S2's research and note |
 | **0.5.3** | Agents can read what you are looking at through `folio` and MCP; Folio registers itself with them; comments carry a `folio comment` link | The tool endpoint, the tool credential, the read tiers; the outward serializer | L3b, T1, T2, T3a, T4, T6, V9b, T9b, R2 | — (B1's note moved to 0.5.0, revision (d)) |
@@ -627,12 +645,13 @@ measure before anything is asked), or **release owner** (scheduling).
    not find; the prototype's record is to be corrected.
 10. **Ruled in direction (2026-09-27).** Several pages with a visible strip, and
     a link never replacing a page in use, are the ruling, no longer a
-    recommendation (WB §10 Q10; §3 rows 22, 23); the owner asked for them early,
+    recommendation (WB §10 Q10; §3 rows 22–24); the owner asked for them early,
     so they arrive first as B1a (0.5.1) in the existing web pane class. B1's
     design proposal, now due at 0.5.0, still scopes history, downloads and
     developer tools against existing code, and page lifetime, profile and close
-    semantics (C3); it also defines the page identity B1a introduces and C3a
-    adopts.
+    semantics (C3); it also carries the page-set lifecycle contract (live-page
+    identity, the ordered set and active page, routing, hidden pages, close,
+    move, rehost and crash) that B1a builds on and C3a consumes (revision (e)).
 11. **Split.** A9: **answered by source** — "0.5 toward 0.6" (SD D-43, D-44);
     choosing its slice is scheduling (0.5.6 proposed), moving it to 0.6 would be
     a change. A10: **owner**, after the measurements (I7).
@@ -747,6 +766,7 @@ repository are named by file, never by location.
 | The owner's rulings of 2026-09-27 (one sentence, recorded in the revision (d) brief, `tickets-046/P05-0d-plan-revision-d.md`, the coordinator's records) | Q1, Q5, Q10 (ruled), B1a, the S1/S2 confirmation, §3 rows 22, 23 | — |
 | `docs/plans/web-preview/plan.md` §0; DESIGN §7.7 ①, §7.9 ②③⑦, §13.38 row ⑳ (read for revision (d)) | §3 rows 22, 23; B1a's size | the preview switcher as history and the pin as bookmark (2026-08-19): not touched by the 2026-09-27 rulings; B1's note scopes history |
 | Code read for B1a's size and prerequisite: `webhost::{WebSeat, WebMachine}`, `WindowRuntime.web` (OC census row 130), `bt-platform`'s `NewWindowRequested` handler and WebKit `createWebViewWithConfiguration:` | B1a; §4.2's B1a bullet | — |
+| Codex's scoped check of (d) (`tickets-046/P05-0d-review-codex-2026-09-27.md`, the coordinator's records), with its code trace (`bt_platform::PageVisual`, `apply_web_outcomes`' routing by pane, the census row's call sites, `webnav::Origin`) and DESIGN §7.9 ①⑧, §7.12 | revision (e): B1a, C3a, B1, §4.1, §4.2, §3 rows 23, 24, §6 Q10 | finding 7 (the D-41 version cell): the ledger's, changed on main by the coordinator, not in this plan |
 | mem:ui-agent-workbench-scope | B1, B2, O4, O5, P1, Q5a, Q5b, S1, S2, S3a, D4b, G5, V8, §1.5 | the herdr/Orca notes (unverified references); the "Agent group by company" sketch (withdrawn by the coordinator 2026-09-20) |
 | mem:workbench-05-notification-model | V5, V6, V10, V11 | "every notification appears" vs "the foreground one does not" — the owner's version was taken (WB §12.1) |
 | mem:workbench-05-where-what-panel | O1a, O1b, S1 | the two-word filter's visibility (a rough edge, WB §14.6) |
@@ -965,3 +985,53 @@ written; (d) edits only the live tables. Each item: ruling → the cells changed
    row ⑳). Each row names what does not fall. Row 11 now says the pages and links
    are ruled.
 
+### Revision (e) — after Codex's scoped check of (d)
+
+Check: `tickets-046/P05-0d-review-codex-2026-09-27.md` (the coordinator's
+records), against `7417cfbe`; verdict *merge with edits*. Findings 1–4 are
+adopted; 5 (Q5(b)'s attribution) and 6 (§5.1 covers every row exactly once:
+109 rows in §2, 110 entries in §5.1, the extra one C3a) pass; 7 is the D-41
+version cell in `docs/plans/structural-debt.md`, which the coordinator changes
+on main — this plan still quotes the row as it reads today. No slice moved:
+B1a stays in 0.5.1, B1 in 0.5.7, B1's note in 0.5.0.
+
+1. **Medium, the prerequisite is a page-set lifecycle contract, not only page
+   identity.** Today's `WebSeat` is reusable machinery, not a many-pages-per-pane
+   owner: `WindowRuntime.web` is keyed by `LeafId`, `bt_platform::PageVisual` is
+   `{tab, seat}`, and outcomes, commits, `Gone` and focus receipts route by
+   pane. → B1a's prerequisite is the page-set lifecycle contract in B1's
+   Codex-reviewed 0.5.0 note (live-page identity distinct from the pane and view
+   address and from URL and history identity; the ordered set and active page;
+   callback, commit and focus routing across switches; hidden-page sizing and
+   presence; one page versus pane or window close; move, rehost, crash). C3a
+   consumes the same owner, lifetime and navigation-invalidation contract, and
+   keeps its DOM-result revision checks. Cells: B1a (text, source, depends on);
+   B1 (a sentence); C3a in §2.C; §4.1 (the note's edge to C3a is now a hard
+   shared-contract edge, labelled as having no B1a build edge); §4.2 (the C3
+   bullet's "background pages" now means B3's agent-controlled pages that
+   survive pane closure; the B1a bullet rewritten); §5's 0.5.0 note cell;
+   §6 Q10. 0.5.1 stays.
+2. **Medium, the size.** → B1a is **M, provisional**, decomposed and
+   re-estimated after the 0.5.0 note into (i) the owner and lifecycle migration
+   (distinct native visual keys, the census row's all-page and addressed
+   lifecycle sites, routing by page, the pool and current-buffer projection,
+   restart restoration) and (ii) the strip and navigation entrances on both
+   platform arms with their validation. The S case and the "most ask for the
+   shown page" rationale are gone. B1a now says which lifetime it promises: a
+   hidden page stays live for the session; after a restart the ordered page list
+   and the active page return, each at its last committed URL, without document
+   state.
+3. **Medium, the link promise.** → B1a covers ordinary same-frame user links on
+   both platforms as well as `target=_blank` and user-initiated new-window
+   requests; address entry, back/forward, reload, redirects and gesture-less
+   script navigation stay same-page and are classified so; a routed request keeps
+   the source page's navigation and mint admission; unsupported forms are named
+   in the note; B1's note defines "page in use". Also §3 row 23.
+4. **Medium, §3's missing supersession.** → New §3 row 24: DESIGN §7.12's one
+   engine, one thumbnail and one visual per pane is **extended** to a set of
+   live pages per pane; §7.9 ①'s committed-URL key stays the pool and history
+   identity and is not a live-page identity; §7.9 ⑧'s restored pool rows are
+   history, not an ordered set of open pages, which B1a adds beside them. The
+   pool, the switcher as history, the preview-buffer classification and the
+   one-preview-pane-per-tab policy stay. Rows 11, 22 and 23 and the B1 row
+   point to it.
