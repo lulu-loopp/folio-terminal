@@ -4827,34 +4827,190 @@ fn item_and_arm(record: &ItemRecord) -> (String, String) {
 /// **The inventory, observed**: every vocabulary site in the product outside a registered door
 /// function's body, counted by `(crate, arm, item, entry)`.
 fn bare_sites_observed(world: &World) -> BTreeMap<BareKey, usize> {
+    vocabulary_sites(world).0
+}
+
+/// A door function's effects: the door it serves, and its vocabulary entries counted.
+type DoorEffects = BTreeMap<(String, String, String), (String, BTreeMap<String, usize>)>;
+
+/// Every vocabulary site in the product, split at the doors: those outside a registered door
+/// function's body, by `(crate, arm, item, entry)`; and, for each door function whose body holds
+/// any, the door it serves and its entries counted, by `(crate, arm, item)`.
+fn vocabulary_sites(world: &World) -> (BTreeMap<BareKey, usize>, DoorEffects) {
     let reader = Reader::new(world);
-    let doors: BTreeSet<(usize, usize)> = door_functions(world)
+    let doors: BTreeMap<(usize, usize), String> = door_functions(world)
         .iter()
-        .map(|door| (door.src, door.record.whole().start()))
+        .map(|door| {
+            (
+                (door.src, door.record.whole().start()),
+                door.doors.join(", "),
+            )
+        })
         .collect();
-    let mut rows = BTreeMap::new();
+    let mut bare = BTreeMap::new();
+    let mut in_doors: DoorEffects = BTreeMap::new();
     for (src, s) in world.srcs.iter().enumerate() {
         for (site, owner) in reader.sites(src) {
-            if !s.in_product(site.at)
-                || owner.is_some_and(|record| doors.contains(&(src, record.whole().start())))
-            {
+            if !s.in_product(site.at) {
                 continue;
             }
             let (item, arm) = owner.map_or_else(
                 || (s.module_at(site.at).to_owned(), "-".to_owned()),
                 item_and_arm,
             );
-            *rows
-                .entry((
-                    s.package.to_owned(),
-                    arm,
-                    item,
-                    reader.entries[site.entry].path.clone(),
-                ))
-                .or_insert(0) += 1;
+            let entry = reader.entries[site.entry].path.clone();
+            let door = owner.and_then(|record| doors.get(&(src, record.whole().start())));
+            match door {
+                Some(door) => {
+                    *in_doors
+                        .entry((s.package.to_owned(), arm, item))
+                        .or_insert_with(|| (door.clone(), BTreeMap::new()))
+                        .1
+                        .entry(entry)
+                        .or_insert(0) += 1;
+                }
+                None => {
+                    *bare
+                        .entry((s.package.to_owned(), arm, item, entry))
+                        .or_insert(0) += 1;
+                }
+            }
         }
     }
-    rows
+    (bare, in_doors)
+}
+
+const EFFECT_COLUMNS: [&str; 7] = [
+    "crate",
+    "arm",
+    "item",
+    "effects",
+    "kind",
+    "authority",
+    "door",
+];
+const EFFECT_KINDS: [&str; 5] = [
+    "owner-door-body",
+    "worker-door-body",
+    "transport",
+    "drop-exception",
+    "interim-owner",
+];
+const AUTHORITIES: [&str; 4] = ["WaitToken", "WorkerCtx", "none (transport)", "drop"];
+
+/// `std::thread::JoinHandle::join 1, std::thread::sleep 1`: a row's effects, each entry with its
+/// count.
+fn effects_spelled(effects: &BTreeMap<String, usize>) -> String {
+    effects
+        .iter()
+        .map(|(entry, count)| format!("{entry} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// RED (A2a, revision (j)7) — **the registry's `# effects` section lists exactly the functions
+/// whose own body holds a listed effect inside a registered door, each with its entries, counts,
+/// kind, authority and the door it serves.**
+///
+/// A2e puts one `expect(clippy::disallowed_methods)` on each effect function — the function whose
+/// body contains the raw effect, never a caller or a wrapper — and an `expect` on a function with no
+/// effect is itself an error, so the holders have to be known by name, arm and count before the
+/// lint exists. Until revision (k) allocates the rest, the only rows are the effect functions that
+/// already sit inside a door: kind `owner-door-body`, authority `WaitToken`, the door their token
+/// names. A door that forwards to a separately defined helper (`trace_sink::flush` →
+/// `flush_sink`) does not make the helper in-door; the helper's sites are inventory. The door
+/// `expect` count stays 0 (assertion 4) until A2e.
+///
+/// MUTATION: add a row for a function that holds no listed effect, or delete a row, or change a
+/// count, and it goes red naming the row.
+#[test]
+fn the_effects_section_is_the_effect_functions_inside_the_doors() {
+    let world = World::new();
+    let (_, observed) = vocabulary_sites(&world);
+    let mut failures = Vec::new();
+    let mut listed: DoorEffects = BTreeMap::new();
+    for cells in section("effects", &EFFECT_COLUMNS) {
+        let key = (
+            cells[0].to_owned(),
+            cells[1].to_owned(),
+            cells[2].to_owned(),
+        );
+        if !EFFECT_KINDS.contains(&cells[4]) {
+            failures.push(format!(
+                "{} {}: kind `{}` is not one of {EFFECT_KINDS:?}",
+                cells[0], cells[2], cells[4]
+            ));
+        }
+        if !AUTHORITIES.contains(&cells[5]) {
+            failures.push(format!(
+                "{} {}: authority `{}` is not one of {AUTHORITIES:?}",
+                cells[0], cells[2], cells[5]
+            ));
+        }
+        let mut effects = BTreeMap::new();
+        for part in cells[3].split(", ") {
+            match part
+                .rsplit_once(' ')
+                .map(|(entry, count)| (entry, count.parse::<usize>()))
+            {
+                Some((entry, Ok(count))) if count > 0 => {
+                    effects.insert(entry.to_owned(), count);
+                }
+                _ => failures.push(format!(
+                    "{} {}: `{part}` is not `<entry> <count>`",
+                    cells[0], cells[2]
+                )),
+            }
+        }
+        // What A2a can say from the code: an effect inside a door is that door's owner-thread body,
+        // admitted by its token. Other kinds wait for revision (k).
+        if (cells[4], cells[5]) != ("owner-door-body", "WaitToken") {
+            failures.push(format!(
+                "{} {}: `{}` / `{}` — until revision (k) allocates the rest, a row is an effect \
+                 function inside a registered door: `owner-door-body` / `WaitToken`",
+                cells[0], cells[2], cells[4], cells[5]
+            ));
+        }
+        if listed.insert(key, (cells[6].to_owned(), effects)).is_some() {
+            failures.push(format!(
+                "{} {} {}: listed twice",
+                cells[0], cells[1], cells[2]
+            ));
+        }
+    }
+    for (key, (door, effects)) in &observed {
+        match listed.get(key) {
+            Some(row) if row == &(door.clone(), effects.clone()) => {}
+            Some((listed_door, listed_effects)) => failures.push(format!(
+                "{} {} {}: the body holds {} for door {door}, and the row says {} for door \
+                 {listed_door}",
+                key.0,
+                key.1,
+                key.2,
+                effects_spelled(effects),
+                effects_spelled(listed_effects)
+            )),
+            None => failures.push(format!(
+                "{} {} {}: a door function (door {door}) whose body holds {}, with no `# effects` \
+                 row",
+                key.0,
+                key.1,
+                key.2,
+                effects_spelled(effects)
+            )),
+        }
+    }
+    for key in listed.keys().filter(|key| !observed.contains_key(*key)) {
+        failures.push(format!(
+            "{} {} {}: an `# effects` row for a function that holds no listed effect inside a door",
+            key.0, key.1, key.2
+        ));
+    }
+    assert!(
+        failures.is_empty(),
+        "the registry's `# effects` section and the doors' bodies differ:\n  {}",
+        failures.join("\n  ")
+    );
 }
 
 /// The committed inventory's rows, keyed, each count a positive integer and each key once.

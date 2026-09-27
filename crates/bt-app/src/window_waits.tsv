@@ -1,6 +1,6 @@
 ## The window thread's waits: the one registry (design note 2026-09-26; budget note R7).
 ##
-## Five sections, each a header line then tab-separated lines. A line starting `##` is a comment.
+## Six sections, each a header line then tab-separated lines. A line starting `##` is a comment.
 ##
 ## `# rows` — ARCHITECTURE §5.3, one line per numbered exception. `status` is `done` (repaid:
 ## what remains on the window thread is its residue, still listed), `open` (to be moved),
@@ -23,6 +23,16 @@
 ## type is exactly `WaitToken<'_, doors::<door>>` for the door named here — never an `Option` of
 ## one — so no call of it compiles without an admission. The guard checks each, per arm, and
 ## refuses one that is also in `# vocabulary`.
+##
+## `# effects` — one line per **effect function**: the function whose own body holds a listed effect,
+## keyed by crate, `cfg` arm and item, with its entries and their counts, its kind (`owner-door-body`,
+## `worker-door-body`, `transport`, `drop-exception`, `interim-owner`), its authority (`WaitToken`,
+## `WorkerCtx`, `none (transport)`, `drop`) and the door it serves (revision (j)7). A2e puts one
+## `expect` on each. Today it holds exactly the effect functions already inside a registered door;
+## revision (k) allocates the rest. Held equal to the bodies by
+## `hang_watch::window_waits_tests::the_effects_section_is_the_effect_functions_inside_the_doors`.
+## `# doors` (admission identities) and `# owners` (FFI constructs) stay separate lists: neither is a
+## list of `expect` holders, and no `# owners` module is exempt from the bare-site inventory.
 ##
 ## `# owners` — where the constructs a lint cannot see through may be written (budget note §C-3):
 ## `msg_send!`/`msg_send_id!`, a raw `vtable(` call, `GetProcAddress`, an `extern` block, `#[link]`
@@ -131,6 +141,16 @@ bt_platform::Compositor::set_window_size	CompositorWindowSize
 bt_platform::WebHost::request_controller	WebController
 bt_platform::WebHost::request_environment	WebEnvironment
 bt_platform::WebHost::rehost	WebRehost
+
+# effects
+crate	arm	item	effects	kind	authority	door
+bt-app	-	crate::gpu_door::open_first_window	bt_render::GpuContext::open 1, pollster::block_on 1	owner-door-body	WaitToken	GpuOpen
+bt-app	-	crate::persist::SessionWriter::close	std::thread::JoinHandle::join 1, std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
+bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
+bt-app	-	crate::pty_door::resize	bt_pty::PtySession::resize 1	owner-door-body	WaitToken	PtyResize
+bt-app	-	crate::pty_door::spawn_shell	bt_pty::PtySession::spawn_shell_in 1	owner-door-body	WaitToken	PtyBirth
+bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	owner-door-body	WaitToken	PaneRetirementWait
+bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
 
 # owners
 construct	owner	count
