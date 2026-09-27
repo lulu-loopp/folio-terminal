@@ -454,7 +454,7 @@ fn inventories(journal: &Journal) -> &Inventories {
 fn failed_with(job: &Job<u32>, txn: u8, stop: Stop) {
     assert_eq!(
         job.state(),
-        &State::Failed(offer(txn), Failure::Stopped(stop)),
+        &State::Failed(Some(offer(txn)), Failure::Stopped(stop)),
     );
     let paint = crate::update_card::paint(job.state()).expect("a failed card");
     assert_eq!(
@@ -487,7 +487,7 @@ fn refused_off_windows() {
     let job = press(&driver, Arc::new(Release::of(Vec::new())), 1);
     assert_eq!(
         job.state(),
-        &State::Failed(offer(1), Failure::Stopped(Stop::Identity))
+        &State::Failed(Some(offer(1)), Failure::Stopped(Stop::Identity))
     );
     assert!(
         !root.join(crate::update_txn::WINDOWS_HOME).exists(),

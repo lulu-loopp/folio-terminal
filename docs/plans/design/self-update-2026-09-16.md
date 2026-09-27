@@ -2024,3 +2024,38 @@ build did not ship — is recorded like any old file and carried to `backup\`, a
 `Inventories` says; §C.4's "fails before any move" is not applied at Prepare.
 (4) `folio.msix` is verified when the release carries one and not required
 (C4 names `folio.exe` and the two sidecars).
+
+**The macOS rollback as built (U-29), and the relaunch.** Where the applier
+stopped at `RollbackIntent`, it — and the rescue build as recovery, from the
+LaunchAgent at login or an ordinary start's hand-over (which now names the
+home: `--update-recover <home> --then-launch …`) — performs M9–M11 over one
+code path, each step `decide`'s answer from what is on disk: the trial stopped
+while the process list shows the journal's pid with its start instant running
+from the new bundle's executable (`SIGTERM`, 5 s, `SIGKILL`, 5 s, through
+`bt_platform::install_flip::ask`: C.5's "RollingBack" is `RollbackIntent`, and
+W9's "quits itself; after 5 s grace, ended" is this); the same `RENAME_SWAP`
+back only while the live identity is new and `stage/` holds the old, under
+exclusive admission (a running copy that keeps it → nothing recorded, the next
+holder tries); the restored bundle checked against the rescue clone's own
+requirement; `RolledBack`; then the plist, `Retired{RolledBack}` and `H/<txn>`,
+the journal kept for the relaunched build. A failed step is `Stuck`, everything
+kept. The protocol had no retry count, so `Stuck` carries `attempts`, and at
+three `decide` answers `GiveUp`: nothing more is tried, and the line names the
+journal's folder (the coordinator's ruling 4). **The relaunch** (ruling 1):
+after a rollback, finished or not, the applier starts the installed bundle with
+`open -n -a <bundle> --args --update-failed <journal>`; after a revert (`Moving`
+or earlier → `Prepared`) with no word — the old build is unchanged and the
+transaction waits for the deferred rule; after `Abandoned` not at all, and the
+next start retires it (W13). Recovery puts `--update-failed <journal>` before a
+handed command line whenever the header's outcome is `rolled_back`, and at login
+starts the build that way only after a rollback it finished (W11).
+**`--update-failed <journal>`** (ruling 3) is a frozen v1 word: a start that
+carries it reads the card from the header alone — `terminal` + `rolled_back` →
+*Previous version restored.*, `destructive` + `rolled_back` → *Update
+incomplete.* and the folder — and continues past such a destructive header
+instead of handing itself back; the word decides, not the path's spelling.
+**C.5's manual-launch sentence**, which U-28 narrowed to the receipt, no longer
+describes any launch: a person's start during an apply hands itself to the
+rescue build, and after a rollback the one start that runs past a destructive
+header uncalled is the one the rescue build sends. The DESIGN entry of the same
+day has the rest.

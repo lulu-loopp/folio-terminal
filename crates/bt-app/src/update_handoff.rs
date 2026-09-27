@@ -491,6 +491,7 @@ mod tests {
                 own_image: None,
                 rescue_image: None,
                 trial_of: None,
+                sent_by_rollback: false,
             }),
             StartAction::Retire,
             "the next start retires it (W13)"
@@ -641,6 +642,7 @@ mod tests {
                 own_image: None,
                 rescue_image: None,
                 trial_of: None,
+                sent_by_rollback: false,
             });
             let holder = decide(&Disk {
                 journal,

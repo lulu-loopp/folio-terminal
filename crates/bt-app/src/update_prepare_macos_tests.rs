@@ -873,7 +873,7 @@ fn every_failure_road_detaches_and_removes_the_txn() {
         let job = press(&driver(&scene, &tools), Arc::new(release), txn);
         assert_eq!(
             job.state(),
-            &State::Failed(offer(txn), Failure::Stopped(stop)),
+            &State::Failed(Some(offer(txn)), Failure::Stopped(stop)),
             "{stop:?}"
         );
         assert!(mounted(home.root()).is_empty(), "{stop:?}: a mount is left");

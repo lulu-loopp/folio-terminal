@@ -125,6 +125,17 @@ pub struct CliRequest {
     /// they are worth is `crate::update_startup`'s question, because only the
     /// journal can say whether this start is the trial of anything.
     pub update_trial: Option<UpdateTrialArg>,
+    /// `--update-failed <journal>` — **this start was sent by the lock holder
+    /// that rolled an update back, or could not** (U-29; §C.5's "relaunches
+    /// the restored old build with `--update-failed <journal>`"; frozen at v1
+    /// with the other update words).
+    ///
+    /// Kept as given. `crate::update_startup` compares it with the journal of
+    /// this copy's installation home and reads that journal's frozen header:
+    /// the card rises at `Failed` (*Previous version restored.*, or *Update
+    /// incomplete.* and the folder), and past a rollback that did not finish
+    /// the start continues instead of handing itself back to the rescue build.
+    pub update_failed: Option<PathBuf>,
 }
 
 /// The two values of `--update-trial`, as the command line gave them.
@@ -302,10 +313,10 @@ pub const EXPLORER_ORIGIN_FLAG: &str = "--from-explorer";
 /// today is a shell and VS Code's `terminal.external.windowsExec`.
 pub const HERE_ORIGIN_FLAG: &str = "--from-here";
 
-/// **The three argv words of an update that cross versions**, frozen at v1
-/// from 0.4.6 (`docs/plans/design/self-update-2026-09-16.md` (b).1 F-8): a
-/// build that is updated away from, or rolled back to, must still read the
-/// words another build writes. None of them is in the usage block — like
+/// **The argv words of an update that cross versions**, frozen at v1 from
+/// 0.4.6 (`docs/plans/design/self-update-2026-09-16.md` (b).1 F-8): a build
+/// that is updated away from, or rolled back to, must still read the words
+/// another build writes. None of them is in the usage block — like
 /// [`EXPLORER_ORIGIN_FLAG`], they are said by one program to another.
 ///
 /// `--update-trial <txn> <nonce>`: the applier starts the new build as the
@@ -325,6 +336,11 @@ pub const THEN_LAUNCH_FLAG: &str = "--then-launch";
 /// its door is macOS's (`update_apply_macos`, U-28), and Windows answers it
 /// with one line until its own (U-23).
 pub const UPDATE_APPLY_FLAG: &str = "--update-apply";
+/// `--update-failed <journal>`: an ordinary launch that the applier or the
+/// rescue build started after a rollback — finished or not — so the card
+/// rises at `Failed` ([`CliRequest::update_failed`], U-29). Written first on
+/// the line, before whatever the start that handed itself over was given.
+pub const UPDATE_FAILED_FLAG: &str = "--update-failed";
 
 /// Turn a command line into a request, or into the fault that ends the launch.
 ///
@@ -442,6 +458,15 @@ where
                     txn: txn.to_string_lossy().into_owned(),
                     nonce: nonce.to_string_lossy().into_owned(),
                 });
+            }
+            // [`UPDATE_TRIAL_FLAG`]'s rule, with one value: the word and the
+            // journal's path are two arguments, as the rollback writes them.
+            Some(flag) if flag == UPDATE_FAILED_FLAG => {
+                if request.update_failed.is_some() {
+                    return Err(CliFault::Repeated(UPDATE_FAILED_FLAG));
+                }
+                let journal = value_for(UPDATE_FAILED_FLAG, flag, &arg, &mut args)?;
+                request.update_failed = Some(PathBuf::from(journal));
             }
             Some(flag) if is_flag(flag, CWD_FLAG) => {
                 if request.cwd.is_some() {
@@ -927,14 +952,15 @@ pub fn update_door(
 }
 
 /// **The line an ordinary start hands itself to the rescue build with**:
-/// `--update-recover --then-launch` and its own command line, verbatim — the
-/// line [`update_door`] reads back.
+/// `--update-recover`, the installation home when the rescue build cannot find
+/// it from its own path (a macOS rescue clone, F-3; U-29), `--then-launch` and
+/// the start's own command line, verbatim — the line [`update_door`] reads
+/// back.
 #[must_use]
-pub fn recover_command_line(then_launch: &[OsString]) -> Vec<OsString> {
-    let mut line = vec![
-        OsString::from(UPDATE_RECOVER_FLAG),
-        OsString::from(THEN_LAUNCH_FLAG),
-    ];
+pub fn recover_command_line(home: Option<&Path>, then_launch: &[OsString]) -> Vec<OsString> {
+    let mut line = vec![OsString::from(UPDATE_RECOVER_FLAG)];
+    line.extend(home.map(|home| home.as_os_str().to_owned()));
+    line.push(OsString::from(THEN_LAUNCH_FLAG));
     line.extend_from_slice(then_launch);
     line
 }
@@ -1350,6 +1376,7 @@ mod tests {
                 tab: false,
                 origin: LaunchOrigin::Plain,
                 update_trial: None,
+                update_failed: None,
             }
         );
     }
@@ -1938,6 +1965,40 @@ mod tests {
         );
     }
 
+    /// RED (U-29) — **`--update-failed <journal>` is one value on an ordinary
+    /// launch, first on the line or anywhere before `--`, kept as given, and
+    /// refused like any other flag when the value is missing or the word is
+    /// given twice.**
+    ///
+    /// The rollback writes `--update-failed <journal>` and then the command
+    /// line of the start that handed itself over, verbatim: the rest of the
+    /// line keeps its meaning.
+    ///
+    /// MUTATION: drop the `UPDATE_FAILED_FLAG` arm of `parse` (the word is an
+    /// unknown flag).
+    #[test]
+    fn the_failed_word_takes_the_journal_on_an_ordinary_launch() {
+        let journal = "/Applications/.Folio.app.folio-update/journal.json";
+        let request = parsed(&["--update-failed", journal, "--cwd", "/x", "--", "-a"]);
+        assert_eq!(request.update_failed, Some(PathBuf::from(journal)));
+        assert_eq!(request.cwd, Some(PathBuf::from("/x")));
+        assert_eq!(request.path, Some(PathBuf::from("-a")));
+        assert_eq!(parsed(&[]).update_failed, None);
+        assert_eq!(
+            refused(&["--update-failed"]),
+            CliFault::MissingValue(UPDATE_FAILED_FLAG)
+        );
+        assert_eq!(
+            refused(&["--update-failed", "--tab"]),
+            CliFault::MissingValue(UPDATE_FAILED_FLAG)
+        );
+        assert_eq!(
+            refused(&["--update-failed", journal, "--update-failed", journal]),
+            CliFault::Repeated(UPDATE_FAILED_FLAG)
+        );
+        assert_eq!(update_door(args(&["--update-failed", journal])), None);
+    }
+
     /// RED (U-28) — **`--update-apply` takes exactly the home, the
     /// transaction and the nonce, and the hand-over writes exactly that
     /// line.**
@@ -2047,7 +2108,7 @@ mod tests {
     #[test]
     fn the_rescue_line_carries_the_handed_command_line_verbatim() {
         let handed = args(&["--cwd", "D:\\x", "--", "--not-a-flag", "--then-launch"]);
-        let line = recover_command_line(&handed);
+        let line = recover_command_line(None, &handed);
         assert_eq!(
             &line[..2],
             &args(&["--update-recover", "--then-launch"])[..]
@@ -2056,14 +2117,22 @@ mod tests {
             update_door(line),
             Some(Ok(UpdateDoor::Recover {
                 home: None,
-                then_launch: Some(handed)
+                then_launch: Some(handed.clone())
             }))
         );
         assert_eq!(
-            update_door(recover_command_line(&[])),
+            update_door(recover_command_line(None, &[])),
             Some(Ok(UpdateDoor::Recover {
                 home: None,
                 then_launch: Some(Vec::new())
+            }))
+        );
+        let home = Path::new("/Applications/.Folio.app.folio-update");
+        assert_eq!(
+            update_door(recover_command_line(Some(home), &handed)),
+            Some(Ok(UpdateDoor::Recover {
+                home: Some(home.to_path_buf()),
+                then_launch: Some(handed.clone())
             }))
         );
         assert_eq!(

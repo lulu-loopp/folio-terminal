@@ -641,6 +641,7 @@ mod tests {
                 Phase::Stuck {
                     trial: None,
                     last_error: "held".to_owned(),
+                    attempts: 1,
                 },
                 TrialSight::Ended,
             ),

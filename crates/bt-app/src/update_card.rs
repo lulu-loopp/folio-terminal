@@ -128,24 +128,11 @@ pub(crate) enum Bar {
 pub(crate) enum Outcome {
     /// `Nothing changed.` — the job stopped before anything installed moved.
     NothingChanged,
-    /// `Previous version restored.` — the flip was rolled back (U-20/U-21's).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no failure rolls back until the flip exists: U-20 / U-21 (b).5"
-        )
-    )]
+    /// `Previous version restored.` — the flip was rolled back
+    /// (`Failure::RolledBack`, U-29).
     Restored,
     /// `Update incomplete.` and the journal's folder — the rollback did not
-    /// finish (U-20/U-21's).
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "no failure leaves a journal behind until the flip exists: U-20 / U-21 (b).5"
-        )
-    )]
+    /// finish (`Failure::Incomplete`, U-29).
     Incomplete { folder: PathBuf },
 }
 
@@ -260,6 +247,7 @@ fn reason(failure: &Failure) -> String {
         Failure::Stopped(Stop::Identity) => Text::UpdateFailedIdentity,
         Failure::Stopped(Stop::Copy) => Text::UpdateFailedCopy,
         Failure::Stopped(Stop::Clone) => Text::UpdateFailedClone,
+        Failure::RolledBack | Failure::Incomplete { .. } => Text::UpdateFailedTrial,
         Failure::Stopped(Stop::Space { short_by }) => {
             return i18n::update_failed_space(&needed_megabytes(*short_by));
         }
@@ -274,11 +262,16 @@ fn needed_megabytes(bytes: u64) -> String {
     bytes.div_ceil(MEGABYTE).max(1).to_string()
 }
 
-/// What each failure the job knows today did: every one stops before
-/// anything installed moves (`update_job::Failure`'s own notes).
-const fn outcome(failure: &Failure) -> Outcome {
+/// What each failure did to the installed copy: a driver's stop and a missing
+/// driver moved nothing (`update_job::Failure`'s own notes); a rollback put
+/// the previous version back, or did not finish (U-29).
+fn outcome(failure: &Failure) -> Outcome {
     match failure {
         Failure::Unsupported | Failure::Stopped(_) => Outcome::NothingChanged,
+        Failure::RolledBack => Outcome::Restored,
+        Failure::Incomplete { folder } => Outcome::Incomplete {
+            folder: folder.clone(),
+        },
     }
 }
 
@@ -568,8 +561,8 @@ mod tests {
     use crate::i18n::{Lang, Text};
     use crate::install_channel::{Channel, Manager};
     use crate::update_job::{
-        Bytes, Driver, Effect, Gathered, Job, NoDownloadDoor, Offer, Poster, Presenters, Refused,
-        SharedTransport, State, Step, Unsupported, Verb,
+        Bytes, Driver, Effect, Failure, Gathered, Job, NoDownloadDoor, Offer, Poster, Presenters,
+        Refused, SharedTransport, State, Step, Unsupported, Verb,
     };
 
     /// The transport the verbs below never ask for a file.
@@ -846,6 +839,44 @@ mod tests {
         assert_eq!(drawn.folder, Some(folder));
         assert_eq!(drawn.verbs, vec![CardVerb::ShowFolder, CardVerb::Close]);
         assert_eq!(drawn.primary(), Some(CardVerb::ShowFolder));
+    }
+
+    /// RED (U-29) — **the two failures a rollback reports are C9's fifth and
+    /// sixth rows, from the job's own state**: the reason that the new
+    /// version did not start, then *Previous version restored.* with the
+    /// releases page, or *Update incomplete.* with the journal's folder.
+    ///
+    /// Until U-29 no failure reached these shapes (`Outcome::Restored` and
+    /// `Outcome::Incomplete` were drawn only by the tests).
+    ///
+    /// MUTATION: map `Failure::RolledBack` to `Outcome::NothingChanged` in
+    /// `outcome`.
+    #[test]
+    fn the_failures_a_rollback_reports_draw_restored_and_incomplete() {
+        let restored =
+            paint(&State::Failed(None, Failure::RolledBack)).expect("a failed job has a card");
+        assert_eq!(
+            restored,
+            Paint {
+                heading: Some(Text::UpdateFailedTrial.text().to_owned()),
+                bar: None,
+                detail: Some("Previous version restored.".to_owned()),
+                folder: None,
+                verbs: vec![CardVerb::Releases, CardVerb::Close],
+            }
+        );
+        let folder = PathBuf::from("/Applications/.Folio.app.folio-update");
+        let incomplete = paint(&State::Failed(
+            None,
+            Failure::Incomplete {
+                folder: folder.clone(),
+            },
+        ))
+        .expect("a failed job has a card");
+        assert_eq!(incomplete.heading, restored.heading);
+        assert_eq!(incomplete.detail.as_deref(), Some("Update incomplete."));
+        assert_eq!(incomplete.folder, Some(folder));
+        assert_eq!(incomplete.primary(), Some(CardVerb::ShowFolder));
     }
 
     /// RED (U-19) — **no card where C9 draws none**: a pending or idle job,

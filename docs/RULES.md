@@ -909,8 +909,12 @@ compared by precedence*; trailing entry 2026-09-26 *the update job is one per
 process, owned by the application*; trailing entry 2026-09-26 *the update card
 says one line per state, holds the window's keys until it is answered or put
 away, follows its window when that window closes, and the General row's foot is
-read off the update job* (U-19; the fold is the enabling tickets', U-31 / U-32,
-per the design note's (b).5 table).
+read off the update job* (U-19); trailing entry 2026-09-27 *on macOS a failed
+trial is rolled back … the rescue build finishes it at the next login or start,
+three times at most* (U-29: the old build started again with `--update-failed`
+after a rollback, with no word after a revert, and not at all after
+`Abandoned`). The fold is the enabling tickets', U-31 / U-32, per the design
+note's (b).5 table.
 
 ### 37. The Explorer and Finder verbs — `folded`
 **Rule.** On Windows there is one verb in two registrations: the classic trees

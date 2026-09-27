@@ -2927,6 +2927,8 @@ pub enum Text {
     /// The installation's disk is short of space for the update (`update_job::Stop::Space`);
     /// `{size}` is the shortfall in megabytes, rounded up.
     UpdateFailedSpace,
+    /// The new build did not prove itself and a rollback followed (`update_job::Failure::RolledBack`, `Incomplete`; U-29).
+    UpdateFailedTrial,
     /// The General row's picker foot while a job waits at `Verified`: the card again.
     UpdateRowRestart,
     /// The General row's picker foot on a copy a package manager updates: the manager's command, to the clipboard.
@@ -5562,6 +5564,11 @@ impl Text {
                 "{size} MB more disk space needed.",
                 "{size} MB more disk space needed.",
             ),
+            Self::UpdateFailedTrial => pick(
+                lang,
+                "The new version did not start.",
+                "The new version did not start.",
+            ),
             Self::UpdateRowRestart => pick(lang, "Restart to update", "Restart to update"),
             Self::UpdateRowCopy => pick(lang, "Copy", "Copy"),
             Self::UpdateRowReady => pick(
@@ -5589,7 +5596,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 800] = [
+    pub const ALL: [Self; 801] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -6371,6 +6378,7 @@ impl Text {
         Self::UpdateFailedCopy,
         Self::UpdateFailedClone,
         Self::UpdateFailedSpace,
+        Self::UpdateFailedTrial,
         Self::UpdateRowRestart,
         Self::UpdateRowCopy,
         Self::UpdateRowReady,
@@ -6541,7 +6549,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 68] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 70] = [
         // Ticket 37's four, in both columns: written in English, Chinese owed by opus46.
         (Self::ShortcutTextLarger, HostPlatform::Windows),
         (Self::ShortcutTextLarger, HostPlatform::MacOs),
@@ -6598,6 +6606,8 @@ impl Text {
         (Self::UpdateFailedClone, HostPlatform::MacOs),
         (Self::UpdateFailedSpace, HostPlatform::Windows),
         (Self::UpdateFailedSpace, HostPlatform::MacOs),
+        (Self::UpdateFailedTrial, HostPlatform::Windows),
+        (Self::UpdateFailedTrial, HostPlatform::MacOs),
         (Self::UpdateRowRestart, HostPlatform::Windows),
         (Self::UpdateRowRestart, HostPlatform::MacOs),
         (Self::UpdateRowCopy, HostPlatform::Windows),

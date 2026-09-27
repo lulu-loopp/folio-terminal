@@ -100,10 +100,16 @@ new bundle is then started through LaunchServices (`open -n -a`) with
 `--update-trial <txn> <nonce>`; the old bundle stays in `stage/` until the new
 one has written its receipt, and a LaunchAgent
 (`~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<txn8>.plist`)
-exists only while the transaction is open. Nothing here changes what the
-release scripts produce: the updater relies on the bundle's own name, its
-`CFBundleExecutable` (`folio`) and its `CFBundleShortVersionString`, which
-`Info.plist.in` already fixes.
+exists only while the transaction is open. If the new bundle sends no receipt
+within 90 seconds, or quits without one, it is asked to quit (and ended after
+5 seconds), the same one call swaps the old bundle back, and the old build is
+started again with `--update-failed <journal>` so its card says the previous
+version was restored. A swap back that fails keeps both bundles, the LaunchAgent
+and the journal; the copy in `.<Bundle>.app.folio-update/<txn>/rescue/` tries it
+again at the next login or start, three times at most, and the card names the
+`.folio-update` folder. Nothing here changes what the release scripts produce:
+the updater relies on the bundle's own name, its `CFBundleExecutable` (`folio`)
+and its `CFBundleShortVersionString`, which `Info.plist.in` already fixes.
 
 ## The four scripts that read this directory
 
