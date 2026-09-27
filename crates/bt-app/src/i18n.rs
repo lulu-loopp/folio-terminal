@@ -2937,6 +2937,9 @@ pub enum Text {
     UpdateRowReady,
     /// The General row's sentence on a copy a package manager updates (C2).
     UpdateRowManaged,
+    /// The About page's `Version` row, its sentence while an update is offered
+    /// (0.4.6 T-GEAR-MARK-LANDS); `{version}` is the offered tag.
+    AboutVersionOffer,
 }
 
 impl Text {
@@ -5581,6 +5584,9 @@ impl Text {
                 "{version} is available: {command}",
                 "{version} is available: {command}",
             ),
+            Self::AboutVersionOffer => {
+                pick(lang, "{version} is available.", "{version} is available.")
+            }
         }
     }
 
@@ -5596,7 +5602,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 801] = [
+    pub const ALL: [Self; 802] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -6383,6 +6389,7 @@ impl Text {
         Self::UpdateRowCopy,
         Self::UpdateRowReady,
         Self::UpdateRowManaged,
+        Self::AboutVersionOffer,
         Self::ShellProfileEncoding,
         Self::ShellMarksVersion,
         Self::ShellMarksPath,
@@ -6549,7 +6556,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 70] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 72] = [
         // Ticket 37's four, in both columns: written in English, Chinese owed by opus46.
         (Self::ShortcutTextLarger, HostPlatform::Windows),
         (Self::ShortcutTextLarger, HostPlatform::MacOs),
@@ -6616,6 +6623,9 @@ impl Text {
         (Self::UpdateRowReady, HostPlatform::MacOs),
         (Self::UpdateRowManaged, HostPlatform::Windows),
         (Self::UpdateRowManaged, HostPlatform::MacOs),
+        // 0.4.6 T-GEAR-MARK-LANDS: the About page's `Version` row names the offer.
+        (Self::AboutVersionOffer, HostPlatform::Windows),
+        (Self::AboutVersionOffer, HostPlatform::MacOs),
         // 0.4.6 ticket 74: the profile editor's login switch and the Program field's refusal.
         (Self::ProfilesRowLogin, HostPlatform::Windows),
         (Self::ProfilesRowLogin, HostPlatform::MacOs),
@@ -6857,6 +6867,21 @@ pub fn update_row_available_in(lang: Lang, version: &str) -> String {
 #[must_use]
 pub fn update_row_ready_in(lang: Lang, version: &str) -> String {
     Text::UpdateRowReady
+        .in_lang(lang)
+        .replace("{version}", version)
+}
+
+/// **The About page's `Version` sentence while an update is offered** (0.4.6
+/// T-GEAR-MARK-LANDS), filled from [`Text::AboutVersionOffer`] so the missing
+/// Chinese stays on the pending list.
+///
+/// It stands **in place of** the row's own sentence rather than after it: the
+/// two together take three lines of the About page's column in English, over
+/// the dialog's two-line budget (`settings::tests::no_settings_sentence_needs_a_third_line`),
+/// and while an update is offered the offer is the thing the row has to say.
+#[must_use]
+pub fn about_version_offer_in(lang: Lang, version: &str) -> String {
+    Text::AboutVersionOffer
         .in_lang(lang)
         .replace("{version}", version)
 }

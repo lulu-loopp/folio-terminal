@@ -1601,7 +1601,7 @@ WindowRuntime.settings	write	crate	Runtime::record_settings_key	call:keep_focus_
 WindowRuntime.settings	write	crate	Runtime::reseed_editor_env	assign	1
 WindowRuntime.settings	write	crate	Runtime::scroll_settings	call:scroll_menu,call:set_hover	3
 WindowRuntime.settings	write	crate	Runtime::settings_field_key	call:backspace,call:delete,call:insert,call:select_all,call:step	10
-WindowRuntime.settings	write	crate	Runtime::settings_layout	call:take_agents_open_edge,call:take_psreadline_open_edge	2
+WindowRuntime.settings	write	crate	Runtime::settings_layout	call:carry_update_mark,call:take_agents_open_edge,call:take_psreadline_open_edge	3
 WindowRuntime.settings	write	crate	Runtime::settings_mouse_input	call:begin_recording,call:close,call:close_menu,call:close_popup,call:press,call:select_category,call:set_hover,call:toggle_menu,call:toggle_row_menu	17
 WindowRuntime.settings	write	crate	Runtime::show_settings_choice_at	call:scroll_menu	1
 WindowRuntime.settings	write	crate	Runtime::toggle_settings_panel	call:seed_quake_command,call:toggle	2
