@@ -70,6 +70,7 @@
     )
 )]
 
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -841,7 +842,7 @@ impl Transport for ReleaseDownload {
 /// **A release feed's file, copied** (U-30b): the file the feed
 /// (`update::Feed`, `--update-feed`) lists under the request's tag and name,
 /// read through `file_reads` on [`bt_platform::file_reads::Lane::Update`] and
-/// written into `into` under the file's own name — in place of
+/// copied durably into `into` under the file's own name — in place of
 /// [`ReleaseDownload`], and nothing else changes: the driver holds what it
 /// copied to the checksum document and to the running build's signer exactly
 /// as it holds a download. Bytes are reported as they are copied, and a
@@ -857,46 +858,64 @@ impl Transport for FeedCopy {
     ) -> Result<std::path::PathBuf, String> {
         let (source, size) = self.0.asset(&request.tag, &request.file_name)?;
         let target = into.join(&request.file_name);
-        let copied = copy_feed_file(&source, &target, size, fetching);
-        if copied.is_err() {
-            let _ = std::fs::remove_file(&target);
-        }
-        copied.map(|()| target)
+        copy_feed_file(&source, &target, size, fetching).map(|()| target)
     }
 }
 
-/// [`FeedCopy`]'s copy of `source` to `target`, a bounded chunk at a time.
+/// [`FeedCopy`]'s copy of `source` to `target`: the durable-copy door
+/// (`install_txn::durable_copy` — a temporary beside the target, flushed,
+/// renamed, nothing left under the name on a failure), fed by [`FeedBytes`].
 fn copy_feed_file(
     source: &std::path::Path,
     target: &std::path::Path,
     size: u64,
     fetching: &Fetching,
 ) -> Result<(), String> {
-    use std::io::{Read as _, Write as _};
-    let mut from = bt_platform::file_reads::open(bt_platform::file_reads::Lane::Update, source)
+    let from = bt_platform::file_reads::open(bt_platform::file_reads::Lane::Update, source)
         .map_err(|error| format!("{}: {error}", source.display()))?;
-    let mut to =
-        std::fs::File::create(target).map_err(|error| format!("{}: {error}", target.display()))?;
-    let mut chunk = vec![0u8; 64 * 1024];
-    let mut received = 0u64;
-    loop {
-        if fetching.cancelled.load(Ordering::SeqCst) {
-            return Err("cancelled".to_owned());
+    let mut bytes = FeedBytes {
+        from,
+        received: 0,
+        size,
+        fetching,
+    };
+    bt_platform::install_txn::durable_copy(&mut bytes, target)
+        .map(drop)
+        .map_err(|failure| failure.to_string())
+}
+
+/// **A feed's file as the copy reads it**: the bytes so far reported as they
+/// pass, and a cancelled job's word turned into a refused read, which ends the
+/// copy with nothing left.
+struct FeedBytes<'a> {
+    from: bt_platform::file_reads::Reader<'a, std::fs::File>,
+    received: u64,
+    size: u64,
+    fetching: &'a Fetching,
+}
+
+impl Read for FeedBytes<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        if self.fetching.cancelled.load(Ordering::SeqCst) {
+            return Err(std::io::Error::other("cancelled"));
         }
-        let read = from
-            .read(&mut chunk)
-            .map_err(|error| format!("{}: {error}", source.display()))?;
-        if read == 0 {
-            return Ok(());
-        }
-        to.write_all(&chunk[..read])
-            .map_err(|error| format!("{}: {error}", target.display()))?;
-        received += read as u64;
-        (fetching.report)(Bytes {
-            received,
-            total: Some(size),
+        let read = feed_chunk(&mut self.from, buffer)?;
+        self.received += read as u64;
+        (self.fetching.report)(Bytes {
+            received: self.received,
+            total: Some(self.size),
         });
+        Ok(read)
     }
+}
+
+/// One chunk of a feed's file, through the `file_reads` reader it was opened
+/// with.
+fn feed_chunk(
+    from: &mut bt_platform::file_reads::Reader<'_, std::fs::File>,
+    buffer: &mut [u8],
+) -> std::io::Result<usize> {
+    from.read(buffer)
 }
 
 /// **The transport a press fetches with**: the feed's copy when this process

@@ -2534,7 +2534,7 @@ mod tests {
         let page = Counting::ok("v0.0.1");
         let owner = OfferState::load(&home, true);
         assert_eq!(
-            owner.run(1_000, check_source(Some(&feed), &page)),
+            owner.run(CHECK_INTERVAL_MS, check_source(Some(&feed), &page)),
             Outcome::Answered("v0.4.7".to_owned())
         );
         assert_eq!(page.calls(), 0, "github.com was contacted");
@@ -2559,7 +2559,7 @@ mod tests {
         let feed = feed_in(&folder, &[("v0.4.7", false)]);
         let page = Counting::ok("v0.4.8");
         assert_eq!(
-            OfferState::load(&home, true).run(1_000, check_source(Some(&feed), &page)),
+            OfferState::load(&home, true).run(CHECK_INTERVAL_MS, check_source(Some(&feed), &page)),
             Outcome::Answered("v0.4.7".to_owned())
         );
         let folder_text = folder.to_string_lossy().into_owned();
@@ -2582,10 +2582,8 @@ mod tests {
         assert_eq!(next.update_feed, None);
         let given = next.update_feed.as_deref().map(Feed::at);
         assert_eq!(
-            OfferState::load(&home, true).run(
-                1_000 + CHECK_INTERVAL_MS + 1,
-                check_source(given.as_ref(), &page)
-            ),
+            OfferState::load(&home, true)
+                .run(2 * CHECK_INTERVAL_MS, check_source(given.as_ref(), &page)),
             Outcome::Answered("v0.4.8".to_owned())
         );
         assert_eq!(page.calls(), 1, "the next start asks github.com");
@@ -2645,7 +2643,7 @@ mod tests {
             feeds.push(Feed::at(&url_of(&folder)));
         }
         for (at, feed) in feeds.iter().enumerate() {
-            let now = 1_000 + u64::try_from(at).unwrap() * (CHECK_INTERVAL_MS + 1);
+            let now = (u64::try_from(at).unwrap() + 1) * CHECK_INTERVAL_MS;
             let owner = OfferState::load(&home, true);
             assert_eq!(
                 owner.run(now, check_source(Some(feed), &page)),
