@@ -317,6 +317,10 @@ fn slow_hold_threshold_ms() -> u64 {
     u64::try_from(SLOW_HOLD_THRESHOLD.as_millis()).unwrap_or(u64::MAX)
 }
 
+/// Nanoseconds in the millisecond the ledger counts. The heartbeat's clock is
+/// nanoseconds since A3; the ledger and the slow-hold line keep milliseconds.
+const NS_PER_MS: u64 = 1_000_000;
+
 /// How many stations there are, and therefore how wide one hold's ledger is.
 ///
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
@@ -342,6 +346,10 @@ const SLOW_MESSAGE_MS: u64 = 20;
 
 #[path = "hang_watch_detail.rs"]
 mod detail;
+
+/// Every turn accounted and every admitted wait measured per call (0.4.6 ticket A3).
+#[path = "hang_watch_accounting.rs"]
+mod accounting;
 
 /// The window thread's waits as one registry, held equal to `bt_platform::admission::doors` and
 /// to `docs/ARCHITECTURE.md` §5.3 (A1a). Here because the stations are this module's.
@@ -1867,6 +1875,10 @@ pub struct Heartbeat {
     detail: detail::Ledger,
     cpu_time: fn() -> Option<u64>,
     held_cpu: AtomicU64,
+    /// **The one clock every verb reads**, [`Instant::now`] outside a test. A pointer for
+    /// [`Self::footprint`]'s reason: a test that counts its calls can say how many reads a turn
+    /// costs, which is how "a parked loop reads no clock" is a claim and not a hope (A3).
+    clock: fn() -> Instant,
     origin: Instant,
     at_ms: AtomicU64,
     turn: AtomicU64,
@@ -1875,8 +1887,9 @@ pub struct Heartbeat {
     /// see [`Park::to_bits`] for the encoding and the module comment for why the
     /// facility is wrong without it.
     park: AtomicU64,
-    /// **When the hold in progress began, plus one** — or zero while the thread
-    /// is parked.
+    /// **When the hold in progress began, in nanoseconds, plus one** — or zero
+    /// while the thread is parked. Nanoseconds since A3, because the same instant
+    /// is the turn's start in [`accounting`]; the ledger reads its milliseconds.
     ///
     /// Offset by one for [`Park::to_bits`]' reason, one field over: zero has to
     /// mean *no hold is open*, which is what makes [`Self::close_hold`]
@@ -1885,7 +1898,9 @@ pub struct Heartbeat {
     /// one. It is a real case and not a hypothetical — the origin is taken at
     /// the first touch of the heartbeat, and the loop's first wake can land
     /// inside that same millisecond.
-    held_since_ms: AtomicU64,
+    held_since_ns: AtomicU64,
+    /// Every turn's record and every admitted call's, for the run (A3).
+    accounts: accounting::Accounts,
     /// When the station in progress was entered.
     station_since_ms: AtomicU64,
     /// The hold in progress, by station. See [`SlowHold::spent_ms`].
@@ -1972,12 +1987,14 @@ impl Heartbeat {
             longest_message: AtomicU32::new(0),
             longest_message_ms: AtomicU64::new(0),
             slow_messages: AtomicU64::new(0),
+            clock: Instant::now,
             origin: Instant::now(),
             at_ms: AtomicU64::new(0),
             turn: AtomicU64::new(0),
             station: AtomicU8::new(Station::Starting as u8),
             park: AtomicU64::new(PARK_RUNNING),
-            held_since_ms: AtomicU64::new(0),
+            held_since_ns: AtomicU64::new(0),
+            accounts: accounting::Accounts::new(),
             station_since_ms: AtomicU64::new(0),
             spent_ms: std::array::from_fn(|_| AtomicU64::new(0)),
             slow: Mutex::new(Vec::new()),
@@ -1989,7 +2006,33 @@ impl Heartbeat {
     /// Milliseconds since this heartbeat started. Monotonic.
     #[must_use]
     pub fn now_ms(&self) -> u64 {
-        u64::try_from(self.origin.elapsed().as_millis()).unwrap_or(u64::MAX)
+        self.now_ns() / NS_PER_MS
+    }
+
+    /// Nanoseconds since this heartbeat started: one read of [`Self::clock`].
+    #[must_use]
+    fn now_ns(&self) -> u64 {
+        self.ns_at((self.clock)())
+    }
+
+    /// `instant` on this heartbeat's own clock, in nanoseconds. No clock read.
+    #[must_use]
+    fn ns_at(&self, instant: Instant) -> u64 {
+        u64::try_from(instant.saturating_duration_since(self.origin).as_nanos()).unwrap_or(u64::MAX)
+    }
+
+    /// **The loop is about to park until `deadline`**: the [`Park`] it hands [`Self::park`], and
+    /// the wake the next turn is owed, kept to the nanosecond for its scheduling delay (A3).
+    #[must_use]
+    pub fn until(&self, deadline: Instant) -> Park {
+        self.accounts.owe(self.ns_at(deadline));
+        Park::Until(self.ms_at(deadline))
+    }
+
+    /// **A visible window's frame is `interval` long this turn.** The turn is measured against
+    /// the shortest (`T − t₀`, A3).
+    pub fn frame_interval(&self, interval: Duration) {
+        self.accounts.frame(accounting::nanos(interval));
     }
 
     /// `instant` on this heartbeat's own clock.
@@ -2013,17 +2056,24 @@ impl Heartbeat {
     /// turn's — which, at a two-second poll against a five-second threshold,
     /// would be the difference between "quiet" and a report.
     pub fn beat(&self) {
-        self.beat_at(self.now_ms());
+        self.beat_at_ns(self.now_ns());
     }
 
     /// [`Self::beat`] on a clock the caller holds. See [`Self::park_at`].
+    #[cfg(test)]
     pub fn beat_at(&self, now_ms: u64) {
+        self.beat_at_ns(now_ms.saturating_mul(NS_PER_MS));
+    }
+
+    /// [`Self::beat_at`] in nanoseconds.
+    fn beat_at_ns(&self, now_ns: u64) {
+        let now_ms = now_ns / NS_PER_MS;
         // A turn reached without a wake before it — the run's first, and every
         // turn on a platform that delivers no `StartCause` — still opens a hold,
         // or the ledger would measure this one from an origin belonging to a
         // hold that has already been written down.
-        if self.held_since_ms.load(Ordering::Relaxed) == 0 {
-            self.open_hold(now_ms);
+        if self.held_since_ns.load(Ordering::Relaxed) == 0 {
+            self.open_hold(now_ns);
         }
         self.move_to(Station::Wait, now_ms);
         self.at_ms.store(now_ms, Ordering::Relaxed);
@@ -2053,8 +2103,10 @@ impl Heartbeat {
     }
 
     /// **A hold begins**: the ledger is emptied, the coarse footprint baseline
-    /// refreshed if needed and the clock started.
-    fn open_hold(&self, now_ms: u64) {
+    /// refreshed if needed and the clock started — and the turn's record (A3).
+    fn open_hold(&self, now_ns: u64) {
+        let now_ms = now_ns / NS_PER_MS;
+        self.accounts.begin(now_ns);
         self.detail.clear();
         self.hold_serial.fetch_add(1, Ordering::Relaxed);
         self.longest_message.store(0, Ordering::Relaxed);
@@ -2069,8 +2121,13 @@ impl Heartbeat {
         }
         self.open_footprint(now_ms);
         self.station_since_ms.store(now_ms, Ordering::Relaxed);
-        self.held_since_ms
-            .store(now_ms.saturating_add(1), Ordering::Relaxed);
+        self.held_since_ns
+            .store(now_ns.saturating_add(1), Ordering::Relaxed);
+    }
+
+    /// When the hold in progress began, in nanoseconds, if one is open.
+    fn hold_began_ns(&self) -> Option<u64> {
+        self.held_since_ns.load(Ordering::Relaxed).checked_sub(1)
     }
 
     /// **Refresh the coarse opening baseline when it is old.**
@@ -2143,17 +2200,24 @@ impl Heartbeat {
         })
     }
 
-    /// **A hold ends**, and if it ran long it is queued for the watchdog.
+    /// **A hold ends**, its turn is accounted, and if it ran long it is queued
+    /// for the watchdog.
     ///
     /// Idempotent by way of the swap: a second park with no wake between them
     /// finds no hold open and has nothing to say, which is what keeps the two
     /// parkings a failed turn can leave from being counted as two holds.
-    fn close_hold(&self, now_ms: u64) {
-        let began = self.held_since_ms.swap(0, Ordering::Relaxed);
-        if began == 0 {
+    ///
+    /// **Every turn is accounted here, before the threshold below** (A3,
+    /// budget note §R-C 1): the record goes into the run's atomics whether or
+    /// not the hold is slow and whether or not any queue takes a line.
+    fn close_hold(&self, now_ns: u64) {
+        let Some(began_ns) = self.held_since_ns.swap(0, Ordering::Relaxed).checked_sub(1) else {
             return;
-        }
-        let held_ms = now_ms.saturating_sub(began - 1);
+        };
+        self.accounts
+            .close(self.turn.load(Ordering::Relaxed), began_ns, now_ns);
+        let now_ms = now_ns / NS_PER_MS;
+        let held_ms = now_ms.saturating_sub(began_ns / NS_PER_MS);
         let mut spent_ms = [0; STATION_COUNT];
         for (slot, cell) in spent_ms.iter_mut().zip(&self.spent_ms) {
             *slot = cell.swap(0, Ordering::Relaxed);
@@ -2352,7 +2416,7 @@ impl Heartbeat {
     /// stamped before the parking so that a watchdog which reads the two in
     /// either order never sees a park without the station that explains it.
     pub fn park(&self, park: Park) {
-        self.park_at(park, self.now_ms());
+        self.park_at_ns(park, self.now_ns());
     }
 
     /// [`Self::park`] on a clock the caller holds.
@@ -2362,9 +2426,16 @@ impl Heartbeat {
     /// instrument whose only clock is the real one can be exercised by a test
     /// only by sleeping — which is how a facility ends up with a test that
     /// passes on a fast machine.
+    #[cfg(test)]
     pub fn park_at(&self, park: Park, now_ms: u64) {
-        self.move_to(Station::Parked, now_ms);
-        self.close_hold(now_ms);
+        self.park_at_ns(park, now_ms.saturating_mul(NS_PER_MS));
+    }
+
+    /// [`Self::park_at`] in nanoseconds.
+    fn park_at_ns(&self, park: Park, now_ns: u64) {
+        self.move_to(Station::Parked, now_ns / NS_PER_MS);
+        self.close_hold(now_ns);
+        self.accounts.parked(matches!(park, Park::Until(_)));
         self.park.store(park.to_bits(), Ordering::Relaxed);
     }
 
@@ -2376,7 +2447,7 @@ impl Heartbeat {
     /// thread that wedges inside that event is a thread holding control, not a
     /// thread parked.
     pub fn woke(&self) {
-        self.woke_at(self.now_ms());
+        self.woke_at_ns(self.now_ns());
     }
 
     /// [`Self::woke`] on a clock the caller holds. See [`Self::park_at`].
@@ -2386,8 +2457,14 @@ impl Heartbeat {
     /// to one hold and is accounted for together. A stall inside `window_event`
     /// is exactly the shape the report of 2026-08-30 describes, and a ledger
     /// that only opened at `about_to_wait` would have nothing to say about it.
+    #[cfg(test)]
     pub fn woke_at(&self, now_ms: u64) {
-        self.open_hold(now_ms);
+        self.woke_at_ns(now_ms.saturating_mul(NS_PER_MS));
+    }
+
+    /// [`Self::woke_at`] in nanoseconds.
+    fn woke_at_ns(&self, now_ns: u64) {
+        self.open_hold(now_ns);
         self.station.store(Station::Woken as u8, Ordering::Relaxed);
         self.detail.at(Station::Woken);
         self.park.store(PARK_RUNNING, Ordering::Relaxed);
@@ -2608,7 +2685,8 @@ pub fn during_pane<T>(station: Station, pane: u64, work: impl FnOnce() -> T) -> 
 /// the call-tree node and the scope — into the admission's cookie; `leave` unpacks it and puts all
 /// three back, as [`during`] does with the `Location` it keeps. Nesting needs no stack of its own:
 /// each admitted frame holds its own cookie. The two instants `leave` is given are the call's
-/// inclusive interval, for A3's per-call record; nothing reads them yet.
+/// inclusive interval: the per-call record and the turn's union of waits (A3, [`accounting`]), and
+/// the end is the instant the station is given back on, so `leave` reads no clock of its own.
 ///
 /// A panicking call is entered and never left (the admission has no guard, for [`enter`]'s own
 /// reason), so its station stays the thread's current one until a later station replaces it —
@@ -2625,9 +2703,9 @@ fn admitted_enter(door: DoorKey) -> Cookie {
     heart.admitted_enter_at(Station::from_byte(door.station()), heart.now_ms())
 }
 
-fn admitted_leave(_door: DoorKey, cookie: Cookie, _start: Instant, _end: Instant) {
+fn admitted_leave(door: DoorKey, cookie: Cookie, start: Instant, end: Instant) {
     let heart = meter_heart();
-    heart.admitted_leave_at(cookie, heart.now_ms());
+    heart.admitted_leave_between(door, cookie, heart.ns_at(start), heart.ns_at(end));
 }
 
 /// The heartbeat the meter charges: the process's, except in a test that lent its thread one.
@@ -2679,40 +2757,98 @@ const _: () = assert!(detail::CAPACITY < u16::MAX as usize);
 /// Cookies the meter was handed back that it did not make (see [`decode`]).
 static INVALID_COOKIES: AtomicU64 = AtomicU64::new(0);
 
-/// **A cookie's layout**: bits 0–7 the station byte, 8–23 the node, 24–39 the scope, 40–63 zero.
-fn pack(station: Station, node: usize, scope: usize) -> Cookie {
-    Cookie::from_raw(u64::from(station as u8) | (node as u64) << 8 | (scope as u64) << 24)
+/// The deepest nesting a cookie records; a deeper call is saved as this, which is still not zero,
+/// so it is still not the outermost.
+const COOKIE_DEPTH_MAX: u64 = 0xFF;
+
+/// **What a cookie saved**: the station, call-tree node and scope to give back, and how many
+/// admitted calls were open when this one began (A3).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Saved {
+    station: Station,
+    node: usize,
+    scope: usize,
+    depth: u64,
+}
+
+/// **A cookie's layout**: bits 0–7 the station byte, 8–23 the node, 24–39 the scope, 40–47 the
+/// nesting depth (A3), 48–63 zero.
+fn pack(saved: Saved) -> Cookie {
+    Cookie::from_raw(
+        u64::from(saved.station as u8)
+            | ((saved.node as u64) << 8)
+            | ((saved.scope as u64) << 24)
+            | (saved.depth.min(COOKIE_DEPTH_MAX) << 40),
+    )
 }
 
 /// **What a cookie saved, if the meter made it.** Every field is range-checked before
 /// [`Station::from_byte`] reads the station, so its fallback is never reached from here.
-fn decode(cookie: Cookie) -> Option<(Station, usize, usize)> {
+fn decode(cookie: Cookie) -> Option<Saved> {
     let raw = cookie.raw();
     let station = (raw & 0xFF) as u8;
     let node = ((raw >> 8) & 0xFFFF) as usize;
     let scope = ((raw >> 24) & 0xFFFF) as usize;
-    let rest = raw >> 40;
+    let depth = (raw >> 40) & COOKIE_DEPTH_MAX;
+    let rest = raw >> 48;
     (usize::from(station) < STATION_COUNT
         && node <= detail::ROOT
         && scope <= detail::ROOT
         && rest == 0)
-        .then(|| (Station::from_byte(station), node, scope))
+        .then(|| Saved {
+            station: Station::from_byte(station),
+            node,
+            scope,
+            depth,
+        })
 }
 
 impl Heartbeat {
     fn admitted_enter_at(&self, station: Station, now: u64) -> Cookie {
+        let depth = self.accounts.enter();
         let (previous, node, scope) = self.enter_saving(station, 0, now);
-        pack(previous, node, scope)
+        pack(Saved {
+            station: previous,
+            node,
+            scope,
+            depth,
+        })
+    }
+
+    /// **An admitted call of `door` ran from `start_ns` to `end_ns`**: it is accounted (A3), and
+    /// what its cookie saved is put back on its end instant.
+    fn admitted_leave_between(
+        &self,
+        door: DoorKey,
+        cookie: Cookie,
+        start_ns: u64,
+        end_ns: u64,
+    ) -> bool {
+        let saved = decode(cookie);
+        self.accounts.call(
+            door,
+            start_ns,
+            end_ns,
+            saved.is_some_and(|saved| saved.depth == 0),
+            self.hold_began_ns(),
+        );
+        self.give_back(saved, end_ns / NS_PER_MS)
     }
 
     /// Put back what the cookie saved, and answer whether it could: a cookie the meter did not
     /// make restores nothing and is counted.
+    #[cfg(test)]
     fn admitted_leave_at(&self, cookie: Cookie, now: u64) -> bool {
-        let Some((station, node, scope)) = decode(cookie) else {
+        self.give_back(decode(cookie), now)
+    }
+
+    fn give_back(&self, saved: Option<Saved>, now: u64) -> bool {
+        let Some(saved) = saved else {
             INVALID_COOKIES.fetch_add(1, Ordering::Relaxed);
             return false;
         };
-        self.resume_at(station, node, scope, now);
+        self.accounts.restore_depth(saved.depth);
+        self.resume_at(saved.station, saved.node, saved.scope, now);
         true
     }
 }
@@ -2725,6 +2861,21 @@ pub fn park(park: Park) {
 /// The platform woke the window thread. See [`Heartbeat::woke`].
 pub fn woke() {
     HEARTBEAT.woke();
+}
+
+/// A visible window's frame is `interval` long this turn. See [`Heartbeat::frame_interval`].
+pub fn frame_interval(interval: Duration) {
+    HEARTBEAT.frame_interval(interval);
+}
+
+/// **The run's budget summary** — every turn's wall time, waits, unexplained time and scheduling
+/// delay, every door's calls, the lines lost and the admissions refused — read from the atomics,
+/// for `fn main` to write before the run's last line (A3).
+#[must_use]
+pub fn budget_summary() -> Vec<String> {
+    HEARTBEAT
+        .accounts
+        .summary(bt_platform::admission::refusals())
 }
 
 /// What the watchdog decided on one look.
@@ -3263,6 +3414,8 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration, trace
     // The question, bound to the thread it is about. Not called unless the
     // arithmetic has already run out of innocent explanations.
     let mut ask = move || bt_platform::hang::ask_thread_to_answer(ui_thread_id, ANSWER_WITHIN);
+    // The budget lines lost as of the last one printed; the next line printed says how many more.
+    let mut lost_printed = 0;
     loop {
         std::thread::sleep(WATCH_INTERVAL);
         let heart = heartbeat();
@@ -3276,6 +3429,8 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration, trace
         // console nobody is reading — at the moment it was supposed to be
         // taking the stack of a window that had stopped.
         let (slow, dropped) = heart.take_slow_holds();
+        // The budget's detail lines (A3), taken beside the holds and said beside them.
+        let (budget, lost) = heart.accounts.take_lines();
         // What the report attempt below left to say, kept until it has said
         // everything the file can hold.
         let mut reported: Option<String> = None;
@@ -3337,6 +3492,12 @@ fn watch_forever(reports: PathBuf, ui_thread_id: u32, threshold: Duration, trace
         }
         if dropped > 0 {
             crate::diagnostics::note(&format!("Folio: {dropped} more slow turns went unrecorded"));
+        }
+        // Each line carries the admissions refused so far and the lines lost since the last one
+        // printed, so silence beside drops never reads as clean (budget note §R-C 4).
+        let refused = bt_platform::admission::refusals();
+        for line in accounting::said(budget, lost, &mut lost_printed, refused) {
+            crate::diagnostics::note(&line);
         }
         if let Some(said) = reported {
             crate::diagnostics::note(&said);
@@ -3698,6 +3859,120 @@ mod tests {
             "station enter/leave pair: {:.1} ns",
             start.elapsed().as_nanos() as f64 / f64::from(iterations)
         );
+        measure_turn_accounting(iterations);
+    }
+
+    /// **What A3's accounting adds, in the four regimes of the budget note's rule 5** (§R-C 5).
+    /// A measurement, never a gate. Each figure is the accounting's own code on a heartbeat of
+    /// its own; the clock reads it does not add are counted by `a_parked_loop_reads_no_clock`.
+    fn measure_turn_accounting(iterations: u32) {
+        use bt_platform::admission::{Door, doors};
+        use std::hint::black_box;
+        use std::time::Instant;
+        let per = |start: Instant, count: u32| start.elapsed().as_nanos() as f64 / f64::from(count);
+        let resize = <doors::PtyResize as Door>::KEY;
+        // The one read A3 takes away from every admitted call: `leave` used to read the clock.
+        let heart = super::Heartbeat::sampling(|| None);
+        let start = Instant::now();
+        for _ in 0..iterations {
+            black_box(heart.now_ms());
+        }
+        let clock_read = per(start, iterations);
+        eprintln!("A3 clock read (saved per admitted call): {clock_read:.1} ns");
+        // Active: a turn that opens, is told one frame, makes two calls under their bounds and
+        // closes quiet.
+        let accounts = super::accounting::Accounts::new();
+        let start = Instant::now();
+        for turn in 0..u64::from(iterations) {
+            let began = turn * 20_000_000;
+            accounts.begin(black_box(began));
+            accounts.frame(16_000_000);
+            for call in 0..2 {
+                let at = began + 1_000_000 + call * 2_000_000;
+                let depth = accounts.enter();
+                accounts.call(resize, at, at + 1_000_000, depth == 0, Some(began));
+                accounts.restore_depth(depth);
+            }
+            accounts.close(turn, began, began + 6_000_000);
+        }
+        let active = per(start, iterations);
+        let accounts = super::accounting::Accounts::new();
+        let start = Instant::now();
+        for turn in 0..u64::from(iterations) {
+            let began = turn * 20_000_000;
+            accounts.begin(black_box(began));
+            accounts.close(turn, began, began + 6_000_000);
+        }
+        let quiet_turn = per(start, iterations);
+        eprintln!(
+            "A3 active: {active:.1} ns per turn of two calls; a turn with none {quiet_turn:.1} ns; \
+             so {:.1} ns per call",
+            (active - quiet_turn) / 2.0
+        );
+        // Overloaded: 64 calls a turn, nested pairs, several past their bound, every trigger.
+        let accounts = super::accounting::Accounts::new();
+        let turns = iterations / 64;
+        let start = Instant::now();
+        for turn in 0..u64::from(turns) {
+            let began = turn * 1_000_000_000;
+            accounts.begin(black_box(began));
+            for call in 0..32 {
+                let at = began + call * 10_000_000;
+                let outer = accounts.enter();
+                let inner = accounts.enter();
+                accounts.call(resize, at + 1, at + 5_000_000, inner == 0, Some(began));
+                accounts.restore_depth(inner);
+                accounts.call(resize, at, at + 6_000_000, outer == 0, Some(began));
+                accounts.restore_depth(outer);
+            }
+            accounts.close(turn, began, began + 400_000_000);
+            let _ = accounts.take_lines();
+        }
+        let overloaded = per(start, turns);
+        eprintln!(
+            "A3 overloaded: {overloaded:.1} ns per turn of 64 calls ({:.1} ns per call)",
+            overloaded / 64.0
+        );
+        // Busy: every turn crosses all four triggers, 20 ms apart, so the coalescing window
+        // suppresses all but one turn's lines a second (the watchdog takes them each second).
+        let accounts = super::accounting::Accounts::new();
+        let start = Instant::now();
+        for turn in 0..u64::from(iterations) {
+            let began = turn * 20_000_000;
+            accounts.begin(black_box(began));
+            for call in 0..2 {
+                let at = began + call * 6_000_000;
+                let depth = accounts.enter();
+                accounts.call(resize, at, at + 5_000_000, depth == 0, Some(began));
+                accounts.restore_depth(depth);
+            }
+            accounts.close(turn, began, began + 19_000_000);
+            if turn % 50 == 0 {
+                let _ = accounts.take_lines();
+            }
+        }
+        let busy = per(start, iterations);
+        eprintln!("A3 busy (all four triggers, coalesced): {busy:.1} ns per turn of two calls");
+        // Failed: the ring is full, so every line of every turn is refused and counted. Turns two
+        // seconds apart, past the coalescing window, so each one offers its lines.
+        let accounts = super::accounting::Accounts::new();
+        for turn in 0..u64::from(iterations) {
+            let began = turn * 2_000_000_000;
+            accounts.close(turn, began, began + 50_000_000);
+        }
+        let start = Instant::now();
+        for turn in 0..u64::from(iterations) {
+            let began = (u64::from(iterations) + turn) * 2_000_000_000;
+            accounts.begin(black_box(began));
+            let depth = accounts.enter();
+            accounts.call(resize, began, began + 10_000_000, depth == 0, Some(began));
+            accounts.restore_depth(depth);
+            accounts.close(turn, began, began + 50_000_000);
+        }
+        let failed = per(start, iterations);
+        eprintln!("A3 failed (ring full, four lines refused a turn): {failed:.1} ns per turn");
+        // Quiescent: a parked loop runs none of it.
+        eprintln!("A3 quiescent: 0 ns and 0 clock reads (a_parked_loop_reads_no_clock)");
     }
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -5627,11 +5902,13 @@ mod tests {
         )
     }
 
-    /// RED (A1a) — **every cookie the meter can hand out decodes to exactly what it saved.**
+    /// RED (A1a; A3 added the depth) — **every cookie the meter can hand out decodes to exactly
+    /// what it saved.**
     ///
-    /// Every station byte, and a node and a scope at 0, 255 and 256 (`ROOT`, what a full call
-    /// tree hands out): a field that did not fit its bits would come back as another station or
-    /// another place in the tree, and the parent's time would be charged to a stranger.
+    /// Every station byte, a node and a scope at 0, 255 and 256 (`ROOT`, what a full call tree
+    /// hands out), and a nesting depth at 0, 1 and the largest a cookie keeps: a field that did
+    /// not fit its bits would come back as another station, another place in the tree or another
+    /// depth, and the parent's time would be charged to a stranger or a nested call counted twice.
     ///
     /// MUTATION: shift the scope by 16 instead of 24 in `pack` and the round trip breaks.
     #[test]
@@ -5641,11 +5918,19 @@ mod tests {
             let station = Station::from_byte(u8::try_from(byte).expect("one byte"));
             for node in places {
                 for scope in places {
-                    assert_eq!(
-                        super::decode(super::pack(station, node, scope)),
-                        Some((station, node, scope)),
-                        "{station} at node {node}, scope {scope}"
-                    );
+                    for depth in [0, 1, super::COOKIE_DEPTH_MAX] {
+                        let saved = super::Saved {
+                            station,
+                            node,
+                            scope,
+                            depth,
+                        };
+                        assert_eq!(
+                            super::decode(super::pack(saved)),
+                            Some(saved),
+                            "{station} at node {node}, scope {scope}, depth {depth}"
+                        );
+                    }
                 }
             }
         }
@@ -5657,7 +5942,7 @@ mod tests {
     /// `Station::from_byte` answers `starting` for a byte it does not know, so a decoder that
     /// trusted it would put the window thread back at a station it never left. Each field is
     /// checked first: a station past the last, a node or a scope past `ROOT`, a bit set above the
-    /// scope.
+    /// depth (bits 48–63; A3 gave bits 40–47 to the depth).
     ///
     /// MUTATION: drop `rest == 0` from `decode` and the last two are restored.
     #[test]
@@ -5672,7 +5957,7 @@ mod tests {
             ("a station past the last", STATION_COUNT as u64),
             ("a node past ROOT", (root + 1) << 8),
             ("a scope past ROOT", (root + 1) << 24),
-            ("bit 40", 1 << 40),
+            ("bit 48", 1 << 48),
             ("bit 63", 1 << 63),
         ] {
             let counted = super::INVALID_COOKIES.load(std::sync::atomic::Ordering::Relaxed);
