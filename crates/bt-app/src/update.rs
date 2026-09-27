@@ -1097,8 +1097,7 @@ static FEED: OnceLock<Feed> = OnceLock::new();
 /// Once per process, at start, before [`begin`]; a second call changes
 /// nothing.
 pub fn use_feed(url: &str) -> String {
-    let _ = FEED.set(Feed::at(url));
-    feed_line(url)
+    feed_line(FEED.get_or_init(|| Feed::at(url)).url())
 }
 
 /// The diagnostics line a start given the feed at `url` writes.
@@ -2677,7 +2676,6 @@ mod tests {
             Some(&feed),
             std::sync::Arc::new(crate::update_job::NoDownloadDoor),
         );
-        use crate::update_job::Transport as _;
         let fetching = crate::update_job::Fetching {
             report: std::sync::Arc::new(|_| {}),
             cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
