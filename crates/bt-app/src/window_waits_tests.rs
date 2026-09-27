@@ -280,7 +280,7 @@ fn the_architecture_table_is_the_registry() {
 
 /// The first-party packages that are not in `folio.exe`: development tools. Every other
 /// workspace member outside `vendor/` must be one `bt-app` depends on.
-const NOT_THE_PRODUCT: [&str; 2] = ["bt-corpus", "bt-source"];
+const NOT_THE_PRODUCT: [&str; 3] = ["bt-corpus", "bt-lint-probe", "bt-source"];
 
 /// The first-party packages a manifest depends on (`[dependencies]` and the per-target tables).
 fn manifest_dependencies(manifest: &str) -> Vec<String> {
@@ -466,7 +466,10 @@ impl Src {
                 && match owner.target.kind {
                     TargetKind::Library => true,
                     TargetKind::Binary => self.package == "bt-app" && owner.target.name == "folio",
-                    TargetKind::IntegrationTest => false,
+                    TargetKind::IntegrationTest
+                    | TargetKind::Example
+                    | TargetKind::Bench
+                    | TargetKind::BuildScript => false,
                 }
         })
     }
@@ -1485,6 +1488,20 @@ fn literals_of(src: &Src, name: &str) -> Vec<usize> {
 /// struct literal in the product, in `admission::lend_worker` (A1b), called by the thread door
 /// and by `enter_standalone_main` once each; `WorkerCtx` and `WaitToken` each have one `impl`
 /// block, the inherent one, and derive nothing.
+///
+/// **And the two mints are fenced** (A2a, revision (j)11.1), because an entrance that takes a
+/// capability may leave the vocabulary only while nothing else can make one: `WaitToken`'s one
+/// struct literal is `WaitToken::fresh`'s, and `fresh` is named in the product exactly where
+/// `admission::admitted` calls it (twice: the unmetered and the metered road); `lend_worker` is
+/// named exactly by its two owners. Every **reference** is counted — a name handed on as a
+/// function value (`.map(WaitToken::fresh)`, `run(lend_worker)`) is one — by the identifier view,
+/// never by the spelling `name(`. `fresh`, `lend_worker` and every field of both capabilities are
+/// private: that pinned visibility is what keeps every reference inside `crate::admission`, where
+/// this counts them.
+///
+/// What stays outside, as revision (b)2 names it and (j)11.1 restates: an inference-typed
+/// fabrication inside `bt-platform`'s own `unsafe` (a `transmute` whose target type is fixed at a
+/// door's parameter rather than written) is not an accident this guard is built to catch.
 fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<String> {
     let mut failures = Vec::new();
     let literals: Vec<String> = world
@@ -1502,16 +1519,60 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
              found {literals:?}"
         ));
     }
-    let mut callers = BTreeMap::new();
-    for src in &world.srcs {
-        for at in src.named("lend_worker") {
-            let after = src.lex(at, (at + 32).min(src.file_end(at)));
-            let before = src.lex(at.saturating_sub(8), at);
-            if src.is(after.get(1), "(") && !src.is(before.last(), "fn") && src.in_product(at) {
-                *callers.entry(src.owner_of(at)).or_insert(0) += 1;
+    let token_literals: Vec<String> = world
+        .srcs
+        .iter()
+        .flat_map(|src| {
+            literals_of(src, "WaitToken")
+                .into_iter()
+                .map(|at| src.owner_of(at))
+        })
+        .collect();
+    if token_literals != ["bt-platform crate::admission::WaitToken::fresh"] {
+        failures.push(format!(
+            "`WaitToken` is built by a struct literal in one place, `WaitToken::fresh`; found \
+             {token_literals:?}"
+        ));
+    }
+    let admission = world
+        .src("bt-platform")
+        .index
+        .modules()
+        .iter()
+        .find(|module| {
+            module
+                .module_paths()
+                .iter()
+                .any(|p| p == "crate::admission")
+        })
+        .map(bt_source::ModuleRecord::span);
+    // Every reference in the product, its declaration excluded: a call, a value, a path to it.
+    let references = |name: &str, within: Option<bt_source::Span>| {
+        let mut found = BTreeMap::new();
+        for src in &world.srcs {
+            for at in src.named(name) {
+                let file_start = src.index.file_at(at).map_or(0, |f| f.span().start());
+                let before = src.lex(at.saturating_sub(8).max(file_start), at);
+                let outside =
+                    within.is_some_and(|span| src.package != "bt-platform" || !span.holds(at));
+                if src.is(before.last(), "fn") || outside || !src.in_product(at) {
+                    continue;
+                }
+                *found.entry(src.owner_of(at)).or_insert(0) += 1;
             }
         }
+        found
+    };
+    let fresh = references("fresh", admission);
+    let wanted_fresh = BTreeMap::from([("bt-platform crate::admission::admitted".to_owned(), 2)]);
+    if fresh != wanted_fresh {
+        failures.push(format!(
+            "`WaitToken::fresh` is named only by `admission::admitted`, twice — a call or a value \
+             is a reference, and any other is a second mint that skips the role, the phase and \
+             the meter; found {fresh:?}"
+        ));
     }
+    let callers = references("lend_worker", None);
     let wanted = BTreeMap::from([
         (
             "bt-platform crate::admission::enter_standalone_main".to_owned(),
@@ -1524,11 +1585,58 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
     ]);
     if callers != wanted {
         failures.push(format!(
-            "`lend_worker` is called by the thread door and by `enter_standalone_main`, once \
-             each; found {callers:?}"
+            "`lend_worker` is named by the thread door and by `enter_standalone_main`, once \
+             each (a call or a value is a reference); found {callers:?}"
         ));
     }
     let platform = world.src("bt-platform");
+    for (query, what) in [
+        (
+            ItemQuery::method("WaitToken", "fresh"),
+            "`WaitToken::fresh`",
+        ),
+        (
+            ItemQuery::function("lend_worker"),
+            "`admission::lend_worker`",
+        ),
+        (
+            ItemQuery::field("WaitToken", "_scope"),
+            "`WaitToken`'s `_scope`",
+        ),
+        (
+            ItemQuery::field("WaitToken", "_door"),
+            "`WaitToken`'s `_door`",
+        ),
+        (
+            ItemQuery::field("WaitToken", "_local"),
+            "`WaitToken`'s `_local`",
+        ),
+        (
+            ItemQuery::field("WorkerCtx", "name"),
+            "`WorkerCtx`'s `name`",
+        ),
+        (
+            ItemQuery::field("WorkerCtx", "_local"),
+            "`WorkerCtx`'s `_local`",
+        ),
+    ] {
+        match platform.index.find(&query.in_module("crate::admission")) {
+            Ok(records) => {
+                for record in records {
+                    let declaration =
+                        platform.lex(record.declaration().start(), record.declaration().end());
+                    if declaration.iter().any(|t| platform.text(*t) == "pub") {
+                        failures.push(format!(
+                            "{what} is visible outside `crate::admission` at {}: a mint, and a \
+                             field a literal elsewhere could fill, stay private",
+                            platform.location(record.whole().start())
+                        ));
+                    }
+                }
+            }
+            Err(failure) => failures.push(format!("{what}: {failure}")),
+        }
+    }
     for type_name in ["WorkerCtx", "WaitToken"] {
         let blocks: Vec<String> = world
             .srcs
@@ -1833,17 +1941,119 @@ const LOWERING: [&str; 4] = [
 /// door `expect`s is zero"). A2 makes this the registry's count.
 const DOOR_EXPECTS: usize = 0;
 
+/// The form a product root carries: tests compiled into the crate are outside the invariant
+/// (revision (j)2).
+const PRODUCT_ROOT_FORM: &str = "cfg_attr(test,allow(clippy::disallowed_methods))";
+/// The form an excluded root carries: an integration test, an example, a benchmark, a build
+/// script, a development binary.
+const EXCLUDED_ROOT_FORM: &str = "allow(clippy::disallowed_methods)";
+
+/// The binaries of the product's packages that are not in the product, by package and name
+/// (revision (j)2: listed, or they are product — no third state).
+const DEVELOPMENT_BINARIES: [(&str, &str); 2] = [
+    ("bt-term", "bt-repaint-oracle"),
+    ("bt-winres", "render-info-plist"),
+];
+
+/// An attribute's body as one string with no spaces: `allow(clippy::disallowed_methods)`.
+fn spelled(src: &Src, toks: &[Tok]) -> String {
+    toks.iter().map(|t| src.text(*t)).collect()
+}
+
+/// The inner attributes a file opens with: every `#![…]` before its first other token, comments
+/// aside. What stands after anything else is not in the file's leading block.
+fn leading_inner_attributes(src: &Src, file: &FileRecord) -> Vec<(usize, String)> {
+    let span = file.span();
+    let toks = src.lex(span.start(), span.end().min(span.start() + 65_536));
+    let mut out = Vec::new();
+    let mut at = 0;
+    while src.is(toks.get(at), "#")
+        && src.is(toks.get(at + 1), "!")
+        && src.is(toks.get(at + 2), "[")
+    {
+        let Some(close) = closing(src, &toks, at + 2) else {
+            break;
+        };
+        out.push((toks[at].start, spelled(src, &toks[at + 3..close])));
+        at = close + 1;
+    }
+    out
+}
+
+/// The workspace as `bt_source`'s own cache reads it — the same spelling of the root, so a
+/// target's file and the index's file record are the same path.
+fn source_workspace() -> bt_source::Workspace {
+    bt_source::Workspace::read(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(".."),
+    )
+    .expect("the workspace")
+}
+
+/// The root files of a package's product targets: its library, and `bt-app`'s `folio`.
+fn product_roots(package: &bt_source::Package) -> Vec<PathBuf> {
+    package
+        .targets()
+        .iter()
+        .filter(|target| match target.id.kind {
+            TargetKind::Library => true,
+            TargetKind::Binary => {
+                !DEVELOPMENT_BINARIES.contains(&(package.name(), target.id.name.as_str()))
+            }
+            _ => false,
+        })
+        .map(|target| target.file.clone())
+        .collect()
+}
+
 /// **No lint on raw effects is lowered outside a door** (§C-2): no `allow` or `expect` of
 /// `clippy::disallowed_methods`, `clippy::style`, `clippy::all` or `warnings` — at a crate,
 /// module, item or statement, in either path spelling, inside `cfg_attr` at any depth — except a
-/// door function's own `expect(clippy::disallowed_methods)`, whose count is the registry's.
+/// door function's own `expect(clippy::disallowed_methods)`, whose count is the registry's, and
+/// **the one form a product root carries** (revision (j)2, A2a):
+/// `#![cfg_attr(test, allow(clippy::disallowed_methods))]`, once, in the leading inner-attribute
+/// block of each library root and of `folio`'s `main.rs` — and nowhere else. A file mounted into
+/// the product by `#[path]`, a nested module's own inner attribute and an outer attribute on a
+/// function are product code, and each is refused.
 fn no_lint_on_raw_effects_is_lowered_outside_a_door(world: &World) -> Vec<String> {
     let mut failures = Vec::new();
     let mut read = 0;
     let mut door_expects = Vec::new();
+    let workspace = source_workspace();
     for src in &world.srcs {
+        let package = workspace.package(src.package).expect("a workspace package");
+        let roots = product_roots(package);
+        let mut admitted: BTreeSet<usize> = BTreeSet::new();
+        for root in &roots {
+            let Some(file) = src.index.file(root) else {
+                failures.push(format!(
+                    "{}'s product root {} is not in its index",
+                    src.package,
+                    root.display()
+                ));
+                continue;
+            };
+            let forms: Vec<usize> = leading_inner_attributes(src, file)
+                .into_iter()
+                .filter(|(_, body)| body == PRODUCT_ROOT_FORM)
+                .map(|(at, _)| at)
+                .collect();
+            if forms.len() != 1 {
+                failures.push(format!(
+                    "{} carries `#![cfg_attr(test, allow(clippy::disallowed_methods))]` {} times in \
+                     its leading inner-attribute block, where a product root carries it once",
+                    root.display(),
+                    forms.len()
+                ));
+            }
+            admitted.extend(forms);
+        }
         for attribute in attributes(src) {
             read += 1;
+            if admitted.contains(&attribute.start) {
+                continue;
+            }
             for (verb, lint) in suppressions(src, &attribute.body) {
                 if !LOWERING.contains(&lint.as_str()) || !src.in_product(attribute.start) {
                     continue;
@@ -1873,6 +2083,138 @@ fn no_lint_on_raw_effects_is_lowered_outside_a_door(world: &World) -> Vec<String
     }
     if read == 0 {
         failures.push("no attribute was read in the product: this reads nothing".into());
+    }
+    failures
+}
+
+/// **Every excluded root carries the unconditional form, and only an excluded root does**
+/// (revision (j)2 with (j)11.7): every integration test, example, benchmark, build script and
+/// development binary of a product package (`DEVELOPMENT_BINARIES`) opens with
+/// `#![allow(clippy::disallowed_methods)]`, once, in its leading inner-attribute block — these are
+/// the compilations budget note §C-3 puts outside the invariant, and the lint reads them all under
+/// `--all-targets`. The roots are the manifest reader's, which follows cargo's own discovery
+/// (`required-features` removes nothing from the source). A root file that is also a product
+/// root, or that the product reaches, is product: it takes the product's rule, and its unconditional
+/// allowance is refused by assertion 4.
+fn every_excluded_root_carries_the_unconditional_form(world: &World) -> Vec<String> {
+    let mut failures = Vec::new();
+    let workspace = source_workspace();
+    let mut checked = 0;
+    for src in &world.srcs {
+        let package = workspace.package(src.package).expect("a workspace package");
+        let products = product_roots(package);
+        let excluded: Vec<bt_source::TargetRoot> = package
+            .targets()
+            .iter()
+            .filter(|target| !products.contains(&target.file))
+            .cloned()
+            .collect();
+        for (name, binary) in DEVELOPMENT_BINARIES {
+            if name == src.package
+                && !excluded
+                    .iter()
+                    .any(|t| t.id.kind == TargetKind::Binary && t.id.name == binary)
+            {
+                failures.push(format!(
+                    "`DEVELOPMENT_BINARIES` names {name}'s `{binary}`, which is not a binary target \
+                     of it"
+                ));
+            }
+        }
+        if excluded.is_empty() {
+            continue;
+        }
+        for target in &excluded {
+            if src
+                .index
+                .file(&target.file)
+                .is_some_and(|file| src.product_file(file))
+            {
+                failures.push(format!(
+                    "{} ({}) is an excluded root the product reaches: a file the product reaches is \
+                     product, and takes the product's rule",
+                    target.file.display(),
+                    target.id
+                ));
+            }
+        }
+        let mut scopes: BTreeSet<PathBuf> = BTreeSet::new();
+        for target in &excluded {
+            let parent = target
+                .file
+                .parent()
+                .expect("a root file is in a directory")
+                .to_path_buf();
+            if parent != package.directory() {
+                scopes.insert(parent);
+            }
+        }
+        let mut disk: Vec<bt_source::DiskScope> = scopes
+            .into_iter()
+            .map(bt_source::DiskScope::under)
+            .collect();
+        if excluded
+            .iter()
+            .any(|t| t.file.parent() == Some(package.directory()))
+        {
+            let subdirectories: Vec<String> = std::fs::read_dir(package.directory())
+                .expect("a package directory lists")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().is_dir())
+                .filter_map(|entry| entry.file_name().to_str().map(ToOwned::to_owned))
+                .collect();
+            let names: Vec<&str> = subdirectories.iter().map(String::as_str).collect();
+            disk.push(bt_source::DiskScope::under(package.directory()).excluding(&names));
+        }
+        let universe = match bt_source::Universe::declare(
+            format!("{}'s excluded roots", src.package),
+            excluded.clone(),
+            disk,
+            bt_source::Vendor::Excluded,
+        ) {
+            Ok(universe) => universe,
+            Err(rejection) => {
+                failures.push(format!("{}: {rejection}", src.package));
+                continue;
+            }
+        };
+        let index: &'static Index = match Index::build(&universe) {
+            Ok(index) => Box::leak(Box::new(index)),
+            Err(rejections) => {
+                failures.push(format!(
+                    "{}'s excluded roots: {}",
+                    src.package,
+                    bt_source::report(&rejections)
+                ));
+                continue;
+            }
+        };
+        let excluded_src = Src {
+            package: src.package,
+            index,
+        };
+        for target in &excluded {
+            let Some(file) = index.file(&target.file) else {
+                failures.push(format!("{} is not in its own index", target.file.display()));
+                continue;
+            };
+            checked += 1;
+            let forms = leading_inner_attributes(&excluded_src, file)
+                .into_iter()
+                .filter(|(_, body)| body == EXCLUDED_ROOT_FORM)
+                .count();
+            if forms != 1 {
+                failures.push(format!(
+                    "{} ({}) carries `#![allow(clippy::disallowed_methods)]` {forms} times in its \
+                     leading inner-attribute block, where an excluded root carries it once",
+                    target.file.display(),
+                    target.id
+                ));
+            }
+        }
+    }
+    if checked == 0 {
+        failures.push("no excluded root was read: this reads nothing".into());
     }
     failures
 }
@@ -2825,6 +3167,117 @@ fn every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door() -> 
     failures
 }
 
+// ── assertion 9: the typed entrances ((j)5, (j)11.1) ──────────────────────────────────────
+
+const ENTRANCE_COLUMNS: [&str; 2] = ["path", "door"];
+
+/// A parameter's type as one string, qualifiers before `WaitToken` and `doors` dropped and every
+/// lifetime written `'l`: `WaitToken<'l,doors::PresentFrame>`.
+fn capability_spelling(src: &Src, toks: &[Tok]) -> String {
+    const QUALIFIERS: [&str; 5] = ["crate", "admission", "bt_platform", "self", "super"];
+    let mut out = String::new();
+    for (at, tok) in toks.iter().enumerate() {
+        let qualifier = tok.kind == Kind::Ident
+            && QUALIFIERS.contains(&src.text(*tok))
+            && src.is(toks.get(at + 1), "::");
+        let its_colons = src.is(Some(tok), "::")
+            && at >= 1
+            && toks[at - 1].kind == Kind::Ident
+            && QUALIFIERS.contains(&src.text(toks[at - 1]));
+        if qualifier || its_colons {
+            continue;
+        }
+        match tok.kind {
+            Kind::Lifetime => out.push_str("'l"),
+            _ => out.push_str(src.text(*tok)),
+        }
+    }
+    out
+}
+
+/// **Every entrance that left the vocabulary takes its capability, on every arm** (revision (j)5
+/// with (j)11.1): each `# entrances` line names a first-party function or method that is not in
+/// `# vocabulary`, whose door is a `# doors` line, and every product declaration of it — one per
+/// `cfg` arm — has a parameter whose type is exactly `WaitToken<'_, doors::<door>>`. Not an
+/// `Option` of one, not another door's: a caller cannot reach the effect without the admission
+/// that door's token comes from, which is what makes listing the entrance in the vocabulary
+/// redundant. The mint behind the token is fenced by assertion 2.
+fn every_entrance_left_the_vocabulary_takes_its_capability(world: &World) -> Vec<String> {
+    let mut failures = Vec::new();
+    let vocabulary: BTreeSet<&str> = section("vocabulary", &VOCABULARY_COLUMNS)
+        .into_iter()
+        .map(|cells| cells[0])
+        .collect();
+    let doors: BTreeSet<&str> = section("doors", &DOOR_COLUMNS)
+        .into_iter()
+        .map(|cells| cells[0])
+        .collect();
+    let entrances = section("entrances", &ENTRANCE_COLUMNS);
+    if entrances.is_empty() {
+        failures.push("the registry's `# entrances` section is empty: this reads nothing".into());
+    }
+    for cells in entrances {
+        let (path, door) = (cells[0], cells[1]);
+        if vocabulary.contains(path) {
+            failures.push(format!(
+                "`{path}` is both an entrance and a vocabulary entry: an entrance leaves the \
+                 vocabulary"
+            ));
+        }
+        if !doors.contains(door) {
+            failures.push(format!(
+                "`{path}` names door `{door}`, which is not a `# doors` line"
+            ));
+        }
+        let segments: Vec<&str> = path.split("::").collect();
+        let package = segments[0].replace('_', "-");
+        let name = segments[segments.len() - 1];
+        let owner = (segments.len() >= 3).then(|| segments[segments.len() - 2]);
+        let wanted = format!("WaitToken<'l,doors::{door}>");
+        let declarations: Vec<&Callable> = world
+            .callables
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|callable| {
+                world.srcs[callable.src].package == package
+                    && callable.type_owner.as_deref() == owner
+                    && callable.trait_name.is_none()
+                    && callable.record.is_some()
+            })
+            .collect();
+        if declarations.is_empty() {
+            failures.push(format!(
+                "`{path}` is declared nowhere in the product: an entrance names a function"
+            ));
+        }
+        for callable in declarations {
+            let src = &world.srcs[callable.src];
+            let record = callable.record.expect("filtered to declared items");
+            let toks = src.lex(record.declaration().start(), record.declaration().end());
+            let Some((_, open, close)) = signature(src, &toks) else {
+                continue;
+            };
+            let params: Vec<String> = split_commas(src, &toks[open + 1..close])
+                .iter()
+                .filter_map(|param| {
+                    let colon = param.iter().position(|t| src.is(Some(t), ":"))?;
+                    Some(capability_spelling(src, &param[colon + 1..]))
+                })
+                .collect();
+            if !params.contains(&wanted) {
+                failures.push(format!(
+                    "`{}` is the entrance `{path}` and takes no `WaitToken<'_, doors::{door}>` — \
+                     its parameters are {params:?}: an entrance without its capability goes \
+                     back into the vocabulary",
+                    key_of(src, record)
+                ));
+            }
+        }
+    }
+    failures
+}
+
 // ── the guard ──────────────────────────────────────────────────────────────────────────────
 
 /// RED (A1e, design note 2026-09-26 §9.1 and revisions (c)4, (c)8, (d)4, (e)3, (f)1–(f)2, (g))
@@ -2850,7 +3303,7 @@ fn every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door() -> 
 fn every_door_is_where_the_registry_says() {
     let world = World::new();
     let words = vocabulary();
-    let assertions: [(&str, Vec<String>); 9] = [
+    let assertions: [(&str, Vec<String>); 11] = [
         (
             "the_universe_is_the_product_and_its_tools_are_declared",
             the_universe_is_the_product_and_its_tools_are_declared(&world),
@@ -2887,6 +3340,14 @@ fn every_door_is_where_the_registry_says() {
             "every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door",
             every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door(),
         ),
+        (
+            "every_entrance_left_the_vocabulary_takes_its_capability",
+            every_entrance_left_the_vocabulary_takes_its_capability(&world),
+        ),
+        (
+            "every_excluded_root_carries_the_unconditional_form",
+            every_excluded_root_carries_the_unconditional_form(&world),
+        ),
     ];
     let mut report = String::new();
     for (assertion, failures) in &assertions {
@@ -2897,5 +3358,2024 @@ fn every_door_is_where_the_registry_says() {
     assert!(
         report.is_empty(),
         "the source guard's prohibitions do not hold:{report}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+// The bare-site inventory (A2a; design note 2026-09-26 revisions (j)1, (j)5, (j)11.5 and (j)11.6)
+// ─────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Every vocabulary entry found in the product outside the body of a registered door function, as
+// rows `(crate, cfg arm, item, entry, count)`, over the declared universe above (`World`). The
+// reading is `cfg`-blind, so a Windows arm and its macOS twin are two rows.
+//
+// **How a site is recognised.** An entry is a path. A path written in the code — called, or handed
+// over as a value — is resolved through the `use` declarations in scope (both spellings: the full
+// path, and a name a `use` brought in; `crate::`, `self::`, `super::` and `Self::` too) and is a
+// site when it names the entry. A method call `receiver.name(…)` is a site of `Type::name` when the
+// receiver's **written type** includes `Type`: the type written on `self`, on a parameter, a field,
+// a `static`, a `let` annotation, or on the declared return of the first-party function or method
+// the receiver was made by, carried through `let`, `if let`, `while let`, `for`, `match` arms and
+// the parameters of a closure handed to a method of the value. Where no type is written anywhere on
+// that road the receiver is untyped and the call is not a site: this is a reading of what the
+// source says, not the compiler's resolution, and what it cannot see (an untyped receiver) is the
+// gap A2e's lint closes. `write!`/`writeln!` are `std::io::Write::write_fmt` when their first
+// argument is an `io` writer by the same reading.
+//
+// The few standard-library signatures the vocabulary's receivers are made through are written out
+// below (`FOREIGN_FUNCTIONS`, `FOREIGN_METHODS`, `BUILDERS`, `PASSING_THROUGH`, `WRAPPERS`,
+// `IO_WRITERS`): the source cannot say what `mpsc::channel()` returns, and these say what `std`
+// does.
+
+/// The committed inventory.
+const BARE_SITES: &str = include_str!("../../../docs/plans/window-thread-bare-sites.tsv");
+const BARE_COLUMNS: [&str; 5] = ["crate", "arm", "item", "entry", "count"];
+
+/// A set of canonical type paths: `std::sync::mpsc::Receiver`, `bt_platform::Compositor`.
+type Ty = BTreeSet<String>;
+
+/// Free functions of `std` whose result a vocabulary receiver is made from.
+const FOREIGN_FUNCTIONS: [(&str, &[&str]); 6] = [
+    (
+        "std::sync::mpsc::channel",
+        &["std::sync::mpsc::Sender", "std::sync::mpsc::Receiver"],
+    ),
+    (
+        "std::sync::mpsc::sync_channel",
+        &["std::sync::mpsc::SyncSender", "std::sync::mpsc::Receiver"],
+    ),
+    ("std::thread::spawn", &["std::thread::JoinHandle"]),
+    ("std::io::stdout", &["std::io::Stdout"]),
+    ("std::io::stderr", &["std::io::Stderr"]),
+    ("std::io::stdin", &["std::io::Stdin"]),
+];
+
+/// Methods of `std` types a vocabulary receiver is made through.
+const FOREIGN_METHODS: [(&str, &str, &str); 7] = [
+    ("std::process::Command", "spawn", "std::process::Child"),
+    ("std::process::Command", "output", "std::process::Output"),
+    ("std::fs::OpenOptions", "open", "std::fs::File"),
+    ("std::fs::File", "try_clone", "std::fs::File"),
+    ("std::thread::Builder", "spawn", "std::thread::JoinHandle"),
+    (
+        "std::process::Child",
+        "wait_with_output",
+        "std::process::Output",
+    ),
+    ("std::io::Stdout", "lock", "std::io::StdoutLock"),
+];
+
+/// Builder methods: each returns the type it is called on.
+const BUILDERS: [(&str, &[&str]); 3] = [
+    (
+        "std::process::Command",
+        &[
+            "arg",
+            "args",
+            "env",
+            "envs",
+            "env_remove",
+            "env_clear",
+            "current_dir",
+            "stdin",
+            "stdout",
+            "stderr",
+            "creation_flags",
+            "raw_arg",
+            "process_group",
+        ],
+    ),
+    (
+        "std::fs::OpenOptions",
+        &[
+            "read",
+            "write",
+            "append",
+            "truncate",
+            "create",
+            "create_new",
+            "custom_flags",
+            "share_mode",
+            "access_mode",
+            "attributes",
+            "mode",
+        ],
+    ),
+    ("std::thread::Builder", &["name", "stack_size"]),
+];
+
+/// Methods whose result carries the value's own types onward: `Option::take`, `Mutex::lock`,
+/// `Result::unwrap`, an iterator over a collection. A set of type names already holds what is
+/// inside a wrapper, so these keep it.
+const PASSING_THROUGH: [&str; 40] = [
+    "unwrap",
+    "expect",
+    "unwrap_or",
+    "unwrap_or_else",
+    "unwrap_or_default",
+    "ok",
+    "map_err",
+    "as_ref",
+    "as_mut",
+    "as_deref",
+    "as_deref_mut",
+    "take",
+    "replace",
+    "clone",
+    "cloned",
+    "copied",
+    "borrow",
+    "borrow_mut",
+    "lock",
+    "try_lock",
+    "get",
+    "get_mut",
+    "iter",
+    "iter_mut",
+    "into_iter",
+    "drain",
+    "pop",
+    "pop_front",
+    "pop_back",
+    "first",
+    "last",
+    "remove",
+    "swap_remove",
+    "into_inner",
+    "flatten",
+    "by_ref",
+    "values",
+    "values_mut",
+    "rev",
+    "filter",
+];
+
+/// Types whose constructor holds what it is given: `Arc::new(Mutex::new(x))` is all three.
+const WRAPPERS: [&str; 10] = [
+    "Arc", "Rc", "Box", "Mutex", "RwLock", "RefCell", "Cell", "Option", "Vec", "VecDeque",
+];
+
+/// The `std` types `write!` reaches `std::io::Write::write_fmt` through, beside `dyn`/`impl
+/// Write` and the first-party types that implement it.
+const IO_WRITERS: [&str; 10] = [
+    "std::io::Write",
+    "std::fs::File",
+    "std::io::Stdout",
+    "std::io::Stderr",
+    "std::io::StdoutLock",
+    "std::io::StderrLock",
+    "std::io::BufWriter",
+    "std::io::LineWriter",
+    "std::process::ChildStdin",
+    "std::net::TcpStream",
+];
+
+const WRITE_FMT: &str = "std::io::Write::write_fmt";
+
+/// Names a pattern holds that bind nothing.
+const NOT_A_BINDING: [&str; 14] = [
+    "mut", "ref", "Some", "None", "Ok", "Err", "_", "box", "true", "false", "self", "Self", "in",
+    "if",
+];
+
+/// One vocabulary entry, as the inventory matches it.
+struct Entry {
+    /// As the registry spells it.
+    path: String,
+    /// The same, canonical (see [`Names::canonical`]).
+    canonical: String,
+    /// For a method entry: its type, canonical, and the method's name.
+    method: Option<(String, String)>,
+}
+
+/// One binding a `use` declaration makes: the name it brings in, the path it names, and whether it
+/// is a glob.
+#[derive(Clone, Debug)]
+struct Import {
+    name: String,
+    path: Vec<String>,
+    glob: bool,
+}
+
+/// What a package's code can name, by where it is written.
+struct Names {
+    /// `bt_platform` for `bt-platform`.
+    crate_ident: String,
+    /// Every first-party crate's identifier.
+    first_party: BTreeSet<String>,
+    /// The `use` declarations written at a module's level, by the module's path.
+    modules: HashMap<String, Vec<Import>>,
+    /// The ones written inside a function, with the function's span.
+    bodies: Vec<(usize, usize, Import)>,
+    /// Every module path the package has.
+    module_paths: BTreeSet<String>,
+    /// Every type the package declares, by name.
+    types: BTreeSet<String>,
+    /// `static` and `const` items, by name: where each is written and its type's tokens.
+    statics: HashMap<String, Vec<(usize, Vec<Tok>)>>,
+}
+
+impl Names {
+    fn new(src: &Src, first_party: &BTreeSet<String>) -> Self {
+        let module_paths: BTreeSet<String> = src
+            .index
+            .modules()
+            .iter()
+            .flat_map(|module| module.module_paths().iter().cloned())
+            .collect();
+        let types = src
+            .index
+            .items()
+            .iter()
+            .filter(|record| record.kind().is_type())
+            .map(|record| record.name().to_owned())
+            .collect();
+        let mut names = Self {
+            crate_ident: src.package.replace('-', "_"),
+            first_party: first_party.clone(),
+            modules: HashMap::new(),
+            bodies: Vec::new(),
+            module_paths,
+            types,
+            statics: HashMap::new(),
+        };
+        for at in src.named("use") {
+            let file_start = src.index.file_at(at).map_or(0, |f| f.span().start());
+            let before = src.lex(at.saturating_sub(16).max(file_start), at);
+            if before
+                .last()
+                .is_some_and(|t| src.is(Some(t), "::") || src.is(Some(t), "."))
+            {
+                continue;
+            }
+            let file_end = src.file_end(at);
+            let mut window = 4096;
+            let (toks, end) = loop {
+                let toks = src.lex(at, (at + window).min(file_end));
+                if let Some(end) = toks.iter().position(|t| src.is(Some(t), ";")) {
+                    break (toks, Some(end));
+                }
+                if at + window >= file_end {
+                    break (toks, None);
+                }
+                window *= 4;
+            };
+            let Some(end) = end else {
+                continue;
+            };
+            if toks
+                .get(1)
+                .is_none_or(|t| t.kind != Kind::Ident && !src.is(Some(t), "::"))
+            {
+                continue;
+            }
+            let module = src.module_at(at).to_owned();
+            let mut found = Vec::new();
+            use_tree(src, &toks[1..end], &[], &mut found);
+            let found: Vec<Import> = found
+                .into_iter()
+                .map(|import| Import {
+                    path: names.absolute_prefix(&import.path, &module),
+                    ..import
+                })
+                .collect();
+            match src.callable_at(at) {
+                Some(record) => names.bodies.extend(
+                    found
+                        .into_iter()
+                        .map(|import| (record.whole().start(), record.whole().end(), import)),
+                ),
+                None => names.modules.entry(module).or_default().extend(found),
+            }
+        }
+        for keyword in ["static", "const"] {
+            for at in src.named(keyword) {
+                let toks = src.lex(at, (at + 1024).min(src.file_end(at)));
+                let name = if src.is(toks.get(1), "mut") { 2 } else { 1 };
+                let Some(tok) = toks.get(name) else {
+                    continue;
+                };
+                if tok.kind != Kind::Ident || !src.is(toks.get(name + 1), ":") {
+                    continue;
+                }
+                let ty: Vec<Tok> = toks[name + 2..]
+                    .iter()
+                    .take_while(|t| !src.is(Some(t), "=") && !src.is(Some(t), ";"))
+                    .copied()
+                    .collect();
+                names
+                    .statics
+                    .entry(src.text(*tok).to_owned())
+                    .or_default()
+                    .push((at, ty));
+            }
+        }
+        names
+    }
+
+    /// A module path, `crate::a::b`, as segments beginning with the crate's identifier.
+    fn module_segments(&self, module: &str) -> Vec<String> {
+        module
+            .split("::")
+            .map(|segment| {
+                if segment == "crate" {
+                    self.crate_ident.clone()
+                } else {
+                    segment.to_owned()
+                }
+            })
+            .collect()
+    }
+
+    /// A path's leading `crate`, `self` and `super`s, resolved against the module it is written
+    /// in; a leading `::` dropped.
+    fn absolute_prefix(&self, path: &[String], module: &str) -> Vec<String> {
+        let mut rest = path;
+        while rest.first().is_some_and(String::is_empty) {
+            rest = &rest[1..];
+        }
+        match rest.first().map(String::as_str) {
+            Some("crate") => std::iter::once(self.crate_ident.clone())
+                .chain(rest[1..].iter().cloned())
+                .collect(),
+            Some("self") => self
+                .module_segments(module)
+                .into_iter()
+                .chain(rest[1..].iter().cloned())
+                .collect(),
+            Some("super") => {
+                let mut base = self.module_segments(module);
+                let mut rest = rest;
+                while rest.first().map(String::as_str) == Some("super") {
+                    if base.len() > 1 {
+                        base.pop();
+                    }
+                    rest = &rest[1..];
+                }
+                base.into_iter().chain(rest.iter().cloned()).collect()
+            }
+            _ => rest.to_vec(),
+        }
+    }
+
+    /// The import that brings `name` in at `at`, in module `module`.
+    fn import(&self, name: &str, at: usize, module: &str) -> Option<&Import> {
+        self.bodies
+            .iter()
+            .find(|(start, end, import)| {
+                *start <= at && at < *end && !import.glob && import.name == name
+            })
+            .map(|(_, _, import)| import)
+            .or_else(|| {
+                self.modules
+                    .get(module)?
+                    .iter()
+                    .find(|import| !import.glob && import.name == name)
+            })
+    }
+
+    /// The globs in scope at `at`.
+    fn globs(&self, at: usize, module: &str) -> Vec<&Import> {
+        self.bodies
+            .iter()
+            .filter(|(start, end, import)| *start <= at && at < *end && import.glob)
+            .map(|(_, _, import)| import)
+            .chain(
+                self.modules
+                    .get(module)
+                    .into_iter()
+                    .flatten()
+                    .filter(|import| import.glob),
+            )
+            .collect()
+    }
+
+    /// **Canonical**: a first-party item is named by its crate and itself —
+    /// `bt_platform::Compositor`, `bt_platform::Compositor::commit`, `bt_pty::wait_for_retirements`
+    /// — because the module it is written in is no part of the name a `pub use` gives it; anything
+    /// else is its path.
+    fn canonical(first_party: &BTreeSet<String>, path: &[String]) -> String {
+        if path.len() >= 2 && first_party.contains(&path[0]) {
+            let last = path.len() - 1;
+            if path.len() >= 3 && path[last - 1].starts_with(|c: char| c.is_ascii_uppercase()) {
+                return format!("{}::{}::{}", path[0], path[last - 1], path[last]);
+            }
+            return format!("{}::{}", path[0], path[last]);
+        }
+        path.join("::")
+    }
+
+    /// Every canonical path a written path may be, at `at` in `module`: through an import, a local
+    /// module, a local item or a glob; or as written, for a crate's own name.
+    fn resolve(&self, written: &[&str], at: usize, module: &str) -> Vec<String> {
+        let segments: Vec<String> = written.iter().map(|s| (*s).to_owned()).collect();
+        let first = written[0];
+        let paths: Vec<Vec<String>> = if ["crate", "self", "super", ""].contains(&first) {
+            vec![self.absolute_prefix(&segments, module)]
+        } else if let Some(import) = self.import(first, at, module) {
+            vec![
+                import
+                    .path
+                    .iter()
+                    .cloned()
+                    .chain(segments[1..].iter().cloned())
+                    .collect(),
+            ]
+        } else if written.len() > 1 && self.module_paths.contains(&format!("{module}::{first}")) {
+            vec![
+                self.module_segments(module)
+                    .into_iter()
+                    .chain(segments.iter().cloned())
+                    .collect(),
+            ]
+        } else if written.len() == 1 || self.types.contains(first) {
+            // A name defined here, or brought in by a glob.
+            let mut out = vec![
+                self.module_segments(module)
+                    .into_iter()
+                    .chain(segments.iter().cloned())
+                    .collect(),
+            ];
+            for glob in self.globs(at, module) {
+                out.push(
+                    glob.path
+                        .iter()
+                        .cloned()
+                        .chain(segments.iter().cloned())
+                        .collect(),
+                );
+            }
+            out
+        } else {
+            vec![segments]
+        };
+        paths
+            .iter()
+            .map(|path| Self::canonical(&self.first_party, path))
+            .collect()
+    }
+
+    /// The canonical path of a type written `written`: through the imports, the package's own
+    /// types, or bare when it is neither (a prelude type, a generic).
+    fn resolve_type(&self, written: &[&str], at: usize, module: &str) -> String {
+        if written.len() == 1 {
+            let name = written[0];
+            if let Some(import) = self.import(name, at, module) {
+                return Self::canonical(&self.first_party, &import.path);
+            }
+            if self.types.contains(name) {
+                return format!("{}::{name}", self.crate_ident);
+            }
+            return name.to_owned();
+        }
+        self.resolve(written, at, module)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
+}
+
+/// One `use` tree, expanded into its bindings.
+fn use_tree(src: &Src, toks: &[Tok], prefix: &[String], out: &mut Vec<Import>) {
+    let mut path = prefix.to_vec();
+    let mut at = 0;
+    if src.is(toks.first(), "::") {
+        path.push(String::new());
+        at = 1;
+    }
+    while let Some(tok) = toks.get(at) {
+        let text = src.text(*tok);
+        if text == "{" {
+            if let Some(close) = closing(src, toks, at) {
+                for part in split_commas(src, &toks[at + 1..close]) {
+                    use_tree(src, &part, &path, out);
+                }
+            }
+            return;
+        }
+        if text == "*" {
+            out.push(Import {
+                name: String::new(),
+                path,
+                glob: true,
+            });
+            return;
+        }
+        if tok.kind != Kind::Ident {
+            return;
+        }
+        if src.is(toks.get(at + 1), "::") {
+            path.push(text.to_owned());
+            at += 2;
+            continue;
+        }
+        let (full, name) = if text == "self" {
+            (path.clone(), path.last().cloned())
+        } else {
+            let mut full = path.clone();
+            full.push(text.to_owned());
+            (full, Some(text.to_owned()))
+        };
+        let name = if src.is(toks.get(at + 1), "as") {
+            toks.get(at + 2).map(|t| src.text(*t).to_owned())
+        } else {
+            name
+        };
+        if let Some(name) = name.filter(|name| name != "_") {
+            out.push(Import {
+                name,
+                path: full,
+                glob: false,
+            });
+        }
+        return;
+    }
+}
+
+/// Everything the inventory reads: the world, each package's names, the vocabulary, and the
+/// first-party types that implement `std::io::Write`.
+struct Reader<'w> {
+    world: &'w World,
+    names: Vec<Names>,
+    entries: Vec<Entry>,
+    io_writers: BTreeSet<String>,
+}
+
+impl<'w> Reader<'w> {
+    fn new(world: &'w World) -> Self {
+        let first_party: BTreeSet<String> = world
+            .srcs
+            .iter()
+            .map(|src| src.package.replace('-', "_"))
+            .collect();
+        let names: Vec<Names> = world
+            .srcs
+            .iter()
+            .map(|src| Names::new(src, &first_party))
+            .collect();
+        let entries = section("vocabulary", &VOCABULARY_COLUMNS)
+            .into_iter()
+            .map(|cells| {
+                let segments: Vec<String> = cells[0].split("::").map(ToOwned::to_owned).collect();
+                let last = segments.len() - 1;
+                let method = (last >= 1
+                    && segments[last - 1].starts_with(|c: char| c.is_ascii_uppercase()))
+                .then(|| {
+                    (
+                        Names::canonical(&first_party, &segments[..last]),
+                        segments[last].clone(),
+                    )
+                });
+                Entry {
+                    path: cells[0].to_owned(),
+                    canonical: Names::canonical(&first_party, &segments),
+                    method,
+                }
+            })
+            .collect();
+        let mut io_writers = BTreeSet::new();
+        for (at, src) in world.srcs.iter().enumerate() {
+            for block in src.index.impls() {
+                let Some(trait_name) = block.trait_name() else {
+                    continue;
+                };
+                let written: Vec<&str> = trait_name
+                    .split('<')
+                    .next()
+                    .unwrap_or_default()
+                    .split("::")
+                    .map(str::trim)
+                    .collect();
+                let start = block.whole().start();
+                let module = src.module_at(start);
+                if names[at].resolve_type(&written, start, module) == "std::io::Write" {
+                    io_writers.insert(format!("{}::{}", names[at].crate_ident, block.type_owner()));
+                }
+            }
+        }
+        Self {
+            world,
+            names,
+            entries,
+            io_writers,
+        }
+    }
+
+    /// The canonical type an associated function's `impl` block is for: the package's own, or a
+    /// foreign one the block implements a trait for (`impl Store for File`).
+    fn own_type(&self, src: usize, record: &ItemRecord) -> Option<String> {
+        let owner = record.type_owner()?;
+        let s = &self.world.srcs[src];
+        let start = record.whole().start();
+        Some(self.names[src].resolve_type(&[owner], start, s.module_at(start)))
+    }
+
+    fn is_io_writer(&self, types: &Ty) -> bool {
+        types
+            .iter()
+            .any(|t| IO_WRITERS.contains(&t.as_str()) || self.io_writers.contains(t))
+    }
+
+    /// The canonical type paths written in `toks`, at `at` in `module` of package `src`.
+    fn types_written(
+        &self,
+        src: usize,
+        at: usize,
+        module: &str,
+        own: Option<&str>,
+        generics: &HashMap<&'static str, Ty>,
+        toks: &[Tok],
+    ) -> Ty {
+        let s = &self.world.srcs[src];
+        let mut out = Ty::new();
+        let mut index = 0;
+        while index < toks.len() {
+            let tok = toks[index];
+            if tok.kind != Kind::Ident {
+                index += 1;
+                continue;
+            }
+            let mut path = vec![s.text(tok)];
+            let mut next = index + 1;
+            while s.is(toks.get(next), "::")
+                && toks.get(next + 1).is_some_and(|t| t.kind == Kind::Ident)
+            {
+                path.push(s.text(toks[next + 1]));
+                next += 2;
+            }
+            index = next;
+            let last = path[path.len() - 1];
+            if path == ["Self"] {
+                out.extend(own.map(ToOwned::to_owned));
+            } else if path.len() == 1 && generics.contains_key(last) {
+                out.extend(generics[last].iter().cloned());
+            } else if last.starts_with(|c: char| c.is_ascii_uppercase()) {
+                out.insert(self.names[src].resolve_type(&path, at, module));
+            }
+        }
+        out
+    }
+
+    /// What a first-party callable is declared to return, with `Self` as `owner`.
+    fn returns(&self, src: usize, record: &ItemRecord, owner: Option<&str>) -> Ty {
+        let s = &self.world.srcs[src];
+        let toks = s.lex(record.declaration().start(), record.declaration().end());
+        let Some((_, _, close)) = signature(s, &toks) else {
+            return Ty::new();
+        };
+        let Some(arrow) = toks[close..].iter().position(|t| s.is(Some(t), "->")) else {
+            return Ty::new();
+        };
+        let from = close + arrow + 1;
+        let to = toks[from..]
+            .iter()
+            .position(|t| s.is(Some(t), "where"))
+            .map_or(toks.len(), |at| from + at);
+        let own = owner
+            .map(ToOwned::to_owned)
+            .or_else(|| self.own_type(src, record));
+        let generics = self.generics_of(src, record, own.as_deref());
+        self.types_written(
+            src,
+            record.whole().start(),
+            record.module_paths()[0],
+            own.as_deref(),
+            &generics,
+            &toks[from..to],
+        )
+    }
+
+    /// A function's generic parameters, each as the types of its bounds.
+    fn generics_of(
+        &self,
+        src: usize,
+        record: &ItemRecord,
+        own: Option<&str>,
+    ) -> HashMap<&'static str, Ty> {
+        let s = &self.world.srcs[src];
+        let toks = s.lex(record.declaration().start(), record.declaration().end());
+        let mut out: HashMap<&'static str, Ty> = HashMap::new();
+        let Some((fn_at, open, close)) = signature(s, &toks) else {
+            return out;
+        };
+        let start = record.whole().start();
+        let module = record.module_paths()[0];
+        let empty = HashMap::new();
+        let mut bound = |list: &[Tok]| {
+            for part in split_commas(s, list) {
+                if part.len() < 3 || part[0].kind != Kind::Ident || !s.is(part.get(1), ":") {
+                    continue;
+                }
+                let types = self.types_written(src, start, module, own, &empty, &part[2..]);
+                out.entry(s.text(part[0])).or_default().extend(types);
+            }
+        };
+        if s.is(toks.get(fn_at + 2), "<")
+            && let Some(end) = toks[fn_at + 2..open]
+                .iter()
+                .rposition(|t| s.is(Some(t), ">"))
+        {
+            bound(&toks[fn_at + 3..fn_at + 2 + end]);
+        }
+        if let Some(clause) = toks[close..].iter().position(|t| s.is(Some(t), "where")) {
+            bound(&toks[close + clause + 1..]);
+        }
+        out
+    }
+
+    /// The first-party callables of the crate `package` named `name`, on the type `owner` (its
+    /// last segment) or free.
+    fn callables(
+        &self,
+        package: &str,
+        owner: Option<&str>,
+        name: &str,
+    ) -> Vec<(usize, &'static ItemRecord)> {
+        self.world
+            .callables
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|callable| {
+                self.names[callable.src].crate_ident == package
+                    && callable.type_owner.as_deref() == owner
+            })
+            .filter_map(|callable| callable.record.map(|record| (callable.src, record)))
+            .collect()
+    }
+
+    /// A first-party canonical path's crate and last segment.
+    fn first_party<'p>(&self, path: &'p str) -> Option<(&'p str, &'p str)> {
+        let (package, rest) = path.split_once("::")?;
+        self.names[0]
+            .first_party
+            .contains(package)
+            .then(|| (package, rest.rsplit("::").next().unwrap_or(rest)))
+    }
+
+    /// A method's result on a value of types `on`.
+    fn method(&self, on: &Ty, name: &str) -> Ty {
+        let mut out = Ty::new();
+        for owner in on {
+            if let Some((package, type_name)) = self.first_party(owner) {
+                for (src, record) in self.callables(package, Some(type_name), name) {
+                    out.extend(self.returns(src, record, Some(owner)));
+                }
+            }
+            for (ty, method, made) in FOREIGN_METHODS {
+                if ty == owner && method == name {
+                    out.insert(made.to_owned());
+                }
+            }
+            for (ty, methods) in BUILDERS {
+                if ty == owner && methods.contains(&name) {
+                    out.insert(owner.clone());
+                }
+            }
+        }
+        if PASSING_THROUGH.contains(&name) {
+            out.extend(on.iter().cloned());
+        }
+        out
+    }
+
+    /// A field's declared types on a value of types `on`.
+    fn field(&self, on: &Ty, name: &str) -> Ty {
+        let mut out = Ty::new();
+        for owner in on {
+            let Some((package, type_name)) = self.first_party(owner) else {
+                continue;
+            };
+            let declared = self
+                .world
+                .fields
+                .get(&(type_name.to_owned(), name.to_owned()));
+            for (src, record) in declared.into_iter().flatten() {
+                if self.names[*src].crate_ident != package {
+                    continue;
+                }
+                let s = &self.world.srcs[*src];
+                let toks = s.lex(record.whole().start(), record.whole().end());
+                if let Some(colon) = toks.iter().position(|t| s.is(Some(t), ":")) {
+                    out.extend(self.types_written(
+                        *src,
+                        record.whole().start(),
+                        record.module_paths()[0],
+                        Some(owner),
+                        &HashMap::new(),
+                        &toks[colon + 1..],
+                    ));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// One body's types: its parameters, its generics' bounds, and its bindings, each name with the
+/// union of every type written on it in the body.
+struct Scope<'r> {
+    reader: &'r Reader<'r>,
+    src: usize,
+    module: &'static str,
+    at: usize,
+    own: Option<String>,
+    generics: HashMap<&'static str, Ty>,
+    bindings: HashMap<&'static str, Ty>,
+}
+
+impl<'r> Scope<'r> {
+    /// A body's scope: its parameters, then its bindings in the order they are written.
+    fn of(reader: &'r Reader<'r>, src: usize, record: &'static ItemRecord) -> Self {
+        let s = &reader.world.srcs[src];
+        let own = reader.own_type(src, record);
+        let generics = reader.generics_of(src, record, own.as_deref());
+        let mut scope = Scope {
+            reader,
+            src,
+            module: record.module_paths()[0],
+            at: record.whole().start(),
+            own,
+            generics,
+            bindings: HashMap::new(),
+        };
+        let declaration = s.lex(record.declaration().start(), record.declaration().end());
+        if let Some((_, open, close)) = signature(s, &declaration) {
+            for param in split_commas(s, &declaration[open + 1..close]) {
+                let Some(colon) = param.iter().position(|t| s.is(Some(t), ":")) else {
+                    continue;
+                };
+                let types = scope.written(&param[colon + 1..]);
+                for name in pattern_names(s, &param[..colon]) {
+                    scope
+                        .bindings
+                        .entry(name)
+                        .or_default()
+                        .extend(types.iter().cloned());
+                }
+            }
+        }
+        if let Some(body) = record.body() {
+            let toks = s.lex(body.start(), body.end());
+            scope.bind(&toks);
+        }
+        scope
+    }
+
+    fn s(&self) -> &'r Src {
+        &self.reader.world.srcs[self.src]
+    }
+
+    fn written(&self, toks: &[Tok]) -> Ty {
+        self.reader.types_written(
+            self.src,
+            self.at,
+            self.module,
+            self.own.as_deref(),
+            &self.generics,
+            toks,
+        )
+    }
+
+    fn add(&mut self, names: Vec<&'static str>, types: &Ty) {
+        for name in names {
+            self.bindings
+                .entry(name)
+                .or_default()
+                .extend(types.iter().cloned());
+        }
+    }
+
+    /// Every binding written in `toks`, typed by what is written on it or by what makes it.
+    fn bind(&mut self, toks: &[Tok]) {
+        let s = self.s();
+        for index in 0..toks.len() {
+            let tok = toks[index];
+            let text = s.text(tok);
+            if tok.kind == Kind::Ident && text == "let" {
+                let conditional = index > 0
+                    && ["if", "while", "&&", "||"]
+                        .iter()
+                        .any(|w| s.is(toks.get(index - 1), w));
+                let pattern_end = depth_zero(s, toks, index + 1, &[":", "=", ";"]);
+                let pattern = &toks[index + 1..pattern_end];
+                let mut types = Ty::new();
+                let mut at = pattern_end;
+                if s.is(toks.get(at), ":") {
+                    let end = depth_zero(s, toks, at + 1, &["=", ";"]);
+                    types = self.written(&toks[at + 1..end]);
+                    at = end;
+                }
+                if s.is(toks.get(at), "=") && types.is_empty() {
+                    let stops: &[&str] = if conditional {
+                        &["{", "&&", "||"]
+                    } else {
+                        &[";", "else"]
+                    };
+                    let end = depth_zero(s, toks, at + 1, stops);
+                    types = self.expression(&toks[at + 1..end]);
+                }
+                self.add(pattern_names(s, pattern), &types);
+            } else if tok.kind == Kind::Ident && text == "for" && !s.is(toks.get(index + 1), "<") {
+                let in_at = depth_zero(s, toks, index + 1, &["in", "{", ";"]);
+                if s.is(toks.get(in_at), "in") {
+                    let end = depth_zero(s, toks, in_at + 1, &["{"]);
+                    let types = self.expression(&toks[in_at + 1..end]);
+                    self.add(pattern_names(s, &toks[index + 1..in_at]), &types);
+                }
+            } else if tok.kind == Kind::Ident && text == "match" {
+                let open = depth_zero(s, toks, index + 1, &["{"]);
+                if open < toks.len() {
+                    let types = self.expression(&toks[index + 1..open]);
+                    if let Some(close) = closing(s, toks, open) {
+                        self.arms(&toks[open + 1..close], &types);
+                    }
+                }
+            } else if tok.kind == Kind::Punct && text == "|" {
+                self.closure(toks, index);
+            }
+        }
+    }
+
+    /// A `match`'s arms: each pattern's names take the scrutinee's types.
+    fn arms(&mut self, toks: &[Tok], types: &Ty) {
+        let s = self.s();
+        let mut at = 0;
+        while at < toks.len() {
+            let arrow = depth_zero(s, toks, at, &["=>"]);
+            if arrow >= toks.len() {
+                return;
+            }
+            let pattern = &toks[at..arrow];
+            let guard = pattern
+                .iter()
+                .position(|t| s.is(Some(t), "if"))
+                .unwrap_or(pattern.len());
+            self.add(pattern_names(s, &pattern[..guard]), types);
+            let body = arrow + 1;
+            at = if s.is(toks.get(body), "{") {
+                let close = closing(s, toks, body).unwrap_or(toks.len() - 1);
+                if s.is(toks.get(close + 1), ",") {
+                    close + 2
+                } else {
+                    close + 1
+                }
+            } else {
+                depth_zero(s, toks, body, &[","]) + 1
+            };
+        }
+    }
+
+    /// A closure's parameters: their written types, or — the closure handed to a method of a
+    /// value — that value's types.
+    fn closure(&mut self, toks: &[Tok], bar: usize) {
+        let s = self.s();
+        let mut before = bar.checked_sub(1);
+        if before.is_some_and(|b| s.is(toks.get(b), "move")) {
+            before = before.and_then(|b| b.checked_sub(1));
+        }
+        let opens = before.is_none_or(|b| {
+            ["(", ",", "=", "=>", "{", ";", "return"]
+                .iter()
+                .any(|p| s.is(toks.get(b), p))
+        });
+        if !opens {
+            return;
+        }
+        let Some(end) = toks[bar + 1..].iter().position(|t| s.is(Some(t), "|")) else {
+            return;
+        };
+        let params = &toks[bar + 1..bar + 1 + end];
+        let mut given = Ty::new();
+        if let Some(b) = before
+            && (s.is(toks.get(b), "(") || s.is(toks.get(b), ","))
+            && let Some(open) = unmatched_open(s, toks, b)
+            && open >= 3
+            && toks[open - 1].kind == Kind::Ident
+            && s.is(toks.get(open - 2), ".")
+            && let Some(start) = chain_start(s, toks, open - 3)
+        {
+            given = self.chain(toks, start, open - 3).unwrap_or_default();
+        }
+        for param in split_commas(s, params) {
+            let colon = param.iter().position(|t| s.is(Some(t), ":"));
+            let types = match colon {
+                Some(colon) => self.written(&param[colon + 1..]),
+                None => given.clone(),
+            };
+            self.add(
+                pattern_names(s, &param[..colon.unwrap_or(param.len())]),
+                &types,
+            );
+        }
+    }
+
+    /// An expression's types when it is one chain, with `&`, `*` or `as` around it.
+    fn expression(&self, toks: &[Tok]) -> Ty {
+        let s = self.s();
+        let mut from = 0;
+        while from < toks.len()
+            && ["&", "*", "mut", "&&"]
+                .iter()
+                .any(|p| s.is(toks.get(from), p))
+        {
+            from += 1;
+        }
+        if from >= toks.len() {
+            return Ty::new();
+        }
+        // A block, `unsafe` or not: what its tail expression is.
+        if s.is(toks.get(from), "unsafe") {
+            from += 1;
+        }
+        if s.is(toks.get(from), "{") && closing(s, toks, from) == Some(toks.len() - 1) {
+            let inner = &toks[from + 1..toks.len() - 1];
+            let mut tail = 0;
+            let mut at = 0;
+            while at < inner.len() {
+                let stop = depth_zero(s, inner, at, &[";"]);
+                if stop >= inner.len() {
+                    break;
+                }
+                tail = stop + 1;
+                at = stop + 1;
+            }
+            return self.expression(&inner[tail..]);
+        }
+        let cast = depth_zero(s, toks, from, &["as"]);
+        if cast < toks.len() {
+            return self.written(&toks[cast + 1..]);
+        }
+        self.chain(toks, from, toks.len() - 1).unwrap_or_default()
+    }
+
+    /// The types of the chain `toks[from..=to]`, or `None` when it is not one chain.
+    fn chain(&self, toks: &[Tok], from: usize, to: usize) -> Option<Ty> {
+        let s = self.s();
+        let reader = self.reader;
+        let mut at = from;
+        let first = *toks.get(at)?;
+        let mut ty: Ty;
+        if first.kind == Kind::Punct && (s.text(first) == "(" || s.text(first) == "[") {
+            let close = closing(s, toks, at)?;
+            ty = split_commas(s, &toks[at + 1..close])
+                .iter()
+                .flat_map(|part| self.expression(part))
+                .collect();
+            at = close + 1;
+        } else if first.kind == Kind::Literal {
+            ty = Ty::new();
+            at += 1;
+        } else if first.kind == Kind::Ident && s.text(first) == "self" {
+            ty = self.own.iter().cloned().collect();
+            at += 1;
+        } else if first.kind == Kind::Ident || s.is(Some(&first), "::") {
+            let mut path: Vec<&str> = Vec::new();
+            if s.is(Some(&first), "::") {
+                path.push("");
+                at += 1;
+            }
+            loop {
+                let tok = *toks.get(at)?;
+                if tok.kind != Kind::Ident {
+                    return None;
+                }
+                path.push(s.text(tok));
+                at += 1;
+                if s.is(toks.get(at), "::") && s.is(toks.get(at + 1), "<") {
+                    at = closing_angle(s, toks, at + 1)? + 1;
+                }
+                if s.is(toks.get(at), "::")
+                    && toks.get(at + 1).is_some_and(|t| t.kind == Kind::Ident)
+                {
+                    at += 1;
+                    continue;
+                }
+                break;
+            }
+            if s.is(toks.get(at), "!") {
+                at = closing(s, toks, at + 1)? + 1;
+                ty = Ty::new();
+            } else if s.is(toks.get(at), "(") {
+                let close = closing(s, toks, at)?;
+                ty = self.call(&path, &toks[at + 1..close]);
+                at = close + 1;
+            } else if s.is(toks.get(at), "{")
+                && path
+                    .last()
+                    .is_some_and(|l| l.starts_with(|c: char| c.is_ascii_uppercase()))
+            {
+                at = closing(s, toks, at)? + 1;
+                ty = self.path_type(&path);
+            } else if path.len() == 1 {
+                ty = self.value(path[0]);
+            } else {
+                ty = self.path_type(&path[..path.len() - 1]);
+            }
+        } else {
+            return None;
+        }
+        while at <= to {
+            let tok = *toks.get(at)?;
+            if tok.kind != Kind::Punct {
+                return None;
+            }
+            match s.text(tok) {
+                "?" => at += 1,
+                "[" => at = closing(s, toks, at)? + 1,
+                "(" => {
+                    at = closing(s, toks, at)? + 1;
+                    ty = Ty::new();
+                }
+                "." => {
+                    let name = *toks.get(at + 1)?;
+                    at += 2;
+                    if name.kind == Kind::Literal {
+                        continue;
+                    }
+                    if name.kind != Kind::Ident {
+                        return None;
+                    }
+                    let name = s.text(name);
+                    if name == "await" {
+                        continue;
+                    }
+                    if s.is(toks.get(at), "::") && s.is(toks.get(at + 1), "<") {
+                        at = closing_angle(s, toks, at + 1)? + 1;
+                    }
+                    if s.is(toks.get(at), "(") {
+                        at = closing(s, toks, at)? + 1;
+                        ty = reader.method(&ty, name);
+                    } else {
+                        ty = reader.field(&ty, name);
+                    }
+                }
+                _ => return None,
+            }
+        }
+        (at == to + 1).then_some(ty)
+    }
+
+    /// A name standing alone: a binding, a parameter, a `static`, or a unit value of a type.
+    fn value(&self, name: &str) -> Ty {
+        if let Some(types) = self.bindings.get(name) {
+            return types.clone();
+        }
+        if let Some(statics) = self.reader.names[self.src].statics.get(name) {
+            let s = self.s();
+            let empty = HashMap::new();
+            return statics
+                .iter()
+                .flat_map(|(at, ty)| {
+                    self.reader
+                        .types_written(self.src, *at, s.module_at(*at), None, &empty, ty)
+                })
+                .collect();
+        }
+        if name.starts_with(|c: char| c.is_ascii_uppercase()) {
+            return self.path_type(&[name]);
+        }
+        Ty::new()
+    }
+
+    /// The canonical type a written type path names (`Self` as the body's own).
+    fn path_type(&self, path: &[&str]) -> Ty {
+        if path == ["Self"] {
+            return self.own.iter().cloned().collect();
+        }
+        if path
+            .last()
+            .is_none_or(|l| !l.starts_with(|c: char| c.is_ascii_uppercase()))
+        {
+            return Ty::new();
+        }
+        BTreeSet::from([self.reader.names[self.src].resolve_type(path, self.at, self.module)])
+    }
+
+    /// A call's result: a first-party function's or associated function's declared return, a
+    /// wrapper's contents, a variant's payload, or what `std` returns by the table.
+    fn call(&self, path: &[&str], args: &[Tok]) -> Ty {
+        let s = self.s();
+        let reader = self.reader;
+        let last = *path.last().unwrap_or(&"");
+        if path.len() == 1 && ["Some", "Ok", "Err"].contains(&last) {
+            return self.expression(args);
+        }
+        if path.len() == 1 && self.bindings.contains_key(last) {
+            return Ty::new();
+        }
+        let qualifier = (path.len() >= 2).then(|| path[path.len() - 2]);
+        if let Some(qualifier) =
+            qualifier.filter(|q| *q == "Self" || q.starts_with(|c: char| c.is_ascii_uppercase()))
+        {
+            let mut out = Ty::new();
+            for owner in self.path_type(&path[..path.len() - 1]) {
+                if let Some((package, type_name)) = reader.first_party(&owner) {
+                    for (src, record) in reader.callables(package, Some(type_name), last) {
+                        out.extend(reader.returns(src, record, Some(&owner)));
+                    }
+                } else {
+                    if WRAPPERS.contains(&qualifier) {
+                        for part in split_commas(s, args) {
+                            out.extend(self.expression(&part));
+                        }
+                    }
+                    out.insert(owner);
+                }
+            }
+            return out;
+        }
+        let mut out = Ty::new();
+        for canonical in reader.names[self.src].resolve(path, self.at, self.module) {
+            if let Some((package, name)) = reader.first_party(&canonical) {
+                for (src, record) in reader.callables(package, None, name) {
+                    out.extend(reader.returns(src, record, None));
+                }
+            } else if let Some((_, made)) = FOREIGN_FUNCTIONS
+                .iter()
+                .find(|(named, _)| *named == canonical)
+            {
+                out.extend(made.iter().map(|t| (*t).to_owned()));
+            }
+        }
+        out
+    }
+}
+
+/// The names a pattern binds.
+fn pattern_names(s: &Src, toks: &[Tok]) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for (at, tok) in toks.iter().enumerate() {
+        if tok.kind != Kind::Ident {
+            continue;
+        }
+        let name = s.text(*tok);
+        if NOT_A_BINDING.contains(&name)
+            || name.starts_with(|c: char| c.is_ascii_uppercase())
+            || ["::", "(", "{", ":", "!"]
+                .iter()
+                .any(|p| s.is(toks.get(at + 1), p))
+            || (at > 0 && s.is(toks.get(at - 1), "::"))
+        {
+            continue;
+        }
+        out.push(name);
+    }
+    out
+}
+
+/// The first index at or after `from` whose token is one of `stops` at bracket depth zero; a
+/// bracket closing below `from`'s depth, or the end.
+fn depth_zero(s: &Src, toks: &[Tok], from: usize, stops: &[&str]) -> usize {
+    let mut depth = 0usize;
+    for (at, tok) in toks.iter().enumerate().skip(from) {
+        if tok.kind == Kind::Literal {
+            continue;
+        }
+        let text = s.text(*tok);
+        if depth == 0 && stops.contains(&text) {
+            return at;
+        }
+        if tok.kind == Kind::Punct {
+            match text {
+                "(" | "[" | "{" => depth += 1,
+                ")" | "]" | "}" => {
+                    if depth == 0 {
+                        return at;
+                    }
+                    depth -= 1;
+                }
+                _ => {}
+            }
+        }
+    }
+    toks.len()
+}
+
+/// The index of the `>` closing the `<` at `open`.
+fn closing_angle(s: &Src, toks: &[Tok], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, tok) in toks.iter().enumerate().skip(open) {
+        if tok.kind != Kind::Punct {
+            continue;
+        }
+        match s.text(*tok) {
+            "<" => depth += 1,
+            ">" => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(at);
+                }
+            }
+            "{" | "}" | ";" => return None,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The bracket `toks[at]` stands inside.
+fn unmatched_open(s: &Src, toks: &[Tok], at: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for back in (0..=at).rev() {
+        let tok = toks[back];
+        if tok.kind != Kind::Punct {
+            continue;
+        }
+        match s.text(tok) {
+            ")" | "]" | "}" => depth += 1,
+            "(" | "[" | "{" => {
+                if depth == 0 {
+                    return Some(back);
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Where the receiver chain ending at `toks[end]` begins: back over `?`, calls, indexes, fields,
+/// path segments and turbofishes.
+fn chain_start(s: &Src, toks: &[Tok], end: usize) -> Option<usize> {
+    let mut at = end;
+    loop {
+        let tok = toks[at];
+        let text = s.text(tok);
+        if tok.kind == Kind::Punct && text == "?" {
+            at = at.checked_sub(1)?;
+            continue;
+        }
+        if tok.kind == Kind::Punct && (text == ")" || text == "]") {
+            let open = unmatched_open(s, toks, at.checked_sub(1)?)?;
+            let Some(before) = open.checked_sub(1) else {
+                return Some(open);
+            };
+            let prev = toks[before];
+            if (prev.kind == Kind::Ident && !KEYWORDS.contains(&s.text(prev)))
+                || s.is(Some(&prev), ">")
+                || s.is(Some(&prev), "!")
+            {
+                at = before;
+                continue;
+            }
+            return Some(open);
+        }
+        if tok.kind == Kind::Punct && text == ">" {
+            // A turbofish, `::<…>`.
+            let mut depth = 0usize;
+            let mut back = at;
+            loop {
+                let t = toks[back];
+                if t.kind == Kind::Punct {
+                    match s.text(t) {
+                        ">" => depth += 1,
+                        "<" => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                back = back.checked_sub(1)?;
+            }
+            if !s.is(toks.get(back.checked_sub(1)?), "::") {
+                return None;
+            }
+            at = back.checked_sub(2)?;
+            continue;
+        }
+        if tok.kind == Kind::Punct && text == "!" {
+            at = at.checked_sub(1)?;
+            continue;
+        }
+        if tok.kind == Kind::Ident || tok.kind == Kind::Literal {
+            let Some(before) = at.checked_sub(1) else {
+                return Some(at);
+            };
+            let prev = toks[before];
+            if s.is(Some(&prev), ".") {
+                at = before.checked_sub(1)?;
+                continue;
+            }
+            if s.is(Some(&prev), "::") {
+                match before.checked_sub(1).map(|b| toks[b]) {
+                    Some(t) if t.kind == Kind::Ident || s.is(Some(&t), ">") => {
+                        at = before - 1;
+                        continue;
+                    }
+                    _ => return Some(before),
+                }
+            }
+            return Some(at);
+        }
+        return None;
+    }
+}
+
+/// One site: its package, its offset, its entry.
+struct BareSite {
+    at: usize,
+    entry: usize,
+}
+
+impl Reader<'_> {
+    /// The entries the path written from `toks[at]` names, and how many tokens it took.
+    fn path_entries(
+        &self,
+        src: usize,
+        toks: &[Tok],
+        at: usize,
+        module: &str,
+        owner: Option<&ItemRecord>,
+    ) -> (Vec<usize>, usize) {
+        let s = &self.world.srcs[src];
+        let mut path: Vec<&str> = Vec::new();
+        let mut next = at;
+        if s.is(toks.get(next), "::") {
+            path.push("");
+            next += 1;
+        }
+        while let Some(tok) = toks.get(next) {
+            if tok.kind != Kind::Ident {
+                break;
+            }
+            path.push(s.text(*tok));
+            next += 1;
+            if s.is(toks.get(next), "::") && s.is(toks.get(next + 1), "<") {
+                match closing_angle(s, toks, next + 1) {
+                    Some(close) => next = close + 1,
+                    None => break,
+                }
+            }
+            if s.is(toks.get(next), "::")
+                && toks.get(next + 1).is_some_and(|t| t.kind == Kind::Ident)
+            {
+                next += 1;
+                continue;
+            }
+            break;
+        }
+        let used = (next - at).max(1);
+        let Some(last) = path.last().copied() else {
+            return (Vec::new(), used);
+        };
+        // A macro's name is not a path to a function.
+        if s.is(toks.get(next), "!") {
+            return (Vec::new(), used);
+        }
+        if !self
+            .entries
+            .iter()
+            .any(|entry| entry.path.rsplit("::").next() == Some(last))
+        {
+            return (Vec::new(), used);
+        }
+        let canonicals: Vec<String> = if path.first() == Some(&"Self") {
+            owner
+                .and_then(|record| self.own_type(src, record))
+                .map(|own| format!("{own}::{}", path[1..].join("::")))
+                .into_iter()
+                .collect()
+        } else {
+            self.names[src].resolve(&path, toks[at].start, module)
+        };
+        let found = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| canonicals.contains(&entry.canonical))
+            .map(|(index, _)| index)
+            .collect();
+        (found, used)
+    }
+
+    /// Every site in one package's product files, with the callable each stands in.
+    fn sites(&self, src: usize) -> Vec<(BareSite, Option<&'static ItemRecord>)> {
+        let s = &self.world.srcs[src];
+        let mut out = Vec::new();
+        let callables: Vec<&'static ItemRecord> = s
+            .index
+            .items()
+            .iter()
+            .filter(|record| record.kind().is_callable() && record.body().is_some())
+            .collect();
+        let method_names: BTreeSet<&str> = self
+            .entries
+            .iter()
+            .filter_map(|entry| entry.method.as_ref().map(|(_, name)| name.as_str()))
+            .collect();
+        let write_fmt = self.entries.iter().position(|e| e.path == WRITE_FMT);
+        for file in s.index.files() {
+            if !s.product_file(file) {
+                continue;
+            }
+            let span = file.span();
+            let toks = s.lex(span.start(), span.end());
+            // The innermost callable of each token, by a sweep over the nested spans.
+            let mut in_file: Vec<&'static ItemRecord> = callables
+                .iter()
+                .copied()
+                .filter(|record| record.whole().within(span))
+                .collect();
+            in_file.sort_by_key(|record| {
+                (
+                    record.whole().start(),
+                    std::cmp::Reverse(record.whole().end()),
+                )
+            });
+            let mut owner_of = vec![None; toks.len()];
+            let mut stack: Vec<&'static ItemRecord> = Vec::new();
+            let mut next = 0;
+            for (index, tok) in toks.iter().enumerate() {
+                while stack.last().is_some_and(|r| r.whole().end() <= tok.start) {
+                    stack.pop();
+                }
+                while next < in_file.len() && in_file[next].whole().start() <= tok.start {
+                    if in_file[next].whole().end() > tok.start {
+                        stack.push(in_file[next]);
+                    }
+                    next += 1;
+                }
+                owner_of[index] = stack.last().copied();
+            }
+            // And the innermost module, the same way.
+            let mut modules: Vec<(usize, usize, &'static str)> = s
+                .index
+                .modules()
+                .iter()
+                .filter(|module| module.span().within(span))
+                .map(|module| {
+                    (
+                        module.span().start(),
+                        module.span().end(),
+                        module.module_paths()[0].as_str(),
+                    )
+                })
+                .collect();
+            modules.sort_by_key(|(start, end, _)| (*start, std::cmp::Reverse(*end)));
+            let mut module_of = vec!["crate"; toks.len()];
+            let mut open: Vec<(usize, &'static str)> = Vec::new();
+            let mut next = 0;
+            for (index, tok) in toks.iter().enumerate() {
+                while open.last().is_some_and(|(end, _)| *end <= tok.start) {
+                    open.pop();
+                }
+                while next < modules.len() && modules[next].0 <= tok.start {
+                    if modules[next].1 > tok.start {
+                        open.push((modules[next].1, modules[next].2));
+                    }
+                    next += 1;
+                }
+                module_of[index] = open.last().map_or("crate", |(_, path)| *path);
+            }
+            let mut scopes: HashMap<usize, Scope> = HashMap::new();
+            let mut in_use = false;
+            let mut index = 0;
+            while index < toks.len() {
+                let tok = toks[index];
+                let text = s.text(tok);
+                let previous = index.checked_sub(1).map(|p| toks[p]);
+                if tok.kind == Kind::Ident
+                    && text == "use"
+                    && !previous.is_some_and(|p| s.is(Some(&p), "::"))
+                {
+                    in_use = true;
+                }
+                if in_use {
+                    if tok.kind == Kind::Punct && text == ";" {
+                        in_use = false;
+                    }
+                    index += 1;
+                    continue;
+                }
+                let owner = owner_of[index];
+                let starts_a_path = (tok.kind == Kind::Ident
+                    || (tok.kind == Kind::Punct && text == "::"))
+                    && !previous.is_some_and(|p| {
+                        s.is(Some(&p), "::") || s.is(Some(&p), ".") || s.is(Some(&p), "fn")
+                    });
+                if starts_a_path {
+                    let module = module_of[index];
+                    let (entries, used) = self.path_entries(src, &toks, index, module, owner);
+                    for entry in entries {
+                        out.push((
+                            BareSite {
+                                at: tok.start,
+                                entry,
+                            },
+                            owner,
+                        ));
+                    }
+                    if used > 1 {
+                        index += used;
+                        continue;
+                    }
+                }
+                let method_call = tok.kind == Kind::Ident
+                    && index >= 2
+                    && previous.is_some_and(|p| s.is(Some(&p), "."))
+                    && method_names.contains(text)
+                    && (s.is(toks.get(index + 1), "(")
+                        || (s.is(toks.get(index + 1), "::") && s.is(toks.get(index + 2), "<")));
+                let writes = tok.kind == Kind::Ident
+                    && (text == "write" || text == "writeln")
+                    && s.is(toks.get(index + 1), "!")
+                    && s.is(toks.get(index + 2), "(");
+                if (method_call || writes)
+                    && let Some(record) = owner
+                {
+                    let scope = scopes
+                        .entry(record.whole().start())
+                        .or_insert_with(|| Scope::of(self, src, record));
+                    if writes {
+                        let close = closing(s, &toks, index + 2).unwrap_or(index + 2);
+                        let first = split_commas(s, &toks[index + 3..close]).into_iter().next();
+                        let types = first
+                            .map(|part| scope.expression(&part))
+                            .unwrap_or_default();
+                        if let Some(entry) = write_fmt.filter(|_| self.is_io_writer(&types)) {
+                            out.push((
+                                BareSite {
+                                    at: tok.start,
+                                    entry,
+                                },
+                                owner,
+                            ));
+                        }
+                    } else if let Some(start) = chain_start(s, &toks, index - 2) {
+                        let receiver = scope.chain(&toks, start, index - 2).unwrap_or_default();
+                        for (at, entry) in self.entries.iter().enumerate() {
+                            let Some((ty, name)) = &entry.method else {
+                                continue;
+                            };
+                            let typed = receiver.contains(ty)
+                                || (entry.path == WRITE_FMT && self.is_io_writer(&receiver));
+                            if name == text && typed {
+                                out.push((
+                                    BareSite {
+                                        at: tok.start,
+                                        entry: at,
+                                    },
+                                    owner,
+                                ));
+                            }
+                        }
+                    }
+                }
+                index += 1;
+            }
+        }
+        out
+    }
+}
+
+/// One inventory row's key: crate, arm, item, entry.
+type BareKey = (String, String, String, String);
+
+/// `crate::git::run_git_with_input`, `crate::<DirWatch as Drop>::drop`, and the arm the item
+/// stands on (`[windows]`, `[not(windows)] [target_os = "macos"]`, or `-`).
+fn item_and_arm(record: &ItemRecord) -> (String, String) {
+    let identity = record
+        .identities()
+        .find(|identity| identity.variant.permits_product())
+        .or_else(|| record.identities().next())
+        .expect("an item is reached by a declaration");
+    let predicates = identity.variant.predicates();
+    let arm = if predicates.is_empty() {
+        "-".to_owned()
+    } else {
+        predicates
+            .iter()
+            .map(|p| format!("[{p}]"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut item = format!("{}::", identity.module_path);
+    match (&identity.type_owner, &identity.trait_name) {
+        (Some(owner), Some(trait_name)) => item.push_str(&format!("<{owner} as {trait_name}>::")),
+        (Some(owner), None) => item.push_str(&format!("{owner}::")),
+        (None, Some(trait_name)) => item.push_str(&format!("{trait_name}::")),
+        (None, None) => {}
+    }
+    item.push_str(&identity.name);
+    (item, arm)
+}
+
+/// **The inventory, observed**: every vocabulary site in the product outside a registered door
+/// function's body, counted by `(crate, arm, item, entry)`.
+fn bare_sites_observed(world: &World) -> BTreeMap<BareKey, usize> {
+    vocabulary_sites(world).0
+}
+
+/// A door function's effects: the door it serves, and its vocabulary entries counted.
+type DoorEffects = BTreeMap<(String, String, String), (String, BTreeMap<String, usize>)>;
+
+/// Every vocabulary site in the product, split at the doors: those outside a registered door
+/// function's body, by `(crate, arm, item, entry)`; and, for each door function whose body holds
+/// any, the door it serves and its entries counted, by `(crate, arm, item)`.
+fn vocabulary_sites(world: &World) -> (BTreeMap<BareKey, usize>, DoorEffects) {
+    let reader = Reader::new(world);
+    let doors: BTreeMap<(usize, usize), String> = door_functions(world)
+        .iter()
+        .map(|door| {
+            (
+                (door.src, door.record.whole().start()),
+                door.doors.join(", "),
+            )
+        })
+        .collect();
+    let mut bare = BTreeMap::new();
+    let mut in_doors: DoorEffects = BTreeMap::new();
+    for (src, s) in world.srcs.iter().enumerate() {
+        for (site, owner) in reader.sites(src) {
+            if !s.in_product(site.at) {
+                continue;
+            }
+            let (item, arm) = owner.map_or_else(
+                || (s.module_at(site.at).to_owned(), "-".to_owned()),
+                item_and_arm,
+            );
+            let entry = reader.entries[site.entry].path.clone();
+            let door = owner.and_then(|record| doors.get(&(src, record.whole().start())));
+            match door {
+                Some(door) => {
+                    *in_doors
+                        .entry((s.package.to_owned(), arm, item))
+                        .or_insert_with(|| (door.clone(), BTreeMap::new()))
+                        .1
+                        .entry(entry)
+                        .or_insert(0) += 1;
+                }
+                None => {
+                    *bare
+                        .entry((s.package.to_owned(), arm, item, entry))
+                        .or_insert(0) += 1;
+                }
+            }
+        }
+    }
+    (bare, in_doors)
+}
+
+const EFFECT_COLUMNS: [&str; 7] = [
+    "crate",
+    "arm",
+    "item",
+    "effects",
+    "kind",
+    "authority",
+    "door",
+];
+const EFFECT_KINDS: [&str; 5] = [
+    "owner-door-body",
+    "worker-door-body",
+    "transport",
+    "drop-exception",
+    "interim-owner",
+];
+const AUTHORITIES: [&str; 4] = ["WaitToken", "WorkerCtx", "none (transport)", "drop"];
+
+/// `std::thread::JoinHandle::join 1, std::thread::sleep 1`: a row's effects, each entry with its
+/// count.
+fn effects_spelled(effects: &BTreeMap<String, usize>) -> String {
+    effects
+        .iter()
+        .map(|(entry, count)| format!("{entry} {count}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// RED (A2a, revision (j)7) — **the registry's `# effects` section lists exactly the functions
+/// whose own body holds a listed effect inside a registered door, each with its entries, counts,
+/// kind, authority and the door it serves.**
+///
+/// A2e puts one `expect(clippy::disallowed_methods)` on each effect function — the function whose
+/// body contains the raw effect, never a caller or a wrapper — and an `expect` on a function with no
+/// effect is itself an error, so the holders have to be known by name, arm and count before the
+/// lint exists. Until revision (k) allocates the rest, the only rows are the effect functions that
+/// already sit inside a door: kind `owner-door-body`, authority `WaitToken`, the door their token
+/// names. A door that forwards to a separately defined helper (`trace_sink::flush` →
+/// `flush_sink`) does not make the helper in-door; the helper's sites are inventory. The door
+/// `expect` count stays 0 (assertion 4) until A2e.
+///
+/// MUTATION: add a row for a function that holds no listed effect, or delete a row, or change a
+/// count, and it goes red naming the row.
+#[test]
+fn the_effects_section_is_the_effect_functions_inside_the_doors() {
+    let world = World::new();
+    let (_, observed) = vocabulary_sites(&world);
+    let mut failures = Vec::new();
+    let mut listed: DoorEffects = BTreeMap::new();
+    for cells in section("effects", &EFFECT_COLUMNS) {
+        let key = (
+            cells[0].to_owned(),
+            cells[1].to_owned(),
+            cells[2].to_owned(),
+        );
+        if !EFFECT_KINDS.contains(&cells[4]) {
+            failures.push(format!(
+                "{} {}: kind `{}` is not one of {EFFECT_KINDS:?}",
+                cells[0], cells[2], cells[4]
+            ));
+        }
+        if !AUTHORITIES.contains(&cells[5]) {
+            failures.push(format!(
+                "{} {}: authority `{}` is not one of {AUTHORITIES:?}",
+                cells[0], cells[2], cells[5]
+            ));
+        }
+        let mut effects = BTreeMap::new();
+        for part in cells[3].split(", ") {
+            match part
+                .rsplit_once(' ')
+                .map(|(entry, count)| (entry, count.parse::<usize>()))
+            {
+                Some((entry, Ok(count))) if count > 0 => {
+                    effects.insert(entry.to_owned(), count);
+                }
+                _ => failures.push(format!(
+                    "{} {}: `{part}` is not `<entry> <count>`",
+                    cells[0], cells[2]
+                )),
+            }
+        }
+        // What A2a can say from the code: an effect inside a door is that door's owner-thread body,
+        // admitted by its token. Other kinds wait for revision (k).
+        if (cells[4], cells[5]) != ("owner-door-body", "WaitToken") {
+            failures.push(format!(
+                "{} {}: `{}` / `{}` — until revision (k) allocates the rest, a row is an effect \
+                 function inside a registered door: `owner-door-body` / `WaitToken`",
+                cells[0], cells[2], cells[4], cells[5]
+            ));
+        }
+        if listed.insert(key, (cells[6].to_owned(), effects)).is_some() {
+            failures.push(format!(
+                "{} {} {}: listed twice",
+                cells[0], cells[1], cells[2]
+            ));
+        }
+    }
+    for (key, (door, effects)) in &observed {
+        match listed.get(key) {
+            Some(row) if row == &(door.clone(), effects.clone()) => {}
+            Some((listed_door, listed_effects)) => failures.push(format!(
+                "{} {} {}: the body holds {} for door {door}, and the row says {} for door \
+                 {listed_door}",
+                key.0,
+                key.1,
+                key.2,
+                effects_spelled(effects),
+                effects_spelled(listed_effects)
+            )),
+            None => failures.push(format!(
+                "{} {} {}: a door function (door {door}) whose body holds {}, with no `# effects` \
+                 row",
+                key.0,
+                key.1,
+                key.2,
+                effects_spelled(effects)
+            )),
+        }
+    }
+    for key in listed.keys().filter(|key| !observed.contains_key(*key)) {
+        failures.push(format!(
+            "{} {} {}: an `# effects` row for a function that holds no listed effect inside a door",
+            key.0, key.1, key.2
+        ));
+    }
+    assert!(
+        failures.is_empty(),
+        "the registry's `# effects` section and the doors' bodies differ:\n  {}",
+        failures.join("\n  ")
+    );
+}
+
+/// The committed inventory's rows, keyed, each count a positive integer and each key once.
+fn bare_sites_committed() -> Result<BTreeMap<BareKey, usize>, Vec<String>> {
+    let mut rows = BTreeMap::new();
+    let mut failures = Vec::new();
+    let mut lines = BARE_SITES
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
+    let header: Vec<&str> = lines.next().unwrap_or_default().split('\t').collect();
+    if header != BARE_COLUMNS {
+        failures.push(format!(
+            "the inventory's columns are {header:?}, not {BARE_COLUMNS:?}"
+        ));
+        return Err(failures);
+    }
+    for line in lines {
+        let cells: Vec<&str> = line.split('\t').collect();
+        if cells.len() != BARE_COLUMNS.len() {
+            failures.push(format!("not five cells: {line}"));
+            continue;
+        }
+        let count = match cells[4].parse::<usize>() {
+            Ok(count) if count > 0 && cells[4] == count.to_string() => count,
+            _ => {
+                failures.push(format!("the count is not a positive integer: {line}"));
+                continue;
+            }
+        };
+        let key = (
+            cells[0].to_owned(),
+            cells[1].to_owned(),
+            cells[2].to_owned(),
+            cells[3].to_owned(),
+        );
+        if rows.insert(key, count).is_some() {
+            failures.push(format!("a key written twice: {line}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(rows)
+    } else {
+        Err(failures)
+    }
+}
+
+/// The inventory's header and rows, as the file holds them.
+fn bare_sites_rendered(rows: &BTreeMap<BareKey, usize>) -> String {
+    let mut out = String::new();
+    for line in BARE_SITES.lines().take_while(|line| line.starts_with('#')) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&BARE_COLUMNS.join("\t"));
+    out.push('\n');
+    for ((package, arm, item, entry), count) in rows {
+        out.push_str(&format!("{package}\t{arm}\t{item}\t{entry}\t{count}\n"));
+    }
+    out
+}
+
+/// RED (A2a, revision (j)1 and (j)11.6) — **every vocabulary site in the product outside a
+/// registered door's body is a row of `docs/plans/window-thread-bare-sites.tsv`, with its count,
+/// and every row is a site.**
+///
+/// The lint cannot be switched on while bare sites exist (revision (i)1), so until A2e the sites
+/// are held here: this is the equality half of the gate, and `scripts/ci/check-window-waits.ps1`
+/// holds the file itself to shrinking against the merge base. A new site is a row the file does not
+/// have; a site removed with its row kept is a row the code no longer has; a second identical site
+/// in a listed function with the count left unchanged is a count that differs. A row's key is
+/// `(crate, arm, item, entry)` and a key is written once. The observed inventory is left in
+/// `target/window-thread-bare-sites.tsv` for the reader.
+///
+/// MUTATION: add `std::thread::sleep(std::time::Duration::ZERO);` to any product function and it
+/// goes red with that row; delete a listed site and keep its row and it goes red with the row.
+#[test]
+fn every_bare_site_is_a_row_and_every_row_a_site() {
+    let world = World::new();
+    let observed = bare_sites_observed(&world);
+    let generated = repository_root()
+        .join("target")
+        .join("window-thread-bare-sites.tsv");
+    if let Some(parent) = generated.parent() {
+        std::fs::create_dir_all(parent).expect("the workspace has a target directory");
+    }
+    std::fs::write(&generated, bare_sites_rendered(&observed)).expect("target/ is writable");
+    let committed = match bare_sites_committed() {
+        Ok(rows) => rows,
+        Err(failures) => panic!(
+            "docs/plans/window-thread-bare-sites.tsv is not well formed:\n  {}",
+            failures.join("\n  ")
+        ),
+    };
+    let mut failures = Vec::new();
+    for (key, count) in &observed {
+        match committed.get(key) {
+            Some(held) if held == count => {}
+            Some(held) => failures.push(format!(
+                "{} {} {} {}: {count} site(s) in the code, {held} in the file",
+                key.0, key.1, key.2, key.3
+            )),
+            None => failures.push(format!(
+                "{} {} {} {}: {count} site(s) in the code, and no row — a new bare site",
+                key.0, key.1, key.2, key.3
+            )),
+        }
+    }
+    for (key, held) in &committed {
+        if !observed.contains_key(key) {
+            failures.push(format!(
+                "{} {} {} {}: a row of {held} the code no longer has — delete it",
+                key.0, key.1, key.2, key.3
+            ));
+        }
+    }
+    let total: usize = observed.values().sum();
+    println!(
+        "the bare-site inventory: {total} site(s) in {} row(s)",
+        observed.len()
+    );
+    assert!(
+        failures.is_empty(),
+        "the bare-site inventory and the code differ ({total} observed; the observed file is \
+         target/window-thread-bare-sites.tsv):\n  {}",
+        failures.join("\n  ")
     );
 }

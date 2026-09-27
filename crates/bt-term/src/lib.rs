@@ -1,5 +1,7 @@
 //! Folio's logic-only terminal actor and alacritty compatibility seam.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod adapter;
 mod bounded_cache;
 mod cell_capture;

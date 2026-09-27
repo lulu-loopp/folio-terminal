@@ -256,6 +256,31 @@ jobs:
           }
           exit 0
 
+      # `docs/plans/window-thread-bare-sites.tsv` stands in for the lint on raw
+      # effects until A2e, and only shrinks. A bare site added together with its
+      # row passes the equality test, so the historical half is what refuses it:
+      # plant the row and require red.
+      - name: the bare-site inventory gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/window-thread-bare-sites.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "bt-app`t-`tcrate::planted`tstd::thread::sleep`t1`n")
+            $failed = $false
+            try {
+              & ./scripts/ci/check-window-waits.ps1
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "the bare-site inventory accepted a row that is at neither the merge base nor the seed"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
       # The census's unknown list is compared by its total, so a row added by
       # hand must go red and a row whose key moved (a function moved to another
       # module, census-7's case) must stay green.
@@ -365,7 +390,7 @@ jobs:
           --package bt-layout --package bt-math --package bt-pty
           --package bt-platform --package bt-persist --package bt-unicode
           --package bt-render --package bt-winres --package bt-source
-          --package bt-workbench --package bt-app
+          --package bt-workbench --package bt-app --package bt-lint-probe
           -- --check
 
       # The two excluded packages are still *linted* — their libraries are
@@ -404,6 +429,24 @@ jobs:
       - name: the migration-debt list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-migration-debt.ps1
+
+      # The window thread's checks (thread-door note, revision (j)): the bare-site
+      # inventory is no larger than at the merge base, or than the pinned seed
+      # when the merge base predates it (the equality half is a test in the suite
+      # above); the configuration fence, which is also this job's assertion that
+      # no clippy configuration directory is set; nothing lowers the lint outside
+      # the source; no registry row is added without a ruling.
+      - name: the window thread's checks
+        shell: pwsh
+        run: ./scripts/ci/check-window-waits.ps1
+
+      # The positive control (thread-door note, revisions (j)4 and (j)11.3): the
+      # probe is what the registry generates, and the lint reports each entry
+      # assigned to this target on its line - a separate invocation from the
+      # clippy line above, which stays as it is.
+      - name: the lint probe's positive control
+        shell: pwsh
+        run: ./scripts/ci/check-lint-probe.ps1
 
       # The ownership census's unknown sites, the same rule across commits:
       # bt-source's `census` test holds the code to the committed list, and
@@ -627,7 +670,11 @@ jobs:
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
+      # Whole history, for `check-window-waits.ps1`: it compares the bare-site
+      # inventory with the merge base's, or with the pinned seed commit.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
 
       # **The release lane's four shell scripts, parsed on every push.** They
       # are `#!/bin/sh`, they are what `release.yml`'s macOS job is made of, and
@@ -717,6 +764,17 @@ jobs:
           cargo clippy --workspace --all-targets --locked
           --exclude mitex --exclude mitex-parser
           -- -D warnings
+
+      # `logic`'s window-thread checks, on the second platform (A2a).
+      - name: the window thread's checks
+        shell: pwsh
+        run: ./scripts/ci/check-window-waits.ps1
+
+      # The lint probe's positive control on this target: the macOS entries
+      # (`libc::write`, `libc::close`) are proven here and only here.
+      - name: the lint probe's positive control
+        shell: pwsh
+        run: ./scripts/ci/check-lint-probe.ps1
 
       # **The macOS lint line can actually fail** — `gates-can-fail`'s mechanism
       # (plant, demand red, put the file back), run here because the violation

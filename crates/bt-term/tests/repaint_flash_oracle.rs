@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 use std::{num::NonZeroU32, time::Duration};
 
 use bt_math::{MathRaster, MathRenderError};

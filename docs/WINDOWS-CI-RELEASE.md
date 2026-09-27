@@ -158,3 +158,27 @@ tests that assert Windows facts on every host, and those tests are red on a
 Mac by design: 43 in `bt-term` and 282 in `bt-app` on the owner's Mac mini
 (structural-debt D-83). A macOS run of either suite should be read against
 those counts, not against zero.
+
+## The window thread's checks (A2a, 2026-09-26)
+
+`scripts/ci/check-window-waits.ps1` runs in `logic` and in `core-macos`. Until
+ticket A2e switches the lint on, `docs/plans/window-thread-bare-sites.tsv` lists
+every vocabulary site the product has outside a registered door, and the script
+holds it to shrinking: each row's count is no larger than at the merge base with
+`origin/main`, or than in the pinned seed commit `2cc59a83` when the merge base
+predates the file. A missing merge base is exit 2, not a pass. `core-macos`
+therefore checks out with full history (`fetch-depth: 0`), as `logic` and
+`gates-can-fail` already did; `gates-can-fail` plants a row and requires red.
+
+The same script is the configuration fence: it pins the five `clippy.toml`
+files (root, `vendor/`, `crates/bt-corpus/`, `crates/bt-source/`, and the lint
+probe's generated one), refuses any other `clippy.toml` or `.clippy.toml`, any
+`.cargo/config`, `CLIPPY_CONF_DIR` anywhere a build could read it or set in the
+job, and any `-A`/`-W`/`--cap-lints` touching the lint in a workflow, a
+`.cargo/config.toml` or a script's `RUSTFLAGS`. A second step on both jobs,
+**the lint probe's positive control** (`scripts/ci/check-lint-probe.ps1`),
+regenerates `crates/bt-lint-probe` from the registry, requires it unchanged and
+tracked, then runs `cargo clippy -p bt-lint-probe --all-targets --
+--force-warn clippy::disallowed_methods` and requires one report per vocabulary
+entry assigned to the runner's platform. `bt-lint-probe` is on `logic`'s fmt
+line.

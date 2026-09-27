@@ -34,6 +34,7 @@
 //! the line editor is told to save no history, and the shell is spawned the way a pane spawns one.
 
 #![cfg(windows)]
+#![allow(clippy::disallowed_methods)]
 
 use std::{
     num::{NonZeroU16, NonZeroU32},

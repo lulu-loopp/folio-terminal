@@ -8,6 +8,8 @@
 //! bt-math clip; a pass (the observed behaviour) exonerates bt-math and localizes the symptom to the
 //! transient first-frame placement/band geometry above this layer.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::num::NonZeroU32;
 
 use bt_math::{MathEngine, MathMode, MathRenderKey};

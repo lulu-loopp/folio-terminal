@@ -43,6 +43,8 @@
 //! character** count for a text one, including its terminator in the second case
 //! and not the first.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 /// **The macOS bundle's `Info.plist`**, which is the third place the same
 /// version line has to arrive at. See the module: it is here because this crate
 /// is where a version meets a container that may refuse it, and that is the

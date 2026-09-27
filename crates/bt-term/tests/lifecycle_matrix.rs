@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 use std::{
     num::{NonZeroU32, NonZeroUsize},
     time::{Duration, Instant},

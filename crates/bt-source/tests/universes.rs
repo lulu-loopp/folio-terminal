@@ -183,6 +183,57 @@ fn the_targets_come_out_of_the_manifests() {
     );
 }
 
+/// RED (A2a, thread-door note revision (j)11.7) — **the manifest reader knows
+/// examples, benchmarks and build scripts as targets**, each by cargo's own
+/// discovery and its switches, and none of them is a product compilation.
+///
+/// The window-thread guard gives these roots their own exclusion form; a reader
+/// that did not know them could not say which roots are excluded, and a
+/// `required-features` gate does not remove a target from the source.
+///
+/// MUTATION: drop the `examples/` discovery in `manifest.rs` and the three
+/// `bt-app` examples go missing; drop `autobenches = false` handling and the
+/// vendored `mitex` gains a benchmark cargo does not build.
+#[test]
+fn examples_benchmarks_and_build_scripts_are_targets_of_their_own() {
+    let workspace = workspace();
+    let named = |package: &str, kind: TargetKind| -> Vec<String> {
+        workspace
+            .package(package)
+            .expect("a workspace package")
+            .targets()
+            .iter()
+            .filter(|target| target.id.kind == kind)
+            .map(|target| target.id.name.clone())
+            .collect()
+    };
+    assert_eq!(
+        named("bt-app", TargetKind::Example),
+        ["container-probe", "gif-fixture", "video-probe"]
+    );
+    assert_eq!(named("bt-platform", TargetKind::Example), ["hotkey_probe"]);
+    assert_eq!(
+        named("bt-app", TargetKind::BuildScript),
+        ["build-script-build"]
+    );
+    assert_eq!(
+        named("bt-pty", TargetKind::BuildScript),
+        ["build-script-build"]
+    );
+    assert!(named("bt-platform", TargetKind::BuildScript).is_empty());
+    assert!(
+        named("mitex", TargetKind::Bench).is_empty(),
+        "`autobenches = false` is honoured"
+    );
+    for kind in [
+        TargetKind::Example,
+        TargetKind::Bench,
+        TargetKind::BuildScript,
+    ] {
+        assert!(!kind.permits_product(), "{kind:?} is not in the product");
+    }
+}
+
 /// RED — **a scope states its own exclusions and its own retention**, and both
 /// are readable afterwards, because a ticket has to be able to print the
 /// universe it migrated a guard onto.

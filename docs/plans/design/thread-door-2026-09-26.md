@@ -3309,3 +3309,46 @@ baseline `pending` rows (16b, 23) are a shrink-only set like the inventory; and
 
 **Dispatch.** With these in the brief, A2a is dispatched on this revision;
 (k) is reviewed against A2a's landed commit.
+
+### (j)12 · How the inventory recognises a site (A2a, 2026-09-26; coordinator's instruction on accepting the seed)
+
+(i)2 and (j)1 said the inventory reads the vocabulary "through the identifier
+view" and left open how a method entry is found without types: the tree holds
+about 1,600 `.join(` calls, of which about twenty are thread joins, so a name
+match would freeze some 1,500 rows no door could ever remove. A2a's reader
+(`hang_watch::window_waits_tests`, `every_bare_site_is_a_row_and_every_row_a_site`)
+recognises a site by **what the source writes**, and only that:
+
+- **A path entry** (`std::thread::sleep`, `pollster::block_on`, `CloseHandle`)
+  is a site wherever a path is written in code — called, or handed on as a
+  value (`.answer(&mut machine, std::thread::sleep)`) — that resolves to the
+  entry through the `use` declarations in scope, a function's own `use`s
+  included: both spellings (the full path, and a name a `use` brought in),
+  `crate::`, `self::`, `super::`, `Self::`, and a glob. A first-party item is
+  named by its crate and itself, so a `pub use` elsewhere changes nothing.
+- **A method entry** (`std::thread::JoinHandle::join`, `wgpu::Queue::submit`)
+  is a site at `receiver.name(…)` only when the receiver's **written type**
+  includes the entry's type: the type written on `self`, on a parameter, a
+  field, a `static`, a `let` annotation, or on the declared return of the
+  first-party function or method the receiver was made by; carried through
+  `let`, `if let`, `while let`, `for`, `match` arms and the parameters of a
+  closure handed to a method of the value. The few standard-library
+  signatures a vocabulary receiver is made through are written out in the
+  reader (`mpsc::channel`, `thread::spawn`, the `Command` and `OpenOptions`
+  builders, `Command::spawn`, `OpenOptions::open`, the wrappers and the
+  methods that pass a value's type on, such as `Option::take`, `Mutex::lock`
+  and `Result::unwrap`). `write!`/`writeln!` are `std::io::Write::write_fmt`
+  when their first argument is an `io` writer by the same reading.
+
+**Its limit, stated so the count is not read as exhaustive before A2e.** A
+call at a receiver whose type is written nowhere on that road — a local bound
+from an untyped foreign call, a closure parameter of a foreign function — is
+not seen. The inventory is therefore a reading of the source, not the
+compiler's resolution: exact for what it sees, silent for what the source does
+not type. Against A2's clippy census on `fcda5dfa` (Windows arms) it found
+every census site outside a build script and outside a door body with its
+count, and nothing on those arms the census lacked except the two
+`wgpu::Queue::present` calls (the census used the wrong spelling) and one
+`cfg(not(windows))` statement. What it cannot see, A2e's lint sees: A2e may
+find sites the inventory never listed, and each is routed through its door
+then, not added to the file.

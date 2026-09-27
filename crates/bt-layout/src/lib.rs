@@ -51,6 +51,8 @@
 //! assert_eq!(files.extent(Axis::Row).floor_px(), 240);
 //! ```
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod demand;
 mod edit;
 mod geom;

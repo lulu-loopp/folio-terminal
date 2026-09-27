@@ -23,6 +23,8 @@
 //! together — and what is left is counted in horizontal bands. One band is one
 //! row of cells.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::num::NonZeroU32;
 
 use bt_math::{MathEngine, MathMode, MathRenderKey};

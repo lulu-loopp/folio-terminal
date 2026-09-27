@@ -4,6 +4,8 @@
 //! `DualPlaneSession` files requests and `take_notifications` hands them over. Whether one becomes
 //! a toast is `bt-app`'s question and is pinned in its own suite.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::num::NonZeroU32;
 
 use bt_term::{DualPlaneSession, NotificationSource, ProgressState, TerminalNotification};

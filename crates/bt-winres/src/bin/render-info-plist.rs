@@ -20,6 +20,8 @@
 //! stderr and the exit code, so `set -e` stops the bundle rather than signing an
 //! `Info.plist` with `@VERSION@` still in it.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::process::ExitCode;
 
 /// The template this repository ships, found relative to the crate rather than

@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 use std::{num::NonZeroU32, time::Instant};
 
 use bt_term::{DualPlaneSession, ProgressState};

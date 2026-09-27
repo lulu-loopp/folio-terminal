@@ -134,14 +134,29 @@ fn named(paths: impl IntoIterator<Item = PathBuf>, root: &Path) -> Vec<String> {
 /// Every `.rs` file in a member crate's `src/` or `tests/` that no compilation
 /// of that crate reaches, with the reason each one is here.
 ///
-/// **It is empty, and that is a measured fact rather than an assumption.** Run
+/// **It was empty, and that was a measured fact rather than an assumption.** Run
 /// on 2026-09-21 over all nineteen members, the declarations reach every `.rs`
 /// file under every member's `src/` and `tests/`, `vendor/` included — nothing
 /// in this tree is a file that compiles nowhere. A row appearing here is a
 /// finding with a reason beside it; it is never an entry added to make a red
 /// test green.
+///
+/// Since A2a the package universe reads `examples/` and `benches/` too (a target
+/// kind this crate now knows), and two vendored files there are no target: both
+/// `mitex` manifests say `autobenches = false` because the vendoring dropped the
+/// `divan` benchmark (see the comment at the top of each manifest), so the bench
+/// sources ship in the directory and are compiled by nothing.
 fn expected_unreached() -> BTreeMap<String, Vec<String>> {
-    BTreeMap::new()
+    BTreeMap::from([
+        (
+            "mitex".to_owned(),
+            vec!["vendor/mitex/benches/convert_large_projects.rs".to_owned()],
+        ),
+        (
+            "mitex-parser".to_owned(),
+            vec!["vendor/mitex-parser/benches/simple.rs".to_owned()],
+        ),
+    ])
 }
 
 /// RED — **`bt-app`'s wholly-test files are the twelve the plan names**, derived

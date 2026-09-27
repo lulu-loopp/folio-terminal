@@ -4,6 +4,8 @@
 //! the two supported generations, and the one whose language limits the script is written to — and
 //! feed exactly what it puts on the wire back into a session.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::{
     path::{Path, PathBuf},
     process::Command,

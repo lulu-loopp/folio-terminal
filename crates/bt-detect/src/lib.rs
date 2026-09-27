@@ -1,5 +1,7 @@
 //! Conservative block-level `$$...$$` detection and the dual lifecycle/version gate.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod ledger;
 pub mod table;
 pub use ledger::{

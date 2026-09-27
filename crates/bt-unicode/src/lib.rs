@@ -1,5 +1,7 @@
 //! Folio's single cell-width oracle.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub mod font_coverage;
 
 use unicode_segmentation::{GraphemeCursor, UnicodeSegmentation};

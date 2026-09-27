@@ -337,6 +337,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "bt-lint-probe"
+version = "0.4.5"
+dependencies = [
+ "bt-pty",
+ "bt-render",
+ "libc",
+ "pollster",
+ "portable-pty",
+ "wgpu",
+ "windows",
+]
+
+[[package]]
 name = "bt-math"
 version = "0.4.5"
 dependencies = [

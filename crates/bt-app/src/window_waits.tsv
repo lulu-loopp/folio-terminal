@@ -1,6 +1,6 @@
 ## The window thread's waits: the one registry (design note 2026-09-26; budget note R7).
 ##
-## Three sections, each a header line then tab-separated lines. A line starting `##` is a comment.
+## Six sections, each a header line then tab-separated lines. A line starting `##` is a comment.
 ##
 ## `# rows` — ARCHITECTURE §5.3, one line per numbered exception. `status` is `done` (repaid:
 ## what remains on the window thread is its residue, still listed), `open` (to be moved),
@@ -13,7 +13,26 @@
 ## types by `hang_watch::window_waits_tests`. Every door takes its token, minted where the line says (A1d).
 ##
 ## `# vocabulary` — the effects that wait (or are counted beside the waits), with the targets
-## they exist on. A2 compares it with the lint's list.
+## they exist on (`all`, `windows`, `macos`; every entry names at least one). A2 compares it with
+## the lint's list. It lists library paths and cross-crate entrances a caller outside the crate can
+## name: a private function is not an entry, and its raw effects are sites of their own
+## (thread-door note, revision (j)11.2).
+##
+## `# entrances` — the cross-crate entrances that left the vocabulary because their signature is
+## the door (revision (j)5): each takes, on every `cfg` arm it is written on, a parameter whose
+## type is exactly `WaitToken<'_, doors::<door>>` for the door named here — never an `Option` of
+## one — so no call of it compiles without an admission. The guard checks each, per arm, and
+## refuses one that is also in `# vocabulary`.
+##
+## `# effects` — one line per **effect function**: the function whose own body holds a listed effect,
+## keyed by crate, `cfg` arm and item, with its entries and their counts, its kind (`owner-door-body`,
+## `worker-door-body`, `transport`, `drop-exception`, `interim-owner`), its authority (`WaitToken`,
+## `WorkerCtx`, `none (transport)`, `drop`) and the door it serves (revision (j)7). A2e puts one
+## `expect` on each. Today it holds exactly the effect functions already inside a registered door;
+## revision (k) allocates the rest. Held equal to the bodies by
+## `hang_watch::window_waits_tests::the_effects_section_is_the_effect_functions_inside_the_doors`.
+## `# doors` (admission identities) and `# owners` (FFI constructs) stay separate lists: neither is a
+## list of `expect` holders, and no `# owners` module is exempt from the bare-site inventory.
 ##
 ## `# owners` — where the constructs a lint cannot see through may be written (budget note §C-3):
 ## `msg_send!`/`msg_send_id!`, a raw `vtable(` call, `GetProcAddress`, an `extern` block, `#[link]`
@@ -100,27 +119,38 @@ std::process::Child::wait	all	waits for a child process
 portable_pty::Child::try_wait	all	counted by call site, does not wait
 pollster::block_on	all	an executor entry: waits for a future
 wgpu::Queue::submit	all	the GPU driver
-wgpu::SurfaceTexture::present	all	the GPU driver and the compositor
-bt_render::WindowRenderer::present_frame_with_phases	all	a cross-crate entrance that waits inside
-bt_render::WindowRenderer::new	all	a cross-crate entrance that waits inside
+wgpu::Queue::present	all	the GPU driver and the compositor
 bt_render::GpuContext::open	all	a cross-crate entrance that waits inside
 bt_pty::PtySession::spawn_shell_in	all	a cross-crate entrance that waits inside
 bt_pty::PtySession::resize	all	a cross-crate entrance that waits inside
 bt_pty::wait_for_retirements	all	a cross-crate entrance that waits inside
-bt_platform::monospace_family_named	all	a cross-crate entrance that waits inside
-bt_platform::Compositor::new	all	a cross-crate entrance that waits inside
-bt_platform::Compositor::commit	all	a cross-crate entrance that waits inside
-bt_platform::Compositor::set_window_size	all	a cross-crate entrance that waits inside
-bt_platform::WebHost::request_controller	all	a cross-crate entrance that waits inside
-bt_platform::WebHost::request_environment	all	a cross-crate entrance that waits inside
-bt_platform::WebHost::rehost	all	a cross-crate entrance that waits inside
-bt_platform::DirWatch::start_scoped	windows, macos	a cross-crate entrance that waits inside
-bt_platform::read_system_locale_declaration	macos	a cross-crate entrance that waits inside
 windows::Win32::UI::Shell::ShellExecuteW	windows	waits for the shell
 windows::Win32::System::Threading::SetEvent	windows	counted by call site, does not wait
 windows::Win32::Foundation::CloseHandle	windows	counted by call site, does not wait
 libc::write	macos	counted by call site, does not wait
 libc::close	macos	counted by call site, does not wait
+
+# entrances
+path	door
+bt_render::WindowRenderer::present_frame_with_phases	PresentFrame
+bt_render::WindowRenderer::new	SurfaceBirth
+bt_platform::monospace_family_named	FontFamilyLookup
+bt_platform::Compositor::new	CompositorBirth
+bt_platform::Compositor::commit	CompositorCommit
+bt_platform::Compositor::set_window_size	CompositorWindowSize
+bt_platform::WebHost::request_controller	WebController
+bt_platform::WebHost::request_environment	WebEnvironment
+bt_platform::WebHost::rehost	WebRehost
+
+# effects
+crate	arm	item	effects	kind	authority	door
+bt-app	-	crate::gpu_door::open_first_window	bt_render::GpuContext::open 1, pollster::block_on 1	owner-door-body	WaitToken	GpuOpen
+bt-app	-	crate::persist::SessionWriter::close	std::thread::JoinHandle::join 1, std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
+bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
+bt-app	-	crate::pty_door::resize	bt_pty::PtySession::resize 1	owner-door-body	WaitToken	PtyResize
+bt-app	-	crate::pty_door::spawn_shell	bt_pty::PtySession::spawn_shell_in 1	owner-door-body	WaitToken	PtyBirth
+bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	owner-door-body	WaitToken	PaneRetirementWait
+bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
 
 # owners
 construct	owner	count

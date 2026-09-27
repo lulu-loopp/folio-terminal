@@ -33,6 +33,7 @@
 //!    `tui/src/terminal_probe.rs` writes `\x1b]10;?\x1b\\\x1b]11;?\x1b\\`.
 
 #![cfg(windows)]
+#![allow(clippy::disallowed_methods)]
 
 use std::{
     num::{NonZeroU16, NonZeroU32},

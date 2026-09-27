@@ -54,6 +54,8 @@
 //!    doors on the other platform and the half of "the display it was saved on
 //!    is gone" that lives in this crate.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(target_os = "macos")]
 mod mac {
     use bt_platform::{NativeWindow, WindowRect};

@@ -1,5 +1,7 @@
 //! ConPTY ownership and the bounded PTY-to-Term transport from DESIGN.md §1.3.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 use std::{
     collections::VecDeque,
     ffi::{OsStr, OsString},

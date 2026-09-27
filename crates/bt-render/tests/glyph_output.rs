@@ -27,6 +27,8 @@
 //! Run with `--nocapture` to read the `BT_GLYPH` lines these cases print;
 //! that is the measurement the ticket reports, on either machine.
 
+#![allow(clippy::disallowed_methods)]
+
 use bt_render::glyph_probe::{
     FIXTURE_COLUMNS, FRACTIONAL_ORIGINS, GLYPH_BANDS, GlyphFixture, digest, first_difference,
     fractional_phases, grid_phases, measure_band, premultiplied_violations, report,

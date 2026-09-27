@@ -23,7 +23,7 @@
 //! does not contain them, and replacing that walk with one would have dropped
 //! every binary target in the workspace without a word.
 
-use crate::manifest::{Package, TargetRoot, Workspace};
+use crate::manifest::{Package, TargetKind, TargetRoot, Workspace};
 use crate::reject::Rejection;
 use crate::universe::{DiskScope, Universe, Vendor};
 
@@ -142,7 +142,8 @@ pub fn crate_sources(package: &Package, vendor: Vendor) -> Result<Universe, Vec<
 }
 
 /// One package's whole compilation: every target, and the directories they are
-/// written in.
+/// written in — `src/`, `tests/`, `examples/`, `benches/`, and the package
+/// directory's own files when a build script is one of them.
 ///
 /// Not one of the four — it is the universe a reader wants when its question is
 /// "what is this crate made of", and the real-tree tests of this crate use it.
@@ -152,9 +153,28 @@ pub fn crate_sources(package: &Package, vendor: Vendor) -> Result<Universe, Vec<
 /// Whatever [`Universe::declare`] and the disk walk reject.
 pub fn whole_package(package: &Package, vendor: Vendor) -> Result<Universe, Vec<Rejection>> {
     let mut scopes = vec![DiskScope::under(package.directory().join("src"))];
-    let tests = package.directory().join("tests");
-    if tests.is_dir() {
-        scopes.push(DiskScope::under(tests));
+    for directory in ["tests", "examples", "benches"] {
+        let directory = package.directory().join(directory);
+        if directory.is_dir() {
+            scopes.push(DiskScope::under(directory));
+        }
+    }
+    // A build script is written beside the manifest: the package directory's own files, and
+    // none of its subdirectories.
+    if package
+        .targets()
+        .iter()
+        .any(|target| target.id.kind == TargetKind::BuildScript)
+    {
+        let subdirectories: Vec<String> = std::fs::read_dir(package.directory())
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().is_dir())
+            .filter_map(|entry| entry.file_name().to_str().map(ToOwned::to_owned))
+            .collect();
+        let names: Vec<&str> = subdirectories.iter().map(String::as_str).collect();
+        scopes.push(DiskScope::under(package.directory()).excluding(&names));
     }
     Universe::declare(
         format!("the whole of {}", package.name()),

@@ -61,6 +61,8 @@
 //!    the frame's layer away and **leaves the slot standing**, and the frame
 //!    rebuilt on the emptied view reads as it did before.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(target_os = "macos")]
 mod mac {
     use std::ffi::c_void;

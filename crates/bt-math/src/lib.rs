@@ -1,5 +1,7 @@
 //! Sandboxed MiTeX -> Typst -> SVG -> resvg math-block rendering.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 use std::{collections::BTreeSet, num::NonZeroU32, sync::OnceLock, time::Duration};
 
 pub use bt_doc::{InlineRunPlacement, MathMode};

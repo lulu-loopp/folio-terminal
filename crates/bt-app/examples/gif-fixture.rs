@@ -17,6 +17,8 @@
 //! frame, so running this is also how you confirm the round trip still survives
 //! an `image` upgrade.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::fs::File;
 use std::io::BufWriter;
 use std::time::Duration;

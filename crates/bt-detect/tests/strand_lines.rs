@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 // auto-generated
 pub const STRAND: &[(u32, &str, &str)] = &[
     (1, "none", ""),

@@ -26,4 +26,6 @@
 //! and revision (b) §R6). `Instant` is an in-process input here and is never serialized; an outward
 //! protocol (`docs/ARCHITECTURE.md` §12.3) is not offered yet.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 pub mod attention;

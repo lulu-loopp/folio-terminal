@@ -10,6 +10,8 @@
 //! Nothing here decides anything about a dot, a ticket or a toast. That is `bt-app`'s ledger and
 //! is pinned in its own suite; this file pins what the bytes did to this session.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::num::NonZeroU32;
 
 use bt_term::DualPlaneSession;

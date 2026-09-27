@@ -33,6 +33,10 @@ All notable changes to Folio are recorded here. The format follows
   name and Artifact Signing identity equal to the running copy's. A copy that
   is not signed, or not built as a release, cannot update itself. Nothing calls
   it yet.
+- Every call in the program that can block the window thread outside a door
+  is now listed in one file that CI only lets shrink (242 today), and the
+  configuration the coming blocking-call lint needs is fenced and proven on
+  Windows and macOS. Nothing changes for anyone using Folio.
 - The macOS CI job now lints every crate with the same warnings-as-errors line
   as Windows, shows that line can fail, and runs the renderer's and the
   corpus's tests on a Mac.

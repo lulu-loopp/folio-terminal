@@ -22,6 +22,8 @@
 //! Every number is printed under `BT_HSCROLL_BENCH` whether or not the assertions pass, so a run
 //! that only widens the margin still leaves the measurement behind.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::num::{NonZeroI64, NonZeroU32, NonZeroUsize};
 use std::time::{Duration, Instant};
 

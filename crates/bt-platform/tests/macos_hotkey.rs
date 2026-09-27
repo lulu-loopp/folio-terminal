@@ -59,6 +59,8 @@
 //! whatever program took it, and one stray `` ⌃` `` in their editor is a cost
 //! this proof has no right to spend.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(target_os = "macos")]
 mod mac {
     use std::ffi::c_void;

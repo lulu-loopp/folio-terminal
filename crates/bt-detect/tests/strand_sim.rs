@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 // Throwaway ground-truth simulator for the scroll-strand frozen scheduling.
 // Replicates session.rs schedule_detection/schedule_scan using only public bt-detect APIs.
 use bt_detect::{
@@ -7,7 +8,11 @@ use bt_detect::{
 use bt_transcript::TranscriptId;
 use std::collections::BTreeMap;
 
-include!("strand_lines.rs");
+// The recorded strand, shared with the `strand_lines` target: a module rather than an
+// `include!`, so that file keeps its own leading `#![allow]` (thread-door note, revision (j)2).
+#[path = "strand_lines.rs"]
+mod strand_lines;
+use strand_lines::STRAND;
 
 fn may_contain(text: &str) -> bool {
     let t = text.trim_start_matches([' ', '\u{2022}', '\u{25e6}', '\u{25aa}', '\u{25cf}']);

@@ -12,6 +12,8 @@
 //! `git.exe`, and Git for Windows has never shipped without its bash, so this is
 //! a real gate rather than one that quietly passes when the tool is missing.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::{
     path::{Path, PathBuf},
     process::Command,

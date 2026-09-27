@@ -60,6 +60,8 @@
 //! **Every engine in this file is muted before it is played**, because these
 //! cases run on the owner's own machine while the owner is working.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 

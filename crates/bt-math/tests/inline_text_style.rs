@@ -27,6 +27,8 @@
 //! is where the next reader can see that for themselves rather than take it on
 //! trust.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::num::NonZeroU32;
 
 use bt_math::{MathEngine, MathMode, MathRaster, MathRenderKey};

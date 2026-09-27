@@ -34,6 +34,8 @@
 //! arrive through that crate's `links` metadata. The format is
 //! `bt_winres::release_manifest`.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 

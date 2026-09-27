@@ -21,6 +21,7 @@ members = [
     "crates/bt-winres",
     "crates/bt-workbench",
     "crates/bt-app",
+    "crates/bt-lint-probe",
     "vendor/alacritty_terminal",
     "vendor/mitex",
     "vendor/mitex-parser",

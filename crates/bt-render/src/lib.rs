@@ -1,5 +1,7 @@
 //! wgpu + cosmic-text rendering for viewport-owned terminal frames.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod cjk_fonts;
 use cjk_fonts::{CjkFace, FontSystem, match_cjk_attrs, match_grid_attrs, proportional_cjk_family};
 mod contrast;

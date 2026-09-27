@@ -9,6 +9,7 @@
 //! by signature, and there is no safe way to ask the process how many bytes a piece of work asked
 //! for. Every operation below forwards straight to [`System`].
 #![allow(unsafe_code)]
+#![allow(clippy::disallowed_methods)]
 
 use std::{
     alloc::{GlobalAlloc, Layout, System},

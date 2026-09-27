@@ -1,5 +1,7 @@
 //! Audited native bridges that are not exposed by winit's safe APIs.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 use std::num::NonZeroIsize;
 
 /// Which kind of thread this is, the window thread's phase, and the owner-thread doors'

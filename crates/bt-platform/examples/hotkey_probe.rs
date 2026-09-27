@@ -56,6 +56,8 @@
 //! `Err(-9878)` (`eventHotKeyExistsErr`) on the line above instead, so the two
 //! are never confused.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(not(target_os = "macos"))]
 fn main() {
     println!(

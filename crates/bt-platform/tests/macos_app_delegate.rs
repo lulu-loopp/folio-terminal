@@ -73,6 +73,8 @@
 //! prompt nobody could reach. A Dock click delivers exactly the reopen ③ and ⑤
 //! are about, which is why it is covered rather than missing.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(target_os = "macos")]
 mod mac {
     use std::io::Write as _;
