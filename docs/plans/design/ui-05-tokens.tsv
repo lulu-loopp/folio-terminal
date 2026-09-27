@@ -26,14 +26,14 @@ picker-wash-hover	rgba(48,89,216,.15)	rgba(122,153,255,.15)	overlay (linear ligh
 picker-wash-chosen	rgba(48,89,216,.22)	rgba(122,153,255,.22)	overlay (linear light; = accent at .22)	the picker's chosen side, item 21a (#e5e7f7 / #465486 on the popover)	n/a
 ink-primary	#37352f	rgba(255,255,255,.87)	text	titles, values, selected row text, focused pane title, hovered menu row text	L 11.43/12.26/9.80; D 11.94/11.18/13.17/9.17
 ink-secondary	rgba(55,53,47,.65)	rgba(255,255,255,.55)	text	a row's second line, card replies and meta, quota rows, identifiers	L 4.07/4.18/3.80; D 5.65/5.42/5.97/4.74
-ink-muted	rgba(55,53,47,.45)	rgba(255,255,255,.38)	text	ages, context %, todo counts, meta; in dark also section labels and reset columns (via ink-section)	L 2.44/2.49/2.37; D 3.47/3.39/3.58/3.09
+ink-muted	rgba(55,53,47,.45)	rgba(255,255,255,.38)	text	ages, context %, todo counts, meta; section labels and reset columns (via ink-section)	L 2.44/2.49/2.37; D 3.47/3.39/3.58/3.09
 ink-title	#7a7974	#9d9d9d	text/glyph	gear, badge, quota control at rest; rail and native tab text at rest; + New tab and + box at rest	L 4.07/4.36/3.49; D 5.65/5.29/6.35/4.26
 ink-title-hover	#37352f	#e3e3e3	text/glyph: hover/open	the same on hover/open; Windows min/max/close glyphs at rest; native tab hover and active text	L 11.43/12.26/9.80; D 11.94/11.18/13.42/9.00
 ink-menu	#777672	#9f9f9f	text (raised to 4.5:1 on the menu by raise_against)	menu, combo-list and where x what rows at rest; selection-pill actions; address and float field text; SPLIT outline	L 4.24/4.55/3.64; D 5.79/5.42/6.51/4.36
 ink-hint	#a5a4a1	#7b7b7b	text	menu hint column and submenu arrow; where x what dimmed parent and ages; field placeholder	L 2.32/2.49/1.99; D 3.62/3.39/4.07/2.73
 ink-pane-title	#a5a4a1	#727272	text	unfocused pane and files head title and breadcrumbs; pane-head tool glyphs at rest; files segments at rest	L 2.32/2.49/1.99; D 3.19/2.98/3.58/2.40
 ink-disabled	#d2d2d0	#525252	text: disabled (exempt)	unavailable menu row: product baseline contract (menu_item_unavailable_text); not drawn in the prototype	L 1.41/1.51/1.21; D 1.96/1.84/2.20/1.48
-ink-section	= text-gray	= ink-muted	alias: section label (owner 2026-09-27: no new grey tier; B default, C = ink-secondary)	AGENT head and its count, quota group labels and compact account head, where x what column captions and Recent, SPLIT caption; quota reset columns	L 3.04/3.26/2.61; D 3.47/3.39/3.58/3.09
+ink-section	= ink-muted	= ink-muted	alias: section label (owner 2026-09-27: no new grey tier, labels keep ink-muted; accepted exception to the text floor, like ink-disabled)	AGENT head and its count, quota group labels and compact account head, where x what column captions and Recent, SPLIT caption; quota reset columns	L 2.44/2.49/2.37; D 3.47/3.39/3.58/3.09
 ink-vendor	#37352f	#e4e4e4	mark	monochrome vendor/profile marks (item 81)	L 11.43/12.26/9.80; D 12.06/11.29/13.55/9.08
 ink-inverse	#ffffff	#ffffff	text on a fill	the word on fill-primary; the glyph on caption-close-hover	on fill-primary: L 5.92; D 2.68
 accent	#3059d8	#7a99ff	identity accent (round 26: never remapped)	focus ring; links; folder and menu glyphs; menu/combo/Git-filter check; picker zone edge and wash; divider-active; open tool and + box glyph; files segment underline; comment count and marks; zoom and outline marks; gear dot; primary button fill	L 5.52/5.92/4.74; D 5.71/5.35/6.42/4.31
@@ -63,7 +63,7 @@ text-pink	= mark-pink	= mark-pink	coloured text (= mark)	reserved, not drawn (re
 mark-brown	#A2845E	-	mark	reserved, not drawn	L 3.26/3.50/2.80 †
 text-brown	= mark-brown	= mark-brown	coloured text (= mark)	reserved, not drawn	L 3.26/3.50/2.80 †
 mark-gray	#8E8E93	rgba(255,255,255,.38)	mark: neutral	quota bar neutral fill, ring neutral sweep, quota in-use dot	L 3.04/3.26/2.61 †; D 3.47/3.39/3.58/3.09
-text-gray	= mark-gray	= mark-gray	coloured text (= mark)	light: ink-section (section labels) by the 2026-09-27 reassignment; no other word	L 3.04/3.26/2.61 †; D 3.47/3.39/3.58/3.09
+text-gray	= mark-gray	= mark-gray	coloured text (= mark)	reserved, not drawn (the section labels keep ink-muted, owner 2026-09-27)	L 3.04/3.26/2.61 †; D 3.47/3.39/3.58/3.09
 mark-gray-here	= mark-gray	= ink-hint	mark: neutral (here-dot)	where x what here-dot (ww-here)	L 3.04/3.26/2.61; D 3.62/3.39/4.07/2.73
 lane-0	= mark-blue	#7b92d5	graph lane blue (dark: GRAPH_LANES_DARK, distinct from the status value)	commit graph lanes and nodes; ref pill edge, 10% tint and name	L 3.74/4.02/3.21; D 5.05/4.73/5.67/3.80
 lane-1	= mark-purple	#a17bd5	graph lane purple (dark: GRAPH_LANES_DARK, distinct from the status value)	commit graph lanes and nodes; ref pill edge, 10% tint and name	L 3.85/4.13/3.30; D 4.61/4.31/5.18/3.47
