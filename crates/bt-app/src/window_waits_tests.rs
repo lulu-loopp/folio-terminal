@@ -1485,6 +1485,20 @@ fn literals_of(src: &Src, name: &str) -> Vec<usize> {
 /// struct literal in the product, in `admission::lend_worker` (A1b), called by the thread door
 /// and by `enter_standalone_main` once each; `WorkerCtx` and `WaitToken` each have one `impl`
 /// block, the inherent one, and derive nothing.
+///
+/// **And the two mints are fenced** (A2a, revision (j)11.1), because an entrance that takes a
+/// capability may leave the vocabulary only while nothing else can make one: `WaitToken`'s one
+/// struct literal is `WaitToken::fresh`'s, and `fresh` is named in the product exactly where
+/// `admission::admitted` calls it (twice: the unmetered and the metered road); `lend_worker` is
+/// named exactly by its two owners. Every **reference** is counted — a name handed on as a
+/// function value (`.map(WaitToken::fresh)`, `run(lend_worker)`) is one — by the identifier view,
+/// never by the spelling `name(`. `fresh`, `lend_worker` and every field of both capabilities are
+/// private: that pinned visibility is what keeps every reference inside `crate::admission`, where
+/// this counts them.
+///
+/// What stays outside, as revision (b)2 names it and (j)11.1 restates: an inference-typed
+/// fabrication inside `bt-platform`'s own `unsafe` (a `transmute` whose target type is fixed at a
+/// door's parameter rather than written) is not an accident this guard is built to catch.
 fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<String> {
     let mut failures = Vec::new();
     let literals: Vec<String> = world
@@ -1502,16 +1516,60 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
              found {literals:?}"
         ));
     }
-    let mut callers = BTreeMap::new();
-    for src in &world.srcs {
-        for at in src.named("lend_worker") {
-            let after = src.lex(at, (at + 32).min(src.file_end(at)));
-            let before = src.lex(at.saturating_sub(8), at);
-            if src.is(after.get(1), "(") && !src.is(before.last(), "fn") && src.in_product(at) {
-                *callers.entry(src.owner_of(at)).or_insert(0) += 1;
+    let token_literals: Vec<String> = world
+        .srcs
+        .iter()
+        .flat_map(|src| {
+            literals_of(src, "WaitToken")
+                .into_iter()
+                .map(|at| src.owner_of(at))
+        })
+        .collect();
+    if token_literals != ["bt-platform crate::admission::WaitToken::fresh"] {
+        failures.push(format!(
+            "`WaitToken` is built by a struct literal in one place, `WaitToken::fresh`; found \
+             {token_literals:?}"
+        ));
+    }
+    let admission = world
+        .src("bt-platform")
+        .index
+        .modules()
+        .iter()
+        .find(|module| {
+            module
+                .module_paths()
+                .iter()
+                .any(|p| p == "crate::admission")
+        })
+        .map(bt_source::ModuleRecord::span);
+    // Every reference in the product, its declaration excluded: a call, a value, a path to it.
+    let references = |name: &str, within: Option<bt_source::Span>| {
+        let mut found = BTreeMap::new();
+        for src in &world.srcs {
+            for at in src.named(name) {
+                let file_start = src.index.file_at(at).map_or(0, |f| f.span().start());
+                let before = src.lex(at.saturating_sub(8).max(file_start), at);
+                let outside =
+                    within.is_some_and(|span| src.package != "bt-platform" || !span.holds(at));
+                if src.is(before.last(), "fn") || outside || !src.in_product(at) {
+                    continue;
+                }
+                *found.entry(src.owner_of(at)).or_insert(0) += 1;
             }
         }
+        found
+    };
+    let fresh = references("fresh", admission);
+    let wanted_fresh = BTreeMap::from([("bt-platform crate::admission::admitted".to_owned(), 2)]);
+    if fresh != wanted_fresh {
+        failures.push(format!(
+            "`WaitToken::fresh` is named only by `admission::admitted`, twice — a call or a value \
+             is a reference, and any other is a second mint that skips the role, the phase and \
+             the meter; found {fresh:?}"
+        ));
     }
+    let callers = references("lend_worker", None);
     let wanted = BTreeMap::from([
         (
             "bt-platform crate::admission::enter_standalone_main".to_owned(),
@@ -1524,11 +1582,58 @@ fn a_capability_has_one_constructor_and_no_trait_road(world: &World) -> Vec<Stri
     ]);
     if callers != wanted {
         failures.push(format!(
-            "`lend_worker` is called by the thread door and by `enter_standalone_main`, once \
-             each; found {callers:?}"
+            "`lend_worker` is named by the thread door and by `enter_standalone_main`, once \
+             each (a call or a value is a reference); found {callers:?}"
         ));
     }
     let platform = world.src("bt-platform");
+    for (query, what) in [
+        (
+            ItemQuery::method("WaitToken", "fresh"),
+            "`WaitToken::fresh`",
+        ),
+        (
+            ItemQuery::function("lend_worker"),
+            "`admission::lend_worker`",
+        ),
+        (
+            ItemQuery::field("WaitToken", "_scope"),
+            "`WaitToken`'s `_scope`",
+        ),
+        (
+            ItemQuery::field("WaitToken", "_door"),
+            "`WaitToken`'s `_door`",
+        ),
+        (
+            ItemQuery::field("WaitToken", "_local"),
+            "`WaitToken`'s `_local`",
+        ),
+        (
+            ItemQuery::field("WorkerCtx", "name"),
+            "`WorkerCtx`'s `name`",
+        ),
+        (
+            ItemQuery::field("WorkerCtx", "_local"),
+            "`WorkerCtx`'s `_local`",
+        ),
+    ] {
+        match platform.index.find(&query.in_module("crate::admission")) {
+            Ok(records) => {
+                for record in records {
+                    let declaration =
+                        platform.lex(record.declaration().start(), record.declaration().end());
+                    if declaration.iter().any(|t| platform.text(*t) == "pub") {
+                        failures.push(format!(
+                            "{what} is visible outside `crate::admission` at {}: a mint, and a \
+                             field a literal elsewhere could fill, stay private",
+                            platform.location(record.whole().start())
+                        ));
+                    }
+                }
+            }
+            Err(failure) => failures.push(format!("{what}: {failure}")),
+        }
+    }
     for type_name in ["WorkerCtx", "WaitToken"] {
         let blocks: Vec<String> = world
             .srcs
