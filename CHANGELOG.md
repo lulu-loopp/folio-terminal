@@ -13,6 +13,9 @@ All notable changes to Folio are recorded here. The format follows
   a profile with arguments no longer reads as not installed.
 - A trace file that cannot be opened is now reported without waiting behind
   other output, so a trace pointed at a bad path can no longer stall tracing.
+- Windows: opening Folio from Explorer's right-click menu, or running
+  `folio --version` while another Folio starts, no longer leaves the new
+  window unable to save its settings and tabs.
 
 ### Internal
 

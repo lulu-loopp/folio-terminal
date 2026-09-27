@@ -1359,6 +1359,34 @@ impl SettingsStore {
         }
     }
 
+    /// **The language `settings.json` in `directory` names — read, and nothing
+    /// else** (B-EXPLORER-CLAIM, 0.4.6).
+    ///
+    /// For the processes that never have a window and only need to know which
+    /// language to say their few words in: `--explorer-command`'s COM server and
+    /// the front door's refusal (`say_at_the_front_door`). [`Self::open`] is not
+    /// that question. It asks [`is_writer_of`], which takes the data directory's
+    /// claim — or remembers the refusal — for the life of the process, and it
+    /// makes the folder and keeps a refused file beside it. A COM server that
+    /// Explorer keeps alive while the menu it drew starts Folio would then hold
+    /// the claim the Folio it started needs, and that Folio would run for its
+    /// whole life as a window that saves nothing.
+    ///
+    /// So this reads the file's bytes through the settings lane
+    /// ([`read_settings_keeping`] with [`bt_persist::Keeping::Owed`]: a refused
+    /// file is reported, never kept, never moved) and answers the default on
+    /// every failure, which is [`Self::open`]'s own contract. It asks nobody who
+    /// writes here, and it is not a brief claim let go again either: a resident
+    /// launch that asked in that instant would be refused, and would remember
+    /// the refusal for its whole run.
+    pub(crate) fn peek_language(directory: &Path) -> bt_persist::LanguageV1 {
+        let (settings, _) = read_settings_keeping(
+            &directory.join(SETTINGS_FILE_NAME),
+            bt_persist::Keeping::Owed,
+        );
+        settings.language
+    }
+
     /// Take the sentence this store owes the reader — [`SessionStore::take_fault`]
     /// and every other store's, one file over.
     pub fn take_fault(&mut self) -> Option<String> {
@@ -1882,11 +1910,7 @@ pub fn storage_dir() -> PathBuf {
             // does below. The move is the next start's; this one's folder is in
             // use by then.
             if crate::update_trial::defer(crate::update_trial::Writer::DataFolderMove) {
-                return if previous.is_dir() && !current.exists() {
-                    previous
-                } else {
-                    current
-                };
+                return as_it_stands(current, previous);
             }
             match relocate(&previous, &current) {
                 Relocation::Nothing | Relocation::AlreadyHere => current,
@@ -1915,6 +1939,35 @@ pub fn storage_dir() -> PathBuf {
             }
         })
         .clone()
+}
+
+/// **The data directory as the disk has it now, with nothing moved and nothing
+/// made** (B-EXPLORER-CLAIM) — the folder [`storage_dir`] would answer if the
+/// rename it owes were not this process's to pay: the folder under the previous
+/// name while that is the only one there, the current one otherwise.
+///
+/// For the language lookups of the processes that never have a window
+/// ([`SettingsStore::peek_language`]'s two callers), which must read the
+/// settings the user's Folio reads and must leave the directory exactly as they
+/// found it — the move is the next resident start's.
+pub(crate) fn storage_dir_as_it_stands() -> PathBuf {
+    let location = storage_location(bt_platform::host_platform(), |name: &str| {
+        std::env::var_os(name)
+    });
+    match location.previous {
+        Some(previous) => as_it_stands(location.directory, previous),
+        None => location.directory,
+    }
+}
+
+/// Which of the two names holds the files while nothing has been moved: the
+/// previous one only when it is there and the current one is not.
+fn as_it_stands(current: PathBuf, previous: PathBuf) -> PathBuf {
+    if previous.is_dir() && !current.exists() {
+        previous
+    } else {
+        current
+    }
 }
 
 /// **The data directory by [`storage_location`]'s rule, and nothing else** —
@@ -2825,6 +2878,185 @@ mod tests {
             "and so must the same question asked of another spelling of it"
         );
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A data directory of a test's own with a `settings.json` that names
+    /// `language`, written the way the product writes it.
+    fn a_home_that_speaks(case: &str, language: bt_persist::LanguageV1) -> (PathBuf, PathBuf) {
+        let root = appdata(case);
+        let home = root.join(STORAGE_NAME);
+        std::fs::create_dir_all(&home).expect("a scratch data directory");
+        let settings = SettingsV1 {
+            language,
+            ..SettingsV1::default()
+        };
+        bt_persist::write_settings_atomic(&home.join(SETTINGS_FILE_NAME), &settings)
+            .expect("a settings file to read the language from");
+        (root, home)
+    }
+
+    /// Whether this process's claim table has an answer — a claim held or a
+    /// refusal remembered — for `directory`.
+    fn the_claim_table_has_answered_for(directory: &Path) -> bool {
+        claim_table().contains_key(&bt_platform::instance::claim_name(directory))
+    }
+
+    /// RED (B-EXPLORER-CLAIM) — **`--explorer-command`'s language lookup reads
+    /// the language and leaves the data directory's claim free, with no answer
+    /// remembered in this process's claim table and nothing written in the
+    /// directory.**
+    ///
+    /// The COM server opened a `SettingsStore` to learn the language, and
+    /// opening one asks `is_writer_of`, which takes the claim and keeps it — or
+    /// keeps the refusal — for the life of the process. Explorer keeps that
+    /// process alive while the menu it drew starts Folio and ten seconds after,
+    /// so the Folio it started found the claim held by a process with no launch
+    /// endpoint and ran as a window that saves nothing. The lookup is the one
+    /// `explorer_menu::serve` makes (`crate::door_language`), over a data
+    /// directory of the test's own; a damaged file beside it is answered with
+    /// the default and left exactly where it was, not kept aside.
+    ///
+    /// MUTATION: have `SettingsStore::peek_language` ask `is_writer_of(directory)`
+    /// first, which is what `SettingsStore::open` does, and this goes red.
+    #[test]
+    fn an_explorer_command_server_never_holds_the_claim() {
+        let (root, home) =
+            a_home_that_speaks("explorer-server-claim", bt_persist::LanguageV1::Chinese);
+
+        let language = crate::door_language(&home);
+
+        assert_eq!(
+            language,
+            crate::i18n::Lang::Chinese,
+            "the lookup reads the language the settings file names"
+        );
+        assert!(
+            !the_claim_table_has_answered_for(&home),
+            "the server's lookup must leave no answer about the data directory in the \
+             process's claim table — neither a claim nor a refusal"
+        );
+        assert!(
+            bt_platform::instance::claim_data_directory(&home).is_some(),
+            "and the claim itself must be free for the Folio the menu starts"
+        );
+
+        let damaged_home = root.join("damaged");
+        write(&damaged_home.join(SETTINGS_FILE_NAME), "{ not json");
+        assert_eq!(
+            SettingsStore::peek_language(&damaged_home),
+            bt_persist::LanguageV1::default(),
+            "a file that cannot be read answers the default"
+        );
+        let left: Vec<_> = std::fs::read_dir(&damaged_home)
+            .expect("the damaged directory")
+            .map(|entry| entry.expect("an entry").file_name())
+            .collect();
+        assert_eq!(
+            left,
+            vec![OsString::from(SETTINGS_FILE_NAME)],
+            "and the lookup keeps nothing aside: the directory is as it was found"
+        );
+        assert!(!the_claim_table_has_answered_for(&damaged_home));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (B-EXPLORER-CLAIM) — **after the Explorer server has looked up its
+    /// language, the resident Folio its menu launches is the writer of the data
+    /// directory and opens its launch endpoint.**
+    ///
+    /// The sequence of a right-click with no Folio running: the server's lookup
+    /// first, then the launch. The launch is another process with a claim table
+    /// of its own, so what it asks is the kernel — `is_writer_of`'s first ask,
+    /// `claim_data_directory` — and, as the writer, it opens the launch
+    /// endpoint (`open_the_data_directorys_endpoints`'s gate). With the lookup
+    /// going through a store, the server still held the claim here, the launch
+    /// was refused, and no endpoint was ever opened for the next launch to find.
+    ///
+    /// MUTATION: have `SettingsStore::peek_language` ask `is_writer_of(directory)`
+    /// first, and this goes red.
+    #[test]
+    fn a_resident_launch_after_the_server_is_the_writer() {
+        let (root, home) =
+            a_home_that_speaks("server-then-resident", bt_persist::LanguageV1::English);
+
+        let _ = crate::door_language(&home);
+
+        let resident = bt_platform::instance::claim_data_directory(&home);
+        assert!(
+            resident.is_some(),
+            "the Folio the menu launched must be the writer of its data directory"
+        );
+        let endpoint = resident.as_ref().map(|_| {
+            bt_platform::launch_pipe::LaunchPipe::start(
+                &home,
+                |_| None::<bt_platform::launch_pipe::Decision<()>>,
+                |()| {},
+            )
+        });
+        assert!(
+            matches!(endpoint, Some(Ok(_))),
+            "and, the writer, it opens the launch endpoint the next launch hands over to"
+        );
+
+        drop(endpoint);
+        drop(resident);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (B-EXPLORER-CLAIM) — **a front-door refusal that looks up its
+    /// language at the same moment as an ordinary launch leaves that launch the
+    /// writer, and remembers no answer of its own.**
+    ///
+    /// `say_at_the_front_door` (a mistyped argument, `--version`, `--help`)
+    /// used to open a `SettingsStore` for its language, and so raced every
+    /// launch started beside it for the claim: whichever lost remembered the
+    /// loss for its life. The two run on two threads released together; the
+    /// launch is another process, so it asks the kernel (`claim_data_directory`,
+    /// its own `is_writer_of`'s first ask). Whichever order they run in, the
+    /// launch must get the claim and the refusal path must leave no row — a
+    /// row would be the claim held against the launch, or a refusal kept.
+    ///
+    /// MUTATION: have `SettingsStore::peek_language` ask `is_writer_of(directory)`
+    /// first, and this goes red in either order.
+    #[test]
+    fn a_front_door_refusal_does_not_cache_a_refusal_for_the_launch() {
+        let (root, home) =
+            a_home_that_speaks("front-door-beside-launch", bt_persist::LanguageV1::English);
+        let start = Arc::new(std::sync::Barrier::new(2));
+
+        let refusal = {
+            let start = Arc::clone(&start);
+            let home = home.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                crate::door_language(&home)
+            })
+        };
+        let launch = {
+            let start = Arc::clone(&start);
+            let home = home.clone();
+            std::thread::spawn(move || {
+                start.wait();
+                // Returned, so it is held until the refusal path is done, as a
+                // resident holds it.
+                bt_platform::instance::claim_data_directory(&home)
+            })
+        };
+        let _ = refusal.join().expect("the refusal thread");
+        let claim = launch.join().expect("the launch thread");
+
+        assert!(
+            claim.is_some(),
+            "the ordinary launch must be the writer of the data directory"
+        );
+        assert!(
+            !the_claim_table_has_answered_for(&home),
+            "and the front door must have remembered nothing about it"
+        );
+
+        drop(claim);
         let _ = std::fs::remove_dir_all(&root);
     }
 

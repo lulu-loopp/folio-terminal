@@ -70781,12 +70781,23 @@ fn report_at_the_front_door(fault: &cli::CliFault) {
 /// for the `install` to be forgotten, and a refusal in the wrong language is
 /// exactly the kind of thing nobody notices until it ships.
 fn say_at_the_front_door(text: &str) {
-    i18n::install(resolved_language(
-        persist::SettingsStore::open().loaded().language,
-    ));
+    i18n::install(door_language(&persist::storage_dir_as_it_stands()));
     if !bt_platform::write_to_console(&format!("{text}\n")) {
         bt_platform::message_box(APP_NAME, text);
     }
+}
+
+/// **The language a process with no window speaks in, read from the settings
+/// in `home` and from nothing else** (B-EXPLORER-CLAIM, 0.4.6) — the one lookup
+/// [`say_at_the_front_door`] and `explorer_menu::serve` share.
+///
+/// Through [`persist::SettingsStore::peek_language`] and never through a store:
+/// opening one asks who writes the data directory, and the answer — the claim,
+/// or a refusal — is kept for the life of the process. Neither of these
+/// processes ever becomes the resident Folio, and the Folio launched beside or
+/// after them must find the claim free.
+fn door_language(home: &Path) -> i18n::Lang {
+    resolved_language(persist::SettingsStore::peek_language(home))
 }
 
 fn panic_log_path() -> PathBuf {

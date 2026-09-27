@@ -366,9 +366,14 @@ pub fn verb_icon(exe: &Path) -> String {
 /// `report_at_the_front_door` makes: this process has no window and no settings
 /// of its own, and the menu must be in the language the user chose for
 /// everything Folio says.
+///
+/// **Read, never opened** (B-EXPLORER-CLAIM): `crate::door_language` reads the
+/// file and asks nobody who writes the data directory. Explorer keeps this
+/// process alive while the menu it drew starts Folio, so a claim taken here
+/// would be held against that Folio, which would then save nothing all run.
 pub fn serve() -> i32 {
-    crate::i18n::install(crate::resolved_language(
-        crate::persist::SettingsStore::open().loaded().language,
+    crate::i18n::install(crate::door_language(
+        &crate::persist::storage_dir_as_it_stands(),
     ));
     let Ok(exe) = std::env::current_exe() else {
         // Without this there is no icon to name and no program to start. There

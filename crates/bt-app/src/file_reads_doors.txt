@@ -36,7 +36,6 @@
 1 attention_words.rs: transcript_lede: File::open
 1 clipboard_picture.rs: reserve: .open
 1 diagnostics.rs: append_note: .open
-1 explorer_menu.rs: serve: crate::persist::SettingsStore::open
 1 files_watch.rs: sync_with: open
 1 git.rs: drain: .read_to_end
 1 git_watch.rs: sync_with: open
@@ -68,7 +67,6 @@
 1 DirtyGate::raise: .open
 1 Runtime::raise_first_run_if_due: .open
 1 Runtime::raise_psreadline_invite_if_due: .open
-1 main.rs: say_at_the_front_door: persist::SettingsStore::open
 1 Runtime::settings_layout: .read
 1 Runtime::turn: .open
 1 pdf.rs: count_pages: .read
