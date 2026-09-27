@@ -38,6 +38,8 @@
 //!   somebody else's; where scheme files live and which of them exist is
 //!   `bt-app`'s question, and deliberately not this crate's.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod atomic;
 mod debounce;
 mod error;

@@ -10,6 +10,8 @@
 //! words and a build that rewrote what it could not parse would destroy the one
 //! copy they could have fixed by hand.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 

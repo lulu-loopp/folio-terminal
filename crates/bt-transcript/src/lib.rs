@@ -1,5 +1,7 @@
 //! Canonical frozen transcript and mutable staging primitives.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
 
 use bitflags::bitflags;

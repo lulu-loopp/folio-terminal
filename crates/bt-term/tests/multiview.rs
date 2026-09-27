@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 use std::num::NonZeroU32;
 
 use bt_doc::{Bias, ContentAnchor, GridPoint, LayoutKey, ScreenId};

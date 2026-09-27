@@ -1,5 +1,7 @@
 //! Layout-free history document, cross-plane anchors, and shared version types.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod anchor;
 mod document;
 mod versions;

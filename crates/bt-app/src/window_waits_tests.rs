@@ -466,7 +466,10 @@ impl Src {
                 && match owner.target.kind {
                     TargetKind::Library => true,
                     TargetKind::Binary => self.package == "bt-app" && owner.target.name == "folio",
-                    TargetKind::IntegrationTest => false,
+                    TargetKind::IntegrationTest
+                    | TargetKind::Example
+                    | TargetKind::Bench
+                    | TargetKind::BuildScript => false,
                 }
         })
     }
@@ -1938,17 +1941,119 @@ const LOWERING: [&str; 4] = [
 /// door `expect`s is zero"). A2 makes this the registry's count.
 const DOOR_EXPECTS: usize = 0;
 
+/// The form a product root carries: tests compiled into the crate are outside the invariant
+/// (revision (j)2).
+const PRODUCT_ROOT_FORM: &str = "cfg_attr(test,allow(clippy::disallowed_methods))";
+/// The form an excluded root carries: an integration test, an example, a benchmark, a build
+/// script, a development binary.
+const EXCLUDED_ROOT_FORM: &str = "allow(clippy::disallowed_methods)";
+
+/// The binaries of the product's packages that are not in the product, by package and name
+/// (revision (j)2: listed, or they are product — no third state).
+const DEVELOPMENT_BINARIES: [(&str, &str); 2] = [
+    ("bt-term", "bt-repaint-oracle"),
+    ("bt-winres", "render-info-plist"),
+];
+
+/// An attribute's body as one string with no spaces: `allow(clippy::disallowed_methods)`.
+fn spelled(src: &Src, toks: &[Tok]) -> String {
+    toks.iter().map(|t| src.text(*t)).collect()
+}
+
+/// The inner attributes a file opens with: every `#![…]` before its first other token, comments
+/// aside. What stands after anything else is not in the file's leading block.
+fn leading_inner_attributes(src: &Src, file: &FileRecord) -> Vec<(usize, String)> {
+    let span = file.span();
+    let toks = src.lex(span.start(), span.end().min(span.start() + 65_536));
+    let mut out = Vec::new();
+    let mut at = 0;
+    while src.is(toks.get(at), "#")
+        && src.is(toks.get(at + 1), "!")
+        && src.is(toks.get(at + 2), "[")
+    {
+        let Some(close) = closing(src, &toks, at + 2) else {
+            break;
+        };
+        out.push((toks[at].start, spelled(src, &toks[at + 3..close])));
+        at = close + 1;
+    }
+    out
+}
+
+/// The workspace as `bt_source`'s own cache reads it — the same spelling of the root, so a
+/// target's file and the index's file record are the same path.
+fn source_workspace() -> bt_source::Workspace {
+    bt_source::Workspace::read(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join(".."),
+    )
+    .expect("the workspace")
+}
+
+/// The root files of a package's product targets: its library, and `bt-app`'s `folio`.
+fn product_roots(package: &bt_source::Package) -> Vec<PathBuf> {
+    package
+        .targets()
+        .iter()
+        .filter(|target| match target.id.kind {
+            TargetKind::Library => true,
+            TargetKind::Binary => {
+                !DEVELOPMENT_BINARIES.contains(&(package.name(), target.id.name.as_str()))
+            }
+            _ => false,
+        })
+        .map(|target| target.file.clone())
+        .collect()
+}
+
 /// **No lint on raw effects is lowered outside a door** (§C-2): no `allow` or `expect` of
 /// `clippy::disallowed_methods`, `clippy::style`, `clippy::all` or `warnings` — at a crate,
 /// module, item or statement, in either path spelling, inside `cfg_attr` at any depth — except a
-/// door function's own `expect(clippy::disallowed_methods)`, whose count is the registry's.
+/// door function's own `expect(clippy::disallowed_methods)`, whose count is the registry's, and
+/// **the one form a product root carries** (revision (j)2, A2a):
+/// `#![cfg_attr(test, allow(clippy::disallowed_methods))]`, once, in the leading inner-attribute
+/// block of each library root and of `folio`'s `main.rs` — and nowhere else. A file mounted into
+/// the product by `#[path]`, a nested module's own inner attribute and an outer attribute on a
+/// function are product code, and each is refused.
 fn no_lint_on_raw_effects_is_lowered_outside_a_door(world: &World) -> Vec<String> {
     let mut failures = Vec::new();
     let mut read = 0;
     let mut door_expects = Vec::new();
+    let workspace = source_workspace();
     for src in &world.srcs {
+        let package = workspace.package(src.package).expect("a workspace package");
+        let roots = product_roots(package);
+        let mut admitted: BTreeSet<usize> = BTreeSet::new();
+        for root in &roots {
+            let Some(file) = src.index.file(root) else {
+                failures.push(format!(
+                    "{}'s product root {} is not in its index",
+                    src.package,
+                    root.display()
+                ));
+                continue;
+            };
+            let forms: Vec<usize> = leading_inner_attributes(src, file)
+                .into_iter()
+                .filter(|(_, body)| body == PRODUCT_ROOT_FORM)
+                .map(|(at, _)| at)
+                .collect();
+            if forms.len() != 1 {
+                failures.push(format!(
+                    "{} carries `#![cfg_attr(test, allow(clippy::disallowed_methods))]` {} times in \
+                     its leading inner-attribute block, where a product root carries it once",
+                    root.display(),
+                    forms.len()
+                ));
+            }
+            admitted.extend(forms);
+        }
         for attribute in attributes(src) {
             read += 1;
+            if admitted.contains(&attribute.start) {
+                continue;
+            }
             for (verb, lint) in suppressions(src, &attribute.body) {
                 if !LOWERING.contains(&lint.as_str()) || !src.in_product(attribute.start) {
                     continue;
@@ -1978,6 +2083,138 @@ fn no_lint_on_raw_effects_is_lowered_outside_a_door(world: &World) -> Vec<String
     }
     if read == 0 {
         failures.push("no attribute was read in the product: this reads nothing".into());
+    }
+    failures
+}
+
+/// **Every excluded root carries the unconditional form, and only an excluded root does**
+/// (revision (j)2 with (j)11.7): every integration test, example, benchmark, build script and
+/// development binary of a product package (`DEVELOPMENT_BINARIES`) opens with
+/// `#![allow(clippy::disallowed_methods)]`, once, in its leading inner-attribute block — these are
+/// the compilations budget note §C-3 puts outside the invariant, and the lint reads them all under
+/// `--all-targets`. The roots are the manifest reader's, which follows cargo's own discovery
+/// (`required-features` removes nothing from the source). A root file that is also a product
+/// root, or that the product reaches, is product: it takes the product's rule, and its unconditional
+/// allowance is refused by assertion 4.
+fn every_excluded_root_carries_the_unconditional_form(world: &World) -> Vec<String> {
+    let mut failures = Vec::new();
+    let workspace = source_workspace();
+    let mut checked = 0;
+    for src in &world.srcs {
+        let package = workspace.package(src.package).expect("a workspace package");
+        let products = product_roots(package);
+        let excluded: Vec<bt_source::TargetRoot> = package
+            .targets()
+            .iter()
+            .filter(|target| !products.contains(&target.file))
+            .cloned()
+            .collect();
+        for (name, binary) in DEVELOPMENT_BINARIES {
+            if name == src.package
+                && !excluded
+                    .iter()
+                    .any(|t| t.id.kind == TargetKind::Binary && t.id.name == binary)
+            {
+                failures.push(format!(
+                    "`DEVELOPMENT_BINARIES` names {name}'s `{binary}`, which is not a binary target \
+                     of it"
+                ));
+            }
+        }
+        if excluded.is_empty() {
+            continue;
+        }
+        for target in &excluded {
+            if src
+                .index
+                .file(&target.file)
+                .is_some_and(|file| src.product_file(file))
+            {
+                failures.push(format!(
+                    "{} ({}) is an excluded root the product reaches: a file the product reaches is \
+                     product, and takes the product's rule",
+                    target.file.display(),
+                    target.id
+                ));
+            }
+        }
+        let mut scopes: BTreeSet<PathBuf> = BTreeSet::new();
+        for target in &excluded {
+            let parent = target
+                .file
+                .parent()
+                .expect("a root file is in a directory")
+                .to_path_buf();
+            if parent != package.directory() {
+                scopes.insert(parent);
+            }
+        }
+        let mut disk: Vec<bt_source::DiskScope> = scopes
+            .into_iter()
+            .map(bt_source::DiskScope::under)
+            .collect();
+        if excluded
+            .iter()
+            .any(|t| t.file.parent() == Some(package.directory()))
+        {
+            let subdirectories: Vec<String> = std::fs::read_dir(package.directory())
+                .expect("a package directory lists")
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().is_dir())
+                .filter_map(|entry| entry.file_name().to_str().map(ToOwned::to_owned))
+                .collect();
+            let names: Vec<&str> = subdirectories.iter().map(String::as_str).collect();
+            disk.push(bt_source::DiskScope::under(package.directory()).excluding(&names));
+        }
+        let universe = match bt_source::Universe::declare(
+            format!("{}'s excluded roots", src.package),
+            excluded.clone(),
+            disk,
+            bt_source::Vendor::Excluded,
+        ) {
+            Ok(universe) => universe,
+            Err(rejection) => {
+                failures.push(format!("{}: {rejection}", src.package));
+                continue;
+            }
+        };
+        let index: &'static Index = match Index::build(&universe) {
+            Ok(index) => Box::leak(Box::new(index)),
+            Err(rejections) => {
+                failures.push(format!(
+                    "{}'s excluded roots: {}",
+                    src.package,
+                    bt_source::report(&rejections)
+                ));
+                continue;
+            }
+        };
+        let excluded_src = Src {
+            package: src.package,
+            index,
+        };
+        for target in &excluded {
+            let Some(file) = index.file(&target.file) else {
+                failures.push(format!("{} is not in its own index", target.file.display()));
+                continue;
+            };
+            checked += 1;
+            let forms = leading_inner_attributes(&excluded_src, file)
+                .into_iter()
+                .filter(|(_, body)| body == EXCLUDED_ROOT_FORM)
+                .count();
+            if forms != 1 {
+                failures.push(format!(
+                    "{} ({}) carries `#![allow(clippy::disallowed_methods)]` {forms} times in its \
+                     leading inner-attribute block, where an excluded root carries it once",
+                    target.file.display(),
+                    target.id
+                ));
+            }
+        }
+    }
+    if checked == 0 {
+        failures.push("no excluded root was read: this reads nothing".into());
     }
     failures
 }
@@ -3066,7 +3303,7 @@ fn every_entrance_left_the_vocabulary_takes_its_capability(world: &World) -> Vec
 fn every_door_is_where_the_registry_says() {
     let world = World::new();
     let words = vocabulary();
-    let assertions: [(&str, Vec<String>); 10] = [
+    let assertions: [(&str, Vec<String>); 11] = [
         (
             "the_universe_is_the_product_and_its_tools_are_declared",
             the_universe_is_the_product_and_its_tools_are_declared(&world),
@@ -3106,6 +3343,10 @@ fn every_door_is_where_the_registry_says() {
         (
             "every_entrance_left_the_vocabulary_takes_its_capability",
             every_entrance_left_the_vocabulary_takes_its_capability(&world),
+        ),
+        (
+            "every_excluded_root_carries_the_unconditional_form",
+            every_excluded_root_carries_the_unconditional_form(&world),
         ),
     ];
     let mut report = String::new();

@@ -59,6 +59,8 @@
 //! then sends the chosen item's action — asked of this process's own delegate
 //! and this process's own items. What a human should look for is in §13.50 ⑥.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(target_os = "macos")]
 mod mac {
     use std::io::Write as _;

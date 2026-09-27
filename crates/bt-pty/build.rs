@@ -8,6 +8,8 @@
 //! `cargo:<key>=<path>` printed below reach `bt-app`'s build script as `DEP_CONPTY_<KEY>`, which
 //! hashes the two files into the release manifest `folio.exe` carries (0.4.6 ticket U-9).
 
+#![allow(clippy::disallowed_methods)]
+
 use std::{env, fs, path::Path, process};
 
 #[path = "src/conpty_sidecar.rs"]

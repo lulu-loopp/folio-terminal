@@ -47,6 +47,8 @@
 //! ordinary `cargo test -p bt-platform` on the Mac runs this binary, prints
 //! three lines and exits. No new `BT_…` name is introduced.
 
+#![allow(clippy::disallowed_methods)]
+
 // ── ② the instrument, and it is arithmetic ─────────────────────────────────
 
 /// One row of the window server's on-screen list, in the two fields that decide

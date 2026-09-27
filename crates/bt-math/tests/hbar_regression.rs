@@ -3,6 +3,8 @@
 //! `\hbar` failed to compile and stayed source on screen (Codex CLI Schrödinger example,
 //! 2026-07-24). The template shadows `planck` with a symbol that restores the `reduce` variant.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::num::NonZeroU32;
 
 use bt_math::{MathEngine, MathMode, MathRenderKey};

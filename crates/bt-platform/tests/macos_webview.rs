@@ -69,6 +69,8 @@
 //! System Events, Accessibility or Automation — every step is a call into this
 //! process's own objects.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(target_os = "macos")]
 mod mac {
     use std::ffi::c_void;

@@ -12,6 +12,8 @@
 //! test exists to catch (`docs/CONVENTIONS.md` §三 "默认值会掩盖 bug") — every
 //! field below carries a non-default, distinguishable value.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::path::PathBuf;
 
 use bt_persist::{

@@ -1,6 +1,8 @@
 //! `admission::enter_standalone_main` — once per process, so it is proved in a process of its own
 //! (design note 2026-09-26, revision (d)1: this target holds nothing else).
 
+#![allow(clippy::disallowed_methods)]
+
 use bt_platform::admission::{self, Role};
 
 /// RED (A1a, revision (c)6) — **a standalone process's main thread becomes a worker once: the

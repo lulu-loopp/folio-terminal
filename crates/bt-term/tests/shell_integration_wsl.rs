@@ -36,6 +36,8 @@
 //! `crates/bt-app/src/shell_integration.rs` and requires every one of them to be
 //! in it, character for character.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::{
     ffi::OsString,
     path::{Path, PathBuf},

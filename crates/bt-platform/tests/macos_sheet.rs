@@ -49,6 +49,8 @@
 //! ④ `cancel:` — the panel's own action, so no key is posted and no
 //!    Accessibility grant is needed — lands as `Ok(None)`, once.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(target_os = "macos")]
 mod mac {
     use std::ptr::NonNull;

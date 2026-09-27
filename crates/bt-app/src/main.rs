@@ -15,6 +15,7 @@
 // `%APPDATA%\Folio\` and lets the console go, unless the run named the console
 // itself by setting one of the `BT_…TRACE…` switches.
 #![windows_subsystem = "windows"]
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
 
 use std::{
     backtrace::Backtrace,

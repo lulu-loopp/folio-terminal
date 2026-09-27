@@ -8,6 +8,8 @@
 //! Nothing here is a repair. Restoring `\;` from a bare `;` would be a content guess, because
 //! `f(x; \theta)` is legitimate math; the terminal's job is to render faithfully what arrived.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::num::NonZeroU32;
 
 use bt_math::{MathEngine, MathMode, MathRenderKey};

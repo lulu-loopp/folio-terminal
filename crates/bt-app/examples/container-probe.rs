@@ -37,6 +37,8 @@
 //! is the thing this ticket exists to stop. With the gate here, both platforms
 //! compile this file and each gets the half that is true of it.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(windows)]
 use std::path::Path;
 #[cfg(windows)]

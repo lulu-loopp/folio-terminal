@@ -1,3 +1,4 @@
+#![allow(clippy::disallowed_methods)]
 // Throwaway ground-truth simulator for the scroll-strand frozen scheduling.
 // Replicates session.rs schedule_detection/schedule_scan using only public bt-detect APIs.
 use bt_detect::{

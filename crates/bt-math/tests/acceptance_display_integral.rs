@@ -21,6 +21,8 @@
 //! carries its two limits above and below the middle of the operator. Both of
 //! those are measured here.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::num::NonZeroU32;
 
 use bt_math::{MathEngine, MathMode, MathRenderKey};

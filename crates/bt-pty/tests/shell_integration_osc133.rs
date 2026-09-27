@@ -32,6 +32,7 @@
 //! either.
 
 #![cfg(windows)]
+#![allow(clippy::disallowed_methods)]
 
 use std::{
     num::{NonZeroU16, NonZeroU32},

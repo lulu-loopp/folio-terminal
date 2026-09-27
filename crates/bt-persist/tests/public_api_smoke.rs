@@ -3,6 +3,8 @@
 //! write-then-read, the sentinel lifecycle, and the debounce/write-failure
 //! helpers composed together the way a real call site would.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};

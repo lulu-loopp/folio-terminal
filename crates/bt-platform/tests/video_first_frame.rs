@@ -40,6 +40,8 @@
 //! so that the next person to change either arm can see the number move before
 //! the assertion catches it.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::path::{Path, PathBuf};
 
 use bt_platform::video::{VideoFrame, decode_first_frame_measured, first_frame};

@@ -2,6 +2,8 @@
 //! `read_session`), plus §5.4-case-3 per-leaf degradation with real illegal
 //! data (not just the generic fixture type `migrate.rs`'s unit tests use).
 
+#![allow(clippy::disallowed_methods)]
+
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 

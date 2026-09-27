@@ -19,6 +19,8 @@
 //! either half turns this file red rather than leaving it quietly testing a
 //! string nothing ships.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::{
     path::{Path, PathBuf},
     process::Command,

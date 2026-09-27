@@ -58,6 +58,8 @@
 //! Every one of ③–⑥ is sent by a process this file started, from a bundle this
 //! file's launcher built, and no pid it did not start is ever looked at.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(target_os = "macos")]
 mod mac {
     use std::io::Write as _;

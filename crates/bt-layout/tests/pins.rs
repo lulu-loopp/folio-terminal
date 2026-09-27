@@ -5,6 +5,8 @@
 //! These live in `tests/` so they can only reach the public API — the same
 //! physical enforcement CONVENTIONS §three asks of the gate tests.
 
+#![allow(clippy::disallowed_methods)]
+
 use bt_layout::{
     Axis, AxisSet, COLLAPSED_EXTENT, DIVIDER, Edit, EditError, ExtentClass, FILES_W, FILES_W_MIN,
     KindMetrics, Landing, LayoutError, LayoutMode, LayoutNode, LogicalPx, LogicalRect, LogicalSize,

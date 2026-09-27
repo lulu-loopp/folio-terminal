@@ -53,6 +53,8 @@
 //! Automation, which X-4 measured as a TCC prompt nobody in an ssh session can
 //! reach. §13.30 writes the human procedure down instead.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(target_os = "macos")]
 mod mac {
     use std::io::Write as _;

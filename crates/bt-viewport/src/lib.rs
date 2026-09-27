@@ -1,5 +1,7 @@
 //! Per-viewport projection, layout cache and scroll anchoring.
 
+#![cfg_attr(test, allow(clippy::disallowed_methods))]
+
 mod height_tree;
 pub mod horizontal;
 pub mod trace;

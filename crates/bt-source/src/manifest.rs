@@ -12,12 +12,12 @@
 //! the instance that made the point, and the guard
 //! `bt_platform::native_window_door_tests::a_stand_in_window_is_only_named_by_tests`
 //! covers those targets today because its walk happens to reach them. So the
-//! three target kinds this crate knows are the three a source guard can care
-//! about: the library, every binary, and every integration test.
-//!
-//! **Benchmarks and examples are deliberately absent.** No reader in this
-//! workspace has a universe that contains one, P1a's ticket names exactly the
-//! three kinds above, and a target kind nobody asks for is a rule nobody checks.
+//! target kinds this crate knows are the ones a source guard can care about: the
+//! library, every binary, every integration test — and, since A2a, every example,
+//! benchmark and build script, because the window-thread guard's excluded roots
+//! (thread-door note, revision (j)2) are exactly those compilations and a reader
+//! that did not know them could not say which roots are excluded. None of the
+//! three is in a build of the shipped program.
 //!
 //! The manifest reader below understands the small part of TOML that cargo's
 //! target discovery is written in and **refuses the rest** rather than guessing.
@@ -38,13 +38,19 @@ pub enum TargetKind {
     /// `tests/…`, or whatever a `[[test]] path` names. Its root module is test
     /// code by construction — there is no build of the product that contains it.
     IntegrationTest,
+    /// `examples/…`, or whatever an `[[example]] path` names.
+    Example,
+    /// `benches/…`, or whatever a `[[bench]] path` names.
+    Bench,
+    /// `build.rs`, or whatever `[package] build` names: cargo's `custom-build`.
+    BuildScript,
 }
 
 impl TargetKind {
     /// Whether a build of the shipped program can contain this target at all.
     #[must_use]
     pub fn permits_product(self) -> bool {
-        !matches!(self, Self::IntegrationTest)
+        matches!(self, Self::Library | Self::Binary)
     }
 }
 
@@ -62,6 +68,9 @@ impl std::fmt::Display for TargetId {
             TargetKind::Library => "lib",
             TargetKind::Binary => "bin",
             TargetKind::IntegrationTest => "test",
+            TargetKind::Example => "example",
+            TargetKind::Bench => "bench",
+            TargetKind::BuildScript => "custom-build",
         };
         write!(formatter, "{}:{kind}:{}", self.package, self.name)
     }
@@ -220,6 +229,8 @@ fn read_package(directory: &Path) -> Result<Package, Rejection> {
     for (section, kind) in [
         ("bin", TargetKind::Binary),
         ("test", TargetKind::IntegrationTest),
+        ("example", TargetKind::Example),
+        ("bench", TargetKind::Bench),
     ] {
         for table in document.tables(section) {
             let Some(path) = table.string("path") else {
@@ -257,6 +268,30 @@ fn read_package(directory: &Path) -> Result<Package, Rejection> {
         for (target, file) in roots_under(&directory.join("tests")) {
             claim(TargetKind::IntegrationTest, target, file);
         }
+    }
+    if document.boolean("package", "autoexamples") != Some(false) {
+        for (target, file) in roots_under(&directory.join("examples")) {
+            claim(TargetKind::Example, target, file);
+        }
+    }
+    if document.boolean("package", "autobenches") != Some(false) {
+        for (target, file) in roots_under(&directory.join("benches")) {
+            claim(TargetKind::Bench, target, file);
+        }
+    }
+    // The build script: `build = "path"`, or `build.rs` beside the manifest unless
+    // `build = false`. Cargo names its target `build-script-build`.
+    let build = match document.string("package", "build") {
+        Some(path) => Some(directory.join(path)),
+        None if document.boolean("package", "build") == Some(false) => None,
+        None => Some(directory.join("build.rs")).filter(|file| file.is_file()),
+    };
+    if let Some(file) = build {
+        claim(
+            TargetKind::BuildScript,
+            "build-script-build".to_owned(),
+            file,
+        );
     }
 
     let mut targets: Vec<TargetRoot> = targets.into_values().collect();

@@ -29,6 +29,8 @@
 //! machine is asked it. It is `#[ignore]`d because it is a measurement rather
 //! than a gate: run it on both machines and diff the transcript.
 
+#![allow(clippy::disallowed_methods)]
+
 use bt_math::{
     MathEngine, MathMode, MathRaster, MathRenderKey, TypesetRun, device_px_per_pt, key_for_em_px,
 };

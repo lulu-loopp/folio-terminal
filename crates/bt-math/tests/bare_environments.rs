@@ -11,6 +11,8 @@
 //! document's language, and what happens when the engine says no is §7.1.3i′⑩: the author's own
 //! text stands, unmarked.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::num::NonZeroU32;
 
 use bt_math::{MathEngine, MathMode, MathRenderKey};

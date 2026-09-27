@@ -24,6 +24,8 @@
 //! other line at its first `//` — which mangles a line holding a URL inside a
 //! string.
 
+#![allow(clippy::disallowed_methods)]
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::PathBuf;

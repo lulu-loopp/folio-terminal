@@ -62,6 +62,8 @@
 //! redraw at a time**, because a window that stops drawing is a window the
 //! server stops compositing, which is a photograph of nothing.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(target_os = "macos")]
 mod mac {
     use std::path::{Path, PathBuf};

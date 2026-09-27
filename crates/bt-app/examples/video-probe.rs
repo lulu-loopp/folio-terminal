@@ -39,6 +39,8 @@
 //! `--all-targets` rather than compiled — which would let the Mac's check pass
 //! by not looking at the file at all.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(windows)]
 use std::path::PathBuf;
 #[cfg(windows)]

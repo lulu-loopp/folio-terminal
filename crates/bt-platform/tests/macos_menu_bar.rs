@@ -58,6 +58,8 @@
 //!    AppKit asks the *application delegate* for it, which needs a winit event
 //!    loop and a bundle — `tests/macos_dock_menu.rs`.
 
+#![allow(clippy::disallowed_methods)]
+
 #[cfg(target_os = "macos")]
 mod mac {
     use std::sync::{Mutex, PoisonError};
