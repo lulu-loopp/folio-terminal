@@ -3413,6 +3413,15 @@ pub mod exclusive_create;
 /// carries (0.4.6 ticket U-14; revision (b) F-4).
 pub mod pe_resource;
 
+/// **Is a downloaded `folio.exe` or `folio.msix` the same publisher's Folio** —
+/// the Windows identity check of the self-updater and the running build's
+/// capability (0.4.6 ticket U-15; `docs/plans/design/self-update-2026-09-16.md`
+/// §E, C8, revision (b) F-5, E-6, E-13): `WinVerifyTrust`, a required RFC 3161
+/// time stamp, revocation with "unknown" refused, the leaf's identity OID and
+/// subject equal to the running build's, `VERSIONINFO` and machine equal to the
+/// offer's. In process, no child; worker only. Refused by name off Windows.
+pub mod trust;
+
 /// **The effects of an update transaction** — durable writes and moves, the
 /// registry flush and the two locks on the installation home (ticket U-11;
 /// `docs/plans/design/self-update-2026-09-16.md` revision (b), §(b).2, F-6,

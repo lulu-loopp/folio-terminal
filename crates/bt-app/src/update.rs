@@ -2193,4 +2193,73 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&root);
     }
+
+    /// PIN (U-15) — **the updater's trust door opens no system certificate
+    /// store and installs nothing**: in `bt-platform`'s product code
+    /// `CertOpenStore` is called only by `trust`'s `Store::memory` (a memory
+    /// store), a certificate or revocation list is added only to the memory
+    /// stores `trust` makes for its own use, and nothing names a system,
+    /// registry, file or physical store provider, `CertOpenSystemStore`,
+    /// `PFXImportCertStore` or `CertSaveStore`.
+    ///
+    /// The exclusive-root engine of the tests (E-13) is the reason a test
+    /// certificate can validate at all; this is what keeps "without touching
+    /// the machine store" true by construction rather than by care.
+    /// `bt_platform::trust`'s `the_machine_store_is_never_written` checks the
+    /// same thing from the other side, on the machine.
+    ///
+    /// MUTATION: open `CERT_STORE_PROV_SYSTEM_W` in `trust::arm::Store` and the
+    /// forbidden list names it.
+    #[test]
+    fn the_trust_door_opens_no_system_certificate_store() {
+        use bt_source::{Index, Pattern, Search, View, needle};
+        let platform = Index::of_package("bt-platform");
+        let owners_of = |name: &str| -> Vec<String> {
+            let found = platform
+                .search(&Search::new(
+                    needle!(Pattern::path(name)),
+                    View::Identifiers,
+                ))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+                .in_the_product(platform);
+            let mut owners: Vec<String> = found
+                .owners(platform)
+                .into_keys()
+                .map(|identity| identity.to_string())
+                .collect();
+            owners.sort();
+            owners
+        };
+        assert_eq!(
+            owners_of("CertOpenStore"),
+            vec!["crate::trust::arm::Store::memory".to_owned()],
+            "a certificate store is opened only as a memory store"
+        );
+        assert_eq!(
+            owners_of("CertAddEncodedCertificateToStore"),
+            vec!["crate::trust::arm::Store::of_certificates".to_owned()],
+        );
+        assert_eq!(
+            owners_of("CertAddEncodedCRLToStore"),
+            vec!["crate::trust::arm::Engine::of".to_owned()],
+        );
+        for forbidden in [
+            "CertOpenSystemStoreW",
+            "CertOpenSystemStoreA",
+            "CERT_STORE_PROV_SYSTEM",
+            "CERT_STORE_PROV_SYSTEM_W",
+            "CERT_STORE_PROV_SYSTEM_A",
+            "CERT_STORE_PROV_SYSTEM_REGISTRY_W",
+            "CERT_STORE_PROV_REG",
+            "CERT_STORE_PROV_FILENAME_W",
+            "CERT_STORE_PROV_FILE",
+            "CERT_STORE_PROV_PHYSICAL_W",
+            "CertAddCertificateContextToStore",
+            "CertAddEncodedCertificateToSystemStoreW",
+            "PFXImportCertStore",
+            "CertSaveStore",
+        ] {
+            assert_eq!(owners_of(forbidden), Vec::<String>::new(), "{forbidden}");
+        }
+    }
 }

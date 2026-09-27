@@ -1010,7 +1010,19 @@ windows = { version = "0.62.2", features = [
     # `ConvertStringSecurityDescriptorToSecurityDescriptorW` and
     # `ConvertSidToStringSidW`: SDDL in, kernel descriptor out.
     "Win32_Security_Authorization",
+    # The updater's Windows identity check (0.4.6 U-15, `src/trust.rs`):
+    # `WinVerifyTrust` and its provider data (`WinTrust`, whose provider
+    # structures are gated on `Catalog` and `Sip` as well), and the chain,
+    # time-stamp and name calls of `Cryptography`. Features, not packages:
+    # `windows` is already here.
+    "Win32_Security_Cryptography",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
     "Win32_Storage_FileSystem",
+    # `folio.msix`'s manifest, read by the package reader Windows itself uses
+    # (U-15: its `Publisher`, version and architecture).
+    "Win32_Storage_Packaging_Appx",
     "Win32_System_Com",
     # `CreateStreamOnHGlobal`: the buffer `ICoreWebView2::CapturePreview` writes
     # a page's picture into (W2 slice 6). A memory stream and not a file, because
