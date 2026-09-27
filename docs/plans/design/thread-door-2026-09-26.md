@@ -5257,3 +5257,891 @@ the recommendation.
    `svg_document_options` on `bt-math-worker` at start, the chrome's first marks drawn without fonts until it lands;
    (ii) keep first use where it falls, admitted. **Recommend (i) for the content reads, in the release after A2**,
    and **(ii) for SVG** until a measurement says the ~100 ms first use is felt.
+
+## Revision 2026-09-27 (m), after the Codex review of (l): the shared operations' graphs published, the interim `file_reads` census closed, and five owner prerequisites carried
+
+**Read against** `847b65c3` (`origin/main` when this revision was written: U-20, the Windows Prepare, and U-29,
+the macOS rollback, merged since (l)'s `0a176ed3`). The review is
+`trace/tickets-046/thread-door-review-codex-2026-09-27-l.md` (verdict *not yet*: do not brief A2s and A2b1 from
+(l) unchanged; findings 12–13 block them; 14–18 are prerequisites of later owner tickets). **Scope, by the
+coordinator's ruling for this round, kept narrow:** (m)1 resolves finding 12 and (m)2 finding 13 completely;
+(m)4 carries findings 14–18 into the briefs of the tickets that own them as dated prerequisites, without
+redesigning them here; (m)5 settles the five registry rows' wording. (l) stays as written; where (m) says
+"amends (l)n", the (m) text holds.
+
+**What moved on `main` since (l), and what it changes here.** U-29 added a fifth standalone entry
+(`update_recover::run_here` → `enter_standalone_main("folio-update-recover")`), so the pin (l)6 counted as four
+is five on `847b65c3` (`window_waits_tests.rs`, `PINS`); (m)2.3 builds on five. U-20 gave `update_archive::expand`,
+`declared_bytes`, `trust`'s four `opaque` reads, `trust_windows::machine`, `pe_resource::read_rcdata` and
+`update_prepare_windows`'s copy a product caller on `bt-update-job` (in (k)8 they had none); they are worker
+reads and are in (m)2's census. Neither ticket added an inventory row or a registry line outside a door (the
+gate's count is in the last paragraph).
+
+**What this commit changes outside this note.** Registry rows 25, 26 and 27 of `crates/bt-app/src/window_waits.tsv`
+take the dispositions of (m)5 (row 26 becomes definite; rows 25 and 27 name what D-80's ticket inherits; row 27's
+deadline wording is corrected); `docs/plans/structural-debt.md`'s D-80 row records that inheritance as a scope
+extension; `docs/DESIGN.md` gains one dated entry; `docs/ARCHITECTURE.md` §5.3's generated table follows the
+registry. No door type, no `# doors` line, no `# effects` line and no code.
+
+### (m)1 · Finding 12 — one shape for every shared operation: two by-value roots, a borrowed leg, a closed graph
+
+**Amends (l)1's R3 and its "`file_reads`' owner half" paragraph, (l)6's `write_here` entrances and (l)7's two
+whole-read entrances.** The review is right that (l) asked A2s to enforce two contracts at once: R3's "one private
+effect function, exactly two callers, the owner entrance taking `WaitToken<D>` by value", and signatures that
+break it — `file_reads`' generated per-identity forwards into one counted body (more than one owner entrance),
+`stderr_line_owned(&WaitToken<'_, doors::DiagnosticWrite>, …)` and the `StoreOpen`/`MarksInstall` whole-read
+entrances taking `&WaitToken` (borrowed, not consumed) — and that the source's shared operations are graphs, not
+leaves (`atomic_write` → `write_temp`, `commit_rename`; `preserving_replace` → `bt_platform::replace_file_preserving`
+→ `replace_file_preserving_with` with `rename_path` passed as a value; `TraceFile::append` → `open`;
+`write_here` → `append`; `profile_marks::lock` → `OurTurn::take`). R1, R2 and R4 stand; R3 is replaced by R3′.
+
+**R3′ · A shared operation is a closed graph entered through two by-value roots.**
+
+- **The leg.** `bt_platform::admission` gains one type, `Leg<'a, D: Door>`, with two private arms —
+  `Owner(WaitToken<'a, D>)` and `Worker(&'a WorkerCtx)` — and exactly two constructors, which are the
+  operation's **two typed roots**: `Leg::owner(token: WaitToken<'a, D>) -> Leg<'a, D>` (the owner token taken
+  **by value**, so one admission roots one leg) and `Leg::worker(ctx: &'a WorkerCtx) -> Leg<'a, D>` (the worker
+  context, which no code owns: the thread door and `enter_standalone_main` lend it). `Leg` is `!Send`/`!Sync`
+  (both arms are), cannot outlive the admission's fresh `'scope` or the worker's borrow, and is not
+  `Clone`. It is generic over `D` only as a type constructor: **every parameter that takes a leg names one
+  concrete door** (`&Leg<'_, doors::DurableWrite>`), so an `&Leg<'_, doors::FontFamilyLookup>` does not type
+  where a `DurableWrite` leg is wanted — C-5's operation-specific authorisation, which (l)1 kept, holds; no trait
+  bound and no `impl Authority` returns. `leg.arm()` answers `Arm::Owner(&WaitToken<'_, D>)` or
+  `Arm::Worker(&WorkerCtx)` for the one thing a graph body needs the arm for (below).
+- **Roots, helpers, and the one uniform distinction.** A **root** is a function whose capability parameter is
+  owned: `WaitToken<'_, D>` by value (an R2 owner-only entrance) or the `Leg` it builds at once, and on a worker
+  the `&WorkerCtx` it was lent. A **helper** is every other function of an operation's graph: it takes
+  `&Leg<'_, D>` (a shared graph) or `&WaitToken<'_, D>` (an R2 owner-only graph) — borrowed, always. A leg is
+  built in exactly one statement, at the root: on the owner, as the first expression inside the identity's
+  `admitted::<D>` closure at one of `D`'s listed mint sites (`admitted::<doors::DurableWrite>(|t|
+  bt_persist::atomic_write(&Leg::owner(t), path, bytes))`); on a worker, from the context the body was lent
+  (`atomic_write(&Leg::worker(ctx), …)`). The rule is the same for whole reads and for tracing ((m)1.2, (m)1.3).
+- **The graph is closed and published.** Each shared operation S1–S19 is listed below ((m)1.4) as its set of
+  helpers, per `cfg` arm: every function that holds a counted site or calls one, with the sites, the internal
+  edges (function-value edges included) and the calls that leave the graph. **Every counted body's callers are
+  inside its graph**, and every helper takes `&Leg<'_, D>` for the graph's `D`. A caller outside the graph
+  reaches it only through a helper the table marks as a **verb** (a public entry of the graph), passing a leg.
+- **Crossing into another operation.** A helper that uses a second shared operation branches on its leg:
+  `Arm::Owner(_)` mints the second operation's identity nested (R4) at that call and builds its leg there;
+  `Arm::Worker(ctx)` builds the second operation's leg from the same `ctx`. Minting the same identity nested
+  (a `DiagnosticWrite` helper that also writes to the console) is allowed by `admitted` and counted once by
+  A3's meter (`hang_watch::accounting::tests::nested_admitted_calls_count_the_union_once`).
+- **Duplication instead of a leg** where the shared body is one small lexical site and the two roads differ:
+  the emergency panic copies ((l)5), and the owner sleeps ((l)1: each owner sleep is its identity's own one-line
+  R2 body; `wait::sleep_within` stays worker-only and is never widened).
+
+**What the guard checks (A2s's schema, replacing (l)1's items 1–3; items 4 and 5 stand):**
+
+1. **Roots.** `Leg::owner` is called only as the leg-building expression inside an `admitted::<D>` closure at a
+   mint site listed on `D`'s `# doors` line; `Leg::worker` only with a context in scope (a thread-door closure's
+   parameter, an `enter_standalone_main` closure's, or a `&WorkerCtx` parameter). A leg is never returned, stored
+   in a field, sent, or captured by a closure that escapes (item 4's rule applied to the leg).
+2. **Closed graph.** For each `shared-body` `# effects` row, the function's callers (through `bt_source`, across
+   crates, per `cfg` arm) are exactly the graph's helpers of (m)1.4 plus, for a verb, the callers the table lists
+   as outside callers; its leg parameter's `D` is the row's door. A third outside caller of a non-verb helper, a
+   helper without a leg parameter, or a leg of another `D` is red. The lists live in the registry: a new
+   `# graphs` section, one line per shared operation (`S#`, door, verbs, helpers per arm, outside callers), which
+   A2s creates empty and each converting ticket appends in (l)8's owner-side order.
+3. **Monomorphic.** Each `shared-body` row's authority cell reads `Leg<doors::D>` (both roots); an R2 row's reads
+   `WaitToken<doors::D>`; a worker family door's `WorkerCtx`. Never a trait.
+4. As (l)1 item 4 (no deferred effect), extended to the leg.
+5. As (l)1 item 5 (spawn-closure attribution).
+
+#### (m)1.2 · `file_reads` is a multi-owner primitive with a closed entrance set
+
+`file_reads` is not an operation of one identity: fifteen reading identities, `GpuOpen`, `SvgFontsFirstUse` and
+every worker lane reach it. It is therefore declared what it is — **a multi-owner primitive** — and the guard
+checks its entrance set, not a count of two.
+
+- **The private counted bodies** (bt-platform, private): `read_counted(lane, path) -> io::Result<Vec<u8>>`
+  (today's `read`), `open_counted<'p>(lane, path: &'p Path) -> io::Result<Reader<'p, File>>` (today's `open`),
+  `wrap_counted<'p, R>(inner: R, lane, path: Option<&'p Path>) -> Reader<'p, R>` (today's `Reader::new`), and
+  `opaque_counted`/`pipe_counted` (today's `opaque`/`pipe_output`).
+- **Its entrance set, closed:** (i) the **worker forms**, each taking `&'w WorkerCtx` — `read`, `read_to_string`,
+  `open(ctx: &'w WorkerCtx, lane, path: &'w Path) -> io::Result<Reader<'w, File>>`, `Reader::on_worker(ctx:
+  &'w WorkerCtx, inner, lane, path) -> Reader<'w, R>`, `opaque`, `pipe_output` — a worker may stream: its
+  `Reader` borrows its context and cannot leave the worker body; (ii) the **owner table**, generated by one macro
+  from one list of rows `(identity D, form, allowed caller items)`: one monomorphic function per row, taking
+  `&WaitToken<'_, doors::D>` — borrowed, because a `file_reads` owner form is always a helper below the
+  identity's root or a leg's `Arm::Owner` — and returning **owned data only**: `read -> Vec<u8>`,
+  `read_to_string -> String`, `read_capped(cap) -> Result<Vec<u8>, Capped>` (stat-free: `open_counted` then
+  `take(cap + 1).read_to_end`, the drain `migrate::read_bounded` does today), `drain(file: File, cap:
+  Option<u64>) -> io::Result<Vec<u8>>` (wraps a file the caller opened with its own `OpenOptions` — the share
+  mode `read_profile_for_edit` needs — and drains it inside), `opaque`. **No owner form returns a `Reader`, a
+  `File` or an iterator.** (iii) During A2b1–A2e only, the **retained capability-free forms** under (m)2's
+  census.
+- **What the guard checks:** the private counted bodies' callers are exactly (i) ∪ (ii) ∪ (iii); each owner
+  form's callers are exactly the items its row lists, each of which is in `D`'s graph (reached from `D`'s root);
+  the table's identities are exactly the `# doors` identities whose `# effects` name a content read; (iii) only
+  shrinks and is empty at A2e.
+- **The private `open`/`Reader` route**, so both shapes exist without a third kind of entrance: owned whole reads
+  go `owner form → open_counted`/`wrap_counted` → drained inside the form; worker streaming goes `worker form →
+  open_counted`/`wrap_counted` → returned under the context's `'w`. `Reader<'a, R>`'s lifetime is the one it has
+  today (the path's borrow), tied on the worker road to the context's.
+
+#### (m)1.3 · Whole reads and tracing under R3′
+
+- **`migrate::read_bounded`** becomes S3's helper `read_bounded(leg: &Leg<'_, doors::StoreOpen>, path, cap)`:
+  its stat (row 101) stays its own site; its content read branches — `Arm::Owner(t)` →
+  `file_reads::owned::store_open::read_capped(t, Lane::Settings, path, cap)`, `Arm::Worker(ctx)` →
+  `file_reads::open(ctx, …)` and the same drain. It returns the owned `Vec<u8>`; no reader leaves it.
+- **`shell_integration::read_profile_for_edit`** becomes S7's helper `read_profile_for_edit(leg: &Leg<'_,
+  doors::MarksInstall>, profile)`: it opens with its own `OpenOptions` (share mode on Windows) and branches —
+  `Arm::Owner(t)` → `file_reads::owned::marks_install::drain(t, file, Lane::Settings, profile, None)`,
+  `Arm::Worker(ctx)` → `Reader::on_worker(ctx, file, …)` drained in place. It returns owned bytes.
+- **The owner's whole reads outside a shared graph** (the five content-read identities of (l)3, `probe_input`,
+  `update_startup`'s reads) take their identity's token by value at their root and call the owner form with
+  `&token`.
+- **Tracing.** `trace_sink::stderr_line_owned` and `file_line_owned` are withdrawn as names; the S12 roots are
+  the leg constructors, and the window thread writes a line as `admitted::<doors::DiagnosticWrite>(|t|
+  trace_sink::say(&Leg::owner(t), line))`, a worker as `trace_sink::say(&Leg::worker(ctx), line)`. `say` and
+  `say_to_file` are S12's two verbs; `write_here`, `TraceFile::open` and `TraceFile::append` are its private
+  helpers, each taking `&Leg<'_, doors::DiagnosticWrite>`. The same holds for S13's and S17's verbs
+  (`bt_platform::write_std_error(leg, …)`, `bt_platform::write_to_console(leg, …)`). `report_frame_shape_stop`
+  is not a root of its own: `FolioApp::fail` mints `DiagnosticWrite` once, builds the leg, and passes `&leg` to
+  it; it calls S12's `say_to_file` and the ordinary `announce_stop`, which calls S17's verb, both with that leg.
+  The queue-only road (`offer_line`) stays capability-free ((l)6). `trace_sink::ProcessStderr`'s `Write` impl —
+  the worker's trait-mediated write — gets its context from a field: `ProcessStderr<'w> { leg: Leg<'w,
+  doors::DiagnosticWrite> }`, built by `run_to`'s caller inside the writer thread's closure from its
+  `&WorkerCtx`, so a role alone supplies nothing.
+
+#### (m)1.4 · The nineteen graphs, per function and per arm
+
+Read on `847b65c3`. For each shared operation: its door `D` (the leg's type argument), where its functions live,
+the **verbs** (the graph functions an outside caller may call, each taking `&Leg<'_, D>`), the **helpers** per
+`cfg` arm with their counted sites (inventory row ×lexical n) and their internal edges, the **crossings** into
+another operation (each a nested mint on the owner arm, a leg from the same context on the worker arm), and the
+**roots** — the owner mint sites where `Leg::owner` is built (by the identity named) and the worker bodies where
+`Leg::worker` is built (by thread). Functions of a graph that hold no counted site and call none are not listed;
+a function that holds no site but lies on a path to one is. "Content read" names the `file_reads` form a helper
+calls on each arm ((m)1.2). The ticket is the one that converts the graph ((l)8, as amended by (m)3).
+
+**S1 · the durable write** — `D = DurableWrite`; bt-persist `atomic`, the wrappers in bt-persist `lib`. Ticket
+A2b2a.
+- Verbs: `atomic_write`, `atomic_replace_preserving`, `atomic_replace_keeping_metadata`, and the wrappers
+  `write_{settings,keybindings,profiles,pins,update_check,session}_atomic` (each one `atomic_write`; the session
+  wrapper has no product caller today and keeps the leg shape for its tests).
+- Helpers [all]: `atomic_write` → `write_temp` (row 98 `sync_all` ×1) and `commit_rename` (row 97 `rename`
+  ×1); `atomic_replace_preserving` → `preserving_replace` → `write_temp`, then S2's
+  `bt_platform::replace_file_preserving`; `atomic_replace_keeping_metadata` → `can_be_preserved` (no site),
+  `preserving_replace`, and on `VolumeCannot` or an unpreservable file `atomic_write_carrying` → `write_temp`,
+  S2's `bt_platform::carry_metadata`, `commit_rename`. `temp_sibling_path`, `unique_suffix`,
+  `may_be_written_the_plain_way` hold no site and stay leg-free. `write_temp`'s `#[cfg(unix)]` mode statement is
+  inside one item: one row, arm `all`.
+- Crossings: none (S2 is the same operation's platform half, below).
+- Owner roots (`DurableWrite`, nested): `SettingsStore::write_now`, `KeybindingsStore::write_now`,
+  `ProfilesStore::write_now` (persist), `PinsStore::write_now` (pins), `OfferState::transact` on its window
+  roads (`mark_seen` ← `answer_mark`; `skip`) and `OfferState::release_trial`,
+  `Runtime::export_settings_to`, `Runtime::import_schemes`, `PreviewBuffer::save` (`atomic_replace_keeping_metadata`),
+  and — inside other graphs, through their crossings — S6's `Marks::write`, S7's `replace_profile`, S10's
+  `Config::land`.
+- Worker roots: `SessionWriter::start`'s closure (`session-writer`); `OfferState::transact` on
+  `bt-update-check`; S6/S7/S10's worker arms (`powershell-profile-{migration,enable,removal}`,
+  `--remove-shell-integration`, `--uninstall-cleanup`).
+
+**S2 · the durable write's platform half** — same `D = DurableWrite` and the same leg (it is S1's graph
+continued across the crate edge; the leg type lives in `bt_platform::admission`, so bt-persist passes it
+through). bt-platform `file_replace`. Ticket A2b2a.
+- Verbs (called only from S1's helpers — the guard holds their outside-caller set **empty**):
+  `replace_file_preserving`, `carry_metadata`.
+- Helpers [windows]: `replace_file_preserving` → `replace_file_preserving_with` (row 169 `metadata` ×1), which
+  takes `replace`, `rename` and `link` as values — `replace_file_w`, `rename_path` (row 168 `rename` ×1),
+  `link_path` — and calls `restore_replaced` (→ `rename`, `link`), `retiring` → `retire_recovery`,
+  `set_file_attributes`; `carry_metadata` [windows] (row 167 `metadata` ×1) → `set_file_attributes`. The three
+  function values become closures that pass the leg: `|a, b| rename_path(leg, a, b)`; the test seam that
+  injects them keeps its shape with a test leg.
+- Helpers [unix]: `replace_file_preserving` [not(windows)] → `carry_metadata` [unix] ×2 (row 150 `metadata` ×1
+  in `carry_metadata`), then its own `File::open(temp).sync_all()` (row 118 ×1) and `rename` (row 119 ×1);
+  `carry_metadata` [unix] → `carry_extended_attributes` [macos] / [all(unix, not(macos))] (no counted site; on
+  the path, so it takes the leg). [not(any(windows, unix))]: no site.
+- `file_link_count` and `set_file_attributes` stay public and leg-free where they have no counted site
+  (`file_link_count` is called before any write, from `preserving_replace` and `can_be_preserved`, and by the
+  marks' `refuse_profile_path`): the guard lists them as not in the graph.
+- Roots: S1's only.
+
+**S3 · the store read** — `D = StoreOpen`; bt-persist `migrate`, `lib`, `export`. Ticket A2b2a.
+- Verbs: `read_{settings,session,keybindings,profiles,pins,update_check}` and their `_keeping` forms, and
+  `export::read_export`.
+- Helpers [all]: `read_X_keeping` → `migrate::read_with_fallback` → `read_bounded` (row 101 `metadata` ×1;
+  content read: owner `file_reads::owned::store_open::read_capped`, worker `file_reads::open(ctx, …)` +
+  `take(cap + 1)` drain, (m)1.3), `keep_oversized` (row 99 `rename` ×1, only `Keeping::Now` and too large),
+  `keep_rejected` (row 100 `write` ×1, only `Keeping::Now` and refused) → `rejected_sibling` (stats only, no
+  row); `read_session_keeping` → also `degrade_in_place` (no site); `read_export` → `read_bounded`,
+  `parse_export` (no site).
+- Crossings: none.
+- Owner roots (`StoreOpen`): the six birth opens in `Runtime::create` (`SessionStore::open`,
+  `SettingsStore::open`, `update::load` → `OfferState::load`, `ProfilesStore::open` → `at`, `PinsStore::open` →
+  `at`, `KeybindingsStore::open`), `say_at_the_front_door`'s `SettingsStore::open` (nested under
+  `LaunchHandOver` on the hand-over road), and — nested under `StoreReread` — `ProfilesStore::reread`,
+  `PinsStore::reread`, `Runtime::import_settings_from`'s `read_export`, `OfferState::transact`'s
+  `read_update_check` on its window roads; under `TrialWritesReleased` the `keep` function values the stores
+  handed `update_trial::owe_copy` (`read_settings`, `read_session`, `read_keybindings`, `read_update_check`,
+  `keep_profiles`, `keep_pins`), which become closures taking the leg (see (m)4, A2b2a's prerequisite).
+- Worker roots: `OfferState::transact` on `bt-update-check`; `SettingsStore::open` under `explorer_menu::serve`
+  (`--explorer-command`, standalone); `say_at_the_front_door` on the parse-fault road (standalone front door).
+
+**S4 · the data folder** — `D = StoreOpen`; bt-app `persist::make_data_folder` (row 41 `create_dir_all` ×1;
+the trial's `is_dir` arm has no row). Ticket A2b2a. Verb: itself. Callers: the five store opens (as S3's
+roots, one leg each) — owner under `StoreOpen`, worker under the two standalone roads of S3. `App::release_trial_writes`'s
+own `create_dir_all` (row 2) is `TrialWritesReleased`'s R2 body, not S4.
+
+**S5 · the first ask for the data folder's place** — `D = StorageRelocate`; bt-app `persist`. Ticket A2b2a.
+- Verb: `settle_storage_dir(leg)` (new name for the `OnceLock`'s filling; the only caller of `relocate`).
+  Helper [all, Windows at run time]: `relocate` (row 42 `rename` ×1; its `is_dir`/`exists` are outside the
+  vocabulary). `storage_dir()` stays capability-free and only reads the settled value: every process road that
+  asks for the data folder settles it first — the roots below, which the guard pins as `settle_storage_dir`'s
+  only callers — and a test settles it through a test leg.
+- Owner root (`StorageRelocate`, Starting): `fn main`'s first ask before `take_the_claim`. Worker roots, the
+  standalone entries whose road asks first: `--explorer-command` (`explorer_menu::serve`),
+  `--remove-shell-integration` (`remove_shell_integration`), the front door's parse-fault road
+  (`say_at_the_front_door`). `update_recover::run_here` and `update_apply_macos::run_here` use
+  `storage_dir_unmoved` and stay outside.
+
+**S6 · the marks record** — `D = MarksRecord`; bt-app `shell_integration::profile_marks`. Ticket A2c2b.
+- Verbs: `lock`, `lock_existing`, `Marks::read`, `Marks::write`.
+- Helpers [all]: `lock` (row 72 `create_dir_all` ×1, row 71 `canonicalize` ×1, row 73 `sleep` ×1 — every
+  20 ms up to `OUR_TURN`, 2 s for `Asker::InApp`, none for `Asker::Door`) → `OurTurn::take` (row 70
+  `Condvar::wait` ×1, `InApp` only, no deadline) and `ours()` (no site); `lock_existing` → `lock`;
+  `Marks::read` (content read: owner `file_reads::owned::marks_record::read`, worker `file_reads::read(ctx, …)`);
+  `Marks::write` (row 69 `create_dir_all` ×1). `refuse_profile_path` (stats, `File::open` + link count, outside
+  the vocabulary) stays leg-free. `OurTurn::drop` (a notify) has no site.
+- **The lock outlives the admission, as today.** `lock` returns `MarksLock` (the lock file and the `OurTurn`),
+  which carries no leg and no token; the enclosing install holds it across its own writes after the
+  `MarksRecord` closure has returned. Nothing in A2 shortens that lifetime.
+- Crossings: `Marks::write` → S1's `atomic_write` (`DurableWrite` nested).
+- Owner roots (`MarksRecord`, nested): `profile_runtime::install_recorded` (under `MarksInstall`: two mints —
+  lock, read and first write; then the second write after `add_profile_with_forms` — with the lock held
+  across both); `psreadline::install_recorded`'s `before` closure (under `PsReadLineApply`); 
+  `attention_ownership::record` (under `AgentHooksWrite`; it also crosses into S9, (m)4.3); and — found by this
+  revision — `psreadline::recorded_install`, a `Marks::read` without the lock under `PsReadLineApply`
+  (`upgrade_recorded` → `InstalledBuild::found`).
+- Worker roots: `profile_runtime::operate_with` (`powershell-profile-migration`, `powershell-profile-removal`;
+  `--remove-shell-integration`; `--uninstall-cleanup` through `remove_shell_integration_at`),
+  `profile_runtime::enable_record` (`powershell-profile-enable`), and `uninstall::execute_with_claim`'s
+  `Marks::read` (`--uninstall-cleanup`; no lock, as today).
+
+**S7 · the profile edit** — `D = MarksInstall`; bt-app `shell_integration`, `profile_marks::apply_recorded`,
+`profile_runtime::install_recorded`. Ticket A2c2b.
+- Verbs: `install_into_profile` (owner road), `profile_marks::apply_recorded` (worker road),
+  `read_profile_for_edit`, `replace_profile`.
+- Helpers: `read_profile_for_edit` — [windows] its `OpenOptions` with `share_mode(FILE_SHARE_READ |
+  FILE_SHARE_DELETE)`, [not(windows)] without; both arms then the content read (owner
+  `file_reads::owned::marks_install::drain`, worker `Reader::on_worker` drained in place, (m)1.3);
+  `replace_profile` [all] (row 74 `sync_all` ×1 on the backup copy, row 75 `create_dir_all` ×1 when the profile
+  did not exist) → `read_profile_for_edit` (the changed-under-us check); `add_profile_with_forms` →
+  `read_profile_for_edit`, `replace_profile`; `profile_runtime::install_recorded` → S6's verbs and
+  `add_profile_with_forms`; `install_into_profile` → `script_path_ps1` (S8) and `install_recorded`;
+  `apply_recorded` → `read_profile_for_edit`, `replace_profile`, and its `record_owned` closure (S6's
+  `Marks::write`, passed the caller's leg).
+- Crossings: `replace_profile` → S1 (`atomic_replace_preserving` when a backup was taken, `atomic_write`
+  otherwise; `DurableWrite` nested); `install_recorded` → S6 (`MarksRecord` nested, as above);
+  `install_into_profile` → S8 (`ShellScriptsInstall` nested); `apply_recorded`'s closure → S6.
+- Owner roots (`MarksInstall`): `Runtime::add_to_profile`, `Runtime::spend_powershell_intent` (around
+  `install_into_profile`, as (l)3).
+- Worker roots: `profile_runtime::operate_with` → `apply_recorded` (the migration and removal workers;
+  `--remove-shell-integration`; `--uninstall-cleanup`).
+
+**S8 · the integration scripts** — `D = ShellScriptsInstall`; bt-app `shell_integration`. Ticket A2c2b.
+- Verbs: `install_script_at` (and its `OnceLock` wrappers `script_path`, `script_path_ps1`,
+  `powershell_script_repaired`, which pass the leg into their `get_or_init` closure — called in place, not
+  stored).
+- Helpers [all]: `install_script_at` (content read: owner `file_reads::owned::shell_scripts_install::read_to_string`,
+  worker `file_reads::read_to_string(ctx, …)`; row 65 `create_dir_all` ×1, row 66 `write` ×1, only when stale);
+  `install` → `install_script_at`. `install_zdotdir` (rows 67, 68) is owner-only (R2) and is not in S8's graph.
+- Crossings: none.
+- Owner roots (`ShellScriptsInstall`): `create_leaf_session` around `Scripts::installed()`;
+  `App::release_trial_writes`'s `BashScript`/`ZshScripts` arms; nested under `MarksInstall`
+  (`install_into_profile` → `script_path_ps1`).
+- Worker roots: `powershell-profile-migration` (`operate`'s `discover` → `powershell_script_repaired`).
+
+**S9 · the agent configuration's state** — `D = AgentConfigState`; bt-app `attention_hooks`,
+`attention_codex`, `attention_copilot`, `attention_ownership::other_live`, `explorer_menu::same_path`.
+Ticket A2b2b.
+- Verbs: `Config::resolve`, `Config::standing`, `attention_ownership::other_live`, `explorer_menu::same_path`,
+  and each family's `state`, `row_state`, `state_at` (hooks, codex, copilot).
+- Helpers [all]: `Config::resolve` → `resolve_with` → `editable_target` (row 8 `canonicalize` ×2, only for a
+  link); `Config::standing` (content read, `Lane::Attention`); `other_live` (row 9 `metadata` ×1) →
+  `same_path`; `same_path` (row 20 `canonicalize` ×1); each `state` → `state_at` → `resolve`, `standing`, then
+  its own content read (installed) and `same_path` per owner. `profile_path_reason` (stats, outside the
+  vocabulary) stays leg-free.
+- Crossings: none.
+- Owner roots (`AgentConfigState`): `Runtime::create` (the three `row_state`s), `Runtime::refresh_agent_rows`,
+  `Runtime::raise_first_run_if_due`; nested under `AgentHooksWrite` (the three applies' resolve, standing and
+  re-read) and — (m)4.3 — under `MarksRecord` in `attention_ownership::record`.
+- Worker roots: `--uninstall-cleanup` (`uninstall::Scope::resolve`/`push_unique` → `same_path`; `agent_apply`
+  → `apply_at(Remove)` → `resolve`, `standing`, `check`/`other_live`); the explorer workers —
+  `folio-explorer-probe` (`Start::this_process`, `read_state`, `reassert_wanted`, `serves_this_folder`),
+  `folio-explorer-deploy`, `folio-explorer-removal`, `folio-explorer-cleanup` — through `classify`,
+  `is_this_executable` (handed to `state_of`, `package_removal` and `Start.ours` as a value: it becomes a closure
+  passing the worker's leg) and `serves_this_folder`.
+
+**S10 · the agent configuration's landing** — `D = AgentHooksWrite`; bt-app `attention_hooks::Config::land`.
+Ticket A2b2b.
+- Verb and helper [all]: `Config::land` (row 6 `create_dir_all` ×1, row 7 `write` ×1 — the backup, only when the
+  file existed and today's backup is absent; content read: the compare re-read, `Lane::Attention`).
+- Crossings: → S1 (`atomic_replace_preserving` for an existing file, `atomic_write` for a new one;
+  `DurableWrite` nested).
+- Owner roots (`AgentHooksWrite`): `apply_claude_hooks`, `apply_codex_notify`, `apply_copilot_hooks` (each
+  family's `apply_resolved` holds the `MarksLock` from `record` across `land`).
+- Worker roots: `--uninstall-cleanup` (`agent_apply` → each family's `apply_at(Remove)` → `land`).
+
+**S11 · the installed PSReadLine copy** — `D = PsReadLineProbe`; bt-app `psreadline`. Ticket A2c2b.
+- Verbs: `installed_copy`, `is_folios_copy_at`.
+- Helpers [all]: `installed_copy` → `is_folios_copy_at` → `installed_disk::read` ×9; `installed_copy` →
+  `unclaimed_or_foreign` → `installed_disk::read` (the assembly), and on `NotFound` `nothing_but_our_names` →
+  `installed_disk::entries`; `installed_disk::{read, entries}` → `with` → `<System as Disk>::read` (content
+  read, `Lane::Settings`) and `<System as Disk>::entries` (row 49 `read_dir` ×1). The trait `Disk`'s `read` and
+  `entries` take the leg (the `#[cfg(test)]` override implements the same signatures); `is_dir` and
+  `product_version` (`GetFileVersionInfoW`, outside the vocabulary, (l)2) hold no counted site and stay leg-free,
+  so `installed_build`, `installed_build_text` and `row_description` stay outside the graph.
+- Crossings: none.
+- Owner roots (`PsReadLineProbe`): `Runtime::refresh_psreadline_installed` (→ `refresh_installed`),
+  `Runtime::raise_psreadline_invite_if_due` (→ `installed_on_probe`); nested under `PsReadLineApply`
+  (`install_checked` → `installed_copy`; `InstalledBuild::found`; `remove_from`).
+- Worker roots: `--uninstall-cleanup` (`psreadline::remove_from` → `installed_copy`).
+
+**S12 · the diagnostic line** — `D = DiagnosticWrite`; bt-app `trace_sink`, `trace`. Ticket A2b2a.
+- Verbs: `trace_sink::say` (today's `stderr_line`, whose sink-less arm writes), `trace_sink::say_to_file`
+  (today's `file_line`), `trace::Gate::get`'s first ask (it reaches `Trace::create`'s eager open).
+- Helpers [all]: `say`/`say_to_file` → `write_line` → (no sink) `write_here` (row 83 `write_fmt` ×1, stderr) or
+  `TraceFile::append` (row 77 `write_fmt` ×1) → `TraceFile::open` (row 78 `write_fmt` ×2: the header, and the
+  could-not-open line to stderr); `Gate::get` → `Trace::from_environment` → `Trace::create` → `TraceFile::open`
+  (only while `trace_sink::started()` is false); `Trace::write` and `Dump::line` → `say_to_file` (they take the
+  leg their callers pass). With a sink, `write_line` only offers; the offer is capability-free.
+- The sink's own worker: `run_to` → `TraceFile::append` (worker leg from `bt-trace-sink`'s context) and
+  `ProcessStderr::write` → S13's verb, with the leg held in `ProcessStderr<'w>` ((m)1.3).
+- Crossings: `ProcessStderr::write` → S13 (same `D`, the worker leg passed on).
+- Owner roots (`DiagnosticWrite`): the window thread's `stderr_line` sites (32 on `847b65c3`: `fn main`'s
+  startup line in `Starting` and its three exit lines in `Exiting`; `Runtime::create` ×6 and
+  `trace_surface_size_clamp`; `apply_stored_terminal_font`; the `runtime/` modules' sixteen), the window
+  thread's gates and dumps, and `FolioApp::fail`'s one mint for `report_frame_shape_stop` ((m)1.3).
+- Worker roots: `bt-trace-sink` (`run_to`), `bt-image-scale-worker` (`MathWorker::spawn`'s closure),
+  `font-families` (`settings::walk_the_machine`), `taskbar-state` (`TaskbarLane::serve`). The two function
+  values (`bt_render::set_trace_writer`, `hang_watch`'s `reads.tick`) become `offer_line` ((l)6) and leave
+  the graph.
+
+**S13 · the process's standard error** — `D = DiagnosticWrite`; bt-platform `write_std_error`. Ticket A2b2a.
+- Verb: `bt_platform::write_std_error(leg, bytes)`.
+- Helpers: [unix] `portable_impl::write_std_error` (row 127 `libc::write` ×1, retried on `EINTR`);
+  [windows] `windows_impl::write_std_error` (`GetStdHandle`, `WriteFile`: no vocabulary row; it takes the leg so
+  the verb has one signature on every arm); [other] none.
+- Owner roots (`DiagnosticWrite`, Starting): `fn main`'s `take_the_claim` refusal line; `update_startup`'s
+  `Machine::say` (nested under `UpdateMounts`).
+- Worker roots: `bt-trace-sink` (`ProcessStderr::write`, through S12); `bt-update-sweep` (`update_startup`'s
+  `on_a_worker` closure); the standalone entries: `fn main`'s `--uninstall-cleanup` argument refusal,
+  `--remove-shell-integration`, the update door's refusal (front door), `uninstall::run`,
+  `update_recover`'s `Machine::say`, `update_apply_macos`'s `Machine::say`.
+
+**S14 · the mount table under a root** — `D = UpdateMounts`; bt-platform `macos_update`. Ticket A2b2a.
+- Verbs: `mounts_under(leg, root)`, `detach_all_under` (today `(&WorkerCtx, root)`; it becomes `(leg, root)`,
+  built from the same context by its worker callers).
+- Helpers: `points_under` [all] (row 113 `canonicalize` ×1) → `mounted` [macos] (`getfsstat`: no row) /
+  [not(macos)] (a refusal); `detach_all_with` → the `Tools.table` function value (`system()` builds it as
+  `&points_under`: it becomes a closure passing the leg) and `detach_point` (its `run_at` and 2 s busy sleep
+  already sit behind the worker's context: they are worker family sites, not S14's). `attach_with`'s own
+  `canonicalize` calls are worker-only (R1).
+- Owner root (`UpdateMounts`, Starting): `update_startup::pass` (the whole pass, (l)3) → `run` → `retire` →
+  `Machine::mounts_under` (a no-op answer off macOS at run time).
+- Worker roots: `bt-update-sweep` (`update_startup::perform` → `detach_all_under`), `bt-update-job`
+  (`update_prepare::clear` ← `abandon`/`discard`), `folio-update-home-detach` (`uninstall::detach_images_under`'s
+  spawned thread), and `uninstall::detach_images_under`'s own `mounts_under` on the `--uninstall-cleanup`
+  standalone entry.
+
+**S15 · the peer's executable** — `D = LaunchHandOver`; bt-platform `launch_pipe` [unix]
+(`launch_pipe_unix.rs`). Ticket A2b2a.
+- Verb: `vetted_peer(leg, stream)`.
+- Helpers [unix]: `vetted_peer` → `peer_executable` ([macos] `proc_pidpath`; [not(macos)] a path) and
+  `vet_executable` (row 157 `metadata` ×2). [windows] the hand-over's check is `vetted_server` (no counted row;
+  not in S15); [portable] stubs.
+- Owner root (`LaunchHandOver`, Starting, already admitted): `hand_over` → `vetted_peer`, inside `fn main`'s
+  `admitted::<doors::LaunchHandOver>` closure (`launch_wire::hand_over` passes its token's leg down; the existing
+  door keeps its identity).
+- Worker root: `folio-launch-endpoint` (`listen` → `serve` → `vetted_peer`, per connection).
+
+**S16 · the data directory's claim name** — `D = ClaimName`; bt-platform `instance`, bt-app `persist`. Ticket
+A2b2a.
+- Verbs: `persist::{is_writer_of, is_writer_of_document, is_storage_writer, adopt_claim, try_claim}`;
+  `instance::{launch_socket_path, attention_socket_path}` [unix]; `instance::canonical_path` for its outside
+  callers.
+- Helpers: `canonical_path` [all] (row 109 `canonicalize` ×1, in a loop walking up to an existing parent);
+  `directory_tag` [not(windows)] → `canonical_path` ([windows]: a string fold, no site — it still takes the leg
+  so the verb has one signature); `claim_name` [windows]/[unix]/[other] → `directory_tag`;
+  `try_claim_data_directory` [windows] (row 174 `CloseHandle` ×1 when the name is held) → `claim_name`;
+  [unix] (the runtime directory, the lock file's `flock`, stale sockets' `unlink`: outside the vocabulary) →
+  `directory_tag`; [other] no site; `claim_data_directory` → `try_claim_data_directory`.
+  `DataDirectoryClaim::drop` [windows] (row 173) is (l)11's counted-only close, outside the graph.
+- Owner roots (`ClaimName`): `fn main`'s ordinary `is_writer_of` (Starting, before `LaunchHandOver`); the store
+  opens' `is_writer_of`/`is_writer_of_document` (nested under `StoreOpen`); `Runtime::create`'s and
+  `open_the_data_directorys_endpoints`' `is_storage_writer`; `LaunchPipe::start`/`AttentionPipe::start`'s
+  socket names (nested under `EndpointStart`); `update_trial::take_the_claim_within`'s `try_claim` and
+  `adopt_claim` (nested under `TrialClaim`); `say_at_the_front_door`'s `SettingsStore::open` on the hand-over
+  road (nested under `LaunchHandOver` → `StoreOpen`).
+- Worker roots: `--update-apply` (macOS: `update_apply_macos::wait_for_the_claim` → `try_claim`); the
+  `--explorer-command` and parse-fault standalone roads (`SettingsStore::open` → `is_writer_of`: they take the
+  claim, as today); `--uninstall-cleanup` (`uninstall::purge_root`, `prepare_tree` → `canonical_path`;
+  `execute` → `claim_data_directory`; `logon_hook::clean_in` → `canonical_path` on Windows).
+- One more owner road, a crossing from an admitted door: `launch_wire::hand_over` → `launch_pipe::endpoint_for`
+  → [unix] `launch_socket_path` → `directory_tag` → `canonical_path`, inside `LaunchHandOver` (`ClaimName`
+  nested); [windows] `endpoint_for` → `directory_tag` (no site).
+
+**S18 · the installation's lock** — `D = UpdateMounts`; bt-platform `install_txn`. Ticket A2b2a.
+- Verbs: `try_hold(leg, path, hold)`, `hold_within(leg, path, hold, wait)`.
+- Helper [all]: `hold_until` (row 108 `sleep` ×1, only with a deadline: `try_hold` passes none, so on the owner's
+  road it runs zero times) → the arm's `open_lock_file`/`try_lock` ([windows] `LockFileEx`; [macos] `flock`;
+  [other] a refusal: no row). `Held::drop` (`unlock`) is outside the graph.
+- Owner root (`UpdateMounts`, Starting): `update_startup::pass` → `run` → `admit` (`try_hold(admission, Shared)`)
+  and `take_lock` (`try_hold(lock, Exclusive)`).
+- Worker roots: `bt-update-job` (`update_prepare_macos::prepare_on`, `update_prepare_windows::prepare_on`:
+  `try_hold`); `--update-apply` and `--update-recover` (macOS: `Txn::hold`, `Txn::at_armed`, `Txn::roll_back`:
+  `hold_within`). `update_prepare::at_launch` has no product caller.
+
+**S19 · the SVG fonts' first use** — `D = SvgFontsFirstUse`; bt-math. Ticket A2b2b.
+- Verbs: `rasterize_svg_document(leg, bytes)`.
+- Helpers [all]: `rasterize_svg_document` → `svg_document_options` (the `OnceLock`; its `get_or_init` closure,
+  called in place, performs the content read: owner `file_reads::owned::svg_fonts_first_use::opaque`, worker
+  `file_reads::opaque(ctx, …)`, `load_system_fonts`) → `svg_options_without_external_images` (no site).
+  `rasterize_svg` (its own `OnceLock`, no system fonts) and `MathEngine::with_system_fonts` (the math worker's
+  own `opaque`, R1) are not in S19.
+- Owner roots (`SvgFontsFirstUse`): bt-app `marks::rasterize` ← `ChromeMarkRasters::push_mark` ← `resolve`,
+  `resolve_on`, `resolve_overlay` — from `refresh_chrome_with_overlay` (← `refresh_chrome`,
+  `refresh_chrome_without_overlay`), `refresh_overlay_with_formula` (← `refresh_overlay`,
+  `refresh_formula_overlay_for_present`) and `play_button_rasters` (← `build_preview_body_in`), all on the window
+  thread (`ChromeMarkRasters` holds an `Rc`). The mint stands at `marks::rasterize`'s callers; after the
+  `OnceLock` is filled the admission costs one check.
+- Worker roots: `bt-math-worker` (`run_decoration_worker`'s inline-image and peek decodes → bt-term
+  `decode_svg_bytes`), `background-picture` (`decode_background_image`). bt-term's call passes the leg its
+  decode was handed (bt-term's decoders take `&WorkerCtx` from A2b1 ((l)8); they build the S19 leg from it).
+
+**S17 · the console line** — `D = DiagnosticWrite`; bt-platform `write_to_console` (the Windows arm is in
+`lib.rs`'s inline `mod windows_impl`). Ticket A2c2b (with (l)5's fencing).
+- Verb: `bt_platform::write_to_console(leg, text)`.
+- Helpers: [windows] `windows_impl::write_to_console` — a redirected stdout gets one `WriteFile`; otherwise the
+  `CONOUT$` open, `WriteConsoleW` and `CloseHandle` (row 198's ordinary copy ×1); [not(windows)]
+  `portable_impl::write_to_console` (stdout's lock, `write_all`, `flush`: no vocabulary row).
+- The emergency copy ((l)5) is a separate lexical body with no leg, reached only from `announce_panic`.
+- Owner roots (`DiagnosticWrite`): `say_at_the_front_door` as `launch_wire::hand_over`'s `say` callback
+  (nested under `LaunchHandOver`, Starting); `announce_stop` under `FolioApp::fail`'s mint ((m)1.3).
+- Worker roots (standalone entries): `say_at_the_front_door` on the parse-fault road (front door),
+  `--remove-shell-integration` (two lines), `--remove-explorer-menu`, `attention_wire::report` (`attention`),
+  `uninstall::run` (`--uninstall-cleanup`).
+
+#### (m)1.5 · A2s's plants, exercising the sharing shape
+
+A2s lands the schema, `Leg`, and the guard on a **fixture graph** in the guard's own test crate, and on one real
+door; it converts no product operation. Its plants (each a recorded mutation or a `compile_fail` doctest, as
+admission's proofs are written, (c)8):
+
+1. `compile_fail`: a `Leg<'_, doors::FontFamilyLookup>` passed to a fixture helper whose parameter is
+   `&Leg<'_, doors::DurableWrite>`.
+2. `compile_fail`: a `&WorkerCtx` passed where an R2 body takes `WaitToken<'_, doors::TraceFlush>` (the real
+   `trace_sink::flush`).
+3. `compile_fail`: `Leg::owner` called with a borrowed `&WaitToken` (the root must consume the token).
+4. Recorded mutation, **multi-function graph**: a fixture of three helpers (a verb, a private body, a leaf with
+   two counted sites) shaped like S1 (`atomic_write` → `write_temp` + `commit_rename`); the plant adds a direct
+   call of the leaf from an outside function → red (closed graph); a second plant removes the leg parameter from
+   the middle helper → red.
+5. Recorded mutation, **two `cfg` arms**: the fixture leaf has a `#[cfg(windows)]` and a `#[cfg(unix)]` body
+   (S2's `carry_metadata` shape); a plant adds an outside caller in one arm only → red in that arm's check.
+6. Recorded mutation, **function-value edge**: a fixture helper passes a leaf as a value to another helper
+   (S2's `rename_path` into `replace_file_preserving_with`); the plant passes it from outside the graph → red.
+7. Recorded mutation, **crossing**: a fixture helper of `D1` that, on `Arm::Owner`, calls a `D2` verb without a
+   nested mint (reusing its own leg is a type error, so the plant calls a capability-free copy) → red.
+8. Recorded mutation, **escaping leg**: a helper returns `move || leaf(&leg)` → red (item 4); a struct field of
+   type `Leg` → red.
+9. Recorded mutation, **multi-owner primitive**: a fixture owner table of two rows; a plant calls row A's form
+   from an item listed only on row B → red; a plant calls a private counted body directly → red.
+10. Recorded mutation, **deferred spawn closure**: a site inside a fixture `spawn_at_priority` closure is
+    attributed to the closure's context (item 5), and the same site in a returned closure is red (item 4).
+11. The real-door control: `trace_sink::flush` (row 17) keeps its pin and its `WaitToken<TraceFlush>` shape
+    green under the new schema, and the publisher closure exception of A2d is accepted as written.
+
+A2s's size stays **S–M, provisional**: checking a private call graph across crates is more than adding enum
+strings.
+
+### (m)2 · Finding 13 — the capability-free `file_reads` callers A2b1 keeps, each with its retirement
+
+**Amends (l)8's "Kept, unchanged, for the callers A2b1 does not convert" and (l)7's and (l)8's two statements of
+the A2anim ordering.** The review is right: (l)8 said the retained capability-free forms were "used only by the
+window thread's content reads … and by `FileAnimationSource`", while it also kept every S1–S19 signature unchanged
+— and `migrate::read_bounded` (the update-check worker, `--explorer-command`), `Marks::read` (the profile
+workers), `read_profile_for_edit` (the profile workers and both removal verbs) and `install_script_at` (the
+migration worker) are shared-operation callers that A2b1 deliberately does not convert. A guard enforcing the
+quoted sentence could not pass A2b1.
+
+#### (m)2.1 · The census, by source item and `cfg` arm
+
+Every product caller of `file_reads`' capability-free forms (`open`, `read`, `read_to_string`, `opaque`,
+`pipe_output`, `Reader::new`, and `LEDGER.add` written directly) on `847b65c3`, with the threads that run it
+today. **A2b1 converts every caller whose threads are all workers or standalone mains** (their bodies already
+hold a context or receive one from (m)2.3's entries) — those are listed in (m)2.2 and leave the census in A2b1.
+The rows below are **retained** by A2b1, as the census the guard holds: its key is `(crate, source item, arm,
+form)`, it only shrinks, and each row names the ticket that retires it. **The census is empty when A2b2a, A2b2b,
+A2c2b and A2anim have landed, and A2e requires it empty.**
+
+| # | crate · source item | arm | form · lane | threads that run it today | why A2b1 keeps it | retired by |
+|---:|---|---|---|---|---|---|
+| C1 | bt-persist · `migrate::read_bounded` | all | `open` · Settings | window (`StoreOpen`'s births; `StoreReread`'s rereads and import; the front door's `say` inside `LaunchHandOver`); `bt-update-check`; standalone `--explorer-command` and the front door's parse fault | S3, shared | A2b2a |
+| C2 | bt-app · `main.rs` `probe_input` | all | `read` · Other | window, birth (`BT_PROBE_INPUT`), under `StoreOpen` | window | A2b2a |
+| C3 | bt-app · `update_startup::run` (the journal) | all | `read` · Install | window, Starting (`UpdateMounts`) | window | A2b2a |
+| C4 | bt-app · `update_startup::image` (the running and rescue executables, whole) | all | `read` · Install | window, Starting (`UpdateMounts`) | window | A2b2a |
+| C5 | bt-render · `terminal_font_system` | [windows] ×2, [macos] ×1 | `opaque` · Fonts | window, the first window, inside `GpuOpen` | window | A2b2a (the owner table's `GpuOpen` row) |
+| C6 | bt-render · `load_chrome_sans_family` | [windows] | `opaque` · Fonts | window, inside `GpuOpen` | window | A2b2a (the same row) |
+| C7 | bt-app · `shell_integration::offer_for` | all | `read` · Settings | window (`ProfileOfferRead`) | window | A2b2b |
+| C8 | bt-app · `attention_hooks::state` | all | `read_to_string` · Attention | window (`AgentConfigState`) | window | A2b2b |
+| C9 | bt-app · `attention_hooks::installed_rows` | all | `read_to_string` · Attention | window (`AgentHookRowsRead`) | window | A2b2b |
+| C10 | bt-app · `attention_hooks::Config::standing` | all | `read_to_string` · Attention | window (`AgentConfigState`, nested under `AgentHooksWrite`); standalone `--uninstall-cleanup` | S9, shared | A2b2b |
+| C11 | bt-app · `attention_hooks::Config::land` | all | `read_to_string` · Attention | window (`AgentHooksWrite`); standalone `--uninstall-cleanup` | S10, shared | A2b2b |
+| C12 | bt-app · `attention_codex::state` | all | `read_to_string` · Attention | window (`AgentConfigState`) | window | A2b2b |
+| C13 | bt-app · `attention_copilot::state` | all | `read_to_string` · Attention | window (`AgentConfigState`) | window | A2b2b |
+| C14 | bt-app · `attention_copilot::installed_rows` | all | `read_to_string` · Attention | window (`AgentHookRowsRead`) | window | A2b2b |
+| C15 | bt-app · `attention_copilot::hooks_are_switched_off` | all | `read_to_string` · Attention | window (`readiness`: `Runtime::create`, `CopilotProbed`, the first run, the copilot apply; `AgentConfigState`) | window | A2b2b |
+| C16 | bt-app · `schemes::read_scheme_file` | all | `read_to_string` · Settings | window (`SchemeCatalogue`) | window | A2b2b |
+| C17 | bt-app · `git_watch::linked_gitdir` | all | `read_to_string` · Settings | window (`GitMarkerRead`) | window | A2b2b |
+| C18 | bt-render · `GpuContext::set_terminal_font` | all | `opaque` ×2 · Fonts | window (`TerminalFontLoad`) | window | A2b2b |
+| C19 | bt-math · `svg_document_options` (its `OnceLock`'s initialiser) | all | `opaque` · Fonts | whichever asks first: window (`SvgFontsFirstUse`), `bt-math-worker`, `background-picture` | S19, shared | A2b2b |
+| C20 | bt-app · `shell_integration::profile_marks::Marks::read` | all | `read` · Settings | window (`MarksRecord` under `MarksInstall`, `PsReadLineApply`, `AgentHooksWrite`; `psreadline::recorded_install`); `powershell-profile-{migration,enable,removal}`; standalone `--remove-shell-integration`, `--uninstall-cleanup` | S6, shared | A2c2b |
+| C21 | bt-app · `shell_integration::read_profile_for_edit` | all (one `Reader::new` after the `[windows]` / `[not(windows)]` `OpenOptions`) | `Reader::new` · Settings | window (`MarksInstall`); `powershell-profile-{migration,removal}`; standalone `--remove-shell-integration`, `--uninstall-cleanup` | S7, shared | A2c2b |
+| C22 | bt-app · `shell_integration::install_script_at` | all | `read_to_string` · Settings | window (`ShellScriptsInstall`; nested under `MarksInstall`); `powershell-profile-migration` | S8, shared | A2c2b |
+| C23 | bt-app · `shell_integration::install_zdotdir` | all | `read_to_string` (per file) · Settings | window (`ShellScriptsInstall`) | window | A2c2b |
+| C24 | bt-app · `psreadline::installed_disk::<System as Disk>::read` | all | `read` · Settings | window (`PsReadLineProbe`; nested under `PsReadLineApply`); standalone `--uninstall-cleanup` | S11, shared | A2c2b |
+| C25 | bt-app · `animation::FileAnimationSource::open_in_lane` | all | the source's own `std::fs::File::open` · Peek, Animation | `bt-math-worker` opens; the open handle is parked on the window thread between fills and can be dropped there | the source outlives its worker body ((l)7) | A2anim |
+| C26 | bt-app · `<animation::FileAnimationSource as Read>::read` | all | `file_reads::LEDGER.add`, written directly · Peek, Animation | `bt-math-worker` | as C25 | A2anim |
+
+**Counts.** 26 retained rows: A2b2a retires 6 (C1–C6), A2b2b 13 (C7–C19), A2c2b 5 (C20–C24), A2anim 2 (C25–C26).
+No row is retired by A2c2a or A2d (neither owns a content read), and none is left for A2e. A2b2a's, A2b2b's and
+A2c2b's briefs each name their rows; the guard's census is this table's key column, and a retiring ticket deletes
+its rows in the commit that converts the caller.
+
+**`FileAnimationSource` is tracked by item, not by lane or by `file_reads` function name.** It does not call a
+`file_reads` form at all: `open_in_lane` opens with `std::fs::File::open` (a `File::open` outside the vocabulary,
+kept in `file_reads_doors.txt` as `animation.rs: open_in_lane: std::fs::File::open`), and its `impl Read for
+FileAnimationSource`'s `read` adds to `file_reads::LEDGER` directly; it serves the `Peek` lane (`first_frame` →
+`file_source_in_lane(…, Lane::Peek)`) and the `Animation` lane (`file_source`, and every `AnimationFill` read), so
+exempting a lane or a form would exempt too much. The census rows name the two items — `FileAnimationSource::open_in_lane`
+(the open) and `<FileAnimationSource as Read>::read` (the counted read) — and the guard also holds the set of
+functions that write `LEDGER.add` directly to a closed list (today: that `read`, and
+`bt_platform::install_evidence::attribute`, a worker read A2b1 converts), so a new direct ledger write is red.
+A2anim retires both rows.
+
+#### (m)2.2 · The worker-only and standalone-only callers A2b1 converts
+
+These leave the capability-free forms in A2b1, onto the worker forms of (m)1.2; none is in the census.
+
+- **bt-app:** `attention_copilot::run_probe` [windows] (`pipe_output`, `copilot-version-probe`);
+  `psreadline::run_probe` [windows] (`pipe_output`, `psreadline-probe`); `attention_wire::payload_on_stdin` and
+  `attention_words::lede_in_tail` (`Reader::new`, the `attention` verb, inside entry 2 of (m)2.3); `git::drain`
+  (`Reader::new`, `bt-git-pipe`); `install_channel::capped` (`open`, `bt-install-channel`); `pdf::page_count`,
+  `pdf::read_capped` (`open`, `bt-preview-worker`, `bt-math-worker`); `preview::read_up_to` (`open`,
+  `bt-preview-worker`); `update::Claim::take` (`read_to_string`, `bt-update-check`); `update_trial::watch`
+  (`read`, `folio-trial-watch`); `update_recover::header_of` (`read`, `--update-recover`);
+  `update_apply_macos::Txn::hold` and `read_receipt` (`read`, `--update-apply` / `--update-recover`);
+  `update_archive::expand` and `declared_bytes` (`open`), `update_prepare::digest_of` (`open`),
+  `update_prepare::matches_its_sum` (`read_to_string`), `update_prepare_windows::<System as Tools>::copy` (`open`)
+  — all `bt-update-job` (U-20's product caller); `update_prepare::at_launch` (`read`; no product caller: tests).
+- **bt-term:** `inline_image::read_and_decode_local_image` (`open`, `bt-math-worker`),
+  `inline_image::decode_background_image` (`open`, `background-picture`).
+- **bt-math:** `MathEngine::with_system_fonts` (`opaque`, `bt-math-worker`).
+- **bt-platform:** `install_evidence::attribute` (`LEDGER.add` written directly, `bt-install-channel`);
+  `launch_agent::arm`'s read closure (`read`, `--update-apply` / `--update-recover`, macOS);
+  `macos_update::run_at` (`pipe_output`) and `architectures` (`open`) (`bt-update-job`, `bt-update-sweep`,
+  `folio-update-home-detach`, and the macOS update and uninstall standalone roads); `pe_resource::read_rcdata`,
+  `trust::{signature, identity_of, verify_release_file_under, verify_release_package_under}` (`opaque`) and
+  `trust_windows::machine` (`open`) — `bt-update-job`; [windows] `video::read_first_frame` (`opaque`, `folio-video-frame`);
+  [windows] `video::engine::Machinery::build` (`opaque`, `folio-video-engine`).
+
+
+#### (m)2.3 · The standalone entries: an exact callsite pin, eight entries
+
+**Amends (l)6's "the pin lists nine entries, the verbs themselves" and (l)8's "the pin lists the nine verbs".**
+The review is right that "nine verbs" mixes units: `window_waits_tests.rs`' `PINS` records an owner item and its
+lexical `enter_standalone_main` call, not a verb name. On `847b65c3` it holds **five** such entries —
+`attention_wire::payload_on_stdin`, `explorer_menu::removal_waited_on`, `explorer_menu::cleanup_waited_on`,
+`update_apply_macos::run_here`, `update_recover::run_here` (U-29's) — each of the first three entering around one
+inner wait, and the last two entering after early refusal lines (`world.say`) and before a final one.
+
+`fn main`'s branches above `enter_window_thread` are **eight semantic categories**: `cli::uninstall_cleanup`
+(both its arms), `cli::attention`, `cli::explorer_command`, `cli::remove_shell_integration`,
+`cli::remove_explorer_menu`, `cli::update_door`'s `Recover`, its `Apply` on macOS, and the front-door refusal —
+which today is **two lexical sites**, `cli::update_door`'s refusal line (`Apply` off macOS, or `Err(usage)`: a
+`write_std_error` in `fn main`) and `cli::parse`'s `Err(fault)` (`report_at_the_front_door` →
+`say_at_the_front_door`). They share **one entering helper**, so the pin has **eight lexical entries, one per
+category**:
+
+| # | owner item of the `enter_standalone_main` call (`PINS`' `owner`) | entry name | encloses |
+|---:|---|---|---|
+| 1 | `bt-app crate::uninstall::run_verb` (new: `fn main`'s `cli::uninstall_cleanup` branch calls it with the parsed request) | `folio-uninstall-cleanup` | both arms: `uninstall::run` (which takes the context; `explorer_menu::cleanup_waited_on`'s inner entry is removed and its body takes the context) and the `Err(reason)` refusal line |
+| 2 | `bt-app crate::attention_wire::run_verb` (existing) | `folio-attention` | the whole verb: `payload_on_stdin` (its inner entry removed; it takes the context), `report`, `lede_in_tail` |
+| 3 | `bt-app crate::explorer_menu::serve` (existing) | `folio-explorer-command` | the whole COM server's life, its settings read (S3, S4, S5, S16) included |
+| 4 | `bt-app crate::shell_integration::remove_verb` (new: the branch's body moved out of `fn main`) | `folio-remove-shell-integration` | `remove_shell_integration(Asker::Door)` and the three report lines (two `write_to_console`, one `write_std_error`) |
+| 5 | `bt-app crate::explorer_menu::remove_verb` (new: the branch's body) | `folio-remove-explorer-menu` | `remove_from_explorer_menu` (`removal_waited_on`'s inner entry removed; it takes the context) and its report line |
+| 6 | `bt-app crate::update_recover::run_here` (existing; the entry moves up) | `folio-update-recover` | the whole body: `current_exe`'s refusal, the not-a-rescue-build refusal, `run`, and every `world.say` |
+| 7 | `bt-app crate::update_apply_macos::run_here` (existing; the entry moves up) | `folio-update-apply` | the whole body: the malformed-argument refusal, `apply`, and the final `world.say` in both arms |
+| 8 | `bt-app crate::refuse_at_the_front_door` (new, in `main.rs`) | `folio-front-door` | the update door's refusal line and `report_at_the_front_door` (its `SettingsStore::open`, `storage_dir`'s first ask and `write_to_console`) — `fn main` calls it from both refusal sites |
+
+**Removed from the pin:** the three inner helper entries — `attention_wire::payload_on_stdin`,
+`explorer_menu::removal_waited_on`, `explorer_menu::cleanup_waited_on`. **Kept:** `enter_standalone_main`'s
+refusal of a second entry in one process, and "once per process": each branch ends in `std::process::exit`, so a
+process makes exactly one of the eight calls. A helper that entered before now receives the context as a
+parameter. The pin's five `Pin` rows become eight, each naming its owner item exactly as above, with `after:
+None`. **Owner:** A2b1 (the first doors that need a standalone context).
+
+### (m)3 · The tickets, amended for (m)1 and (m)2
+
+**Amends (l)8's table in these cells only** (sizes, totals and order otherwise stand; 226 rows, 248 sites):
+
+| ticket | what changes |
+|---|---|
+| **A2s** | owns R3′'s mechanism: `admission::Leg<'a, D>` and `Arm`, with their two constructors; the `# effects` kinds `shared-body` (authority `Leg<doors::D>`) and `emergency`; the closed-graph check of (m)1's guard items 1–3, which reads each graph's helper and verb lists from the registry; the multi-owner-primitive check of (m)1.2 with an **empty** owner table and the retained census of (m)2 as its data; plants 1–11 of (m)1.5 (they replace (l)8's "plants 1 and 2 over two existing doors"). Converts no product operation. S–M, provisional. |
+| **A2b1** | adds the worker forms of (m)1.2 (`file_reads::{read, read_to_string, open, opaque, pipe_output}` and `Reader::on_worker` on `&'w WorkerCtx`), converts the worker-only callers of (m)2's table, and lands the retained census's guard; the exact standalone pin of (m)2.3 replaces "the nine verbs". **Does not depend on A2anim** ((m)4). |
+| **A2b2a** | converts S1–S5, S12–S16 and S18 to R3′ legs; creates the owner table of (m)1.2 with the rows of its identities; retires the census rows (m)2 assigns it; carries (m)4's finding-14 prerequisite. |
+| **A2b2b** | converts S9, S10 and S19; appends its owner-table rows; retires its census rows; carries (m)4.3's corrected `PreviewStat`/`GitMarkerRead` edges. |
+| **A2c2a** | carries (m)4's findings 15 and 17 prerequisites; its `WatchStart` line names no nested identity ((m)4.3). |
+| **A2c2b** | converts S6, S7, S8, S11 and S17; retires its census rows; writes **13 effect-function lines** for the old A2c's (5) rows — ten wait-reaching `drop-exception` functions and the three counted-only closes among them — beside `EXCEPTIONS`' thirteen roots, not "13 `drop-exception` lines and 3 counted-only lines" as (l)8 said (the review's F11; (l)11's own enumeration already has thirteen functions including the three). Adds the `MarksRecord` → `AgentConfigState` edge ((m)4.3). |
+| **A2e** | depends on A2anim (the retained census must be empty). |
+
+
+### (m)4 · Findings 14–18 — dated prerequisites inside the owning briefs, not redesigned here
+
+The coordinator's ruling for this round: findings 14–18 are not redesigned in (m). Each is written below as a
+dated prerequisite paragraph inside the brief of the ticket that owns it; that ticket is not dispatched until its
+paragraph is resolved in its own brief (by the ticket's author, reviewed with it). Nothing in (l)3's table is
+changed by this section except where (m)4.3 corrects an edge to what the source shows.
+
+#### A2b2a — the stores and the start (the brief's prerequisite section)
+
+**Prerequisite, dated 2026-09-27 — before A2b2a: the trial release is a held batch (finding 14).** Source on
+`847b65c3`: `update_trial::Gate::decide` moves `pending` into `released` (and `owed_copies` into
+`released_copies`) once and answers `true` once, and `watch` wakes the window thread once for it and returns;
+`FolioApp::user_event`'s `AppEvent::TrialWritesReleased` arm hands `update_trial::take_released()` — a
+`mem::take` of `released` — to `App::release_trial_writes`, which runs every writer in sorted order and returns
+nothing; `Writer::RefusedCopies` runs `update_trial::keep_owed_copies`, a second `mem::take` (of
+`released_copies`) whose `keep` calls return nothing. (l)3's refusal cell ("the released writers stay in the gate,
+untaken, for the next release event") is therefore not a retry: there is no next release event. A2b2a's brief
+states, before its first line of code:
+
+- **The retry trigger.** A refused `TrialWritesReleased` admission leaves the batch pending *and* names what runs
+  it again: the brief chooses one owner-visible trigger (a `pending_release` flag on the window's state that the
+  next turn's `about_to_wait` re-posts as one `TrialWritesReleased` while the phase is `Running`, or the
+  equivalent) and says it is bounded to one attempt per turn.
+- **Acknowledge after completion.** The batch is taken as a held value with a cursor (or an explicit requeue),
+  not emptied up front: a writer is removed from it only when its own nested admission completed. A refused
+  nested operation stops the batch at that writer and requeues it and every writer after it.
+- **Nested copy refusal.** `RefusedCopies` runs first by sort order, and every store writer after it would
+  replace a document whose rejected copy is still owed. If `StoreReread`/`StoreOpen` refuses a `keep`, the copy
+  is not dropped: `keep_owed_copies` becomes a held list with the same acknowledge-after-completion rule (its
+  second `mem::take` goes), and **the writers that would replace those documents are not run** until the copies
+  are kept — no overwrite-before-copy.
+- **Tests (red on BASE, green on the branch; each with its refusal control):**
+  `a_refused_trial_release_runs_again_on_the_next_turn` (the outer admission refused by a plant narrowing its
+  phases; the next turn runs the batch once, and nothing is written in between);
+  `a_refused_owed_copy_holds_back_the_writer_that_would_replace_it` (the nested `StoreReread` refused: the
+  document is byte-identical and its copy still owed; `settings.json` not written);
+  `a_retried_release_writes_each_writer_once` (after the later successful retry: each writer ran exactly once,
+  the copies were kept before the documents were replaced, and no writer ran twice).
+
+This is admission-failure semantics A2b2a needs because it creates `TrialWritesReleased`; B12 later moves the
+writes to the storage lane and keeps this contract.
+
+#### A2b2b — the gestures and views (the brief's prerequisite section)
+
+**Prerequisite, dated 2026-09-27 — before A2b2b: `PreviewStat` and `GitMarkerRead` edges as the source orders
+them (finding 16).** See (m)4.3; A2b2b's brief carries the corrected lines for its two identities.
+
+#### A2c2a — the owner waits (the brief's prerequisite section)
+
+**Prerequisite, dated 2026-09-27 — before A2c2a: `VideoShutdown` is admitted at the transfer's parent
+transaction (finding 15).** Source on `847b65c3`: `runtime::tabs::Runtime::absorb_tab` runs
+`absorb_tab_into_layout` (the source tab's seats and sessions move into the active tab) and
+`carry_the_pages_of_moved_panes` before `carry_the_recordings_of_moved_panes`;
+`Runtime::move_pane_across_tabs` runs `pane_into_tab` (the pane moves, and on a seat-centre aim another is
+traded back) before both carries; `Runtime::extract_pane_into_new_tab` runs `tear_pane_into_tab`, inserts the
+torn tab and shifts `active_tab` before both carries. `runtime::panes::Runtime::carry_the_recordings_of_moved_panes`
+returns `()`. An admission refused inside the carry, before its `take` loop, leaves the video seats keyed by
+panes that have already moved, the caller goes on, and a later sweep closes the "preserved" seat — (l)3's "the
+gesture that wanted it gone does not happen this turn" is false at that boundary. A2c2a's brief states:
+
+- **The boundary.** `VideoShutdown` for a transfer is minted by the transfer's parent, **before the first
+  topology or page-ownership change**: at the top of `absorb_tab`, `move_pane_across_tabs` and
+  `extract_pane_into_new_tab`, above `absorb_tab_into_layout` / `pane_into_tab` / `tear_pane_into_tab`, and
+  the carry takes that token by `&` (it stops being a place an admission is decided). A refusal returns the
+  function's existing "nothing happened" answer (`Ok(())` without the merge for `absorb_tab`, `Ok(false)` for
+  `move_pane_across_tabs`, `Ok(None)` for `extract_pane_into_new_tab`), with the layout, pages and seats
+  untouched. If the brief finds that a caller cannot take "nothing happened" at that point, it specifies a
+  commit/rollback protocol and propagates the refusal instead; it does not admit inside the carry.
+- **Pins.** The three transfer callers are pinned as `VideoShutdown`'s mint sites for the carry (and the
+  guard refuses a mint inside `carry_the_recordings_of_moved_panes`); their callers today —
+  `commit_layout_drop` (`absorb_tab`, `move_pane_across_tabs`), `commit_pane_adopt` and
+  `FolioApp::settle_arrival` (`move_pane_across_tabs`), `commit_pane_extract`, `move_pane_to_new_tab`,
+  `move_pane_to_new_window` and `FolioApp::settle_drag_handover` (`extract_pane_into_new_tab`) — are listed in
+  the brief with what each does on the refusal answer.
+- **Tests:** one refusal witness per transfer caller (`a_refused_tab_merge_moves_no_pane_page_or_recording`,
+  `a_refused_cross_tab_move_moves_nothing`, `a_refused_tear_out_leaves_the_tab_whole`), each asserting the
+  layout tree, the page map and the video map unchanged and the engine still running.
+- **Unchanged:** the engine shutdown effects stay in their pinned bodies (`VideoSeat::shutdown`, the engines'
+  `shutdown`, D-80); the simple stop, sweep, hide and play roads and `promote_file_peek` keep (l)3's narrower
+  boundaries, which their promises permit.
+
+**Prerequisite, dated 2026-09-27 — before A2c2a: `MediaQuiet` admits the reader quiescence only (finding 17).**
+Source on `847b65c3`: `bt_platform::video::shutdown_media_session` runs `READERS.quiet_within(MEDIA_QUIET_BUDGET)`
+and then `MFShutdown` in one function, so refusing an admission around the whole call runs neither, while (l)3's
+refusal witness expected `MFShutdown` to run. A2c2a's brief states: `shutdown_media_session` is split so the
+admitted operation is **the reader quiescence alone** (`Readers::quiet_within`, row 184) and `MFShutdown` runs
+after it on both roads — after a completed wait, and on the refusal road without the wait (the line it prints
+over a reader still inside stays). The refusal test observes both: no `wait_timeout` taken, and `MFShutdown`
+called (a counter behind `video`'s test seam). **Wording, corrected here for the brief and the owner:** the
+1.5 s is `MEDIA_QUIET_BUDGET`, a configured wait deadline; `quiet_within` first takes the readers' mutex and the
+condition variable reacquires it, and scheduling can pass the deadline, so it is **not** "proven by its deadline
+loop" (withdrawn from (l)3) and not an elapsed-time guarantee; `MFShutdown` has no deadline at all. The same
+correction applies to (l)15's bounds wherever they are counts: a finite number of file-system operations
+(`RunLog`'s "one directory create, two stats and a rename"; `StorageRelocate`'s "one rename"; `UpdateMounts`'
+reads; `StoreOpen`'s "six bounded reads") and a byte cap on a read are **workload bounds**, not latency
+guarantees, and the owner's list presents them as such.
+
+#### (m)4.3 · Finding 16 — the nested edges as the source orders them (A2b2b's, A2c2a's and A2c2b's briefs)
+
+**Dated 2026-09-27 — before A2b2b, A2c2a and A2c2b.** Source on `847b65c3`:
+`preview_watch::PreviewWatch::sync_with` inserts each newly wanted file with `stamp(path)` (`Stamp::of`, row 46)
+**before** it opens any folder's watch through its `open` closure (`subscribe` →
+`DirWatch::start_shallow_named`); `due_with` drains the news and takes due clocks, then stamps; and
+`git_watch::subscribe` calls `linked_gitdir(root)` **before** it iterates `DirWatch::start` over the root and the
+gitdir. `WatchStart` stays admitted **around each actual start** (the `open` closure's call, and each
+`DirWatch::start` in `git_watch::subscribe`), as (l)3 says. The edges are corrected:
+
+- **`PreviewStat`** encloses `advance_preview_watch` (and `ask_the_unwatched_preview_files`) from the top, as
+  (l)3 placed it; its nested relation is **`PreviewStat` → `WatchStart`** only (the arrivals' `subscribe`, minted
+  inside `PreviewStat`'s closure around each `open` call). The reverse edge (l)3 gave `WatchStart` ("N:
+  `PreviewStat` (46, `sync_with` stamps each new file first)") is withdrawn: the stamps are `PreviewStat`'s own
+  sites, run before any start, under `PreviewStat`'s token. No inner `PreviewStat` refusal is added after
+  `take_due`.
+- **`GitMarkerRead`** is not nested inside `WatchStart`. Its entrance is `git_watch::subscribe`'s
+  `linked_gitdir` call, **before** the starts, reached from `advance_git_watch` → `GitWatch::sync`; its
+  enclosing identity is none (the turn's `advance_git_watch` mints `GitMarkerRead` and then, per start,
+  `WatchStart`, as siblings). (l)3's "nested inside `WatchStart`'s subscribe road", its `WatchStart` line's "N:
+  `GitMarkerRead`" and (l)8's "reached from inside A2c2a's admission" are withdrawn.
+- **`WatchStart`'s line** names no nested identity: its static multiset is its own rows (140–143 [mac];
+  193–195 [win]) and the pinned departures, and its mint sites are the `open` closures inside `PreviewStat`'s
+  and `FilesWatch::sync`'s admissions (or the turn, for `advance_files_watch`), `git_watch::subscribe`'s loop and
+  `DirNews::arm`.
+- **`MarksRecord`'s nested relation** gains the edge (l)3 omitted: `attention_ownership::record` calls
+  `explorer_menu::same_path` (row 20, S9) on every recorded root while it holds the marks lock. The edge is
+  `MarksRecord` → `AgentConfigState` (S9's owner leg, minted nested inside `MarksRecord`'s closure), and
+  `AgentConfigState`'s mint-site list names `attention_ownership::record` as an incoming route. The same holds
+  for `psreadline::recorded_install` (a `Marks::read` without the lock, under `PsReadLineApply` through
+  `InstalledBuild::found` ← `upgrade_recorded`): its read mints `MarksRecord` nested; (m)1's S6 lists it.
+
+#### A2anim — the prerequisite for its design note (finding 18)
+
+**Dated 2026-09-27 — before A2anim's implementation; its design note (CONVENTIONS §十 rule 11) states:**
+
+- **Types and lifetimes.** `animation::AnimationSource: Read + Send` loses `Send` (or gains a lifetime
+  parameter) for the worker-local source: the decoder in the worker's table is
+  `gif::Decoder<Box<dyn AnimationSource + 'w>>` (or a concrete `gif::Decoder<FileAnimationSource<'w>>`), where
+  `'w` is the borrow of the math worker loop's `&'w WorkerCtx`; the note names the concrete type, where the table
+  lives (a local of `run_decoration_worker`'s loop, so it cannot outlive the borrow), and that no value holding
+  `'w` is sent. `AnimationCursor` stops holding `reader` and `is_send` is re-pointed at the key.
+- **Explicit aggregate bounds.** The ring's per-playback frame and byte budget and the window's
+  `MAX_ANIMATION_CACHE_BYTES` (3 × `MAX_ANIMATION_HELD_BYTES`) do not bound the number of live decoders on the
+  worker. The note states a **handle bound** (a number of open decoders, counting in-flight opens) and a **byte
+  bound** for the table, and says how keys that are retired but not yet processed (a retire message still
+  queued) count against both. The implementer supplies a finite enforceable number; a new visible eviction
+  policy is the owner's to choose.
+- **Release protocol.** A retirement whose send fails (the worker gone) needs no release on the window thread;
+  a retirement that cannot be queued because the worker's queue is full is not dropped (the note says whether it
+  is coalesced into the next fill's message or kept in a bounded window-side retire list); a successful
+  completion for a key the window has since retired or replaced (a **stale success**) is answered with a retire
+  of that generation by the window, not adopted — a successful send to the process-wide completion receiver
+  does not prove the window that asked still exists, so the worker retires on its own a key whose window has
+  closed (the note names the signal it uses).
+- **Preserved:** the file-change restart (`AnimationStamp`), and the ring's frame and byte accounting.
+
+**Ordering, stated once** (it replaces both of (l)'s sentences — (l)7's "A2b1 depends on it" and (l)8's
+table): **A2b1 does not depend on A2anim.** A2b1 lands with `FileAnimationSource` as a guarded exception of the
+retained census ((m)2); A2anim lands independently after its reviewed note; **A2e depends on A2anim**, because
+A2e requires the exception census to be empty.
+
+#### B13 — the Windows clipboard's open leaves the window thread
+
+| | |
+|---|---|
+| **target version** | 0.4.7 (the coordinator's ruling, 2026-09-27) |
+| size | M |
+| who | Opus, local lane; Windows witnesses |
+| depends on | A2c2a (`ClipboardOpen` exists and row 26 is its admitted interim stay); A5's lane contract |
+
+**True on BASE.** `windows_impl::open_clipboard_with_retry` → `retry_open_clipboard` makes five `OpenClipboard`
+attempts with 5 + 10 + 20 + 40 = 75 ms of `std::thread::sleep` between them, on the window thread, from
+`clipboard_text` (Settings field paste, the terminal's paste line, the preview's paste), `set_clipboard_text`
+(every copy verb) and `WindowsClipboard::begin` (the terminal's paste-from-clipboard). **Goal.** The window thread
+never sleeps for the clipboard: a clipboard-owner on a worker (a message-only window of its own, since
+`OpenClipboard` binds to a window handle) answers copy and paste requests; a copy is fire-and-forget with a
+receipt the status line may show; a paste completes when its answer lands and is dropped if the target pane or
+field changed first. **Tests:** `copying_never_sleeps_on_the_window_thread`, `a_paste_lands_in_the_field_that_asked`,
+`a_paste_answered_after_its_field_closed_does_nothing`, and the refusal control from A2c2a. **Docs:** registry
+row 26 to `done`; `ClipboardOpen`'s line retired; a DESIGN entry. **Architecture impact.** (a) the clipboard's
+open/owner handle gets one owner, the clipboard worker. (b) a new worker and its request lane. (c) repays row 26.
+(c′) a paste lands a turn later. (d) yes (the clipboard handle's owner moves) — a one-page design note reviewed by
+Codex first.
+
+### (m)5 · The five registry rows
+
+The five rows stay; three texts change in this commit (`window_waits.tsv`; §5.3 regenerated), each citing the
+dated DESIGN entry of this revision:
+
+- **Row 24** (`EndpointStart`) — unchanged: a receive budget of 5 s plus a join, **per endpoint**; the total is
+  not proven. Repaid by B11.
+- **Row 25** (`VideoShutdown`) — its repayment line now says that **D-80's ticket inherits the direct-close
+  cost**: `structural-debt.md`'s D-80 records a shutdown through an explicit door instead of a `Drop`; removing
+  the synchronous cost of the six direct-close roads is scope D-80's ticket inherits from this row, recorded on
+  the D-80 row as an extension by (m). Removing the destructor chain alone does not repay row 25.
+- **Row 26** (`ClipboardOpen`) — **definite**: the coordinator's ruling (2026-09-27) is *interim stay, repaid by
+  a clipboard B-ticket, B13 (0.4.7)*. The brief is (m)4's B13 section. It no longer waits on an owner ruling.
+- **Row 27** (`MediaQuiet`) — the wording of (m)4 (a configured wait deadline, not an elapsed-time bound;
+  `MFShutdown` unbounded); its repayment by D-80's ticket is recorded as an **extension** of D-80's scope (reader
+  quiescence and `MFShutdown` are not in D-80's recorded text), and the owner's stay alternative stands.
+- **Row 28** (`TrialClaim`) — unchanged: `CLAIM_WAIT` (30 s) plus one last try; claim attempts are not
+  instantaneous and the sum is not an unconditional wall-clock guarantee.
+
+### (m)6 · Corrections the review asked for that this revision can make in place
+
+- **The audit boundary is in the note, not only in a report.** (l)2 said "every identity's callee closure was
+  walked" and (l)3 called its table complete; four tails were not certified, and TDL's report said so. They are
+  stated here as obligations: **the chrome rebuild tail beyond T's two nested identities** (`refresh_chrome` →
+  `refresh_chrome_with_overlay` and the overlay graph) — before A2b2b claims complete coverage, and before A2e;
+  **`files_trees` before a recycle** (it reads cached trees, marks requests pending, sends to the files worker and
+  can disable it on a failed send: the state `Recycle`'s admission protects) — before A2b2b; **`adopt_new_palette`**
+  (records an application change, updates native and page colours, clears caches, calls
+  `refresh_preview_for_layout` — which can reach the video sweep — rebuilds the chrome and publishes a frame) —
+  before `SchemeWrite`/`SchemeCatalogue` (A2b2b) and `VideoShutdown` (A2c2a) are converted, its nested promises
+  scoped to what an already-adopted palette allows; **the store writes during exit** (`App::finish`,
+  `FolioApp::settle_quit`'s phases) — a witnessed caller census and unsaved-obligation witnesses before A2b2a,
+  session-writer retirement kept separate. (l)3's "complete" means complete up to these four.
+- **"Nine doors"** in (l)9's B10 means nine former categories; `StoreOpen` and `StoreReread` are two identities,
+  so B10 repays ten identities. The brief uses those words.
+- **`ClaimName`'s refused first ask** (review, sample): a refusal recorded as "not the writer" is keyed by the
+  directory **as spelled**, never by a canonical name computed outside the admission; B10's spelling-keyed cache
+  is the eventual form.
+- **B11** (review F10): its brief says who publishes a timeout or refusal while a cleanup is stuck in a join (the
+  lane's supervisor, not the joining worker) and bounds retiring attempts as well as starts.
+
+### (m)7 · This revision's own architecture impact
+
+- **(a)** None by this commit. The tickets: unchanged from (l)15 — A2anim moves the animation decoder's owner;
+  B13 (new) moves the clipboard's open handle to a clipboard worker; nothing else in A2 moves a fact's owner.
+- **(b)** This commit: no door. The tickets: one new type in `admission` (`Leg`, `Arm`), the registry's
+  `# graphs` section, `file_reads`' owner table and worker forms and the retained census ((m)1.2, (m)2); B13's
+  clipboard worker.
+- **(c)** D-80's row records its scope extension (rows 25 and 27). B13 is opened at dispatch. No other ledger
+  change.
+- **(c′)** None by this commit. The tickets: a refused `TrialWritesReleased` becomes a new source of a re-posted
+  release on a later turn (A2b2a, (m)4); a refused transfer becomes a new "nothing happened" answer of
+  `absorb_tab`, `move_pane_across_tabs` and `extract_pane_into_new_tab` (A2c2a, (m)4) — each listed caller of
+  those three is named in its brief with what it does on that answer; a paste can land a turn later (B13).
+- **(d)** Yes, as an amendment to the note's own contract: (l)1's R3 is replaced by R3′ ((m)1); `file_reads` is
+  declared a multi-owner primitive with a checked entrance set; the standalone pin is re-specified ((m)2.3). Codex
+  reads (m) before A2s and A2b1 are briefed.
+
+**Gates run for this commit** (docs and the registry; no Rust changed): `cargo fmt -p bt-app -- --check`;
+`pwsh -NoProfile -File scripts/ci/check-window-waits.ps1` (248 → 248 sites on `847b65c3`, 0 added; no registry row
+added without a ruling; two rows pending); `cargo test -p bt-app -j 6 -- window_wait every_bare_site_is_a_row`
+(the registry's six tests, the §5.3 table among them); `cargo test -p bt-source --test census` and
+`--test real_workspace` (the wholly-test files stay the twenty `main` pins); `scripts/check-machine-paths.ps1`.

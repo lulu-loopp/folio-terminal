@@ -12825,3 +12825,28 @@ The thread-door note's revision (k)9 item 4 found five waits the window thread m
 **Also corrected in the registry.** Row 2 names the marks lock's two further roads (the agent hook installs through `attention_ownership::record`, and `psreadline::install_recorded` from the PSReadLine apply, window birth's upgrade and the trial's release). Row 8 names both platforms: the Windows `DirWatch::start_scoped` waits on its watcher's first word with no deadline exactly as the macOS one does.
 
 **Not here.** No door type, `# doors` line, `# effects` line or code: the identities (`EndpointStart`, `VideoShutdown`, `ClipboardOpen`, `MediaQuiet`, `TrialClaim`) land with A2c2a, which the note's revision (l)8 briefs.
+
+### 2026-09-27 — The thread-door note's revision (m): a shared operation is a closed graph entered by two by-value roots, the interim `file_reads` census has a retirement for every caller, and registry row 26 is an interim stay repaid by B13
+
+The thread-door note's revision (m) (`docs/plans/design/thread-door-2026-09-26.md`), adopting the Codex review of
+revision (l) under the coordinator's narrow ruling for this round. It supersedes, in the entry above (*five
+window-thread waits the thread-door survey found are registry rows 24–28*), the lines for rows 25, 26 and 27.
+
+- **Row 25** (`VideoShutdown`) — still retained on the window thread and repaid by D-80's ticket (0.4.7), which
+  **inherits the direct-close cost** of the six `VideoSeats::{close, open, put}` roads as scope added to D-80's
+  recorded one; removing the destructor chain alone does not repay the row.
+- **Row 26** (`ClipboardOpen`) — the coordinator's ruling: **an interim stay, repaid by the clipboard ticket B13
+  (0.4.7)**, which moves the clipboard's open to a worker that owns its own window handle. No longer an owner
+  question.
+- **Row 27** (`MediaQuiet`) — 1.5 s is a configured wait deadline, not an elapsed-time bound (the mutex, the
+  condition variable's reacquisition and scheduling can pass it; `MFShutdown` after it has none); repaid by
+  D-80's ticket as a recorded extension of D-80's scope (reader quiescence and `MFShutdown`), unless the owner
+  rules it stays.
+
+**Also true from (m):** every shared window-and-worker operation (S1–S19) is entered through
+`admission::Leg<'_, D>`, built only by `Leg::owner` (the owner token taken by value) or `Leg::worker` (the
+worker's context), and every function of its published graph takes the leg by reference; `file_reads` is a
+multi-owner primitive whose entrance set (worker forms, a generated owner table of whole reads, and a retained
+capability-free census that only shrinks) the guard checks; A2b1 does not wait for A2anim, and A2e does.
+
+**Not here.** No door type, `# doors` line, `# effects` line or code.
