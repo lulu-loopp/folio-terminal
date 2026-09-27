@@ -3373,3 +3373,743 @@ grow: both of the applier's polls sleep only through this door. For (k): every
 existing worker sleep in the inventory (`update_trial::watch`,
 `take_the_claim_within`, `install_txn::hold_until`,
 `macos_update::{run_at, detach_point}`) is a candidate to route through it.
+
+---
+
+## Revision 2026-09-27 (k), the allocation: every bare site gets one disposition, and A2b–A2d are re-cut from it
+
+**Classified against** `b054379b`, and **re-read against `c50adb60`** (`origin/main` when this revision was
+committed, with U-28 merged). The inventory `docs/plans/window-thread-bare-sites.tsv` is the same file at both:
+**226 rows holding 248 sites**. This is the regeneration at `11b9da8a` after U-27, and the gate's seed moved
+with it at `bf652273`. The registry `crates/bt-app/src/window_waits.tsv` has 23 `# rows`, 24 `# doors`,
+9 `# entrances` and, since U-28, 8 `# effects`. The eighth is `crate::wait::sleep_within`, of kind
+`worker-door-body`, with authority `WorkerCtx` and an empty door column ((j)13).
+
+U-28 changed the thread of one row: `install_txn::hold_until`'s sleep (row 108) is now reached from the macOS
+applier's standalone main. It also added two `file_reads` sites, which (k)8 lists. It added no bare site.
+
+(j)13's list of "worker sleeps" is corrected here: `update_trial::take_the_claim_within` (row 89) runs on the
+window thread before the loop, not on a worker.
+
+**How each row was read.** Every row was traced from its item to the thread that runs it today: callers
+recursively, down to a spawn closure, a `Runtime` method or `FolioApp` handler, `fn main`'s road, a door verb,
+or a test. Nothing was built or run. Where a row says "owner (Starting)", the site runs on the window thread
+after `admission::enter_window_thread` and before the loop exists. "Owner (Exiting)" means after
+`admission::exiting`. "Standalone" means a door process's main thread. "None" means no product caller exists,
+and the row says which tests, examples or tools reach it. The table cites items by identity. Call chains are
+named by function, never by line.
+
+### (k)1 · The dispositions as applied, and the one interface they force
+
+**The five kinds, read against the table.**
+
+- **(1): the site stays where it is, in a function that becomes an `# effects` holder under an identity that
+  already exists.** That is:
+  - the helpers inside an existing owner door (`PresentFrame`'s `compose_frame` and `handle_surface_failure`,
+    `TraceFlush`'s `flush_sink`);
+  - the hand-off lane's door body;
+  - bt-pty's transport functions.
+- **(2): the site goes through a door that A2b, A2c or A2d creates.** A worker door takes the worker's
+  context. An owner road takes an admitted token; the token is of an **interim owner door**, a new admission
+  identity and registry line with the `open` status (i)3 ruled.
+- **(3): no row.** Every excluded root was already outside the inventory (A2a's (j)2 forms), so no row of the
+  inventory is excluded.
+- **(4): no row.** A2a's checked removal took all nine typed entrances out of the vocabulary, so no row is a
+  typed-entrance call site. What remains of (4) is the `# entrances` section, which is the registry's, not
+  the inventory's.
+- **(5): the functions A1e pins** (`EXCEPTIONS`/`PINNED` in `window_waits_tests.rs`). Three `Drop`s that only
+  close a handle are added to that table as counted-only rows; see (k)2 item 5.
+
+No sixth kind is added. The five rows the kinds cannot hold are listed in (k)4 as unclassified. They are not
+forced into a kind.
+
+**The interface: `admission::Authority`.** Of the 172 rows in (2), 90 run on the window thread, and 34 of those run in a function a worker or a standalone main also
+executes (the table's thread column says "owner + …"). Examples:
+
+- `bt_persist::atomic`'s rename and `sync_all`, reached from the settings store on the owner and from the
+  session writer on a worker;
+- `file_replace`;
+- `profile_marks::lock`;
+- `explorer_menu::same_path`;
+- `migrate::read_bounded`.
+
+An `expect` never reaches a separately defined callee ((j)7). So the effect function must be the one function
+both roads call, and it must accept both capabilities. **Every family door therefore takes `by: &impl
+admission::Authority`.** `Authority` is sealed, with no implementation outside `admission`, and it has exactly two
+implementors:
+
+- `WorkerCtx`;
+- `WaitToken<'_, D>` for every door `D`.
+
+A worker passes its context. The window thread passes the token of the interim door whose road it is on.
+Without either, the call does not compile, so nothing (b)2 and §C-5 guarantee is lost.
+
+**What the guard gains.** A `# effects` row of kind `worker-door-body` gains the authority `Authority` and a
+`door` cell listing the admission identities whose mint sites reach it. The guard checks that list against the
+`admitted::<D>` calls whose work reaches the door, the way `every_door_is_where_the_registry_says` already
+reads mint sites. This amends (j)6's "`wait::*` on `&WorkerCtx`". U-28's `wait::sleep_within(&WorkerCtx,
+Duration)` widens to `&impl Authority` without changing a call site.
+
+**Standalone mains.** The attention verb's stdin reader and the two Explorer waits enter
+`enter_standalone_main`. The rest of their processes' disk work runs with no role. That covers:
+
+- `--uninstall-cleanup`'s body (it enters only inside `cleanup_waited_on`);
+- `--remove-shell-integration`;
+- `--explorer-command` (`explorer_menu::serve` reads settings);
+- `--update-recover`;
+- the command-line refusal in `fn main` before `enter_window_thread` (`report_at_the_front_door` →
+  `say_at_the_front_door` → `SettingsStore::open`).
+
+Each verb enters **once, at its top**. The context is lent down to the removal, cleanup and profile roads.
+`cleanup_waited_on` and `removal_waited_on` stop entering and take the context. The guard's pinned caller list
+for `enter_standalone_main` grows from three to the verbs themselves. This is A2b's (k)7, because A2b's doors
+are the first that need it.
+
+**Counts.**
+
+| by disposition | rows | sites |
+|---|---:|---:|
+| (1) in an effect function under an existing identity | 19 | 23 |
+| (2) through a door A2b/A2c/A2d creates | 172 | 188 |
+| (3) excluded by (j)2 | 0 | 0 |
+| (4) typed-entrance call site | 0 | 0 |
+| (5) retained destructor road | 30 | 32 |
+| could not classify ((k)4) | 5 | 5 |
+| **total** | **226** | **248** |
+
+| (2) by door family | rows | sites |
+|---|---:|---:|
+| `file_reads::observe` | 57 | 62 |
+| `file_writes::*` | 41 | 43 |
+| `wait::*` (`sleep_within`, `join`, `recv`, `recv_timeout`, `condvar_wait`, `condvar_wait_timeout`, `block_on`) | 51 | 56 |
+| `handles::*` (`close_handle`, `set_event`; `close_fd`, `write_fd` on Unix) | 16 | 20 |
+| `quiet_command::*` (`output_within`, `wait_within`) | 7 | 7 |
+| of which name an owner identity in the door cell (8 more run on the owner and take the tokens listed on row 97) | 82 | 93 |
+
+| by ticket | rows | sites |
+|---|---:|---:|
+| A2b | 83 | 90 |
+| A2c | 120 | 130 |
+| A2d | 18 | 23 |
+| A2e only | 0 | 0 |
+| none (unclassified) | 5 | 5 |
+
+| by the thread that runs it today | rows |
+|---|---:|
+| workers only | 66 |
+| the window thread only (turn, `Starting`, `Exiting`, or inside an existing door) | 68 |
+| a standalone main only | 8 |
+| transport only (bt-pty's threads, pinned drops included) | 10 |
+| a `Drop` on the window thread only | 3 |
+| several of these | 49 |
+| no product caller (statics never dropped, tests, examples, tools) | 22 |
+
+**A2e only is empty.** Each (1) row needs a signature or kind change before an `expect` can land: a helper
+taking `&WaitToken`, a `transport` or `drop-exception` kind, or `Authority` for the hand-off body. A2a's guard
+refuses those until the ticket that owns the row adds them.
+
+### (k)2 · A2a's six items, each given its disposition
+
+1. **The macOS `WebHost::request_environment` `create_dir_all`** stays **(1)**, `owner-door-body` of
+   `WebEnvironment`, as it already is in `# effects`.
+   - It runs inside the admitted door, on the window thread, and the door's line says so.
+   - Routing it through `file_writes` inside the door would give one admission two authorities for one
+     effect.
+   - The residue belongs to row 21. When a later ticket moves the environment's folder creation, it moves with
+     it. It is not A2b's.
+2. **`Path::exists` / `is_file` / `is_dir` / `try_exists` / `symlink_metadata`** are observations the
+   vocabulary does not list. There are 205 such calls in product sources (a text count, tests included by
+   file name only).
+   - This is a vocabulary question, not a disposition. It is not answered by adding rows: the inventory never
+     grows.
+   - **Proposal:** A2e adds `std::path::Path::{exists, is_file, is_dir, try_exists, symlink_metadata}` and
+     `std::fs::symlink_metadata` to the vocabulary **only after** A2b's `file_reads::observe` exists. They are
+     routed in A2e's own diff through `observe`, with the probe proving each per target.
+   - Until then (j)12's limit applies, and they are named as outside the invariant by C-1's first bullet.
+   - `read_system_locale_declaration`'s `Path::exists` rides row 7's `LocaleProbe` door when it lands.
+   - **Owner decision** (k)10 Q4, because it roughly doubles A2e.
+3. **bt-pty's `SystemShellEnvironment::is_file`** (row 215) is **(1)** `transport` under A2d.
+   - The inventory's arm is item-level (`–`), and the counted `metadata` is a `cfg(unix)` statement. So on
+     Windows the site does not exist, and `path.is_file()` does the same stat unlisted (item 2).
+   - A2d's `# effects` row names the arm the statement stands on (`[unix]`) and not the item's. The guard
+     reads statement-level `cfg` for `# effects` rows only, not for the inventory, which stays as seeded.
+4. **`hang_watch::run_selftest_if_due`** (`[debug_assertions]`, row 92) is **(2)** through an interim
+   `SelfTest` door.
+   - It is product by (j)2's rules: `debug_assertions` is not `test`.
+   - It is a deliberate hold on the window thread, so the honest row is "ruled to stay (debug builds only)".
+     That is proposed to the owner, (k)10 Q2.
+5. **Counted handles on `Drop`s outside the exception table** are **(5)**: `attention_pipe::Overlapped`,
+   `attention_pipe::OwnedHandle` and `instance::DataDirectoryClaim` (rows 161, 162, 173).
+   - A `Drop` has no capability, so no door can take them.
+   - A2c adds them to the pinned table as **counted-only** rows: a body with a `CloseHandle` ×1, no edges, and
+     product reach as found. (g)4's reading ("refused inside a `Drop`" means the entries that wait) stays.
+   - They are rows because the lint will fire on them, not because they wait. None of them gets a repayment
+     ticket: a handle closed in its owner's destructor is the design.
+6. **`write!`/`writeln!` to stderr** is **(2)** through `file_writes::write_line`, the same door as the
+   trace file's writes. This covers `trace_sink::write_here` (row 83), and in part `trace::TraceFile::open`,
+   whose second write is its error line (row 78).
+   - After `diagnostics::enter_resident_run`, stderr *is* the run log (the survey read
+     `choose_resident_channel`). Before it, stderr is a console or a pipe that can block on a stalled reader.
+     Either way it is an I/O write on the calling thread.
+   - The Unix `write_std_error` (`libc::write`, row 127) goes through `handles::write_fd` for the same reason.
+   - `append_panic_report` (row 5) is not like these. It runs on whichever thread panics; see (k)4.
+
+### (k)3 · The allocation table
+
+Columns: the inventory's key; the disposition; the door the site goes through, and for an owner road `·` the
+admission identity whose token it takes; the thread that runs it today; the ticket that removes the row; and the
+B-ticket the interim door is owed to (for (5), the ledger row). "(widened)" and "(proposed)" mark owings that
+need an owner ruling ((k)10). "As 97" means the owner tokens listed on row 97.
+
+| # | crate | arm | item | entry ×count | disp | door · identity | thread today | ticket | owed to / note |
+|---:|---|---|---|---|---|---|---|---|---|
+| 1 | bt-app | – | `crate::<TheDeviceAndItsWindows as LostDevice>::rebuild` | `pollster::block_on` ×1 | (2) | `wait::block_on` · interim `DeviceRecovery` (row 10) | owner | A2c | B9 |
+| 2 | bt-app | – | `crate::App::release_trial_writes` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` · interim `TrialWritesReleased` (new row) | owner | A2b | B8 (widened) |
+| 3 | bt-app | – | `crate::FolioApp::recovered_from_a_lost_device` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` (the path handed to the pilot) · interim `DeviceRecovery` (row 10) | owner | A2c | B9 |
+| 4 | bt-app | – | `crate::animation::AnimationStamp::of` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 5 | bt-app | – | `crate::append_panic_report` | `std::io::Write::write_fmt` ×1 | ? | could not classify: the panic hook road | any (panic hook) + owner | — |  |
+| 6 | bt-app | – | `crate::attention_hooks::Config::land` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` · interim `AgentHooksWrite` (new row) | owner + standalone | A2b | B8 (widened) |
+| 7 | bt-app | – | `crate::attention_hooks::Config::land` | `std::fs::write` ×1 | (2) | `file_writes::write` · interim `AgentHooksWrite` | owner + standalone | A2b | B8 (widened) |
+| 8 | bt-app | – | `crate::attention_hooks::editable_target` | `std::fs::canonicalize` ×2 | (2) | `file_reads::observe` · interim `AgentConfigState` (new row) | owner + standalone | A2b | B10 |
+| 9 | bt-app | – | `crate::attention_ownership::other_live` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` · interim `AgentHooksWrite` | owner + standalone | A2b | B8 (widened) |
+| 10 | bt-app | – | `crate::attention_wire::payload_on_stdin` | `std::sync::mpsc::Receiver::recv_timeout` ×1 | (2) | `wait::recv_timeout` | standalone | A2c | `attention`; the context is already in scope |
+| 11 | bt-app | – | `crate::clipboard_picture::names_in` | `std::fs::read_dir` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 12 | bt-app | – | `crate::clipboard_picture::save` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` | worker | A2b |  |
+| 13 | bt-app | – | `crate::diagnostics::last_written` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` · interim `RunLog` (new row, Starting) | owner (Starting) | A2b | candidate "stays" |
+| 14 | bt-app | – | `crate::diagnostics::newest_crash_report` | `std::fs::read_dir` ×1 | (2) | `file_reads::observe` · interim `RunLog` | owner (Starting) | A2b | macOS in practice; candidate "stays" |
+| 15 | bt-app | – | `crate::diagnostics::open_run_log` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` · interim `RunLog` | owner (Starting) | A2b | candidate "stays" |
+| 16 | bt-app | – | `crate::diagnostics::rotate_if_oversized` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` · interim `RunLog` | owner (Starting) | A2b | candidate "stays" |
+| 17 | bt-app | – | `crate::diagnostics::rotate_if_oversized` | `std::fs::rename` ×1 | (2) | `file_writes::rename` · interim `RunLog` | owner (Starting) | A2b | candidate "stays" |
+| 18 | bt-app | – | `crate::explorer_menu::cleanup_waited_on` | `std::sync::mpsc::Receiver::recv_timeout` ×1 | (2) | `wait::recv_timeout` | standalone | A2c | `--uninstall-cleanup`; the context is in scope |
+| 19 | bt-app | – | `crate::explorer_menu::removal_waited_on` | `std::sync::mpsc::Receiver::recv_timeout` ×1 | (2) | `wait::recv_timeout` | standalone | A2c | `--remove-explorer-menu`; the context is in scope |
+| 20 | bt-app | – | `crate::explorer_menu::same_path` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` · interim `AgentConfigState` / `AgentHooksWrite` | owner + worker + standalone | A2b | B10 / B8 (widened) |
+| 21 | bt-app | – | `crate::facts_of_a_file_the_user_chose` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` · `PeekFacts` (new row) | owner | A2b | ruled in DESIGN already; proposed `ruled to stay` |
+| 22 | bt-app | – | `crate::files::canonical_path` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 23 | bt-app | – | `crate::files::read_directory` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 24 | bt-app | – | `crate::files::read_directory` | `std::fs::read_dir` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 25 | bt-app | – | `crate::files::run_dir_worker` | `std::sync::mpsc::Receiver::recv` ×1 | (2) | `wait::recv` | worker | A2c |  |
+| 26 | bt-app | – | `crate::git::run_git_with_input` | `std::process::Child::wait` ×1 | (2) | `quiet_command::wait_within` | worker | A2c |  |
+| 27 | bt-app | – | `crate::git::run_git_with_input` | `std::thread::JoinHandle::join` ×2 | (2) | `wait::join` | worker | A2c |  |
+| 28 | bt-app | – | `crate::git::run_git_with_input` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` | worker | A2c |  |
+| 29 | bt-app | – | `crate::git::run_git_worker` | `std::sync::mpsc::Receiver::recv` ×1 | (2) | `wait::recv` | worker | A2c |  |
+| 30 | bt-app | – | `crate::handoff_lane::run_handoff_lane` | `std::sync::mpsc::Receiver::recv` ×1 | (2) | `wait::recv` | worker | A2c |  |
+| 31 | bt-app | – | `crate::hang_watch::prune_reports` | `std::fs::read_dir` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 32 | bt-app | – | `crate::hang_watch::watch_forever` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` | worker | A2c |  |
+| 33 | bt-app | – | `crate::hang_watch::write_report` | `std::fs::File::create` ×1 | (2) | `file_writes::create` | worker | A2b |  |
+| 34 | bt-app | – | `crate::hang_watch::write_report` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` | worker | A2b |  |
+| 35 | bt-app | – | `crate::page_destination` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` · interim `PathResolve` (new row) | owner | A2b | B10 |
+| 36 | bt-app | – | `crate::palette_index::IndexWorker::spawn` | `std::sync::mpsc::Receiver::recv` ×1 | (2) | `wait::recv` | worker | A2c | the site is in the spawn closure |
+| 37 | bt-app | – | `crate::palette_index::canonical` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 38 | bt-app | – | `crate::palette_index::walk_bounded` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 39 | bt-app | – | `crate::palette_index::walk_bounded` | `std::fs::read_dir` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 40 | bt-app | – | `crate::persist::SessionWriter::start` | `std::sync::mpsc::Receiver::recv` ×1 | (2) | `wait::recv` | worker | A2c | the site is in the spawn closure |
+| 41 | bt-app | – | `crate::persist::make_data_folder` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` · interim `StoreOpen` (new row) / `LaunchHandOver` | owner + owner (Starting) + standalone | A2b | B10 |
+| 42 | bt-app | – | `crate::persist::relocate` | `std::fs::rename` ×1 | (2) | `file_writes::rename` · interim `StorageRelocate` (new row, Starting) | owner (Starting) + standalone | A2b | candidate "stays" |
+| 43 | bt-app | – | `crate::preview::file_mtime` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` · `PreviewSave` (row 20) | owner | A2b | row 20, document half |
+| 44 | bt-app | – | `crate::preview::read_size` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 45 | bt-app | – | `crate::preview::run_preview_worker` | `std::sync::mpsc::Receiver::recv` ×1 | (2) | `wait::recv` | worker | A2c |  |
+| 46 | bt-app | – | `crate::preview_watch::Stamp::of` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` · interim `PreviewStat` (new row) | owner | A2b | B10 |
+| 47 | bt-app | – | `crate::psreadline::install_checked` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` · `PsReadLineApply` (row 3) | owner | A2c | B4 |
+| 48 | bt-app | – | `crate::psreadline::install_checked` | `std::fs::write` ×1 | (2) | `file_writes::write` · `PsReadLineApply` (row 3) | owner | A2c | B4 |
+| 49 | bt-app | – | `crate::psreadline::installed_disk::<System as Disk>::entries` | `std::fs::read_dir` ×1 | (2) | `file_reads::observe` · `PsReadLineProbe` (row 4) | owner + standalone | A2c | B5 |
+| 50 | bt-app | – | `crate::raster_peek_page` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 51 | bt-app | – | `crate::read_video_glance` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 52 | bt-app | – | `crate::revived_page_of` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` · interim `PathResolve` | owner | A2b | B10 |
+| 53 | bt-app | – | `crate::run_decoration_worker` | `std::sync::mpsc::Receiver::recv` ×1 | (2) | `wait::recv` | worker | A2c |  |
+| 54 | bt-app | – | `crate::run_path_verify_worker` | `std::sync::mpsc::Receiver::recv` ×1 | (2) | `wait::recv` | worker | A2c |  |
+| 55 | bt-app | – | `crate::run_scale_worker` | `std::sync::mpsc::Receiver::recv` ×1 | (2) | `wait::recv` | worker | A2c |  |
+| 56 | bt-app | – | `crate::runtime::files::Runtime::rename_files_row` | `std::fs::rename` ×1 | (2) | `file_writes::rename` · `RenameDisk` (row 20) | owner | A2b | row 20, document half |
+| 57 | bt-app | – | `crate::runtime::preview::Runtime::open_preview_web_file_on` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` · interim `PathResolve` | owner | A2b | B10 |
+| 58 | bt-app | – | `crate::runtime::preview::Runtime::rename_preview_file` | `std::fs::rename` ×1 | (2) | `file_writes::rename` · `RenameDisk` (row 20) | owner | A2b | row 20, document half |
+| 59 | bt-app | – | `crate::runtime::profiles::Runtime::toggle_root_menu` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` · interim `RecentFolders` (new row) | owner | A2b | B10 |
+| 60 | bt-app | – | `crate::schemes::read_scheme_file` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` · interim `SchemeCatalogue` (new row) | owner | A2b | B10 |
+| 61 | bt-app | – | `crate::schemes::user_dir` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` · interim `SchemeWrite` (new row) | owner | A2b | B8 (widened) |
+| 62 | bt-app | – | `crate::schemes::user_sources` | `std::fs::read_dir` ×1 | (2) | `file_reads::observe` · interim `SchemeCatalogue` | owner | A2b | B10 |
+| 63 | bt-app | – | `crate::schemes::write_custom_copy` | `std::fs::write` ×1 | (2) | `file_writes::write` · interim `SchemeWrite` | owner | A2b | B8 (widened) |
+| 64 | bt-app | – | `crate::shell_integration::cached_profile_answer` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` | worker + standalone | A2c | the profile-probe family |
+| 65 | bt-app | – | `crate::shell_integration::install_script_at` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` · interim `ShellScriptsInstall` (new row) / `MarksInstall` (row 2) | owner + worker | A2c | B8 (widened) / B4 |
+| 66 | bt-app | – | `crate::shell_integration::install_script_at` | `std::fs::write` ×1 | (2) | `file_writes::write` · interim `ShellScriptsInstall` / `MarksInstall` | owner + worker | A2c | B8 (widened) / B4 |
+| 67 | bt-app | – | `crate::shell_integration::install_zdotdir` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` · interim `ShellScriptsInstall` | owner | A2c | B8 (widened) |
+| 68 | bt-app | – | `crate::shell_integration::install_zdotdir` | `std::fs::write` ×1 | (2) | `file_writes::write` · interim `ShellScriptsInstall` | owner | A2c | B8 (widened) |
+| 69 | bt-app | – | `crate::shell_integration::profile_marks::Marks::write` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` · `MarksInstall` (row 2) / `PsReadLineApply` (row 3) / `AgentHooksWrite` | owner + worker + standalone | A2c | B4 |
+| 70 | bt-app | – | `crate::shell_integration::profile_marks::OurTurn::take` | `std::sync::Condvar::wait` ×1 | (2) | `wait::condvar_wait` · `MarksInstall` / `PsReadLineApply` / `AgentHooksWrite` | owner + worker | A2c | B4 |
+| 71 | bt-app | – | `crate::shell_integration::profile_marks::lock` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` · `MarksInstall` / `PsReadLineApply` / `AgentHooksWrite` | owner + worker + standalone | A2c | B4 |
+| 72 | bt-app | – | `crate::shell_integration::profile_marks::lock` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` · `MarksInstall` / `PsReadLineApply` / `AgentHooksWrite` | owner + worker + standalone | A2c | B4 |
+| 73 | bt-app | – | `crate::shell_integration::profile_marks::lock` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` · `MarksInstall` / `PsReadLineApply` / `AgentHooksWrite` | owner + worker | A2c | B4 |
+| 74 | bt-app | – | `crate::shell_integration::replace_profile` | `std::fs::File::sync_all` ×1 | (2) | `file_writes::sync_all` · `MarksInstall` | owner + worker + standalone | A2c | B4 |
+| 75 | bt-app | – | `crate::shell_integration::replace_profile` | `std::fs::create_dir_all` ×1 | (2) | `file_writes::create_dir_all` · `MarksInstall` | owner + worker + standalone | A2c | B4 |
+| 76 | bt-app | – | `crate::taskbar_lane::TaskbarLane::serve` | `std::sync::Condvar::wait` ×1 | (2) | `wait::condvar_wait` | worker | A2c |  |
+| 77 | bt-app | – | `crate::trace::TraceFile::append` | `std::io::Write::write_fmt` ×1 | (2) | `file_writes::write_line` · `DiagnosticWrite` (row 20) | worker + owner | A2b | B8 (diagnostic writes join the trace queue) |
+| 78 | bt-app | – | `crate::trace::TraceFile::open` | `std::io::Write::write_fmt` ×2 | (2) | `file_writes::write_line` · `DiagnosticWrite` (row 20) | worker + owner | A2b | B8; one of the two writes is to stderr |
+| 79 | bt-app | – | `crate::trace_sink::flush_sink` | `std::sync::mpsc::Receiver::recv_timeout` ×1 | (1) | in the door `TraceFlush` (row 17): `flush_sink` takes `&WaitToken` | owner (Exiting) | A2c | also a pinned body of `trace_sink::Shutdown` |
+| 80 | bt-app | – | `crate::trace_sink::flush_sink` | `std::thread::JoinHandle::join` ×1 | (1) | in the door `TraceFlush` (row 17) | owner (Exiting) | A2c | as 79 |
+| 81 | bt-app | – | `crate::trace_sink::flush_sink` | `std::thread::sleep` ×2 | (1) | in the door `TraceFlush` (row 17) | owner (Exiting) | A2c | as 79 |
+| 82 | bt-app | – | `crate::trace_sink::run_to` | `std::sync::mpsc::Receiver::recv_timeout` ×1 | (2) | `wait::recv_timeout` | worker | A2c |  |
+| 83 | bt-app | – | `crate::trace_sink::write_here` | `std::io::Write::write_fmt` ×1 | (2) | `file_writes::write_line` · `DiagnosticWrite` (row 20) | owner + owner (Exiting) + any thread without a sink | A2b | stderr, which is the run log after `enter_resident_run` |
+| 84 | bt-app | – | `crate::uninstall::detach_images_under` | `std::thread::JoinHandle::join` ×1 | (2) | `wait::join` | standalone | A2c | `--uninstall-cleanup` |
+| 85 | bt-app | – | `crate::uninstall::inspect_tree` | `std::fs::read_dir` ×1 | (2) | `file_reads::observe` | standalone | A2b | `--uninstall-cleanup` |
+| 86 | bt-app | – | `crate::uninstall::usable_recorded_directory` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | standalone | A2b | `--uninstall-cleanup` |
+| 87 | bt-app | – | `crate::update::Claim::take` | `std::fs::File::create` ×1 | (2) | `file_writes::create` | worker | A2b |  |
+| 88 | bt-app | – | `crate::update::Claim::take` | `std::io::Write::write_fmt` ×2 | (2) | `file_writes::write_line` | worker | A2b |  |
+| 89 | bt-app | – | `crate::update_trial::take_the_claim_within` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` · interim `TrialClaim` (new row, Starting) | owner (Starting) | A2c | candidate "stays" |
+| 90 | bt-app | – | `crate::update_trial::watch` | `std::thread::sleep` ×2 | (2) | `wait::sleep_within` | worker | A2c |  |
+| 91 | bt-app | – | `crate::webhost::WebSeat::go_to` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` · interim `PathResolve` | owner | A2b | B10 |
+| 92 | bt-app | [debug_assertions] | `crate::hang_watch::run_selftest_if_due` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` · interim `SelfTest` (new row) | owner | A2c | debug builds only; candidate "stays" |
+| 93 | bt-app | [windows] | `crate::attention_copilot::run_probe` | `std::process::Command::output` ×1 | (2) | `quiet_command::output_within` | worker | A2c |  |
+| 94 | bt-app | [windows] | `crate::psreadline::run_probe` | `std::process::Command::output` ×1 | (2) | `quiet_command::output_within` | worker | A2c |  |
+| 95 | bt-app | [windows] | `crate::shell_integration::run_profile_probe` | `std::process::Child::wait` ×1 | (2) | `quiet_command::wait_within` | worker + standalone | A2c |  |
+| 96 | bt-app | [windows] | `crate::shell_integration::run_profile_probe` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` | worker + standalone | A2c |  |
+| 97 | bt-persist | – | `crate::atomic::commit_rename` | `std::fs::rename` ×1 | (2) | `file_writes::rename` (in `bt_persist::atomic`) | owner + worker + standalone | A2b | owner tokens: row 20's stores, `PreviewSave`, `MarksInstall`, `AgentHooksWrite`, `SchemeWrite` |
+| 98 | bt-persist | – | `crate::atomic::write_temp` | `std::fs::File::sync_all` ×1 | (2) | `file_writes::sync_all` (in `bt_persist::atomic`) | owner + worker + standalone | A2b | as 97 |
+| 99 | bt-persist | – | `crate::migrate::keep_oversized` | `std::fs::rename` ×1 | (2) | `file_writes::rename` · interim `StoreOpen` / `LaunchHandOver` | owner + owner (Starting) + worker + standalone | A2b | B10 |
+| 100 | bt-persist | – | `crate::migrate::keep_rejected` | `std::fs::write` ×1 | (2) | `file_writes::write` · interim `StoreOpen` / `LaunchHandOver` | owner + owner (Starting) + worker + standalone | A2b | B10 |
+| 101 | bt-persist | – | `crate::migrate::read_bounded` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` · interim `StoreOpen` / `LaunchHandOver` | owner + owner (Starting) + worker + standalone | A2b | B10 |
+| 102 | bt-platform | – | `crate::handoff::resolved_for_a_door` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 103 | bt-platform | – | `crate::handoff::reveal_arguments` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b | reached on Windows only |
+| 104 | bt-platform | – | `crate::hotkey::SummonTrace::opened` | `std::io::Write::write_fmt` ×1 | (2) | `file_writes::write_line` · `DiagnosticWrite` (row 20) | owner | A2b | `BT_HOTKEY_TRACE` only; also from the message hook |
+| 105 | bt-platform | – | `crate::hotkey::SummonTrace::write` | `std::io::Write::write_fmt` ×1 | (2) | `file_writes::write_line` · `DiagnosticWrite` (row 20) | owner | A2b | as 104 |
+| 106 | bt-platform | – | `crate::https_download::<File as Store>::seal` | `std::fs::File::sync_all` ×1 | (2) | `file_writes::sync_all` | worker | A2b | reached on macOS only |
+| 107 | bt-platform | – | `crate::https_download::Partial::finish` | `std::fs::rename` ×1 | (2) | `file_writes::rename` | worker | A2b | reached on macOS only |
+| 108 | bt-platform | – | `crate::install_txn::hold_until` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` | standalone (`--update-apply`, macOS, entered) since U-28 | A2c | reached through `install_txn::hold_within` from `update_apply_macos` (U-28); the worker context is in scope there |
+| 109 | bt-platform | – | `crate::instance::canonical_path` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` · interim `ClaimName` (new row) / `LaunchHandOver` | owner + owner (Starting) | A2b | B10; Unix only |
+| 110 | bt-platform | – | `crate::launch_agent::sweep` | `std::fs::read_dir` ×1 | (2) | `file_reads::observe` | standalone | A2b | `--uninstall-cleanup` |
+| 111 | bt-platform | – | `crate::macos_update::attach_with` | `std::fs::canonicalize` ×3 | (2) | `file_reads::observe` | worker | A2b |  |
+| 112 | bt-platform | – | `crate::macos_update::detach_point` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` | worker | A2c |  |
+| 113 | bt-platform | – | `crate::macos_update::points_under` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` · interim `UpdateMounts` (new row, Starting) | owner (Starting) + standalone + worker | A2b | candidate "stays" |
+| 114 | bt-platform | – | `crate::macos_update::run_at` | `std::process::Child::wait` ×1 | (2) | `quiet_command::wait_within` | worker | A2c |  |
+| 115 | bt-platform | – | `crate::macos_update::run_at` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` | worker | A2c |  |
+| 116 | bt-platform | – | `crate::macos_update::verify_clone` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 117 | bt-platform | [all(windows, target_arch = "x86_64")] | `crate::hang::capture_thread_stack` | `windows::Win32::Foundation::CloseHandle` ×1 | (2) | `handles::close_handle` | worker | A2c |  |
+| 118 | bt-platform | [not(windows)] | `crate::file_replace::replace_file_preserving` | `std::fs::File::sync_all` ×1 | (2) | `file_writes::sync_all` (in `file_replace`) | owner + owner (Exiting) + worker + standalone | A2b | owner tokens as 97 |
+| 119 | bt-platform | [not(windows)] | `crate::file_replace::replace_file_preserving` | `std::fs::rename` ×1 | (2) | `file_writes::rename` (in `file_replace`) | owner + owner (Exiting) + worker + standalone | A2b | as 118 |
+| 120 | bt-platform | [not(windows)] [target_os = "macos"] | `crate::video::macos_player::Engine::shutdown` | `std::thread::JoinHandle::join` ×1 | (5) | `drop-exception`: `macos_player::Engine::shutdown` (pinned) | owner + drop | A2c | D-80; the direct owner roads are an open item |
+| 121 | bt-platform | [not(windows)] [target_os = "macos"] | `crate::video::macos_player::Engine::shutdown` | `std::thread::sleep` ×1 | (5) | `drop-exception`: as 120 | owner + drop | A2c | D-80 |
+| 122 | bt-platform | [not(windows)] [target_os = "macos"] | `crate::video::macos_player::Engine::wait_for_metadata` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` | none (examples and tests) | A2c |  |
+| 123 | bt-platform | [not(windows)] [target_os = "macos"] | `crate::video::macos_player::Machinery::one_turn` | `std::sync::mpsc::Receiver::recv_timeout` ×1 | (2) | `wait::recv_timeout` | worker | A2c |  |
+| 124 | bt-platform | [not(windows)] [target_os = "macos"] | `crate::video::within_budget` | `std::sync::mpsc::Receiver::recv_timeout` ×1 | (2) | `wait::recv_timeout` | worker | A2c |  |
+| 125 | bt-platform | [not(windows)] [unix] | `crate::portable_impl::redirect_std_streams_to_file` | `libc::close` ×1 | (2) | `handles::close_fd` · interim `RunLog` | owner (Starting) | A2c | candidate "stays" |
+| 126 | bt-platform | [not(windows)] [unix] | `crate::portable_impl::same_file` | `std::fs::metadata` ×2 | (2) | `file_reads::observe` · interim `FilesRowCase` (new row) | owner | A2b | B10 |
+| 127 | bt-platform | [not(windows)] [unix] | `crate::portable_impl::write_std_error` | `libc::write` ×1 | (2) | `handles::write_fd` | worker + owner (Starting) + standalone | A2c | stderr |
+| 128 | bt-platform | [target_os = "macos"] | `crate::handoff::macos_handoff::openable_target` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 129 | bt-platform | [target_os = "macos"] | `crate::handoff::macos_handoff::openable_target` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 130 | bt-platform | [target_os = "macos"] | `crate::handoff::macos_handoff::reveal_in_explorer` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 131 | bt-platform | [target_os = "macos"] | `crate::handoff::macos_handoff::reveal_in_explorer` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 132 | bt-platform | [target_os = "macos"] | `crate::hang::ask_run_loop_to_answer` | `std::sync::mpsc::Receiver::recv_timeout` ×1 | (2) | `wait::recv_timeout` | worker | A2c |  |
+| 133 | bt-platform | [target_os = "macos"] | `crate::http::Download::wait` | `std::sync::Condvar::wait_timeout` ×1 | (2) | `wait::condvar_wait_timeout` | worker | A2c |  |
+| 134 | bt-platform | [target_os = "macos"] | `crate::http::Exchange::wait` | `std::sync::Condvar::wait_timeout` ×1 | (2) | `wait::condvar_wait_timeout` | worker | A2c |  |
+| 135 | bt-platform | [target_os = "macos"] | `crate::install_txn::arm::<Os as Surface>::rename` | `std::fs::rename` ×1 | (2) | `file_writes::rename` | worker | A2b |  |
+| 136 | bt-platform | [target_os = "macos"] | `crate::macos_files::recycle` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` · interim `Recycle` (new row) | owner | A2b | B10 |
+| 137 | bt-platform | [target_os = "macos"] | `crate::macos_identity::arm::run` | `std::process::Child::wait` ×1 | (2) | `quiet_command::wait_within` | worker | A2c |  |
+| 138 | bt-platform | [target_os = "macos"] | `crate::macos_identity::arm::run` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` | worker | A2c |  |
+| 139 | bt-platform | [target_os = "macos"] | `crate::macos_watch::<DirWatch as Drop>::drop` | `std::thread::JoinHandle::join` ×1 | (5) | `drop-exception`: macOS `DirWatch::drop` (pinned) | drop (owner) | A2c | D-40, B7 |
+| 140 | bt-platform | [target_os = "macos"] | `crate::macos_watch::DirWatch::start_scoped` | `std::fs::canonicalize` ×1 | (2) | `file_reads::observe` · `WatchStart` (row 8) | owner | A2c | B7 |
+| 141 | bt-platform | [target_os = "macos"] | `crate::macos_watch::DirWatch::start_scoped` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` · `WatchStart` (row 8) | owner | A2c | B7 |
+| 142 | bt-platform | [target_os = "macos"] | `crate::macos_watch::DirWatch::start_scoped` | `std::sync::mpsc::Receiver::recv` ×1 | (2) | `wait::recv` · interim `WatchStart` (row 8) | owner | A2c | B7 |
+| 143 | bt-platform | [target_os = "macos"] | `crate::macos_watch::DirWatch::start_scoped` | `std::thread::JoinHandle::join` ×2 | (2) | `wait::join` · interim `WatchStart` (row 8) | owner | A2c | B7 |
+| 144 | bt-platform | [target_os = "macos"] | `crate::quiet_command_text` | `std::process::Command::output` ×1 | (2) | `quiet_command::output_within` · `LocaleProbe` (row 7) | owner | A2c | B6 |
+| 145 | bt-platform | [unix] | `crate::attention_pipe::<AttentionPipe as Drop>::drop` | `libc::close` ×1 | (5) | `drop-exception`: Unix `AttentionPipe::drop` (pinned) | none (a static) | A2c | D-79 |
+| 146 | bt-platform | [unix] | `crate::attention_pipe::<AttentionPipe as Drop>::drop` | `libc::write` ×1 | (5) | as 145 | none (a static) | A2c | D-79 |
+| 147 | bt-platform | [unix] | `crate::attention_pipe::<AttentionPipe as Drop>::drop` | `std::thread::JoinHandle::join` ×1 | (5) | as 145 | none (a static) | A2c | D-79 |
+| 148 | bt-platform | [unix] | `crate::attention_pipe::AttentionPipe::start` | `libc::close` ×2 | (2) | `handles::close_fd` · interim `EndpointStart` (new row) | owner | A2c | B11 (proposed) |
+| 149 | bt-platform | [unix] | `crate::attention_pipe::listen` | `libc::close` ×1 | (2) | `handles::close_fd` | worker (reached in tests only) | A2c |  |
+| 150 | bt-platform | [unix] | `crate::file_replace::carry_metadata` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` (in `file_replace`) | owner + owner (Exiting) + worker + standalone | A2b | as 97 |
+| 151 | bt-platform | [unix] | `crate::install_evidence::imp::owner_of` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 152 | bt-platform | [unix] | `crate::launch_pipe::<LaunchPipe as Drop>::drop` | `libc::close` ×1 | (5) | `drop-exception`: Unix `LaunchPipe::drop` (pinned) | none (a static) | A2c | D-79 |
+| 153 | bt-platform | [unix] | `crate::launch_pipe::<LaunchPipe as Drop>::drop` | `libc::write` ×1 | (5) | as 152 | none (a static) | A2c | D-79 |
+| 154 | bt-platform | [unix] | `crate::launch_pipe::<LaunchPipe as Drop>::drop` | `std::thread::JoinHandle::join` ×1 | (5) | as 152 | none (a static) | A2c | D-79 |
+| 155 | bt-platform | [unix] | `crate::launch_pipe::LaunchPipe::start` | `libc::close` ×2 | (2) | `handles::close_fd` · interim `EndpointStart` | owner | A2c | B11 (proposed) |
+| 156 | bt-platform | [unix] | `crate::launch_pipe::listen` | `libc::close` ×1 | (2) | `handles::close_fd` | worker (reached in tests only) | A2c |  |
+| 157 | bt-platform | [unix] | `crate::launch_pipe::vet_executable` | `std::fs::metadata` ×2 | (2) | `file_reads::observe` · `LaunchHandOver` | worker + owner (Starting) | A2b | the client half is inside row 18's door |
+| 158 | bt-platform | [windows] | `crate::attention_pipe::<AttentionPipe as Drop>::drop` | `std::thread::JoinHandle::join` ×1 | (5) | `drop-exception`: Windows `AttentionPipe::drop` (pinned) | none (a static) | A2c | D-79 |
+| 159 | bt-platform | [windows] | `crate::attention_pipe::<AttentionPipe as Drop>::drop` | `windows::Win32::Foundation::CloseHandle` ×1 | (5) | as 158 | none (a static) | A2c | D-79 |
+| 160 | bt-platform | [windows] | `crate::attention_pipe::<AttentionPipe as Drop>::drop` | `windows::Win32::System::Threading::SetEvent` ×1 | (5) | as 158 | none (a static) | A2c | D-79 |
+| 161 | bt-platform | [windows] | `crate::attention_pipe::<Overlapped as Drop>::drop` | `windows::Win32::Foundation::CloseHandle` ×1 | (5) | `drop-exception`, counted only (added to the pinned table) | worker + standalone + owner (Starting) | A2c | closes, does not wait |
+| 162 | bt-platform | [windows] | `crate::attention_pipe::<OwnedHandle as Drop>::drop` | `windows::Win32::Foundation::CloseHandle` ×1 | (5) | `drop-exception`, counted only (added to the pinned table) | owner + owner (Starting) + worker + standalone | A2c | as 161 |
+| 163 | bt-platform | [windows] | `crate::attention_pipe::AttentionPipe::start` | `std::sync::mpsc::Receiver::recv_timeout` ×1 | (2) | `wait::recv_timeout` · interim `EndpointStart` (new row) | owner | A2c | B11 (proposed) |
+| 164 | bt-platform | [windows] | `crate::attention_pipe::AttentionPipe::start` | `std::thread::JoinHandle::join` ×2 | (2) | `wait::join` · interim `EndpointStart` | owner | A2c | B11 (proposed) |
+| 165 | bt-platform | [windows] | `crate::attention_pipe::AttentionPipe::start` | `windows::Win32::Foundation::CloseHandle` ×2 | (2) | `handles::close_handle` · interim `EndpointStart` | owner | A2c | B11 (proposed) |
+| 166 | bt-platform | [windows] | `crate::attention_pipe::AttentionPipe::start` | `windows::Win32::System::Threading::SetEvent` ×1 | (2) | `handles::set_event` · interim `EndpointStart` | owner | A2c | B11 (proposed) |
+| 167 | bt-platform | [windows] | `crate::file_replace::carry_metadata` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` (in `file_replace`) · `PreviewSave` | owner + owner (Exiting) | A2b | row 20, document half |
+| 168 | bt-platform | [windows] | `crate::file_replace::rename_path` | `std::fs::rename` ×1 | (2) | `file_writes::rename` (in `file_replace`) | owner + worker + standalone | A2b | owner tokens as 97 |
+| 169 | bt-platform | [windows] | `crate::file_replace::replace_file_preserving_with` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` (in `file_replace`) | owner + worker + standalone | A2b | as 168 |
+| 170 | bt-platform | [windows] | `crate::http::<Request as Drop>::drop` | `std::sync::Condvar::wait_timeout` ×1 | (5) | `drop-exception`: `http::Request::drop` (pinned) | none on Windows until U-20 | A2c | D-82 |
+| 171 | bt-platform | [windows] | `crate::http::Shared::wait` | `std::sync::Condvar::wait_timeout` ×1 | (2) | `wait::condvar_wait_timeout` | worker (after U-20) | A2c |  |
+| 172 | bt-platform | [windows] | `crate::install_evidence::imp::current_account` | `windows::Win32::Foundation::CloseHandle` ×1 | (2) | `handles::close_handle` | worker | A2c |  |
+| 173 | bt-platform | [windows] | `crate::instance::<DataDirectoryClaim as Drop>::drop` | `windows::Win32::Foundation::CloseHandle` ×1 | (5) | `drop-exception`, counted only (added to the pinned table) | standalone + owner (Starting) | A2c | as 161 |
+| 174 | bt-platform | [windows] | `crate::instance::try_claim_data_directory` | `windows::Win32::Foundation::CloseHandle` ×1 | (2) | `handles::close_handle` · interim `TrialClaim` / owner (Starting) | owner (Starting) + standalone | A2c | candidate "stays" |
+| 175 | bt-platform | [windows] | `crate::launch_pipe::<LaunchPipe as Drop>::drop` | `std::thread::JoinHandle::join` ×1 | (5) | `drop-exception`: Windows `LaunchPipe::drop` (pinned) | none (a static) | A2c | D-79 |
+| 176 | bt-platform | [windows] | `crate::launch_pipe::<LaunchPipe as Drop>::drop` | `windows::Win32::Foundation::CloseHandle` ×1 | (5) | as 175 | none (a static) | A2c | D-79 |
+| 177 | bt-platform | [windows] | `crate::launch_pipe::<LaunchPipe as Drop>::drop` | `windows::Win32::System::Threading::SetEvent` ×1 | (5) | as 175 | none (a static) | A2c | D-79 |
+| 178 | bt-platform | [windows] | `crate::launch_pipe::Instance::arm_connect` | `windows::Win32::System::Threading::SetEvent` ×1 | (2) | `handles::set_event` | worker | A2c |  |
+| 179 | bt-platform | [windows] | `crate::launch_pipe::LaunchPipe::start` | `std::sync::mpsc::Receiver::recv_timeout` ×1 | (2) | `wait::recv_timeout` · interim `EndpointStart` | owner | A2c | B11 (proposed) |
+| 180 | bt-platform | [windows] | `crate::launch_pipe::LaunchPipe::start` | `std::thread::JoinHandle::join` ×2 | (2) | `wait::join` · interim `EndpointStart` | owner | A2c | B11 (proposed) |
+| 181 | bt-platform | [windows] | `crate::launch_pipe::LaunchPipe::start` | `windows::Win32::Foundation::CloseHandle` ×2 | (2) | `handles::close_handle` · interim `EndpointStart` | owner | A2c | B11 (proposed) |
+| 182 | bt-platform | [windows] | `crate::launch_pipe::LaunchPipe::start` | `windows::Win32::System::Threading::SetEvent` ×1 | (2) | `handles::set_event` · interim `EndpointStart` | owner | A2c | B11 (proposed) |
+| 183 | bt-platform | [windows] | `crate::process_image_path` | `windows::Win32::Foundation::CloseHandle` ×1 | (2) | `handles::close_handle` · `LaunchHandOver` | owner (Starting) | A2c | inside row 18's door |
+| 184 | bt-platform | [windows] | `crate::video::Readers::quiet_within` | `std::sync::Condvar::wait_timeout` ×1 | (2) | `wait::condvar_wait_timeout` · interim `MediaQuiet` (new row, Exiting) | owner (Exiting) | A2c | candidate "stays" |
+| 185 | bt-platform | [windows] | `crate::video::engine::Engine::shutdown` | `std::thread::JoinHandle::join` ×1 | (5) | `drop-exception`: Windows `video::engine::Engine::shutdown` (pinned) | owner + drop | A2c | D-80 |
+| 186 | bt-platform | [windows] | `crate::video::engine::Engine::shutdown` | `std::thread::sleep` ×1 | (5) | as 185 | owner + drop | A2c | D-80 |
+| 187 | bt-platform | [windows] | `crate::video::engine::Engine::wait_for_metadata` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` | none (examples and tests) | A2c |  |
+| 188 | bt-platform | [windows] | `crate::video::engine::Machinery::pump` | `std::sync::mpsc::Receiver::recv_timeout` ×1 | (2) | `wait::recv_timeout` | worker | A2c |  |
+| 189 | bt-platform | [windows] | `crate::video::engine::can_play_types` | `std::thread::JoinHandle::join` ×1 | (2) | `wait::join` | none (tests) | A2c |  |
+| 190 | bt-platform | [windows] | `crate::video::within_budget` | `std::sync::mpsc::Receiver::recv_timeout` ×1 | (2) | `wait::recv_timeout` | worker | A2c |  |
+| 191 | bt-platform | [windows] | `crate::windows_impl::<DirWatch as Drop>::drop` | `std::thread::JoinHandle::join` ×1 | (5) | `drop-exception`: Windows `DirWatch::drop` (pinned) | drop (owner) | A2c | D-40; B7 (widened to Windows) |
+| 192 | bt-platform | [windows] | `crate::windows_impl::<DirWatch as Drop>::drop` | `windows::Win32::System::Threading::SetEvent` ×1 | (5) | as 191 | drop (owner) | A2c | as 191 |
+| 193 | bt-platform | [windows] | `crate::windows_impl::DirWatch::start_scoped` | `std::sync::mpsc::Receiver::recv` ×1 | (2) | `wait::recv` · interim `WatchStart` (row 8, Windows arm added) | owner | A2c | B7 (widened) |
+| 194 | bt-platform | [windows] | `crate::windows_impl::DirWatch::start_scoped` | `std::thread::JoinHandle::join` ×1 | (2) | `wait::join` · interim `WatchStart` | owner | A2c | B7 (widened) |
+| 195 | bt-platform | [windows] | `crate::windows_impl::close` | `windows::Win32::Foundation::CloseHandle` ×1 | (5) | `drop-exception`: `windows_impl::close` (a pinned body of the `DirWatch` chain) | drop (owner) + owner (inside `WatchStart`) | A2c | as 191 |
+| 196 | bt-platform | [windows] | `crate::windows_impl::directory_folds_case` | `windows::Win32::Foundation::CloseHandle` ×1 | (2) | `handles::close_handle` · interim `FilesRowCase` | owner | A2c | B10 |
+| 197 | bt-platform | [windows] | `crate::windows_impl::open_clipboard_with_retry` | `std::thread::sleep` ×1 | (2) | `wait::sleep_within` (the path handed as a value) · interim `ClipboardOpen` (new row) | owner | A2c | candidate "stays" (at most 75 ms) |
+| 198 | bt-platform | [windows] | `crate::windows_impl::write_to_console` | `windows::Win32::Foundation::CloseHandle` ×1 | ? | could not classify: the panic hook road | owner (Starting) + standalone + any (panic hook) | — |  |
+| 199 | bt-platform | [windows] [not(test)] | `crate::handoff::windows_handoff::shell_execute_w` | `windows::Win32::UI::Shell::ShellExecuteW` ×1 | (1) | the hand-off door's body (`ShellThread`) | worker | A2c | row 1 (done) |
+| 200 | bt-pty | – | `crate::InputRing::take` | `std::sync::Condvar::wait` ×1 | (1) | `transport` | transport | A2d |  |
+| 201 | bt-pty | – | `crate::OutputRing::push_read` | `std::sync::Condvar::wait` ×1 | (1) | `transport` | transport | A2d |  |
+| 202 | bt-pty | – | `crate::PtyDump::create_at` | `std::fs::File::create` ×2 | (1) | `transport` (runs inside `PtyBirth`) | owner (inside row 11's door) | A2d | debug dumps only |
+| 203 | bt-pty | – | `crate::PtyDump::create_at` | `std::io::Write::write_fmt` ×2 | (1) | `transport` (runs inside `PtyBirth`) | owner (inside row 11's door) | A2d | debug dumps only |
+| 204 | bt-pty | – | `crate::PtyDump::finish` | `std::io::Write::write_fmt` ×1 | (5) | `drop-exception`: `PtyDump::finish` (pinned) | transport + drop | A2d | D-81 |
+| 205 | bt-pty | – | `crate::PtyDump::publish` | `std::fs::File::sync_data` ×2 | (5) | `drop-exception`: `PtyDump::publish` (pinned) | owner (inside `PtyBirth`) + transport + drop | A2d | D-81 |
+| 206 | bt-pty | – | `crate::PtyDump::write_chunk` | `std::io::Write::write_fmt` ×1 | (1) | `transport` | transport | A2d |  |
+| 207 | bt-pty | – | `crate::PtyDump::write_input_at` | `std::io::Write::write_fmt` ×1 | (1) | `transport` | owner | A2d | debug dumps only; beside row 19 |
+| 208 | bt-pty | – | `crate::PtyDump::write_resize` | `std::io::Write::write_fmt` ×1 | (1) | `transport` (runs inside `PtyResize`) | owner (inside row 12's door) | A2d | debug dumps only |
+| 209 | bt-pty | – | `crate::PtySession::shutdown` | `portable_pty::Child::try_wait` ×2 | (5) | `drop-exception`: `PtySession::shutdown` (pinned) | transport + drop | A2d | D-81 |
+| 210 | bt-pty | – | `crate::PtySession::try_wait` | `portable_pty::Child::try_wait` ×1 | (1) | `transport` (counted, does not wait) | owner | A2d |  |
+| 211 | bt-pty | – | `crate::Retirements::wait_within` | `std::sync::Condvar::wait_timeout` ×1 | (1) | `transport` (runs inside `PaneRetirementWait`) | owner (Exiting, inside row 15's door) | A2d |  |
+| 212 | bt-pty | – | `crate::join_within` | `std::thread::JoinHandle::join` ×1 | (5) | `drop-exception`: `join_within` (pinned) | transport + drop | A2d | D-81 |
+| 213 | bt-pty | – | `crate::join_within` | `std::thread::sleep` ×1 | (5) | as 212 | transport + drop | A2d | D-81 |
+| 214 | bt-pty | – | `crate::reap_within` | `std::thread::sleep` ×1 | (5) | `drop-exception`: `reap_within` (pinned) | transport + drop | A2d | D-81 |
+| 215 | bt-pty | – | `crate::shell::<SystemShellEnvironment as ShellEnvironment>::is_file` | `std::fs::metadata` ×1 | (1) | `transport` (a Unix-only statement) | owner + worker | A2d | arm `-`, effect under `cfg(unix)` |
+| 216 | bt-pty | – | `crate::spawn_dump_publisher` | `std::fs::File::sync_data` ×2 | (1) | `transport` (the publisher thread) | transport | A2d | the site is written in the spawner |
+| 217 | bt-pty | – | `crate::spawn_dump_publisher` | `std::thread::sleep` ×1 | (1) | `transport` (the publisher thread) | transport | A2d | as 216 |
+| 218 | bt-render | – | `crate::WindowRenderer::compose_frame` | `wgpu::Queue::present` ×1 | (1) | in the door `PresentFrame` (row 9): `compose_frame` takes `&WaitToken` | owner | A2c |  |
+| 219 | bt-render | – | `crate::WindowRenderer::compose_frame` | `wgpu::Queue::submit` ×1 | (1) | in the door `PresentFrame` (row 9) | owner | A2c |  |
+| 220 | bt-render | – | `crate::WindowRenderer::handle_surface_failure` | `wgpu::Queue::submit` ×1 | (1) | in the door `PresentFrame` (row 9): `handle_surface_failure` takes `&WaitToken` | owner | A2c |  |
+| 221 | bt-render | – | `crate::WindowRenderer::probe_frame` | `wgpu::Queue::present` ×1 | ? | could not classify: a probe outside the product binary | none (bt-corpus tools, tests) | — |  |
+| 222 | bt-render | – | `crate::WindowRenderer::probe_frame` | `wgpu::Queue::submit` ×1 | ? | could not classify: as 221 | none (bt-corpus tools, tests) | — |  |
+| 223 | bt-render | – | `crate::WindowRenderer::read_back` | `wgpu::Queue::submit` ×1 | ? | could not classify: as 221 | none (tests, one example) | — |  |
+| 224 | bt-term | – | `crate::inline_image::LocalImageStamp::of` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 225 | bt-term | – | `crate::session::path_exists` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+| 226 | bt-term | – | `crate::session::verify_path` | `std::fs::metadata` ×1 | (2) | `file_reads::observe` | worker | A2b |  |
+
+**Sum check.** 226 rows, 248 sites, one disposition each. The table was generated from the inventory at
+`b054379b` joined by row number with the allocation, and the counts in (k)1 are computed from the same join.
+
+### (k)4 · Could not classify: five rows, with a proposal each
+
+| # | item · entry | why no kind holds it | proposal (for the review) |
+|---:|---|---|---|
+| 5 | `append_panic_report` · `Write::write_fmt` | The panic hook (`install_panic_log_hook_at`'s closure) runs on **whichever thread panics**. That includes bt-pty's `Unset` threads and the rayon pool, which hold no capability and cannot be given one. The other road, `report_frame_shape_stop` from `FolioApp::fail`, is the owner's. A panic is not a destructor, so (5) does not hold it as written. | Read (5) as "a retained destructor **or unwind** road", and pin the hook's body in the exception table the way A1e pins a `Drop`: the edge list, and `write_fmt` ×1. The owner road takes a `DiagnosticWrite` token. The alternative is to post the report to the trace sink, which loses the report when the process dies, which is the case it exists for. Owner or Codex to choose; (k)10 Q5. |
+| 198 | `windows_impl::write_to_console` · `CloseHandle` | The same hook (`announce_panic`) reaches it from any thread. Its other roads are the front door's messages (owner `Starting`, inside `LaunchHandOver` through `say`) and four standalone verbs. | The same as row 5 for the hook road. Every other road goes through `handles::close_handle` with the verb's context or the `LaunchHandOver` token. |
+| 221, 222 | `WindowRenderer::probe_frame` · `Queue::present`, `Queue::submit` | This is a public bt-render function with no caller in the `folio` binary. Its callers are `HeadlessRenderProbe::prepare_frame` (bt-corpus's `bt-replay` and `bt-zoom-perf`) and bt-render's tests. No GPU door family exists or is planned, and a worker door would be wrong: the queue belongs to the owner. | Put the probe behind a non-default `headless-probe` feature of bt-render, which bt-corpus enables. A product configuration (C-4: default features) then does not compile it, and the row goes. This is a code change that changes no product behaviour. It is outside A2b–A2d's families, so it becomes a small ticket of its own or a line in A2e. |
+| 223 | `WindowRenderer::read_back` · `Queue::submit` | This is public too. It is reached only from tests, `bt-render/tests/glyph_output.rs`, `bt-app/tests/macos_glyph_surface.rs` and `bt-app/examples/video-probe.rs`. | The same feature. |
+
+### (k)5 · The effect-level table for every interim owner door
+
+Each line is one admission identity: a `# doors` line, an `admission::doors` type and a registry row. For each
+line, these hold:
+
+- **Function boundary:** the minted call (`admitted::<D>(|t| …)`) at the site named. The door functions
+  reached under it are the family doors of (k)3, each taking `&t`.
+- **Role:** `Window`.
+- **Capability:** `WaitToken<'_, doors::D>`.
+- **Refusal:** in every row it happens before any state the road mutates.
+
+The witness test drives the real caller on a window-entered test thread, and asserts the admitted record and
+the effect's count. "Found" is the execution context the survey saw on `b054379b`. **Every version is the
+owner's to rule.** The column gives the ledger's version where one exists, and "owner" where none does.
+`open` is never rendered "ruled to stay". Where a line is proposed for that ruling, it says so and goes to
+(k)10.
+
+| identity (row) | minted at | phases | effects (rows of (k)3) | refusal | witness | owed · version | found · discovered |
+|---|---|---|---|---|---|---|---|
+| `MarksInstall` (2) | `Runtime::add_to_profile`; `Runtime::spend_powershell_intent` (the `install_into_profile` call) | Running | 65, 66 (the `.ps1` road), 69–75, and through `bt_persist::atomic`/`file_replace` 97, 98, 118, 119, 150, 168, 169 | the strip keeps its verb, as after a failed install | `an_add_press_is_admitted_as_marks_install_and_writes_through_file_writes` | B4 · 0.4.6 (D-34) | turn · 2026-09-23 (row 2) |
+| `PsReadLineApply` (3) | `Runtime::apply_psreadline`; `Runtime::create`'s `psreadline::upgrade_recorded`; `App::release_trial_writes`'s upgrade | Running | 47, 48, 69–73 | the Settings row keeps its verb and the toast says it was not applied. At `create`, the upgrade is skipped this launch and offered again at the next. | `apply_psreadline_is_admitted_and_the_launch_upgrade_is_too` | B4 · 0.4.6 (D-35; D-34's ticket-56 note) | turn and window birth · 2026-09-21; the launch road 2026-09-27 (this survey) |
+| `PsReadLineProbe` (4) | `Runtime::refresh_psreadline_installed`; `Runtime::raise_psreadline_invite_if_due` | Running | 49 | the row draws the last adopted answer | `the_installed_copy_walk_is_admitted_on_the_page_open_edge` | B5 · 0.4.6 (D-36) | turn · 2026-09-21 |
+| `LocaleProbe` (7) | `create_leaf_session`, around `shell_integration::shell_command`; `system_locale_declaration` takes `&t` down to `quiet_command_text` | Running | 144 (two children); `Path::exists` rides it if (k)2 item 2 lands | the shell is born without the declaration, as on a machine that does not say | `the_first_pane_birth_admits_the_locale_children_once` (Mac) | B6 · 0.4.6 (D-39) | pane birth, once per process · row 7 |
+| `WatchStart` (8, both arms) | `dir_news::arm`, `files_watch`/`git_watch`/`preview_watch` subscribe roads, minted at `Runtime::advance_*_watch` and `Runtime::create`'s scheme and storage watches | Running | 140–143 (macOS), 193, 194 (Windows), and 195 when it is reached from a refusal | the subscription stays unarmed and the next sync retries, as a refused start does today | `a_watch_start_is_admitted_and_its_refusal_is_retried` | B7 **widened to Windows** · 0.4.6 (D-40) | turn · row 8 (macOS); Windows arm 2026-09-27 |
+| `DeviceRecovery` (10) | `FolioApp::fail` → `recovered_from_a_lost_device` | Running, Exiting | 1, 3 | the device is not rebuilt, and `fail` takes its give-up road (the frame-shape stop) | `a_lost_device_is_recovered_under_its_admission` | B9 · 0.4.6 (D-42) | turn · row 10 |
+| `SettingsWrite`, `KeybindingsWrite`, `ProfilesWrite` (20) | the store methods in `persist.rs` and `runtime/configuration.rs` (stations exist) | Running, Exiting | 97, 98 (`bt_persist::atomic`) | the in-memory store stays changed, and the next write carries it | `a_settings_change_is_admitted_as_settings_write` | B8 · 0.4.6 (D-47) | turn · row 20 |
+| `PreviewSave` (20) | `Runtime::save_preview_on`, the float's save, `Runtime::quit_save` | Running, Exiting | 43, 97, 98, 118, 119, 150, 167 | the buffer stays dirty and the save is not reported | `a_preview_save_is_admitted_on_the_press_and_on_quit` | row 20's document half, not ticketed (owner ruling 2026-09-25, 2) · owner | turn and exit · row 20 |
+| `RenameDisk` (20) | `Runtime::finish_rename` → `rename_files_row`, `rename_preview_file` | Running | 56, 58 | the rename editor stays open with the old name | `a_rename_commit_is_admitted_as_rename_disk` | the same · owner | turn · row 20 |
+| `DiagnosticWrite` (20) | `trace_sink::write_line`'s sink-less arm; `hotkey::trace`; `glyph_trace::frame` | Running, Exiting | 77, 78, 83, 104, 105 | the line is dropped and counted, as a full sink drops one | `a_sink_less_trace_line_is_admitted_as_diagnostic_write` | B8 ("diagnostic writes join the trace queue") · 0.4.6 | turn and exit · row 20; `BT_GLYPH_CENSUS`'s owner writes found 2026-09-27 |
+| `AgentHooksWrite` (new) | `Runtime::apply_claude_hooks`, `apply_codex_notify`, `apply_copilot_hooks` | Running | 6, 7, 9, 20 (the apply half), 69–73 (via `attention_ownership::record`), 97, 98, 168, 169 | the Agents row keeps its verb | `an_agent_hook_install_is_admitted` | B8 **widened** · owner | turn · 2026-09-27 |
+| `AgentConfigState` (new) | `Runtime::create` (the three `row_state`s); `Runtime::refresh_agent_rows`; `Runtime::raise_first_run_if_due` | Running | 8, 20 (the state half) | the row draws its last state | `the_agent_rows_state_is_admitted` | B10 · owner | window birth and turn · 2026-09-27 |
+| `TrialWritesReleased` (new; station exists) | `App::release_trial_writes` | Running | 2 | the data folder is created at the next write instead | `releasing_trial_writes_is_admitted` | B8 **widened** · owner | turn · 2026-09-27 |
+| `SchemeWrite` (new) | `Runtime::add_scheme`, `edit_scheme_at`, `delete_scheme_file`; `import_schemes` | Running | 61, 63 | the scheme is not written, and the toast says so | `adding_a_scheme_is_admitted` | B8 **widened** · owner | turn · 2026-09-27 |
+| `ShellScriptsInstall` (new) | `create_leaf_session`'s `Scripts::installed` (outside `PtyBirth`); `App::release_trial_writes` | Running | 65–68 | the pane is born without integration scripts, as when they cannot be written today | `the_first_pane_writes_its_scripts_under_admission` | B8 **widened** · owner | first pane birth · 2026-09-27 |
+| `StoreOpen` (new) | `Runtime::create`'s store opens (session, settings, profiles, keybindings, pins, `update::load`); `reread_profiles`, `reread_pins`; `import_settings_from`; `OfferState` `mark_seen`/`skip` | Running | 41, 99–101 (the `LaunchHandOver` road keeps its own token) | the store opens with its defaults, as on a missing file | `window_birth_admits_its_store_reads` | B10 · owner — **candidate "stays"** at window birth, (k)10 Q2 | window birth and turn · 2026-09-27 |
+| `ClaimName` (new) | `persist::is_writer_of`, `is_writer_of_document` | Starting, Running | 109 (Unix) | "not the writer", as when the claim is held elsewhere | `the_claim_name_is_resolved_once` | B10 (cache the name; today it is canonicalised on every call, before the cache lookup) · owner | every store open · 2026-09-27 |
+| `PathResolve` (new) | `navigate_preview_page`, `toggle_switcher_pin`, `dismiss_web_sheet_on`, `revive_web_pages`, `finish_rename` (the address bar), `open_preview_web_file` roads | Running | 35, 52, 57, 91 | the gesture is refused as for an unresolvable path | `resolving_a_page_path_is_admitted` | B10 · owner | turn · 2026-09-27 |
+| `PreviewStat` (new) | `Runtime::advance_preview_watch`; `ask_the_unwatched_preview_files` | Running | 46 | the file is treated as unchanged until the next turn | `a_preview_stamp_is_admitted` | B10 · owner | turn · 2026-09-27 |
+| `RecentFolders` (new) | `Runtime::chrome_mouse_input` → `toggle_root_menu` | Running | 59 | the menu lists the folders unchecked | `the_root_menu_stats_are_admitted` | B10 · owner | turn · 2026-09-27 |
+| `SchemeCatalogue` (new) | `adopt_stored_schemes` (`create`); `reread_schemes`; `settings_content`; `scheme_labels`; export and import | Running | 60, 62 | the catalogue keeps its last reading | `the_scheme_catalogue_is_read_under_admission` | B10 · owner | window birth and turn · 2026-09-27 |
+| `FilesRowCase` (new) | `Runtime::open_files_row_new` → `directory_folds_case` | Running | 126, 196 | the directory is taken as case-sensitive | `a_new_files_row_asks_case_under_admission` | B10 · owner | turn · 2026-09-27 |
+| `Recycle` (new) | `Runtime::delete_files_row`, `delete_scheme_file` | Running | 136 (macOS) | the delete is refused, as for a missing file | `a_recycle_is_admitted` | B10 · owner | turn · 2026-09-27 |
+| `PeekFacts` (new) | `Runtime::file_peek_card_layers` | Running | 21 | the card shows no facts | `a_peek_cards_one_stat_is_admitted` | none — DESIGN §7.29/§7.37 already admit "once per frame of one hover"; **proposed `ruled to stay`** | frame building · ruled earlier; row 2026-09-27 |
+| `EndpointStart` (new) | `Runtime::create` → `open_the_data_directorys_endpoints` | Running | 148, 155, 163–166, 179–182 | the endpoint is absent for this run, as when it fails to start today | `the_endpoints_start_under_admission` | **B11 (proposed)**: the endpoints answer their first word by wake · owner | window birth, up to 5 s each · 2026-09-27 |
+| `RunLog` (new) | `diagnostics::enter_resident_run` | Starting | 13–17, 125 | the run goes on with stderr unredirected | `the_run_log_opens_under_admission` | **candidate "stays"** (no loop yet: row 18's reasoning) · owner | before the loop · 2026-09-27 |
+| `StorageRelocate` (new) | `fn main`'s `persist::storage_dir()` | Starting | 42 | the old folder is used this run | `the_one_time_relocate_is_admitted` | **candidate "stays"** · owner | before the loop, once · 2026-09-27 |
+| `UpdateMounts` (new) | `update_startup::pass` → `mounts_under` | Starting | 113 (macOS) | the retirement is deferred to the next launch | `startup_mounts_are_read_under_admission` | **candidate "stays"** · owner | before the loop · 2026-09-27 |
+| `TrialClaim` (new) | `update_trial::take_the_claim` | Starting | 89, 174 (and 173's drop) | the trial refuses to start, which is its existing refusal | `a_trial_takes_its_claim_under_admission` | **candidate "stays"** (bounded by `CLAIM_WAIT`) · owner | before the loop, trials only · 2026-09-27 |
+| `MediaQuiet` (new) | `fn main` → `video::shutdown_media_session` | Exiting | 184 | quit proceeds, as on the budget's expiry | `the_media_session_quiets_under_admission` | **candidate "stays"** (bounded exit wait, like rows 15–17) · owner | exit, at most 1.5 s · 2026-09-27 |
+| `ClipboardOpen` (new) | `clipboard_text`, `set_clipboard_text` callers | Running | 197 | the clipboard is reported busy, as after the fourth retry | `a_busy_clipboard_retries_under_admission` | **candidate "stays"** (at most 75 ms), or a new B-ticket · owner | turn · 2026-09-27 |
+| `SelfTest` (new; station exists) | `FolioApp::about_to_wait` | Running | 92 | no hold | `the_selftest_hold_is_admitted` | **candidate "stays"** (debug builds only) · owner | turn, debug builds with `BT_HANG_SELFTEST` · 2026-09-27 |
+
+**A window-thread wait the table does not admit yet.** The video engines' `shutdown` (rows 120, 121, 185,
+186) is reached on the window thread outside any `Drop`, when a pane closes or reopens a file, through
+`VideoSeats::close`, `shutdown_all` and `VideoSeat::shutdown`.
+
+- These are pinned bodies of D-80's chain, so an `admitted` edge cannot be added inside them without
+  breaking the pin.
+- The admission therefore belongs at the callers of `VideoSeats::close` and `shutdown_all` outside a `Drop`,
+  as an interim `VideoShutdown` door owed to D-80's ticket (0.4.7).
+- A2c places it and names the callers. The survey did not list them all by name, so this is an open item for
+  A2c's brief, not a line of this table.
+
+### (k)6 · B10 — the window thread's file observation moves to a worker or a cache
+
+| | |
+|---|---|
+| **target version** | the owner's (0.4.6 or 0.4.7); after A2b |
+| size | M. If the owner rules `StoreOpen` "stays" (k)10 Q2, it drops to S–M. |
+| who | Opus, local lane |
+| depends on | A2b (the interim doors, `file_reads::observe` and `Authority`); A5's lane contract (`bt-app::lane`) |
+
+**True on BASE.** The window thread stats, lists and canonicalises paths inside turns and at window birth
+through ten interim doors, each with an `open` registry row owed to B10:
+
+- `AgentConfigState` (8, 20);
+- `StoreOpen` (41, 99–101);
+- `ClaimName` (109);
+- `PathResolve` (35, 52, 57, 91);
+- `PreviewStat` (46);
+- `RecentFolders` (59);
+- `SchemeCatalogue` (60, 62);
+- `FilesRowCase` (126, 196);
+- `Recycle` (136).
+
+Each is a gesture's or a frame's blocking call against a disk that can be a network share.
+
+**Goal**, per door, by the class it belongs to:
+
+- **A cache with one owner** for answers that do not change inside a run: `ClaimName` (the directory's
+  claim name, computed once per directory). Its door and row are deleted. The residue is none.
+- **An observation lane, as a versioned LatestValue request** (B5's shape, which B10 reuses) for answers a
+  view draws: `AgentConfigState`, `SchemeCatalogue`, `PreviewStat`, `RecentFolders`. The view draws the last
+  adopted answer.
+- **A request and answer on the existing lane of the gesture** for answers a gesture needs before it acts:
+  `PathResolve` on the hand-off lane's pattern (the path-verify worker already resolves the same paths),
+  `FilesRowCase` and `Recycle` on the files worker. The gesture completes when its answer lands.
+- **`StoreOpen`, only if the owner does not rule it "stays"**: the stores are read before the first window on
+  a worker started at the top of `fn main`, as B6 does for the locale, and adopted by `Runtime::create`.
+
+**Tests red on BASE.**
+
+- `no_turn_stats_a_path_outside_an_admitted_door` (bt-source: `file_reads::observe`'s owner mint sites are
+  exactly the doors B10 keeps).
+- `a_claim_name_is_resolved_once_per_directory`.
+- `an_older_scheme_catalogue_answer_is_never_adopted`.
+- `a_path_resolved_after_its_gesture_was_cancelled_does_nothing`.
+
+**Docs.**
+
+- Each door's registry row goes to `done`, with its residue if any.
+- The ledger's B10 row, opened when this brief is dispatched.
+- A DESIGN entry.
+
+**Architecture impact.**
+
+- (a) The views' observed-file facts get one writer each: the adopt.
+- (b) No new thread. It uses the lanes of B5 and the files, preview and hand-off workers.
+- (c) It repays B10's row.
+- (c′) The rows, menus and catalogues can lag the disk by one answer, and a path gesture completes one turn
+  later.
+- (d) No.
+
+**Out of scope, found here.** These are the window-thread **content** reads of (k)8, by lane: Attention's
+agent configuration files, Settings' `.git` marker, `$PROFILE` and scheme files, and Fonts'
+`set_terminal_font` and `svg_document_options`. Those are `file_reads` owner doors under option (d) (A2b), and
+B10 covers observation only. Moving them is a separate ticket, (k)10 Q6.
+
+### (k)7 · Ownership among A2b, A2c and A2d; the re-sized briefs; the order
+
+**Shared surfaces, and who changes them.**
+
+- the registry (`window_waits.tsv`: `# rows`, `# doors`, `# effects`);
+- `admission` (`Authority`, the interim door types, and `enter_standalone_main`'s callers);
+- the guard (`window_waits_tests.rs`: the `# effects` kinds and authorities, the mint-site check for `Authority`
+  rows, and statement-level `cfg` for `# effects`).
+
+**A2b lands first and makes every change of shape to them.** A2c and A2d only add lines of an existing shape.
+
+**One amendment to (j)6's "rows 2–4 are A2c's wholly".** `bt_persist::atomic` and `file_replace` are A2b's
+(the shared file functions), and they are reached under `MarksInstall` and `PsReadLineApply`. So **A2b creates
+and mints every interim identity that any file effect is reached under**. That includes rows 2, 3 and 4's
+identities, `RunLog` and `FilesRowCase`. **A2c keeps every row** in `profile_marks`, `psreadline` and
+`shell_integration`, and routes them under the tokens A2b has placed. Ownership stays single per row. The
+identities that only waits or handles reach (`DeviceRecovery`, `WatchStart`, `LocaleProbe`, `EndpointStart`,
+`TrialClaim`, `MediaQuiet`, `ClipboardOpen`, `SelfTest`) are A2c's.
+
+| ticket | rows · sites | families and items | size | order |
+|---|---|---|---|---|
+| **A2b** | 83 · 90 (bt-app 49, bt-platform 26, bt-persist 5, bt-term 3) | `file_writes` (31 rows) and `file_reads::observe` (52 rows) are born, both on `&impl Authority`; `admission::Authority`; `file_reads` option (d) per (k)8; the standalone verbs' single entry; 26 interim identities minted with their registry rows (the file-reached ones of (k)5, and rows 2–4's); the guard's shape changes | **L** in the repo's convention. **Recommended split:** **A2b1** (M) takes the doors, `Authority`, the guard and the standalone entries, the 35 rows that run only on workers or standalone mains, and option (d). **A2b2** (M) takes the interim identities and the 48 rows that run on the window thread (alone or with others). | first; A2b1 → A2b2 |
+| **A2c** | 120 · 130 (bt-platform 71, bt-app 46, bt-render 3) | `wait::*` (51 rows), `quiet_command::*` (7), `handles::*` (16), all on `&impl Authority`; the rows of `profile_marks`, `psreadline` and `shell_integration` (file effects through A2b's doors) (15); the owner-door helpers `compose_frame`, `handle_surface_failure`, `flush_sink` and the hand-off body, as (1) (7 rows, 8 sites); 24 `# effects` rows of kind `drop-exception` for the pinned bodies and the three counted-only drops (5); the eight wait interim identities; `VideoShutdown`'s placement | **L**. **U-28's `wait::sleep_within`** (on main since `c50adb60`), with its `worker-door-body` guard rule, is credited: A2c widens its parameter to `&impl Authority` and adds no second sleep door. The door column stays empty for worker-only rows, as (j)13 has it, and lists the identities only where a window-thread road reaches the door. **Recommended split:** **A2c1** (M) takes the worker and standalone waits, child processes, handles on workers, and `sleep_within`'s widening. **A2c2** (M) takes the owner interim waits, the in-door helpers, the drop-exception rows and the profile-family rows. | after A2b1 (A2c2 after A2b2); A2c1 → A2c2 |
+| **A2d** | 18 · 23 (bt-pty only) | the transport effect functions (12 rows, 15 sites, kind `transport`, authority `none (transport)`), including those that run inside `PtyBirth`, `PtyResize` and `PaneRetirementWait`; the pinned `PtySession` chain as `drop-exception` (6 rows, 8 sites); (c)6's debt row; the statement-level arm of row 215 | **S–M**, unchanged | after A2b1; in parallel with A2c |
+| **A2e** | 0 | the lint, as (i)1 and (j)9 say; plus (k)2 item 2's vocabulary if the owner rules it, and (k)4's feature line | M (L with item 2) | last |
+
+**Conflicts to expect.**
+
+- A2c and A2d both add `# effects` lines. The section is keyed by crate and item, so the lines do not collide.
+- A2b2 and A2c2 both touch `Runtime::create`: A2b2 mints `StoreOpen`, `AgentConfigState`, `SchemeCatalogue`
+  and `PsReadLineApply` there, and A2c2 mints `EndpointStart` and `WatchStart`. They land serially.
+
+### (k)8 · The `file_reads` context inventory: every lane × the thread that reads today
+
+58 product call sites, traced on `b054379b`, and U-28's two added at `c50adb60`. The site is the enclosing function. "Ctx unused" means the worker's
+closure receives `&WorkerCtx` and does not pass it down. Nothing in bt-pty calls `file_reads`.
+
+| lane | site (file · function · form) | thread today | option (d) |
+|---|---|---|---|
+| InlineImage | `bt-term inline_image.rs` · `read_and_decode_local_image` (`open`, lane passed in), via `InlineImageDecoder::decode` | worker `bt-math-worker` | worker reader, `&WorkerCtx` passed down |
+| InlineImage | `bt-term inline_image.rs` · `decode_background_image` (`open`) | worker `background-picture` | worker |
+| Peek | `bt-app animation.rs` · `first_frame` → `file_source_in_lane`; `main.rs` · `peek_pixels` → bt-term `decode_in_lane` | worker `bt-math-worker` | worker |
+| Peek | `bt-platform video/mod.rs` · `read_first_frame` (`opaque`) | worker `folio-video-frame` | worker |
+| Animation | `bt-app animation.rs` · `FileAnimationSource::open`, `file_source`; its `Read::read` (`LEDGER.add`) on each fill | worker `bt-math-worker` | worker; **but the source is parked on the window thread between fills** (below) |
+| Animation | `bt-platform video/engine.rs` · `Machinery::build` (`opaque`, `SetSource`) | worker `folio-video-engine` | worker |
+| Preview | `bt-app preview.rs` · `read_up_to` (`open`) | worker `bt-preview-worker` | worker |
+| Pdf | `bt-app pdf.rs` · `page_count`, `read_capped` (`open`) | workers `bt-preview-worker`, `bt-math-worker` | worker |
+| GitPipe | `bt-app git.rs` · `drain` (`Reader::new`) | worker `bt-git-pipe` | worker (the context is already in scope) |
+| Settings | `bt-app git_watch.rs` · `linked_gitdir` (`read_to_string`) | **window, turn** (`advance_git_watch`, a new root) | owner door (a Settings content read; (k)6 out of scope) |
+| Settings | `bt-app psreadline.rs` · `run_probe` (`pipe_output`) | worker `psreadline-probe` | worker |
+| Settings | `bt-app psreadline.rs` · `installed_disk::System::read` (`read`) | **window**: birth (`upgrade_recorded`), turn (apply, refresh, invite); standalone `--uninstall-cleanup` | owner under `PsReadLineApply`/`PsReadLineProbe`; standalone context |
+| Settings | `bt-app schemes.rs` · `read_scheme_file` (`read_to_string`) | **window**: birth and turn | owner under `SchemeCatalogue` |
+| Settings | `bt-app shell_integration/profile_marks.rs` · `Marks::read` (`read`) | **window**: birth and turn; workers `powershell-profile-{migration,enable,removal}`; standalone `--remove-shell-integration`, `--uninstall-cleanup` | `Authority`: owner under `MarksInstall`/`PsReadLineApply`/`AgentHooksWrite`; workers; standalone |
+| Settings | `bt-app shell_integration.rs` · `install_script_at`, `install_zdotdir` (`read_to_string`) | **window**: first pane, trial release; worker `powershell-profile-migration` | owner under `ShellScriptsInstall`/`MarksInstall`; worker |
+| Settings | `bt-app shell_integration.rs` · `read_profile_for_edit` (`Reader::new`) | **window, turn**; workers (migration, removal); standalone (both verbs) | `Authority`, as `Marks::read` |
+| Settings | `bt-app shell_integration.rs` · `offer_for` (`read`) | **window, turn** (the terminal notice pass) | owner door (content; (k)6 out of scope) |
+| Settings | `bt-app update.rs` · `Claim::take` (`read_to_string`) | worker `bt-update-check` | worker |
+| Settings | `bt-persist migrate.rs` · `read_bounded` (`open`) | **window**: before the loop (`say_at_the_front_door`, inside `LaunchHandOver`), birth, turn; worker `bt-update-check`; standalone `--explorer-command` | `Authority`: owner under `StoreOpen`/`LaunchHandOver`; worker; standalone |
+| Fonts | `bt-render lib.rs` · `terminal_font_system`, `load_chrome_sans_family` (`opaque`) | **window**, first window, inside `GpuOpen` | owner, already admitted (`GpuOpen`) |
+| Fonts | `bt-render lib.rs` · `GpuContext::set_terminal_font` (`opaque` ×2) | **window**: birth and turn (a font change) | owner door (content; (k)6 out of scope) |
+| Fonts | `bt-math lib.rs` · `MathEngine::with_system_fonts` (`opaque`) | worker `bt-math-worker` | worker |
+| Fonts | `bt-math lib.rs` · `svg_document_options` (`opaque`, a `OnceLock` loading the system fonts) | **whichever thread asks first**: in practice the window thread (chrome marks rasterised in frame building), otherwise `bt-math-worker` | **decide before A2b**: warm it on the math worker at start, or admit it on the owner; its comment ("whichever worker asks first") is wrong |
+| Attention | `bt-app attention_{hooks,codex,copilot}.rs` · `state`, `hooks_are_switched_off`, `Config::standing` (`read_to_string`) | **window**: birth (`row_state`), turn (`refresh_agent_rows`, `CopilotProbed`, first run); standalone `--uninstall-cleanup` (`standing`) | owner under `AgentConfigState`; standalone |
+| Attention | `bt-app attention_{hooks,copilot}.rs` · `installed_rows` (`read_to_string`) | **window, turn**: every `AttentionSpoke` drain | owner door (content; (k)6 out of scope) |
+| Attention | `bt-app attention_hooks.rs` · `Config::land` (`read_to_string`) | **window, turn** (apply); standalone `--uninstall-cleanup` | owner under `AgentHooksWrite`; standalone |
+| Attention | `bt-app attention_copilot.rs` · `run_probe` (`pipe_output`) | worker `copilot-version-probe` | worker |
+| Attention | `bt-app attention_wire.rs` · `payload_on_stdin` (`Reader::new` on stdin) | worker `folio-attention-stdin`, in the `attention` verb (its main is inside `enter_standalone_main`) | worker (the context is in scope) |
+| Attention | `bt-app attention_words.rs` · `lede_in_tail` (`Reader::new`) | standalone `attention`, after the entry has returned | standalone: under (k)1's single entry the context reaches it |
+| Install | `bt-app install_channel.rs` · `capped` (`open`); `bt-platform install_evidence.rs` · `attribute` (`LEDGER.add`) | worker `bt-install-channel` | worker |
+| Install | `bt-app update_startup.rs` · `run`, `image` (`read`; the whole executable) | **window, before the loop** (`update_startup::pass`) | owner, `Starting`: under `UpdateMounts`, minted at `update_startup::pass`, which both reach |
+| Install | `bt-app update_recover.rs` · `run` (`read`) | standalone `--update-recover` | standalone (under (k)1's entry) |
+| Update | `bt-app update_prepare_macos.rs` · `matches_its_sum` (`read_to_string`, `open`); `bt-platform macos_update.rs` · `architectures` (`open`), `run_at` (`pipe_output`) | workers `bt-update-job`, `bt-update-sweep`, `folio-update-home-detach` | worker (`run_at` gains the context its public entries already take) |
+| Update | `bt-app update_archive.rs` · `expand`; `bt-platform trust.rs` ×4, `trust_windows.rs` · `machine`, `pe_resource.rs` · `read_rcdata`, `launch_agent.rs` · `arm` | none yet (tests; U-20 wires the Windows Prepare) | worker by contract: each takes `&WorkerCtx` when A2b lands, so U-20's caller must hold one |
+| UpdateJournal | `bt-app update_trial.rs` · `watch` (`read`) | worker `folio-trial-watch` | worker |
+| UpdateJournal | `bt-app update_prepare_macos.rs` · `at_launch` (`read`) | none (tests) | worker |
+| UpdateJournal | `bt-app update_apply_macos.rs` · the applier's two journal reads (`read`), U-28 | standalone `--update-apply` (macOS), inside `enter_standalone_main("folio-update-apply")` | standalone: the context is in scope |
+| Other | `bt-app main.rs` · `probe_input` (`read`) | **window**, birth, `BT_PROBE_INPUT` only | owner under `StoreOpen` |
+
+**What the inventory says about option (d).**
+
+- **No `Reader` crosses a thread.** Every reader is made and drained in one function, so (j)8's
+  `Reader<'w>` borrowing `&'w WorkerCtx` fits every worker site as written.
+- **One source outlives its worker body: `FileAnimationSource`.** It is opened on `bt-math-worker`, carried
+  to the window thread inside the animation, parked there, and handed back per `AnimationFill`. Its reads
+  always run on the worker, but the open handle lives on the owner, and a failed send re-parks it and drops
+  it (closing the file) there. Under (j)8 it cannot hold `&WorkerCtx`, because it would outlive the body.
+  **A2b must re-cut it:** the worker keeps the source in its own table and the window thread holds only a key.
+  This is the one worker lane that needs a change of shape rather than a parameter.
+- **Media Foundation reads past its `opaque`.** `opaque` covers only `SetSource` and
+  `MFCreateSourceReaderFromURL`. The engine and the abandoned `folio-video-frame` thread go on reading
+  uncounted. That is outside C-1 (a third party blocking internally), and is stated so.
+- **Window-thread content reads.** Every window-thread read in the table gets an owner door under option
+  (d). Most sit under an interim identity of (k)5 or an already admitted door (`GpuOpen`, `LaunchHandOver`).
+  Five are content reads with no identity yet: `linked_gitdir`, `offer_for`, `set_terminal_font`,
+  `installed_rows` and `svg_document_options`. Each gets an owner door and a registry row owed to (k)10 Q6's
+  ticket.
+
+### (k)9 · What the survey found that the registry does not say
+
+These are recorded here for the tickets' briefs. Each becomes a registry edit in the ticket named, never an
+inventory row.
+
+1. **Row 2 misses two roads to the marks lock**: `attention_ownership::record`, from the agent-hook installs,
+   and `psreadline::upgrade_recorded`, from `Runtime::create` and `release_trial_writes` (A2b2's registry
+   edit). `OurTurn::take`'s unbounded wait can hold the window thread for a whole worker transaction on either
+   road.
+2. **Row 8 names only macOS.** The Windows `DirWatch::start_scoped` also waits unboundedly (`recv`) for the
+   watcher's first word, on the window thread (A2c2; B7 widened).
+3. **Row 11's road writes the shell integration scripts** (bash, and the three zsh `ZDOTDIR` files, also on
+   Windows) outside `PtyBirth`, on the first pane of the run (`ShellScriptsInstall`).
+4. **Unlisted window-thread waits:**
+   - the endpoints' start in `Runtime::create` (up to 5 s each);
+   - a video pane's close (up to 2 s, then a join);
+   - the clipboard retry (up to 75 ms);
+   - the media session's quiet at exit (1.5 s);
+   - the trial's claim before the loop.
+
+   Each becomes a row through (k)5.
+5. **`persist::is_writer_of` canonicalises on every call** on Unix, before its cache lookup (`ClaimName`,
+   B10).
+6. **`BT_GLYPH_CENSUS` alone starts no sink.** So `glyph_trace::frame` writes its file synchronously on the
+   window thread every frame (`DiagnosticWrite`).
+7. **Stale comments** the tickets fix where they pass:
+   - `cached_profile_answer` ("only on workers": the door verbs run it too);
+   - `bt_term::session::path_exists` ("what stood on the window thread": only the path-verify worker reaches
+     it now);
+   - `svg_document_options` ("whichever worker asks first");
+   - `update_startup`'s "`mounts_under` waits on nothing".
+8. **Ten `Drop`/`listen` rows are unreachable in the product.** `AttentionPipe` and `LaunchPipe` live in
+   `OnceLock` statics, so these rows stay (5) and their D-79 repayment stands. The Windows `http` download
+   is reached only from the macOS driver until U-20.
+9. **`bt-platform/src/lib.rs` holds a NUL byte** inside a `CONOUT$` string literal, so `grep` reads the file
+   as binary. The guard reads through `bt_source` and is unaffected, but any script that greps must pass `-a`.
+10. **No worker passes its `WorkerCtx` down.** Every worker closure except `bt-os-handoff` (and the macOS
+    update job) binds `_ctx` and drops it. A2b1 and A2c1 thread it into each body. That is most of their
+    diff, and it is mechanical.
+
+### (k)10 · This revision's own architecture impact, and the owner's decisions
+
+**Impact.**
+
+- **(a)** None by this commit. The tickets it briefs move no fact's owner. B10 (k)6 does (the views' observed
+  facts).
+- **(b)** None by this commit. The doors A2b–A2d will create are these:
+  - the families, on `admission::Authority`;
+  - 34 interim owner identities, each a registry line;
+  - the standalone verbs' single entries.
+- **(c)** None by this commit. When the tickets are briefed, (k) opens:
+  - B10;
+  - the proposed B11;
+  - (c)6's transport debt row (A2d);
+  - the new registry rows of (k)5.
+
+  The Q1 rulings may widen B7 and B8.
+- **(c′)** None.
+- **(d)** Yes: `admission::Authority` amends (j)6 (family doors on `&impl Authority`, not `&WorkerCtx`) and (b)2/§C-5's
+  capability list. `# effects` gains the authority `Authority` with a mint-site check. (5) is extended to
+  counted-only `Drop`s. (j)6's "rows 2–4 wholly A2c's" is amended as (k)7 says.
+
+**Decisions for the owner.**
+
+1. **Versions and widenings.** Rule each of these:
+   - whether A2b–A2e (now A2b1/A2b2, A2c1/A2c2, A2d, A2e) land in 0.4.6 or 0.4.7;
+   - whether B7 widens to the Windows watcher;
+   - whether B8 widens to the window thread's other file writes (agent hooks, schemes, shell scripts, trial
+     release) or a new ticket takes them;
+   - the proposed B11 (endpoints);
+   - the video shutdown's interim door on D-80's 0.4.7 ticket.
+2. **"Stays on the window thread", proposed for ruling** (each bounded, or before the loop, or already ruled
+   in DESIGN):
+   - `RunLog`, `StorageRelocate`, `UpdateMounts`, `TrialClaim` (before the loop: row 18's reasoning);
+   - `MediaQuiet` (a bounded exit wait, like rows 15–17);
+   - `ClipboardOpen` (at most 75 ms);
+   - `SelfTest` (debug builds only);
+   - `PeekFacts` (DESIGN already admits it);
+   - `StoreOpen` (the stores must be read before the first frame; the alternative is (k)6's pre-loop worker).
+3. **The recommended splits** of A2b and A2c into two M tickets each.
+4. **Path predicates in the vocabulary** ((k)2 item 2): in A2e, after A2b; or left outside C-1.
+5. **The panic hook road** ((k)4 rows 5 and 198): (5) read as "destructor or unwind road", or the report
+   posted to the sink.
+6. **The window-thread content reads** ((k)8): a ticket of their own (Attention's agent files on every
+   `AttentionSpoke` drain, the `.git` marker, `$PROFILE`'s offer read, the terminal font change), and where
+   `svg_document_options` is first paid.
