@@ -12811,3 +12811,42 @@ A call outside every turn (the launch hand-over before the loop, the trace flush
 **The owner's format ruling holds**: a finished rollback leaves in the home only the journal (frozen v1 header, `terminal` / `rolled_back`, which the old build's start retires and a trial reads as ended), the lock and the admission; no entrance; the old bundle live with its own identity.
 
 **Pinned by** `update_apply_macos::tests` — `a_failed_health_swaps_back`, `a_dead_trial_rolls_back_at_once`, `rollback_from_the_new_live_swaps_and_from_the_old_live_does_not`, `a_failed_swap_back_is_stuck_with_everything_kept`, `stuck_is_retried_on_the_next_start_and_stops_after_the_bound`, `rolled_back_is_retired_at_the_next_start`, `the_trial_is_asked_to_quit_before_it_is_killed`, `no_relaunch_after_abandoned_and_a_plain_relaunch_after_a_revert`, `rolled_back_leaves_only_what_the_old_build_reads` (the Mac mini, synthetic bundles and processes); `install_flip::tests::a_process_is_signalled_only_while_its_image_and_start_instant_match`; `update_txn::tests::{stuck_counts_its_attempts_and_gives_up_at_the_bound, a_start_sent_with_update_failed_continues_past_an_unfinished_rollback}`; `update_startup::tests::on_disk::{a_start_sent_after_a_rollback_continues_with_its_card, a_macos_start_names_the_home_when_it_hands_over}`; `update_job::tests::a_launch_sent_by_a_rollback_raises_the_failed_card`; `update_card::tests::the_failures_a_rollback_reports_draw_restored_and_incomplete`; `cli::tests::the_failed_word_takes_the_journal_on_an_ordinary_launch`.
+
+### 2026-09-27 — Five window-thread waits the thread-door survey found are registry rows 24–28: each is retained on the window thread for now, bounded as it is today, and owed a named repayment
+
+The thread-door note's revision (k)9 item 4 found five waits the window thread makes that no registry row named; revision (l) (`docs/plans/design/thread-door-2026-09-26.md`), adopting the Codex review of (k), records them before any A2 ticket is briefed. Each ruling below is **open**: it says why the wait may stay where it is until its repayment lands, and who repays it. None is `ruled to stay`, and no deadline changes.
+
+- **Row 24, the endpoints' start** (`AttentionPipe::start`, `LaunchPipe::start`, from `Runtime::create`) — interim: retained on the window thread, bounded by 5 s per endpoint for the listener's first word plus a join of a listener already told to stop (the total is not proven); repaid by B11 (version: owner).
+- **Row 25, a video seat's engine shut down outside a `Drop`** (`VideoSeats::{close, open, put}` from six `Runtime` roads) — interim: retained on the window thread, bounded by `SHUTDOWN_BUDGET` (2 s) per engine plus the join of a thread that has said it stopped (a sweep of N seats is N × 2 s); repaid by D-80's ticket (version: 0.4.7 as the ledger has it; owner).
+- **Row 26, the Windows clipboard's open** (`retry_open_clipboard`) — interim: retained on the window thread, bounded by 75 ms of sleeps between five opens; repaid by the owner's ruling, where a stay is proposed, or by a clipboard B-ticket if the owner declines it (version: owner).
+- **Row 27, the media session's quiet at exit** (`Readers::quiet_within`) — interim: retained on the window thread, bounded by 1.5 s; repaid by D-80's ticket, which owns the media teardown, unless the owner rules it stays as rows 15–17 do (version: owner).
+- **Row 28, an update's trial taking the data directory's claim** (`update_trial::take_the_claim_within`, before the loop) — interim: retained on the window thread, bounded by `CLAIM_WAIT` (30 s) plus one last try; repaid by B11's startup claim ownership, unless the owner rules it stays as row 18 does (version: owner).
+
+**Also corrected in the registry.** Row 2 names the marks lock's two further roads (the agent hook installs through `attention_ownership::record`, and `psreadline::install_recorded` from the PSReadLine apply, window birth's upgrade and the trial's release). Row 8 names both platforms: the Windows `DirWatch::start_scoped` waits on its watcher's first word with no deadline exactly as the macOS one does.
+
+**Not here.** No door type, `# doors` line, `# effects` line or code: the identities (`EndpointStart`, `VideoShutdown`, `ClipboardOpen`, `MediaQuiet`, `TrialClaim`) land with A2c2a, which the note's revision (l)8 briefs.
+
+### 2026-09-27 — The thread-door note's revision (m): a shared operation is a closed graph entered by two by-value roots, the interim `file_reads` census has a retirement for every caller, and registry row 26 is an interim stay repaid by B13
+
+The thread-door note's revision (m) (`docs/plans/design/thread-door-2026-09-26.md`), adopting the Codex review of
+revision (l) under the coordinator's narrow ruling for this round. It supersedes, in the entry above (*five
+window-thread waits the thread-door survey found are registry rows 24–28*), the lines for rows 25, 26 and 27.
+
+- **Row 25** (`VideoShutdown`) — still retained on the window thread and repaid by D-80's ticket (0.4.7), which
+  **inherits the direct-close cost** of the six `VideoSeats::{close, open, put}` roads as scope added to D-80's
+  recorded one; removing the destructor chain alone does not repay the row.
+- **Row 26** (`ClipboardOpen`) — the coordinator's ruling: **an interim stay, repaid by the clipboard ticket B13
+  (0.4.7)**, which moves the clipboard's open to a worker that owns its own window handle. No longer an owner
+  question.
+- **Row 27** (`MediaQuiet`) — 1.5 s is a configured wait deadline, not an elapsed-time bound (the mutex, the
+  condition variable's reacquisition and scheduling can pass it; `MFShutdown` after it has none); repaid by
+  D-80's ticket as a recorded extension of D-80's scope (reader quiescence and `MFShutdown`), unless the owner
+  rules it stays.
+
+**Also true from (m):** every shared window-and-worker operation (S1–S19) is entered through
+`admission::Leg<'_, D>`, built only by `Leg::owner` (the owner token taken by value) or `Leg::worker` (the
+worker's context), and every function of its published graph takes the leg by reference; `file_reads` is a
+multi-owner primitive whose entrance set (worker forms, a generated owner table of whole reads, and a retained
+capability-free census that only shrinks) the guard checks; A2b1 does not wait for A2anim, and A2e does.
+
+**Not here.** No door type, `# doors` line, `# effects` line or code.
