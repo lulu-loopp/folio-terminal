@@ -601,7 +601,7 @@ directory) is re-minted and the event is logged.
 | bind another view (drag-out float V10, a 0.6 client) | unchanged | unchanged | unchanged | +1 |
 | move (tab, window, tear-off) | unchanged | unchanged | unchanged | rebound (AR §4.1) |
 | unbind a view that is not the last | unchanged | unchanged | that view's principal's input grant ends | −1 |
-| **unbind the last view** | **ends in 0.5** (today's behaviour: the child is retired); **in 0.6 stays alive**, held by the host behind the tray and reachable by remote clients (§7 Q3) | 0.5: —; 0.6: unchanged | 0.5: all end; 0.6: view-bound input grants end | 0 |
+| **unbind the last view** | **ends in 0.5** (today's behaviour: the child is retired); **in 0.6 stays alive**, held by the host behind the tray and reachable by remote clients (§7 Q3) — in 0.5, except a session sent to the background (roadmap S5), which lives with no bound view until Folio quits; 0.6's tray generalises this to every session (2026-09-28) | 0.5: —; 0.6: unchanged | 0.5: all end; 0.6: view-bound input grants end | 0 |
 | child exits | stays, with `exit` | — | every grant and credential of the incarnation ends | unchanged; the pane shows the exit |
 | restart the child (restart shell, resume an agent) | unchanged | +1 | minted afresh; nothing resurrected | unchanged |
 | explicit close (the person closes the pane or kills the session) | ends | — | all end | all unbound |
@@ -860,7 +860,8 @@ rotation, refresh and revocation mechanics (§3.6, §5); a wait's question text
    the views; *Quit* from the tray ends every session. **No separate host
    process** — option (c) is dropped; RS's 0.6 broker is the in-process host
    behind the tray. A remote client sees the host's whole session list, opens
-   any, and can create a session on the host. *Changes:* §2.2 step 2; §4.2's
+   any, and can create a session on the host. In 0.5 the last view's unbind
+   still ends its session, except a session sent to the background (roadmap S5), which lives with no bound view until Folio quits; 0.6's tray generalises this to every session (2026-09-28). *Changes:* §2.2 step 2; §4.2's
    last-view, create and quit rows; §3.4's `session` family; §4.5's
    `session.create`; §4.7's `create` tier; §8 (b).
 4. **May pairing authorise automatic push traffic?** — **(a) opt-in per device,
@@ -1000,6 +1001,10 @@ paste-and-submit variant in Appendix A as a possible supersession. The owner's
 ruling of 2026-09-27 replaces both: there is no paste-without-Enter mode.
 **For the coordinator:** RM §3 row 21, and the S2, V11 and C2 rows that cite it,
 need the same edit.
+
+### Revision (f), background services (2026-09-28)
+
+§4.2's last-view row and §7 Q3 gain one sentence each: a session sent to the background (RM S5) lives with no bound view until Folio quits, and 0.6's tray generalises this to every session — the owner's ruling of 2026-09-28, recorded as RM revision (g) and §3 row 25.
 
 ---
 
