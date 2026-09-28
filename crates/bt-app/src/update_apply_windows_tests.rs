@@ -36,7 +36,8 @@ use bt_platform::trust::FileVersion;
 use bt_platform::trust_harness::{Behaviour, IDENTITY, TestCa};
 use bt_winres::digest::sha256;
 
-use crate::update_apply::an_earlier_holder;
+use crate::update_apply::{Left, Window};
+use crate::update_handoff::{Leaving, Spawner};
 use crate::update_prepare_windows::tests::build_that;
 use crate::update_txn::{
     Body, Class, Header, HeaderOutcome, Member, Outcome, PhaseKind, Receipt, STUCK_ATTEMPT_LIMIT,
@@ -399,7 +400,6 @@ impl Install {
                 pid: std::process::id(),
                 started: 0,
             },
-            predecessor: None,
         }
     }
 
@@ -2150,68 +2150,56 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
     }
 }
 
-/// RED (U-24, the coordinator's ruling 3) — **one rule for a live applier at
-/// `Handoff`, on both platforms**: a process of the rescue executable that
-/// started no later than the recovery may be the applier O started, and the
-/// recovery leaves the handed-off transaction to it — nothing written, nothing
-/// waited for, nothing started (that applier opens Folio); a process that
-/// started after it is not one.
+/// RED (U-24, the coordinator's ruling 3; U-34) — **one rule for a live
+/// applier at `Handoff`, on both platforms: the recovery leaves the handed-off
+/// transaction to the live process the window's mark names — nothing
+/// written, nothing waited for, nothing started (that process opens Folio);
+/// a live process of the rescue image the mark does not name is not waited
+/// for, and the recovery reverts and opens Folio itself.**
 ///
-/// The pure half is `update_apply::an_earlier_holder`, which both the macOS and
-/// the Windows recovery ask; the Windows half runs a real process of the
-/// rescue copy. U-23 let the lock go and waited up to 180 s instead; that wait
-/// is removed.
+/// The mark is `H\<txn>\owner` (`update_apply::OWNER_FILE`), which the
+/// applier takes before it waits for O's lock. U-24 inferred the applier from
+/// an older process of the rescue image; that inference is gone — a P that
+/// never took the mark is nobody's successor. U-23 let the lock go and waited
+/// up to 180 s instead; that wait is removed.
 ///
-/// MUTATION: in `update_apply::an_earlier_holder`, count only a process that
-/// started strictly before (`<`).
+/// MUTATION: in `recover`, leave a `Handoff` to any live process of the rescue
+/// image, named or not.
 #[test]
 fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
-    let mine = Running {
-        pid: 10,
-        started: 500,
-    };
-    let earlier = Running {
-        pid: 7,
-        started: 400,
-    };
-    let same_instant = Running {
-        pid: 8,
-        started: 500,
-    };
-    let later = Running {
-        pid: 9,
-        started: 600,
-    };
-    assert_eq!(
-        an_earlier_holder(mine, None, &[mine, later, earlier]),
-        Some(earlier)
-    );
-    assert_eq!(
-        an_earlier_holder(mine, None, &[mine, same_instant]),
-        Some(same_instant)
-    );
-    assert_eq!(an_earlier_holder(mine, None, &[mine, later]), None);
-    assert_eq!(an_earlier_holder(mine, None, &[]), None);
-
     let Some(install) = Install::new("alive") else {
         return;
     };
     let journal = std::fs::read(install.home.journal()).unwrap();
     let applier = install.children.start(&install.rescue, &[]);
-    let mut road = install.road(limits(20_000, 20_000));
-    road.me = Running {
-        pid: std::process::id(),
-        started: u64::MAX,
+    let applier = Running {
+        pid: applier,
+        started: install_flip::started_of(applier).expect("it runs"),
     };
-    let began = Instant::now();
-    let (code, world) = on_a_worker({
+    let road = |install: &Install| {
+        let mut road = install.road(limits(20_000, 20_000));
+        road.me = Running {
+            pid: std::process::id(),
+            started: u64::MAX,
+        };
+        road
+    };
+    let run = |road: Road| {
         let mut world = install.world(Trial::Silent);
-        move |worker| {
+        on_a_worker(move |worker| {
             let code =
                 crate::update_recover::run_windows(worker, &road, Some(&handed()), &mut world);
             (code, world)
-        }
-    });
+        })
+    };
+
+    // Named by the mark: left to it.
+    assert_eq!(
+        crate::update_apply::take_the_window(&install.home, install.txn, applier),
+        Window::Mine
+    );
+    let began = Instant::now();
+    let (code, world) = run(road(&install));
     assert!(
         began.elapsed() < Duration::from_secs(5),
         "nothing is waited for: {:?}",
@@ -2219,7 +2207,7 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
     );
     assert_eq!(code, 1, "{:?}", world.said);
     assert!(
-        said_at(&world, &format!("{applier} runs from")).is_some(),
+        said_at(&world, &format!("{} has the update's window", applier.pid)).is_some(),
         "{:?}",
         world.said
     );
@@ -2230,6 +2218,23 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
     );
     assert!(world.opened.is_empty(), "that applier opens Folio");
     nothing_moved(&install);
+
+    // Not named — it never took the mark: not waited for.
+    std::fs::remove_file(crate::update_apply::owner_path(&install.home, install.txn)).unwrap();
+    let (code, world) = run(road(&install));
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert_eq!(
+        install.on_disk().body.phase,
+        Phase::Prepared {
+            deferred_launches: 0
+        }
+    );
+    assert_eq!(
+        world.opened,
+        vec![(install.installed.clone(), handed())],
+        "{:?}",
+        world.said
+    );
 }
 
 // ── a journal write refused (U-34) ──────────────────────────────────────────
@@ -2497,68 +2502,6 @@ fn a_panic_inside_the_applier_still_opens_folio() {
     );
 }
 
-/// RED (U-34) — **a recovery build marked with its predecessor never takes
-/// that dying road process for a live applier**: at `Handoff`, with a process
-/// of the rescue image older than it running, recovery leaves the transaction
-/// alone — unless that process is the predecessor the start was marked with
-/// (`update_apply::PREDECESSOR_VARIABLE`), when it reverts and opens the old
-/// build with the handed command line.
-///
-/// An exit guard's start can reach the recovery build (an ordinary start
-/// hands itself over at `Handoff`) while the guard's own process, of the
-/// rescue image, is still leaving; the mark is the proof that it is not an
-/// applier to come.
-///
-/// MUTATION: in `update_apply::an_earlier_holder`, ignore `predecessor`.
-#[test]
-fn a_recovery_marked_with_its_predecessor_does_not_wait_for_it() {
-    let Some(install) = Install::new("predecessor") else {
-        return;
-    };
-    let dying = install.children.start(&install.rescue, &[]);
-    let dying = Running {
-        pid: dying,
-        started: install_flip::started_of(dying).expect("it runs"),
-    };
-    let road_after = |predecessor| {
-        let mut road = install.road(limits(20_000, 20_000));
-        road.me = Running {
-            pid: std::process::id(),
-            started: u64::MAX,
-        };
-        road.predecessor = predecessor;
-        road
-    };
-    let journal = std::fs::read(install.home.journal()).unwrap();
-    let run = |road: Road| {
-        let mut world = install.world(Trial::Silent);
-        on_a_worker(move |worker| {
-            let code =
-                crate::update_recover::run_windows(worker, &road, Some(&handed()), &mut world);
-            (code, world)
-        })
-    };
-
-    let (_, world) = run(road_after(None));
-    assert_eq!(std::fs::read(install.home.journal()).unwrap(), journal);
-    assert!(world.opened.is_empty(), "{:?}", world.said);
-
-    let (code, world) = run(road_after(Some(dying)));
-    assert_eq!(code, 0, "{:?}", world.said);
-    assert_eq!(
-        install.on_disk().body.phase,
-        Phase::Prepared {
-            deferred_launches: 0
-        }
-    );
-    assert_eq!(
-        world.opened,
-        vec![(install.installed.clone(), handed())],
-        "{:?}",
-        world.said
-    );
-}
-
 /// RED (U-34) — **the recovery run at logon is the one exit that may start
 /// nothing: when it did nothing a person is owed a window for**. Over a
 /// `Committed` it retires, nobody is waiting and nothing is started; over an
@@ -2643,60 +2586,126 @@ fn a_refused_start_on_the_way_out_falls_back_to_the_rescue_copy() {
     );
 }
 
-/// RED (U-34) — **an applier that leaves before its road while the build that
-/// handed it the update is still on its way out starts nothing: that build's
-/// own exit guard will**; once that build has let go of its claim (its guard
-/// is under way), the applier starts Folio itself.
+/// **A spawner that starts nothing and records every start** — O's exit
+/// guard's, in the tests of the window's mark.
+#[derive(Default)]
+struct Starts {
+    calls: Vec<(PathBuf, Vec<OsString>)>,
+}
+
+impl Spawner for Starts {
+    fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running> {
+        self.calls.push((program.to_path_buf(), args.to_vec()));
+        Ok(Running { pid: 0, started: 0 })
+    }
+}
+
+/// RED (U-34, round 2; Codex's review, blocker 1) — **the duty that a window
+/// follows *Restart to update* is handed from the outgoing build O to its
+/// applier P by one mark, never inferred from who is alive: whichever of the
+/// two takes `H\<txn>\owner` first opens Folio and the other starts nothing
+/// — in either order, exactly one start.**
 ///
-/// The double start the guard would otherwise make: O's guard finds its
-/// applier gone and starts Folio, and so did the applier. The old build here
-/// is a process of the installed program, marked as the applier's
-/// predecessor, holding the data directory's claim; the journal is `Handoff`.
+/// The review's four steps, which left no window when O and P each inferred
+/// the other's duty from liveness: P decides → O lets go of its claim → O
+/// looks at P and finds it alive → P leaves. Here P's decision is taking the
+/// mark (before it waits for O's lock, which O holds); O, leaving, finds the
+/// mark taken by a live P and starts nothing; P then leaves (its lock wait
+/// runs out) and its own guard opens the window. In the other order O, at its
+/// end, takes the mark and starts Folio; a P that arrives afterwards finds a
+/// live owner, touches nothing and starts nothing. O is a real process of the
+/// installed program; each step is ordered by the test, not by timing.
 ///
-/// MUTATION: in `WindowsLeave::predecessor_opens`, answer `None`.
+/// MUTATION: in `update_handoff::Leaving::leave`, start whatever the mark
+/// says (order A: two starts); in `update_apply_windows::apply`, run the road
+/// whatever `take_the_window` answers (order B: two starts).
 #[test]
-fn an_applier_leaving_before_the_old_build_starts_nothing_itself() {
-    let Some(install) = Install::new("old-leaves") else {
+fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
+    // Order A: P takes the mark, then O leaves, then P leaves.
+    let Some(install) = Install::new("duty-p-first") else {
         return;
     };
     let old = install.children.start(&install.installed, &[]);
     let old = Running {
         pid: old,
-        started: install_flip::started_of(old).expect("it runs"),
+        started: install_flip::started_of(old).expect("O runs"),
     };
     let lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
         .unwrap()
         .unwrap();
-    let claim = crate::persist::try_claim(&install.data).unwrap();
-    let road = |install: &Install| {
-        let mut road = install.road(limits(600, 20_000));
-        road.predecessor = Some(old);
-        road
-    };
-    let run = |road: Road| {
-        let mut world = install.world(Trial::Answers);
-        let (txn, nonce) = (install.txn, install.applier);
-        on_a_worker(move |worker| {
-            let ended = apply(worker, &road, txn, nonce, &mut world);
-            (ended, world)
-        })
-    };
-    let (ended, world) = run(road(&install));
-    assert_eq!(ended, Ended::OldHeldTheLock);
-    assert!(world.opened.is_empty(), "{:?}", world.said);
-    assert!(
-        said_at(&world, "opens Folio as it leaves").is_some(),
-        "{:?}",
-        world.said
+    let mut road = install.road(limits(1_500, 20_000));
+    road.me = crate::update_apply::this_process();
+    let applier = start(
+        road,
+        install.txn,
+        install.applier,
+        install.world(Trial::Answers),
     );
-
-    drop(claim);
-    let (_, world) = run(road(&install));
+    let give_up = Instant::now() + Duration::from_secs(20);
+    while crate::update_apply::window_owner(&install.home, install.txn).is_none() {
+        assert!(Instant::now() < give_up, "P never took the window");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        crate::update_apply::window_owner(&install.home, install.txn),
+        Some(crate::update_apply::this_process()),
+        "step 1: P decided — the mark is P's"
+    );
+    let mut starts = Starts::default();
+    let left =
+        Leaving::over(&install.home, install.txn).leave(old, &install.installed, &mut starts);
+    assert_eq!(
+        left,
+        Left::NotMine(Some(std::process::id())),
+        "steps 2–3: O finds P's mark"
+    );
+    assert!(starts.calls.is_empty(), "O starts nothing");
+    let (ended, world) = applier.join().unwrap();
     drop(lock);
+    assert_eq!(ended, Ended::OldHeldTheLock, "{:?}", world.said);
     assert_eq!(
         world.opened,
         vec![(install.installed.clone(), failed_then(&install, &[]))],
-        "{:?}",
-        world.said
+        "step 4: P, leaving, opens the one window"
+    );
+
+    // Order B: O leaves first; a late P finds O's mark.
+    let Some(install) = Install::new("duty-o-first") else {
+        return;
+    };
+    let old = install.children.start(&install.installed, &[]);
+    let old = Running {
+        pid: old,
+        started: install_flip::started_of(old).expect("O runs"),
+    };
+    let mut starts = Starts::default();
+    let left =
+        Leaving::over(&install.home, install.txn).leave(old, &install.installed, &mut starts);
+    assert_eq!(left, Left::Started(install.installed.clone()));
+    assert_eq!(
+        starts.calls,
+        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        "O's start carries --update-failed: `Handoff` is destructive"
+    );
+    let journal = std::fs::read(install.home.journal()).unwrap();
+    let mut road = install.road(limits(1_500, 20_000));
+    road.me = crate::update_apply::this_process();
+    let (ended, world) = match start(
+        road,
+        install.txn,
+        install.applier,
+        install.world(Trial::Answers),
+    )
+    .join()
+    {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
+    assert!(world.opened.is_empty(), "{:?}", world.said);
+    assert_eq!(
+        std::fs::read(install.home.journal()).unwrap(),
+        journal,
+        "untouched"
     );
 }

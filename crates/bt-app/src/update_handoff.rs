@@ -28,19 +28,22 @@
 //! again (W2).
 //!
 //! **And then O leaves through its exit guard** (0.4.6 ticket U-34, the one
-//! guard every road process leaves through: `update_apply::ExitGuard`). The
-//! answer decides only whom O leaves behind ([`Leaving`]): the applier it
-//! started, by its pid and creation time. At the process's very end —
-//! after the loop, once O has let go of its data directory's claim
-//! ([`leave_armed`]) — an applier still running opens Folio; otherwise O
-//! starts the installed build, plainly and marked as O's successor, and that
-//! start reads the journal as every start does: `Prepared` or `Abandoned` →
-//! it opens (W2, W13); `Handoff` → it hands itself to the recovery build,
-//! which leaves a late applier alone or reverts and opens the old build. **An
-//! answer that does not come within [`crate::quit::HANDOFF_DEADLINE`]** — a
-//! first start of the new rescue executable held by a scanner (W9) — is no
-//! successor, so O makes that start itself; the storage worker it leaves
-//! behind is ended with the process.
+//! guard every road process leaves through: `update_apply::ExitGuard`). Who
+//! opens the window is decided by one mark, never by who is alive
+//! (`update_apply::OWNER_FILE`, `H\<txn>\owner`): the hand-over clears it
+//! before `Handoff` is written ([`perform`]); the applier takes it as soon as
+//! it knows its transaction; O, at the process's very end — after the loop,
+//! once it has let go of its data directory's claim ([`leave_armed`]) — takes
+//! it too, and starts Folio only if it got it ([`Leaving`]). So an applier
+//! that took the mark opens the window itself, and O starts nothing; an
+//! applier that never took it (not started, not yet running, refused before
+//! its road) leaves it to O, and a late one that finds O's mark touches
+//! nothing. O's start reads the header the way a lock holder's does: a
+//! `destructive` journal (`Handoff`, nothing moved) is started with
+//! `--update-failed`, so it continues — with *Update incomplete.* — and never
+//! hands itself back; `Prepared` or `Abandoned` plainly (W2, W13). **An answer
+//! that does not come within [`crate::quit::HANDOFF_DEADLINE`]** (W9) changes
+//! nothing of this: the mark decides.
 //!
 //! # Where it runs
 //!
@@ -61,9 +64,13 @@ use std::time::Instant;
 use bt_platform::install_flip::Running;
 use bt_platform::install_txn::{self, Held};
 
+use bt_platform::file_reads::{self, Lane};
+
 use crate::cli;
-use crate::update_apply::{ExitGuard, Leave, Left};
-use crate::update_txn::{Event, Home, Journal, Nonce, Refusal, TxnId};
+use crate::update_apply::{ExitGuard, Leave, Left, Window};
+use crate::update_txn::{
+    Class, Event, Header, HeaderOutcome, Home, Journal, Nonce, Refusal, TxnId,
+};
 
 /// **What Prepare leaves the job holding** (U-20 / U-27 make it; the job keeps
 /// it from its `Verified` report until the process leaves): the installation
@@ -95,20 +102,12 @@ pub(crate) trait Spawner: Send {
 
 /// **The product's spawner**: `bt_platform::quiet_command` — the door for a
 /// program named by an absolute path (`quiet_command_named` is for a bare name
-/// looked up on `PATH`, which this is not) — and the child dropped at once,
-/// marked with this process as its predecessor
-/// (`update_apply::PREDECESSOR_VARIABLE`, U-34).
+/// looked up on `PATH`, which this is not) — and the child dropped at once.
 pub(crate) struct Detached;
 
 impl Spawner for Detached {
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running> {
-        let child = bt_platform::quiet_command(program)
-            .args(args)
-            .env(
-                crate::update_apply::PREDECESSOR_VARIABLE,
-                crate::update_apply::predecessor_value(crate::update_apply::this_process()),
-            )
-            .spawn()?;
+        let child = bt_platform::quiet_command(program).args(args).spawn()?;
         let pid = child.id();
         Ok(Running {
             pid,
@@ -136,6 +135,8 @@ pub(crate) fn apply_command_line(home: &Path, txn: TxnId, applier: &Nonce) -> Ve
 pub(crate) struct HandoffJob {
     txn: TxnId,
     journal: PathBuf,
+    /// `H\<txn>\owner`, cleared before `Handoff` (`update_apply::OWNER_FILE`).
+    owner: PathBuf,
     handoff: Vec<u8>,
     abandoned: Vec<u8>,
     program: PathBuf,
@@ -159,6 +160,7 @@ impl HandoffJob {
         Ok(Self {
             txn: staged.journal.txn,
             journal: staged.home.journal(),
+            owner: crate::update_apply::owner_path(&staged.home, staged.journal.txn),
             handoff: handoff.encode(),
             abandoned: abandoned.encode(),
             program: staged.home.rescue_program(&staged.journal.rescue),
@@ -223,6 +225,11 @@ impl HandedOff {
 /// holds is measured apart from the durable write).
 pub(crate) fn perform(mut job: HandoffJob) -> HandedOff {
     let began = Instant::now();
+    // No window's mark of an earlier attempt may stand once `Handoff` is on
+    // the disk: the applier this hand-over starts takes a fresh one (U-34).
+    if let Err(why) = crate::update_apply::clear_the_window(&job.owner) {
+        return HandedOff::NotRecorded(format!("the window's mark: {why}"));
+    }
     if let Err(failure) = install_txn::durable_write(&job.journal, &job.handoff) {
         crate::diagnostics::note(&took_line(job.txn, began.elapsed(), None));
         return HandedOff::NotRecorded(failure.to_string());
@@ -262,44 +269,60 @@ pub(crate) fn took_line(
     }
 }
 
-/// **Whom O's way out leaves behind** (U-34): the applier it started, by its
-/// pid and start instant, or nobody — the hand-over never sent, refused, not
-/// recorded, its applier not started, or no answer within
-/// [`crate::quit::HANDOFF_DEADLINE`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// **What O's way out owes after *Restart to update*** (U-34): the
+/// transaction it hands over — whose window's mark decides who opens Folio —
+/// or none, when nothing was staged.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Leaving {
-    pub(crate) successor: Option<Running>,
+    pub(crate) window: Option<(Home, TxnId)>,
 }
 
 impl Leaving {
-    /// After `answer`, or none by the deadline.
+    /// The transaction `txn` in `home`, handed over or about to be.
     #[must_use]
-    pub(crate) fn after(answer: Option<&HandedOff>) -> Self {
+    pub(crate) fn over(home: &Home, txn: TxnId) -> Self {
         Self {
-            successor: match answer {
-                Some(HandedOff::Started { applier }) => Some(*applier),
-                _ => None,
-            },
+            window: Some((home.clone(), txn)),
         }
     }
 
-    /// **Leave, through the exit guard** (`update_apply::ExitGuard`): an
-    /// applier still running opens Folio; otherwise `program` — the installed
-    /// build, this process's own executable — is started plainly with
-    /// `spawner`, and reads the journal as every start does.
-    pub(crate) fn leave(self, program: &Path, spawner: &mut dyn Spawner) -> Left {
-        let mut guard = ExitGuard::new(OldLeave { program, spawner });
-        guard.succeeded_by(self.successor);
+    /// No transaction to read: O starts Folio plainly.
+    #[must_use]
+    pub(crate) fn nothing_staged() -> Self {
+        Self { window: None }
+    }
+
+    /// **Leave, through the exit guard** (`update_apply::ExitGuard`), as `me`:
+    /// the window's mark taken ([`crate::update_apply::take_the_window`]) — a
+    /// live applier that has it opens the window, and nothing is started
+    /// here; otherwise `program`, the installed build (this process's own
+    /// executable), is started with what the header names.
+    pub(crate) fn leave(self, me: Running, program: &Path, spawner: &mut dyn Spawner) -> Left {
+        let home = self.window.as_ref().map(|(home, _)| home.clone());
+        let mut guard = ExitGuard::new(OldLeave {
+            program,
+            spawner,
+            home: home.as_ref(),
+        });
+        if let Some((home, txn)) = &self.window
+            && let Window::Theirs(owner) = crate::update_apply::take_the_window(home, *txn, me)
+        {
+            guard.not_mine(Some(owner.pid));
+        }
         guard.leave()
     }
 }
 
-/// **How O leaves** (`update_apply::Leave`): its own executable, started
-/// plainly. O is not the lock holder and reads no journal to decide: the start
-/// it makes reads it, and hands a `destructive` one to the recovery build.
+/// **How O leaves** (`update_apply::Leave`): its own executable. O is not the
+/// lock holder and nothing has moved while the journal is O's (`Prepared`,
+/// `Handoff`, `Abandoned`): the header alone names the words — a
+/// `destructive` one `--update-failed`, so the start continues past it with
+/// *Update incomplete.* and never hands itself to the recovery build; any
+/// other plainly.
 struct OldLeave<'a> {
     program: &'a Path,
     spawner: &'a mut dyn Spawner,
+    home: Option<&'a Home>,
 }
 
 impl Leave for OldLeave<'_> {
@@ -308,7 +331,20 @@ impl Leave for OldLeave<'_> {
     }
 
     fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
-        Some((self.program.to_path_buf(), Vec::new()))
+        let words = self
+            .home
+            .filter(|home| {
+                file_reads::read(Lane::UpdateJournal, home.journal())
+                    .ok()
+                    .and_then(|bytes| Header::parse(&bytes).ok())
+                    .is_some_and(|header| {
+                        header.class == Class::Destructive
+                            || header.outcome == HeaderOutcome::RolledBack
+                    })
+            })
+            .map(|home| crate::update_apply::failed_words(home).to_vec())
+            .unwrap_or_default();
+        Some((self.program.to_path_buf(), words))
     }
 
     fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()> {
@@ -317,13 +353,13 @@ impl Leave for OldLeave<'_> {
 }
 
 /// **What the loop reads of a hand-over it sent** (U-34): nothing yet, or its
-/// end — the line to note and whom O leaves behind.
+/// end and the line to note.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Looked {
     /// No answer, and the deadline has not passed: look again next turn.
     Waiting,
     /// The answer came, or the deadline passed without one.
-    Over { line: String, leaving: Leaving },
+    Over { line: String },
 }
 
 /// **One look at the hand-over's answer** for transaction `txn`, `overdue`
@@ -332,25 +368,23 @@ pub(crate) fn look(answer: Option<&Receiver<HandedOff>>, txn: TxnId, overdue: bo
     match answer.and_then(|answer| answer.try_recv().ok()) {
         Some(handed) => Looked::Over {
             line: handed.line(txn),
-            leaving: Leaving::after(Some(&handed)),
         },
         None if overdue => Looked::Over {
             line: format!(
-                "Folio: update {txn}'s hand-over did not answer in time; Folio starts itself again \
-                 as it leaves, and that start reads the journal"
+                "Folio: update {txn}'s hand-over did not answer in time; the window's mark decides \
+                 who opens Folio as this process leaves"
             ),
-            leaving: Leaving::after(None),
         },
         None => Looked::Waiting,
     }
 }
 
-/// **What this process's way out owes, once an update's hand-over is over**
-/// — set by the loop ([`arm`]), spent once at the process's end or in its
-/// panic ([`leave_armed`]).
+/// **What this process's way out owes after *Restart to update*** — set by
+/// the loop ([`arm`]), spent once at the process's end or in its panic
+/// ([`leave_armed`]).
 static ARMED: Mutex<Option<Leaving>> = Mutex::new(None);
 
-/// **Arm O's exit guard** with whom it leaves behind.
+/// **Arm O's exit guard** with the transaction it hands over.
 pub(crate) fn arm(leaving: Leaving) {
     if let Ok(mut armed) = ARMED.lock() {
         *armed = Some(leaving);
@@ -367,7 +401,7 @@ pub(crate) fn leave_armed() -> Option<Left> {
     let leaving = ARMED.try_lock().ok()?.take()?;
     crate::persist::let_go_of_every_claim();
     let left = match std::env::current_exe() {
-        Ok(program) => leaving.leave(&program, &mut Detached),
+        Ok(program) => leaving.leave(crate::update_apply::this_process(), &program, &mut Detached),
         Err(error) => Left::NotStarted(PathBuf::new(), error.to_string()),
     };
     crate::diagnostics::note(&format!("Folio: leaving after an update: {}", left.said()));
@@ -402,6 +436,7 @@ mod tests {
         WriteVerdict,
     };
     use crate::update_apply::Left;
+    use crate::update_apply::Window;
     use crate::update_job::{Abandon, Applied, Job, Offer, State};
     use crate::update_txn::{
         Asker, Class, Disk, HeaderOutcome, Home, Inventories, Journal, JournalRead, Layout,
@@ -946,14 +981,14 @@ mod tests {
         answer: &std::sync::mpsc::Receiver<HandedOff>,
         quit: &Quit,
         at: impl Fn(u32) -> Instant,
-    ) -> (String, Leaving) {
+    ) -> String {
         for turn in 0..2_000 {
             match look(
                 Some(answer),
                 TxnId::new(TXN),
                 quit.handoff_is_overdue(at(turn)),
             ) {
-                Looked::Over { line, leaving } => return (line, leaving),
+                Looked::Over { line } => return line,
                 Looked::Waiting => std::thread::sleep(Duration::from_millis(10)),
             }
         }
@@ -961,9 +996,11 @@ mod tests {
     }
 
     /// RED (U-34, W9) — **a hand-over with no answer by its deadline still
-    /// leaves a Folio: O's exit guard starts the installed build, plainly, once
-    /// — and an answer inside the deadline naming a running applier starts
-    /// nothing more.**
+    /// leaves a Folio: O's exit guard, finding no applier holding the
+    /// window's mark, takes it and starts the installed build once — with
+    /// `--update-failed`, `Handoff` being destructive — and a late applier then
+    /// finds O's mark and starts nothing; when the applier did take the mark,
+    /// O starts nothing.**
     ///
     /// The clean VM's W9: the storage worker was still inside the applier's
     /// start (a first start of a new 79 MB executable) when the 3 s budget ran
@@ -977,7 +1014,8 @@ mod tests {
     ///
     /// MUTATION: in `look`, answer `Looked::Waiting` past the deadline too, or
     /// in `OldLeave::opening` answer `None` (no start by the deadline); in
-    /// `Leaving::after`, ignore the answer (a second start after a prompt one).
+    /// `Leaving::leave`, start whatever the mark says (a second start beside
+    /// the applier's).
     #[test]
     fn a_hand_over_with_no_answer_in_time_still_opens_folio_once() {
         let folder = Folder::new("overdue");
@@ -1009,23 +1047,25 @@ mod tests {
             ),
             Looked::Waiting
         );
-        let (line, leaving) =
-            look_until_over(&answer, &quit, |_| sent + crate::quit::HANDOFF_DEADLINE);
+        let line = look_until_over(&answer, &quit, |_| sent + crate::quit::HANDOFF_DEADLINE);
         assert!(line.contains("did not answer in time"), "{line}");
-        assert_eq!(leaving, Leaving { successor: None });
         quit.handed_off();
         assert_eq!(
             (quit.step(), quit.handoff()),
             (QuitStep::Exit, Handoff::Done)
         );
 
+        // O leaves: nobody took the window's mark, so O takes it and starts.
+        let txn = TxnId::new(TXN);
+        let old = crate::update_apply::this_process();
         let installed = folder.0.join("folio.exe");
         let mut starts = Starts::default();
-        let left = leaving.leave(&installed, &mut starts);
+        let left = Leaving::over(&staged.home, txn).leave(old, &installed, &mut starts);
         assert_eq!(left, Left::Started(installed.clone()));
-        assert_eq!(starts.calls, vec![(installed.clone(), Vec::new())]);
+        let failed = crate::update_apply::failed_words(&staged.home).to_vec();
+        assert_eq!(starts.calls, vec![(installed.clone(), failed)]);
 
-        // The late start goes through; nothing more is started by O.
+        // The late start goes through; the applier finds O's live mark.
         *gate.0.lock().expect("the gate") = true;
         gate.1.notify_all();
         let late = answer
@@ -1033,23 +1073,82 @@ mod tests {
             .expect("the worker answers at last");
         assert!(matches!(late, HandedOff::Started { .. }), "{late:?}");
         assert_eq!(asked.lock().expect("the record").calls.len(), 1);
+        let late_applier = Running { pid: 1, started: 1 };
+        assert_eq!(
+            crate::update_apply::take_the_window(&staged.home, txn, late_applier),
+            Window::Theirs(old),
+            "a late applier finds O's mark and touches nothing"
+        );
         assert_eq!(starts.calls.len(), 1, "exactly one start");
 
-        // A prompt answer naming a running applier: nothing is started.
+        // A prompt hand-over whose applier took the mark: O starts nothing.
         install_txn::durable_write(&staged.home.journal(), &staged.journal.encode())
             .expect("back to Prepared for the second road");
         let (spawner, _) = recording(&staged, false);
         let handoff = HandoffJob::new(&staged, nonce(), spawner).expect("Prepared → Handoff");
         let answer = store.hand_off(handoff).expect("the worker takes it");
         let sent = Instant::now();
-        let (line, leaving) = look_until_over(&answer, &quit, |_| sent);
+        let line = look_until_over(&answer, &quit, |_| sent);
         assert!(line.contains("handed to its applier"), "{line}");
+        assert_eq!(
+            crate::update_apply::window_owner(&staged.home, txn),
+            None,
+            "the hand-over cleared the earlier mark"
+        );
+        let applier = crate::update_apply::this_process();
+        assert_eq!(
+            crate::update_apply::take_the_window(&staged.home, txn, applier),
+            Window::Mine
+        );
         let mut starts = Starts::default();
         assert_eq!(
-            leaving.leave(&installed, &mut starts),
-            Left::Succeeded(std::process::id())
+            Leaving::over(&staged.home, txn).leave(
+                Running { pid: 1, started: 1 },
+                &installed,
+                &mut starts
+            ),
+            Left::NotMine(Some(applier.pid))
         );
         assert!(starts.calls.is_empty(), "{:?}", starts.calls);
+    }
+
+    /// RED (U-34, round 2) — **the window's mark is taken by exactly one live
+    /// process**: created for the first taker; refused to a second while the
+    /// first runs (by pid and start instant); taken over from an owner that no
+    /// longer runs; and unknown — nobody proven — when it can be neither made
+    /// nor read.
+    ///
+    /// MUTATION: in `update_apply::take_the_window`, replace the mark whatever
+    /// it names (a second live taker then gets it too).
+    #[test]
+    fn the_windows_mark_is_taken_by_exactly_one_live_process() {
+        let folder = Folder::new("mark");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let me = crate::update_apply::this_process();
+        let other = Running { pid: 1, started: 1 };
+        let take = |who| crate::update_apply::take_the_window(&staged.home, txn, who);
+        assert_eq!(take(me), Window::Mine);
+        assert_eq!(take(me), Window::Mine);
+        assert_eq!(take(other), Window::Theirs(me));
+        std::fs::write(
+            crate::update_apply::owner_path(&staged.home, txn),
+            format!("{}:{}", me.pid, me.started.wrapping_add(1)),
+        )
+        .unwrap();
+        assert_eq!(
+            take(other),
+            Window::Mine,
+            "an owner that no longer runs is taken over"
+        );
+        assert_eq!(
+            crate::update_apply::window_owner(&staged.home, txn),
+            Some(other)
+        );
+        assert!(matches!(
+            crate::update_apply::take_the_window(&staged.home, TxnId::new([0x77; 16]), me),
+            Window::Unknown(_)
+        ));
     }
 
     /// RED (U-34) — **the hand-over's budget is a program's first start, not a
@@ -1065,62 +1164,5 @@ mod tests {
         assert!(
             crate::quit::HANDOFF_DEADLINE * 4 <= crate::update_apply::Limits::PRODUCT.old_within
         );
-    }
-
-    /// RED (U-34) — **a Folio started with the predecessor mark reads it once,
-    /// and nothing it spawns sees it**: the mark is taken out of the process's
-    /// environment at `main`'s top (`update_apply::take_predecessor`), so a
-    /// shell the Folio starts — a pane's, any child's — inherits no mark meant
-    /// for the Folio alone.
-    ///
-    /// Run as a child of this test binary, started the way an exit guard
-    /// starts a Folio (the mark in its environment): it reads the mark, then
-    /// starts the platform's shell to print its environment.
-    ///
-    /// MUTATION: in `update_apply::take_predecessor`, read the variable with
-    /// `std::env::var_os` and leave it in the environment.
-    #[test]
-    fn a_shell_started_by_a_marked_folio_does_not_see_the_mark() {
-        const CHILD: &str = "BT_U34_MARKED_CHILD";
-        const NAME: &str =
-            "update_handoff::tests::a_shell_started_by_a_marked_folio_does_not_see_the_mark";
-        let mark = Running {
-            pid: 4242,
-            started: 777,
-        };
-        let variable = crate::update_apply::PREDECESSOR_VARIABLE;
-        if std::env::var_os(CHILD).is_some() {
-            assert_eq!(crate::update_apply::take_predecessor(), Some(mark));
-            assert_eq!(crate::update_apply::predecessor_here(), Some(mark));
-            let (shell, words): (PathBuf, &[&str]) = match bt_platform::host_platform() {
-                HostPlatform::Windows => (
-                    PathBuf::from(std::env::var_os("ComSpec").expect("Windows names its shell")),
-                    &["/d", "/c", "set"],
-                ),
-                _ => (PathBuf::from("/usr/bin/env"), &[]),
-            };
-            let printed = bt_platform::quiet_command(&shell)
-                .args(words)
-                .stdin(std::process::Stdio::null())
-                .output()
-                .expect("the shell runs");
-            let printed = String::from_utf8_lossy(&printed.stdout);
-            assert!(
-                printed.contains(CHILD),
-                "the environment is printed: {printed}"
-            );
-            assert!(!printed.contains(variable), "{printed}");
-            return;
-        }
-        let ran = bt_platform::quiet_command(std::env::current_exe().expect("this test binary"))
-            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
-            .env(CHILD, "1")
-            .env(variable, crate::update_apply::predecessor_value(mark))
-            .stdin(std::process::Stdio::null())
-            .output()
-            .expect("the marked child runs");
-        let said = String::from_utf8_lossy(&ran.stdout);
-        assert!(ran.status.success(), "{said}");
-        assert!(said.contains("1 passed"), "the child ran the test: {said}");
     }
 }

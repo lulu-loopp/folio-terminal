@@ -132,11 +132,12 @@
 //! waited for while its recorded process lives and its deadline has not passed,
 //! then `Committed` and its retirement, or the rollback (W7); `RollbackIntent`,
 //! `Stuck`, `RolledBack` → the rollback and its retirement (W9–W11);
-//! `Committed` → its retirement (W12). **A `Handoff` while a process of the
-//! rescue executable that started no later than this one runs is left to it**
-//! — the one rule for both platforms (`update_apply::an_earlier_holder`): R
-//! writes nothing, waits for nothing and opens nothing; that applier opens
-//! Folio.
+//! `Committed` → its retirement (W12). **A `Handoff` whose window's mark names a
+//! live process is left to it** — the one rule for both platforms
+//! (`update_apply::the_window_is_theirs`, U-34): R writes nothing, waits for
+//! nothing and opens nothing; that process opens Folio. Any other process of
+//! the rescue image — an applier that never took the mark — is not waited
+//! for.
 //!
 //! Every phase is recorded through `update_apply::Journaled` (the protocol's
 //! refusal, the writer table, then `install_txn::durable_write`, asked again
@@ -161,7 +162,7 @@ use bt_platform::trust::Policy;
 use crate::cli;
 use crate::install_channel::Channel;
 use crate::update_apply::{
-    Ended, ExitGuard, Journaled, Leave, Limits, Opener, Opens, Watch, Watched, an_earlier_holder,
+    Ended, ExitGuard, Journaled, Leave, Limits, Opener, Opens, Watch, Watched, Window,
     failed_words, now_ms, owed_at_logon, read_receipt, stop_trial, trial_runs, trial_words,
 };
 use crate::update_prepare_windows::{Resume, staged_as_verified};
@@ -227,13 +228,9 @@ pub(crate) struct Road {
     /// How the installed copy was installed, derived now.
     pub(crate) channel: Option<Channel>,
     pub(crate) limits: Limits,
-    /// This process, by its pid and start time: an applier still alive is a
-    /// process of the rescue image started no later than it.
+    /// This process, by its pid and start time: what the window's mark names
+    /// when this process takes it (`update_apply::OWNER_FILE`).
     pub(crate) me: Running,
-    /// **The road process whose exit guard started this chain**, as its start
-    /// marked it (`update_apply::PREDECESSOR_VARIABLE`, U-34): leaving, and
-    /// never taken for an applier still to come.
-    pub(crate) predecessor: Option<Running>,
 }
 
 impl Road {
@@ -249,9 +246,7 @@ impl Road {
             policy: Policy::System,
             channel,
             limits: Limits::PRODUCT,
-            // Its start not known: nothing counts as started before it.
             me: crate::update_apply::this_process(),
-            predecessor: crate::update_apply::predecessor_here(),
         }
     }
 
@@ -285,10 +280,6 @@ pub(crate) struct WindowsLeave<'a, W: World> {
     pub(crate) road: &'a Road,
     pub(crate) world: &'a mut W,
     pub(crate) handed: &'a [OsString],
-    /// Whether this is the applier, whose predecessor is O
-    /// (`update_apply::the_old_build_still_leaves`); the recovery build's
-    /// predecessor has already made its start.
-    pub(crate) applier: bool,
 }
 
 impl<W: World> Leave for WindowsLeave<'_, W> {
@@ -312,18 +303,6 @@ impl<W: World> Leave for WindowsLeave<'_, W> {
         let (program, mut words) = self.road.opening(&Opens::Rescue);
         words.extend_from_slice(self.handed);
         Some((program.to_path_buf(), words))
-    }
-
-    fn predecessor_opens(&mut self) -> Option<u32> {
-        if !self.applier {
-            return None;
-        }
-        crate::update_apply::the_old_build_still_leaves(
-            self.road.predecessor,
-            &self.road.installed,
-            &self.road.home,
-            &self.road.data,
-        )
     }
 }
 
@@ -382,7 +361,6 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
         road: &road,
         world: &mut world,
         handed: &[],
-        applier: true,
     })
     .leave();
     World::say(&mut world, &format!("BT_UPDATE_APPLY {}", left.said()));
@@ -409,8 +387,27 @@ pub(crate) fn apply(
         road,
         world,
         handed: &[],
-        applier: true,
     });
+    // **The window's duty first** (U-34, `update_apply::OWNER_FILE`): taken
+    // before the wait for O's lock, while O still runs. An applier that does
+    // not get it leaves the transaction untouched: the process that has the
+    // duty opens Folio, and the next start or logon finishes the update.
+    match crate::update_apply::take_the_window(&road.home, txn, road.me) {
+        Window::Mine => {}
+        other => {
+            let owner = match &other {
+                Window::Theirs(owner) => Some(owner.pid),
+                _ => None,
+            };
+            guard.not_mine(owner);
+            let left = guard.leave();
+            guard
+                .inner()
+                .world
+                .say(&format!("BT_UPDATE_APPLY {other:?}; {}", left.said()));
+            return Ended::Refused(format!("the window is not this applier's: {other:?}"));
+        }
+    }
     let (ended, successor) =
         apply_under_the_lock(worker, road, txn, nonce, &mut *guard.inner().world);
     guard.succeeded_by(successor);
@@ -497,12 +494,12 @@ pub(crate) fn recover(
             match Txn::of(road, worker, journal, lock, Asker::Rescue) {
                 Ok(mut held) => {
                     let mut ended = if held.j.phase() == PhaseKind::Handoff
-                        && let Some(applier) = an_applier_may_still_come(road)
+                        && let Some(applier) =
+                            crate::update_apply::the_window_is_theirs(&road.home, txn, road.me)
                     {
                         world.say(&format!(
-                            "BT_UPDATE_RECOVER {} runs from {} and may be the applier; the handed-off update is left to it",
-                            applier.pid,
-                            road.rescue.display()
+                            "BT_UPDATE_RECOVER {} has the update's window; the handed-off update is left to it",
+                            applier.pid
                         ));
                         held.successor = Some(applier);
                         Ended::LockHeld
@@ -548,17 +545,6 @@ fn hold(road: &Road) -> Result<(Held, Journal), Ended> {
         Ok(None) => Err(Ended::Left("there is no transaction".to_owned())),
         Err(why) => Err(Ended::Left(why)),
     }
-}
-
-/// **A process other than this one running from the rescue executable, and
-/// started no later than it** — the applier O started, still waiting for the
-/// lock O held, or an earlier recovery: its pid
-/// (`update_apply::an_earlier_holder`, both platforms' rule) — never the
-/// predecessor whose exit guard started this chain. A list that cannot be read
-/// names none.
-fn an_applier_may_still_come(road: &Road) -> Option<Running> {
-    let listed = install_flip::running_from(&road.rescue).ok()?;
-    an_earlier_holder(road.me, road.predecessor, &listed)
 }
 
 /// **What the disk names to start now** (U-29b's rulings 2 and 3, adopted by
@@ -1441,14 +1427,9 @@ impl World for Machine {
 
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
         // `quiet_command` is the one door for a child; it is dropped at once,
-        // never waited on or ended. Every start of this world is an exit
-        // guard's, so each carries this process as its predecessor (U-34).
+        // never waited on or ended.
         bt_platform::quiet_command(program)
             .args(args)
-            .env(
-                crate::update_apply::PREDECESSOR_VARIABLE,
-                crate::update_apply::predecessor_value(crate::update_apply::this_process()),
-            )
             .spawn()
             .map(drop)
     }

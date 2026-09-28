@@ -71,15 +71,14 @@
 //! started.
 //!
 //! **A live applier at `Handoff`, on both platforms** (U-24, the
-//! coordinator's ruling 3): a process of the rescue executable that started no
-//! later than this one may be the applier O started, still waiting for O's
-//! lock; recovery leaves the handed-off transaction to it, writes nothing and
-//! waits for nothing — that applier is its successor, and opens Folio
-//! (`update_apply::an_earlier_holder`). **Never the predecessor**: a start an
-//! exit guard made carries its maker's pid and start instant in
-//! `FOLIO_UPDATE_PREDECESSOR` (`update_apply::PREDECESSOR_VARIABLE`, U-34),
-//! and the process it names — leaving, not coming — is never taken for an
-//! applier.
+//! coordinator's ruling 3; since U-34 by the window's mark): the applier O
+//! started takes the duty that a window follows as soon as it knows its
+//! transaction (`H\<txn>\owner`, `update_apply::OWNER_FILE`), before it waits
+//! for O's lock; recovery that finds `Handoff` while a live process holds that
+//! mark leaves the handed-off transaction to it, writes nothing and waits for
+//! nothing — that process is its successor, and opens Folio
+//! (`update_apply::the_window_is_theirs`). A process of the rescue image that
+//! never took the mark is not waited for.
 //!
 //! **Any other home**, reading the header:
 //!
@@ -199,7 +198,6 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
                         road,
                         world: &mut machine,
                         handed,
-                        applier: false,
                     });
                     if then_launch.is_none() {
                         guard.nobody_waiting();
@@ -230,7 +228,7 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
 /// of this build recovers, the installed program with `--update-failed` while
 /// the header is `destructive` (it continues past it, with *Update
 /// incomplete.*), and plainly otherwise — with the handed command line after
-/// its words, marked with this process as its predecessor.
+/// its words.
 struct DoorLeave<'a, W: World> {
     worker: Option<&'a WorkerCtx>,
     door: &'a Door<'a>,
@@ -337,7 +335,6 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
                 data: door.data.to_path_buf(),
                 agents: door.agents.map(Path::to_path_buf),
                 limits: door.limits,
-                predecessor: crate::update_apply::predecessor_here(),
             };
             let mut logged = Logged {
                 world: &mut *guard.inner().world,
@@ -404,7 +401,6 @@ pub(crate) fn run_windows(
         road,
         world,
         handed: then_launch.unwrap_or(&[]),
-        applier: false,
     });
     let recovered = crate::update_apply_windows::recover(
         worker,
@@ -549,14 +545,9 @@ impl Hands for Machine {
 impl World for Machine {
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
         // `quiet_command` is the one door for a child; the child is dropped at
-        // once, never waited on or ended. Every start here is the exit
-        // guard's, so each carries this process as its predecessor (U-34).
+        // once, never waited on or ended.
         bt_platform::quiet_command(program)
             .args(args)
-            .env(
-                crate::update_apply::PREDECESSOR_VARIABLE,
-                crate::update_apply::predecessor_value(crate::update_apply::this_process()),
-            )
             .spawn()
             .map(drop)
     }

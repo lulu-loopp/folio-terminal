@@ -402,7 +402,6 @@ impl Install {
             data: self.data.clone(),
             agents: Some(self.agents.clone()),
             limits,
-            predecessor: None,
         }
     }
 
@@ -2602,39 +2601,6 @@ fn the_stuck_bound_still_holds_when_the_new_bundle_is_live() {
         panic!("still Stuck");
     };
     assert!(retrial.is_some(), "the trial over Stuck is recorded");
-}
-
-/// RED (U-29b) — **a `Handoff` found under the lock is left to a process of
-/// the rescue clone that started before this one** — the applier O started,
-/// still waiting for the lock O held — and taken by this recovery otherwise.
-///
-/// The coordinator's ruling 1 reverts a `Handoff` a dead applier left; an
-/// applier that is alive takes the lock the moment O lets it go, and a start
-/// that won the race must not undo the restart it is part of (the owner's
-/// ruling of 2026-09-25, 3: a start during an apply waits).
-///
-/// MUTATION: in `an_earlier_holder`, drop the `other.started <= mine.started`
-/// comparison.
-#[test]
-fn a_handoff_is_left_to_an_applier_that_started_first() {
-    let mine = Running {
-        pid: 20,
-        started: 5_000,
-    };
-    let earlier = Running {
-        pid: 10,
-        started: 4_000,
-    };
-    let later = Running {
-        pid: 30,
-        started: 6_000,
-    };
-    assert_eq!(
-        an_earlier_holder(mine, None, &[mine, earlier, later]),
-        Some(earlier)
-    );
-    assert_eq!(an_earlier_holder(mine, None, &[mine, later]), None);
-    assert_eq!(an_earlier_holder(mine, None, &[]), None);
 }
 
 // ── a journal write that fails (U-34) ───────────────────────────────────────

@@ -105,24 +105,6 @@ pub fn started_of(pid: u32) -> Option<u64> {
     imp::started_of(pid)
 }
 
-/// **Read the environment variable `name` of this process once, and remove it**
-/// (0.4.6 ticket U-34): an update's road marks the start it makes with its
-/// maker, and what that start then spawns — panes, shells, anything — must not
-/// inherit a mark that was meant for it alone.
-///
-/// Call it first thing in `main`, before this process starts a thread of its
-/// own: the removal writes the process environment, which a concurrent
-/// `getenv` on another thread could read torn on Unix.
-#[must_use]
-pub fn take_environment_variable(name: &str) -> Option<std::ffi::OsString> {
-    let value = std::env::var_os(name)?;
-    // SAFETY: called at the top of `main`, before this program has started a
-    // thread (the doc above); on Windows the call is `SetEnvironmentVariableW`,
-    // which the system serialises.
-    unsafe { std::env::remove_var(name) };
-    Some(value)
-}
-
 /// **What [`ask`] asks of a process.**
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ask {

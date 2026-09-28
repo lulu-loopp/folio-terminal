@@ -146,7 +146,7 @@ use bt_platform::{HostPlatform, launch_agent};
 
 use crate::cli;
 use crate::update_apply::{
-    ExitGuard, Leave, Recording, Watch, Watched, an_earlier_holder, stop_trial, trial_runs,
+    ExitGuard, Leave, Recording, Watch, Watched, Window, stop_trial, trial_runs,
 };
 pub(crate) use crate::update_apply::{Opener, Opens, failed_words, trial_words};
 use crate::update_txn::{
@@ -206,10 +206,6 @@ pub(crate) struct Road {
     /// no home folder to find it from.
     pub(crate) agents: Option<PathBuf>,
     pub(crate) limits: Limits,
-    /// **The road process whose exit guard started this chain**
-    /// (`update_apply::PREDECESSOR_VARIABLE`, U-34): never taken for an
-    /// applier still to come.
-    pub(crate) predecessor: Option<Running>,
 }
 
 /// **The effects of a lock holder that a test stands in for**: its lines, the
@@ -341,10 +337,6 @@ pub(crate) struct MacLeave<'a, W: World> {
     pub(crate) worker: Option<&'a WorkerCtx>,
     pub(crate) home: &'a Home,
     pub(crate) world: &'a mut W,
-    /// The applier's predecessor — O — and O's data directory
-    /// (`update_apply::the_old_build_still_leaves`).
-    pub(crate) predecessor: Option<Running>,
-    pub(crate) data: &'a Path,
 }
 
 impl<W: World> Leave for MacLeave<'_, W> {
@@ -358,21 +350,8 @@ impl<W: World> Leave for MacLeave<'_, W> {
         Some((bundle, words))
     }
 
-    /// LaunchServices starts the bundle with an environment of its own: the
-    /// predecessor's mark does not ride this start, and needs not — while the
-    /// journal is `destructive` the words always carry `--update-failed`, so
-    /// the start continues and never hands itself to the recovery build.
     fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()> {
         self.world.relaunch(program, words)
-    }
-
-    fn predecessor_opens(&mut self) -> Option<u32> {
-        crate::update_apply::the_old_build_still_leaves(
-            self.predecessor,
-            &self.home.installed_program()?,
-            self.home,
-            self.data,
-        )
     }
 }
 
@@ -411,7 +390,6 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
                 data: data.clone(),
                 agents: launch_agents(),
                 limits: Limits::PRODUCT,
-                predecessor: crate::update_apply::predecessor_here(),
             };
             match bt_platform::admission::enter_standalone_main("folio-update-apply", |worker| {
                 apply(worker, &road, &mut world)
@@ -433,8 +411,6 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
         worker: None,
         home: &home,
         world: &mut world,
-        predecessor: crate::update_apply::predecessor_here(),
-        data: &data,
     })
     .leave();
     world.say(&format!("BT_UPDATE_APPLY {}", left.said()));
@@ -472,9 +448,30 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
         worker: Some(worker),
         home: &road.home,
         world,
-        predecessor: road.predecessor,
-        data: &road.data,
     });
+    // **The window's duty first** (U-34, `update_apply::OWNER_FILE`): taken
+    // before the wait for O's lock, while O still runs. An applier that does
+    // not get it leaves the transaction untouched.
+    match crate::update_apply::take_the_window(
+        &road.home,
+        road.txn,
+        crate::update_apply::this_process(),
+    ) {
+        Window::Mine => {}
+        other => {
+            let owner = match &other {
+                Window::Theirs(owner) => Some(owner.pid),
+                _ => None,
+            };
+            guard.not_mine(owner);
+            let left = guard.leave();
+            guard
+                .inner()
+                .world
+                .say(&format!("BT_UPDATE_APPLY {other:?}; {}", left.said()));
+            return Ended::Refused(format!("the window is not this applier's: {other:?}"));
+        }
+    }
     let (ended, successor) = {
         let world = &mut *guard.inner().world;
         match Txn::hold(road, worker, Asker::LockHolder) {
@@ -546,13 +543,14 @@ pub(crate) fn recover(
         Ok((mut txn, bundles)) => {
             let places = bundles.places();
             let mut ended = if txn.phase() == PhaseKind::Handoff
-                && let Some(applier) =
-                    an_applier_may_still_come(places.rescue_program, road.predecessor)
-            {
+                && let Some(applier) = crate::update_apply::the_window_is_theirs(
+                    &road.home,
+                    road.txn,
+                    crate::update_apply::this_process(),
+                ) {
                 hands.say(&format!(
-                    "BT_UPDATE_RECOVER {} runs from {} and may be the applier; the handed-off update is left to it",
-                    applier.pid,
-                    places.rescue_program.display()
+                    "BT_UPDATE_RECOVER {} has the update's window; the handed-off update is left to it",
+                    applier.pid
                 ));
                 txn.successor = Some(applier);
                 Ended::LockHeld
@@ -582,26 +580,6 @@ pub(crate) fn recover(
         successor,
         waiting,
     }
-}
-
-/// **A process other than this one running from the rescue clone's
-/// executable, started before this one** — the applier O started at
-/// `Handoff`, still waiting for the lock O held, or an earlier recovery: its
-/// pid. The applier takes the lock the moment it is free, so a `Handoff`
-/// found under the lock while it may still come is left to it — never the
-/// predecessor whose exit guard started this chain. A list that cannot be read
-/// names none.
-fn an_applier_may_still_come(
-    rescue_program: &Path,
-    predecessor: Option<Running>,
-) -> Option<Running> {
-    let own = std::process::id();
-    let mine = Running {
-        pid: own,
-        started: install_flip::started_of(own)?,
-    };
-    let listed = install_flip::running_from(rescue_program).ok()?;
-    an_earlier_holder(mine, predecessor, &listed)
 }
 
 /// **What the disk names to start now** (the coordinator's rulings 2 and 3,

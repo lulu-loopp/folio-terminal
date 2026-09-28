@@ -62731,6 +62731,12 @@ impl FolioApp {
         match quit.handoff() {
             quit::Handoff::NotOwed | quit::Handoff::Done => true,
             quit::Handoff::Owed => {
+                // The exit guard is armed with the transaction whose window's
+                // mark decides who opens Folio (U-34).
+                update_handoff::arm(match app.update_job.staged() {
+                    Some(staged) => update_handoff::Leaving::over(&staged.home, staged.journal.txn),
+                    None => update_handoff::Leaving::nothing_staged(),
+                });
                 let sent = app
                     .update_job
                     .staged()
@@ -62758,9 +62764,6 @@ impl FolioApp {
                         diagnostics::note(&format!(
                             "Folio: update {txn} was not handed over, and stays prepared: {why}"
                         ));
-                        // Nobody is left behind: the exit guard starts Folio
-                        // again as this process ends (U-34).
-                        update_handoff::arm(update_handoff::Leaving::after(None));
                         quit.handed_off();
                         true
                     }
@@ -62773,10 +62776,7 @@ impl FolioApp {
                     quit.handoff_is_overdue(now),
                 ) {
                     update_handoff::Looked::Waiting => return false,
-                    update_handoff::Looked::Over { line, leaving } => {
-                        diagnostics::note(&line);
-                        update_handoff::arm(leaving);
-                    }
+                    update_handoff::Looked::Over { line } => diagnostics::note(&line),
                 }
                 app.handoff_answer = None;
                 quit.handed_off();
@@ -70984,10 +70984,6 @@ fn report_frame_shape_stop(error: &anyhow::Error, path: &Path, announce: impl Fn
 }
 
 fn main() -> Result<()> {
-    // **An update's predecessor mark, read once and taken out of the
-    // environment** (0.4.6 U-34) — first, before this process starts any
-    // thread or child, so nothing it spawns inherits a mark meant for it.
-    let _ = update_apply::take_predecessor();
     // First, so that even the panic hook's own words have somewhere to land
     // when a shell launched this window-subsystem process to read its traces.
     // **For the front door only** — see `diagnostics::enter_resident_run`, which

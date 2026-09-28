@@ -2361,8 +2361,9 @@ unwinding), the guard does one of two things:
   started, or found, whose pid and start instant it holds and
   `install_flip::still_running` confirms: the trial P started (recorded or,
   over `Moving`, unrecorded and unstoppable), the retrial R started with the
-  handed command line, the applier R found at `Handoff`, the applier O started.
-  It opens Folio; nothing is started.
+  handed command line, the process that holds the window's mark at `Handoff`
+  (round 2). It opens Folio; nothing is started. A process that does not have
+  the duty a window follows (the mark, below) starts nothing either.
 - **(b) otherwise it starts what the disk names**, read at that instant — for
   P and R the rule U-29b wrote (`opens_now` on each platform): the installed
   build, with `--update-failed <journal>` while the header is `destructive` or
@@ -2380,19 +2381,15 @@ product's hook ends the process from inside the hook, with a message box, and
 no `Drop` would run). O's own panic hook spends O's guard before it ends the
 process.
 
-**O's exit.** The loop no longer decides anything but whom O leaves behind:
-`update_handoff::look` reads the answer on the loop's turns, and on an answer,
-or at `quit::HANDOFF_DEADLINE` without one, arms the guard
-(`update_handoff::arm`) — the applier's pid and creation time when it started,
-nobody otherwise. The guard is spent at the very end of `fn main`, after the
+**O's exit.** The loop no longer decides anything on O's way out: the guard
+is armed with the transaction it hands over (`update_handoff::arm`), and the
+answer, or `quit::HANDOFF_DEADLINE` without one, only ends the wait
+(`update_handoff::look`). The guard is spent at the very end of `fn main`, after the
 loop has returned and the session's sentinel is gone, **after** the process
 lets go of its data directory's claim (`persist::let_go_of_every_claim`), so
 the start it makes is the writer rather than a launch handed back to a Folio
 that is leaving; never on the storage worker, which may be the thing that is
-stuck. That start then reads the journal: `Prepared` (W2) or `Abandoned`
-(W13) → it opens; `Handoff` → it hands itself to R, which leaves a late
-applier alone (that applier is R's successor) or reverts and opens the old
-build.
+stuck. Who starts is the window's mark's to decide (below).
 
 **The hand-over's budget** (`quit::HANDOFF_DEADLINE`) is 15 s, sized for the
 first start of a new executable, not a session write: the VM rows that passed
@@ -2403,58 +2400,62 @@ The storage worker notes one line timing the durable write of `Handoff` and
 the applier's start apart (`update_handoff::took_line`), so a scanner's first
 look at the rescue executable is measurable on the VM.
 
-**The frozen word: the predecessor mark.** A start a guard makes can reach R —
-an ordinary start at `Handoff` hands itself over — while the guard's own
-process is still leaving, and on Windows P and R run from the rescue image:
-R's "an older process of the rescue image is the applier" would take the
-dying guard for an applier to come and open nothing. So every start a guard
-makes on Windows (and O's on both platforms) carries its maker in the
-environment: **`FOLIO_UPDATE_PREDECESSOR=<pid>:<creation>`** (decimal; the
-creation instant as `install_flip::started_of` reads it — Windows 100 ns since
-1601, macOS microseconds since 1970). An environment variable and not an argv
-flag, because the process in between is the installed build, of any version:
-an environment reaches R through it untouched, where a flag would need every
-version's grammar to accept and forward it. Frozen at v1 beside F-8's words
-(ARCHITECTURE's frozen-words table). R reads it before it infers anything
-(`update_apply::an_earlier_holder` never names the predecessor); the inference
-itself stays for O's timeout road, whose applier may start late. A macOS
-LaunchServices start carries no environment; there the guard's starts of a
-`destructive` journal always carry `--update-failed`, which continues and
-never reaches R.
+**The duty that a window follows is a mark, handed over explicitly (round 2,
+after Codex's review of 2026-09-28, blocker 1).** Round 1 let O and P each
+infer the other's duty from pid liveness, and one legal order left no window:
+P, seeing O still before its guard, decided to start nothing; O released its
+claim, found P still alive and started nothing; P exited. Liveness is not
+ownership. The duty now lives in one file, **`H\<txn>\owner`**, holding
+`<pid>:<creation>` of the one process that has it
+(`update_apply::OWNER_FILE`). It is taken with `install_txn::durable_create`,
+which never replaces, so of two processes that try at once exactly one gets
+it; a mark whose process no longer runs (pid and start instant) is stale — its
+owner is dead and can open nothing — and the next taker replaces it.
 
-**The mark is read once, and never leaks.** Every process — the update doors
-and the ordinary start alike — reads `FOLIO_UPDATE_PREDECESSOR` first thing in
-`main`, before it starts a thread or a child, and removes it from its own
-environment (`update_apply::take_predecessor`, through
-`bt_platform::install_flip::take_environment_variable`): nothing it spawns —
-panes, shells, the next road process — inherits a mark meant for it. A road
-process it starts gets a mark of its own: an exit guard's start names its
-maker, and an ordinary start that hands itself to the recovery build passes on
-the mark it was started with (`update_startup`'s spawn), so the chain guard →
-start → R keeps its proof. A build older than 0.4.6's final form never reads
-the mark and passes it on in its environment, which reaches R the same way.
+- **O clears it** as it hands the transaction over, before `Handoff` is
+  written, on the storage worker, while O holds the transaction lock
+  (`update_handoff::perform`): no mark of an earlier attempt stands.
+- **P takes it** as soon as it knows its transaction — before it waits for
+  O's lock, while O still runs (`update_apply_windows::apply`,
+  `update_apply_macos::apply`). Only a P that took it runs its road, and its
+  guard then opens the window. A P that finds it taken by a live process
+  touches nothing and starts nothing; one that cannot make or read it leaves
+  the duty with O.
+- **O takes it at its very end**, after letting go of its claim
+  (`update_handoff::Leaving::leave`), and starts Folio only if it got it. O's
+  start reads the header as a lock holder does — `destructive` (nothing moved
+  while the journal is O's) with `--update-failed`, so it continues with
+  *Update incomplete.* and never hands itself to R; `Prepared`/`Abandoned`
+  plainly. When the mark cannot be made or read, O keeps the duty: an error
+  biases to a second start, never to none.
+- **R never takes it.** At `Handoff` R leaves the transaction to the live
+  process the mark names (`update_apply::the_window_is_theirs`) and ignores
+  every other process: a P that never took the mark is nobody's successor.
+  U-24's inference — an older process of the rescue image is the applier — is
+  gone, and with it round 1's predecessor environment variable, which existed
+  only to correct that inference (it was never shipped).
 
-**The double start, made structural, and the one race left.** O starts its
-applier and leaves; if the applier leaves before its road — a refusal, a
-panic; it cannot get further, because it waits for O's lock — while O is still
-on its way out, both O's guard (finding the applier gone) and the applier's
-guard would start Folio. So the applier's guard does not start while **its
-predecessor is O still before O's own guard**
-(`update_apply::the_old_build_still_leaves`): the mark's process still running
-by pid and start instant, from the installed program (O, never a rescue-image
-process: a recovery build's predecessor has already made its start, and R
-never asks), the journal still `Handoff`, and O's data-directory claim still
-held — O lets go of it immediately before its guard looks at the applier.
-**The one accepted race** is the instant between those two statements of O's:
-an applier that finds the claim free and starts Folio while O still finds it
-running — or that leaves just after O looked — gives a second start beside
-O's. It is harmless: the second start finds the first one's data-directory
-claim taken and hands its launch to that Folio (the single-instance hand-over,
-`launch_wire`), which opens a window for it; nothing is applied twice, since
-neither start is a lock holder. The opposite order — an applier that found the
-claim held, and so started nothing, still running when O looks — needs the
-applier to outlive its own last statements across O's two, and would leave
-O's guard seeing it alive; it is the same instant, and the same acceptance.
+Nobody ever defers to a process that could itself defer: O defers only to a
+live P that holds the mark, and a P that holds the mark never defers. R defers
+only to the mark's live holder, which never defers to R.
+
+| moment | mark | O (at its end) | P | window |
+|---|---|---|---|---|
+| hand-over sent | cleared by O | armed | not yet started | — |
+| P starts, takes the mark (the ordinary case) | P | finds P's mark: starts nothing | runs its road; its guard opens | P's |
+| P refused before its road, or never started (W9) | absent | takes it, starts Folio | touches nothing | O's |
+| P arrives after O took it (a late first start) | O | already started Folio | finds a live O: touches nothing, starts nothing | O's |
+| P took it and died (killed) | P, stale | takes it over, starts Folio | — | O's |
+| P took it, O still alive, R started by a person | P | (as above) | its guard opens | P's; R leaves `Handoff` to P |
+| P took it, O gone, P killed | P, stale | — | — | the next start: R ignores the stale mark and reverts |
+| the mark cannot be made (I/O) | — | keeps the duty, starts | leaves the duty with O | O's (a second start is possible, never none) |
+
+The review's four steps are now a deterministic test
+(`update_apply_windows::tests::the_window_is_handed_over_by_one_mark_and_opened_exactly_once`):
+P takes the mark; O, leaving, finds it and starts nothing; P leaves and its
+guard opens the one window — and the other order, O first and a late P second,
+also gives exactly one start. It goes red when O starts whatever the mark
+says, and when P runs its road whatever `take_the_window` answers.
 
 **The applier's own writes** (U-34's first half). `update_apply::write_journal`
 asks `install_txn::durable_write` again, with a pause from 10 ms doubling
@@ -2479,7 +2480,7 @@ whether a Folio window follows):
 
 | process | exit | before | after | how |
 |---|---|---|---|---|
-| O | `Started` | P owes | P, while it runs; else O starts Folio | successor, test |
+| O | `Started` | P owes | whoever holds the window's mark: P if it took it, else O | the mark; `the_window_is_handed_over_by_one_mark_and_opened_exactly_once` |
 | O | `NotRecorded` (journal `Prepared`) | none | Folio (W2's card) | guard, construction |
 | O | `NotStarted`, `Abandoned` written | none | Folio | guard, construction |
 | O | `NotStarted`, abandon not written (`Handoff`) | none | Folio → R reverts | guard, construction |
@@ -2488,7 +2489,7 @@ whether a Folio window follows):
 | O | panic after the hand-over | none | Folio | the panic hook spends the guard |
 | O | panic before the hand-over | none | none (an ordinary crash) | not a road exit |
 | P | exe unnamed, not a rescue home | none | none: no home to read | nothing to name |
-| P | malformed line, standalone main refused | none | by the disk; nothing while O is still before its guard (O's guard starts) | guard; `an_applier_leaving_before_the_old_build_starts_nothing_itself` |
+| P | malformed line, standalone main refused | none | nothing from P, which never took the window's mark; O, finding no mark, starts Folio | the mark; `the_window_is_handed_over_by_one_mark_and_opened_exactly_once` |
 | P | `OldHeldTheLock` | none | installed + `--update-failed` | `an_applier_that_never_gets_the_lock_still_opens_folio` |
 | P | lock error, journal unreadable, txn mismatch, another nonce | none | by the disk | guard, construction |
 | P | `OldStayed` / `Unverified` / `EntranceFailed` → `Abandoned` | none | installed, plainly | `p_waits_for_o_and_releases_the_claim` |
@@ -2501,7 +2502,7 @@ whether a Folio window follows):
 | R (start) | exe unnamed, not a rescue build | none | none: no home | nothing to name |
 | R (start) | standalone main refused | none | by the disk | guard, construction |
 | R (start) | lock not had in 60 s | none | by the disk | guard, construction |
-| R (start) | `Handoff` with an earlier holder | P owes | P while it runs; never the marked predecessor | `a_recovery_marked_with_its_predecessor_does_not_wait_for_it` |
+| R (start) | `Handoff` with an earlier holder | P owes | the mark's live holder only; a P that never took the mark is not waited for | `a_live_applier_at_handoff_is_left_alone_on_both_platforms` |
 | R (start) | road `Failed`, the start refused, panic | by disk / none / none | by the disk, fallback, by the disk | guard |
 | R (logon) | nothing done | none | none (the exception) | `the_logon_run_starts_nothing_only_when_nobody_is_waiting` |
 | R (logon) | revert, finished rollback | old build | old build (unchanged) | same test |

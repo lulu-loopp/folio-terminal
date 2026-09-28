@@ -36,12 +36,11 @@
 //! * [`stop_trial`] — W9/M9's stop: asked to quit, 5 s of grace, then ended —
 //!   each through `bt_platform::install_flip::ask`, which touches nothing that
 //!   is not that very trial (pid, start instant and image);
-//! * [`an_earlier_holder`] — **the one rule for a live applier at `Handoff`**
-//!   (U-24, the coordinator's ruling 3): recovery that finds `Handoff` while a
-//!   process of the rescue executable started no later than it runs — and is
-//!   not the predecessor that started this chain ([`PREDECESSOR_VARIABLE`],
-//!   U-34) — yields to it, writes nothing and opens nothing: that holder opens
-//!   Folio;
+//! * [`OWNER_FILE`] — **the window's owner** (U-34): the one process that has
+//!   taken the duty that a Folio window follows *Restart to update*, handed
+//!   from O to P explicitly ([`take_the_window`]); recovery that finds
+//!   `Handoff` leaves it to a live process the mark names
+//!   ([`the_window_is_theirs`]), writes nothing and opens nothing;
 //! * [`ExitGuard`] — **the one way a road process leaves** (U-34): at its
 //!   exit, whatever the reason, a successor it holds still running opens
 //!   Folio, else it starts what the disk names ([`Opens`]); the recovery run
@@ -566,44 +565,33 @@ pub(crate) fn stop_trial(
     Err(format!("the trial {} did not end", process.pid))
 }
 
-/// **The one rule for a live applier at `Handoff`** (U-29b's, made both
-/// platforms' by U-24, the coordinator's ruling 3): of `listed` — the
-/// processes running from the rescue executable — one that is not `mine`,
-/// is not `predecessor`, and started no later than `mine`. The applier O
-/// started takes the transaction lock the moment it is free, so a recovery
-/// that finds `Handoff` under the lock while such a process lives leaves the
-/// transaction to it: it writes nothing, waits for nothing and opens nothing —
-/// that holder opens Folio.
+/// **The window's owner** (U-34, round 2): the file `H\<txn>\owner`, holding
+/// `<pid>:<creation>` of the one process that has taken the duty that a Folio
+/// window follows *Restart to update*. It is the explicit hand-over of that
+/// duty between the outgoing build O and its applier P: pid liveness decides
+/// nothing between two live processes that could each defer to the other.
 ///
-/// **`predecessor` is the road process whose exit guard started this chain**
-/// (U-34, [`PREDECESSOR_VARIABLE`]): a rescue-image process that is leaving,
-/// not an applier to come, and never taken for one. The inference that an
-/// older process of the rescue image is the applier is kept for the one road
-/// that needs it — O's hand-over, whose applier may start late.
-pub(crate) fn an_earlier_holder(
-    mine: Running,
-    predecessor: Option<Running>,
-    listed: &[Running],
-) -> Option<Running> {
-    listed
-        .iter()
-        .find(|other| {
-            other.pid != mine.pid && Some(**other) != predecessor && other.started <= mine.started
-        })
-        .copied()
-}
+/// * O clears it as it hands the transaction over (before `Handoff`, while O
+///   holds the transaction lock), so no mark of an earlier attempt stands;
+/// * P takes it as soon as it knows its transaction, before it waits for O's
+///   lock ([`take_the_window`]) — and only a P that took it runs its road and
+///   opens a window; one that finds it taken leaves everything alone;
+/// * O takes it at its very end, after letting go of its claim — and starts
+///   Folio only if it took it;
+/// * the recovery build R never takes it: at `Handoff` it leaves the
+///   transaction to a live process the mark names, and ignores any other
+///   process (a P that never took the mark is not an applier to wait for).
+///
+/// Taking is `install_txn::durable_create`, which never replaces: of two
+/// processes that try, exactly one creates it. A mark whose process no longer
+/// runs (pid and start instant) is stale — its owner died — and is taken over
+/// by the next taker, which then replaces it.
+pub(crate) const OWNER_FILE: &str = "owner";
 
-/// **The environment word every start an exit guard makes carries** (U-34):
-/// `FOLIO_UPDATE_PREDECESSOR=<pid>:<creation>`, the starting process's pid and
-/// its start instant (`bt_platform::install_flip::started_of`: on Windows the
-/// creation time in 100 ns since 1601, on macOS microseconds since 1970).
-/// Frozen at v1: the build it is handed to may be another version, and it
-/// passes the word on untouched — an environment is inherited by every child
-/// without the child's grammar knowing it, so the ordinary start between a
-/// guard and the recovery build it hands itself to carries the mark whatever
-/// its version. The recovery build reads it before it infers anything from an
-/// older process of the rescue image ([`an_earlier_holder`]).
-pub(crate) const PREDECESSOR_VARIABLE: &str = "FOLIO_UPDATE_PREDECESSOR";
+/// `H\<txn>\owner`.
+pub(crate) fn owner_path(home: &Home, txn: TxnId) -> PathBuf {
+    home.transaction(txn).join(OWNER_FILE)
+}
 
 /// This process, by its pid and start instant (`started` 0 when it cannot be
 /// read: nothing then matches it).
@@ -615,43 +603,76 @@ pub(crate) fn this_process() -> Running {
     }
 }
 
-/// **The value of [`PREDECESSOR_VARIABLE`] naming `me`**: `<pid>:<creation>`,
-/// both in decimal.
-pub(crate) fn predecessor_value(me: Running) -> OsString {
-    OsString::from(format!("{}:{}", me.pid, me.started))
+/// `<pid>:<creation>`, both in decimal.
+fn owner_value(owner: Running) -> String {
+    format!("{}:{}", owner.pid, owner.started)
 }
 
-/// **The predecessor a value of [`PREDECESSOR_VARIABLE`] names**, or `None`
-/// for none, or for a value that is not exactly `<pid>:<creation>`.
-pub(crate) fn predecessor_named(value: Option<&std::ffi::OsStr>) -> Option<Running> {
-    let (pid, started) = value?.to_str()?.split_once(':')?;
+/// The process a mark's bytes name, or `None` for bytes that are not exactly
+/// `<pid>:<creation>`.
+fn owner_named(bytes: &[u8]) -> Option<Running> {
+    let (pid, started) = std::str::from_utf8(bytes).ok()?.trim().split_once(':')?;
     Some(Running {
         pid: pid.parse().ok()?,
         started: started.parse().ok()?,
     })
 }
 
-/// The predecessor this process was started with, as [`take_predecessor`]
-/// read it; `None` before that, or when there was none.
-pub(crate) fn predecessor_here() -> Option<Running> {
-    PREDECESSOR.get().copied().flatten()
+/// **The process the window's mark names**, or `None` when there is none, or
+/// it cannot be read.
+pub(crate) fn window_owner(home: &Home, txn: TxnId) -> Option<Running> {
+    let bytes = file_reads::read(Lane::UpdateJournal, owner_path(home, txn)).ok()?;
+    owner_named(&bytes)
 }
 
-/// What [`take_predecessor`] read.
-static PREDECESSOR: std::sync::OnceLock<Option<Running>> = std::sync::OnceLock::new();
+/// **Who has the duty a window follows**, as [`take_the_window`] found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Window {
+    /// This process: it opens a window when it leaves.
+    Mine,
+    /// This live process has it: it opens the window.
+    Theirs(Running),
+    /// The mark could be neither made nor read: nobody is proven to have it.
+    Unknown(String),
+}
 
-/// **Read this process's predecessor mark once, and take it out of the
-/// environment** (U-34): every process — the update doors and the ordinary
-/// start alike — does it first thing in `main`, before it spawns anything, so
-/// no pane, shell or later process inherits a mark meant for this one. A road
-/// process started from here gets a mark of its own: an exit guard's start
-/// names its maker, and an ordinary start that hands itself to the recovery
-/// build passes on the mark it was started with
-/// (`update_startup`'s `Machine::spawn_detached`).
-pub(crate) fn take_predecessor() -> Option<Running> {
-    *PREDECESSOR.get_or_init(|| {
-        predecessor_named(install_flip::take_environment_variable(PREDECESSOR_VARIABLE).as_deref())
-    })
+/// **Take the duty a window follows, unless a live process already has it**
+/// ([`OWNER_FILE`]): the mark created for `me`, never over another's; a mark
+/// naming a process that no longer runs is stale and is replaced.
+pub(crate) fn take_the_window(home: &Home, txn: TxnId, me: Running) -> Window {
+    let path = owner_path(home, txn);
+    let value = owner_value(me);
+    match install_txn::durable_create(&path, value.as_bytes()) {
+        Ok(()) => return Window::Mine,
+        Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(failure) => return Window::Unknown(failure.to_string()),
+    }
+    match window_owner(home, txn) {
+        Some(owner) if owner == me => Window::Mine,
+        Some(owner) if install_flip::still_running(owner) => Window::Theirs(owner),
+        // Stale, or unreadable: its owner cannot open anything.
+        _ => match install_txn::durable_write(&path, value.as_bytes()) {
+            Ok(()) => Window::Mine,
+            Err(failure) => Window::Unknown(failure.to_string()),
+        },
+    }
+}
+
+/// **Clear the window's mark** — O, as it hands the transaction over, before
+/// `Handoff` is written: no mark of an earlier attempt stands. None there is
+/// success.
+///
+/// # Errors
+/// The removal's failure, as a sentence.
+pub(crate) fn clear_the_window(owner: &Path) -> Result<(), String> {
+    install_txn::durable_remove(owner).map_err(|failure| failure.to_string())
+}
+
+/// **The live process the window's mark names, if it is not `me`** — the one
+/// R leaves a `Handoff` to. A process the mark does not name is never waited
+/// for, however it runs.
+pub(crate) fn the_window_is_theirs(home: &Home, txn: TxnId, me: Running) -> Option<Running> {
+    window_owner(home, txn).filter(|owner| *owner != me && install_flip::still_running(*owner))
 }
 
 /// **What a road process's exit guard asks of the platform it runs on**
@@ -664,9 +685,7 @@ pub(crate) trait Leave {
     /// at this instant ([`Opens`]), or `None` when nothing can be named (no
     /// home to read).
     fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)>;
-    /// Start `program` with `words`, detached, marked with this process as
-    /// its predecessor ([`PREDECESSOR_VARIABLE`]) where the start can carry
-    /// an environment.
+    /// Start `program` with `words`, detached.
     ///
     /// # Errors
     /// It could not be started.
@@ -677,47 +696,6 @@ pub(crate) trait Leave {
     fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
         None
     }
-    /// **The build that handed this update over, still before its own exit
-    /// guard** — an applier's only ([`the_old_build_still_leaves`]): its pid,
-    /// or `None`.
-    fn predecessor_opens(&mut self) -> Option<u32> {
-        None
-    }
-}
-
-/// **Whether the build that handed this update over is still on its way out,
-/// before its own exit guard** (U-34): the applier's predecessor — the mark O
-/// started it with — still running by pid and start instant, from the
-/// installed program `installed` (so it is O, not a rescue-image process), the
-/// journal still `Handoff`, and O's data-directory claim at `data` still held
-/// (O lets go of it immediately before its guard). Then O's guard is still to
-/// come and will find this applier gone, and an applier that leaves before its
-/// road (a refusal, a panic) starts nothing itself: one start, not two. Its
-/// pid, or `None`.
-///
-/// **The one accepted race** (design revision (e)): between O letting go of
-/// the claim and O looking at its applier there are two statements; an applier
-/// that looks in that instant, or leaves after O looked, may start a second
-/// Folio beside O's — harmless, the second start finds the first one's claim
-/// and hands its launch to it.
-pub(crate) fn the_old_build_still_leaves(
-    predecessor: Option<Running>,
-    installed: &Path,
-    home: &Home,
-    data: &Path,
-) -> Option<u32> {
-    let old = predecessor.filter(|old| install_flip::still_running(*old))?;
-    if !install_flip::running_from(installed).ok()?.contains(&old) {
-        return None;
-    }
-    let bytes = file_reads::read(Lane::UpdateJournal, home.journal()).ok()?;
-    if Journal::parse(&bytes).ok()?.body.phase.kind() != PhaseKind::Handoff {
-        return None;
-    }
-    match crate::persist::try_claim(data) {
-        Err(bt_platform::instance::ClaimRefusal::Held) => Some(old.pid),
-        _ => None,
-    }
 }
 
 /// **How a road process left** — what its [`ExitGuard`] did.
@@ -726,9 +704,10 @@ pub(crate) enum Left {
     /// A successor this process started, or found, still runs — pid and start
     /// instant — and opens Folio: nothing was started.
     Succeeded(u32),
-    /// The build that handed this update over is still on its way out, before
-    /// its own exit guard, which starts Folio: nothing was started here.
-    PredecessorOpens(u32),
+    /// Another process has the duty a window follows ([`OWNER_FILE`]), or
+    /// nobody is proven to have it and this process never took it: nothing
+    /// was started here.
+    NotMine(Option<u32>),
     /// The recovery run at logon, with nothing done and nobody waiting (W8):
     /// nothing was started.
     NobodyWaiting,
@@ -745,9 +724,12 @@ impl Left {
     pub(crate) fn said(&self) -> String {
         match self {
             Left::Succeeded(pid) => format!("{pid} runs and opens Folio; nothing else was started"),
-            Left::PredecessorOpens(pid) => format!(
-                "{pid}, the build that handed the update over, opens Folio as it leaves; nothing was started"
-            ),
+            Left::NotMine(Some(pid)) => {
+                format!("{pid} has the duty to open Folio; nothing was started here")
+            }
+            Left::NotMine(None) => {
+                String::from("this process never took the duty to open Folio; nothing was started")
+            }
             Left::NobodyWaiting => String::from("nobody is waiting; nothing was started"),
             Left::Nameless => String::from("nothing could be named to start"),
             Left::Started(program) => format!("started {}", program.display()),
@@ -773,10 +755,12 @@ impl Left {
 /// Otherwise it starts what the disk names at that instant ([`Leave::opening`]:
 /// the installed build, with `--update-failed <journal>` while the journal is
 /// not over; the new build before `Committed` only as a trial; the rescue copy
-/// where neither whole set is installed), marked with this process as its
-/// predecessor — and, when that program will not start, the next one the rule
-/// names ([`Leave::fallback`]) before it gives up with one line. **One exception**: the recovery run at logon that did nothing a
-/// person is owed a window for — nobody is waiting ([`ExitGuard::nobody_waiting`]).
+/// where neither whole set is installed) — and, when that program will not
+/// start, the next one the rule names ([`Leave::fallback`]) before it gives up
+/// with one line. **Two exceptions**: a process that does not have the duty a
+/// window follows ([`OWNER_FILE`], [`ExitGuard::not_mine`]), and the recovery
+/// run at logon that did nothing a person is owed a window for — nobody is
+/// waiting ([`ExitGuard::nobody_waiting`]).
 ///
 /// It replaces the per-road answers U-29b's rules had spread over each end
 /// (`opens_after`'s table of who owes what, the refusals that left silently):
@@ -785,6 +769,9 @@ pub(crate) struct ExitGuard<L: Leave> {
     leave: L,
     successor: Option<Running>,
     waiting: bool,
+    /// `Some` once this process knows it does not have the duty a window
+    /// follows: the process that has it, if one is proven.
+    not_mine: Option<Option<u32>>,
     left: Option<Left>,
 }
 
@@ -795,8 +782,16 @@ impl<L: Leave> ExitGuard<L> {
             leave,
             successor: None,
             waiting: true,
+            not_mine: None,
             left: None,
         }
+    }
+
+    /// **This process does not have the duty a window follows**
+    /// ([`OWNER_FILE`]): `owner` has it, or nobody is proven to — then the
+    /// process that armed first (O) keeps it. The guard starts nothing.
+    pub(crate) fn not_mine(&mut self, owner: Option<u32>) {
+        self.not_mine = Some(owner);
     }
 
     /// What the road acts through while the guard holds it.
@@ -822,16 +817,17 @@ impl<L: Leave> ExitGuard<L> {
         if let Some(left) = &self.left {
             return left.clone();
         }
-        let left = match self
-            .successor
-            .filter(|successor| install_flip::still_running(*successor))
-        {
-            Some(successor) => Left::Succeeded(successor.pid),
-            None if !self.waiting => Left::NobodyWaiting,
-            None => match self.leave.predecessor_opens() {
-                Some(old) => Left::PredecessorOpens(old),
+        let left = if let Some(owner) = self.not_mine {
+            Left::NotMine(owner)
+        } else {
+            match self
+                .successor
+                .filter(|successor| install_flip::still_running(*successor))
+            {
+                Some(successor) => Left::Succeeded(successor.pid),
+                None if !self.waiting => Left::NobodyWaiting,
                 None => self.start(),
-            },
+            }
         };
         self.left = Some(left.clone());
         left
