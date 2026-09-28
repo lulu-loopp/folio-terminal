@@ -2727,7 +2727,20 @@ point 6).
 `bt_platform::standalone_alert`: on macOS `CFUserNotificationDisplayAlert`,
 which a process with no `NSApplication`, on any thread, can raise — AppKit's
 alert, which (e) used, cannot be raised by the applier or the recovery build and
-fell back to two log lines. Windows is unchanged (`MessageBoxW`).
+fell back to two log lines. Windows is unchanged (`MessageBoxW`). The box is
+synchronous: it *appears* by the delivery bound (for O at the latest at
+`LEAVE_WITHIN`, 75 s) and the process *returns* by the alert's bound — on macOS
+`STANDALONE_ALERT_WITHIN`, 15 minutes, after which the box is taken away and the
+process leaves as if it had been dismissed; on Windows `MessageBoxW` has no
+timeout, so the return is user-bounded, not bounded by Folio. That the box is
+presented at all is rehearsal evidence (R-D5).
+
+**Coordinator rulings, 2026-09-28.** D-12 is by design, pending the owner's nod:
+a logon recovery that finishes a commit opens nothing — nobody asked for Folio
+at logon, the next start is ordinary, and "every phase opens Folio" is about a
+Restart or a start. D-14 is owner-ruled for 0.4.7 on both platforms and is
+disclosed in the 0.4.6 release note's Known issues. U-35 and U-36 are proposed
+0.4.7 tickets pending the owner's nod, recorded by the coordinator in the index.
 
 **Not changed.** The transaction protocol, the recovery decisions, the exit
 guard's rule and the owner's ruling on external kills.

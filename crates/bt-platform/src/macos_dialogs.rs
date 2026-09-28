@@ -891,12 +891,30 @@ fn say_to_stderr(title: &str, text: &str) {
 ///
 /// **`CFUserNotificationDisplayAlert`** is the box Core Foundation raises for
 /// exactly this caller — any thread, no application, drawn by the system in
-/// front of whatever the reader is looking at — and it returns when the button
-/// is pressed (no timeout: it is the last thing this process does). No button
-/// title is given, so the one button is the system's own OK in the reader's
-/// language, as the other doors' is. A refusal of the box itself leaves the
-/// two lines where the run's diagnostics go.
+/// front of whatever the reader is looking at. No button title is given, so
+/// the one button is the system's own OK in the reader's language, as the
+/// other doors' is. A refusal of the box itself leaves the two lines where the
+/// run's diagnostics go.
+///
+/// **It is synchronous, and bounded** (U-32, the coordinator's ruling on
+/// Codex's review, 2026-09-28): the call returns when OK is pressed or, at
+/// the latest, after [`STANDALONE_ALERT_WITHIN`] — the system takes the box
+/// away and this process leaves as if it had been dismissed. Fifteen minutes
+/// is long enough for a person who stepped away and finite for a process: a
+/// road process never stands in the process list for ever behind a box
+/// nobody answers.
 pub fn standalone_alert(title: &str, text: &str) {
+    standalone_alert_within(title, text, STANDALONE_ALERT_WITHIN);
+}
+
+/// **The longest a road process's failure box keeps the process** — then it
+/// is taken away and the process leaves ([`standalone_alert`]).
+pub const STANDALONE_ALERT_WITHIN: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// [`standalone_alert`], taken away after `within` if nobody answered it.
+/// Answers whether the system raised it (`false`: refused, and the two lines
+/// went to the log instead).
+fn standalone_alert_within(title: &str, text: &str, within: std::time::Duration) -> bool {
     let header = objc2_core_foundation::CFString::from_str(title);
     let message = objc2_core_foundation::CFString::from_str(text);
     let mut response: objc2_core_foundation::CFOptionFlags = 0;
@@ -904,7 +922,7 @@ pub fn standalone_alert(title: &str, text: &str) {
     // every optional argument absent; the response is written into a local.
     let refused = unsafe {
         objc2_core_foundation::CFUserNotification::display_alert(
-            0.0,
+            within.as_secs_f64(),
             objc2_core_foundation::kCFUserNotificationNoteAlertLevel,
             None,
             None,
@@ -920,11 +938,47 @@ pub fn standalone_alert(title: &str, text: &str) {
     if refused != 0 {
         say_to_stderr(title, text);
     }
+    refused == 0
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (U-32, the coordinator's ruling on Codex's review) — **the road
+    /// processes' failure box returns by its bound when nobody answers it.**
+    ///
+    /// `CFUserNotificationDisplayAlert` with a timeout of `0` waits for the
+    /// button for ever, which would keep a windowless road process alive
+    /// behind a box nobody sees. Asked with a bound of half a second and not
+    /// answered, the call returns within a few seconds of it — whether the
+    /// system raised the box (and took it away at the bound) or refused it
+    /// (a session that cannot show one: the two lines are logged instead).
+    ///
+    /// MUTATION: pass `0.0` as the timeout again.
+    #[test]
+    fn the_standalone_alert_returns_by_its_bound() {
+        assert_eq!(STANDALONE_ALERT_WITHIN, std::time::Duration::from_secs(900));
+        let bound = std::time::Duration::from_millis(500);
+        let (sent, answered) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let raised = standalone_alert_within(
+                "Folio test",
+                "U-32: this box closes by itself in half a second.",
+                bound,
+            );
+            let _ = sent.send((raised, started.elapsed()));
+        });
+        let (raised, took) = answered
+            .recv_timeout(bound + std::time::Duration::from_secs(20))
+            .expect("the alert returned by its bound");
+        eprintln!("standalone alert: raised {raised}, returned after {took:?}");
+        assert!(
+            took < bound + std::time::Duration::from_secs(10),
+            "raised {raised}, returned after {took:?}"
+        );
+    }
 
     /// **The picture chooser offers every format the decoder honours, and the
     /// list is the decoder's own.**
