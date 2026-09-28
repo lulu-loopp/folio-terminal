@@ -1758,16 +1758,26 @@ impl<W: Copy + Eq> Job<W> {
             self.said = true;
             line(&answer, self.offers)
         });
+        // **The offer does not wait for a window to be minted** (U-32, the
+        // macOS rehearsal's first row): the window directory this reads is
+        // published once a turn (`FolioApp::publish_window_directory`), and a
+        // check that settles before the first turn — a local release feed, a
+        // fast network, the macOS loop delivering its first user events before
+        // its first `about_to_wait` — found no window, left the job `Idle`,
+        // and no later `UpdateJobOffer` came to ask again: the card was never
+        // drawn although the line said it was offered. The card's one way of
+        // choosing a window is [`Self::hand_over`], asked once a turn; an
+        // offer minted with no presenter is seated there as soon as an
+        // ordinary window is open.
         if let (Ok(eligible), true) = (&answer, self.offers)
-            && let Some(window) = crate::most_recently_active_window(
-                presenters.visited,
-                presenters.open,
-                presenters.quake,
-            )
             && let Some(offer) = Offer::mint(mint(), &eligible.tag, evidence.platform)
         {
             self.state = State::Available(offer);
-            self.presenter = Some(window);
+            self.presenter = crate::most_recently_active_window(
+                presenters.visited,
+                presenters.open,
+                presenters.quake,
+            );
             self.offered_this_launch = true;
         }
         self.answer = Some(answer);
@@ -2700,7 +2710,8 @@ mod tests {
     ///
     /// §B, and §7.59's rule (`most_recently_active_window`): the summoned
     /// terminal is a companion that spends most of its life hidden. A run
-    /// whose only window is the summoned one keeps its offer for a window.
+    /// whose only window is the summoned one keeps its offer for a window,
+    /// which `Job::hand_over` seats once one is open (U-32).
     ///
     /// MUTATION: pass `None` for `presenters.quake` in `Job::consider` and the
     /// card goes up in the summoned terminal, `9`.
@@ -2728,21 +2739,72 @@ mod tests {
             },
             || txn(1),
         );
-        assert_eq!(
-            alone.state(),
-            &State::Idle,
-            "a card in the summoned terminal"
-        );
-        alone.consider(
-            gathered("v0.4.7", None, Some(Channel::Ours)),
+        assert_eq!(alone.presenter(), None, "never the summoned terminal");
+        assert_eq!(alone.card_window(), None, "no card is drawn yet");
+        alone.hand_over(&Presenters {
+            visited: &[9, 4],
+            open: &[9, 4],
+            quake: Some(9),
+        });
+        assert_eq!(alone.presenter(), Some(4), "the offer waited for a window");
+    }
+
+    /// RED (U-32, the macOS rehearsal's first row) — **an offer considered
+    /// before the first turn has published any window is still drawn: the
+    /// next turn's hand-over seats it in the one ordinary window, and its card
+    /// is painted there.**
+    ///
+    /// The window thread publishes its window directory once a turn, in
+    /// `about_to_wait`. On macOS, with a local feed, the check and the channel
+    /// both landed before that first turn: the job considered with no window
+    /// open (only the restored, hidden summoned terminal on its way), said
+    /// "v0.4.7 is offered", stayed `Idle`, and nothing asked it again — the
+    /// gear had its dot and no card ever appeared. This is the product's
+    /// order: `consider` with the directory the first turn has not written
+    /// yet, then `settle_update_card`'s `hand_over` with the one it writes.
+    ///
+    /// MUTATION: in `Job::consider`, mint the offer only when a window is
+    /// found (the `let Some(window) = …` guard of before).
+    #[test]
+    fn an_offer_considered_before_any_window_is_published_is_seated_and_painted_at_the_next_turn() {
+        let mut job: Job<u32> = Job::for_platform(HostPlatform::MacOs);
+        let line = job.consider(
+            Gathered {
+                platform: HostPlatform::MacOs,
+                ..gathered("v0.4.7", None, Some(Channel::Ours))
+            },
             &Presenters {
-                visited: &[9, 4],
-                open: &[9, 4],
-                quake: Some(9),
+                visited: &[1],
+                open: &[],
+                quake: None,
             },
             || txn(1),
         );
-        assert_eq!(alone.presenter(), Some(4), "the offer waited for a window");
+        assert_eq!(
+            line.as_deref(),
+            Some("Folio: update job — v0.4.7 is offered")
+        );
+        assert_eq!(job.card_window(), None, "no window is published yet");
+        assert!(job.hand_over(&Presenters {
+            visited: &[1, 9],
+            open: &[1, 9],
+            quake: Some(9),
+        }));
+        assert_eq!(
+            job.card_window(),
+            Some(1),
+            "the ordinary window, not the summoned one"
+        );
+        let paint = crate::update_card::paint(job.state()).expect("a card is painted");
+        assert_eq!(paint.heading.as_deref(), Some("Folio 0.4.7"));
+        assert_eq!(
+            paint.verbs,
+            vec![
+                crate::update_card::CardVerb::Update,
+                crate::update_card::CardVerb::Later,
+                crate::update_card::CardVerb::Skip
+            ]
+        );
     }
 
     /// RED (U-31) — **a Windows build offers: the job it holds raises the card
