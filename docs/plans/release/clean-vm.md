@@ -1116,7 +1116,7 @@ Error: Cannot read the virtual machine configuration file
 | 已验证:`new-vm.ps1` 的幂等拒绝与 `-Stage install` 的前置检查 | 本机跑过(用临时目录) |
 | **已验证**:两台机的 `clean` 快照已回到出厂 `Restricted`(五个作用域全 `Undefined`) | 2026-08-30 逐台实测,§3.4d |
 | **已验证**:加密机上 `deleteSnapshot` 报「Cannot read the virtual machine configuration file」并退 `-1`,而快照确实删掉了 | 同上;判据用 `listSnapshots` |
-| §4.4 更新器:后继版本注入口 | **已有(U-30b)** —— `--update-feed <file-URL>`,只在带它启动的进程里生效,校验和与签名者检查不变;见 §4.4 前提 3。Windows 的 `OFFERS_ENABLED_WINDOWS` 已由 U-31 打开;仍待:`OFFERS_ENABLED_MACOS` 由 U-32 打开;`hard-reset-in-vm.ps1 -Feed` 未在真虚机上跑过 |
+| §4.4 更新器:后继版本注入口 | **已有(U-30b)** —— `--update-feed <file-URL>`,只在带它启动的进程里生效,校验和与签名者检查不变;见 §4.4 前提 3。Windows 的 `OFFERS_ENABLED_WINDOWS` 已由 U-31 打开;macOS 的 `OFFERS_ENABLED_MACOS` 已由 U-32 打开;仍待:`hard-reset-in-vm.ps1 -Feed` 未在真虚机上跑过 |
 | §4.4 更新器:macOS 断电验收虚机 | **不存在** —— Mac mini 无可处置的 macOS 客户机(见 §Clean-machine coverage 的数字);Mac mini 本身不做断电;`kill -9` 不等价于断电(进程死后文件系统缓存仍会落盘,内核不断电)。待硬件条件或 M 表近似方案裁决后补 |
 | §4.4 更新器:`hard-reset-in-vm.ps1` 和 `in-guest-updater.ps1` | **未验证** —— 脚本已写,`-WhatIf` 已跑通;未在真虚机上跑过 |
 

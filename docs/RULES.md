@@ -925,8 +925,8 @@ switch; a newer, unskipped tag; the channel (`Ours` only — `Managed` is sent t
 its manager's command, `NotOurs` and `Unknown` to the releases page); the
 updater flag; a release file named for this tag here. It says its answer once
 per launch in `diagnostics.log`, with no path and no account. **The gate** is a
-build fact per platform, `Job::offers_enabled_on`: **on for Windows** (U-31),
-**off for macOS** until U-32, off wherever no release is built. With the gate
+build fact per platform, `Job::offers_enabled_on`: **on for Windows** (U-31)
+and **on for macOS** (U-32), off wherever no release is built. With the gate
 off the job decides and stays `Idle`. With it on, an eligible answer mints the
 offer once — `{txn, tag, asset, hash_doc, to_version}`, never derived again —
 and raises the card once per launch in the ordinary window the reader was last
@@ -939,7 +939,10 @@ two files, by the offer's own tag, from
 change. **The card** says one line per state with C9's verbs (Update · Later ·
 Skip; Cancel under the download's bar; Restart · Later at `Verified`; a failure's
 reason, then `Nothing changed.`, `Previous version restored.` or `Update
-incomplete.` with the journal's folder), holds the window's keys until answered
+incomplete.` with the folder of its own home's journal, whatever path
+`--update-failed` carried; a trial started over `Stuck` whose receipt then
+commits it forward says `Updated.` instead, from its watch's `Committed`),
+holds the window's keys until answered
 or put away, and follows its window when that window closes. **Restart asks the
 application's quit** (`App::restart_for_update`: `Job::restart`, then the one
 quit door with `Reason::UpdateRestart`), never the job alone. The General row's
@@ -962,16 +965,22 @@ exit guard**, armed when Restart to update is pressed: one mark
 the applier once it takes it, else the outgoing build — and that process
 leaves a successor it knows is running, or starts what the disk names and
 counts it only when a Folio acknowledges it by holding the data directory,
-else the next program, else shows the failure window itself. So a window
+else the next program, else shows the failure window itself — a box a
+process with no application can raise (`bt_platform::standalone_alert`:
+Core Foundation's on macOS, the ownerless one on Windows). So a window
 follows Restart to update whatever the road met — a refused write, a
 hand-over past its 15 s, a refusal, a panic; the one exception is the
 recovery at logon that attempted nothing. An applier killed from outside after
 it has taken the window duty, and a live holder the recovery build deferred to
 that is then killed from outside, are outside the guarantee and are recovered
 by the next start or logon (before `Armed` there is no logon entrance, so the
-next start); no watcher process is built (owner ruling 2026-09-28). The macOS road (the bundle exchange, the
-LaunchAgent entrance, its rollback and opening rules) is built to the same
-contract behind its shut gate; U-32 opens it.
+next start); no watcher process is built (owner ruling 2026-09-28). **The road
+on macOS** is the same contract: the Prepare stages beside the bundle
+(`<parent>/.<Bundle>.app.folio-update/`) and holds the new bundle to the
+running one's designated requirement; the entrance at login is one LaunchAgent
+`io.github.lulu-loopp.folio.update-<txn8>.plist`, removed when the transaction
+ends; the bundle is swapped whole by one `RENAME_SWAP`, and swapped back the
+same way; a copy Homebrew installed is sent to `brew upgrade --cask folio`.
 **From.** §7.52 *an installed preview has no way to know it is out of date: one
 request, a stamp good for a day, and a gear*; the `update.rs` module doc;
 `PRIVACY.md`; trailing entries 2026-09-26 *the update check's state has one
@@ -988,7 +997,8 @@ start's update check and download read a local release feed …* (U-30b), *on
 Windows a failed trial is rolled back by digest …, and U-29b's opening rules hold
 on Windows too* (U-24), *Folio offers its own updates on Windows: the update
 job's gate is a build fact per platform …* (U-31); 2026-09-28 *every road process
-of an update leaves through one exit guard …* (U-34).
+of an update leaves through one exit guard …* (U-34), *Folio offers its own
+updates on macOS too …* (U-32).
 **Overrides.** The U-31 entry replaces the U-18 entry's "offers are the constant
 `false` until U-31/U-32" and the U-19 entry's "no shipped build shows any of
 this" for Windows, and replaces §7.52's "不下载、不替换、不重启" as a bound on
@@ -997,7 +1007,8 @@ opening for every still-`destructive` journal and its wait for a live applier at
 `Handoff`. U-34 replaces U-29's "after `Abandoned` no relaunch", U-23's and
 U-24's "after `Committed` or `Abandoned` nothing" and their silent refusals, and
 U-24's "a destructive journal on a home no road of this build recovers starts
-nothing".
+nothing". U-32 replaces U-31's "off for macOS until U-32" and U-29's "the card's
+folder is the one the rollback named".
 
 ### 37. The Explorer and Finder verbs — `folded`
 **Rule.** On Windows there is one verb in two registrations: the classic trees

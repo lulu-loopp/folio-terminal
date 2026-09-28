@@ -8,10 +8,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
-- Windows: Folio can update itself. When a newer release is published, a card
-  offers it and, once it is downloaded, restarts Folio into it; a Restart to
-  update row on Settings > General brings the card back. A copy installed with
-  scoop or winget is told to use its manager, with the command to copy.
+- Folio can update itself on Windows, and on macOS through the same card and
+  row. When a newer release is published, a card offers it and, once it is
+  downloaded, restarts Folio into it; a Restart to update row on Settings >
+  General brings the card back. A copy installed with scoop or winget is told
+  to use its manager, with the command to copy, and a Homebrew install on
+  macOS is told to `brew upgrade`.
 
 ### Changed
 
@@ -53,6 +55,10 @@ All notable changes to Folio are recorded here. The format follows
   "Update incomplete" card when the update did not finish, instead of leaving
   no window until the next sign-in; if Folio cannot be started at all, the
   updater itself says the update is incomplete and where.
+- An update whose card said "Update incomplete" and which then completed on
+  the next try says so on its card. On macOS, when the updater cannot start
+  Folio at all, its "Update incomplete" message is now shown in a box rather
+  than only written to the log.
 - macOS: the shipped shells start as login shells, so tools whose PATH is set
   in .zprofile — Homebrew's — are found; a profile can turn login on or off;
   a profile with arguments no longer reads as not installed.

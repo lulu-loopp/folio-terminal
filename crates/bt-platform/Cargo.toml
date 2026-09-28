@@ -583,6 +583,14 @@ objc2-core-foundation = { version = "0.3", default-features = false, features = 
     # feature; named here because this crate's own code writes all three, and a
     # feature that arrives by union is a feature nobody declared.
     "CFCGTypes",
+    # U-32: `CFUserNotificationDisplayAlert`, the one box a process with no
+    # AppKit application can raise — the update's road processes' failure
+    # window (`standalone_alert`). Its binding is behind this crate's
+    # notification feature and names `CFURL` (the three optional icon, sound and
+    # localisation addresses, all passed as none). **Not a package**: both are
+    # features of this crate, which is already here.
+    "CFURL",
+    "CFUserNotification",
     "std",
 ] }
 # **M4-2 adds one package, and it is the web engine** — `objc2-web-kit` 0.3.2,

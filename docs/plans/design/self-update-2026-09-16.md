@@ -2703,3 +2703,31 @@ back).
 
 **Not changed.** The recovery decisions (`decide`, the rollback), `at_start`
 and `hand_to_rescue`, the W1/W2 job-owner pass (U-33).
+
+## Revision 2026-09-28 (f) — the macOS gate, and three corrections the enabler needed (U-32)
+
+**The gate.** `OFFERS_ENABLED_MACOS = true` (b).5's U-32 row. Everything the
+macOS road does is (c), (d) and (e) as built; the rehearsal on two owner-signed,
+notarised bundles is the ticket's merge condition (its report,
+`U-32-rehearsal.md`).
+
+**The card follows the journal's final phase.** A trial started over `Stuck`
+carries `--update-failed`, so its card is *Update incomplete.* at launch; when
+its own receipt commits the transaction forward, the trial's watch reads
+`Committed` and the job moves that card (or a closed one) to
+`update_job::State::Updated` — *Updated.* (`Job::after_commit`, on
+`AppEvent::TrialWritesReleased`). Nothing else about the trial changes: the
+watch, the release of held writes and the receipt are U-13's and U-29b's.
+
+**The card's folder.** A start sent with `--update-failed <journal>` names its
+own home's folder on the card; the word's value is no longer read (U-29's open
+point 6).
+
+**The failure window without an application.** (e)'s last resort is shown with
+`bt_platform::standalone_alert`: on macOS `CFUserNotificationDisplayAlert`,
+which a process with no `NSApplication`, on any thread, can raise — AppKit's
+alert, which (e) used, cannot be raised by the applier or the recovery build and
+fell back to two log lines. Windows is unchanged (`MessageBoxW`).
+
+**Not changed.** The transaction protocol, the recovery decisions, the exit
+guard's rule and the owner's ruling on external kills.

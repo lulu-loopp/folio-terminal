@@ -284,14 +284,16 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     let header = header.clone();
     let trial = trial_of(start.trial, world);
     // The card is read before a retirement removes the journal it is read
-    // from; the folder is the one the rollback named.
+    // from. The word's value is not read (U-32, U-29's open point 6): the
+    // card is this home's header, so the folder it names is this home's —
+    // the folder of the journal just read — whatever path the word carried.
     let failed = start
         .failed
-        .and_then(|journal| Some((journal, after_rollback(&header)?)))
-        .map(|(journal, after)| match after {
+        .and_then(|_| after_rollback(&header))
+        .map(|after| match after {
             AfterRollback::Restored => Failure::RolledBack,
             AfterRollback::Incomplete => Failure::Incomplete {
-                folder: journal.parent().unwrap_or(journal).to_path_buf(),
+                folder: start.home.root().to_path_buf(),
             },
         });
     // The transaction lock is asked for only where its answer decides
@@ -1319,6 +1321,241 @@ mod tests {
                 panic!("no journal never stops a start");
             };
             assert_eq!(failed, None, "no journal, no card");
+        }
+
+        /// RED (U-32) — **the card a start sent with `--update-failed` raises
+        /// names the folder of its own home's journal, whatever path the word
+        /// carried.**
+        ///
+        /// U-29's open point 6: the word's value was used only as the card's
+        /// folder, and was never checked. The card is read from this home's
+        /// header, so the folder it names is this home's; the value is not
+        /// read at all, and so needs no check. A word naming another place —
+        /// a stale path, a path spelt differently — shows the same folder.
+        ///
+        /// MUTATION: in `run`, take `Incomplete`'s folder from the word's
+        /// value again (`journal.parent()`).
+        #[test]
+        fn the_incomplete_card_names_its_own_homes_folder_whatever_the_word_says() {
+            use crate::update_txn::HeaderOutcome;
+            let Some(scene) = Scene::new("sent-elsewhere") else {
+                return;
+            };
+            scene.journal_of(Class::Destructive, HeaderOutcome::RolledBack);
+            let elsewhere = scene.root.join("elsewhere").join("journal.json");
+            let mut world = Recorded::default();
+            let Verdict::Continue { failed, .. } = scene.run_sent(&elsewhere, &mut world) else {
+                panic!("a start the rollback sent must continue");
+            };
+            assert_eq!(
+                failed,
+                Some(Failure::Incomplete {
+                    folder: scene.home.root().to_path_buf()
+                }),
+                "the folder of the journal the card was read from"
+            );
+        }
+
+        /// RED (U-32) — **a trial started over `Stuck` that commits forward
+        /// says the update is done: its card, *Update incomplete.* at launch,
+        /// becomes the updated card once its watch reads `Committed`, and a
+        /// card the reader closed comes back once to say so.**
+        ///
+        /// U-29b's open point 3 and the coordinator's ruling 2: a lock holder
+        /// that finds `Stuck` with the new build live starts it as a trial —
+        /// `--update-trial` with a recorded nonce and `--update-failed` — and
+        /// that trial's receipt commits the transaction forward. The card had
+        /// been read from the header at launch (`destructive` → *Update
+        /// incomplete.*) and kept saying so after the commit. Every step here
+        /// is the product's: the journal is `Stuck` with the retrial recorded
+        /// and then `Committed` on its receipt through `update_txn`'s own
+        /// transitions, the start is the real pass, the job is seeded by what
+        /// the pass decided, and the commit is read by the trial's real watch.
+        /// A trial that was never told anything (the happy path) is not told
+        /// this either.
+        ///
+        /// MUTATION: in `Job::after_commit`, answer `false` and leave the
+        /// state as it is.
+        #[test]
+        fn a_stuck_retrial_that_commits_shows_the_update_done() {
+            use crate::update_card::{self, CardVerb};
+            use crate::update_job::{Job, Presenters, State, Verb};
+            use crate::update_txn::{
+                Body, Event, Inventories, Journal, Layout, Phase, Receipt, Retrial, TrialProcess,
+            };
+            let Some(scene) = Scene::new("stuck-retrial") else {
+                return;
+            };
+            let process = TrialProcess {
+                pid: 4242,
+                started: 7,
+            };
+            let stuck = Journal {
+                txn: txn(),
+                rescue: scene.rescue.to_string_lossy().into_owned(),
+                body: Body {
+                    phase: Phase::Stuck {
+                        trial: None,
+                        last_error: "the exchange back was refused".to_owned(),
+                        attempts: 1,
+                        retrial: None,
+                    },
+                    layout: Layout::Members(Inventories {
+                        old_shipped: vec!["folio.exe".to_owned()],
+                        old_present: Vec::new(),
+                        new: Vec::new(),
+                    }),
+                },
+            }
+            .advance(&Event::RetrialBegan {
+                nonce: nonce(),
+                process,
+                began_ms: 1,
+            })
+            .expect("the holder records the trial it started over Stuck");
+            assert!(matches!(
+                stuck.body.phase,
+                Phase::Stuck {
+                    retrial: Some(Retrial { .. }),
+                    ..
+                }
+            ));
+            std::fs::write(scene.home.journal(), stuck.encode()).unwrap();
+
+            // The trial's start: both words, as the holder writes them.
+            let journal = scene.home.journal();
+            let trial = trial_arg(txn(), nonce());
+            let argv = [
+                OsString::from(cli::UPDATE_FAILED_FLAG),
+                journal.clone().into_os_string(),
+            ];
+            let mut world = Recorded {
+                admission: Some(scene.home.admission()),
+                ..Recorded::default()
+            };
+            let Verdict::Continue {
+                admission,
+                trial: as_trial,
+                failed,
+                ..
+            } = run(
+                &Start {
+                    own_exe: &scene.own_exe,
+                    home: &scene.home,
+                    argv: &argv,
+                    trial: Some(&trial),
+                    failed: Some(&journal),
+                },
+                &mut world,
+            )
+            else {
+                panic!("the retrial continues as the trial");
+            };
+            assert_eq!(as_trial, Some((txn(), nonce())), "a trial");
+            let presenters = Presenters {
+                visited: &[1],
+                open: &[1],
+                quake: None,
+            };
+            let mut job: Job<u32> = Job::with_offers(true).after_rollback(failed);
+            job.hand_over(&presenters);
+            let at_launch = update_card::paint(job.state()).expect("a card at launch");
+            assert_eq!(
+                at_launch.detail.as_deref(),
+                Some(crate::i18n::Text::UpdateCardIncomplete.text()),
+                "at launch the header said the update was incomplete"
+            );
+
+            // Its receipt commits it forward; the trial's watch reads that.
+            let committed = stuck
+                .advance(&Event::ReceiptAccepted(Receipt {
+                    txn: txn(),
+                    nonce: nonce(),
+                    pid: process.pid,
+                    version: "0.4.7".to_owned(),
+                }))
+                .expect("the receipt of the recorded retrial commits");
+            assert_eq!(committed.body.phase, Phase::Committed);
+            std::fs::write(&journal, committed.encode()).unwrap();
+            let gate = crate::update_trial::Gate::new();
+            let woke = std::cell::Cell::new(false);
+            crate::update_trial::watch(
+                &gate,
+                &journal,
+                txn(),
+                std::time::Duration::from_millis(5),
+                &|| woke.set(true),
+            );
+            assert!(woke.get(), "the watch read the commit and woke the window");
+
+            assert!(job.after_commit("0.4.7"), "the card follows the commit");
+            assert_eq!(job.state(), &State::Updated("0.4.7".to_owned()));
+            assert_eq!(job.card_window(), Some(1), "in the window the card was in");
+            let done = update_card::paint(job.state()).expect("a card after the commit");
+            assert_eq!(done.heading.as_deref(), Some("Folio 0.4.7"));
+            assert_eq!(
+                done.detail.as_deref(),
+                Some(crate::i18n::Text::UpdateCardUpdated.text())
+            );
+            assert_eq!(done.folder, None, "no folder to show: nothing is left");
+            assert_eq!(done.verbs, vec![CardVerb::Close]);
+            assert!(!job.after_commit("0.4.7"), "said once");
+            job.answer_verb(
+                Verb::Later,
+                &crate::update_job::Unsupported,
+                &nothing_fetched(),
+            )
+            .expect("Close puts it away");
+            assert_eq!(job.state(), &State::Idle);
+            drop(admission);
+
+            // The reader closed *Update incomplete.* before the commit: the
+            // updated card comes back once, in the last active window.
+            let mut closed: Job<u32> =
+                Job::with_offers(true).after_rollback(Some(Failure::Incomplete {
+                    folder: scene.home.root().to_path_buf(),
+                }));
+            closed.hand_over(&presenters);
+            closed
+                .answer_verb(
+                    Verb::Later,
+                    &crate::update_job::Unsupported,
+                    &nothing_fetched(),
+                )
+                .expect("Close");
+            assert_eq!(closed.card_window(), None);
+            assert!(closed.after_commit("0.4.7"));
+            closed.hand_over(&presenters);
+            assert_eq!(closed.card_window(), Some(1));
+
+            // A trial nobody told anything (the happy path) shows nothing.
+            let mut plain: Job<u32> = Job::with_offers(true).after_rollback(None);
+            assert!(!plain.after_commit("0.4.7"));
+            assert_eq!(update_card::paint(plain.state()), None);
+            let mut restored: Job<u32> =
+                Job::with_offers(true).after_rollback(Some(Failure::RolledBack));
+            assert!(
+                !restored.after_commit("0.4.7"),
+                "a retired rollback is never committed"
+            );
+        }
+
+        /// The transport a verb that fetches nothing is handed.
+        struct NoTransport;
+
+        impl crate::update_job::Transport for NoTransport {
+            fn fetch(
+                &self,
+                _request: &crate::update_job::Request,
+                _into: &Path,
+                _fetching: &crate::update_job::Fetching,
+            ) -> Result<PathBuf, String> {
+                Err("nothing is fetched here".to_owned())
+            }
+        }
+
+        fn nothing_fetched() -> crate::update_job::SharedTransport {
+            std::sync::Arc::new(NoTransport)
         }
 
         /// RED (U-29) — **a start in a macOS bundle hands itself to the rescue

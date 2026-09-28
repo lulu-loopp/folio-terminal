@@ -63854,10 +63854,17 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // slot, and its one reader, `raise_first_run_if_due`, is on the clock
             // run of the turn this wake brings round.
             AppEvent::InstallChannelRead => Ok(()),
-            // **What a committed trial held back, written now** (`update_trial`).
+            // **What a committed trial held back, written now** (`update_trial`),
+            // and a card that said the update was incomplete now says it is
+            // done (U-32): the card follows the journal's final phase.
             AppEvent::TrialWritesReleased => {
                 if let Some(app) = self.app.as_mut() {
                     app.release_trial_writes(update_trial::take_released());
+                    if app.update_job.after_commit(version::VERSION) {
+                        diagnostics::note(
+                            "Folio: update job — the update this launch said was incomplete is committed",
+                        );
+                    }
                 }
                 Ok(())
             }

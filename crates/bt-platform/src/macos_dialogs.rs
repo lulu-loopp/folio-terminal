@@ -877,6 +877,51 @@ fn say_to_stderr(title: &str, text: &str) {
     eprintln!("{text}");
 }
 
+/// **Say one thing in a box from a process that has no application** — the
+/// failure window of the update's road processes (U-32; U-34's
+/// `update_apply::Leave::show_here`), where every start that could have
+/// opened Folio was refused.
+///
+/// [`message_box`] cannot be that window here. The applier and the recovery
+/// build are windowless: they never create an `NSApplication`, and their exit
+/// guard runs on a worker thread, so `message_box` answers both of its first
+/// two questions with `say_to_stderr` — the box the guarantee ends in would be
+/// two lines in a log. The old build's end is no better placed: its windows
+/// are closed by then, so M4-11's third question can refuse it too.
+///
+/// **`CFUserNotificationDisplayAlert`** is the box Core Foundation raises for
+/// exactly this caller — any thread, no application, drawn by the system in
+/// front of whatever the reader is looking at — and it returns when the button
+/// is pressed (no timeout: it is the last thing this process does). No button
+/// title is given, so the one button is the system's own OK in the reader's
+/// language, as the other doors' is. A refusal of the box itself leaves the
+/// two lines where the run's diagnostics go.
+pub fn standalone_alert(title: &str, text: &str) {
+    let header = objc2_core_foundation::CFString::from_str(title);
+    let message = objc2_core_foundation::CFString::from_str(text);
+    let mut response: objc2_core_foundation::CFOptionFlags = 0;
+    // SAFETY: two strings this function owns for the length of the call, and
+    // every optional argument absent; the response is written into a local.
+    let refused = unsafe {
+        objc2_core_foundation::CFUserNotification::display_alert(
+            0.0,
+            objc2_core_foundation::kCFUserNotificationNoteAlertLevel,
+            None,
+            None,
+            None,
+            Some(&header),
+            Some(&message),
+            None,
+            None,
+            None,
+            &raw mut response,
+        )
+    };
+    if refused != 0 {
+        say_to_stderr(title, text);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -592,7 +592,7 @@ pub(crate) fn leave_armed(_token: WaitToken<'_, doors::UpdateLeave>) -> Option<L
         }
     };
     if matches!(left, Left::ShownHere(_)) {
-        bt_platform::message_box(
+        bt_platform::standalone_alert(
             crate::APP_NAME,
             &crate::update_apply::failure_text(home.as_ref()),
         );
@@ -654,6 +654,57 @@ mod tests {
         Asker, Class, Disk, HeaderOutcome, Home, Inventories, Journal, JournalRead, Layout,
         Located, Nonce, Phase, PhaseKind, StartAction, StartView, TxnId, at_start, decide,
     };
+
+    /// PIN (U-32) — **every road process shows its failure window with the box
+    /// a process with no application can raise, and none of them with the
+    /// application's box.**
+    ///
+    /// U-34's last resort — no start was delivered, so the guard's own process
+    /// shows *Update incomplete.* and the folder — is `Leave::show_here` in the
+    /// applier and the recovery build, and `leave_armed` in the old build. On
+    /// Windows both boxes are `MessageBoxW`. On macOS `bt_platform::message_box`
+    /// is AppKit's alert, which a windowless process (no `NSApplication`, a
+    /// worker thread) cannot raise: it writes two lines to the log instead, so
+    /// the macOS twin of the checklist's D-5 row — every start refused — ended
+    /// with no window at all. `bt_platform::standalone_alert` is Core
+    /// Foundation's box there, raised from any thread of any process.
+    ///
+    /// MUTATION: call `bt_platform::message_box` in any road `show_here` (or in
+    /// `leave_armed`) again.
+    #[test]
+    fn every_road_process_shows_its_failure_window_without_an_application() {
+        use bt_source::{Found, Index, Search, View, needle};
+        let index = Index::of_package("bt-app");
+        let callers = |found: Found| -> Vec<String> {
+            let mut names: Vec<String> = found
+                .in_the_product(index)
+                .owners(index)
+                .into_keys()
+                .map(|identity| identity.name)
+                .collect();
+            names.sort();
+            names.dedup();
+            names
+        };
+        let search = |needle| {
+            index
+                .search(&Search::new(needle, View::CodeKeepingLiterals))
+                .unwrap_or_else(|failure| panic!("{failure}"))
+        };
+        let application_boxes = callers(search(needle!("bt_platform::message_box(")));
+        for road in ["show_here", "leave_armed"] {
+            assert!(
+                !application_boxes.iter().any(|name| name == road),
+                "`{road}` raises the application's box, which a road process on macOS cannot: \
+                 {application_boxes:?}"
+            );
+        }
+        assert_eq!(
+            callers(search(needle!("bt_platform::standalone_alert("))),
+            ["leave_armed", "show_here"],
+            "the road processes' failure windows"
+        );
+    }
 
     const TXN: [u8; 16] = [0x21; 16];
 
