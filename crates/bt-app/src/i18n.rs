@@ -3860,16 +3860,16 @@ impl Text {
                 "The program a new tab of this profile starts.",
                 "使用此配置文件的新标签页启动的程序。",
             ),
-            Self::ProfilesRowLogin => pick(lang, "Login shell", "Login shell"),
+            Self::ProfilesRowLogin => pick(lang, "Login shell", "登录 shell"),
             Self::ProfilesRowLoginDesc => pick(
                 lang,
                 "Starts the shell as a login shell. It reads your login files, such as .zprofile, first.",
-                "Starts the shell as a login shell. It reads your login files, such as .zprofile, first.",
+                "以登录 shell 方式启动。启动时先读取登录文件，如 .zprofile。",
             ),
             Self::ProfilesProgramHasArguments => pick(
                 lang,
                 "Only the program goes here. Arguments have their own row.",
-                "Only the program goes here. Arguments have their own row.",
+                "此处仅填写程序。参数请填在单独的一行。",
             ),
             Self::ProfilesRowStartingDir => pick(lang, "Starting directory", "起始目录"),
             Self::ProfilesRowStartingDirDesc => pick(
@@ -4377,8 +4377,7 @@ impl Text {
                 "session.json could not be written. Nothing was closed.",
                 "session.json 写入失败。没有关闭任何窗口。",
             ),
-            // English in both columns until opus46 writes the Chinese (`CHINESE_PENDING`).
-            Self::ShutdownSavingLayout => pick(lang, "Saving your layout", "Saving your layout"),
+            Self::ShutdownSavingLayout => pick(lang, "Saving your layout", "正在保存窗口布局"),
 
             // ── the preview pane's lock (§7.7 ⑧) ───────────────────────────
             Self::PreviewLock => pick(
@@ -4991,12 +4990,10 @@ impl Text {
             Self::ShortcutScopeSearchHost => {
                 pick(lang, "Where there is text to search", "有内容可搜索的地方")
             }
-            // English in both columns until opus46 writes the Chinese: every one of these is in
-            // `CHINESE_PENDING`, so the missing translation is loud rather than invisible.
-            Self::ShortcutTextLarger => pick(lang, "Larger text", "Larger text"),
-            Self::ShortcutTextSmaller => pick(lang, "Smaller text", "Smaller text"),
-            Self::ShortcutTextActualSize => pick(lang, "Actual text size", "Actual text size"),
-            Self::ShortcutScopeTerminal => pick(lang, "In a terminal", "In a terminal"),
+            Self::ShortcutTextLarger => pick(lang, "Larger text", "放大文字"),
+            Self::ShortcutTextSmaller => pick(lang, "Smaller text", "缩小文字"),
+            Self::ShortcutTextActualSize => pick(lang, "Actual text size", "实际大小"),
+            Self::ShortcutScopeTerminal => pick(lang, "In a terminal", "在终端中"),
             Self::PreviewWebBack => pick(lang, "Back", "后退"),
             Self::PreviewWebForward => pick(lang, "Forward", "前进"),
             Self::PreviewWebReload => pick(lang, "Reload", "重新加载"),
@@ -5508,90 +5505,78 @@ impl Text {
             Self::MenuZoomWindow => pick(lang, "Zoom", "缩放"),
             Self::MenuBringAllToFront => pick(lang, "Bring All to Front", "前置全部窗口"),
             Self::MenuFolioHelp => pick(lang, "Folio Help", "Folio 帮助"),
-            Self::UpdateCardUpdate => pick(lang, "Update", "Update"),
-            Self::UpdateCardLater => pick(lang, "Later", "Later"),
-            Self::UpdateCardSkip => pick(lang, "Skip", "Skip"),
-            Self::UpdateCardCancel => pick(lang, "Cancel", "Cancel"),
-            Self::UpdateCardRestart => pick(lang, "Restart", "Restart"),
-            Self::UpdateCardReleases => pick(lang, "Releases", "Releases"),
-            Self::UpdateCardShowFolder => pick(lang, "Show folder", "Show folder"),
-            Self::UpdateCardClose => pick(lang, "Close", "Close"),
+            Self::UpdateCardUpdate => pick(lang, "Update", "更新"),
+            Self::UpdateCardLater => pick(lang, "Later", "以后"),
+            Self::UpdateCardSkip => pick(lang, "Skip", "跳过此版本"),
+            Self::UpdateCardCancel => pick(lang, "Cancel", "取消"),
+            Self::UpdateCardRestart => pick(lang, "Restart", "重启以更新"),
+            Self::UpdateCardReleases => pick(lang, "Releases", "发布页"),
+            Self::UpdateCardShowFolder => pick(lang, "Show folder", "显示文件夹"),
+            Self::UpdateCardClose => pick(lang, "Close", "关闭"),
             Self::UpdateCardReady => pick(
                 lang,
                 "Ready. Running programs will close.",
-                "Ready. Running programs will close.",
+                "准备就绪。正在运行的程序将被关闭。",
             ),
-            Self::UpdateCardProgress => {
-                pick(lang, "{received} / {total} MB", "{received} / {total} MB")
-            }
-            Self::UpdateCardNothingChanged => pick(lang, "Nothing changed.", "Nothing changed."),
-            Self::UpdateCardRestored => pick(
+            Self::UpdateCardProgress => pick(
                 lang,
-                "Previous version restored.",
-                "Previous version restored.",
+                "{received} / {total} MB",
+                "已下载 {received} / {total} MB",
             ),
-            Self::UpdateCardIncomplete => pick(lang, "Update incomplete.", "Update incomplete."),
+            Self::UpdateCardNothingChanged => pick(lang, "Nothing changed.", "什么都没变。"),
+            Self::UpdateCardRestored => pick(lang, "Previous version restored.", "已恢复旧版。"),
+            Self::UpdateCardIncomplete => pick(lang, "Update incomplete.", "更新未完成。"),
             Self::UpdateFailedUnsupported => pick(
                 lang,
                 "Folio cannot update itself here.",
-                "Folio cannot update itself here.",
+                "Folio 无法在此处自行更新。",
             ),
-            Self::UpdateFailedStopped => pick(lang, "Download stopped.", "Download stopped."),
+            Self::UpdateFailedStopped => pick(lang, "Download stopped.", "下载已停止。"),
             Self::UpdateFailedBusy => pick(
                 lang,
                 "Another update is in progress.",
-                "Another update is in progress.",
+                "另一项更新正在进行。",
             ),
-            Self::UpdateFailedJournal => pick(
-                lang,
-                "The update could not be saved.",
-                "The update could not be saved.",
-            ),
-            Self::UpdateFailedSums => pick(lang, "Checksum mismatch.", "Checksum mismatch."),
-            Self::UpdateFailedMount => pick(
-                lang,
-                "The image could not be opened.",
-                "The image could not be opened.",
-            ),
-            Self::UpdateFailedIdentity => pick(
-                lang,
-                "The update is not verified.",
-                "The update is not verified.",
-            ),
-            Self::UpdateFailedCopy => pick(
-                lang,
-                "The update could not be copied.",
-                "The update could not be copied.",
-            ),
+            Self::UpdateFailedJournal => {
+                pick(lang, "The update could not be saved.", "更新无法保存。")
+            }
+            Self::UpdateFailedSums => pick(lang, "Checksum mismatch.", "校验和不匹配。"),
+            Self::UpdateFailedMount => {
+                pick(lang, "The image could not be opened.", "镜像无法打开。")
+            }
+            Self::UpdateFailedIdentity => {
+                pick(lang, "The update is not verified.", "更新未通过验证。")
+            }
+            Self::UpdateFailedCopy => {
+                pick(lang, "The update could not be copied.", "更新无法复制。")
+            }
             Self::UpdateFailedClone => pick(
                 lang,
                 "The current version could not be kept.",
-                "The current version could not be kept.",
+                "当前版本无法保留。",
             ),
             Self::UpdateFailedSpace => pick(
                 lang,
                 "{size} MB more disk space needed.",
-                "{size} MB more disk space needed.",
+                "还需要 {size} MB 磁盘空间。",
             ),
-            Self::UpdateFailedTrial => pick(
-                lang,
-                "The new version did not start.",
-                "The new version did not start.",
-            ),
-            Self::UpdateRowRestart => pick(lang, "Restart to update", "Restart to update"),
-            Self::UpdateRowCopy => pick(lang, "Copy", "Copy"),
+            Self::UpdateFailedTrial => {
+                pick(lang, "The new version did not start.", "新版本未能启动。")
+            }
+            Self::UpdateRowRestart => pick(lang, "Restart to update", "重启以更新"),
+            Self::UpdateRowCopy => pick(lang, "Copy", "复制"),
             Self::UpdateRowReady => pick(
                 lang,
                 "{version} is ready. Restart to update closes running programs.",
-                "{version} is ready. Restart to update closes running programs.",
+                "{version} 已就绪。重启以更新会关闭正在运行的程序。",
             ),
             Self::UpdateRowManaged => pick(
                 lang,
                 "{version} is available: {command}",
-                "{version} is available: {command}",
+                "有新版本 {version}：{command}",
             ),
             Self::AboutVersionOffer => {
-                pick(lang, "{version} is available.", "{version} is available.")
+                pick(lang, "{version} is available.", "{version} 可供更新。")
             }
         }
     }
@@ -6563,87 +6548,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 74] = [
-        // Ticket 37's four, in both columns: written in English, Chinese owed by opus46.
-        (Self::ShortcutTextLarger, HostPlatform::Windows),
-        (Self::ShortcutTextLarger, HostPlatform::MacOs),
-        (Self::ShortcutTextSmaller, HostPlatform::Windows),
-        (Self::ShortcutTextSmaller, HostPlatform::MacOs),
-        (Self::ShortcutTextActualSize, HostPlatform::Windows),
-        (Self::ShortcutTextActualSize, HostPlatform::MacOs),
-        (Self::ShortcutScopeTerminal, HostPlatform::Windows),
-        (Self::ShortcutScopeTerminal, HostPlatform::MacOs),
-        // 0.4.6 U-19: the update card and the General row, both columns.
-        (Self::UpdateCardUpdate, HostPlatform::Windows),
-        (Self::UpdateCardUpdate, HostPlatform::MacOs),
-        (Self::UpdateCardLater, HostPlatform::Windows),
-        (Self::UpdateCardLater, HostPlatform::MacOs),
-        (Self::UpdateCardSkip, HostPlatform::Windows),
-        (Self::UpdateCardSkip, HostPlatform::MacOs),
-        (Self::UpdateCardCancel, HostPlatform::Windows),
-        (Self::UpdateCardCancel, HostPlatform::MacOs),
-        (Self::UpdateCardRestart, HostPlatform::Windows),
-        (Self::UpdateCardRestart, HostPlatform::MacOs),
-        (Self::UpdateCardReleases, HostPlatform::Windows),
-        (Self::UpdateCardReleases, HostPlatform::MacOs),
-        (Self::UpdateCardShowFolder, HostPlatform::Windows),
-        (Self::UpdateCardShowFolder, HostPlatform::MacOs),
-        (Self::UpdateCardClose, HostPlatform::Windows),
-        (Self::UpdateCardClose, HostPlatform::MacOs),
-        (Self::UpdateCardReady, HostPlatform::Windows),
-        (Self::UpdateCardReady, HostPlatform::MacOs),
-        (Self::UpdateCardProgress, HostPlatform::Windows),
-        (Self::UpdateCardProgress, HostPlatform::MacOs),
-        (Self::UpdateCardNothingChanged, HostPlatform::Windows),
-        (Self::UpdateCardNothingChanged, HostPlatform::MacOs),
-        (Self::UpdateCardRestored, HostPlatform::Windows),
-        (Self::UpdateCardRestored, HostPlatform::MacOs),
-        (Self::UpdateCardIncomplete, HostPlatform::Windows),
-        (Self::UpdateCardIncomplete, HostPlatform::MacOs),
-        (Self::UpdateFailedUnsupported, HostPlatform::Windows),
-        (Self::UpdateFailedUnsupported, HostPlatform::MacOs),
-        (Self::UpdateFailedStopped, HostPlatform::Windows),
-        (Self::UpdateFailedStopped, HostPlatform::MacOs),
-        (Self::UpdateFailedBusy, HostPlatform::Windows),
-        (Self::UpdateFailedBusy, HostPlatform::MacOs),
-        (Self::UpdateFailedJournal, HostPlatform::Windows),
-        (Self::UpdateFailedJournal, HostPlatform::MacOs),
-        (Self::UpdateFailedSums, HostPlatform::Windows),
-        (Self::UpdateFailedSums, HostPlatform::MacOs),
-        (Self::UpdateFailedMount, HostPlatform::Windows),
-        (Self::UpdateFailedMount, HostPlatform::MacOs),
-        (Self::UpdateFailedIdentity, HostPlatform::Windows),
-        (Self::UpdateFailedIdentity, HostPlatform::MacOs),
-        (Self::UpdateFailedCopy, HostPlatform::Windows),
-        (Self::UpdateFailedCopy, HostPlatform::MacOs),
-        (Self::UpdateFailedClone, HostPlatform::Windows),
-        (Self::UpdateFailedClone, HostPlatform::MacOs),
-        (Self::UpdateFailedSpace, HostPlatform::Windows),
-        (Self::UpdateFailedSpace, HostPlatform::MacOs),
-        (Self::UpdateFailedTrial, HostPlatform::Windows),
-        (Self::UpdateFailedTrial, HostPlatform::MacOs),
-        (Self::UpdateRowRestart, HostPlatform::Windows),
-        (Self::UpdateRowRestart, HostPlatform::MacOs),
-        (Self::UpdateRowCopy, HostPlatform::Windows),
-        (Self::UpdateRowCopy, HostPlatform::MacOs),
-        (Self::UpdateRowReady, HostPlatform::Windows),
-        (Self::UpdateRowReady, HostPlatform::MacOs),
-        (Self::UpdateRowManaged, HostPlatform::Windows),
-        (Self::UpdateRowManaged, HostPlatform::MacOs),
-        // 0.4.6 T-GEAR-MARK-LANDS: the About page's `Version` row names the offer.
-        (Self::AboutVersionOffer, HostPlatform::Windows),
-        (Self::AboutVersionOffer, HostPlatform::MacOs),
-        // 0.4.6 ticket 74: the profile editor's login switch and the Program field's refusal.
-        (Self::ProfilesRowLogin, HostPlatform::Windows),
-        (Self::ProfilesRowLogin, HostPlatform::MacOs),
-        (Self::ProfilesRowLoginDesc, HostPlatform::Windows),
-        (Self::ProfilesRowLoginDesc, HostPlatform::MacOs),
-        (Self::ProfilesProgramHasArguments, HostPlatform::Windows),
-        (Self::ProfilesProgramHasArguments, HostPlatform::MacOs),
-        // 0.4.6 B-ENDSESSION: the shutdown screen's line while the layout is written.
-        (Self::ShutdownSavingLayout, HostPlatform::Windows),
-        (Self::ShutdownSavingLayout, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
