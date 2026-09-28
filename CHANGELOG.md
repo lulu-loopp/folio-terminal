@@ -21,6 +21,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- A web address written right after Chinese text, a colon or an `=` is a
+  link, and one followed by an opening bracket, as in `…/a.html(note)`, ends
+  before the bracket.
 - A reboot or logout saves your layout like a quit; pinned tabs come back
   with their panes.
 - Renaming a file to a name that differs only in capitals no longer replaces a

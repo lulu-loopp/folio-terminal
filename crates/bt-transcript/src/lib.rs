@@ -59,11 +59,15 @@ pub struct HyperlinkRange {
 
 /// Recognize deliberately narrow bare web URLs without changing transcript source text.
 ///
-/// Candidates must begin at a conservative prose boundary, use `http://` or `https://`, and
-/// contain an unambiguous host. In particular, single-label hosts are rejected except for the
-/// explicitly supported `localhost` development case. A candidate ends at the first byte that
-/// cannot be part of an address ([`is_url_terminator`]), and trailing prose punctuation is then
-/// released.
+/// Candidates must begin at a scheme boundary ([`is_url_leading_boundary`]), use `http://` or
+/// `https://`, and contain an unambiguous host. In particular, single-label hosts are rejected
+/// except for the explicitly supported `localhost` development case. A candidate ends at the first
+/// byte that cannot be part of an address ([`is_url_terminator`]) or before a bracket it opens and
+/// never closes ([`unclosed_bracket_cut`]), and trailing prose punctuation is then released.
+///
+/// A candidate that is refused still owns its text ([`http_scheme_spans`], §7.1.5k ④): the scan
+/// resumes after it, so an address quoted inside a refused one (`http://intranet/?next=http://…`)
+/// is never offered as if it stood on its own.
 pub fn detect_http_urls(text: &str) -> Vec<HyperlinkRange> {
     let bytes = text.as_bytes();
     let mut ranges = Vec::new();
@@ -77,11 +81,8 @@ pub fn detect_http_urls(text: &str) -> Vec<HyperlinkRange> {
             cursor += scheme_len;
             continue;
         }
-        let mut end = cursor + scheme_len;
-        while end < bytes.len() && !is_url_terminator(bytes[end]) {
-            end += 1;
-        }
-        end = release_url_tail(&text[cursor..end]) + cursor;
+        let token_end = cursor + url_token_len(&text[cursor..], scheme_len);
+        let end = release_url_tail(&text[cursor..token_end]) + cursor;
         if bare_http_url_is_valid(&text[cursor..end], scheme_len) {
             ranges.push(HyperlinkRange {
                 byte_start: cursor,
@@ -89,7 +90,7 @@ pub fn detect_http_urls(text: &str) -> Vec<HyperlinkRange> {
             });
             cursor = end;
         } else {
-            cursor += scheme_len;
+            cursor = token_end;
         }
     }
     ranges
@@ -118,35 +119,76 @@ pub fn http_scheme_spans(text: &str) -> Vec<HyperlinkRange> {
             cursor += scheme_len;
             continue;
         }
-        let mut end = cursor + scheme_len;
-        while end < bytes.len() && !is_url_terminator(bytes[end]) {
-            end += 1;
-        }
+        let end = cursor + url_token_len(&text[cursor..], scheme_len);
         spans.push(HyperlinkRange {
             byte_start: cursor,
             byte_end: end,
         });
-        cursor = end.max(cursor + scheme_len);
+        cursor = end;
     }
     spans
 }
 
-/// Release the prose an address swallowed at its end: sentence punctuation, and a closing bracket
+/// How long the `http(s)://` token at the start of `rest` is: up to the first byte that cannot
+/// belong to an address ([`is_url_terminator`]), and then **before the first bracket the token
+/// opens and never closes** ([`unclosed_bracket_cut`]).
+///
+/// The first `scheme_len` bytes are the scheme itself and are never cut.
+fn url_token_len(rest: &str, scheme_len: usize) -> usize {
+    let bytes = rest.as_bytes();
+    let mut end = scheme_len;
+    while end < bytes.len() && !is_url_terminator(bytes[end]) {
+        end += 1;
+    }
+    unclosed_bracket_cut(&rest[..end]).max(scheme_len)
+}
+
+/// Where an address ends when it opens a `(` or `[` it never closes: **before that bracket**.
+///
+/// An address may carry brackets — every Wikipedia disambiguation link is
+/// `https://en.wikipedia.org/wiki/Foo_(bar)` — but it carries them in pairs. A `(` whose `)` is
+/// not inside the candidate is the sentence opening an aside right after the address, as in
+/// `http://127.0.0.1:8765/sheets/services.html(Mac 外观加 ?face=mac)` (owner report 2026-09-28):
+/// read as part of the address it is `…services.html(Mac`, prose glued onto a working link, the
+/// cut/glued address §7.1.5k calls the worst place to be wrong. So the class rule is the pair
+/// rule: a bracket that closes inside the candidate stays, and the first one that never does ends
+/// the address. The mirror case — a closing bracket the address never opened — is
+/// [`release_url_tail`]'s.
+fn unclosed_bracket_cut(candidate: &str) -> usize {
+    let mut open: Vec<(u8, usize)> = Vec::new();
+    for (index, byte) in candidate.bytes().enumerate() {
+        match byte {
+            b'(' | b'[' => open.push((byte, index)),
+            b')' | b']' => {
+                let opener = if byte == b')' { b'(' } else { b'[' };
+                if open.last().is_some_and(|(top, _)| *top == opener) {
+                    open.pop();
+                }
+            }
+            _ => {}
+        }
+    }
+    open.first().map_or(candidate.len(), |(_, index)| *index)
+}
+
+/// Release the prose an address swallowed at its end: an opening bracket it never closes and
+/// everything behind it ([`unclosed_bracket_cut`]), sentence punctuation, and a closing bracket
 /// **only when it closes one the address never opened**.
 ///
 /// Stripping every trailing `)` is what turned `see (https://host/a_(b)?x=(c)).` into a link to
 /// `https://host/a_(b)?x=(c` — a shorter address that works and goes somewhere else. Counting is
 /// the whole fix: an address that opened a bracket may close it, and the one left over belongs to
-/// the sentence.
+/// the sentence. `]` is counted the same way, so `[https://host/a]` yields `https://host/a`.
 fn release_url_tail(candidate: &str) -> usize {
     let bytes = candidate.as_bytes();
-    let mut end = candidate.len();
+    let mut end = unclosed_bracket_cut(candidate);
     while end > 0 {
         match bytes[end - 1] {
             b'.' | b',' | b';' | b':' | b'!' | b'?' => end -= 1,
-            b')' => {
-                let opened = bytes[..end].iter().filter(|byte| **byte == b'(').count();
-                let closed = bytes[..end].iter().filter(|byte| **byte == b')').count();
+            close @ (b')' | b']') => {
+                let opener = if close == b')' { b'(' } else { b'[' };
+                let opened = bytes[..end].iter().filter(|byte| **byte == opener).count();
+                let closed = bytes[..end].iter().filter(|byte| **byte == close).count();
                 if closed <= opened {
                     break;
                 }
@@ -218,11 +260,15 @@ pub fn detect_bare_domains(text: &str) -> Vec<HyperlinkRange> {
 /// Where a bare domain may begin: at the start of the line, or after a byte that cannot be part of
 /// a host or the path behind it.
 ///
-/// Unlike [`is_url_leading_boundary`] a **non-ASCII** byte counts — since the scan reaches this test
-/// only from an ASCII host character, that byte is the last byte of a preceding CJK character, and
-/// `见microsoft.com` written without a space is exactly how the address arrives in the prose this is
-/// for. A host character does not open one: an ASCII alphanumeric, or the `.`/`-`/`_`/`/` a host or
-/// its path is spelled with, means the scan is in the middle of a longer token.
+/// A **non-ASCII** byte counts — since the scan reaches this test only from an ASCII host
+/// character, that byte is the last byte of a preceding CJK character, and `见microsoft.com`
+/// written without a space is exactly how the address arrives in the prose this is for. A host
+/// character does not open one: an ASCII alphanumeric, or the `.`/`-`/`_`/`/` a host or its path is
+/// spelled with, means the scan is in the middle of a longer token.
+///
+/// This stays narrower than [`is_url_leading_boundary`] on purpose: a bare host has no scheme to
+/// announce it, so an `@` (`user@example.com`), `/`, `:` or `=` in front of it is read as the
+/// middle of a longer token rather than as a place an address may start.
 fn is_domain_leading_boundary(byte: u8) -> bool {
     !byte.is_ascii()
         || byte.is_ascii_whitespace()
@@ -275,8 +321,20 @@ fn http_scheme_len(bytes: &[u8]) -> Option<usize> {
         .or_else(|| bytes.starts_with(b"https://").then_some(8))
 }
 
+/// Whether the byte before `http` lets a scheme begin there: **any byte that cannot be part of a
+/// longer scheme-bearing token.**
+///
+/// A URI scheme is spelled with ASCII letters, digits, `+`, `-` and `.` (RFC 3986 §3.1), and `_`
+/// joins identifiers; a byte of that class in front of `http` means the scan is inside some longer
+/// word — `xhttp://`, `git+https://`, `my_http://` — whose scheme is not ours. Every other byte
+/// ends whatever came before, so it is a boundary: whitespace, quotes and brackets as before, but
+/// also the `:` of `对比表:http://…`, the `=` of `url=http://…`, `,` `;` `/`, and **every non-ASCII
+/// byte** — the scan reaches this test only at an ASCII `h`, so a byte `>= 0x80` behind it is the
+/// last byte of a preceding character, and `见http://…` written without a space is how an address
+/// arrives in CJK prose (§7.38). This was a list of allowed bytes until 2026-09-28; a list is
+/// always one byte short, and the owner's own line was short by a `:`.
 fn is_url_leading_boundary(byte: u8) -> bool {
-    byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'(' | b'[' | b'{' | b'<')
+    !(byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.' | b'_'))
 }
 
 /// Where a bare URL stops: at the first byte that cannot belong to one.
@@ -2490,9 +2548,12 @@ mod tests {
                 "https://example.test/a.md，下一句",
                 Some("https://example.test/a.md"),
             ),
-            // The leading boundary is unchanged: prose pressed against the scheme is still no
-            // address at all, because a boundary we cannot read is not a boundary.
-            ("中文https://example.test/x", None),
+            // Prose pressed against the scheme opens it (T-URL-BOUNDARY, 2026-09-28): a CJK
+            // character cannot continue a scheme, so it is a boundary like a space.
+            (
+                "中文https://example.test/x。",
+                Some("https://example.test/x"),
+            ),
         ] {
             let ranges = detect_http_urls(text);
             assert_eq!(
@@ -2550,6 +2611,136 @@ mod tests {
         }
     }
 
+    /// Every schemed address one line offers, as the printed text of each range.
+    fn urls(text: &str) -> Vec<&str> {
+        detect_http_urls(text)
+            .into_iter()
+            .map(|range| &text[range.byte_start..range.byte_end])
+            .collect()
+    }
+
+    /// RED (T-URL-BOUNDARY) — **a scheme opens after any byte that cannot continue a scheme, so an
+    /// address glued to CJK prose, to a colon or to an `=` is a link.**
+    ///
+    /// The owner's own Folio printed `对比表:http://127.0.0.1:8765/sheets/services.html(…)` and
+    /// drew nothing: the byte in front of `http` was an ASCII `:`, and the leading boundary was a
+    /// list — whitespace, quotes, opening brackets — that did not name it. The same list refused
+    /// `见http://…`, the CJK-prose case §7.38 was written for, and `url=http://…`. The boundary is
+    /// now the class: anything that is not an ASCII letter, digit, `+`, `-`, `.` or `_` (the bytes a
+    /// longer scheme or identifier is spelled with). Those still refuse, so `xhttp://`,
+    /// `git+https://` and `my_http://` stay dark.
+    ///
+    /// MUTATION: restore `is_url_leading_boundary` to
+    /// `byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'(' | b'[' | b'{' | b'<')`.
+    #[test]
+    fn a_scheme_opens_after_any_byte_that_cannot_continue_a_scheme() {
+        for (text, expected) in [
+            (
+                "对比表:http://example.test/b.html",
+                Some("http://example.test/b.html"),
+            ),
+            ("见http://example.test/b。", Some("http://example.test/b")),
+            ("url=http://example.test/b", Some("http://example.test/b")),
+            ("a,http://example.test/b", Some("http://example.test/b")),
+            ("a;https://example.test/b", Some("https://example.test/b")),
+            (
+                "对比表：http://example.test/b",
+                Some("http://example.test/b"),
+            ),
+            ("见，http://example.test/b", Some("http://example.test/b")),
+            ("xhttp://example.test/b", None),
+            ("git+https://example.test/b", None),
+            ("my_http://example.test/b", None),
+            ("v2-http://example.test/b", None),
+            ("a.http://example.test/b", None),
+            ("9https://example.test/b", None),
+        ] {
+            assert_eq!(
+                urls(text),
+                expected.into_iter().collect::<Vec<_>>(),
+                "reading `{text}`"
+            );
+        }
+    }
+
+    /// RED (T-URL-BOUNDARY) — **an opening bracket the address never closes ends the address
+    /// before it; a balanced pair stays.**
+    ///
+    /// Had the scan above reached the owner's line, `(` was no terminator, and the range would have
+    /// been `…services.html(Mac` — a working link with prose glued onto it, the cut/glued address
+    /// §7.1.5k calls the worst place to be wrong. [`release_url_tail`] already released a `)` the
+    /// address never opened; this is its mirror: a `(` or `[` the address never closes is the
+    /// sentence's, and the address ends in front of it. A Wikipedia disambiguation link keeps its
+    /// pair, and a sentence's brackets around an address are still released.
+    ///
+    /// MUTATION: make `unclosed_bracket_cut` return `candidate.len()`.
+    #[test]
+    fn an_opening_bracket_the_address_never_closes_ends_it() {
+        for (text, expected) in [
+            (
+                "对比表:http://127.0.0.1:8765/sheets/a.html(Mac 外观加 ?face=mac),报告在 docs\\a.md。",
+                "http://127.0.0.1:8765/sheets/a.html",
+            ),
+            (
+                "对比表:http://example.test/b.html(Mac 外观)",
+                "http://example.test/b.html",
+            ),
+            (
+                "see http://example.test/b.html(Mac",
+                "http://example.test/b.html",
+            ),
+            ("http://example.test/b(", "http://example.test/b"),
+            ("http://example.test/b[", "http://example.test/b"),
+            ("http://example.test/b.(note", "http://example.test/b"),
+            ("http://example.test/a_(b)(c", "http://example.test/a_(b)"),
+            ("http://example.test/a(b[c)d", "http://example.test/a"),
+            (
+                "https://en.wikipedia.org/wiki/Foo_(bar)",
+                "https://en.wikipedia.org/wiki/Foo_(bar)",
+            ),
+            ("(http://example.test/b)", "http://example.test/b"),
+            ("[http://example.test/b]", "http://example.test/b"),
+            ("http://[::1]:8080/x", "http://[::1]:8080/x"),
+        ] {
+            assert_eq!(urls(text), [expected], "reading `{text}`");
+        }
+    }
+
+    /// PIN (T-URL-BOUNDARY) — **the text a scheme owns ends where its address ends, and an address
+    /// quoted inside a refused one is not offered on its own.**
+    ///
+    /// Two consequences of the rules above, pinned so the two scans keep saying one sentence
+    /// (§7.1.5k ④). [`http_scheme_spans`] stops before the unclosed bracket exactly as
+    /// [`detect_http_urls`] does, so the prose behind it belongs to nobody's scheme. And now that `=`
+    /// and `/` open a scheme, a refused address (`intranet` is a single-label host) must still own
+    /// its query string: the scan resumes after the refused token rather than inside it, or
+    /// `http://example.test/x` would light as if it stood alone.
+    ///
+    /// MUTATION: in `detect_http_urls`, resume a refused candidate at `cursor += scheme_len`.
+    #[test]
+    fn a_schemes_text_ends_where_its_address_ends() {
+        let text = "对比表:http://example.test/b.html(Mac 外观)";
+        let spans = http_scheme_spans(text);
+        assert_eq!(
+            spans
+                .iter()
+                .map(|range| &text[range.byte_start..range.byte_end])
+                .collect::<Vec<_>>(),
+            ["http://example.test/b.html"]
+        );
+        assert!(urls("http://intranet/?next=http://example.test/x").is_empty());
+        assert!(urls("http://intranet/http://example.test/x").is_empty());
+        assert!(
+            urls("http://intranet/a(http://example.test/x)").is_empty(),
+            "a pair the refused address closes is still the refused address's"
+        );
+        assert_eq!(
+            urls("http://intranet/a(http://example.test/x"),
+            ["http://example.test/x"],
+            "an address ends before a bracket it never closes, so what follows is its own"
+        );
+    }
+
     /// Every bare domain one line offers, as the printed text of each range.
     fn domains(text: &str) -> Vec<&str> {
         detect_bare_domains(text)
@@ -2599,13 +2790,15 @@ mod tests {
 
     /// §7.38: prose punctuation is released off a bare domain's tail exactly as it is off a URL's —
     /// a non-ASCII sentence stop ends the scan before it, and trailing ASCII sentence punctuation is
-    /// stripped. CJK prose with no space before the host still opens one, which a schemed URL's
-    /// leading boundary deliberately does not (that boundary must be readable; a preceding CJK
-    /// character is one).
+    /// stripped. CJK prose with no space before the host still opens one, as it opens a schemed URL
+    /// since T-URL-BOUNDARY (2026-09-28).
     #[test]
     fn a_bare_domain_releases_its_prose_tail_and_opens_after_cjk() {
         assert_eq!(domains("见 microsoft.com。"), ["microsoft.com"]);
         assert_eq!(domains("见microsoft.com"), ["microsoft.com"]);
+        assert_eq!(domains("见github.com/a/b"), ["github.com/a/b"]);
+        assert_eq!(domains("见github.com/a/b(备注)"), ["github.com/a/b"]);
+        assert_eq!(domains("see github.com/a/b(note"), ["github.com/a/b"]);
         assert_eq!(domains("see example.com, then go"), ["example.com"]);
         assert_eq!(domains("(github.com/a/b)"), ["github.com/a/b"]);
     }
