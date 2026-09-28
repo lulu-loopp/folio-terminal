@@ -585,7 +585,8 @@ pub(crate) fn stop_trial(
 /// Taking is `install_txn::durable_create`, which never replaces: of two
 /// processes that try, exactly one creates it. A mark whose process no longer
 /// runs (pid and start instant) is stale — its owner died — and is taken over
-/// by the next taker, which then replaces it.
+/// by a single-winner election keyed on the stale value read (a ballot file
+/// created the same never-replacing way), whose one winner replaces it.
 pub(crate) const OWNER_FILE: &str = "owner";
 
 /// `H\<txn>\owner`.
@@ -642,19 +643,78 @@ pub(crate) enum Window {
 pub(crate) fn take_the_window(home: &Home, txn: TxnId, me: Running) -> Window {
     let path = owner_path(home, txn);
     let value = owner_value(me);
-    match install_txn::durable_create(&path, value.as_bytes()) {
-        Ok(()) => return Window::Mine,
-        Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(failure) => return Window::Unknown(failure.to_string()),
+    // A few rounds: each ends in a decision, unless the mark changed under us.
+    for _ in 0..4 {
+        match install_txn::durable_create(&path, value.as_bytes()) {
+            Ok(()) => return Window::Mine,
+            Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(failure) => return Window::Unknown(failure.to_string()),
+        }
+        let read = match file_reads::read(Lane::UpdateJournal, &path) {
+            Ok(bytes) => bytes,
+            // Cleared between the create and the read: try the create again.
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Window::Unknown(error.to_string()),
+        };
+        match owner_named(&read) {
+            Some(owner) if owner == me => return Window::Mine,
+            Some(owner) if install_flip::still_running(owner) => return Window::Theirs(owner),
+            // Stale, or unreadable: its owner cannot open anything.
+            _ => {}
+        }
+        // **The takeover is an election keyed on the value read** (round 4,
+        // Codex's finding 14): of the contenders that read this very stale
+        // value, only the one whose ballot `owner.takeover.<value>` is created
+        // (a create that never replaces) replaces the mark — and nothing else
+        // ever writes over that value, so the replacement is of exactly the
+        // value it read as stale.
+        let ballot = home
+            .transaction(txn)
+            .join(format!("{OWNER_FILE}.takeover.{}", ballot_key(&read)));
+        match install_txn::durable_create(&ballot, value.as_bytes()) {
+            Ok(()) => {
+                return match install_txn::durable_write(&path, value.as_bytes()) {
+                    Ok(()) => Window::Mine,
+                    Err(failure) => Window::Unknown(failure.to_string()),
+                };
+            }
+            Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => {
+                let winner = file_reads::read(Lane::UpdateJournal, &ballot)
+                    .ok()
+                    .and_then(|bytes| owner_named(&bytes));
+                match winner {
+                    Some(winner) if winner == me => return Window::Mine,
+                    Some(winner) if install_flip::still_running(winner) => {
+                        return Window::Theirs(winner);
+                    }
+                    // The winner is gone too: read the mark again — it has
+                    // either the dead winner's value, a fresh election of its
+                    // own, or still the old one.
+                    _ => {}
+                }
+            }
+            Err(failure) => return Window::Unknown(failure.to_string()),
+        }
     }
-    match window_owner(home, txn) {
-        Some(owner) if owner == me => Window::Mine,
-        Some(owner) if install_flip::still_running(owner) => Window::Theirs(owner),
-        // Stale, or unreadable: its owner cannot open anything.
-        _ => match install_txn::durable_write(&path, value.as_bytes()) {
-            Ok(()) => Window::Mine,
-            Err(failure) => Window::Unknown(failure.to_string()),
-        },
+    Window::Unknown(String::from("the window's mark kept changing"))
+}
+
+/// The ballot name for a stale mark's bytes: its digits and separator, or
+/// `unreadable`.
+fn ballot_key(bytes: &[u8]) -> String {
+    let key: String = bytes
+        .iter()
+        .take(48)
+        .filter_map(|byte| match byte {
+            b'0'..=b'9' => Some(char::from(*byte)),
+            b':' => Some('-'),
+            _ => None,
+        })
+        .collect();
+    if key.is_empty() {
+        String::from("unreadable")
+    } else {
+        key
     }
 }
 
@@ -721,15 +781,20 @@ pub(crate) const ACKNOWLEDGED_WITHIN: Duration = Duration::from_secs(20);
 /// **Whether a Folio holds the data directory `data`'s claim within
 /// `within`** — the acknowledgement of a start (round 2, blocker 2). Asked
 /// every quarter second through the wait door; without a worker to sleep on,
-/// asked once. A claim this process could take is let go at once (the start
-/// that should hold it has not yet); one that cannot be asked about is taken
-/// as held — no answer is coming, and a start not proven dead is not started
-/// twice.
+/// asked once. Only `ClaimRefusal::Held` — a live holder — acknowledges. A
+/// claim this process could take is let go at once (the start that should
+/// hold it has not yet), and a question the platform did not answer
+/// (`ClaimRefusal::QueryDenied`) is no evidence that anybody holds anything:
+/// both are asked again until the bound, and then the start is not delivered
+/// (round 4, Codex's finding 12).
 pub(crate) fn claimed_within(worker: Option<&WorkerCtx>, data: &Path, within: Duration) -> bool {
     let until = Instant::now() + within;
     loop {
         match crate::persist::try_claim(data) {
-            Err(_) => return true,
+            // Only a live holder is a delivery. A question the platform did
+            // not answer is no evidence that anybody holds anything (round 4).
+            Err(bt_platform::instance::ClaimRefusal::Held) => return true,
+            Err(bt_platform::instance::ClaimRefusal::QueryDenied(_)) => {}
             Ok(claim) => drop(claim),
         }
         let left = until.saturating_duration_since(Instant::now());

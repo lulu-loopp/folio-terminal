@@ -2825,3 +2825,85 @@ fn a_start_counts_only_when_acknowledged_and_the_last_resort_is_a_window_here() 
         world.said
     );
 }
+
+/// RED (U-34, round 4; Codex's finding 14) — **a stale window's mark is taken
+/// over by exactly one of two contenders racing for it**: both read the same
+/// stale value, and only the one whose ballot is created replaces it; the
+/// other answers `Theirs(winner)`. Two threads race, released together by a
+/// barrier, over many rounds, each round from a fresh stale mark; the two
+/// contenders are both live processes (this test and a synthetic program it
+/// started), so neither can be taken for a dead owner.
+///
+/// MUTATION: in `update_apply::take_the_window`, replace a stale mark directly
+/// (check, then `durable_write`) — both contenders then answer `Mine` in some
+/// round.
+#[test]
+fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
+    let Some(install) = Install::new("stale-race") else {
+        return;
+    };
+    let other = install.children.start(&install.installed, &[]);
+    let contenders = [
+        crate::update_apply::this_process(),
+        Running {
+            pid: other,
+            started: install_flip::started_of(other).expect("it runs"),
+        },
+    ];
+    let me = crate::update_apply::this_process();
+    let stale = format!("{}:{}", me.pid, me.started.wrapping_add(1));
+    let mark = crate::update_apply::owner_path(&install.home, install.txn);
+    let folder = mark.parent().unwrap().to_path_buf();
+    for round in 0..40 {
+        for entry in std::fs::read_dir(&folder).unwrap().flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("owner.takeover.")
+            {
+                std::fs::remove_file(entry.path()).unwrap();
+            }
+        }
+        std::fs::write(&mark, format!("{stale}{}", "0".repeat(round % 3))).unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let racers: Vec<_> = contenders
+            .iter()
+            .map(|who| {
+                let (home, txn, who, barrier) = (
+                    install.home.clone(),
+                    install.txn,
+                    *who,
+                    Arc::clone(&barrier),
+                );
+                bt_platform::spawn_at_priority(
+                    "bt-u34-stale-race",
+                    bt_platform::ThreadPriority::BelowNormal,
+                    move |_worker| {
+                        barrier.wait();
+                        crate::update_apply::take_the_window(&home, txn, who)
+                    },
+                )
+                .expect("a racer")
+            })
+            .collect();
+        let answers: Vec<Window> = racers
+            .into_iter()
+            .map(|racer| racer.join().unwrap())
+            .collect();
+        let mine = answers
+            .iter()
+            .filter(|answer| **answer == Window::Mine)
+            .count();
+        assert_eq!(mine, 1, "round {round}: {answers:?}");
+        let winner = contenders[answers.iter().position(|a| *a == Window::Mine).unwrap()];
+        assert!(
+            answers.contains(&Window::Theirs(winner)),
+            "round {round}: the loser names the winner: {answers:?}"
+        );
+        assert_eq!(
+            crate::update_apply::window_owner(&install.home, install.txn),
+            Some(winner),
+            "round {round}"
+        );
+    }
+}

@@ -1424,4 +1424,94 @@ mod tests {
         assert_eq!(left, None);
         assert!(took < Duration::from_secs(2), "{took:?}");
     }
+
+    /// RED (U-34, round 4; Codex's finding 12) — **a claim the platform will
+    /// not answer for is no acknowledgement**: with the data directory's claim
+    /// name squatted — `ClaimRefusal::QueryDenied`, "no evidence anybody holds
+    /// anything" — `claimed_within` answers `false` at the bound, and a guard
+    /// whose start is acknowledged that way falls back and then shows the
+    /// failure window itself.
+    ///
+    /// The squat is the platform's own shape for this refusal
+    /// (`bt_platform::trust_harness::squat_the_claim`: another kind of named
+    /// kernel object under the claim's name on Windows, a directory where the
+    /// lock file goes on Unix).
+    ///
+    /// MUTATION: in `update_apply::claimed_within`, count every refusal as
+    /// held (`Err(_) => return true`).
+    #[test]
+    fn a_claim_the_platform_will_not_answer_for_is_no_acknowledgement() {
+        let folder = Folder::new("query-denied");
+        let data = folder.0.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let Ok(squat) = bt_platform::trust_harness::squat_the_claim(&data) else {
+            return;
+        };
+        assert!(
+            matches!(
+                crate::persist::try_claim(&data),
+                Err(bt_platform::instance::ClaimRefusal::QueryDenied(_))
+            ),
+            "the squat is the refusal that answers nothing"
+        );
+
+        struct ByTheClaim<'a> {
+            data: &'a Path,
+            worker: &'a bt_platform::admission::WorkerCtx,
+            starts: usize,
+            shown: Vec<String>,
+        }
+        impl crate::update_apply::Leave for ByTheClaim<'_> {
+            fn say(&mut self, _line: &str) {}
+            fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+                Some((PathBuf::from("installed"), Vec::new()))
+            }
+            fn start(&mut self, _program: &Path, _words: &[OsString]) -> io::Result<()> {
+                self.starts += 1;
+                Ok(())
+            }
+            fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+                Some((PathBuf::from("rescue"), Vec::new()))
+            }
+            fn acknowledged(&mut self) -> bool {
+                crate::update_apply::claimed_within(
+                    Some(self.worker),
+                    self.data,
+                    Duration::from_millis(300),
+                )
+            }
+            fn show_here(&mut self, why: &str) {
+                self.shown.push(why.to_owned());
+            }
+        }
+
+        let (answered, starts, shown) = bt_platform::spawn_at_priority(
+            "bt-u34-denied",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| {
+                let answered = crate::update_apply::claimed_within(
+                    Some(worker),
+                    &data,
+                    Duration::from_millis(300),
+                );
+                let mut guard = crate::update_apply::ExitGuard::new(ByTheClaim {
+                    data: &data,
+                    worker,
+                    starts: 0,
+                    shown: Vec::new(),
+                });
+                let left = guard.leave();
+                assert!(matches!(left, Left::ShownHere(_)), "{left:?}");
+                let leave = guard.inner();
+                (answered, leave.starts, std::mem::take(&mut leave.shown))
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        drop(squat);
+        assert!(!answered, "QueryDenied is not a delivery");
+        assert_eq!(starts, 2, "the start, then the fallback");
+        assert_eq!(shown.len(), 1, "then the failure window, here");
+    }
 }

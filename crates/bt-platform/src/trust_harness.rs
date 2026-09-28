@@ -93,6 +93,70 @@ pub fn hold_without_delete_sharing(path: &Path) -> io::Result<std::fs::File> {
     }
 }
 
+/// **A data directory's claim name squatted** (0.4.6 ticket U-34, round 4):
+/// `crate::instance::try_claim_data_directory` then answers
+/// `ClaimRefusal::QueryDenied` — the question not answered — for as long as
+/// the value lives, the shape `instance`'s own test of the two refusals uses:
+/// on Windows an event under the claim's kernel name (another kind of named
+/// object), on Unix a directory where the lock file goes.
+pub struct Squat {
+    /// The event, owned: dropping it closes it.
+    #[cfg(windows)]
+    _event: std::os::windows::io::OwnedHandle,
+    /// The directory standing where the lock file goes, removed on drop.
+    #[cfg(unix)]
+    lock: std::path::PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for Squat {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir(&self.lock);
+    }
+}
+
+/// Squat `directory`'s claim name — see [`Squat`].
+///
+/// # Errors
+/// The squatting object could not be made.
+pub fn squat_the_claim(directory: &Path) -> io::Result<Squat> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows::Win32::System::Threading::CreateEventW;
+        use windows::core::PCWSTR;
+        let name: Vec<u16> = std::ffi::OsStr::new(&crate::instance::claim_name(directory))
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        // SAFETY: the name is NUL-terminated and lives across the call.
+        let event = unsafe { CreateEventW(None, false, false, PCWSTR(name.as_ptr())) }
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        // SAFETY: the handle was just made by this call and is owned by
+        // nothing else.
+        Ok(Squat {
+            _event: unsafe { OwnedHandle::from_raw_handle(event.0) },
+        })
+    }
+    #[cfg(unix)]
+    {
+        let runtime = crate::instance::prepare_runtime_directory()?;
+        let lock =
+            crate::instance::lock_path_in(&runtime, &crate::instance::directory_tag(directory));
+        std::fs::create_dir(&lock)?;
+        Ok(Squat { lock })
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = directory;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "no claim to squat here",
+        ))
+    }
+}
+
 #[cfg(windows)]
 #[path = "trust_harness_windows.rs"]
 pub mod world;

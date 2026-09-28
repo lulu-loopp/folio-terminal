@@ -2498,6 +2498,56 @@ corrected; no environment variable carries anything of the update now.
 | P took it, O gone, P killed | P, stale | — | — | the next start: R ignores the stale mark and reverts |
 | the mark cannot be made (I/O) | — | keeps the duty, starts | leaves the duty with O | O's (a second start is possible, never none) |
 
+**Pending ruling 2026-09-28: an applier ended from outside after it took the
+mark.** The one interleaving the mark does not close:
+
+1. P starts and takes `H\<txn>\owner` (before it waits for O's lock).
+2. O, at its very end, finds the mark naming P, running — and leaves without
+   a start, as it must: P holds the duty.
+3. P is ended from outside — Task Manager, a security product's kill, a
+   crash of the OS process layer — before its exit guard runs (a kill runs no
+   `Drop`).
+
+No window follows until the next start (R ignores the now-stale mark and
+reverts `Handoff`/`Armed`, or rolls back from `Moving` on) or, from `Armed` on,
+the next logon. **The road cannot close this with two processes.** O cannot
+wait for P's delivery before it leaves, because P's road needs O gone: P waits
+for O's transaction lock (held until O's process ends) and O's data-directory
+claim, and takes O's admission exclusively before it moves a file; an O that
+waited for P's window would wait for a P that waits for O. Closing it needs a
+third process that outlives both and watches P — a watchdog O would start and
+that P would have to report to — which is a new process, a new frozen
+contract and a new owner of the duty; U-34 does not add one. The same
+acceptance holds for **R's deference to a merely live holder**
+(`update_apply_windows::recover`, `update_apply::the_window_is_theirs`): R at
+`Handoff` leaves the transaction to the live process the mark names, and if
+that process is then ended from outside before its guard runs, the person's
+start that R carried ends without a window until the next start. **Pending the
+owner's ruling that an externally terminated applier after mark acquisition is
+outside the immediate-window guarantee and is recovered by the next start or
+logon**; if the ruling is otherwise, this boundary is reopened.
+
+**The stale-mark takeover is a single-winner election (round 4, Codex's
+finding 14).** A contender that reads a stale mark does not replace it
+directly: it creates the ballot `H\<txn>\owner.takeover.<value read>` with the
+same never-replacing create, and only the one that created it replaces the
+mark — so the mark is replaced only by the one process that read exactly that
+value as stale, and a loser answers `Theirs(winner)` from the ballot. A winner
+that dies before replacing leaves the mark stale and the ballot naming a dead
+process; the next contender reads again and, after a few rounds, answers
+`Unknown` (O then keeps the duty; P then starts nothing). Pinned by
+`update_apply_windows::tests::a_stale_mark_is_taken_over_by_exactly_one_contender`
+(two live contenders racing over forty rounds; red under a direct replace).
+
+**Acknowledgement is a live holder only (round 4, Codex's finding 12).**
+`claimed_within` counts only `ClaimRefusal::Held`. `QueryDenied` — the platform
+not answering, "no evidence anybody holds anything" — is asked again until the
+bound and then is no delivery: the guard falls back and, failing that, shows
+the failure window itself. Pinned by
+`update_handoff::tests::a_claim_the_platform_will_not_answer_for_is_no_acknowledgement`
+(the claim's name squatted, the platform's own shape for that refusal:
+`bt_platform::trust_harness::squat_the_claim`).
+
 The review's four steps are now a deterministic test
 (`update_apply_windows::tests::the_window_is_handed_over_by_one_mark_and_opened_exactly_once`):
 P takes the mark; O, leaving, finds it and starts nothing; P leaves and its

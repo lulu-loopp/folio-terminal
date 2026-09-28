@@ -354,7 +354,7 @@ pub fn fits_a_socket_path(path: &Path) -> bool {
 /// the strength of.
 #[cfg(unix)]
 #[must_use]
-fn lock_path_in(runtime: &Path, tag: &str) -> PathBuf {
+pub(crate) fn lock_path_in(runtime: &Path, tag: &str) -> PathBuf {
     runtime.join(format!("{tag}.lock"))
 }
 
