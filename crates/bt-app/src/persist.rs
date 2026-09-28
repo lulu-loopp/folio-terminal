@@ -782,6 +782,9 @@ pub struct SessionStore {
     /// True once the sentinel for *this* run exists, so a clean exit knows
     /// there is something to remove.
     armed: bool,
+    /// **The sentinel went because the system was ending the session** (B-ENDSESSION), so a
+    /// shutdown taken back puts it back — [`Self::rearm_after_the_systems_end`].
+    sentinel_dropped_for_the_systems_end: bool,
     /// **Whether this process writes the session at all** (review row R4-5).
     ///
     /// False in the second Folio over one data directory: its window works, its
@@ -866,6 +869,7 @@ impl SessionStore {
             writes: DocumentWrites::new(),
             writer: SessionWriter::open(),
             armed,
+            sentinel_dropped_for_the_systems_end: false,
             writer_of_record,
             fault,
         }
@@ -906,9 +910,19 @@ impl SessionStore {
             writes: DocumentWrites::new(),
             writer: SessionWriter::open(),
             armed: false,
+            sentinel_dropped_for_the_systems_end: false,
             writer_of_record,
             fault: None,
         }
+    }
+
+    /// [`Self::at`], with this run's sentinel created and armed as [`Self::open`] arms it — for
+    /// the tests that watch a run's end drop it (B-ENDSESSION).
+    #[cfg(test)]
+    pub(crate) fn armed_at(session_path: PathBuf, sentinel_path: PathBuf) -> Self {
+        let mut store = Self::at(session_path, sentinel_path);
+        store.armed = create_sentinel(&store.sentinel_path).is_ok();
+        store
     }
 
     /// The session document as it was read. The caller owns what the fields
@@ -1263,6 +1277,38 @@ impl SessionStore {
             now,
         );
         landed
+    }
+
+    /// **The system is ending the session: write the document this store holds and, once it has
+    /// landed, drop this run's sentinel** (B-ENDSESSION; `docs/M2-persistence-schema-v1.md` §5.5:
+    /// a system shutdown saves immediately and removes `session.lock`, like a quit).
+    ///
+    /// The quit's own write ([`Self::flush_judged`], through the one writer and the one bounded
+    /// wait, `doors::SessionWriteWait`) and the quit's own rule for the sentinel ([`Self::close`]):
+    /// it goes only once the document it vouches for has landed. A budget that ran out, or a
+    /// refusal, leaves it standing, and the disk holds the last completed save.
+    ///
+    /// **What differs from the close is that the writer stays.** The session may yet go on —
+    /// somebody can stop a shutdown at the last screen — and a store whose writer had been retired
+    /// would never save the layout again for the rest of the run.
+    pub(crate) fn save_for_the_systems_end(&mut self) -> Result<(), SaveRefusal> {
+        let landed = self.flush_judged();
+        if landed.is_ok() && self.armed {
+            let _ = remove_sentinel(&self.sentinel_path);
+            self.armed = false;
+            self.sentinel_dropped_for_the_systems_end = true;
+        }
+        landed
+    }
+
+    /// **The system took the end back** (B-ENDSESSION): the run goes on, so its claim to be
+    /// running goes back where [`Self::save_for_the_systems_end`] took it from — and only then; a
+    /// run that had no sentinel to drop gets none.
+    pub(crate) fn rearm_after_the_systems_end(&mut self) {
+        if !std::mem::take(&mut self.sentinel_dropped_for_the_systems_end) {
+            return;
+        }
+        self.armed = create_sentinel(&self.sentinel_path).is_ok();
     }
 
     /// Flush anything pending, let the writer finish, and drop this run's sentinel. Idempotent.
@@ -2324,6 +2370,83 @@ mod tests {
         );
 
         drop(release);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (B-ENDSESSION) — **a layout write that misses its budget at the system's question still
+    /// answers the system yes, and leaves the last completed save and `session.lock` standing.**
+    ///
+    /// Rule 1's fallback: the system is never kept waiting past the one bounded wait, and a run
+    /// that did not see its document land claims no clean exit. What the disk holds is the last
+    /// autosave, which is whole — the hold kept every later change off it. The real platform
+    /// answer, the real `session_end` hold and settle, a real first landing through the real
+    /// writer, then the writer that never answers.
+    ///
+    /// MUTATION: in `SessionStore::save_for_the_systems_end`, drop the sentinel whatever
+    /// `flush_judged` answered.
+    #[test]
+    fn a_write_that_misses_the_budget_still_answers_true_and_keeps_the_last_layout() {
+        crate::tests::on_the_window_thread_exiting();
+        crate::session_end::forget();
+        let root = std::env::temp_dir().join(format!(
+            "bt-app-endsession-stall-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private directory for this test");
+        let sentinel = root.join("session.lock");
+        let mut store = SessionStore::armed_at(root.join("session.json"), sentinel.clone());
+        assert!(sentinel.is_file(), "the run's sentinel stands");
+
+        let last_save = SessionV1 {
+            windows: vec![bt_persist::SessionWindowV1::default()],
+            ..SessionV1::default()
+        };
+        store.record(last_save.clone(), Instant::now());
+        assert_eq!(store.flush_judged(), Ok(()), "the last autosave lands");
+        // An edit made just before the shutdown, owed to the disk when the question comes.
+        let mut owed = last_save.clone();
+        owed.windows.push(bt_persist::SessionWindowV1::default());
+        store.record(owed, Instant::now());
+        retire(&mut store.writer);
+        let (stalled, release) = a_writer_that_never_answers();
+        store.writer = stalled;
+
+        let answered = bt_platform::session_end::answer(
+            bt_platform::session_end::WM_QUERYENDSESSION,
+            0,
+            &crate::session_end::hear,
+        );
+        assert_eq!(
+            answered,
+            Some(1),
+            "the system is answered yes before anything is written"
+        );
+        let settled: Vec<_> = crate::session_end::take()
+            .into_iter()
+            .map(|end| crate::session_end::settle(end, &mut store, false))
+            .collect();
+        assert_eq!(
+            settled,
+            vec![crate::session_end::Settled::Saved(Err(
+                SaveRefusal::TimedOut(save_did_not_finish())
+            ))]
+        );
+        assert!(
+            sentinel.is_file(),
+            "a run that did not see its document land claims no clean exit"
+        );
+        assert_eq!(
+            bt_persist::read_session(&root.join("session.json"))
+                .0
+                .windows,
+            last_save.windows,
+            "the disk holds the last completed save"
+        );
+
+        drop(release);
+        crate::session_end::forget();
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -246,6 +246,7 @@ App.session_store	write	crate	FolioApp::settle_quit	call:flush_judged	1
 App.session_store	write	crate	FolioApp::update_session_answer	call:hand_over_final,call:landing_of,call:receipt_overdue	3
 App.session_store	write	crate::runtime::frame	Runtime::redraw	call:write_receipt	1
 App.session_store	write	crate::runtime::frame	Runtime::turn	call:flush_if_due	1
+App.session_store	access	crate	FolioApp::settle_session_end	lend	1
 App.settings_fault	write	crate	Runtime::announce_persistence_faults	call:take	1
 App.settings_store	write	crate	App::release_trial_writes	call:release_trial	1
 App.settings_store	write	crate	Runtime::apply_acrylic	call:store	1

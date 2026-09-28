@@ -58,7 +58,7 @@ App.copilot_hooks_installed	bool	-	0	0	0	0	0	0	0	complete
 App.copilot_readiness	Readiness	-	n	2	2	0	0	0	0	complete
 App.powershell_integration_asked	bool	-	1	1	1	0	0	0	0	complete
 App.notifications	NotificationDesk	-	1	1	1	0	0	0	0	complete
-App.session_store	SessionStore	-	n	2	8	0	0	0	0	complete
+App.session_store	SessionStore	-	n	2	8	1	0	0	0	complete
 App.settings_store	SettingsStore	-	n	16	46	1	0	0	1	incomplete
 App.shortcuts	Shortcuts	-	n	3	3	0	0	0	0	complete
 App.keybindings_store	KeybindingsStore	-	n	2	2	0	0	0	0	complete
@@ -103,6 +103,7 @@ WindowRuntime.ime_report_due	Option<Instant>	-	n	2	2	0	0	0	0	complete
 WindowRuntime.leaving	Option<Instant>	-	1	1	3	0	0	0	1	incomplete
 WindowRuntime.renderer	WindowRenderer	-	n	14	35	53	0	0	1	incomplete
 WindowRuntime.system_settings_watch	Option<SystemSettingsWatch>	-	0	0	0	0	0	0	0	complete
+WindowRuntime.session_end_watch	Option<SessionEndWatch>	-	0	0	0	0	0	0	0	complete
 WindowRuntime.tabs	Vec<TabState>	hub	0	0	0	136	11	0	6	incomplete
 WindowRuntime.active_tab	usize	-	n	3	8	4	0	0	0	complete
 WindowRuntime.pty_wake	PtyWakeSignal	-	0	0	0	0	0	0	0	complete

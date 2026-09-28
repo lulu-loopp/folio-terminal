@@ -3190,6 +3190,12 @@ pub mod mem;
 /// them by. Nothing is installed off Windows; see the module's own header.
 pub mod pump;
 
+/// **The system ending the session — a shutdown, a restart, a sign-out** (B-ENDSESSION): one
+/// subclass per window that hears `WM_QUERYENDSESSION` and a shutdown taken back, answers the
+/// question yes, and hands the news to the event loop. Hears nothing off Windows, where the
+/// system asks the application to terminate instead.
+pub mod session_end;
+
 /// **The system's pan gesture, as travel the wheel road can spend** (0.4.4
 /// ticket 11). Platform-free arithmetic over the positions Windows reports;
 /// the Windows touch door ([`let_the_system_translate_touch`]) is its only

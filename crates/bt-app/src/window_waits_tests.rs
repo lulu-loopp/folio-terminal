@@ -1710,8 +1710,10 @@ const LANDMARKS: [(&str, &[&str]); 4] = [
 /// `main`'s build-error arm and after `run_app`; `quit_abandoned` in the `Abandon` arm; and the
 /// six standalone entries (the fourth, the macOS applier's, U-28; the fifth, the recovery
 /// door's, which rolls a macOS bundle back on a worker since U-29 and recovers a Windows
-/// transaction since U-23; the sixth, the Windows applier's, U-23).
-const PINS: [Pin; 13] = [
+/// transaction since U-23; the sixth, the Windows applier's, U-23). B-ENDSESSION adds the
+/// system's end's write step, `exiting` then `quit_abandoned` around the one admitted wait in
+/// `session_end::settle` (the quit's `Write` on the held document; nothing is torn down).
+const PINS: [Pin; 15] = [
     Pin {
         writer: "enter_window_thread",
         owner: "bt-app crate::main",
@@ -1746,6 +1748,16 @@ const PINS: [Pin; 13] = [
         writer: "quit_abandoned",
         owner: "bt-app crate::FolioApp::settle_quit",
         after: Some("Abandon"),
+    },
+    Pin {
+        writer: "exiting",
+        owner: "bt-app crate::session_end::settle",
+        after: None,
+    },
+    Pin {
+        writer: "quit_abandoned",
+        owner: "bt-app crate::session_end::settle",
+        after: None,
     },
     Pin {
         writer: "enter_standalone_main",

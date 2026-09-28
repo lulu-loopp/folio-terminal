@@ -143,6 +143,7 @@ mod schemes;
 mod search;
 mod seats;
 mod seed;
+mod session_end;
 mod settings;
 mod settings_bundle;
 mod settling;
@@ -750,6 +751,12 @@ enum AppEvent {
     /// here would be a second copy travelling a second way — and `AppEvent` is
     /// `Copy`, which a list of paths is not.
     AppDelegateSpoke,
+    /// **The system is ending the session, or took the end back** (B-ENDSESSION).
+    ///
+    /// Carries nothing, on [`Self::AppDelegateSpoke`]'s footing: the news is parked in
+    /// `session_end`'s inbox by the window procedure the system sent it to, and the document is
+    /// already held there. What this owes is the turn that writes it.
+    SessionEnding,
     /// **The clipboard's picture has been written to a file** (§7.61).
     ///
     /// The thirteenth of the same family and owed a wake for
@@ -847,7 +854,8 @@ impl AppEvent {
             | Self::QuakeSummoned
             | Self::LaunchAsked
             | Self::InstallChannelRead
-            | Self::AppDelegateSpoke => Station::Woken,
+            | Self::AppDelegateSpoke
+            | Self::SessionEnding => Station::Woken,
         }
     }
 }
@@ -13146,6 +13154,14 @@ struct WindowRuntime {
                   event proxy it was built with, never through this field"
     )]
     system_settings_watch: Option<bt_platform::SystemSettingsWatch>,
+    /// This window's ear for the system ending the session (B-ENDSESSION): held so that dropping
+    /// the window takes the subclass off the HWND, and asked to take the shutdown screen's line
+    /// down once the layout is written ([`FolioApp::settle_session_end`]).
+    ///
+    /// `None` on a window whose handle could not be reached or whose subclass would not install:
+    /// the system's question then goes to `DefWindowProc` for that window, as it did for every
+    /// window before, and the other windows still hear it.
+    session_end_watch: Option<bt_platform::session_end::SessionEndWatch>,
     tabs: Vec<TabState>,
     active_tab: usize,
     /// The one bit every shell in this window nudges the loop through. See
@@ -40438,6 +40454,22 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         )
         .ok()
     });
+    // **The window's ear for the system ending the session** (B-ENDSESSION). The procedure the
+    // system sends the question to holds the document and parks the news; the wake brings the
+    // turn that writes it. One per window because the question is sent to every top-level window,
+    // and one answer is as good as another: the hold is set once and the write is idempotent.
+    let session_end_watch = native_window(&window).ok().and_then(|native| {
+        let proxy = event_proxy.clone();
+        bt_platform::session_end::SessionEndWatch::install(
+            native,
+            Box::new(move |end| {
+                session_end::hear(end);
+                let _ = proxy.send_event(AppEvent::SessionEnding);
+            }),
+            Box::new(|| i18n::Text::ShutdownSavingLayout.text().to_owned()),
+        )
+        .ok()
+    });
     // **A window is born knowing its display's rate**, before it has drawn
     // anything: the first journey a reader starts can be in the first second,
     // and a window that had to wait for a move or a scale change to find out
@@ -40454,6 +40486,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         leaving: None,
         renderer,
         system_settings_watch,
+        session_end_watch,
         tabs,
         active_tab,
         pty_wake,
@@ -50752,11 +50785,16 @@ impl App {
     /// **And from the photograph on** (0.4.6 U-21, `quit::Quit::document_is_frozen`): an
     /// update's quit keeps the windows up and the loop turning while it waits for its session's
     /// receipt, and nothing done in that time is a change to the document that is landing.
+    ///
+    /// **And while the system is ending the session** (B-ENDSESSION, `session_end`): from the
+    /// system's question on, a shell the system ends is not a pane the reader closed, and the
+    /// layout on the disk is the one they left.
     fn record_session(&mut self, now: Instant) {
         if self
             .quit
             .as_ref()
             .is_some_and(quit::Quit::document_is_frozen)
+            || session_end::holds_the_document()
         {
             return;
         }
@@ -61503,6 +61541,60 @@ impl FolioApp {
         }
     }
 
+    /// **The system is ending the session, or took the end back: settle what it said**
+    /// (B-ENDSESSION; `docs/M2-persistence-schema-v1.md` §5.5).
+    ///
+    /// Windows' side of what [`Self::begin_the_systems_quit`] is on macOS, and a different shape
+    /// for a reason the platform gives: AppKit waits for an answer the application gives when it
+    /// is ready, and Windows takes its answer from the window procedure there and then. So the
+    /// procedure answered yes and held the document where it stood (`session_end::hear`), and
+    /// this turn is the quit's write step on that document — the one writer, the one bounded
+    /// wait, `session.lock` dropped once it has landed — and then the shutdown screen's line comes
+    /// down. **Nothing is torn down**: the system ends the process, and a session taken back
+    /// finds every window as it was.
+    ///
+    /// A save that did not land leaves the sentinel standing and the disk holding the last
+    /// completed save, which is still whole because the hold kept every later change off it; the
+    /// system is not kept waiting for it.
+    fn settle_session_end(&mut self) {
+        let heard = session_end::take();
+        if heard.is_empty() {
+            return;
+        }
+        let Some(app) = self.app.as_mut() else {
+            return;
+        };
+        let mut lines_down = false;
+        for end in heard {
+            let a_quit_holds_it = app
+                .quit
+                .as_ref()
+                .is_some_and(quit::Quit::document_is_frozen);
+            match session_end::settle(end, &mut app.session_store, a_quit_holds_it) {
+                session_end::Settled::Saved(Ok(())) | session_end::Settled::LeftToTheQuit => {
+                    lines_down = true;
+                }
+                session_end::Settled::Saved(Err(refusal)) => {
+                    diagnostics::note(&format!(
+                        "{APP_NAME}: the session is ending and its layout was not saved: {}",
+                        refusal.message()
+                    ));
+                    lines_down = true;
+                }
+                // Every change the hold kept off the document is recorded now: the windows as
+                // they stand are the layout again.
+                session_end::Settled::TakenBack => app.record_session(Instant::now()),
+            }
+        }
+        if lines_down {
+            for window in self.windows.values() {
+                if let Some(watch) = &window.session_end_watch {
+                    watch.saved();
+                }
+            }
+        }
+    }
+
     /// One launch's tab, in a window that is already standing.
     fn open_a_tab_for_a_launch(
         &mut self,
@@ -63618,6 +63710,13 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // the launch requests it shares its whole shape with, and it needs
             // the `ActiveEventLoop` and every window at once.
             AppEvent::AppDelegateSpoke => Ok(()),
+            // **Settled here, at once** (B-ENDSESSION): the system is waiting on the far side of
+            // this turn and may end the process as soon as it has asked every application, so the
+            // write is not left for `about_to_wait`'s chain. The document is already held.
+            AppEvent::SessionEnding => {
+                self.settle_session_end();
+                Ok(())
+            }
             // **Nothing here either** (U-3): the fact is in `install_channel`'s
             // slot, and its one reader, `raise_first_run_if_due`, is on the clock
             // run of the turn this wake brings round.
@@ -74064,6 +74163,52 @@ mod quit_with_no_window_tests {
             .len(),
             1,
             "the quit debt is recorded somewhere other than `App::ask_to_quit`"
+        );
+    }
+
+    /// PIN (B-ENDSESSION, macOS) — **a sign-out, a restart or a shutdown on macOS takes the quit
+    /// road, and AppKit is told it may end the process only once the session is on the disk and
+    /// `session.lock` is gone.**
+    ///
+    /// On macOS the system's end is `applicationShouldTerminate:`, the same request a Dock Quit
+    /// sends; the delegate parks it, and the loop's turn opens Folio's own quit through the one
+    /// door every quit goes through — the card, the photograph, the write, the teardown — and
+    /// answers `NSTerminateNow` after `App::finish` has dropped the sentinel. That road was built
+    /// by M3-1; this pins that the system's end is on it. Read through `bt_source` rather than
+    /// behind a `cfg`: the claim is about the text of three items, which is the same text on every
+    /// platform, and holding it on every platform's run is stronger than holding it on one.
+    ///
+    /// MUTATION: answer `NSTerminateNow` in `begin_the_systems_quit`, or move the
+    /// `answer_the_systems_quit(… Now)` line in `settle_quit` above `app.finish()`.
+    #[test]
+    fn should_terminate_takes_the_quit_road() {
+        let settle = method_body("FolioApp", "settle_app_delegate_events");
+        let asked = settle
+            .find("AppDelegateEventKind::TerminationRequested(answer) =>")
+            .expect("the delegate's termination request is read");
+        let opened = settle
+            .find("self.begin_the_systems_quit(answer);")
+            .expect("and opens the system's quit");
+        assert!(asked < opened, "{settle}");
+        let begin = method_body("FolioApp", "begin_the_systems_quit");
+        assert!(
+            begin.contains("app.ask_to_quit();"),
+            "the system's quit is the one quit"
+        );
+        assert!(
+            !begin.contains("TerminationDecision::Now"),
+            "the request is not answered before the transaction has run"
+        );
+        let quit = method_body("FolioApp", "settle_quit");
+        let finished = quit
+            .find("app.finish();")
+            .expect("the way out drops the sentinel");
+        let now = quit
+            .find("self.answer_the_systems_quit(bt_platform::TerminationDecision::Now);")
+            .expect("and then lets AppKit end the process");
+        assert!(
+            finished < now,
+            "AppKit is let go only after the session is on the disk"
         );
     }
 }
