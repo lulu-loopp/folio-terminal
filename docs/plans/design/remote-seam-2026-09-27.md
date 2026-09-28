@@ -15,6 +15,13 @@ early, against the minimum of that plan's §5.2 (a)–(e).
 answered the first review and the mobile data contract (MS §3). §9 records each
 finding; where an earlier revision and this text disagree, this text rules.
 
+**Revision (e), 2026-09-27: the owner's rulings.** The owner ruled every open
+question; §7 is now their record, and each consequence is applied in the body:
+both phones from one codebase, Android first (§6); a 0.6 host behind the tray,
+with remote session creation (§2.2, §3.4, §4.2, §4.5); the tailnet listener
+(§3.1, §3.6); and a reply whose meaning follows its view, superseding RM §3
+row 21's paste-only (§4.5, §5).
+
 **Sources, by short name.** RM — `docs/plans/roadmap-0.5-2026-09-27.md` (rows
 C1, C2, A3, A4, A7a, A9, L1–L3b, S1, S2, T1–T4, V5, V11, B4, R1, R2; §3 row 21;
 §5, §5.2). AR — `docs/ARCHITECTURE.md` (§2 processes, §4 ownership, §5.1
@@ -51,7 +58,7 @@ answered by a summarising tool, so exact wording was not checked line by line;
 | system and source | the pattern | failure modes in practice | verdict for Folio |
 |---|---|---|---|
 | **mosh** — the SSP paper (Winstein and Balakrishnan, USENIX ATC 2012, <https://mosh.org/mosh-paper.pdf>, §2–§3; read) | The server runs a terminal emulator and holds "the authoritative state of the terminal"; SSP synchronizes *state objects*, each Instruction an idempotent diff "between a numbered source and target state", sent at a frame rate set from the RTT (at least half the smoothed RTT apart, capped at 50 Hz, after an 8 ms collection interval), so a flood never fills the network; roaming is the server re-targeting to the source of any authentic datagram with a higher sequence number (AES-128-OCB, key handed out over SSH); the client predicts echo in epochs and underlines unconfirmed guesses | By the paper's own words, state sync "causes trouble for a task like 'cat'-ing a large file … where the user might rely on having accurate history on the scrollback buffer": no scrollback. UDP only | **Adapt.** State sync, not byte sync, for every client that does not render a terminal: the ledger and the phone's text view are latest-value objects sent as numbered, idempotent diffs, paced by the link (§3.3). **Defer** prediction until measured (RS §8.6's measurement, for an interactive desktop client only; tools and phones never predict). **Avoid** UDP (the tailnet carries TCP) |
-| **tmux** — the manual, `window-size` and `destroy-unattached` (<https://man.openbsd.org/tmux>; read), *Getting Started* and *Control Mode* (<https://github.com/tmux/tmux/wiki/Getting-Started>, <https://github.com/tmux/tmux/wiki/Control-Mode>; read through a summariser); **GNU screen** — the manual, `-x` (<https://www.gnu.org/software/screen/manual/screen.html>; read) | "tmux keeps all its state in a single main process, called the tmux server"; a session "will survive accidental disconnection … or intentional detaching", and `destroy-unattached` decides whether the last detach ends it. A window has one size: `window-size` is `largest`, `smallest`, `manual` or `latest` ("the size of the client that had the most recent activity"). Control mode: commands answered inside `%begin`/`%end`/`%error` guards carrying a command number; `%output %pane` notifications; flow control by `pause-after`, `%pause`, `%continue`, after which the client refetches; existing content via `capture-pane`; a control client's size via `refresh-client -C`. screen's `-x` attaches a second display to an attached session | Control clients do not see the output of tmux's own modes; the command set is tmux's whole command set; a smaller client pans or pads | **Adopt** the server/client split, the numbered command/answer guard, pause-then-refetch as the flow-control answer (§3.3, §3.5), and an explicit last-detach rule (§4.2). **Adapt** `capture-pane` + `%output` into RS §8.2's checkpoint + bytes. Size policy is the owner's (§7 Q2) |
+| **tmux** — the manual, `window-size` and `destroy-unattached` (<https://man.openbsd.org/tmux>; read), *Getting Started* and *Control Mode* (<https://github.com/tmux/tmux/wiki/Getting-Started>, <https://github.com/tmux/tmux/wiki/Control-Mode>; read through a summariser); **GNU screen** — the manual, `-x` (<https://www.gnu.org/software/screen/manual/screen.html>; read) | "tmux keeps all its state in a single main process, called the tmux server"; a session "will survive accidental disconnection … or intentional detaching", and `destroy-unattached` decides whether the last detach ends it. A window has one size: `window-size` is `largest`, `smallest`, `manual` or `latest` ("the size of the client that had the most recent activity"). Control mode: commands answered inside `%begin`/`%end`/`%error` guards carrying a command number; `%output %pane` notifications; flow control by `pause-after`, `%pause`, `%continue`, after which the client refetches; existing content via `capture-pane`; a control client's size via `refresh-client -C`. screen's `-x` attaches a second display to an attached session | Control clients do not see the output of tmux's own modes; the command set is tmux's whole command set; a smaller client pans or pads | **Adopt** the server/client split, the numbered command/answer guard, pause-then-refetch as the flow-control answer (§3.3, §3.5), and an explicit last-detach rule (§4.2). **Adapt** `capture-pane` + `%output` into RS §8.2's checkpoint + bytes. Size: `latest` among desktop views (§7 Q2, ruled) |
 | **iTerm2's tmux integration** (<https://iterm2.com/documentation-tmux-integration.html>; read through a summariser) | A native GUI over `tmux -CC`: tmux windows become native windows and tabs, a split is `split-window`, a window resize is sent as the client's size; when the connection drops tmux keeps running and `tmux -CC attach` restores the layout | "A tab with a tmux window may not contain non-tmux split panes"; one size per window leaves "empty" gray areas for differently sized clients; scrollback and search are weaker than in a native window | **Adapt.** A native client over a server's session model works, and the desktop remains one: the host owns sessions, the desktop owns layout, and no tab mixes two ownership models. A phone never proposes a size |
 | **WezTerm multiplexer** — docs (<https://wezterm.org/multiplexing.html>; read through a summariser); source `mux/src/domain.rs`, `wezterm-client/src/domain.rs`, `codec/src/lib.rs` (<https://github.com/wezterm/wezterm>; read through a summariser, and the review's independent inspection confirmed the maps, the mark-and-sweep resync, the framing and the render-change sequence fields) | A `Domain` owns panes, tabs and windows; the GUI has its own domain (`LocalDomain`, always attached, not detachable) and attaches to others through a `ClientDomain`, which keeps `remote_to_local` maps for windows, tabs and panes, resyncs from `ListPanes` by mark-and-sweep, and forwards each local operation ("translate the local ids …, resync the changed structure, and then translate the results back"). The codec: a `leb128` length whose high bit marks compression, a serial, an ident, the body, with a `CODEC_VERSION` constant checked at connect; PDUs such as `GetPaneRenderChanges` (dirty lines, cursor, `seqno`, `input_serial`), `GetLines`, `WriteToPane`, `SendPaste`, `Resize`, `NotifyAlert`, `PaneRemoved`, `SetFocusedPane`, `GetTlsCreds`. Transports: a unix socket, SSH (start the server, then its socket), TLS with credentials bootstrapped over SSH | The docs call multiplexing "a young feature"; WSL 2 has no AF_UNIX interop; the client proxies server-computed render state, so every GUI feature needs a PDU (RS §8.2 records the maintainer's own objection); the PDU set mirrors internal operations, so the wire is coupled to the internals | **Adapt** — the closest structure to Folio. The desktop is its own in-process local domain (§2); a remote host is mirrored through an id map, never by sharing ids; the frame header (a capped length, a serial, a kind) and render changes under a sequence number shape §3. **Avoid** a protocol of internal operations (AR §12.3): Folio's wire carries domain commands |
 | **Eternal Terminal** (<https://eternalterminal.dev/howitworks/>; read through a summariser) | SSH authenticates; the server mints a per-session passkey, starts its own process and closes SSH; each side's `BackedWriter` keeps "an encrypted buffer of the last N bytes sent and the sequence number" and, on reconnect, resends what the other side has not acknowledged | A disconnection longer than the buffer loses bytes; bytes, not a screen, so nothing to rebuild from beyond the buffer | **Adopt** acknowledged offsets for the byte stream and operation ids with retained outcomes for commands (§3.3, §3.5). **Adapt** its bootstrap for a headless host (RS §8.3) |
@@ -66,7 +73,7 @@ answered by a summarising tool, so exact wording was not checked line by line;
 
 | design | what it is | verdict for Folio |
 |---|---|---|
-| **VS Code Remote Tunnels** (<https://code.visualstudio.com/docs/remote/tunnels>; read through a summariser) | "Both hosting and connecting to a tunnel requires authentication with the same Github or Microsoft account on each end"; both ends make outbound connections to a service hosted in Azure and "VS Code doesn't set up any network listeners"; an SSH connection runs over the tunnel "to provide end-to-end encryption"; usage limits on tunnels and bandwidth | **Rejected as the default, recorded as the real alternative.** It removes the listener and the Tailscale dependency, at the price of an account with a third-party service that relays every byte and sees every connection's metadata — against "Folio collects nothing" and "no service to run". It is §7 Q10's alternative (c) |
+| **VS Code Remote Tunnels** (<https://code.visualstudio.com/docs/remote/tunnels>; read through a summariser) | "Both hosting and connecting to a tunnel requires authentication with the same Github or Microsoft account on each end"; both ends make outbound connections to a service hosted in Azure and "VS Code doesn't set up any network listeners"; an SSH connection runs over the tunnel "to provide end-to-end encryption"; usage limits on tunnels and bandwidth | **Rejected as the default, recorded as the real alternative.** It removes the listener and the Tailscale dependency, at the price of an account with a third-party service that relays every byte and sees every connection's metadata — against "Folio collects nothing" and "no service to run". It was §7 Q10's (c), not chosen; the carriage adapters stay separate so it can be added later without touching authorization |
 | **OpenSSH multiplexing** (<https://man.openbsd.org/ssh_config>, `ControlMaster`, `ControlPersist`; read) | "Enables the sharing of multiple sessions over a single network connection"; `ControlPersist` keeps the master "open in the background … after the initial client connection has been closed" | **Rejected, in one sentence**: a carriage optimisation, not session persistence or resynchronisation, and the Windows client cannot use it (RS §8.3, Q12); Folio multiplexes inside its own framing on one long-lived `ssh.exe` for the headless-host carriage |
 | **Termius Vault** (<https://termius.com/vault>; read through a summariser) | Hosts, keys, passwords, snippets and port forwards synchronised across devices through a cloud vault "on Termius servers" (AWS), encrypted "before it leaves your device", with a local copy on each device | **Rejected explicitly.** Folio syncs no credential, device key, pairing record or configuration through any cloud. Pairing is device-local: a new or restored phone pairs again; a lost phone is revoked from the desktop. This is the answer to multi-device and recovery expectations, stated so no later feature assumes a vault |
 | **tmux-resurrect** (<https://github.com/tmux-plugins/tmux-resurrect>; read through a summariser) | Saves sessions, windows, panes, layout, each pane's working directory and "programs running within a pane" from a conservative list; optionally pane contents; does not preserve live processes | **Adopt as a warning for S1**: persisted desired state and vendor resume ids restore *what may be started*, never replay commands; Folio starts an agent only as S1 states and sends it nothing (§4.2's restore row) |
@@ -135,12 +142,16 @@ resize off the window thread) is still not a prerequisite for 0.6 — and this
 note adds that **SD is**, and is a prerequisite of the 0.5 rows above. In 0.5
 the façade is a domain boundary, **not a windowless host**.
 
-**Step 2 (0.6): the host with no window.** The no-window link test (RS §1,
-§8.1) becomes true with RS §8.8's **T4** (the canonical terminal, headless, in
-a library) and **T5** (the broker owning sessions): the same façade API,
-implemented by a process that links no window. On the desktop, where a window
-does draw the session, the façade keeps one parse (§2.3); where no window does,
-T4's metrics-free canonical copy is the terminal.
+**Step 2 (0.6): the host behind the tray** (§7 Q3, ruled 2026-09-27). Closing
+the last window leaves Folio in the system tray with every session alive and
+reachable by remote clients; opening from the tray restores the views; *Quit*
+from the tray ends every session. RS §8.8's **T5** broker is this in-process
+host, not a separate process. **T4** (the canonical terminal, headless, in a
+library) is what a session runs on while no window draws it, so the façade and
+T4 still pass RS's no-window link test (RS §1, §8.1) as crates, though the host
+runs inside `folio`. On the desktop, where a window does draw the session, the
+façade keeps one parse (§2.3); where none does, T4's metrics-free canonical
+copy is the terminal.
 
 The desktop window is the façade's **first client, in-process** — WezTerm's GUI
 with its own always-attached local domain — and never speaks the wire to itself.
@@ -242,7 +253,7 @@ header; RS §8.5). Clients negotiate the families they use; none needs all.
 | client | when | carriage | authenticator | families |
 |---|---|---|---|---|
 | the tool face (`folio <verb>`, `folio mcp`) | 0.5.3 | the tool endpoint, local only (TF "the door": a named pipe with `PIPE_REJECT_REMOTE_CLIENTS`; a `0700` Unix socket with a peer check) | the tool credential (§3.6) | `ledger`, `session`, `pane.text`, `cmd` (TF §3's tiers and "operate Folio") |
-| the remote desktop client | 0.6 | the tailnet carriage, or RS §8.3's `ssh` stdio for a headless host (§3.6: one adapter each) | a paired device, class *desktop*, on the tailnet; the SSH account on `ssh` stdio | all, `pane.stream` included |
+| the remote desktop client | 0.6 | the tailnet carriage (§7 Q10) | a paired device, class *desktop* | all, `pane.stream` included |
 | the phone | after 0.6 | the tailnet carriage | a paired device, class *phone* | `ledger`, `notice`, `session`, `presence`, `cmd` (§5) |
 
 ### 3.2 Framing and compatibility
@@ -358,7 +369,7 @@ sends every subscriber to `paused` with `reason: generation`.
 |---|---|---|---|---|---|
 | `ledger` | the host | every row (≤ 512, in `born_seq` order; `waits` ≤ 16 a row) and account (≤ 64) (§4.6) | rows upserted or removed; accounts upserted; coalesced per row over a short window (mosh's collection interval) | the last 256 publications or 10 minutes, whichever is less | `since` inside the retained run → deltas; else snapshot |
 | `notice` | the host | every notice not yet handled or expired (≤ 512, oldest first) | `raised`, `handled`, `expanded` events, never coalesced | open notices, and handled ones for 10 minutes as tombstones (≤ 512) | `since` inside → events; else snapshot of open notices |
-| `session` | the host | every session (≤ 1,024, creation order): `{session, incarnation, program, folder, title, exit?}` | `born`, `incarnated`, `exited`, `closed` events | closed sessions as tombstones for 10 minutes (≤ 256) | as `notice` |
+| `session` | the host | every session (≤ 1,024, creation order): `{session, incarnation, program, folder, title, exit?}`; a remote client sees the host's whole list and opens any session by subscribing to its pane scope (§7 Q3) | `born` (a remote `session.create` included, §4.5), `incarnated`, `exited`, `closed` events | closed sessions as tombstones for 10 minutes (≤ 256) | as `notice` |
 | `pane.text` | `{session, incarnation}` | the screen's rows (≤ 500) and the last *N* settled lines (N ≤ 1,000), each line `{id, text}` in UTF-8 (≤ 4 KiB), the cursor `{row, col, visible}` | `lines {append[], replace[{row, text}], scroll_off}` | the current screen only | always a snapshot (history on request: `lines.get {before_id, count ≤ 500}`) |
 | `pane.stream` (0.6, Folio clients) | `{session, incarnation}` | RS §8.2's checkpoint at `fcur.offset`, ≤ `limits.checkpoint_bytes`; older history is cut at a line boundary and marked `history_cut` | `bytes {len}` raw at `fcur.offset`, and `resize {epoch, cols, rows}` in order with the bytes | the journal's run from the last checkpoint (RS §9 Q3), as publications | `since` (the envelope cursor) inside the run → the bytes after it; else a new checkpoint in a new `gen` |
 | `presence` | the connection | — | client → host only, a lease (§4.5) | the lease | re-sent on connect |
@@ -395,6 +406,9 @@ the table for the repeat to collect.
 | after the terminal entry was evicted | `error {code: "stale"}` |
 | under a new `boot` | nothing to match: the client dropped its expectations at the boot change (§3.3); an old-boot operation's fate is unknown, and the client says so |
 
+Two words, used this way throughout. **Seen**: no longer unread — the row's
+badge is cleared on every device. **Answered**: the agent's wait is resolved.
+
 Terminal outcomes, closed (`admitted` is progress, never the answer):
 
 | outcome | means |
@@ -420,7 +434,7 @@ grants one engine checks; no credential is accepted on another carriage.
 |---|---|
 | an unpaired node joins the tailnet (or is shared into it) | `whois` must name a node **bound to a paired device**; outside pairing, nothing else is admitted |
 | a tailnet admin or policy change | the device key is still required; a node that changes owner fails the binding check (the pairing bound node id *and* user) |
-| a paired phone is compromised or lost | revoke from the desktop ends its principal and every grant at once; phones hold only *read*, *seen/mute/dismiss/show* and per-session *reply* grants (§4.7), so the damage is reading the list and pasting text at a free-text wait |
+| a paired phone is compromised or lost | revoke from the desktop ends its principal and every grant at once; phones hold only *read*, *seen/mute/dismiss/show* and per-session *reply* grants (§4.7), so the damage is reading the list and sending a reply at a free-text wait |
 | a local tool credential is stolen | it is valid only on the local endpoint, only for its incarnation, only within its tiers; the tailnet carriage refuses it |
 | replay of a handshake or a command | both signatures cover fresh nonces from both sides inside `T`; commands are bound to `(principal, boot, op)` and a connection |
 | downgrade | `T` holds the exact bytes of both offers, the selection, the limits and the client kind, signed by both keys |
@@ -495,7 +509,8 @@ tailnet's identity).
   six-digit code is 20 bits: the budget and the tailnet protect it, which is why
   its path requires the fingerprint comparison.)
 
-**The `ssh` stdio adapter** (RS §8.3, a headless host). The client starts the
+**The `ssh` stdio adapter — designed, not built** (§7 Q10 chose the tailnet
+listener; this stays as the pattern a second carriage follows). The client starts the
 carriage as `ssh <host> folio … --stdio`; SSH has authenticated the host (the
 client's `known_hosts`) and the user, and the far process runs as the account
 that owns the data directory. **Pairing and paired-device authentication are
@@ -529,8 +544,9 @@ authenticator is presented only to the endpoint that authenticates it.
    rows 75, 163 and 168 and §2.4's view fields have no serializer. A phone gets
    data it lays out itself.
 2. **Bytes into a pane without a grant** held by that principal for that
-   session's current incarnation (§4.7). A phone's bytes are only a reply at a
-   free-text wait, in C2's paste-only mode (§5).
+   session's current incarnation (§4.7). A phone's input is a reply at a
+   free-text wait from the conversation view, or, once it has a terminal view,
+   that terminal's ordinary input (§4.5, §7 Q8).
 3. **Private keys and bearer secrets**, as §3.7 states.
 4. **View identity or authority**: window, tab, seat, positional indices;
    "own tab" is resolved to sessions on the host at authorization time, and the
@@ -581,15 +597,15 @@ directory) is re-minted and the event is logged.
 
 | event | session | incarnation | grants and credentials | views |
 |---|---|---|---|---|
-| create (a pane opens a shell or agent) | minted | 1 | a tool credential if tool-enabled | one bound |
+| create (a pane opens a shell or agent; in 0.6 also a remote `session.create`, §4.5) | minted | 1 | a tool credential if tool-enabled | one bound (none for a remote create until a client opens it) |
 | bind another view (drag-out float V10, a 0.6 client) | unchanged | unchanged | unchanged | +1 |
 | move (tab, window, tear-off) | unchanged | unchanged | unchanged | rebound (AR §4.1) |
 | unbind a view that is not the last | unchanged | unchanged | that view's principal's input grant ends | −1 |
-| **unbind the last view** | **ends in 0.5** (today's behaviour: the child is retired) — whether it survives is §7 Q3 | — | all end | 0 |
+| **unbind the last view** | **ends in 0.5** (today's behaviour: the child is retired); **in 0.6 stays alive**, held by the host behind the tray and reachable by remote clients (§7 Q3) | 0.5: —; 0.6: unchanged | 0.5: all end; 0.6: view-bound input grants end | 0 |
 | child exits | stays, with `exit` | — | every grant and credential of the incarnation ends | unchanged; the pane shows the exit |
 | restart the child (restart shell, resume an agent) | unchanged | +1 | minted afresh; nothing resurrected | unchanged |
 | explicit close (the person closes the pane or kills the session) | ends | — | all end | all unbound |
-| Folio quits, updates or crashes | ends (0.5: the process owns the children); restore owes it | — | all end | — |
+| Folio quits (0.6: *Quit* from the tray), updates or crashes | ends (the process owns the children; no separate host, §7 Q3); restore owes it | — | all end | — |
 | restore after a start | the persisted `session`, if restore brings the pane back | +1 | minted afresh | one bound |
 
 ### 4.3 L1: each fact, its owner, its expiry
@@ -627,15 +643,17 @@ logged as a verb and an outcome, never its text.
 |---|---|---|---|
 | `presence {foreground, looking_at?: session}` | every client, as a **lease** of 60 s renewed while foreground; a disconnect ends it at once | the host stamps it on receipt; decides who gets an interruption (§5) | a lease never outlives its connection; an expired foreground lease counts as background |
 | `seen {session, incarnation, agent_epoch, through_rev}` | a client whose foreground presence lease names that session (the item was on its screen), or the desktop's focus rule | moves the watermark to `through_rev` if higher and the triple is the row's current one (else `stale`; a `through_rev` above the row's `rev` is refused); clears `unread` | seen never answers a wait (WB §13.2); a transport `ack` never moves it |
-| `answered` | only the producer (a hook's clear, an OSC `no`) | clears that wait | no client command answers a wait; a reply is typed input, not an answer |
+| `answered` | only the producer (a hook's clear, an OSC `no`) | clears that wait | no client command answers a wait; a reply is input, and the wait is answered only when its producer clears it |
 | `mute {session, agent_epoch, on}` | any client | per-agent mute: silences the notification only, never the dot and never Failed (RM V5) | — |
 | `dismiss {notice}` | any client | marks the notice handled everywhere | does not touch the dot or the wait |
 | `show {session}` | a device | the desktop opens that session as a person's jump (`open_from_notification`) | not an interruption of the desktop (it is the person's own act) |
-| `reply {session, incarnation, notice?, text}` | a device holding a *reply* grant | C2, **paste-only** (RM §3 row 21; WB §13.3.1), only while `reply_open` | never Enter; never at a permission or quota wait |
+| `reply {session, incarnation, notice?, text}` | a device holding a *reply* grant, from the conversation view (S2) | **sent to the agent directly** through C2 — the text is submitted, only while `reply_open` (§7 Q8, superseding RM §3 row 21's paste-only) | never at a permission or quota wait; no paste-without-Enter mode |
+| typed input `{session, incarnation, bytes}` | a client in a terminal view holding an `input` grant (the 0.6 desktop; a phone once it has a terminal view) | the terminal's ordinary input through C2's admission: keystrokes as typed, Enter included when the person presses it | no paste-without-Enter mode (§7 Q8) |
+| `session.create {program?, folder?, profile?}` | a device holding the `create` grant (a 0.6 desktop client; the phone as its UI grows, §7 Q12) | the façade creates a session on the host as a new pane would, bound to no view until a client opens it; `done` carries `{session, incarnation}` (§7 Q3) | names no view; opens no desktop window |
 | `device.prefs {notifications, done}` | the phone about itself (MS §3.7) | the host sends no push the phone would drop | — |
 
 Interruption (AR §12.2 decision 3) is decided on the host per notice from
-presence leases; the rule is §7 Q7's.
+presence leases, as §7 Q7 ruled.
 
 ### 4.6 L3b: the row, the account and the host, with the mobile contract
 
@@ -671,7 +689,8 @@ withdrawn. Severity colours the badge, not the order.
 - **Principal**: `{principal_id (opaque, 128-bit), kind: tool | device | ssh}`. A tool
   principal points at a credential id and its holder `{session, incarnation}`;
   a device principal at a device id; an `ssh` principal at the data directory's
-  account, on the `ssh` carriage only (§3.6). **The raw credential is never an identity**
+  account, on the `ssh` carriage only, if that adapter is ever built (§3.6).
+  **The raw credential is never an identity**
   and never appears in a record or a log.
 - **Tool credential**: `{credential_id, verifier (hash of the cap), holder
   {session, incarnation}, minted_at}`; dies with the holder's incarnation, on
@@ -680,17 +699,18 @@ withdrawn. Severity colours the badge, not the order.
   {node_stable_id, user}, paired_at, push_route?}`; lives until revoked or the
   data directory is reset.
 - **Grant**: `{grant_id, principal_id, target: {session, incarnation} | all,
-  tier: read | read_other | notify | send | operate | input | reply |
+  tier: read | read_other | notify | send | operate | input | reply | create |
   ledger_read | ledger_act, generation, granted_at, granted_via}`. A grant whose
   target is a session **dies with that incarnation**; a grant whose target is
   `all` (a device's `ledger_read` and `ledger_act`, the owner's "operate
   Folio") lives with its principal until revoked. "Own tab" is not a target: the
   host resolves it to sessions at authorization time from the holder's current
   view binding.
-- **Device classes** are product presets of grants, not authority (the phone's
-  preset is the owner's Q12): a *phone*
+- **Device classes** are product presets of grants, not authority. A *phone*
   receives `ledger_read` and `ledger_act` (seen, mute, dismiss, show) and, per
-  session, `reply`; a *desktop* receives, per attached session, `input`.
+  session, `reply` — v0's preset under §7 Q12's capability parity by stage, to
+  grow with the phone's UI; a *desktop* receives `create` and, per attached
+  session, `input`.
   Effective capability is always the grants.
 
 ### 4.8 When each lands
@@ -711,17 +731,16 @@ answers. **The list**: every running agent row **in creation order**
 severity. **The item**: the same facts, the lede, and on request the latest
 reply (`notice.expand`: V5's source, the transcript tail the Stop hook names,
 else the screen tail). **A reply field, conditional**: shown only while the
-host's `reply_open` is true, and it sends a **paste-only** reply — the text lands
-on the agent's input line without Enter, the agent's draft preserved (RM §3 row
-21; WB §13.3.1; a submitting reply is Appendix A's). *Show on desktop* is
-`show`. Mute is per agent.
+host's `reply_open` is true, and the reply is **sent to the agent directly**
+from the item's conversation segment (§7 Q8, superseding RM §3 row 21's
+paste-only). *Show on desktop* is `show`. Mute is per agent.
 
 **The dependency chain, and three stages.**
 
 | stage | needs | what it proves |
 |---|---|---|
 | read-only prototype, against a simulator feed | L3a (0.5.0), L3b's serializer (0.5.3), V5's expand (0.5.0) | the list, the item, the subscription state machine |
-| conversation and reply | S2's model (0.5.5), C2's paste-only mode (0.5.2), V11's predicate (0.5.5) | the item's conversation segment, the reply |
+| conversation and reply | S2's model (0.5.5), C2 (0.5.2), V11's predicate (0.5.5) | the item's conversation segment, the reply |
 | real devices | the tailnet carriage, pairing and the push sender (0.6) | everything, on a phone |
 
 **Push needs a relay, and the relay is not blind to metadata.** APNs and FCM
@@ -741,8 +760,9 @@ cannot ship inside an open-source desktop build. So a small relay holds it.
 "No telemetry" therefore means **no analytics, no profile and no durable
 per-send record**, not "the relay observes nothing". And **automatic push is new
 network traffic**: Folio today starts only the update check and what the person
-opens. Pairing with push is consent, but it does not make the owner's sentence
-literally true — **only the owner can extend that rule** (§7 Q4, blocking).
+opens. **The owner extended that rule** (§7 Q4, 2026-09-27): automatic push is
+opt-in per device, off until the person turns it on, and this statement of
+metadata and retention is published with it.
 
 **The payload.** ChaCha20-Poly1305 (CryptoKit on iOS; the platform cipher on Android 9
 and later) with a 256-bit key from the phone; nonce = `key_version
@@ -759,7 +779,8 @@ data message is decrypted and **always** shown as a notification, so FCM does no
 deprioritize it. A retraction `{v, handled}` removes a delivered notification
 (*handled anywhere, gone everywhere*). **Content-free** is the floor (ntfy's
 upstream shape): the push carries only an opaque id and the app fetches over the
-tailnet — at the cost that an offline phone shows only *Folio* (§7 Q5).
+tailnet — at the cost that an offline phone shows only *Folio*; the person
+chooses per device, defaulting to the encrypted notice (§7 Q5).
 
 **Self-hosting, honestly.** The relay is a published program; the project would
 run the default one; a person may run their own only with an app built under
@@ -778,11 +799,11 @@ then push and background reliability, then binary size, then store review.
 Terminal rendering is **not** a criterion for v0 — the phone presents
 information and does not project a terminal (MC §4).
 
-| | native SwiftUI + Kotlin/Compose | Flutter | React Native | **Rust core + native UI** |
+| | native SwiftUI + Kotlin/Compose | Flutter | React Native | **Rust core + one Kotlin UI** (Compose; Compose Multiplatform on iOS) |
 |---|---|---|---|---|
-| one person, with agents | two small UIs; the protocol, pairing and crypto written twice | one UI in Dart; the protocol a third implementation | one UI in TypeScript; native modules for push and key store anyway | two small UIs; the protocol, the subscription state machine and the ledger model are the desktop's own `bt-remote` through UniFFI; the UniFFI wrappers, lifecycle glue and extension packaging are still per platform and can still drift |
-| push and background | first-class; the iOS extension is native | the extension is still a native target; plugins between | as Flutter | first-class; whether the Rust core fits the extension's launch and memory budget is **the spike's first question** |
-| binary size (to be measured) | smallest | an engine | a runtime | native plus the core |
+| one person, with agents | two small UIs; the protocol, pairing and crypto written twice | one UI in Dart; the protocol a third implementation | one UI in TypeScript; native modules for push and key store anyway | one UI in Kotlin; the protocol, the subscription state machine and the ledger model are the desktop's own `bt-remote` through UniFFI; the iOS extension, the UniFFI wrappers and lifecycle glue are still per platform and can drift |
+| push and background | first-class; the iOS extension is native | the extension is still a native target; plugins between | as Flutter | first-class on Android; on iOS the extension is a native target, and whether the Rust core fits its launch and memory budget is **the spike's first question** |
+| binary size (to be measured) | smallest | an engine | a runtime | native plus the core, and Compose's runtime on iOS |
 | store review | ordinary | ordinary | ordinary; over-the-air code pushes draw questions | ordinary |
 
 For every column, Guideline 2.1 (<https://developer.apple.com/app-store/review/guidelines/>)
@@ -791,94 +812,94 @@ login", or a built-in demo mode "with prior approval by Apple": the app must
 **provide a reviewable demo or a working review setup**, since a reviewer
 cannot pair with a desktop.
 
-**Recommendation, conditional on a one-week spike: the Rust core plus native
-UI, one platform first.** The spike passes if: the core links into the app and
-into the iOS Notification Service Extension (or the Android messaging service);
-§3.3's mutation cases run on the device; key operations stay native (Secure
-Enclave / Keystore signing is called through native APIs, never as key bytes in
-Rust); a payload decrypts within the extension's time and memory limits; a
-TestFlight or internal-track build installs; the binary size is measured. If the
-core does not fit the extension, the extension decrypts natively and the core
-stays in the app. Kotlin Multiplatform is the fallback if the core outgrows
-UniFFI; Flutter with a Rust bridge if the owner wants both platforms from one UI
-on day one.
+**Recommendation (§7 Q1: both platforms from one codebase, Android first),
+conditional on a one-week spike: the Rust core under one Kotlin UI** — Compose
+on Android, which ships first, carried to iOS by Compose Multiplatform — with the
+iOS Notification Service Extension a small native target over the same core.
+The spike passes if, on both platforms: the core links into the app and into the
+Android messaging service and the iOS extension; §3.3's mutation cases run on
+the device; key operations stay native (Keystore / Secure Enclave signing
+through native APIs, never key bytes in Rust); a payload decrypts within the
+extension's limits; an internal-track and a TestFlight build install; binary
+size is measured. If the core does not fit the extension, the extension
+decrypts natively. Flutter over the same core is the alternative if Compose
+Multiplatform's iOS target fails the spike; two native UIs over the core are
+the fallback, at the cost of the one codebase the owner asked for.
 
 ---
 
-## 7. Open questions for the owner
+## 7. The owner's rulings (2026-09-27)
 
-Only questions the sources do not settle. **Settled, not asked:** L3b's version
-(0.5.3, §4.8); a second encryption layer (§3.6 is what the threat model needs);
-device classes as presets of grants (§4.7; the phone's preset is Q12); pairing,
-rotation, refresh and revocation mechanics (§3.6, §5); the reply mode and a
-wait's question text (Appendix A). Numbers are kept stable.
+The owner ruled every open question on 2026-09-27; this section is now their
+record, numbered as the questions were. **Settled by the sources, and never
+asked:** L3b's version (0.5.3, §4.8); a second encryption layer (§3.6 is what the
+threat model needs); device classes as presets of grants (§4.7); pairing,
+rotation, refresh and revocation mechanics (§3.6, §5); a wait's question text
+(Appendix A).
 
-1. **Which phone first?** iOS · Android · both at once. *Recommend:* the one the
-   owner carries; the second after v0 proves the protocol.
-2. **PTY size, before any second interactive view** (A7a decision 1, due
-   0.5.1). "Both may type" is ruled (WB §11.7.4, 2026-09-10) and carried
-   forward: input from every client is totally ordered by C2's admission on the
-   host, and a resize is ordered with the bytes (RS §8.2's resize epoch). Phones
-   and tools are never size candidates. The choice is the size policy.
-   (a) *latest*: the size follows the interactive view whose most recent
-   **admitted interactive input** — a keystroke or paste C2 admitted from that
-   view; not a resize, focus, scroll or presence — is latest in C2's admission
-   order. That order is total, so there is no tie; when that view disconnects
-   or unbinds, the size passes to the view with the next latest admitted input,
-   or, where no remaining view has typed, to the one bound longest; other views
-   show the session at that size, letterboxed or scaled, never reflowed.
-   (b) a size **leader** by explicit take-over, passed on disconnect by the same
-   rule; (c) *smallest*. *Recommend (a)*, with the leader shown on each view.
-3. **How long does a session live?** Split by version. **0.5** may keep today's
-   behaviour: the last view's close, quit, update and crash end it (§4.2).
-   **0.6** is not open while RS stands: its remote client needs a session that
-   outlives a client connection. The choice: (a) as today in 0.5; (b) the last
-   view's close leaves an **in-process session with no bound view**,
-   reattachable, and quit ends it; (c) a separate host process keeps sessions
-   across quit and update, not reboot. *Recommend (a) for 0.5, (b) for 0.6*, and
-   (c) later, where RS §8.1's broker points.
-4. **May pairing authorise Folio to send automatic push traffic?** (**blocking
-   for push**; it blocks nothing in SD, C1 or L1–L3) — the owner's network rule
-   names only what the person opens and the update check. (a) yes, opt-in per
-   device, off until the person turns it on, with §5's metadata and retention
-   statement published; (b) yes, on by default once paired; (c) no: the phone
-   learns only when it is opened. *Recommend (a).*
-5. **What a push carries.** (a) the encrypted notice; (b) nothing but an opaque
-   id, the app fetching over the tailnet (ntfy's shape); (c) the person picks
-   per device. *Recommend (c)*, default (a).
-6. **The lock screen.** (a) title and lede shown by default; (b) generic
-   *Folio* until unlock, text on opt-in; (c) follow the phone's own "show
-   previews" setting. *Recommend (c)*: the platform setting is where people
-   already decide this.
-7. **Who is interrupted** (A7a decision 3). (a) the host decides per notice
-   from presence leases: a desktop window focused with input in the last few
-   minutes keeps it; else a foreground phone gets it in-app; else the push;
-   (b) always both; (c) the phone only while the desktop is locked. *Recommend
-   (a)*, and opening an item on the phone counts as **seen** everywhere (A7a
-   decision 2) — never as answered.
-8. *Moved to Appendix A* (a phone reply that submits: settled paste-only).
-9. *Moved to Appendix A* (a wait's question text: no declared vendor field).
-10. **The remote product's carriage**, exactly one of: (a) **a direct tailnet
-    listener** — Tailscale on both ends, phones and desktops, §3.6's tailnet
-    adapter; (b) **`ssh` stdio on demand** — no listener, desktop clients only,
-    no phone and no pairing, §3.6's `ssh` adapter; (c) **an outbound tunnel
-    service**, as VS Code Remote Tunnels (§1.1) — no listener and no Tailscale,
-    but an account with a service that relays every connection, and neither
-    adapter covers its identity; (d) **no remote product**. *Recommend (a)*: the
-    only choice that serves the phone without a third party; our own NAT
-    traversal is not a near-term alternative.
-11. **What each paired phone may receive.** Folder, title, latest reply,
-    account quota, model. (a) everything the row carries; (b) per-device
-    switches for folder, latest reply and quota; (c) per-session opt-in.
-    *Recommend (b)*, defaults on, set on the desktop's device page.
-12. **What does a phone offer by default?** §4.7's phone preset — `seen`,
-    `mute`, `dismiss`, `show` and, per session, a paste-only `reply` — follows
-    the mobile mock (MS §3.5) and has no cited owner ruling. Grants stay the
-    engine's; this asks about the product surface, which Q11 (what the phone
-    *receives*) does not. (a) exactly that set; (b) read-only by default, each
-    action switched on per device; (c) that set without `reply` until S2 shows
-    its use. *Recommend (a)*: every action is reversible or paste-only, and none
-    answers a wait.
+1. **Which phone first?** — **Both, from one codebase; Android ships first**
+   (the owner carries Android, and v0's push, lock-screen and background
+   testing needs it in hand); **iOS follows on the same code** (the owner has
+   the Apple developer account). *Changes:* §6's recommendation and spike serve
+   both platforms.
+2. **PTY size before a second interactive view?** — **(a) *latest*, and only
+   among desktop interactive views.** The size follows the desktop view whose
+   most recent **admitted interactive input** (a keystroke or paste C2 admitted
+   from that view; not a resize, focus, scroll or presence) is latest in C2's
+   admission order, which is total, so there is no tie; when it disconnects or
+   unbinds, the size passes to the desktop view with the next latest admitted
+   input, else the one bound longest; other desktop views show that size,
+   letterboxed or scaled, never reflowed. **The phone and the conversation view
+   are never size candidates**: the phone is not a projection, and the
+   conversation view reads structured data, not a grid. "Both may type" (WB
+   §11.7.4) and host-ordered input and resize stand. *Changes:* A7a decision 1
+   takes this; nothing else in the note.
+3. **How long does a session live?** — **0.5 as today; 0.6 is (b) plus a
+   tray.** Closing the last window leaves Folio in the system tray with every
+   session alive and reachable by remote clients; opening from the tray restores
+   the views; *Quit* from the tray ends every session. **No separate host
+   process** — option (c) is dropped; RS's 0.6 broker is the in-process host
+   behind the tray. A remote client sees the host's whole session list, opens
+   any, and can create a session on the host. *Changes:* §2.2 step 2; §4.2's
+   last-view, create and quit rows; §3.4's `session` family; §4.5's
+   `session.create`; §4.7's `create` tier; §8 (b).
+4. **May pairing authorise automatic push traffic?** — **(a) opt-in per device,
+   off until the person turns it on.** The owner's network rule gains this one
+   exception, with §5's metadata and retention statement published. *Changes:*
+   §5's network paragraph.
+5. **What a push carries.** — **(c) per device, defaulting to (a), the
+   encrypted notice.** *Changes:* §5's content-free sentence.
+6. **The lock screen.** — **(c) follow the phone's own preview setting.**
+   *Changes:* none beyond §5's payload, which already shows a generic *Folio*
+   when the extension cannot decrypt.
+7. **Who is interrupted?** — **(a)**: the host decides per notice from presence
+   leases; opening an item on the phone counts as **seen** everywhere, never as
+   **answered** (both words defined in §3.5). *Changes:* §4.5's interruption
+   sentence.
+8. **The reply** (formerly a request to supersede paste-only; ruled in its
+   place). — **The reply's meaning follows the view it is typed in. In the
+   conversation view a reply is sent to the agent directly. In a terminal view
+   the phone sends keystrokes as typed, Enter included when the person presses
+   it: it behaves like a terminal. There is no "paste without Enter" mode.**
+   This **supersedes RM §3 row 21's paste-only ruling** for these surfaces.
+   *Changes:* §3.6's lost-phone row, §3.8 item 2, §4.5's `reply` row and a
+   terminal-input row, §5's slice and stages; Appendix A's paste-only entry
+   leaves for §9 as superseded. **For the coordinator:** RM §3 row 21 (and the
+   rows that cite it, S2 and V11) needs the same edit.
+9. **A wait's question text** — settled by the sources, not ruled: Appendix A.
+10. **The remote product's carriage.** — **(a) the direct tailnet listener**,
+    chosen as the most convenient now. The carriage adapters stay separate, so a
+    tunnel service can be added later without touching the authorization
+    engine. *Changes:* §3.1's desktop row; §3.6's `ssh` adapter kept as a
+    designed second adapter, not built; §1.1's tunnel row; §8 (b).
+11. **What a paired phone receives.** — **(a) everything the row carries**;
+    per-device switches are deferred until someone asks for them. *Changes:*
+    none; §4.6 is the phone's contract as written.
+12. **What a phone can do.** — **Capability parity by stage, not surface
+    parity**: every decision or action the desktop offers (seen, mute, dismiss,
+    jump, reply, later approve/deny and new sessions) reaches the phone as its
+    UI grows, with no permanent cap; the terminal grid is not projected. **v0
+    keeps §4.7's preset.** *Changes:* §4.7's device-class line.
 
 ---
 
@@ -898,11 +919,11 @@ move: each still needs its own Codex-reviewed note (CONVENTIONS rule 11) — SD'
   fields are placed (§2.4).
 - (b) Doors, each on AR §6's admission rule and §5.1's ingress lane: the tool
   endpoint (TF, 0.5.3); the tailnet listener and the local Tailscale `whois`
-  query (0.6); the `ssh` stdio carriage's argv (0.6, §3.6); an HTTPS `POST` to
-  the relay beside `bt_platform::http`, which has `https_get` and
-  `https_download` only; the host key store and the device list. New argv doors are TF's `folio <verb>` and `folio mcp` (AR §2.1); a
-  headless host (§7 Q3 (c)) would add one more, and threads on the ingress lane
-  (AR §0.1's counts change then).
+  query (0.6); an HTTPS `POST` to the relay beside `bt_platform::http`, which
+  has `https_get` and `https_download` only; the host key store and the device
+  list. New argv doors are TF's `folio <verb>` and `folio mcp` (AR §2.1). No
+  headless host and no `ssh` carriage argv (§7 Q3, Q10); the 0.6 tray keeps the
+  process, not a new one.
 - (c) Debt: it depends on D-1 and D-54 (the registry and the session-named
   `Site`), D-57 (the ledger's crate), D-43 and D-44 (PTY birth and resize), by
   their current versions; SD is a new row the roadmap would gain, not debt.
@@ -934,6 +955,8 @@ move: each still needs its own Codex-reviewed note (CONVENTIONS rule 11) — SD'
 
 ### Revision (c), after Codex's review of (b) (2026-09-27)
 
+Line refs in this table are to commit 37949135.
+
 | # | finding | what changed |
 |---|---|---|
 | 14 | Blocking — the resumable stream had four incompatible cursor rules | §3.2: decoding checks `10 ≤ total_len` and `json_len ≤ total_len − 10` before the subtraction (`:256–260`). §3.3 (`:278–353`): one envelope cursor `{boot, gen, seq}`, `pane.stream`'s `offset` inside it; `ack` carries the full cursor and releases credit only within the same `{boot, gen}`; what is acknowledged and what retained; `snapshot_begin/chunk/end` with one id, chunk and total caps and a digest; bounded collections with `omitted`; `paused` holds until a credit-bearing `resubscribe`, `reset` bypasses credit once; the mutation table as judged, with generation change and incomplete snapshot added. §3.4: a bound on every host-wide collection (`:355–372`) |
@@ -946,6 +969,37 @@ move: each still needs its own Codex-reviewed note (CONVENTIONS rule 11) — SD'
 | 21 | Later — the push brief | §10 (`:982`): nonce crash-safety and what the relay stores; §3.7 and §5 point to it |
 | — | owner-question triage | §7 (`:808–881`): Q8 and Q9 to Appendix A; Q10 as four exclusive carriages; Q2 defines "latest"; Q3 split by version; Q4 blocking for push only; Q12 added |
 | — | judged differently | overflow voids the subscriber's cursor instead of bumping the scope's shared `gen` (`:350–353`) |
+
+### Revision (d), after Codex's round-3 check of (c) (2026-09-27)
+
+Two sentences repaired: snapshot pieces are acknowledged by their own `{snap,
+index}` cursor in a snapshot lane with its own window, using no publication
+credit (§3.3, and the incomplete-snapshot case); `welcome` carries `window_id`
+while pairing, so the phone can derive `K_pair` on the code path and `T` binds
+it (§3.6).
+
+### Revision (e), the owner's rulings (2026-09-27)
+
+| ruling | what changed |
+|---|---|
+| Q1 both phones, one codebase, Android first | §6: the recommendation becomes the Rust core under one Kotlin UI (Compose, Compose Multiplatform on iOS), the spike covering both platforms |
+| Q2 *latest*, desktop views only | §7 Q2 states that the phone and the conversation view are never size candidates; §1's tmux row |
+| Q3 0.5 as today; 0.6 host behind the tray; no separate host | §2.2 step 2; §4.2's create, last-view and quit rows; §3.4's `session` family (the whole list, open any); §4.5's `session.create`; §4.7's `create` tier; §8 (b) |
+| Q4 push opt-in per device | §5's network paragraph states the extended rule |
+| Q5 per device, default the encrypted notice | §5's content-free sentence |
+| Q6 follow the phone's preview setting | none beyond §7 |
+| Q7 (a); opening = seen, never answered | §3.5 defines **seen** and **answered**; §4.5's interruption sentence |
+| Q8 reply follows its view | §4.5: `reply` is sent to the agent from the conversation view; a terminal view's input is ordinary typed input, Enter included; §3.6's lost-phone row; §3.8 item 2; §5's slice and stages |
+| Q10 the tailnet listener | §3.1's desktop row; §3.6's `ssh` adapter kept as designed, not built; §4.7's `ssh` principal conditional; §1.1's tunnel row |
+| Q11 everything the row carries | none: §4.6 is the phone's contract |
+| Q12 capability parity by stage | §4.7's device-class line; v0 keeps the preset |
+
+**Superseded:** the paste-only phone reply. Revision (b) followed RM §3 row 21
+(paste-only, no Enter, the agent's draft preserved) and (c) kept a
+paste-and-submit variant in Appendix A as a possible supersession. The owner's
+ruling of 2026-09-27 replaces both: there is no paste-without-Enter mode.
+**For the coordinator:** RM §3 row 21, and the S2, V11 and C2 rows that cite it,
+need the same edit.
 
 ---
 
@@ -995,11 +1049,6 @@ And the roadmap's C1 row stops calling `incarnation` "agent lifetime": it is the
 
 Settled, not open; recorded so a later request starts from the ruling.
 
-- **A phone reply that submits** (formerly Q8). The notification reply is ruled
-  paste-only (RM §3 row 21; WB §13.3.1), and §5 follows it. A supersession would
-  allow paste-and-submit from a paired phone, only at a free-text wait, only
-  into a session holding a *reply* grant. Revisit after S2 shows how often a
-  phone reply is wanted.
 - **The question text of a wait** (formerly Q9). Off the wire: no vendor gives
   it in a declared field. Reopen only when research finds such a field; it
   would then go, bounded (≤ 300), to paired devices as §4.6's `question⁺`.
