@@ -924,6 +924,12 @@ download read a local release feed instead of github.com* (U-30b: a
 command-line flag only, never persisted; the checksum and the signer checks
 unchanged). The fold is the enabling tickets', U-31 / U-32, per the design
 note's (b).5 table.
+2026-09-27 *on Windows a failed trial is rolled back by digest …, and U-29b's
+opening rules hold on Windows too* (U-24: the trial stopped only by its pid,
+creation time and image; the rescue copy opens only where the install holds
+neither whole set; one rule for a live applier at `Handoff` on both
+platforms — left to it, nothing waited for, nothing opened). The fold is the
+enabling tickets', U-31 / U-32, per the design note's (b).5 table.
 
 ### 37. The Explorer and Finder verbs — `folded`
 **Rule.** On Windows there is one verb in two registrations: the classic trees

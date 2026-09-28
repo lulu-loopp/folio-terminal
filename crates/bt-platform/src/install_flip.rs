@@ -27,13 +27,20 @@
 //!   `GetProcessTimes`'s creation time on Windows (100 ns since 1601); a
 //!   Windows process that has exited while a handle keeps its record is not
 //!   running.
-//! * **[`ask`]** (U-29): a signal to a recorded process — `SIGTERM` to ask it
-//!   to quit, `SIGKILL` to end it — sent only after the process list shows
-//!   that very process (pid *and* start instant) running from one of the
-//!   given executables. The rollback stops the trial this way (§(b).2 W9/M9):
-//!   the trial was started by LaunchServices, so its stopper is not its
-//!   parent and has only the journal's record to go by. macOS only; on
-//!   Windows the signal is refused by name (the Windows rollback is U-24's).
+//! * **[`ask`]** (U-29; Windows U-24): a recorded process asked to quit, or
+//!   ended — only after the process list shows that very process (pid *and*
+//!   start instant) running from one of the given executables. The rollback
+//!   stops the trial this way (§(b).2 W9/M9): its stopper is not its parent
+//!   (the trial was started by LaunchServices, or by an applier that has since
+//!   died) and has only the journal's record to go by. macOS: `SIGTERM` to
+//!   ask, `SIGKILL` to end. Windows: the process is opened and its creation
+//!   time read again **from that handle**, so a pid reused between the look
+//!   and the act is never touched; to ask, `WM_CLOSE` is posted to each of its
+//!   visible, unowned top-level windows that are not tool windows — the close
+//!   a person makes, and the one `scripts/release/smoke.ps1` ends a run with
+//!   (Folio listens to no other quit road; a process with no such window is
+//!   asked by nothing, and its grace runs out); to end, `TerminateProcess` on
+//!   the same handle. Refused by name elsewhere.
 //! * **[`held_open`]** (Windows): whether another process holds a file open,
 //!   asked by opening it for reading and writing with no sharing at all —
 //!   E-7's process check before the first move. Any other handle on the file
@@ -101,10 +108,12 @@ pub fn started_of(pid: u32) -> Option<u64> {
 /// **What [`ask`] asks of a process.**
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ask {
-    /// `SIGTERM`: the ordinary request to quit, which a process may answer
-    /// in its own time (or ignore).
+    /// The ordinary request to quit, which a process may answer in its own
+    /// time (or ignore): `SIGTERM` on macOS, `WM_CLOSE` to its windows on
+    /// Windows.
     Quit,
-    /// `SIGKILL`: the end, which no process can refuse.
+    /// The end, which no process can refuse: `SIGKILL` on macOS,
+    /// `TerminateProcess` on Windows.
     End,
 }
 
@@ -127,19 +136,21 @@ pub fn runs_from(process: Running, images: &[&Path]) -> io::Result<bool> {
     Ok(false)
 }
 
-/// **Send `ask` to `process`, if it is still that process running from one of
-/// `images`** — see the module header. Answers whether the signal was sent:
-/// `false` when the process list does not show it (it has ended, its pid was
-/// reused, or it runs some other program), and nothing is sent then.
+/// **Ask `process` to quit, or end it, if it is still that process running
+/// from one of `images`** — see the module header. Answers whether it was that
+/// process and was asked: `false` when the process list does not show it (it
+/// has ended, its pid was reused, or it runs some other program), and nothing
+/// is sent then.
 ///
 /// # Errors
-/// The process list could not be read, or the signal was refused for a reason
-/// other than the process having just ended; `Unsupported` off macOS.
+/// The process list could not be read, or the process could not be asked for
+/// a reason other than its having just ended; `Unsupported` where there is no
+/// arm (neither macOS nor Windows).
 pub fn ask(process: Running, images: &[&Path], ask: Ask) -> io::Result<bool> {
     if !runs_from(process, images)? {
         return Ok(false);
     }
-    imp::signal(process.pid, ask)
+    imp::signal(process, ask)
 }
 
 /// **Whether another process holds the file at `path` open** — see the module
@@ -234,8 +245,8 @@ mod imp {
         (written == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
     }
 
-    pub(super) fn signal(pid: u32, ask: Ask) -> io::Result<bool> {
-        let pid = libc::pid_t::try_from(pid)
+    pub(super) fn signal(process: Running, ask: Ask) -> io::Result<bool> {
+        let pid = libc::pid_t::try_from(process.pid)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a pid past pid_t"))?;
         let signal = match ask {
             Ask::Quit => libc::SIGTERM,
@@ -271,14 +282,23 @@ mod imp {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use std::path::Path;
-    use windows::Win32::Foundation::{ERROR_SHARING_VIOLATION, FILETIME, HANDLE, STILL_ACTIVE};
+    use windows::Win32::Foundation::{
+        ERROR_INVALID_PARAMETER, ERROR_SHARING_VIOLATION, FILETIME, HANDLE, HWND, LPARAM,
+        STILL_ACTIVE, WPARAM,
+    };
     use windows::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
     };
     use windows::Win32::System::ProcessStatus::K32EnumProcesses;
     use windows::Win32::System::Threading::{
         GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        PROCESS_TERMINATE, TerminateProcess,
     };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GW_OWNER, GWL_EXSTYLE, GetWindow, GetWindowLongW, GetWindowThreadProcessId,
+        IsWindowVisible, PostMessageW, WM_CLOSE, WS_EX_TOOLWINDOW,
+    };
+    use windows::core::BOOL;
 
     /// Room for the processes that start between two asks.
     const SLACK: usize = 256;
@@ -381,11 +401,103 @@ mod imp {
         Some((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
     }
 
-    pub(super) fn signal(_pid: u32, _ask: super::Ask) -> io::Result<bool> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "install_flip signals a process on macOS only",
-        ))
+    /// **Ask the process, or end it, through a handle that is that process**:
+    /// its creation time is read again from the handle this opens, so a pid
+    /// reused since the list was read is never touched. `false`: it has ended
+    /// (or its pid is another process's now), and nothing was done.
+    pub(super) fn signal(process: Running, ask: super::Ask) -> io::Result<bool> {
+        // SAFETY: a call taking two flags and an integer; it answers an error
+        // for a pid that has gone or that this token may not open.
+        let opened = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE,
+                false,
+                process.pid,
+            )
+        };
+        let handle = match opened {
+            Ok(handle) => handle,
+            // No process has this pid any more.
+            Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => {
+                return Ok(false);
+            }
+            Err(error) => return Err(io::Error::other(error)),
+        };
+        // SAFETY: the handle was opened here, is owned by nothing else, and is
+        // closed when `owned` is dropped.
+        let owned = unsafe { OwnedHandle::from_raw_handle(handle.0) };
+        let handle = HANDLE(owned.as_raw_handle());
+        if creation_of(handle) != Some(process.started) {
+            return Ok(false);
+        }
+        match ask {
+            super::Ask::Quit => {
+                for window in closable_windows_of(process.pid) {
+                    // SAFETY: a post takes the window and two integers; a
+                    // window that has gone since it was listed refuses it.
+                    let _ = unsafe { PostMessageW(Some(window), WM_CLOSE, WPARAM(0), LPARAM(0)) };
+                }
+                Ok(true)
+            }
+            super::Ask::End => {
+                // SAFETY: `handle` is live for the call and was opened with
+                // `PROCESS_TERMINATE`.
+                match unsafe { TerminateProcess(handle, ENDED_BY_A_ROLLBACK) } {
+                    Ok(()) => Ok(true),
+                    // It ended on its own between the look and the end.
+                    Err(_) if creation_of(handle).is_none() => Ok(false),
+                    Err(error) => Err(io::Error::other(error)),
+                }
+            }
+        }
+    }
+
+    /// The exit code of a process [`signal`] ends.
+    const ENDED_BY_A_ROLLBACK: u32 = 1;
+
+    /// **The windows of the process `pid` a person could close**: its
+    /// top-level windows that are visible, have no owner and are not tool
+    /// windows — the ones a person's `×` or `Alt+F4` closes.
+    fn closable_windows_of(pid: u32) -> Vec<HWND> {
+        /// What the enumeration looks for, and what it found.
+        struct Look {
+            pid: u32,
+            found: Vec<HWND>,
+        }
+
+        /// Keep each window of `look.pid` a person could close. `state` is the
+        /// `&mut Look` below, which outlives the enumeration because
+        /// `EnumWindows` is synchronous.
+        unsafe extern "system" fn keep_closable(window: HWND, state: LPARAM) -> BOOL {
+            // SAFETY: `state` is the `&mut Look` of `closable_windows_of`,
+            // live for the whole enumeration and touched by nothing else.
+            let look = unsafe { &mut *(state.0 as *mut Look) };
+            let mut owner_pid = 0u32;
+            // SAFETY: `window` is the one being enumerated; `owner_pid` is
+            // writable.
+            unsafe { GetWindowThreadProcessId(window, Some(&raw mut owner_pid)) };
+            if owner_pid != look.pid {
+                return true.into();
+            }
+            // SAFETY: three reads of the enumerated window's own state.
+            let visible = unsafe { IsWindowVisible(window) }.as_bool();
+            let owned =
+                unsafe { GetWindow(window, GW_OWNER) }.is_ok_and(|owner| !owner.is_invalid());
+            let style = unsafe { GetWindowLongW(window, GWL_EXSTYLE) };
+            let tool = style & WS_EX_TOOLWINDOW.0.cast_signed() != 0;
+            if visible && !owned && !tool {
+                look.found.push(window);
+            }
+            true.into()
+        }
+
+        let mut look = Look {
+            pid,
+            found: Vec::new(),
+        };
+        // SAFETY: the callback reads `look` only during this synchronous call.
+        let _ = unsafe { EnumWindows(Some(keep_closable), LPARAM((&raw mut look) as isize)) };
+        look.found
     }
 
     pub(super) fn held_open(path: &Path) -> io::Result<bool> {
@@ -424,10 +536,10 @@ mod imp {
         None
     }
 
-    pub(super) fn signal(_pid: u32, _ask: Ask) -> io::Result<bool> {
+    pub(super) fn signal(_process: Running, _ask: Ask) -> io::Result<bool> {
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
-            "install_flip signals a process on macOS only",
+            "install_flip asks a process to quit on macOS and Windows only",
         ))
     }
 
@@ -554,24 +666,109 @@ mod tests {
     ///
     /// Coordinator ruling 2 (U-29): "never touch a process whose image is not
     /// the trial's executable and whose start time is not the journal's". The
-    /// processes are `/bin/sleep`, started and reaped by this test.
+    /// processes are `/bin/sleep` on macOS and a synthetic program on Windows
+    /// (U-24: the Windows arm is real), started and reaped by this test.
     ///
     /// MUTATION: in `ask`, signal without asking `runs_from` first.
     #[test]
     fn a_process_is_signalled_only_while_its_image_and_start_instant_match() {
         #[cfg(target_os = "macos")]
         signals_reach_only_the_recorded_process();
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        a_windows_process_is_asked_only_by_its_identity();
+        #[cfg(not(any(target_os = "macos", windows)))]
         {
-            // No signal is sent: refused by name where there is no process
-            // list, and on Windows (a real list since U-23) the program is not
-            // there, so nothing runs from it.
+            // Refused by name where there is no process list.
             let nobody = Running { pid: 1, started: 0 };
-            assert!(!matches!(
-                ask(nobody, &[Path::new("/bin/sleep")], Ask::Quit),
-                Ok(true)
-            ));
+            assert!(ask(nobody, &[Path::new("/bin/sleep")], Ask::Quit).is_err());
         }
+    }
+
+    /// RED (U-24) — **on Windows a recorded process is asked to quit, and
+    /// ended, only while it is that very process — its pid, its creation time
+    /// and its image all the recorded ones**: another creation time or another
+    /// image gets nothing and runs on; `Quit` leaves a process with no window to
+    /// close running (nothing a person could close was there to ask); `End`
+    /// ends it, and asking again after it has ended sends nothing.
+    ///
+    /// W9: "stop the trial process (quits itself; after 5 s grace, ended by its
+    /// starter, or by R from the recorded pid and start time)". The programs
+    /// are synthetic (they open no window), started from a folder of the
+    /// test's own and reaped by their handles.
+    ///
+    /// MUTATION: in `ask`, call `imp::signal` without asking `runs_from` first
+    /// (the handle's creation time still refuses another start, but the image
+    /// goes unchecked, and the process asked through another image is ended).
+    #[cfg(windows)]
+    fn a_windows_process_is_asked_only_by_its_identity() {
+        let scratch = Scratch::new("ask");
+        let program = scratch.0.join("folio.exe");
+        crate::trust_harness::program(
+            &program,
+            crate::trust::FileVersion([0, 4, 7, 0]),
+            crate::trust_harness::Behaviour::StaysUp,
+        )
+        .unwrap();
+        let elsewhere = scratch.0.join("copy").join("folio.exe");
+        std::fs::create_dir_all(elsewhere.parent().unwrap()).unwrap();
+        std::fs::copy(&program, &elsewhere).unwrap();
+        let start = |image: &Path| {
+            crate::quiet_command(image)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("the synthetic program starts")
+        };
+        let mut child = start(&program);
+        let me = Running {
+            pid: child.id(),
+            started: started_of(child.id()).expect("a process just started has a start time"),
+        };
+        let other_start = Running {
+            pid: me.pid,
+            started: me.started + 1,
+        };
+        let asked = [
+            ask(other_start, &[&program], Ask::End),
+            ask(me, &[&elsewhere], Ask::End),
+            ask(me, &[&scratch.0.join("nowhere.exe")], Ask::End),
+        ];
+        let untouched = still_running(me);
+        let quit = ask(me, &[&elsewhere, &program], Ask::Quit);
+        let after_quit = still_running(me);
+        let ended = ask(me, &[&program], Ask::End);
+        let status = child.wait();
+        let again = ask(me, &[&program], Ask::End);
+        let mut stranger = start(&elsewhere);
+        let theirs = Running {
+            pid: stranger.id(),
+            started: started_of(stranger.id()).unwrap(),
+        };
+        let not_theirs = ask(theirs, &[&program], Ask::End);
+        let stranger_runs = still_running(theirs);
+        let _ = stranger.kill();
+        let _ = stranger.wait();
+        for answer in asked {
+            assert!(
+                !answer.unwrap(),
+                "nothing is sent to a process that is not it"
+            );
+        }
+        assert!(untouched, "the process runs on");
+        assert!(quit.unwrap(), "that process is asked");
+        assert!(
+            after_quit,
+            "with no window to close, asking does not end it"
+        );
+        assert!(ended.unwrap(), "that process is ended");
+        assert_eq!(status.unwrap().code(), Some(1));
+        assert!(!again.unwrap(), "an ended process is asked nothing");
+        assert!(
+            !not_theirs.unwrap(),
+            "another image's process is asked nothing"
+        );
+        assert!(stranger_runs, "and runs on");
     }
 
     #[cfg(target_os = "macos")]
