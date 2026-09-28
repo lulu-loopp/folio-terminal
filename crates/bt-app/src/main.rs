@@ -19695,6 +19695,57 @@ impl ImeOwner {
     ];
 }
 
+/// **A one-line text field of this window's own that can hold the keyboard**
+/// (B-AUDIT-046 RT-1).
+///
+/// What a paste is for: when one of these holds the keyboard, the clipboard's
+/// text goes into it — never into the terminal the field happens to be
+/// standing on. Derived from the ladder by [`text_field_holding`], never listed
+/// a second time beside it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextFieldSeat {
+    /// The tab-name editor.
+    TabName,
+    /// The branch prompt inside a git context menu.
+    GitPrompt,
+    /// The command palette's box.
+    Palette,
+    /// A text field of the settings dialog (a profile's path, its arguments,
+    /// the summoned terminal's startup command …).
+    Settings,
+    /// The commit graph's search field.
+    GraphSearch,
+    /// The in-pane find bar.
+    FindBar,
+}
+
+/// **Which text field holds the keyboard**, read off the rung the ladder
+/// resolved ([`ime_owner`]) — or `None` when what holds it is not a text field
+/// (B-AUDIT-046 RT-1).
+///
+/// The rungs *are* the enumeration: every rung that is a one-line field answers
+/// with itself, and the match is total, so a rung added to [`ImeOwner`] has to
+/// say here whether a paste goes into it. The one field that is not a rung of
+/// its own is the settings dialog's: the dialog is a modal, and whether its
+/// focus is a text field is the one extra fact this is handed
+/// ([`Runtime::settings_field_holds_the_keyboard`]).
+///
+/// The preview's document is not here: it takes a paste through its own door
+/// (`ClipboardSeat::PreviewDocument`), because it keeps the file's line breaks
+/// where a one-line field keeps the first line.
+#[must_use]
+fn text_field_holding(rung: ImeOwner, settings_field: bool) -> Option<TextFieldSeat> {
+    match rung {
+        ImeOwner::Rename => Some(TextFieldSeat::TabName),
+        ImeOwner::GitPrompt => Some(TextFieldSeat::GitPrompt),
+        ImeOwner::Palette => Some(TextFieldSeat::Palette),
+        ImeOwner::GraphSearch => Some(TextFieldSeat::GraphSearch),
+        ImeOwner::Search => Some(TextFieldSeat::FindBar),
+        ImeOwner::Modal => settings_field.then_some(TextFieldSeat::Settings),
+        ImeOwner::FilesTree | ImeOwner::Preview | ImeOwner::Shell => None,
+    }
+}
+
 /// **Where the candidate window hangs**, as a function of the rung
 /// (user report, 2026-08-17).
 ///
@@ -21583,16 +21634,30 @@ fn name_is_writable(name: &str) -> bool {
     })
 }
 
-/// Whether two paths name the same entry on a case-insensitive filesystem.
+/// **Whether renaming `old` to `new` would replace a different entry** — the
+/// question both rename doors ask before `std::fs::rename`, which replaces
+/// whatever `new` names on every platform (B-AUDIT-046 RT-3).
 ///
-/// It exists for one case and says so: renaming a file into its own name with
-/// different capitals. `notes.md` → `Notes.md` is a rename somebody means, and
-/// an existence check alone would refuse it because the destination is the
-/// source.
-#[must_use]
-fn same_path_ignoring_case(left: &std::path::Path, right: &std::path::Path) -> bool {
-    left.as_os_str().to_string_lossy().to_lowercase()
-        == right.as_os_str().to_string_lossy().to_lowercase()
+/// Asked of the **file's identity**, [`bt_platform::same_file`], never of the
+/// two strings. The string rule this replaces lower-cased both paths, which
+/// was right on a volume that folds case and wrong on one that does not: on
+/// case-sensitive APFS, Linux, a Windows directory with the case-sensitivity
+/// flag or a WSL tree, `readme.md` → `README.md` with a separate `README.md`
+/// present passed the check and replaced that file with no prompt and no undo.
+///
+/// Two cases, one question:
+///
+/// * `notes.md` → `Notes.md` on a volume that folds case: the destination
+///   "exists" because it **is** the source, `same_file` says so, and the OS
+///   renames in place — a rename somebody means;
+/// * the same press where `Notes.md` is a second file: `same_file` says it is
+///   not the source, and the rename is refused on the road every collision
+///   takes.
+///
+/// `symlink_metadata` rather than `exists`, so a dangling link at `new` is an
+/// entry in the way too, not an empty name.
+fn rename_would_replace_another_entry(old: &std::path::Path, new: &std::path::Path) -> bool {
+    new.symlink_metadata().is_ok() && !bt_platform::same_file(old, new)
 }
 
 /// The files tree's stable id for `directory`, under a column rooted at `root` —
@@ -23055,9 +23120,12 @@ struct RenameClipboard<'a> {
 ///
 /// Split out so that the reading happens *before* the editor is borrowed, which
 /// is the borrow order `settings_field_key` already keeps for the same reason.
+///
+/// **The window's own paste predicate** (B-AUDIT-046 RT-1): `Shift+Insert` and
+/// `Ctrl+Shift+V` are a paste in this box exactly as they are at the terminal's
+/// rung, rather than a `Ctrl+V` of its own spelling.
 fn rename_pastes(key: &Key, modifiers: ModifiersState) -> bool {
-    input::is_command_chord_alone(modifiers)
-        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"))
+    input::is_paste_shortcut(key, modifiers)
 }
 
 fn rename_key(
@@ -23121,7 +23189,7 @@ fn rename_key(
                 editor.clamp_scroll();
             }
         }
-        Key::Character(text) if control && text.eq_ignore_ascii_case("v") => {
+        _ if rename_pastes(key, modifiers) => {
             editor.insert(clipboard.paste);
         }
         // Every other `Ctrl`-letter chord: swallowed, for the reason the whole
@@ -44094,6 +44162,57 @@ impl Runtime<'_> {
         Ok(())
     }
 
+    /// **Whether a text field of the settings dialog holds the keyboard** — the
+    /// one fact [`text_field_holding`] needs beyond the rung (B-AUDIT-046 RT-1).
+    ///
+    /// The conditions under which the ladder reaches
+    /// [`Self::settings_field_key`] and it answers, asked in the ladder's own
+    /// words: no card stands above the dialog (each of those has its rung above
+    /// the dialog's), no chord is being recorded (the recorder takes every key),
+    /// no picker is open over the field, and the focus is a text field.
+    fn settings_field_holds_the_keyboard(&self) -> bool {
+        let card_above = self.app.quit.as_ref().is_some_and(quit::Quit::is_asking)
+            || self.window.dirty_gate.is_open()
+            || self.window.first_run.is_open()
+            || self.window.psreadline_invite.is_open()
+            || self.paste_card_seat().is_some()
+            || self.update_card_is_up();
+        !card_above
+            && self.window.settings.is_open()
+            && self.window.settings.recording_row().is_none()
+            && self.window.settings.menu().is_none()
+            && self.window.settings.row_menu().is_none()
+            && self
+                .window
+                .settings
+                .focus()
+                .is_some_and(|target| self.window.settings.text_field(target).is_some())
+    }
+
+    /// **One paste into the focused settings field**, written through to the
+    /// table as a keystroke's edit is.
+    ///
+    /// A path is the one value in this dialog nobody types out, and the
+    /// clipboard is where it comes from. Newlines are dropped rather than turned
+    /// into a second line: the field holds one.
+    fn paste_into_settings_field(&mut self, text: &str) -> Result<()> {
+        let text = text.replace(['\r', '\n'], "");
+        let Some(target) = self.window.settings.focus() else {
+            return Ok(());
+        };
+        let Some(field) = self.window.settings.text_field_mut(target) else {
+            return Ok(());
+        };
+        if !text.is_empty() {
+            field.insert(&text);
+            self.write_editor_field(target)?;
+        }
+        if self.refresh_chrome() {
+            self.present_chrome_change()?;
+        }
+        Ok(())
+    }
+
     /// One key press into whichever of the editor's fields has the focus, and
     /// whether it was the field's.
     ///
@@ -44124,17 +44243,18 @@ impl Runtime<'_> {
         if self.window.settings.text_field(target).is_none() {
             return Ok(false);
         }
+        // **The clipboard's chord is a paste into this field**, by the window's
+        // own predicate — `Shift+Insert` included — and through the one door
+        // every field's paste goes through (B-AUDIT-046 RT-1).
+        if input::is_paste_shortcut(&event.logical_key, self.window.modifiers) {
+            if !event.repeat {
+                self.paste_into_field(TextFieldSeat::Settings)?;
+            }
+            return Ok(true);
+        }
         let shift = self.window.modifiers.shift_key();
         // The application's modifier — see `search_field_key`'s note (M1-7).
         let control = input::is_command_chord(self.window.modifiers);
-        let paste = matches!(&event.logical_key, Key::Character(text)
-            if control && matches!(text.as_str(), "v" | "V"));
-        let pasted = paste.then(|| {
-            hang_watch::during(hang_watch::Station::ClipboardRead, || {
-                bt_platform::clipboard_text()
-            })
-            .unwrap_or_default()
-        });
         let Some(field) = self.window.settings.text_field_mut(target) else {
             return Ok(false);
         };
@@ -44171,24 +44291,9 @@ impl Runtime<'_> {
                 field.insert(" ");
                 edited = true;
             }
-            Key::Character(_) if control => {
-                match pasted {
-                    // A path is the one value in this dialog nobody types out,
-                    // and the clipboard is where it comes from. Newlines are
-                    // dropped rather than turned into a second line: the field
-                    // holds one.
-                    Some(text) if !text.is_empty() => {
-                        field.insert(&text.replace(['\r', '\n'], ""));
-                        edited = true;
-                    }
-                    Some(_) => {}
-                    None => {
-                        if let Key::Character(letter) = &event.logical_key
-                            && matches!(letter.as_str(), "a" | "A")
-                        {
-                            field.select_all();
-                        }
-                    }
+            Key::Character(letter) if control => {
+                if matches!(letter.as_str(), "a" | "A") {
+                    field.select_all();
                 }
             }
             // Whatever the keyboard produced, which is the layout's answer and
@@ -50238,6 +50343,10 @@ impl Runtime<'_> {
     fn clipboard_focus(&mut self) -> menubar::ClipboardFocus {
         menubar::ClipboardFocus {
             swallowing: self.a_surface_above_the_clipboard_rung_holds_the_keyboard(),
+            field: text_field_holding(
+                ime_owner(self.keyboard_owner()),
+                self.settings_field_holds_the_keyboard(),
+            ),
             preview_edit: self.preview_edit_focus().is_some(),
         }
     }
@@ -74020,6 +74129,181 @@ mod edit_menu_clipboard_tests {
             assert!(
                 verbs.contains(verb),
                 "`{verb}` has no arm in the application menu's verb runner"
+            );
+        }
+    }
+
+    /// RED (B-AUDIT-046 RT-1) — **a paste goes to the text field that holds the
+    /// keyboard, by either shortcut and by Edit ▸ Paste, and never to the shell
+    /// behind it.**
+    ///
+    /// The paste step used to fork on the quick edit alone, so `Ctrl+V`,
+    /// `Shift+Insert`, `Cmd+V` or Edit ▸ Paste with the caret in the find bar or
+    /// the graph's search wrote the clipboard into the terminal standing behind
+    /// the field — and with a newline at its end, ran it — while the field
+    /// stayed empty. The window already said the keyboard had left the shell.
+    ///
+    /// **The fields are not listed here.** The test walks every rung of the
+    /// ladder (`ImeOwner::ALL`) and takes the product's own answer to "is this
+    /// rung a field with a caret" (`ime_caret_source`), so a field added to the
+    /// ladder is asked about without anyone writing it down. The settings
+    /// dialog's fields ride the modal rung and are asked with its one extra fact.
+    /// The decision is the one both roads read — `keyboard_input`'s clipboard
+    /// rung and `run_an_application_menu_verb` — which the second half holds
+    /// them to, along with each upper field's own paste rung.
+    ///
+    /// MUTATION: make `menubar::paste_seat` return `clipboard_seat(focus)`
+    /// whatever the field — the find bar and the graph search rows answer
+    /// `Terminal` and go red; drop the `input::is_paste_shortcut` arm from
+    /// `git_menu_key` — the source half goes red.
+    #[test]
+    fn paste_goes_to_the_focused_field_and_never_to_the_shell_behind_it() {
+        use super::{
+            ImeCaretSource, ImeOwner, TextFieldSeat, ime_caret_source, text_field_holding,
+        };
+        use crate::input::is_paste_shortcut_on;
+        use crate::menubar::{ClipboardFocus, ClipboardSeat, paste_seat};
+        use bt_platform::HostPlatform;
+        use winit::keyboard::{Key, ModifiersState, NamedKey};
+
+        // Both shortcut forms, as the window's own predicate reads them on each
+        // platform: the keystroke road reaches `paste_seat` only through it.
+        let v = || Key::Character("v".into());
+        let control_v = (v(), ModifiersState::CONTROL);
+        let shift_insert = (Key::Named(NamedKey::Insert), ModifiersState::SHIFT);
+        let command_v = (v(), ModifiersState::SUPER);
+        for (chord, platform) in [
+            (&control_v, HostPlatform::Windows),
+            (&shift_insert, HostPlatform::Windows),
+            (&command_v, HostPlatform::MacOs),
+        ] {
+            assert!(
+                is_paste_shortcut_on(&chord.0, chord.1, platform),
+                "{chord:?} is a paste on {platform:?}"
+            );
+        }
+
+        let mut fields_reached = Vec::new();
+        for rung in ImeOwner::ALL {
+            for settings_field in [false, true] {
+                for swallowing in [false, true] {
+                    for preview_edit in [false, true] {
+                        let field = text_field_holding(rung, settings_field);
+                        let seat = paste_seat(ClipboardFocus {
+                            swallowing,
+                            field,
+                            preview_edit,
+                        });
+                        let takes_text = ime_caret_source(rung) == ImeCaretSource::Field;
+                        if takes_text && rung != ImeOwner::Preview {
+                            let field = field.unwrap_or_else(|| {
+                                panic!("{rung:?} has a caret and is no text field")
+                            });
+                            assert_eq!(
+                                seat,
+                                ClipboardSeat::Field(field),
+                                "a paste with {rung:?} holding the keyboard goes into it"
+                            );
+                            fields_reached.push(field);
+                        }
+                        if rung == ImeOwner::Modal && settings_field {
+                            assert_eq!(seat, ClipboardSeat::Field(TextFieldSeat::Settings));
+                            fields_reached.push(TextFieldSeat::Settings);
+                        }
+                        if rung == ImeOwner::Preview && preview_edit && !swallowing {
+                            assert_eq!(seat, ClipboardSeat::PreviewDocument);
+                        }
+                        if field.is_some() {
+                            assert_ne!(
+                                seat,
+                                ClipboardSeat::Terminal,
+                                "{rung:?}: a paste reached the shell behind a field"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        // The shell itself still gets its paste when nothing else holds the keys.
+        assert_eq!(
+            paste_seat(ClipboardFocus::default()),
+            ClipboardSeat::Terminal
+        );
+        // The two fields the defect was reported in are among the ones reached.
+        for field in [TextFieldSeat::FindBar, TextFieldSeat::GraphSearch] {
+            assert!(
+                fields_reached.contains(&field),
+                "{field:?} is never reached"
+            );
+        }
+
+        // The two roads read that one decision, and nothing else decides.
+        let ladder = ladder();
+        let rung = ladder
+            .find("menubar::paste_seat(self.clipboard_focus())")
+            .expect("the keystroke's paste asks the ladder's seat");
+        let terminal = ladder
+            .find("self.paste_from_clipboard()?;")
+            .expect("and the terminal is one of its answers");
+        assert!(
+            rung < terminal,
+            "the seat is asked before the shell is written to"
+        );
+        assert_eq!(
+            ladder.matches("self.paste_from_clipboard()").count(),
+            1,
+            "a second road to the terminal's paste in the ladder"
+        );
+        assert!(ladder.contains("self.paste_into_field(field)?;"));
+        let menu = method_body("Runtime", "run_an_application_menu_verb");
+        assert!(
+            menu.contains("menubar::paste_seat(focus)")
+                && menu.contains("self.paste_into_field(field)"),
+            "Edit ▸ Paste decides for itself instead of asking the seat"
+        );
+        let focus = method_body("Runtime", "clipboard_focus");
+        assert!(
+            focus.contains("text_field_holding(")
+                && focus.contains("ime_owner(self.keyboard_owner())"),
+            "the field is read off the ladder, not listed"
+        );
+        // The fields whose rungs stand above the clipboard rung take the same
+        // two chords themselves, through the same door or predicate.
+        for (handler, answer) in [
+            (
+                "git_menu_key",
+                "self.paste_into_field(TextFieldSeat::GitPrompt)?;",
+            ),
+            (
+                "settings_field_key",
+                "self.paste_into_field(TextFieldSeat::Settings)?;",
+            ),
+            (
+                "palette_key",
+                "input::is_paste_shortcut(&event.logical_key, self.window.modifiers)",
+            ),
+        ] {
+            assert!(
+                method_body("Runtime", handler).contains(answer),
+                "{handler} does not take the window's paste"
+            );
+        }
+        assert!(
+            item_body(&ItemQuery::function("rename_pastes")).contains("input::is_paste_shortcut("),
+            "the name box spells its own paste chord"
+        );
+        let door = method_body("Runtime", "paste_into_field");
+        for insert in [
+            "self.search_ime(",
+            "self.graph_search_ime(",
+            "self.git_prompt_ime(",
+            "self.palette_ime(",
+            "self.rename_ime(",
+            "self.paste_into_settings_field(",
+        ] {
+            assert!(
+                door.contains(insert),
+                "a field's paste skips its own insert: {insert}"
             );
         }
     }

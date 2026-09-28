@@ -2090,7 +2090,13 @@ fn windows_path_of_file_uri(host: &str, path: String, local: bool) -> Option<std
 /// Percent-escapes to bytes to UTF-8, strictly: a `%` without two hex digits
 /// after it, or a byte sequence that is not UTF-8, makes the whole string
 /// unreadable rather than partly guessed.
-fn percent_decode_utf8(text: &str) -> Option<String> {
+///
+/// Public because it is the decoder [`file_uri_to_path_on`] reads a URI's path
+/// with, and a relative reference in a document (`my%20notes.md`) is the same
+/// path grammar without the scheme in front: one decoder for both, so the two
+/// cannot disagree about what `%20` or a stray `%` means (B-AUDIT-046 PRV-2).
+#[must_use]
+pub fn percent_decode_utf8(text: &str) -> Option<String> {
     if !text.contains('%') {
         return Some(text.to_owned());
     }
@@ -2118,6 +2124,142 @@ fn hex_digit(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+// ── File identity and this machine's names (B-AUDIT-046) ───────────────────
+
+/// **Whether two paths name one object on the disk** — the file system's own
+/// identity, never a comparison of the two strings (B-AUDIT-046 RT-3).
+///
+/// Device and inode on Unix; volume serial number and 128-bit file id on
+/// Windows (`GetFileInformationByHandleEx(FileIdInfo)`). The whole point is that
+/// the strings differ: `readme.md` and `README.md` are one file on a volume that
+/// folds case and two files on one that does not — case-sensitive APFS, Linux,
+/// a Windows directory with the case-sensitivity flag set, a WSL tree — and no
+/// rule about letters can tell which without asking the volume.
+///
+/// **A link is judged as itself** (`symlink_metadata`, and on Windows a handle
+/// opened with `FILE_FLAG_OPEN_REPARSE_POINT`): a symbolic link named
+/// `README.md` that points at `readme.md` is a different entry from the file,
+/// and a rename onto it would replace the link.
+///
+/// `false` when either path cannot be asked — it does not exist, or the volume
+/// will not say — which is the direction every caller needs: "not provably the
+/// same object" is what makes a rename refuse to replace the other name.
+#[must_use]
+pub fn same_file(one: &std::path::Path, other: &std::path::Path) -> bool {
+    match (file_identity(one), file_identity(other)) {
+        (Some(one), Some(other)) => one == other,
+        _ => false,
+    }
+}
+
+/// The identity [`same_file`] compares, or `None` when the path cannot be asked.
+#[cfg(unix)]
+fn file_identity(path: &std::path::Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = std::fs::symlink_metadata(path).ok()?;
+    Some((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(windows)]
+use windows_impl::file_identity;
+
+/// Where there is neither an inode nor a file id, nothing can be proved the same.
+#[cfg(not(any(unix, windows)))]
+fn file_identity(path: &std::path::Path) -> Option<()> {
+    let _ = path;
+    None
+}
+
+/// **The names this machine answers to** — every spelling a shell on it may put
+/// in the authority of a `file://<host>/path` URI (B-AUDIT-046 TRM-3).
+///
+/// Read from the operating system and never from an environment variable:
+/// `COMPUTERNAME` exists only on Windows, so a reader built on it answered
+/// nothing on a Mac, and every OSC 7 report fish sends — `file://$hostname/…` —
+/// was taken for a remote share.
+///
+/// * **Unix**: `gethostname(3)`, which is where `$HOST` (zsh), `$HOSTNAME`
+///   (bash) and fish's `$hostname` all come from — and its first DNS label as
+///   well when it has more than one, because a shell configured with
+///   `hostname -s` prints the short form of the same name.
+/// * **Windows**: the physical DNS host name and the NetBIOS name; a WSL
+///   distribution takes one of them for its own host name, and the two differ
+///   in case and, past fifteen characters, in length.
+///
+/// Compared case-insensitively by the reader (host names are), and empty when
+/// the system will not say, which leaves `localhost` and an empty authority as
+/// the only spellings of "this machine".
+#[must_use]
+pub fn host_names() -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    for name in system_host_names() {
+        let short = name.split('.').next().unwrap_or_default().to_owned();
+        for candidate in [name, short] {
+            if !candidate.is_empty()
+                && !names
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(&candidate))
+            {
+                names.push(candidate);
+            }
+        }
+    }
+    names
+}
+
+/// `gethostname(3)`.
+#[cfg(unix)]
+fn system_host_names() -> Vec<String> {
+    // POSIX caps a host name at `HOST_NAME_MAX` (255 on Linux and macOS); one
+    // more for the terminator the call writes when the name fits.
+    let mut buffer = [0u8; 256];
+    // SAFETY: the pointer and length describe `buffer`, which outlives the call.
+    let status = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+    if status != 0 {
+        return Vec::new();
+    }
+    let end = buffer
+        .iter()
+        .position(|&byte| byte == 0)
+        .unwrap_or(buffer.len());
+    std::str::from_utf8(&buffer[..end])
+        .map(|name| vec![name.to_owned()])
+        .unwrap_or_default()
+}
+
+/// `GetComputerNameExW`, for the DNS host name and the NetBIOS name.
+#[cfg(windows)]
+fn system_host_names() -> Vec<String> {
+    use windows::Win32::System::SystemInformation::{
+        COMPUTER_NAME_FORMAT, ComputerNamePhysicalDnsHostname, ComputerNamePhysicalNetBIOS,
+        GetComputerNameExW,
+    };
+    use windows::core::PWSTR;
+
+    let read = |format: COMPUTER_NAME_FORMAT| -> Option<String> {
+        // A DNS host name is at most 255 characters; a NetBIOS name far fewer.
+        let mut buffer = [0u16; 256];
+        let mut length = u32::try_from(buffer.len()).unwrap_or(u32::MAX);
+        // SAFETY: the pointer and the in/out length describe `buffer`, which
+        // outlives the call; on success `length` is the characters written.
+        unsafe { GetComputerNameExW(format, Some(PWSTR(buffer.as_mut_ptr())), &raw mut length) }
+            .ok()?;
+        let written = buffer.get(..usize::try_from(length).ok()?)?;
+        String::from_utf16(written).ok()
+    };
+    [ComputerNamePhysicalDnsHostname, ComputerNamePhysicalNetBIOS]
+        .into_iter()
+        .filter_map(read)
+        .collect()
+}
+
+/// A platform with no host name to ask.
+#[cfg(not(any(unix, windows)))]
+fn system_host_names() -> Vec<String> {
+    Vec::new()
 }
 
 // ── Explorer's context menu (Windows landing block, slice 2) ───────────────
@@ -8714,6 +8856,55 @@ mod windows_impl {
             Ok(()) => info.Flags & FILE_CS_FLAG_CASE_SENSITIVE_DIR == 0,
             Err(_) => true,
         }
+    }
+
+    /// The identity [`crate::same_file`] compares, or `None` when the path cannot be asked.
+    ///
+    /// A handle that asks for no access right at all — the identity is metadata,
+    /// and a handle with no rights stands in the way of no reader or writer —
+    /// opened with `FILE_FLAG_BACKUP_SEMANTICS` so a directory can be asked too.
+    pub(crate) fn file_identity(path: &std::path::Path) -> Option<(u64, u128)> {
+        use windows::Win32::Storage::FileSystem::{
+            FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FileIdInfo,
+        };
+
+        let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+        if wide.contains(&0) {
+            return None;
+        }
+        wide.push(0);
+        // SAFETY: `wide` outlives the call and holds a NUL-terminated UTF-16 path,
+        // which is what `PCWSTR` requires; the call returns a handle or an error.
+        let handle = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                None,
+            )
+        }
+        .ok()?;
+        let mut info = FILE_ID_INFO::default();
+        // SAFETY: `info` is exclusively borrowed for the call and its size is the
+        // size the class declares; the handle is open for the duration.
+        let asked = unsafe {
+            GetFileInformationByHandleEx(
+                handle,
+                FileIdInfo,
+                (&raw mut info).cast(),
+                u32::try_from(size_of::<FILE_ID_INFO>()).unwrap_or(u32::MAX),
+            )
+        };
+        // SAFETY: the handle was opened above and is closed exactly once.
+        unsafe { close(handle) };
+        asked.ok()?;
+        Some((
+            info.VolumeSerialNumber,
+            u128::from_le_bytes(info.FileId.Identifier),
+        ))
     }
 
     /// Paint this window's own background in `rgb`, or in **nothing** at all.

@@ -1489,10 +1489,10 @@ pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
 /// (`file:///D:/src/` and `file:///D:/` both name directories); an interior one (`file:///D://a`)
 /// stays rejected.
 ///
-/// A non-empty authority is accepted only when it is `localhost` or `local_host`, this machine's
-/// own name — the two spellings of "this host" that a file URI has. Anything else is a remote
-/// share (`file://server/share/a.png`), which no local read may follow. Callers that must not
-/// honour a hostname at all pass `None`.
+/// A non-empty authority is accepted only when it is `localhost` or one of `local_hosts`, this
+/// machine's own names ([`local_host_names`]). Anything else is a remote share
+/// (`file://server/share/a.png`), which no local read may follow. Callers that must not honour a
+/// hostname at all pass an empty list.
 ///
 /// **This one accepts a POSIX root as well as a drive letter**, and that is what an OSC 7 report
 /// from a shell running inside WSL looks like: `file:///home/alice/src`. The directory a shell is
@@ -1515,29 +1515,29 @@ pub fn file_uri_to_local_image_path(uri: &str) -> Option<PathBuf> {
 /// `%`. A payload that is not a percent-encoded URI is read as the path it plainly is
 /// (`bt_transcript::paths::Spelling`), which is the same acceptance the raw backslashes above
 /// already had. The printed-reference door keeps the strict reading.
-pub fn file_uri_to_local_path(uri: &str, local_host: Option<&str>) -> Option<PathBuf> {
+pub fn file_uri_to_local_path(uri: &str, local_hosts: &[String]) -> Option<PathBuf> {
     bt_transcript::paths::decode_file_uri(
         uri,
-        local_host,
+        local_hosts,
         bt_transcript::paths::TrailingSlash::Directory,
         bt_transcript::paths::Rooting::DriveOrPosixRoot,
         bt_transcript::paths::Spelling::EncodedOrVerbatim,
     )
 }
 
-/// This machine's name — the one authority a `file://` URI may carry besides none and `localhost`.
+/// This machine's names — the authorities a `file://` URI may carry besides none and `localhost`.
+///
+/// **Asked of the operating system through [`bt_platform::host_names`]**, never of an environment
+/// variable (B-AUDIT-046 TRM-3). This used to read `COMPUTERNAME`, which exists only on Windows:
+/// on a Mac it answered nothing, so every OSC 7 of the form `file://<host>/path` — fish's own
+/// report, Apple's `zshrc_Apple_Terminal`, `vte.sh` — was taken for a remote share and the pane
+/// forgot its directory.
 ///
 /// Read once: a machine does not rename itself inside one terminal session, and the OSC 7 path
 /// runs on the event thread.
-pub fn local_host_name() -> Option<&'static str> {
-    static LOCAL_HOST: OnceLock<Option<String>> = OnceLock::new();
-    LOCAL_HOST
-        .get_or_init(|| {
-            std::env::var("COMPUTERNAME")
-                .ok()
-                .filter(|name| !name.is_empty())
-        })
-        .as_deref()
+pub fn local_host_names() -> &'static [String] {
+    static LOCAL_HOSTS: OnceLock<Vec<String>> = OnceLock::new();
+    LOCAL_HOSTS.get_or_init(bt_platform::host_names)
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2842,7 +2842,7 @@ mod tests {
             ("FILE:///D:/src", r"D:\src"),
         ] {
             assert_eq!(
-                file_uri_to_local_path(uri, None),
+                file_uri_to_local_path(uri, &[]),
                 Some(PathBuf::from(expected)),
                 "{uri:?}"
             );
@@ -2850,7 +2850,7 @@ mod tests {
         // This machine's own name is the third spelling of "this host"; any other authority is a
         // remote share and names no directory this terminal may resolve against.
         assert_eq!(
-            file_uri_to_local_path("file://MACHINE/D:/src", Some("machine")),
+            file_uri_to_local_path("file://MACHINE/D:/src", &["machine".to_owned()]),
             Some(PathBuf::from(r"D:\src"))
         );
         for rejected in [
@@ -2860,7 +2860,7 @@ mod tests {
             "",
             "not a uri",
         ] {
-            assert_eq!(file_uri_to_local_path(rejected, None), None, "{rejected:?}");
+            assert_eq!(file_uri_to_local_path(rejected, &[]), None, "{rejected:?}");
         }
         // Two of these used to be on that list and are answers now, not refusals.
         // `%zz` opens no escape, so the payload was never percent-encoded and the
@@ -2869,11 +2869,11 @@ mod tests {
         // the root of a POSIX namespace, which is a place a shell really stands
         // in (review row R3-11).
         assert_eq!(
-            file_uri_to_local_path("file:///D:/a%zz", None),
+            file_uri_to_local_path("file:///D:/a%zz", &[]),
             Some(PathBuf::from(r"D:\a%zz"))
         );
         assert_eq!(
-            file_uri_to_local_path("file:///", None),
+            file_uri_to_local_path("file:///", &[]),
             Some(PathBuf::from("/"))
         );
         // The image peek keeps its own stricter reading: no hostname authority, and a trailing
@@ -2930,13 +2930,13 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                file_uri_to_local_path(uri, None),
+                file_uri_to_local_path(uri, &[]),
                 Some(PathBuf::from(expected)),
                 "{uri:?}"
             );
         }
         assert_eq!(
-            file_uri_to_local_path(r"file://server\share\src", None),
+            file_uri_to_local_path(r"file://server\share\src", &[]),
             None,
             "a backslash in the path does not make another host's share ours"
         );
@@ -2969,7 +2969,7 @@ mod tests {
             ("file:///%E5%9B%BE%20%E7%89%87", "/图 片"),
         ] {
             assert_eq!(
-                file_uri_to_local_path(uri, None),
+                file_uri_to_local_path(uri, &[]),
                 Some(PathBuf::from(expected)),
                 "{uri:?}"
             );
@@ -2977,14 +2977,14 @@ mod tests {
         // Every other gate still stands in front of it. A POSIX root buys no authority, no interior
         // empty segment and no broken escape.
         for rejected in ["file://server/home/alice", "file:///home//alice"] {
-            assert_eq!(file_uri_to_local_path(rejected, None), None, "{rejected:?}");
+            assert_eq!(file_uri_to_local_path(rejected, &[]), None, "{rejected:?}");
         }
         // `%zz` is not a broken escape any more, because a payload carrying one
         // was never percent-encoded: it is a directory with a `%` in its name,
         // which is what `cmd.exe` reports and cannot spell any other way (review
         // row R3-9).
         assert_eq!(
-            file_uri_to_local_path("file:///home/%zz", None),
+            file_uri_to_local_path("file:///home/%zz", &[]),
             Some(PathBuf::from("/home/%zz"))
         );
         // **The image peek does not widen with it.** A reference is something this terminal opens,

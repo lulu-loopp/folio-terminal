@@ -1834,17 +1834,17 @@ fn a_files_box_opens_with_its_stem_selected() {
     );
 }
 
-/// PIN (user ruling 2026-08-19) — **the four quiet refusals, and the one
-/// name that only looks like a collision.**
+/// PIN (user ruling 2026-08-19) — **the quiet refusals of a name that
+/// cannot exist.**
 ///
 /// A name that cannot exist is a fact about the draft and is refused in
-/// silence; the collision test has to let a file be renamed into its own
-/// name with different capitals, because on this platform the destination
-/// "already exists" for the plain reason that it IS the source.
+/// silence. The other half this pin used to carry — a file renamed into its
+/// own name with different capitals is not a collision — is a question about
+/// the file's identity now, and is pinned on a real volume by
+/// `a_case_only_rename_never_replaces_a_different_file` (B-AUDIT-046).
 ///
 /// Red gate: drop `is_control` and a name carrying a tab character reaches
-/// `fs::rename`; compare the paths case-sensitively and `notes.md` →
-/// `Notes.md` is refused as a collision with itself.
+/// `fs::rename`.
 #[test]
 fn a_name_windows_will_not_take_is_refused_before_the_filesystem_is_asked() {
     for name in ["notes.md", ".gitignore", "a b c.txt", "笔记.md"] {
@@ -1855,14 +1855,6 @@ fn a_name_windows_will_not_take_is_refused_before_the_filesystem_is_asked() {
     ] {
         assert!(!name_is_writable(name), "{name:?} is not");
     }
-    assert!(same_path_ignoring_case(
-        std::path::Path::new(r"C:\notes\Notes.md"),
-        std::path::Path::new(r"c:\NOTES\notes.MD"),
-    ));
-    assert!(!same_path_ignoring_case(
-        std::path::Path::new(r"C:\notes\notes.md"),
-        std::path::Path::new(r"C:\notes\other.md"),
-    ));
 }
 
 /// PIN (user ruling 2026-08-19) — **the files column's key for a directory
@@ -1909,8 +1901,8 @@ fn a_directory_under_a_column_resolves_to_the_key_the_tree_walks_by() {
 /// This walks the real filesystem because that is the only place that claim
 /// is true or false.
 ///
-/// Red gate: drop the `new.exists()` guard in `rename_preview_file` and the
-/// second half of this test finds one file where it left two.
+/// Red gate: drop the identity question in `rename_would_replace_another_entry`
+/// and the first half of this test finds one file where it left two.
 #[test]
 fn a_rename_never_eats_the_file_that_already_has_the_name() {
     let directory = std::env::temp_dir().join(format!(
@@ -1927,10 +1919,13 @@ fn a_rename_never_eats_the_file_that_already_has_the_name() {
     std::fs::write(&from, "one").expect("write the file being renamed");
     std::fs::write(&taken, "two").expect("write the file in the way");
 
-    // The judgement `rename_preview_file` makes, stated over the same two
-    // facts it reads: a destination that exists and is a different entry.
+    // The door both rename surfaces go through, asked for real: a destination
+    // that exists and is a different entry is refused and nothing moves.
     let onto_taken = directory.join("taken.md");
-    assert!(onto_taken.exists() && !same_path_ignoring_case(&from, &onto_taken));
+    assert!(
+        rename_would_replace_another_entry(&from, &onto_taken),
+        "a name another file holds is refused"
+    );
     assert_eq!(
         std::fs::read_to_string(&taken).expect("the file in the way is still there"),
         "two",
@@ -1940,12 +1935,141 @@ fn a_rename_never_eats_the_file_that_already_has_the_name() {
     // A name nothing else has moves the file and leaves no copy behind.
     let onto_free = directory.join("todo.md");
     assert!(!onto_free.exists());
+    assert!(!rename_would_replace_another_entry(&from, &onto_free));
     std::fs::rename(&from, &onto_free).expect("the filesystem lets it go");
     assert!(!from.exists(), "the old name is gone");
     assert_eq!(
         std::fs::read_to_string(&onto_free).expect("the new name holds the bytes"),
         "one"
     );
+    std::fs::remove_dir_all(&directory).ok();
+}
+
+/// RED (B-AUDIT-046 RT-3) — **a rename that differs from another file's name
+/// only in case never replaces that file; a case-only rename of the file itself
+/// still goes through.**
+///
+/// The gate this replaces compared the two paths lower-cased, which only means
+/// "the same file" on a volume that folds case the way `str::to_lowercase`
+/// does. Where two such names are two files — case-sensitive APFS, Linux, a
+/// Windows directory with the case-sensitivity flag, a WSL tree — the gate
+/// passed and `std::fs::rename` replaced the other file with no prompt and no
+/// undo. The door now asks the volume for both entries' identity.
+///
+/// **Which road this walks is the volume's answer, asked here and printed.**
+/// Three pairs whose lower-cased spellings are equal are offered to the temp
+/// folder, and the first one the volume stores as *two* files is the
+/// collision: ASCII case on a case-sensitive volume (Linux, case-sensitive
+/// APFS); the Kelvin sign `K` beside `k`, and `ẞ` beside `ß`, on NTFS, whose
+/// upcase table folds neither while `to_lowercase` folds both. A volume that
+/// folds all three (case-insensitive APFS) has no collision to build, and the
+/// test then asserts the identity comparison directly on two distinct files.
+/// Either way the case-only rename of one file is walked for real.
+///
+/// The rename doors' own sequence is walked for real: the identity question
+/// both doors ask, then `std::fs::rename` exactly when it says the name is
+/// free.
+///
+/// MUTATION: in `rename_would_replace_another_entry`, replace
+/// `bt_platform::same_file(old, new)` with a comparison of the two paths
+/// lower-cased — the collision road finds `theirs` replaced by `mine`.
+#[test]
+fn a_case_only_rename_never_replaces_a_different_file() {
+    let directory = std::env::temp_dir().join(format!(
+        "bt-audit046-rename-{}-{:?}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|since| since.as_nanos())
+            .unwrap_or_default()
+    ));
+    std::fs::create_dir_all(&directory).expect("a temp folder");
+
+    let pairs = [
+        ("readme.md", "README.md"),
+        ("k.md", "\u{212a}.md"),
+        ("\u{df}.md", "\u{1e9e}.md"),
+    ];
+    let mut collision = None;
+    for (index, (one, other)) in pairs.into_iter().enumerate() {
+        assert_eq!(
+            one.to_lowercase(),
+            other.to_lowercase(),
+            "every pair is one name to a lower-cased comparison"
+        );
+        let folder = directory.join(format!("pair-{index}"));
+        std::fs::create_dir_all(&folder).expect("a folder per pair");
+        std::fs::write(folder.join(one), "mine").expect("write the file being renamed");
+        let second = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(folder.join(other));
+        match second {
+            Ok(mut file) => {
+                use std::io::Write as _;
+                file.write_all(b"theirs").expect("write the other file");
+                collision = Some((folder, one, other));
+                break;
+            }
+            // The volume folds this pair: the second name *is* the first file.
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => panic!("the volume refused {other:?} for a reason of its own: {error}"),
+        }
+    }
+
+    match &collision {
+        Some((folder, one, other)) => {
+            eprintln!("road: collision ({one:?} beside {other:?} are two files here)");
+            let from = folder.join(one);
+            let onto = folder.join(other);
+            assert!(
+                !bt_platform::same_file(&from, &onto),
+                "the volume says these are two files"
+            );
+            // The doors' own sequence: ask, and move only when the name is free.
+            if !rename_would_replace_another_entry(&from, &onto) {
+                std::fs::rename(&from, &onto).expect("the filesystem lets it go");
+            }
+            assert_eq!(
+                std::fs::read_to_string(&onto).expect("the other file is still there"),
+                "theirs",
+                "and nothing has moved onto it"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&from).expect("the renamed file stayed put"),
+                "mine"
+            );
+        }
+        None => {
+            eprintln!("road: identity (this volume folds every pair; no collision to build)");
+            let one = directory.join("one.md");
+            let two = directory.join("two.md");
+            std::fs::write(&one, "mine").expect("write one");
+            std::fs::write(&two, "theirs").expect("write two");
+            assert!(!bt_platform::same_file(&one, &two), "two files are two");
+            assert!(
+                bt_platform::same_file(&one, &directory.join("ONE.md")),
+                "and a folding volume's other spelling is the same file"
+            );
+        }
+    }
+
+    // The case-only rename of the file itself, on whatever this volume is.
+    let folder = directory.join("own");
+    std::fs::create_dir_all(&folder).expect("a folder for the own-name rename");
+    std::fs::write(folder.join("notes.md"), "own").expect("write the file");
+    let (own, recased) = (folder.join("notes.md"), folder.join("Notes.md"));
+    assert!(
+        !rename_would_replace_another_entry(&own, &recased),
+        "a case-only rename of one file is a rename"
+    );
+    std::fs::rename(&own, &recased).expect("the filesystem lets it go");
+    let names: Vec<String> = std::fs::read_dir(&folder)
+        .expect("list the folder")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["Notes.md"], "one file, under the new spelling");
     std::fs::remove_dir_all(&directory).ok();
 }
 

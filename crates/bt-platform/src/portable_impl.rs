@@ -1310,7 +1310,7 @@ pub fn directory_folds_case(directory: &Path) -> bool {
         let Some(parent) = candidate.parent() else {
             continue;
         };
-        return same_file(candidate, &parent.join(flipped));
+        return crate::same_file(candidate, &parent.join(flipped));
     }
     false
 }
@@ -1332,27 +1332,6 @@ fn flip_case(name: &str) -> Option<String> {
         })
         .collect();
     (flipped != name).then_some(flipped)
-}
-
-/// Whether two paths name one object on the disk.
-///
-/// Device and inode, which is the file system's own identity and not a string
-/// comparison — the whole point is that the two strings are different.
-#[cfg(unix)]
-fn same_file(one: &Path, other: &Path) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    let (Ok(one), Ok(other)) = (std::fs::metadata(one), std::fs::metadata(other)) else {
-        return false;
-    };
-    one.dev() == other.dev() && one.ino() == other.ino()
-}
-
-/// The same question where there are no inodes to compare.
-#[cfg(not(unix))]
-fn same_file(one: &Path, other: &Path) -> bool {
-    let _ = (one, other);
-    false
 }
 
 // ── the Explorer verb, which macOS does not have (M4-9) ────────────────────

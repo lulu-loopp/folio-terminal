@@ -136,7 +136,6 @@ bt-platform	[not(windows)] [target_os = "macos"]	crate::video::macos_player::Eng
 bt-platform	[not(windows)] [target_os = "macos"]	crate::video::macos_player::Machinery::one_turn	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[not(windows)] [target_os = "macos"]	crate::video::within_budget	std::sync::mpsc::Receiver::recv_timeout	1
 bt-platform	[not(windows)] [unix]	crate::portable_impl::redirect_std_streams_to_file	libc::close	1
-bt-platform	[not(windows)] [unix]	crate::portable_impl::same_file	std::fs::metadata	2
 bt-platform	[not(windows)] [unix]	crate::portable_impl::write_std_error	libc::write	1
 bt-platform	[target_os = "macos"]	crate::handoff::macos_handoff::openable_target	std::fs::canonicalize	1
 bt-platform	[target_os = "macos"]	crate::handoff::macos_handoff::openable_target	std::fs::metadata	1

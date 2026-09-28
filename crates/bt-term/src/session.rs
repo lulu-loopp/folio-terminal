@@ -52,7 +52,7 @@ use crate::{
         DecodedInlineImage, ImageReferenceShape, InlineImageDecodeError, InlineImageScaleTask,
         InlineImageSource, InlineImageTask, ScaledInlineImage, ShellIntegrationMarker,
         decode_inline_image, detect_peek_image_candidates, file_uri_to_local_image_path,
-        file_uri_to_local_path, local_host_name, normalized_local_image_path_key,
+        file_uri_to_local_path, local_host_names, normalized_local_image_path_key,
         scale_inline_image,
     },
     lifecycle::{LifecycleDirective, RowDirective, classify, plan_resize},
@@ -10976,7 +10976,7 @@ impl DualPlaneSession {
     /// thread), the same way a printed absolute path's existence is only ever the worker's
     /// question.
     fn set_reported_working_directory(&mut self, uri: &str) {
-        let reported = file_uri_to_local_path(uri, local_host_name());
+        let reported = file_uri_to_local_path(uri, local_host_names());
         // **The pane's first word about where it is standing is the answer to `~`** — but only for
         // a pane this window asked to be put down in its shell's own home (§7.30, 2026-09-07). The
         // launcher was handed a mark, the shell expanded it, and this is the shell saying what it
@@ -26981,6 +26981,77 @@ mod tests {
         std::fs::remove_dir(&nested).unwrap();
         std::fs::remove_file(directory.join("notes.md")).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED (B-AUDIT-046 TRM-3) — **a working-directory report that names this machine is this
+    /// machine's directory, and one that names another machine is still ignored.**
+    ///
+    /// `file://<host>/path` is how most shells say where they are standing, and the three forms
+    /// below are copied from the shells' own sources:
+    ///
+    /// * fish, `share/functions/__fish_config_interactive.fish` (`__fish_update_cwd_osc`):
+    ///   `printf \e\]7\;file://%s%s\a $host (string escape --style=url -- $PWD)`, where
+    ///   `$host` is `$hostname`;
+    /// * Apple's `/etc/zshrc_Apple_Terminal` (`update_terminal_cwd`):
+    ///   `printf '\e]7;%s\a' "file://$HOST$url_path"`;
+    /// * bash under VTE's `vte.sh` (`__vte_osc7`):
+    ///   `printf "\033]7;file://%s%s\033\\" "${HOSTNAME}" "$(__vte_urlencode "${PWD}")"` — the
+    ///   string terminator rather than the bell.
+    ///
+    /// The host they print is `gethostname`'s answer. The reader used to know this machine's name
+    /// only from `COMPUTERNAME`, which a Mac does not have, so every one of these was read as a
+    /// remote share and the pane forgot its directory. It now asks
+    /// [`bt_platform::host_names`] — the real producer, not a name handed in by the test — and the
+    /// comparison is case-insensitive, because host names are.
+    ///
+    /// MUTATION: make `local_host_names` answer the `COMPUTERNAME` variable again — every host
+    /// row goes red on macOS and Linux, where it is unset.
+    #[test]
+    fn a_cwd_message_naming_this_host_is_accepted_and_a_foreign_one_ignored() {
+        let directory = std::env::temp_dir();
+        let bare = bt_transcript::paths::local_path_to_file_uri(&directory);
+        let path = bare
+            .strip_prefix("file://")
+            .expect("a local file URI opens with the scheme and an empty authority");
+        let expected = file_uri_to_local_path(&bare, &[]).expect("the bare form is this machine's");
+        let host = bt_platform::host_names()
+            .into_iter()
+            .next()
+            .expect("this machine has a name to ask for");
+
+        let reported = |payload: String| {
+            let mut session = DualPlaneSession::new(nz(80), nz(24));
+            session.feed(payload.as_bytes()).unwrap();
+            session
+                .working_directory()
+                .map(std::path::Path::to_path_buf)
+        };
+        for spelling in [host.clone(), host.to_uppercase(), host.to_lowercase()] {
+            for (shell, payload) in [
+                ("fish", format!("\x1b]7;file://{spelling}{path}\x07")),
+                ("zsh (Apple)", format!("\x1b]7;file://{spelling}{path}\x07")),
+                (
+                    "bash (vte.sh)",
+                    format!("\x1b]7;file://{spelling}{path}\x1b\\"),
+                ),
+            ] {
+                assert_eq!(
+                    reported(payload).as_deref(),
+                    Some(expected.as_path()),
+                    "{shell}'s report naming this host as {spelling:?} is this machine's directory"
+                );
+            }
+        }
+        assert_eq!(
+            reported(format!("\x1b]7;file://localhost{path}\x07")).as_deref(),
+            Some(expected.as_path()),
+            "`localhost` is this machine too"
+        );
+        assert_eq!(
+            reported(format!("\x1b]7;file://another-machine.invalid{path}\x07")),
+            None,
+            "a report naming another machine names no directory here"
+        );
     }
 
     /// PIN (§7.1.5j, user report 2026-08-23) — **a screen that has stopped printing still finishes

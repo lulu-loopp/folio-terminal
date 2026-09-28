@@ -10,7 +10,7 @@ use crate::{
     files_row_activation, files_row_counts_clicks, files_row_entry, files_row_menu_subject, float,
     float_dock_label, folder_pick_outcome, foot_revealed_label, git_panel, hang_watch,
     home_shortened_path, i18n, marks, name_is_writable, palette_index, press_files_node, preview,
-    profiles, reroot_files_state, same_path_ignoring_case, seats, settings, toast,
+    profiles, rename_would_replace_another_entry, reroot_files_state, seats, settings, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -129,7 +129,10 @@ impl Runtime<'_> {
             return Ok(());
         }
         let new = directory.join(name);
-        if new.exists() && !same_path_ignoring_case(&old, &new) {
+        // A name another entry already holds is refused in silence, the road
+        // every collision takes; the question is the file's identity, not its
+        // spelling (B-AUDIT-046 RT-3).
+        if rename_would_replace_another_entry(&old, &new) {
             return Ok(());
         }
         if let Err(error) = hang_watch::during(hang_watch::Station::RenameDisk, || {

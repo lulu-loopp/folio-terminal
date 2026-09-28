@@ -7,7 +7,7 @@ use crate::{
     RenameClipboard, RenameExit, RenameVerdict, Runtime, Step, UserInputKind, composing_event_of,
     composition_ruling, diagnostics, file_menu_powers, git_graph, goto_tab_index, hang_watch,
     ime_caret_source, ime_commit_bytes, ime_cursor_area_of, ime_outbound, ime_owner, ime_report,
-    input, keyboard_owner_is_a_shell, keyhint, marks, native_window, paste_card_key,
+    input, keyboard_owner_is_a_shell, keyhint, marks, menubar, native_window, paste_card_key,
     popup_takes_the_key, preedit_caret_byte, profiles, quit, recoverable_clipboard_write,
     rename_key, rename_pastes, restore, settings, settings_key_of, shortcuts, toast,
     window_ime_cursor_area, write_pty_input, write_terminal_clipboard_text,
@@ -1788,11 +1788,32 @@ impl Runtime<'_> {
             }
             return Ok(());
         }
-        if !editing && input::is_paste_shortcut(&event.logical_key, self.window.modifiers) {
-            if !event.repeat {
-                self.paste_from_clipboard()?;
+        // **A paste goes where the keyboard is** (B-AUDIT-046 RT-1): into the
+        // text field that holds it — the find bar, the graph's search — and to
+        // the terminal only when no field does. It used to fork on the quick
+        // edit alone, so `Ctrl+V` typed into either field was written into the
+        // shell standing behind it while the field stayed empty. The question is
+        // the Edit menu's own ([`menubar::paste_seat`]), read off the one ladder.
+        if input::is_paste_shortcut(&event.logical_key, self.window.modifiers) {
+            match menubar::paste_seat(self.clipboard_focus()) {
+                menubar::ClipboardSeat::Field(field) => {
+                    if !event.repeat {
+                        self.paste_into_field(field)?;
+                    }
+                    return Ok(());
+                }
+                menubar::ClipboardSeat::Terminal => {
+                    if !event.repeat {
+                        self.paste_from_clipboard()?;
+                    }
+                    return Ok(());
+                }
+                // The quick edit's own rung below takes its paste.
+                menubar::ClipboardSeat::PreviewDocument => {}
+                // Every surface that swallows the keyboard has returned above;
+                // should one ever stand below, the paste still reaches no shell.
+                menubar::ClipboardSeat::Nobody => return Ok(()),
             }
-            return Ok(());
         }
         // The scaffold that used to stand here — `Ctrl+Alt+Shift+P`, a dev chord
         // that opened and closed the preview seat so its ruled address could be
@@ -1978,6 +1999,29 @@ impl Runtime<'_> {
         )
     }
 
+    /// A composition — or a paste, which arrives as one committed run — with the
+    /// name editor holding the keyboard.
+    ///
+    /// The editor's two doors: a pre-edit is drawn at its caret and is not in
+    /// the text, and a commit is an ordinary insert that replaces the
+    /// selection. Typing reveals the caret, exactly as it does in the terminal.
+    pub(crate) fn rename_ime(&mut self, event: &Ime) -> Result<()> {
+        let Some(mut editor) = self.window.rename.take() else {
+            return Ok(());
+        };
+        match event {
+            Ime::Preedit(text, _) => editor.field.set_preedit(text),
+            Ime::Commit(text) => editor.insert(text),
+            Ime::Enabled | Ime::Disabled => {}
+        }
+        self.window.rename = Some(editor);
+        self.window
+            .rename_blink
+            .reset(Instant::now(), self.app.motion);
+        self.refresh_chrome();
+        self.present_chrome_change()
+    }
+
     /// **Every surface whose rung in [`Runtime::keyboard_input`] stands above
     /// the clipboard's**, asked as one question (T-MAC-EDIT-CLIPBOARD).
     ///
@@ -2154,18 +2198,7 @@ impl Runtime<'_> {
                 // makes drawing it safe — an Escape that cancels a composition
                 // leaves the name exactly as it was, with nothing to un-type.
                 ImeOwner::Rename => {
-                    let mut editor = self.window.rename.take().expect("the editor is open");
-                    match &event {
-                        Ime::Preedit(text, _) => editor.field.set_preedit(text),
-                        Ime::Commit(text) => editor.insert(text),
-                        Ime::Enabled | Ime::Disabled => {}
-                    }
-                    self.window.rename = Some(editor);
-                    self.window
-                        .rename_blink
-                        .reset(Instant::now(), self.app.motion);
-                    self.refresh_chrome();
-                    self.present_chrome_change()?;
+                    self.rename_ime(&event)?;
                     return Ok(());
                 }
                 // With a modal or a popup up the terminal is not who is being

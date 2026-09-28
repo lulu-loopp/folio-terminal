@@ -45,13 +45,14 @@ use crate::{
     preview_rail_tip_text, preview_select, preview_selection_bands, preview_tab_index_among,
     preview_text, preview_text_box_at, preview_text_boxes, preview_text_grain, preview_trace,
     preview_viewport, preview_watch, preview_wide_blocks, preview_wrap, preview_wrap_columns,
-    profiles, recoverable_clipboard_write, resolve_document_pictures, revealable_preview_file,
-    same_path_ignoring_case, scroll_bar_layer, scrollback_quota, seats, settings, settle_attention,
-    shown_address, source_opens_as_a_page, step_preview_caret_by_row, strip_animation_tick_is_due,
-    surface_pixels, surface_subject_of, surface_takes_image_zoom, switcher_rows, tab_owes_frame,
-    tab_trailing_targets, table_block, text_field, tick_owes_a_present, toast, tooltip, trace_sink,
-    video_frame_texture_key, video_seat, video_still_destination, viewport_of_rect, visible_range,
-    webhost, webnav, wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
+    profiles, recoverable_clipboard_write, rename_would_replace_another_entry,
+    resolve_document_pictures, revealable_preview_file, scroll_bar_layer, scrollback_quota, seats,
+    settings, settle_attention, shown_address, source_opens_as_a_page, step_preview_caret_by_row,
+    strip_animation_tick_is_due, surface_pixels, surface_subject_of, surface_takes_image_zoom,
+    switcher_rows, tab_owes_frame, tab_trailing_targets, table_block, text_field,
+    tick_owes_a_present, toast, tooltip, trace_sink, video_frame_texture_key, video_seat,
+    video_still_destination, viewport_of_rect, visible_range, webhost, webnav,
+    wheel_points_sideways, window_taskbar_progress, write_terminal_clipboard_text,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
@@ -1043,7 +1044,10 @@ impl Runtime<'_> {
             return Ok(());
         }
         let new = directory.join(name);
-        if new.exists() && !same_path_ignoring_case(&old, &new) {
+        // A name another entry already holds is refused in silence, the road
+        // every collision takes; the question is the file's identity, not its
+        // spelling (B-AUDIT-046 RT-3).
+        if rename_would_replace_another_entry(&old, &new) {
             return Ok(());
         }
         if let Err(error) = hang_watch::during(hang_watch::Station::RenameDisk, || {

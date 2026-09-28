@@ -20,6 +20,18 @@ All notable changes to Folio are recorded here. The format follows
 
 - A reboot or logout saves your layout like a quit; pinned tabs come back
   with their panes.
+- Renaming a file to a name that differs only in capitals no longer replaces a
+  different file of that name in a folder that tells capitals apart; the
+  rename is refused instead.
+- Pasting with the find bar, the git graph's search, the git branch prompt or
+  a settings field focused puts the text into that field instead of the
+  terminal behind it — by Ctrl+V, Shift+Insert, Cmd+V or Edit ▸ Paste.
+- macOS: a shell that names the Mac in its working-directory report, as fish
+  does, now gives the pane its folder: new tabs start there and relative paths
+  are clickable.
+- Markdown preview: `file:///Users/…` links and images open on macOS, and
+  links written with `%20` for a space (`my%20notes.md`) find the file on both
+  platforms.
 - macOS: the shipped shells start as login shells, so tools whose PATH is set
   in .zprofile — Homebrew's — are found; a profile can turn login on or off;
   a profile with arguments no longer reads as not installed.
