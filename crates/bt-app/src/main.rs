@@ -600,7 +600,8 @@ enum AppEvent {
     TrialWritesReleased,
     /// **One of the update job's two facts has landed** (U-18): the day's
     /// check settled (`update::begin`), or how this copy was installed was read
-    /// (`install_channel`'s worker).
+    /// (`install_channel`'s worker) — or the job owner's pass over an earlier
+    /// launch's transaction landed (`update_job::Job::after_start`, U-33).
     ///
     /// Carries nothing: both facts are in their owners' slots by the time this
     /// is sent, and the handler gathers them (`update_job::Gathered::now`) and
@@ -41334,7 +41335,19 @@ impl Runtime<'_> {
             &persist::storage_dir(),
             settings_store.loaded().update_check,
         );
-        update::begin();
+        // **The update job, and the day's check behind it** (U-18, U-33). A transaction an
+        // earlier launch left `preparing` or `deferred` (`update_startup::waiting`) is the job
+        // owner's to sweep, count, resume or discard, on the job's worker and before any offer;
+        // the check starts once that pass has landed, and not at all when it resumed a staged
+        // set (`Job::after_start`). With nothing waiting the check starts here, as it always has.
+        // A launch a rollback sent raises its card at `Failed` (U-29).
+        let the_update_job = update_job::Job::default()
+            .after_rollback(update_startup::failed())
+            .after_start(
+                update_startup::waiting(),
+                update_job::resumer_for_this_copy(),
+                update::begin,
+            );
         // **How this copy was installed** (U-1): read once, off this thread, and said once in
         // `diagnostics.log`. The first-run card's Explorer row reads it (U-3) and waits a turn
         // for it, so the wake is installed before the worker can finish. It is the update job's
@@ -42031,8 +42044,7 @@ impl Runtime<'_> {
             window_ring: None,
             window_ring_shown: None,
             quake: quake::Quake::default(),
-            // A launch a rollback sent raises its card at `Failed` (U-29).
-            update_job: update_job::Job::default().after_rollback(update_startup::failed()),
+            update_job: the_update_job,
             update_shown: update_card::Shown::default(),
             quit_reason: quit::Reason::Asked,
             handoff_answer: None,

@@ -82,7 +82,8 @@ use bt_platform::HostPlatform;
 use crate::install_channel::{Channel, Manager};
 use crate::update::{Version, newer_than, should_offer};
 use crate::update_handoff::Staged;
-use crate::update_txn::{Nonce, TxnId};
+use crate::update_prepare::Resumer;
+use crate::update_txn::{Home, Nonce, TxnId};
 
 /// **Whether a Windows reader may be offered an update** — on since U-31, once
 /// the Windows driver (U-20), the card (U-19), the quit barrier (U-21), the
@@ -234,6 +235,10 @@ pub(crate) enum Pending {
     AwaitingClassification,
     /// The channel is known; the day's check has not settled.
     AwaitingCheck,
+    /// **An earlier launch's transaction is being settled** by this launch's
+    /// job-owner pass ([`Job::after_start`], U-33): nothing is offered until
+    /// it has swept, counted, resumed or discarded it.
+    AwaitingTransaction,
 }
 
 /// **The two facts that arrive off the window thread, as far as they have**,
@@ -1014,6 +1019,75 @@ pub(crate) fn driver_for_this_copy() -> (Box<dyn Driver>, SharedTransport) {
     }
 }
 
+/// **How this copy revalidates a staged transaction a later launch finds**
+/// (U-33): the running install folder's on Windows
+/// (`update_prepare_windows::resumer`, under the system's trust), the running
+/// bundle's on macOS (`update_prepare_macos::resumer_of_this_copy`), and
+/// nothing anywhere else (`update_prepare::no_resume`, which discards).
+#[must_use]
+pub(crate) fn resumer_for_this_copy() -> Resumer {
+    match bt_platform::host_platform() {
+        HostPlatform::Windows => match std::env::current_exe() {
+            Ok(exe) => {
+                crate::update_prepare_windows::resumer(exe, bt_platform::trust::Policy::System)
+            }
+            Err(_) => crate::update_prepare::no_resume(),
+        },
+        HostPlatform::MacOs => crate::update_prepare_macos::resumer_of_this_copy(),
+        HostPlatform::OtherUnix => crate::update_prepare::no_resume(),
+    }
+}
+
+// ── an earlier launch's transaction ─────────────────────────────────────────
+
+/// **What this launch's job-owner pass decided** (U-33) —
+/// `update_prepare::settle_at_launch`'s answer, carried from the job's worker
+/// to the window thread.
+pub(crate) enum Landed {
+    /// Nothing is left of an earlier launch's transaction that is this
+    /// launch's to show: nothing waited, or it was swept, counted with offers
+    /// off, or discarded. The launch checks and offers as usual.
+    Ordinary,
+    /// Another holder has the transaction lock: nothing was touched, and this
+    /// launch offers nothing.
+    Busy,
+    /// **A staged set passed revalidation**: the offer minted again from the
+    /// set's own version under the transaction's identity, and the staged
+    /// transaction, lock held — the verified card, as if its download had just
+    /// finished.
+    Resumed(Offer, Box<Staged>),
+}
+
+/// Where this launch's job-owner pass is.
+enum Launch {
+    /// None was due at this launch, or it has landed and been read.
+    Done,
+    /// The start left a transaction for the job owner; the pass starts once
+    /// how this copy was installed is known (the revalidation holds the copy
+    /// to it, as a press does).
+    Due {
+        home: Home,
+        resume: Resumer,
+        check: Box<dyn FnOnce() + Send>,
+    },
+    /// The pass runs on the job's worker and leaves its answer here.
+    Running {
+        landed: Arc<Mutex<Option<Landed>>>,
+        check: Box<dyn FnOnce() + Send>,
+    },
+}
+
+/// What [`Job::consider`] does after asking the launch pass.
+enum Pass {
+    /// The pass has not landed: nothing is decided.
+    Waiting,
+    /// The pass decided this launch (a resumed card, or `Busy`): the line to
+    /// say, the first time.
+    Decided(Option<String>),
+    /// The launch is an ordinary one: consider the offer as usual.
+    Ordinary,
+}
+
 // ── progress, and the stale-event rule ─────────────────────────────────────
 
 /// **Why the quit gave the update up** (0.4.6 U-21, §C.3 and R-4): the reason
@@ -1234,6 +1308,9 @@ pub(crate) struct Job<W> {
     /// The cancel flag of the driver working for this job's offer, from the
     /// press until the download ends ([`Poster::cancelled`]).
     running: Option<Arc<AtomicBool>>,
+    /// **This launch's job-owner pass** over the transaction an earlier
+    /// launch left ([`Self::after_start`], U-33).
+    launch: Launch,
 }
 
 impl<W: Copy + Eq> Default for Job<W> {
@@ -1288,6 +1365,7 @@ impl<W: Copy + Eq> Job<W> {
             staged: None,
             abandoned: None,
             running: None,
+            launch: Launch::Done,
         }
     }
 
@@ -1319,6 +1397,151 @@ impl<W: Copy + Eq> Job<W> {
             self.offered_this_launch = true;
         }
         self
+    }
+
+    /// **What the start left for this launch's job owner** (U-33; (b).1 F-17
+    /// and (b).2's W1–W2, M1–M2): `waiting` is the home whose `preparing` /
+    /// `deferred` transaction the start continued past
+    /// (`update_startup::waiting`), `resume` how this copy revalidates a
+    /// staged set ([`resumer_for_this_copy`]) and `check` the start of the
+    /// day's update check (`update::begin`).
+    ///
+    /// With nothing waiting, `check` runs now, as every start has. Otherwise
+    /// the job owner's pass (`update_prepare::settle_at_launch`) runs **once,
+    /// on the job's worker** (`bt-update-job`), as soon as the channel is
+    /// known, and **before any offer**: the job stays
+    /// [`Pending::AwaitingTransaction`] until it lands, and [`Self::consider`]
+    /// reads its answer on the window thread — `Swept`, a discard, anything
+    /// that leaves no staged set → an ordinary launch; `Busy` → no offer this
+    /// launch; a counted set that revalidates → `Verified` with the offer
+    /// rebuilt from the set's own version, in the most recently active
+    /// ordinary window, exactly as if the download had just finished.
+    ///
+    /// **The day's check and a resumed set** (the 24-hour rule): `check` runs
+    /// only once the pass has landed, and **not at all when the pass resumed a
+    /// staged set** — that launch's card is the staged version's, and a check
+    /// run beside it would offer the same release a second time. A launch
+    /// whose pass swept or discarded, or found the lock held, checks as usual
+    /// (a check that is not due asks nothing, `update::due`). A kernel that
+    /// will not give the pass a thread leaves the transaction for the next
+    /// launch and makes this one ordinary.
+    #[must_use]
+    pub(crate) fn after_start(
+        mut self,
+        waiting: Option<Home>,
+        resume: Resumer,
+        check: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        match waiting {
+            None => check(),
+            Some(home) => {
+                self.launch = Launch::Due {
+                    home,
+                    resume,
+                    check: Box::new(check),
+                };
+            }
+        }
+        self
+    }
+
+    /// **The launch pass, asked on the window thread** by [`Self::consider`]:
+    /// started once the channel is known, read once it has landed.
+    fn launch_pass(&mut self, gathered: &Gathered, presenters: &Presenters<'_, W>) -> Pass {
+        let (landed, check) = match std::mem::replace(&mut self.launch, Launch::Done) {
+            Launch::Done => return Pass::Ordinary,
+            Launch::Due {
+                home,
+                resume,
+                check,
+            } => {
+                let Some(channel) = gathered.channel else {
+                    self.launch = Launch::Due {
+                        home,
+                        resume,
+                        check,
+                    };
+                    self.state = State::Pending(Pending::AwaitingTransaction);
+                    return Pass::Waiting;
+                };
+                let landed = Arc::new(Mutex::new(None));
+                let (slot, offers, platform) =
+                    (Arc::clone(&landed), self.offers, gathered.platform);
+                let spawned = bt_platform::spawn_at_priority(
+                    crate::update_prepare::WORKER,
+                    bt_platform::ThreadPriority::BelowNormal,
+                    move |worker| {
+                        let answer = crate::update_prepare::settle_at_launch(
+                            worker,
+                            &home,
+                            offers,
+                            resume,
+                            Some(channel),
+                            platform,
+                        );
+                        *slot
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
+                        evidence_landed();
+                    },
+                );
+                if spawned.is_err() {
+                    check();
+                    return Pass::Ordinary;
+                }
+                self.launch = Launch::Running { landed, check };
+                self.state = State::Pending(Pending::AwaitingTransaction);
+                return Pass::Waiting;
+            }
+            Launch::Running { landed, check } => {
+                let answer = landed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                match answer {
+                    Some(answer) => (answer, check),
+                    None => {
+                        self.launch = Launch::Running { landed, check };
+                        self.state = State::Pending(Pending::AwaitingTransaction);
+                        return Pass::Waiting;
+                    }
+                }
+            }
+        };
+        match landed {
+            Landed::Ordinary => {
+                check();
+                Pass::Ordinary
+            }
+            Landed::Busy => {
+                check();
+                self.state = State::Idle;
+                self.offered_this_launch = true;
+                Pass::Decided((!self.said).then(|| {
+                    self.said = true;
+                    format!("Folio: update job — no offer: {}", Stop::Busy.why())
+                }))
+            }
+            Landed::Resumed(offer, staged) => {
+                let line = format!(
+                    "Folio: update job — {} was prepared at an earlier launch and is verified again",
+                    offer.tag()
+                );
+                self.presenter = crate::most_recently_active_window(
+                    presenters.visited,
+                    presenters.open,
+                    presenters.quake,
+                );
+                self.staged = Some(*staged);
+                self.state = State::Verified(offer);
+                self.put_away = false;
+                self.offered_this_launch = true;
+                Pass::Decided((!self.said).then(|| {
+                    self.said = true;
+                    line
+                }))
+            }
+        }
     }
 
     /// A job standing at `Verified` with `offer` — a test's way to the quit
@@ -1445,7 +1668,9 @@ impl<W: Copy + Eq> Job<W> {
     }
 
     /// **Consider an offer** on what has been gathered — the handler of
-    /// `AppEvent::UpdateJobOffer`.
+    /// `AppEvent::UpdateJobOffer`. An earlier launch's transaction is settled
+    /// first ([`Self::after_start`]): until its pass lands nothing is decided,
+    /// and a resumed set or a held lock decides this launch without an offer.
     ///
     /// Only a job that has not offered this launch is moved — and a job that
     /// has not offered holds no offer, so an offer, once minted, is never
@@ -1457,6 +1682,12 @@ impl<W: Copy + Eq> Job<W> {
         presenters: &Presenters<'_, W>,
         mint: impl FnOnce() -> TxnId,
     ) -> Option<String> {
+        // An earlier launch's transaction is settled before any offer (U-33).
+        match self.launch_pass(&gathered, presenters) {
+            Pass::Waiting => return None,
+            Pass::Decided(line) => return line,
+            Pass::Ordinary => {}
+        }
         if self.offered_this_launch {
             return None;
         }

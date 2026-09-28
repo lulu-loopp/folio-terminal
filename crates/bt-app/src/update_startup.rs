@@ -47,7 +47,10 @@
 //!      not the rescue copy of the build that began the transaction (the
 //!      folder was replaced by hand): then `H\<txn>` (its image detached first,
 //!      as above) and the journal are removed under the lock, nothing in the
-//!      install, and the start continues.
+//!      install, and the start continues. A transaction the start continues
+//!      past is **left for this launch's job owner** ([`waiting`]): the update
+//!      job's pass sweeps, counts, resumes or discards it on its worker
+//!      (`update_job::Job::after_start`, U-33) — the start itself never does.
 //!
 //! A journal this build cannot read, a lock somebody else holds, and a file
 //! that cannot be measured all leave everything as it is and continue.
@@ -101,6 +104,19 @@ struct Trial {
 /// **The failure a rollback sent this start to report**, set only by
 /// [`pass`] (U-29).
 static FAILED: OnceLock<Failure> = OnceLock::new();
+
+/// **The home whose `preparing` / `deferred` transaction this start continued
+/// past**, set only by [`pass`] (U-33).
+static WAITING: OnceLock<Home> = OnceLock::new();
+
+/// **The installation home whose transaction waits for this launch's job
+/// owner** — the start found a `preparing` or `deferred` journal there and
+/// continued past it, touching nothing (the ordinary start's rule). The update
+/// job's pass at this launch (`update_job::Job::after_start`) is what sweeps,
+/// counts, resumes or discards it. `None` for every other start.
+pub(crate) fn waiting() -> Option<Home> {
+    WAITING.get().cloned()
+}
 
 /// **What the card of this launch says about an earlier launch's update**:
 /// set when this start carried `--update-failed` and its home's journal says
@@ -172,11 +188,14 @@ pub(crate) struct Start<'a> {
 /// What the pass decided.
 pub(crate) enum Verdict {
     /// Start as usual, holding `admission` for the life of the process, with
-    /// the card a rollback sent this start to raise.
+    /// the card a rollback sent this start to raise, and the home whose
+    /// `preparing` / `deferred` transaction the start left for this launch's
+    /// job owner ([`waiting`]).
     Continue {
         admission: Option<Held>,
         trial: Option<(TxnId, Nonce)>,
         failed: Option<Failure>,
+        waiting: Option<Home>,
     },
     /// Leave now, with this exit code: the rescue build has this start.
     Exit(i32),
@@ -206,9 +225,13 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
             admission,
             trial,
             failed,
+            waiting,
         } => {
             if let Some(held) = admission {
                 let _ = ADMISSION.set(held);
+            }
+            if let Some(home) = waiting {
+                let _ = WAITING.set(home);
             }
             if let Some((txn, nonce)) = trial {
                 let _ = TRIAL.set(Trial { txn, nonce, home });
@@ -246,6 +269,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
                 admission,
                 trial: None,
                 failed: None,
+                waiting: None,
             };
         }
     };
@@ -254,6 +278,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             admission,
             trial: None,
             failed: None,
+            waiting: None,
         };
     };
     let header = header.clone();
@@ -287,16 +312,22 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
         trial_of: trial.map(|(txn, _)| txn),
         sent_by_rollback: start.failed.is_some(),
     };
+    // The start's lock is let go before the job owner asks for it: a
+    // transaction continued past is the job's, at this launch (U-33).
+    let waiting =
+        matches!(header.class, Class::Preparing | Class::Deferred).then(|| start.home.clone());
     match at_start(&view) {
         StartAction::Continue => Verdict::Continue {
             admission,
             trial: None,
             failed,
+            waiting,
         },
         StartAction::RunAsTrial => Verdict::Continue {
             admission,
             trial,
             failed,
+            waiting: None,
         },
         action @ (StartAction::Retire | StartAction::Discard) => {
             retire(action, &header, start.home, lock, world);
@@ -304,6 +335,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
                 admission,
                 trial: None,
                 failed,
+                waiting: None,
             }
         }
         StartAction::HandToRescue => hand_to_rescue(start, &header, admission, world),
@@ -512,6 +544,7 @@ fn hand_to_rescue(
         failed: named.map(|home| Failure::Incomplete {
             folder: home.to_path_buf(),
         }),
+        waiting: None,
     }
 }
 

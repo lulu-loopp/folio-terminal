@@ -75,8 +75,10 @@
 //! staged member still its recorded digest, the staged executable's identity again at
 //! its own version, and the rescue copy still the old image. The applier runs
 //! it after O has let go and before the entrance is written (U-23); O's resume
-//! at a later launch ([`revalidate`], which discards on a failure) is the
-//! card's (U-19 with U-32).
+//! at a later launch is [`resume`] ([`revalidate`], which discards on a
+//! failure, then the staged `folio.exe`'s own version), which the update job
+//! runs on its worker at every launch that finds a `Prepared` transaction
+//! (`update_prepare::settle_at_launch`, U-33).
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -652,13 +654,6 @@ pub(crate) struct Resume<'a> {
 ///
 /// # Errors
 /// The [`Stop`] that failed; the transaction is gone.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "O's resume at a later launch is the card's (U-19 with U-32); the applier revalidates through `staged_as_verified` (U-23)"
-    )
-)]
 pub(crate) fn revalidate(
     worker: &WorkerCtx,
     staged: Staged,
@@ -671,6 +666,54 @@ pub(crate) fn revalidate(
             Err(stop)
         }
     }
+}
+
+/// **O's resume at a later launch** (U-33; `update_prepare::Resumer`):
+/// [`revalidate`], then the version the staged set installs, read from the
+/// staged `folio.exe`'s own release manifest (F-4: the manifest the archive's
+/// expansion held to the offer) — the offer is rebuilt from it, never from a
+/// download. A set whose manifest cannot be read is discarded like any other
+/// that fails revalidation.
+///
+/// # Errors
+/// The [`Stop`] that failed; the transaction is gone.
+pub(crate) fn resume(
+    worker: &WorkerCtx,
+    staged: Staged,
+    resume: &Resume<'_>,
+) -> Result<(Staged, String), Stop> {
+    let staged = revalidate(worker, staged, resume)?;
+    let version = staged
+        .home
+        .members_folder(staged.journal.txn, Place::Set)
+        .and_then(|set| EmbeddedManifest.manifest_text(&set.join(EXECUTABLE)).ok())
+        .and_then(|text| Manifest::parse(&text).ok())
+        .map(|manifest| manifest.version);
+    match version {
+        Some(version) => Ok((staged, version)),
+        None => {
+            let _ = discard(worker, staged, &Event::Discarded);
+            Err(Stop::Identity)
+        }
+    }
+}
+
+/// **The resumer of the running copy** (`update_job::resumer_for_this_copy`):
+/// [`resume`] for the executable at `exe` under `policy`, for the channel
+/// the job hands it.
+#[must_use]
+pub(crate) fn resumer(exe: PathBuf, policy: Policy) -> crate::update_prepare::Resumer {
+    Box::new(move |worker, staged, channel| {
+        resume(
+            worker,
+            staged,
+            &Resume {
+                exe: &exe,
+                channel,
+                policy: &policy,
+            },
+        )
+    })
 }
 
 /// **The staged transaction `journal` of `home` is still what was verified**

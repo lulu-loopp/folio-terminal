@@ -62,9 +62,10 @@
 //! its second launch. **Before any resume** ([`revalidate`]): the channel, the
 //! folder, the running bundle (still the one the journal names), and the
 //! staged bundle (the identity check, and the version and cdhash the journal
-//! recorded); a failure discards. Neither has a product caller yet: the card
-//! that resumes a staged job at a later launch is U-19's, with U-32 (U-28
-//! decided the place and left it unwired: a counted job has no offer to show).
+//! recorded); a failure discards. The update job runs both at every launch
+//! that finds a transaction waiting (`update_prepare::settle_at_launch`,
+//! U-33), and a set that passes is [`resume`]d: the verified card again, for
+//! the version the journal recorded.
 //!
 //! The worker, the progress reports, the checksum, the abandonment and the
 //! launch pass are `update_prepare`'s: the same on both platforms.
@@ -501,13 +502,6 @@ pub(crate) fn identity(worker: &WorkerCtx, bundle: &Path) -> Result<BundleIdenti
 ///
 /// # Errors
 /// The [`Stop`] that failed; the transaction is gone.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the launch pass and the resume are wired with the staged card of a later launch (U-19, with U-32; U-28 left them unwired: a counted job has no offer)"
-    )
-)]
 pub(crate) fn revalidate(
     worker: &WorkerCtx,
     staged: Staged,
@@ -521,6 +515,50 @@ pub(crate) fn revalidate(
             let _ = discard(worker, staged, &Event::Discarded);
             Err(stop)
         }
+    }
+}
+
+/// **O's resume at a later launch** (U-33; `update_prepare::Resumer`):
+/// [`revalidate`], then the version the staged bundle installs — the one the
+/// journal recorded at `Prepared`, which the revalidation has just held the
+/// staged bundle to.
+///
+/// # Errors
+/// The [`Stop`] that failed; the transaction is gone.
+pub(crate) fn resume(
+    worker: &WorkerCtx,
+    staged: Staged,
+    bundle: &Path,
+    tools: &dyn Tools,
+    channel: Option<Channel>,
+) -> Result<(Staged, String), Stop> {
+    let staged = revalidate(worker, staged, bundle, tools, channel)?;
+    match &staged.journal.body.layout {
+        Layout::Bundle { new, .. } => {
+            let version = new.version.clone();
+            Ok((staged, version))
+        }
+        _ => {
+            let _ = discard(worker, staged, &Event::Discarded);
+            Err(Stop::Journal)
+        }
+    }
+}
+
+/// **The resumer of the running copy** (`update_job::resumer_for_this_copy`):
+/// [`resume`] for the bundle this process's executable sits in, with the
+/// system's tools; a process not running from a bundle cannot revalidate
+/// anything (`update_prepare::no_resume`).
+#[must_use]
+pub(crate) fn resumer_of_this_copy() -> crate::update_prepare::Resumer {
+    let bundle = std::env::current_exe()
+        .ok()
+        .and_then(|exe| running_bundle(&exe));
+    match bundle {
+        Some(bundle) => Box::new(move |worker, staged, channel| {
+            resume(worker, staged, &bundle, &System, channel)
+        }),
+        None => crate::update_prepare::no_resume(),
     }
 }
 

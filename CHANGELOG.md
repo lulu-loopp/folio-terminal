@@ -33,6 +33,12 @@ All notable changes to Folio are recorded here. The format follows
 - Windows: opening Folio from Explorer's right-click menu, or running
   `folio --version` while another Folio starts, no longer leaves the new
   window unable to save its settings and tabs.
+- Windows: an update that was downloaded but not installed — Folio closed
+  with Later, or the machine lost power mid-download — no longer blocks every
+  later update. The next start shows the downloaded update again, ready to
+  restart, without downloading it a second time; a download that never
+  finished, or one no longer intact, is cleared, and one still unused at the
+  second start after it is cleared too.
 
 ### Internal
 

@@ -1366,3 +1366,422 @@ fn a_feed_asset_signed_by_another_signer_is_refused_as_identity() {
     assert_eq!(scene.installed(), before, "nothing installed was changed");
     assert_eq!(page.calls(), 0, "github.com was contacted");
 }
+
+// ── a later launch, through the product's road (U-33) ───────────────────────
+
+/// **The start's world for a later launch**: nothing is started, no entrance
+/// is removed and nothing is mounted; what it would say is kept.
+#[derive(Default)]
+struct Quiet(Vec<String>);
+
+impl crate::update_startup::World for Quiet {
+    fn say(&mut self, line: &str) {
+        self.0.push(line.to_owned());
+    }
+
+    fn spawn_detached(&mut self, program: &Path, _: &[std::ffi::OsString]) -> std::io::Result<()> {
+        panic!("a later launch started {}", program.display())
+    }
+
+    fn retire_entrance(&mut self, _: TxnId) -> Result<(), String> {
+        panic!("a later launch of a waiting transaction removed an entrance")
+    }
+
+    fn mounts_under(&mut self, _: &Path) -> Result<Vec<PathBuf>, String> {
+        Ok(Vec::new())
+    }
+
+    fn on_a_worker(&mut self, _: crate::update_startup::OffThread) -> std::io::Result<()> {
+        panic!("a later launch handed a retirement to a worker")
+    }
+}
+
+/// What a later launch left: the job after its pass landed, whether the day's
+/// check was started, and the one line the job said.
+struct Launched {
+    job: Job<u32>,
+    checked: Arc<std::sync::atomic::AtomicBool>,
+    said: Option<String>,
+}
+
+/// **A later launch of the copy whose executable is `exe`, down the product's
+/// road**: the ordinary start's pass (`update_startup::run`, which decides
+/// what it leaves for the job owner), the job built the way `create` builds
+/// it (`Job::after_start` with that answer, `resume`, and a check that records
+/// being started), then the job asked to consider on `gathered` the way the
+/// window thread asks it — every `AppEvent::UpdateJobOffer` — until its pass
+/// has landed. The window `1` is open and was the last visited.
+fn launch(exe: &Path, resume: crate::update_prepare::Resumer, gathered: &Gathered) -> Launched {
+    let home = Home::of(HostPlatform::Windows, exe).expect("an executable in a folder");
+    let start = crate::update_startup::Start {
+        own_exe: exe,
+        home: &home,
+        argv: &[],
+        trial: None,
+        failed: None,
+    };
+    let mut world = Quiet::default();
+    let crate::update_startup::Verdict::Continue { waiting, .. } =
+        crate::update_startup::run(&start, &mut world)
+    else {
+        panic!("a start with a waiting transaction continues");
+    };
+    assert!(world.0.is_empty(), "the start said {:?}", world.0);
+    let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut job = Job::with_offers(true).after_start(waiting, resume, {
+        let checked = Arc::clone(&checked);
+        move || checked.store(true, std::sync::atomic::Ordering::SeqCst)
+    });
+    let presenters = Presenters {
+        visited: &[1],
+        open: &[1],
+        quake: None,
+    };
+    let deadline = Instant::now() + Duration::from_secs(300);
+    let mut said = None;
+    loop {
+        if let Some(line) = job.consider(gathered.clone(), &presenters, || TxnId::new([0xAA; 16])) {
+            said = Some(line);
+        }
+        if job.state() != &State::Pending(crate::update_job::Pending::AwaitingTransaction) {
+            return Launched { job, checked, said };
+        }
+        assert!(Instant::now() < deadline, "the launch pass never landed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// What a launch has gathered by the time the channel is read: the channel,
+/// and a check that has not settled yet (`check`) or that knows `v0.4.7`.
+fn at_launch_gathered(knows_the_release: bool) -> Gathered {
+    Gathered {
+        check: knows_the_release.then(|| {
+            (
+                UpdateCheckV1 {
+                    latest_tag: Some(TAG.to_owned()),
+                    ..UpdateCheckV1::default()
+                },
+                true,
+            )
+        }),
+        channel: Some(Channel::Ours),
+        running: "0.4.6",
+        capable: true,
+        trial: false,
+        platform: HostPlatform::Windows,
+    }
+}
+
+/// The product's resumer for `scene`'s running build, under the scene's root.
+fn resumer_of(scene: &Scene) -> crate::update_prepare::Resumer {
+    resumer(scene.exe.clone(), scene.ca.policy())
+}
+
+/// **Download, Later, close**: the real Prepare of `v0.4.7` under
+/// transaction `1` reaches `Verified`, and the process ends — the job and the
+/// lock it held are let go, the journal stays at `Prepared`.
+fn prepared_and_closed(scene: &Scene) {
+    let job = press(
+        &scene.driver(TestTools::real()),
+        Arc::new(Release::of(scene.archive.clone())),
+        1,
+    );
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+    drop(job);
+}
+
+/// **An install folder whose earlier launch died during a download**: a
+/// running build at `<root>/Folio/folio.exe` and transaction `3`'s journal at
+/// `Allocated`, as the Windows Prepare writes it, with part of an archive in
+/// `H\<txn>\download\`. No signature is needed: nothing here is verified.
+fn allocated_scene(tag: &str) -> (Scratch, PathBuf, Home, TxnId) {
+    let root = std::env::temp_dir().join(format!(
+        "bt-u33-{tag}-{}-{}",
+        std::process::id(),
+        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
+    ));
+    let scratch = Scratch(root.clone());
+    let install = root.join("Folio");
+    std::fs::create_dir_all(&install).unwrap();
+    let exe = install.join(EXECUTABLE);
+    std::fs::write(&exe, b"the running build").unwrap();
+    let home = Home::of(HostPlatform::Windows, &exe).expect("an executable in a folder");
+    let txn = TxnId::new([3; 16]);
+    let rescue = home
+        .rescue_copy(txn, OsStr::new(EXECUTABLE))
+        .expect("a rescue path");
+    let allocated = Journal::allocate(
+        txn,
+        rescue.to_str().expect("a UTF-8 path").to_owned(),
+        Layout::Members(Inventories {
+            old_shipped: vec![EXECUTABLE.to_owned()],
+            old_present: Vec::new(),
+            new: Vec::new(),
+        }),
+    );
+    std::fs::create_dir_all(home.root()).unwrap();
+    install_txn::durable_write(&home.journal(), &allocated.encode()).unwrap();
+    let download = home.transaction(txn).join("download");
+    std::fs::create_dir_all(&download).unwrap();
+    std::fs::write(
+        download.join(offer(0).asset()),
+        b"half of an archive".repeat(1_000),
+    )
+    .unwrap();
+    (scratch, exe, home, txn)
+}
+
+/// RED (U-33) — **a launch after "download, Later, close" shows the verified
+/// card again, from the staged set and without any download: `Verified` with
+/// the staged version, in the last active window, the staged transaction held
+/// — and it does not start the day's check.**
+///
+/// W2 and F-17: the job owner "resumes (revalidating) or discards after 2
+/// launches". On the clean VM nothing ran the pass: the journal stayed at
+/// `Prepared` for ever, the start offered v0.4.7 again as new, and every
+/// press ended `Busy` (`U-31-W-verify.md`). Here the real Prepare stages the
+/// release, the process ends, and a later launch goes down the product's road
+/// — the start's pass, `Job::after_start`, `Job::consider` — with no
+/// transport at all: the card can only come from the set on disk. The offer
+/// is the transaction's own and names the staged `folio.exe`'s version; the
+/// launch is counted; and the 24-hour rule holds: the launch that resumed does
+/// not check, so the same release is not offered twice.
+///
+/// MUTATION: in `Job::consider`, skip `self.launch_pass(…)` (take the
+/// ordinary road) — the job waits for the check and never shows the card.
+#[test]
+fn a_later_launch_shows_the_verified_card_from_the_staged_set_without_downloading() {
+    let Some(scene) = Scene::new("resume") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+    prepared_and_closed(&scene);
+
+    let launched = launch(&scene.exe, resumer_of(&scene), &at_launch_gathered(false));
+    let job = &launched.job;
+    let State::Verified(offer) = job.state() else {
+        panic!("the verified card comes back: {:?}", job.state());
+    };
+    assert_eq!(
+        offer.txn(),
+        TxnId::new([1; 16]),
+        "the transaction's own offer"
+    );
+    assert_eq!(offer.to_version(), TO, "the staged folio.exe's version");
+    assert_eq!(job.card_window(), Some(1), "in the last active window");
+    assert_eq!(
+        crate::update_card::paint(job.state()).map(|paint| paint.verbs),
+        Some(vec![
+            crate::update_card::CardVerb::Restart,
+            crate::update_card::CardVerb::Later
+        ]),
+        "the Restart to update card"
+    );
+    let staged = job.staged().expect("the staged transaction is the job's");
+    assert_eq!(staged.journal.txn, TxnId::new([1; 16]));
+    let home = scene.home();
+    assert!(
+        install_txn::try_hold(&home.lock(), Hold::Exclusive)
+            .unwrap()
+            .is_none(),
+        "the job holds the transaction lock"
+    );
+    assert_eq!(
+        journal_on_disk(&home).body.phase,
+        Phase::Prepared {
+            deferred_launches: 1
+        },
+        "the launch is counted"
+    );
+    assert!(
+        !launched.checked.load(std::sync::atomic::Ordering::SeqCst),
+        "a launch that resumed a staged set starts no check (the 24-hour rule)"
+    );
+    assert!(
+        launched
+            .said
+            .as_deref()
+            .is_some_and(|line| line.contains("verified again")),
+        "{:?}",
+        launched.said
+    );
+    assert_eq!(scene.installed(), before, "nothing installed was changed");
+}
+
+/// RED (U-33) — **a staged set that fails revalidation at a later launch is
+/// discarded — its folder, its rescue copy and its journal gone, the lock let
+/// go — and the launch checks and offers as usual.**
+///
+/// F-17: revalidation (hash, signature, manifest, classification) comes
+/// before any resume, and a failure discards. A staged member changed between
+/// the Prepare and the launch; the product's road refuses it and clears the
+/// transaction, so a later press is not refused `Busy`.
+///
+/// MUTATION: in `update_prepare::settle_at_launch`, answer
+/// `Landed::Resumed` without calling `resume` (the changed set is shown as
+/// verified).
+#[test]
+fn a_later_launch_discards_a_staged_set_that_fails_revalidation() {
+    let Some(scene) = Scene::new("resume-refused") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+    prepared_and_closed(&scene);
+    let set = scene
+        .home()
+        .members_folder(TxnId::new([1; 16]), Place::Set)
+        .unwrap();
+    std::fs::write(
+        set.join("uninstall.cmd"),
+        b"@rem changed after the Prepare\r\n",
+    )
+    .unwrap();
+
+    let launched = launch(&scene.exe, resumer_of(&scene), &at_launch_gathered(false));
+    assert_eq!(
+        launched.job.state(),
+        &State::Pending(crate::update_job::Pending::AwaitingCheck),
+        "an ordinary launch, waiting for its check"
+    );
+    assert!(launched.job.staged().is_none());
+    assert!(
+        launched.checked.load(std::sync::atomic::Ordering::SeqCst),
+        "a launch that discarded checks as usual"
+    );
+    scene.left_nothing(1);
+    assert_eq!(scene.installed(), before, "nothing installed was changed");
+}
+
+/// RED (U-33) — **the second launch that finds the same staged set discards
+/// it, even though the first showed its card: nothing of it is left, and that
+/// launch checks as usual.**
+///
+/// W2: "discards after 2 launches" — a launch counts whether or not the card
+/// it shows is pressed. Download, Later, close; a launch shows the verified
+/// card again; Later, close; the next launch finds `deferred_launches` at its
+/// limit and clears the transaction.
+///
+/// MUTATION: in `update_prepare::settle_at_launch`, treat
+/// `AtLaunch::Discarded` as a resume of the set the journal names (or set
+/// `DEFERRED_LAUNCH_LIMIT` to 3) — the second launch shows the card again.
+#[test]
+fn the_second_launch_that_finds_a_staged_set_discards_it() {
+    let Some(scene) = Scene::new("resume-twice") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+    prepared_and_closed(&scene);
+
+    let first = launch(&scene.exe, resumer_of(&scene), &at_launch_gathered(false));
+    assert!(
+        matches!(first.job.state(), State::Verified(_)),
+        "{:?}",
+        first.job.state()
+    );
+    drop(first);
+
+    let second = launch(&scene.exe, resumer_of(&scene), &at_launch_gathered(false));
+    assert!(
+        !matches!(second.job.state(), State::Verified(_)),
+        "{:?}",
+        second.job.state()
+    );
+    assert!(second.job.staged().is_none());
+    assert!(
+        second.checked.load(std::sync::atomic::Ordering::SeqCst),
+        "a launch that discarded checks as usual"
+    );
+    scene.left_nothing(1);
+    assert_eq!(scene.installed(), before, "nothing installed was changed");
+}
+
+/// RED (U-33) — **a launch after a download died at `Allocated` sweeps it
+/// while the lock is free: `H\<txn>` and the journal are gone, the install is
+/// untouched, and the launch checks and offers as usual.**
+///
+/// W1 and F-17: at `Allocated`, "if the lock is free: delete `H\<txn>` and the
+/// journal. Old starts." On the clean VM about 120 MB and the journal stayed
+/// for ever and every later press was refused `Busy`, because nothing ran the
+/// job owner's pass. The transaction here is the Windows Prepare's
+/// `Allocated` shape; the launch goes down the product's road.
+///
+/// MUTATION: in `update_startup::run`, answer `waiting: None` for every class
+/// (the start leaves nothing for the job owner) — the journal and `H\<txn>`
+/// stay.
+#[test]
+fn a_later_launch_sweeps_a_download_that_died_at_allocated() {
+    let (_scratch, exe, home, txn) = allocated_scene("sweep");
+    let launched = launch(
+        &exe,
+        crate::update_prepare::no_resume(),
+        &at_launch_gathered(false),
+    );
+    assert!(
+        !home.transaction(txn).exists(),
+        "the transaction's folder is removed"
+    );
+    assert!(!home.journal().exists(), "the journal is removed");
+    assert!(
+        install_txn::try_hold(&home.lock(), Hold::Exclusive)
+            .unwrap()
+            .is_some(),
+        "the lock is let go"
+    );
+    assert_eq!(std::fs::read(&exe).unwrap(), b"the running build");
+    assert_eq!(
+        launched.job.state(),
+        &State::Pending(crate::update_job::Pending::AwaitingCheck)
+    );
+    assert!(
+        launched.checked.load(std::sync::atomic::Ordering::SeqCst),
+        "the launch checks as usual"
+    );
+}
+
+/// RED (U-33) — **while another holder has the transaction lock, a launch
+/// changes nothing and offers nothing, even with a newer release known.**
+///
+/// The launch pass's `Busy`: the transaction is somebody else's now (another
+/// Folio of this install, or its applier), so the job owner here neither
+/// sweeps nor counts it, and no card is raised this launch — a card whose
+/// press could only be refused `Busy`.
+///
+/// MUTATION: in `Job::launch_pass`, answer `Landed::Busy` as an ordinary
+/// launch (`check(); Pass::Ordinary`) — `v0.4.7` is offered.
+#[test]
+fn a_later_launch_that_finds_the_lock_held_changes_nothing_and_offers_nothing() {
+    let (_scratch, exe, home, txn) = allocated_scene("busy");
+    let journal = std::fs::read(home.journal()).unwrap();
+    let holder = install_txn::try_hold(&home.lock(), Hold::Exclusive)
+        .unwrap()
+        .expect("the lock is free before the test holds it");
+    let mut launched = launch(
+        &exe,
+        crate::update_prepare::no_resume(),
+        &at_launch_gathered(true),
+    );
+    assert_eq!(launched.job.state(), &State::Idle);
+    assert_eq!(launched.job.card_window(), None, "no card");
+    assert_eq!(
+        launched.said.as_deref(),
+        Some("Folio: update job — no offer: another update holds this installation")
+    );
+    // The check settles later in the same launch: still no offer.
+    launched.job.consider(
+        at_launch_gathered(true),
+        &Presenters {
+            visited: &[1],
+            open: &[1],
+            quake: None,
+        },
+        || TxnId::new([0xAA; 16]),
+    );
+    assert_eq!(launched.job.state(), &State::Idle);
+    assert_eq!(std::fs::read(home.journal()).unwrap(), journal);
+    assert!(home.transaction(txn).join("download").exists());
+    drop(holder);
+}

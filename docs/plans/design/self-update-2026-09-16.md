@@ -2174,7 +2174,8 @@ window, and never loops through the rescue build.
 **U-20's four decisions, as taken.** (1) Revalidation runs in the applier,
 under the lock, after O has let go and before the entrance is written
 (`update_prepare_windows::staged_as_verified`; O's later-launch resume,
-`revalidate`, is the card's, U-19 with U-32). The version is read from the
+`revalidate`, was handed to "U-19 with U-32" and is wired by U-33 — see
+"The job owner's pass, wired (U-33)" below). The version is read from the
 staged `folio.exe`'s own `VERSIONINFO`, not from a body field: the journal's
 recorded digests were taken when the set had just been verified at the
 offer's version and bind it to that offer; a field would grow the rescue
@@ -2291,3 +2292,43 @@ transaction; R writes nothing, waits for nothing and opens nothing (U-23's
 180 s wait is removed). `Asker::Rescue` drives the Windows recovery; the
 trial's wait (`update_apply::watch_trial`) and stop (`stop_trial`) are both
 platforms'.
+
+## Revision 2026-09-27 (d) — the job owner's pass, wired (U-33)
+
+**Who owned it.** The job owner's pass at a later launch — W1's sweep, W2's
+count and discard, and the revalidated resume (F-17) — was U-20's "deferred age
+rule" ((b).5). U-20 reused U-27's `update_prepare::at_launch`; U-27's report
+handed the wiring to U-28, U-28's to "U-19 with U-32" (`reports/U-28.md`), and
+U-32 is the macOS enabler, so no Windows ticket took it and U-31 turned offers
+on with `at_launch` and `revalidate` still carrying `expect(dead_code)`. The
+clean-VM checklist found it (W1 and W2 failed: `U-31-W-verify.md`). **U-33
+wired it**; the ledger's "U-19 with U-32" for this row is closed by U-33.
+
+**What a launch does now.** The ordinary start is unchanged: at `preparing` /
+`deferred` it continues and touches nothing, and it now names the home it
+continued past (`update_startup::waiting`). The update job is built with that
+answer (`Job::after_start`), and its pass (`update_prepare::settle_at_launch`)
+runs once, on the `bt-update-job` worker, as soon as the channel is known and
+before any offer; the job is `Pending::AwaitingTransaction` until it lands.
+`at_launch` answers, and the job maps it:
+
+| pass | this launch |
+|---|---|
+| `Nothing`, `Left`, `Swept` (W1, M1), `Discarded` (the second launch, W2, M2), a failed step | ordinary: the check starts, the job offers as usual |
+| `Busy` (another holder has the lock) | nothing is touched and nothing is offered |
+| `Counted`, offers off in this build | the count is recorded and the lock let go; no card |
+| `Counted`, offers on | revalidated for the channel (`update_prepare_windows::resume` — `staged_as_verified`, then the staged `folio.exe`'s own release manifest for the version; `update_prepare_macos::resume` — `still_valid`, then the journal's recorded version); the offer minted again from that version under the transaction's own identity (tag `v<version>`); the job at `Verified` holding the staged transaction, in the most recently active ordinary window — the card as if the download had just finished. A revalidation that fails has discarded the set (`Discarded`, then the clearing): ordinary |
+
+**The day's check beside a resumed set.** The check (`update::begin`) is the
+last thing the pass decides: it starts once the pass has landed, and not at
+all when it resumed a set — that launch's card is the staged version's, and a
+check beside it would offer the same release a second time. A launch that
+swept, discarded or found the lock held checks as usual (24 hours, `update::due`).
+
+**A resumed launch counts.** `deferred_launches` is advanced by every launch
+that finds the set, the one that shows the card again included: download,
+Later, close; the next start shows *Restart to update*; Later, close again; the
+start after that discards (the limit is 2, `DEFERRED_LAUNCH_LIMIT`). F-17's
+"each launch that does not resume" is read as each launch whose card did not
+lead to a Restart — the journal cannot know, when it counts, whether the card
+will be pressed.

@@ -24,7 +24,9 @@
 //!   second launch (W2, M2). It reads the phase alone, so it is one function
 //!   for both layouts. What *revalidating* a staged transaction means differs
 //!   (a bundle's identity, a member set's digests), and each driver has its
-//!   own.
+//!   own ([`Resumer`]). The whole pass as the update job runs it at a launch
+//!   — the phase's answer, then the resume of a counted set with the offer
+//!   rebuilt from its own version — is [`settle_at_launch`] (U-33).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -34,8 +36,11 @@ use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
 use bt_platform::install_txn::{self, Hold};
 
+use bt_platform::HostPlatform;
+
+use crate::install_channel::Channel;
 use crate::update_handoff::Staged;
-use crate::update_job::{Bytes, Fetching, Poster, Step, Stop};
+use crate::update_job::{Bytes, Fetching, Landed, Offer, Poster, Step, Stop};
 use crate::update_txn::{
     Action, Actor, Asker, Disk, Effect, Event, Home, Journal, Located, PhaseKind, TxnId, decide,
     may,
@@ -245,13 +250,6 @@ pub(crate) fn clear(
 // ── a later launch ──────────────────────────────────────────────────────────
 
 /// **What the job owner of a launch did about the transaction it found.**
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the launch pass and the resume are wired with the staged card of a later launch (U-19, with U-32; U-28 left them unwired: a counted job has no offer)"
-    )
-)]
 pub(crate) enum AtLaunch {
     /// No journal: no transaction.
     Nothing,
@@ -274,13 +272,6 @@ pub(crate) enum AtLaunch {
 ///
 /// # Errors
 /// A step that failed, as a sentence; whatever it left is the next launch's.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the launch pass and the resume are wired with the staged card of a later launch (U-19, with U-32; U-28 left them unwired: a counted job has no offer)"
-    )
-)]
 pub(crate) fn at_launch(worker: &WorkerCtx, home: &Home) -> Result<AtLaunch, String> {
     if std::fs::symlink_metadata(home.journal()).is_err() {
         return Ok(AtLaunch::Nothing);
@@ -334,5 +325,100 @@ pub(crate) fn at_launch(worker: &WorkerCtx, home: &Home) -> Result<AtLaunch, Str
             }
         }
         _ => Ok(AtLaunch::Left),
+    }
+}
+
+/// **How this copy revalidates a staged transaction before O resumes it**
+/// (F-17), on the job's worker, given how this copy was installed: the staged
+/// transaction back with **the version its set installs**, read from the set
+/// itself — the staged `folio.exe`'s own release manifest on Windows, the
+/// staged bundle's recorded version on macOS — never from a download. A
+/// failure has already discarded the transaction (`Discarded`, then
+/// [`clear`]) and says why. `update_job::resumer_for_this_copy` is the
+/// product's; a test holds the real revalidation to its own trust root.
+pub(crate) type Resumer =
+    Box<dyn FnOnce(&WorkerCtx, Staged, Option<Channel>) -> Result<(Staged, String), Stop> + Send>;
+
+/// **The resumer of a copy that cannot revalidate** — a platform with no
+/// release, a copy that cannot name its own executable or bundle: whatever it
+/// finds staged is discarded, since nothing here could ever install it.
+#[must_use]
+pub(crate) fn no_resume() -> Resumer {
+    Box::new(|worker, staged, _| {
+        let _ = discard(worker, staged, &Event::Discarded);
+        Err(Stop::NotOurs)
+    })
+}
+
+/// **This launch's job-owner pass, whole** (U-33; (b).2's W1–W2 and M1–M2),
+/// on the job's worker: [`at_launch`], then —
+///
+/// * `Swept`, `Discarded`, `Nothing`, `Left`, or a step that failed →
+///   [`Landed::Ordinary`]: the launch offers as usual;
+/// * `Busy` → [`Landed::Busy`]: another holder has the transaction, and this
+///   launch offers nothing;
+/// * `Counted` with `offers` off → the count is recorded and the lock let go
+///   ([`Landed::Ordinary`]): a build whose job never offers shows no card, and
+///   the second launch discards;
+/// * `Counted` with `offers` on → `resume` revalidates the staged set for
+///   `channel` and answers its version; the offer is minted again from that
+///   version under the transaction's own identity, for `platform`'s files —
+///   [`Landed::Resumed`], the verified card of this launch. A revalidation
+///   that fails has discarded the set ([`Landed::Ordinary`]).
+///
+/// What it did is said in one `diagnostics.log` line, with no path.
+pub(crate) fn settle_at_launch(
+    worker: &WorkerCtx,
+    home: &Home,
+    offers: bool,
+    resume: Resumer,
+    channel: Option<Channel>,
+    platform: HostPlatform,
+) -> Landed {
+    let say = |line: &str| crate::diagnostics::note(&format!("Folio: update job — {line}"));
+    match at_launch(worker, home) {
+        Ok(AtLaunch::Counted(staged)) if !offers => {
+            drop(staged);
+            say("a verified update is kept for a later launch; offers are off in this build");
+            Landed::Ordinary
+        }
+        Ok(AtLaunch::Counted(staged)) => {
+            let txn = staged.journal.txn;
+            match resume(worker, *staged, channel) {
+                Ok((staged, version)) => match Offer::mint(txn, &format!("v{version}"), platform) {
+                    Some(offer) => Landed::Resumed(offer, Box::new(staged)),
+                    None => {
+                        let _ = discard(worker, staged, &Event::Discarded);
+                        say(&format!(
+                            "the update prepared at an earlier launch names no release ({version}) and is discarded"
+                        ));
+                        Landed::Ordinary
+                    }
+                },
+                Err(stop) => {
+                    say(&format!(
+                        "the update prepared at an earlier launch is discarded: {}",
+                        stop.why()
+                    ));
+                    Landed::Ordinary
+                }
+            }
+        }
+        Ok(AtLaunch::Busy) => Landed::Busy,
+        Ok(AtLaunch::Swept) => {
+            say("an unfinished download of an earlier launch is cleared");
+            Landed::Ordinary
+        }
+        Ok(AtLaunch::Discarded) => {
+            say("the update prepared at an earlier launch is discarded at its second launch");
+            Landed::Ordinary
+        }
+        Ok(AtLaunch::Nothing | AtLaunch::Left) => Landed::Ordinary,
+        Err(failure) => {
+            say(&format!(
+                "an earlier launch's update is kept for the next launch: {failure}"
+            ));
+            Landed::Ordinary
+        }
     }
 }
