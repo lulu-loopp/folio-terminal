@@ -50805,10 +50805,6 @@ impl App {
     ///
     /// # Errors
     /// That refusal, or the job's for Restart in its state.
-    #[expect(
-        dead_code,
-        reason = "U-19's card presses Restart; offers stay off until U-31 / U-32 (U-21 drives the road from tests)"
-    )]
     fn restart_for_update(&mut self) -> Result<(), update_job::Refusal> {
         if self.quit.is_some() || self.quit_requested {
             return Err(update_job::Refusal::TheQuitAnswers);

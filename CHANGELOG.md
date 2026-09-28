@@ -6,6 +6,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- Windows: Folio can update itself. When a newer release is published, a card
+  offers it and, once it is downloaded, restarts Folio into it; a Restart to
+  update row on Settings > General brings the card back. A copy installed with
+  scoop or winget is told to use its manager, with the command to copy.
+
 ### Changed
 
 - The Chinese settings dialog reads as a settings page: the descriptions

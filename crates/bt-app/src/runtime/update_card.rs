@@ -89,16 +89,19 @@ impl Runtime<'_> {
     /// driver and transport (`update_job::driver_for_this_copy`: the macOS
     /// Prepare and the download door, U-27; Windows' driver is U-20's), and
     /// Skip's write is handed to the check's one owner ([`update::skip`],
-    /// coordinator ruling 10). Offers are off (`Job::offers_enabled`), so no
-    /// card carries a press yet. `Releases` and `Show folder` leave the window through the doors
-    /// every such press uses and move nothing. The repaint is the loop's
+    /// coordinator ruling 10). **Restart** is the application's quit with the
+    /// update's reason (`App::restart_for_update`, which moves the job), not a
+    /// job verb (U-31). A card is up only where offers are on
+    /// (`Job::offers_enabled`: Windows since U-31). `Releases` and `Show folder`
+    /// leave the window through the doors every such press uses and move
+    /// nothing. The repaint is the loop's
     /// (`FolioApp::settle_update_card`), which sees what the job now shows.
     pub(in crate::runtime) fn answer_update_card(
         &mut self,
         verb: update_card::CardVerb,
     ) -> Result<()> {
-        match verb.job_verb() {
-            Some(job_verb) => {
+        match verb.asks() {
+            update_card::Asks::Job(job_verb) => {
                 let (driver, transport) = update_job::driver_for_this_copy();
                 let answered =
                     self.app
@@ -110,19 +113,22 @@ impl Runtime<'_> {
                     eprintln!("BT_UPDATE the skipped version was not written: {error}");
                 }
             }
-            None => match verb {
-                update_card::CardVerb::Releases => {
-                    self.hand_url_to_the_browser(update::RELEASES_PAGE)?;
+            update_card::Asks::Quit => {
+                // A refusal is the job's own for its state (a quit already
+                // under way answers instead); nothing moves, as for a refused
+                // job verb.
+                let _ = self.app.restart_for_update();
+            }
+            update_card::Asks::Releases => {
+                self.hand_url_to_the_browser(update::RELEASES_PAGE)?;
+            }
+            update_card::Asks::ShowFolder => {
+                if let Some(folder) =
+                    update_card::paint(self.app.update_job.state()).and_then(|paint| paint.folder)
+                {
+                    self.reveal_in_explorer(&folder);
                 }
-                update_card::CardVerb::ShowFolder => {
-                    if let Some(folder) = update_card::paint(self.app.update_job.state())
-                        .and_then(|paint| paint.folder)
-                    {
-                        self.reveal_in_explorer(&folder);
-                    }
-                }
-                _ => {}
-            },
+            }
         }
         Ok(())
     }

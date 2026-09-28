@@ -1,5 +1,6 @@
 //! **Whether a newer Folio exists** — asked once a day, answered by a mark on
-//! the gear, and never acted on (`docs/DESIGN.md` §7.52).
+//! the gear, and never acted on by the check itself (`docs/DESIGN.md` §7.52);
+//! what a reader may then do about it is the update job's (`update_job`).
 //!
 //! # What this is, stated as a bound
 //!
@@ -29,9 +30,12 @@
 //!   response that is not JSON, a tag that is not a version — is the same
 //!   outcome: the stamp advances and nothing is said. A terminal that reported
 //!   its update check's problems would be a terminal that talked about itself.
-//! * **Downloads nothing.** There is no installer, no replacement, no restart.
-//!   The most this feature can do is put a dot on a gear and a sentence in a
-//!   dialog, and the one press it offers hands an address to the browser.
+//! * **Downloads nothing.** The check has no installer, no replacement, no
+//!   restart: the most it can do is put a dot on a gear and a sentence in a
+//!   dialog. What it learned is the update job's evidence (`update_job`): on a
+//!   build whose platform's gate is open (Windows since 0.4.6, U-31) the job
+//!   may raise a card, and only a press on that card downloads anything. The
+//!   check runs the same with the gate open or shut.
 //!
 //! # The ruling about in-place self-update, and what it cost here
 //!
@@ -43,6 +47,8 @@
 //! offered since §7.51 landed. A reader who comes here looking for the Windows
 //! installer this ticket was going to gate should stop looking — there is no
 //! `cfg` to write, because there is no second behaviour to choose between.
+//! Since 0.4.6 the swap exists, and it is not here: `update_job` and the
+//! Prepare, apply and rollback modules it drives, behind a gate per platform.
 //!
 //! What M4-10 actually changed is one layer down: `bt-platform`'s
 //! `http::https_get` now has a macOS arm (`NSURLSession`, DESIGN §13.27), so
