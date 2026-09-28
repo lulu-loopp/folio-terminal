@@ -2443,10 +2443,15 @@ P, seeing O still before its guard, decided to start nothing; O released its
 claim, found P still alive and started nothing; P exited. Liveness is not
 ownership. The duty now lives in one file, **`H\<txn>\owner`**, holding
 `<pid>:<creation>` of the one process that has it
-(`update_apply::OWNER_FILE`). It is taken with `install_txn::durable_create`,
-which never replaces, so of two processes that try at once exactly one gets
-it; a mark whose process no longer runs (pid and start instant) is stale — its
-owner is dead and can open nothing — and the next taker replaces it.
+(`update_apply::OWNER_FILE`). It is taken by one election under an exclusive
+operating-system lock, `H\<txn>\owner.lock` (round 5): read-check-replace
+under the lock — the mark absent, unreadable or naming a process that no
+longer runs (pid and start instant; its owner is dead and can open nothing) →
+the taker replaces it with itself, `Mine`; naming a live process → `Theirs`.
+Of two processes that try at once, exactly one is inside the lock at a time,
+so exactly one takes a free or stale mark. A lock that cannot be had, or a mark
+that cannot be written, answers `Mine` — the worst case is a second start,
+never none.
 
 - **O clears it** as it hands the transaction over, before `Handoff` is
   written, on the storage worker, while O holds the transaction lock
