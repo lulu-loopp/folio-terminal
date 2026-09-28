@@ -965,7 +965,9 @@ counts it only when a Folio acknowledges it by holding the data directory,
 else the next program, else shows the failure window itself. So a window
 follows Restart to update whatever the road met — a refused write, a
 hand-over past its 15 s, a refusal, a panic; the one exception is the
-recovery at logon that attempted nothing. The macOS road (the bundle exchange, the
+recovery at logon that attempted nothing. An applier killed from outside after
+it has taken the window duty is outside the guarantee and is recovered by the
+next start or logon; no watcher process is built (owner ruling 2026-09-28). The macOS road (the bundle exchange, the
 LaunchAgent entrance, its rollback and opening rules) is built to the same
 contract behind its shut gate; U-32 opens it.
 **From.** §7.52 *an installed preview has no way to know it is out of date: one

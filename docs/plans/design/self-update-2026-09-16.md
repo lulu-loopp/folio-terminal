@@ -2517,37 +2517,31 @@ corrected; no environment variable carries anything of the update now.
 | P took it, O gone, P killed | P, stale | — | — | the next start: R ignores the stale mark and reverts |
 | the election cannot be held (I/O) | — | takes the duty, starts | takes the duty, runs its road | both may open (a second start is possible, never none) |
 
-**Open decision requested 2026-09-28: an applier ended from outside after it
-took the mark, while O was already gone.** The immediate-window guarantee is
-**not** narrowed by this note; until the owner decides, this interleaving is an
-open gap in it. Round 6 narrows it: an applier killed *before* it takes the
-mark, or after it but while O is still waiting for its decision, is covered by
-O — O stops waiting when the applier is gone and takes the duty itself. What
-remains:
+**Owner ruling 2026-09-28 (finding 13, option A): an applier killed from
+outside after it took the window duty is outside the guarantee.** "Every
+phase opens Folio" covers every failure of the road itself — every refusal,
+error, timeout and panic of O, P and R. An applier ended from *outside* (Task
+Manager, a security product's kill) after it has taken the duty, and after O
+has seen its mark and left, is recovered by the next start or the next logon,
+not at once; no third watcher is built — in the owner's words, a watcher can be
+killed too, and there is no end to it. The interleaving:
 
 1. P starts and takes `H\<txn>\owner` (before it waits for O's lock).
 2. O, at its very end, finds the mark naming P, running — and leaves without
    a start: P holds the duty.
-3. After O has gone, P is ended from outside — Task Manager, a security
-   product's kill — before its exit guard runs (a kill runs no `Drop`).
+3. After O has gone, P is ended from outside before its exit guard runs (a kill
+   runs no `Drop`).
 
-No window follows until the next start (R ignores the now-stale mark and
-reverts `Handoff`/`Armed`, or rolls back from `Moving` on) or, from `Armed` on,
-the next logon. The same holds for **R's deference to a merely live holder**
-(`update_apply_windows::recover`, `update_apply::the_window_is_theirs`): R at
-`Handoff` leaves the transaction to the live process the mark names, and if
-that process is then ended from outside before its guard runs, the person's
-start R carried ends without a window until the next start. **Closing it
-requires one of two things this round does not build:** a teardown and
-protocol change — O releasing its transaction lock, its data-directory claim
-and its admission (everything P's road waits for) while keeping the duty, and
-staying alive until P acknowledges it has delivered a window, or taking the
-duty back when P dies — or a third process that outlives both and watches P
-(a watcher O starts and P reports to), with its own frozen contract. As built,
-O cannot wait for P's delivery, because P's road needs exactly what O holds
-until its process ends. The decision requested is between those two and
-accepting the gap (an externally terminated applier recovered by the next
-start or logon).
+The next start (R ignores the now-stale mark and reverts `Handoff`/`Armed`, or
+rolls back from `Moving` on) or, from `Armed` on, the next logon opens Folio.
+The same ruling covers **R's deference to a merely live holder**
+(`update_apply_windows::recover`, `update_apply::the_window_is_theirs`): a holder
+R left the transaction to and that is then ended from outside is recovered by
+the next start. **What round 6 already covers:** an applier killed *before* it
+takes the mark, or after it while O still waits for its decision, is O's — O
+stops waiting when the applier is gone and takes the duty itself. (The
+teardown alternative — O releasing its transaction lock, data claim and
+admission while keeping the duty until P acknowledges — was not chosen.)
 
 **The applier never gives up the update to a live O at once (round 6).** An
 applier that finds the mark naming a live process — only ever O at its end,
