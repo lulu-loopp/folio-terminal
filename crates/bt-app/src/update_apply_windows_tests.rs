@@ -2861,17 +2861,7 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
     let me = crate::update_apply::this_process();
     let stale = format!("{}:{}", me.pid, me.started.wrapping_add(1));
     let mark = crate::update_apply::owner_path(&install.home, install.txn);
-    let folder = mark.parent().unwrap().to_path_buf();
     for round in 0..40 {
-        for entry in std::fs::read_dir(&folder).unwrap().flatten() {
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("owner.takeover.")
-            {
-                std::fs::remove_file(entry.path()).unwrap();
-            }
-        }
         std::fs::write(&mark, format!("{stale}{}", "0".repeat(round % 3))).unwrap();
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let racers: Vec<_> = contenders
