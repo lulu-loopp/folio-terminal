@@ -659,8 +659,18 @@ pub(crate) const ELECTION_WITHIN: Duration = Duration::from_secs(5);
 /// bounded poll); a lock it cannot take or open, or a mark it cannot write,
 /// makes it answer `Mine` — the bias is a second start, never none. There is
 /// no third answer.
-pub(crate) fn take_the_window(home: &Home, txn: TxnId, me: Running) -> Window {
-    take_the_window_within(home, txn, me, ELECTION_WITHIN)
+///
+/// **By `until`** (round 8, Codex's finding 15): the wait for the lock is the
+/// smaller of [`ELECTION_WITHIN`] and what is left before `until` — the
+/// applier's road deadline — so an election begun near that deadline never
+/// carries the applier's wait for O past it.
+pub(crate) fn take_the_window(home: &Home, txn: TxnId, me: Running, until: Instant) -> Window {
+    take_the_window_within(
+        home,
+        txn,
+        me,
+        ELECTION_WITHIN.min(until.saturating_duration_since(Instant::now())),
+    )
 }
 
 /// [`take_the_window`], waiting up to `within` for the election's lock — zero

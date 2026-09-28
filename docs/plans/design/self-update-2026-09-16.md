@@ -2553,7 +2553,11 @@ mark is its first act after its line is parsed, before anything else. **That
 60 s is one budget** (round 7): one deadline, counted from the applier's
 start, is carried through the mark, O's transaction lock, O's claim and the
 exclusive admission on both platforms, so a headless applier never waits for O
-longer than `old_within` in all (pinned by
+longer than `old_within` in all — the election's own wait for its lock is
+the smaller of `ELECTION_WITHIN` and what is left of that deadline
+(`update_apply::take_the_window`, round 8), so an election begun near the
+deadline never carries the wait past it (pinned, with the test holding the
+election's lock, by
 `update_apply_windows::tests::the_applier_waits_for_o_within_one_budget`). An
 applier that arrives after O's wait ran out and O started its replacement
 takes the stale mark once O has gone and enters its road, which meets that
@@ -2620,7 +2624,7 @@ admitted only on the way out (`doors::UpdateLeave`, §5.3 row 29, bounded by
 `update_handoff::LEAVE_WITHIN`, 75 s since round 6 — the wait for the
 applier's decision (15 s, `APPLIER_MARK_WITHIN`), the election's lock (5 s,
 `ELECTION_WITHIN`), two starts each with its acknowledgement (20 s each), and
-a margin). During that wait no window of O exists — its loop has returned and its windows are gone — so the person sees Folio disappear until the applier's trial or O's replacement appears; only at the bound, when nothing was delivered, does the message box appear.
+a margin). During that wait no window of O exists — its loop has returned and its windows are gone — so the person sees Folio disappear until the applier's trial or O's replacement appears; the message box appears when nothing was delivered — at the latest at the bound, earlier when every start has already failed (round 8).
 
 **The irrecoverable boundary, honestly.** What no process can survive from
 inside: the operating system refusing to show a message box at all (the last

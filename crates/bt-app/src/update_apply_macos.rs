@@ -484,16 +484,23 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
     // anyway: wait for it to go (round 6), within the applier's own wait for
     // O, before giving up the transaction. **One deadline for the whole wait
     // for O** (round 7): the mark, the transaction lock, the claim and the
-    // admission all spend `window`.
+    // admission all spend `window` — the election's own wait for its lock
+    // too (round 8).
     let until = window;
     let duty = loop {
         match crate::update_apply::take_the_window(
             &road.home,
             road.txn,
             crate::update_apply::this_process(),
+            until,
         ) {
             Window::Theirs(_) if Instant::now() < until => {
-                bt_platform::wait::sleep_within(worker, road.limits.poll);
+                bt_platform::wait::sleep_within(
+                    worker,
+                    road.limits
+                        .poll
+                        .min(until.saturating_duration_since(Instant::now())),
+                );
             }
             decided => break decided,
         }

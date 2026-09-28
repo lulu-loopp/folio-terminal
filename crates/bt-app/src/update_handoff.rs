@@ -1320,7 +1320,12 @@ mod tests {
         assert_eq!(asked.lock().expect("the record").calls.len(), 1);
         let late_applier = Running { pid: 1, started: 1 };
         assert_eq!(
-            crate::update_apply::take_the_window(&staged.home, txn, late_applier),
+            crate::update_apply::take_the_window(
+                &staged.home,
+                txn,
+                late_applier,
+                Instant::now() + crate::update_apply::ELECTION_WITHIN
+            ),
             Window::Theirs(old),
             "a late applier finds O's mark and touches nothing"
         );
@@ -1342,7 +1347,12 @@ mod tests {
         );
         let applier = crate::update_apply::this_process();
         assert_eq!(
-            crate::update_apply::take_the_window(&staged.home, txn, applier),
+            crate::update_apply::take_the_window(
+                &staged.home,
+                txn,
+                applier,
+                Instant::now() + crate::update_apply::ELECTION_WITHIN
+            ),
             Window::Mine
         );
         let mut starts = Starts::default();
@@ -1373,7 +1383,14 @@ mod tests {
         let txn = TxnId::new(TXN);
         let me = crate::update_apply::this_process();
         let other = Running { pid: 1, started: 1 };
-        let take = |who| crate::update_apply::take_the_window(&staged.home, txn, who);
+        let take = |who| {
+            crate::update_apply::take_the_window(
+                &staged.home,
+                txn,
+                who,
+                Instant::now() + crate::update_apply::ELECTION_WITHIN,
+            )
+        };
         assert_eq!(take(me), Window::Mine);
         assert_eq!(take(me), Window::Mine);
         assert_eq!(take(other), Window::Theirs(me));
@@ -1392,7 +1409,12 @@ mod tests {
             Some(other)
         );
         assert_eq!(
-            crate::update_apply::take_the_window(&staged.home, TxnId::new([0x77; 16]), me),
+            crate::update_apply::take_the_window(
+                &staged.home,
+                TxnId::new([0x77; 16]),
+                me,
+                Instant::now() + crate::update_apply::ELECTION_WITHIN
+            ),
             Window::Mine,
             "an election that cannot be held answers Mine: a second start, never none"
         );
@@ -1638,8 +1660,14 @@ mod tests {
         .expect("the test is inside the election");
         let home = staged.home.clone();
         let late = Running { pid: 1, started: 1 };
-        let contender =
-            std::thread::spawn(move || crate::update_apply::take_the_window(&home, txn, late));
+        let contender = std::thread::spawn(move || {
+            crate::update_apply::take_the_window(
+                &home,
+                txn,
+                late,
+                Instant::now() + crate::update_apply::ELECTION_WITHIN,
+            )
+        });
         std::thread::sleep(Duration::from_millis(300));
         assert!(!contender.is_finished(), "the contender waits for the lock");
         std::fs::write(&mark, format!("{}:{}", me.pid, me.started)).unwrap();
@@ -1718,7 +1746,12 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         assert_eq!(
-            crate::update_apply::take_the_window(&staged.home, txn, me),
+            crate::update_apply::take_the_window(
+                &staged.home,
+                txn,
+                me,
+                Instant::now() + crate::update_apply::ELECTION_WITHIN
+            ),
             Window::Mine,
             "the killed contender's lock went with it"
         );

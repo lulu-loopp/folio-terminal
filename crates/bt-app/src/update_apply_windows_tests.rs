@@ -2217,7 +2217,12 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
 
     // Named by the mark: left to it.
     assert_eq!(
-        crate::update_apply::take_the_window(&install.home, install.txn, applier),
+        crate::update_apply::take_the_window(
+            &install.home,
+            install.txn,
+            applier,
+            Instant::now() + crate::update_apply::ELECTION_WITHIN
+        ),
         Window::Mine
     );
     let began = Instant::now();
@@ -2878,7 +2883,12 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
                     bt_platform::ThreadPriority::BelowNormal,
                     move |_worker| {
                         barrier.wait();
-                        crate::update_apply::take_the_window(&home, txn, who)
+                        crate::update_apply::take_the_window(
+                            &home,
+                            txn,
+                            who,
+                            Instant::now() + crate::update_apply::ELECTION_WITHIN,
+                        )
                     },
                 )
                 .expect("a racer")
@@ -3046,7 +3056,12 @@ fn an_applier_finding_os_mark_waits_for_o_to_leave_and_applies() {
         started: install_flip::started_of(old).expect("O runs"),
     };
     assert_eq!(
-        crate::update_apply::take_the_window(&install.home, install.txn, old_running),
+        crate::update_apply::take_the_window(
+            &install.home,
+            install.txn,
+            old_running,
+            Instant::now() + crate::update_apply::ELECTION_WITHIN
+        ),
         Window::Mine
     );
     let mut road = install.road(limits(20_000, 20_000));
@@ -3072,13 +3087,15 @@ fn applied_on(install: &Install, road: Road, world: Fake) -> (Ended, Fake) {
     }
 }
 
-/// RED (U-34, round 7; Codex's finding 15) — **the applier's wait for O is one
-/// budget**: a wait for O's mark that spent most of `old_within` leaves only the
-/// rest for O's transaction lock, so an applier that then finds the lock held
-/// ends `OldHeldTheLock` at the one deadline, not a fresh `old_within` later.
+/// RED (U-34, rounds 7 and 8; Codex's finding 15) — **the applier's wait for O
+/// is one budget**: a wait for O's mark that spent most of `old_within` leaves
+/// only the rest for the election's lock (held here by the test, so the
+/// election has to wait) and then for O's transaction lock (held too), so the
+/// applier ends `OldHeldTheLock` at the one deadline — not an election's 5 s
+/// later, nor a fresh `old_within` later.
 ///
-/// MUTATION: in `apply_under_the_lock`, wait for the lock a fresh
-/// `road.limits.old_within`.
+/// MUTATIONS: in `take_the_window`, wait the full `ELECTION_WITHIN`; in
+/// `apply_under_the_lock`, wait for the lock a fresh `road.limits.old_within`.
 #[test]
 fn the_applier_waits_for_o_within_one_budget() {
     let Some(install) = Install::new("one-budget") else {
@@ -3090,7 +3107,12 @@ fn the_applier_waits_for_o_within_one_budget() {
         started: install_flip::started_of(old).expect("O runs"),
     };
     assert_eq!(
-        crate::update_apply::take_the_window(&install.home, install.txn, old_running),
+        crate::update_apply::take_the_window(
+            &install.home,
+            install.txn,
+            old_running,
+            Instant::now() + crate::update_apply::ELECTION_WITHIN
+        ),
         Window::Mine
     );
     let held = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
@@ -3106,14 +3128,30 @@ fn the_applier_waits_for_o_within_one_budget() {
         install.world(Trial::Answers),
     );
     std::thread::sleep(Duration::from_millis(1_500));
-    install.children.end(old);
+    // The election's lock, taken between two of the applier's elections (each
+    // holds it for one read), and held: the next election has to wait for it.
+    let election = loop {
+        if let Some(held) = install_txn::try_hold(
+            &crate::update_apply::owner_lock_path(&install.home, install.txn),
+            Hold::Exclusive,
+        )
+        .unwrap()
+        {
+            break held;
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    };
     let (ended, world) = applier.join().unwrap();
     let took = began.elapsed();
+    drop(election);
     drop(held);
+    install.children.end(old);
     assert_eq!(ended, Ended::OldHeldTheLock, "{:?}", world.said);
+    // The deadline is 2 s; what follows it is the guard's leave in this
+    // world, which waits for nothing.
     assert!(
-        took < Duration::from_millis(3_000),
-        "the lock got only what the mark left of the 2 s: {took:?}"
+        took < Duration::from_millis(2_400),
+        "the election and the lock got only what the mark left of the 2 s: {took:?}"
     );
 }
 
