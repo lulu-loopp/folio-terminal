@@ -2381,6 +2381,36 @@ product's hook ends the process from inside the hook, with a message box, and
 no `Drop` would run). O's own panic hook spends O's guard before it ends the
 process.
 
+**Armed at the commitment, not at a subphase (round 2, blocker 3).** The rule
+is about what the person did, so the duty begins when they do it. **O arms its
+guard when *Restart to update* is pressed** (`App::restart_for_update`), before
+the quit or the hand-over, and disarms it only when the quit is abandoned and
+O stays with its windows (`QuitStep::Abandon`); a quit that goes on without a
+hand-over (a session receipt that timed out) keeps it armed, and O's end starts
+Folio. **The doors' unwinding panic hook is installed before any of the line is
+parsed** — the first word alone says the process is a door. **The recovery
+build's smallest outer guard is its first statement** (`update_recover::run_here`):
+before it can name a home, a person's start handed to it that cannot be
+finished — no executable name, not a rescue build — ends in the failure window
+shown by that process (the run at logon owes nobody); the road's own guard,
+made as the first statement of `run_windows`/`run`, takes the duty over
+(`ExitGuard::hand_on`). **The applier needs no outer guard of its own**: until
+it takes the window's mark, the duty is O's — armed at the press, and finding
+no mark at O's end — so P's early returns and refusals start nothing
+(`ExitGuard::not_mine`).
+
+**O's panic road is deliberately small (round 2, finding 5).** The hook
+spends `update_handoff::leave_in_panic`: it only tries the armed slot and the
+claim table (a thread that holds either — possibly the panicking one — makes
+it give up rather than deadlock), takes the window's mark, makes one start and
+takes it as delivered: no wait, no process list, no log. The hook's own message
+box is this crash's window. The ordinary end (`leave_armed`, behind the door)
+carries the guarantee. What the update doors' hook loses against the windowed
+one is stated where it is installed (`install_update_door_panic_hook_at`): the
+alert, the run footer with the admission refusals, the hiding of windows (there
+are none) and the trace flush through `leave_process`; the report with its
+backtrace is kept.
+
 **O's exit.** The loop no longer decides anything on O's way out: the guard
 is armed with the transaction it hands over (`update_handoff::arm`), and the
 answer, or `quit::HANDOFF_DEADLINE` without one, only ends the wait
@@ -2516,9 +2546,9 @@ whether a Folio window follows):
 | O | `NotStarted`, abandon not written (`Handoff`) | none | Folio → R reverts | guard, construction |
 | O | nothing staged, job refused, no worker | none | Folio | guard, construction |
 | O | no answer in the budget (W9) | none | Folio → R: late P left alone, or revert | guard, `a_hand_over_with_no_answer_in_time_still_opens_folio_once` |
-| O | panic after the hand-over | none | Folio | the panic hook spends the guard |
-| O | panic before the hand-over | none | none (an ordinary crash) | not a road exit |
-| P | exe unnamed, not a rescue home | none | none: no home to read | nothing to name |
+| O | panic after *Restart to update* was pressed | none | O's panic road: one start; the hook's own box | armed at the press; `the_panic_road_never_waits_for_a_held_armed_slot` |
+| O | the quit abandoned after Restart (Cancel, a refused write) | O stays | O's windows | disarmed |
+| P | exe unnamed, not a rescue home | none | nothing from P, which never took the mark; O, finding no mark, starts Folio | the mark |
 | P | malformed line, standalone main refused | none | nothing from P, which never took the window's mark; O, finding no mark, starts Folio | the mark; `the_window_is_handed_over_by_one_mark_and_opened_exactly_once` |
 | P | `OldHeldTheLock` | none | installed + `--update-failed` | `an_applier_that_never_gets_the_lock_still_opens_folio` |
 | P | lock error, journal unreadable, txn mismatch, another nonce | none | by the disk | guard, construction |
@@ -2529,7 +2559,7 @@ whether a Folio window follows):
 | P | `Committed` | T | T while it runs; else the new build | successor |
 | P | the owed start refused | none | the rescue copy + `--update-failed` | `a_refused_start_on_the_way_out_falls_back_to_the_rescue_copy` |
 | P | panic | none | by the disk | `a_panic_inside_the_applier_still_opens_folio` |
-| R (start) | exe unnamed, not a rescue build | none | none: no home | nothing to name |
+| R (start) | exe unnamed, not a rescue build | none | the failure window, shown by R | the outer guard |
 | R (start) | standalone main refused | none | by the disk | guard, construction |
 | R (start) | lock not had in 60 s | none | by the disk | guard, construction |
 | R (start) | `Handoff` with an earlier holder | P owes | the mark's live holder only; a P that never took the mark is not waited for | `a_live_applier_at_handoff_is_left_alone_on_both_platforms` |

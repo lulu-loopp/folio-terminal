@@ -141,7 +141,11 @@ the private folder `bt-app`'s `update_trial` tests set on the copy of their own
 test binary that runs a start's writers in a process of its own (the trial is a
 fact once per process), with `APPDATA`, `LOCALAPPDATA`, `HOME`, `XDG_DATA_HOME`
 and `BT_POWERSHELL_PROFILE` pointed inside that folder. Only the child half of
-those two tests reads them. `BT_TRUST_RELEASE_TAG` names the release (`v0.4.5-preview`)
+those two tests reads them. `BT_UPDATE_DOOR_PANIC_TEST_CHILD` names the panic
+log `bt-app`'s `tests::an_update_doors_panic_unwinds_through_its_exit_guard_under_mains_hook`
+sets on the copy of its own test binary that installs the update doors' panic hook
+(a hook is the process's): only that test's child half reads it, and it writes
+only that log, in the test's own temporary folder. `BT_TRUST_RELEASE_TAG` names the release (`v0.4.5-preview`)
 `bt-platform`'s ignored `trust::tests::the_released_windows_assets_carry_an_identity_oid`
 downloads to read real signatures from (E-6); unset or empty, it asks GitHub for the
 latest release. It downloads into the temporary folder and writes nothing else.

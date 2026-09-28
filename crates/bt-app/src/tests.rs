@@ -54603,3 +54603,82 @@ fn each_leafs_resize_is_one_admission_and_a_refused_one_is_a_failed_resize() {
     .join()
     .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
 }
+
+/// RED (U-34, round 2; Codex's review, finding 9) — **an update door's panic
+/// unwinds through its road's exit guard under the very hook `fn main`
+/// installs for the doors, and the report still reaches the panic log.**
+///
+/// The product's own hook ends the process from inside the hook, before any
+/// unwinding, so no `Drop` — no exit guard — would ever run; the doors install
+/// `install_update_door_panic_hook_at` instead, before their line is parsed.
+/// The hook is the process's, so the check runs in a copy of this test binary
+/// of its own (`BT_UPDATE_DOOR_PANIC_TEST_CHILD` names the panic log there): a
+/// guard whose start is recorded, a panic under it on a thread, the thread
+/// joined, the start made, the report written, and the process still here to
+/// say so.
+///
+/// MUTATION: in `install_update_door_panic_hook_at`, install the hook with the
+/// product's end — `|_| std::process::exit(101)` — as its `fatal`.
+#[test]
+fn an_update_doors_panic_unwinds_through_its_exit_guard_under_mains_hook() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const CHILD: &str = "BT_UPDATE_DOOR_PANIC_TEST_CHILD";
+    const NAME: &str =
+        "tests::an_update_doors_panic_unwinds_through_its_exit_guard_under_mains_hook";
+    static STARTED: AtomicBool = AtomicBool::new(false);
+    struct Recorder;
+    impl update_apply::Leave for Recorder {
+        fn say(&mut self, _line: &str) {}
+        fn opening(&mut self) -> Option<(PathBuf, Vec<std::ffi::OsString>)> {
+            Some((PathBuf::from("folio"), Vec::new()))
+        }
+        fn start(&mut self, _program: &Path, _words: &[std::ffi::OsString]) -> std::io::Result<()> {
+            STARTED.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+        fn acknowledged(&mut self) -> bool {
+            true
+        }
+        fn show_here(&mut self, _why: &str) {}
+    }
+    if let Some(log) = std::env::var_os(CHILD) {
+        install_update_door_panic_hook_at(PathBuf::from(&log));
+        let joined = bt_platform::spawn_at_priority(
+            "bt-u34-door-panic",
+            bt_platform::ThreadPriority::BelowNormal,
+            |_worker| {
+                let _guard = update_apply::ExitGuard::new(Recorder);
+                panic!("a fault inside the road (test)");
+            },
+        )
+        .expect("a thread")
+        .join();
+        assert!(joined.is_err(), "the road panicked");
+        assert!(STARTED.load(Ordering::SeqCst), "the guard's start was made");
+        let report = std::fs::read_to_string(&log).expect("the panic log");
+        assert!(report.contains("a fault inside the road"), "{report}");
+        println!("u34: the door panic unwound");
+        return;
+    }
+    let folder = std::env::temp_dir().join(format!(
+        "bt-u34-door-panic-{}-{}",
+        std::process::id(),
+        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
+    ));
+    std::fs::create_dir_all(&folder).unwrap();
+    let log = folder.join("folio-panic.log");
+    let ran = bt_platform::quiet_command(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+        .env(CHILD, &log)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the child runs");
+    let _ = std::fs::remove_dir_all(&folder);
+    let said = String::from_utf8_lossy(&ran.stdout);
+    assert!(ran.status.success(), "{said}");
+    assert!(
+        said.contains("u34: the door panic unwound"),
+        "the child got past the panic: {said}"
+    );
+    assert!(said.contains("1 passed"), "{said}");
+}

@@ -136,6 +136,17 @@ pub(crate) struct Door<'a> {
 
 /// **The door, for this process**: this executable must be a rescue build.
 pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>) -> i32 {
+    // **The smallest outer guard, first** (U-34, round 2, blocker 3): until the
+    // road's own guard carries the duty, a person's start handed here that
+    // cannot be finished ends in the failure window, shown by this process;
+    // the run at logon owes nobody.
+    let mut outer = ExitGuard::new(Unnamed {
+        world: Machine,
+        failed: None,
+    });
+    if then_launch.is_none() {
+        outer.nobody_waiting();
+    }
     let mut world = Machine;
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
@@ -143,6 +154,8 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
             world.say(&format!(
                 "BT_UPDATE_RECOVER cannot name its own executable: {error}"
             ));
+            let left = outer.leave();
+            world.say(&format!("BT_UPDATE_RECOVER {}", left.said()));
             return 2;
         }
     };
@@ -157,6 +170,8 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
             exe.display(),
             cli::UPDATE_RECOVER_FLAG
         ));
+        let left = outer.leave();
+        world.say(&format!("BT_UPDATE_RECOVER {}", left.said()));
         return 2;
     };
     // One standalone main for both roads: a Windows member set is recovered
@@ -175,6 +190,8 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
         limits: Limits::PRODUCT,
     };
     match bt_platform::admission::enter_standalone_main("folio-update-recover", |worker| {
+        // The road's guard takes the duty over as its first statement.
+        outer.hand_on();
         match &windows {
             Some(road) => run_windows(
                 worker,
@@ -188,6 +205,7 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
         Ok(code) => code,
         Err(refused) => {
             world.say(&format!("BT_UPDATE_RECOVER {refused:?}"));
+            outer.hand_on();
             // The home is known: this way out leaves through the exit guard
             // too (U-34), with nothing recovered.
             let handed = then_launch.as_deref().unwrap_or(&[]);
@@ -220,6 +238,37 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
             world.say(&format!("BT_UPDATE_RECOVER {}", left.said()));
             2
         }
+    }
+}
+
+/// **How the recovery door leaves before it can name a home** (U-34, round 2):
+/// nothing can be started, so the failure window is shown by this process.
+struct Unnamed<W: World> {
+    world: W,
+    failed: Option<String>,
+}
+
+impl<W: World> Leave for Unnamed<W> {
+    fn say(&mut self, line: &str) {
+        self.world.say(line);
+    }
+
+    fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+        None
+    }
+
+    fn start(&mut self, _program: &Path, _words: &[OsString]) -> io::Result<()> {
+        Err(io::Error::other("nothing can be named to start"))
+    }
+
+    fn acknowledged(&mut self) -> bool {
+        false
+    }
+
+    fn show_here(&mut self, why: &str) {
+        self.failed = Some(why.to_owned());
+        self.world
+            .show_here(&crate::update_apply::failure_text(None));
     }
 }
 
@@ -324,6 +373,13 @@ fn header_of(home: &Home) -> Read {
 /// **The door over any home** — see the module header. Answers the exit
 /// code. Every way out leaves through the exit guard (U-34).
 pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -> i32 {
+    // Every way out, a panic included, leaves through the exit guard (U-34),
+    // made first.
+    let mut guard = ExitGuard::new(DoorLeave {
+        worker: Some(worker),
+        door,
+        world,
+    });
     let home = door.home;
     let (log, whereabouts) = log_file(home, door.data);
     let first = header_of(home);
@@ -334,11 +390,6 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
         .header
         .as_ref()
         .filter(|header| recovers_here && header.class == Class::Destructive);
-    let mut guard = ExitGuard::new(DoorLeave {
-        worker: Some(worker),
-        door,
-        world,
-    });
     let (did, ended) = match destructive {
         Some(header) => {
             let road = Road {
@@ -408,14 +459,15 @@ pub(crate) fn run_windows(
     then_launch: Option<&[OsString]>,
     world: &mut impl crate::update_apply_windows::World,
 ) -> i32 {
-    let (log, whereabouts) = log_file(&road.home, &road.data);
-    // Every way out, a panic included, leaves through the exit guard (U-34).
+    // Every way out, a panic included, leaves through the exit guard (U-34),
+    // made first.
     let mut guard = ExitGuard::new(crate::update_apply_windows::WindowsLeave {
         road,
         world,
         handed: then_launch.unwrap_or(&[]),
         worker: Some(worker),
     });
+    let (log, whereabouts) = log_file(&road.home, &road.data);
     let recovered = crate::update_apply_windows::recover(
         worker,
         road,

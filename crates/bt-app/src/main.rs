@@ -50822,6 +50822,15 @@ impl App {
             return Err(update_job::Refusal::TheQuitAnswers);
         }
         self.quit_reason = self.update_job.restart()?;
+        // **The person has pressed Restart to update: from here a window is
+        // owed** (U-34, round 2, blocker 3). The exit guard is armed now, before
+        // the quit or the hand-over, and disarmed only if the quit is abandoned
+        // and this process stays.
+        let data = persist::storage_dir();
+        update_handoff::arm(match self.update_job.staged() {
+            Some(staged) => update_handoff::Leaving::over(&staged.home, staged.journal.txn, &data),
+            None => update_handoff::Leaving::nothing_staged(&data),
+        });
         self.ask_to_quit();
         Ok(())
     }
@@ -62585,6 +62594,8 @@ impl FolioApp {
                     // Back to `Running` after a refused write; a quit cancelled at its card, or
                     // whose saves did not all land, never left it.
                     bt_platform::admission::quit_abandoned();
+                    // This process stays: it owes no window after Restart any more (U-34).
+                    update_handoff::disarm();
                     if let Some(app) = self.app.as_mut() {
                         app.quit = None;
                     }
@@ -62731,15 +62742,8 @@ impl FolioApp {
         match quit.handoff() {
             quit::Handoff::NotOwed | quit::Handoff::Done => true,
             quit::Handoff::Owed => {
-                // The exit guard is armed with the transaction whose window's
-                // mark decides who opens Folio (U-34).
-                let data = persist::storage_dir();
-                update_handoff::arm(match app.update_job.staged() {
-                    Some(staged) => {
-                        update_handoff::Leaving::over(&staged.home, staged.journal.txn, &data)
-                    }
-                    None => update_handoff::Leaving::nothing_staged(&data),
-                });
+                // The exit guard was armed when Restart was pressed
+                // (`App::restart_for_update`, U-34).
                 let sent = app
                     .update_job
                     .staged()
@@ -70712,6 +70716,20 @@ fn install_panic_log_hook() {
     });
 }
 
+/// **The update doors' panic hook** (0.4.6 U-34): the report is written to the
+/// panic log at `path` as every panic's is, and then the panic **unwinds** —
+/// through the road's exit guard, a `Drop`, which opens Folio — and leaves
+/// `main` as Rust's own panic exit (101). The product's hook would end the
+/// process from inside the hook, with a message box in a process that has no
+/// window, before any unwinding. What these doors do not get that a windowed
+/// run does: the alert (`announce_panic`), the run footer with the admission
+/// refusals, the hiding of windows (there are none) and the trace flush through
+/// `leave_process`; the report in the panic log, with its backtrace, is kept.
+fn install_update_door_panic_hook_at(path: PathBuf) {
+    drop(panic::take_hook());
+    install_panic_log_hook_at(path, |_| {});
+}
+
 fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync + 'static) {
     let previous = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
@@ -71073,15 +71091,16 @@ fn main() -> Result<()> {
     // applier left, U-23); `--update-apply` is the applier — macOS
     // (`update_apply_macos`, U-28) and Windows (`update_apply_windows`, U-23) —
     // and is answered with one line where there is none.
+    // **A road process's panic unwinds** (0.4.6 U-34), and its hook is in place
+    // before anything of the door's line is parsed (round 2, blocker 3): the
+    // first word alone says it is a door.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|word| word == cli::UPDATE_APPLY_FLAG || word == cli::UPDATE_RECOVER_FLAG)
+    {
+        install_update_door_panic_hook_at(panic_log_path());
+    }
     if let Some(door) = cli::update_door(std::env::args_os().skip(1)) {
-        // **A road process's panic unwinds** (0.4.6 U-34): its exit guard is a
-        // `Drop`, and the product's hook would end the process from inside the
-        // hook — with a message box in a process that has no window — before
-        // any unwinding. Here the report is still written to the panic log;
-        // then the panic unwinds through the guard, which starts Folio, and
-        // leaves `main` as Rust's own panic exit.
-        drop(panic::take_hook());
-        install_panic_log_hook_at(panic_log_path(), |_| {});
         let usage = match door {
             Ok(cli::UpdateDoor::Recover { home, then_launch }) => {
                 std::process::exit(update_recover::run_here(home, then_launch))

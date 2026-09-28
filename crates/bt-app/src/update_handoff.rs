@@ -453,6 +453,14 @@ pub(crate) fn look(answer: Option<&Receiver<HandedOff>>, txn: TxnId, overdue: bo
 /// ([`leave_armed`]).
 static ARMED: Mutex<Option<Leaving>> = Mutex::new(None);
 
+/// **Disarm O's exit guard**: the quit after *Restart to update* was
+/// abandoned, and this process stays with its windows.
+pub(crate) fn disarm() {
+    if let Ok(mut armed) = ARMED.lock() {
+        *armed = None;
+    }
+}
+
 /// **Arm O's exit guard** with the transaction it hands over.
 pub(crate) fn arm(leaving: Leaving) {
     if let Ok(mut armed) = ARMED.lock() {
@@ -1385,5 +1393,35 @@ mod tests {
                 (staged.home.rescue_program(&staged.journal.rescue), failed),
             ]
         );
+    }
+
+    /// RED (U-34, round 2; Codex's review, finding 5) — **O's panic road never
+    /// waits for the armed slot another thread holds**: it answers `None` at
+    /// once — the hook's own message box is then the crash's window — and
+    /// leaves the slot as it was.
+    ///
+    /// MUTATION: in `leave_in_panic`, `lock()` the slot instead of trying it.
+    #[test]
+    fn the_panic_road_never_waits_for_a_held_armed_slot() {
+        let (held, release) = std::sync::mpsc::channel::<()>();
+        let (holding, is_held) = std::sync::mpsc::channel::<()>();
+        let holder = bt_platform::spawn_at_priority(
+            "bt-u34-armed",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |_worker| {
+                let _slot = super::ARMED.lock().expect("the slot");
+                holding.send(()).unwrap();
+                let _ = release.recv_timeout(Duration::from_secs(10));
+            },
+        )
+        .unwrap();
+        is_held.recv().unwrap();
+        let began = Instant::now();
+        let left = super::leave_in_panic();
+        let took = began.elapsed();
+        held.send(()).unwrap();
+        holder.join().unwrap();
+        assert_eq!(left, None);
+        assert!(took < Duration::from_secs(2), "{took:?}");
     }
 }

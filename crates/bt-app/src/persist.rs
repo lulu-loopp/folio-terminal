@@ -2058,6 +2058,36 @@ fn relocate(previous: &Path, current: &Path) -> Relocation {
 mod tests {
     use super::*;
 
+    /// RED (U-34, round 2; Codex's review, finding 5) — **letting go of every
+    /// claim never waits for a claim table another thread holds**: it runs in
+    /// O's panic hook, possibly on the thread that holds the table, and gives
+    /// up at once rather than deadlock.
+    ///
+    /// MUTATION: in `let_go_of_every_claim`, `lock()` the table instead of
+    /// trying it.
+    #[test]
+    fn letting_go_of_the_claims_never_waits_for_a_held_table() {
+        let (held, release) = std::sync::mpsc::channel::<()>();
+        let (holding, is_held) = std::sync::mpsc::channel::<()>();
+        let holder = bt_platform::spawn_at_priority(
+            "bt-u34-claims",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |_worker| {
+                let _table = claims().lock().expect("the table");
+                holding.send(()).unwrap();
+                let _ = release.recv_timeout(std::time::Duration::from_secs(10));
+            },
+        )
+        .unwrap();
+        is_held.recv().unwrap();
+        let began = std::time::Instant::now();
+        let_go_of_every_claim();
+        let took = began.elapsed();
+        held.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
+
     /// The writer's retirement through its admitted door (`doors::SessionWriterRetire`), on a test
     /// thread already entered as the window thread on its way out.
     fn retire(writer: &mut SessionWriter) {

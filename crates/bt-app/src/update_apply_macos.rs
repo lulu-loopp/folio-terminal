@@ -429,13 +429,17 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
         ),
     };
     world.say(&format!("BT_UPDATE_APPLY {refused}"));
-    let left = ExitGuard::new(MacLeave {
+    // Refused before it took the window's mark: the duty stays with O, which
+    // armed it at the press and finds no mark (U-34, round 2).
+    let mut guard = ExitGuard::new(MacLeave {
         worker: None,
         home: &home,
         world: &mut world,
         data: &data,
-    })
-    .leave();
+    });
+    guard.not_mine(None);
+    let left = guard.leave();
+    drop(guard);
     world.say(&format!("BT_UPDATE_APPLY {}", left.said()));
     2
 }

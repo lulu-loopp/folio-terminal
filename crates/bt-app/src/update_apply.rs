@@ -869,6 +869,12 @@ impl<L: Leave> ExitGuard<L> {
         self.waiting = false;
     }
 
+    /// **Hand the duty on** to a guard constructed inside this one's scope,
+    /// which now carries it: this one starts nothing when it is dropped.
+    pub(crate) fn hand_on(&mut self) {
+        self.left = Some(Left::NotMine(None));
+    }
+
     /// **Leave now**: the start the exit owes, once — a second call answers
     /// the first one's result, and the drop then does nothing.
     pub(crate) fn leave(&mut self) -> Left {
