@@ -422,6 +422,14 @@ debounce 写入立即 flush、删除哨兵文件),因此**系统关机计入"正
 本文未逐字拟定的实现细节(`DESIGN.md` §7.1.4 只要求"崩溃恢复的措辞不暗示进程还活着"这一条
 约束),本条只把"怎么知道该走哪条文案"钉死为一个可实现的机制。
 
+**Implemented 2026-09-27 (0.4.6, B-ENDSESSION).** Windows: each window's `bt_platform::session_end`
+subclass answers `WM_QUERYENDSESSION` `TRUE` and holds the document (`session_end::hear`; from then
+on `App::record_session` records nothing, so a shell the system ends keeps its pane in the file);
+the loop's next turn writes it through the quit's writer and bounded wait and removes
+`session.lock` once it has landed (a write past the budget leaves it standing). `WM_ENDSESSION(FALSE)`
+lets the document go and re-creates the sentinel. macOS: the system's end is
+`applicationShouldTerminate:`, already the quit transaction (M3-1).
+
 ## 6. 与既有裁决的一致性检查
 
 - 本文没有引入任何与 `DESIGN.md` §7.1.4 冲突的字段或行为——每个字段名尽量复用该节原文用词

@@ -3191,7 +3191,16 @@ fn launch_from_disk(
         bt_persist::create_sentinel(&sentinel_path).expect("the run's sentinel");
     }
     let exit = bt_persist::probe_sentinel(&sentinel_path).expect("the sentinel is asked about");
-    let (read, _, degradation) = bt_persist::read_session(&session_path);
+    let (plan, shapes) = launch_plan_on_disk(&session_path);
+    let _ = std::fs::remove_dir_all(home);
+    (exit, plan, shapes)
+}
+
+/// **What the next launch opens from the session file at `session_path`**: the real reader,
+/// `plan_windows`, `plan_launch` and `revive_plan` — the first window's plan and the shape each
+/// opened tab is revived as.
+fn launch_plan_on_disk(session_path: &Path) -> (LaunchPlan, Vec<RevivedShape>) {
+    let (read, _, degradation) = bt_persist::read_session(session_path);
     assert!(degradation.is_clean(), "the document reads back whole");
     let windows = plan_windows(
         &read.windows,
@@ -3218,8 +3227,7 @@ fn launch_from_disk(
             (kinds, folders)
         })
         .collect();
-    let _ = std::fs::remove_dir_all(home);
-    (exit, plan, shapes)
+    (plan, shapes)
 }
 
 fn restore_home(name: &str) -> PathBuf {
@@ -3344,6 +3352,284 @@ fn a_clean_exit_restore_is_unchanged() {
         clean.1.ask.len(),
         2,
         "the two unpinned tabs are asked about"
+    );
+}
+
+// ── B-ENDSESSION: a shutdown, a restart or a sign-out is a quit ──
+
+/// A pinned tab of `shells` shells side by side, every one standing in `cwd`: two for the tab
+/// as the reader left it, one for what is left of it once the system has ended the other shell
+/// and the ordinary "this shell has exited" road has closed its pane.
+fn shells_tab(cwd: &Path, shells: usize) -> TabV1 {
+    let cwd = cwd.to_string_lossy().into_owned();
+    let shell = || {
+        Box::new(LayoutNodeV1::Leaf(LeafNodeV1::Term(TermLeafV1 {
+            profile_id: "pwsh".to_owned(),
+            cwd: cwd.clone(),
+            manual_name: None,
+            card_skip: 0,
+            last_command: String::new(),
+        })))
+    };
+    let root = if shells == 2 {
+        LayoutNodeV1::Split(bt_persist::SplitNodeV1 {
+            dir: bt_persist::SplitDirV1::Row,
+            ratio: 500_000,
+            children: [shell(), shell()],
+        })
+    } else {
+        *shell()
+    };
+    TabV1 {
+        root,
+        pinned: true,
+        focused_leaf: "leaf-1".to_owned(),
+        preview: None,
+    }
+}
+
+/// One window of two pinned tabs, each of `shells` shells.
+fn shells_document(cwd: &Path, shells: usize) -> bt_persist::SessionV1 {
+    bt_persist::SessionV1 {
+        windows: vec![bt_persist::SessionWindowV1 {
+            tabs: vec![shells_tab(cwd, shells), shells_tab(cwd, shells)],
+            ..bt_persist::SessionWindowV1::default()
+        }],
+        ..bt_persist::SessionV1::default()
+    }
+}
+
+/// **What `App::record_session` does with a document**, asked the question it asks: nothing
+/// while the system's end holds the document, the store's `record` otherwise. That the app asks
+/// it — and asks it before the store is handed anything — is held on `App::record_session`'s own
+/// text by [`a_shell_the_system_ends_after_the_freeze_keeps_its_pane_in_the_document`].
+fn record_as_the_app_does(store: &mut persist::SessionStore, document: bt_persist::SessionV1) {
+    if session_end::holds_the_document() {
+        return;
+    }
+    store.record(document, Instant::now());
+}
+
+/// The windows `session.json` holds right now, read by the real reader.
+fn windows_on_disk(session_path: &Path) -> Vec<bt_persist::SessionWindowV1> {
+    bt_persist::read_session(session_path).0.windows
+}
+
+/// A scratch home for one of these tests, emptied, and the system's news forgotten on the way in
+/// and on the way out — one thread can run every test (`--test-threads=1`), and a hold left
+/// standing would stop the next test's recordings.
+struct EndSessionHome(PathBuf);
+
+impl EndSessionHome {
+    fn new(name: &str) -> Self {
+        session_end::forget();
+        let home =
+            std::env::temp_dir().join(format!("bt-endsession-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).expect("a scratch home");
+        Self(home)
+    }
+
+    fn session(&self) -> PathBuf {
+        self.0.join("session.json")
+    }
+
+    fn sentinel(&self) -> PathBuf {
+        self.0.join("session.lock")
+    }
+}
+
+impl Drop for EndSessionHome {
+    fn drop(&mut self) {
+        session_end::forget();
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// The system asks, through the platform's own answer to `WM_QUERYENDSESSION` and the `hear` the
+/// window procedure is given; answers what the window procedure returns.
+fn the_system_asks() -> Option<isize> {
+    bt_platform::session_end::answer(
+        bt_platform::session_end::WM_QUERYENDSESSION,
+        0,
+        &session_end::hear,
+    )
+}
+
+/// RED (B-ENDSESSION) — **the system's question holds the document, writes it through the quit's
+/// road and drops the run's sentinel; nothing that happens after it changes the file.**
+///
+/// The owner's reboot of 2026-09-27 came back with every pinned tab short of its panes and the
+/// run marked unclean: `WM_QUERYENDSESSION` went to `DefWindowProc`, the system ended the shells,
+/// each death closed a pane, and the autosave wrote what was left. Here the real platform answer
+/// hears the question, the real store writes the held document through the one writer and the
+/// one bounded wait, and the "pane closed" recordings that follow — the reap's — are refused.
+///
+/// MUTATION: in `session_end::hear`, park the question without holding the document — the
+/// shrunken layout is what lands, and `session.lock` is still dropped over it.
+#[test]
+fn a_query_end_session_freezes_writes_and_drops_the_sentinel() {
+    on_the_window_thread();
+    let home = EndSessionHome::new("query");
+    let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
+    assert!(home.sentinel().is_file(), "the run's sentinel stands");
+    let whole = shells_document(&home.0, 2);
+    record_as_the_app_does(&mut store, whole.clone());
+
+    assert_eq!(the_system_asks(), Some(1), "the question is answered TRUE");
+    // The system ends one shell of each tab; the reap closes their panes and records.
+    record_as_the_app_does(&mut store, shells_document(&home.0, 1));
+    let settled: Vec<_> = session_end::take()
+        .into_iter()
+        .map(|end| session_end::settle(end, &mut store, false))
+        .collect();
+    assert_eq!(settled, vec![session_end::Settled::Saved(Ok(()))]);
+    assert_eq!(
+        windows_on_disk(&home.session()),
+        whole.windows,
+        "the layout on the disk is the one before the system's question"
+    );
+    assert!(
+        !home.sentinel().exists(),
+        "and the run claims its clean exit, as a quit does"
+    );
+
+    // Later "pane closed" edits, and a write forced after them: the file does not move.
+    record_as_the_app_does(&mut store, shells_document(&home.0, 1));
+    assert!(bt_platform::admission::exiting());
+    assert_eq!(store.flush_judged(), Ok(()));
+    assert_eq!(windows_on_disk(&home.session()), whole.windows);
+}
+
+/// RED (B-ENDSESSION) — **a shell the system ends after the question keeps its pane in the
+/// document, and the next start revives it as an ordinary saved leaf.**
+///
+/// Both halves of rule 2: `App::record_session` asks whether the system's end holds the document
+/// before it hands the store anything (its own text, read through `bt_source`), and what the
+/// held document brings back at the next start — through the real reader, `plan_launch` and
+/// `revive_plan` — is both shells of both pinned tabs, each in its folder.
+///
+/// MUTATION: drop `|| session_end::holds_the_document()` from `App::record_session`'s guard.
+#[test]
+fn a_shell_the_system_ends_after_the_freeze_keeps_its_pane_in_the_document() {
+    let door = method_body("App", "record_session");
+    let asked = door
+        .find("session_end::holds_the_document()")
+        .expect("the one door onto the document asks whether the system's end holds it");
+    let handed = door
+        .find(["self.session_store", ".record("].concat().as_str())
+        .expect("the door still hands the store a document");
+    assert!(
+        asked < handed,
+        "asked before the store is handed anything:\n{door}"
+    );
+
+    on_the_window_thread();
+    let home = EndSessionHome::new("shell-ended");
+    let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
+    record_as_the_app_does(&mut store, shells_document(&home.0, 2));
+    assert_eq!(the_system_asks(), Some(1));
+    record_as_the_app_does(&mut store, shells_document(&home.0, 1));
+    for end in session_end::take() {
+        session_end::settle(end, &mut store, false);
+    }
+
+    let (plan, shapes) = launch_plan_on_disk(&home.session());
+    assert_eq!(plan.open.len(), 2, "both pinned tabs open");
+    let both = (
+        vec![bt_layout::SeatKind::Terminal, bt_layout::SeatKind::Terminal],
+        vec![Some(home.0.clone()), Some(home.0.clone())],
+    );
+    assert_eq!(
+        shapes,
+        vec![both.clone(), both],
+        "each tab comes back with both shells, each in its folder"
+    );
+}
+
+/// PIN (B-ENDSESSION) — **without the system's question, a shell that exits still closes its
+/// pane, and the layout on the disk says so.**
+///
+/// The behaviour the hold must not touch: a shell that ends for its own reasons (`exit`, a crash)
+/// is a change the reader made, recorded and written as before; the run's sentinel stands.
+///
+/// MUTATION: make `session_end::holds_the_document` answer `true` — the closed pane never
+/// reaches the file.
+#[test]
+fn an_ordinary_shell_exit_without_a_freeze_still_closes_the_pane() {
+    on_the_window_thread();
+    let home = EndSessionHome::new("ordinary");
+    let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
+    record_as_the_app_does(&mut store, shells_document(&home.0, 2));
+    assert!(bt_platform::admission::exiting());
+    assert_eq!(store.flush_judged(), Ok(()));
+    record_as_the_app_does(&mut store, shells_document(&home.0, 1));
+    assert_eq!(store.flush_judged(), Ok(()));
+
+    assert!(!session_end::holds_the_document());
+    assert_eq!(
+        windows_on_disk(&home.session()),
+        shells_document(&home.0, 1).windows,
+        "the closed pane is gone from the layout"
+    );
+    let (_, shapes) = launch_plan_on_disk(&home.session());
+    let one = (
+        vec![bt_layout::SeatKind::Terminal],
+        vec![Some(home.0.clone())],
+    );
+    assert_eq!(shapes, vec![one.clone(), one]);
+    assert!(
+        home.sentinel().is_file(),
+        "and nothing claimed a clean exit"
+    );
+}
+
+/// RED (B-ENDSESSION) — **a shutdown taken back lets the document go and puts the sentinel
+/// back: the run goes on, and so do its saves.**
+///
+/// `WM_ENDSESSION` with `FALSE` — another program, or the person at the shutdown screen, stopped
+/// it. Without this the rest of the run would never save its layout again, and a crash after it
+/// would pass for a clean exit.
+///
+/// MUTATION: in `session_end::settle`'s `TakenBack` arm, leave the document held, or drop the
+/// `rearm_after_the_systems_end` call.
+#[test]
+fn a_shutdown_taken_back_lets_the_document_go_and_puts_the_sentinel_back() {
+    on_the_window_thread();
+    let home = EndSessionHome::new("taken-back");
+    let mut store = persist::SessionStore::armed_at(home.session(), home.sentinel());
+    record_as_the_app_does(&mut store, shells_document(&home.0, 2));
+    assert_eq!(the_system_asks(), Some(1));
+    assert_eq!(
+        bt_platform::session_end::answer(
+            bt_platform::session_end::WM_ENDSESSION,
+            0,
+            &session_end::hear
+        ),
+        Some(0),
+        "a shutdown taken back is processed"
+    );
+    let settled: Vec<_> = session_end::take()
+        .into_iter()
+        .map(|end| session_end::settle(end, &mut store, false))
+        .collect();
+    assert_eq!(
+        settled,
+        vec![
+            session_end::Settled::Saved(Ok(())),
+            session_end::Settled::TakenBack
+        ]
+    );
+    assert!(home.sentinel().is_file(), "the run is running again");
+    assert!(!session_end::holds_the_document());
+
+    record_as_the_app_does(&mut store, shells_document(&home.0, 1));
+    assert!(bt_platform::admission::exiting());
+    assert_eq!(store.flush_judged(), Ok(()));
+    assert_eq!(
+        windows_on_disk(&home.session()),
+        shells_document(&home.0, 1).windows,
+        "a change after the shutdown was taken back is saved"
     );
 }
 

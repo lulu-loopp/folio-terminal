@@ -1078,6 +1078,10 @@ windows = { version = "0.62.2", features = [
     # also needs `Win32_Security` above, for the `SECURITY_ATTRIBUTES` it takes
     # and nothing here ever passes.
     "Win32_System_Registry",
+    # `ShutdownBlockReasonCreate` / `ShutdownBlockReasonDestroy`: the line the
+    # system's shutdown screen shows for a window while the layout is being
+    # written (`src/session_end.rs`, B-ENDSESSION).
+    "Win32_System_Shutdown",
     "Win32_System_Threading",
     # `OSVERSIONINFOW`, which is the only thing `RtlGetVersion` below writes
     # into.

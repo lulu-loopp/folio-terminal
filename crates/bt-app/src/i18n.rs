@@ -2225,6 +2225,10 @@ pub enum Text {
     /// there, so the only way to know the quit did not silently half-happen is to
     /// be told.
     QuitSessionNotWritten,
+    /// **The line the system's shutdown screen shows for a Folio window while the layout is
+    /// being written** (B-ENDSESSION): `ShutdownBlockReasonCreate`'s reason, up for at most the
+    /// session write's budget. A state, so a few words.
+    ShutdownSavingLayout,
 
     // ── the preview pane's lock (§7.7 ⑧, Claude 定 2026-08-23) ─────────────
     //
@@ -4373,6 +4377,8 @@ impl Text {
                 "session.json could not be written. Nothing was closed.",
                 "session.json 写入失败。没有关闭任何窗口。",
             ),
+            // English in both columns until opus46 writes the Chinese (`CHINESE_PENDING`).
+            Self::ShutdownSavingLayout => pick(lang, "Saving your layout", "Saving your layout"),
 
             // ── the preview pane's lock (§7.7 ⑧) ───────────────────────────
             Self::PreviewLock => pick(
@@ -5602,7 +5608,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 802] = [
+    pub const ALL: [Self; 803] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -6242,6 +6248,7 @@ impl Text {
         Self::QuitTitle,
         Self::QuitSave,
         Self::QuitSessionNotWritten,
+        Self::ShutdownSavingLayout,
         Self::PreviewLock,
         Self::PreviewUnlock,
         Self::PaneMenuMoveToNewWindow,
@@ -6556,7 +6563,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 72] = [
+    const CHINESE_PENDING: [(Self, HostPlatform); 74] = [
         // Ticket 37's four, in both columns: written in English, Chinese owed by opus46.
         (Self::ShortcutTextLarger, HostPlatform::Windows),
         (Self::ShortcutTextLarger, HostPlatform::MacOs),
@@ -6633,6 +6640,9 @@ impl Text {
         (Self::ProfilesRowLoginDesc, HostPlatform::MacOs),
         (Self::ProfilesProgramHasArguments, HostPlatform::Windows),
         (Self::ProfilesProgramHasArguments, HostPlatform::MacOs),
+        // 0.4.6 B-ENDSESSION: the shutdown screen's line while the layout is written.
+        (Self::ShutdownSavingLayout, HostPlatform::Windows),
+        (Self::ShutdownSavingLayout, HostPlatform::MacOs),
     ];
 }
 
