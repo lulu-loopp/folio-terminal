@@ -58,7 +58,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
 use bt_platform::install_flip::{self, Ask, Running};
-use bt_platform::install_txn;
+use bt_platform::install_txn::{self, Hold};
 
 use crate::cli;
 use crate::update_txn::{
@@ -582,11 +582,11 @@ pub(crate) fn stop_trial(
 ///   transaction to a live process the mark names, and ignores any other
 ///   process (a P that never took the mark is not an applier to wait for).
 ///
-/// Taking is `install_txn::durable_create`, which never replaces: of two
-/// processes that try, exactly one creates it. A mark whose process no longer
-/// runs (pid and start instant) is stale — its owner died — and is taken over
-/// by a single-winner election keyed on the stale value read (a ballot file
-/// created the same never-replacing way), whose one winner replaces it.
+/// Taking is one election under an exclusive operating-system lock,
+/// `H\<txn>\owner.lock` ([`take_the_window`]): read the mark, and write this
+/// process into it only when it is absent or its process no longer runs (pid
+/// and start instant) — its owner died. The lock goes with a holder that dies
+/// inside the election.
 pub(crate) const OWNER_FILE: &str = "owner";
 
 /// `H\<txn>\owner`.
@@ -633,88 +633,56 @@ pub(crate) enum Window {
     Mine,
     /// This live process has it: it opens the window.
     Theirs(Running),
-    /// The mark could be neither made nor read: nobody is proven to have it.
-    Unknown(String),
 }
+
+/// `H\<txn>\owner.lock`: the election's lock (round 5).
+pub(crate) fn owner_lock_path(home: &Home, txn: TxnId) -> PathBuf {
+    home.transaction(txn).join(format!("{OWNER_FILE}.lock"))
+}
+
+/// **How long a contender waits for the election's lock** (round 5): its
+/// holder keeps it for the few milliseconds of one read and one durable write,
+/// so a contender that waits longer is waiting for a holder that is stuck — it
+/// then takes the duty itself (a second start is possible, never none).
+pub(crate) const ELECTION_WITHIN: Duration = Duration::from_secs(5);
 
 /// **Take the duty a window follows, unless a live process already has it**
-/// ([`OWNER_FILE`]): the mark created for `me`, never over another's; a mark
-/// naming a process that no longer runs is stale and is replaced.
+/// ([`OWNER_FILE`]; round 5, Codex's finding 14): one exclusive operating-
+/// system lock, `H\<txn>\owner.lock` (`install_txn::hold_within`: `LockFileEx`
+/// on Windows, `flock` on Unix), is held around the whole read-check-replace —
+/// read the mark; absent, unreadable or naming a process that no longer runs
+/// (pid and start instant) → write this process durably, [`Window::Mine`];
+/// naming this process → `Mine`; naming another live process →
+/// [`Window::Theirs`]. A holder that dies inside the election releases the lock
+/// with its process, so there is no half-held state and nothing to clean up. A
+/// contender waits up to [`ELECTION_WITHIN`] for the lock (`install_txn`'s own
+/// bounded poll); a lock it cannot take or open, or a mark it cannot write,
+/// makes it answer `Mine` — the bias is a second start, never none. There is
+/// no third answer.
 pub(crate) fn take_the_window(home: &Home, txn: TxnId, me: Running) -> Window {
-    let path = owner_path(home, txn);
-    let value = owner_value(me);
-    // A few rounds: each ends in a decision, unless the mark changed under us.
-    for _ in 0..4 {
-        match install_txn::durable_create(&path, value.as_bytes()) {
-            Ok(()) => return Window::Mine,
-            Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(failure) => return Window::Unknown(failure.to_string()),
-        }
-        let read = match file_reads::read(Lane::UpdateJournal, &path) {
-            Ok(bytes) => bytes,
-            // Cleared between the create and the read: try the create again.
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(error) => return Window::Unknown(error.to_string()),
-        };
-        match owner_named(&read) {
-            Some(owner) if owner == me => return Window::Mine,
-            Some(owner) if install_flip::still_running(owner) => return Window::Theirs(owner),
-            // Stale, or unreadable: its owner cannot open anything.
-            _ => {}
-        }
-        // **The takeover is an election keyed on the value read** (round 4,
-        // Codex's finding 14): of the contenders that read this very stale
-        // value, only the one whose ballot `owner.takeover.<value>` is created
-        // (a create that never replaces) replaces the mark — and nothing else
-        // ever writes over that value, so the replacement is of exactly the
-        // value it read as stale.
-        let ballot = home
-            .transaction(txn)
-            .join(format!("{OWNER_FILE}.takeover.{}", ballot_key(&read)));
-        match install_txn::durable_create(&ballot, value.as_bytes()) {
-            Ok(()) => {
-                return match install_txn::durable_write(&path, value.as_bytes()) {
-                    Ok(()) => Window::Mine,
-                    Err(failure) => Window::Unknown(failure.to_string()),
-                };
-            }
-            Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => {
-                let winner = file_reads::read(Lane::UpdateJournal, &ballot)
-                    .ok()
-                    .and_then(|bytes| owner_named(&bytes));
-                match winner {
-                    Some(winner) if winner == me => return Window::Mine,
-                    Some(winner) if install_flip::still_running(winner) => {
-                        return Window::Theirs(winner);
-                    }
-                    // The winner is gone too: read the mark again — it has
-                    // either the dead winner's value, a fresh election of its
-                    // own, or still the old one.
-                    _ => {}
-                }
-            }
-            Err(failure) => return Window::Unknown(failure.to_string()),
-        }
-    }
-    Window::Unknown(String::from("the window's mark kept changing"))
+    take_the_window_within(home, txn, me, ELECTION_WITHIN)
 }
 
-/// The ballot name for a stale mark's bytes: its digits and separator, or
-/// `unreadable`.
-fn ballot_key(bytes: &[u8]) -> String {
-    let key: String = bytes
-        .iter()
-        .take(48)
-        .filter_map(|byte| match byte {
-            b'0'..=b'9' => Some(char::from(*byte)),
-            b':' => Some('-'),
-            _ => None,
-        })
-        .collect();
-    if key.is_empty() {
-        String::from("unreadable")
-    } else {
-        key
+/// [`take_the_window`], waiting up to `within` for the election's lock — zero
+/// in O's panic road, which waits for nothing.
+pub(crate) fn take_the_window_within(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    within: Duration,
+) -> Window {
+    let lock = install_txn::hold_within(&owner_lock_path(home, txn), Hold::Exclusive, within);
+    let Ok(Some(_held)) = lock else {
+        return Window::Mine;
+    };
+    match window_owner(home, txn) {
+        Some(owner) if owner == me => Window::Mine,
+        Some(owner) if install_flip::still_running(owner) => Window::Theirs(owner),
+        // Absent, unreadable, or its process gone: this process takes it.
+        _ => {
+            let _ = install_txn::durable_write(&owner_path(home, txn), owner_value(me).as_bytes());
+            Window::Mine
+        }
     }
 }
 

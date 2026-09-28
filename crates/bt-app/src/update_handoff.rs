@@ -347,7 +347,17 @@ impl Leaving {
             worker,
         });
         if let Some((home, txn)) = &self.transaction
-            && let Window::Theirs(owner) = crate::update_apply::take_the_window(home, *txn, me)
+            && let Window::Theirs(owner) = crate::update_apply::take_the_window_within(
+                home,
+                *txn,
+                me,
+                // The panic road (no worker) waits for nothing.
+                if worker.is_some() {
+                    crate::update_apply::ELECTION_WITHIN
+                } else {
+                    Duration::ZERO
+                },
+            )
         {
             guard.not_mine(Some(owner.pid));
         }
@@ -1274,11 +1284,11 @@ mod tests {
     /// RED (U-34, round 2) — **the window's mark is taken by exactly one live
     /// process**: created for the first taker; refused to a second while the
     /// first runs (by pid and start instant); taken over from an owner that no
-    /// longer runs; and unknown — nobody proven — when it can be neither made
-    /// nor read.
+    /// longer runs; and `Mine` when the election cannot be held at all — the
+    /// bias is a second start, never none (there is no third answer).
     ///
-    /// MUTATION: in `update_apply::take_the_window`, replace the mark whatever
-    /// it names (a second live taker then gets it too).
+    /// MUTATION: in `update_apply::take_the_window_within`, replace the mark
+    /// whatever it names (a second live taker then gets it too).
     #[test]
     fn the_windows_mark_is_taken_by_exactly_one_live_process() {
         let folder = Folder::new("mark");
@@ -1304,10 +1314,11 @@ mod tests {
             crate::update_apply::window_owner(&staged.home, txn),
             Some(other)
         );
-        assert!(matches!(
+        assert_eq!(
             crate::update_apply::take_the_window(&staged.home, TxnId::new([0x77; 16]), me),
-            Window::Unknown(_)
-        ));
+            Window::Mine,
+            "an election that cannot be held answers Mine: a second start, never none"
+        );
     }
 
     /// RED (U-34) — **the hand-over's budget is a program's first start, not a
@@ -1513,5 +1524,126 @@ mod tests {
         assert!(!answered, "QueryDenied is not a delivery");
         assert_eq!(starts, 2, "the start, then the fallback");
         assert_eq!(shown.len(), 1, "then the failure window, here");
+    }
+
+    /// RED (U-34, round 5; Codex's finding 14) — **the election is one
+    /// exclusive lock around read-check-replace: a contender that arrives while
+    /// another is inside it waits, and then reads what the other left — a live
+    /// owner that appeared between its arrival and its turn is `Theirs`, never
+    /// overwritten.**
+    ///
+    /// The deterministic interleaving: the mark names a dead process; the test
+    /// takes `owner.lock` (a contender inside the election); a second
+    /// contender starts and blocks on the lock; inside, the test writes a live
+    /// owner (this process) and lets the lock go; the second contender then
+    /// answers `Theirs(live owner)` and the mark still names it. Under the
+    /// round-4 ballot scheme the second contender read the dead value without
+    /// waiting and overwrote it.
+    ///
+    /// MUTATION: in `update_apply::take_the_window_within`, skip the lock.
+    #[test]
+    fn a_contender_waits_for_the_election_and_never_overwrites_a_live_owner() {
+        let folder = Folder::new("election-order");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let me = crate::update_apply::this_process();
+        let mark = crate::update_apply::owner_path(&staged.home, txn);
+        std::fs::write(&mark, format!("{}:{}", me.pid, me.started.wrapping_add(1))).unwrap();
+        let inside = install_txn::try_hold(
+            &crate::update_apply::owner_lock_path(&staged.home, txn),
+            Hold::Exclusive,
+        )
+        .unwrap()
+        .expect("the test is inside the election");
+        let home = staged.home.clone();
+        let late = Running { pid: 1, started: 1 };
+        let contender =
+            std::thread::spawn(move || crate::update_apply::take_the_window(&home, txn, late));
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!contender.is_finished(), "the contender waits for the lock");
+        std::fs::write(&mark, format!("{}:{}", me.pid, me.started)).unwrap();
+        drop(inside);
+        assert_eq!(contender.join().unwrap(), Window::Theirs(me));
+        assert_eq!(
+            crate::update_apply::window_owner(&staged.home, txn),
+            Some(me)
+        );
+    }
+
+    /// RED (U-34, round 5; Codex's finding 14) — **a contender killed inside
+    /// the election leaves nothing behind that stops the next one**: the
+    /// operating system lets its lock go with its process, and the next
+    /// contender takes the stale mark — `Mine`, never a third answer.
+    ///
+    /// The killed contender is a copy of this test binary
+    /// (`BT_U34_ELECTION_CHILD` names the transaction's folder): it takes
+    /// `owner.lock`, and — as the round-4 scheme's ballot winner would have —
+    /// leaves `owner.takeover.<stale value>` naming itself, then says so and
+    /// waits to be ended. The test ends it by its own handle.
+    ///
+    /// MUTATION: restore the round-4 ballot election (the next contender then
+    /// finds a ballot naming a dead winner and answers `Unknown`).
+    #[test]
+    fn a_contender_killed_inside_the_election_releases_it() {
+        const CHILD: &str = "BT_U34_ELECTION_CHILD";
+        const NAME: &str =
+            "update_handoff::tests::a_contender_killed_inside_the_election_releases_it";
+        if let Some(folder) = std::env::var_os(CHILD) {
+            let folder = PathBuf::from(folder);
+            let _held = install_txn::try_hold(&folder.join("owner.lock"), Hold::Exclusive)
+                .unwrap()
+                .expect("the child is inside the election");
+            let stale = std::fs::read_to_string(folder.join("owner")).unwrap();
+            let key: String = stale
+                .chars()
+                .filter_map(|c| match c {
+                    '0'..='9' => Some(c),
+                    ':' => Some('-'),
+                    _ => None,
+                })
+                .collect();
+            let me = crate::update_apply::this_process();
+            std::fs::write(
+                folder.join(format!("owner.takeover.{key}")),
+                format!("{}:{}", me.pid, me.started),
+            )
+            .unwrap();
+            println!("u34 elector inside");
+            std::thread::sleep(Duration::from_secs(60));
+            return;
+        }
+        let folder = Folder::new("election-killed");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let me = crate::update_apply::this_process();
+        let transaction = staged.home.transaction(txn);
+        std::fs::write(
+            crate::update_apply::owner_path(&staged.home, txn),
+            format!("{}:{}", me.pid, me.started.wrapping_add(1)),
+        )
+        .unwrap();
+        let mut child =
+            bt_platform::quiet_command(std::env::current_exe().expect("this test binary"))
+                .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+                .env(CHILD, &transaction)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("the child runs");
+        let mut lines =
+            std::io::BufRead::lines(std::io::BufReader::new(child.stdout.take().unwrap()));
+        let inside = lines.any(|line| line.is_ok_and(|line| line.contains("u34 elector inside")));
+        assert!(inside, "the child got inside the election");
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(
+            crate::update_apply::take_the_window(&staged.home, txn, me),
+            Window::Mine,
+            "the killed contender's lock went with it"
+        );
+        assert_eq!(
+            crate::update_apply::window_owner(&staged.home, txn),
+            Some(me)
+        );
     }
 }

@@ -2455,14 +2455,14 @@ owner is dead and can open nothing — and the next taker replaces it.
   O's lock, while O still runs (`update_apply_windows::apply`,
   `update_apply_macos::apply`). Only a P that took it runs its road, and its
   guard then opens the window. A P that finds it taken by a live process
-  touches nothing and starts nothing; one that cannot make or read it leaves
-  the duty with O.
+  touches nothing and starts nothing; one that cannot hold the election (round
+  5, below) takes the duty — a second start is possible, never none.
 - **O takes it at its very end**, after letting go of its claim
   (`update_handoff::Leaving::leave`), and starts Folio only if it got it. O's
   start reads the header as a lock holder does — `destructive` (nothing moved
   while the journal is O's) with `--update-failed`, so it continues with
   *Update incomplete.* and never hands itself to R; `Prepared`/`Abandoned`
-  plainly. When the mark cannot be made or read, O keeps the duty: an error
+  plainly. When the election cannot be held, O takes the duty: an error
   biases to a second start, never to none.
 - **R never takes it.** At `Handoff` R leaves the transaction to the live
   process the mark names (`update_apply::the_window_is_theirs`) and ignores
@@ -2496,48 +2496,56 @@ corrected; no environment variable carries anything of the update now.
 | P took it and died (killed) | P, stale | takes it over, starts Folio | — | O's |
 | P took it, O still alive, R started by a person | P | (as above) | its guard opens | P's; R leaves `Handoff` to P |
 | P took it, O gone, P killed | P, stale | — | — | the next start: R ignores the stale mark and reverts |
-| the mark cannot be made (I/O) | — | keeps the duty, starts | leaves the duty with O | O's (a second start is possible, never none) |
+| the election cannot be held (I/O) | — | takes the duty, starts | takes the duty, runs its road | both may open (a second start is possible, never none) |
 
-**Pending ruling 2026-09-28: an applier ended from outside after it took the
-mark.** The one interleaving the mark does not close:
+**Open decision requested 2026-09-28: an applier ended from outside after it
+took the mark.** The immediate-window guarantee is **not** narrowed by this
+note; until the owner decides, this interleaving is an open gap in it:
 
 1. P starts and takes `H\<txn>\owner` (before it waits for O's lock).
 2. O, at its very end, finds the mark naming P, running — and leaves without
-   a start, as it must: P holds the duty.
-3. P is ended from outside — Task Manager, a security product's kill, a
-   crash of the OS process layer — before its exit guard runs (a kill runs no
-   `Drop`).
+   a start: P holds the duty.
+3. P is ended from outside — Task Manager, a security product's kill — before
+   its exit guard runs (a kill runs no `Drop`).
 
 No window follows until the next start (R ignores the now-stale mark and
 reverts `Handoff`/`Armed`, or rolls back from `Moving` on) or, from `Armed` on,
-the next logon. **The road cannot close this with two processes.** O cannot
-wait for P's delivery before it leaves, because P's road needs O gone: P waits
-for O's transaction lock (held until O's process ends) and O's data-directory
-claim, and takes O's admission exclusively before it moves a file; an O that
-waited for P's window would wait for a P that waits for O. Closing it needs a
-third process that outlives both and watches P — a watchdog O would start and
-that P would have to report to — which is a new process, a new frozen
-contract and a new owner of the duty; U-34 does not add one. The same
-acceptance holds for **R's deference to a merely live holder**
+the next logon. The same holds for **R's deference to a merely live holder**
 (`update_apply_windows::recover`, `update_apply::the_window_is_theirs`): R at
 `Handoff` leaves the transaction to the live process the mark names, and if
 that process is then ended from outside before its guard runs, the person's
-start that R carried ends without a window until the next start. **Pending the
-owner's ruling that an externally terminated applier after mark acquisition is
-outside the immediate-window guarantee and is recovered by the next start or
-logon**; if the ruling is otherwise, this boundary is reopened.
+start R carried ends without a window until the next start. **Closing it
+requires one of two things this round does not build:** a teardown and
+protocol change — O releasing its transaction lock, its data-directory claim
+and its admission (everything P's road waits for) while keeping the duty, and
+staying alive until P acknowledges it has delivered a window, or taking the
+duty back when P dies — or a third process that outlives both and watches P
+(a watcher O starts and P reports to), with its own frozen contract. As built,
+O cannot wait for P's delivery, because P's road needs exactly what O holds
+until its process ends. The decision requested is between those two and
+accepting the gap (an externally terminated applier recovered by the next
+start or logon).
 
-**The stale-mark takeover is a single-winner election (round 4, Codex's
-finding 14).** A contender that reads a stale mark does not replace it
-directly: it creates the ballot `H\<txn>\owner.takeover.<value read>` with the
-same never-replacing create, and only the one that created it replaces the
-mark — so the mark is replaced only by the one process that read exactly that
-value as stale, and a loser answers `Theirs(winner)` from the ballot. A winner
-that dies before replacing leaves the mark stale and the ballot naming a dead
-process; the next contender reads again and, after a few rounds, answers
-`Unknown` (O then keeps the duty; P then starts nothing). Pinned by
-`update_apply_windows::tests::a_stale_mark_is_taken_over_by_exactly_one_contender`
-(two live contenders racing over forty rounds; red under a direct replace).
+**The stale-mark takeover is one lock around read-check-replace (round 5,
+Codex's finding 14, which the round-4 ballot did not close).** The election is
+held under `H\<txn>\owner.lock`, an exclusive operating-system lock
+(`install_txn::hold_within`: `LockFileEx` on Windows, `flock` on Unix), for the
+few milliseconds of one read and one durable write: read the mark; absent,
+unreadable or naming a process that no longer runs → write this process,
+`Mine`; naming this process → `Mine`; naming another live process → `Theirs`.
+Every writer of the mark writes inside the lock, so a contender never replaces
+a value it did not read under the same hold; a holder that dies inside the
+election releases the lock with its process, so there is no half-held state,
+no ballot and no cleanup rule. A contender waits up to 5 s for the lock
+(`ELECTION_WITHIN`; O's panic road waits for nothing); a lock it cannot take or
+open, or a mark it cannot write, answers `Mine` — the bias is a second start,
+never none. There is no third answer (round 4's `Unknown` is gone). Pinned by
+`update_handoff::tests::a_contender_waits_for_the_election_and_never_overwrites_a_live_owner`
+(the owner changes while a contender waits for the lock: `Theirs`, never
+overwritten), `update_handoff::tests::a_contender_killed_inside_the_election_releases_it`
+(a copy of the test binary killed while holding the lock: the next contender
+is `Mine`), and `update_apply_windows::tests::a_stale_mark_is_taken_over_by_exactly_one_contender`
+(the forty-round race, kept as a soak) — each red under the round-4 code.
 
 **Acknowledgement is a live holder only (round 4, Codex's finding 12).**
 `claimed_within` counts only `ClaimRefusal::Held`. `QueryDenied` — the platform

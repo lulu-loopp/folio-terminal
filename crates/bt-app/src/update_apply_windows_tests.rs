@@ -2692,7 +2692,16 @@ fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
         install.world(Trial::Answers),
     );
     let give_up = Instant::now() + Duration::from_secs(20);
-    while crate::update_apply::window_owner(&install.home, install.txn).is_none() {
+    // P's election is over: the mark is written and its lock let go.
+    while crate::update_apply::window_owner(&install.home, install.txn).is_none()
+        || install_txn::try_hold(
+            &crate::update_apply::owner_lock_path(&install.home, install.txn),
+            Hold::Exclusive,
+        )
+        .ok()
+        .flatten()
+        .is_none()
+    {
         assert!(Instant::now() < give_up, "P never took the window");
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -2826,17 +2835,16 @@ fn a_start_counts_only_when_acknowledged_and_the_last_resort_is_a_window_here() 
     );
 }
 
-/// RED (U-34, round 4; Codex's finding 14) — **a stale window's mark is taken
-/// over by exactly one of two contenders racing for it**: both read the same
-/// stale value, and only the one whose ballot is created replaces it; the
-/// other answers `Theirs(winner)`. Two threads race, released together by a
+/// RED (U-34, rounds 4 and 5; Codex's finding 14) — **a stale window's mark is
+/// taken over by exactly one of two contenders racing for it** (a soak): the
+/// election is one exclusive lock around read-check-replace, so the first in
+/// replaces the stale value and the second reads the live winner, `Theirs`. Two threads race, released together by a
 /// barrier, over many rounds, each round from a fresh stale mark; the two
 /// contenders are both live processes (this test and a synthetic program it
 /// started), so neither can be taken for a dead owner.
 ///
-/// MUTATION: in `update_apply::take_the_window`, replace a stale mark directly
-/// (check, then `durable_write`) — both contenders then answer `Mine` in some
-/// round.
+/// MUTATION: in `update_apply::take_the_window_within`, skip the lock (check,
+/// then `durable_write`) — both contenders then answer `Mine` in some round.
 #[test]
 fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
     let Some(install) = Install::new("stale-race") else {
