@@ -482,8 +482,10 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
     // not get it leaves the transaction untouched.
     // A live owner that is not this applier is O at its end, which leaves
     // anyway: wait for it to go (round 6), within the applier's own wait for
-    // O, before giving up the transaction.
-    let until = Instant::now() + road.limits.old_within;
+    // O, before giving up the transaction. **One deadline for the whole wait
+    // for O** (round 7): the mark, the transaction lock, the claim and the
+    // admission all spend `window`.
+    let until = window;
     let duty = loop {
         match crate::update_apply::take_the_window(
             &road.home,
@@ -514,7 +516,7 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
     }
     let (ended, successor) = {
         let world = &mut *guard.inner().world;
-        match Txn::hold(road, worker, Asker::LockHolder) {
+        match Txn::hold(road, worker, Asker::LockHolder, window) {
             Ok((mut txn, bundles)) => {
                 let places = bundles.places();
                 let mut ended = txn.run(worker, &places, window, world);
@@ -579,7 +581,12 @@ pub(crate) fn recover(
         Opener::Login
     };
     let handed = start.unwrap_or(&[]);
-    let (ended, successor) = match Txn::hold(road, worker, Asker::Rescue) {
+    let (ended, successor) = match Txn::hold(
+        road,
+        worker,
+        Asker::Rescue,
+        Instant::now() + road.limits.old_within,
+    ) {
         Ok((mut txn, bundles)) => {
             let places = bundles.places();
             let mut ended = if txn.phase() == PhaseKind::Handoff
@@ -726,9 +733,15 @@ struct Txn<'a> {
 }
 
 impl<'a> Txn<'a> {
-    /// **The transaction lock within [`Limits::old_within`], then the
-    /// journal** — this road's transaction, a bundle's.
-    fn hold(road: &'a Road, worker: &'a WorkerCtx, asker: Asker) -> Result<(Self, Bundles), Ended> {
+    /// **The transaction lock by `until`** — the road's one deadline, counted
+    /// from its start ([`Limits::old_within`]) — **then the journal**: this
+    /// road's transaction, a bundle's.
+    fn hold(
+        road: &'a Road,
+        worker: &'a WorkerCtx,
+        asker: Asker,
+        until: Instant,
+    ) -> Result<(Self, Bundles), Ended> {
         let (Some(installed), Some(program), Some(stage), Some(rescue_program)) = (
             road.home.installed_bundle(),
             road.home.installed_program(),
@@ -742,7 +755,7 @@ impl<'a> Txn<'a> {
         let lock = match install_txn::hold_within(
             &road.home.lock(),
             Hold::Exclusive,
-            road.limits.old_within,
+            until.saturating_duration_since(Instant::now()),
         ) {
             Ok(Some(held)) => held,
             Ok(None) => return Err(Ended::LockHeld),

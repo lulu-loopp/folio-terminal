@@ -3071,3 +3071,98 @@ fn applied_on(install: &Install, road: Road, world: Fake) -> (Ended, Fake) {
         Err(panic) => std::panic::resume_unwind(panic),
     }
 }
+
+/// RED (U-34, round 7; Codex's finding 15) — **the applier's wait for O is one
+/// budget**: a wait for O's mark that spent most of `old_within` leaves only the
+/// rest for O's transaction lock, so an applier that then finds the lock held
+/// ends `OldHeldTheLock` at the one deadline, not a fresh `old_within` later.
+///
+/// MUTATION: in `apply_under_the_lock`, wait for the lock a fresh
+/// `road.limits.old_within`.
+#[test]
+fn the_applier_waits_for_o_within_one_budget() {
+    let Some(install) = Install::new("one-budget") else {
+        return;
+    };
+    let old = install.children.start(&install.rescue, &[]);
+    let old_running = Running {
+        pid: old,
+        started: install_flip::started_of(old).expect("O runs"),
+    };
+    assert_eq!(
+        crate::update_apply::take_the_window(&install.home, install.txn, old_running),
+        Window::Mine
+    );
+    let held = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+        .unwrap()
+        .unwrap();
+    let mut road = install.road(limits(2_000, 20_000));
+    road.me = crate::update_apply::this_process();
+    let began = Instant::now();
+    let applier = start(
+        road,
+        install.txn,
+        install.applier,
+        install.world(Trial::Answers),
+    );
+    std::thread::sleep(Duration::from_millis(1_500));
+    install.children.end(old);
+    let (ended, world) = applier.join().unwrap();
+    let took = began.elapsed();
+    drop(held);
+    assert_eq!(ended, Ended::OldHeldTheLock, "{:?}", world.said);
+    assert!(
+        took < Duration::from_millis(3_000),
+        "the lock got only what the mark left of the 2 s: {took:?}"
+    );
+}
+
+/// RED (U-34, round 7) — **a late applier after O's wait ran out never
+/// commits over O's replacement**: alive but unmarked past O's wait, it loses
+/// the duty; O takes the mark and starts the installed build (its window is
+/// the one the person sees); the applier, finding O's live mark, waits for O to
+/// go, takes the stale mark and enters its road — which meets the running
+/// Folio (here the data directory's claim it holds) and ends `Abandoned` with
+/// nothing moved, its guard's start acknowledged by that Folio.
+///
+/// MUTATION: in `update_handoff::Leaving::leave`, never take the duty after
+/// the wait (O then starts nothing, and the person has no window).
+#[test]
+fn a_late_applier_after_os_wait_meets_os_replacement_and_never_commits() {
+    let Some(install) = Install::new("late-applier") else {
+        return;
+    };
+    let old = install.children.start(&install.rescue, &[]);
+    let old = Running {
+        pid: old,
+        started: install_flip::started_of(old).expect("O runs"),
+    };
+    let applier = crate::update_apply::this_process();
+    let leaving = Leaving::over(&install.home, install.txn, &install.data)
+        .after_applier(applier, Duration::from_millis(500));
+    let (left, starts) = old_leaves(&install, old, leaving).join().unwrap();
+    assert_eq!(left, Left::Started(install.installed.clone()), "{starts:?}");
+    assert_eq!(starts.len(), 1, "O's replacement");
+    // O's replacement runs and holds the data directory.
+    let replacement = crate::persist::try_claim(&install.data).unwrap();
+    let mut road = install.road(limits(4_000, 20_000));
+    road.me = applier;
+    let applier_run = start(
+        road,
+        install.txn,
+        install.applier,
+        install.world(Trial::Answers),
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    install.children.end(old.pid);
+    let (ended, world) = applier_run.join().unwrap();
+    drop(replacement);
+    assert_eq!(ended, Ended::Abandoned, "{:?}", world.said);
+    nothing_moved(&install);
+    assert!(world.launched.is_empty(), "no trial: never committed");
+    assert_eq!(
+        world.opened.len(),
+        1,
+        "its guard's start, handed to the running Folio"
+    );
+}

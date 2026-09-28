@@ -426,7 +426,9 @@ pub(crate) fn apply(
     // duty opens Folio, and the next start or logon finishes the update.
     // A live owner that is not this applier is O at its end, which leaves
     // anyway: wait for it to go (round 6), within the applier's own wait for
-    // O, before giving up the transaction.
+    // O, before giving up the transaction. **One deadline for the whole wait
+    // for O** (round 7): the mark, the transaction lock, the claim and the
+    // admission all spend the same `old_within`.
     let until = Instant::now() + road.limits.old_within;
     let window = loop {
         match crate::update_apply::take_the_window(&road.home, txn, road.me) {
@@ -453,7 +455,7 @@ pub(crate) fn apply(
         }
     }
     let (ended, successor) =
-        apply_under_the_lock(worker, road, txn, nonce, &mut *guard.inner().world);
+        apply_under_the_lock(worker, road, txn, nonce, until, &mut *guard.inner().world);
     guard.succeeded_by(successor);
     let left = guard.leave();
     guard
@@ -470,13 +472,13 @@ fn apply_under_the_lock(
     road: &Road,
     txn: TxnId,
     nonce: Nonce,
+    window: Instant,
     world: &mut impl World,
 ) -> (Ended, Option<Running>) {
-    let window = Instant::now() + road.limits.old_within;
     let lock = match install_txn::hold_within(
         &road.home.lock(),
         Hold::Exclusive,
-        road.limits.old_within,
+        window.saturating_duration_since(Instant::now()),
     ) {
         Ok(Some(held)) => held,
         Ok(None) => return (Ended::OldHeldTheLock, None),
