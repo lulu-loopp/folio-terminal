@@ -2055,7 +2055,7 @@ fn relocate(previous: &Path, current: &Path) -> Relocation {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// RED (U-34, round 2; Codex's review, finding 5) — **letting go of every
@@ -3156,6 +3156,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **The claim on `directory`, asked for until it is let go** — within 5 s,
+    /// and only a live holder is asked about again.
+    ///
+    /// A claim this process dropped is not always free at once off Windows: a
+    /// `flock` belongs to the open file description, and a child that another
+    /// test thread is starting at that moment holds a copy of every descriptor
+    /// from its fork until its exec closes them (on macOS that exec validates
+    /// the signature of a freshly copied test binary, which takes a while). The
+    /// lock is let go when that exec is done; asking once would read the
+    /// child's copy as a holder.
+    pub(crate) fn claim_once_let_go(directory: &Path) -> bt_platform::instance::DataDirectoryClaim {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match try_claim(directory) {
+                Ok(claim) => return claim,
+                Err(bt_platform::instance::ClaimRefusal::Held)
+                    if std::time::Instant::now() < until =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(refusal) => panic!("asked again, the platform answers again: {refusal:?}"),
+            }
+        }
+    }
+
     /// RED (U-5, self-update R-3) — **`try_claim` asks the platform every time
     /// and remembers nothing.**
     ///
@@ -3183,7 +3208,7 @@ mod tests {
         );
 
         drop(other);
-        let taken = try_claim(&directory).expect("asked again, the platform answers again");
+        let taken = claim_once_let_go(&directory);
         assert!(
             matches!(
                 try_claim(&directory),
@@ -3193,6 +3218,7 @@ mod tests {
         );
 
         drop(taken);
+        drop(claim_once_let_go(&directory));
         assert!(
             is_writer_of(&directory),
             "no refusal try_claim was given was left in the table for is_writer_of to read"

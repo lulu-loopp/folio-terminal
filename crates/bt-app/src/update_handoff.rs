@@ -1432,6 +1432,10 @@ mod tests {
                 let claim = crate::persist::try_claim(&data).unwrap();
                 let held = crate::update_apply::claimed_within(Some(worker), &data, within);
                 drop(claim);
+                // Let go once the platform says so: a child another test is
+                // starting may hold a copy of the lock until its exec
+                // (`persist::tests::claim_once_let_go`).
+                drop(crate::persist::tests::claim_once_let_go(&data));
                 let began = Instant::now();
                 let free = crate::update_apply::claimed_within(Some(worker), &data, within);
                 (held, (free, began.elapsed() >= within))
