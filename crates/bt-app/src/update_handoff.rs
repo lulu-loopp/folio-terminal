@@ -300,7 +300,7 @@ pub(crate) fn took_line(
 /// or none, when nothing was staged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Leaving {
-    pub(crate) window: Option<(Home, TxnId)>,
+    pub(crate) transaction: Option<(Home, TxnId)>,
     /// The data directory O held: the Folio it starts takes it, which is the
     /// start's acknowledgement.
     pub(crate) data: PathBuf,
@@ -312,7 +312,7 @@ impl Leaving {
     #[must_use]
     pub(crate) fn over(home: &Home, txn: TxnId, data: &Path) -> Self {
         Self {
-            window: Some((home.clone(), txn)),
+            transaction: Some((home.clone(), txn)),
             data: data.to_path_buf(),
         }
     }
@@ -321,7 +321,7 @@ impl Leaving {
     #[must_use]
     pub(crate) fn nothing_staged(data: &Path) -> Self {
         Self {
-            window: None,
+            transaction: None,
             data: data.to_path_buf(),
         }
     }
@@ -338,7 +338,7 @@ impl Leaving {
         spawner: &mut dyn Spawner,
         worker: Option<&WorkerCtx>,
     ) -> Left {
-        let home = self.window.as_ref().map(|(home, _)| home.clone());
+        let home = self.transaction.as_ref().map(|(home, _)| home.clone());
         let mut guard = ExitGuard::new(OldLeave {
             program,
             spawner,
@@ -346,7 +346,7 @@ impl Leaving {
             data: &self.data,
             worker,
         });
-        if let Some((home, txn)) = &self.window
+        if let Some((home, txn)) = &self.transaction
             && let Window::Theirs(owner) = crate::update_apply::take_the_window(home, *txn, me)
         {
             guard.not_mine(Some(owner.pid));
@@ -484,7 +484,7 @@ pub(crate) const LEAVE_WITHIN: Duration = Duration::from_secs(45);
 pub(crate) fn leave_armed(_token: WaitToken<'_, doors::UpdateLeave>) -> Option<Left> {
     let leaving = ARMED.lock().ok()?.take()?;
     crate::persist::let_go_of_every_claim();
-    let home = leaving.window.as_ref().map(|(home, _)| home.clone());
+    let home = leaving.transaction.as_ref().map(|(home, _)| home.clone());
     let left = match std::env::current_exe() {
         Err(error) => Left::ShownHere(format!("this program cannot be named: {error}")),
         Ok(program) => {
