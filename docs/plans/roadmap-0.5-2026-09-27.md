@@ -44,6 +44,18 @@ after A3 and A4 and before L1, L3a, C2, T1, T2, S1, V10 and A9, first in
 supersedes §3 row 21's paste-only: the reply follows its view: the conversation view sends to the agent; a terminal view sends keystrokes as typed, Enter included; no paste-without-Enter mode (C2, S2, V11, Q31). C1 names
 the child-process generation and the agent epoch separately. §10 records it.
 
+**Revision (g), 2026-09-28: background services.** The owner asked for a way
+to start background services (dev servers, watchers, tunnels) without a
+terminal pane standing in the foreground, and a panel to start and stop them;
+he ruled the coordinator's proposal on 2026-09-28 (*"可以,照此做,UI 到时候要设计"*).
+Two new rows in §2.S: **S5**, the primitives — a service **is** a session with
+no bound view, sent to the background and brought forward by binding a view
+(0.5.7, the version after V10's, where T5's tiers exist for its two tool verbs)
+— and **S6**, the services panel and the declared list per project folder
+(version unassigned, after S5). §3 gains row 25 (a session may
+now outlive its last view in 0.5, for a service only); §4.2 gains the "no
+second process model" contract. §10 records it.
+
 The owner's ask (2026-09-27): *"Shouldn't all the feature increments 0.5 is to
 implement be gathered up, with their dependencies worked out, and written into
 one plan-and-schedule document?"* His leaning the same day: design once,
@@ -246,6 +258,8 @@ own note; its consumers may not ship before it.
 | S3a | `[Image #N]` links in an agent's input line | Learn a pane's `[Image #k]` → file mapping from the OSC 8 links Claude Code prints; the mapping's lifetime across agent replacement and resume; recognise the same text in the input area; the file-exists verdict off the input path (today's hit path reads only `frame.hyperlink_at`) | IDX (0.4.7 small, owner ask 2026-09-27); mem:ui-agent-workbench-scope (2026-09-27) | asked (0.4.7 small or 0.5) | — | M (pending a demonstrated reuse path) | §6 Q21 |
 | S3b | `[Image #N]` as a thumbnail in the conversation view | The placeholder shown as the picture | mem:ui-design-05-approach-0922 (2026-09-27) | asked | S2, S3a | with S2 | — |
 | S4 | A finished turn in three lines | What it did, what it says it did not verify, CI | WB §2.3; mem:attention-bottleneck-idea (point 3) | proposed (the notification's expand shows the latest reply, ruled) | S2 | S (design) | — |
+| S5 | Background services: the primitives | Revision (g). **Send a pane to the background** = unbind its view; the session lives on as A15's session with no bound view (the remote-seam note's §4.2 "bind"/"unbind" transitions, and its §7 Q3 model of a session held with no window drawing it, brought into 0.5 for a service only — §3 row 25). **Bring a service forward** = bind a pane to it (V10's view binding). The session's scrollback and state are the ordinary session's: nothing is copied, replayed or kept apart. The tool face gains the same two verbs (`folio` and MCP, one domain API, T1), so an agent can send its own dev server to the background and bring it back; they are acting verbs under T5's tiers. **Hard contract: no second process model** (§4.2) — a service **is** a `LeafSession` with no view, not a new kind of process or supervisor; stopping it is the session's ordinary close. That close must end the **whole process tree**, not only the child Folio started (a dev server's workers, a watcher's children): a Windows Job object, a macOS process group — **the one new obligation on the PTY layer**, checked when A15 lands. Until 0.6's tray host (note §7 Q3), Folio quitting ends every service as it ends every session | the owner's ruling of 2026-09-28 in conversation (on the coordinator's proposal: *"可以,照此做,UI 到时候要设计"*); `docs/plans/design/remote-seam-2026-09-27.md` §4.2, §7 Q3 (commit 7fd826f9); A15; precedents: JetBrains' Services tool window, VS Code tasks (`isBackground`), Procfile / overmind, tmux detach | ruled (2026-09-28); no design | A15, V10; T5 (the two tool verbs only) | M | — |
+| S6 | Background services: the panel and the declared list | Revision (g). **One row per service** — name, state (running, or exited with its code), uptime, the last output line — with **start / stop / restart / show** (show = S5's bring forward). **A declared list per project folder** — name, command, cwd, env — stored beside the profiles (`profiles.json`). A service's exit or error becomes a notice through L1. The phone sees and restarts a service under the capability-parity ruling (remote-seam note §7 Q12). **Not in scope:** start at boot or daemon management (the operating system's job); dependencies between services; restart policies beyond one toggle; VS Code-style readiness matchers (the first version reads the exit code and, optionally, one line match). **UI: to be designed in the prototype** (a prototype round runs in parallel); **where it sits — a sidebar view or the where × what panel (O1a) — is the owner's call** | the owner's ruling of 2026-09-28 in conversation; remote-seam note §7 Q12 (commit 7fd826f9); precedents: JetBrains' Services tool window, VS Code tasks (`isBackground`), Procfile / overmind, tmux detach | ruled (2026-09-28); no design; the placement open | S5, L1 | M (design) + M | the placement (owner) |
 
 ### 2.T The tool face and comments
 
@@ -364,6 +378,7 @@ own note; its consumers may not ship before it.
 | 22 | The web-preview form of 2026-08-19 (`docs/plans/web-preview/plan.md` §0, the line that makes the web page a preview pane's content): **no several pages inside the preview — several pages come from terminal-less tabs**; and its built form, DESIGN §7.9 ⑦, one page per tab (2026-08-22): a tab that already has a page takes a second address **as a navigation in that seat**, not a second pane or a second controller | Several pages with a visible strip in one web pane (Q10 ruled in direction, 2026-09-27), built first as B1a in the existing web pane class. What does **not** fall: the web page stays a preview buffer (§7.7 ①, §7.9) until B1's promotion (row 11), the preview-pane-per-tab singleton stays a rule about panes, and "history = the preview switcher" (2026-08-19) stays until B1's note scopes history | the owner's sentence of 2026-09-27; Q10; B1a |
 | 23 | `window.open` / `target=_blank` in the same form (plan §0's line on the external profile, a review-round addition to the 2026-08-19 form): **only a user-initiated new-window request becomes a navigation in the same pane**, a popup without a gesture is cancelled; as built (DESIGN §13.38 row ⑳), neither opens anything | A link from a page in use opens **beside it, never over it**, as a new page on the strip (Q10 ruled in direction, 2026-09-27; B1a). What does **not** fall: a popup without a gesture is still cancelled, and the target still passes `webnav`'s gate — together with the source page's navigation and mint admission (revision (e)). The promise also covers ordinary same-frame user links, which take neither new-window door (B1a) | the owner's sentence of 2026-09-27; Q10; B1a |
 | 24 | One engine, one thumbnail and one visual per pane: DESIGN §7.12 (2026-08-23, the correction to §7.9 ②), whose three window tables — `WindowRuntime::web`, `WindowRuntime::web_thumbs` and the compositor's visual table — are keyed by `LeafId{tab,seat}`, with `bt_platform::PageVisual{tab,seat}` as the native name | **Extended, not repealed** (revision (e), Codex's check of (d), finding 4): for B1a a pane holds an ordered set of live pages, so each table is keyed by a live-page identity and the native visual name gains the page; §7.12's rule that two pages alive in one window never share a name stays, now per page. Two further assumptions are extended the same way: **§7.9 ①'s committed-URL key** (`switcher_key`) stays the pool, switcher and history identity, but it is not a live-page identity — two open pages on the same URL are two pages; **§7.9 ⑧'s restored pool rows** are history, not an ordered set of open pages — B1a adds that set (and its restoration, B1a's lifetime promise) beside the pool. The pool, the switcher as history, the preview-buffer classification (§7.9) and the one-preview-pane-per-tab policy stay | the owner's sentence of 2026-09-27; Q10; B1a; B1's note |
+| 25 | Unbinding a session's last view ends it in 0.5 (today's behaviour); a session outlives its views only in 0.6, behind the tray (remote-seam note §4.2's last-view row and §7 Q3, "0.5 as today", ruled 2026-09-27) | **Narrowed, not repealed** (revision (g)): a session the person or an agent **sends to the background** (S5) lives on with no bound view in 0.5.x; every other last-view unbind still ends its session as today. What does **not** fall: Folio quitting ends every session, services included, until 0.6's tray host; the tray itself stays 0.6. The note's §4.2 row and Q3 are the note's to amend, not this plan's | the owner's ruling of 2026-09-28 in conversation; S5 |
 
 ## 4. Dependencies (revised in (b))
 
@@ -421,6 +436,11 @@ flowchart LR
   L3a -.-> S2
   C1 --> A7a[A7a 0.6 decisions] --> A7b[A7b second-view design] --> V10[V10 floats]
   A9[A9 PTY lifecycle] -.-> V10
+  A15 --> S5[S5 services: primitives]
+  V10 --> S5
+  T5 -->|"the two tool verbs only"| S5
+  S5 --> S6[S6 services panel, declared list]
+  L1 --> S6
   B1N[B1 note with the page-set lifecycle contract, due 0.5.0] --> B1a[B1a several pages] --> B1
   D1 --> B1a
   B1N -->|"shared contract: owner, lifetime, navigation invalidation (no B1a build edge)"| C3a
@@ -487,6 +507,15 @@ flowchart LR
 - **S1 before O1b**: recovery before its resume entrances.
 - **A7a and A7b before V10** (the second view's owners), **A7a before R2**
   (AR §12.2: before the second client).
+- **No second process model for background services** (revision (g), the
+  owner's ruling of 2026-09-28): **A15 and V10 before S5, S5 and L1 before S6.**
+  A service is a `LeafSession` with no bound view, owned by A15 like every
+  session; sending it to the background unbinds its view and bringing it
+  forward binds one (V10's binding), so S5 adds no process kind, supervisor or
+  store of its own. Stopping a service is the session's ordinary close, which
+  must end the whole process tree — a Windows Job object, a macOS process group:
+  the one new obligation on the PTY layer, checked when A15 lands. S5's two
+  tool verbs follow T5's tiers. S6's exit and error notices are L1 facts.
 - **Q1 and Q2 before Q3**: the chip shows only what an honest source gives
   (WB §7).
 - **D1 (the tokens and components a surface actually uses) before that
@@ -535,8 +564,8 @@ moved into 0.5 needs a dated owner ruling (Q23). I7 does not block.
 | **0.5.3** | Agents can read what you are looking at through `folio` and MCP; Folio registers itself with them; comments carry a `folio comment` link | The tool endpoint, the tool credential, the read tiers; the outward serializer | L3b, T1, T2, T3a, T4, T6, V9b, T9b, R2 | — (B1's note moved to 0.5.0, revision (d)) |
 | **0.5.4** | Agents come back after a restart, vendor by vendor; the panel's agent levels and resumable Recent (0.5 scope, confirmed by the owner on 2026-09-27) | Session recovery on C1 | S1, O1b, S3a (if Q21 puts it in 0.5) | — |
 | **0.5.5** | The conversation view; "this turn"; reply from a notification (0.5 scope, confirmed by the owner on 2026-09-27) | The transcript model, extending V5's | S2, S3b, Q5a, V11 | — |
-| **0.5.6** | The tear-out float, in the window (§6 Q5(a), 2026-09-27); the zoom float is not in 0.5 (§6 Q5(b)) | PTY birth and resize under the session owner (co-scheduled) | V10, A9 | — |
-| **0.5.7** | The browser as its own class, keeping B1a's pages (Q10 ruled in direction, 2026-09-27); agents that open, split, navigate and type; an agent driving a page you can watch | Web ownership in full; acting verbs; the send and operate-Folio tiers | C3, B1, B2, B4, T5, T3b, T12, B3 | — |
+| **0.5.6** | The tear-out float, in the window (§6 Q5(a), 2026-09-27); the zoom float is not in 0.5 (§6 Q5(b)) | PTY birth and resize under the session owner (co-scheduled) | V10, A9 | S5 (the no-view session and the process-tree close, against A15's note; revision (g)) |
+| **0.5.7** | The browser as its own class, keeping B1a's pages (Q10 ruled in direction, 2026-09-27); agents that open, split, navigate and type; an agent driving a page you can watch; **a pane sent to the background keeps running as a service and comes back when a pane is bound to it — by the person or by an agent's own verb** (revision (g)) | Web ownership in full; acting verbs; the send and operate-Folio tiers; **the no-view session and the process-tree close** (S5) | C3, B1, B2, B4, T5, T3b, T12, B3, S5 | S6 (UI from the prototype round; placement the owner's call) |
 | **0.5.8** | Preview beauty and line numbers; the Mac's menu bar; the web demo | The composition crate; **the Markdown-conveniences design note (P2) — its build is deferred until the note scopes and sizes it** | P1, P2 (the note), M1, A13, X2 | — |
 
 0.5.7 is the largest; it may split into "browser" and "an agent drives it" at the
@@ -568,10 +597,11 @@ notification, jump to the exact pane, and answer in the agent's own terminal.
 | 0.5.4 | S1, O1b, S3a |
 | 0.5.5 | S2, S3b, Q5a, V11 |
 | 0.5.6 | V10, A9 |
-| 0.5.7 | C3, B1, B2, B4, T5, T3b, T12, B3 |
+| 0.5.7 | C3, B1, B2, B4, T5, T3b, T12, B3, S5 |
 | 0.5.8 | P1, P2 (design note only; build unscheduled), M1, A13, X2 |
 | standing acceptance rule (applies to every version) | A14, D7, D4b, X4 |
 | awaiting the owner's scope ruling (proposals and asks not scheduled) | V7, V12, V13, G5, K1, O4, L6, S4, T7, P3, Q5b, Q6, D6, X1, X3 |
+| ruled, version unassigned: after its prerequisite, the 0.5 second half or 0.6 (revision (g)) | S6 |
 | deliberately deferred out of 0.5 | O5 |
 | in flight outside this repository | R1 |
 
@@ -782,6 +812,7 @@ repository are named by file, never by location.
 | The Codex review of this plan (`tickets-046/P05-0-review-codex-2026-09-27.md`) | revision (b) throughout (§10) | — |
 | The owner's rulings of 2026-09-27 (one sentence, recorded in the revision (d) brief, `tickets-046/P05-0d-plan-revision-d.md`, the coordinator's records) | Q1, Q5, Q10 (ruled), B1a, the S1/S2 confirmation, §3 rows 22, 23 | — |
 | `docs/plans/web-preview/plan.md` §0; DESIGN §7.7 ①, §7.9 ②③⑦, §13.38 row ⑳ (read for revision (d)) | §3 rows 22, 23; B1a's size | the preview switcher as history and the pin as bookmark (2026-08-19): not touched by the 2026-09-27 rulings; B1's note scopes history |
+| The owner's ruling of 2026-09-28 in conversation (background services, on the coordinator's proposal; recorded in the revision (g) brief, `tickets-046/P05-services-row.md`, the coordinator's records), with the remote-seam note's §4.2 and §7 Q3, Q12 (commit 7fd826f9) | S5, S6, §3 row 25, §4.2's no-second-process-model bullet | boot-time start, daemon management, dependencies between services, restart policies beyond one toggle and readiness matchers (out of scope by the ruling; S6 says so) |
 | Code read for B1a's size and prerequisite: `webhost::{WebSeat, WebMachine}`, `WindowRuntime.web` (OC census row 130), `bt-platform`'s `NewWindowRequested` handler and WebKit `createWebViewWithConfiguration:` | B1a; §4.2's B1a bullet | — |
 | Codex's scoped check of (d) (`tickets-046/P05-0d-review-codex-2026-09-27.md`, the coordinator's records), with its code trace (`bt_platform::PageVisual`, `apply_web_outcomes`' routing by pane, the census row's call sites, `webnav::Origin`) and DESIGN §7.9 ①⑧, §7.12 | revision (e): B1a, C3a, B1, §4.1, §4.2, §3 rows 23, 24, §6 Q10 | finding 7 (the D-41 version cell): the ledger's, changed on main by the coordinator, not in this plan |
 | mem:ui-agent-workbench-scope | B1, B2, O4, O5, P1, Q5a, Q5b, S1, S2, S3a, D4b, G5, V8, §1.5 | the herdr/Orca notes (unverified references); the "Agent group by company" sketch (withdrawn by the coordinator 2026-09-20) |
@@ -1072,3 +1103,44 @@ commit 7fd826f9: §2.2's proposed row text, §9, §10) and the owner's ruling of
    dependents); S2; V11; V10's input line; §6 Q31 (ruled).
 3. **C1's wording.** `incarnation` is the child-process generation, and
    `agent_epoch` is named separately (the note's §10).
+
+### Revision (g) — background services (2026-09-28)
+
+From the owner's ruling of 2026-09-28 in conversation: he asked for a way to
+start background services (dev servers, watchers, tunnels) without a terminal
+pane standing in the foreground, with a panel to start and stop them, and ruled
+the coordinator's proposal: *"可以,照此做,UI 到时候要设计"*. Industry
+precedents named in both rows: JetBrains' Services tool window, VS Code tasks
+(`isBackground`), Procfile / overmind, tmux detach.
+
+1. **The primitives.** New row **S5** in §2.S: send a pane to the background =
+   unbind its view, the session lives on (A15's session with no bound view, the
+   remote-seam note's §7 Q3 model brought into 0.5 for a service only); bring a
+   service forward = bind a pane to it; scrollback and state are the ordinary
+   session's; the tool face gains the same two verbs. Hard edges `A15 → S5`,
+   `V10 → S5`, and `T5 → S5` for the two tool verbs only (the verbs are acting
+   verbs; T5 lands in 0.5.7). Placed in **0.5.7**, the version after V10's, so
+   the whole row lands at once with T5's tiers rather than splitting its verbs
+   off; its design note is due at 0.5.6.
+2. **The panel and the declared list.** New row **S6** in §2.S: one row per
+   service with start / stop / restart / show; a declared list per project
+   folder stored beside the profiles; exit and error as L1 notices; the phone
+   under the capability-parity ruling (note §7 Q12); the out-of-scope list; UI
+   from the prototype round, placement (sidebar view or the where × what panel)
+   the owner's call. Hard edges `S5 → S6`, `L1 → S6`. Version **unassigned,
+   after S5** (the 0.5 second half or 0.6): §5.1 gains that disposition line;
+   its design is listed as due at 0.5.7.
+3. **The contract.** §4.2 gains "no second process model": a service is a
+   `LeafSession` with no view; stopping it is the session's ordinary close,
+   which must end the whole process tree (a Windows Job object, a macOS process
+   group) — the one new obligation on the PTY layer, checked when A15 lands.
+4. **The supersession.** §3 row 25: the note's §4.2 last-view row and §7 Q3
+   ("0.5 as today") are **narrowed** for a session sent to the background, not
+   repealed; Folio quitting still ends every session until 0.6's tray. **For the
+   coordinator:** the remote-seam note's §4.2 row and §7 Q3 need the matching
+   edit; this revision touches only this plan.
+
+Cells: header paragraph (g); §2.S (S5, S6 new); §3 row 25; §4.1's graph;
+§4.2's hard contracts; §5's 0.5.6 row (S5's note due) and 0.5.7 row (S5
+landing, S6's design due); §5.1's 0.5.7 row and the new "version unassigned"
+line; §9 (the ruling's row).
