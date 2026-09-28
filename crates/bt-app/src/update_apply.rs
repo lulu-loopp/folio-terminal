@@ -821,8 +821,9 @@ impl Left {
 /// waiting ([`ExitGuard::nobody_waiting`]).
 ///
 /// It replaces the per-road answers U-29b's rules had spread over each end
-/// (`opens_after`'s table of who owes what, the refusals that left silently):
-/// what a road decides now is only whom it leaves behind.
+/// (the table of who owed a window after which end, and the refusals that left
+/// silently): what a road decides now is only whom it leaves behind, and
+/// whether it has the duty at all.
 pub(crate) struct ExitGuard<L: Leave> {
     leave: L,
     successor: Option<Running>,

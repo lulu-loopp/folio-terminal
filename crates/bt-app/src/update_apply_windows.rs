@@ -106,10 +106,15 @@
 //! **Leaving: one exit guard** (U-34; U-29b's rulings 2 and 3, adopted here by
 //! U-24, now applied by it): every way out of the applier and of the
 //! recovery — a normal end, any refusal once the home is known, a panic
-//! unwinding — goes through `update_apply::ExitGuard` ([`WindowsLeave`]). A
-//! successor it leaves behind still running — the trial it started, the
-//! applier it found at `Handoff` — opens Folio; otherwise exactly one start of
-//! what the disk names once the lock is let go ([`opens_now`]): the old build
+//! unwinding — goes through `update_apply::ExitGuard` ([`WindowsLeave`]). The
+//! applier has the duty only once it has taken the window's mark
+//! (`update_apply::OWNER_FILE`), before it waits for O's lock; before that, and
+//! when another live process holds the mark, it starts nothing. A successor
+//! it leaves behind still running — the trial it started, the mark's holder
+//! found at `Handoff` — opens Folio; otherwise one start of what the disk
+//! names once the lock is let go ([`opens_now`]), counted only when a Folio
+//! acknowledges it by holding the data directory, else the rescue copy, else
+//! the failure window shown by this process: the old build
 //! plainly after a revert or an abandon; after a rollback, finished or not,
 //! and while the journal is `destructive` with the old set whole — a journal
 //! write refused past [`crate::update_apply::JOURNAL_WRITE_WITHIN`], a lock
@@ -393,12 +398,12 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
     2
 }
 
-/// **The applier, over any road** — see the module header. Once the lock is
-/// let go, exactly the start the road owes ([`opens_after`] for
-/// [`Opener::Applier`]): the old build plainly after a revert, the installed
-/// build with `--update-failed` after a rollback, the rescue copy where
-/// neither whole set is installed, nothing after `Committed` (the trial runs)
-/// or `Abandoned`.
+/// **The applier, over any road** — see the module header. It takes the
+/// window's mark first (`update_apply::take_the_window`) and runs its road only
+/// if it got it; once the lock is let go, it leaves through its exit guard
+/// (`update_apply::ExitGuard`): the trial it started, still running, is the
+/// window; otherwise the start the disk names ([`opens_now`]), acknowledged,
+/// else the rescue copy, else the failure window shown here.
 pub(crate) fn apply(
     worker: &WorkerCtx,
     road: &Road,

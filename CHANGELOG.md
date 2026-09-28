@@ -31,7 +31,8 @@ All notable changes to Folio are recorded here. The format follows
   that takes longer than the start of the new copy allows (now 15 s, where it
   was 3 s), or a fault in the updater now reopens the installed Folio, with an
   "Update incomplete" card when the update did not finish, instead of leaving
-  no window until the next sign-in.
+  no window until the next sign-in; if Folio cannot be started at all, the
+  updater itself says the update is incomplete and where.
 - macOS: the shipped shells start as login shells, so tools whose PATH is set
   in .zprofile — Homebrew's — are found; a profile can turn login on or off;
   a profile with arguments no longer reads as not installed.

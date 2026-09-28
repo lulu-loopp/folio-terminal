@@ -2268,7 +2268,7 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
 /// `Stuck` relaunched whatever was live, the untrialled new build included,
 /// its writers not held back.
 ///
-/// MUTATION: in `opens_after`, answer `Opens::Installed { failed }` whatever
+/// MUTATION: in `opens_now`, answer `Opens::Installed { failed }` whatever
 /// is live.
 #[test]
 fn a_new_live_bundle_is_never_started_plainly_before_committed() {
@@ -2467,8 +2467,8 @@ fn a_receipt_found_by_recovery_commits_forward() {
 /// the folder; the journal is kept." The start the door makes is run through
 /// the command line's own parser and the ordinary start's pass.
 ///
-/// MUTATION: in `opens_after`, owe nothing after `Ended::Failed` and
-/// `Ended::Refused`.
+/// MUTATION: in `recover`, answer `waiting: false` for a start's recovery
+/// that failed (the exit guard then starts nothing).
 #[test]
 fn recovery_failure_still_opens_with_the_incomplete_card() {
     if !on_macos() {
@@ -2642,8 +2642,8 @@ fn unwritable(home: &Home) -> std::fs::Permissions {
 /// the *Update incomplete.* card. On Windows the same write is asked again
 /// while another program holds the journal open; a macOS rename never is.
 ///
-/// MUTATION: in `update_apply_macos::opens_after`, put `Ended::Failed(_)`
-/// back in the applier's arm that owes nothing.
+/// MUTATION: in `update_apply_macos::apply`, tell the guard nobody is waiting
+/// after `Ended::Failed` (U-23's "a failed applier owes no window").
 #[test]
 fn a_failed_applier_still_opens_the_live_bundle_with_the_incomplete_card() {
     if !on_macos() {

@@ -537,8 +537,8 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
 /// [`Asker::Rescue`] from what is on disk:
 ///
 /// - `Handoff` / `Armed` — nothing exchanged: the entrance removed, back to
-///   `Prepared` (unless a process that may still be the applier runs from
-///   the rescue clone, started before this one: then it is left to it, as
+///   `Prepared` (unless a live process holds the window's mark,
+///   `update_apply::OWNER_FILE`: then it is left to it, as
 ///   [`Ended::LockHeld`]);
 /// - `Moving` — decided by the live identity: the old one → `Prepared`; the
 ///   new one → the new build started as the trial, `Trial` recorded, and

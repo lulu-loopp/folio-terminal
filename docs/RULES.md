@@ -957,11 +957,15 @@ retried at the next logon or start three times at most; whatever phase a dead
 applier leaves, a start opens exactly one Folio, and the new build before
 `Committed` only as a trial. **Every road process — the outgoing build once
 its hand-over is over, the applier, the recovery build — leaves through one
-exit guard**: a successor it leaves running (by pid and start instant) opens
-Folio, otherwise it starts what the disk names, so a window follows Restart to
-update whatever the road met — a refused write, a hand-over past its 15 s, a
-refusal, a panic; the one exception is the recovery at logon that did nothing
-a person is owed a window for. The macOS road (the bundle exchange, the
+exit guard**, armed when Restart to update is pressed: one mark
+(`H\<txn>\owner`) says which one process has the duty to open a window —
+the applier once it takes it, else the outgoing build — and that process
+leaves a successor it knows is running, or starts what the disk names and
+counts it only when a Folio acknowledges it by holding the data directory,
+else the next program, else shows the failure window itself. So a window
+follows Restart to update whatever the road met — a refused write, a
+hand-over past its 15 s, a refusal, a panic; the one exception is the
+recovery at logon that attempted nothing. The macOS road (the bundle exchange, the
 LaunchAgent entrance, its rollback and opening rules) is built to the same
 contract behind its shut gate; U-32 opens it.
 **From.** §7.52 *an installed preview has no way to know it is out of date: one

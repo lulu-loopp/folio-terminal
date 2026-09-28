@@ -2022,7 +2022,7 @@ enum Opened {
 /// the rollback exists it opens only where the install holds neither whole
 /// set.
 ///
-/// MUTATION: in `opens_after`, answer `Opens::Rescue` for every `destructive`
+/// MUTATION: in `opens_now`, answer `Opens::Rescue` for every `destructive`
 /// header (U-23's rule).
 #[test]
 fn every_phase_left_by_a_dead_applier_still_opens_folio() {
@@ -2338,8 +2338,8 @@ fn a_journal_write_refused_for_a_moment_is_asked_again_and_the_update_completes(
 /// set whole under a `destructive` header, so the installed build with the
 /// *Update incomplete.* card. The started build is recorded, never made.
 ///
-/// MUTATION: in `update_apply_windows::opens_after`, put `Ended::Failed(_)`
-/// back in the applier's arm that owes nothing.
+/// MUTATION: in `update_apply_windows::apply`, tell the guard nobody is
+/// waiting after `Ended::Failed` (U-23's "a failed applier owes no window").
 #[test]
 fn a_journal_write_refused_for_good_still_opens_the_installed_build_with_the_incomplete_card() {
     let Some(install) = armed("refused-for-good") else {

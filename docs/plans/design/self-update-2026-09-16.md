@@ -2475,6 +2475,18 @@ Nobody ever defers to a process that could itself defer: O defers only to a
 live P that holds the mark, and a P that holds the mark never defers. R defers
 only to the mark's live holder, which never defers to R.
 
+**Trust.** The mark is internal metadata of the installation home, written and
+read by the same user's processes (O, its rescue copy), as the journal and the
+entrance are; it is not a privilege boundary. A process that forges it can
+only make a road wait for, or start nothing beside, a process that exists by
+pid *and* start instant — the same power over this user's update any process
+of this user already has over the journal. It is validated as the journal is:
+its form (`<pid>:<creation>`), and liveness by both numbers, so a reused pid
+is never taken for its owner. Round 1's predecessor environment variable,
+which a caller could set on any start and whose value leaked into every child
+of an older build that passed it through, is gone with the inference it
+corrected; no environment variable carries anything of the update now.
+
 | moment | mark | O (at its end) | P | window |
 |---|---|---|---|---|
 | hand-over sent | cleared by O | armed | not yet started | — |
@@ -2549,9 +2561,9 @@ whether a Folio window follows):
 | O | `Started` | P owes | whoever holds the window's mark: P if it took it, else O | the mark; `the_window_is_handed_over_by_one_mark_and_opened_exactly_once` |
 | O | `NotRecorded` (journal `Prepared`) | none | Folio (W2's card) | guard, construction |
 | O | `NotStarted`, `Abandoned` written | none | Folio | guard, construction |
-| O | `NotStarted`, abandon not written (`Handoff`) | none | Folio → R reverts | guard, construction |
+| O | `NotStarted`, abandon not written (`Handoff`) | none | O takes the mark: installed + `--update-failed` (it continues; the next start reverts) | guard, construction |
 | O | nothing staged, job refused, no worker | none | Folio | guard, construction |
-| O | no answer in the budget (W9) | none | Folio → R: late P left alone, or revert | guard, `a_hand_over_with_no_answer_in_time_still_opens_folio_once` |
+| O | no answer in the budget (W9) | none | whoever holds the mark: a late P that took it opens; else O takes it and starts, and a P later than that touches nothing | the mark; `a_hand_over_with_no_answer_in_time_still_opens_folio_once` |
 | O | panic after *Restart to update* was pressed | none | O's panic road: one start; the hook's own box | armed at the press; `the_panic_road_never_waits_for_a_held_armed_slot` |
 | O | the quit abandoned after Restart (Cancel, a refused write) | O stays | O's windows | disarmed |
 | P | exe unnamed, not a rescue home | none | nothing from P, which never took the mark; O, finding no mark, starts Folio | the mark |
