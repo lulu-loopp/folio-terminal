@@ -2462,8 +2462,19 @@ never none.
   guard then opens the window. A P that finds it taken by a live process
   touches nothing and starts nothing; one that cannot hold the election (round
   5, below) takes the duty — a second start is possible, never none.
-- **O takes it at its very end**, after letting go of its claim
-  (`update_handoff::Leaving::leave`), and starts Folio only if it got it. O's
+- **O waits for the applier it started, then takes it at its very end**
+  (round 6: the clean VM's happy path on A5 failed because O reached its end
+  0.8 s before its applier's first decision, won the election, and the
+  applier refused the whole update). After letting go of its claim, O's end
+  (`update_handoff::Leaving::leave`, on its worker's wait door) waits until the
+  mark names the applier the hand-over reported started (its pid and start
+  instant, `update_handoff::record_the_applier`), or that applier is gone, or
+  `APPLIER_MARK_WITHIN` (15 s — the hand-over's own budget for a first start;
+  the VM measured 0.8 s from the applier's start to its mark) has passed. Only
+  then the election: the applier's mark → O starts nothing; the applier gone
+  (dead before or after its mark) → O takes the duty; alive without a mark past
+  the wait → O takes the duty and says so in one line. O starts Folio only if
+  it got the duty. O's
   start reads the header as a lock holder does — `destructive` (nothing moved
   while the journal is O's) with `--update-failed`, so it continues with
   *Update incomplete.* and never hands itself to R; `Prepared`/`Abandoned`
@@ -2495,23 +2506,30 @@ corrected; no environment variable carries anything of the update now.
 | moment | mark | O (at its end) | P | window |
 |---|---|---|---|---|
 | hand-over sent | cleared by O | armed | not yet started | — |
-| P starts, takes the mark (the ordinary case) | P | finds P's mark: starts nothing | runs its road; its guard opens | P's |
+| P starts, takes the mark (the ordinary case) | P | waits for P's decision, finds P's mark: starts nothing | runs its road; its guard opens | P's |
+| O reaches its end before P's mark (A5) | P, a moment later | waits for P (up to 15 s), then finds P's mark: starts nothing | takes the mark, runs its road | P's (the trial) |
+| P dies before its mark | absent | stops waiting when P is gone; takes it, starts Folio | — | O's |
+| P alive, no mark within O's wait | O | takes it after the wait, starts Folio (one line) | finds a live O: waits for O to leave, then takes the stale mark; its road then meets O's start | O's |
 | P refused before its road, or never started (W9) | absent | takes it, starts Folio | touches nothing | O's |
-| P arrives after O took it (a late first start) | O | already started Folio | finds a live O: touches nothing, starts nothing | O's |
+| P arrives after O took it (a late first start, no answer recorded) | O | already started Folio | finds a live O: waits for O to leave (within its 60 s wait for O), then takes the mark; its road meets O's start (a running Folio holds the claim and the files: `OldStayed` or a revert), and its guard's start is acknowledged by that Folio | O's |
 | P took it and died (killed) | P, stale | takes it over, starts Folio | — | O's |
 | P took it, O still alive, R started by a person | P | (as above) | its guard opens | P's; R leaves `Handoff` to P |
 | P took it, O gone, P killed | P, stale | — | — | the next start: R ignores the stale mark and reverts |
 | the election cannot be held (I/O) | — | takes the duty, starts | takes the duty, runs its road | both may open (a second start is possible, never none) |
 
 **Open decision requested 2026-09-28: an applier ended from outside after it
-took the mark.** The immediate-window guarantee is **not** narrowed by this
-note; until the owner decides, this interleaving is an open gap in it:
+took the mark, while O was already gone.** The immediate-window guarantee is
+**not** narrowed by this note; until the owner decides, this interleaving is an
+open gap in it. Round 6 narrows it: an applier killed *before* it takes the
+mark, or after it but while O is still waiting for its decision, is covered by
+O — O stops waiting when the applier is gone and takes the duty itself. What
+remains:
 
 1. P starts and takes `H\<txn>\owner` (before it waits for O's lock).
 2. O, at its very end, finds the mark naming P, running — and leaves without
    a start: P holds the duty.
-3. P is ended from outside — Task Manager, a security product's kill — before
-   its exit guard runs (a kill runs no `Drop`).
+3. After O has gone, P is ended from outside — Task Manager, a security
+   product's kill — before its exit guard runs (a kill runs no `Drop`).
 
 No window follows until the next start (R ignores the now-stale mark and
 reverts `Handoff`/`Armed`, or rolls back from `Moving` on) or, from `Armed` on,
@@ -2530,6 +2548,14 @@ O cannot wait for P's delivery, because P's road needs exactly what O holds
 until its process ends. The decision requested is between those two and
 accepting the gap (an externally terminated applier recovered by the next
 start or logon).
+
+**The applier never gives up the update to a live O at once (round 6).** An
+applier that finds the mark naming a live process — only ever O at its end,
+past its wait for this applier — waits, on its worker's wait door and within
+its own 60 s wait for O (`Limits::old_within`), for that process to leave (O
+leaves anyway), then takes the now-stale mark and runs its road; only a holder
+still alive after that wait makes it leave the transaction untouched. The
+mark is its first act after its line is parsed, before anything else.
 
 **The stale-mark takeover is one lock around read-check-replace (round 5,
 Codex's finding 14, which the round-4 ballot did not close).** The election is

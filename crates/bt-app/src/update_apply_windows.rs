@@ -424,7 +424,19 @@ pub(crate) fn apply(
     // before the wait for O's lock, while O still runs. An applier that does
     // not get it leaves the transaction untouched: the process that has the
     // duty opens Folio, and the next start or logon finishes the update.
-    match crate::update_apply::take_the_window(&road.home, txn, road.me) {
+    // A live owner that is not this applier is O at its end, which leaves
+    // anyway: wait for it to go (round 6), within the applier's own wait for
+    // O, before giving up the transaction.
+    let until = Instant::now() + road.limits.old_within;
+    let window = loop {
+        match crate::update_apply::take_the_window(&road.home, txn, road.me) {
+            Window::Theirs(_) if Instant::now() < until => {
+                bt_platform::wait::sleep_within(worker, road.limits.poll);
+            }
+            decided => break decided,
+        }
+    };
+    match window {
         Window::Mine => {}
         other => {
             let owner = match &other {

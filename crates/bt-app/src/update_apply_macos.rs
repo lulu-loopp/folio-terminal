@@ -480,11 +480,23 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
     // **The window's duty first** (U-34, `update_apply::OWNER_FILE`): taken
     // before the wait for O's lock, while O still runs. An applier that does
     // not get it leaves the transaction untouched.
-    match crate::update_apply::take_the_window(
-        &road.home,
-        road.txn,
-        crate::update_apply::this_process(),
-    ) {
+    // A live owner that is not this applier is O at its end, which leaves
+    // anyway: wait for it to go (round 6), within the applier's own wait for
+    // O, before giving up the transaction.
+    let until = Instant::now() + road.limits.old_within;
+    let duty = loop {
+        match crate::update_apply::take_the_window(
+            &road.home,
+            road.txn,
+            crate::update_apply::this_process(),
+        ) {
+            Window::Theirs(_) if Instant::now() < until => {
+                bt_platform::wait::sleep_within(worker, road.limits.poll);
+            }
+            decided => break decided,
+        }
+    };
+    match duty {
         Window::Mine => {}
         other => {
             let owner = match &other {

@@ -304,7 +304,23 @@ pub(crate) struct Leaving {
     /// The data directory O held: the Folio it starts takes it, which is the
     /// start's acknowledgement.
     pub(crate) data: PathBuf,
+    /// **The applier O started**, by pid and start instant, once the
+    /// hand-over answered `Started` ([`record_the_applier`]): O's end waits for
+    /// its decision before O's own election (round 6).
+    pub(crate) applier: Option<Running>,
+    /// How long O's end waits for that decision ([`APPLIER_MARK_WITHIN`]).
+    pub(crate) applier_within: Duration,
 }
+
+/// **How long O's end waits for the applier it started to take the window's
+/// mark** (U-34, round 6): until the mark names that applier, or it is gone,
+/// or this passes. The clean VM measured 0.8 s from the applier's start to its
+/// mark (the start itself, 839 ms, had already returned: the first scan of the
+/// new rescue executable is behind it); 15 s is the hand-over's own budget for
+/// a first start, so an applier that started within it is waited for as long
+/// again for its first decision. Only an applier alive without a mark past it
+/// loses the duty to O.
+pub(crate) const APPLIER_MARK_WITHIN: Duration = Duration::from_secs(15);
 
 impl Leaving {
     /// The transaction `txn` in `home`, handed over or about to be, by a
@@ -314,7 +330,18 @@ impl Leaving {
         Self {
             transaction: Some((home.clone(), txn)),
             data: data.to_path_buf(),
+            applier: None,
+            applier_within: APPLIER_MARK_WITHIN,
         }
+    }
+
+    /// The same, after the hand-over started `applier`: O's end waits up to
+    /// `within` for its decision.
+    #[must_use]
+    pub(crate) fn after_applier(mut self, applier: Running, within: Duration) -> Self {
+        self.applier = Some(applier);
+        self.applier_within = within;
+        self
     }
 
     /// No transaction to read: O starts Folio plainly.
@@ -323,6 +350,8 @@ impl Leaving {
         Self {
             transaction: None,
             data: data.to_path_buf(),
+            applier: None,
+            applier_within: APPLIER_MARK_WITHIN,
         }
     }
 
@@ -346,6 +375,33 @@ impl Leaving {
             data: &self.data,
             worker,
         });
+        // **The applier O started decides first** (round 6): O's end waits,
+        // on its worker's wait door, until the mark names that applier, or it
+        // is gone, or [`Leaving::applier_within`] passes — O must not take the
+        // duty from an applier it has just started and that is still coming.
+        // The panic road (no worker) waits for nothing.
+        if let (Some((home, txn)), Some(applier), Some(worker)) =
+            (&self.transaction, self.applier, worker)
+        {
+            let until = Instant::now() + self.applier_within;
+            loop {
+                if crate::update_apply::window_owner(home, *txn) == Some(applier)
+                    || !bt_platform::install_flip::still_running(applier)
+                {
+                    break;
+                }
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    crate::diagnostics::note(&format!(
+                        "Folio: the applier {} took no window mark within {} s; this process takes the duty",
+                        applier.pid,
+                        self.applier_within.as_secs()
+                    ));
+                    break;
+                }
+                bt_platform::wait::sleep_within(worker, Duration::from_millis(50).min(left));
+            }
+        }
         if let Some((home, txn)) = &self.transaction
             && let Window::Theirs(owner) = crate::update_apply::take_the_window_within(
                 home,
@@ -437,8 +493,12 @@ impl Leave for OldLeave<'_> {
 pub(crate) enum Looked {
     /// No answer, and the deadline has not passed: look again next turn.
     Waiting,
-    /// The answer came, or the deadline passed without one.
-    Over { line: String },
+    /// The answer came, or the deadline passed without one; the applier it
+    /// started, if it said so.
+    Over {
+        line: String,
+        applier: Option<Running>,
+    },
 }
 
 /// **One look at the hand-over's answer** for transaction `txn`, `overdue`
@@ -447,12 +507,17 @@ pub(crate) fn look(answer: Option<&Receiver<HandedOff>>, txn: TxnId, overdue: bo
     match answer.and_then(|answer| answer.try_recv().ok()) {
         Some(handed) => Looked::Over {
             line: handed.line(txn),
+            applier: match handed {
+                HandedOff::Started { applier } => Some(applier),
+                _ => None,
+            },
         },
         None if overdue => Looked::Over {
             line: format!(
                 "Folio: update {txn}'s hand-over did not answer in time; the window's mark decides \
                  who opens Folio as this process leaves"
             ),
+            applier: None,
         },
         None => Looked::Waiting,
     }
@@ -471,6 +536,16 @@ pub(crate) fn disarm() {
     }
 }
 
+/// **Record the applier the hand-over started** in O's armed exit guard, so
+/// O's end waits for its decision (round 6).
+pub(crate) fn record_the_applier(applier: Running) {
+    if let Ok(mut armed) = ARMED.lock()
+        && let Some(leaving) = armed.take()
+    {
+        *armed = Some(leaving.after_applier(applier, APPLIER_MARK_WITHIN));
+    }
+}
+
 /// **Arm O's exit guard** with the transaction it hands over.
 pub(crate) fn arm(leaving: Leaving) {
     if let Ok(mut armed) = ARMED.lock() {
@@ -479,8 +554,10 @@ pub(crate) fn arm(leaving: Leaving) {
 }
 
 /// **How long the process's end waits for its exit guard** (§5.3 row 29): the
-/// guard's two starts, each with its acknowledgement, and a margin.
-pub(crate) const LEAVE_WITHIN: Duration = Duration::from_secs(45);
+/// wait for the applier's decision ([`APPLIER_MARK_WITHIN`], 15 s), the
+/// election's lock (5 s), the guard's two starts each with its acknowledgement
+/// (20 s each), and a margin.
+pub(crate) const LEAVE_WITHIN: Duration = Duration::from_secs(75);
 
 /// **O's exit guard, spent** (U-34) — an owner-thread door (`doors::UpdateLeave`,
 /// §5.3 row 29), admitted once at the very end of `fn main`: the loop has
@@ -1149,7 +1226,7 @@ mod tests {
                 TxnId::new(TXN),
                 quit.handoff_is_overdue(at(turn)),
             ) {
-                Looked::Over { line } => return line,
+                Looked::Over { line, .. } => return line,
                 Looked::Waiting => std::thread::sleep(Duration::from_millis(10)),
             }
         }

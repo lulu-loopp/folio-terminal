@@ -62783,7 +62783,12 @@ impl FolioApp {
                     quit.handoff_is_overdue(now),
                 ) {
                     update_handoff::Looked::Waiting => return false,
-                    update_handoff::Looked::Over { line } => diagnostics::note(&line),
+                    update_handoff::Looked::Over { line, applier } => {
+                        diagnostics::note(&line);
+                        if let Some(applier) = applier {
+                            update_handoff::record_the_applier(applier);
+                        }
+                    }
                 }
                 app.handoff_answer = None;
                 quit.handed_off();

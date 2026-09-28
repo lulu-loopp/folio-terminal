@@ -2905,3 +2905,169 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
         );
     }
 }
+
+// ── the applier decides first (U-34, round 6) ───────────────────────────────
+
+/// The starts a recording spawner was asked for.
+type Started = Vec<(PathBuf, Vec<OsString>)>;
+
+/// O's end, on a worker of its own as `update_handoff::leave_armed` runs it:
+/// `leaving`, as the process `old`, with the recording spawner.
+fn old_leaves(install: &Install, old: Running, leaving: Leaving) -> JoinHandle<(Left, Started)> {
+    let installed = install.installed.clone();
+    start_on_a_worker(move |worker| {
+        let mut starts = Starts::default();
+        let left = leaving.leave(old, &installed, &mut starts, Some(worker));
+        (left, starts.calls)
+    })
+}
+
+/// RED (U-34, round 6; the clean VM's happy path on A5) — **O, reaching its
+/// end before the applier it started has taken the window's mark, waits for
+/// that applier's decision: the applier takes the mark, the update is applied
+/// to `Committed`, and the one window is the trial — O starts nothing.**
+///
+/// On A5 O reached its end 0.8 s before its applier's first decision, won the
+/// election, and the applier refused and abandoned the whole update. Here O's
+/// end runs first with the applier recorded (this test process, as the
+/// applier), and the applier starts half a second later, through the real
+/// road.
+///
+/// MUTATION: in `update_handoff::Leaving::leave`, skip the wait for the
+/// applier's decision.
+#[test]
+fn o_waits_for_the_applier_it_started_and_the_update_applies() {
+    let Some(install) = Install::new("o-waits") else {
+        return;
+    };
+    // O's identity only: its process has gone, as a real O's has once its
+    // guard answers (a process of the installed image would hold it open).
+    let old = Running { pid: 1, started: 1 };
+    let applier = crate::update_apply::this_process();
+    let leaving = Leaving::over(&install.home, install.txn, &install.data)
+        .after_applier(applier, Duration::from_secs(20));
+    let o = old_leaves(&install, old, leaving);
+    std::thread::sleep(Duration::from_millis(500));
+    let mut road = install.road(limits(20_000, 20_000));
+    road.me = applier;
+    let (ended, world) = applied_on(&install, road, install.world(Trial::Answers));
+    let (left, starts) = o.join().unwrap();
+    assert_eq!(left, Left::NotMine(Some(applier.pid)), "{starts:?}");
+    assert!(starts.is_empty(), "O starts nothing");
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert!(world.opened.is_empty(), "the trial is the one window");
+    assert!(install.holds(Place::Install, &install.new));
+}
+
+/// RED (U-34, round 6) — **an applier that dies before it takes the mark
+/// leaves the duty to O, which takes it and starts Folio as soon as the
+/// applier is gone** — well within its wait.
+///
+/// MUTATION: in `update_handoff::Leaving::leave`, wait the whole budget
+/// whether or not the applier still runs (the start then comes only after it).
+#[test]
+fn an_applier_that_dies_before_its_mark_leaves_the_window_to_o() {
+    let Some(install) = Install::new("applier-dies") else {
+        return;
+    };
+    let old = install.children.start(&install.installed, &[]);
+    let old = Running {
+        pid: old,
+        started: install_flip::started_of(old).expect("O runs"),
+    };
+    let doomed = install.children.start(&install.rescue, &[]);
+    let applier = Running {
+        pid: doomed,
+        started: install_flip::started_of(doomed).expect("it runs"),
+    };
+    let leaving = Leaving::over(&install.home, install.txn, &install.data)
+        .after_applier(applier, Duration::from_secs(20));
+    let began = Instant::now();
+    let o = old_leaves(&install, old, leaving);
+    std::thread::sleep(Duration::from_millis(300));
+    install.children.end(doomed);
+    let (left, starts) = o.join().unwrap();
+    assert_eq!(left, Left::Started(install.installed.clone()), "{starts:?}");
+    assert_eq!(starts.len(), 1);
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "O did not wait out its budget: {:?}",
+        began.elapsed()
+    );
+}
+
+/// RED (U-34, round 6) — **an applier alive that never takes the mark loses
+/// the duty to O once O's wait has passed**, and O starts Folio.
+///
+/// MUTATION: in `update_handoff::Leaving::leave`, wait for the applier with no
+/// bound (O's end then never leaves).
+#[test]
+fn an_applier_that_never_takes_the_mark_loses_the_window_after_os_wait() {
+    let Some(install) = Install::new("applier-silent") else {
+        return;
+    };
+    let old = install.children.start(&install.installed, &[]);
+    let old = Running {
+        pid: old,
+        started: install_flip::started_of(old).expect("O runs"),
+    };
+    let silent = install.children.start(&install.rescue, &[]);
+    let applier = Running {
+        pid: silent,
+        started: install_flip::started_of(silent).expect("it runs"),
+    };
+    let leaving = Leaving::over(&install.home, install.txn, &install.data)
+        .after_applier(applier, Duration::from_millis(700));
+    let began = Instant::now();
+    let (left, starts) = old_leaves(&install, old, leaving).join().unwrap();
+    assert!(began.elapsed() >= Duration::from_millis(700), "O waited");
+    assert_eq!(left, Left::Started(install.installed.clone()), "{starts:?}");
+    assert_eq!(
+        crate::update_apply::window_owner(&install.home, install.txn),
+        Some(old)
+    );
+}
+
+/// RED (U-34, round 6) — **an applier that finds the mark held by a live O
+/// waits for O to leave rather than give up the update**: when O's process
+/// ends, the applier takes the mark over and applies to `Committed`.
+///
+/// MUTATION: in `update_apply_windows::apply`, refuse at the first
+/// `Theirs` (the round-5 behaviour).
+#[test]
+fn an_applier_finding_os_mark_waits_for_o_to_leave_and_applies() {
+    let Some(install) = Install::new("applier-waits") else {
+        return;
+    };
+    // O, alive: a process of the rescue image, which holds no install file.
+    let old = install.children.start(&install.rescue, &[]);
+    let old_running = Running {
+        pid: old,
+        started: install_flip::started_of(old).expect("O runs"),
+    };
+    assert_eq!(
+        crate::update_apply::take_the_window(&install.home, install.txn, old_running),
+        Window::Mine
+    );
+    let mut road = install.road(limits(20_000, 20_000));
+    road.me = crate::update_apply::this_process();
+    let applier = start(
+        road,
+        install.txn,
+        install.applier,
+        install.world(Trial::Answers),
+    );
+    std::thread::sleep(Duration::from_millis(600));
+    install.children.end(old);
+    let (ended, world) = applier.join().unwrap();
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert!(world.opened.is_empty(), "the trial is the window");
+}
+
+/// The applier over `road`, run to its end.
+fn applied_on(install: &Install, road: Road, world: Fake) -> (Ended, Fake) {
+    match start(road, install.txn, install.applier, world).join() {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    }
+}
