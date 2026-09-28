@@ -1442,8 +1442,17 @@ fn a_failed_swap_back_is_stuck_with_everything_kept() {
     assert!(said(&world, &install.home.root().display().to_string()));
     // The new bundle is live and not committed: it is started again only as
     // a trial, with the card's words after the trial's (U-29b, ruling 3),
-    // and never plainly.
-    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+    // and never plainly. The one over `Stuck` was never found running here
+    // (the stand-in `open` starts nothing), so the exit guard has no
+    // successor and starts one more — as a trial too (U-34).
+    assert!(
+        world
+            .relaunched
+            .iter()
+            .all(|(_, words)| words.first() == Some(&OsString::from(cli::UPDATE_TRIAL_FLAG))),
+        "{:?}",
+        world.relaunched
+    );
     let launched = world.launched.lock().unwrap().clone();
     assert_eq!(launched.len(), 2, "the trial, then the one over Stuck");
     assert_eq!(launched[1][0], OsString::from(cli::UPDATE_TRIAL_FLAG));
@@ -2305,7 +2314,13 @@ fn a_new_live_bundle_is_never_started_plainly_before_committed() {
     };
     let (ended, world) = applied(install.road(limits(5_000, 800)), world);
     assert!(matches!(ended, Ended::Stuck(_)), "{ended:?}");
-    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+    // The stand-in `open` starts nothing, so no trial is found running and
+    // the exit guard starts one more — as a trial (U-34), never plainly.
+    assert!(
+        world.relaunched.iter().all(|(_, words)| is_trial(words)),
+        "{:?}",
+        world.relaunched
+    );
     let launched = world.launched.lock().unwrap().clone();
     assert_eq!(launched.len(), 2);
     assert!(launched.iter().all(|words| is_trial(words)), "{launched:?}");
@@ -2762,12 +2777,8 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_swapped_back() {
         "1.0",
         "the old bundle is back"
     );
-    assert!(
-        install_flip::running_from(&install.stage().join(EXE))
-            .unwrap()
-            .is_empty(),
-        "the trial does not run on"
-    );
+    let trial = children.started.lock().unwrap()[0];
+    assert!(children.ended(trial).is_some(), "the trial does not run on");
     assert_eq!(
         world.relaunched,
         vec![(install.installed.clone(), failed_then(&install, &[]))]
