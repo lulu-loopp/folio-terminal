@@ -2470,7 +2470,7 @@ fn is_percent_encoded_path(path: &str) -> bool {
 pub fn file_uri_to_local_reference(uri: &str) -> Option<PathBuf> {
     decode_file_uri(
         uri,
-        None,
+        &[],
         TrailingSlash::Reject,
         Rooting::DriveOnly,
         Spelling::Encoded,
@@ -2494,13 +2494,14 @@ pub fn file_uri_to_local_reference(uri: &str) -> Option<PathBuf> {
 /// (`file:///D:/src/` and `file:///D:/` both name directories); an interior one (`file:///D://a`)
 /// stays rejected.
 ///
-/// A non-empty authority is accepted only when it is `localhost` or `local_host`, this machine's own
-/// name — the two spellings of "this host" that a file URI has. Anything else is a remote share
-/// (`file://server/share/a.png`), which no local read may follow. Callers that must not honour a
-/// hostname at all pass `None`.
+/// A non-empty authority is accepted only when it is `localhost` or one of `local_hosts`, this
+/// machine's own names — the spellings of "this host" that a file URI has (a shell names its host
+/// by whichever of the full and the short name it was configured with, so there can be more than
+/// one). Anything else is a remote share (`file://server/share/a.png`), which no local read may
+/// follow. Callers that must not honour a hostname at all pass an empty list.
 pub fn decode_file_uri(
     uri: &str,
-    local_host: Option<&str>,
+    local_hosts: &[String],
     trailing_slash: TrailingSlash,
     rooting: Rooting,
     spelling: Spelling,
@@ -2512,7 +2513,9 @@ pub fn decode_file_uri(
     let (authority, path) = rest.split_at(rest.find('/')?);
     let authority_is_this_host = authority.is_empty()
         || authority.eq_ignore_ascii_case("localhost")
-        || local_host.is_some_and(|host| authority.eq_ignore_ascii_case(host));
+        || local_hosts
+            .iter()
+            .any(|host| authority.eq_ignore_ascii_case(host));
     if !authority_is_this_host {
         return None;
     }
@@ -7298,7 +7301,7 @@ mod tests {
         assert_eq!(
             decode_file_uri(
                 "file:///",
-                None,
+                &[],
                 TrailingSlash::Directory,
                 Rooting::DriveOrPosixRoot,
                 Spelling::EncodedOrVerbatim
@@ -7310,7 +7313,7 @@ mod tests {
         assert_eq!(
             decode_file_uri(
                 "file:///",
-                None,
+                &[],
                 TrailingSlash::Reject,
                 Rooting::DriveOnly,
                 Spelling::Encoded
@@ -7321,7 +7324,7 @@ mod tests {
         assert_eq!(
             decode_file_uri(
                 "file:////etc",
-                None,
+                &[],
                 TrailingSlash::Directory,
                 Rooting::DriveOrPosixRoot,
                 Spelling::EncodedOrVerbatim
@@ -7352,7 +7355,7 @@ mod tests {
             assert_eq!(
                 decode_file_uri(
                     uri,
-                    None,
+                    &[],
                     TrailingSlash::Directory,
                     Rooting::DriveOrPosixRoot,
                     Spelling::EncodedOrVerbatim
@@ -7366,7 +7369,7 @@ mod tests {
         assert_eq!(
             decode_file_uri(
                 "file:///D:/Code/C%23%20Projects",
-                None,
+                &[],
                 TrailingSlash::Directory,
                 Rooting::DriveOrPosixRoot,
                 Spelling::EncodedOrVerbatim
@@ -7392,7 +7395,7 @@ mod tests {
             assert_eq!(
                 decode_file_uri(
                     refused,
-                    None,
+                    &[],
                     TrailingSlash::Directory,
                     Rooting::DriveOrPosixRoot,
                     Spelling::EncodedOrVerbatim
@@ -7416,7 +7419,7 @@ mod tests {
             assert_eq!(
                 decode_file_uri(
                     uri,
-                    None,
+                    &[],
                     TrailingSlash::Directory,
                     Rooting::DriveOrPosixRoot,
                     Spelling::EncodedOrVerbatim
@@ -7427,7 +7430,7 @@ mod tests {
             assert_eq!(
                 decode_file_uri(
                     uri,
-                    None,
+                    &[],
                     TrailingSlash::Reject,
                     Rooting::DriveOnly,
                     Spelling::Encoded
@@ -7440,7 +7443,7 @@ mod tests {
         assert_eq!(
             decode_file_uri(
                 "file:///D:/src/a%20b.md",
-                None,
+                &[],
                 TrailingSlash::Reject,
                 Rooting::DriveOnly,
                 Spelling::Encoded
@@ -7450,7 +7453,7 @@ mod tests {
         assert_eq!(
             decode_file_uri(
                 "file:///home/alice/src",
-                None,
+                &[],
                 TrailingSlash::Directory,
                 Rooting::DriveOrPosixRoot,
                 Spelling::EncodedOrVerbatim

@@ -3548,11 +3548,24 @@ impl Runtime<'_> {
             bt_platform::menu::AppMenuAction::CopySelection => true,
             bt_platform::menu::AppMenuAction::PasteIntoFocus => false,
         };
-        match menubar::clipboard_seat(self.clipboard_focus()) {
+        // A paste asks who holds the keyboard first — a text field of this
+        // window's takes it (B-AUDIT-046 RT-1) — and a copy keeps the seat it
+        // always had; see `menubar::paste_seat`.
+        let focus = self.clipboard_focus();
+        let seat = if copying {
+            menubar::clipboard_seat(focus)
+        } else {
+            menubar::paste_seat(focus)
+        };
+        match seat {
             // A surface of this window's is holding the keyboard and answers
             // its own keys; see `ClipboardSeat::Nobody` for why doing nothing
             // is the answer rather than the absence of one.
             menubar::ClipboardSeat::Nobody => Ok(()),
+            // Only `paste_seat` answers a field, so this is always a paste: the
+            // pasteboard's text into the field, through the door the field's
+            // own paste chord goes through.
+            menubar::ClipboardSeat::Field(field) => self.paste_into_field(field),
             menubar::ClipboardSeat::PreviewDocument => {
                 if copying {
                     self.copy_preview_selection();

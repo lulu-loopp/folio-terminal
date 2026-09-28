@@ -1409,8 +1409,8 @@ WindowRuntime.rename	write	crate	Runtime::cancel_composition	call:set_preedit	1
 WindowRuntime.rename	write	crate::runtime::files	Runtime::dress_files_tree_editor	call:fit	1
 WindowRuntime.rename	write	crate::runtime::files	Runtime::open_files_row_new	assign	1
 WindowRuntime.rename	write	crate::runtime::files	Runtime::open_files_row_rename	assign	1
-WindowRuntime.rename	write	crate::runtime::keyboard	Runtime::ime_input	assign,call:take	2
 WindowRuntime.rename	write	crate::runtime::keyboard	Runtime::keyboard_input	assign,call:take	2
+WindowRuntime.rename	write	crate::runtime::keyboard	Runtime::rename_ime	assign,call:take	2
 WindowRuntime.rename	write	crate::runtime::preview	Runtime::dress_preview_address_editor	call:fit	1
 WindowRuntime.rename	write	crate::runtime::preview	Runtime::dress_preview_crumb_editor	call:fit	1
 WindowRuntime.rename	write	crate::runtime::preview	Runtime::dress_preview_name_editor	call:fit	1
@@ -1429,8 +1429,8 @@ WindowRuntime.rename	access	crate::runtime::tabs	Runtime::measure_open_rename	ca
 WindowRuntime.rename_blink	write	crate	FolioApp::adopt_motion_preference	call:reset	1
 WindowRuntime.rename_blink	write	crate::runtime::files	Runtime::open_files_row_new	call:reset	1
 WindowRuntime.rename_blink	write	crate::runtime::files	Runtime::open_files_row_rename	call:reset	1
-WindowRuntime.rename_blink	write	crate::runtime::keyboard	Runtime::ime_input	call:reset	1
 WindowRuntime.rename_blink	write	crate::runtime::keyboard	Runtime::keyboard_input	call:reset	1
+WindowRuntime.rename_blink	write	crate::runtime::keyboard	Runtime::rename_ime	call:reset	1
 WindowRuntime.rename_blink	write	crate::runtime::preview	Runtime::open_preview_crumb_rename	call:reset	1
 WindowRuntime.rename_blink	write	crate::runtime::preview	Runtime::open_preview_rename	call:reset	1
 WindowRuntime.rename_blink	write	crate::runtime::tabs	Runtime::advance_rename_blink_if_due	call:advance	1
@@ -1597,10 +1597,11 @@ WindowRuntime.settings	write	crate	Runtime::apply_settings_choice_announcing	cal
 WindowRuntime.settings	write	crate	Runtime::drag_settings_menu_bar	call:scroll_menu	1
 WindowRuntime.settings	write	crate	Runtime::open_scheme_for_editing	call:close	1
 WindowRuntime.settings	write	crate	Runtime::open_settings_on_row	call:press,call:select_category	2
+WindowRuntime.settings	write	crate	Runtime::paste_into_settings_field	call:insert	1
 WindowRuntime.settings	write	crate	Runtime::record_settings_key	call:keep_focus_reachable,call:record	3
 WindowRuntime.settings	write	crate	Runtime::reseed_editor_env	assign	1
 WindowRuntime.settings	write	crate	Runtime::scroll_settings	call:scroll_menu,call:set_hover	3
-WindowRuntime.settings	write	crate	Runtime::settings_field_key	call:backspace,call:delete,call:insert,call:select_all,call:step	10
+WindowRuntime.settings	write	crate	Runtime::settings_field_key	call:backspace,call:delete,call:insert,call:select_all,call:step	9
 WindowRuntime.settings	write	crate	Runtime::settings_layout	call:carry_update_mark,call:take_agents_open_edge,call:take_psreadline_open_edge	3
 WindowRuntime.settings	write	crate	Runtime::settings_mouse_input	call:begin_recording,call:close,call:close_menu,call:close_popup,call:press,call:select_category,call:set_hover,call:toggle_menu,call:toggle_row_menu	17
 WindowRuntime.settings	write	crate	Runtime::show_settings_choice_at	call:scroll_menu	1
@@ -1615,6 +1616,7 @@ WindowRuntime.settings	write	crate::runtime::profiles	Runtime::delete_profile	ca
 WindowRuntime.settings	write	crate::runtime::profiles	Runtime::open_profile_editor	call:open_editor	1
 WindowRuntime.settings	write	crate::runtime::profiles	Runtime::take_profile_table	assign,call:close_editor,call:close_row_menu,call:keep_focus_reachable	4
 WindowRuntime.settings	access	crate	Runtime::apply_editor_choice	call:editor_mut	2
+WindowRuntime.settings	access	crate	Runtime::paste_into_settings_field	call:text_field_mut	1
 WindowRuntime.settings	access	crate	Runtime::reseed_editor_env	call:editor_mut	1
 WindowRuntime.settings	access	crate	Runtime::settings_field_key	call:text_field_mut	1
 WindowRuntime.settings	access	crate	Runtime::write_editor_field	call:editor_mut	2

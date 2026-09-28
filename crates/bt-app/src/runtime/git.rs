@@ -5,7 +5,7 @@ use crate::{
     Ask, Fading, FilesFocusArrival, GitMenuDraw, GitMenuState, GitOrigin, GitPromptDraw,
     GitPromptState, GitRowKey, GraphFilterMenuState, GraphView, LeafId, MarkdownCaretPaint,
     MarkdownCaretSeat, MenuPaint, Popup, PreviewDocument, PreviewSurface, ProseParagraph,
-    RenameExit, Runtime, TransferRefusal, answers_for, cli, float, float_git_hover,
+    RenameExit, Runtime, TextFieldSeat, TransferRefusal, answers_for, cli, float, float_git_hover,
     float_git_page_shown, float_graph_hover, git, git_answer_notice, git_document_answer,
     git_document_question, git_full_path, git_graph, git_panel, git_surfaces_wanting_reread,
     graph_key_of, hang_watch, i18n, input, markdown_gap_paragraph, marks, native_window, preview,
@@ -3175,6 +3175,16 @@ impl Runtime<'_> {
                 Key::Named(NamedKey::Enter) => {
                     if !event.repeat {
                         self.commit_git_prompt()?;
+                    }
+                    return Ok(());
+                }
+                // **A paste goes into the prompt** (B-AUDIT-046 RT-1), by the
+                // window's own predicate and through the one door every
+                // field's paste takes. It used to be swallowed as a chord this
+                // field had no verb for.
+                key if input::is_paste_shortcut(key, self.window.modifiers) => {
+                    if !event.repeat {
+                        self.paste_into_field(TextFieldSeat::GitPrompt)?;
                     }
                     return Ok(());
                 }

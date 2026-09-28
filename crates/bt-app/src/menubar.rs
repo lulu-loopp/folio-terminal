@@ -649,6 +649,10 @@ pub(crate) struct ClipboardFocus {
     /// Every one of those stands **above** the clipboard rung in
     /// `keyboard_input`, so a `Cmd+V` typed now would not reach a shell either.
     pub swallowing: bool,
+    /// **The one-line text field that holds the keyboard**, if one does
+    /// (B-AUDIT-046 RT-1) — read off the keyboard's own ladder by
+    /// `text_field_holding`, never listed here.
+    pub field: Option<crate::TextFieldSeat>,
     /// The preview document has the keyboard and is editable, which is the one
     /// condition the clipboard rung itself forks on (`editing`).
     pub preview_edit: bool,
@@ -667,6 +671,12 @@ pub(crate) enum ClipboardSeat {
     /// pasteboard in with the file's own line breaks, through the same two
     /// functions the editor's own `Cmd+C` and `Cmd+V` reach.
     PreviewDocument,
+    /// **A one-line text field of this window's** — the find bar, the graph's
+    /// search, the tab-name editor, the git prompt, the palette or a settings
+    /// field. Only a paste answers this ([`paste_seat`]): the clipboard's text
+    /// goes into the field through its own insert, and never into the shell the
+    /// field is standing on (B-AUDIT-046 RT-1).
+    Field(crate::TextFieldSeat),
     /// **The focused terminal pane** — the view selection onto the pasteboard,
     /// and the pasteboard into the child through `paste_from_clipboard`, which
     /// is the path a `Cmd+V` keystroke takes today: one sanitiser, one
@@ -693,6 +703,24 @@ pub(crate) const fn clipboard_seat(focus: ClipboardFocus) -> ClipboardSeat {
         ClipboardSeat::PreviewDocument
     } else {
         ClipboardSeat::Terminal
+    }
+}
+
+/// **Who answers a paste** — the keystroke's (`Ctrl+V`, `Shift+Insert`,
+/// `Cmd+V`) and Edit ▸ Paste's alike (B-AUDIT-046 RT-1).
+///
+/// A text field holding the keyboard owns the paste, whatever else is true:
+/// the field is what the reader is typing into, and the terminal behind a find
+/// bar or a graph search is exactly the shell a paste must not reach. Below
+/// that it is [`clipboard_seat`]'s answer, which is the copy's too.
+///
+/// Copy is not changed by this: a field that holds the keyboard has its own
+/// copy chord where it has one, and Edit ▸ Copy keeps [`clipboard_seat`].
+#[must_use]
+pub(crate) const fn paste_seat(focus: ClipboardFocus) -> ClipboardSeat {
+    match focus.field {
+        Some(field) => ClipboardSeat::Field(field),
+        None => clipboard_seat(focus),
     }
 }
 
@@ -1232,6 +1260,7 @@ mod tests {
         let seat = |swallowing, preview_edit| {
             clipboard_seat(ClipboardFocus {
                 swallowing,
+                field: None,
                 preview_edit,
             })
         };

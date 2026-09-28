@@ -3,8 +3,8 @@
 
 use crate::{
     Drag, DropLanding, LeafSession, PasteAnswer, PasteBody, PasteCardKey, PasteOffer, PasteTarget,
-    PreparedClipboardPaste, Runtime, StagedPaste, UserInputKind, copy_selection, hang_watch,
-    input_line_needs_a_space_first, offer_pty_input, paste_answer_text, paste_body,
+    PreparedClipboardPaste, Runtime, StagedPaste, TextFieldSeat, UserInputKind, copy_selection,
+    hang_watch, input_line_needs_a_space_first, offer_pty_input, paste_answer_text, paste_body,
     paste_card_step, paste_offer_is_kept, paste_target_is_live, pending_paste_in,
     prepare_clipboard_paste, prepare_dropped_paste, profile_banner_name,
     recoverable_clipboard_write, restore, seats, stage_paste, take_pending_paste, text_field,
@@ -15,6 +15,7 @@ use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use winit::event::Ime;
 
 impl Runtime<'_> {
     /// **What a landing is promising to write into, read off the window as it
@@ -217,6 +218,38 @@ impl Runtime<'_> {
         .as_deref()
         .map(text_field::one_line)
         .unwrap_or_default()
+    }
+
+    /// **One paste into the text field that holds the keyboard** (B-AUDIT-046
+    /// RT-1) — the keystroke's (`Ctrl+V`, `Shift+Insert`, `Cmd+V`) and Edit ▸
+    /// Paste's alike, and never into the terminal the field is standing on.
+    ///
+    /// Each field takes it through **its own insert door**: the one a committed
+    /// composition goes through, because a paste into a one-line field is
+    /// exactly that — a run of text arriving at the caret, replacing the
+    /// selection — and each of those doors already does what its field does
+    /// after an insert (re-ask the search, re-filter the palette, write the
+    /// setting through). One line of printable text for the five one-line
+    /// fields (`text_field::one_line`, as [`Self::clipboard_line`] cuts it);
+    /// the settings dialog drops the line breaks instead, its own long-standing
+    /// rule for a pasted path.
+    pub(crate) fn paste_into_field(&mut self, field: TextFieldSeat) -> Result<()> {
+        let text = hang_watch::during(hang_watch::Station::ClipboardRead, || {
+            bt_platform::clipboard_text()
+        })
+        .unwrap_or_default();
+        if text.is_empty() {
+            return Ok(());
+        }
+        let line = || Ime::Commit(text_field::one_line(&text));
+        match field {
+            TextFieldSeat::FindBar => self.search_ime(line()),
+            TextFieldSeat::GraphSearch => self.graph_search_ime(&line()),
+            TextFieldSeat::GitPrompt => self.git_prompt_ime(&line()),
+            TextFieldSeat::Palette => self.palette_ime(&line()),
+            TextFieldSeat::TabName => self.rename_ime(&line()),
+            TextFieldSeat::Settings => self.paste_into_settings_field(&text),
+        }
     }
 
     /// `Ctrl+V` / `Shift+Insert` — the keyboard's paste, into the shell the

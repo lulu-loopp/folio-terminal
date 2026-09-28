@@ -198,7 +198,7 @@ fn read_installation(registry: &dyn Registry) -> WslFacts {
 /// One machine, one answer — and one place it is kept.
 ///
 /// Process-wide rather than owned by `Runtime`, for the reason
-/// `bt_term::local_host_name` is: a machine does not install a WSL distribution
+/// `bt_term::local_host_names` is: a machine does not install a WSL distribution
 /// *inside* one terminal session, and the readers are the places a profile is
 /// **named** — a menu row, a tooltip, a settings option — which are scattered
 /// through the chrome and would otherwise each need this threaded down to them

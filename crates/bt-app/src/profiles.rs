@@ -828,55 +828,14 @@ pub enum IntegrationChoice {
 /// OSC 7 leaves the relative path undetected rather than guessing.
 #[must_use]
 pub fn derive_integration(program: &ProgramSource) -> Integration {
-    let leaf = match program {
-        // Not a file name at all — it is `BT_SHELL`, then a `pwsh` probe, and
-        // every path it can resolve to is a PowerShell 7.
-        ProgramSource::PowerShellSeven => return Integration::PowerShellOptIn,
-        ProgramSource::Path(path) => path.file_name().map(std::ffi::OsStr::to_string_lossy),
-        // Every candidate of one shipped row names one program family — the four
-        // Git Bash places are four `bash.exe`s — so the first is the family, and
-        // a row whose candidates disagreed would be a row that could not say what
-        // it starts either.
-        ProgramSource::FirstOf(candidates) => candidates
-            .first()
-            .map(|candidate| match candidate {
-                ProgramCandidate::Under { tail, .. }
-                | ProgramCandidate::BesideOnPath { tail, .. } => tail.as_str(),
-                // The name *is* the leaf here, which is the one place this
-                // third form is simpler than the two above rather than merely
-                // different from them.
-                ProgramCandidate::OnPath { name } => name.as_str(),
-            })
-            .map(|tail| {
-                std::borrow::Cow::Borrowed(tail.rsplit(['\\', '/']).next().unwrap_or_default())
-            }),
-    };
-    let Some(leaf) = leaf else {
-        return Integration::None;
-    };
-    let stem = leaf
-        .rsplit_once('.')
-        .map_or(leaf.as_ref(), |(stem, _)| stem)
-        .to_ascii_lowercase();
-    match stem.as_str() {
-        "pwsh" | "powershell" => Integration::PowerShellOptIn,
-        // `wsl` is a launcher and not a shell, and the question of which shell
-        // it logs the reader into is asked inside the distribution — by
-        // `shell_integration::WSL_LOGIN_SHELL`, which knows both this door and
-        // the one below.
-        "bash" | "wsl" => Integration::BashInitFile,
-        "zsh" => Integration::ZshDotDir,
-        "cmd" => Integration::CmdPrompt,
-        // **`sh` is here rather than above** (review row R3-6). It used to be
-        // sent to bash's init file, which `sh` ignores in silence: the pane got
-        // no marks, no directory and no error, which is the one failure that
-        // looks exactly like a shell that has no integration. Now it says so.
-        // A `dash` and a `sh` are the same answer, and it is an honest whole
-        // one: a screen that never sees OSC 133 keeps the cursor/WRAPLINE
-        // heuristics, and one that never sees OSC 7 leaves the relative path
-        // undetected rather than guessing a directory.
-        _ => Integration::None,
+    // Not a file name at all — it is `BT_SHELL`, then a `pwsh` probe, and every
+    // path it can resolve to is a PowerShell 7.
+    if matches!(program, ProgramSource::PowerShellSeven) {
+        return Integration::PowerShellOptIn;
     }
+    // Anything the table has not heard of gets `None` — see the row notes on
+    // [`SHELL_FAMILIES`] for why `sh` is one of those rather than bash's.
+    shell_family(program).map_or(Integration::None, |family| family.integration)
 }
 
 /// One row's door, resolved — the answer every caller outside the editor wants.
@@ -893,24 +852,129 @@ pub fn derive_grammar(program: &ProgramSource) -> crate::shell_literal::ShellGra
     derive_grammar_on(program, SeedPlatform::of_this_build())
 }
 
+/// **The program's family name**: the leaf of its path without the extension,
+/// lower-cased — `bash` for `bash`, `bash.exe` and `/bin/bash` alike.
+///
+/// The one derivation every family question asks ([`shell_family`], the
+/// `cmd` test in [`encoder_for`]); the integration door used to compute its own
+/// from `file_name`, and the two could part on a path this one read as text.
+///
+/// A path's leaf is the platform's own `file_name`, so a backslash inside a
+/// POSIX file name stays part of the name. Every candidate of one shipped row
+/// names one program family — the four Git Bash places are four `bash.exe`s —
+/// so the first is the family, and its tail is written with either separator.
 fn program_stem(program: &ProgramSource) -> Option<String> {
-    let leaf = match program {
+    let leaf: std::borrow::Cow<'_, str> = match program {
         ProgramSource::PowerShellSeven => return Some("pwsh".into()),
-        ProgramSource::Path(path) => path.to_str()?,
+        ProgramSource::Path(path) => path.file_name()?.to_string_lossy(),
         ProgramSource::FirstOf(candidates) => match candidates.first()? {
             ProgramCandidate::Under { tail, .. } | ProgramCandidate::BesideOnPath { tail, .. } => {
-                tail
+                tail.rsplit(['\\', '/']).next()?.into()
             }
-            ProgramCandidate::OnPath { name } => name,
+            ProgramCandidate::OnPath { name } => name.rsplit(['\\', '/']).next()?.into(),
         },
-    }
-    .rsplit(['\\', '/'])
-    .next()?;
+    };
     Some(
         leaf.rsplit_once('.')
-            .map_or(leaf, |(stem, _)| stem)
+            .map_or(leaf.as_ref(), |(stem, _)| stem)
             .to_ascii_lowercase(),
     )
+}
+
+/// **One shell family: the names it goes by, how it is told to be a login
+/// shell, how a pasted path is quoted for it, and which integration door
+/// serves it** (B-AUDIT-046 SET-4, ticket 74).
+///
+/// One row per family, because these used to be four lists that each named
+/// the shells they knew and had drifted apart: the login-flag list named
+/// `mksh`, `tcsh` and `csh`, the quoting list named none of them, so a paste
+/// into a csh pane was quoted by the platform's default grammar — and csh
+/// expands `!` inside single quotes, so a path holding one was `Event not
+/// found`. A family now has a login flag only in a row that also says how it
+/// is quoted; the two cannot disagree again.
+pub(crate) struct ShellFamily {
+    /// Program stems ([`program_stem`]) that are this family.
+    pub(crate) stems: &'static [&'static str],
+    /// The flag that makes it a login shell, or `None` for a program that has
+    /// no such thing — see [`login_flag`].
+    pub(crate) login_flag: Option<&'static str>,
+    /// How text pasted into it is quoted.
+    pub(crate) grammar: crate::shell_literal::ShellGrammar,
+    /// The integration door that serves it by default.
+    pub(crate) integration: Integration,
+}
+
+/// Every shell family this product knows by name.
+///
+/// **`tcsh` and `csh` are not here, on purpose** (ticket 74's list had them):
+/// their quoting is not POSIX — `!` is history expansion even inside single
+/// quotes, and a newline cannot be quoted at all — and `shell_literal` has no
+/// csh grammar. A family with no quoting rule gets no row, so it gets no login
+/// flag either and is quoted by the platform default, exactly as before ticket
+/// 74; a csh grammar is its own ticket.
+///
+/// **`sh` is not bash** (review row R3-6): it ignores bash's init file in
+/// silence, so it is served by no integration rather than the wrong one.
+/// **`wsl` is a launcher and not a shell**: it has no login flag of its own,
+/// and which shell it logs the reader into is asked inside the distribution —
+/// by `shell_integration::WSL_LOGIN_SHELL`.
+pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
+    ShellFamily {
+        stems: &["pwsh", "powershell"],
+        login_flag: None,
+        grammar: crate::shell_literal::ShellGrammar::PowerShell,
+        integration: Integration::PowerShellOptIn,
+    },
+    ShellFamily {
+        stems: &["cmd"],
+        login_flag: None,
+        grammar: crate::shell_literal::ShellGrammar::Cmd,
+        integration: Integration::CmdPrompt,
+    },
+    ShellFamily {
+        stems: &["bash"],
+        login_flag: Some("--login"),
+        grammar: crate::shell_literal::ShellGrammar::Posix,
+        integration: Integration::BashInitFile,
+    },
+    ShellFamily {
+        stems: &["wsl"],
+        login_flag: None,
+        grammar: crate::shell_literal::ShellGrammar::Posix,
+        integration: Integration::BashInitFile,
+    },
+    ShellFamily {
+        stems: &["zsh"],
+        login_flag: Some("-l"),
+        grammar: crate::shell_literal::ShellGrammar::Posix,
+        integration: Integration::ZshDotDir,
+    },
+    ShellFamily {
+        stems: &["sh", "dash", "ksh", "mksh"],
+        login_flag: Some("-l"),
+        grammar: crate::shell_literal::ShellGrammar::Posix,
+        integration: Integration::None,
+    },
+    ShellFamily {
+        stems: &["fish"],
+        login_flag: Some("-l"),
+        grammar: crate::shell_literal::ShellGrammar::Fish,
+        integration: Integration::None,
+    },
+    ShellFamily {
+        stems: &["nu"],
+        login_flag: Some("-l"),
+        grammar: crate::shell_literal::ShellGrammar::Nushell,
+        integration: Integration::None,
+    },
+];
+
+/// The family `program` belongs to, or `None` for a program no row names.
+fn shell_family(program: &ProgramSource) -> Option<&'static ShellFamily> {
+    let stem = program_stem(program)?;
+    SHELL_FAMILIES
+        .iter()
+        .find(|family| family.stems.contains(&stem.as_str()))
 }
 
 fn derive_grammar_on(
@@ -918,12 +982,10 @@ fn derive_grammar_on(
     platform: SeedPlatform,
 ) -> crate::shell_literal::ShellGrammar {
     use crate::shell_literal::ShellGrammar;
+    if let Some(family) = shell_family(program) {
+        return family.grammar;
+    }
     match program_stem(program).as_deref() {
-        Some("pwsh" | "powershell") => ShellGrammar::PowerShell,
-        Some("cmd") => ShellGrammar::Cmd,
-        Some("bash" | "zsh" | "sh" | "dash" | "ksh" | "wsl" | "gitbash") => ShellGrammar::Posix,
-        Some("fish") => ShellGrammar::Fish,
-        Some("nu") => ShellGrammar::Nushell,
         Some(agent) if AGENT_IDS.contains(&agent) => ShellGrammar::Agent,
         _ if platform == SeedPlatform::Windows => ShellGrammar::Cmd,
         _ => ShellGrammar::Posix,
@@ -3069,17 +3131,15 @@ pub fn set_colour(index: usize, colour: MarkColour) -> bool {
 /// Linux machines and a choice for it on macOS — takes `-l` and refuses
 /// `--login`, which is why the short form is the default.
 ///
-/// The families named are the ones whose manuals document a login mode; a
-/// PowerShell on Windows, `cmd.exe`, `wsl.exe`, an agent or a program this list
-/// has not heard of gets `None`, carries no login flag whatever its row says, and
-/// is offered no switch.
+/// The families with a flag are the ones whose manuals document a login mode
+/// **and** whose quoting this product knows — one row of [`SHELL_FAMILIES`]
+/// says both (B-AUDIT-046 SET-4). A PowerShell on Windows, `cmd.exe`,
+/// `wsl.exe`, an agent, `tcsh`/`csh` (no quoting rule yet) or a program the
+/// table has not heard of gets `None`, carries no login flag whatever its row
+/// says, and is offered no switch.
 #[must_use]
 pub fn login_flag(program: &ProgramSource) -> Option<&'static str> {
-    match program_stem(program).as_deref()? {
-        "bash" => Some("--login"),
-        "zsh" | "sh" | "dash" | "ksh" | "mksh" | "fish" | "nu" | "tcsh" | "csh" => Some("-l"),
-        _ => None,
-    }
+    shell_family(program)?.login_flag
 }
 
 /// **The words this row hands its program**: the login flag when the row asks
@@ -25926,6 +25986,81 @@ mod paste_tests {
         }
         fn is_file(&self, _: &Path) -> bool {
             false
+        }
+    }
+
+    /// RED (B-AUDIT-046 SET-4, ticket 74) — **every shell that is given a login
+    /// flag is also given a quoting rule of its own.**
+    ///
+    /// Ticket 74's login-flag list named `mksh`, `tcsh` and `csh`, and the
+    /// quoting list named none of them: a login csh pane was quoted by the
+    /// platform's default grammar, which on a Mac is POSIX and wrong for csh (`!`
+    /// is history expansion inside single quotes). Both answers now come from
+    /// one row of `SHELL_FAMILIES`, and this asks the two public doors — not the
+    /// table — over every name the table knows plus the two the old list had:
+    /// the set of shells with a login flag is a subset of the set whose grammar
+    /// is their own, which is the grammar that does not change with the
+    /// platform's default.
+    ///
+    /// MUTATION: give `login_flag` back a list of its own
+    /// (`"tcsh" | "csh" => Some("-l")`) — `tcsh` has a flag and a grammar that
+    /// is Cmd on Windows and POSIX on a Mac, and the subset assertion goes red.
+    #[test]
+    fn every_shell_with_a_login_flag_has_a_quoting_rule() {
+        use std::collections::BTreeSet;
+        let named = |stem: &str| ProgramSource::Path(PathBuf::from(stem));
+        let universe: BTreeSet<&str> = SHELL_FAMILIES
+            .iter()
+            .flat_map(|family| family.stems.iter().copied())
+            .chain(["tcsh", "csh"])
+            .collect();
+        let with_a_login_flag: BTreeSet<&str> = universe
+            .iter()
+            .copied()
+            .filter(|stem| login_flag(&named(stem)).is_some())
+            .collect();
+        let with_their_own_grammar: BTreeSet<&str> = universe
+            .iter()
+            .copied()
+            .filter(|stem| {
+                let program = named(stem);
+                derive_grammar_on(&program, SeedPlatform::Windows)
+                    == derive_grammar_on(&program, SeedPlatform::MacOs)
+                    && shell_family(&program).is_some()
+            })
+            .collect();
+        let without = with_a_login_flag
+            .difference(&with_their_own_grammar)
+            .collect::<Vec<_>>();
+        assert!(
+            without.is_empty(),
+            "these shells get a login flag and no quoting rule of their own: {without:?}"
+        );
+        // And the answers are the row's: the same stem through the doors gives
+        // what its one row says, so no door is reading a second list.
+        for family in SHELL_FAMILIES {
+            for stem in family.stems {
+                for spelling in [
+                    stem.to_string(),
+                    format!("{stem}.exe"),
+                    format!("/bin/{stem}"),
+                ] {
+                    let program = named(&spelling);
+                    assert_eq!(login_flag(&program), family.login_flag, "{spelling}");
+                    assert_eq!(
+                        derive_integration(&program),
+                        family.integration,
+                        "{spelling}"
+                    );
+                    for platform in [SeedPlatform::Windows, SeedPlatform::MacOs] {
+                        assert_eq!(
+                            derive_grammar_on(&program, platform),
+                            family.grammar,
+                            "{spelling} on {platform:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 

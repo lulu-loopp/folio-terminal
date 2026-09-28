@@ -270,7 +270,7 @@ WindowRuntime.video_meta	BTreeMap<PreviewSurface, (String, f32)>	-	1	1	1	0	0	0	0
 WindowRuntime.search_scan	Option<SearchScanCache>	-	n	2	3	0	0	0	0	complete
 WindowRuntime.search_revision	u64	-	1	1	3	0	0	0	0	complete
 WindowRuntime.chrome_marks	ChromeMarkRasters	-	n	2	2	0	0	0	0	complete
-WindowRuntime.settings	SettingsPanel	-	n	6	24	6	0	0	0	complete
+WindowRuntime.settings	SettingsPanel	-	n	6	25	7	0	0	0	complete
 WindowRuntime.settings_geometry	Geometry	-	1	1	1	0	0	0	0	complete
 WindowRuntime.settings_scroll	f32	-	n	3	8	0	0	0	0	complete
 WindowRuntime.profile_menu	ProfileMenu	-	n	3	4	0	0	0	0	complete

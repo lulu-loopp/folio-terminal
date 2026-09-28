@@ -7451,13 +7451,18 @@ pub enum LinkAction {
 /// * a trailing `#fragment` is **cut** off a path first: `DESIGN.md#7.1.2`
 ///   names `DESIGN.md`, and the anchor is simply a part of the address this
 ///   window cannot honour yet;
-/// * `file:` is unwrapped to the path it carries, percent-escapes and all;
+/// * `file:` is unwrapped to the path it carries by the one `file:` reader this
+///   product has, [`bt_platform::file_uri_to_path`] — so `file:///Users/a.md`
+///   is `/Users/a.md` on a Mac and `file:///C:/a.md` is `C:\a.md` on Windows,
+///   each platform's own grammar (B-AUDIT-046 PRV-2);
 /// * anything else carrying a `scheme:` is [`LinkAction::Scheme`], *except*
 ///   that a bare Windows drive letter (`C:\x`) is a path and not a scheme — one
 ///   letter before the colon is a drive ([`handover_scheme`]);
 /// * an absolute path is taken as it stands; a relative one is resolved
 ///   against the **document's own directory**, which is the only frame a
-///   relative link has ever meant.
+///   relative link has ever meant — after its percent-escapes are undone
+///   ([`relative_reference_path`]), because `my%20notes.md` is how a document
+///   has to write `my notes.md`.
 #[must_use]
 pub fn link_action(target: &str, document: &Path) -> LinkAction {
     let target = target.trim();
@@ -7469,14 +7474,14 @@ pub fn link_action(target: &str, document: &Path) -> LinkAction {
     }
     let lower = target.to_ascii_lowercase();
     let path = if lower.starts_with("file:") {
-        let Some(path) = file_url_path(target) else {
+        let Some(path) = bt_platform::file_uri_to_path(target) else {
             return LinkAction::Nowhere;
         };
         path
     } else if handover_scheme(target).is_some() {
         return LinkAction::Scheme(target.to_owned());
     } else {
-        PathBuf::from(strip_fragment(target))
+        relative_reference_path(strip_fragment(target))
     };
     if path.as_os_str().is_empty() {
         return LinkAction::Nowhere;
@@ -7597,49 +7602,21 @@ fn strip_fragment(target: &str) -> &str {
     target.split_once('#').map_or(target, |(path, _)| path)
 }
 
-/// The path inside a `file:` URL — `file:///C:/a/b`, `file://host/share/a` and
-/// the abbreviated `file:/C:/a` alike, with percent-escapes undone.
-fn file_url_path(target: &str) -> Option<PathBuf> {
-    let rest = strip_fragment(target).get("file:".len()..)?;
-    // `file://host/share` is a UNC path and keeps its two leading slashes;
-    // `file:///C:/x` and `file:/C:/x` are local and lose all of theirs.
-    let local = rest.strip_prefix("//").map_or(rest, |authority| {
-        authority.strip_prefix('/').unwrap_or(authority)
-    });
-    let text = if rest.starts_with("//") && !rest.starts_with("///") {
-        format!(r"\\{}", percent_decode(local))
-    } else {
-        percent_decode(local.trim_start_matches('/'))
-    };
-    (!text.is_empty()).then(|| PathBuf::from(text.replace('/', r"\")))
-}
-
-/// `%20` and its kin, undone. A `%` that does not begin a valid escape is a
-/// literal `%`, which is what every lenient reader does and what a hand-written
-/// link most often means.
-fn percent_decode(text: &str) -> String {
-    let bytes = text.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        let escape = (bytes[index] == b'%')
-            .then(|| {
-                text.get(index + 1..index + 3)
-                    .and_then(|hex| u8::from_str_radix(hex, 16).ok())
-            })
-            .flatten();
-        match escape {
-            Some(byte) => {
-                out.push(byte);
-                index += 3;
-            }
-            None => {
-                out.push(bytes[index]);
-                index += 1;
-            }
-        }
-    }
-    String::from_utf8(out).unwrap_or_else(|_| text.to_owned())
+/// **The path a link written without a scheme names**, its percent-escapes
+/// undone (B-AUDIT-046 PRV-2).
+///
+/// CommonMark does not allow a raw space in a link destination, so a document
+/// writes `[notes](my%20notes.md)` and `![](shot%201.png)`, and a reader that
+/// joined the text as it stands looked for a file called `my%20notes.md`. The
+/// escapes are decoded by the same decoder the `file:` reader uses
+/// ([`bt_platform::percent_decode_utf8`]), so the two kinds of link cannot
+/// disagree about what `%20` means.
+///
+/// **A spelling that is not a percent-encoding is its own name.** `100%.md` or
+/// `50%-off.md` is somebody's file name written as it is, not a malformed URI,
+/// and the decoder's refusal of it means exactly that: read as written.
+fn relative_reference_path(target: &str) -> PathBuf {
+    PathBuf::from(bt_platform::percent_decode_utf8(target).unwrap_or_else(|| target.to_owned()))
 }
 
 /// How thick a scrolling region's bar is *drawn*.
@@ -10417,6 +10394,79 @@ mod tests {
         );
         assert_eq!(link_action("#section", document), LinkAction::Nowhere);
         assert_eq!(link_action("   ", document), LinkAction::Nowhere);
+    }
+
+    /// RED (B-AUDIT-046 PRV-2) — **a `file:` link names the path its platform
+    /// means, and a percent-encoded relative link or image names the file with
+    /// the decoded name.**
+    ///
+    /// The preview used to carry a `file:` reader of its own that stripped the
+    /// slashes and turned `/` into `\`: right for `file:///C:/…`, and on a Mac
+    /// `file:///Users/x/a.md` became the relative name `Users\x\a.md` — one file
+    /// name with backslashes in it — and every such link or image was dead.
+    /// Relative targets were joined undecoded, so `my%20notes.md` looked for a
+    /// file with `%20` in its name, on both platforms. Both now go through the
+    /// platform's own reader and its decoder.
+    ///
+    /// Written against this machine's own absolute paths (the temp folder) so
+    /// the same assertions hold on Windows and on macOS, plus each platform's
+    /// literal `file:` spelling asked of the platform this build is.
+    ///
+    /// MUTATION: put back the private reader — `file_url_path`, which strips the
+    /// leading slashes and swaps `/` for `\` — in `link_action`'s `file:` arm:
+    /// the macOS row goes red; join `strip_fragment(target)` undecoded and the
+    /// `%20` rows go red on both.
+    #[test]
+    fn preview_links_resolve_file_urls_and_percent_encoded_relatives_on_both_platforms() {
+        let folder = std::env::temp_dir().join("bt-audit046-links");
+        let document = folder.join("notes.md");
+
+        // Relative references, escapes undone before the join.
+        assert_eq!(
+            link_action("my%20notes.md", &document),
+            LinkAction::Preview(folder.join("my notes.md")),
+            "a space a document had to escape is a space"
+        );
+        assert_eq!(
+            link_action("shots/shot%201.png", &document),
+            LinkAction::Preview(folder.join("shots").join("shot 1.png")),
+            "an image source is the same kind of reference"
+        );
+        assert_eq!(
+            link_action("%E7%AC%94%E8%AE%B0.md#top", &document),
+            LinkAction::Preview(folder.join("笔记.md")),
+            "escaped UTF-8 is the name it spells, with the anchor cut"
+        );
+        assert_eq!(
+            link_action("100%.md", &document),
+            LinkAction::Preview(folder.join("100%.md")),
+            "a spelling that is not an escape is the name as written"
+        );
+
+        // A `file:` URL of this machine's own absolute path, as this platform
+        // spells one.
+        let target = folder.join("a b.md");
+        let uri = bt_transcript::paths::local_path_to_file_uri(&target);
+        assert_eq!(
+            link_action(&uri, &document),
+            LinkAction::Preview(target),
+            "{uri} is this machine's file"
+        );
+
+        // And each platform's literal spelling, asked of the platform this is.
+        match bt_platform::host_platform() {
+            bt_platform::HostPlatform::Windows => assert_eq!(
+                link_action("file:///C:/notes/a%20b.md", &document),
+                LinkAction::Preview(PathBuf::from(r"C:\notes\a b.md"))
+            ),
+            bt_platform::HostPlatform::MacOs | bt_platform::HostPlatform::OtherUnix => {
+                assert_eq!(
+                    link_action("file:///Users/x/a%20b.md", &document),
+                    LinkAction::Preview(PathBuf::from("/Users/x/a b.md")),
+                    "a POSIX root is a root, not a relative name"
+                );
+            }
+        }
     }
 
     /// PIN (user ruling, 2026-08-13) — **a hard-wrapped source paragraph is one
