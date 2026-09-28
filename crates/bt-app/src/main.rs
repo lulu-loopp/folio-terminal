@@ -62714,8 +62714,10 @@ impl FolioApp {
     /// The first ask builds the hand-over from the job's staged transaction — the journal at
     /// `Prepared`, the lock this process still holds — and sends it to the storage worker, which
     /// writes `Handoff` durably and then starts the applier; later asks look for its answer. The
-    /// answer, or [`quit::HANDOFF_DEADLINE`] without one, lets the process leave: whatever the
-    /// journal says then is a row of the recovery table.
+    /// answer, or [`quit::HANDOFF_DEADLINE`] without one, lets the process leave, and arms its
+    /// exit guard with whom it leaves behind (`update_handoff::arm`, U-34): the applier it
+    /// started, or nobody — then the process starts Folio again at its very end
+    /// (`update_handoff::leave_armed`).
     fn hand_the_update_over(&mut self, now: Instant) -> bool {
         let Some(app) = self.app.as_mut() else {
             return true;
@@ -62756,23 +62758,25 @@ impl FolioApp {
                         diagnostics::note(&format!(
                             "Folio: update {txn} was not handed over, and stays prepared: {why}"
                         ));
+                        // Nobody is left behind: the exit guard starts Folio
+                        // again as this process ends (U-34).
+                        update_handoff::arm(update_handoff::Leaving::after(None));
                         quit.handed_off();
                         true
                     }
                 }
             }
             quit::Handoff::Sent { .. } => {
-                let answered = app
-                    .handoff_answer
-                    .as_ref()
-                    .and_then(|answer| answer.try_recv().ok());
-                match answered {
-                    Some(handed) => diagnostics::note(&handed.line(txn)),
-                    None if quit.handoff_is_overdue(now) => diagnostics::note(&format!(
-                        "Folio: update {txn}'s hand-over did not answer in time; Folio leaves, \
-                         and the next start reads the journal"
-                    )),
-                    None => return false,
+                match update_handoff::look(
+                    app.handoff_answer.as_ref(),
+                    txn,
+                    quit.handoff_is_overdue(now),
+                ) {
+                    update_handoff::Looked::Waiting => return false,
+                    update_handoff::Looked::Over { line, leaving } => {
+                        diagnostics::note(&line);
+                        update_handoff::arm(leaving);
+                    }
                 }
                 app.handoff_answer = None;
                 quit.handed_off();
@@ -70689,6 +70693,10 @@ fn install_panic_log_hook() {
         // because the next two statements end the process whether one window
         // was hidden or none.
         let _ = bt_platform::hide_every_window_of_this_process();
+        // **An update's exit guard runs on this road too** (U-34): a panic after
+        // the hand-over leaves the applier or starts Folio again, as the
+        // process's ordinary end does.
+        let _ = update_handoff::leave_armed();
         eprintln!(
             "{}",
             diagnostics::run_footer(
@@ -71063,6 +71071,14 @@ fn main() -> Result<()> {
     // (`update_apply_macos`, U-28) and Windows (`update_apply_windows`, U-23) —
     // and is answered with one line where there is none.
     if let Some(door) = cli::update_door(std::env::args_os().skip(1)) {
+        // **A road process's panic unwinds** (0.4.6 U-34): its exit guard is a
+        // `Drop`, and the product's hook would end the process from inside the
+        // hook — with a message box in a process that has no window — before
+        // any unwinding. Here the report is still written to the panic log;
+        // then the panic unwinds through the guard, which starts Folio, and
+        // leaves `main` as Rust's own panic exit.
+        drop(panic::take_hook());
+        install_panic_log_hook_at(panic_log_path(), |_| {});
         let usage = match door {
             Ok(cli::UpdateDoor::Recover { home, then_launch }) => {
                 std::process::exit(update_recover::run_here(home, then_launch))
@@ -71372,6 +71388,12 @@ fn main() -> Result<()> {
     // The session that outlived every question is released once the loop has
     // returned, never before a question could still be in flight.
     bt_platform::video::shutdown_media_session();
+    // **An update's exit guard** (0.4.6 U-34): after a Restart to update, this
+    // process leaves behind the applier it started, or starts Folio again —
+    // here, with the loop over and the session's sentinel gone, after letting
+    // go of the data directory's claim, so that start is the writer. Nothing
+    // at all for any other run.
+    let _ = update_handoff::leave_armed();
     // **And now the process leaves, by the one road a WebView2 host may take**
     // (§7.35). Everything this program owns has been let go of above and inside
     // the loop — the shells, the controllers, the browsers under a deadline, the

@@ -153,6 +153,20 @@ impl Failure {
             error,
         }
     }
+
+    /// **Whether this is a rename refused because another program has the
+    /// target open** — on Windows `ERROR_ACCESS_DENIED` or
+    /// `ERROR_SHARING_VIOLATION` at [`Stage::Rename`]: a scanner, an indexer, a
+    /// backup or sync tool holding the file without `FILE_SHARE_DELETE`, which
+    /// lets go of it again in a moment (0.4.6 ticket U-34). A caller that can
+    /// wait asks again; this door never does (it has no wait door, and its
+    /// callers own their deadlines). **Never on macOS**: `rename(2)` replaces
+    /// a target that is open, and no other error of a replacing rename is one
+    /// that goes away by itself.
+    #[must_use]
+    pub fn refused_while_open(&self) -> bool {
+        self.stage == Stage::Rename && arm::refused_while_open(&self.error)
+    }
 }
 
 impl std::fmt::Display for Failure {
@@ -669,7 +683,9 @@ mod arm {
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
     use std::path::{Path, PathBuf};
-    use windows::Win32::Foundation::{ERROR_LOCK_VIOLATION, ERROR_SUCCESS, HANDLE};
+    use windows::Win32::Foundation::{
+        ERROR_ACCESS_DENIED, ERROR_LOCK_VIOLATION, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, HANDLE,
+    };
     use windows::Win32::Storage::FileSystem::{
         FILE_FLAG_BACKUP_SEMANTICS, FlushFileBuffers, LOCK_FILE_FLAGS, LOCKFILE_EXCLUSIVE_LOCK,
         LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
@@ -695,6 +711,16 @@ mod arm {
 
     fn raw(file: &File) -> HANDLE {
         HANDLE(file.as_raw_handle())
+    }
+
+    /// `MoveFileExW(…, MOVEFILE_REPLACE_EXISTING)` over a target another
+    /// handle holds without delete sharing answers `ERROR_ACCESS_DENIED`; a
+    /// source or target opened with no sharing at all, `ERROR_SHARING_VIOLATION`.
+    pub(super) fn refused_while_open(error: &io::Error) -> bool {
+        error.raw_os_error().is_some_and(|code| {
+            code == ERROR_ACCESS_DENIED.0.cast_signed()
+                || code == ERROR_SHARING_VIOLATION.0.cast_signed()
+        })
     }
 
     /// The operating system's error as `io::Error` with its kind: a Win32 code
@@ -889,6 +915,12 @@ mod arm {
     use std::os::unix::io::AsRawFd;
     use std::path::Path;
 
+    /// `rename(2)` replaces a target that is open: nothing here goes away by
+    /// itself.
+    pub(super) fn refused_while_open(_error: &io::Error) -> bool {
+        false
+    }
+
     fn c_path(path: &Path) -> io::Result<CString> {
         CString::new(path.as_os_str().as_bytes())
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "NUL in a path"))
@@ -1016,6 +1048,11 @@ mod arm {
     use std::fs::File;
     use std::io;
     use std::path::Path;
+
+    /// Nothing is ever renamed here.
+    pub(super) fn refused_while_open(_error: &io::Error) -> bool {
+        false
+    }
 
     fn refused(operation: &str) -> io::Error {
         io::Error::new(

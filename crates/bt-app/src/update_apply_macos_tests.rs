@@ -197,6 +197,7 @@ impl Drop for Children {
 
 type LaunchHook = Box<dyn FnMut(&Path, &[OsString]) -> io::Result<()> + Send>;
 type ExchangeHook = Box<dyn FnMut(&Path, &Path) + Send>;
+type SayHook = Box<dyn FnMut(&str) + Send>;
 
 /// **The stand-in world**: its lines kept, the real exchange after an
 /// optional look (or a refusal, from the `refuse_from`-th on), a check of the
@@ -214,6 +215,8 @@ struct Fake {
     /// The first exchange (counted from 0) that is refused.
     refuse_from: usize,
     unverified: Option<String>,
+    /// Looks at every line as it is said (U-34).
+    on_say: Option<SayHook>,
 }
 
 impl Default for Fake {
@@ -228,12 +231,16 @@ impl Default for Fake {
             exchanges: 0,
             refuse_from: usize::MAX,
             unverified: None,
+            on_say: None,
         }
     }
 }
 
 impl Hands for Fake {
     fn say(&mut self, line: &str) {
+        if let Some(look) = &mut self.on_say {
+            look(line);
+        }
         self.said.push(line.to_owned());
     }
 
@@ -395,6 +402,7 @@ impl Install {
             data: self.data.clone(),
             agents: Some(self.agents.clone()),
             limits,
+            predecessor: None,
         }
     }
 
@@ -1690,19 +1698,21 @@ fn the_trial_is_asked_to_quit_before_it_is_killed() {
     assert_eq!(children.status(stranger), None, "the stranger still runs");
 }
 
-/// RED (U-29) — **after `Abandoned` nothing is started again; after a revert
-/// the old build is started again with no word at all.**
+/// RED (U-29; U-34) — **after `Abandoned`, and after a revert, the old build
+/// is started again with no word at all.**
 ///
-/// The coordinator's ruling 1 (U-29): "After `Abandoned` at the applier (O
-/// never left, or the claim stayed held) no relaunch … After a revert at
-/// admission (`Moving` → back to `Prepared`) the applier relaunches the old
-/// build without a flag (it is unchanged; the transaction waits `Prepared` for
-/// the deferred rule)."
+/// The coordinator's ruling 1 (U-29): "After a revert at admission (`Moving`
+/// → back to `Prepared`) the applier relaunches the old build without a flag
+/// (it is unchanged; the transaction waits `Prepared` for the deferred
+/// rule)." Its "After `Abandoned` … no relaunch" is superseded by U-34: the
+/// applier leaves through its exit guard, and with no successor running it
+/// starts what the disk names — the journal is over, so the old build,
+/// plainly.
 ///
 /// MUTATION: in `apply`, give the revert's relaunch the words
 /// `failed_words` gives a rollback's.
 #[test]
-fn no_relaunch_after_abandoned_and_a_plain_relaunch_after_a_revert() {
+fn a_plain_relaunch_after_abandoned_and_after_a_revert() {
     if !on_macos() {
         return;
     }
@@ -1711,7 +1721,12 @@ fn no_relaunch_after_abandoned_and_a_plain_relaunch_after_a_revert() {
     let (ended, world) = applied(install.road(limits(1_000, 5_000)), Fake::default());
     drop(claim);
     assert_eq!(ended, Ended::Abandoned, "{:?}", world.said);
-    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+    assert_eq!(
+        world.relaunched,
+        vec![(install.installed.clone(), Vec::new())],
+        "{:?}",
+        world.said
+    );
 
     let install = Install::new("reverted");
     std::fs::write(install.home.admission(), b"").unwrap();
@@ -2599,7 +2614,162 @@ fn a_handoff_is_left_to_an_applier_that_started_first() {
         pid: 30,
         started: 6_000,
     };
-    assert_eq!(an_earlier_holder(mine, &[mine, earlier, later]), Some(10));
-    assert_eq!(an_earlier_holder(mine, &[mine, later]), None);
-    assert_eq!(an_earlier_holder(mine, &[]), None);
+    assert_eq!(
+        an_earlier_holder(mine, None, &[mine, earlier, later]),
+        Some(earlier)
+    );
+    assert_eq!(an_earlier_holder(mine, None, &[mine, later]), None);
+    assert_eq!(an_earlier_holder(mine, None, &[]), None);
+}
+
+// ── a journal write that fails (U-34) ───────────────────────────────────────
+
+/// **The home made unwritable** — no new file can be made in it, so every
+/// journal write fails at its temporary (the macOS form of a refused write:
+/// a rename here is never refused for an open target) — and the permissions
+/// it had, to put back.
+fn unwritable(home: &Home) -> std::fs::Permissions {
+    let before = std::fs::metadata(home.root()).unwrap().permissions();
+    let mut shut = before.clone();
+    shut.set_readonly(true);
+    std::fs::set_permissions(home.root(), shut).unwrap();
+    before
+}
+
+/// RED (U-34) — **an applier whose road fails still opens Folio: the live
+/// bundle with `--update-failed <journal>`, the journal and the LaunchAgent
+/// kept for the next start or login** — a transaction lock that cannot be
+/// opened, and a journal write that fails at `Armed` → `Moving`.
+///
+/// The owner's ruling of 2026-09-25 (every phase opens Folio), made the
+/// applier's by U-34: a failed road owes what a person's start would, read
+/// from the disk — here the old bundle live under a `destructive` header, so
+/// the *Update incomplete.* card. On Windows the same write is asked again
+/// while another program holds the journal open; a macOS rename never is.
+///
+/// MUTATION: in `update_apply_macos::opens_after`, put `Ended::Failed(_)`
+/// back in the applier's arm that owes nothing.
+#[test]
+fn a_failed_applier_still_opens_the_live_bundle_with_the_incomplete_card() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("fail-unlockable");
+    let journal = std::fs::read(install.home.journal()).unwrap();
+    std::fs::create_dir(install.home.lock()).unwrap();
+    let (ended, world) = applied(install.road(limits(1_000, 5_000)), Fake::default());
+    assert!(matches!(ended, Ended::Failed(_)), "{ended:?}");
+    assert_eq!(std::fs::read(install.home.journal()).unwrap(), journal);
+    assert_eq!(
+        world.relaunched,
+        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        "{:?}",
+        world.said
+    );
+
+    let install = Install::new("fail-write");
+    install.write(Phase::Armed);
+    install.arm();
+    std::fs::write(install.home.lock(), b"").unwrap();
+    std::fs::write(install.home.admission(), b"").unwrap();
+    let before = unwritable(&install.home);
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), Fake::default());
+    std::fs::set_permissions(install.home.root(), before).unwrap();
+    assert!(
+        matches!(ended, Ended::Failed(_)),
+        "{ended:?}: {:?}",
+        world.said
+    );
+    assert_eq!(install.on_disk().unwrap().body.phase, Phase::Armed);
+    assert!(install.plist().exists(), "the LaunchAgent is kept");
+    assert_eq!(version_of(&install.installed), "1.0", "nothing exchanged");
+    assert_eq!(
+        world.relaunched,
+        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        "{:?}",
+        world.said
+    );
+}
+
+/// RED (U-34) — **a trial whose start the journal cannot record is ended
+/// before anything else happens, and the road goes on as for a trial that did
+/// not start: `RollbackIntent`, the swap back, and the old bundle with
+/// `--update-failed`; `Trial` is never written and the trial does not run
+/// on.**
+///
+/// The trial is found only once it runs (LaunchServices reports no pid), so
+/// `TrialBegan` cannot be durable before the start without a new phase; the
+/// rights table gives the lock holder `EndTrial` over `Moving` for this one
+/// case. The home is made unwritable from the trial's launch until the
+/// applier says the trial could not be recorded.
+///
+/// MUTATION: in `Txn::watch_trial`, answer `Watched::Unrecorded` with
+/// `Err(why)` whatever the phase (the trial runs on, unrecorded).
+#[test]
+fn a_trial_whose_start_cannot_be_recorded_is_ended_and_swapped_back() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("unrecorded");
+    let children = Children::default();
+    let started = children.clone();
+    let root = install.home.root().to_path_buf();
+    let shut: Arc<Mutex<Option<std::fs::Permissions>>> = Arc::default();
+    let at_launch = Arc::clone(&shut);
+    let mut world = launching(Box::new(move |bundle, _| {
+        started.start(bundle, "trial");
+        let before = std::fs::metadata(&root).unwrap().permissions();
+        let mut closed = before.clone();
+        closed.set_readonly(true);
+        std::fs::set_permissions(&root, closed).unwrap();
+        *at_launch.lock().unwrap() = Some(before);
+        Ok(())
+    }));
+    let root = install.home.root().to_path_buf();
+    let at_say = Arc::clone(&shut);
+    world.on_say = Some(Box::new(move |line| {
+        if line.contains("could not be recorded")
+            && let Some(before) = at_say.lock().unwrap().take()
+        {
+            std::fs::set_permissions(&root, before).unwrap();
+        }
+    }));
+    let (ended, world) = applied(install.road(limits(5_000, 20_000)), world);
+    if let Some(before) = shut.lock().unwrap().take() {
+        std::fs::set_permissions(install.home.root(), before).unwrap();
+    }
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(
+        world
+            .wrote()
+            .contains("[Armed, Moving, RollbackIntent, RolledBack, Retired]"),
+        "{}",
+        world.wrote()
+    );
+    let unrecorded = world
+        .said
+        .iter()
+        .position(|line| line.contains("could not be recorded"))
+        .expect("said");
+    let asked = world
+        .said
+        .iter()
+        .position(|line| line.contains("is asked to quit"))
+        .expect("the trial is stopped");
+    assert!(unrecorded < asked, "{:?}", world.said);
+    assert_eq!(
+        version_of(&install.installed),
+        "1.0",
+        "the old bundle is back"
+    );
+    assert!(
+        install_flip::running_from(&install.stage().join(EXE))
+            .unwrap()
+            .is_empty(),
+        "the trial does not run on"
+    );
+    assert_eq!(
+        world.relaunched,
+        vec![(install.installed.clone(), failed_then(&install, &[]))]
+    );
 }

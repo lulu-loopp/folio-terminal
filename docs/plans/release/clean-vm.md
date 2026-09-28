@@ -727,7 +727,7 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
    `open -n -a /Applications/Folio.app --args --update-feed file:///Users/folio/feed/` 启动。
 4. 客户机回到 `clean` 快照后再装候选版,每一行从同一个起点开始。
 
-#### Windows 步骤(W1–W13)
+#### Windows 步骤(W1–W15)
 
 跑法:
 
@@ -761,6 +761,8 @@ pwsh -File scripts/release/cleanvm/hard-reset-in-vm.ps1 `
 | ☐ | W11 | 回滚完成 | 日志阶段为 `RolledBack` | 旧安装已通过摘要校验 | 删除 Run 值;用 `--update-failed` 重新启动旧版;标记为 `terminal`;后续启动删除 `H\<txn>` |
 | ☐ | W12 | 提交完成,清理未完成 | 日志阶段为 `Committed`,部分清理已做 | 新版在安装目录;部分残留(backup、Run 值、rescue) | 完成剩余删除(debt);rescue 文件夹由下一次普通启动删除 |
 | ☐ | W13 | 更新被取消 | 日志阶段为 `Abandoned` | 旧安装不变,无文件被移动 | 删除入口(如有);删除 `H\<txn>`;标记为 `terminal` |
+| ☐ | W14 | 更新进行中,日志已达 `Armed`(Run 值已写);用另一程序以不含 delete 共享的方式持有 `H\journal.json`(例如 PowerShell `[IO.File]::Open(<路径>, 'Open', 'Read', 'ReadWrite')` 句柄),持续超过 2 秒 | 不断电;句柄持有覆盖 applier 的 `Armed` → `Moving` 写入 | 句柄一直持有时:`diagnostics.log` 包含重命名失败行和 `BT_UPDATE_APPLY started …`;日志停留在 `Armed`;Run 值 `FolioUpdate-<txn8>` 仍存在;无文件被移动 | applier 重试写入约 2 秒;若在此期间释放句柄则更新正常完成;若未释放,applier 以 `Failed` 结束并以 `--update-failed <journal>` 启动已安装版本(卡片显示「Update incomplete.」并指出文件夹);下次启动或登录回退到 `Prepared` |
+| ☐ | W15 | 按「重启以更新」,但 rescue 可执行文件 `H\<txn>\rescue\folio.exe` 的首次启动被阻滞超过 15 秒(例如 Defender 首次扫描新副本,或调试器挂起进程创建) | 不断电;交接应答未在 15 秒内到达(`HANDOFF_DEADLINE`) | `diagnostics.log` 包含 "hand-over did not answer in time" 和交接计时行(Handoff written in N ms, the applier's start took N ms),以及 "leaving after an update: started …" | 旧 Folio 退出后启动已安装版本一次;该启动读取日志:处于 `Handoff` 时将自身交给 recovery 版本,后者把事务留给迟到的 applier(applier 的 trial 或重启即窗口),或回退到 `Prepared` 并打开旧版;任何情况下恰好出现一个 Folio 窗口 |
 
 #### macOS 步骤(M1–M11)
 

@@ -25,6 +25,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Windows: after Restart to update, Folio always comes back. A journal write
+  that another program (a scanner or a backup tool) briefly holds open is tried
+  again for about two seconds; an update that still cannot go on, a hand-over
+  that takes longer than the start of the new copy allows (now 15 s, where it
+  was 3 s), or a fault in the updater now reopens the installed Folio, with an
+  "Update incomplete" card when the update did not finish, instead of leaving
+  no window until the next sign-in.
 - macOS: the shipped shells start as login shells, so tools whose PATH is set
   in .zprofile — Homebrew's — are found; a profile can turn login on or off;
   a profile with arguments no longer reads as not installed.

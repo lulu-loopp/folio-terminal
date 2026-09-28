@@ -20,12 +20,27 @@
 //!    the first lock holder performs the apply, so a death between the two
 //!    loses nothing.
 //! 3. **A start that failed is journalled** `Abandoned` — terminal, outcome
-//!    `none`, the design's "journals `Failed`" — and the process leaves
-//!    anyway: nothing has moved, and the next start retires it (W13).
+//!    `none`, the design's "journals `Failed`": nothing has moved, and the
+//!    next start retires it (W13).
 //!
 //! A `Handoff` that could not be written leaves the journal `Prepared` (the
-//! write is atomic), starts nothing, and the process leaves: the next start
-//! offers the update again (W2).
+//! write is atomic) and starts nothing: the next start offers the update
+//! again (W2).
+//!
+//! **And then O leaves through its exit guard** (0.4.6 ticket U-34, the one
+//! guard every road process leaves through: `update_apply::ExitGuard`). The
+//! answer decides only whom O leaves behind ([`Leaving`]): the applier it
+//! started, by its pid and creation time. At the process's very end —
+//! after the loop, once O has let go of its data directory's claim
+//! ([`leave_armed`]) — an applier still running opens Folio; otherwise O
+//! starts the installed build, plainly and marked as O's successor, and that
+//! start reads the journal as every start does: `Prepared` or `Abandoned` →
+//! it opens (W2, W13); `Handoff` → it hands itself to the recovery build,
+//! which leaves a late applier alone or reverts and opens the old build. **An
+//! answer that does not come within [`crate::quit::HANDOFF_DEADLINE`]** — a
+//! first start of the new rescue executable held by a scanner (W9) — is no
+//! successor, so O makes that start itself; the storage worker it leaves
+//! behind is ended with the process.
 //!
 //! # Where it runs
 //!
@@ -33,15 +48,21 @@
 //! the window thread: a durable write waits for the device. The window thread
 //! builds the [`HandoffJob`] — pure: the two journals it may write are
 //! encoded before anything is sent — hands it over, and reads the answer on
-//! its turns under [`crate::quit::HANDOFF_DEADLINE`].
+//! its turns under [`crate::quit::HANDOFF_DEADLINE`] ([`look`]). The worker
+//! says how long the write and the start each took, in one line.
 
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
+use bt_platform::install_flip::Running;
 use bt_platform::install_txn::{self, Held};
 
 use crate::cli;
+use crate::update_apply::{ExitGuard, Leave, Left};
 use crate::update_txn::{Event, Home, Journal, Nonce, Refusal, TxnId};
 
 /// **What Prepare leaves the job holding** (U-20 / U-27 make it; the job keeps
@@ -63,24 +84,36 @@ pub(crate) struct Staged {
 /// **How a process is started and let go** — the one effect of the hand-over
 /// that is not a file. The product's is [`Detached`]; a test's records.
 pub(crate) trait Spawner: Send {
-    /// Start `program` with `args`, detached: never waited on.
+    /// Start `program` with `args`, detached: never waited on. Answers the
+    /// child by its pid and start instant (`started` 0 when it cannot be read:
+    /// nothing then proves it runs).
     ///
     /// # Errors
     /// The operating system would not start it.
-    fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()>;
+    fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running>;
 }
 
 /// **The product's spawner**: `bt_platform::quiet_command` — the door for a
 /// program named by an absolute path (`quiet_command_named` is for a bare name
-/// looked up on `PATH`, which this is not) — and the child dropped at once.
+/// looked up on `PATH`, which this is not) — and the child dropped at once,
+/// marked with this process as its predecessor
+/// (`update_apply::PREDECESSOR_VARIABLE`, U-34).
 pub(crate) struct Detached;
 
 impl Spawner for Detached {
-    fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
-        bt_platform::quiet_command(program)
+    fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running> {
+        let child = bt_platform::quiet_command(program)
             .args(args)
-            .spawn()
-            .map(drop)
+            .env(
+                crate::update_apply::PREDECESSOR_VARIABLE,
+                crate::update_apply::predecessor_value(crate::update_apply::this_process()),
+            )
+            .spawn()?;
+        let pid = child.id();
+        Ok(Running {
+            pid,
+            started: bt_platform::install_flip::started_of(pid).unwrap_or(0),
+        })
     }
 }
 
@@ -101,6 +134,7 @@ pub(crate) fn apply_command_line(home: &Path, txn: TxnId, applier: &Nonce) -> Ve
 /// **One hand-over, decided on the window thread and performed on the storage
 /// worker**: both journals it may write, already encoded, and the start.
 pub(crate) struct HandoffJob {
+    txn: TxnId,
     journal: PathBuf,
     handoff: Vec<u8>,
     abandoned: Vec<u8>,
@@ -123,6 +157,7 @@ impl HandoffJob {
         let handoff = staged.journal.advance(&Event::HandedOff { applier })?;
         let abandoned = handoff.advance(&Event::ApplierNotStarted)?;
         Ok(Self {
+            txn: staged.journal.txn,
             journal: staged.home.journal(),
             handoff: handoff.encode(),
             abandoned: abandoned.encode(),
@@ -136,8 +171,8 @@ impl HandoffJob {
 /// **What became of a hand-over.**
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum HandedOff {
-    /// `Handoff` is durable and the applier was started.
-    Started,
+    /// `Handoff` is durable and the applier was started: this process.
+    Started { applier: Running },
     /// `Handoff` could not be written: the journal is still `Prepared` and
     /// nothing was started.
     NotRecorded(String),
@@ -155,7 +190,12 @@ impl HandedOff {
     #[must_use]
     pub(crate) fn line(&self, txn: TxnId) -> String {
         match self {
-            Self::Started => format!("Folio: update {txn} handed to its applier"),
+            Self::Started { applier } => {
+                format!(
+                    "Folio: update {txn} handed to its applier ({})",
+                    applier.pid
+                )
+            }
             Self::NotRecorded(error) => {
                 format!("Folio: update {txn} was not handed over, and stays prepared: {error}")
             }
@@ -178,19 +218,160 @@ impl HandedOff {
 
 /// **Perform one hand-over**, on the thread that calls this — the storage
 /// worker: `Handoff` durably, **then** the applier; a failed start journals
-/// `Abandoned`.
+/// `Abandoned`. One diagnostics line says how long the write and the start
+/// each took (U-34: a first start of the new rescue executable that a scanner
+/// holds is measured apart from the durable write).
 pub(crate) fn perform(mut job: HandoffJob) -> HandedOff {
+    let began = Instant::now();
     if let Err(failure) = install_txn::durable_write(&job.journal, &job.handoff) {
+        crate::diagnostics::note(&took_line(job.txn, began.elapsed(), None));
         return HandedOff::NotRecorded(failure.to_string());
     }
-    match job.spawner.spawn_detached(&job.program, &job.args) {
-        Ok(()) => HandedOff::Started,
+    let written = began.elapsed();
+    let spawned = Instant::now();
+    let started = job.spawner.spawn_detached(&job.program, &job.args);
+    crate::diagnostics::note(&took_line(job.txn, written, Some(spawned.elapsed())));
+    match started {
+        Ok(applier) => HandedOff::Started { applier },
         Err(error) => HandedOff::NotStarted {
             error: error.to_string(),
             abandoned: install_txn::durable_write(&job.journal, &job.abandoned)
                 .map_err(|failure| failure.to_string()),
         },
     }
+}
+
+/// **The hand-over's timing line**: the durable write of `Handoff`, and the
+/// start of the applier (`None`: not tried, the write failed).
+#[must_use]
+pub(crate) fn took_line(
+    txn: TxnId,
+    write: std::time::Duration,
+    spawn: Option<std::time::Duration>,
+) -> String {
+    match spawn {
+        Some(spawn) => format!(
+            "Folio: update {txn}'s hand-over: Handoff written in {} ms, the applier's start took {} ms",
+            write.as_millis(),
+            spawn.as_millis()
+        ),
+        None => format!(
+            "Folio: update {txn}'s hand-over: Handoff not written, after {} ms",
+            write.as_millis()
+        ),
+    }
+}
+
+/// **Whom O's way out leaves behind** (U-34): the applier it started, by its
+/// pid and start instant, or nobody — the hand-over never sent, refused, not
+/// recorded, its applier not started, or no answer within
+/// [`crate::quit::HANDOFF_DEADLINE`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Leaving {
+    pub(crate) successor: Option<Running>,
+}
+
+impl Leaving {
+    /// After `answer`, or none by the deadline.
+    #[must_use]
+    pub(crate) fn after(answer: Option<&HandedOff>) -> Self {
+        Self {
+            successor: match answer {
+                Some(HandedOff::Started { applier }) => Some(*applier),
+                _ => None,
+            },
+        }
+    }
+
+    /// **Leave, through the exit guard** (`update_apply::ExitGuard`): an
+    /// applier still running opens Folio; otherwise `program` — the installed
+    /// build, this process's own executable — is started plainly with
+    /// `spawner`, and reads the journal as every start does.
+    pub(crate) fn leave(self, program: &Path, spawner: &mut dyn Spawner) -> Left {
+        let mut guard = ExitGuard::new(OldLeave { program, spawner });
+        guard.succeeded_by(self.successor);
+        guard.leave()
+    }
+}
+
+/// **How O leaves** (`update_apply::Leave`): its own executable, started
+/// plainly. O is not the lock holder and reads no journal to decide: the start
+/// it makes reads it, and hands a `destructive` one to the recovery build.
+struct OldLeave<'a> {
+    program: &'a Path,
+    spawner: &'a mut dyn Spawner,
+}
+
+impl Leave for OldLeave<'_> {
+    fn say(&mut self, line: &str) {
+        crate::diagnostics::note(line);
+    }
+
+    fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+        Some((self.program.to_path_buf(), Vec::new()))
+    }
+
+    fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()> {
+        self.spawner.spawn_detached(program, words).map(drop)
+    }
+}
+
+/// **What the loop reads of a hand-over it sent** (U-34): nothing yet, or its
+/// end — the line to note and whom O leaves behind.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Looked {
+    /// No answer, and the deadline has not passed: look again next turn.
+    Waiting,
+    /// The answer came, or the deadline passed without one.
+    Over { line: String, leaving: Leaving },
+}
+
+/// **One look at the hand-over's answer** for transaction `txn`, `overdue`
+/// once [`crate::quit::HANDOFF_DEADLINE`] has passed. Never waits.
+pub(crate) fn look(answer: Option<&Receiver<HandedOff>>, txn: TxnId, overdue: bool) -> Looked {
+    match answer.and_then(|answer| answer.try_recv().ok()) {
+        Some(handed) => Looked::Over {
+            line: handed.line(txn),
+            leaving: Leaving::after(Some(&handed)),
+        },
+        None if overdue => Looked::Over {
+            line: format!(
+                "Folio: update {txn}'s hand-over did not answer in time; Folio starts itself again \
+                 as it leaves, and that start reads the journal"
+            ),
+            leaving: Leaving::after(None),
+        },
+        None => Looked::Waiting,
+    }
+}
+
+/// **What this process's way out owes, once an update's hand-over is over**
+/// — set by the loop ([`arm`]), spent once at the process's end or in its
+/// panic ([`leave_armed`]).
+static ARMED: Mutex<Option<Leaving>> = Mutex::new(None);
+
+/// **Arm O's exit guard** with whom it leaves behind.
+pub(crate) fn arm(leaving: Leaving) {
+    if let Ok(mut armed) = ARMED.lock() {
+        *armed = Some(leaving);
+    }
+}
+
+/// **O's exit guard, spent** (U-34): at the very end of the process — the loop
+/// has returned, the session's sentinel is gone — or in a panic after the
+/// hand-over. First this process lets go of its data directory's claim, so the
+/// start it makes is the writer and not a launch handed back to a Folio that
+/// is leaving; then the exit guard. `None` when no update was handed over.
+pub(crate) fn leave_armed() -> Option<Left> {
+    // Never waits: this also runs in the panic hook.
+    let leaving = ARMED.try_lock().ok()?.take()?;
+    crate::persist::let_go_of_every_claim();
+    let left = match std::env::current_exe() {
+        Ok(program) => leaving.leave(&program, &mut Detached),
+        Err(error) => Left::NotStarted(PathBuf::new(), error.to_string()),
+    };
+    crate::diagnostics::note(&format!("Folio: leaving after an update: {}", left.said()));
+    Some(left)
 }
 
 #[cfg(test)]
@@ -209,14 +390,18 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use bt_platform::HostPlatform;
+    use bt_platform::install_flip::Running;
     use bt_platform::install_txn::{self, Hold};
 
-    use super::{HandedOff, HandoffJob, Spawner, Staged, apply_command_line, perform};
+    use super::{
+        HandedOff, HandoffJob, Leaving, Looked, Spawner, Staged, apply_command_line, look, perform,
+    };
     use crate::persist::SessionStore;
     use crate::quit::{
         Handoff, Quit, QuitAnswer, QuitStep, Reason, SaveReport, UPDATE_RECEIPT_DEADLINE,
         WriteVerdict,
     };
+    use crate::update_apply::Left;
     use crate::update_job::{Abandon, Applied, Job, Offer, State};
     use crate::update_txn::{
         Asker, Class, Disk, HeaderOutcome, Home, Inventories, Journal, JournalRead, Layout,
@@ -305,7 +490,7 @@ mod tests {
     }
 
     impl Spawner for Recording {
-        fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
+        fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running> {
             let journal = Journal::parse(&std::fs::read(&self.journal)?)
                 .map_err(|refusal| io::Error::other(refusal.to_string()))?;
             self.asked.lock().expect("the record").calls.push((
@@ -316,7 +501,9 @@ mod tests {
             if self.fail {
                 Err(io::Error::other("the system would not start it"))
             } else {
-                Ok(())
+                // Nothing is started: this test's own process stands for the
+                // applier, alive for as long as anything looks.
+                Ok(crate::update_apply::this_process())
             }
         }
     }
@@ -415,7 +602,12 @@ mod tests {
         let answered = answer
             .recv_timeout(Duration::from_secs(20))
             .expect("the storage worker answers");
-        assert_eq!(answered, HandedOff::Started);
+        assert_eq!(
+            answered,
+            HandedOff::Started {
+                applier: crate::update_apply::this_process()
+            }
+        );
         quit.handed_off();
         assert_eq!(quit.handoff(), Handoff::Done);
         assert_eq!(quit.step(), QuitStep::Exit);
@@ -686,7 +878,10 @@ mod tests {
                     "W13 when no applier was started"
                 );
             } else {
-                assert_eq!(answered, HandedOff::Started);
+                assert!(
+                    matches!(answered, HandedOff::Started { .. }),
+                    "{answered:?}"
+                );
                 assert_eq!(
                     (phase, start, holder),
                     (
@@ -698,5 +893,177 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A spawner that starts nothing and records every start it is asked
+    /// for: O's exit guard's.
+    #[derive(Default)]
+    struct Starts {
+        calls: Vec<(PathBuf, Vec<OsString>)>,
+    }
+
+    impl Spawner for Starts {
+        fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running> {
+            self.calls.push((program.to_path_buf(), args.to_vec()));
+            Ok(Running { pid: 0, started: 0 })
+        }
+    }
+
+    /// **A spawner held on its first start until the test lets it go** — the
+    /// first start of a new executable that a scanner reads whole (W9).
+    struct Held {
+        gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
+        asked: Arc<Mutex<Asked>>,
+        journal: PathBuf,
+    }
+
+    impl Spawner for Held {
+        fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running> {
+            let (open, turn) = &*self.gate;
+            let give_up = Instant::now() + Duration::from_secs(60);
+            let mut opened = open.lock().expect("the gate");
+            while !*opened && Instant::now() < give_up {
+                opened = turn
+                    .wait_timeout(opened, Duration::from_millis(50))
+                    .expect("the gate")
+                    .0;
+            }
+            drop(opened);
+            let journal = Journal::parse(&std::fs::read(&self.journal)?)
+                .map_err(|refusal| io::Error::other(refusal.to_string()))?;
+            self.asked.lock().expect("the record").calls.push((
+                program.to_path_buf(),
+                args.to_vec(),
+                journal.body.phase,
+            ));
+            Ok(crate::update_apply::this_process())
+        }
+    }
+
+    /// The loop's looks at the answer, as `hand_the_update_over` makes them,
+    /// with `now` read as `at(turn)`, until the hand-over is over.
+    fn look_until_over(
+        answer: &std::sync::mpsc::Receiver<HandedOff>,
+        quit: &Quit,
+        at: impl Fn(u32) -> Instant,
+    ) -> (String, Leaving) {
+        for turn in 0..2_000 {
+            match look(
+                Some(answer),
+                TxnId::new(TXN),
+                quit.handoff_is_overdue(at(turn)),
+            ) {
+                Looked::Over { line, leaving } => return (line, leaving),
+                Looked::Waiting => std::thread::sleep(Duration::from_millis(10)),
+            }
+        }
+        panic!("the hand-over never ended");
+    }
+
+    /// RED (U-34, W9) — **a hand-over with no answer by its deadline still
+    /// leaves a Folio: O's exit guard starts the installed build, plainly, once
+    /// — and an answer inside the deadline naming a running applier starts
+    /// nothing more.**
+    ///
+    /// The clean VM's W9: the storage worker was still inside the applier's
+    /// start (a first start of a new 79 MB executable) when the 3 s budget ran
+    /// out; O left, no applier ran, and nothing opened until the next logon.
+    /// Through the real road: the quit walked to its way out, the job's staged
+    /// transaction, the real storage worker holding the first start past the
+    /// deadline, the loop's look at the answer — the deadline read on the
+    /// quit's own clock, [`crate::quit::HANDOFF_DEADLINE`] later — and O's
+    /// exit guard. The start it makes is recorded, never made; the late
+    /// applier's start is let through afterwards and changes nothing.
+    ///
+    /// MUTATION: in `look`, answer `Looked::Waiting` past the deadline too, or
+    /// in `OldLeave::opening` answer `None` (no start by the deadline); in
+    /// `Leaving::after`, ignore the answer (a second start after a prompt one).
+    #[test]
+    fn a_hand_over_with_no_answer_in_time_still_opens_folio_once() {
+        let folder = Folder::new("overdue");
+        let staged = staged(&folder);
+        let (mut job, reason) = quitting_job();
+        let mut quit = Quit::begin_for(Vec::new(), reason);
+        walk_to_the_way_out(&mut quit, &mut job, |_, _| {});
+        let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let asked = Arc::new(Mutex::new(Asked::default()));
+        let held = Held {
+            gate: Arc::clone(&gate),
+            asked: Arc::clone(&asked),
+            journal: staged.home.journal(),
+        };
+        let handoff =
+            HandoffJob::new(&staged, nonce(), Box::new(held)).expect("Prepared → Handoff");
+        let mut store =
+            SessionStore::at(folder.0.join("session.json"), folder.0.join("session.lock"));
+        let answer = store
+            .hand_off(handoff)
+            .expect("the storage worker takes the hand-over");
+        let sent = Instant::now();
+        quit.handoff_sent(sent);
+        assert_eq!(
+            look(
+                Some(&answer),
+                TxnId::new(TXN),
+                quit.handoff_is_overdue(sent)
+            ),
+            Looked::Waiting
+        );
+        let (line, leaving) =
+            look_until_over(&answer, &quit, |_| sent + crate::quit::HANDOFF_DEADLINE);
+        assert!(line.contains("did not answer in time"), "{line}");
+        assert_eq!(leaving, Leaving { successor: None });
+        quit.handed_off();
+        assert_eq!(
+            (quit.step(), quit.handoff()),
+            (QuitStep::Exit, Handoff::Done)
+        );
+
+        let installed = folder.0.join("folio.exe");
+        let mut starts = Starts::default();
+        let left = leaving.leave(&installed, &mut starts);
+        assert_eq!(left, Left::Started(installed.clone()));
+        assert_eq!(starts.calls, vec![(installed.clone(), Vec::new())]);
+
+        // The late start goes through; nothing more is started by O.
+        *gate.0.lock().expect("the gate") = true;
+        gate.1.notify_all();
+        let late = answer
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the worker answers at last");
+        assert!(matches!(late, HandedOff::Started { .. }), "{late:?}");
+        assert_eq!(asked.lock().expect("the record").calls.len(), 1);
+        assert_eq!(starts.calls.len(), 1, "exactly one start");
+
+        // A prompt answer naming a running applier: nothing is started.
+        install_txn::durable_write(&staged.home.journal(), &staged.journal.encode())
+            .expect("back to Prepared for the second road");
+        let (spawner, _) = recording(&staged, false);
+        let handoff = HandoffJob::new(&staged, nonce(), spawner).expect("Prepared → Handoff");
+        let answer = store.hand_off(handoff).expect("the worker takes it");
+        let sent = Instant::now();
+        let (line, leaving) = look_until_over(&answer, &quit, |_| sent);
+        assert!(line.contains("handed to its applier"), "{line}");
+        let mut starts = Starts::default();
+        assert_eq!(
+            leaving.leave(&installed, &mut starts),
+            Left::Succeeded(std::process::id())
+        );
+        assert!(starts.calls.is_empty(), "{:?}", starts.calls);
+    }
+
+    /// RED (U-34) — **the hand-over's budget is a program's first start, not a
+    /// session write**: at least twice W9's measured 5.9 s, and no more than a
+    /// quarter of the applier's own wait for O's lock, so an applier that
+    /// does start is never timed out by O's slowness.
+    ///
+    /// MUTATION: set `quit::HANDOFF_DEADLINE` back to 3 s.
+    #[test]
+    fn the_hand_over_budget_covers_a_first_start_of_a_new_executable() {
+        let w9 = Duration::from_millis(5_900);
+        assert!(crate::quit::HANDOFF_DEADLINE >= w9 * 2);
+        assert!(
+            crate::quit::HANDOFF_DEADLINE * 4 <= crate::update_apply::Limits::PRODUCT.old_within
+        );
     }
 }

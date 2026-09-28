@@ -2332,3 +2332,160 @@ start after that discards (the limit is 2, `DEFERRED_LAUNCH_LIMIT`). F-17's
 "each launch that does not resume" is read as each launch whose card did not
 lead to a Restart — the journal cannot know, when it counts, whether the card
 will be pressed.
+
+## Revision 2026-09-28 (e) — one exit guard (U-34)
+
+**Why.** The clean-VM checklist lost the window after *Restart to update* three
+ways: the applier's journal write refused by another program's handle (W4,
+W12: `Failed`, and `Failed` owed nothing), the hand-over's answer not back in
+3 s while the first start of the new rescue executable was still inside
+`CreateProcessW` (W9: O left, no applier ran), and U-23's open point 6 (an
+applier that never started journals `Abandoned`, and nothing opens). The
+verifier's table of every way a road process leaves
+(`reports/U-31-W-verify.md`, "Every way a road process leaves", 2026-09-28)
+counted seven places deciding whether a window follows and about twenty paths
+that leave none: each place answered its own cases, none ran on a panic or on
+a timeout, and each assumed that whoever it handed to would open Folio. The
+owner's ruling 3 (2026-09-25) presumes that after Restart something applies
+and then opens a window; U-29b's ruling 2 made that true for a person's start
+only. **U-34 makes it one rule at one place.**
+
+**The rule.** Every road process — the applier P and the recovery build R on
+both platforms, from the moment each knows its home; O from the moment its
+quit reaches the hand-over — leaves through one guard,
+`update_apply::ExitGuard`. At its exit, whatever the reason (a normal end, any
+`Ended`, a refusal after the home is known, a failed start, a timeout, a panic
+unwinding), the guard does one of two things:
+
+- **(a) a successor it holds is proven running** — a process this process
+  started, or found, whose pid and start instant it holds and
+  `install_flip::still_running` confirms: the trial P started (recorded or,
+  over `Moving`, unrecorded and unstoppable), the retrial R started with the
+  handed command line, the applier R found at `Handoff`, the applier O started.
+  It opens Folio; nothing is started.
+- **(b) otherwise it starts what the disk names**, read at that instant — for
+  P and R the rule U-29b wrote (`opens_now` on each platform): the installed
+  build, with `--update-failed <journal>` while the header is `destructive` or
+  a retired rollback; the new build before `Committed` only as a trial; on
+  Windows the rescue copy where neither whole set is installed, and the rescue
+  copy as the fallback when the installed build will not start. For O, which
+  is not the lock holder: its own executable, plainly — that start reads the
+  journal as every start does.
+
+**The one exception** is R at logon with nothing done that a person is owed a
+window for (no command line; no revert and no finished rollback): nobody is
+waiting (W8). A panic in P or R unwinds through the guard: the update doors
+install a panic hook that writes the report and lets the panic unwind (the
+product's hook ends the process from inside the hook, with a message box, and
+no `Drop` would run). O's own panic hook spends O's guard before it ends the
+process.
+
+**O's exit.** The loop no longer decides anything but whom O leaves behind:
+`update_handoff::look` reads the answer on the loop's turns, and on an answer,
+or at `quit::HANDOFF_DEADLINE` without one, arms the guard
+(`update_handoff::arm`) — the applier's pid and creation time when it started,
+nobody otherwise. The guard is spent at the very end of `fn main`, after the
+loop has returned and the session's sentinel is gone, **after** the process
+lets go of its data directory's claim (`persist::let_go_of_every_claim`), so
+the start it makes is the writer rather than a launch handed back to a Folio
+that is leaving; never on the storage worker, which may be the thing that is
+stuck. That start then reads the journal: `Prepared` (W2) or `Abandoned`
+(W13) → it opens; `Handoff` → it hands itself to R, which leaves a late
+applier alone (that applier is R's successor) or reverts and opens the old
+build.
+
+**The hand-over's budget** (`quit::HANDOFF_DEADLINE`) is 15 s, sized for the
+first start of a new executable, not a session write: the VM rows that passed
+took 1.2–3.3 s from `Handoff` to O's end, W9 5.9 s; 15 s is over twice W9 and
+a quarter of the applier's 60 s wait for O's lock (pinned by
+`update_handoff::tests::the_hand_over_budget_covers_a_first_start_of_a_new_executable`).
+The storage worker notes one line timing the durable write of `Handoff` and
+the applier's start apart (`update_handoff::took_line`), so a scanner's first
+look at the rescue executable is measurable on the VM.
+
+**The frozen word: the predecessor mark.** A start a guard makes can reach R —
+an ordinary start at `Handoff` hands itself over — while the guard's own
+process is still leaving, and on Windows P and R run from the rescue image:
+R's "an older process of the rescue image is the applier" would take the
+dying guard for an applier to come and open nothing. So every start a guard
+makes on Windows (and O's on both platforms) carries its maker in the
+environment: **`FOLIO_UPDATE_PREDECESSOR=<pid>:<creation>`** (decimal; the
+creation instant as `install_flip::started_of` reads it — Windows 100 ns since
+1601, macOS microseconds since 1970). An environment variable and not an argv
+flag, because the process in between is the installed build, of any version:
+an environment reaches R through it untouched, where a flag would need every
+version's grammar to accept and forward it. Frozen at v1 beside F-8's words
+(ARCHITECTURE's frozen-words table). R reads it before it infers anything
+(`update_apply::an_earlier_holder` never names the predecessor); the inference
+itself stays for O's timeout road, whose applier may start late. A macOS
+LaunchServices start carries no environment; there the guard's starts of a
+`destructive` journal always carry `--update-failed`, which continues and
+never reaches R.
+
+**The applier's own writes** (U-34's first half). `update_apply::write_journal`
+asks `install_txn::durable_write` again, with a pause from 10 ms doubling
+through the worker's wait door, for about 2 s in all
+(`JOURNAL_WRITE_WITHIN`), while the rename is refused because another program
+holds `journal.json` open (`install_txn::Failure::refused_while_open`:
+Windows' `ERROR_ACCESS_DENIED` and `ERROR_SHARING_VIOLATION` at the rename;
+never on macOS, where `rename(2)` replaces an open target and no other error of
+a replacing rename passes by itself). `durable_write` itself does not wait. A
+trial started over `Moving` whose `TrialBegan` cannot be recorded is ended at
+once — asked to quit, then ended, by pid, start instant and image — and the
+road goes on as for a trial that did not start (`RollbackIntent`, the
+rollback): its pid exists only once it runs, so the record cannot precede the
+start without a new phase, and the rights table gives the lock holder
+`EndTrial` over `Moving` for this one case (`decide` never answers
+`StopTrial` there: it records no trial there). A retrial over `Stuck` whose
+`RetrialBegan` cannot be recorded runs on: it carries `--update-failed`, and
+is what `Opens::Trial` would have started over that `Stuck`.
+
+**The exits, before and after** (the verifier's table, Windows; "window" is
+whether a Folio window follows):
+
+| process | exit | before | after | how |
+|---|---|---|---|---|
+| O | `Started` | P owes | P, while it runs; else O starts Folio | successor, test |
+| O | `NotRecorded` (journal `Prepared`) | none | Folio (W2's card) | guard, construction |
+| O | `NotStarted`, `Abandoned` written | none | Folio | guard, construction |
+| O | `NotStarted`, abandon not written (`Handoff`) | none | Folio → R reverts | guard, construction |
+| O | nothing staged, job refused, no worker | none | Folio | guard, construction |
+| O | no answer in the budget (W9) | none | Folio → R: late P left alone, or revert | guard, `a_hand_over_with_no_answer_in_time_still_opens_folio_once` |
+| O | panic after the hand-over | none | Folio | the panic hook spends the guard |
+| O | panic before the hand-over | none | none (an ordinary crash) | not a road exit |
+| P | exe unnamed, not a rescue home | none | none: no home to read | nothing to name |
+| P | malformed line, standalone main refused | none | by the disk | guard, construction |
+| P | `OldHeldTheLock` | none | installed + `--update-failed` | `an_applier_that_never_gets_the_lock_still_opens_folio` |
+| P | lock error, journal unreadable, txn mismatch, another nonce | none | by the disk | guard, construction |
+| P | `OldStayed` / `Unverified` / `EntranceFailed` → `Abandoned` | none | installed, plainly | `p_waits_for_o_and_releases_the_claim` |
+| P | a journal write refused for good (W4, W12) | none | installed + `--update-failed`; `Armed` and the `Run` value kept | `a_journal_write_refused_for_good_still_opens_the_installed_build_with_the_incomplete_card` |
+| P | `TrialBegan` not recorded | none, trial runs unrecorded | trial ended, rollback, old build + `--update-failed` | `a_trial_whose_start_cannot_be_recorded_is_ended_and_rolled_back` |
+| P | revert, rollback, `Stuck`, no receipt, trial not launched | by case | by the disk (unchanged) | existing tests |
+| P | `Committed` | T | T while it runs; else the new build | successor |
+| P | the owed start refused | none | the rescue copy + `--update-failed` | `a_refused_start_on_the_way_out_falls_back_to_the_rescue_copy` |
+| P | panic | none | by the disk | `a_panic_inside_the_applier_still_opens_folio` |
+| R (start) | exe unnamed, not a rescue build | none | none: no home | nothing to name |
+| R (start) | standalone main refused | none | by the disk | guard, construction |
+| R (start) | lock not had in 60 s | none | by the disk | guard, construction |
+| R (start) | `Handoff` with an earlier holder | P owes | P while it runs; never the marked predecessor | `a_recovery_marked_with_its_predecessor_does_not_wait_for_it` |
+| R (start) | road `Failed`, the start refused, panic | by disk / none / none | by the disk, fallback, by the disk | guard |
+| R (logon) | nothing done | none | none (the exception) | `the_logon_run_starts_nothing_only_when_nobody_is_waiting` |
+| R (logon) | revert, finished rollback | old build | old build (unchanged) | same test |
+
+S (an ordinary start) and T (the trial) are unchanged: S keeps its own window
+or has handed itself to R; T is a Folio with a window.
+
+**What it replaces.** `opens_after`'s table of who owes what after which end
+(the `Applier` exclusions for `Refused`, `Failed`, `OldHeldTheLock`,
+`Abandoned` and `Committed`; `LockHeld` for a start) — `update_apply::Opener`
+keeps only who a recovery run is for; `Opens::Nothing`; `Txn::launched` (now
+`successor`); O's "Folio leaves, and the next start reads the journal" and the
+hand-over's "the process leaves anyway"; the silent exit 2 of both doors'
+refusals once the home is known; U-29b's per-road lists in the doors' headers.
+It supersedes U-29's ruling 1's "after `Abandoned` … no relaunch" and U-24's
+"a destructive journal on a home no road of this build recovers starts
+nothing" (such a start now carries `--update-failed`, and never hands itself
+back).
+
+**Not changed.** The recovery decisions (`decide`, the rollback), `at_start`
+and `hand_to_rescue`, the W1/W2 job-owner pass (U-33).

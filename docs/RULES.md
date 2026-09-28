@@ -955,7 +955,13 @@ build runs as a trial and is `Committed` only on its receipt; a failed trial is
 rolled back by digest, and a rollback that fails is `Stuck` with everything kept,
 retried at the next logon or start three times at most; whatever phase a dead
 applier leaves, a start opens exactly one Folio, and the new build before
-`Committed` only as a trial. The macOS road (the bundle exchange, the
+`Committed` only as a trial. **Every road process — the outgoing build once
+its hand-over is over, the applier, the recovery build — leaves through one
+exit guard**: a successor it leaves running (by pid and start instant) opens
+Folio, otherwise it starts what the disk names, so a window follows Restart to
+update whatever the road met — a refused write, a hand-over past its 15 s, a
+refusal, a panic; the one exception is the recovery at logon that did nothing
+a person is owed a window for. The macOS road (the bundle exchange, the
 LaunchAgent entrance, its rollback and opening rules) is built to the same
 contract behind its shut gate; U-32 opens it.
 **From.** §7.52 *an installed preview has no way to know it is out of date: one
@@ -973,13 +979,17 @@ says, a start opens Folio …* (U-29b), *`--update-feed <file-URL>` makes one
 start's update check and download read a local release feed …* (U-30b), *on
 Windows a failed trial is rolled back by digest …, and U-29b's opening rules hold
 on Windows too* (U-24), *Folio offers its own updates on Windows: the update
-job's gate is a build fact per platform …* (U-31).
+job's gate is a build fact per platform …* (U-31); 2026-09-28 *every road process
+of an update leaves through one exit guard …* (U-34).
 **Overrides.** The U-31 entry replaces the U-18 entry's "offers are the constant
 `false` until U-31/U-32" and the U-19 entry's "no shipped build shows any of
 this" for Windows, and replaces §7.52's "不下载、不替换、不重启" as a bound on
 Folio (it remains the check's own bound). U-24 replaces U-23's rescue-copy
 opening for every still-`destructive` journal and its wait for a live applier at
-`Handoff`.
+`Handoff`. U-34 replaces U-29's "after `Abandoned` no relaunch", U-23's and
+U-24's "after `Committed` or `Abandoned` nothing" and their silent refusals, and
+U-24's "a destructive journal on a home no road of this build recovers starts
+nothing".
 
 ### 37. The Explorer and Finder verbs — `folded`
 **Rule.** On Windows there is one verb in two registrations: the classic trees

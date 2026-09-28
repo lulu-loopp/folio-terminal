@@ -64,6 +64,35 @@ pub fn program(path: &Path, version: FileVersion, behaviour: Behaviour) -> io::R
     }
 }
 
+/// **Open `path` for reading the way a scanner, an indexer or a backup tool
+/// may: sharing reading and writing, but not deletion** (0.4.6 ticket U-34).
+/// While the handle lives, a rename that replaces `path` is refused with
+/// `ERROR_ACCESS_DENIED` — the refusal the applier's journal write met on the
+/// clean VM (rows W4 and W12).
+///
+/// # Errors
+/// The open's own error; `Unsupported` off Windows, where no open keeps a
+/// rename out.
+pub fn hold_without_delete_sharing(path: &Path) -> io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode((FILE_SHARE_READ | FILE_SHARE_WRITE).0)
+            .open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "only Windows keeps a rename out of an open file",
+        ))
+    }
+}
+
 #[cfg(windows)]
 #[path = "trust_harness_windows.rs"]
 pub mod world;

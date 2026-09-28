@@ -55,7 +55,12 @@
 //!    <nonce>` with a fresh nonce, detached, through `quiet_command`; its pid
 //!    from the child and its start time from `GetProcessTimes` →
 //!    `Trial{nonce, process, began_ms}`, durable. Not started →
-//!    `RollbackIntent`, and the rollback.
+//!    `RollbackIntent`, and the rollback. **Started, and `Trial` not
+//!    recorded** (U-34: the pid exists only once the process does, so the
+//!    record comes after the start) → the trial ended at once, by its pid,
+//!    creation time and image (`EndTrial` is the applier's over `Moving` for
+//!    this one case), and the road goes on as for a trial that did not
+//!    start: the journal never outlives its knowledge of a running trial.
 //! 7. **Commit** (W7 → W8, `update_apply::watch_trial`): a receipt of this
 //!    transaction and this trial's nonce while the journal says `Trial` →
 //!    `Committed{outcome: committed}`, durable; any other receipt is said once
@@ -98,13 +103,20 @@
 //!    logon, and every start hands itself here, until
 //!    `update_txn::STUCK_ATTEMPT_LIMIT` rollbacks have failed.
 //!
-//! **Relaunch** (U-29's ruling 1 and U-29b's rulings 2 and 3, adopted here by
-//! U-24): once the lock is let go, exactly one start ([`Opens`], computed from
-//! the disk): after a revert the old build plainly; after a rollback,
-//! finished or not, the installed build with `--update-failed <journal>` (its
-//! card: *Previous version restored.* or *Update incomplete.* and the folder);
-//! after `Committed` or `Abandoned` nothing. **The new set, live and not
-//! committed, is only ever started as a trial**: a road that ends `Stuck` with
+//! **Leaving: one exit guard** (U-34; U-29b's rulings 2 and 3, adopted here by
+//! U-24, now applied by it): every way out of the applier and of the
+//! recovery — a normal end, any refusal once the home is known, a panic
+//! unwinding — goes through `update_apply::ExitGuard` ([`WindowsLeave`]). A
+//! successor it leaves behind still running — the trial it started, the
+//! applier it found at `Handoff` — opens Folio; otherwise exactly one start of
+//! what the disk names once the lock is let go ([`opens_now`]): the old build
+//! plainly after a revert or an abandon; after a rollback, finished or not,
+//! and while the journal is `destructive` with the old set whole — a journal
+//! write refused past [`crate::update_apply::JOURNAL_WRITE_WITHIN`], a lock
+//! never had — the installed build with `--update-failed <journal>` (its
+//! card: *Previous version restored.* or *Update incomplete.* and the folder),
+//! the journal and the `Run` value staying for the next start or logon.
+//! **The new set, live and not committed, is only ever started as a trial**: a road that ends `Stuck` with
 //! every new file installed at its digest starts it as a trial over `Stuck` —
 //! recorded (`RetrialBegan`), so its receipt commits forward (W8) — and waits
 //! for it under the lock ([`Txn::retry_as_trial`]). Where the install holds
@@ -127,7 +139,9 @@
 //! Folio.
 //!
 //! Every phase is recorded through `update_apply::Journaled` (the protocol's
-//! refusal, the writer table, then `install_txn::durable_write`); every effect
+//! refusal, the writer table, then `install_txn::durable_write`, asked again
+//! through the wait door while another program holds `journal.json` open —
+//! `update_apply::write_journal`, U-34); every effect
 //! is asked of `update_txn::may` first. Headless: the main thread is a worker
 //! (`admission::enter_standalone_main`), and its only sleeps are the wait
 //! door's (`bt_platform::wait::sleep_within`) and `install_txn::hold_within`'s.
@@ -147,8 +161,8 @@ use bt_platform::trust::Policy;
 use crate::cli;
 use crate::install_channel::Channel;
 use crate::update_apply::{
-    Ended, Journaled, Limits, Opener, Opens, Watch, Watched, an_earlier_holder, failed_words,
-    now_ms, read_receipt, stop_trial, trial_runs, trial_words,
+    Ended, ExitGuard, Journaled, Leave, Limits, Opener, Opens, Watch, Watched, an_earlier_holder,
+    failed_words, now_ms, owed_at_logon, read_receipt, stop_trial, trial_runs, trial_words,
 };
 use crate::update_prepare_windows::{Resume, staged_as_verified};
 use crate::update_txn::{
@@ -216,6 +230,10 @@ pub(crate) struct Road {
     /// This process, by its pid and start time: an applier still alive is a
     /// process of the rescue image started no later than it.
     pub(crate) me: Running,
+    /// **The road process whose exit guard started this chain**, as its start
+    /// marked it (`update_apply::PREDECESSOR_VARIABLE`, U-34): leaving, and
+    /// never taken for an applier still to come.
+    pub(crate) predecessor: Option<Running>,
 }
 
 impl Road {
@@ -223,7 +241,6 @@ impl Road {
     /// runs it.
     pub(crate) fn of_this_copy(home: Home, installed: PathBuf, rescue: PathBuf) -> Self {
         let channel = Some(crate::install_channel::channel_of(&installed));
-        let pid = std::process::id();
         Self {
             home,
             installed,
@@ -232,31 +249,66 @@ impl Road {
             policy: Policy::System,
             channel,
             limits: Limits::PRODUCT,
-            me: Running {
-                pid,
-                // Not known: nothing counts as started before this process.
-                started: install_flip::started_of(pid).unwrap_or(0),
-            },
+            // Its start not known: nothing counts as started before it.
+            me: crate::update_apply::this_process(),
+            predecessor: crate::update_apply::predecessor_here(),
         }
     }
 
     /// **The program [`Opens`] starts, and its words** before a handed
-    /// command line; `None` for [`Opens::Nothing`].
-    pub(crate) fn opening(&self, opens: &Opens) -> Option<(&Path, Vec<OsString>)> {
-        let words = opens.words(&self.home)?;
+    /// command line.
+    pub(crate) fn opening(&self, opens: &Opens) -> (&Path, Vec<OsString>) {
         let program = match opens {
             Opens::Rescue => &self.rescue,
             _ => &self.installed,
         };
-        Some((program, words))
+        (program, opens.words(&self.home))
     }
 }
 
-/// **What recovery did, and what opens after it.**
+/// **What recovery did, and whom it leaves behind.**
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Recovered {
     pub(crate) ended: Ended,
-    pub(crate) opens: Opens,
+    /// A successor that opens Folio while it runs: the applier found at
+    /// `Handoff`, or the trial this run started with the handed command line.
+    pub(crate) successor: Option<Running>,
+    /// Whether anybody waits for a window: a person's start always; the run
+    /// at logon only after a revert or a rollback it finished.
+    pub(crate) waiting: bool,
+}
+
+/// **How a Windows road process leaves** (`update_apply::ExitGuard`, U-34):
+/// what the disk names from `road` ([`opens_now`]), with `handed` after its
+/// words, started through the world.
+pub(crate) struct WindowsLeave<'a, W: World> {
+    pub(crate) road: &'a Road,
+    pub(crate) world: &'a mut W,
+    pub(crate) handed: &'a [OsString],
+}
+
+impl<W: World> Leave for WindowsLeave<'_, W> {
+    fn say(&mut self, line: &str) {
+        self.world.say(line);
+    }
+
+    fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+        let (program, mut words) = self.road.opening(&opens_now(self.road));
+        words.extend_from_slice(self.handed);
+        Some((program.to_path_buf(), words))
+    }
+
+    fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()> {
+        self.world.spawn_detached(program, words)
+    }
+
+    /// The rescue copy — O's own image, which has run — with
+    /// `--update-failed`: whose own home holds no journal.
+    fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+        let (program, mut words) = self.road.opening(&Opens::Rescue);
+        words.extend_from_slice(self.handed);
+        Some((program.to_path_buf(), words))
+    }
 }
 
 /// **The door, for this process**: this executable must be the rescue copy
@@ -287,31 +339,37 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
     };
     let road = Road::of_this_copy(home, installed, exe);
     world.log = Some(crate::update_recover::log_file(&road.home, &road.data).0);
-    let (Ok(txn), Ok(nonce)) = (TxnId::parse(txn), Nonce::parse(nonce)) else {
-        World::say(
-            &mut world,
-            &format!(
-                "BT_UPDATE_APPLY malformed transaction or nonce; {}",
-                cli::UPDATE_APPLY_USAGE
-            ),
-        );
-        return 2;
+    // From here the home is known: every way out, a refusal included, leaves
+    // through the exit guard (U-34).
+    let refused = match (TxnId::parse(txn), Nonce::parse(nonce)) {
+        (Ok(txn), Ok(nonce)) => {
+            match bt_platform::admission::enter_standalone_main("folio-update-apply", |worker| {
+                apply(worker, &road, txn, nonce, &mut world)
+            }) {
+                Ok(ended) => {
+                    World::say(
+                        &mut world,
+                        &format!("BT_UPDATE_APPLY transaction {txn}: {ended:?}"),
+                    );
+                    return ended.code();
+                }
+                Err(refused) => format!("{refused:?}"),
+            }
+        }
+        _ => format!(
+            "malformed transaction or nonce; {}",
+            cli::UPDATE_APPLY_USAGE
+        ),
     };
-    match bt_platform::admission::enter_standalone_main("folio-update-apply", |worker| {
-        apply(worker, &road, txn, nonce, &mut world)
-    }) {
-        Ok(ended) => {
-            World::say(
-                &mut world,
-                &format!("BT_UPDATE_APPLY transaction {txn}: {ended:?}"),
-            );
-            ended.code()
-        }
-        Err(refused) => {
-            World::say(&mut world, &format!("BT_UPDATE_APPLY {refused:?}"));
-            2
-        }
-    }
+    World::say(&mut world, &format!("BT_UPDATE_APPLY {refused}"));
+    let left = ExitGuard::new(WindowsLeave {
+        road: &road,
+        world: &mut world,
+        handed: &[],
+    })
+    .leave();
+    World::say(&mut world, &format!("BT_UPDATE_APPLY {}", left.said()));
+    2
 }
 
 /// **The applier, over any road** — see the module header. Once the lock is
@@ -327,6 +385,34 @@ pub(crate) fn apply(
     nonce: Nonce,
     world: &mut impl World,
 ) -> Ended {
+    // Every way out of the road, a panic included, leaves through the guard
+    // (U-34); the lock is let go before a build starts — its own start
+    // retires a finished transaction, which needs it.
+    let mut guard = ExitGuard::new(WindowsLeave {
+        road,
+        world,
+        handed: &[],
+    });
+    let (ended, successor) =
+        apply_under_the_lock(worker, road, txn, nonce, &mut *guard.inner().world);
+    guard.succeeded_by(successor);
+    let left = guard.leave();
+    guard
+        .inner()
+        .world
+        .say(&format!("BT_UPDATE_APPLY {}", left.said()));
+    ended
+}
+
+/// **The applier's road under the transaction lock**: where it ended, and
+/// the trial it started, which opens Folio while it runs.
+fn apply_under_the_lock(
+    worker: &WorkerCtx,
+    road: &Road,
+    txn: TxnId,
+    nonce: Nonce,
+    world: &mut impl World,
+) -> (Ended, Option<Running>) {
     let window = Instant::now() + road.limits.old_within;
     let lock = match install_txn::hold_within(
         &road.home.lock(),
@@ -334,21 +420,24 @@ pub(crate) fn apply(
         road.limits.old_within,
     ) {
         Ok(Some(held)) => held,
-        Ok(None) => return Ended::OldHeldTheLock,
-        Err(failure) => return Ended::Failed(failure.to_string()),
+        Ok(None) => return (Ended::OldHeldTheLock, None),
+        Err(failure) => return (Ended::Failed(failure.to_string()), None),
     };
     let journal = match read_journal(&road.home) {
         Ok(Some(journal)) => journal,
-        Ok(None) => return Ended::Refused("there is no journal".to_owned()),
-        Err(why) => return Ended::Refused(why),
+        Ok(None) => return (Ended::Refused("there is no journal".to_owned()), None),
+        Err(why) => return (Ended::Refused(why), None),
     };
     if journal.txn != txn {
-        return Ended::Refused(format!(
-            "the journal is transaction {}, not {txn}",
-            journal.txn
-        ));
+        return (
+            Ended::Refused(format!(
+                "the journal is transaction {}, not {txn}",
+                journal.txn
+            )),
+            None,
+        );
     }
-    let (ended, launched) = match Txn::of(road, journal, lock, Asker::LockHolder) {
+    match Txn::of(road, worker, journal, lock, Asker::LockHolder) {
         Ok(mut held) => {
             let mut ended = held.apply(worker, nonce, window, world);
             if ended.rolled_back() {
@@ -361,28 +450,10 @@ pub(crate) fn apply(
                     held.j.written
                 ),
             );
-            // The lock is let go before a build starts: its own start retires
-            // a finished transaction, which needs it.
-            (ended, held.launched)
+            (ended, held.successor)
         }
-        Err(ended) => (ended, false),
-    };
-    let opens = if launched {
-        Opens::Nothing
-    } else {
-        opens_after(road, &ended, Opener::Applier)
-    };
-    if let Some((program, words)) = road.opening(&opens) {
-        let line = match world.spawn_detached(program, &words) {
-            Ok(()) => format!("BT_UPDATE_APPLY {} started ({opens:?})", program.display()),
-            Err(error) => format!(
-                "BT_UPDATE_APPLY {} could not be started ({opens:?}): {error}",
-                program.display()
-            ),
-        };
-        world.say(&line);
+        Err(ended) => (ended, None),
     }
-    ended
 }
 
 /// **Recovery over any road** (R) — see the module header: the transaction
@@ -402,18 +473,20 @@ pub(crate) fn recover(
         Opener::Login
     };
     let handed = start.unwrap_or(&[]);
-    let (ended, launched) = match hold(road) {
+    let (ended, successor) = match hold(road) {
         Ok((lock, journal)) => {
             let txn = journal.txn;
-            match Txn::of(road, journal, lock, Asker::Rescue) {
+            match Txn::of(road, worker, journal, lock, Asker::Rescue) {
                 Ok(mut held) => {
                     let mut ended = if held.j.phase() == PhaseKind::Handoff
-                        && let Some(pid) = an_applier_may_still_come(road)
+                        && let Some(applier) = an_applier_may_still_come(road)
                     {
                         world.say(&format!(
-                            "BT_UPDATE_RECOVER {pid} runs from {} and may be the applier; the handed-off update is left to it",
+                            "BT_UPDATE_RECOVER {} runs from {} and may be the applier; the handed-off update is left to it",
+                            applier.pid,
                             road.rescue.display()
                         ));
+                        held.successor = Some(applier);
                         Ended::LockHeld
                     } else {
                         held.settle(worker, None, world)
@@ -426,19 +499,19 @@ pub(crate) fn recover(
                         "BT_UPDATE_RECOVER transaction {txn} wrote {:?}",
                         held.j.written
                     ));
-                    (ended, held.launched)
+                    (ended, held.successor)
                 }
-                Err(ended) => (ended, false),
+                Err(ended) => (ended, None),
             }
         }
-        Err(ended) => (ended, false),
+        Err(ended) => (ended, None),
     };
-    let opens = if launched {
-        Opens::Nothing
-    } else {
-        opens_after(road, &ended, opener)
-    };
-    Recovered { ended, opens }
+    let waiting = opener == Opener::Start || owed_at_logon(&ended);
+    Recovered {
+        ended,
+        successor,
+        waiting,
+    }
 }
 
 /// The transaction lock within [`Limits::old_within`], then the journal.
@@ -462,42 +535,23 @@ fn hold(road: &Road) -> Result<(Held, Journal), Ended> {
 /// **A process other than this one running from the rescue executable, and
 /// started no later than it** — the applier O started, still waiting for the
 /// lock O held, or an earlier recovery: its pid
-/// (`update_apply::an_earlier_holder`, both platforms' rule). A list that
-/// cannot be read names none.
-fn an_applier_may_still_come(road: &Road) -> Option<u32> {
+/// (`update_apply::an_earlier_holder`, both platforms' rule) — never the
+/// predecessor whose exit guard started this chain. A list that cannot be read
+/// names none.
+fn an_applier_may_still_come(road: &Road) -> Option<Running> {
     let listed = install_flip::running_from(&road.rescue).ok()?;
-    an_earlier_holder(road.me, &listed)
+    an_earlier_holder(road.me, road.predecessor, &listed)
 }
 
-/// **What opens after a road that ended `ended`**, read from the disk once the
-/// lock is let go (U-29b's rulings 2 and 3, adopted by U-24): nothing where
-/// nothing is owed (see [`Opener`]); else, while the header is not
-/// `destructive`, the installed build — with `--update-failed` after a retired
-/// rollback; while it is, by what the install folder holds, read by digest:
-/// every new file at its digest and no commit → the new build **only as a
-/// trial**; the whole new set committed, or the whole old set → the installed
-/// build with `--update-failed`; neither whole set, or a journal whose layout
-/// cannot be read → the rescue copy with `--update-failed`.
-fn opens_after(road: &Road, ended: &Ended, opener: Opener) -> Opens {
-    let owed = match (opener, ended) {
-        (_, Ended::LockHeld | Ended::Abandoned) => false,
-        (
-            Opener::Applier,
-            Ended::Refused(_)
-            | Ended::Failed(_)
-            | Ended::Committed
-            | Ended::CommittedWithDebt(_)
-            | Ended::OldHeldTheLock,
-        ) => false,
-        (Opener::Login, ended) => matches!(
-            ended,
-            Ended::Reverted | Ended::RolledBack | Ended::RolledBackWithDebt(_)
-        ),
-        _ => true,
-    };
-    if !owed {
-        return Opens::Nothing;
-    }
+/// **What the disk names to start now** (U-29b's rulings 2 and 3, adopted by
+/// U-24; since U-34 read only by the exit guard, [`WindowsLeave`]): while the
+/// header is not `destructive`, the installed build — with `--update-failed`
+/// after a retired rollback; while it is, by what the install folder holds,
+/// read by digest: every new file at its digest and no commit → the new build
+/// **only as a trial**; the whole new set committed, or the whole old set →
+/// the installed build with `--update-failed`; neither whole set, or a journal
+/// whose layout cannot be read → the rescue copy with `--update-failed`.
+pub(crate) fn opens_now(road: &Road) -> Opens {
     let bytes = file_reads::read(Lane::UpdateJournal, road.home.journal()).ok();
     let Some(header) = bytes.as_deref().and_then(|bytes| Header::parse(bytes).ok()) else {
         return Opens::Installed { failed: false };
@@ -579,19 +633,26 @@ struct Txn<'a> {
     /// Who this holder is to `decide`: the applier, or the rescue build as
     /// recovery.
     asker: Asker,
-    j: Journaled,
+    j: Journaled<'a>,
     /// Held for the whole road; let go when this is dropped.
     _lock: Held,
     inventories: Inventories,
-    /// **A trial this holder started is the window**: set when a retrial over
-    /// `Stuck` was launched — nothing else is started after the road (U-29b,
-    /// ruling 2's "exactly one"). The applier's own trial is followed by a
-    /// commit (the trial runs) or a rollback (the old build opens).
-    launched: bool,
+    /// **The successor this holder leaves behind**: the trial it started — the
+    /// applier's own, or a retrial over `Stuck` — or the applier found at
+    /// `Handoff`. While it runs it is the window, and the exit guard starts
+    /// nothing (U-34; U-29b's ruling 2's "exactly one"); a trial stopped by a
+    /// rollback no longer runs.
+    successor: Option<Running>,
 }
 
 impl<'a> Txn<'a> {
-    fn of(road: &'a Road, journal: Journal, lock: Held, asker: Asker) -> Result<Self, Ended> {
+    fn of(
+        road: &'a Road,
+        worker: &'a WorkerCtx,
+        journal: Journal,
+        lock: Held,
+        asker: Asker,
+    ) -> Result<Self, Ended> {
         let Layout::Members(inventories) = journal.body.layout.clone() else {
             return Err(Ended::Refused(
                 "the journal is not a member set's".to_owned(),
@@ -600,10 +661,10 @@ impl<'a> Txn<'a> {
         Ok(Self {
             road,
             asker,
-            j: Journaled::of(&road.home, journal),
+            j: Journaled::of(&road.home, worker, journal),
             _lock: lock,
             inventories,
-            launched: false,
+            successor: None,
         })
     }
 
@@ -839,29 +900,69 @@ impl<'a> Txn<'a> {
         // A trial that has already gone has no start time: it is then taken
         // as not running, and only its receipt can commit.
         let started = install_flip::started_of(pid).unwrap_or(0);
-        self.j.record(
+        let process = TrialProcess { pid, started };
+        self.successor = Some(Running { pid, started });
+        if let Err(why) = self.j.record(
             Actor::Applier,
             &Event::TrialBegan {
                 nonce,
-                process: TrialProcess { pid, started },
+                process,
                 began_ms,
             },
-        )?;
-        match self.watch(worker, Actor::Applier, world)? {
-            Watched::Committed => Ok(self.retire_committed(Actor::Applier, world)),
-            Watched::NoReceipt => self.declare_rollback(worker, Actor::Applier, world),
+        ) {
+            // The journal does not know this trial (U-34): it is ended, and
+            // the road goes on as for a trial that did not start.
+            world.say(&format!(
+                "BT_UPDATE_APPLY the trial {pid} could not be recorded: {why}"
+            ));
+            self.end_unrecorded(worker, process, why, world)?;
+            return self.declare_rollback(worker, Actor::Applier, world);
         }
+        if self.watch(worker, Actor::Applier, world)? {
+            Ok(self.retire_committed(Actor::Applier, world))
+        } else {
+            self.declare_rollback(worker, Actor::Applier, world)
+        }
+    }
+
+    /// **End the trial this holder launched over `Moving` whose start the
+    /// journal could not record** (U-34): asked to quit, then ended, only by
+    /// its pid, creation time and image, as W9 stops a recorded one. A trial
+    /// that will not end runs on as the window (the holder's successor), and
+    /// nothing else is started.
+    ///
+    /// # Errors
+    /// `why`, and why the trial could not be ended.
+    fn end_unrecorded(
+        &mut self,
+        worker: &WorkerCtx,
+        process: TrialProcess,
+        why: String,
+        world: &mut impl World,
+    ) -> Result<(), String> {
+        self.j.may(Actor::Applier, Effect::EndTrial)?;
+        let limits = &self.road.limits;
+        let installed = self.road.installed.clone();
+        let stopped = stop_trial(
+            worker,
+            process,
+            &[installed.as_path()],
+            (limits.quit_within, limits.end_within, limits.poll),
+            &mut |line| world.say(line),
+        );
+        stopped.map_err(|stop| format!("{why}; {stop}"))
     }
 
     /// **The trial the journal records, waited for** (W7): its receipt, while
     /// the recorded process runs from `<install>\folio.exe` — its pid, its
-    /// creation time and its image — and its deadline has not passed.
+    /// creation time and its image — and its deadline has not passed. `true`
+    /// once `Committed` is durable.
     fn watch(
         &mut self,
         worker: &WorkerCtx,
         actor: Actor,
         world: &mut impl World,
-    ) -> Result<Watched, String> {
+    ) -> Result<bool, String> {
         let road = self.road;
         let watch = Watch {
             home: &road.home,
@@ -871,16 +972,17 @@ impl<'a> Txn<'a> {
             trial_within_ms: road.limits.trial_within_ms,
         };
         let images = [road.installed.as_path()];
-        crate::update_apply::watch_trial(
+        let watched = crate::update_apply::watch_trial(
             worker,
             &mut self.j,
             &watch,
             // The Windows trial's pid is the child's own, recorded at its
-            // launch: there is never one to find.
+            // launch: there is never one to find, so never one unrecorded.
             &mut |_, _| None,
             &mut |process| trial_runs(process, &images),
             &mut |line| world.say(line),
-        )
+        )?;
+        Ok(watched == Watched::Committed)
     }
 
     /// `RollbackDeclared` as `actor`, durable, then the rollback.
@@ -939,7 +1041,7 @@ impl<'a> Txn<'a> {
             match action {
                 Action::Revert { .. } => return self.revert(actor, world),
                 Action::AwaitReceipt { .. } => {
-                    if self.watch(worker, actor, world)? == Watched::Committed {
+                    if self.watch(worker, actor, world)? {
                         return Ok(self.retire_committed(actor, world));
                     }
                     if self.j.phase() == PhaseKind::Stuck {
@@ -1144,8 +1246,11 @@ impl<'a> Txn<'a> {
                 return Ok(self.still_stuck());
             }
         };
-        self.launched = true;
         let started = install_flip::started_of(pid).unwrap_or(0);
+        self.successor = Some(Running { pid, started });
+        // A retrial whose start cannot be recorded runs on as the window: it
+        // carries `--update-failed`, and a trial of this transaction that no
+        // journal records is what `Opens::Trial` starts over `Stuck` (U-34).
         self.j.record(
             actor,
             &Event::RetrialBegan {
@@ -1154,9 +1259,10 @@ impl<'a> Txn<'a> {
                 began_ms,
             },
         )?;
-        Ok(match self.watch(worker, actor, world)? {
-            Watched::Committed => self.retire_committed(actor, world),
-            Watched::NoReceipt => self.still_stuck(),
+        Ok(if self.watch(worker, actor, world)? {
+            self.retire_committed(actor, world)
+        } else {
+            self.still_stuck()
         })
     }
 
@@ -1317,9 +1423,14 @@ impl World for Machine {
 
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
         // `quiet_command` is the one door for a child; it is dropped at once,
-        // never waited on or ended.
+        // never waited on or ended. Every start of this world is an exit
+        // guard's, so each carries this process as its predecessor (U-34).
         bt_platform::quiet_command(program)
             .args(args)
+            .env(
+                crate::update_apply::PREDECESSOR_VARIABLE,
+                crate::update_apply::predecessor_value(crate::update_apply::this_process()),
+            )
             .spawn()
             .map(drop)
     }

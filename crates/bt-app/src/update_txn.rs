@@ -1552,6 +1552,20 @@ pub(crate) const EFFECT_RIGHTS: &[Right] = &[
             PhaseKind::Stuck,
         ],
     },
+    // A lock holder that launched the trial over `Moving` and could not
+    // record `TrialBegan` ends the trial it just launched (U-34): the
+    // journal never knew it, so no recorded fact changes, and `decide` never
+    // hands out `StopTrial` at `Moving` (it records no trial there).
+    Right {
+        actor: Actor::Applier,
+        effect: Effect::EndTrial,
+        during: &[PhaseKind::Moving],
+    },
+    Right {
+        actor: Actor::Recovery,
+        effect: Effect::EndTrial,
+        during: &[PhaseKind::Moving],
+    },
     // Both lock holders roll back, commit and retire (W7–W13, M7–M11).
     Right {
         actor: Actor::Applier,

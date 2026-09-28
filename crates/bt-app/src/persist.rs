@@ -237,6 +237,25 @@ pub(crate) fn is_writer_of(directory: &Path) -> bool {
         .is_some()
 }
 
+/// **Let go of every claim this process holds** (0.4.6 U-34): O at its very
+/// end, after an update's hand-over, so that the start its exit guard makes
+/// takes the claim and is the writer — not a launch handed back to this
+/// process, which is leaving. Each row then answers "not the writer": nothing
+/// is written after this.
+///
+/// It never waits for the table: it also runs in the panic hook, possibly on the
+/// thread that holds it — then the claims go with the process, a moment later.
+pub(crate) fn let_go_of_every_claim() {
+    let mut table = match claims().try_lock() {
+        Ok(table) => table,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    for row in table.values_mut() {
+        *row = None;
+    }
+}
+
 /// **The claim table** — one row per claim name, holding either the claim this
 /// process took (it is the writer, and the guard lives here for the life of
 /// the process) or `None` (it asked and was refused). Written by
@@ -246,13 +265,17 @@ fn claim_table() -> std::sync::MutexGuard<
     'static,
     HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>,
 > {
+    claims()
+        .lock()
+        .expect("the claim table is locked to read or take one entry and nothing else")
+}
+
+/// The table [`claim_table`] locks.
+fn claims() -> &'static Mutex<HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>> {
     static CLAIMS: OnceLock<
         Mutex<HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>>,
     > = OnceLock::new();
-    CLAIMS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("the claim table is locked to read or take one entry and nothing else")
+    CLAIMS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// **Ask for the claim on `directory` now, and remember nothing** (§C.7 of

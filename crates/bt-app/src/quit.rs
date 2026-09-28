@@ -93,16 +93,22 @@ pub const PAGE_TEARDOWN_DEADLINE: Duration =
 /// ordinary [`WriteVerdict::TimedOut`], which leaves.
 pub(crate) const UPDATE_RECEIPT_DEADLINE: Duration = crate::persist::SESSION_SAVE_BUDGET;
 
-/// **How long the way out waits for the hand-over's answer** (U-21): three
-/// seconds.
+/// **How long the way out waits for the hand-over's answer** (U-21; sized by
+/// U-34): fifteen seconds.
 ///
 /// What it waits for is one journal of a few hundred bytes written durably (a
-/// flush of the file and of its folder) and one process started, on the
-/// storage worker — the same order of work as one session write, so the same
-/// bound. The windows are hidden by then, and past it the process leaves
-/// anyway: whatever the journal holds at that instant, `Prepared` or
-/// `Handoff`, is a row the recovery table names (W2, W3).
-pub(crate) const HANDOFF_DEADLINE: Duration = Duration::from_secs(3);
+/// flush of the file and of its folder) and **the first start of a new
+/// executable** — the rescue copy, written moments before and never run, which
+/// a scanner that checks on execute reads whole inside that start. U-21 sized
+/// the bound as one session write (3 s); the clean VM measured the hand-over,
+/// with the way out after it, at 1.2–3.3 s on the rows that passed and 5.9 s
+/// where it did not (W9: the answer never came, and nothing opened). Fifteen
+/// seconds is four and a half times the slowest pass and over twice W9's, and
+/// leaves the applier 45 s of its 60 s wait for this process's lock. The
+/// windows are hidden by then, and the owner's ruling 3 (2026-09-25) accepts
+/// a wait after Restart. Past it the process leaves through its exit guard,
+/// which starts Folio again (`update_handoff::leave_armed`).
+pub(crate) const HANDOFF_DEADLINE: Duration = Duration::from_secs(15);
 
 /// **How often the loop comes back to look for an answer the quit is waiting
 /// on** — the session's receipt, the hand-over's (U-21).
