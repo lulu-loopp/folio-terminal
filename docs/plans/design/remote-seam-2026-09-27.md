@@ -295,27 +295,27 @@ incarnation}` for the pane families.
   the incarnation's output of the publication's first raw byte (for a
   checkpoint, where its bytes resume). It sits **inside** the envelope and never
   replaces it.
-- **Acknowledged, and retained.** A client acknowledges the envelope cursor
-  only: `ack {family, scope, cur}`. The host releases credit for everything it
-  sent up to `cur` only when `cur`'s `boot` and `gen` equal the subscription's
-  current ones; any other ack — an old generation's, crossing a reset on the
-  other direction of the connection — releases nothing and is counted. The host
-  retains, per scope, the run §3.4 states, addressed by envelope cursor, and for
-  `pane.stream` the journal bytes that run covers, addressed by `offset`. The
+- **Acknowledged, and retained.** Publications are acknowledged by the envelope
+  cursor, `ack {family, scope, cur}`; snapshot pieces by their own, `ack {family,
+  scope, snap, index}` (below). A `cur` ack releases credit up to `cur` only when
+  its `boot` and `gen` equal the subscription's; any other — an old generation's,
+  crossing a reset on the other direction — releases nothing and is counted. The
+  host retains, per scope, the run §3.4 states, addressed by envelope cursor, and
+  for `pane.stream` the journal bytes that run covers, addressed by `offset`. The
   client retains the cursor of the last publication it **applied**, and in
   `pane.stream` also `end = offset + len` of the last bytes applied.
 - **A snapshot** is `snapshot_begin {snap, chunks, total_bytes}`, then `chunks`
-  × `snapshot_chunk {snap, index}` in order, then `snapshot_end {snap,
-  digest}`: one `snap` id, `digest` SHA-256 over the chunk bodies in order.
-  Every piece carries the cursor of the state it describes (the scope's `seq`
-  when it was taken) and is ordered by `index`, not `seq`; pieces go only to the
-  subscription that asked, and each takes one credit. A chunk is at most
-  256 KiB (inside the 1 MiB frame cap), a snapshot at most its family's
-  `snapshot_bytes` in `welcome.limits`. The client applies nothing until `snapshot_end` arrives with
-  every chunk and a matching digest; the scope's state is then the snapshot's,
-  at `snapshot_end`'s cursor. A **delta** carries `prev_seq` and applies only on
-  top of exactly that state (mosh's numbered source and target); an **event** is
-  a receipt with its own identity.
+  × `snapshot_chunk {snap, index}`, then `snapshot_end {snap, digest}`, `index`
+  numbering all its pieces from 0 in order; each carries the cursor of the state
+  it describes and goes only to the subscription that asked. **Pieces use no
+  publication credit**: a snapshot lane with its own window (`snapshot_window`,
+  `welcome.limits`) lets the host send piece `index` only while it is at most
+  that window past the last acked `{snap, index}`; the client acks each piece on
+  receipt, in order, before applying any. A chunk is ≤ 256 KiB, a snapshot ≤ its
+  family's `snapshot_bytes`; `digest` is SHA-256 of the chunk bodies. The client
+  applies nothing before `snapshot_end` with every chunk and a matching digest;
+  the state is then the snapshot's, at its cursor. A **delta** carries `prev_seq`
+  and applies only on exactly that state (mosh's source and target); an **event** is a receipt of its own.
 - **Every collection a snapshot carries is bounded** (§3.4). One over its bound
   is sent as its first members in the family's order plus `omitted {count}`,
   which the client shows; nothing is dropped silently.
@@ -327,7 +327,7 @@ Host-side states, per subscription:
 
 | state | the host | leaves by |
 |---|---|---|
-| `syncing` | sends deltas from `since` if it holds that run within the same `{boot, gen}`, else a snapshot, within credit | catch-up or `snapshot_end` sent → `live` |
+| `syncing` | sends deltas from `since` if it holds that run within the same `{boot, gen}`, else a snapshot, in its lane | catch-up or `snapshot_end` sent → `live` |
 | `live` | sends each new publication while credit remains; with none left, sends nothing and waits for an `ack` (backpressure, not failure) | the client's cursor leaves the retained run, or the scope's `gen` changes → `paused` |
 | `paused` | has sent **one** `reset` — a control frame of at most 256 bytes that may bypass credit once — naming the scope's current `{boot, gen}` and `reason: overflow \| generation`; then sends nothing and keeps no backlog | only an explicit credit-bearing `resubscribe` → `syncing` |
 
@@ -345,7 +345,7 @@ a cursor and one small frame (tmux's `%pause`, then the client's refetch).
 | boot change | a new `welcome` (or a publication) with another `boot` | discards every cursor and every unresolved `op` expectation (§3.5); subscribes without `since` |
 | overflow | `reset {reason: overflow}` | discards the scope's state; when it wants the scope again, a credit-bearing `resubscribe` without `since`, answered by a snapshot |
 | stale incarnation | a `pane.*` publication for an older `incarnation`, or the `session` family's `incarnated` event | discards that pane scope; learns the new `{session, incarnation}` from the `session` family before subscribing |
-| incomplete snapshot | a missing chunk, a digest that does not match, or a `snapshot_end` naming another `snap` | discards the partial snapshot; `resubscribe` without `since` |
+| incomplete snapshot | a piece whose `index` is not the next, a digest that does not match, or a piece naming another `snap` | acks nothing more of it; discards the partial snapshot; `resubscribe` without `since` |
 
 **Overflow voids the subscriber's cursor, not the scope's generation**, which
 every subscriber shares: bumping it for one slow phone would reset every other
@@ -439,8 +439,8 @@ grants one engine checks; no credential is accepted on another carriage.
    `device` is `{id}` for a paired device or `{candidate_key, self_sig, name,
    class}` for one that is pairing.
 3. `welcome {offer, protocol, families, limits, host, boot, nh, E_client,
-   E_host}`: the host's own offer, the selected major and family minors, and
-   both endpoint identities as the host observes them.
+   E_host, window_id?}`: the host's own offer, the selection, both endpoint
+   identities as observed, and, while pairing, the pairing window's id.
 4. `host_proof {sig_h}`, `sig_h = Sign(host key, "folio-remote/1 host" ‖ T)`.
 5. `device_proof {sig_d, pair_mac?}`, `sig_d = Sign(device key, "folio-remote/1
    device" ‖ T)`; `pair_mac` only while pairing.
@@ -469,12 +469,12 @@ tailnet's identity).
   as a six-digit code. The host keeps neither the secret nor a hash of it but
   `K_pair = HKDF-SHA256(ikm = the secret, or the code's six ASCII digits; salt =
   host_id ‖ window_id; info = "folio-remote/1 pairing")`, in memory, for the
-  window only. The phone derives the same `K_pair` from what it scanned or typed
-  and `host_id` and `window_id` (from the QR; on the code path, from `welcome`).
+  window only. The phone derives it from what it scanned or typed plus `host_id`
+  and `window_id` (the QR's, or `welcome.host.id` and `welcome.window_id`).
 - **Candidate.** A `hello` whose `device` is a candidate first consumes an
   attempt, then is held in memory only; `self_sig` is the candidate key's
   signature over `"folio-remote/1 candidate" ‖ candidate_key ‖ nc`
-  (possession; the code path learns `window_id` only from `welcome`). The handshake runs as above, and `device_proof` adds `pair_mac =
+  (possession; the code path learns `window_id` only from `welcome`, whose bytes `T` binds). The handshake runs as above, and `device_proof` adds `pair_mac =
   HMAC-SHA256(K_pair, "folio-remote/1 pair" ‖ T)`.
 - **Checks, all before anything durable.** `self_sig`, `sig_d` and `pair_mac`
   verify; on the code path the person has compared the host key's short
