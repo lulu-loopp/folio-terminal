@@ -2422,6 +2422,40 @@ LaunchServices start carries no environment; there the guard's starts of a
 `destructive` journal always carry `--update-failed`, which continues and
 never reaches R.
 
+**The mark is read once, and never leaks.** Every process — the update doors
+and the ordinary start alike — reads `FOLIO_UPDATE_PREDECESSOR` first thing in
+`main`, before it starts a thread or a child, and removes it from its own
+environment (`update_apply::take_predecessor`, through
+`bt_platform::install_flip::take_environment_variable`): nothing it spawns —
+panes, shells, the next road process — inherits a mark meant for it. A road
+process it starts gets a mark of its own: an exit guard's start names its
+maker, and an ordinary start that hands itself to the recovery build passes on
+the mark it was started with (`update_startup`'s spawn), so the chain guard →
+start → R keeps its proof. A build older than 0.4.6's final form never reads
+the mark and passes it on in its environment, which reaches R the same way.
+
+**The double start, made structural, and the one race left.** O starts its
+applier and leaves; if the applier leaves before its road — a refusal, a
+panic; it cannot get further, because it waits for O's lock — while O is still
+on its way out, both O's guard (finding the applier gone) and the applier's
+guard would start Folio. So the applier's guard does not start while **its
+predecessor is O still before O's own guard**
+(`update_apply::the_old_build_still_leaves`): the mark's process still running
+by pid and start instant, from the installed program (O, never a rescue-image
+process: a recovery build's predecessor has already made its start, and R
+never asks), the journal still `Handoff`, and O's data-directory claim still
+held — O lets go of it immediately before its guard looks at the applier.
+**The one accepted race** is the instant between those two statements of O's:
+an applier that finds the claim free and starts Folio while O still finds it
+running — or that leaves just after O looked — gives a second start beside
+O's. It is harmless: the second start finds the first one's data-directory
+claim taken and hands its launch to that Folio (the single-instance hand-over,
+`launch_wire`), which opens a window for it; nothing is applied twice, since
+neither start is a lock holder. The opposite order — an applier that found the
+claim held, and so started nothing, still running when O looks — needs the
+applier to outlive its own last statements across O's two, and would leave
+O's guard seeing it alive; it is the same instant, and the same acceptance.
+
 **The applier's own writes** (U-34's first half). `update_apply::write_journal`
 asks `install_txn::durable_write` again, with a pause from 10 ms doubling
 through the worker's wait door, for about 2 s in all
@@ -2454,7 +2488,7 @@ whether a Folio window follows):
 | O | panic after the hand-over | none | Folio | the panic hook spends the guard |
 | O | panic before the hand-over | none | none (an ordinary crash) | not a road exit |
 | P | exe unnamed, not a rescue home | none | none: no home to read | nothing to name |
-| P | malformed line, standalone main refused | none | by the disk | guard, construction |
+| P | malformed line, standalone main refused | none | by the disk; nothing while O is still before its guard (O's guard starts) | guard; `an_applier_leaving_before_the_old_build_starts_nothing_itself` |
 | P | `OldHeldTheLock` | none | installed + `--update-failed` | `an_applier_that_never_gets_the_lock_still_opens_folio` |
 | P | lock error, journal unreadable, txn mismatch, another nonce | none | by the disk | guard, construction |
 | P | `OldStayed` / `Unverified` / `EntranceFailed` → `Abandoned` | none | installed, plainly | `p_waits_for_o_and_releases_the_claim` |

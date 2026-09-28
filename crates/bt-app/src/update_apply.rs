@@ -631,9 +631,27 @@ pub(crate) fn predecessor_named(value: Option<&std::ffi::OsStr>) -> Option<Runni
     })
 }
 
-/// The predecessor this process's own environment names.
+/// The predecessor this process was started with, as [`take_predecessor`]
+/// read it; `None` before that, or when there was none.
 pub(crate) fn predecessor_here() -> Option<Running> {
-    predecessor_named(std::env::var_os(PREDECESSOR_VARIABLE).as_deref())
+    PREDECESSOR.get().copied().flatten()
+}
+
+/// What [`take_predecessor`] read.
+static PREDECESSOR: std::sync::OnceLock<Option<Running>> = std::sync::OnceLock::new();
+
+/// **Read this process's predecessor mark once, and take it out of the
+/// environment** (U-34): every process — the update doors and the ordinary
+/// start alike — does it first thing in `main`, before it spawns anything, so
+/// no pane, shell or later process inherits a mark meant for this one. A road
+/// process started from here gets a mark of its own: an exit guard's start
+/// names its maker, and an ordinary start that hands itself to the recovery
+/// build passes on the mark it was started with
+/// (`update_startup`'s `Machine::spawn_detached`).
+pub(crate) fn take_predecessor() -> Option<Running> {
+    *PREDECESSOR.get_or_init(|| {
+        predecessor_named(install_flip::take_environment_variable(PREDECESSOR_VARIABLE).as_deref())
+    })
 }
 
 /// **What a road process's exit guard asks of the platform it runs on**
@@ -659,6 +677,47 @@ pub(crate) trait Leave {
     fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
         None
     }
+    /// **The build that handed this update over, still before its own exit
+    /// guard** — an applier's only ([`the_old_build_still_leaves`]): its pid,
+    /// or `None`.
+    fn predecessor_opens(&mut self) -> Option<u32> {
+        None
+    }
+}
+
+/// **Whether the build that handed this update over is still on its way out,
+/// before its own exit guard** (U-34): the applier's predecessor — the mark O
+/// started it with — still running by pid and start instant, from the
+/// installed program `installed` (so it is O, not a rescue-image process), the
+/// journal still `Handoff`, and O's data-directory claim at `data` still held
+/// (O lets go of it immediately before its guard). Then O's guard is still to
+/// come and will find this applier gone, and an applier that leaves before its
+/// road (a refusal, a panic) starts nothing itself: one start, not two. Its
+/// pid, or `None`.
+///
+/// **The one accepted race** (design revision (e)): between O letting go of
+/// the claim and O looking at its applier there are two statements; an applier
+/// that looks in that instant, or leaves after O looked, may start a second
+/// Folio beside O's — harmless, the second start finds the first one's claim
+/// and hands its launch to it.
+pub(crate) fn the_old_build_still_leaves(
+    predecessor: Option<Running>,
+    installed: &Path,
+    home: &Home,
+    data: &Path,
+) -> Option<u32> {
+    let old = predecessor.filter(|old| install_flip::still_running(*old))?;
+    if !install_flip::running_from(installed).ok()?.contains(&old) {
+        return None;
+    }
+    let bytes = file_reads::read(Lane::UpdateJournal, home.journal()).ok()?;
+    if Journal::parse(&bytes).ok()?.body.phase.kind() != PhaseKind::Handoff {
+        return None;
+    }
+    match crate::persist::try_claim(data) {
+        Err(bt_platform::instance::ClaimRefusal::Held) => Some(old.pid),
+        _ => None,
+    }
 }
 
 /// **How a road process left** — what its [`ExitGuard`] did.
@@ -667,6 +726,9 @@ pub(crate) enum Left {
     /// A successor this process started, or found, still runs — pid and start
     /// instant — and opens Folio: nothing was started.
     Succeeded(u32),
+    /// The build that handed this update over is still on its way out, before
+    /// its own exit guard, which starts Folio: nothing was started here.
+    PredecessorOpens(u32),
     /// The recovery run at logon, with nothing done and nobody waiting (W8):
     /// nothing was started.
     NobodyWaiting,
@@ -683,6 +745,9 @@ impl Left {
     pub(crate) fn said(&self) -> String {
         match self {
             Left::Succeeded(pid) => format!("{pid} runs and opens Folio; nothing else was started"),
+            Left::PredecessorOpens(pid) => format!(
+                "{pid}, the build that handed the update over, opens Folio as it leaves; nothing was started"
+            ),
             Left::NobodyWaiting => String::from("nobody is waiting; nothing was started"),
             Left::Nameless => String::from("nothing could be named to start"),
             Left::Started(program) => format!("started {}", program.display()),
@@ -763,27 +828,34 @@ impl<L: Leave> ExitGuard<L> {
         {
             Some(successor) => Left::Succeeded(successor.pid),
             None if !self.waiting => Left::NobodyWaiting,
-            None => match self.leave.opening() {
-                None => Left::Nameless,
-                Some((program, words)) => match self.leave.start(&program, &words) {
-                    Ok(()) => Left::Started(program),
-                    Err(error) => match self.leave.fallback() {
-                        Some((next, words)) if next != program => {
-                            match self.leave.start(&next, &words) {
-                                Ok(()) => Left::Started(next),
-                                Err(again) => Left::NotStarted(
-                                    next,
-                                    format!("{again}, after {}: {error}", program.display()),
-                                ),
-                            }
-                        }
-                        _ => Left::NotStarted(program, error.to_string()),
-                    },
-                },
+            None => match self.leave.predecessor_opens() {
+                Some(old) => Left::PredecessorOpens(old),
+                None => self.start(),
             },
         };
         self.left = Some(left.clone());
         left
+    }
+
+    /// The start the disk names, or its fallback.
+    fn start(&mut self) -> Left {
+        match self.leave.opening() {
+            None => Left::Nameless,
+            Some((program, words)) => match self.leave.start(&program, &words) {
+                Ok(()) => Left::Started(program),
+                Err(error) => match self.leave.fallback() {
+                    Some((next, words)) if next != program => match self.leave.start(&next, &words)
+                    {
+                        Ok(()) => Left::Started(next),
+                        Err(again) => Left::NotStarted(
+                            next,
+                            format!("{again}, after {}: {error}", program.display()),
+                        ),
+                    },
+                    _ => Left::NotStarted(program, error.to_string()),
+                },
+            },
+        }
     }
 }
 

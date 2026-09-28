@@ -199,6 +199,7 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
                         road,
                         world: &mut machine,
                         handed,
+                        applier: false,
                     });
                     if then_launch.is_none() {
                         guard.nobody_waiting();
@@ -403,6 +404,7 @@ pub(crate) fn run_windows(
         road,
         world,
         handed: then_launch.unwrap_or(&[]),
+        applier: false,
     });
     let recovered = crate::update_apply_windows::recover(
         worker,

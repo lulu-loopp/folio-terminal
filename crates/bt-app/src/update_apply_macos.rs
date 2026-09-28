@@ -341,6 +341,10 @@ pub(crate) struct MacLeave<'a, W: World> {
     pub(crate) worker: Option<&'a WorkerCtx>,
     pub(crate) home: &'a Home,
     pub(crate) world: &'a mut W,
+    /// The applier's predecessor — O — and O's data directory
+    /// (`update_apply::the_old_build_still_leaves`).
+    pub(crate) predecessor: Option<Running>,
+    pub(crate) data: &'a Path,
 }
 
 impl<W: World> Leave for MacLeave<'_, W> {
@@ -360,6 +364,15 @@ impl<W: World> Leave for MacLeave<'_, W> {
     /// the start continues and never hands itself to the recovery build.
     fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()> {
         self.world.relaunch(program, words)
+    }
+
+    fn predecessor_opens(&mut self) -> Option<u32> {
+        crate::update_apply::the_old_build_still_leaves(
+            self.predecessor,
+            &self.home.installed_program()?,
+            self.home,
+            self.data,
+        )
     }
 }
 
@@ -395,7 +408,7 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
                 home: home.clone(),
                 txn,
                 nonce: Some(nonce),
-                data,
+                data: data.clone(),
                 agents: launch_agents(),
                 limits: Limits::PRODUCT,
                 predecessor: crate::update_apply::predecessor_here(),
@@ -420,6 +433,8 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
         worker: None,
         home: &home,
         world: &mut world,
+        predecessor: crate::update_apply::predecessor_here(),
+        data: &data,
     })
     .leave();
     world.say(&format!("BT_UPDATE_APPLY {}", left.said()));
@@ -457,6 +472,8 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
         worker: Some(worker),
         home: &road.home,
         world,
+        predecessor: road.predecessor,
+        data: &road.data,
     });
     let (ended, successor) = {
         let world = &mut *guard.inner().world;

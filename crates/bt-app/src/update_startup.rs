@@ -558,11 +558,19 @@ impl World for Machine {
 
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
         // `quiet_command` is the one door for a child, and the child is dropped
-        // at once: nothing here waits on it or ends it.
-        bt_platform::quiet_command(program)
-            .args(args)
-            .spawn()
-            .map(drop)
+        // at once: nothing here waits on it or ends it. Every start here is a
+        // hand-over to the recovery build, which gets the mark this start was
+        // given — taken out of this process's own environment at `main`'s top
+        // (U-34).
+        let mut command = bt_platform::quiet_command(program);
+        command.args(args);
+        if let Some(predecessor) = crate::update_apply::predecessor_here() {
+            command.env(
+                crate::update_apply::PREDECESSOR_VARIABLE,
+                crate::update_apply::predecessor_value(predecessor),
+            );
+        }
+        command.spawn().map(drop)
     }
 
     fn retire_entrance(&mut self, txn: TxnId) -> Result<(), String> {

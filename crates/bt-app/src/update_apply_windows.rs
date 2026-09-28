@@ -285,6 +285,10 @@ pub(crate) struct WindowsLeave<'a, W: World> {
     pub(crate) road: &'a Road,
     pub(crate) world: &'a mut W,
     pub(crate) handed: &'a [OsString],
+    /// Whether this is the applier, whose predecessor is O
+    /// (`update_apply::the_old_build_still_leaves`); the recovery build's
+    /// predecessor has already made its start.
+    pub(crate) applier: bool,
 }
 
 impl<W: World> Leave for WindowsLeave<'_, W> {
@@ -308,6 +312,18 @@ impl<W: World> Leave for WindowsLeave<'_, W> {
         let (program, mut words) = self.road.opening(&Opens::Rescue);
         words.extend_from_slice(self.handed);
         Some((program.to_path_buf(), words))
+    }
+
+    fn predecessor_opens(&mut self) -> Option<u32> {
+        if !self.applier {
+            return None;
+        }
+        crate::update_apply::the_old_build_still_leaves(
+            self.road.predecessor,
+            &self.road.installed,
+            &self.road.home,
+            &self.road.data,
+        )
     }
 }
 
@@ -366,6 +382,7 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
         road: &road,
         world: &mut world,
         handed: &[],
+        applier: true,
     })
     .leave();
     World::say(&mut world, &format!("BT_UPDATE_APPLY {}", left.said()));
@@ -392,6 +409,7 @@ pub(crate) fn apply(
         road,
         world,
         handed: &[],
+        applier: true,
     });
     let (ended, successor) =
         apply_under_the_lock(worker, road, txn, nonce, &mut *guard.inner().world);

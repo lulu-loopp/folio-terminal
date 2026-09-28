@@ -70984,6 +70984,10 @@ fn report_frame_shape_stop(error: &anyhow::Error, path: &Path, announce: impl Fn
 }
 
 fn main() -> Result<()> {
+    // **An update's predecessor mark, read once and taken out of the
+    // environment** (0.4.6 U-34) — first, before this process starts any
+    // thread or child, so nothing it spawns inherits a mark meant for it.
+    let _ = update_apply::take_predecessor();
     // First, so that even the panic hook's own words have somewhere to land
     // when a shell launched this window-subsystem process to read its traces.
     // **For the front door only** — see `diagnostics::enter_resident_run`, which

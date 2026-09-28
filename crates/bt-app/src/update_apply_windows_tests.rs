@@ -2642,3 +2642,61 @@ fn a_refused_start_on_the_way_out_falls_back_to_the_rescue_copy() {
         world.said
     );
 }
+
+/// RED (U-34) — **an applier that leaves before its road while the build that
+/// handed it the update is still on its way out starts nothing: that build's
+/// own exit guard will**; once that build has let go of its claim (its guard
+/// is under way), the applier starts Folio itself.
+///
+/// The double start the guard would otherwise make: O's guard finds its
+/// applier gone and starts Folio, and so did the applier. The old build here
+/// is a process of the installed program, marked as the applier's
+/// predecessor, holding the data directory's claim; the journal is `Handoff`.
+///
+/// MUTATION: in `WindowsLeave::predecessor_opens`, answer `None`.
+#[test]
+fn an_applier_leaving_before_the_old_build_starts_nothing_itself() {
+    let Some(install) = Install::new("old-leaves") else {
+        return;
+    };
+    let old = install.children.start(&install.installed, &[]);
+    let old = Running {
+        pid: old,
+        started: install_flip::started_of(old).expect("it runs"),
+    };
+    let lock = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+        .unwrap()
+        .unwrap();
+    let claim = crate::persist::try_claim(&install.data).unwrap();
+    let road = |install: &Install| {
+        let mut road = install.road(limits(600, 20_000));
+        road.predecessor = Some(old);
+        road
+    };
+    let run = |road: Road| {
+        let mut world = install.world(Trial::Answers);
+        let (txn, nonce) = (install.txn, install.applier);
+        on_a_worker(move |worker| {
+            let ended = apply(worker, &road, txn, nonce, &mut world);
+            (ended, world)
+        })
+    };
+    let (ended, world) = run(road(&install));
+    assert_eq!(ended, Ended::OldHeldTheLock);
+    assert!(world.opened.is_empty(), "{:?}", world.said);
+    assert!(
+        said_at(&world, "opens Folio as it leaves").is_some(),
+        "{:?}",
+        world.said
+    );
+
+    drop(claim);
+    let (_, world) = run(road(&install));
+    drop(lock);
+    assert_eq!(
+        world.opened,
+        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        "{:?}",
+        world.said
+    );
+}

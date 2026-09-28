@@ -1066,4 +1066,61 @@ mod tests {
             crate::quit::HANDOFF_DEADLINE * 4 <= crate::update_apply::Limits::PRODUCT.old_within
         );
     }
+
+    /// RED (U-34) — **a Folio started with the predecessor mark reads it once,
+    /// and nothing it spawns sees it**: the mark is taken out of the process's
+    /// environment at `main`'s top (`update_apply::take_predecessor`), so a
+    /// shell the Folio starts — a pane's, any child's — inherits no mark meant
+    /// for the Folio alone.
+    ///
+    /// Run as a child of this test binary, started the way an exit guard
+    /// starts a Folio (the mark in its environment): it reads the mark, then
+    /// starts the platform's shell to print its environment.
+    ///
+    /// MUTATION: in `update_apply::take_predecessor`, read the variable with
+    /// `std::env::var_os` and leave it in the environment.
+    #[test]
+    fn a_shell_started_by_a_marked_folio_does_not_see_the_mark() {
+        const CHILD: &str = "BT_U34_MARKED_CHILD";
+        const NAME: &str =
+            "update_handoff::tests::a_shell_started_by_a_marked_folio_does_not_see_the_mark";
+        let mark = Running {
+            pid: 4242,
+            started: 777,
+        };
+        let variable = crate::update_apply::PREDECESSOR_VARIABLE;
+        if std::env::var_os(CHILD).is_some() {
+            assert_eq!(crate::update_apply::take_predecessor(), Some(mark));
+            assert_eq!(crate::update_apply::predecessor_here(), Some(mark));
+            let (shell, words): (PathBuf, &[&str]) = match bt_platform::host_platform() {
+                HostPlatform::Windows => (
+                    PathBuf::from(std::env::var_os("ComSpec").expect("Windows names its shell")),
+                    &["/d", "/c", "set"],
+                ),
+                _ => (PathBuf::from("/usr/bin/env"), &[]),
+            };
+            let printed = bt_platform::quiet_command(&shell)
+                .args(words)
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("the shell runs");
+            let printed = String::from_utf8_lossy(&printed.stdout);
+            assert!(
+                printed.contains(CHILD),
+                "the environment is printed: {printed}"
+            );
+            assert!(!printed.contains(variable), "{printed}");
+            return;
+        }
+        let ran = bt_platform::quiet_command(std::env::current_exe().expect("this test binary"))
+            .args(["--exact", NAME, "--test-threads=1", "--nocapture"])
+            .env(CHILD, "1")
+            .env(variable, crate::update_apply::predecessor_value(mark))
+            .stdin(std::process::Stdio::null())
+            .output()
+            .expect("the marked child runs");
+        let said = String::from_utf8_lossy(&ran.stdout);
+        assert!(ran.status.success(), "{said}");
+        assert!(said.contains("1 passed"), "the child ran the test: {said}");
+    }
 }
