@@ -2373,9 +2373,15 @@ unwinding), the guard does one of two things:
   is not the lock holder: its own executable, plainly — that start reads the
   journal as every start does.
 
-**The one exception** is R at logon with nothing done that a person is owed a
-window for (no command line; no revert and no finished rollback): nobody is
-waiting (W8). A panic in P or R unwinds through the guard: the update doors
+**The one exception** is R at logon that attempted nothing (no command line,
+and an end that is genuinely a no-op: nothing to recover, a commit's retirement
+finished — the update succeeded and its trial was the window — the line
+refused, or the lock another holder keeps, which is the window mark's holder):
+nobody is waiting (W8). **Every end at logon that attempted the transaction
+owes a window** (round 2, blocker 4): a revert, a rollback finished or not
+(`Stuck`, `GaveUp`, `RollbackWaits`) and a recovery that failed open the
+installed build with `--update-failed`, because the Restart before them never
+got one (`update_apply::owed_at_logon`). A panic in P or R unwinds through the guard: the update doors
 install a panic hook that writes the report and lets the panic unwind (the
 product's hook ends the process from inside the hook, with a message box, and
 no `Drop` would run). O's own panic hook spends O's guard before it ends the
@@ -2564,8 +2570,9 @@ whether a Folio window follows):
 | R (start) | lock not had in 60 s | none | by the disk | guard, construction |
 | R (start) | `Handoff` with an earlier holder | P owes | the mark's live holder only; a P that never took the mark is not waited for | `a_live_applier_at_handoff_is_left_alone_on_both_platforms` |
 | R (start) | road `Failed`, the start refused, panic | by disk / none / none | by the disk, fallback, by the disk | guard |
-| R (logon) | nothing done | none | none (the exception) | `the_logon_run_starts_nothing_only_when_nobody_is_waiting` |
+| R (logon) | nothing attempted (nothing to recover, a commit retired, the lock held by the mark's holder) | none | none (the exception) | `the_logon_run_starts_nothing_only_when_nobody_is_waiting` |
 | R (logon) | revert, finished rollback | old build | old build (unchanged) | same test |
+| R (logon) | `Failed`, `Stuck`, `GaveUp`, `RollbackWaits` | none | installed + `--update-failed` | same test (`GaveUp`) |
 
 S (an ordinary start) and T (the trial) are unchanged: S keeps its own window
 or has handed itself to R; T is a Folio with a window.

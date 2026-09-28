@@ -2524,14 +2524,17 @@ fn a_panic_inside_the_applier_still_opens_folio() {
     );
 }
 
-/// RED (U-34) — **the recovery run at logon is the one exit that may start
-/// nothing: when it did nothing a person is owed a window for**. Over a
-/// `Committed` it retires, nobody is waiting and nothing is started; over an
-/// `Armed` it reverts, and the old build opens — the Restart before it never
-/// got a window (W11).
+/// RED (U-34; round 2, Codex's review, blocker 4) — **the recovery run at
+/// logon is the one exit that may start nothing, and only when it attempted
+/// nothing**: over a `Committed` it retires, nobody is waiting and nothing is
+/// started; over an `Armed` it reverts, and the old build opens — the Restart
+/// before it never got a window (W11); and over a `Stuck` at its bound it
+/// gives up — it attempted the transaction and failed — and the installed build
+/// opens with `--update-failed`.
 ///
 /// MUTATION: in `update_recover::run_windows`, never tell the guard that
-/// nobody is waiting.
+/// nobody is waiting (the first part); in `update_apply::owed_at_logon`, owe a
+/// window only after a revert or a finished rollback (the last).
 #[test]
 fn the_logon_run_starts_nothing_only_when_nobody_is_waiting() {
     let Some(install) = Install::new("logon-committed") else {
@@ -2570,6 +2573,27 @@ fn the_logon_run_starts_nothing_only_when_nobody_is_waiting() {
     assert_eq!(
         world.opened,
         vec![(install.installed.clone(), Vec::new())],
+        "{:?}",
+        world.said
+    );
+
+    let Some(install) = Install::new("logon-gave-up") else {
+        return;
+    };
+    install.arm();
+    install.write(stuck(STUCK_ATTEMPT_LIMIT));
+    let (_, world) = recovered_at_logon(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Silent),
+    );
+    assert!(
+        matches!(install.on_disk().body.phase, Phase::Stuck { .. }),
+        "given up, everything kept"
+    );
+    assert_eq!(
+        world.opened,
+        vec![(install.installed.clone(), failed_then(&install, &[]))],
         "{:?}",
         world.said
     );

@@ -1028,12 +1028,23 @@ pub(crate) enum Opener {
     Start,
 }
 
-/// **Whether a recovery at logon that ended `ended` did something a person is
-/// owed a window for** — the Restart before it ended in a revert or a
-/// finished rollback (W11); every other end at logon leaves nobody waiting.
+/// **Whether a recovery at logon that ended `ended` owes a window** (U-34,
+/// round 2, blocker 4): every end that attempted the transaction does — a
+/// revert or a rollback, finished or not (`Stuck`, `GaveUp`,
+/// `RollbackWaits`), and a recovery that failed — because the Restart before it
+/// never got one. Only the genuinely no-op ends owe nothing: nothing to
+/// recover (`Left`), a commit's retirement finished (the update succeeded; its
+/// trial was the window), the line refused, or the lock another holder keeps —
+/// the holder of the window's mark, which opens it.
 pub(crate) fn owed_at_logon(ended: &Ended) -> bool {
-    matches!(
+    !matches!(
         ended,
-        Ended::Reverted | Ended::RolledBack | Ended::RolledBackWithDebt(_)
+        Ended::Left(_)
+            | Ended::Committed
+            | Ended::CommittedWithDebt(_)
+            | Ended::Refused(_)
+            | Ended::LockHeld
+            | Ended::OldHeldTheLock
+            | Ended::Abandoned
     )
 }

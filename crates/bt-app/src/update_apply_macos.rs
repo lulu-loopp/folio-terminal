@@ -597,11 +597,17 @@ pub(crate) fn recover(
         }
         Err(ended) => (ended, None),
     };
-    // At login, a window only after a revert or a rollback it finished (W11).
+    // At login, every end that attempted the transaction owes a window; only
+    // the no-op ends do not (U-34, round 2, blocker 4 — as
+    // `update_apply::owed_at_logon`).
     let waiting = opener == Opener::Start
-        || matches!(
+        || !matches!(
             ended,
-            Ended::Reverted | Ended::RolledBack | Ended::RolledBackWithDebt(_)
+            Ended::Committed
+                | Ended::CommittedWithDebt(_)
+                | Ended::Refused(_)
+                | Ended::LockHeld
+                | Ended::Abandoned
         );
     Recovered {
         ended,
