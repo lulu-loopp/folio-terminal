@@ -6,6 +6,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- Windows: Folio can update itself. When a newer release is published, a card
+  offers it and, once it is downloaded, restarts Folio into it; a Restart to
+  update row on Settings > General brings the card back. A copy installed with
+  scoop or winget is told to use its manager, with the command to copy.
+
 ### Changed
 
 - The Chinese settings dialog reads as a settings page: the descriptions
@@ -38,6 +45,14 @@ All notable changes to Folio are recorded here. The format follows
 - Markdown preview: `file:///Users/…` links and images open on macOS, and
   links written with `%20` for a space (`my%20notes.md`) find the file on both
   platforms.
+- Windows: after Restart to update, Folio always comes back. A journal write
+  that another program (a scanner or a backup tool) briefly holds open is tried
+  again for about two seconds; an update that still cannot go on, a hand-over
+  that takes longer than the start of the new copy allows (now 15 s, where it
+  was 3 s), or a fault in the updater now reopens the installed Folio, with an
+  "Update incomplete" card when the update did not finish, instead of leaving
+  no window until the next sign-in; if Folio cannot be started at all, the
+  updater itself says the update is incomplete and where.
 - macOS: the shipped shells start as login shells, so tools whose PATH is set
   in .zprofile — Homebrew's — are found; a profile can turn login on or off;
   a profile with arguments no longer reads as not installed.
@@ -46,6 +61,12 @@ All notable changes to Folio are recorded here. The format follows
 - Windows: opening Folio from Explorer's right-click menu, or running
   `folio --version` while another Folio starts, no longer leaves the new
   window unable to save its settings and tabs.
+- Windows: an update that was downloaded but not installed — Folio closed
+  with Later, or the machine lost power mid-download — no longer blocks every
+  later update. The next start shows the downloaded update again, ready to
+  restart, without downloading it a second time; a download that never
+  finished, or one no longer intact, is cleared, and one still unused at the
+  second start after it is cleared too.
 
 ### Internal
 

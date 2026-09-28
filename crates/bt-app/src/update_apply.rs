@@ -22,8 +22,9 @@
 //!   every phase this process wrote: a phase is recorded through
 //!   `update_txn::Journal::advance` (the protocol's refusal), only when
 //!   `update_txn::may_record` says the actor may, and written with
-//!   `install_txn::durable_write`; an effect is asked of `update_txn::may`
-//!   first;
+//!   [`write_journal`] — `install_txn::durable_write`, asked again for
+//!   [`JOURNAL_WRITE_WITHIN`] while another program holds the journal open
+//!   (U-34); an effect is asked of `update_txn::may` first;
 //! * [`wait_for_the_claim`] — §C.4's authoritative test that the old build is
 //!   gone: the data directory's claim, tried until had and let go at once;
 //! * [`watch_trial`] — a trial waited for (W7, W8, M7, M8), on both platforms:
@@ -35,12 +36,15 @@
 //! * [`stop_trial`] — W9/M9's stop: asked to quit, 5 s of grace, then ended —
 //!   each through `bt_platform::install_flip::ask`, which touches nothing that
 //!   is not that very trial (pid, start instant and image);
-//! * [`an_earlier_holder`] — **the one rule for a live applier at `Handoff`**
-//!   (U-24, the coordinator's ruling 3): recovery that finds `Handoff` while a
-//!   process of the rescue executable started no later than it runs yields to
-//!   it, writes nothing and opens nothing — that holder opens Folio;
-//! * [`Opens`] / [`Opener`] — exactly one start after a road, or none (U-29b's
-//!   rules, adopted on Windows by U-24).
+//! * [`OWNER_FILE`] — **the window's owner** (U-34): the one process that has
+//!   taken the duty that a Folio window follows *Restart to update*, handed
+//!   from O to P explicitly ([`take_the_window`]); recovery that finds
+//!   `Handoff` leaves it to a live process the mark names
+//!   ([`the_window_is_theirs`]), writes nothing and opens nothing;
+//! * [`ExitGuard`] — **the one way a road process leaves** (U-34): at its
+//!   exit, whatever the reason, a successor it holds still running opens
+//!   Folio, else it starts what the disk names ([`Opens`]); the recovery run
+//!   at logon with nothing done is the one exception ([`Opener`]).
 //!
 //! Every wait here sleeps through the worker's wait door
 //! (`bt_platform::wait::sleep_within`), on the `WorkerCtx` of the standalone
@@ -54,7 +58,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
 use bt_platform::install_flip::{self, Ask, Running};
-use bt_platform::install_txn;
+use bt_platform::install_txn::{self, Hold};
 
 use crate::cli;
 use crate::update_txn::{
@@ -166,6 +170,43 @@ impl Ended {
     }
 }
 
+/// **How long a journal write refused because another program has
+/// `journal.json` open is asked again** (0.4.6 ticket U-34): a scanner, an
+/// indexer, a backup or sync tool that opened it without delete sharing lets
+/// go within moments; about 2 s in all, the first pause 10 ms and each next
+/// one twice the last.
+pub(crate) const JOURNAL_WRITE_WITHIN: Duration = Duration::from_secs(2);
+
+/// **Write the journal's bytes durably** (`install_txn::durable_write`), and
+/// while the rename is refused because another program holds `journal.json`
+/// open (`install_txn::Failure::refused_while_open`: Windows only), ask again
+/// with a growing pause through the wait door until [`JOURNAL_WRITE_WITHIN`]
+/// has passed (U-34; the clean VM's rows W4 and W12 lost a Restart to one
+/// such refusal). The door itself never waits: it has other callers and no
+/// wait door, so the bound and the sleep are the applier's.
+///
+/// # Errors
+/// The last failure, as a sentence; the journal keeps its last durable
+/// bytes.
+pub(crate) fn write_journal(worker: &WorkerCtx, path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let until = Instant::now() + JOURNAL_WRITE_WITHIN;
+    let mut pause = Duration::from_millis(10);
+    loop {
+        match install_txn::durable_write(path, bytes) {
+            Ok(()) => return Ok(()),
+            Err(failure) if failure.refused_while_open() => {
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(failure.to_string());
+                }
+                bt_platform::wait::sleep_within(worker, pause.min(left));
+                pause = pause.saturating_mul(2);
+            }
+            Err(failure) => return Err(failure.to_string()),
+        }
+    }
+}
+
 /// **A holder of the journal under its lock**, as [`watch_trial`] needs it:
 /// the journal as it stands durably, and the one road a phase is recorded by.
 pub(crate) trait Recording {
@@ -181,19 +222,24 @@ pub(crate) trait Recording {
 }
 
 /// **The journal of one transaction under its lock**: as it stands durably,
-/// and every phase this process wrote, in order.
-pub(crate) struct Journaled {
+/// and every phase this process wrote, in order — each written on the worker
+/// the holder runs on, whose wait door a refused write sleeps through
+/// ([`write_journal`]).
+pub(crate) struct Journaled<'w> {
     /// `H\journal.json`.
     path: PathBuf,
+    worker: &'w WorkerCtx,
     pub(crate) journal: Journal,
     pub(crate) written: Vec<PhaseKind>,
 }
 
-impl Journaled {
-    /// The journal `journal`, as read from the home `home`.
-    pub(crate) fn of(home: &Home, journal: Journal) -> Self {
+impl<'w> Journaled<'w> {
+    /// The journal `journal`, as read from the home `home`, written from
+    /// `worker`.
+    pub(crate) fn of(home: &Home, worker: &'w WorkerCtx, journal: Journal) -> Self {
         Self {
             path: home.journal(),
+            worker,
             journal,
             written: Vec::new(),
         }
@@ -218,8 +264,7 @@ impl Journaled {
         if !crate::update_txn::may_record(actor, phase) {
             return Err(format!("{actor:?} may not record {phase:?}"));
         }
-        install_txn::durable_write(&self.path, &next.encode())
-            .map_err(|failure| failure.to_string())?;
+        write_journal(self.worker, &self.path, &next.encode())?;
         self.journal = next;
         self.written.push(phase);
         Ok(())
@@ -241,7 +286,7 @@ impl Journaled {
     }
 }
 
-impl Recording for Journaled {
+impl Recording for Journaled<'_> {
     fn journal(&self) -> &Journal {
         &self.journal
     }
@@ -303,13 +348,17 @@ pub(crate) fn now_ms() -> u64 {
 }
 
 /// **How a trial's watch ended.**
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Watched {
     /// A receipt the journal accepted: `Committed` is durable.
     Committed,
     /// The trial gone without a receipt, or its deadline passed; nothing more
     /// was recorded.
     NoReceipt,
+    /// **The trial this holder launched runs, and its start could not be
+    /// recorded** (`TrialBegan` or `RetrialBegan`, U-34): the journal does not
+    /// know it. The caller ends it, or says why it is the window.
+    Unrecorded { process: TrialProcess, why: String },
 }
 
 /// **What a trial's watch is over**: the home, who records, the trial this
@@ -338,11 +387,12 @@ pub(crate) struct Watch<'a> {
 /// nonce — is recorded as `Committed` by the watch's
 /// actor ([`Watched::Committed`]); any other is said once and waited past. The
 /// recorded process no longer `alive` (by its pid, its start time and its
-/// image), or the deadline passed → [`Watched::NoReceipt`].
+/// image), or the deadline passed → [`Watched::NoReceipt`]. The launched trial
+/// found but not recorded → [`Watched::Unrecorded`].
 ///
 /// # Errors
-/// The journal records no trial and none was started, or a write failed;
-/// nothing more was recorded.
+/// The journal records no trial and none was started, or a write after the
+/// trial's record failed; nothing more was recorded.
 pub(crate) fn watch_trial(
     worker: &WorkerCtx,
     txn: &mut impl Recording,
@@ -398,7 +448,9 @@ pub(crate) fn watch_trial(
                             began_ms,
                         }
                     };
-                    txn.record(actor, &event)?;
+                    if let Err(why) = txn.record(actor, &event) {
+                        return Ok(Watched::Unrecorded { process, why });
+                    }
                     continue;
                 }
             }
@@ -513,18 +565,440 @@ pub(crate) fn stop_trial(
     Err(format!("the trial {} did not end", process.pid))
 }
 
-/// **The one rule for a live applier at `Handoff`** (U-29b's, made both
-/// platforms' by U-24, the coordinator's ruling 3): of `listed` — the
-/// processes running from the rescue executable — one that is not `mine` and
-/// started no later than it. The applier O started takes the transaction lock
-/// the moment it is free, so a recovery that finds `Handoff` under the lock
-/// while such a process lives leaves the transaction to it: it writes nothing,
-/// waits for nothing and opens nothing — that holder opens Folio.
-pub(crate) fn an_earlier_holder(mine: Running, listed: &[Running]) -> Option<u32> {
-    listed
-        .iter()
-        .find(|other| other.pid != mine.pid && other.started <= mine.started)
-        .map(|other| other.pid)
+/// **The window's owner** (U-34, round 2): the file `H\<txn>\owner`, holding
+/// `<pid>:<creation>` of the one process that has taken the duty that a Folio
+/// window follows *Restart to update*. It is the explicit hand-over of that
+/// duty between the outgoing build O and its applier P: pid liveness decides
+/// nothing between two live processes that could each defer to the other.
+///
+/// * O clears it as it hands the transaction over (before `Handoff`, while O
+///   holds the transaction lock), so no mark of an earlier attempt stands;
+/// * P takes it as soon as it knows its transaction, before it waits for O's
+///   lock ([`take_the_window`]) — and only a P that took it runs its road and
+///   opens a window; one that finds it taken leaves everything alone;
+/// * O takes it at its very end, after letting go of its claim — and starts
+///   Folio only if it took it;
+/// * the recovery build R never takes it: at `Handoff` it leaves the
+///   transaction to a live process the mark names, and ignores any other
+///   process (a P that never took the mark is not an applier to wait for).
+///
+/// Taking is one election under an exclusive operating-system lock,
+/// `H\<txn>\owner.lock` ([`take_the_window`]): read the mark, and write this
+/// process into it only when it is absent or its process no longer runs (pid
+/// and start instant) — its owner died. The lock goes with a holder that dies
+/// inside the election.
+pub(crate) const OWNER_FILE: &str = "owner";
+
+/// `H\<txn>\owner`.
+pub(crate) fn owner_path(home: &Home, txn: TxnId) -> PathBuf {
+    home.transaction(txn).join(OWNER_FILE)
+}
+
+/// This process, by its pid and start instant (`started` 0 when it cannot be
+/// read: nothing then matches it).
+pub(crate) fn this_process() -> Running {
+    let pid = std::process::id();
+    Running {
+        pid,
+        started: install_flip::started_of(pid).unwrap_or(0),
+    }
+}
+
+/// `<pid>:<creation>`, both in decimal.
+fn owner_value(owner: Running) -> String {
+    format!("{}:{}", owner.pid, owner.started)
+}
+
+/// The process a mark's bytes name, or `None` for bytes that are not exactly
+/// `<pid>:<creation>`.
+fn owner_named(bytes: &[u8]) -> Option<Running> {
+    let (pid, started) = std::str::from_utf8(bytes).ok()?.trim().split_once(':')?;
+    Some(Running {
+        pid: pid.parse().ok()?,
+        started: started.parse().ok()?,
+    })
+}
+
+/// **The process the window's mark names**, or `None` when there is none, or
+/// it cannot be read.
+pub(crate) fn window_owner(home: &Home, txn: TxnId) -> Option<Running> {
+    let bytes = file_reads::read(Lane::UpdateJournal, owner_path(home, txn)).ok()?;
+    owner_named(&bytes)
+}
+
+/// **Who has the duty a window follows**, as [`take_the_window`] found it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Window {
+    /// This process: it opens a window when it leaves.
+    Mine,
+    /// This live process has it: it opens the window.
+    Theirs(Running),
+}
+
+/// `H\<txn>\owner.lock`: the election's lock (round 5).
+pub(crate) fn owner_lock_path(home: &Home, txn: TxnId) -> PathBuf {
+    home.transaction(txn).join(format!("{OWNER_FILE}.lock"))
+}
+
+/// **How long a contender waits for the election's lock** (round 5): its
+/// holder keeps it for the few milliseconds of one read and one durable write,
+/// so a contender that waits longer is waiting for a holder that is stuck — it
+/// then takes the duty itself (a second start is possible, never none).
+pub(crate) const ELECTION_WITHIN: Duration = Duration::from_secs(5);
+
+/// **Take the duty a window follows, unless a live process already has it**
+/// ([`OWNER_FILE`]; round 5, Codex's finding 14): one exclusive operating-
+/// system lock, `H\<txn>\owner.lock` (`install_txn::hold_within`: `LockFileEx`
+/// on Windows, `flock` on Unix), is held around the whole read-check-replace —
+/// read the mark; absent, unreadable or naming a process that no longer runs
+/// (pid and start instant) → write this process durably, [`Window::Mine`];
+/// naming this process → `Mine`; naming another live process →
+/// [`Window::Theirs`]. A holder that dies inside the election releases the lock
+/// with its process, so there is no half-held state and nothing to clean up. A
+/// contender waits up to [`ELECTION_WITHIN`] for the lock (`install_txn`'s own
+/// bounded poll); a lock it cannot take or open, or a mark it cannot write,
+/// makes it answer `Mine` — the bias is a second start, never none. There is
+/// no third answer.
+///
+/// **By `until`** (round 8, Codex's finding 15): the wait for the lock is the
+/// smaller of [`ELECTION_WITHIN`] and what is left before `until` — the
+/// applier's road deadline — so an election begun near that deadline never
+/// carries the applier's wait for O past it.
+pub(crate) fn take_the_window(home: &Home, txn: TxnId, me: Running, until: Instant) -> Window {
+    take_the_window_within(
+        home,
+        txn,
+        me,
+        ELECTION_WITHIN.min(until.saturating_duration_since(Instant::now())),
+    )
+}
+
+/// [`take_the_window`], waiting up to `within` for the election's lock — zero
+/// in O's panic road, which waits for nothing.
+pub(crate) fn take_the_window_within(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    within: Duration,
+) -> Window {
+    let lock = install_txn::hold_within(&owner_lock_path(home, txn), Hold::Exclusive, within);
+    let Ok(Some(_held)) = lock else {
+        return Window::Mine;
+    };
+    match window_owner(home, txn) {
+        Some(owner) if owner == me => Window::Mine,
+        Some(owner) if install_flip::still_running(owner) => Window::Theirs(owner),
+        // Absent, unreadable, or its process gone: this process takes it.
+        _ => {
+            let _ = install_txn::durable_write(&owner_path(home, txn), owner_value(me).as_bytes());
+            Window::Mine
+        }
+    }
+}
+
+/// **Clear the window's mark** — O, as it hands the transaction over, before
+/// `Handoff` is written: no mark of an earlier attempt stands. None there is
+/// success.
+///
+/// # Errors
+/// The removal's failure, as a sentence.
+pub(crate) fn clear_the_window(owner: &Path) -> Result<(), String> {
+    install_txn::durable_remove(owner).map_err(|failure| failure.to_string())
+}
+
+/// **The live process the window's mark names, if it is not `me`** — the one
+/// R leaves a `Handoff` to. A process the mark does not name is never waited
+/// for, however it runs.
+pub(crate) fn the_window_is_theirs(home: &Home, txn: TxnId, me: Running) -> Option<Running> {
+    window_owner(home, txn).filter(|owner| *owner != me && install_flip::still_running(*owner))
+}
+
+/// **What a road process's exit guard asks of the platform it runs on**
+/// ([`ExitGuard`], U-34).
+pub(crate) trait Leave {
+    /// One line of what happened.
+    fn say(&mut self, line: &str);
+    /// **What the disk names now**: the program and its words — the handed
+    /// command line after them — read from the journal and the installation
+    /// at this instant ([`Opens`]), or `None` when nothing can be named (no
+    /// home to read).
+    fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)>;
+    /// Start `program` with `words`, detached.
+    ///
+    /// # Errors
+    /// It could not be started.
+    fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()>;
+    /// **What to start when [`Leave::opening`]'s program would not start**, or
+    /// started and never acknowledged: the next program the disk rule names —
+    /// on Windows the rescue copy with `--update-failed`, O's own image, known
+    /// to run — or `None`.
+    fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+        None
+    }
+    /// **Whether the start just made was delivered** (round 2, blocker 2):
+    /// a Folio holds the data directory's claim within
+    /// [`ACKNOWLEDGED_WITHIN`] ([`claimed_within`]) — the one that was
+    /// started, or one already running, which that start hands its launch to.
+    /// A start that died, or never got that far, is not.
+    fn acknowledged(&mut self) -> bool;
+    /// **The failure window, in this very process** (round 2, blocker 2): when
+    /// no start was delivered, this process — a Folio build — shows *Update
+    /// incomplete.* and the folder itself, without a spawn. `why` is what
+    /// failed.
+    fn show_here(&mut self, why: &str);
+}
+
+/// **How long a start a road process makes has to be acknowledged** (U-34,
+/// round 2): the Folio it started — or one already running — holding the data
+/// directory's claim. A start of an image the machine has run takes a second
+/// or two; 20 s leaves room for a first start a scanner reads whole (W9's
+/// 5.9 s) and is still a bound a person waiting after *Restart to update*
+/// meets only when something is wrong.
+pub(crate) const ACKNOWLEDGED_WITHIN: Duration = Duration::from_secs(20);
+
+/// **Whether a Folio holds the data directory `data`'s claim within
+/// `within`** — the acknowledgement of a start (round 2, blocker 2). Asked
+/// every quarter second through the wait door; without a worker to sleep on,
+/// asked once. Only `ClaimRefusal::Held` — a live holder — acknowledges. A
+/// claim this process could take is let go at once (the start that should
+/// hold it has not yet), and a question the platform did not answer
+/// (`ClaimRefusal::QueryDenied`) is no evidence that anybody holds anything:
+/// both are asked again until the bound, and then the start is not delivered
+/// (round 4, Codex's finding 12).
+pub(crate) fn claimed_within(worker: Option<&WorkerCtx>, data: &Path, within: Duration) -> bool {
+    let until = Instant::now() + within;
+    loop {
+        match crate::persist::try_claim(data) {
+            // Only a live holder is a delivery. A question the platform did
+            // not answer is no evidence that anybody holds anything (round 4).
+            Err(bt_platform::instance::ClaimRefusal::Held) => return true,
+            Err(bt_platform::instance::ClaimRefusal::QueryDenied(_)) => {}
+            Ok(claim) => drop(claim),
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        let Some(worker) = worker.filter(|_| !left.is_zero()) else {
+            return false;
+        };
+        bt_platform::wait::sleep_within(worker, Duration::from_millis(250).min(left));
+    }
+}
+
+/// **The failure window's words** (round 2): the update card's *Update
+/// incomplete.* and the installation home's folder, as `--update-failed`'s
+/// card says them.
+pub(crate) fn failure_text(home: Option<&Home>) -> String {
+    let incomplete = crate::i18n::Text::UpdateCardIncomplete.text();
+    match home {
+        Some(home) => format!("{incomplete}\n\n{}", home.root().display()),
+        None => incomplete.to_owned(),
+    }
+}
+
+/// **How a road process left** — what its [`ExitGuard`] did.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Left {
+    /// A successor this process started, or found, still runs — pid and start
+    /// instant — and opens Folio: nothing was started.
+    Succeeded(u32),
+    /// Another process has the duty a window follows ([`OWNER_FILE`]), or
+    /// nobody is proven to have it and this process never took it: nothing
+    /// was started here.
+    NotMine(Option<u32>),
+    /// The recovery run at logon, with nothing done and nobody waiting (W8):
+    /// nothing was started.
+    NobodyWaiting,
+    /// This program was started, and acknowledged: a Folio holds the data
+    /// directory.
+    Started(PathBuf),
+    /// No start was delivered — nothing could be named, the operating system
+    /// refused each program, or each started and never took the data
+    /// directory — and this process showed the failure window itself; why.
+    ShownHere(String),
+}
+
+impl Left {
+    /// The words the door's one line ends with.
+    pub(crate) fn said(&self) -> String {
+        match self {
+            Left::Succeeded(pid) => format!("{pid} runs and opens Folio; nothing else was started"),
+            Left::NotMine(Some(pid)) => {
+                format!("{pid} has the duty to open Folio; nothing was started here")
+            }
+            Left::NotMine(None) => {
+                String::from("this process never took the duty to open Folio; nothing was started")
+            }
+            Left::NobodyWaiting => String::from("nobody is waiting; nothing was started"),
+            Left::Started(program) => format!("started {}", program.display()),
+            Left::ShownHere(why) => {
+                format!("no start was delivered ({why}); the failure window was shown here")
+            }
+        }
+    }
+}
+
+/// **The one way a road process leaves** (0.4.6 ticket U-34; the owner's
+/// ruling of 2026-09-25 that every phase opens Folio, and the verifier's table
+/// of every exit in `reports/U-31-W-verify.md`): the applier and the recovery
+/// build, on both platforms, hold one from the moment they know their home
+/// until they have left — a normal return, any end, any refusal, and a panic
+/// unwinding (`Drop`; the workspace builds with `panic = "unwind"`, and the
+/// update doors' panic hook lets it unwind).
+///
+/// **On leaving it does one of two things.** A successor it holds — a trial
+/// this process started, the trial it found recorded, the applier it found at
+/// `Handoff` — still running by its pid and start instant
+/// (`install_flip::still_running`) opens Folio, and nothing is started.
+/// Otherwise it starts what the disk names at that instant ([`Leave::opening`]:
+/// the installed build, with `--update-failed <journal>` while the journal is
+/// not over; the new build before `Committed` only as a trial; the rescue copy
+/// where neither whole set is installed). A start is delivered only when it is
+/// acknowledged ([`Leave::acknowledged`]: a Folio holds the data directory);
+/// otherwise the next program the rule names ([`Leave::fallback`]); and when
+/// no start is delivered, this process shows the failure window itself
+/// ([`Leave::show_here`]). **The irrecoverable boundary** is what no process
+/// can survive from inside: the operating system refusing to show a window at
+/// all, or this process ended from outside (a kill, a power cut — the entrance
+/// at logon and the next start finish those). **Two exceptions**: a process that does not have the duty a
+/// window follows ([`OWNER_FILE`], [`ExitGuard::not_mine`]), and the recovery
+/// run at logon that did nothing a person is owed a window for — nobody is
+/// waiting ([`ExitGuard::nobody_waiting`]).
+///
+/// It replaces the per-road answers U-29b's rules had spread over each end
+/// (the table of who owed a window after which end, and the refusals that left
+/// silently): what a road decides now is only whom it leaves behind, and
+/// whether it has the duty at all.
+pub(crate) struct ExitGuard<L: Leave> {
+    leave: L,
+    successor: Option<Running>,
+    waiting: bool,
+    /// `Some` once this process knows it does not have the duty a window
+    /// follows: the process that has it, if one is proven.
+    not_mine: Option<Option<u32>>,
+    left: Option<Left>,
+}
+
+impl<L: Leave> ExitGuard<L> {
+    /// A guard over `leave`, owed a window until told otherwise.
+    pub(crate) fn new(leave: L) -> Self {
+        Self {
+            leave,
+            successor: None,
+            waiting: true,
+            not_mine: None,
+            left: None,
+        }
+    }
+
+    /// **This process does not have the duty a window follows**
+    /// ([`OWNER_FILE`]): `owner` has it, or nobody is proven to — then the
+    /// process that armed first (O) keeps it. The guard starts nothing.
+    pub(crate) fn not_mine(&mut self, owner: Option<u32>) {
+        self.not_mine = Some(owner);
+    }
+
+    /// What the road acts through while the guard holds it.
+    pub(crate) fn inner(&mut self) -> &mut L {
+        &mut self.leave
+    }
+
+    /// **The successor this process leaves behind**, by pid and start
+    /// instant, if any: it opens Folio while it runs.
+    pub(crate) fn succeeded_by(&mut self, successor: Option<Running>) {
+        self.successor = successor;
+    }
+
+    /// **Nobody is waiting for a window** — the recovery run at logon that
+    /// did nothing a person is owed one for.
+    pub(crate) fn nobody_waiting(&mut self) {
+        self.waiting = false;
+    }
+
+    /// **Hand the duty on** to a guard constructed inside this one's scope,
+    /// which now carries it: this one starts nothing when it is dropped.
+    pub(crate) fn hand_on(&mut self) {
+        self.left = Some(Left::NotMine(None));
+    }
+
+    /// **Leave now**: the start the exit owes, once — a second call answers
+    /// the first one's result, and the drop then does nothing.
+    pub(crate) fn leave(&mut self) -> Left {
+        if let Some(left) = &self.left {
+            return left.clone();
+        }
+        let left = if let Some(owner) = self.not_mine {
+            Left::NotMine(owner)
+        } else {
+            match self
+                .successor
+                .filter(|successor| install_flip::still_running(*successor))
+            {
+                Some(successor) => Left::Succeeded(successor.pid),
+                None if !self.waiting => Left::NobodyWaiting,
+                None => self.start(),
+            }
+        };
+        self.left = Some(left.clone());
+        left
+    }
+
+    /// The start the disk names, or its fallback.
+    fn start(&mut self) -> Left {
+        let mut why = Vec::new();
+        match self.leave.opening() {
+            None => why.push(String::from("nothing could be named to start")),
+            Some((program, words)) => {
+                if let Some(left) = self.deliver(&program, &words, &mut why) {
+                    return left;
+                }
+                if let Some((next, words)) =
+                    self.leave.fallback().filter(|(next, _)| *next != program)
+                    && let Some(left) = self.deliver(&next, &words, &mut why)
+                {
+                    return left;
+                }
+            }
+        }
+        let why = why.join("; ");
+        self.leave.show_here(&why);
+        Left::ShownHere(why)
+    }
+
+    /// One start, and its acknowledgement: `Some` once delivered; otherwise
+    /// what failed is added to `why`.
+    fn deliver(
+        &mut self,
+        program: &Path,
+        words: &[OsString],
+        why: &mut Vec<String>,
+    ) -> Option<Left> {
+        match self.leave.start(program, words) {
+            Ok(()) if self.leave.acknowledged() => {
+                return Some(Left::Started(program.to_path_buf()));
+            }
+            Ok(()) => why.push(format!(
+                "{} started and no Folio took the data directory",
+                program.display()
+            )),
+            Err(error) => why.push(format!(
+                "{} could not be started: {error}",
+                program.display()
+            )),
+        }
+        None
+    }
+}
+
+impl<L: Leave> Drop for ExitGuard<L> {
+    /// **The exit nobody asked for** — an early return that did not call
+    /// [`ExitGuard::leave`], or a panic unwinding: the same start, and one
+    /// line saying so.
+    fn drop(&mut self) {
+        if self.left.is_none() {
+            let left = self.leave();
+            let line = format!("BT_UPDATE_EXIT the road left early; {}", left.said());
+            self.leave.say(&line);
+        }
+    }
 }
 
 /// **The words the build started after a rollback carries**: `--update-failed`
@@ -546,13 +1020,11 @@ pub(crate) fn trial_words(txn: TxnId, nonce: &Nonce) -> [OsString; 3] {
     ]
 }
 
-/// **What opens once a lock holder has let the lock go** (the coordinator's
-/// rulings 2 and 3 of U-29b, adopted on Windows by U-24): one start, or none.
+/// **What the disk names to start** when a road process leaves with no
+/// successor running (the coordinator's rulings 2 and 3 of U-29b, adopted on
+/// Windows by U-24; since U-34 read only by an [`ExitGuard`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Opens {
-    /// Nothing: a trial this holder started is the window, another holder is
-    /// at work, or nothing is owed.
-    Nothing,
     /// The installed build as an ordinary start, with `--update-failed
     /// <journal>` first when `failed`: the journal is still `destructive`
     /// (the start must not hand itself back) or a retired rollback (its
@@ -573,35 +1045,50 @@ pub(crate) enum Opens {
 }
 
 impl Opens {
-    /// The words the build is started with, before a handed command line;
-    /// `None` for [`Opens::Nothing`].
-    pub(crate) fn words(&self, home: &Home) -> Option<Vec<OsString>> {
+    /// The words the build is started with, before a handed command line.
+    pub(crate) fn words(&self, home: &Home) -> Vec<OsString> {
         match self {
-            Opens::Nothing => None,
-            Opens::Installed { failed: false } => Some(Vec::new()),
-            Opens::Installed { failed: true } | Opens::Rescue => Some(failed_words(home).to_vec()),
+            Opens::Installed { failed: false } => Vec::new(),
+            Opens::Installed { failed: true } | Opens::Rescue => failed_words(home).to_vec(),
             Opens::Trial { txn } => {
                 let mut words = trial_words(*txn, &crate::update_job::mint_nonce()).to_vec();
                 words.extend(failed_words(home));
-                Some(words)
+                words
             }
         }
     }
 }
 
-/// **Who starts a build once the lock is let go**, which decides what is owed
-/// (U-29b).
+/// **Who a recovery run is for**, which decides whether anybody waits for a
+/// window when nothing was done (U-29b; since U-34 only that).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Opener {
-    /// P at the end of its road: what the restart it took over owes — the
-    /// old build after a revert, the live build after a rollback, nothing
-    /// after a commit (the trial is the window) or when it did not get that
-    /// far (U-29's ruling 1).
-    Applier,
-    /// R from the entrance at logon: a start only after a revert or a
-    /// finished rollback (W11).
+    /// R from the entrance at logon: nobody started anything, so a window is
+    /// owed only after a revert or a rollback it finished — the Restart that
+    /// preceded them never got one (W11) — or when a person's start is its
+    /// own successor.
     Login,
-    /// R handed a person's start (`--then-launch`): always one start, even
-    /// when the recovery itself failed (the coordinator's ruling 2).
+    /// R handed a person's start (`--then-launch`): a window always follows.
     Start,
+}
+
+/// **Whether a recovery at logon that ended `ended` owes a window** (U-34,
+/// round 2, blocker 4): every end that attempted the transaction does — a
+/// revert or a rollback, finished or not (`Stuck`, `GaveUp`,
+/// `RollbackWaits`), and a recovery that failed — because the Restart before it
+/// never got one. Only the genuinely no-op ends owe nothing: nothing to
+/// recover (`Left`), a commit's retirement finished (the update succeeded; its
+/// trial was the window), the line refused, or the lock another holder keeps —
+/// the holder of the window's mark, which opens it.
+pub(crate) fn owed_at_logon(ended: &Ended) -> bool {
+    !matches!(
+        ended,
+        Ended::Left(_)
+            | Ended::Committed
+            | Ended::CommittedWithDebt(_)
+            | Ended::Refused(_)
+            | Ended::LockHeld
+            | Ended::OldHeldTheLock
+            | Ended::Abandoned
+    )
 }

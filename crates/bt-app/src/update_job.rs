@@ -57,10 +57,11 @@
 //! the inventories, the journal at `Prepared`. Elsewhere it is [`Unsupported`],
 //! which refuses before any network, staging, flush or wait: the job goes
 //! straight to [`State::Failed`]. The quit barrier is U-21 ([`Job::restart`], and the two answers the quit delivers
-//! to [`Job::apply`] on the window thread). And no user sees any of this: [`Job::offers_enabled`] is a
-//! constant `false` until the enabling tickets (U-31, U-32) turn it on, so the
-//! job never leaves `Idle` in a shipped build. What it does do is decide, and
-//! say what it decided once per launch in `diagnostics.log`.
+//! to [`Job::apply`] on the window thread). Whether a reader sees any of this
+//! is [`Job::offers_enabled`], a build fact per platform: on for Windows since
+//! U-31, off for macOS until U-32 (and off everywhere else, where no release is
+//! built). With offers off the job decides and never leaves `Idle`. Either way
+//! it says what it decided once per launch in `diagnostics.log`.
 
 #![cfg_attr(
     not(test),
@@ -81,14 +82,18 @@ use bt_platform::HostPlatform;
 use crate::install_channel::{Channel, Manager};
 use crate::update::{Version, newer_than, should_offer};
 use crate::update_handoff::Staged;
-use crate::update_txn::{Nonce, TxnId};
+use crate::update_prepare::Resumer;
+use crate::update_txn::{Home, Nonce, TxnId};
 
-/// **Whether a reader may be offered an update at all** (U-18: off).
-///
-/// Turned on by the enabling tickets, one per platform (U-31 Windows, U-32
-/// macOS), once a driver, the card and the recovery contract exist. Until then
-/// the job decides and never offers.
-const OFFERS_ENABLED: bool = false;
+/// **Whether a Windows reader may be offered an update** — on since U-31, once
+/// the Windows driver (U-20), the card (U-19), the quit barrier (U-21), the
+/// apply and the rollback (U-23, U-24) and the clean-VM checklist (U-30) exist.
+const OFFERS_ENABLED_WINDOWS: bool = true;
+
+/// **Whether a macOS reader may be offered an update** — off until U-32 turns
+/// it on, after the macOS recovery contract has passed its experiments (owner
+/// ruling 2026-09-25, 2). Until then the job decides and never offers there.
+const OFFERS_ENABLED_MACOS: bool = false;
 
 /// The host the two files of an offer are fetched from (C11). GitHub
 /// redirects to its asset host; the redirect rules are the download door's
@@ -230,6 +235,10 @@ pub(crate) enum Pending {
     AwaitingClassification,
     /// The channel is known; the day's check has not settled.
     AwaitingCheck,
+    /// **An earlier launch's transaction is being settled** by this launch's
+    /// job-owner pass ([`Job::after_start`], U-33): nothing is offered until
+    /// it has swept, counted, resumed or discarded it.
+    AwaitingTransaction,
 }
 
 /// **The two facts that arrive off the window thread, as far as they have**,
@@ -1010,6 +1019,75 @@ pub(crate) fn driver_for_this_copy() -> (Box<dyn Driver>, SharedTransport) {
     }
 }
 
+/// **How this copy revalidates a staged transaction a later launch finds**
+/// (U-33): the running install folder's on Windows
+/// (`update_prepare_windows::resumer`, under the system's trust), the running
+/// bundle's on macOS (`update_prepare_macos::resumer_of_this_copy`), and
+/// nothing anywhere else (`update_prepare::no_resume`, which discards).
+#[must_use]
+pub(crate) fn resumer_for_this_copy() -> Resumer {
+    match bt_platform::host_platform() {
+        HostPlatform::Windows => match std::env::current_exe() {
+            Ok(exe) => {
+                crate::update_prepare_windows::resumer(exe, bt_platform::trust::Policy::System)
+            }
+            Err(_) => crate::update_prepare::no_resume(),
+        },
+        HostPlatform::MacOs => crate::update_prepare_macos::resumer_of_this_copy(),
+        HostPlatform::OtherUnix => crate::update_prepare::no_resume(),
+    }
+}
+
+// ── an earlier launch's transaction ─────────────────────────────────────────
+
+/// **What this launch's job-owner pass decided** (U-33) —
+/// `update_prepare::settle_at_launch`'s answer, carried from the job's worker
+/// to the window thread.
+pub(crate) enum Landed {
+    /// Nothing is left of an earlier launch's transaction that is this
+    /// launch's to show: nothing waited, or it was swept, counted with offers
+    /// off, or discarded. The launch checks and offers as usual.
+    Ordinary,
+    /// Another holder has the transaction lock: nothing was touched, and this
+    /// launch offers nothing.
+    Busy,
+    /// **A staged set passed revalidation**: the offer minted again from the
+    /// set's own version under the transaction's identity, and the staged
+    /// transaction, lock held — the verified card, as if its download had just
+    /// finished.
+    Resumed(Offer, Box<Staged>),
+}
+
+/// Where this launch's job-owner pass is.
+enum Launch {
+    /// None was due at this launch, or it has landed and been read.
+    Done,
+    /// The start left a transaction for the job owner; the pass starts once
+    /// how this copy was installed is known (the revalidation holds the copy
+    /// to it, as a press does).
+    Due {
+        home: Home,
+        resume: Resumer,
+        check: Box<dyn FnOnce() + Send>,
+    },
+    /// The pass runs on the job's worker and leaves its answer here.
+    Running {
+        landed: Arc<Mutex<Option<Landed>>>,
+        check: Box<dyn FnOnce() + Send>,
+    },
+}
+
+/// What [`Job::consider`] does after asking the launch pass.
+enum Pass {
+    /// The pass has not landed: nothing is decided.
+    Waiting,
+    /// The pass decided this launch (a resumed card, or `Busy`): the line to
+    /// say, the first time.
+    Decided(Option<String>),
+    /// The launch is an ordinary one: consider the offer as usual.
+    Ordinary,
+}
+
 // ── progress, and the stale-event rule ─────────────────────────────────────
 
 /// **Why the quit gave the update up** (0.4.6 U-21, §C.3 and R-4): the reason
@@ -1215,7 +1293,7 @@ pub(crate) struct Job<W> {
     answer: Option<Result<Eligible, NotEligible>>,
     /// Whether the decision has been written to `diagnostics.log`.
     said: bool,
-    /// [`OFFERS_ENABLED`] in the product.
+    /// [`Job::offers_enabled`] in the product.
     offers: bool,
     /// Reports from a driver, waiting for the window thread.
     inbox: Arc<Mutex<Vec<Progress>>>,
@@ -1230,19 +1308,45 @@ pub(crate) struct Job<W> {
     /// The cancel flag of the driver working for this job's offer, from the
     /// press until the download ends ([`Poster::cancelled`]).
     running: Option<Arc<AtomicBool>>,
+    /// **This launch's job-owner pass** over the transaction an earlier
+    /// launch left ([`Self::after_start`], U-33).
+    launch: Launch,
 }
 
 impl<W: Copy + Eq> Default for Job<W> {
     fn default() -> Self {
-        Self::with_offers(Self::offers_enabled())
+        Self::for_platform(bt_platform::host_platform())
     }
 }
 
 impl<W: Copy + Eq> Job<W> {
-    /// **Whether offers reach anybody** — `false` until U-31 / U-32.
+    /// **Whether offers reach a reader of this build** — the gate of the
+    /// platform this build is for ([`Self::offers_enabled_on`]).
     #[must_use]
     pub(crate) const fn offers_enabled() -> bool {
-        OFFERS_ENABLED
+        Self::offers_enabled_on(bt_platform::host_platform())
+    }
+
+    /// **Whether offers reach a reader on `platform`**: Windows since U-31,
+    /// macOS once U-32 turns its gate on, and nowhere else (no release is
+    /// built there). A build fact — no setting, no variable, no flag moves it.
+    /// Pure and taking the platform as a value, so that a test on one platform
+    /// reads the other's gate.
+    #[must_use]
+    pub(crate) const fn offers_enabled_on(platform: HostPlatform) -> bool {
+        match platform {
+            HostPlatform::Windows => OFFERS_ENABLED_WINDOWS,
+            HostPlatform::MacOs => OFFERS_ENABLED_MACOS,
+            HostPlatform::OtherUnix => false,
+        }
+    }
+
+    /// **The job a build for `platform` holds**: its gate is that platform's
+    /// ([`Self::offers_enabled_on`]). The application's is the host's
+    /// (`Job::default`).
+    #[must_use]
+    pub(crate) fn for_platform(platform: HostPlatform) -> Self {
+        Self::with_offers(Self::offers_enabled_on(platform))
     }
 
     /// A job whose gate is `offers`; the product's is [`Self::offers_enabled`].
@@ -1261,6 +1365,7 @@ impl<W: Copy + Eq> Job<W> {
             staged: None,
             abandoned: None,
             running: None,
+            launch: Launch::Done,
         }
     }
 
@@ -1292,6 +1397,151 @@ impl<W: Copy + Eq> Job<W> {
             self.offered_this_launch = true;
         }
         self
+    }
+
+    /// **What the start left for this launch's job owner** (U-33; (b).1 F-17
+    /// and (b).2's W1–W2, M1–M2): `waiting` is the home whose `preparing` /
+    /// `deferred` transaction the start continued past
+    /// (`update_startup::waiting`), `resume` how this copy revalidates a
+    /// staged set ([`resumer_for_this_copy`]) and `check` the start of the
+    /// day's update check (`update::begin`).
+    ///
+    /// With nothing waiting, `check` runs now, as every start has. Otherwise
+    /// the job owner's pass (`update_prepare::settle_at_launch`) runs **once,
+    /// on the job's worker** (`bt-update-job`), as soon as the channel is
+    /// known, and **before any offer**: the job stays
+    /// [`Pending::AwaitingTransaction`] until it lands, and [`Self::consider`]
+    /// reads its answer on the window thread — `Swept`, a discard, anything
+    /// that leaves no staged set → an ordinary launch; `Busy` → no offer this
+    /// launch; a counted set that revalidates → `Verified` with the offer
+    /// rebuilt from the set's own version, in the most recently active
+    /// ordinary window, exactly as if the download had just finished.
+    ///
+    /// **The day's check and a resumed set** (the 24-hour rule): `check` runs
+    /// only once the pass has landed, and **not at all when the pass resumed a
+    /// staged set** — that launch's card is the staged version's, and a check
+    /// run beside it would offer the same release a second time. A launch
+    /// whose pass swept or discarded, or found the lock held, checks as usual
+    /// (a check that is not due asks nothing, `update::due`). A kernel that
+    /// will not give the pass a thread leaves the transaction for the next
+    /// launch and makes this one ordinary.
+    #[must_use]
+    pub(crate) fn after_start(
+        mut self,
+        waiting: Option<Home>,
+        resume: Resumer,
+        check: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        match waiting {
+            None => check(),
+            Some(home) => {
+                self.launch = Launch::Due {
+                    home,
+                    resume,
+                    check: Box::new(check),
+                };
+            }
+        }
+        self
+    }
+
+    /// **The launch pass, asked on the window thread** by [`Self::consider`]:
+    /// started once the channel is known, read once it has landed.
+    fn launch_pass(&mut self, gathered: &Gathered, presenters: &Presenters<'_, W>) -> Pass {
+        let (landed, check) = match std::mem::replace(&mut self.launch, Launch::Done) {
+            Launch::Done => return Pass::Ordinary,
+            Launch::Due {
+                home,
+                resume,
+                check,
+            } => {
+                let Some(channel) = gathered.channel else {
+                    self.launch = Launch::Due {
+                        home,
+                        resume,
+                        check,
+                    };
+                    self.state = State::Pending(Pending::AwaitingTransaction);
+                    return Pass::Waiting;
+                };
+                let landed = Arc::new(Mutex::new(None));
+                let (slot, offers, platform) =
+                    (Arc::clone(&landed), self.offers, gathered.platform);
+                let spawned = bt_platform::spawn_at_priority(
+                    crate::update_prepare::WORKER,
+                    bt_platform::ThreadPriority::BelowNormal,
+                    move |worker| {
+                        let answer = crate::update_prepare::settle_at_launch(
+                            worker,
+                            &home,
+                            offers,
+                            resume,
+                            Some(channel),
+                            platform,
+                        );
+                        *slot
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(answer);
+                        evidence_landed();
+                    },
+                );
+                if spawned.is_err() {
+                    check();
+                    return Pass::Ordinary;
+                }
+                self.launch = Launch::Running { landed, check };
+                self.state = State::Pending(Pending::AwaitingTransaction);
+                return Pass::Waiting;
+            }
+            Launch::Running { landed, check } => {
+                let answer = landed
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                match answer {
+                    Some(answer) => (answer, check),
+                    None => {
+                        self.launch = Launch::Running { landed, check };
+                        self.state = State::Pending(Pending::AwaitingTransaction);
+                        return Pass::Waiting;
+                    }
+                }
+            }
+        };
+        match landed {
+            Landed::Ordinary => {
+                check();
+                Pass::Ordinary
+            }
+            Landed::Busy => {
+                check();
+                self.state = State::Idle;
+                self.offered_this_launch = true;
+                Pass::Decided((!self.said).then(|| {
+                    self.said = true;
+                    format!("Folio: update job — no offer: {}", Stop::Busy.why())
+                }))
+            }
+            Landed::Resumed(offer, staged) => {
+                let line = format!(
+                    "Folio: update job — {} was prepared at an earlier launch and is verified again",
+                    offer.tag()
+                );
+                self.presenter = crate::most_recently_active_window(
+                    presenters.visited,
+                    presenters.open,
+                    presenters.quake,
+                );
+                self.staged = Some(*staged);
+                self.state = State::Verified(offer);
+                self.put_away = false;
+                self.offered_this_launch = true;
+                Pass::Decided((!self.said).then(|| {
+                    self.said = true;
+                    line
+                }))
+            }
+        }
     }
 
     /// A job standing at `Verified` with `offer` — a test's way to the quit
@@ -1418,7 +1668,9 @@ impl<W: Copy + Eq> Job<W> {
     }
 
     /// **Consider an offer** on what has been gathered — the handler of
-    /// `AppEvent::UpdateJobOffer`.
+    /// `AppEvent::UpdateJobOffer`. An earlier launch's transaction is settled
+    /// first ([`Self::after_start`]): until its pass lands nothing is decided,
+    /// and a resumed set or a held lock decides this launch without an offer.
     ///
     /// Only a job that has not offered this launch is moved — and a job that
     /// has not offered holds no offer, so an offer, once minted, is never
@@ -1430,6 +1682,12 @@ impl<W: Copy + Eq> Job<W> {
         presenters: &Presenters<'_, W>,
         mint: impl FnOnce() -> TxnId,
     ) -> Option<String> {
+        // An earlier launch's transaction is settled before any offer (U-33).
+        match self.launch_pass(&gathered, presenters) {
+            Pass::Waiting => return None,
+            Pass::Decided(line) => return line,
+            Pass::Ordinary => {}
+        }
         if self.offered_this_launch {
             return None;
         }
@@ -1705,8 +1963,8 @@ mod tests {
         }
     }
 
-    /// A job whose offers are on — the enabling tickets' job; the product's
-    /// stays off (`offers_stay_off_until_the_enabling_tickets`).
+    /// A job whose offers are on, whatever the platform — the gate's own tests
+    /// read the product's (`the_windows_gate_is_on`, `the_macos_gate_is_still_off`).
     fn job() -> Job<u32> {
         Job::with_offers(true)
     }
@@ -2432,41 +2690,185 @@ mod tests {
         assert_eq!(alone.presenter(), Some(4), "the offer waited for a window");
     }
 
-    /// RED (U-18) — **offers stay off until the enabling tickets turn them on,
-    /// and the decision is still said once.**
+    /// RED (U-31) — **a Windows build offers: the job it holds raises the card
+    /// for a newer release and says so once.**
     ///
-    /// No user sees an update card from this ticket: the job the application
-    /// holds (`Job::default`) decides, writes one `diagnostics.log` line naming
-    /// the answer — no path, no account — and stays `Idle`. U-31 (Windows) and
-    /// U-32 (macOS) change the constant.
+    /// U-18 built the job with its gate shut; U-31 opens it for Windows only,
+    /// once the Windows roads — the Prepare, the card, the quit barrier, the
+    /// apply and the rollback — exist and the clean-VM checklist has run on
+    /// this build. The gate is a build fact per platform, read here through
+    /// the constructor the application uses (`Job::for_platform`, which
+    /// `Job::default` calls with the host), so a Mac or Linux runner reads the
+    /// Windows gate too. `diagnostics.log` names the offer, and the decision is
+    /// still said once per launch.
     ///
-    /// MUTATION: set `OFFERS_ENABLED` to `true`.
+    /// MUTATION: set `OFFERS_ENABLED_WINDOWS` to `false`.
     #[test]
-    fn offers_stay_off_until_the_enabling_tickets() {
+    fn the_windows_gate_is_on() {
         assert!(
-            !Job::<u32>::offers_enabled(),
-            "U-18: offers stay off until U-31 / U-32 enable them"
+            Job::<u32>::offers_enabled_on(HostPlatform::Windows),
+            "U-31: offers are on for Windows"
         );
-        let mut job: Job<u32> = Job::default();
+        assert_eq!(
+            Job::<u32>::offers_enabled(),
+            Job::<u32>::offers_enabled_on(bt_platform::host_platform()),
+            "the application's gate is its own platform's"
+        );
+        let mut job: Job<u32> = Job::for_platform(HostPlatform::Windows);
         let line = job.consider(
             gathered("v0.4.7", None, Some(Channel::Ours)),
             &one_window(),
             || txn(1),
         );
+        assert!(
+            matches!(job.state(), State::Available(offer) if offer.tag() == "v0.4.7"),
+            "no card on Windows: {:?}",
+            job.state()
+        );
+        assert_eq!(job.presenter(), Some(1));
+        assert_eq!(
+            line.as_deref(),
+            Some("Folio: update job — v0.4.7 is offered")
+        );
+        assert_eq!(
+            job.consider(
+                gathered("v0.4.8", None, Some(Channel::Ours)),
+                &one_window(),
+                || txn(2)
+            ),
+            None,
+            "the decision is said once per launch"
+        );
+    }
+
+    /// RED (U-18, renamed at U-31) — **a macOS build still offers nothing,
+    /// and the decision is still said once.**
+    ///
+    /// The macOS recovery contract is U-32's; until it passes its experiments
+    /// macOS stays on the releases page (owner ruling 2026-09-25, 2). The job a
+    /// macOS build holds decides, writes one `diagnostics.log` line naming the
+    /// answer — no path, no account — and stays `Idle`. A platform no release
+    /// is built for has no gate to open.
+    ///
+    /// MUTATION: set `OFFERS_ENABLED_MACOS` to `true`.
+    #[test]
+    fn the_macos_gate_is_still_off() {
+        assert!(
+            !Job::<u32>::offers_enabled_on(HostPlatform::MacOs),
+            "offers stay off on macOS until U-32"
+        );
+        assert!(!Job::<u32>::offers_enabled_on(HostPlatform::OtherUnix));
+        let mac = |tag: &str| Gathered {
+            platform: HostPlatform::MacOs,
+            ..gathered(tag, None, Some(Channel::Ours))
+        };
+        let mut job: Job<u32> = Job::for_platform(HostPlatform::MacOs);
+        let line = job.consider(mac("v0.4.7"), &one_window(), || txn(1));
         assert_eq!(job.state(), &State::Idle, "a card went up with offers off");
         assert_eq!(
             line.as_deref(),
             Some("Folio: update job — v0.4.7 would be offered; offers are off in this build")
         );
         assert_eq!(
-            job.consider(
-                gathered("v0.4.8", None, Some(Channel::Ours)),
-                &one_window(),
-                || txn(1)
-            ),
+            job.consider(mac("v0.4.8"), &one_window(), || txn(1)),
             None,
             "the decision is said once per launch"
         );
+    }
+
+    /// RED (U-31) — **through the Windows gate, a copy that is ours gets the
+    /// card and a copy scoop owns gets scoop's command on the General row.**
+    ///
+    /// Opening the gate must not reach a managed copy: the 2026-09-20 ruling
+    /// (managed installs do not self-update) holds after it. Each copy is a
+    /// real folder read by the real channel reader and classifier — `ours`
+    /// owned by this account with no marker, `scoop` with scoop's marker — the
+    /// check's answer comes through the check's own owner, and the job is the
+    /// one a Windows build holds (`Job::for_platform`). What each copy then
+    /// shows is read the way the window reads it: the card's paint and the
+    /// row's foot.
+    ///
+    /// MUTATION: set `OFFERS_ENABLED_WINDOWS` to `false` (the `ours` copy gets
+    /// no card).
+    #[test]
+    fn an_ours_copy_sees_the_offer_and_a_managed_copy_sees_the_command() {
+        use crate::update_card::{self, RowFoot};
+        struct Answering;
+        impl crate::update::Releases for Answering {
+            fn latest_tag(&self) -> Result<String, String> {
+                Ok("v99.0.1".to_owned())
+            }
+        }
+        let base = std::env::temp_dir().join(format!("bt-update-job-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let me = bt_platform::install_evidence::current_account().unwrap();
+        for (folder, marker) in [
+            ("ours", None),
+            (
+                "scoop",
+                Some(&br#"{"v":1,"manager":"scoop","uninstall_hook":true}"#[..]),
+            ),
+        ] {
+            let data = base.join(folder).join("data");
+            let root = base.join(folder).join("install");
+            std::fs::create_dir_all(&data).unwrap();
+            std::fs::create_dir_all(&root).unwrap();
+            if let Some(marker) = marker {
+                std::fs::write(root.join(install_channel::MARKER_FILE_NAME), marker).unwrap();
+            }
+            let channel = install_channel::classify(&install_channel::read(
+                &root,
+                HostPlatform::Windows,
+                Ok(&me),
+                install_channel::WingetEvidence::None,
+            ));
+            let owner = crate::update::OfferState::load(&data, true);
+            let _ = owner.run(crate::update::CHECK_INTERVAL_MS + 1, &Answering);
+            let mut job: Job<u32> = Job::for_platform(HostPlatform::Windows);
+            let line = job.consider(
+                Gathered {
+                    check: owner.job_evidence(),
+                    channel: Some(channel),
+                    running: crate::version::VERSION,
+                    capable: true,
+                    trial: false,
+                    platform: HostPlatform::Windows,
+                },
+                &one_window(),
+                || txn(1),
+            );
+            if marker.is_none() {
+                assert!(
+                    matches!(job.state(), State::Available(offer) if offer.tag() == "v99.0.1"),
+                    "{folder}: {:?}",
+                    job.state()
+                );
+                assert!(
+                    update_card::paint(job.state()).is_some(),
+                    "{folder}: the card is drawn"
+                );
+                assert_eq!(
+                    line.as_deref(),
+                    Some("Folio: update job — v99.0.1 is offered")
+                );
+                assert_eq!(update_card::row_foot(&job), RowFoot::ReleasesPage);
+            } else {
+                assert_eq!(
+                    job.state(),
+                    &State::Idle,
+                    "{folder}: a managed copy got a card"
+                );
+                assert_eq!(update_card::paint(job.state()), None, "{folder}");
+                assert_eq!(
+                    update_card::row_foot(&job),
+                    RowFoot::Copy {
+                        command: "scoop update folio"
+                    },
+                    "{folder}"
+                );
+            }
+        }
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     /// RED (U-18) — **a press fetches exactly two files, by the offer's own

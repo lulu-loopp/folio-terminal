@@ -11,8 +11,9 @@
 //!   for the download a bar (determinate with `12 / 41 MB` beside it, or the
 //!   indeterminate bar alone when the length is unknown). `None` in every
 //!   state C9 draws no card for.
-//! - **What a press on it asks** — [`CardVerb::job_verb`] (Escape and the close
-//!   box are Later; a failed card's Close is Later too) and [`spend`], which
+//! - **What a press on it asks** — [`CardVerb::asks`] (Escape and the close
+//!   box are Later; a failed card's Close is Later too; Restart asks the
+//!   application's quit, not the job alone) and [`spend`], which
 //!   hands the job's one outside effect, Skip's, to the check's owner
 //!   (`update::OfferState::skip`).
 //! - **Where the keyboard's ring is** — [`Card`], the per-window hover and ring,
@@ -27,9 +28,8 @@
 //! window's half — which rung of the key ladder, which window draws it — is
 //! `runtime/update_card.rs`.
 //!
-//! **Offers stay off** (`update_job::Job::offers_enabled`): no shipped build
-//! reaches a state with a card until the enabling tickets (U-31, U-32). The card
-//! and the row are reached by the tests and by the job's own events.
+//! **Who sees the card** is `update_job::Job::offers_enabled`: a Windows build
+//! since U-31; a macOS build reaches no state with a card until U-32.
 
 use std::path::PathBuf;
 
@@ -72,20 +72,37 @@ impl CardVerb {
         .text()
     }
 
-    /// **The job's verb this button is**, or `None` for the two that leave
-    /// the window and move nothing (Releases, Show folder). Close is Later
-    /// (`update_job::Verb`'s own note).
+    /// **What a press on this button asks, and of whom.** Close is Later
+    /// (`update_job::Verb`'s own note). **Restart is the quit's**, not a verb
+    /// the job answers alone: the job's Restart only moves it to `Quitting`,
+    /// and the Folio it was pressed in must then be asked to quit with the
+    /// update's reason (`App::restart_for_update`), or nothing leaves.
     #[must_use]
-    pub(crate) const fn job_verb(self) -> Option<Verb> {
+    pub(crate) const fn asks(self) -> Asks {
         match self {
-            Self::Update => Some(Verb::Press),
-            Self::Later | Self::Close => Some(Verb::Later),
-            Self::Skip => Some(Verb::Skip),
-            Self::Cancel => Some(Verb::Cancel),
-            Self::Restart => Some(Verb::Restart),
-            Self::Releases | Self::ShowFolder => None,
+            Self::Update => Asks::Job(Verb::Press),
+            Self::Later | Self::Close => Asks::Job(Verb::Later),
+            Self::Skip => Asks::Job(Verb::Skip),
+            Self::Cancel => Asks::Job(Verb::Cancel),
+            Self::Restart => Asks::Quit,
+            Self::Releases => Asks::Releases,
+            Self::ShowFolder => Asks::ShowFolder,
         }
     }
+}
+
+/// **Who answers a press on the card** ([`CardVerb::asks`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Asks {
+    /// The job, with this verb (`Job::answer_verb`).
+    Job(Verb),
+    /// The application's quit, carrying the update (`App::restart_for_update`,
+    /// which moves the job through `Job::restart`).
+    Quit,
+    /// The browser, with the releases page. Moves nothing.
+    Releases,
+    /// The file manager, at the journal's folder. Moves nothing.
+    ShowFolder,
 }
 
 /// What a point on the card is over.
@@ -555,7 +572,7 @@ mod tests {
     use bt_platform::HostPlatform;
 
     use super::{
-        Bar, Card, CardVerb, Key, Outcome, Paint, RowFoot, Target, copy_command, failed, key,
+        Asks, Bar, Card, CardVerb, Key, Outcome, Paint, RowFoot, Target, copy_command, failed, key,
         paint, row_description_in, row_foot, shown, spend,
     };
     use crate::i18n::{Lang, Text};
@@ -767,6 +784,45 @@ mod tests {
         assert_eq!(drawn.primary(), Some(CardVerb::Restart));
     }
 
+    /// RED (U-31) — **Restart on the verified card asks the application to
+    /// quit with the update's reason; it is not a verb the job answers
+    /// alone.**
+    ///
+    /// The job's own Restart only moves it to `Quitting`: the quit that
+    /// photographs the session and hands the installation to the applier is
+    /// the application's (`App::restart_for_update`, U-21). Before U-31 the
+    /// card's Restart went to `Job::answer_verb`, which left the job at
+    /// `Quitting` with no quit asked for — the card gone, Folio still running,
+    /// and every later verb refused as `TheQuitAnswers`. That was unseen while
+    /// offers were off; with the Windows gate on it is the happy path. Every
+    /// other verb still asks what it asked.
+    ///
+    /// MUTATION: map `CardVerb::Restart` to `Asks::Job(Verb::Restart)` in
+    /// `CardVerb::asks`.
+    #[test]
+    fn restart_on_the_card_asks_the_quit_and_not_the_job_alone() {
+        assert_eq!(CardVerb::Restart.asks(), Asks::Quit);
+        for (verb, asks) in [
+            (CardVerb::Update, Asks::Job(Verb::Press)),
+            (CardVerb::Later, Asks::Job(Verb::Later)),
+            (CardVerb::Close, Asks::Job(Verb::Later)),
+            (CardVerb::Skip, Asks::Job(Verb::Skip)),
+            (CardVerb::Cancel, Asks::Job(Verb::Cancel)),
+            (CardVerb::Releases, Asks::Releases),
+            (CardVerb::ShowFolder, Asks::ShowFolder),
+        ] {
+            assert_eq!(verb.asks(), asks, "{verb:?}");
+        }
+        // What the quit's entrance does to the job it is pressed on.
+        let mut job = verified();
+        let txn = job.state().offer().map(Offer::txn).expect("an offer");
+        assert_eq!(
+            job.restart(),
+            Ok(crate::quit::Reason::UpdateRestart { txn })
+        );
+        assert!(matches!(job.state(), State::Quitting(_)));
+    }
+
     /// RED (U-19) — **a failure that moved nothing gives its reason, then
     /// `Nothing changed.`, and offers Releases and Close.**
     ///
@@ -793,8 +849,12 @@ mod tests {
                 verbs: vec![CardVerb::Releases, CardVerb::Close],
             }
         );
-        assert_eq!(CardVerb::Close.job_verb(), Some(Verb::Later));
-        assert_eq!(CardVerb::Releases.job_verb(), None, "a page moves nothing");
+        assert_eq!(CardVerb::Close.asks(), Asks::Job(Verb::Later));
+        assert_eq!(
+            CardVerb::Releases.asks(),
+            Asks::Releases,
+            "a page moves nothing"
+        );
     }
 
     /// RED (U-19) — **a rolled-back failure gives its reason, then `Previous

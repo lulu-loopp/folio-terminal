@@ -819,6 +819,8 @@ pub mod doors {
         SessionWriterRetire => "16b", 213, [Exiting];
         /// Row 17: the trace writer's bounded flush (`TraceFlush`).
         TraceFlush => "17", 214, [Exiting];
+        /// Row 29: an update's exit guard at the process's end, bounded (`UpdateLeave`).
+        UpdateLeave => "29", 222, [Exiting];
         /// Row 18: the launch handed to a running Folio, before the loop exists (`Starting`).
         LaunchHandOver => "18", 0, [Starting];
         /// Row 21: `CreateCoreWebView2CompositionController` (`WebController`).

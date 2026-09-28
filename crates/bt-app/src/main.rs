@@ -601,7 +601,8 @@ enum AppEvent {
     TrialWritesReleased,
     /// **One of the update job's two facts has landed** (U-18): the day's
     /// check settled (`update::begin`), or how this copy was installed was read
-    /// (`install_channel`'s worker).
+    /// (`install_channel`'s worker) — or the job owner's pass over an earlier
+    /// launch's transaction landed (`update_job::Job::after_start`, U-33).
     ///
     /// Carries nothing: both facts are in their owners' slots by the time this
     /// is sent, and the handler gathers them (`update_job::Gathered::now`) and
@@ -41435,7 +41436,19 @@ impl Runtime<'_> {
             &persist::storage_dir(),
             settings_store.loaded().update_check,
         );
-        update::begin();
+        // **The update job, and the day's check behind it** (U-18, U-33). A transaction an
+        // earlier launch left `preparing` or `deferred` (`update_startup::waiting`) is the job
+        // owner's to sweep, count, resume or discard, on the job's worker and before any offer;
+        // the check starts once that pass has landed, and not at all when it resumed a staged
+        // set (`Job::after_start`). With nothing waiting the check starts here, as it always has.
+        // A launch a rollback sent raises its card at `Failed` (U-29).
+        let the_update_job = update_job::Job::default()
+            .after_rollback(update_startup::failed())
+            .after_start(
+                update_startup::waiting(),
+                update_job::resumer_for_this_copy(),
+                update::begin,
+            );
         // **How this copy was installed** (U-1): read once, off this thread, and said once in
         // `diagnostics.log`. The first-run card's Explorer row reads it (U-3) and waits a turn
         // for it, so the wake is installed before the worker can finish. It is the update job's
@@ -42132,8 +42145,7 @@ impl Runtime<'_> {
             window_ring: None,
             window_ring_shown: None,
             quake: quake::Quake::default(),
-            // A launch a rollback sent raises its card at `Failed` (U-29).
-            update_job: update_job::Job::default().after_rollback(update_startup::failed()),
+            update_job: the_update_job,
             update_shown: update_card::Shown::default(),
             quit_reason: quit::Reason::Asked,
             handoff_answer: None,
@@ -50952,15 +50964,20 @@ impl App {
     ///
     /// # Errors
     /// That refusal, or the job's for Restart in its state.
-    #[expect(
-        dead_code,
-        reason = "U-19's card presses Restart; offers stay off until U-31 / U-32 (U-21 drives the road from tests)"
-    )]
     fn restart_for_update(&mut self) -> Result<(), update_job::Refusal> {
         if self.quit.is_some() || self.quit_requested {
             return Err(update_job::Refusal::TheQuitAnswers);
         }
         self.quit_reason = self.update_job.restart()?;
+        // **The person has pressed Restart to update: from here a window is
+        // owed** (U-34, round 2, blocker 3). The exit guard is armed now, before
+        // the quit or the hand-over, and disarmed only if the quit is abandoned
+        // and this process stays.
+        let data = persist::storage_dir();
+        update_handoff::arm(match self.update_job.staged() {
+            Some(staged) => update_handoff::Leaving::over(&staged.home, staged.journal.txn, &data),
+            None => update_handoff::Leaving::nothing_staged(&data),
+        });
         self.ask_to_quit();
         Ok(())
     }
@@ -62778,6 +62795,8 @@ impl FolioApp {
                     // Back to `Running` after a refused write; a quit cancelled at its card, or
                     // whose saves did not all land, never left it.
                     bt_platform::admission::quit_abandoned();
+                    // This process stays: it owes no window after Restart any more (U-34).
+                    update_handoff::disarm();
                     if let Some(app) = self.app.as_mut() {
                         app.quit = None;
                     }
@@ -62907,8 +62926,10 @@ impl FolioApp {
     /// The first ask builds the hand-over from the job's staged transaction — the journal at
     /// `Prepared`, the lock this process still holds — and sends it to the storage worker, which
     /// writes `Handoff` durably and then starts the applier; later asks look for its answer. The
-    /// answer, or [`quit::HANDOFF_DEADLINE`] without one, lets the process leave: whatever the
-    /// journal says then is a row of the recovery table.
+    /// answer, or [`quit::HANDOFF_DEADLINE`] without one, lets the process leave, and arms its
+    /// exit guard with whom it leaves behind (`update_handoff::arm`, U-34): the applier it
+    /// started, or nobody — then the process starts Folio again at its very end
+    /// (`update_handoff::leave_armed`).
     fn hand_the_update_over(&mut self, now: Instant) -> bool {
         let Some(app) = self.app.as_mut() else {
             return true;
@@ -62922,6 +62943,8 @@ impl FolioApp {
         match quit.handoff() {
             quit::Handoff::NotOwed | quit::Handoff::Done => true,
             quit::Handoff::Owed => {
+                // The exit guard was armed when Restart was pressed
+                // (`App::restart_for_update`, U-34).
                 let sent = app
                     .update_job
                     .staged()
@@ -62955,17 +62978,18 @@ impl FolioApp {
                 }
             }
             quit::Handoff::Sent { .. } => {
-                let answered = app
-                    .handoff_answer
-                    .as_ref()
-                    .and_then(|answer| answer.try_recv().ok());
-                match answered {
-                    Some(handed) => diagnostics::note(&handed.line(txn)),
-                    None if quit.handoff_is_overdue(now) => diagnostics::note(&format!(
-                        "Folio: update {txn}'s hand-over did not answer in time; Folio leaves, \
-                         and the next start reads the journal"
-                    )),
-                    None => return false,
+                match update_handoff::look(
+                    app.handoff_answer.as_ref(),
+                    txn,
+                    quit.handoff_is_overdue(now),
+                ) {
+                    update_handoff::Looked::Waiting => return false,
+                    update_handoff::Looked::Over { line, applier } => {
+                        diagnostics::note(&line);
+                        if let Some(applier) = applier {
+                            update_handoff::record_the_applier(applier);
+                        }
+                    }
                 }
                 app.handoff_answer = None;
                 quit.handed_off();
@@ -70889,6 +70913,10 @@ fn install_panic_log_hook() {
         // because the next two statements end the process whether one window
         // was hidden or none.
         let _ = bt_platform::hide_every_window_of_this_process();
+        // **An update's exit guard runs on this road too** (U-34): a panic after
+        // the hand-over leaves the applier or starts Folio again, as the
+        // process's ordinary end does.
+        let _ = update_handoff::leave_in_panic();
         eprintln!(
             "{}",
             diagnostics::run_footer(
@@ -70899,6 +70927,20 @@ fn install_panic_log_hook() {
         );
         bt_platform::leave_process(PANIC_EXIT_CODE)
     });
+}
+
+/// **The update doors' panic hook** (0.4.6 U-34): the report is written to the
+/// panic log at `path` as every panic's is, and then the panic **unwinds** —
+/// through the road's exit guard, a `Drop`, which opens Folio — and leaves
+/// `main` as Rust's own panic exit (101). The product's hook would end the
+/// process from inside the hook, with a message box in a process that has no
+/// window, before any unwinding. What these doors do not get that a windowed
+/// run does: the alert (`announce_panic`), the run footer with the admission
+/// refusals, the hiding of windows (there are none) and the trace flush through
+/// `leave_process`; the report in the panic log, with its backtrace, is kept.
+fn install_update_door_panic_hook_at(path: PathBuf) {
+    drop(panic::take_hook());
+    install_panic_log_hook_at(path, |_| {});
 }
 
 fn install_panic_log_hook_at(path: PathBuf, fatal: impl Fn(&Path) + Send + Sync + 'static) {
@@ -71262,6 +71304,15 @@ fn main() -> Result<()> {
     // applier left, U-23); `--update-apply` is the applier — macOS
     // (`update_apply_macos`, U-28) and Windows (`update_apply_windows`, U-23) —
     // and is answered with one line where there is none.
+    // **A road process's panic unwinds** (0.4.6 U-34), and its hook is in place
+    // before anything of the door's line is parsed (round 2, blocker 3): the
+    // first word alone says it is a door.
+    if std::env::args_os()
+        .nth(1)
+        .is_some_and(|word| word == cli::UPDATE_APPLY_FLAG || word == cli::UPDATE_RECOVER_FLAG)
+    {
+        install_update_door_panic_hook_at(panic_log_path());
+    }
     if let Some(door) = cli::update_door(std::env::args_os().skip(1)) {
         let usage = match door {
             Ok(cli::UpdateDoor::Recover { home, then_launch }) => {
@@ -71572,6 +71623,12 @@ fn main() -> Result<()> {
     // The session that outlived every question is released once the loop has
     // returned, never before a question could still be in flight.
     bt_platform::video::shutdown_media_session();
+    // **An update's exit guard** (0.4.6 U-34): after a Restart to update, this
+    // process leaves behind the applier it started, or starts Folio again —
+    // here, with the loop over and the session's sentinel gone, after letting
+    // go of the data directory's claim, so that start is the writer. Nothing
+    // at all for any other run.
+    let _ = bt_platform::admission::admitted::<doors::UpdateLeave, _>(update_handoff::leave_armed);
     // **And now the process leaves, by the one road a WebView2 host may take**
     // (§7.35). Everything this program owns has been let go of above and inside
     // the loop — the shells, the controllers, the browsers under a deadline, the

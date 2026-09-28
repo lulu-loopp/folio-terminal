@@ -326,7 +326,7 @@ const NS_PER_MS: u64 = 1_000_000;
 /// Held against [`Station`] by `every_station_has_a_slot_in_the_ledger`: a
 /// further variant added without widening this would have its milliseconds
 /// charged to nobody, and the line would silently stop adding up.
-const STATION_COUNT: usize = 222;
+const STATION_COUNT: usize = 223;
 
 /// How deep the dispatched messages [`Heartbeat::message_began_at`] keeps
 /// apart can nest (ticket 64).
@@ -1055,6 +1055,9 @@ pub enum Station {
     /// **The update job applying its drivers' reports** — `Job::drain_progress`
     /// on `AppEvent::UpdateJobProgress` (`update_job`, 0.4.6 U-18).
     UpdateJobProgress = 221,
+    /// **An update's exit guard at the process's end** — `update_handoff::leave_armed`, after
+    /// the loop (§5.3 row 29; door `UpdateLeave`, 0.4.6 U-34).
+    UpdateLeave = 222,
 }
 
 impl Station {
@@ -1284,6 +1287,7 @@ impl Station {
             Self::TrialWritesReleased => "App::release_trial_writes",
             Self::UpdateJobOffer => "FolioApp::consider_update_offer",
             Self::UpdateJobProgress => "update_job::Job::drain_progress",
+            Self::UpdateLeave => "update_handoff::leave_armed",
         }
     }
 
@@ -1527,6 +1531,7 @@ impl Station {
             219 => Self::TrialWritesReleased,
             220 => Self::UpdateJobOffer,
             221 => Self::UpdateJobProgress,
+            222 => Self::UpdateLeave,
             _ => Self::Starting,
         }
     }

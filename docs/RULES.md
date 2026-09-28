@@ -900,36 +900,104 @@ exactly where the install marker says the manager has an uninstall hook*.
 hover fill. The 2026-09-26 entry replaces "the update check is the only row that
 arrives on".
 
-### 36. The update check — `not yet folded`
-Entries: §7.52 *an installed preview has no way to know it is out of date: one
+### 36. The update check — `folded`
+**Rule.** **The check.** At most once every 24 hours across every window on the
+machine, on a thread of its own started after the first window, Folio sends one
+`GET` of `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` with
+the one header `User-Agent: Folio`, through the platform's own HTTP stack
+(WinHTTP; `NSURLSession`, ephemeral). The newest tag is the greatest by
+precedence, never the first listed. Every failure is silent and counts as that
+day's attempt. The check itself downloads, replaces and restarts nothing: its
+answer is the gear's mark and the General row's sentence. `update-check.json`
+(schema v2: the stamp, `latest_tag`, `seen_tag`, `skipped_tag`) has one owner,
+`update::OfferState`, which holds one lock across every read-modify-write; a
+claim file keeps a second process from asking the same day. The offer decision is
+`update::should_offer`: the switch on, a tag newer than the running build, and
+above `skipped_tag` by precedence (Skip only raises it). The switch off starts
+no thread, writes nothing, and hides a cached offer from the next frame.
+`--update-feed <file-URL>` makes one start read a local folder in the releases
+list's shape instead of github.com, for the check and the download alike; it is
+never persisted and moves nothing else — not the gate, not the checksum, not the
+signer. **The job.** One `update_job::Job` per process, on `App`, waits typed
+(`Pending`) for both the check to settle and the channel to be read, then
+decides eligibility by a pure function in this order: a trial never offers; the
+switch; a newer, unskipped tag; the channel (`Ours` only — `Managed` is sent to
+its manager's command, `NotOurs` and `Unknown` to the releases page); the
+updater flag; a release file named for this tag here. It says its answer once
+per launch in `diagnostics.log`, with no path and no account. **The gate** is a
+build fact per platform, `Job::offers_enabled_on`: **on for Windows** (U-31),
+**off for macOS** until U-32, off wherever no release is built. With the gate
+off the job decides and stays `Idle`. With it on, an eligible answer mints the
+offer once — `{txn, tag, asset, hash_doc, to_version}`, never derived again —
+and raises the card once per launch in the ordinary window the reader was last
+in, never the summoned terminal. **The frozen address**: a press fetches exactly
+two files, by the offer's own tag, from
+`https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/` —
+`folio-<version>-windows-x64.zip` with `SHA256SUMS.txt`, or
+`Folio-<version>-macos-arm64.dmg` with `SHA256SUMS-macos.txt` — never
+`/releases/latest/`; this grammar is read by every earlier build and does not
+change. **The card** says one line per state with C9's verbs (Update · Later ·
+Skip; Cancel under the download's bar; Restart · Later at `Verified`; a failure's
+reason, then `Nothing changed.`, `Previous version restored.` or `Update
+incomplete.` with the journal's folder), holds the window's keys until answered
+or put away, and follows its window when that window closes. **Restart asks the
+application's quit** (`App::restart_for_update`: `Job::restart`, then the one
+quit door with `Reason::UpdateRestart`), never the job alone. The General row's
+foot is read off the job: the releases page; **Restart to update** at
+`Verified`; the manager's command with **Copy** on a managed copy. **The road
+on Windows**: the Prepare stages inside the install folder
+(`<install>\.folio-update\`) and holds every signed file to the running build's
+signer; the ordinary quit hands the installation to the applier only on a
+receipt for its own session document; the entrance at logon is one `Run` value
+`FolioUpdate-<txn8>`, armed before any move and removed when the transaction
+ends (`--uninstall-cleanup` removes one left behind for this copy); the new
+build runs as a trial and is `Committed` only on its receipt; a failed trial is
+rolled back by digest, and a rollback that fails is `Stuck` with everything kept,
+retried at the next logon or start three times at most; whatever phase a dead
+applier leaves, a start opens exactly one Folio, and the new build before
+`Committed` only as a trial. **Every road process — the outgoing build once
+its hand-over is over, the applier, the recovery build — leaves through one
+exit guard**, armed when Restart to update is pressed: one mark
+(`H\<txn>\owner`) says which one process has the duty to open a window —
+the applier once it takes it, else the outgoing build — and that process
+leaves a successor it knows is running, or starts what the disk names and
+counts it only when a Folio acknowledges it by holding the data directory,
+else the next program, else shows the failure window itself. So a window
+follows Restart to update whatever the road met — a refused write, a
+hand-over past its 15 s, a refusal, a panic; the one exception is the
+recovery at logon that attempted nothing. An applier killed from outside after
+it has taken the window duty, and a live holder the recovery build deferred to
+that is then killed from outside, are outside the guarantee and are recovered
+by the next start or logon (before `Armed` there is no logon entrance, so the
+next start); no watcher process is built (owner ruling 2026-09-28). The macOS road (the bundle exchange, the
+LaunchAgent entrance, its rollback and opening rules) is built to the same
+contract behind its shut gate; U-32 opens it.
+**From.** §7.52 *an installed preview has no way to know it is out of date: one
 request, a stamp good for a day, and a gear*; the `update.rs` module doc;
-`PRIVACY.md`; trailing entry 2026-09-26 *the update check's state has one owner
-that holds one lock across every read-modify-write, and a skipped version is
-compared by precedence*; trailing entry 2026-09-26 *the update job is one per
-process, owned by the application*; trailing entry 2026-09-26 *the update card
-says one line per state, holds the window's keys until it is answered or put
-away, follows its window when that window closes, and the General row's foot is
-read off the update job* (U-19); trailing entry 2026-09-27 *on macOS a failed
-trial is rolled back … the rescue build finishes it at the next login or start,
-three times at most* (U-29: the old build started again with `--update-failed`
-after a rollback, with no word after a revert, and not at all after
-`Abandoned`); trailing entry 2026-09-27 *on macOS, whatever the journal says, a
-start opens Folio: the recovery finishes every phase a dead applier can leave,
-exactly one build is started after it, and the new build is started before
-`Committed` only as a trial* (U-29b: `Stuck` with the new bundle live commits
-forward on the receipt of the trial started over it; a start carrying
-`--update-failed` continues past any `destructive` header); trailing entry
-2026-09-27 *`--update-feed <file-URL>` makes one start's update check and
-download read a local release feed instead of github.com* (U-30b: a
-command-line flag only, never persisted; the checksum and the signer checks
-unchanged). The fold is the enabling tickets', U-31 / U-32, per the design
-note's (b).5 table.
-2026-09-27 *on Windows a failed trial is rolled back by digest …, and U-29b's
-opening rules hold on Windows too* (U-24: the trial stopped only by its pid,
-creation time and image; the rescue copy opens only where the install holds
-neither whole set; one rule for a live applier at `Handoff` on both
-platforms — left to it, nothing waited for, nothing opened). The fold is the
-enabling tickets', U-31 / U-32, per the design note's (b).5 table.
+`PRIVACY.md`; trailing entries 2026-09-26 *the update check's state has one
+owner that holds one lock across every read-modify-write, and a skipped version
+is compared by precedence*, *the update job is one per process, owned by the
+application*, *the update card says one line per state …* (U-19), *an update's
+Restart is the ordinary quit run to completion with the reason
+`UpdateRestart` …* (U-21); 2026-09-27 *the Windows Prepare takes an offer from
+the press to `Prepared` inside the install folder …* (U-20), *on Windows the
+applier takes a handed-over update from `Handoff` to `Committed` …* (U-23), *on
+macOS a failed trial is rolled back …* (U-29), *on macOS, whatever the journal
+says, a start opens Folio …* (U-29b), *`--update-feed <file-URL>` makes one
+start's update check and download read a local release feed …* (U-30b), *on
+Windows a failed trial is rolled back by digest …, and U-29b's opening rules hold
+on Windows too* (U-24), *Folio offers its own updates on Windows: the update
+job's gate is a build fact per platform …* (U-31); 2026-09-28 *every road process
+of an update leaves through one exit guard …* (U-34).
+**Overrides.** The U-31 entry replaces the U-18 entry's "offers are the constant
+`false` until U-31/U-32" and the U-19 entry's "no shipped build shows any of
+this" for Windows, and replaces §7.52's "不下载、不替换、不重启" as a bound on
+Folio (it remains the check's own bound). U-24 replaces U-23's rescue-copy
+opening for every still-`destructive` journal and its wait for a live applier at
+`Handoff`. U-34 replaces U-29's "after `Abandoned` no relaunch", U-23's and
+U-24's "after `Committed` or `Abandoned` nothing" and their silent refusals, and
+U-24's "a destructive journal on a home no road of this build recovers starts
+nothing".
 
 ### 37. The Explorer and Finder verbs — `folded`
 **Rule.** On Windows there is one verb in two registrations: the classic trees

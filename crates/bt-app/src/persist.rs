@@ -237,6 +237,25 @@ pub(crate) fn is_writer_of(directory: &Path) -> bool {
         .is_some()
 }
 
+/// **Let go of every claim this process holds** (0.4.6 U-34): O at its very
+/// end, after an update's hand-over, so that the start its exit guard makes
+/// takes the claim and is the writer — not a launch handed back to this
+/// process, which is leaving. Each row then answers "not the writer": nothing
+/// is written after this.
+///
+/// It never waits for the table: it also runs in the panic hook, possibly on the
+/// thread that holds it — then the claims go with the process, a moment later.
+pub(crate) fn let_go_of_every_claim() {
+    let mut table = match claims().try_lock() {
+        Ok(table) => table,
+        Err(std::sync::TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    for row in table.values_mut() {
+        *row = None;
+    }
+}
+
 /// **The claim table** — one row per claim name, holding either the claim this
 /// process took (it is the writer, and the guard lives here for the life of
 /// the process) or `None` (it asked and was refused). Written by
@@ -246,13 +265,17 @@ fn claim_table() -> std::sync::MutexGuard<
     'static,
     HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>,
 > {
+    claims()
+        .lock()
+        .expect("the claim table is locked to read or take one entry and nothing else")
+}
+
+/// The table [`claim_table`] locks.
+fn claims() -> &'static Mutex<HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>> {
     static CLAIMS: OnceLock<
         Mutex<HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>>,
     > = OnceLock::new();
-    CLAIMS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .expect("the claim table is locked to read or take one entry and nothing else")
+    CLAIMS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// **Ask for the claim on `directory` now, and remember nothing** (§C.7 of
@@ -2078,8 +2101,38 @@ fn relocate(previous: &Path, current: &Path) -> Relocation {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// RED (U-34, round 2; Codex's review, finding 5) — **letting go of every
+    /// claim never waits for a claim table another thread holds**: it runs in
+    /// O's panic hook, possibly on the thread that holds the table, and gives
+    /// up at once rather than deadlock.
+    ///
+    /// MUTATION: in `let_go_of_every_claim`, `lock()` the table instead of
+    /// trying it.
+    #[test]
+    fn letting_go_of_the_claims_never_waits_for_a_held_table() {
+        let (held, release) = std::sync::mpsc::channel::<()>();
+        let (holding, is_held) = std::sync::mpsc::channel::<()>();
+        let holder = bt_platform::spawn_at_priority(
+            "bt-u34-claims",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |_worker| {
+                let _table = claims().lock().expect("the table");
+                holding.send(()).unwrap();
+                let _ = release.recv_timeout(std::time::Duration::from_secs(10));
+            },
+        )
+        .unwrap();
+        is_held.recv().unwrap();
+        let began = std::time::Instant::now();
+        let_go_of_every_claim();
+        let took = began.elapsed();
+        held.send(()).unwrap();
+        holder.join().unwrap();
+        assert!(took < std::time::Duration::from_secs(2), "{took:?}");
+    }
 
     /// The writer's retirement through its admitted door (`doors::SessionWriterRetire`), on a test
     /// thread already entered as the window thread on its way out.
@@ -3226,6 +3279,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// **The claim on `directory`, asked for until it is let go** — within 5 s,
+    /// and only a live holder is asked about again.
+    ///
+    /// A claim this process dropped is not always free at once off Windows: a
+    /// `flock` belongs to the open file description, and a child that another
+    /// test thread is starting at that moment holds a copy of every descriptor
+    /// from its fork until its exec closes them (on macOS that exec validates
+    /// the signature of a freshly copied test binary, which takes a while). The
+    /// lock is let go when that exec is done; asking once would read the
+    /// child's copy as a holder.
+    pub(crate) fn claim_once_let_go(directory: &Path) -> bt_platform::instance::DataDirectoryClaim {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            match try_claim(directory) {
+                Ok(claim) => return claim,
+                Err(bt_platform::instance::ClaimRefusal::Held)
+                    if std::time::Instant::now() < until =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(refusal) => panic!("asked again, the platform answers again: {refusal:?}"),
+            }
+        }
+    }
+
     /// RED (U-5, self-update R-3) — **`try_claim` asks the platform every time
     /// and remembers nothing.**
     ///
@@ -3253,7 +3331,7 @@ mod tests {
         );
 
         drop(other);
-        let taken = try_claim(&directory).expect("asked again, the platform answers again");
+        let taken = claim_once_let_go(&directory);
         assert!(
             matches!(
                 try_claim(&directory),
@@ -3263,6 +3341,7 @@ mod tests {
         );
 
         drop(taken);
+        drop(claim_once_let_go(&directory));
         assert!(
             is_writer_of(&directory),
             "no refusal try_claim was given was left in the table for is_writer_of to read"

@@ -38,19 +38,6 @@
 //! back and retired (M9–M11); `Committed` retired. Every line of it is
 //! appended to the same file.
 //!
-//! **Then exactly one start** (ruling 2), with the handed command line after
-//! its words: the old build plainly, or with `--update-failed <journal>` after
-//! a rollback or while the journal is still `destructive` (so the start
-//! continues instead of handing itself back, and its card says *Update
-//! incomplete.*); the new build plainly once `Committed`, and before that only
-//! as a trial (`--update-trial <txn> <nonce>`) — which, over a `Stuck`, this
-//! run starts itself, records and waits for, so that its receipt commits
-//! forward (ruling 3). A trial this run started is itself the start. When the
-//! recovery itself fails, the live build is started by the same rule. Only a
-//! lock another holder keeps — the applier at work — starts nothing: that
-//! holder opens Folio. At login (no command line), a start follows only a
-//! revert or a finished rollback (W11), or a trial the decision needed.
-//!
 //! **A Windows member set** (U-23, U-24, [`run_windows`]): whatever the
 //! header says, the rescue build takes the transaction lock and finishes, as
 //! R, whatever a dead applier left, by the applier's own code
@@ -61,24 +48,37 @@
 //! not passed, then `Committed` and its retirement, or rolled back;
 //! `RollbackIntent`, `Stuck` and `RolledBack` rolled back and retired
 //! (W9–W11); `Committed` retired (W12). Every line of it is appended to the
-//! same file. **Then exactly one start, by the same rules as a bundle's**
-//! (U-29b's, adopted by U-24): the old build plainly, or with
-//! `--update-failed <journal>` after a rollback or while the journal is still
-//! `destructive`; the new set plainly once `Committed`, and before that only
-//! as a trial — over a `Stuck` with the new set installed, one this run starts
-//! itself, records and waits for, so that its receipt commits forward. Where
-//! the install folder holds neither whole set — a rollback that could not
-//! finish — **the rescue copy** is started with `--update-failed <journal>`:
-//! O's own image, whose own home holds no journal (the fallback when even the
-//! recovery could not finish; the rescue copy U-23 opened for every
-//! still-`destructive` journal is retired now that the rollback exists).
+//! same file.
+//!
+//! **Then it leaves through the one exit guard** (U-34,
+//! `update_apply::ExitGuard`; U-29b's "every phase opens Folio" is now this one
+//! rule, not a list of ends): a successor it leaves behind still running —
+//! the trial it started with the handed command line after its words (over a
+//! `Stuck` whose new build is live, recorded so its receipt commits forward,
+//! ruling 3), or the applier it found at `Handoff` — opens Folio; otherwise
+//! exactly one start of what the disk names, with the handed command line
+//! after its words: the old build plainly, or with `--update-failed <journal>`
+//! after a rollback or while the journal is still `destructive` (so the start
+//! continues instead of handing itself back, and its card says *Update
+//! incomplete.*); the new build plainly once `Committed`, and before that only
+//! as a trial (`--update-trial <txn> <nonce>`); on Windows, where the install
+//! folder holds neither whole set, the rescue copy with `--update-failed`
+//! (O's own image, whose own home holds no journal). The same holds when the
+//! recovery itself fails, when its lock wait runs out, when the standalone
+//! main is refused, and on a panic. **The one exception is the run at logon
+//! that did nothing a person is owed a window for** — no command line, and no
+//! revert or finished rollback (W8, W11): nobody is waiting, and nothing is
+//! started.
 //!
 //! **A live applier at `Handoff`, on both platforms** (U-24, the
-//! coordinator's ruling 3): a process of the rescue executable that started no
-//! later than this one may be the applier O started, still waiting for O's
-//! lock; recovery leaves the handed-off transaction to it, writes nothing,
-//! waits for nothing and starts nothing — that applier opens Folio
-//! (`update_apply::an_earlier_holder`).
+//! coordinator's ruling 3; since U-34 by the window's mark): the applier O
+//! started takes the duty that a window follows as soon as it knows its
+//! transaction (`H\<txn>\owner`, `update_apply::OWNER_FILE`), before it waits
+//! for O's lock; recovery that finds `Handoff` while a live process holds that
+//! mark leaves the handed-off transaction to it, writes nothing and waits for
+//! nothing — that process is its successor, and opens Folio
+//! (`update_apply::the_window_is_theirs`). A process of the rescue image that
+//! never took the mark is not waited for.
 //!
 //! **Any other home**, reading the header:
 //!
@@ -90,8 +90,10 @@
 //!   first, for its card). The start that handed itself over is thereby made
 //!   (U-12's contract), and it cannot come back here: the ordinary start hands
 //!   over only a `destructive` class;
-//! * a `destructive` class on a home no road of this build recovers: one line,
-//!   and nothing is started.
+//! * a `destructive` class on a home no road of this build recovers: the
+//!   installed Folio with `--update-failed <journal>` before the handed
+//!   arguments, which continues past the header with *Update incomplete.*
+//!   (U-34: the exit guard's start; U-24 started nothing here).
 //!
 //! Headless, like the other argv doors: it runs before the parse and the
 //! admission in `fn main`, on a standalone main that is a worker
@@ -109,8 +111,9 @@ use bt_platform::admission::WorkerCtx;
 use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
+use crate::update_apply::{ExitGuard, Leave, Left, Opens};
 use crate::update_apply_macos::{self, Hands, Limits, Road};
-use crate::update_txn::{Class, Header, HeaderOutcome, Home};
+use crate::update_txn::{Class, Header, Home};
 
 /// **The recovery door's effects**: a lock holder's (its lines, the exchange,
 /// the check of a restored bundle), and the start of the installed Folio.
@@ -133,6 +136,17 @@ pub(crate) struct Door<'a> {
 
 /// **The door, for this process**: this executable must be a rescue build.
 pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>) -> i32 {
+    // **The smallest outer guard, first** (U-34, round 2, blocker 3): until the
+    // road's own guard carries the duty, a person's start handed here that
+    // cannot be finished ends in the failure window, shown by this process;
+    // the run at logon owes nobody.
+    let mut outer = ExitGuard::new(Unnamed {
+        world: Machine,
+        failed: None,
+    });
+    if then_launch.is_none() {
+        outer.nobody_waiting();
+    }
     let mut world = Machine;
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,
@@ -140,6 +154,8 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
             world.say(&format!(
                 "BT_UPDATE_RECOVER cannot name its own executable: {error}"
             ));
+            let left = outer.leave();
+            world.say(&format!("BT_UPDATE_RECOVER {}", left.said()));
             return 2;
         }
     };
@@ -154,6 +170,8 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
             exe.display(),
             cli::UPDATE_RECOVER_FLAG
         ));
+        let left = outer.leave();
+        world.say(&format!("BT_UPDATE_RECOVER {}", left.said()));
         return 2;
     };
     // One standalone main for both roads: a Windows member set is recovered
@@ -172,6 +190,8 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
         limits: Limits::PRODUCT,
     };
     match bt_platform::admission::enter_standalone_main("folio-update-recover", |worker| {
+        // The road's guard takes the duty over as its first statement.
+        outer.hand_on();
         match &windows {
             Some(road) => run_windows(
                 worker,
@@ -185,8 +205,133 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
         Ok(code) => code,
         Err(refused) => {
             world.say(&format!("BT_UPDATE_RECOVER {refused:?}"));
+            outer.hand_on();
+            // The home is known: this way out leaves through the exit guard
+            // too (U-34), with nothing recovered.
+            let handed = then_launch.as_deref().unwrap_or(&[]);
+            let left = match &windows {
+                Some(road) => {
+                    let mut machine = crate::update_apply_windows::Machine { log: None };
+                    let mut guard = ExitGuard::new(crate::update_apply_windows::WindowsLeave {
+                        road,
+                        world: &mut machine,
+                        handed,
+                        worker: None,
+                    });
+                    if then_launch.is_none() {
+                        guard.nobody_waiting();
+                    }
+                    guard.leave()
+                }
+                None => {
+                    let mut guard = ExitGuard::new(DoorLeave {
+                        worker: None,
+                        door: &door,
+                        world: &mut world,
+                    });
+                    if then_launch.is_none() {
+                        guard.nobody_waiting();
+                    }
+                    guard.leave()
+                }
+            };
+            world.say(&format!("BT_UPDATE_RECOVER {}", left.said()));
             2
         }
+    }
+}
+
+/// **How the recovery door leaves before it can name a home** (U-34, round 2):
+/// nothing can be started, so the failure window is shown by this process.
+struct Unnamed<W: World> {
+    world: W,
+    failed: Option<String>,
+}
+
+impl<W: World> Leave for Unnamed<W> {
+    fn say(&mut self, line: &str) {
+        self.world.say(line);
+    }
+
+    fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+        None
+    }
+
+    fn start(&mut self, _program: &Path, _words: &[OsString]) -> io::Result<()> {
+        Err(io::Error::other("nothing can be named to start"))
+    }
+
+    fn acknowledged(&mut self) -> bool {
+        false
+    }
+
+    fn show_here(&mut self, why: &str) {
+        self.failed = Some(why.to_owned());
+        self.world
+            .show_here(&crate::update_apply::failure_text(None));
+    }
+}
+
+/// **How the recovery door leaves over a home [`run`] reads** (U-34): the
+/// installed program started directly with what the disk names — for a macOS
+/// bundle's transaction `update_apply_macos::opens_now`; over a home no road
+/// of this build recovers, the installed program with `--update-failed` while
+/// the header is `destructive` (it continues past it, with *Update
+/// incomplete.*), and plainly otherwise — with the handed command line after
+/// its words.
+struct DoorLeave<'a, W: World> {
+    worker: Option<&'a WorkerCtx>,
+    door: &'a Door<'a>,
+    world: &'a mut W,
+}
+
+impl<W: World> Leave for DoorLeave<'_, W> {
+    fn say(&mut self, line: &str) {
+        self.world.say(line);
+    }
+
+    fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+        let home = self.door.home;
+        let opens = if home.installed_bundle().is_some() {
+            update_apply_macos::opens_now(self.worker, home)
+        } else {
+            let destructive = header_of(home)
+                .header
+                .is_some_and(|header| header.class == Class::Destructive);
+            Opens::Installed {
+                failed: destructive,
+            }
+        };
+        let mut words = opens.words(home);
+        words.extend_from_slice(self.door.then_launch.unwrap_or(&[]));
+        Some((self.door.installed.to_path_buf(), words))
+    }
+
+    fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()> {
+        self.world.spawn_detached(program, words)
+    }
+
+    fn acknowledged(&mut self) -> bool {
+        self.world.acknowledged(self.worker, self.door.data)
+    }
+
+    fn show_here(&mut self, why: &str) {
+        self.world.say(&format!(
+            "BT_UPDATE_EXIT no start was delivered ({why}); the failure window is shown here"
+        ));
+        self.world
+            .show_here(&crate::update_apply::failure_text(Some(self.door.home)));
+    }
+}
+
+/// The exit code a door's end answers: a start delivered, 0; none delivered
+/// (the failure window shown here), 1; otherwise `ended`, the code of what the recovery ended as (0 when
+/// nothing was recovered).
+fn code_of(left: &Left, ended: i32) -> i32 {
+    match left {
+        Left::Started(_) => 0,
+        Left::ShownHere(_) => 1,
+        _ => ended,
     }
 }
 
@@ -226,8 +371,15 @@ fn header_of(home: &Home) -> Read {
 }
 
 /// **The door over any home** — see the module header. Answers the exit
-/// code.
+/// code. Every way out leaves through the exit guard (U-34).
 pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -> i32 {
+    // Every way out, a panic included, leaves through the exit guard (U-34),
+    // made first.
+    let mut guard = ExitGuard::new(DoorLeave {
+        worker: Some(worker),
+        door,
+        world,
+    });
     let home = door.home;
     let (log, whereabouts) = log_file(home, door.data);
     let first = header_of(home);
@@ -238,7 +390,7 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
         .header
         .as_ref()
         .filter(|header| recovers_here && header.class == Class::Destructive);
-    let (did, outcome, code) = match destructive {
+    let (did, ended) = match destructive {
         Some(header) => {
             let road = Road {
                 home: home.clone(),
@@ -249,66 +401,43 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
                 limits: door.limits,
             };
             let mut logged = Logged {
-                world: &mut *world,
+                world: &mut *guard.inner().world,
                 log: &log,
             };
             let recovered =
                 update_apply_macos::recover(worker, &road, &mut logged, door.then_launch);
-            let did = format!(
-                "recovery ended {:?}, and opens {:?}",
-                recovered.ended, recovered.opens
-            );
-            let (outcome, code) = match recovered.opens.words(home) {
-                Some(mut words) => {
-                    words.extend_from_slice(door.then_launch.unwrap_or(&[]));
-                    spawn(world, door.installed, &words)
-                }
-                None => (
-                    String::from("nothing else was started"),
-                    recovered.ended.code(),
-                ),
-            };
-            (did, outcome, code)
+            guard.succeeded_by(recovered.successor);
+            if !recovered.waiting {
+                guard.nobody_waiting();
+            }
+            (
+                format!("recovery ended {:?}", recovered.ended),
+                Some(recovered.ended),
+            )
         }
         None => {
+            if door.then_launch.is_none() {
+                guard.nobody_waiting();
+            }
             let did = if recovers_here {
                 String::from("nothing to recover")
             } else {
                 String::from("nothing was recovered")
             };
-            let failed = recovers_here
-                && first
-                    .header
-                    .as_ref()
-                    .is_some_and(|header| header.outcome == HeaderOutcome::RolledBack);
-            let unfinished = first
-                .header
-                .as_ref()
-                .is_some_and(|header| header.class == Class::Destructive);
-            let (outcome, code) = match door.then_launch {
-                None => (String::from("nothing was touched"), 0),
-                Some(_) if unfinished => (
-                    String::from(
-                        "the update is not finished and no road of this build finishes it here; Folio was not started",
-                    ),
-                    1,
-                ),
-                Some(argv) => {
-                    let mut words = Vec::new();
-                    if failed {
-                        words.extend(update_apply_macos::failed_words(home));
-                    }
-                    words.extend_from_slice(argv);
-                    spawn(world, door.installed, &words)
-                }
-            };
-            (did, outcome, code)
+            (did, None)
         }
     };
-    let line = format!(
-        "BT_UPDATE_RECOVER {}; {did}; {outcome}{whereabouts}",
-        first.state
+    let left = guard.leave();
+    let code = code_of(
+        &left,
+        ended.as_ref().map_or(0, update_apply_macos::Ended::code),
     );
+    let line = format!(
+        "BT_UPDATE_RECOVER {}; {did}; {}{whereabouts}",
+        first.state,
+        left.said()
+    );
+    let world = &mut *guard.inner().world;
     world.say(&line);
     if !crate::diagnostics::append_note(&log, &line) {
         world.say(&format!(
@@ -330,41 +459,37 @@ pub(crate) fn run_windows(
     then_launch: Option<&[OsString]>,
     world: &mut impl crate::update_apply_windows::World,
 ) -> i32 {
+    // Every way out, a panic included, leaves through the exit guard (U-34),
+    // made first.
+    let mut guard = ExitGuard::new(crate::update_apply_windows::WindowsLeave {
+        road,
+        world,
+        handed: then_launch.unwrap_or(&[]),
+        worker: Some(worker),
+    });
     let (log, whereabouts) = log_file(&road.home, &road.data);
     let recovered = crate::update_apply_windows::recover(
         worker,
         road,
         &mut LoggedWindows {
-            world: &mut *world,
+            world: &mut *guard.inner().world,
             log: &log,
         },
         then_launch,
     );
+    guard.succeeded_by(recovered.successor);
+    if !recovered.waiting {
+        guard.nobody_waiting();
+    }
+    let left = guard.leave();
     let now = header_of(&road.home);
-    let did = format!(
-        "recovery ended {:?}, and opens {:?}",
-        recovered.ended, recovered.opens
-    );
-    let (outcome, code) = match road.opening(&recovered.opens) {
-        Some((program, mut words)) => {
-            words.extend_from_slice(then_launch.unwrap_or(&[]));
-            match world.spawn_detached(program, &words) {
-                Ok(()) => (format!("started {}", program.display()), 0),
-                Err(error) => (
-                    format!("{} could not be started: {error}", program.display()),
-                    1,
-                ),
-            }
-        }
-        None => (
-            String::from("nothing else was started"),
-            recovered.ended.code(),
-        ),
-    };
     let line = format!(
-        "BT_UPDATE_RECOVER {}; {did}; {outcome}{whereabouts}",
-        now.state
+        "BT_UPDATE_RECOVER {}; recovery ended {:?}; {}{whereabouts}",
+        now.state,
+        recovered.ended,
+        left.said()
     );
+    let world = &mut *guard.inner().world;
     world.say(&line);
     if !crate::diagnostics::append_note(&log, &line) {
         world.say(&format!(
@@ -372,7 +497,7 @@ pub(crate) fn run_windows(
             log.display()
         ));
     }
-    code
+    code_of(&left, recovered.ended.code())
 }
 
 /// **A Windows world whose every line is also appended to the log** — the
@@ -417,16 +542,13 @@ impl<W: crate::update_apply_windows::World> crate::update_apply_windows::World
     fn moved(&mut self, done: &crate::update_txn::Move) {
         self.world.moved(done);
     }
-}
 
-/// Start the installed Folio with `args`; the words of the line, and the code.
-fn spawn(world: &mut impl World, installed: &Path, args: &[OsString]) -> (String, i32) {
-    match world.spawn_detached(installed, args) {
-        Ok(()) => (format!("started {}", installed.display()), 0),
-        Err(error) => (
-            format!("{} could not be started: {error}", installed.display()),
-            1,
-        ),
+    fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {
+        self.world.acknowledged(worker, data)
+    }
+
+    fn show_here(&mut self, text: &str) {
+        self.world.show_here(text);
     }
 }
 
@@ -453,6 +575,14 @@ impl<W: World> Hands for Logged<'_, W> {
 
     fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
         self.world.launch_trial(bundle, args)
+    }
+
+    fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {
+        self.world.acknowledged(worker, data)
+    }
+
+    fn show_here(&mut self, text: &str) {
+        self.world.show_here(text);
     }
 }
 
@@ -492,6 +622,14 @@ impl Hands for Machine {
     fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
         update_apply_macos::open_bundle(bundle, args)
     }
+
+    fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {
+        crate::update_apply::claimed_within(worker, data, crate::update_apply::ACKNOWLEDGED_WITHIN)
+    }
+
+    fn show_here(&mut self, text: &str) {
+        bt_platform::message_box(crate::APP_NAME, text);
+    }
 }
 
 impl World for Machine {
@@ -520,6 +658,7 @@ mod tests {
     struct Recorded {
         said: Vec<String>,
         spawned: Vec<(PathBuf, Vec<OsString>)>,
+        shown: Vec<String>,
     }
 
     impl Hands for Recorded {
@@ -537,6 +676,14 @@ mod tests {
 
         fn launch_trial(&mut self, bundle: &Path, _: &[OsString]) -> io::Result<()> {
             panic!("a Windows home never starts a trial: {bundle:?}")
+        }
+
+        fn acknowledged(&mut self, _worker: Option<&WorkerCtx>, _data: &Path) -> bool {
+            true
+        }
+
+        fn show_here(&mut self, text: &str) {
+            self.shown.push(text.to_owned());
         }
     }
 
@@ -660,41 +807,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (U-22; U-23; U-24) — **the door over a home no road of its own
-    /// recovers never starts a Folio into an unfinished transaction**: one
-    /// line, exit 1, nothing started, the journal as it was; with no command
-    /// line it says one line and exits 0; with no journal at all the handed
-    /// line is launched into the installed Folio.
+    /// RED (U-22; U-23; U-24; U-34) — **the door over a home no road of its
+    /// own recovers still opens a Folio, and never one that hands itself
+    /// back**: handed a command line, the installed Folio with
+    /// `--update-failed <journal>` first — it continues past the unfinished
+    /// header with *Update incomplete.* — exit 0, the journal as it was; with
+    /// no command line nobody is waiting and it says one line and exits 0;
+    /// with no journal at all the handed line is launched into the installed
+    /// Folio.
     ///
     /// A Windows member set is `run_windows`'s (every phase opens a Folio:
-    /// `update_apply_windows::tests::every_phase_left_by_a_dead_applier_still_opens_folio`);
-    /// the rescue copy U-23 opened here for every still-`destructive` journal
-    /// is retired (U-24, the coordinator's ruling 3).
+    /// `update_apply_windows::tests::every_phase_left_by_a_dead_applier_still_opens_folio`).
+    /// U-24 started nothing here; U-34 makes every way out of the door the exit
+    /// guard's, which starts what the disk names — `--update-failed` while the
+    /// header is `destructive`, so the start never hands itself back.
     ///
-    /// MUTATION: in `run`, start the installed Folio with the handed line for
-    /// an unfinished header too.
+    /// MUTATION: in `DoorLeave::opening`, answer `failed: false` for an
+    /// unfinished header (the start would hand itself back).
     #[test]
-    fn a_destructive_journal_on_a_home_this_door_does_not_recover_starts_nothing() {
+    fn a_destructive_journal_on_a_home_this_door_does_not_recover_opens_with_the_incomplete_card() {
         let (root, rescue) = installation("destructive", Some(Phase::Moving));
         let (home, installed) = Home::of_rescue(HostPlatform::Windows, &rescue).unwrap();
         let journal = std::fs::read(home.journal()).unwrap();
         let data = data_root(&root);
         let (code, world) = run_over(&home, &installed, Some(handed()), &data);
-        assert_eq!(code, 1);
-        assert!(world.spawned.is_empty(), "{:?}", world.spawned);
+        assert_eq!(code, 0);
+        let mut words = crate::update_apply::failed_words(&home).to_vec();
+        words.extend(handed());
+        assert_eq!(world.spawned, vec![(installed.clone(), words)]);
         assert!(world.said[0].contains("Destructive"), "{:?}", world.said);
-        assert!(
-            world.said[0].contains("was not started"),
-            "{:?}",
-            world.said
-        );
         assert_eq!(std::fs::read(home.journal()).unwrap(), journal);
 
         let (code, world) = run_over(&home, &installed, None, &data);
         assert_eq!(code, 0);
         assert!(world.spawned.is_empty());
         assert_eq!(world.said.len(), 1);
-        assert!(world.said[0].ends_with("nothing was touched"));
+        assert!(
+            world.said[0].ends_with("nobody is waiting; nothing was started"),
+            "{:?}",
+            world.said
+        );
         let _ = std::fs::remove_dir_all(&root);
 
         let (root, rescue) = installation("absent", None);

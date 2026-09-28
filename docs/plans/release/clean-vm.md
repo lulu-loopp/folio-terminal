@@ -674,7 +674,7 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
 #### 前提
 
 1. 两个候选版(A 和 B)都已签名、公证、带更新能力(`FOLIO_UPDATER=on`);A 还必须是更新
-   卡已打开的构建(`OFFERS_ENABLED`,U-31 Windows / U-32 macOS 之后)——`--update-feed`
+   卡已打开的构建(`OFFERS_ENABLED_WINDOWS` 自 U-31 起、`OFFERS_ENABLED_MACOS` 自 U-32 起)——`--update-feed`
    只换来源,不打开卡片。B 不必发布到 GitHub,见第 3 条。
 2. A 版已经通过普通 zip 路径装进客户机的 `C:\folio-vm\folio\`(§4.1 的 `unpack` 阶段)。
 3. 后继版本 B 经命令行参数 `--update-feed <file-URL>` 注入(U-30b)。带这个参数启动的那个
@@ -727,7 +727,7 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
    `open -n -a /Applications/Folio.app --args --update-feed file:///Users/folio/feed/` 启动。
 4. 客户机回到 `clean` 快照后再装候选版,每一行从同一个起点开始。
 
-#### Windows 步骤(W1–W13)
+#### Windows 步骤(W1–W15)
 
 跑法:
 
@@ -761,6 +761,8 @@ pwsh -File scripts/release/cleanvm/hard-reset-in-vm.ps1 `
 | ☐ | W11 | 回滚完成 | 日志阶段为 `RolledBack` | 旧安装已通过摘要校验 | 删除 Run 值;用 `--update-failed` 重新启动旧版;标记为 `terminal`;后续启动删除 `H\<txn>` |
 | ☐ | W12 | 提交完成,清理未完成 | 日志阶段为 `Committed`,部分清理已做 | 新版在安装目录;部分残留(backup、Run 值、rescue) | 完成剩余删除(debt);rescue 文件夹由下一次普通启动删除 |
 | ☐ | W13 | 更新被取消 | 日志阶段为 `Abandoned` | 旧安装不变,无文件被移动 | 删除入口(如有);删除 `H\<txn>`;标记为 `terminal` |
+| ☐ | W14 | 更新进行中,日志已达 `Armed`(Run 值已写);用另一程序以不含 delete 共享的方式持有 `H\journal.json`(例如 PowerShell `[IO.File]::Open(<路径>, 'Open', 'Read', 'ReadWrite')` 句柄),持续超过 2 秒 | 不断电;句柄持有覆盖 applier 的 `Armed` → `Moving` 写入 | 句柄一直持有时:`diagnostics.log` 包含重命名失败行和 `BT_UPDATE_APPLY started …`;日志停留在 `Armed`;Run 值 `FolioUpdate-<txn8>` 仍存在;无文件被移动 | applier 重试写入约 2 秒;若在此期间释放句柄则更新正常完成;若未释放,applier 以 `Failed` 结束并以 `--update-failed <journal>` 启动已安装版本(卡片显示「Update incomplete.」并指出文件夹);下次启动或登录回退到 `Prepared` |
+| ☐ | W15 | 按「重启以更新」前,用另一程序以完全不共享的方式持有 rescue 可执行文件 `H\<txn>\rescue\folio.exe`(例如 PowerShell `[IO.File]::Open(<路径>, 'Open', 'Read', 'None')` 句柄),使其启动被拒绝;旧 Folio 退出后再释放句柄。(启动仅迟缓——应答未在 15 秒 `HANDOFF_DEADLINE` 内到达——的路径由单元测试 `a_hand_over_with_no_answer_in_time_still_opens_folio_once` 覆盖,不属于本行。) | 不断电;句柄持有期间 applier 启动被拒绝 | `diagnostics.log` 包含交接结果行("its applier could not be started" / was abandoned);计时行("Handoff written in N ms, the applier's start took N ms")仅在启动调用先于旧 Folio 退出返回时存在;以及 "leaving after an update: started …";日志阶段为 `Abandoned`(terminal);`H\<txn>\owner` 记录旧 Folio 的 pid | applier 未运行,无文件被移动;旧 Folio 退出后接管窗口职责(无其他人接管)并以普通方式启动已安装版本一次(日志为 terminal);该启动退役事务并正常打开;出现一个 Folio 窗口 |
 
 #### macOS 步骤(M1–M11)
 
@@ -1114,7 +1116,7 @@ Error: Cannot read the virtual machine configuration file
 | 已验证:`new-vm.ps1` 的幂等拒绝与 `-Stage install` 的前置检查 | 本机跑过(用临时目录) |
 | **已验证**:两台机的 `clean` 快照已回到出厂 `Restricted`(五个作用域全 `Undefined`) | 2026-08-30 逐台实测,§3.4d |
 | **已验证**:加密机上 `deleteSnapshot` 报「Cannot read the virtual machine configuration file」并退 `-1`,而快照确实删掉了 | 同上;判据用 `listSnapshots` |
-| §4.4 更新器:后继版本注入口 | **已有(U-30b)** —— `--update-feed <file-URL>`,只在带它启动的进程里生效,校验和与签名者检查不变;见 §4.4 前提 3。仍待:`OFFERS_ENABLED` 由 U-31/U-32 打开;`hard-reset-in-vm.ps1 -Feed` 未在真虚机上跑过 |
+| §4.4 更新器:后继版本注入口 | **已有(U-30b)** —— `--update-feed <file-URL>`,只在带它启动的进程里生效,校验和与签名者检查不变;见 §4.4 前提 3。Windows 的 `OFFERS_ENABLED_WINDOWS` 已由 U-31 打开;仍待:`OFFERS_ENABLED_MACOS` 由 U-32 打开;`hard-reset-in-vm.ps1 -Feed` 未在真虚机上跑过 |
 | §4.4 更新器:macOS 断电验收虚机 | **不存在** —— Mac mini 无可处置的 macOS 客户机(见 §Clean-machine coverage 的数字);Mac mini 本身不做断电;`kill -9` 不等价于断电(进程死后文件系统缓存仍会落盘,内核不断电)。待硬件条件或 M 表近似方案裁决后补 |
 | §4.4 更新器:`hard-reset-in-vm.ps1` 和 `in-guest-updater.ps1` | **未验证** —— 脚本已写,`-WhatIf` 已跑通;未在真虚机上跑过 |
 
