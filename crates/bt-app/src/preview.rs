@@ -7452,8 +7452,8 @@ pub enum LinkAction {
 ///   names `DESIGN.md`, and the anchor is simply a part of the address this
 ///   window cannot honour yet;
 /// * `file:` is unwrapped to the path it carries by the one `file:` reader this
-///   product has, [`bt_platform::file_uri_to_path`] — so `file:///Users/a.md`
-///   is `/Users/a.md` on a Mac and `file:///C:/a.md` is `C:\a.md` on Windows,
+///   product has, [`bt_platform::file_uri_to_path`] — so `file:///Users/alice/a.md`
+///   is `/Users/alice/a.md` on a Mac and `file:///C:/a.md` is `C:\a.md` on Windows,
 ///   each platform's own grammar (B-AUDIT-046 PRV-2);
 /// * anything else carrying a `scheme:` is [`LinkAction::Scheme`], *except*
 ///   that a bare Windows drive letter (`C:\x`) is a path and not a scheme — one
