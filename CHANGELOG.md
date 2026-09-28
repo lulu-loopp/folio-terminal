@@ -22,9 +22,7 @@ All notable changes to Folio are recorded here. The format follows
   use one word for each thing across every page.
 - The update card, the settings update row, the shortcut panel's zoom
   actions, the profile editor's login switch, and the shutdown screen all
-  carry Chinese translations. `CHINESE_PENDING` then was empty; it now
-  lists the update card's "Updated." (both platforms), whose Chinese
-  follows in its own ticket before the release.
+  carry Chinese translations. `CHINESE_PENDING` is empty.
 - When the settings gear wears its update dot, clicking it opens Settings at
   the update row, which wears the same dot for as long as you stay on the page;
   the About page's Version row names the newer version and carries the same

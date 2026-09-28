@@ -5528,7 +5528,7 @@ impl Text {
             Self::UpdateCardNothingChanged => pick(lang, "Nothing changed.", "什么都没变。"),
             Self::UpdateCardRestored => pick(lang, "Previous version restored.", "已恢复旧版。"),
             Self::UpdateCardIncomplete => pick(lang, "Update incomplete.", "更新未完成。"),
-            Self::UpdateCardUpdated => pick(lang, "Updated.", "Updated."),
+            Self::UpdateCardUpdated => pick(lang, "Updated.", "已更新。"),
             Self::UpdateFailedUnsupported => pick(
                 lang,
                 "Folio cannot update itself here.",
@@ -6552,11 +6552,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 2] = [
-        // U-32: the card of a `Stuck` trial that committed forward.
-        (Self::UpdateCardUpdated, HostPlatform::Windows),
-        (Self::UpdateCardUpdated, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
