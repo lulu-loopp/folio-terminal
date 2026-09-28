@@ -2457,6 +2457,36 @@ guard opens the one window — and the other order, O first and a late P second,
 also gives exactly one start. It goes red when O starts whatever the mark
 says, and when P runs its road whatever `take_the_window` answers.
 
+**A start counts only when it is acknowledged (round 2, blocker 2).** Round
+1 took a successful `CreateProcess` for a delivered window. Now a guard's
+start is delivered only when a Folio holds the data directory's claim within
+`update_apply::ACKNOWLEDGED_WITHIN` (20 s: a start of an image the machine has
+run takes a second or two; W9's first start took 5.9 s) —
+`update_apply::claimed_within`, asked every quarter second through the
+worker's wait door. The Folio that holds it is the one started, or one already
+running, which that start hands its launch to (the single-instance hand-over);
+either has a window. A start that died before it got that far, or never
+started, is not acknowledged, and the guard starts the next program the rule
+names (Windows: the rescue copy with `--update-failed`; O: the rescue copy the
+journal names). **When no start is delivered, the guard's own process shows
+the failure window** — it is a Folio build: *Update incomplete.* and the
+installation home's folder in a message box (`Leave::show_here`,
+`update_apply::failure_text`), no spawn. O shows it on its main thread once
+its guard, which runs on a worker of its own so that the acknowledgement's
+wait sleeps through a worker's door, has answered: an owner-thread door
+admitted only on the way out (`doors::UpdateLeave`, §5.3 row 29, bounded by
+`update_handoff::LEAVE_WITHIN`, 45 s — two starts with their
+acknowledgements, and a margin).
+
+**The irrecoverable boundary, honestly.** What no process can survive from
+inside: the operating system refusing to show a message box at all (the last
+resort is a window of this process, and nothing smaller exists), and a road
+process ended from outside — a kill, a power cut — before its guard runs. The
+second is what the entrance at logon (from `Armed` on) and the next start
+finish; before `Armed` there is no entrance, and the next start the person
+makes reverts and opens the old build. A trial that is running and has
+committed, and then crashes, is a crash of an ordinary Folio.
+
 **The applier's own writes** (U-34's first half). `update_apply::write_journal`
 asks `install_txn::durable_write` again, with a pause from 10 ms doubling
 through the worker's wait door, for about 2 s in all

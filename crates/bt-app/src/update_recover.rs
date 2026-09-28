@@ -198,6 +198,7 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
                         road,
                         world: &mut machine,
                         handed,
+                        worker: None,
                     });
                     if then_launch.is_none() {
                         guard.nobody_waiting();
@@ -260,15 +261,27 @@ impl<W: World> Leave for DoorLeave<'_, W> {
     fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()> {
         self.world.spawn_detached(program, words)
     }
+
+    fn acknowledged(&mut self) -> bool {
+        self.world.acknowledged(self.worker, self.door.data)
+    }
+
+    fn show_here(&mut self, why: &str) {
+        self.world.say(&format!(
+            "BT_UPDATE_EXIT no start was delivered ({why}); the failure window is shown here"
+        ));
+        self.world
+            .show_here(&crate::update_apply::failure_text(Some(self.door.home)));
+    }
 }
 
-/// The exit code a door's end answers: a start made, 0; a start that failed,
-/// 1; otherwise `ended`, the code of what the recovery ended as (0 when
+/// The exit code a door's end answers: a start delivered, 0; none delivered
+/// (the failure window shown here), 1; otherwise `ended`, the code of what the recovery ended as (0 when
 /// nothing was recovered).
 fn code_of(left: &Left, ended: i32) -> i32 {
     match left {
         Left::Started(_) => 0,
-        Left::NotStarted(..) => 1,
+        Left::ShownHere(_) => 1,
         _ => ended,
     }
 }
@@ -401,6 +414,7 @@ pub(crate) fn run_windows(
         road,
         world,
         handed: then_launch.unwrap_or(&[]),
+        worker: Some(worker),
     });
     let recovered = crate::update_apply_windows::recover(
         worker,
@@ -476,6 +490,14 @@ impl<W: crate::update_apply_windows::World> crate::update_apply_windows::World
     fn moved(&mut self, done: &crate::update_txn::Move) {
         self.world.moved(done);
     }
+
+    fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {
+        self.world.acknowledged(worker, data)
+    }
+
+    fn show_here(&mut self, text: &str) {
+        self.world.show_here(text);
+    }
 }
 
 /// **A world whose every line is also appended to the log** — the
@@ -501,6 +523,14 @@ impl<W: World> Hands for Logged<'_, W> {
 
     fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
         self.world.launch_trial(bundle, args)
+    }
+
+    fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {
+        self.world.acknowledged(worker, data)
+    }
+
+    fn show_here(&mut self, text: &str) {
+        self.world.show_here(text);
     }
 }
 
@@ -540,6 +570,14 @@ impl Hands for Machine {
     fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
         update_apply_macos::open_bundle(bundle, args)
     }
+
+    fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {
+        crate::update_apply::claimed_within(worker, data, crate::update_apply::ACKNOWLEDGED_WITHIN)
+    }
+
+    fn show_here(&mut self, text: &str) {
+        bt_platform::message_box(crate::APP_NAME, text);
+    }
 }
 
 impl World for Machine {
@@ -568,6 +606,7 @@ mod tests {
     struct Recorded {
         said: Vec<String>,
         spawned: Vec<(PathBuf, Vec<OsString>)>,
+        shown: Vec<String>,
     }
 
     impl Hands for Recorded {
@@ -585,6 +624,14 @@ mod tests {
 
         fn launch_trial(&mut self, bundle: &Path, _: &[OsString]) -> io::Result<()> {
             panic!("a Windows home never starts a trial: {bundle:?}")
+        }
+
+        fn acknowledged(&mut self, _worker: Option<&WorkerCtx>, _data: &Path) -> bool {
+            true
+        }
+
+        fn show_here(&mut self, text: &str) {
+            self.shown.push(text.to_owned());
         }
     }
 

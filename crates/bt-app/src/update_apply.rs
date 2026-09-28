@@ -690,11 +690,64 @@ pub(crate) trait Leave {
     /// # Errors
     /// It could not be started.
     fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()>;
-    /// **What to start when [`Leave::opening`]'s program would not start**:
-    /// the next program the disk rule names — on Windows the rescue copy with
-    /// `--update-failed`, O's own image, known to run — or `None`.
+    /// **What to start when [`Leave::opening`]'s program would not start**, or
+    /// started and never acknowledged: the next program the disk rule names —
+    /// on Windows the rescue copy with `--update-failed`, O's own image, known
+    /// to run — or `None`.
     fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
         None
+    }
+    /// **Whether the start just made was delivered** (round 2, blocker 2):
+    /// a Folio holds the data directory's claim within
+    /// [`ACKNOWLEDGED_WITHIN`] ([`claimed_within`]) — the one that was
+    /// started, or one already running, which that start hands its launch to.
+    /// A start that died, or never got that far, is not.
+    fn acknowledged(&mut self) -> bool;
+    /// **The failure window, in this very process** (round 2, blocker 2): when
+    /// no start was delivered, this process — a Folio build — shows *Update
+    /// incomplete.* and the folder itself, without a spawn. `why` is what
+    /// failed.
+    fn show_here(&mut self, why: &str);
+}
+
+/// **How long a start a road process makes has to be acknowledged** (U-34,
+/// round 2): the Folio it started — or one already running — holding the data
+/// directory's claim. A start of an image the machine has run takes a second
+/// or two; 20 s leaves room for a first start a scanner reads whole (W9's
+/// 5.9 s) and is still a bound a person waiting after *Restart to update*
+/// meets only when something is wrong.
+pub(crate) const ACKNOWLEDGED_WITHIN: Duration = Duration::from_secs(20);
+
+/// **Whether a Folio holds the data directory `data`'s claim within
+/// `within`** — the acknowledgement of a start (round 2, blocker 2). Asked
+/// every quarter second through the wait door; without a worker to sleep on,
+/// asked once. A claim this process could take is let go at once (the start
+/// that should hold it has not yet); one that cannot be asked about is taken
+/// as held — no answer is coming, and a start not proven dead is not started
+/// twice.
+pub(crate) fn claimed_within(worker: Option<&WorkerCtx>, data: &Path, within: Duration) -> bool {
+    let until = Instant::now() + within;
+    loop {
+        match crate::persist::try_claim(data) {
+            Err(_) => return true,
+            Ok(claim) => drop(claim),
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        let Some(worker) = worker.filter(|_| !left.is_zero()) else {
+            return false;
+        };
+        bt_platform::wait::sleep_within(worker, Duration::from_millis(250).min(left));
+    }
+}
+
+/// **The failure window's words** (round 2): the update card's *Update
+/// incomplete.* and the installation home's folder, as `--update-failed`'s
+/// card says them.
+pub(crate) fn failure_text(home: Option<&Home>) -> String {
+    let incomplete = crate::i18n::Text::UpdateCardIncomplete.text();
+    match home {
+        Some(home) => format!("{incomplete}\n\n{}", home.root().display()),
+        None => incomplete.to_owned(),
     }
 }
 
@@ -711,12 +764,13 @@ pub(crate) enum Left {
     /// The recovery run at logon, with nothing done and nobody waiting (W8):
     /// nothing was started.
     NobodyWaiting,
-    /// Nothing could be named to start: no home to read.
-    Nameless,
-    /// This program was started.
+    /// This program was started, and acknowledged: a Folio holds the data
+    /// directory.
     Started(PathBuf),
-    /// This program could not be started, for this reason.
-    NotStarted(PathBuf, String),
+    /// No start was delivered — nothing could be named, the operating system
+    /// refused each program, or each started and never took the data
+    /// directory — and this process showed the failure window itself; why.
+    ShownHere(String),
 }
 
 impl Left {
@@ -731,10 +785,9 @@ impl Left {
                 String::from("this process never took the duty to open Folio; nothing was started")
             }
             Left::NobodyWaiting => String::from("nobody is waiting; nothing was started"),
-            Left::Nameless => String::from("nothing could be named to start"),
             Left::Started(program) => format!("started {}", program.display()),
-            Left::NotStarted(program, error) => {
-                format!("{} could not be started: {error}", program.display())
+            Left::ShownHere(why) => {
+                format!("no start was delivered ({why}); the failure window was shown here")
             }
         }
     }
@@ -755,9 +808,14 @@ impl Left {
 /// Otherwise it starts what the disk names at that instant ([`Leave::opening`]:
 /// the installed build, with `--update-failed <journal>` while the journal is
 /// not over; the new build before `Committed` only as a trial; the rescue copy
-/// where neither whole set is installed) — and, when that program will not
-/// start, the next one the rule names ([`Leave::fallback`]) before it gives up
-/// with one line. **Two exceptions**: a process that does not have the duty a
+/// where neither whole set is installed). A start is delivered only when it is
+/// acknowledged ([`Leave::acknowledged`]: a Folio holds the data directory);
+/// otherwise the next program the rule names ([`Leave::fallback`]); and when
+/// no start is delivered, this process shows the failure window itself
+/// ([`Leave::show_here`]). **The irrecoverable boundary** is what no process
+/// can survive from inside: the operating system refusing to show a window at
+/// all, or this process ended from outside (a kill, a power cut — the entrance
+/// at logon and the next start finish those). **Two exceptions**: a process that does not have the duty a
 /// window follows ([`OWNER_FILE`], [`ExitGuard::not_mine`]), and the recovery
 /// run at logon that did nothing a person is owed a window for — nobody is
 /// waiting ([`ExitGuard::nobody_waiting`]).
@@ -835,23 +893,48 @@ impl<L: Leave> ExitGuard<L> {
 
     /// The start the disk names, or its fallback.
     fn start(&mut self) -> Left {
+        let mut why = Vec::new();
         match self.leave.opening() {
-            None => Left::Nameless,
-            Some((program, words)) => match self.leave.start(&program, &words) {
-                Ok(()) => Left::Started(program),
-                Err(error) => match self.leave.fallback() {
-                    Some((next, words)) if next != program => match self.leave.start(&next, &words)
-                    {
-                        Ok(()) => Left::Started(next),
-                        Err(again) => Left::NotStarted(
-                            next,
-                            format!("{again}, after {}: {error}", program.display()),
-                        ),
-                    },
-                    _ => Left::NotStarted(program, error.to_string()),
-                },
-            },
+            None => why.push(String::from("nothing could be named to start")),
+            Some((program, words)) => {
+                if let Some(left) = self.deliver(&program, &words, &mut why) {
+                    return left;
+                }
+                if let Some((next, words)) =
+                    self.leave.fallback().filter(|(next, _)| *next != program)
+                    && let Some(left) = self.deliver(&next, &words, &mut why)
+                {
+                    return left;
+                }
+            }
         }
+        let why = why.join("; ");
+        self.leave.show_here(&why);
+        Left::ShownHere(why)
+    }
+
+    /// One start, and its acknowledgement: `Some` once delivered; otherwise
+    /// what failed is added to `why`.
+    fn deliver(
+        &mut self,
+        program: &Path,
+        words: &[OsString],
+        why: &mut Vec<String>,
+    ) -> Option<Left> {
+        match self.leave.start(program, words) {
+            Ok(()) if self.leave.acknowledged() => {
+                return Some(Left::Started(program.to_path_buf()));
+            }
+            Ok(()) => why.push(format!(
+                "{} started and no Folio took the data directory",
+                program.display()
+            )),
+            Err(error) => why.push(format!(
+                "{} could not be started: {error}",
+                program.display()
+            )),
+        }
+        None
     }
 }
 

@@ -237,6 +237,14 @@ pub(crate) trait Hands {
     /// # Errors
     /// `open` could not be started.
     fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()>;
+    /// **Whether a start just made was acknowledged** (U-34, round 2): a Folio
+    /// holds the data directory `data` within
+    /// `update_apply::ACKNOWLEDGED_WITHIN`, asked through `worker`'s wait door
+    /// (`update_apply::claimed_within`).
+    fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool;
+    /// **The failure window, in this process** (U-34, round 2): `text` in an
+    /// alert.
+    fn show_here(&mut self, text: &str);
 }
 
 /// **The applier's effects that a test stands in for**: a lock holder's, and
@@ -337,6 +345,8 @@ pub(crate) struct MacLeave<'a, W: World> {
     pub(crate) worker: Option<&'a WorkerCtx>,
     pub(crate) home: &'a Home,
     pub(crate) world: &'a mut W,
+    /// The data directory a started Folio takes: the acknowledgement.
+    pub(crate) data: &'a Path,
 }
 
 impl<W: World> Leave for MacLeave<'_, W> {
@@ -352,6 +362,18 @@ impl<W: World> Leave for MacLeave<'_, W> {
 
     fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()> {
         self.world.relaunch(program, words)
+    }
+
+    fn acknowledged(&mut self) -> bool {
+        self.world.acknowledged(self.worker, self.data)
+    }
+
+    fn show_here(&mut self, why: &str) {
+        self.world.say(&format!(
+            "BT_UPDATE_EXIT no start was delivered ({why}); the failure window is shown here"
+        ));
+        self.world
+            .show_here(&crate::update_apply::failure_text(Some(self.home)));
     }
 }
 
@@ -411,6 +433,7 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
         worker: None,
         home: &home,
         world: &mut world,
+        data: &data,
     })
     .leave();
     world.say(&format!("BT_UPDATE_APPLY {}", left.said()));
@@ -448,6 +471,7 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
         worker: Some(worker),
         home: &road.home,
         world,
+        data: &road.data,
     });
     // **The window's duty first** (U-34, `update_apply::OWNER_FILE`): taken
     // before the wait for O's lock, while O still runs. An applier that does
@@ -1517,6 +1541,14 @@ impl Hands for Machine {
 
     fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
         open_bundle(bundle, args)
+    }
+
+    fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {
+        crate::update_apply::claimed_within(worker, data, crate::update_apply::ACKNOWLEDGED_WITHIN)
+    }
+
+    fn show_here(&mut self, text: &str) {
+        bt_platform::message_box(crate::APP_NAME, text);
     }
 }
 

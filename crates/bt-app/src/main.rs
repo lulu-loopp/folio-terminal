@@ -62733,9 +62733,12 @@ impl FolioApp {
             quit::Handoff::Owed => {
                 // The exit guard is armed with the transaction whose window's
                 // mark decides who opens Folio (U-34).
+                let data = persist::storage_dir();
                 update_handoff::arm(match app.update_job.staged() {
-                    Some(staged) => update_handoff::Leaving::over(&staged.home, staged.journal.txn),
-                    None => update_handoff::Leaving::nothing_staged(),
+                    Some(staged) => {
+                        update_handoff::Leaving::over(&staged.home, staged.journal.txn, &data)
+                    }
+                    None => update_handoff::Leaving::nothing_staged(&data),
                 });
                 let sent = app
                     .update_job
@@ -70696,7 +70699,7 @@ fn install_panic_log_hook() {
         // **An update's exit guard runs on this road too** (U-34): a panic after
         // the hand-over leaves the applier or starts Folio again, as the
         // process's ordinary end does.
-        let _ = update_handoff::leave_armed();
+        let _ = update_handoff::leave_in_panic();
         eprintln!(
             "{}",
             diagnostics::run_footer(
@@ -71393,7 +71396,7 @@ fn main() -> Result<()> {
     // here, with the loop over and the session's sentinel gone, after letting
     // go of the data directory's claim, so that start is the writer. Nothing
     // at all for any other run.
-    let _ = update_handoff::leave_armed();
+    let _ = bt_platform::admission::admitted::<doors::UpdateLeave, _>(update_handoff::leave_armed);
     // **And now the process leaves, by the one road a WebView2 host may take**
     // (§7.35). Everything this program owns has been let go of above and inside
     // the loop — the shells, the controllers, the browsers under a deadline, the

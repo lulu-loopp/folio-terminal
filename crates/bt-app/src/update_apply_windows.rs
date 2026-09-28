@@ -209,6 +209,12 @@ pub(crate) trait World {
     /// One move of the flip, or of its rollback, is done — the instant
     /// between two moves.
     fn moved(&mut self, _done: &Move) {}
+    /// **Whether a start just made was acknowledged**: a Folio holds the data
+    /// directory `data` within `update_apply::ACKNOWLEDGED_WITHIN`, asked
+    /// through `worker`'s wait door (`update_apply::claimed_within`).
+    fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool;
+    /// **The failure window, in this process**: `text` in a message box.
+    fn show_here(&mut self, text: &str);
 }
 
 /// **One Windows road**: the home, the installed program it replaces, the
@@ -280,6 +286,9 @@ pub(crate) struct WindowsLeave<'a, W: World> {
     pub(crate) road: &'a Road,
     pub(crate) world: &'a mut W,
     pub(crate) handed: &'a [OsString],
+    /// The worker whose wait door the acknowledgement's wait sleeps through;
+    /// `None` where none was lent (then it is asked once).
+    pub(crate) worker: Option<&'a WorkerCtx>,
 }
 
 impl<W: World> Leave for WindowsLeave<'_, W> {
@@ -303,6 +312,18 @@ impl<W: World> Leave for WindowsLeave<'_, W> {
         let (program, mut words) = self.road.opening(&Opens::Rescue);
         words.extend_from_slice(self.handed);
         Some((program.to_path_buf(), words))
+    }
+
+    fn acknowledged(&mut self) -> bool {
+        self.world.acknowledged(self.worker, &self.road.data)
+    }
+
+    fn show_here(&mut self, why: &str) {
+        self.world.say(&format!(
+            "BT_UPDATE_EXIT no start was delivered ({why}); the failure window is shown here"
+        ));
+        self.world
+            .show_here(&crate::update_apply::failure_text(Some(&self.road.home)));
     }
 }
 
@@ -361,6 +382,7 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
         road: &road,
         world: &mut world,
         handed: &[],
+        worker: None,
     })
     .leave();
     World::say(&mut world, &format!("BT_UPDATE_APPLY {}", left.said()));
@@ -387,6 +409,7 @@ pub(crate) fn apply(
         road,
         world,
         handed: &[],
+        worker: Some(worker),
     });
     // **The window's duty first** (U-34, `update_apply::OWNER_FILE`): taken
     // before the wait for O's lock, while O still runs. An applier that does
@@ -1440,6 +1463,14 @@ impl World for Machine {
 
     fn disarm(&mut self, txn: TxnId) -> Result<(), String> {
         bt_platform::logon_hook::disarm(txn.bytes()).map_err(|refusal| refusal.to_string())
+    }
+
+    fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {
+        crate::update_apply::claimed_within(worker, data, crate::update_apply::ACKNOWLEDGED_WITHIN)
+    }
+
+    fn show_here(&mut self, text: &str) {
+        bt_platform::message_box(crate::APP_NAME, text);
     }
 
     fn is_armed(&mut self, txn: TxnId) -> Result<bool, String> {

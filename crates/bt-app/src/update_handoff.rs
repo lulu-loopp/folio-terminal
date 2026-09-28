@@ -58,8 +58,10 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::sync::mpsc::Receiver;
-use std::time::Instant;
+use std::sync::mpsc::{self, Receiver};
+use std::time::{Duration, Instant};
+
+use bt_platform::admission::{WaitToken, WorkerCtx, doors};
 
 use bt_platform::install_flip::Running;
 use bt_platform::install_txn::{self, Held};
@@ -98,6 +100,11 @@ pub(crate) trait Spawner: Send {
     /// # Errors
     /// The operating system would not start it.
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running>;
+    /// **Whether a start just made was acknowledged** (U-34, round 2): a
+    /// Folio holds the data directory `data` within
+    /// `update_apply::ACKNOWLEDGED_WITHIN`, asked through `worker`'s wait door
+    /// (`update_apply::claimed_within`).
+    fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool;
 }
 
 /// **The product's spawner**: `bt_platform::quiet_command` — the door for a
@@ -113,6 +120,25 @@ impl Spawner for Detached {
             pid,
             started: bt_platform::install_flip::started_of(pid).unwrap_or(0),
         })
+    }
+
+    fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {
+        crate::update_apply::claimed_within(worker, data, crate::update_apply::ACKNOWLEDGED_WITHIN)
+    }
+}
+
+/// **The panic hook's spawner** (round 2, finding 5): the same start, taken as
+/// delivered at once — the hook waits for nothing, enumerates nothing and
+/// opens no log; the hook's own message box is the window this crash owes.
+struct Unwaited;
+
+impl Spawner for Unwaited {
+    fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running> {
+        Detached.spawn_detached(program, args)
+    }
+
+    fn acknowledged(&mut self, _worker: Option<&WorkerCtx>, _data: &Path) -> bool {
+        true
     }
 }
 
@@ -275,21 +301,29 @@ pub(crate) fn took_line(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Leaving {
     pub(crate) window: Option<(Home, TxnId)>,
+    /// The data directory O held: the Folio it starts takes it, which is the
+    /// start's acknowledgement.
+    pub(crate) data: PathBuf,
 }
 
 impl Leaving {
-    /// The transaction `txn` in `home`, handed over or about to be.
+    /// The transaction `txn` in `home`, handed over or about to be, by a
+    /// process whose data directory is `data`.
     #[must_use]
-    pub(crate) fn over(home: &Home, txn: TxnId) -> Self {
+    pub(crate) fn over(home: &Home, txn: TxnId, data: &Path) -> Self {
         Self {
             window: Some((home.clone(), txn)),
+            data: data.to_path_buf(),
         }
     }
 
     /// No transaction to read: O starts Folio plainly.
     #[must_use]
-    pub(crate) fn nothing_staged() -> Self {
-        Self { window: None }
+    pub(crate) fn nothing_staged(data: &Path) -> Self {
+        Self {
+            window: None,
+            data: data.to_path_buf(),
+        }
     }
 
     /// **Leave, through the exit guard** (`update_apply::ExitGuard`), as `me`:
@@ -297,12 +331,20 @@ impl Leaving {
     /// live applier that has it opens the window, and nothing is started
     /// here; otherwise `program`, the installed build (this process's own
     /// executable), is started with what the header names.
-    pub(crate) fn leave(self, me: Running, program: &Path, spawner: &mut dyn Spawner) -> Left {
+    pub(crate) fn leave(
+        self,
+        me: Running,
+        program: &Path,
+        spawner: &mut dyn Spawner,
+        worker: Option<&WorkerCtx>,
+    ) -> Left {
         let home = self.window.as_ref().map(|(home, _)| home.clone());
         let mut guard = ExitGuard::new(OldLeave {
             program,
             spawner,
             home: home.as_ref(),
+            data: &self.data,
+            worker,
         });
         if let Some((home, txn)) = &self.window
             && let Window::Theirs(owner) = crate::update_apply::take_the_window(home, *txn, me)
@@ -323,6 +365,8 @@ struct OldLeave<'a> {
     program: &'a Path,
     spawner: &'a mut dyn Spawner,
     home: Option<&'a Home>,
+    data: &'a Path,
+    worker: Option<&'a WorkerCtx>,
 }
 
 impl Leave for OldLeave<'_> {
@@ -349,6 +393,31 @@ impl Leave for OldLeave<'_> {
 
     fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()> {
         self.spawner.spawn_detached(program, words).map(drop)
+    }
+
+    /// The rescue copy the journal names, with `--update-failed`: O's own
+    /// image, copied, whose own home holds no journal.
+    fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+        let home = self.home?;
+        let bytes = file_reads::read(Lane::UpdateJournal, home.journal()).ok()?;
+        let journal = Journal::parse(&bytes).ok()?;
+        Some((
+            home.rescue_program(&journal.rescue),
+            crate::update_apply::failed_words(home).to_vec(),
+        ))
+    }
+
+    fn acknowledged(&mut self) -> bool {
+        self.spawner.acknowledged(self.worker, self.data)
+    }
+
+    /// Nothing is shown from the worker the guard runs on: the process's main
+    /// thread shows the failure window once the guard has answered
+    /// ([`leave_armed`]), so the window outlives no wait.
+    fn show_here(&mut self, why: &str) {
+        crate::diagnostics::note(&format!(
+            "Folio: no start after the update was delivered ({why})"
+        ));
     }
 }
 
@@ -391,21 +460,69 @@ pub(crate) fn arm(leaving: Leaving) {
     }
 }
 
-/// **O's exit guard, spent** (U-34): at the very end of the process — the loop
-/// has returned, the session's sentinel is gone — or in a panic after the
-/// hand-over. First this process lets go of its data directory's claim, so the
-/// start it makes is the writer and not a launch handed back to a Folio that
-/// is leaving; then the exit guard. `None` when no update was handed over.
-pub(crate) fn leave_armed() -> Option<Left> {
-    // Never waits: this also runs in the panic hook.
-    let leaving = ARMED.try_lock().ok()?.take()?;
+/// **How long the process's end waits for its exit guard** (§5.3 row 29): the
+/// guard's two starts, each with its acknowledgement, and a margin.
+pub(crate) const LEAVE_WITHIN: Duration = Duration::from_secs(45);
+
+/// **O's exit guard, spent** (U-34) — an owner-thread door (`doors::UpdateLeave`,
+/// §5.3 row 29), admitted once at the very end of `fn main`: the loop has
+/// returned and the session's sentinel is gone. First this process lets go of
+/// its data directory's claim, so the start it makes is the writer and not a
+/// launch handed back to a Folio that is leaving; then the exit guard runs on
+/// a worker of its own — its acknowledgement waits through that worker's wait
+/// door — and this thread waits for its answer, bounded by [`LEAVE_WITHIN`].
+/// When no start was delivered, this thread shows the failure window itself
+/// before the process ends. `None` when nothing was armed.
+pub(crate) fn leave_armed(_token: WaitToken<'_, doors::UpdateLeave>) -> Option<Left> {
+    let leaving = ARMED.lock().ok()?.take()?;
     crate::persist::let_go_of_every_claim();
+    let home = leaving.window.as_ref().map(|(home, _)| home.clone());
     let left = match std::env::current_exe() {
-        Ok(program) => leaving.leave(crate::update_apply::this_process(), &program, &mut Detached),
-        Err(error) => Left::NotStarted(PathBuf::new(), error.to_string()),
+        Err(error) => Left::ShownHere(format!("this program cannot be named: {error}")),
+        Ok(program) => {
+            let me = crate::update_apply::this_process();
+            let (answer, answered) = mpsc::channel();
+            match bt_platform::spawn_at_priority(
+                "folio-update-leave",
+                bt_platform::ThreadPriority::BelowNormal,
+                move |worker| {
+                    let _ = answer.send(leaving.leave(me, &program, &mut Detached, Some(worker)));
+                },
+            ) {
+                Ok(_) => answered.recv_timeout(LEAVE_WITHIN).unwrap_or_else(|_| {
+                    Left::ShownHere(String::from("the exit guard did not answer in time"))
+                }),
+                Err(error) => Left::ShownHere(format!("no worker for the exit guard: {error}")),
+            }
+        }
     };
+    if matches!(left, Left::ShownHere(_)) {
+        bt_platform::message_box(
+            crate::APP_NAME,
+            &crate::update_apply::failure_text(home.as_ref()),
+        );
+    }
     crate::diagnostics::note(&format!("Folio: leaving after an update: {}", left.said()));
     Some(left)
+}
+
+/// **O's exit guard in its panic hook** (U-34, round 2, finding 5): the
+/// deliberately small road — never waits for a lock another thread holds (the
+/// armed slot and the claim table are only tried), takes the window's mark,
+/// makes one start and takes it as delivered: no wait, no process list, no
+/// log. The hook's own message box is this crash's window; the process's
+/// ordinary end ([`leave_armed`]) carries the guarantee. `None` when nothing
+/// was armed, or the slot is held.
+pub(crate) fn leave_in_panic() -> Option<Left> {
+    let leaving = ARMED.try_lock().ok()?.take()?;
+    crate::persist::let_go_of_every_claim();
+    let program = std::env::current_exe().ok()?;
+    Some(leaving.leave(
+        crate::update_apply::this_process(),
+        &program,
+        &mut Unwaited,
+        None,
+    ))
 }
 
 #[cfg(test)]
@@ -540,6 +657,14 @@ mod tests {
                 // applier, alive for as long as anything looks.
                 Ok(crate::update_apply::this_process())
             }
+        }
+
+        fn acknowledged(
+            &mut self,
+            _worker: Option<&bt_platform::admission::WorkerCtx>,
+            _data: &Path,
+        ) -> bool {
+            true
         }
     }
 
@@ -935,12 +1060,22 @@ mod tests {
     #[derive(Default)]
     struct Starts {
         calls: Vec<(PathBuf, Vec<OsString>)>,
+        /// Every start dies before it takes the data directory.
+        die: bool,
     }
 
     impl Spawner for Starts {
         fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running> {
             self.calls.push((program.to_path_buf(), args.to_vec()));
             Ok(Running { pid: 0, started: 0 })
+        }
+
+        fn acknowledged(
+            &mut self,
+            _worker: Option<&bt_platform::admission::WorkerCtx>,
+            _data: &Path,
+        ) -> bool {
+            !self.die
         }
     }
 
@@ -972,6 +1107,14 @@ mod tests {
                 journal.body.phase,
             ));
             Ok(crate::update_apply::this_process())
+        }
+
+        fn acknowledged(
+            &mut self,
+            _worker: Option<&bt_platform::admission::WorkerCtx>,
+            _data: &Path,
+        ) -> bool {
+            true
         }
     }
 
@@ -1055,12 +1198,19 @@ mod tests {
             (QuitStep::Exit, Handoff::Done)
         );
 
+        // W9's instant: `Handoff` has landed and the applier's start is stuck.
+        let give_up = Instant::now() + Duration::from_secs(20);
+        while on_disk(&staged.home).body.phase.kind() != PhaseKind::Handoff {
+            assert!(Instant::now() < give_up, "Handoff never landed");
+            std::thread::sleep(Duration::from_millis(10));
+        }
         // O leaves: nobody took the window's mark, so O takes it and starts.
         let txn = TxnId::new(TXN);
         let old = crate::update_apply::this_process();
         let installed = folder.0.join("folio.exe");
         let mut starts = Starts::default();
-        let left = Leaving::over(&staged.home, txn).leave(old, &installed, &mut starts);
+        let left =
+            Leaving::over(&staged.home, txn, &folder.0).leave(old, &installed, &mut starts, None);
         assert_eq!(left, Left::Started(installed.clone()));
         let failed = crate::update_apply::failed_words(&staged.home).to_vec();
         assert_eq!(starts.calls, vec![(installed.clone(), failed)]);
@@ -1102,10 +1252,11 @@ mod tests {
         );
         let mut starts = Starts::default();
         assert_eq!(
-            Leaving::over(&staged.home, txn).leave(
+            Leaving::over(&staged.home, txn, &folder.0).leave(
                 Running { pid: 1, started: 1 },
                 &installed,
-                &mut starts
+                &mut starts,
+                None,
             ),
             Left::NotMine(Some(applier.pid))
         );
@@ -1163,6 +1314,76 @@ mod tests {
         assert!(crate::quit::HANDOFF_DEADLINE >= w9 * 2);
         assert!(
             crate::quit::HANDOFF_DEADLINE * 4 <= crate::update_apply::Limits::PRODUCT.old_within
+        );
+    }
+
+    /// RED (U-34, round 2) — **a start is acknowledged only by a Folio holding
+    /// the data directory**: while a claim on it is held, at once; while none
+    /// is, not before the bound runs out.
+    ///
+    /// MUTATION: in `update_apply::claimed_within`, answer `true` for a claim
+    /// this process could take.
+    #[test]
+    fn a_start_is_acknowledged_only_by_a_folio_holding_the_data_directory() {
+        let folder = Folder::new("ack");
+        let data = folder.0.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        let (held, free) = bt_platform::spawn_at_priority(
+            "bt-u34-ack",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |worker| {
+                let within = Duration::from_millis(400);
+                let claim = crate::persist::try_claim(&data).unwrap();
+                let held = crate::update_apply::claimed_within(Some(worker), &data, within);
+                drop(claim);
+                let began = Instant::now();
+                let free = crate::update_apply::claimed_within(Some(worker), &data, within);
+                (held, (free, began.elapsed() >= within))
+            },
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+        assert!(held, "a Folio holds it: acknowledged");
+        assert_eq!(free, (false, true), "nobody took it within the bound");
+    }
+
+    /// RED (U-34, round 2) — **O's exit guard falls back and, when nothing is
+    /// delivered, says so to the process's end**: its own executable started
+    /// and never acknowledged, then the rescue copy the journal names, then
+    /// `Left::ShownHere` — which `leave_armed` answers with the failure window
+    /// on the main thread.
+    ///
+    /// MUTATION: in `OldLeave::fallback`, answer `None`.
+    #[test]
+    fn the_old_builds_guard_falls_back_to_the_rescue_copy_and_then_to_a_window_here() {
+        let folder = Folder::new("o-falls-back");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let handoff = staged
+            .journal
+            .advance(&crate::update_txn::Event::HandedOff { applier: nonce() })
+            .unwrap();
+        install_txn::durable_write(&staged.home.journal(), &handoff.encode()).unwrap();
+        let installed = folder.0.join("folio.exe");
+        let mut starts = Starts {
+            die: true,
+            ..Starts::default()
+        };
+        let left = Leaving::over(&staged.home, txn, &folder.0).leave(
+            crate::update_apply::this_process(),
+            &installed,
+            &mut starts,
+            None,
+        );
+        assert!(matches!(left, Left::ShownHere(_)), "{left:?}");
+        let failed = crate::update_apply::failed_words(&staged.home).to_vec();
+        assert_eq!(
+            starts.calls,
+            vec![
+                (installed, failed.clone()),
+                (staged.home.rescue_program(&staged.journal.rescue), failed),
+            ]
         );
     }
 }

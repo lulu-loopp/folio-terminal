@@ -175,6 +175,13 @@ struct Fake {
     /// **A program that will not start** (U-34): its start is recorded and
     /// refused.
     refuse_start_of: Option<PathBuf>,
+    /// **So many starts die before they take the data directory** (U-34,
+    /// round 2): created, never acknowledged.
+    starts_die: usize,
+    /// **Every start is refused** (U-34, round 2).
+    refuse_every_start: bool,
+    /// The failure windows shown in this process (U-34, round 2).
+    shown: Vec<String>,
 }
 
 impl World for Fake {
@@ -188,7 +195,7 @@ impl World for Fake {
 
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
         self.opened.push((program.to_path_buf(), args.to_vec()));
-        if self.refuse_start_of.as_deref() == Some(program) {
+        if self.refuse_every_start || self.refuse_start_of.as_deref() == Some(program) {
             return Err(io::Error::other("the system would not start it (test)"));
         }
         Ok(())
@@ -249,6 +256,18 @@ impl World for Fake {
         if let Some(look) = &mut self.on_move {
             look(done);
         }
+    }
+
+    fn acknowledged(&mut self, _worker: Option<&WorkerCtx>, _data: &Path) -> bool {
+        if self.starts_die == 0 {
+            return true;
+        }
+        self.starts_die -= 1;
+        false
+    }
+
+    fn show_here(&mut self, text: &str) {
+        self.shown.push(text.to_owned());
     }
 }
 
@@ -418,6 +437,9 @@ impl Install {
             held: None,
             panic_at_arm: false,
             refuse_start_of: None,
+            starts_die: 0,
+            refuse_every_start: false,
+            shown: Vec::new(),
         }
     }
 
@@ -2598,6 +2620,10 @@ impl Spawner for Starts {
         self.calls.push((program.to_path_buf(), args.to_vec()));
         Ok(Running { pid: 0, started: 0 })
     }
+
+    fn acknowledged(&mut self, _worker: Option<&WorkerCtx>, _data: &Path) -> bool {
+        true
+    }
 }
 
 /// RED (U-34, round 2; Codex's review, blocker 1) — **the duty that a window
@@ -2652,8 +2678,12 @@ fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
         "step 1: P decided — the mark is P's"
     );
     let mut starts = Starts::default();
-    let left =
-        Leaving::over(&install.home, install.txn).leave(old, &install.installed, &mut starts);
+    let left = Leaving::over(&install.home, install.txn, &install.data).leave(
+        old,
+        &install.installed,
+        &mut starts,
+        None,
+    );
     assert_eq!(
         left,
         Left::NotMine(Some(std::process::id())),
@@ -2679,8 +2709,12 @@ fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
         started: install_flip::started_of(old).expect("O runs"),
     };
     let mut starts = Starts::default();
-    let left =
-        Leaving::over(&install.home, install.txn).leave(old, &install.installed, &mut starts);
+    let left = Leaving::over(&install.home, install.txn, &install.data).leave(
+        old,
+        &install.installed,
+        &mut starts,
+        None,
+    );
     assert_eq!(left, Left::Started(install.installed.clone()));
     assert_eq!(
         starts.calls,
@@ -2707,5 +2741,63 @@ fn the_window_is_handed_over_by_one_mark_and_opened_exactly_once() {
         std::fs::read(install.home.journal()).unwrap(),
         journal,
         "untouched"
+    );
+}
+
+/// RED (U-34, round 2; Codex's review, blocker 2) — **a start is delivered only
+/// when it is acknowledged**: one created that dies before it takes the data
+/// directory is not, and the rescue copy is started instead; **and when no
+/// start is delivered at all — the operating system refuses both programs —
+/// this process shows the failure window itself**, *Update incomplete.* and
+/// the folder, without a spawn.
+///
+/// The acknowledgement is a Folio holding the data directory's claim
+/// (`update_apply::claimed_within`, pinned on its own in
+/// `update_handoff::tests::a_start_is_acknowledged_only_by_a_folio_holding_the_data_directory`);
+/// here the world answers it.
+///
+/// MUTATION: in `ExitGuard::deliver`, take a created start as delivered
+/// without its acknowledgement (the first part); in `ExitGuard::start`, give up
+/// without `show_here` (the second).
+#[test]
+fn a_start_counts_only_when_acknowledged_and_the_last_resort_is_a_window_here() {
+    let Some(install) = Install::new("dies-at-once") else {
+        return;
+    };
+    let held = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+        .unwrap()
+        .unwrap();
+    let mut world = install.world(Trial::Answers);
+    world.starts_die = 1;
+    let (ended, world) = applied(&install, limits(600, 20_000), world);
+    drop(held);
+    assert_eq!(ended, Ended::OldHeldTheLock);
+    assert_eq!(
+        world.opened,
+        vec![
+            (install.installed.clone(), failed_then(&install, &[])),
+            (install.rescue.clone(), failed_then(&install, &[])),
+        ],
+        "the installed build died at once; the rescue copy was started"
+    );
+    assert!(world.shown.is_empty(), "{:?}", world.shown);
+
+    let Some(install) = Install::new("nothing-starts") else {
+        return;
+    };
+    let held = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+        .unwrap()
+        .unwrap();
+    let mut world = install.world(Trial::Answers);
+    world.refuse_every_start = true;
+    let (ended, world) = applied(&install, limits(600, 20_000), world);
+    drop(held);
+    assert_eq!(ended, Ended::OldHeldTheLock);
+    assert_eq!(world.opened.len(), 2, "both programs were tried");
+    assert_eq!(
+        world.shown,
+        vec![crate::update_apply::failure_text(Some(&install.home))],
+        "{:?}",
+        world.said
     );
 }

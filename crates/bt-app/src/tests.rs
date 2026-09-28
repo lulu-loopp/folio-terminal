@@ -54371,6 +54371,7 @@ fn every_owner_door_is_refused_on_a_worker_and_admitted_only_in_its_phases() {
     a_door_answers_by_role_and_phase::<doors::SessionWriteWait>(&[Exiting]);
     a_door_answers_by_role_and_phase::<doors::SessionWriterRetire>(&[Exiting]);
     a_door_answers_by_role_and_phase::<doors::TraceFlush>(&[Exiting]);
+    a_door_answers_by_role_and_phase::<doors::UpdateLeave>(&[Exiting]);
     a_door_answers_by_role_and_phase::<doors::LaunchHandOver>(&[Starting]);
     a_door_answers_by_role_and_phase::<doors::WebController>(&[Running, Exiting]);
     a_door_answers_by_role_and_phase::<doors::WebEnvironment>(&[Running]);
@@ -54382,7 +54383,7 @@ fn every_owner_door_is_refused_on_a_worker_and_admitted_only_in_its_phases() {
     a_door_answers_by_role_and_phase::<doors::SetCursor>(&[Running]);
     assert_eq!(
         doors::ALL.len(),
-        24,
+        25,
         "a door added to the registry is a door this list has to name"
     );
 }
@@ -54470,6 +54471,8 @@ fn every_owner_door_takes_its_own_token_by_value() {
     let _: fn(WaitToken<'_, doors::PlaceHidden>, &Window) -> bool = window_is_hidden;
     let _: fn(WaitToken<'_, doors::PlaceExposure>, &Window) -> bool = window_is_exposed;
     let _: fn(WaitToken<'_, doors::TraceFlush>) = trace_sink::flush;
+    let _: fn(WaitToken<'_, doors::UpdateLeave>) -> Option<crate::update_apply::Left> =
+        crate::update_handoff::leave_armed;
     let _: fn(&Compositor, WaitToken<'_, doors::CompositorCommit>) -> Result<(), String> =
         Compositor::commit;
     let _: fn(WaitToken<'_, doors::CompositorBirth>, NativeWindow) -> Result<Compositor, String> =

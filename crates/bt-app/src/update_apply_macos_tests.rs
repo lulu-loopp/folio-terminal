@@ -217,6 +217,10 @@ struct Fake {
     unverified: Option<String>,
     /// Looks at every line as it is said (U-34).
     on_say: Option<SayHook>,
+    /// Every start dies before it takes the data directory (U-34, round 2).
+    starts_die: bool,
+    /// The failure windows shown in this process (U-34, round 2).
+    shown: Vec<String>,
 }
 
 impl Default for Fake {
@@ -232,6 +236,8 @@ impl Default for Fake {
             refuse_from: usize::MAX,
             unverified: None,
             on_say: None,
+            starts_die: false,
+            shown: Vec::new(),
         }
     }
 }
@@ -269,6 +275,14 @@ impl Hands for Fake {
             Some(launch) => launch(bundle, args),
             None => Ok(()),
         }
+    }
+
+    fn acknowledged(&mut self, _worker: Option<&WorkerCtx>, _data: &Path) -> bool {
+        !self.starts_die
+    }
+
+    fn show_here(&mut self, text: &str) {
+        self.shown.push(text.to_owned());
     }
 }
 
