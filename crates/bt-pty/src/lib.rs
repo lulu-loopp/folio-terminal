@@ -59,6 +59,59 @@ pub fn conpty_source() -> ConPtySource {
     ConPtySource::NotWindows
 }
 
+/// **Which pseudoconsole a session runs on, in the terms a key encoder needs** (T-KEYBOARD-RECORDS).
+///
+/// Folio writes win32-input-mode key records only to the ConPTY it ships, whose translation of
+/// them is the one pinned (`tests/keyboard_protocol_through_conpty.rs`). The operating system's
+/// ConPTY, which a process falls back to on its own when the packaged pair is missing or fails to
+/// load, translates many of them differently for a program that reads bytes, and on that path the
+/// promise "a program that never asked receives exactly the bytes it received before" holds only
+/// without records (coordinator's ruling, 2026-09-29).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConPtyKind {
+    /// The packaged `conpty.dll` + `OpenConsole.exe` beside the executable.
+    Shipped,
+    /// The operating system's implementation (`kernel32`).
+    Inbox,
+    /// No ConPTY: another platform, or a pane with no pseudoconsole behind it.
+    NotConPty,
+}
+
+impl ConPtyKind {
+    /// The kind a selected implementation is.
+    #[cfg(windows)]
+    #[must_use]
+    pub fn of(source: &ConPtySource) -> Self {
+        match source {
+            ConPtySource::Sidecar { .. } => Self::Shipped,
+            ConPtySource::System => Self::Inbox,
+        }
+    }
+
+    /// The kind a selected implementation is.
+    #[cfg(not(windows))]
+    #[must_use]
+    pub fn of(source: &ConPtySource) -> Self {
+        let ConPtySource::NotWindows = source;
+        Self::NotConPty
+    }
+}
+
+/// Why this process runs on the operating system's ConPTY, or `None` when it runs on the packaged
+/// pair or on no ConPTY at all.
+#[cfg(windows)]
+#[must_use]
+pub fn conpty_fallback_reason() -> Option<String> {
+    portable_pty::win::conpty_fallback_reason()
+}
+
+/// Why this process runs on the operating system's ConPTY: never, off Windows.
+#[cfg(not(windows))]
+#[must_use]
+pub fn conpty_fallback_reason() -> Option<String> {
+    None
+}
+
 /// DESIGN.md §1.3: each session has exactly one MiB of buffered PTY output.
 pub const PTY_RING_BYTES: NonZeroUsize = NonZeroUsize::new(1024 * 1024).unwrap();
 /// How much input may pile up behind a child that has stopped reading it — the input side's half
@@ -2074,6 +2127,20 @@ impl PtySession {
 
     pub fn conpty_source(&self) -> &ConPtySource {
         &self.conpty_source
+    }
+
+    /// Which pseudoconsole this session runs on, as a key encoder reads it — fixed at spawn.
+    pub fn conpty_kind(&self) -> ConPtyKind {
+        ConPtyKind::of(&self.conpty_source)
+    }
+
+    /// Why this session runs on the operating system's ConPTY, or `None` when it does not.
+    pub fn inbox_conpty_reason(&self) -> Option<String> {
+        if self.conpty_kind() == ConPtyKind::Inbox {
+            conpty_fallback_reason()
+        } else {
+            None
+        }
     }
 
     pub fn child_id(&self) -> Option<u32> {
@@ -4419,6 +4486,25 @@ mod tests {
             "/usr/local/bin/sh"
         )));
         assert!(!program_is_the_last_resort_shell(OsStr::new("/bin/zsh")));
+    }
+
+    /// RED (T-KEYBOARD-RECORDS, review round 3) — **the packaged pair is `Shipped` and the
+    /// operating system's ConPTY is `Inbox`**: the one fact the key encoder reads to decide
+    /// whether a pane may be sent win32-input-mode records.
+    ///
+    /// MUTATION: map `ConPtySource::System` to `ConPtyKind::Shipped`.
+    #[cfg(windows)]
+    #[test]
+    fn the_packaged_conpty_is_shipped_and_the_system_one_is_inbox() {
+        assert_eq!(
+            ConPtyKind::of(&ConPtySource::Sidecar {
+                dll: std::path::PathBuf::from("conpty.dll"),
+            }),
+            ConPtyKind::Shipped
+        );
+        assert_eq!(ConPtyKind::of(&ConPtySource::System), ConPtyKind::Inbox);
+        // This test executable has the pair beside it, so the process never fell back.
+        assert_eq!(conpty_fallback_reason(), None);
     }
 
     /// Windows: `CONPTY_SIDECAR_VERSION` and `ConPtySource::Sidecar` are

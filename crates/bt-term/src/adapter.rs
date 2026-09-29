@@ -187,6 +187,15 @@ pub struct KeyboardProtocol {
     /// [`SUPPORTED_KITTY_FLAGS`].
     pub kitty: u8,
     pub modify_other_keys: ModifyOtherKeys,
+    /// **win32-input-mode (DEC 9001) is set**: the party on the other end of the PTY parses
+    /// `CSI Vk;Sc;Uc;Kd;Cs;Rc _` key records in the input it is sent. ConPTY sets it at the head
+    /// of every session; a nested ConPTY can clear it, and `RIS` clears it with every other mode.
+    ///
+    /// It is not a program's request for an encoding, and no program's request changes it: it
+    /// says the transport is there. On Windows the encoder writes the chords VT cannot express as
+    /// key records only while this is set **and** no program asked for kitty or modifyOtherKeys
+    /// (`docs/plans/design/keyboard-protocol-2026-09-29.md` §7.3, T-KEYBOARD-RECORDS).
+    pub win32_input_mode: bool,
 }
 
 /// Facts emitted by the alacritty compatibility seam. DESIGN.md §3.1 policy is intentionally
@@ -1709,6 +1718,7 @@ impl TerminalAdapter {
                     VendorModifyOtherKeys::EnableExceptWellDefined => ModifyOtherKeys::One,
                     VendorModifyOtherKeys::EnableAll => ModifyOtherKeys::Two,
                 },
+                win32_input_mode: mode.contains(TermMode::WIN32_INPUT),
             },
         }
     }
@@ -5147,6 +5157,7 @@ mod tests {
             KeyboardProtocol {
                 kitty: 1,
                 modify_other_keys: ModifyOtherKeys::Two,
+                win32_input_mode: false,
             }
         );
     }
@@ -5201,6 +5212,7 @@ mod tests {
             KeyboardProtocol {
                 kitty: 1,
                 modify_other_keys: ModifyOtherKeys::One,
+                win32_input_mode: false,
             }
         );
     }
@@ -5224,5 +5236,91 @@ mod tests {
         terminal.set_keyboard_focus(true);
         assert!(terminal.take_pty_writes().is_empty());
         assert_eq!(terminal.modes().keyboard, KeyboardProtocol::default());
+    }
+
+    fn win32_input_mode(terminal: &TerminalAdapter) -> bool {
+        terminal.modes().keyboard.win32_input_mode
+    }
+
+    /// RED (T-KEYBOARD-RECORDS) — **the terminal records whether win32-input-mode is set: `?9001h`
+    /// sets it, `?9001l` clears it, `RIS` clears it, and a later `?9001h` sets it again.**
+    ///
+    /// ConPTY writes `?9001h` at the head of every session to say it parses key records in what it
+    /// is sent; a nested ConPTY that ends clears it with `?9001l`; `RIS` resets every mode, and
+    /// whatever ConPTY sends after one decides whether the mode is back (the real bytes are
+    /// asserted in `bt-pty`'s `keyboard_protocol_through_conpty`). The key encoder writes records
+    /// only while this is set (design note §7.3, gate 1), so a mode that stuck after `?9001l` would
+    /// send records to a party that no longer parses them.
+    ///
+    /// MUTATION: drop the `PrivateMode::Unknown(9001)` arm of the vendored `set_private_mode` (the
+    /// first assertion reads false), or of `unset_private_mode` (the mode survives `?9001l`).
+    #[test]
+    fn win32_input_mode_is_set_cleared_and_reset_as_the_transport_says() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        assert!(
+            !win32_input_mode(&terminal),
+            "nothing asked for it before a byte arrived"
+        );
+        terminal.feed(b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001h");
+        assert!(win32_input_mode(&terminal), "ConPTY's session head sets it");
+        assert!(
+            terminal
+                .take_pty_writes()
+                .iter()
+                .all(|reply| !reply.contains(&b'_')),
+            "and nothing is answered for it"
+        );
+        terminal.feed(b"\x1b[?9001l");
+        assert!(!win32_input_mode(&terminal), "a nested ConPTY clears it");
+        terminal.feed(b"\x1b[?9001h");
+        assert!(win32_input_mode(&terminal));
+        terminal.feed(b"\x1bc");
+        assert!(!win32_input_mode(&terminal), "RIS clears it");
+        terminal.feed(b"\x1b[?9001h");
+        assert!(
+            win32_input_mode(&terminal),
+            "and the next `?9001h` sets it again"
+        );
+    }
+
+    /// RED (T-KEYBOARD-RECORDS) — **win32-input-mode is independent of the keyboard protocols a
+    /// program asks for, of the screen that is showing, and of ConPTY's teardown of them.**
+    ///
+    /// A program's `CSI > 1 u`, `CSI > 4 ; 2 m` and their resets change the protocol and leave the
+    /// transport's mode alone; entering and leaving the alternate screen leaves it alone (it is one
+    /// value per terminal, not per screen); a resize's oracle carries it through the transaction.
+    /// The encoder's precedence — a program that asked wins over records — is decided from both
+    /// values, so neither may overwrite the other.
+    ///
+    /// MUTATION: clear `WIN32_INPUT` in the vendored `swap_alt` (the flag is gone on the alternate
+    /// screen), or derive it from the kitty flags in `modes()`.
+    #[test]
+    fn win32_input_mode_is_independent_of_the_protocols_and_the_screen() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.feed(b"\x1b[?9001h\x1b[>1u\x1b[>4;2m");
+        assert_eq!(
+            terminal.modes().keyboard,
+            KeyboardProtocol {
+                kitty: 1,
+                modify_other_keys: ModifyOtherKeys::Two,
+                win32_input_mode: true,
+            }
+        );
+        terminal.feed(b"\x1b[?1049h");
+        assert!(win32_input_mode(&terminal), "the alternate screen keeps it");
+        terminal.feed(b"\x1b[?1049l\x1b[>4m\x1b[<u");
+        assert_eq!(
+            terminal.modes().keyboard,
+            KeyboardProtocol {
+                kitty: 0,
+                modify_other_keys: ModifyOtherKeys::Off,
+                win32_input_mode: true,
+            },
+            "the program's teardown ends its protocol and leaves the transport's mode"
+        );
+        terminal.resize(nz(16), nz(6));
+        terminal.reconcile_resize_transaction_to_viewport();
+        terminal.finish_resize_transaction();
+        assert!(win32_input_mode(&terminal), "a resize carries it through");
     }
 }
