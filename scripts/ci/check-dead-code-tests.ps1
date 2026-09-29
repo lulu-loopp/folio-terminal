@@ -137,7 +137,7 @@ $base = @{
 Test-Case 'the tree exactly as the list has it passes, and says how many sites there are' {
     $result = Invoke-Gate (New-Tree -Name 'as-listed' -Base $base)
     if ($result.ExitCode -ne 0) { throw "it exited $($result.ExitCode): $($result.Text)" }
-    if ($result.Flat -notmatch 'the dead-code list only shrinks: 1 sites, 0 dated\.') { throw "no summary line: $($result.Text)" }
+    if ($result.Flat -notmatch 'the dead-code list only shrinks: 1 sites, 0 dated, 0 permanent, 0 moved\.') { throw "no summary line: $($result.Text)" }
 }
 
 Test-Case 'a new site with no dated reason fails, naming the site and the rule' {
@@ -153,7 +153,24 @@ Test-Case 'a new site dated to a day that has not come passes' {
     $result = Invoke-Gate (New-Tree -Name 'dated' -Base $base -Now $now)
     if ($result.ExitCode -ne 0) { throw "it exited $($result.ExitCode): $($result.Text)" }
     if ($result.Flat -notmatch 'dated .*fresh \(expect\) - U-41 until 2999-12-31') { throw "the dated site was not reported: $($result.Text)" }
-    if ($result.Flat -notmatch '2 sites, 1 dated\.') { throw "the summary did not count it: $($result.Text)" }
+    if ($result.Flat -notmatch '2 sites, 1 dated, 0 permanent, 0 moved\.') { throw "the summary did not count it: $($result.Text)" }
+}
+
+Test-Case 'a site kept for a mechanism passes undated and unlisted with a permanent: reason' {
+    $now = @{ 'crates/demo/src/lib.rs' = $lib + "`n#[expect(dead_code, reason = `"permanent: held for its Drop`")]`nfn held() {}`n" }
+    $result = Invoke-Gate (New-Tree -Name 'permanent' -Base $base -Now $now)
+    if ($result.ExitCode -ne 0) { throw "it exited $($result.ExitCode): $($result.Text)" }
+    if ($result.Flat -notmatch 'permanent demo/src/lib\.rs:\d+ held \(expect\)') { throw "the permanent site was not reported: $($result.Text)" }
+    if ($result.Flat -notmatch '2 sites, 0 dated, 1 permanent, 0 moved\.') { throw "the summary did not count it: $($result.Text)" }
+}
+
+Test-Case 'a permanent: reason with no why after it fails' {
+    $now = @{ 'crates/demo/src/lib.rs' = $lib + "`n#[expect(dead_code, reason = `"permanent: `")]`nfn held() {}`n" }
+    $result = Invoke-Gate (New-Tree -Name 'permanent-empty' -Base $base -Now $now)
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if ($result.Flat -notmatch "src/lib\.rs:\d+ held \(expect\) is not on docs/plans/DEAD-CODE\.tsv and its reason is neither") {
+        throw "the site was not refused: $($result.Text)"
+    }
 }
 
 Test-Case 'a site whose date has passed fails as expired' {
@@ -192,7 +209,7 @@ mod thing_tests;
     }
     $result = Invoke-Gate (New-Tree -Name 'test-code' -Base $base -Now $now)
     if ($result.ExitCode -ne 0) { throw "it exited $($result.ExitCode): $($result.Text)" }
-    if ($result.Flat -notmatch '1 sites, 0 dated\.') { throw "a test site was counted: $($result.Text)" }
+    if ($result.Flat -notmatch '1 sites, 0 dated, 0 permanent, 0 moved\.') { throw "a test site was counted: $($result.Text)" }
 }
 
 Test-Case 'a file a crate root reaches through an ordinary declaration is product code' {
@@ -220,7 +237,7 @@ Test-Case 'a site that went, with its row, passes and is reported as removed' {
     $result = Invoke-Gate (New-Tree -Name 'removed' -Base $base -Now $now)
     if ($result.ExitCode -ne 0) { throw "it exited $($result.ExitCode): $($result.Text)" }
     if ($result.Flat -notmatch 'removed demo \| src/lib\.rs \| listed_helper \| allow') { throw "the removal was not reported: $($result.Text)" }
-    if ($result.Flat -notmatch '1 rows -> 0, 0 added, 1 removed\.') { throw "the comparison line is wrong: $($result.Text)" }
+    if ($result.Flat -notmatch '1 rows -> 0, 0 added, 1 removed, 0 moved\.') { throw "the comparison line is wrong: $($result.Text)" }
 }
 
 Test-Case 'a site that went while its row stayed fails as stale' {
@@ -238,6 +255,44 @@ Test-Case 'a listed site whose reason changed fails' {
     if ($result.ExitCode -eq 0) { throw 'it exited 0' }
     if ($result.Flat -notmatch "listed_helper \(allow\) is on docs/plans/DEAD-CODE\.tsv with the reason '' and now says 'a reason written later'") {
         throw "the changed reason was not reported: $($result.Text)"
+    }
+}
+
+Test-Case 'a listed site moved to another file, its row changed only in the file column, passes as moved' {
+    $now = @{
+        'crates/demo/src/lib.rs' = "pub struct Kept;`nmod moved;`n"
+        'crates/demo/src/moved.rs' = "#[allow(dead_code)]`nfn listed_helper() {}`n"
+        'docs/plans/DEAD-CODE.tsv' = (Get-List @("demo`tsrc/moved.rs`tlisted_helper`tallow`t"))
+    }
+    $result = Invoke-Gate (New-Tree -Name 'moved' -Base $base -Now $now)
+    if ($result.ExitCode -ne 0) { throw "it exited $($result.ExitCode): $($result.Text)" }
+    if ($result.Flat -notmatch 'moved demo \| src/moved\.rs \| listed_helper \| allow \| \(from src/lib\.rs\)') { throw "the move was not reported: $($result.Text)" }
+    if ($result.Flat -notmatch '1 rows -> 1, 0 added, 0 removed, 1 moved\.') { throw "the comparison line did not count it: $($result.Text)" }
+    if ($result.Flat -notmatch '1 sites, 0 dated, 0 permanent, 1 moved\.') { throw "the summary did not count it: $($result.Text)" }
+}
+
+Test-Case 'a listed site moved with its reason changed as well is refused as an added row' {
+    $now = @{
+        'crates/demo/src/lib.rs' = "pub struct Kept;`nmod moved;`n"
+        'crates/demo/src/moved.rs' = "#[allow(dead_code, reason = `"a reason written on the way`")]`nfn listed_helper() {}`n"
+        'docs/plans/DEAD-CODE.tsv' = (Get-List @("demo`tsrc/moved.rs`tlisted_helper`tallow`ta reason written on the way"))
+    }
+    $result = Invoke-Gate (New-Tree -Name 'moved-and-changed' -Base $base -Now $now)
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if ($result.Flat -notmatch 'gained a row the merge base does not have: demo \| src/moved\.rs \| listed_helper \| allow \| a reason written on the way') {
+        throw "the added row was not named: $($result.Text)"
+    }
+}
+
+Test-Case 'a moved site whose row still names the old file fails, naming both files' {
+    $now = @{
+        'crates/demo/src/lib.rs' = "pub struct Kept;`nmod moved;`n"
+        'crates/demo/src/moved.rs' = "#[allow(dead_code)]`nfn listed_helper() {}`n"
+    }
+    $result = Invoke-Gate (New-Tree -Name 'misfiled' -Base $base -Now $now)
+    if ($result.ExitCode -eq 0) { throw 'it exited 0' }
+    if ($result.Flat -notmatch 'listed_helper \(allow\) is on docs/plans/DEAD-CODE\.tsv under src/lib\.rs, and lives in src/moved\.rs now') {
+        throw "the stale file column was not named: $($result.Text)"
     }
 }
 
@@ -273,7 +328,7 @@ Test-Case 'a gate that passed leaves a CI step green, even after a git call that
     $now = @{ 'docs/plans/DEAD-CODE.tsv' = (Get-List @($listedRow)) }
     $result = Invoke-Gate (New-Tree -Name 'as-ci-step' -Base $bare -Now $now) -AsCiStep
     if ($result.ExitCode -ne 0) { throw "the step exited $($result.ExitCode): $($result.Text)" }
-    if ($result.Flat -notmatch 'the dead-code list only shrinks: 1 sites, 0 dated\.') { throw "the gate did not pass: $($result.Text)" }
+    if ($result.Flat -notmatch 'the dead-code list only shrinks: 1 sites, 0 dated, 0 permanent, 0 moved\.') { throw "the gate did not pass: $($result.Text)" }
 }
 
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue

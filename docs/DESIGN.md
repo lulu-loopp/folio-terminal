@@ -13148,3 +13148,13 @@ U-33 shipped `at_launch` built and not called, under `#[expect(dead_code)]`, and
 **Product code** is every `.rs` under `crates/*/src` except `tests.rs`, `*_tests.rs`, files under a `tests/` directory in `src`, the files a crate reaches only through a `#[cfg(test)]` module declaration, and everything inside an item carrying `#[cfg(test)]`, found by a walk over the tokens rather than a pattern over the text.
 
 **Pinned by** `scripts/ci/check-dead-code.ps1` (CI `logic`), its fourteen cases in `scripts/ci/check-dead-code-tests.ps1` and the planted row in `gates-can-fail`. The triage of the 90 listed sites (which wait for a named ticket, which name a shipped one, which are test helpers in product files) is ticket U-44b.
+
+### 2026-09-29 — A `dead_code` site kept for a mechanism says `permanent: <why>`, and a listed site that moves keeps its row (U-44, coordinator's rulings)
+
+Two rulings on the entry above ("A `dead_code` allowance in product code is either on a list that only shrinks or dated to a ticket"), which they extend and in part supersede.
+
+**Permanent by design has its own form.** Code kept for a mechanism rather than waiting for a caller — a field held for its `Drop`, a serde field that enforces a shape, something read on one platform only, an FFI layout — is not "built, not wired", and dating it would mean re-dating it forever. Its reason begins `permanent: ` and a why follows, naming the mechanism (`"permanent: held for its Drop"`, `"permanent: read on macOS only"`); such a site passes undated and unlisted. The gate checks the prefix and that the why is not empty; whether it names a mechanism is the reviewer's reading. Where the language can say it without an attribute — an `_` prefix on a field, a platform `cfg` on a platform's field — that comes first; `permanent:` is for what it cannot (methods, trait impls).
+
+**A move is not an addition.** A row of `docs/plans/DEAD-CODE.tsv` is identified by its crate, item, form and reason; the file column is where the site lives today. Against the merge base, a row whose only change is its file is the same site moved: reported, counted ("N moved") and allowed. A row changed in anything else is still an added row and refused, and so are a changed reason and a stale row. In the tree, a moved site whose row still names the old file fails, naming both files. This keeps the `main.rs` → `runtime/` split from tripping on listed items.
+
+**Pinned by** the gate's test file, now nineteen cases: a `permanent:` site passes; `permanent:` with no why fails; a file-only change passes as moved; a file change with a reason change is refused; a row left naming the old file fails.

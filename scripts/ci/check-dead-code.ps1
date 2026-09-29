@@ -14,7 +14,11 @@
 #   * its reason is `"<TICKET-ID> until YYYY-MM-DD: <why>"`, and the date has
 #     not passed. The ticket id is one or more uppercase tokens joined by `-`
 #     (`U-41`, `T-KEYBOARD-RECORDS`, `S5`). On the day after the date the site
-#     fails: expired — wire it, delete it, or re-ticket it.
+#     fails: expired — wire it, delete it, or re-ticket it; or
+#   * its reason is `"permanent: <why>"`: the code is kept for a mechanism, not
+#     waiting for a caller (held for its Drop, a serde shape, read on one
+#     platform, an FFI layout). The gate checks the prefix and that a why
+#     follows it; that the why names the mechanism is the reviewer's to read.
 #
 # What else fails: a listed site whose reason changed (the row is the site as
 # it was; a site that is now dated leaves the list), and a row whose site is
@@ -49,7 +53,11 @@
 #
 # THE COMPARISON is the migration-debt gate's (`check-migration-debt.ps1`):
 # against the pull request's merge base with `origin/main`, rows compared whole
-# and with multiplicity, the commented header not compared. It passes, loudly,
+# and with multiplicity, the commented header not compared — with one
+# difference: a row is identified by its crate, item, form and reason, and its
+# file column is where the site lives today, so a row whose only change is the
+# file is the same site moved (reported, counted, allowed), not an added row.
+# In the tree itself the row must name the file the site is in. It passes, loudly,
 # when the base has no list — that is how the commit that introduces the list
 # passes. It refuses (exit 2) when there is no base at all: no `origin/main` in
 # the clone, or no merge base, means the comparison did not happen. CI runs it
@@ -899,6 +907,12 @@ function Get-Key([string]$row) {
     $cells = $row -split "`t"
     return ($cells[0..3] -join "`t")
 }
+# What a row is: crate, item, form and reason. The file column is where the site lives today,
+# so a row whose only change is its file is the same site moved (coordinator's ruling, U-44).
+function Get-Identity([string]$row) {
+    $cells = $row -split "`t"
+    return (@($cells[0], $cells[2], $cells[3], $cells[4]) -join "`t")
+}
 function Format-Row([string]$row) { return ($row -replace "`t", ' | ') }
 
 # The rows still waiting for their site, with multiplicity.
@@ -906,9 +920,12 @@ $waiting = [Collections.Generic.List[string]]::new()
 foreach ($row in $listed) { $waiting.Add($row) }
 
 $today = [DateTime]::UtcNow.Date
+$moves = 0
 $ticket = '^(?<id>[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*) until (?<date>\d{4}-\d{2}-\d{2}): \S'
+$permanentForm = '^permanent: \S'
 $failures = @()
 $dated = 0
+$permanent = 0
 
 foreach ($site in $sites) {
     $where = "$($site.Crate)/$($site.File):$($site.Line) $($site.Item) ($($site.Form))"
@@ -926,6 +943,14 @@ foreach ($site in $sites) {
     if ($waiting.Remove($site.Row)) {
         # on the list, exactly as it was
     } else {
+        $moved = @($waiting | Where-Object { (Get-Identity $_) -eq (Get-Identity $site.Row) })
+        if ($moved.Count -gt 0) {
+            [void]$waiting.Remove($moved[0])
+            $was = ($moved[0] -split "`t")[1]
+            Write-Host "misfiled  $where"
+            $failures += "$where is on $relative under $was, and lives in $($site.File) now: a moved site keeps its row with the file column changed to where it lives"
+            continue
+        }
         $same = @($waiting | Where-Object { (Get-Key $_) -eq (Get-Key $site.Row) })
         if ($same.Count -gt 0) {
             [void]$waiting.Remove($same[0])
@@ -934,9 +959,14 @@ foreach ($site in $sites) {
             $failures += "$where is on $relative with the reason '$was' and now says '$($site.Reason)': a listed site's reason does not change - a site that is now dated leaves the list in the same commit"
             continue
         }
+        if ($site.Reason -cmatch $permanentForm) {
+            $permanent++
+            Write-Host "permanent $where"
+            continue
+        }
         if ($null -eq $date) {
             Write-Host "unlisted  $where"
-            $failures += "$where is not on $relative and its reason is not '<TICKET-ID> until YYYY-MM-DD: <why>': a door that is built is wired in the same ticket, or dated (docs/CONVENTIONS.md section 8)"
+            $failures += "$where is not on $relative and its reason is neither '<TICKET-ID> until YYYY-MM-DD: <why>' nor 'permanent: <why>': a door that is built is wired in the same ticket, or dated; code kept for a mechanism (Drop, serde, one platform, FFI layout) says so (docs/CONVENTIONS.md section 8)"
             continue
         }
     }
@@ -991,19 +1021,35 @@ if (-not $inBase) {
     foreach ($row in $before) {
         if ($allowed.ContainsKey($row)) { $allowed[$row] += 1 } else { $allowed[$row] = 1 }
     }
-    $added = @()
+    $unmatched = @()
     foreach ($row in $listed) {
-        if ($allowed.ContainsKey($row) -and $allowed[$row] -gt 0) { $allowed[$row] -= 1 } else { $added += $row }
+        if ($allowed.ContainsKey($row) -and $allowed[$row] -gt 0) { $allowed[$row] -= 1 } else { $unmatched += $row }
     }
+    # The base rows left over, with multiplicity; a row of this tree that differs from one of
+    # them only in its file is that row moved, and uses it up.
+    $left = [Collections.Generic.List[string]]::new()
     foreach ($row in $allowed.Keys) {
-        for ($k = 0; $k -lt $allowed[$row]; $k++) { Write-Host "removed   $(Format-Row $row)" }
+        for ($k = 0; $k -lt $allowed[$row]; $k++) { $left.Add($row) }
     }
+    $added = @()
+    $moves = 0
+    foreach ($row in $unmatched) {
+        $from = @($left | Where-Object { (Get-Identity $_) -eq (Get-Identity $row) })
+        if ($from.Count -gt 0) {
+            [void]$left.Remove($from[0])
+            $moves++
+            Write-Host "moved     $(Format-Row $row) (from $(($from[0] -split "`t")[1]))"
+        } else {
+            $added += $row
+        }
+    }
+    foreach ($row in $left) { Write-Host "removed   $(Format-Row $row)" }
     foreach ($row in $added) {
         Write-Host "added     $(Format-Row $row)"
         $failures += "$relative gained a row the merge base does not have: $(Format-Row $row) - this list only shrinks; a new site is dated instead"
     }
-    $removed = $before.Count - ($listed.Count - $added.Count)
-    Write-Host "$relative against $($base.Substring(0, 12)): $($before.Count) rows -> $($listed.Count), $($added.Count) added, $removed removed."
+    $removed = $left.Count
+    Write-Host "$relative against $($base.Substring(0, 12)): $($before.Count) rows -> $($listed.Count), $($added.Count) added, $removed removed, $moves moved."
 }
 
 if ($failures.Count -gt 0) {
@@ -1013,7 +1059,7 @@ if ($failures.Count -gt 0) {
     foreach ($failure in $failures) { Write-Host "  $failure" }
     throw "the dead-code gate failed: $($failures.Count) finding(s), each on its own line above"
 }
-Write-Host "the dead-code list only shrinks: $($sites.Count) sites, $dated dated."
+Write-Host "the dead-code list only shrinks: $($sites.Count) sites, $dated dated, $permanent permanent, $moves moved."
 # Explicitly: `git show` of a base without the list leaves 1 in `$LASTEXITCODE`, and GitHub's
 # `pwsh` shell ends a step with `exit $LASTEXITCODE` (the note above `gates-can-fail` in ci.yml).
 exit 0

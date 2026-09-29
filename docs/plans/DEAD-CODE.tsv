@@ -4,15 +4,19 @@
 #
 # **This list only shrinks.** `scripts/ci/check-dead-code.ps1` compares it with the
 # merge base and fails on an added row. A row leaves in the commit that wires its
-# item, deletes it, or dates it; a row whose site is gone, or whose site's reason
-# changed, fails the gate until the row goes.
+# item, deletes it, dates it, or marks it permanent; a row whose site is gone, or
+# whose site's reason changed, fails the gate until the row goes. A row is its
+# crate, item, form and reason; `file` is where the site lives today, so a site
+# that moves keeps its row with the file column changed (a move, not an addition).
 #
-# **A site that is not on this list is dated**: its reason reads
-# `<TICKET-ID> until YYYY-MM-DD: <why>` (`U-41 until 2026-10-15: the card calls it`),
-# and on the day after that date the gate fails it — wire it, delete it, or
-# re-ticket it. A door that is built is wired in the same ticket, or dated
-# (`docs/CONVENTIONS.md` §八). Prefer `expect` to `allow`: the attribute then fails
-# the build on the day the code is used.
+# **A site that is not on this list is dated or permanent.** Dated: its reason
+# reads `<TICKET-ID> until YYYY-MM-DD: <why>` (`U-41 until 2026-10-15: the card
+# calls it`), and on the day after that date the gate fails it — wire it, delete
+# it, or re-ticket it. Permanent: its reason reads `permanent: <why>`, the why
+# naming the mechanism the code is kept for (held for its Drop, a serde shape,
+# read on one platform, an FFI layout). A door that is built is wired in the same
+# ticket, or dated (`docs/CONVENTIONS.md` §八). Prefer `expect` to `allow`: the
+# attribute then fails the build on the day the code is used.
 #
 # Product code: every `.rs` under `crates/*/src` except `tests.rs`, `*_tests.rs`,
 # files under a `src/**/tests/` directory, the files a crate reaches only through

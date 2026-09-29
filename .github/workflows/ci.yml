@@ -466,8 +466,9 @@ jobs:
 
       # "Built, not wired" (0.4.7 U-44): every `allow`/`expect(dead_code)` in
       # product code is on `docs/plans/DEAD-CODE.tsv`, which only shrinks
-      # against the merge base, or carries `<TICKET-ID> until YYYY-MM-DD: <why>`
-      # with the date still ahead (`docs/CONVENTIONS.md` §八).
+      # against the merge base (a row whose only change is its file is a move),
+      # or carries `<TICKET-ID> until YYYY-MM-DD: <why>` with the date still
+      # ahead, or `permanent: <why>` (`docs/CONVENTIONS.md` §八).
       - name: the dead-code list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-dead-code.ps1

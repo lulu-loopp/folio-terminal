@@ -1440,8 +1440,11 @@ is dispatched; the note lives under `docs/plans/design/`, the review under
 no design note. **A door that is built is wired in the same ticket, or dated**
 (2026-09-29, U-44): an `allow(dead_code)` / `expect(dead_code)` in product code
 is a row of `docs/plans/DEAD-CODE.tsv`, which only shrinks, or its reason reads
-`<TICKET-ID> until YYYY-MM-DD: <why>` and it fails on the day after that date;
-`scripts/ci/check-dead-code.ps1` is the gate.
+`<TICKET-ID> until YYYY-MM-DD: <why>` and it fails on the day after that date,
+or — for code kept for a mechanism rather than a caller (Drop, serde, one
+platform, FFI layout) where no `_` prefix or platform `cfg` can say so — it
+reads `permanent: <why>`. A listed row whose only change is its file column is
+the site moved, not a row added; `scripts/ci/check-dead-code.ps1` is the gate.
 **From.** `docs/CONVENTIONS.md` §十 rules 10 and 11 and the field in
 `docs/templates/brief.md`; the vocabulary is `docs/ARCHITECTURE.md` §4
 (ownership) and §6 (doors), and the debt ledger is
