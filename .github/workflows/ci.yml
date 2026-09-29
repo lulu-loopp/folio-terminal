@@ -262,6 +262,34 @@ jobs:
           }
           exit 0
 
+      # `docs/plans/DEAD-CODE.tsv` holds the undated `dead_code` sites the tree
+      # had when the gate was written, and only shrinks; every other site is
+      # dated and fails on the day after its date. Planting a row proves the
+      # comparison against the merge base is one; the test file runs the gate
+      # against scratch trees, one case per rule (a new undated site, an expired
+      # one, a stale row, a changed reason, no merge base, and the rest).
+      - name: the dead-code gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "docs/plans/DEAD-CODE.tsv"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "bt-app`tsrc/planted.rs`tprobe`tallow`t`n")
+            $failed = $false
+            try {
+              & ./scripts/ci/check-dead-code.ps1
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "the dead-code list accepted a row that is not at the merge base"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          & ./scripts/ci/check-dead-code-tests.ps1
+          exit 0
+
       # `docs/plans/window-thread-bare-sites.tsv` stands in for the lint on raw
       # effects until A2e, and only shrinks. A bare site added together with its
       # row passes the equality test, so the historical half is what refuses it:
@@ -435,6 +463,15 @@ jobs:
       - name: the migration-debt list only shrinks
         shell: pwsh
         run: ./scripts/ci/check-migration-debt.ps1
+
+      # "Built, not wired" (0.4.7 U-44): every `allow`/`expect(dead_code)` in
+      # product code is on `docs/plans/DEAD-CODE.tsv`, which only shrinks
+      # against the merge base (a row whose only change is its file is a move),
+      # or carries `<TICKET-ID> until YYYY-MM-DD: <why>` with the date still
+      # ahead, or `permanent: <why>` (`docs/CONVENTIONS.md` §八).
+      - name: the dead-code list only shrinks
+        shell: pwsh
+        run: ./scripts/ci/check-dead-code.ps1
 
       # The window thread's checks (thread-door note, revision (j)): the bare-site
       # inventory is no larger than at the merge base, or than the pinned seed

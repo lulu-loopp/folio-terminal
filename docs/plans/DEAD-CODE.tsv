@@ -1,0 +1,121 @@
+# DEAD-CODE — every `#[allow(dead_code)]` / `#[expect(dead_code)]` in product code
+# that was in the tree when the gate was written (0.4.7, U-44), one row per site,
+# exactly as it stood.
+#
+# **This list only shrinks.** `scripts/ci/check-dead-code.ps1` compares it with the
+# merge base and fails on an added row. A row leaves in the commit that wires its
+# item, deletes it, dates it, or marks it permanent; a row whose site is gone, or
+# whose site's reason changed, fails the gate until the row goes. A row is its
+# crate, item, form and reason; `file` is where the site lives today, so a site
+# that moves keeps its row with the file column changed (a move, not an addition).
+#
+# **A site that is not on this list is dated or permanent.** Dated: its reason
+# reads `<TICKET-ID> until YYYY-MM-DD: <why>` (`U-41 until 2026-10-15: the card
+# calls it`), and on the day after that date the gate fails it — wire it, delete
+# it, or re-ticket it. Permanent: its reason reads `permanent: <why>`, the why
+# naming the mechanism the code is kept for (held for its Drop, a serde shape,
+# read on one platform, an FFI layout). A door that is built is wired in the same
+# ticket, or dated (`docs/CONVENTIONS.md` §八). Prefer `expect` to `allow`: the
+# attribute then fails the build on the day the code is used.
+#
+# Product code: every `.rs` under `crates/*/src` except `tests.rs`, `*_tests.rs`,
+# files under a `src/**/tests/` directory, the files a crate reaches only through
+# a `#[cfg(test)]` module, and everything inside a `#[cfg(test)]` item. `file` is
+# the path inside the crate; `item` is the item the attribute sits on, by its path
+# inside the file (`Type::method`, `Enum::Variant`, `Struct.field`, `Tuple.0`,
+# `(module)` for an inner attribute); `reason` is the `reason = "…"` string's
+# value, empty when there is none. Regenerate the rows of a tree with
+# `pwsh -NoProfile -File scripts/ci/check-dead-code.ps1 -Rows`.
+#
+# The sites grouped by what they are waiting for: the U-44b triage ticket.
+crate	file	item	form	reason
+bt-app	src/git_panel.rs	GitTreeBadges::is_empty	allow	
+bt-app	src/git.rs	GIT_NEVER_WORDS	allow	
+bt-app	src/git.rs	StatusCode::letter	allow	
+bt-app	src/git.rs	GitGroup	allow	
+bt-app	src/git.rs	GitStatusEntry::is_conflict	allow	
+bt-app	src/git.rs	GitStatusEntry::in_group	allow	
+bt-app	src/git.rs	GitStatus::group	allow	
+bt-app	src/git.rs	GitStatus::count	allow	
+bt-app	src/git.rs	GitSlot::fault	allow	
+bt-app	src/git.rs	GitCache::refresh	allow	
+bt-app	src/git.rs	GitCache::repo	allow	
+bt-app	src/git.rs	GitCache::status	allow	
+bt-app	src/git.rs	GitCache::refs	allow	
+bt-app	src/git.rs	GitCache::log_refs	allow	
+bt-app	src/git.rs	GitCache::more_commits	allow	
+bt-app	src/i18n.rs	Text::CleanupArchiveExit	expect	Printed by uninstall.cmd; the archive source pin checks this copy.
+bt-app	src/i18n.rs	Text::CleanupArchiveReady	expect	Printed by uninstall.cmd; the archive source pin checks this copy.
+bt-app	src/i18n.rs	Text::CleanupArchiveIncomplete	expect	Printed by uninstall.cmd; the archive source pin checks this copy.
+bt-app	src/main.rs	WindowRuntime.system_settings_watch	expect	held for its Drop; the subclass talks to the loop through the event proxy it was built with, never through this field
+bt-app	src/main.rs	UserInputKind	allow	A2 converts the five call sites that will pass these
+bt-app	src/main.rs	UserInputKind::is_answer	allow	A2 gates the answer door on this
+bt-app	src/main.rs	UserInputKind::answer_kind	allow	A2 passes the result of this to the ledger
+bt-app	src/main.rs	Layered::ALL	allow	
+bt-app	src/preview_provenance.rs	TextOrigin::is_empty	allow	
+bt-app	src/preview_provenance.rs	TextOrigin::origin_of	allow	
+bt-app	src/preview_provenance.rs	TextOrigin::text_of	allow	
+bt-app	src/preview_provenance.rs	file_offset_of	allow	
+bt-app	src/preview_provenance.rs	place_of	allow	
+bt-app	src/preview.rs	is_diff_name	allow	
+bt-app	src/preview.rs	PreviewSource::GitGraph	allow	
+bt-app	src/preview.rs	PreviewPool::len	allow	
+bt-app	src/profiles.rs	TermMenuLayout::submenu_rows	allow	
+bt-app	src/profiles.rs	PaneMenuLayout::item	allow	
+bt-app	src/profiles.rs	PaneMenuLayout::zone	allow	
+bt-app	src/profiles.rs	PaneMenuLayout::submenu_rows	allow	
+bt-app	src/profiles.rs	TabMenuLayout::submenu_rows	allow	
+bt-app	src/profiles.rs	GitFilterMenuLayout::rows	allow	
+bt-app	src/profiles.rs	GitFilterMenuLayout::frame	allow	
+bt-app	src/runtime/preview.rs	Runtime::next_animation_frame	allow	
+bt-app	src/seats.rs	Seats::zoom	allow	
+bt-app	src/seats.rs	DropPlan.tree	allow	
+bt-app	src/seats.rs	DropEdge::axis	allow	
+bt-app	src/seats.rs	DropEdge::leading	allow	
+bt-app	src/seed.rs	SeedVault::len	allow	
+bt-app	src/seed.rs	SeedVault::is_empty	allow	
+bt-app	src/seed.rs	PinMigration	allow	
+bt-app	src/seed.rs	impl PinMigration	allow	
+bt-app	src/settings.rs	SettingsLayout::row	allow	
+bt-app	src/settings.rs	SettingsLayout::advanced	allow	
+bt-app	src/settings.rs	SettingsLayout::reset_advanced	allow	
+bt-app	src/settings.rs	SettingsLayout::advanced_clip	allow	
+bt-app	src/text_field.rs	TextField::holding	allow	
+bt-app	src/text_field.rs	TextField::caret	allow	
+bt-app	src/update_handoff.rs	Staged.lock	expect	a lock is held by owning it; nothing reads it (install_txn::Held's drop releases it)
+bt-app	src/update_job.rs	(module)	expect	the drivers land after the card: U-20/U-27 drive and report, U-21 quits ((b).5)
+bt-app	src/update_txn.rs	(module)	expect	the protocol lands before its drivers: U-11, U-12 and U-20…U-29 call it ((b).5)
+bt-app	src/update.rs	FeedRelease.name	expect	required of the feed's shape (the releases list's); the check does not read it
+bt-app	src/update.rs	FeedRelease.prerelease	expect	required of the feed's shape (the releases list's); the check offers pre-releases as the page's list does
+bt-app	src/web_thumb.rs	WebThumbs::take	allow	F1c's drag and F2's menu row press the transfer
+bt-app	src/web_thumb.rs	WebThumbs::put	allow	F1c's drag and F2's menu row press the transfer
+bt-app	src/webhost.rs	WebMachine::on_rehost_lost	allow	F1b's transfer transaction is the caller
+bt-app	src/webhost.rs	claims_chord	allow	
+bt-app	src/webhost.rs	RehostReport	allow	F1b's transfer transaction is the caller
+bt-app	src/webhost.rs	WebSeat::address	allow	F1b's transfer transaction is the caller
+bt-app	src/webhost.rs	WebSeat::rehost	allow	F1b's transfer transaction is the caller
+bt-app	src/webnav.rs	(module)	allow	
+bt-platform	src/app_delegate.rs	TerminationAnswer::new	expect	M3-1: a termination request is made by AppKit, and there is no AppKit here
+bt-platform	src/instance.rs	DataDirectoryClaim.lock	expect	the field is the mechanism rather than data
+bt-platform	src/lib.rs	windows_impl::SkirtBand.visual	allow	the tree owns it; this is the record of it
+bt-platform	src/lib.rs	windows_impl::PageGround.fill	allow	the tree owns it; this is the record of it
+bt-platform	src/macos_services.rs	ProviderCell.0	allow	the retain is the whole of what this holds
+bt-platform	src/portable_impl.rs	Compositor.window	expect	M1-4 reads it to reach the window's view; holding it now is what keeps the type's shape the same on both platforms
+bt-platform	src/portable_impl.rs	CustomWindowFrame.window	expect	only the macOS arm has a native title bar to reach back into
+bt-platform	src/portable_impl.rs	SystemSettingsWatch.wake	expect	M1-3 calls it from the notification observer; holding it now keeps the ownership contract identical on both platforms
+bt-platform	src/portable_impl.rs	MathContextMenu.window	expect	M2-3 pops the menu over this window
+bt-platform	src/portable_impl.rs	FolderPicker.window	expect	M2-3 sheets the panel onto this window
+bt-platform	src/portable_impl.rs	ImagePicker.window	expect	M2-3 sheets the panel onto this window
+bt-platform	src/portable_impl.rs	SaveFilePicker.window	expect	a Linux arm would put its panel over this window
+bt-platform	src/portable_impl.rs	ImeSystemCaret.window	expect	M1-8 decides whether this door survives at all
+bt-platform	src/trust_windows.rs	Engine.stores	expect	held for the engine's life; read only by the test that counts the exclusive roots
+bt-platform	src/webview_portable.rs	WebHost.gate	expect	the macOS arm calls it from -webView:decidePolicyForNavigationAction:
+bt-platform	src/webview_portable.rs	WebHost.request_gate	expect	the macOS arm asks it about a subframe; the rest is a compiled rule list
+bt-platform	src/webview_portable.rs	WebHost.wake	expect	the macOS arm wakes the loop when a delegate answers
+bt-workbench	src/attention.rs	Credential::Strong	allow	the pipe lane spells this tier as a `WaitKind` row today; the C slices name it
+bt-workbench	src/attention.rs	State	allow	the derived state is what the grid's cells are spelled against
+bt-workbench	src/attention.rs	Via::Osc99	allow	`bt-term` has no `OSC 99` parser yet
+bt-workbench	src/attention.rs	IdSource::Path	allow	§12.1.6: no upstream identifier has been quoted yet
+bt-workbench	src/attention.rs	duplicated_tier	allow	R2's checker; its witness is the catalogue's own red form
+bt-workbench	src/attention.rs	AttentionLedger::state	allow	the derived state is what the grid's cells are spelled against
+bt-workbench	src/attention.rs	AttentionLedger::is_agent_seat	allow	the eighth mark `Attached` is §7.1.5b's own row and is not built; the ruling it is built from is, and its witness is the three cells below
