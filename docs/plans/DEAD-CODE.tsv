@@ -29,7 +29,6 @@
 #
 # The sites grouped by what they are waiting for: the U-44b triage ticket.
 crate	file	item	form	reason
-bt-app	src/main.rs	WindowRuntime.system_settings_watch	expect	held for its Drop; the subclass talks to the loop through the event proxy it was built with, never through this field
 bt-app	src/main.rs	UserInputKind	allow	A2 converts the five call sites that will pass these
 bt-app	src/main.rs	UserInputKind::is_answer	allow	A2 gates the answer door on this
 bt-app	src/preview_provenance.rs	TextOrigin::is_empty	allow	
@@ -40,23 +39,4 @@ bt-app	src/seed.rs	impl PinMigration	allow
 bt-app	src/update_handoff.rs	Staged.lock	expect	a lock is held by owning it; nothing reads it (install_txn::Held's drop releases it)
 bt-app	src/update_job.rs	(module)	expect	the drivers land after the card: U-20/U-27 drive and report, U-21 quits ((b).5)
 bt-app	src/update_txn.rs	(module)	expect	the protocol lands before its drivers: U-11, U-12 and U-20…U-29 call it ((b).5)
-bt-app	src/update.rs	FeedRelease.name	expect	required of the feed's shape (the releases list's); the check does not read it
-bt-app	src/update.rs	FeedRelease.prerelease	expect	required of the feed's shape (the releases list's); the check offers pre-releases as the page's list does
 bt-app	src/webnav.rs	(module)	allow	
-bt-platform	src/app_delegate.rs	TerminationAnswer::new	expect	M3-1: a termination request is made by AppKit, and there is no AppKit here
-bt-platform	src/instance.rs	DataDirectoryClaim.lock	expect	the field is the mechanism rather than data
-bt-platform	src/lib.rs	windows_impl::SkirtBand.visual	allow	the tree owns it; this is the record of it
-bt-platform	src/lib.rs	windows_impl::PageGround.fill	allow	the tree owns it; this is the record of it
-bt-platform	src/macos_services.rs	ProviderCell.0	allow	the retain is the whole of what this holds
-bt-platform	src/portable_impl.rs	Compositor.window	expect	M1-4 reads it to reach the window's view; holding it now is what keeps the type's shape the same on both platforms
-bt-platform	src/portable_impl.rs	CustomWindowFrame.window	expect	only the macOS arm has a native title bar to reach back into
-bt-platform	src/portable_impl.rs	SystemSettingsWatch.wake	expect	M1-3 calls it from the notification observer; holding it now keeps the ownership contract identical on both platforms
-bt-platform	src/portable_impl.rs	MathContextMenu.window	expect	M2-3 pops the menu over this window
-bt-platform	src/portable_impl.rs	FolderPicker.window	expect	M2-3 sheets the panel onto this window
-bt-platform	src/portable_impl.rs	ImagePicker.window	expect	M2-3 sheets the panel onto this window
-bt-platform	src/portable_impl.rs	SaveFilePicker.window	expect	a Linux arm would put its panel over this window
-bt-platform	src/portable_impl.rs	ImeSystemCaret.window	expect	M1-8 decides whether this door survives at all
-bt-platform	src/trust_windows.rs	Engine.stores	expect	held for the engine's life; read only by the test that counts the exclusive roots
-bt-platform	src/webview_portable.rs	WebHost.gate	expect	the macOS arm calls it from -webView:decidePolicyForNavigationAction:
-bt-platform	src/webview_portable.rs	WebHost.request_gate	expect	the macOS arm asks it about a subframe; the rest is a compiled rule list
-bt-platform	src/webview_portable.rs	WebHost.wake	expect	the macOS arm wakes the loop when a delegate answers

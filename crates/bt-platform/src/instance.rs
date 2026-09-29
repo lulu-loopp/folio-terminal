@@ -686,9 +686,8 @@ pub struct DataDirectoryClaim {
     /// The descriptor the `flock` is held on. Never read from and never written
     /// to, which is the point rather than an oversight: what is in the file is
     /// not the claim — the descriptor being open is, and `File`'s own drop
-    /// closing it is what releases it.
-    #[expect(dead_code, reason = "the field is the mechanism rather than data")]
-    lock: std::fs::File,
+    /// closing it is what releases it — hence the leading underscore.
+    _lock: std::fs::File,
 }
 
 /// Take the claim on `directory`, or say why not: [`ClaimRefusal::Held`]
@@ -756,7 +755,7 @@ pub fn try_claim_data_directory(directory: &Path) -> Result<DataDirectoryClaim, 
             let _ = std::fs::remove_file(&endpoint);
         }
     }
-    Ok(DataDirectoryClaim { lock })
+    Ok(DataDirectoryClaim { _lock: lock })
 }
 
 /// A machine with neither a kernel object nor a descriptor to hold always

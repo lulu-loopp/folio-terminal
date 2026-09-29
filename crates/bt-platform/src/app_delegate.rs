@@ -289,13 +289,7 @@ impl TerminationAnswer {
     /// Built by `applicationShouldTerminate:` and by nothing else, which is why
     /// it is unreachable on a machine with no such selector — the whole of the
     /// gate below.
-    #[cfg_attr(
-        not(any(target_os = "macos", test)),
-        expect(
-            dead_code,
-            reason = "M3-1: a termination request is made by AppKit, and there is no AppKit here"
-        )
-    )]
+    #[cfg(any(target_os = "macos", test))]
     pub(crate) fn new() -> Self {
         Self {
             slot: Arc::new(TerminationSlot {

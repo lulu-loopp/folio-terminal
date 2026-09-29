@@ -34,24 +34,13 @@ fn no_engine(what: &str) -> String {
 /// it three closures and then asks it for an environment, and it is *that* ask
 /// that refuses. The three closures are held rather than dropped because they
 /// are the seat's own policy — the navigation gate, the request gate and the
-/// wake — and M4-2 calls all three from a `WKNavigationDelegate`; a host that
-/// threw them away would be a different type by then.
+/// wake — and the other two arms call all three; this one holds them for their
+/// drop, so that they live exactly as long as the host does there too, and
+/// calls none of them (hence the leading underscores).
 pub struct WebHost {
-    #[expect(
-        dead_code,
-        reason = "the macOS arm calls it from -webView:decidePolicyForNavigationAction:"
-    )]
-    gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
-    #[expect(
-        dead_code,
-        reason = "the macOS arm asks it about a subframe; the rest is a compiled rule list"
-    )]
-    request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
-    #[expect(
-        dead_code,
-        reason = "the macOS arm wakes the loop when a delegate answers"
-    )]
-    wake: Box<dyn Fn()>,
+    _gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
+    _request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
+    _wake: Box<dyn Fn()>,
     /// The colour scheme the seat said its pages prefer — kept, like the other two arms keep
     /// it, so that the seat's own record of what it said reads the same on every machine.
     color_scheme: Cell<Option<WebColorScheme>>,
@@ -67,9 +56,9 @@ impl WebHost {
         wake: Box<dyn Fn()>,
     ) -> Self {
         Self {
-            gate,
-            request_gate,
-            wake,
+            _gate: gate,
+            _request_gate: request_gate,
+            _wake: wake,
             color_scheme: Cell::new(None),
         }
     }

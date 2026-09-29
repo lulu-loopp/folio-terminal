@@ -215,7 +215,8 @@ pub(super) struct Engine {
         not(test),
         expect(
             dead_code,
-            reason = "held for the engine's life; read only by the test that counts the exclusive roots"
+            reason = "permanent: held for its Drop, which closes the stores with the engine; read \
+                      only by the test that counts the exclusive roots"
         )
     )]
     stores: Vec<Store>,

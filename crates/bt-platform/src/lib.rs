@@ -4026,11 +4026,11 @@ mod windows_impl {
     /// written in both places would be scaled by the size.
     struct SkirtBand {
         /// Held rather than dropped after `AddVisual`, exactly as
-        /// [`PageGround::fill`] is: the tree owns a reference of its own, so
+        /// [`PageGround::_fill`] is: the tree owns a reference of its own, so
         /// this handle is the *record* that the band was built, and a band that
-        /// carried only a matrix would not say what the matrix is on.
-        #[allow(dead_code, reason = "the tree owns it; this is the record of it")]
-        visual: IDCompositionVisual,
+        /// carried only a matrix would not say what the matrix is on. Never
+        /// read, hence the leading underscore; its release is the band's drop.
+        _visual: IDCompositionVisual,
         /// Scale on the diagonal, origin in the last row — the 3×2 convention
         /// `IDCompositionMatrixTransform` shares with Direct2D. Mutated in
         /// place, four floats, rather than rebuilt per resize.
@@ -4057,10 +4057,10 @@ mod windows_impl {
         /// Held rather than dropped after `AddVisual` even though nothing reads
         /// it again: the tree owns a reference of its own, so this handle is
         /// the *record* that the pair was built, and a `PageGround` that only
-        /// carried one visual would not say what it is.
-        #[allow(dead_code, reason = "the tree owns it; this is the record of it")]
-        fill: IDCompositionVisual,
-        /// The scale itself, built once and set on `fill` once.
+        /// carried one visual would not say what it is. Never read, hence the
+        /// leading underscore; its release is the ground's drop.
+        _fill: IDCompositionVisual,
+        /// The scale itself, built once and set on `_fill` once.
         ///
         /// A transform *object* rather than four numbers written straight at
         /// the visual, because `IDCompositionVisual::SetTransform2` takes a
@@ -4251,7 +4251,10 @@ mod windows_impl {
             .map_err(|error| {
                 compositor_failure(&format!("IDCompositionVisual::AddVisual({role})"), &error)
             })?;
-            Ok(SkirtBand { visual, placement })
+            Ok(SkirtBand {
+                _visual: visual,
+                placement,
+            })
         }
 
         /// **Tell the window's ground how big the window is — and publish it
@@ -4570,7 +4573,7 @@ mod windows_impl {
             })?;
             Ok(PageGround {
                 holder,
-                fill,
+                _fill: fill,
                 scale,
             })
         }

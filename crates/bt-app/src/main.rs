@@ -13151,7 +13151,7 @@ struct WindowRuntime {
     /// before there were any — it reads the preference once, at start-up.
     #[expect(
         dead_code,
-        reason = "held for its Drop; the subclass talks to the loop through the \
+        reason = "permanent: held for its Drop; the subclass talks to the loop through the \
                   event proxy it was built with, never through this field"
     )]
     system_settings_watch: Option<bt_platform::SystemSettingsWatch>,

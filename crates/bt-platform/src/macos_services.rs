@@ -206,10 +206,10 @@ static PROVIDER: OnceLock<ProviderCell> = OnceLock::new();
 /// from another thread is not safe in general — and nothing here ever does: the
 /// cell is written once from the main thread and read by nobody. What it exists
 /// for is the retain, not the pointer.
-struct ProviderCell(
-    #[allow(dead_code, reason = "the retain is the whole of what this holds")]
-    Retained<ServicesProvider>,
-);
+struct ProviderCell {
+    /// The retain is the whole of what this holds, hence the leading underscore.
+    _retained: Retained<ServicesProvider>,
+}
 
 // SAFETY: the value is written once, from the main thread, and never read,
 // returned or messaged afterwards. The only thing that happens to it after the
@@ -246,7 +246,9 @@ pub(crate) fn install() -> Result<(), String> {
     // SAFETY: the object is an instance of this file's own class, which answers
     // the selector `NSServices`' `NSMessage` names. It is kept alive below.
     unsafe { app.setServicesProvider(Some(&provider)) };
-    let _ = PROVIDER.set(ProviderCell(provider));
+    let _ = PROVIDER.set(ProviderCell {
+        _retained: provider,
+    });
     NSUpdateDynamicServices();
     Ok(())
 }
