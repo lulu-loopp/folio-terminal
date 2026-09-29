@@ -1372,7 +1372,7 @@ mod tests {
         let mut journal = Journal::parse(&journal_bytes(TXN, trial_phase())).unwrap();
         journal.rescue = rescue.display().to_string();
         std::fs::write(home.journal(), journal.encode()).unwrap();
-        let mut child = bt_platform::quiet_command(std::env::current_exe().unwrap())
+        let child = bt_platform::quiet_command(std::env::current_exe().unwrap())
             .args([
                 "--exact",
                 "update_trial::tests::a_trial_watch_in_a_process_of_its_own_hands_back_its_identity_and_stays",

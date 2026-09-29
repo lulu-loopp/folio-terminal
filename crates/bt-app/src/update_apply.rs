@@ -712,6 +712,22 @@ pub(crate) enum BeforeDeciding {
     Decide,
 }
 
+/// **What [`before_deciding`] looks at**: the home and transaction, the new
+/// build's executable, whether the phase is a `Stuck`, the exact instances
+/// that are no candidate (the recorded trial of a `Stuck`, this recovery's own
+/// starter), the trial `--from-trial` named, and the data directory whose claim
+/// is asked.
+#[derive(Clone, Copy)]
+pub(crate) struct Before<'a> {
+    pub(crate) home: &'a Home,
+    pub(crate) txn: TxnId,
+    pub(crate) program: &'a Path,
+    pub(crate) over_stuck: bool,
+    pub(crate) excluded: &'a [Running],
+    pub(crate) handed_back: Option<HandedBack>,
+    pub(crate) data: &'a Path,
+}
+
 /// **H.3's order**, both platforms: (1) adopt a running trial its receipt names
 /// exactly; (2) end the handed-back trial named by `--from-trial` when it is
 /// unready (`end`, W9's stop of that exact instance), then look again; (3) fail
@@ -721,15 +737,18 @@ pub(crate) enum BeforeDeciding {
 /// this recovery's own starter); `data` is the data directory whose claim is
 /// asked.
 pub(crate) fn before_deciding(
-    home: &Home,
-    txn: TxnId,
-    program: &Path,
-    over_stuck: bool,
-    excluded: &[Running],
-    handed_back: Option<HandedBack>,
-    data: &Path,
+    what: &Before<'_>,
     end: &mut dyn FnMut(TrialProcess) -> Result<(), String>,
 ) -> BeforeDeciding {
+    let Before {
+        home,
+        txn,
+        program,
+        over_stuck,
+        excluded,
+        handed_back,
+        data,
+    } = *what;
     // The handed-back trial is never excluded, even when it is this recovery's
     // own starter (the watchdog's hand-back): it is ended here, or it is a
     // candidate (Codex's check of (h), round 3).

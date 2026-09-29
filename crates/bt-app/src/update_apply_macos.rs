@@ -1641,16 +1641,16 @@ impl<'a> Txn<'a> {
                 &mut |line| hands.say(line),
             )
         };
-        match crate::update_apply::before_deciding(
-            &road.home,
-            road.txn,
+        let what = crate::update_apply::Before {
+            home: &road.home,
+            txn: road.txn,
             program,
             over_stuck,
-            &excluded,
-            road.handed_back,
-            &road.data,
-            &mut end,
-        ) {
+            excluded: &excluded,
+            handed_back: road.handed_back,
+            data: &road.data,
+        };
+        match crate::update_apply::before_deciding(&what, &mut end) {
             BeforeDeciding::Decide => Ok(Pre::Decide),
             BeforeDeciding::Defer(deferral) => {
                 hands.say(&format!("BT_UPDATE_RECOVER deferred: {}", deferral.said()));

@@ -3455,7 +3455,11 @@ fn adoption_needs_a_receipt_naming_the_exact_process() {
         version: "0.4.7".to_owned(),
         started: Some(process.started.wrapping_sub(1)),
     };
-    let cases: [(&str, &dyn Fn(&Install, TrialProcess) -> (Nonce, Receipt)); 3] = [
+    type Case<'a> = (
+        &'a str,
+        &'a dyn Fn(&Install, TrialProcess) -> (Nonce, Receipt),
+    );
+    let cases: [Case<'_>; 3] = [
         ("reused", &|install, process| {
             (Nonce::new([0x61; 32]), stale(install, process))
         }),
