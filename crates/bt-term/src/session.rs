@@ -26319,7 +26319,7 @@ mod tests {
         let after = session.viewport_frame(&mut projection).unwrap();
         assert_eq!(
             after.hyperlink_at(1, 2).map(|hit| hit.uri),
-            Some(bt_transcript::paths::local_path_to_file_uri(&present).into()),
+            Some(bt_transcript::paths::local_path_to_file_uri(&present)),
             "and the frame after the answer draws the link"
         );
         std::fs::remove_file(&present).unwrap();
@@ -26361,7 +26361,7 @@ mod tests {
         );
         assert_eq!(
             frame.hyperlink_at(2, 2).map(|hit| hit.uri),
-            Some(bt_transcript::paths::local_path_to_file_uri(&present).into()),
+            Some(bt_transcript::paths::local_path_to_file_uri(&present)),
             "the program's input line stands after it"
         );
 
