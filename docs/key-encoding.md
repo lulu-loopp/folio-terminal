@@ -4,7 +4,7 @@
 
 The bytes a key sends to the program in a pane, in each mode a program can ask for: nothing asked (*legacy*), the kitty keyboard protocol's first tier (*kitty flag 1*), or xterm's modifyOtherKeys (*1* or *2*). When a program asks for both, kitty wins. A program that never asks receives the legacy column, which is what Folio sent before either protocol existed here.
 
-On Windows, a program that never asks reads the *Windows records* column instead, while ConPTY has win32-input-mode on (it turns it on for every session): the chords whose legacy bytes cannot tell them apart — a modified Enter, Tab, Backspace or Space, Shift+Escape, and Ctrl with a key that has no control code — go as the key records `CSI Vk;Sc;Uc;Kd;Cs;Rc _` (down, then up), which ConPTY turns into those exact key events. Every other chord sends its legacy bytes. A program that asks for kitty or modifyOtherKeys gets that protocol instead.
+On Windows, a program that never asks reads the *Windows records* column instead, while ConPTY has win32-input-mode on (it turns it on for every session): the chords whose legacy bytes cannot tell them apart — a modified Enter, Tab, Backspace or Space, Shift+Escape, and Ctrl with a key that has no control code or with Ctrl+Alt — go as the key records `CSI Vk;Sc;Uc;Kd;Cs;Rc _` (down, then up), which ConPTY turns into those exact key events. Every other chord sends its legacy bytes. A program that asks for kitty or modifyOtherKeys gets that protocol instead.
 
 `CSI` is `ESC [`. `—` sends nothing. *(table)* is a chord Folio's shortcut table claims on Windows, so no program receives it. *(system)* is taken by Windows first; *(n/a)* never arrives on Windows and is encoded for macOS. Chords are as a US layout produces them. The design is `docs/plans/design/keyboard-protocol-2026-09-29.md`.
 
@@ -56,40 +56,40 @@ On Windows, a program that never asks reads the *Windows records* column instead
 | e | standard | SA | off | `\eE` | `CSI 101;4u` | `CSI 27;4;69~` | `CSI 27;4;69~` | `\eE` |
 | e | standard | C | off | `\x05` | `CSI 101;5u` | `\x05` | `CSI 27;5;101~` | `\x05` |
 | e | standard | SC | off | `\x05` | `CSI 101;6u` | `\x05` | `CSI 27;6;69~` | `\x05` |
-| e | standard | AC | off | `\e\x05` | `CSI 101;7u` | `CSI 27;7;101~` | `CSI 27;7;101~` | `\e\x05` |
-| e | standard | SAC | off | `\e\x05` | `CSI 101;8u` | `CSI 27;8;69~` | `CSI 27;8;69~` | `\e\x05` |
+| e | standard | AC | off | — | — | — | — | `CSI 69;18;0;1;10;1_CSI 69;18;0;0;10;1_` |
+| e | standard | SAC | off | — | — | — | — | `CSI 69;18;0;1;26;1_CSI 69;18;0;0;26;1_` |
 | i | standard | - | off | `i` | `i` | `i` | `i` | `i` |
 | i | standard | S | off | `I` | `I` | `I` | `CSI 27;2;73~` | `I` |
 | i | standard | A | off | `\ei` | `CSI 105;3u` | `CSI 27;3;105~` | `CSI 27;3;105~` | `\ei` |
 | i | standard | SA | off | `\eI` | `CSI 105;4u` | `CSI 27;4;73~` | `CSI 27;4;73~` | `\eI` |
 | i | standard | C | off | `\t` | `CSI 105;5u` | `\t` | `CSI 27;5;105~` | `\t` |
 | i | standard | SC | off | `\t` | `CSI 105;6u` | `\t` | `CSI 27;6;73~` | `\t` |
-| i | standard | AC | off | `\e\t` | `CSI 105;7u` | `CSI 27;7;105~` | `CSI 27;7;105~` | `\e\t` |
-| i | standard | SAC | off | `\e\t` | `CSI 105;8u` | `CSI 27;8;73~` | `CSI 27;8;73~` | `\e\t` |
+| i | standard | AC | off | — | — | — | — | `CSI 73;23;0;1;10;1_CSI 73;23;0;0;10;1_` |
+| i | standard | SAC | off | — | — | — | — | `CSI 73;23;0;1;26;1_CSI 73;23;0;0;26;1_` |
 | m | standard | - | off | `m` | `m` | `m` | `m` | `m` |
 | m | standard | S | off | `M` | `M` | `M` | `CSI 27;2;77~` | `M` |
 | m | standard | A | off | `\em` | `CSI 109;3u` | `CSI 27;3;109~` | `CSI 27;3;109~` | `\em` |
 | m | standard | SA | off | `\eM` | `CSI 109;4u` | `CSI 27;4;77~` | `CSI 27;4;77~` | `\eM` |
 | m | standard | C | off | `\r` | `CSI 109;5u` | `\r` | `CSI 27;5;109~` | `\r` |
 | m | standard | SC | off | (table) | (table) | (table) | (table) | (table) |
-| m | standard | AC | off | `\e\r` | `CSI 109;7u` | `CSI 27;7;109~` | `CSI 27;7;109~` | `\e\r` |
-| m | standard | SAC | off | `\e\r` | `CSI 109;8u` | `CSI 27;8;77~` | `CSI 27;8;77~` | `\e\r` |
+| m | standard | AC | off | — | — | — | — | `CSI 77;50;0;1;10;1_CSI 77;50;0;0;10;1_` |
+| m | standard | SAC | off | — | — | — | — | `CSI 77;50;0;1;26;1_CSI 77;50;0;0;26;1_` |
 | [ | standard | - | off | `[` | `[` | `[` | `[` | `[` |
 | [ | standard | S | off | `{` | `{` | `{` | `CSI 27;2;123~` | `{` |
 | [ | standard | A | off | `\e[` | `CSI 91;3u` | `CSI 27;3;91~` | `CSI 27;3;91~` | `\e[` |
 | [ | standard | SA | off | `\e{` | `CSI 91;4u` | `CSI 27;4;123~` | `CSI 27;4;123~` | `\e{` |
 | [ | standard | C | off | `\e` | `CSI 91;5u` | `\e` | `CSI 27;5;91~` | `\e` |
 | [ | standard | SC | off | — | `CSI 91;6u` | — | `CSI 27;6;123~` | `CSI 219;26;0;1;24;1_CSI 219;26;0;0;24;1_` |
-| [ | standard | AC | off | `\e\e` | `CSI 91;7u` | `CSI 27;7;91~` | `CSI 27;7;91~` | `\e\e` |
-| [ | standard | SAC | off | — | `CSI 91;8u` | `CSI 27;8;123~` | `CSI 27;8;123~` | `CSI 219;26;0;1;26;1_CSI 219;26;0;0;26;1_` |
+| [ | standard | AC | off | — | — | — | — | `CSI 219;26;0;1;10;1_CSI 219;26;0;0;10;1_` |
+| [ | standard | SAC | off | — | — | — | — | `CSI 219;26;0;1;26;1_CSI 219;26;0;0;26;1_` |
 | 1 | standard | - | off | `1` | `1` | `1` | `1` | `1` |
 | 1 | standard | S | off | `!` | `!` | `!` | `!` | `!` |
 | 1 | standard | A | off | `\e1` | `CSI 49;3u` | `CSI 27;3;49~` | `CSI 27;3;49~` | `\e1` |
 | 1 | standard | SA | off | `\e!` | `CSI 49;4u` | `CSI 27;4;33~` | `CSI 27;4;33~` | `\e!` |
 | 1 | standard | C | off | — | `CSI 49;5u` | `CSI 27;5;49~` | `CSI 27;5;49~` | `CSI 49;2;0;1;8;1_CSI 49;2;0;0;8;1_` |
 | 1 | standard | SC | off | (table) | (table) | (table) | (table) | (table) |
-| 1 | standard | AC | off | — | `CSI 49;7u` | `CSI 27;7;49~` | `CSI 27;7;49~` | `CSI 49;2;0;1;10;1_CSI 49;2;0;0;10;1_` |
-| 1 | standard | SAC | off | — | `CSI 49;8u` | `CSI 27;8;33~` | `CSI 27;8;33~` | `CSI 49;2;0;1;26;1_CSI 49;2;0;0;26;1_` |
+| 1 | standard | AC | off | — | — | — | — | `CSI 49;2;0;1;10;1_CSI 49;2;0;0;10;1_` |
+| 1 | standard | SAC | off | — | — | — | — | `CSI 49;2;0;1;26;1_CSI 49;2;0;0;26;1_` |
 | F1 | standard | - | on | `\eOP` | `CSI P` |  |  | `\eOP` |
 | F1 | standard | - | off |  | `CSI P` |  |  |  |
 | F1 | standard | C | on | `CSI 1;5P` | `CSI 1;5P` |  |  | `CSI 1;5P` |

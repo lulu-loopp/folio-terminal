@@ -28,7 +28,11 @@
 //! key-record reader gets exactly that key, a VT-input reader gets what ConPTY's own encoder
 //! writes for it and a native Node reader what libuv writes (both pinned as literals), with
 //! Ctrl+Enter no worse than today's `\r`. The Node reader is named `a_native_node_reader…` so
-//! CI's filter selects it out as it does case 4.
+//! CI's filter selects it out as it does case 4. The chords are every one the application's
+//! encoder writes on a US layout, read from the file `bt-app`'s own test holds equal to the
+//! encoder, and the byte literals are the ConPTY Folio ships (the vendored pair); under
+//! `BT_CONPTY_FORCE_SYSTEM=1` the key-record reader still passes and the byte readers differ, as
+//! the design note's revision (e) tabulates.
 //!
 //! Every child is spawned the way a pane spawns it, `PtyCommand` through `PtySession`, and every
 //! PowerShell script crosses the command line as `-EncodedCommand`, so nothing in it is re-parsed
@@ -441,140 +445,125 @@ fn a_native_node_reader_reads_the_answer_and_csi_u_as_its_bytes() {
     probe.finish();
 }
 
-// ── T-KEYBOARD-RECORDS (design note §7.3, gate 2) ─────────────────────────────────────────────
+// ── T-KEYBOARD-RECORDS (design note §7.3, gates 1 and 2) ──────────────────────────────────────
+//
+// **Scope of the byte literals.** The VT-input and Node readbacks below are what the ConPTY Folio
+// ships answers: the vendored `conpty.dll`/`OpenConsole.exe` pair (`ConPtySource::Sidecar`), which
+// these tests run against. `BT_CONPTY_FORCE_SYSTEM=1` switches a process to the ConPTY inbox in
+// Windows; that is a test switch, not a product setting, and under it the key-record reader still
+// passes while several byte readbacks differ (design note revision (e) has the comparison). The
+// product falls back to the inbox ConPTY on its own only when the packaged pair is missing beside
+// `folio.exe` or fails to load (`vendor/conpty/portable-pty/src/win/psuedocon.rs`, `load_conpty`).
 
-/// One chord this test drives as a win32-input-mode record pair, as Folio's encoder builds it
-/// (`bt-app`'s `input::key_records` and `key_encoding.tsv`'s `records` column), with the key event
-/// a console reader should get from it.
+/// Every chord the application's encoder writes as a record pair on Windows with a US layout —
+/// `bt-app`'s `input::keyboard_bytes`, rendered by its test
+/// `the_windows_us_records_file_is_what_the_encoder_writes`, which fails when this file is not
+/// exactly the encoder's output. Rows: key, location, modifiers, bytes (`\e` is ESC).
+const ENCODER_RECORDS: &str = include_str!("../../bt-app/src/key_records_windows_us.tsv");
+
+/// One chord driven through ConPTY: the record pair and the key event it stands for.
 struct Chord {
     name: String,
     records: Vec<u8>,
-    /// `ConsoleKey`'s name, as `[Console]::ReadKey` reports it.
-    console_key: &'static str,
-    /// `ConsoleModifiers`: Alt 1, Shift 2, Control 4.
-    console_modifiers: u8,
+    virtual_key: u16,
     character: u16,
-    /// In T-KEYBOARD-RECORDS' set. The six chords of Escape with Ctrl or Alt are driven too, and
-    /// are not in it: ConPTY swallows their record (asserted below), so the encoder keeps their
-    /// ESC.
-    in_set: bool,
+    /// `ConsoleModifiers`: Alt 1, Shift 2, Control 4, from the record's control-key state.
+    console_modifiers: u8,
+    /// Written by the encoder. The six chords of Escape with Ctrl or Alt are driven too and are
+    /// not: ConPTY swallows their record (asserted below), which is why the encoder keeps their
+    /// ESC. Their pairs are built here, in the encoder's form, because the encoder writes none.
+    from_the_encoder: bool,
 }
 
-/// **The chords this test drives**: Enter, Tab, Backspace, Escape and Space under each of the
-/// seven modifier sets, Ctrl with Numpad Enter, and Ctrl with three keys that have no C0 code.
-/// Each record is what the encoder writes on a US layout: `VK`, set-1 scan code, the character
-/// the layout types for the chord (`ToUnicodeEx`: Ctrl gives Enter LF, Backspace DEL, Escape and
-/// Space themselves, Tab nothing; Ctrl with Shift or Alt gives nothing), and `SHIFT_PRESSED` 16 /
-/// `LEFT_CTRL_PRESSED` 8 / `LEFT_ALT_PRESSED` 2 / `ENHANCED_KEY` 256.
-fn record_chords() -> Vec<Chord> {
-    let pair = |virtual_key: u16, scan: u16, character: u16, state: u16| {
-        format!(
-            "\x1b[{virtual_key};{scan};{character};1;{state};1_\
-             \x1b[{virtual_key};{scan};{character};0;{state};1_"
-        )
-        .into_bytes()
+/// The fields of the first record of a pair: `(Vk, Uc, Cs)`.
+fn record_fields(records: &[u8]) -> (u16, u16, u16) {
+    let text = std::str::from_utf8(records).expect("a record is ASCII");
+    let body = text
+        .strip_prefix("\x1b[")
+        .and_then(|rest| rest.split('_').next())
+        .unwrap_or_else(|| panic!("not a record: {text:?}"));
+    let fields = body
+        .split(';')
+        .map(|field| field.parse::<u16>().expect("a number"))
+        .collect::<Vec<_>>();
+    let [virtual_key, _scan, character, down, state, repeat] = fields[..] else {
+        panic!("six fields: {text:?}");
     };
-    let mut chords = Vec::new();
-    for (name, console_key, virtual_key, scan, plain, with_control) in [
-        ("Enter", "Enter", 13, 28, 13, Some(10)),
-        ("Tab", "Tab", 9, 15, 9, None),
-        ("Backspace", "Backspace", 8, 14, 8, Some(127)),
-        ("Escape", "Escape", 27, 1, 27, Some(27)),
-        ("Space", "Spacebar", 32, 57, 32, Some(32)),
-    ] {
-        for mods in ["S", "A", "SA", "C", "SC", "AC", "SAC"] {
-            let (shift, alt, control) =
-                (mods.contains('S'), mods.contains('A'), mods.contains('C'));
-            let character = match (control, shift || alt) {
-                (false, _) => plain,
-                (true, false) => with_control.unwrap_or(0),
-                (true, true) => 0,
-            };
-            let state = 16 * u16::from(shift) + 8 * u16::from(control) + 2 * u16::from(alt);
-            chords.push(Chord {
-                name: format!("{mods}+{name}"),
-                records: pair(virtual_key, scan, character, state),
-                console_key,
-                console_modifiers: 2 * u8::from(shift) + 4 * u8::from(control) + u8::from(alt),
-                character,
-                in_set: !(name == "Escape" && (control || alt)),
-            });
-        }
+    assert_eq!((down, repeat), (1, 1), "down first, one repeat: {text:?}");
+    (virtual_key, character, state)
+}
+
+fn chord(name: String, records: Vec<u8>, from_the_encoder: bool) -> Chord {
+    let (virtual_key, character, state) = record_fields(&records);
+    let console_modifiers =
+        u8::from(state & 2 != 0) + 2 * u8::from(state & 16 != 0) + 4 * u8::from(state & 8 != 0);
+    Chord {
+        name,
+        records,
+        virtual_key,
+        character,
+        console_modifiers,
+        from_the_encoder,
     }
-    for (name, console_key, virtual_key, scan, character, state, console_modifiers) in [
-        ("C+NumpadEnter", "Enter", 13, 28, 10, 8 + 256, 4),
-        ("C+1", "D1", 0x31, 2, 0, 8, 4),
-        ("AC+1", "D1", 0x31, 2, 0, 8 + 2, 4 + 1),
-        ("SC+[", "Oem4", 0xDB, 0x1A, 0, 16 + 8, 2 + 4),
+}
+
+/// The encoder's chords, then the six swallowed Escape chords.
+fn record_chords() -> Vec<Chord> {
+    let mut chords = ENCODER_RECORDS
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .map(|line| {
+            let cells = line.split('\t').collect::<Vec<_>>();
+            let [key, location, mods, bytes] = cells[..] else {
+                panic!("four columns: {line:?}");
+            };
+            let name = if location == "numpad" {
+                format!("{mods}+Numpad{key}")
+            } else {
+                format!("{mods}+{key}")
+            };
+            chord(name, bytes.replace("\\e", "\x1b").into_bytes(), true)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(chords.len(), 155, "every chord the encoder file holds");
+    for (mods, state) in [
+        ("A", 2),
+        ("SA", 18),
+        ("C", 8),
+        ("SC", 24),
+        ("AC", 10),
+        ("SAC", 26),
     ] {
-        chords.push(Chord {
-            name: name.to_owned(),
-            records: pair(virtual_key, scan, character, state),
-            console_key,
-            console_modifiers,
-            character,
-            in_set: true,
-        });
+        let character = if mods == "C" {
+            27
+        } else if mods.contains('C') {
+            0
+        } else {
+            27
+        };
+        let record = |down: u8| format!("\x1b[27;1;{character};{down};{state};1_");
+        chords.push(chord(
+            format!("{mods}+Escape"),
+            format!("{}{}", record(1), record(0)).into_bytes(),
+            false,
+        ));
     }
     chords
 }
 
-/// What a reader got for each chord of [`record_chords`] in the acceptance run, as hex — in that
-/// order: `(chord, VT-input reader, Node raw-stdin reader)`. ConPTY parses the record into a key
-/// event and, for a client that reads VT or for libuv, turns the event back into bytes with its
-/// own encoder, so these are ConPTY's and libuv's answers, pinned so a change in either is caught.
-/// An empty cell reads nothing: every Escape with Ctrl or Alt (ConPTY swallows the record), and
-/// Ctrl+Space and Ctrl+Shift+Space for libuv (which today's legacy bytes do not reach it with
-/// either — they send nothing).
-const READ_BACK: [(&str, &str, &str); 39] = [
-    ("S+Enter", "0d", "0d"),
-    ("A+Enter", "1b0d", "1b0d"),
-    ("SA+Enter", "1b0d", "1b0d"),
-    ("C+Enter", "0a", "0a"),
-    ("SC+Enter", "0a", "0a"),
-    ("AC+Enter", "1b0a", "1b0a"),
-    ("SAC+Enter", "1b0a", "1b0a"),
-    ("S+Tab", "1b5b5a", "1b5b5a"),
-    ("A+Tab", "1b09", "1b09"),
-    ("SA+Tab", "1b1b5b5a", "1b1b5b5a"),
-    ("C+Tab", "09", "09"),
-    ("SC+Tab", "1b5b5a", "1b5b5a"),
-    ("AC+Tab", "1b09", "1b09"),
-    ("SAC+Tab", "1b1b5b5a", "1b1b5b5a"),
-    ("S+Backspace", "7f", "7f"),
-    ("A+Backspace", "1b7f", "1b7f"),
-    ("SA+Backspace", "1b7f", "1b7f"),
-    ("C+Backspace", "08", "08"),
-    ("SC+Backspace", "08", "08"),
-    ("AC+Backspace", "1b08", "1b08"),
-    ("SAC+Backspace", "1b08", "1b08"),
-    ("S+Escape", "1b", "1b"),
-    ("A+Escape", "", ""),
-    ("SA+Escape", "", ""),
-    ("C+Escape", "", ""),
-    ("SC+Escape", "", ""),
-    ("AC+Escape", "", ""),
-    ("SAC+Escape", "", ""),
-    ("S+Space", "20", "20"),
-    ("A+Space", "1b20", "1b20"),
-    ("SA+Space", "1b20", "1b20"),
-    ("C+Space", "00", ""),
-    ("SC+Space", "00", ""),
-    ("AC+Space", "1b00", "1b"),
-    ("SAC+Space", "1b00", "1b"),
-    ("C+NumpadEnter", "0a", "0a"),
-    ("C+1", "31", "31"),
-    ("AC+1", "1b31", "1b31"),
-    ("SC+[", "1b", "1b"),
-];
+/// `§` separates one chord's reading from the next and `¶` ends the run: no record of the set
+/// types either on a US layout, and neither is a byte a VT encoder writes.
+const SEPARATOR: &str = "\u{a7}";
+const END: &str = "\u{b6}";
 
-/// The read-back row of `chord`, by name.
-fn read_back(chord: &Chord) -> (&'static str, &'static str) {
-    let (_, vt, node) = READ_BACK
-        .iter()
-        .find(|(name, _, _)| *name == chord.name)
-        .unwrap_or_else(|| panic!("no read-back row for {}", chord.name));
-    (vt, node)
+/// Send every chord's record pair and a separator, in order, then the end mark.
+fn send_every_chord(probe: &mut Probe, chords: &[Chord]) {
+    for chord in chords {
+        probe.pty.write(&chord.records).unwrap();
+        probe.pty.write(SEPARATOR.as_bytes()).unwrap();
+        probe.pump_once();
+    }
+    probe.send(END.as_bytes());
 }
 
 /// **ConPTY asks for win32-input-mode at the head of every session, and the session records it;
@@ -582,8 +571,8 @@ fn read_back(chord: &Chord) -> (&'static str, &'static str) {
 ///
 /// The real bytes, asserted: `?9001h` arrives before the child's first output and the session's
 /// `win32_input_mode` is on; the child's `ESC c` reaches the terminal, which resets every mode;
-/// the report states whether ConPTY's own reaction re-requested the mode, and the assertion is on
-/// the session's state after it, which is what the encoder reads.
+/// ConPTY follows it with `?1004h ?9001h` at once, so the session has the mode on again, which is
+/// what the encoder reads.
 #[test]
 fn conpty_asks_for_win32_input_mode_and_the_session_records_it() {
     const SCRIPT: &str = r#"
@@ -638,6 +627,9 @@ while ($true) { $k = [Console]::ReadKey($true); if ($k.KeyChar -eq 'q') { break 
     probe.finish();
 }
 
+/// Rows enough for one `BT_KKR_<n>=` line per chord and the markers.
+const CHORD_ROWS: u16 = 200;
+
 /// Split what a reader printed, one `BT_KKR_<n>=` line per chord.
 fn per_chord(probe: &mut Probe, chords: &[Chord], last: &str) -> Vec<String> {
     probe.wait_for(last);
@@ -650,45 +642,43 @@ fn per_chord(probe: &mut Probe, chords: &[Chord], last: &str) -> Vec<String> {
         .collect()
 }
 
-/// Gate 2, **a key-record reader gets each chord of the set as that key, with its modifiers and
-/// its character** — `Enter` with `Control` for Ctrl+Enter, and likewise every chord.
+/// Gate 2, **a key-record reader gets every chord the encoder writes as that key, with its
+/// modifiers and its character** — `Enter` with `Control` for Ctrl+Enter, and likewise each of
+/// the 155 — **and gets nothing for the six Escape chords ConPTY swallows.**
 ///
 /// PowerShell's `[Console]::ReadKey`, as PSReadLine, cmd, .NET and Codex on Windows read. Each
-/// chord is sent as the record pair Folio writes, then an `x`; the reader prints the key events
-/// between two `x`s, one line per chord. Exactly one key event per chord, and it is the chord.
+/// chord is sent as the encoder's record pair, then a separator; the reader prints, per chord,
+/// every key event it read as `ConsoleKey/ConsoleModifiers/KeyChar` in numbers. Exactly one
+/// event per chord: its virtual key, its modifiers and its character, field for field.
 #[test]
-fn a_key_record_reader_reads_every_chord_of_the_set_as_that_key() {
+fn a_key_record_reader_reads_every_chord_the_encoder_writes_as_that_key() {
     const SCRIPT: &str = r#"
 Write-Output ('BT_KKR_' + 'READY')
 $t = @(); $cur = @()
 while ($true) {
   $k = [Console]::ReadKey($true)
-  if ($k.KeyChar -eq 'q') { break }
-  if ($k.KeyChar -eq 'x' -and [int]$k.Modifiers -eq 0) { $t += ,($cur -join ' '); $cur = @(); continue }
-  $cur += ('{0}/{1}/{2:x2}' -f $k.Key, [int]$k.Modifiers, [int]$k.KeyChar)
+  if ($k.KeyChar -eq [char]0xB6) { break }
+  if ($k.KeyChar -eq [char]0xA7) { $t += ,($cur -join ' '); $cur = @(); continue }
+  $cur += ('{0}/{1}/{2:x2}' -f [int]$k.Key, [int]$k.Modifiers, [int]$k.KeyChar)
 }
 for ($i = 0; $i -lt $t.Count; $i++) { Write-Output ('BT_KKR_' + $i + '=' + $t[$i]) }
 Write-Output ('BT_KKR_' + 'END')
 "#;
     let chords = record_chords();
-    let mut probe = Probe::spawn_with_rows(powershell(SCRIPT), 80);
+    let mut probe = Probe::spawn_with_rows(powershell(SCRIPT), CHORD_ROWS);
     probe.wait_for("BT_KKR_READY");
-    for chord in &chords {
-        probe.send(&chord.records);
-        probe.send(b"x");
-    }
-    probe.send(b"q");
+    send_every_chord(&mut probe, &chords);
     let read = per_chord(&mut probe, &chords, "BT_KKR_END");
     for (chord, events) in chords.iter().zip(&read) {
         eprintln!("BT_KKR_RECORD {} {events:?}", chord.name);
     }
     for (chord, events) in chords.iter().zip(&read) {
-        if chord.in_set {
+        if chord.from_the_encoder {
             assert_eq!(
                 events,
                 &format!(
                     "{}/{}/{:02x}",
-                    chord.console_key, chord.console_modifiers, chord.character
+                    chord.virtual_key, chord.console_modifiers, chord.character
                 ),
                 "{}: one key event, the chord itself",
                 chord.name
@@ -704,15 +694,15 @@ Write-Output ('BT_KKR_' + 'END')
     probe.finish();
 }
 
-/// Gate 2, **a VT-input reader gets, for each chord, exactly what ConPTY's own encoder writes
-/// for that key event** — asserted as literals, so a change in ConPTY is caught.
+/// Gate 2, **a VT-input reader gets, for every chord, exactly what ConPTY's own encoder writes
+/// for that key event** — asserted as the literals of [`READ_BACK`], so a change in the ConPTY
+/// Folio ships is caught.
 ///
 /// The same reader as case 3 (`ENABLE_VIRTUAL_TERMINAL_INPUT`, `ReadConsoleW`): what WSL's relay
-/// reads. ConPTY parses Folio's record into a key event and, for a client that asked for VT
-/// input, writes that event back out as VT itself; the literals are what it wrote in the
-/// acceptance run (the report lists them).
+/// reads. ConPTY parses the record into a key event and, for a client that asked for VT input,
+/// writes that event back out as VT itself. Scoped to the vendored ConPTY (the note above).
 #[test]
-fn a_vt_input_reader_reads_what_conpty_encodes_for_each_record() {
+fn a_vt_input_reader_reads_what_conpty_encodes_for_every_record() {
     const SCRIPT: &str = r#"
 $sig = @'
 [DllImport("kernel32.dll")] public static extern IntPtr GetStdHandle(int which);
@@ -729,33 +719,29 @@ if (-not [FolioProbe.Console]::SetConsoleMode($h, $vt)) { Write-Output ('BT_KKR_
 Write-Output ('BT_KKR_' + 'READY')
 $buffer = New-Object char[] 256
 $s = ''
-while (-not $s.Contains('q')) {
+while (-not $s.Contains([char]0xB6)) {
   $n = [uint32]0
   if (-not [FolioProbe.Console]::ReadConsoleW($h, $buffer, 256, [ref]$n, [IntPtr]::Zero)) { break }
   if ($n -gt 0) { $s += -join $buffer[0..([int]$n - 1)] }
 }
-$s = $s.Substring(0, $s.IndexOf('q'))
-$parts = $s.Split('x')
+$s = $s.Substring(0, $s.IndexOf([char]0xB6))
+$parts = $s.Split([char]0xA7)
 for ($i = 0; $i -lt $parts.Count - 1; $i++) {
   Write-Output ('BT_KKR_' + $i + '=' + (($parts[$i].ToCharArray() | ForEach-Object { '{0:x2}' -f [int]$_ }) -join ''))
 }
 Write-Output ('BT_KKR_' + 'END')
 "#;
     let chords = record_chords();
-    let mut probe = Probe::spawn_with_rows(powershell(SCRIPT), 80);
+    let mut probe = Probe::spawn_with_rows(powershell(SCRIPT), CHORD_ROWS);
     probe.wait_for("BT_KKR_READY");
     assert!(
         probe.value_after("BT_KKR_NOMODE").is_none(),
         "the console must accept ENABLE_VIRTUAL_TERMINAL_INPUT for this reader to be one"
     );
-    for chord in &chords {
-        probe.send(&chord.records);
-        probe.send(b"x");
-    }
-    probe.send(b"q");
+    send_every_chord(&mut probe, &chords);
     let read = per_chord(&mut probe, &chords, "BT_KKR_END");
     for (chord, bytes) in chords.iter().zip(&read) {
-        eprintln!("BT_KKR_VT {} {bytes:?}", chord.name);
+        eprintln!("BT_KKR_VT {:?} {bytes:?}", chord.name);
     }
     for (chord, bytes) in chords.iter().zip(&read) {
         assert_eq!(
@@ -768,57 +754,54 @@ Write-Output ('BT_KKR_' + 'END')
     probe.finish();
 }
 
-/// Gate 2, **a native Node raw-stdin reader gets, for each chord, bytes asserted exactly — and
+/// Gate 2, **a native Node raw-stdin reader gets, for every chord, bytes asserted exactly — and
 /// for Ctrl+Enter nothing worse than today's `\r`.**
 ///
 /// libuv reads the console's key events and turns them into bytes itself. Needs `node` on `PATH`
-/// and fails without it, as case 4 does; CI's `conpty` job selects it out by name.
+/// and fails without it, as case 4 does; CI's `conpty` job selects it out by name. Scoped to the
+/// vendored ConPTY (the note above).
 #[test]
 fn a_native_node_reader_reads_every_record_no_worse_than_today() {
     let version = std::process::Command::new("node").arg("--version").output();
     let Ok(version) = version.as_ref().map(|output| output.stdout.clone()) else {
         panic!("this reader needs `node` on PATH and there is none: {version:?}");
     };
+    // `§` is C2 A7 and `¶` C2 B6 in what libuv hands over.
     const SCRIPT: &str = "const out = process.stdout; \
         let buf = Buffer.alloc(0); \
         process.stdin.setRawMode(true); process.stdin.resume(); \
         process.stdin.on('data', (d) => { buf = Buffer.concat([buf, d]); \
-          if (buf.includes(0x71)) { \
-            const all = buf.subarray(0, buf.indexOf(0x71)); \
+          const end = buf.indexOf(Buffer.from([0xc2, 0xb6])); \
+          if (end >= 0) { \
+            const all = buf.subarray(0, end); \
             const parts = []; let from = 0; \
-            for (let i = 0; i < all.length; i++) { if (all[i] === 0x78) { parts.push(all.subarray(from, i)); from = i + 1; } } \
+            for (let i = 0; i + 1 < all.length; i++) { if (all[i] === 0xc2 && all[i + 1] === 0xa7) { parts.push(all.subarray(from, i)); from = i + 2; i++; } } \
             parts.forEach((p, i) => out.write('BT_KKR_' + i + '=' + p.toString('hex') + '\\r\\n')); \
             out.write('BT_KKR_' + 'END\\r\\n'); \
             setTimeout(() => process.exit(0), 200); \
           } }); \
         out.write('BT_KKR_' + 'READY\\r\\n');";
-    let chords = record_chords();
-    let mut probe = Probe::spawn_with_rows(PtyCommand::new("node").arg("-e").arg(SCRIPT), 80);
-    probe.wait_for("BT_KKR_READY");
     // Today's bytes for Ctrl+Enter first: the legacy `\r`.
-    probe.send(b"\r");
-    probe.send(b"x");
-    for chord in &chords {
-        probe.send(&chord.records);
-        probe.send(b"x");
-    }
-    probe.send(b"q");
     let mut all = vec![Chord {
         name: "today's Ctrl+Enter".to_owned(),
         records: b"\r".to_vec(),
-        console_key: "Enter",
-        console_modifiers: 0,
+        virtual_key: 13,
         character: 13,
-        in_set: false,
+        console_modifiers: 4,
+        from_the_encoder: false,
     }];
-    all.extend(chords);
+    all.extend(record_chords());
+    let mut probe =
+        Probe::spawn_with_rows(PtyCommand::new("node").arg("-e").arg(SCRIPT), CHORD_ROWS);
+    probe.wait_for("BT_KKR_READY");
+    send_every_chord(&mut probe, &all);
     let read = per_chord(&mut probe, &all, "BT_KKR_END");
     eprintln!(
         "BT_KKR_NODE node={:?}",
         String::from_utf8_lossy(&version).trim()
     );
     for (chord, bytes) in all.iter().zip(&read) {
-        eprintln!("BT_KKR_NODE {} {bytes:?}", chord.name);
+        eprintln!("BT_KKR_NODE {:?} {bytes:?}", chord.name);
     }
     assert_eq!(
         read[0], "0d",
@@ -843,3 +826,182 @@ fn a_native_node_reader_reads_every_record_no_worse_than_today() {
     );
     probe.finish();
 }
+
+/// The read-back row of `chord`, by name: `(VT-input reader, Node raw-stdin reader)`.
+fn read_back(chord: &Chord) -> (&'static str, &'static str) {
+    let (_, vt, node) = READ_BACK
+        .iter()
+        .find(|(name, _, _)| *name == chord.name)
+        .unwrap_or_else(|| panic!("no read-back row for {}", chord.name));
+    (vt, node)
+}
+
+/// What each reader got for each chord in the acceptance run through the vendored ConPTY, as hex:
+/// `(chord, VT-input reader, Node raw-stdin reader)`. ConPTY parses the record into a key event
+/// and, for a client that reads VT, turns it back into bytes with its own encoder; libuv does the
+/// same for Node. These are those answers, pinned so a change in either is caught — the
+/// translations Windows Terminal's users get from the same records (design note revision (e)).
+/// An empty cell reads nothing.
+const READ_BACK: [(&str, &str, &str); 161] = [
+    ("S+Enter", "0d", "0d"),
+    ("A+Enter", "1b0d", "1b0d"),
+    ("SA+Enter", "1b0d", "1b0d"),
+    ("C+Enter", "0a", "0a"),
+    ("SC+Enter", "0a", "0a"),
+    ("AC+Enter", "1b0a", "1b0a"),
+    ("SAC+Enter", "1b0a", "1b0a"),
+    ("S+Tab", "1b5b5a", "1b5b5a"),
+    ("A+Tab", "1b09", "1b09"),
+    ("SA+Tab", "1b1b5b5a", "1b1b5b5a"),
+    ("AC+Tab", "1b09", "1b09"),
+    ("SAC+Tab", "1b1b5b5a", "1b1b5b5a"),
+    ("S+Backspace", "7f", "7f"),
+    ("A+Backspace", "1b7f", "1b7f"),
+    ("SA+Backspace", "1b7f", "1b7f"),
+    ("C+Backspace", "08", "08"),
+    ("SC+Backspace", "08", "08"),
+    ("AC+Backspace", "1b08", "1b08"),
+    ("SAC+Backspace", "1b08", "1b08"),
+    ("S+Escape", "1b", "1b"),
+    ("S+Space", "20", "20"),
+    ("A+Space", "1b20", "1b20"),
+    ("SA+Space", "1b20", "1b20"),
+    ("C+Space", "00", ""),
+    ("SC+Space", "00", ""),
+    ("AC+Space", "1b00", "1b"),
+    ("SAC+Space", "1b00", "1b"),
+    ("AC+a", "1b01", "1b01"),
+    ("SAC+a", "1b01", "1b01"),
+    ("AC+b", "1b02", "1b02"),
+    ("SAC+b", "1b02", "1b02"),
+    ("AC+c", "1b03", "1b03"),
+    ("SAC+c", "1b03", "1b03"),
+    ("AC+d", "1b04", "1b04"),
+    ("SAC+d", "1b04", "1b04"),
+    ("AC+e", "1b05", "1b05"),
+    ("SAC+e", "1b05", "1b05"),
+    ("AC+f", "1b06", "1b06"),
+    ("SAC+f", "1b06", "1b06"),
+    ("AC+g", "1b07", "1b07"),
+    ("SAC+g", "1b07", "1b07"),
+    ("AC+h", "1b08", "1b08"),
+    ("SAC+h", "1b08", "1b08"),
+    ("AC+i", "1b09", "1b09"),
+    ("SAC+i", "1b09", "1b09"),
+    ("AC+j", "1b0a", "1b0a"),
+    ("SAC+j", "1b0a", "1b0a"),
+    ("AC+k", "1b0b", "1b0b"),
+    ("SAC+k", "1b0b", "1b0b"),
+    ("AC+l", "1b0c", "1b0c"),
+    ("SAC+l", "1b0c", "1b0c"),
+    ("AC+m", "1b0d", "1b0d"),
+    ("SAC+m", "1b0d", "1b0d"),
+    ("AC+n", "1b0e", "1b0e"),
+    ("SAC+n", "1b0e", "1b0e"),
+    ("AC+o", "1b0f", "1b0f"),
+    ("SAC+o", "1b0f", "1b0f"),
+    ("AC+p", "1b10", "1b10"),
+    ("SAC+p", "1b10", "1b10"),
+    ("AC+q", "1b11", "1b11"),
+    ("SAC+q", "1b11", "1b11"),
+    ("AC+r", "1b12", "1b12"),
+    ("SAC+r", "1b12", "1b12"),
+    ("AC+s", "1b13", "1b13"),
+    ("SAC+s", "1b13", "1b13"),
+    ("AC+t", "1b14", "1b14"),
+    ("SAC+t", "1b14", "1b14"),
+    ("AC+u", "1b15", "1b15"),
+    ("SAC+u", "1b15", "1b15"),
+    ("AC+v", "1b16", "1b16"),
+    ("SAC+v", "1b16", "1b16"),
+    ("AC+w", "1b17", "1b17"),
+    ("SAC+w", "1b17", "1b17"),
+    ("AC+x", "1b18", "1b18"),
+    ("SAC+x", "1b18", "1b18"),
+    ("AC+y", "1b19", "1b19"),
+    ("SAC+y", "1b19", "1b19"),
+    ("AC+z", "1b1a", "1b1a"),
+    ("SAC+z", "1b1a", "1b1a"),
+    ("C+0", "30", "30"),
+    ("SC+0", "29", "29"),
+    ("AC+0", "1b30", "1b30"),
+    ("SAC+0", "1b29", "1b29"),
+    ("C+1", "31", "31"),
+    ("AC+1", "1b31", "1b31"),
+    ("SAC+1", "1b21", "1b21"),
+    ("C+2", "00", ""),
+    ("AC+2", "1b00", "1b"),
+    ("SAC+2", "1b00", "1b"),
+    ("C+3", "1b", "1b"),
+    ("AC+3", "1b1b", "1b1b"),
+    ("SAC+3", "1b1b", "1b1b"),
+    ("C+4", "1c", "1c"),
+    ("AC+4", "1b1c", "1b1c"),
+    ("SAC+4", "1b1c", "1b1c"),
+    ("C+5", "1d", "1d"),
+    ("AC+5", "1b1d", "1b1d"),
+    ("SAC+5", "1b1d", "1b1d"),
+    ("C+6", "1e", "1e"),
+    ("AC+6", "1b1e", "1b1e"),
+    ("SAC+6", "1b1e", "1b1e"),
+    ("C+7", "1f", "1f"),
+    ("AC+7", "1b1f", "1b1f"),
+    ("SAC+7", "1b1f", "1b1f"),
+    ("C+8", "7f", "7f"),
+    ("AC+8", "1b7f", "1b7f"),
+    ("SAC+8", "1b7f", "1b7f"),
+    ("C+9", "39", "39"),
+    ("AC+9", "1b39", "1b39"),
+    ("SAC+9", "1b39", "1b39"),
+    ("C+`", "00", ""),
+    ("SC+`", "1e", "1e"),
+    ("AC+`", "1b00", "1b"),
+    ("SAC+`", "1b1e", "1b1e"),
+    ("C+-", "2d", "2d"),
+    ("AC+-", "1b2d", "1b2d"),
+    ("SAC+-", "1b1f", "1b1f"),
+    ("C+=", "3d", "3d"),
+    ("SC+=", "2b", "2b"),
+    ("AC+=", "1b3d", "1b3d"),
+    ("SAC+=", "1b2b", "1b2b"),
+    ("SC+[", "1b", "1b"),
+    ("AC+[", "1b1b", "1b1b"),
+    ("SAC+[", "1b1b", "1b1b"),
+    ("SC+]", "1d", "1d"),
+    ("AC+]", "1b1d", "1b1d"),
+    ("SAC+]", "1b1d", "1b1d"),
+    ("SC+\\", "1c", "1c"),
+    ("AC+\\", "1b1c", "1b1c"),
+    ("SAC+\\", "1b1c", "1b1c"),
+    ("C+;", "3b", "3b"),
+    ("SC+;", "3a", "3a"),
+    ("AC+;", "1b3b", "1b3b"),
+    ("SAC+;", "1b3a", "1b3a"),
+    ("C+'", "27", "27"),
+    ("SC+'", "22", "22"),
+    ("AC+'", "1b27", "1b27"),
+    ("SAC+'", "1b22", "1b22"),
+    ("SC+,", "3c", "3c"),
+    ("AC+,", "1b2c", "1b2c"),
+    ("SAC+,", "1b3c", "1b3c"),
+    ("C+.", "2e", "2e"),
+    ("SC+.", "3e", "3e"),
+    ("AC+.", "1b2e", "1b2e"),
+    ("SAC+.", "1b3e", "1b3e"),
+    ("C+/", "1f", "1f"),
+    ("AC+/", "1b1f", "1b1f"),
+    ("SAC+/", "1b7f", "1b7f"),
+    ("S+NumpadEnter", "0d", "0d"),
+    ("A+NumpadEnter", "1b0d", "1b0d"),
+    ("SA+NumpadEnter", "1b0d", "1b0d"),
+    ("C+NumpadEnter", "0a", "0a"),
+    ("SC+NumpadEnter", "0a", "0a"),
+    ("AC+NumpadEnter", "1b0a", "1b0a"),
+    ("SAC+NumpadEnter", "1b0a", "1b0a"),
+    ("A+Escape", "", ""),
+    ("SA+Escape", "", ""),
+    ("C+Escape", "", ""),
+    ("SC+Escape", "", ""),
+    ("AC+Escape", "", ""),
+    ("SAC+Escape", "", ""),
+];

@@ -555,6 +555,30 @@ Each is what the implementation does and why; none changes a decision of §0 or 
 - **§7.3, "the 'records' column of `key_encoding.tsv`".** The TSV is one row per key, modifiers, DECCKM and mode, so the column is a fifth mode, `records`, with a row for every chord the table has; `docs/key-encoding.md` shows it as the column *Windows records*. A chord outside the set carries its legacy bytes there.
 - **§7.3, "built like `SHIFT_ENTER_RECORDS`".** The record's fields are the press as Windows reported it rather than a table per chord: the virtual key is fixed for the five named keys and the installed layout's for a text key's scan code (`bt_platform::virtual_key_of_scan_code`), a keypad digit or decimal key that typed text is `VK_NUMPADn`/`VK_DECIMAL`, the scan code comes from winit's physical key, and the character is winit's `text_with_all_modifiers` (Windows' `WM_CHAR`). On a US layout this gives Shift+Enter exactly `SHIFT_ENTER_RECORDS`, which a test asserts. The US answers the tests use were measured with `ToUnicodeEx` and `MapVirtualKeyExW` against the US layout.
 
+Added after Codex's review of the branch (`KR-review-codex-2026-09-29`, round 2):
+
+- **§7.3, "Ctrl with a key that has no C0 code", on Windows.** winit keeps Ctrl while Alt is down, because Ctrl+Alt may be AltGr (`WindowsModifiers::remove_only_ctrl`, winit 0.30.13 `platform_impl/windows/keyboard_layout.rs`, applied in `keyboard.rs`'s key-event builder), and when `ToUnicodeEx` types nothing for that state it hands the key over as `Key::Unidentified(NativeKey::Windows(vk))`. On the US layout that is every Ctrl+Alt and Ctrl+Shift+Alt chord on all 47 text keys (measured). Such a press has no character for any rung, so the legacy encoder — and either protocol — sends nothing for it, whatever C0 code the letter would have had. The encoder therefore writes a record for Ctrl (with or without Shift and Alt) on a key whose key without modifiers is text and which has a scan code, carrying the virtual key Windows reported; a media key or a key with no position is not one. The first round's tests had modelled these chords as characters and so promised records the real event never produced; the sweep and the table now build them as winit does. That the kitty and modifyOtherKeys encoders also send nothing for these chords on Windows is T-KEYBOARD-PROTOCOL's, reported, not changed here.
+- **§7.3 gate 2, "each chord in the set".** The real-ConPTY test sends every chord the encoder writes on a US layout — 155 of them: the captured sweep's 158 and Numpad Enter's 7, less the 10 the shortcut table claims — as the encoder's own bytes (`crates/bt-app/src/key_records_windows_us.tsv`, which a `bt-app` test holds equal to the encoder), plus the six swallowed Escape chords.
+- **The translations byte readers see (owner ruling Q1 = A; coordinator, 2026-09-29: parity with Windows Terminal is the criterion).** A key record is a key event; a program that reads the console as VT (WSL's relay) or through libuv (Node) gets that event back as bytes from ConPTY's own encoder, which is the encoder Windows Terminal's users get for the same records. **A byte reader behind ConPTY sees what it sees under Windows Terminal.** Some of those bytes differ from Folio's legacy ones, and that is intended: Ctrl+1 now reaches such a reader as `1` (0x31) where legacy sent nothing; Ctrl+Shift+[ as ESC (0x1B) where legacy sent nothing; Ctrl+Backspace as BS (0x08) where legacy sent DEL; Ctrl+3 as ESC, Ctrl+8 as DEL, Ctrl+2 and Ctrl+\` as NUL to a VT reader (nothing to libuv), Ctrl+/ as 0x1F; Ctrl+Alt+<letter> as ESC and the letter's C0 code where legacy on Windows sent nothing. The full table is `READ_BACK` in the test.
+- **Which ConPTY those bytes are for.** The literals are the ConPTY Folio ships, the vendored `conpty.dll`/`OpenConsole.exe` pair. `BT_CONPTY_FORCE_SYSTEM=1` is a test switch; the product itself uses the ConPTY inbox in Windows only when the packaged pair is missing beside `folio.exe` or fails to load (`load_conpty` in the vendored `portable-pty`). On that path key-record readers are unchanged — every one of the 161 chords reaches `[Console]::ReadKey` as the same key event (measured with `BT_CONPTY_FORCE_SYSTEM=1`, inbox `conhost.exe` 10.0.26100.1) and the Escape records are swallowed there too — while byte readers get the inbox encoder's translations, which differ on 60 of the 161 chords (below; not asserted). The one where a record is worse for a byte reader than the legacy byte is Ctrl+Alt+Enter (and Ctrl+Shift+Alt+Enter): legacy `\r` arrives, the record arrives as nothing; on the vendored ConPTY it arrives as ESC LF.
+
+| chord | vendored VT | inbox VT | vendored Node | inbox Node |
+|---|---|---|---|---|
+| Ctrl+Shift+Enter (and Numpad) | `0a` | `0d` | `0a` | `0d` |
+| Ctrl+Alt+Enter, Ctrl+Shift+Alt+Enter (and Numpad) | `1b0a` | nothing | `1b0a` | nothing |
+| Shift+Alt+Tab | `1b1b5b5a` | `1b09` | `1b1b5b5a` | `1b09` |
+| Ctrl+Alt+Tab | `1b09` | `09` | `1b09` | `09` |
+| Ctrl+Shift+Alt+Tab | `1b1b5b5a` | `09` | `1b1b5b5a` | `09` |
+| Ctrl+0 / Ctrl+Shift+0 | `30` / `29` | `10` | `30` / `29` | `10` |
+| Ctrl+- | `2d` | `0d` | `2d` | `0d` |
+| Ctrl+= / Ctrl+Shift+= | `3d` / `2b` | `1d` | `3d` / `2b` | `1d` |
+| Ctrl+; / Ctrl+Shift+; | `3b` / `3a` | `1b` | `3b` / `3a` | `1b` |
+| Ctrl+' / Ctrl+Shift+' | `27` / `22` | `07` | `27` / `22` | `07` |
+| Ctrl+Shift+, | `3c` | `0c` | `3c` | `0c` |
+| Ctrl+. / Ctrl+Shift+. | `2e` / `3e` | `0e` | `2e` / `3e` | `0e` |
+| Ctrl+Shift+\` | `1e` | `00` | `1e` | nothing |
+| Ctrl+Alt and Ctrl+Shift+Alt with a digit but 2, \`, -, =, [, ], \\, ;, ', , or . (38 chords) | ESC and a byte | nothing | ESC and a byte (ESC alone for Ctrl+Alt+\`) | nothing |
+
 ## Sources
 
 - kitty keyboard protocol: https://sw.kovidgoyal.net/kitty/keyboard-protocol/ (source `docs/keyboard-protocol.rst`), and kitty's encoder `kitty/key_encoding.c` (https://github.com/kovidgoyal/kitty).
