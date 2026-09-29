@@ -1,4 +1,5 @@
 use bt_platform::HostPlatform;
+use bt_pty::ConPtyKind;
 use bt_term::{KeyboardProtocol, ModifyOtherKeys, SUPPORTED_KITTY_FLAGS};
 use winit::event::{ElementState, MouseButton};
 use winit::keyboard::{
@@ -967,6 +968,13 @@ pub(crate) struct KeyOrigin<'a> {
     /// The installed layout's virtual key for a scan code: `bt_platform::virtual_key_of_scan_code`
     /// in the product, a fixed layout in a test.
     pub(crate) virtual_key_of_scan_code: fn(u16) -> Option<u16>,
+    /// Whether the installed layout types an ordinary character on a virtual key with no
+    /// modifier — `false` for a dead key: `bt_platform::virtual_key_types_a_character` in the
+    /// product, a fixed layout in a test.
+    pub(crate) virtual_key_types_a_character: fn(u16) -> bool,
+    /// Which pseudoconsole the pane runs on (`bt_pty::PtySession::conpty_kind`, fixed at spawn).
+    /// Records are written only to the ConPTY Folio ships ([`key_records`]).
+    pub(crate) conpty: ConPtyKind,
 }
 
 /// `dwControlKeyState` bits (`wincon.h`) a record carries: which modifiers were down, and whether
@@ -998,7 +1006,17 @@ const ENHANCED_KEY: u16 = 0x0100;
 ///   protocol, has anything to send for such a key, so it is a chord VT cannot express here
 ///   whatever its C0 code would have been; its record carries the virtual key Windows reported.
 ///   A key whose key without modifiers is not text, or that has no scan code (a media key), is
-///   not one.
+///   not one; **nor is a dead key**, which winit reports as the character it would compose
+///   (`keyboard.rs`: "We convert dead keys into their character"), so the installed layout is
+///   asked whether the virtual key types an ordinary character
+///   ([`KeyOrigin::virtual_key_types_a_character`], `MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)`, whose
+///   top bit marks a dead key). The French layout's dead `^` under Ctrl+Alt is refused.
+///
+/// **Only on the ConPTY Folio ships** ([`ConPtyKind::Shipped`]; coordinator's ruling,
+/// 2026-09-29). A process falls back to the operating system's ConPTY on its own when the
+/// packaged pair is missing or fails to load, and that ConPTY turns many records into other bytes
+/// for a program that reads bytes (design note revision (e)); there, as everywhere records are not
+/// written, a program that never asked receives exactly the bytes it received before.
 ///
 /// A chord holding Super, a composing key and a paste chord are never in it
 /// ([`withheld_from_every_protocol`]). A Ctrl chord that has a C0 code (`Ctrl+I`, `Ctrl+M`,
@@ -1034,7 +1052,10 @@ fn key_records(
     modifiers: ModifiersState,
     origin: KeyOrigin<'_>,
 ) -> Option<Vec<u8>> {
-    if origin.platform != HostPlatform::Windows || withheld_from_every_protocol(key, modifiers) {
+    if origin.platform != HostPlatform::Windows
+        || origin.conpty != ConPtyKind::Shipped
+        || withheld_from_every_protocol(key, modifiers)
+    {
         return None;
     }
     let (shift, alt, control) = (
@@ -1063,14 +1084,17 @@ fn key_records(
         // Ctrl+Alt on a text key the layout types nothing for: winit keeps Ctrl while Alt is down
         // (Ctrl+Alt may be AltGr) and, finding no text, hands the key over with no character but
         // the virtual key Windows reported. It is a text key if its key without modifiers is
-        // text and it has a position; anything else (a media key, a key with no scan code) is not.
+        // text, the layout types an ordinary character on it (not a dead key, which winit also
+        // reports as text), and it has a position; anything else (a media key, a dead key, a key
+        // with no scan code) is not.
         Key::Unidentified(NativeKey::Windows(virtual_key))
             if control
                 && scan.is_some()
                 && matches!(
                     key_without_modifiers,
                     Key::Character(text) if !text.chars().any(char::is_control)
-                ) =>
+                )
+                && (origin.virtual_key_types_a_character)(*virtual_key) =>
         {
             *virtual_key
         }
@@ -3186,6 +3210,17 @@ mod tests {
         None
     }
 
+    fn no_character(_: u16) -> bool {
+        false
+    }
+
+    /// Whether the US layout types an ordinary character on a virtual key — it has no dead keys,
+    /// so every digit, letter and punctuation key does (`MapVirtualKeyExW(vk, MAPVK_VK_TO_CHAR,
+    /// 0x04090409)` sets the dead-key bit on none of them).
+    fn us_types_a_character(virtual_key: u16) -> bool {
+        matches!(virtual_key, 0x30..=0x39 | 0x41..=0x5A | 0xBA..=0xC0 | 0xDB..=0xDE)
+    }
+
     /// A press that says nothing about itself beyond its key: for the tests whose mode writes no
     /// record, where the origin is never read.
     const NOWHERE: KeyOrigin<'static> = KeyOrigin {
@@ -3193,6 +3228,8 @@ mod tests {
         physical_key: PhysicalKey::Unidentified(NativeKeyCode::Unidentified),
         text_with_all_modifiers: None,
         virtual_key_of_scan_code: no_virtual_key,
+        virtual_key_types_a_character: no_character,
+        conpty: ConPtyKind::Shipped,
     };
 
     /// The US layout's virtual key for the scan codes of its digit row and punctuation, as
@@ -3349,6 +3386,20 @@ mod tests {
                 physical_key: self.physical_key,
                 text_with_all_modifiers: self.text.as_deref(),
                 virtual_key_of_scan_code: us_virtual_key,
+                virtual_key_types_a_character: us_types_a_character,
+                conpty: if platform == HostPlatform::Windows {
+                    ConPtyKind::Shipped
+                } else {
+                    ConPtyKind::NotConPty
+                },
+            }
+        }
+
+        /// The same press in a pane that runs on the Windows inbox ConPTY.
+        fn on_the_inbox_conpty(&self) -> KeyOrigin<'_> {
+            KeyOrigin {
+                conpty: ConPtyKind::Inbox,
+                ..self.on(HostPlatform::Windows)
             }
         }
     }
@@ -3951,6 +4002,8 @@ mod tests {
                     physical_key: PhysicalKey::Code(physical),
                     text_with_all_modifiers: typed,
                     virtual_key_of_scan_code: us_virtual_key,
+                    virtual_key_types_a_character: us_types_a_character,
+                    conpty: ConPtyKind::Shipped,
                 },
             )
         };
@@ -4073,6 +4126,8 @@ mod tests {
                     physical_key: PhysicalKey::Code(KeyCode::Enter),
                     text_with_all_modifiers: Some("\n"),
                     virtual_key_of_scan_code: us_virtual_key,
+                    virtual_key_types_a_character: us_types_a_character,
+                    conpty: ConPtyKind::Shipped,
                 },
             )
         }
@@ -4192,11 +4247,15 @@ mod tests {
     /// Ctrl+Shift+Alt), each with DECCKM off and on. The set and the record's fields are written
     /// here from the win32-input-mode spec and the US layout's measured answers, not read from
     /// `key_records`. The same run with the press said to come from a Mac changes nothing:
-    /// macOS is unchanged byte for byte.
+    /// macOS is unchanged byte for byte. And the same Windows run in a pane on the inbox ConPTY
+    /// changes nothing either: with win32-input-mode on and the inbox source, every chord is its
+    /// mode-off bytes, which are the capture itself wherever the press is the capture's own
+    /// (coordinator's ruling, 2026-09-29: records only on the ConPTY Folio ships).
     ///
     /// MUTATION: let `key_records` write for a Ctrl chord that has a C0 code (Ctrl+E reads a record
     /// pair), or drop its `Key::Unidentified` arm (Ctrl+Alt+1 reads nothing), or drop its
-    /// `origin.platform != HostPlatform::Windows` refusal (the macOS run differs).
+    /// `origin.platform != HostPlatform::Windows` refusal (the macOS run differs), or its
+    /// `origin.conpty != ConPtyKind::Shipped` refusal (the inbox run differs).
     #[test]
     fn with_win32_input_mode_only_the_chords_vt_cannot_express_change() {
         let sweep = legacy_sweep();
@@ -4236,6 +4295,22 @@ mod tests {
                 assert_eq!(before, hex, "{where_}: the mode off is the capture");
             }
             let after = sent(&logical, &base, RECORDS, HostPlatform::Windows);
+
+            // The same Windows pane on the inbox ConPTY: no records, so exactly the mode-off
+            // bytes — which are the capture wherever the press is the capture's own.
+            let on_the_inbox = hex_of(keyboard_bytes(
+                &logical,
+                &base,
+                KeyLocation::Standard,
+                modifiers,
+                decckm,
+                RECORDS,
+                press.on_the_inbox_conpty(),
+            ));
+            assert_eq!(
+                on_the_inbox, before,
+                "{where_}: the inbox ConPTY gets no record"
+            );
 
             let (shift, alt, control) = (
                 modifiers.shift_key(),
@@ -4307,6 +4382,134 @@ mod tests {
         );
     }
 
+    /// RED (T-KEYBOARD-RECORDS, review round 3) — **a dead key under Ctrl+Alt is not a record,
+    /// though winit reports its key without modifiers as text.**
+    ///
+    /// winit turns a dead key into the character it would compose when it builds
+    /// `key_without_modifiers` (winit 0.30.13 `platform_impl/windows/keyboard.rs`, "We convert dead
+    /// keys into their character"). On the French layout the dead `^` is `VK_OEM_6` (221) at scan
+    /// code 26, and Ctrl+Alt types nothing on it, so the press arrives as
+    /// `Key::Unidentified(NativeKey::Windows(221))` with the key without modifiers `^` — the same
+    /// shape as a text key. The layout itself tells them apart (`MapVirtualKeyW(vk,
+    /// MAPVK_VK_TO_CHAR)` sets the top bit for a dead key), and the encoder asks it: the dead key
+    /// sends what it sent before (nothing), while an ordinary key of the same layout (`&` on the
+    /// `1` key, `VK_1`) is still its record.
+    ///
+    /// MUTATION: drop the `virtual_key_types_a_character` condition from `key_records`'
+    /// `Key::Unidentified` arm (the dead `^` reads `ESC[221;26;0;1;10;1_…`).
+    #[test]
+    fn a_dead_key_under_ctrl_alt_is_not_a_record() {
+        fn french_types_a_character(virtual_key: u16) -> bool {
+            // `VK_OEM_6` is the dead circumflex on the French layout; its digits row types
+            // `& é " ' ( - è _ ç à` without a modifier.
+            virtual_key != 0xDD
+        }
+        let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
+        let sent = |logical: &Key, base: &str, physical| {
+            keyboard_bytes(
+                logical,
+                &Key::Character(base.into()),
+                KeyLocation::Standard,
+                ctrl_alt,
+                false,
+                RECORDS,
+                KeyOrigin {
+                    platform: HostPlatform::Windows,
+                    physical_key: PhysicalKey::Code(physical),
+                    text_with_all_modifiers: None,
+                    virtual_key_of_scan_code: no_virtual_key,
+                    virtual_key_types_a_character: french_types_a_character,
+                    conpty: ConPtyKind::Shipped,
+                },
+            )
+        };
+        assert_eq!(
+            sent(
+                &Key::Unidentified(NativeKey::Windows(0xDD)),
+                "^",
+                KeyCode::BracketLeft
+            ),
+            None,
+            "the dead circumflex"
+        );
+        assert_eq!(
+            sent(
+                &Key::Unidentified(NativeKey::Windows(0x31)),
+                "&",
+                KeyCode::Digit1
+            ),
+            Some(b"\x1b[49;2;0;1;10;1_\x1b[49;2;0;0;10;1_".to_vec()),
+            "an ordinary key of the same layout"
+        );
+    }
+
+    /// RED (T-KEYBOARD-RECORDS, review round 3) — **a pane on the inbox ConPTY gets no records:
+    /// every chord of the set is its legacy bytes there** (coordinator's ruling, 2026-09-29).
+    ///
+    /// The process falls back to the operating system's ConPTY when the packaged pair is missing
+    /// or fails to load, and that ConPTY turns records into other bytes for a byte reader (it
+    /// drops Ctrl+Alt+Enter altogether). There the promise holds that a program which never asked
+    /// receives exactly what it received before. A pane with no ConPTY behind it writes none
+    /// either. The pane's kind is fixed at spawn (`bt_pty::PtySession::conpty_kind`, pinned in
+    /// `bt-pty`).
+    ///
+    /// MUTATION: drop `origin.conpty != ConPtyKind::Shipped` from `key_records` (the inbox
+    /// Ctrl+Enter reads its record pair).
+    #[test]
+    fn a_pane_on_the_inbox_conpty_gets_no_records() {
+        for (name, modifiers, legacy) in [
+            ("Enter", ModifiersState::CONTROL, b"\r".to_vec()),
+            ("Enter", ModifiersState::SHIFT, b"\r".to_vec()),
+            (
+                "Enter",
+                ModifiersState::CONTROL | ModifiersState::ALT,
+                b"\r".to_vec(),
+            ),
+            ("Tab", ModifiersState::SHIFT, b"\x1b[Z".to_vec()),
+            ("Backspace", ModifiersState::CONTROL, b"\x7f".to_vec()),
+            ("Space", ModifiersState::CONTROL, Vec::new()),
+            ("1", ModifiersState::CONTROL, Vec::new()),
+            (
+                "1",
+                ModifiersState::CONTROL | ModifiersState::ALT,
+                Vec::new(),
+            ),
+        ] {
+            let (logical, base) = windows_us_event(name, modifiers);
+            let press = UsPress::new(name, modifiers);
+            let sent = |origin| {
+                keyboard_bytes(
+                    &logical,
+                    &base,
+                    KeyLocation::Standard,
+                    modifiers,
+                    false,
+                    RECORDS,
+                    origin,
+                )
+                .unwrap_or_default()
+            };
+            assert_eq!(
+                sent(press.on_the_inbox_conpty()),
+                legacy,
+                "{name} {modifiers:?} on the inbox ConPTY"
+            );
+            assert_eq!(
+                sent(KeyOrigin {
+                    conpty: ConPtyKind::NotConPty,
+                    ..press.on(HostPlatform::Windows)
+                }),
+                legacy,
+                "{name} {modifiers:?} with no ConPTY"
+            );
+            assert_ne!(
+                sent(press.on(HostPlatform::Windows)),
+                legacy,
+                "{name} {modifiers:?} on the shipped ConPTY is its record pair"
+            );
+        }
+    }
+
     /// RED (T-KEYBOARD-RECORDS, review round 2) — **Ctrl+Alt+1 on Windows, as winit really hands
     /// it over, is its record pair.**
     ///
@@ -4335,6 +4538,8 @@ mod tests {
                     physical_key: physical,
                     text_with_all_modifiers: None,
                     virtual_key_of_scan_code: us_virtual_key,
+                    virtual_key_types_a_character: us_types_a_character,
+                    conpty: ConPtyKind::Shipped,
                 },
             )
         };
@@ -4426,6 +4631,8 @@ mod tests {
             physical_key: physical,
             text_with_all_modifiers: typed,
             virtual_key_of_scan_code: layout_answers_a_for_the_a_key_and_end_for_numpad_1,
+            virtual_key_types_a_character: us_types_a_character,
+            conpty: ConPtyKind::Shipped,
         };
         let sent = |key: &Key, location, modifiers, origin| {
             keyboard_bytes(key, key, location, modifiers, false, RECORDS, origin)

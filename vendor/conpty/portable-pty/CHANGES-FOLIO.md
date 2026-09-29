@@ -19,6 +19,15 @@ is called after the child is attached, `ConptyClearPseudoConsole` is bound and
 exposed as `win::conpty::clear_host_buffer`, and the selected implementation is
 reported through `ConPtySource`.
 
+## Why the loader fell back is kept (`src/win/psuedocon.rs`, `src/win/mod.rs`) — T-KEYBOARD-RECORDS
+
+`load_conpty` names each way it can end up on the operating system's
+implementation — `BT_CONPTY_FORCE_SYSTEM` set, the executable's path unknown,
+`conpty.dll` or `OpenConsole.exe` missing beside it, or the DLL failing to load —
+and `win::conpty_fallback_reason` hands that sentence back (`None` on the
+packaged pair). Folio writes it to `diagnostics.log` when a pane is born on the
+inbox ConPTY, because on that path it writes no win32-input-mode key records.
+
 ## A job object around each child (`src/win/mod.rs`, `src/win/psuedocon.rs`) — R2-6
 
 The child is created with `CREATE_SUSPENDED`, put in an unnamed job object

@@ -3757,8 +3757,8 @@ mod windows_impl {
                     CPS_CANCEL, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
                 },
                 KeyboardAndMouse::{
-                    GetCapture, GetKeyboardLayout, MAPVK_VSC_TO_VK_EX, MapVirtualKeyW, SetFocus,
-                    VkKeyScanW,
+                    GetCapture, GetKeyboardLayout, MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX,
+                    MapVirtualKeyW, SetFocus, VkKeyScanW,
                 },
                 // One call that undoes one winit makes, and the four that answer
                 // the system's pan gesture — see
@@ -6632,6 +6632,26 @@ mod windows_impl {
         u16::try_from(answer)
             .ok()
             .filter(|virtual_key| *virtual_key != 0)
+    }
+
+    /// Whether **the installed layout** types an ordinary character on this
+    /// virtual key with no modifier held — not a dead key, and not a key that
+    /// types nothing.
+    ///
+    /// `MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)` answers the unshifted character in
+    /// the low word, `0` when there is none, and "dead keys (diacritics) are
+    /// indicated by setting the top bit of the return value" (the function's
+    /// documentation). winit cannot say this any more: it reports a dead key's
+    /// key without modifiers as the character it would compose
+    /// (`platform_impl/windows/keyboard.rs`, "We convert dead keys into their
+    /// character"), so a key encoder that must refuse a composing key asks the
+    /// layout itself (T-KEYBOARD-RECORDS). One synchronous call on the calling
+    /// thread's layout, with no pointer and no wait.
+    #[must_use]
+    pub fn virtual_key_types_a_character(virtual_key: u16) -> bool {
+        // SAFETY: as for `virtual_key_of_scan_code`: two integers by value.
+        let answer = unsafe { MapVirtualKeyW(u32::from(virtual_key), MAPVK_VK_TO_CHAR) };
+        answer != 0 && answer & 0x8000_0000 == 0
     }
 
     pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
@@ -12154,8 +12174,8 @@ pub use windows_impl::{
     std_error_is_console, stop_flashing_window, system_backdrop_available, system_uses_light_apps,
     take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
     thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_key_of_scan_code,
-    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error,
-    write_to_console,
+    virtual_key_types_a_character, virtual_screen_rect, wheel_scroll_amount, window_is_exposed,
+    work_area_at, write_std_error, write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -12177,7 +12197,8 @@ pub use portable_impl::{
     is_window_cloaked, leave_process, let_the_system_translate_touch, read_context_menu,
     redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
     set_system_backdrop, silence_std_streams, system_backdrop_available, thread_mouse_capture,
-    virtual_key_for_character, virtual_key_of_scan_code, write_std_error, write_to_console,
+    virtual_key_for_character, virtual_key_of_scan_code, virtual_key_types_a_character,
+    write_std_error, write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).

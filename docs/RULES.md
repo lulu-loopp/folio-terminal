@@ -651,9 +651,13 @@ above, Alt+Enter does nothing) is intended and disclosed. The set is the
 `records` column of `key_encoding.tsv`. **A byte reader behind ConPTY sees what it
 sees under Windows Terminal** (coordinator, 2026-09-29, within Q1 = A): the bytes
 ConPTY's own encoder makes of a record (Ctrl+1 → `1`, Ctrl+Backspace → BS) are
-intended, and are pinned for the ConPTY Folio ships. Entries: DESIGN 2026-09-29 *On
+intended, and are pinned for the ConPTY Folio ships. **Records are written only to that
+ConPTY**: a pane that the process put on Windows' inbox ConPTY (the packaged pair missing or
+not loading) gets none, so there a program that never asked receives exactly what it did
+before, and the pane says why in `diagnostics.log`. A dead key is never a record. Entries: DESIGN 2026-09-29 *On
 Windows, the chords VT cannot express reach console programs as win32-input-mode key
-records…* and *On Windows, Ctrl+Alt on a text key is a key record too…*.
+records…*, *On Windows, Ctrl+Alt on a text key is a key record too…* and *Key records are
+written only to the ConPTY Folio ships, and never for a dead key*.
 
 ### 28. Mouse routing — `not yet folded` (the wheel half is folded, 2026-09-24)
 Entries: §7.1.5f, §7.1.5g, §7.1.5i; §7.21 and §7.22 *gesture disclosure*; §7.60

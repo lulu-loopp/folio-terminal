@@ -453,7 +453,9 @@ fn a_native_node_reader_reads_the_answer_and_csi_u_as_its_bytes() {
 // Windows; that is a test switch, not a product setting, and under it the key-record reader still
 // passes while several byte readbacks differ (design note revision (e) has the comparison). The
 // product falls back to the inbox ConPTY on its own only when the packaged pair is missing beside
-// `folio.exe` or fails to load (`vendor/conpty/portable-pty/src/win/psuedocon.rs`, `load_conpty`).
+// `folio.exe` or fails to load (`vendor/conpty/portable-pty/src/win/psuedocon.rs`, `load_conpty`),
+// and a pane on it is sent no records at all (`ConPtyKind::Inbox`; coordinator's ruling,
+// 2026-09-29): these literals never have to hold there.
 
 /// Every chord the application's encoder writes as a record pair on Windows with a US layout —
 /// `bt-app`'s `input::keyboard_bytes`, rendered by its test
@@ -624,6 +626,39 @@ while ($true) { $k = [Console]::ReadKey($true); if ($k.KeyChar -eq 'q') { break 
         "so after a RIS the session has it on again, and records go on reaching the child"
     );
     probe.send(b"q");
+    probe.finish();
+}
+
+/// RED (T-KEYBOARD-RECORDS, review round 3) — **a spawned pane knows which ConPTY it runs on,
+/// and why when it is the inbox one.**
+///
+/// The key encoder writes win32-input-mode records only to the ConPTY Folio ships (coordinator's
+/// ruling, 2026-09-29), reading this at the key; the application writes the reason to
+/// `diagnostics.log` when a pane is born on the inbox one. In an ordinary run the test executable
+/// has the packaged pair beside it, so the pane is `Shipped` with no reason; under
+/// `BT_CONPTY_FORCE_SYSTEM=1` it is `Inbox`, and the reason names the switch — which is also how
+/// this file's byte literals are shown not to apply there (the encoder writes no records to such a
+/// pane: `bt-app`'s `input::tests::a_pane_on_the_inbox_conpty_gets_no_records`).
+///
+/// MUTATION: map `ConPtySource::System` to `ConPtyKind::Shipped` in `ConPtyKind::of`.
+#[test]
+fn a_spawned_pane_knows_which_conpty_it_runs_on() {
+    let probe = Probe::spawn(powershell("exit"));
+    let kind = probe.pty.conpty_kind();
+    let reason = probe.pty.inbox_conpty_reason();
+    eprintln!("BT_KKR_CONPTY kind={kind:?} reason={reason:?}");
+    if std::env::var_os("BT_CONPTY_FORCE_SYSTEM").is_some() {
+        assert_eq!(kind, bt_pty::ConPtyKind::Inbox);
+        assert!(
+            reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("BT_CONPTY_FORCE_SYSTEM")),
+            "the reason names the switch: {reason:?}"
+        );
+    } else {
+        assert_eq!(kind, bt_pty::ConPtyKind::Shipped);
+        assert_eq!(reason, None);
+    }
     probe.finish();
 }
 

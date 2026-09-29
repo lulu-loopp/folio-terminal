@@ -38073,6 +38073,16 @@ fn create_leaf_session(
         None
     };
     let shell_fallback = pty.as_mut().and_then(PtySession::take_shell_fallback);
+    // **A pane born on the inbox ConPTY says so, once, and why** (T-KEYBOARD-RECORDS). The
+    // process falls back to Windows' own ConPTY when the packaged pair is missing or will not
+    // load; that pane gets no win32-input-mode key records (`input::key_records`), so a line in
+    // `diagnostics.log` is what tells a reader why Ctrl+Enter reaches its console program as Enter.
+    if let Some(reason) = pty.as_ref().and_then(PtySession::inbox_conpty_reason) {
+        diagnostics::note(&format!(
+            "ConPTY: this pane runs on the Windows inbox ConPTY ({reason}); no key records are \
+             written to it"
+        ));
+    }
     // **A pane is the shell it is actually running.** When the profile's own
     // program would not start, `bt-pty` falls back once to `powershell.exe` and
     // hands back the notice that says so — so what this leaf *is*, from here on,
