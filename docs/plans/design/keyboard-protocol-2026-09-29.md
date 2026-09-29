@@ -1,6 +1,6 @@
 # The kitty keyboard protocol's disambiguate tier and xterm's modifyOtherKeys in Folio's terminal — design note, 2026-09-29
 
-0.4.7 ticket KP-0 (docs only). T-KEYBOARD-PROTOCOL implements it after Codex's review. Base: main `38b5743b`.
+0.4.7 ticket KP-0 (docs only). T-KEYBOARD-PROTOCOL implements it after Codex's review. Base: main `38b5743b`. **Revision (b), 2026-09-29**, folds in Codex's review (`keyboard-protocol-review-codex-2026-09-29.md`, beside this note); the list of what changed is at the end, and the sections below are the current text.
 
 The owner's rulings of 2026-09-28 that this note works under: this is the first ticket of 0.4.7; there is **no Alt+Enter ESC-prefix hack** (PSReadLine reads a lone ESC as clear-line, and ConPTY turns `ESC CR` into an Alt+Enter key record); **only the disambiguate tier (flag 1) is built now**, and the other kitty flags wait until a program we care about needs them; **win32-input-mode is not planned**. §1 reports a fact that bears on the third ruling. It is question Q1 in §9, and it does not change what this note decides for T-KEYBOARD-PROTOCOL.
 
@@ -10,14 +10,15 @@ Notation: `CSI` is `\e[`; `\e` is ESC; `\r \t \x7f` are CR, HT, DEL. S, A and C 
 
 ## 0. The decisions, in one screen
 
-1. **State lives in `bt-term`, in the vendored `alacritty_terminal`, per pane and per screen.** The vendor already parses all four kitty sequences and keeps two stacks, but they are switched off by `Config::kitty_keyboard = false`. That switch is why Folio "swallows" the requests today. The ticket turns it on and replaces the vendor's model with kitty's: a current value per screen plus a stack of saved values. The vendor's model has four defects that matter (§2.2). modifyOtherKeys gets a per-terminal field, which the vendor does not have.
-2. **Only flag 1 is honoured.** Every other requested bit is dropped where the request is parsed, so the query answers with what is actually in force. The first time a session drops a bit, it writes one line to `diagnostics.log`.
-3. **The encoder learns the mode the same way it learns DECCKM.** `TerminalModes` gains `keyboard: KeyboardProtocol { kitty: u8, modify_other_keys: Off|One|Two }`. The window thread reads it from the session it already owns, at the moment of the key. There is no polling, no lock and no new wait.
-4. **Encoding follows kitty's own encoder (`kitty/key_encoding.c`) for flag 1 and xterm's reference output for modifyOtherKeys.** Folio's standing policies sit on top: Super never reaches the child, and on a Mac Option types text unless the setting makes it Alt. §4.4 has the full table; the ticket moves it into a TSV that the test and this document share.
-5. **A program's leftovers are undone at the next prompt.** When OSC 133 `A` arrives on the primary screen after a `C`, the primary screen's keyboard state and modifyOtherKeys go back to what they were at that `C`. The OSC 133 `A` handler already does this for mouse modes. This version is more precise because a shell may use this mode itself, as fish does.
-6. **The shortcut table, the cards, the paste roads and IME composition are untouched.** The encoder is the last rung of the key ladder, and it is the only rung that changes.
-7. **One ticket, T-KEYBOARD-PROTOCOL, size M**, with two commits (the bt-term state and the bt-app encoder) merged together. Either half on its own is worse than neither (§7).
-8. **Flag 1 cannot reach some programs on Windows** (§1). A program that reads the console's key records never asks for the protocol, and could not read its bytes if it did. This covers Codex, PowerShell/PSReadLine, cmd and anything built on crossterm's Windows backend. **Issue #13's reporter (Codex on Windows 11) is one of them.** Q1 asks the owner whether Folio should send those chords the way Windows Terminal and WezTerm send them to such programs: as a win32-input-mode key record, for those chords only, in a second ticket. Whichever answer the owner gives, the reply on #13 needs correcting.
+1. **State lives in `bt-term`, in the vendored `alacritty_terminal`, per pane and per screen.** The vendor already stores the kitty sequences' state in two stacks, but it is switched off by `Config::kitty_keyboard = false`. That switch is why Folio "swallows" the requests today. The ticket turns it on and replaces the vendor's model with kitty's: a current value per screen plus a stack of saved values. The vendor's model has four defects that matter (§2.2). modifyOtherKeys gets a per-terminal field, which the vendor does not have.
+2. **`vte` is vendored too, for three dispatch arms** (§3): an explicit `CSI < 0 u` is a no-op, `CSI > m` resets modifyOtherKeys, and the flag values reach the terminal as their full `u16`, so the refused-bits diagnostic can name bits 8–15.
+3. **Only flag 1 is honoured.** Every other requested bit is dropped where the request is handled, so the query answers with what is actually in force. The first time a session drops a bit, it writes one line to `diagnostics.log`.
+4. **The encoder reads the mode the same way it reads DECCKM**: directly from the session-owned terminal state, at the moment of the key. `TerminalModes` gains `keyboard: KeyboardProtocol { kitty: u8, modify_other_keys: Off|One|Two }`. There is no polling, no lock and no new wait.
+5. **Encoding follows kitty's own encoder (`kitty/key_encoding.c`) for flag 1, and xterm for modifyOtherKeys** (xterm's reference table for which chords are encoded, xterm's default `formatOtherKeys=0` for the wire form). Folio's standing policies sit on top: Super never reaches the child, and on a Mac Option types text unless the setting makes it Alt. §4.4 has the full table; the ticket moves it into a TSV that the test and this document share, and keeps a separate hard-coded oracle for the normative spot checks.
+6. **No prompt-time recovery in this ticket.** A program that dies with flags on leaves them on until `RIS`, a pop, or a new shell (§2.4 says what the person does). Restoring at OSC 133 was proposed in the first draft and withdrawn: the marker cannot tell a nested shell's prompt from the outer shell's return, and restoring there can strip a live program's flags.
+7. **The shortcut table, the cards, the paste roads and IME composition are untouched.** The encoder is the last rung of the key ladder, and it is the only rung that changes.
+8. **One ticket, T-KEYBOARD-PROTOCOL, size M–L**, with two commits (the bt-term state with vendored `vte`, and the bt-app encoder) merged together. Either half on its own is worse than neither (§7). **T-FKEYS** (legacy F1–F12, which send nothing today) is its prerequisite, so the flag-1 forms of F1–F4 land here on top of it.
+9. **Flag 1 cannot reach some programs on Windows** (§1, confirmed by the review). A program that reads the console's key records never asks for the protocol, and could not read its bytes if it did. This covers Codex, PowerShell/PSReadLine, cmd and anything built on crossterm's Windows backend. **Issue #13's reporter (Codex on Windows 11) is one of them, so T-KEYBOARD-PROTOCOL does not close #13.** Q1 asks the owner whether Folio should send those chords the way Windows Terminal and WezTerm send them to such programs: as a win32-input-mode key record, for those chords only, in a second ticket. §9 writes out what each answer means. Whichever answer the owner gives, the reply on #13 needs correcting.
 
 ---
 
@@ -36,7 +37,7 @@ So, on Windows:
 | Child | Asks for flag 1? | What T-KEYBOARD-PROTOCOL gives it |
 |---|---|---|
 | WSL / ssh programs (neovim, fish, helix, Codex on Linux, Claude Code in WSL) | yes | the full protocol, through ConPTY in both directions |
-| Node programs on Windows (Claude Code running natively) | Claude Code asks: `CSI ? u`, then `CSI > 5 u` and `CSI > 4 ; 2 m` (anthropics/claude-code#96526, #97501) | the reply and the `CSI … u` keys arrive as characters. libuv reassembles the characters of key records into bytes, so this should work. **The ticket's real-ConPTY test measures it; this note does not assume it.** |
+| Node programs on Windows (Claude Code running natively) | Claude Code asks: `CSI ? u`, then `CSI > 5 u` and `CSI > 4 ; 2 m` (anthropics/claude-code#96526, #97501) | the reply and the `CSI … u` keys arrive as characters. libuv reassembles the characters of key records into bytes, so the program reads the sequence. **The ticket's real-ConPTY test asserts this with a native Node raw-stdin reader (§6.3); if it fails, the ticket stops and reports rather than shipping the claim.** |
 | Key-record programs (Codex, PSReadLine, cmd, .NET) | no | nothing changes, by construction |
 
 macOS has no such layer, so every program there is in the first row.
@@ -54,36 +55,38 @@ The state belongs to each pane: it lives in the vendored `Term` inside that pane
 | enter the alternate screen (`?1049h`, `?1047h`, `?47h` — whatever reaches `swap_alt`) | the alternate screen starts **empty** (`current = 0`, stack cleared); the primary's state is kept as it was | unchanged |
 | leave the alternate screen | the alternate screen's state is **discarded**; the primary's is in force again | unchanged |
 | `RIS` (`ESC c`) | both screens cleared | `Off` |
-| `DECSTR` (`CSI ! p`) | unchanged: `vte` 0.15 does not dispatch `DECSTR` at all today, and this ticket does not add it | unchanged |
-| OSC 133 `A` on the primary screen, after a `C` (§2.4) | the primary's state is restored to its value at that `C` | restored to its value at that `C` |
+| `DECSTR` (`CSI ! p`) | **preserved** (as in WT and WezTerm; kitty assigns DECSTR no meaning here) | **not reset — a stated divergence from xterm** (below) |
+| OSC 133 markers | nothing (§2.4) | nothing |
 | the child exits; *Restart shell*; a pane restored from `session.json` | a new `LeafSession` and a new adapter: nothing to carry over, and nothing is persisted | same |
 
-Starting the alternate screen empty follows WT's `UseAlternateScreenBuffer` and kitty's note under the stacks paragraph: a full-screen program should be able to change the mode "in the alternate screen only … without … knowing what that mode is". The vendor instead *keeps* the alternate stack from one alternate-screen session to the next, because `swap_alt` swaps two stacks. With the vendor's behaviour, a crashed `nvim` would hand its flags to the next `less`.
+**Clearing the alternate screen's state on entry and on exit is Folio's policy, not the spec's.** The spec requires independent main and alternate stacks; it does not say the alternate stack is cleared. Implementations differ: Windows Terminal clears it (`UseAlternateScreenBuffer`/`UseMainScreenBuffer`), while Ghostty and WezTerm keep keyboard state on persistent screen objects and preserve it across switches until a full reset. Folio takes WT's side for a safety reason: with preserved state, a crashed `nvim` would hand its flags to the next `less`. A program that follows kitty's quickstart (push on entering the alternate screen, pop before leaving it) sees no difference. The vendor's `swap_alt` currently preserves it, which is defect 4 of §2.2 only under this policy.
+
+**DECSTR and modifyOtherKeys.** xterm's soft reset returns its key-modifier resources to their initial values, and WezTerm resets modifyOtherKeys on DECSTR. Folio does not implement DECSTR at all today — `vte` 0.15 does not dispatch `CSI ! p`, so none of its effects (cursor, margins, modes) happen — and resetting modifyOtherKeys alone would give one effect of a sequence whose others are all missing. So under this ticket DECSTR leaves modifyOtherKeys as it is, and that is a divergence from xterm, stated here and in the DESIGN entry. When a ticket implements DECSTR, it resets modifyOtherKeys to Off and leaves the kitty state alone.
 
 ### 2.2 Why the vendor's model is replaced rather than switched on
 
 `vendor/alacritty_terminal/src/term/mod.rs` has `keyboard_mode_stack` / `inactive_keyboard_mode_stack`, `push_keyboard_mode`, `pop_keyboard_modes`, `set_keyboard_mode` and `report_keyboard_mode`, all guarded by `config.kitty_keyboard`. Turning that switch on is not enough:
 
-1. **Overflow evicts from the wrong stack.** `push_keyboard_mode` checks `keyboard_mode_stack.len() >= KEYBOARD_MODE_STACK_MAX_DEPTH` and then removes `self.title_stack[0]`. The keyboard stack grows without bound (4096 is the title stack's cap, not this stack's), and the title stack loses an entry.
+1. **Overflow evicts from the wrong stack.** `push_keyboard_mode` checks `keyboard_mode_stack.len() >= KEYBOARD_MODE_STACK_MAX_DEPTH` and then removes `self.title_stack[0]`. That corrupts the title stack (it loses its oldest entry) **or panics when the title stack is empty** (`Vec::remove(0)` on an empty vector), and the keyboard stack itself is never trimmed (4096 is the title stack's cap, not this stack's).
 2. **The query reports the top of the stack, not the flags in force.** `CSI = 5 u` (fish's form, which sets and does not push) changes `TermMode` but no stack entry, so a following `CSI ? u` answers `0`. A program that follows the spec's detection advice ("set the desired progressive enhancements and then query") gets the wrong answer.
 3. **A switch between screens recomputes the mode from the top of the stack.** Flags set with `CSI =` on the primary screen are therefore lost on the way back from `less`.
-4. The alternate stack survives from one alternate-screen session to the next (§2.1).
+4. The alternate stack survives from one alternate-screen session to the next, which Folio's policy (§2.1) rules out.
 
 The replacement is kitty's model:
 
 - `current` is what is in force.
 - `push(f)` saves `current` on the stack (evicting the oldest entry when the stack is at its cap) and sets `current = f`.
-- `pop(n)` restores the `n`-th saved value, or `0` if that empties the stack.
+- `pop(n)`, for `n ≥ 1`: if `n` is less than the stack's length, `current` becomes the `n`-th saved value from the top and those `n` entries are removed; otherwise the stack is emptied and `current = 0` (kitty: "If a pop request is received that empties the stack, all flags are reset"). `pop(0)` does nothing.
 - `set(f, mode)` changes `current` only.
 - `query` answers `current`.
 
-After every change, the `TermMode::KITTY_KEYBOARD_PROTOCOL` bits are derived from the active screen's `current`, so the rest of the vendor code that reads `TermMode` is untouched. The cap is **8**, WT's `KittyStackMaxSize`. The eviction is the one the spec requires ("the oldest entry from the stack must be evicted").
+After every change, the `TermMode::KITTY_KEYBOARD_PROTOCOL` bits are derived from the active screen's `current`, so the rest of the vendor code that reads `TermMode` is untouched. The cap is **8**. The spec requires a cap but not its size; 8 matches Windows Terminal (`KittyStackMaxSize`) and Ghostty, and WezTerm uses 128. The eviction is the one the spec requires ("the oldest entry from the stack must be evicted").
 
 `vendor/alacritty_terminal` is Folio's own fork and is edited in place, as `set_write_provenance` and the transcript hook already are. The resize oracle (`ResizeCanonical`) is fed the same bytes, so it reaches the same state. Its listener's replies are never drained to the PTY, and the ticket pins this with a test: a query that arrives while a resize is armed is answered once.
 
 ### 2.3 How the encoder learns the mode
 
-The window thread owns every `DualPlaneSession` directly. It already reads `leaf.session.application_cursor_mode()` at the one place that calls `input::keyboard_bytes` (`runtime/keyboard.rs`, the last rung of `keyboard_input`). The new value is published the same way:
+The window thread owns every `DualPlaneSession` directly. It already reads `leaf.session.application_cursor_mode()` at the one place that calls `input::keyboard_bytes` (`runtime/keyboard.rs`, the last rung of `keyboard_input`). The new value is read the same way, directly from the session-owned terminal state; no cross-thread publication is involved:
 
 ```rust
 // bt-term
@@ -94,42 +97,58 @@ pub struct TerminalModes { /* existing five */, pub keyboard: KeyboardProtocol }
 
 `TerminalAdapter::modes()` fills it in from the vendor `Term` for the active screen. The call site reads `terminal_modes()` once and passes `(application_cursor_mode, keyboard)` to the encoder. This reads a field of data the window thread already holds. It adds no door, no lock and no wait, so neither the thread-door note's §C-5 nor the window-thread budget has anything to register: those govern waits, and this is not one.
 
-### 2.4 A program's leftovers, and the prompt
+### 2.4 A program's leftovers: not recovered by this ticket
 
-A program that pushes flag 1 and dies without popping it leaves the pane encoding `Ctrl+C` as `CSI 99;5u`. In a Unix shell that is an inconvenience; the spec keeps plain Enter/Tab/Backspace legacy so that `reset` can still be typed. **Behind ConPTY it is worse.** PSReadLine is a key-record client, so `CSI 99;5u` arrives as six typed characters and `Ctrl+C` no longer interrupts anything.
+A program that pushes flag 1 and dies without popping it leaves the pane encoding `Ctrl+C` as `CSI 99;5u`. In a Unix shell that is an inconvenience; the spec keeps plain Enter/Tab/Backspace legacy so that `reset` can still be typed. **Behind ConPTY it is worse.** PSReadLine is a key-record client, so `CSI 99;5u` arrives as six typed characters and `Ctrl+C` no longer interrupts anything. (Only a program that writes VT can have set the flags, so this needs a WSL or Node program to die in a pane whose shell is PowerShell.)
 
-Folio already handles the same failure for mouse modes at OSC 133 `A` on the primary screen (`TerminalAdapter::retire_program_input_modes`, called from the handler in `session.rs`: "a prompt is the shell speaking"). That rule cannot be copied as it stands, because a shell may use this mode itself. fish sets `CSI = 5 u` while it reads a command line and `CSI = 0 u` before it runs one (`fish-shell/src/tty_handoff.rs`, `src/reader/reader.rs`: `exec_prompt` first, then `enable_tty_protocols` inside the read loop). fish also repaints its prompt, which sends another `A`, while its flags are on.
+**This ticket does not recover from it automatically.** The first draft restored the primary screen's state at OSC 133 `A` to its value at the preceding `C`. That boundary is not ownership-safe, and the rule is withdrawn. OSC 133 is in-band and unauthenticated, and `session.rs` already records that a nested program can emit a complete marked prompt that the bytes cannot attribute (`shell_prompt_opened_in_order`). Mouse cleanup at `A` is safe because a shell never needs mouse tracking at its prompt; keyboard enhancement has no such invariant, because shells and line editors use it (fish sets `CSI = 5 u` while it reads a command line).
 
-**The rule:** at OSC 133 `C` on the primary screen, the session takes a snapshot of the primary's keyboard state and of modifyOtherKeys. At the next OSC 133 `A` on the primary screen, if a `C` has been seen since the previous `A`, both are restored from that snapshot.
+**The negative trace any future proposal must pass** (it goes into that proposal's tests, and it is written here so nobody re-proposes the rule without it):
 
-The effect is that whatever a command changed is undone when its prompt comes back. Two things are left alone: what the shell set for itself before `C`, and anything between an `A` and the next `C` (repaints, the command line). For fish the snapshot is `0`, because it turned its flags off before `C`, and it turns them on again after drawing the prompt. For PowerShell, which never sets them, the snapshot is also `0`, so a dead program's flags are cleared. A shell without OSC 133 (cmd, a bare bash) gets no help here, just as it gets none for mouse modes.
+1. The outer shell emits OSC 133 `C` (flags 0 at that moment).
+2. A primary-screen TUI or REPL pushes flag 1 (`CSI > 1 u`) and, still running, launches a subshell that has OSC 133 integration. A TUI that leaves the alternate screen before launching the shell has the same shape.
+3. The subshell emits OSC 133 `A` on the primary screen.
+4. The subshell exits and the TUI resumes.
+
+**Required:** at step 4 the flags are still 1. The withdrawn rule set them to 0 at step 3, silently removing a live program's encoding. Requiring a `D` before the `A` avoids some of these cases but loses the crash case the rule was for. A sound design needs an ownership-capable boundary, such as authenticated shell-integration state (a per-session nonce in Folio's own integration) or an explicit reset the person asks for. It is not in 0.4.7.
+
+**What the person does meanwhile**, when a dead program has left the keys encoded:
+
+- In a Unix shell (WSL, ssh, macOS): type `reset` and Enter. Plain letters and Enter are unaffected, `reset` sends `RIS`, and `RIS` clears both screens' state and modifyOtherKeys (§2.1).
+- In PowerShell: type ``Write-Host -NoNewline "`e[<99u`e[>4m"`` and Enter. This pops every saved value, which resets the flags, and turns modifyOtherKeys off; the bytes pass through ConPTY to Folio (§1). `` `e `` is PowerShell 7's escape; in Windows PowerShell 5.1, write `$([char]27)` in its place. Or use the pane's *Restart shell*, or open a new tab.
+- A Folio "reset keyboard protocol" verb is a possible later door. It is recorded here, not proposed.
 
 ---
 
 ## 3. Grammar
 
-`vte` 0.15 (`src/ansi.rs`) already dispatches all four kitty sequences and both xterm ones. The ticket changes what the vendor `Term` does with them, not the parser.
+`vte` 0.15 (`src/ansi.rs`) already dispatches all four kitty sequences and both xterm ones, but three of its arms lose information this ticket needs. **The ticket vendors `vte` 0.15.0 at `vendor/vte`** (`[patch.crates-io] vte = { path = "vendor/vte" }`, beside the existing `alacritty_terminal`, `mitex` and `portable-pty` patches) and changes exactly these arms:
 
-| Bytes | `vte` dispatch | Folio does |
+1. `('u', [b'<'])` — pop. Upstream calls `next_param_or(1)`, which cannot tell an omitted count from an explicit `0`. The vendored arm passes `1` when the parameter is omitted and the value as written otherwise, so `CSI < 0 u` reaches the terminal as `0` and does nothing (kitty: the count "defaults to 1 if unspecified" — an explicit 0 is specified; WT agrees).
+2. `('m', [b'>'])` — XTMODKEYS. Upstream treats `CSI > m` (no parameters) as unhandled. xterm specifies that XTMODKEYS with no parameters resets all key-modifier resources to their initial values; Folio's only such resource is modifyOtherKeys, so the vendored arm calls `set_modify_other_keys(Reset)`.
+3. `('u', [b'>'])` and `('u', [b'='])` — push and set. Upstream casts the parameter to `u8` and `from_bits_truncate`s it before the handler sees it, so bits 5–15 of a request vanish without trace. The vendored arms pass the parameter as its full `u16`, so the terminal masks it and the refused-bits diagnostic can name every bit that was asked for.
+
+The `Handler` trait's `push_keyboard_mode` and `set_keyboard_mode` therefore take a `u16`. The only implementor is the vendored `Term` (plus the adapter's `ParserTailSink`, which keeps the trait's defaults); `bt-corpus` uses `vte`'s `Parser`/`Perform` only and is unaffected. The alternative — intercepting these sequences in the adapter's boundary parser — was rejected, because that parser runs ahead of the processor and would have to replay its decisions at the processor's pace.
+
+| Bytes | Dispatch (vendored `vte`) | Folio does |
 |---|---|---|
-| `CSI > flags u` | `push_keyboard_mode(KeyboardModes::from_bits_truncate(p as u8))`, `p` default 0 | push; `current = flags & SUPPORTED` |
-| `CSI < n u` | `pop_keyboard_modes(n)`, `n` default 1 | pop `n` (§2.2) |
-| `CSI = flags ; mode u` | `set_keyboard_mode(bits, Replace/Union/Difference)` for mode 1/2/3, default 1 | `current` = / \|= / &=! `flags & SUPPORTED` |
+| `CSI > flags u` | `push_keyboard_mode(p: u16)`, `p` default 0 | push; `current = p & SUPPORTED` |
+| `CSI < n u` | `pop_keyboard_modes(n)`, `n` = 1 when omitted, as written otherwise | pop `n` (§2.2); `n = 0` does nothing |
+| `CSI = flags ; mode u` | `set_keyboard_mode(p: u16, Replace/Union/Difference)` for mode 1/2/3, default 1 | `current` = / \|= / &=! `p & SUPPORTED` |
 | `CSI ? u` | `report_keyboard_mode()` | reply `CSI ? current u` |
 | `CSI > 4 ; v m` | `set_modify_other_keys(Reset/EnableExceptWellDefined/EnableAll)` for `v` = 0/1/2; `CSI > 4 m` means `v = 0` | Off / One / Two |
+| `CSI > m` | `set_modify_other_keys(Reset)` (vendored arm 2) | Off |
 | `CSI ? 4 m` | `report_modify_other_keys()` | reply `CSI > 4 ; v m` |
-| `CSI > m`, `CSI > 4 ; 3 m`, `CSI > 5 ; … m` | unhandled | nothing |
+| `CSI > 4 ; 3 m`, `CSI > 1 ; … m`, other XTMODKEYS resources | unhandled | nothing |
 
 **Bounds.** No value is treated as an error; each case below says what happens.
 
-- Parameters are `u16`.
-- The flags value is a bit set. `as u8` keeps its low byte and `from_bits_truncate` drops bits 5–7. Both of these are masking, so no value is out of range.
-- `SUPPORTED_KITTY_FLAGS = 0b1` then masks again.
-- `vte` reads a pop count of `0` as the default, which is `1`. Kitty's text only says the count "defaults to 1 if unspecified", and WT treats an explicit `0` as a no-op. This note records the difference and does not chase it.
-- `vte` reads a `mode` other than 1–3 as 1 (replace).
+- Parameters are `u16`, and the flags value is a bit set, so no value is out of range: `SUPPORTED_KITTY_FLAGS = 0b1` masks it.
+- A pop count of `0` is a no-op; a count at least the stack's length empties it and resets the flags.
+- `vte` reads a `mode` other than 1–3 as 1 (replace), unchanged.
 - The stack holds 8 saved values.
 
-**Requested but unsupported bits.** When the mask drops a bit, the vendor reports the dropped bits through the listener, as a new `Event` variant that `CaptureListener` records. The adapter ORs them into a per-session `u8`. The first time a bit appears, the session writes one line to `diagnostics.log`: `keyboard protocol: flags 0b111 requested, 0b1 in force` (Codex on Unix asks for `>7u`, Claude Code for `>5u`). There is no card and no setting. The log line is how we will learn that "a program we care about needs them".
+**Requested but unsupported bits.** When the mask drops bits, the vendor `Term` reports them, as the full `u16` that was asked for, through the listener (a new `Event` variant that `CaptureListener` records). The adapter ORs them into a per-session `u16`. The first time a bit appears, the session writes one line to `diagnostics.log`: `keyboard protocol: flags 0b111 requested, 0b1 in force` (Codex on Unix asks for `>7u`, Claude Code for `>5u`). There is no card and no setting. The log line is how we will learn that "a program we care about needs them".
 
 **Replies** go through `Event::PtyWrite` and the adapter's ordered `PendingReply` queue, together with every other reply. So `CSI ? u` followed by `CSI c` is answered in that order. The spec's detection recipe depends on that order: "If an answer for the device attributes is received without getting back an answer for the progressive enhancement the terminal does not support this protocol".
 
@@ -161,15 +180,15 @@ The encoder applies the first of these rules that matches:
 5. A keypad key that produced no text → `CSI code;m u`, using the spec's keypad code (`KP_ENTER` 57414, `KP_LEFT` 57417 … `KP_DELETE` 57426). This covers Numpad Enter, and the keypad's arrows, Home, End, Insert, Delete, PageUp and PageDown with Num Lock off. Keypad digits and operators produce text, so rule 2 handles them. (See Q2.)
 6. Everything else that has a code → `CSI code;m u`, leaving out `;m` when `m = 1`. The codes are: Escape 27, Enter 13, Tab 9, Backspace 127, Space 32, and for a text key the character from `key_without_modifiers`. This rule covers Esc on its own, every Alt chord, every Ctrl chord (including `Ctrl+i`, `Ctrl+m`, `Ctrl+[` and `Ctrl+c`), Shift+Tab (`CSI 9;2u`, not `CSI Z`), Ctrl+digit, and every modified Enter, Tab, Backspace and Space.
 
-Function keys: Folio's encoder has **no case for F-keys today**, so F1–F12 send nothing (§8 F-1). Flag 1 would change the form of F1–F4. This ticket adds neither.
+7. Function keys (on top of T-FKEYS, the prerequisite that gives F1–F12 their legacy forms: `SS3 P/Q/R/S` and `CSI 15~ … CSI 24~`, with modifiers `CSI 1;m P/Q/R/S` and `CSI n;m ~`): under flag 1, F1, F2 and F4 are `CSI P`, `CSI Q`, `CSI S` without modifiers and `CSI 1;m P/Q/S` with them; F3 is `CSI 13~` / `CSI 13;m~` (kitty removed `CSI R` because it collides with the cursor position report); F5–F12 are as legacy. This is kitty's `encode_function_key`. Folio's encoder has **no case for F-keys today**, so F1–F12 send nothing (§8 F-1); that legacy fix is T-FKEYS's, not this ticket's, because it changes bytes for programs that never asked.
 
 ### 4.3 The rule under modifyOtherKeys
 
-The encoder uses modifyOtherKeys only when the kitty flags are 0. **When both are set, kitty wins**, as it does in kitty, in WT's `TerminalInput` and in Ghostty; Claude Code asks for both.
+The encoder uses modifyOtherKeys only when the kitty flags are 0. **When both are set, kitty wins**, as in kitty, Ghostty and WezTerm (Windows Terminal does not implement xterm's modifyOtherKeys in its encoder, so it is no precedent here); Claude Code asks for both.
 
-The form is xterm's default, `CSI 27 ; m ; k ~`. `k` is the character **with Shift applied** and without Ctrl, which is xterm's keysym; for example, `Ctrl+Shift+a` gives `k = 65`. The fixed codes are Enter 13, Tab 9, Escape 27, Space 32 and Backspace **127**. Folio's Backspace sends DEL; xterm's reference output used 8 because its Backspace was `^H`.
+The wire form is xterm's default, `formatOtherKeys=0`: `CSI 27 ; m ; k ~`. `k` is the character **with Shift applied** and without Ctrl, which is xterm's keysym; for example, `Ctrl+Shift+a` gives `k = 65`. The fixed codes are Enter 13, Tab 9, Escape 27, Space 32 and Backspace **127**. Folio's Backspace sends DEL; xterm's reference output used 8 because its Backspace was `^H`.
 
-Which chords are encoded follows xterm's own table (`alacritty/vte` `doc/modifyOtherKeys-example.txt`, which is the output of xterm's `vttests/modify-keys.pl`), by class of key:
+Which chords are encoded follows xterm's own reference table (`alacritty/vte` `doc/modifyOtherKeys-example.txt`, the output of xterm's `vttests/modify-keys.pl`). That table was generated with `formatOtherKeys=1`, so it prints `CSI k;m u`; it is the evidence for *which* chords are encoded and with which `k` and `m`, not for the bytes. The bytes are the `formatOtherKeys=0` form above. By class of key:
 
 | Class | Mode 1 encodes | Mode 2 encodes |
 |---|---|---|
@@ -181,9 +200,9 @@ Which chords are encoded follows xterm's own table (`alacritty/vte` `doc/modifyO
 
 A chord that a mode does not encode takes the legacy row.
 
-`k` needs the shifted character while Ctrl is held. On Windows, `logical_key` is exactly that. On macOS, a Ctrl chord can arrive as its control character, so `k` is `key_without_modifiers` uppercased for letters. For digits, the ticket measures the rows on the Mac mini before trusting them (§6.2).
+`k` needs the shifted character while Ctrl is held. On Windows, `logical_key` is exactly that. On macOS, a Ctrl chord can arrive as its control character, so `k` is `key_without_modifiers` uppercased for letters. For digits, the ticket checks the rows by hand on the Mac mini before trusting them (§6.2).
 
-On Windows, a key-record child that asked for modifyOtherKeys alone would lose these chords entirely, because ConPTY drops an unknown `~` sequence for such a child (§1). No such child is known: Claude Code asks for both, and flag 1 wins. The real-ConPTY test records what actually happens.
+On Windows, a key-record child that asked for modifyOtherKeys alone would lose these chords entirely, because ConPTY drops an unknown `~` sequence for such a child (§1). No such child is known: Claude Code asks for both, and flag 1 wins. The real-ConPTY test asserts the drop (§6.3), so the fact is pinned rather than assumed.
 
 ### 4.4 The table
 
@@ -279,10 +298,16 @@ The **legacy** column is what Folio sends today, and it does not change.
 | 1 | AC | — | `CSI 49;7u` | `CSI 27;7;49~` | `CSI 27;7;49~` |
 | 1 | SAC | — | `CSI 49;8u` | `CSI 27;8;33~` | `CSI 27;8;33~` |
 
-For these keys, the only changes are the DECCKM and keypad rules of §4.2:
+For these keys, the only changes are the DECCKM, keypad and function-key rules of §4.2 (the F-key legacy cells are T-FKEYS's, which lands first):
 
 | Key | Mods | legacy, DECCKM on | kitty flag 1, DECCKM on or off |
 |---|---|---|---|
+| F1 | – | `\eOP` (T-FKEYS) | `CSI P` |
+| F1 | C | `CSI 1;5P` (T-FKEYS) | `CSI 1;5P` |
+| F3 | – | `\eOR` (T-FKEYS) | `CSI 13~` |
+| F3 | S | `CSI 1;2R` (T-FKEYS) | `CSI 13;2~` |
+| F4 | – | `\eOS` (T-FKEYS) | `CSI S` |
+| F5 | – | `CSI 15~` (T-FKEYS) | `CSI 15~` |
 | ArrowUp | – | `\eOA` | `CSI A` |
 | ArrowUp | C | `CSI 1;5A` | `CSI 1;5A` |
 | Home | – | `\eOH` | `CSI H` |
@@ -326,22 +351,26 @@ The rule that `Ctrl+C` copies a selection is decided before the encoder, so it i
 
 ### 6.1 `bt-term` (parser and state)
 
-These tests run on `TerminalAdapter`, observing `modes().keyboard` and `take_pty_writes()`:
+These tests run on `TerminalAdapter`, observing `modes().keyboard` and `take_pty_writes()`, unless they say otherwise:
 
 - push/pop/set/query: `CSI > 1 u` → 1; `CSI ? u` → `CSI ? 1 u`; `CSI = 0 u` → 0 and the query answers 0 (the vendor's defect 2); `CSI = 1 ; 2 u` then `CSI = 1 ; 3 u`; `CSI < u` on an empty stack → 0; `CSI < 5 u` past the bottom → 0.
-- masking: `CSI > 31 u` → 1, the query answers `CSI ? 1 u`, and the session reports the refused bits `0b11110` once. A second identical push adds no line.
-- the cap: nine pushes of distinct values followed by eight pops reach the second value pushed, because the oldest was evicted. The title stack is untouched (defect 1).
-- two screens: push 1 on the primary; `?1049h` → 0, and the query answers 0; push 1; `?1049l` → 1; `?1049h` again → 0, because the alternate screen starts empty (defect 4). A `CSI = 1 u` on the primary survives a round trip through the alternate screen (defect 3).
+- **pop zero**: `CSI > 1 u` then `CSI < 0 u` → still 1, and the stack still holds one saved value (a following `CSI < u` → 0). `CSI < u` (omitted) pops one.
+- masking: `CSI > 31 u` → 1, the query answers `CSI ? 1 u`, and the session reports the refused bits `0b11110` once (a second identical push adds no line). `CSI > 257 u` → 1, and the refused bits reported are `0b1_0000_0000` (bit 8 survives to the diagnostic, which the vendored `vte` arm 3 exists for).
+- **the cap, on the state model itself** (a unit test of the per-screen `KeyboardState` with the mask set to all bits, because under the adapter's mask every value is 0 or 1 and eviction would be invisible): from `current = 0`, push 1, 2, … 9. The ninth push evicts the oldest saved value (0), leaving saved `[1..8]` and `current = 9`. Seven pops reach `current = 2` with saved `[1]`; the eighth pop empties the stack and resets `current` to **0** (kitty's empty-stack rule), not 1. The same unit shows `pop(0)` leaves everything as it was.
+- the cap, through the adapter: 1,000 pushes leave at most 8 saved values, and the title stack is untouched both when it holds entries and **when it is empty** (defect 1's panic).
+- two screens, each of `?47`, `?1047` and `?1049` separately: push 1 on the primary; `h` → 0, and the query answers 0; push 1; `l` → 1; `h` again → 0, because the alternate screen starts empty (Folio's policy, defect 4). A `CSI = 1 u` on the primary survives a round trip through the alternate screen (defect 3).
 - `RIS` clears both screens and modifyOtherKeys.
-- modifyOtherKeys: `CSI > 4 ; 2 m` → Two; `CSI ? 4 m` → `CSI > 4 ; 2 m`; `CSI > 4 m` → Off; `CSI > 4 ; 3 m` and `CSI > m` change nothing.
+- modifyOtherKeys: `CSI > 4 ; 2 m` → Two; `CSI ? 4 m` → `CSI > 4 ; 2 m`; `CSI > 4 m` → Off; after `CSI > 4 ; 1 m`, **`CSI > m` → Off** (vendored `vte` arm 2); `CSI > 4 ; 3 m` changes nothing.
+- DECSTR: after `CSI > 1 u` and `CSI > 4 ; 2 m`, `CSI ! p` leaves both as they were (§2.1's stated divergence; the test names it).
 - reply order: `CSI ? u CSI c` → the kitty reply, then DA1.
 - the resize oracle: a query fed while a resize is armed is answered once.
 - ConPTY's teardown bytes: `a_teardown_that_conpty_re_enables_does_not_type_at_the_pane` still passes, and afterwards the state is 0 / Off.
-- the prompt rule, on `DualPlaneSession` with OSC 133. Feed fish's sequence: `A`, `=5u`, `A` (repaint), `=0u`, `C`, a program's `>1u`, `A`. At the last `A` the flags are 0, and the repaint `A` did not touch the `=5u`. Also check that an `A` on the alternate screen does nothing, that a `>4;2m` inside the command is Off at the next `A`, and that nothing is restored when there is no `C` between two `A`s.
+- OSC 133 does not touch the keyboard state: after `C`, `CSI > 1 u`, `A` on the primary screen, the flags are still 1 (the §2.4 negative trace, in the shape this ticket guarantees).
 
 ### 6.2 `bt-app` (the encoder)
 
 - **The table is data.** `crates/bt-app/src/key_encoding.tsv` holds the rows of §4.4: key, location, modifiers, DECCKM, mode, and the bytes as escaped text. `input::tests::every_row_of_the_key_encoding_table` runs each row through `keyboard_bytes`. §4.4 of this note is the table's first version; after the ticket, the TSV is the source. `scripts/dev/generate-key-encoding-table.ps1` generates `docs/key-encoding.md` from it, and a test keeps the two equal. This follows the pattern of `window_waits.tsv` and ARCHITECTURE §5.3. `(table)` rows are checked against `Shortcuts::lookup` instead, because the chord is claimed and the encoder is never asked.
+- **An independent oracle beside the TSV.** A wrong TSV would make the generated document and the exhaustive test agree with each other, so `input::tests::the_protocols_normative_cases` asserts, as literals in Rust source and not read from the TSV, the cases the specs themselves state: Esc → `CSI 27u`; Ctrl+I → `CSI 105;5u` while Tab → `\t`; Ctrl+M → `CSI 109;5u` while Enter → `\r`; Shift+Tab → `CSI 9;2u`; Alt+a → `CSI 97;3u`; Ctrl+Space → `CSI 32;5u`; Numpad Enter → `CSI 57414u`; Ctrl+Enter → `CSI 13;5u`; plain Up under DECCKM → `CSI A`; F1 → `CSI P`, F3 → `CSI 13~`; and for modifyOtherKeys 2, Ctrl+Enter → `CSI 27;5;13~`, Shift+a → `CSI 27;2;65~`, Ctrl+Shift+a → `CSI 27;6;65~`; for mode 1, Ctrl+a → `\x01` and Alt+a → `CSI 27;3;97~`.
 - Some cases are tested separately rather than as plain table rows:
   - every letter `a`–`z` under C and AC in all four modes, generated so that no letter is special;
   - a non-ASCII key: `é` with C → `CSI 233;5u`;
@@ -350,101 +379,127 @@ These tests run on `TerminalAdapter`, observing `modes().keyboard` and `take_pty
   - Super on both platforms → nothing, in every mode;
   - macOS Option with the setting off (text) and on (`CSI 97;3u`).
 - **The golden replay.** Feed a `TerminalAdapter` the bytes crossterm sends for Codex on Unix: `CSI ? u`, then `CSI > 7 u` (`DISAMBIGUATE | REPORT_EVENT_TYPES | REPORT_ALTERNATE_KEYS`). Then encode using its `modes().keyboard`. Expected: plain Enter → `\r`, Ctrl+Enter → `CSI 13;5u`, Shift+Enter → `CSI 13;2u`, Esc → `CSI 27u`, `a` → `a`, and no release event for any key. Then feed Codex's exit bytes (`CSI < 1 u`, `CSI < u`, `CSI > 4 ; 0 m`), after which Ctrl+Enter is `\r` again. Repeat with Claude Code's `CSI > 5 u` + `CSI > 4 ; 2 m`: kitty wins, so Ctrl+Enter is `CSI 13;5u`, not `CSI 27;5;13~`.
-- A measurement on the Mac mini: winit's `logical_key` and `key_without_modifiers` for `Ctrl+Shift+1`, `Ctrl+Shift+[` and `Ctrl+Shift+a` on the US layout, to confirm §4.3's `k` there.
+- **A manual platform check on the Mac mini**: winit's `logical_key` and `key_without_modifiers` for `Ctrl+Shift+1`, `Ctrl+Shift+[` and `Ctrl+Shift+a` on the US layout, to confirm §4.3's `k` there. It is run by hand in Folio's own checkout on that machine and touches nothing outside it; it neither needs nor authorises any change to anything else running there.
 
 ### 6.3 Through a real ConPTY (Windows)
 
-`crates/bt-pty/tests/keyboard_protocol_through_conpty.rs` follows the pattern of `color_query_through_conpty.rs`: Windows PowerShell is spawned the way a pane spawns it.
+`crates/bt-pty/tests/keyboard_protocol_through_conpty.rs` follows the pattern of `color_query_through_conpty.rs`: the child is spawned the way a pane spawns it. **Every outcome below is an assertion (pass/fail), not an observation.**
 
-1. The child writes `\e[?u\e[>1u`. Both sequences arrive in the bytes the pty hands us, and the session's flags become 1. This confirms §1's first fact: the request crosses ConPTY.
-2. A key-record child (`[Console]::ReadKey($true)` in a loop, printing `Key`, `Modifiers` and `KeyChar`) is sent three inputs, and the test records what it reads for each:
-   - `\e[13;5u`: expected to arrive as the characters (§1's second fact);
-   - `\e[27;5;13~`: expected to arrive as nothing;
-   - Folio's win32-input-mode record for Ctrl+Enter: expected to arrive as `Enter` with `Control`. This is the evidence Q1 needs.
-3. A VT-input child (the same script after `SetConsoleMode(…ENABLE_VIRTUAL_TERMINAL_INPUT)`, reading `[Console]::In`) is sent `\e[13;5u`, and it reads those bytes.
+1. **The request crosses.** A PowerShell child writes `\e[?u\e[>1u`. Both sequences arrive in the bytes the pty hands us, the session's flags become 1, and the reply `\e[?0u` reaches the child.
+2. **A key-record reader** (PowerShell, `[Console]::ReadKey($true)` in a loop, printing `Key`, `Modifiers` and `KeyChar`):
+   - sent `\e[13;5u`, it reads the characters `ESC [ 1 3 ; 5 u` as seven key events and no `Enter`+`Control` — asserted, because it is the fact that makes §1's third row true;
+   - sent `\e[27;5;13~`, it reads nothing;
+   - sent Folio's win32-input-mode record pair for Ctrl+Enter (built like `SHIFT_ENTER_RECORDS`), it reads `Enter` with `Control`. This is the transport T-KEYBOARD-RECORDS would use (Q1-A).
+3. **A VT-input reader** (the same script after `SetConsoleMode(…ENABLE_VIRTUAL_TERMINAL_INPUT)`, reading `[Console]::In`): sent `\e[13;5u`, it reads exactly those bytes; sent `\e[27;5;13~`, it reads exactly those bytes.
+4. **A native Node raw-stdin reader** — the stand-in for Claude Code on Windows, whose transport this is: `node -e` with `process.stdin.setRawMode(true)`, writing `\e[?u` and printing every chunk it reads as hex. It receives `\e[?0u` for its query, and sent `\e[13;5u` it reads exactly those seven bytes. This case needs `node` on `PATH`. It runs in the ticket's acceptance run on the release machine, where Node is installed; when `node` is missing the test **fails** with that reason rather than skipping, and CI selects it out by name rather than letting it pass silently.
 
-The test asserts 1 and 3. It records 2 as observations in its output, and the ticket's report quotes them.
+If 4 fails, §1's second row is wrong, and the ticket stops and reports before any CHANGELOG line names Claude Code on Windows.
 
 ### 6.4 Real programs (the ticket's acceptance, on the candidate build)
 
-| Program | Where | Expected |
+| Program | Where | Expected (pass/fail) |
 |---|---|---|
 | Codex TUI, with the reporter's config (Ctrl+Enter submits, Enter inserts a newline) | macOS; WSL | Ctrl+Enter submits, Enter inserts a newline |
-| Codex TUI | Windows native | **unchanged** (Ctrl+Enter inserts a newline, as today) unless the answer to Q1 is A |
+| Codex TUI, same config | Windows native | **unchanged**: Ctrl+Enter inserts a newline, as today. Under Q1-B this is the expected result and #13 stays open (narrowed); under Q1-A, T-KEYBOARD-RECORDS owns this row and it becomes "Ctrl+Enter submits" |
 | neovim, with `:inoremap <C-CR> …` and a `:map <C-i>` distinct from `<Tab>` | macOS; WSL | both fire; Esc leaves insert mode immediately (no `ttimeout` wait) |
-| fish, with `bind ctrl-enter …` and `bind ctrl-i …` | macOS; WSL | both fire. After running `nvim` and `:q`, and after `kill -9` of a program that pushed flags, Ctrl+C at the prompt still clears the line |
-| PowerShell 7 and 5.1 + PSReadLine | Windows | byte-identical to today. From pwsh, start a WSL program that pushes flag 1 in the same pane and kill it; Ctrl+C at the next prompt still interrupts (§2.4) |
-| Claude Code | macOS; WSL; Windows native | it detects support (`CSI ? u`), and Shift+Enter / Ctrl+Enter do what its keybindings say. On Windows native, record whether this works (§1, second row) |
-| `kitten show-key -m kitty` | macOS | matches §4.4's kitty column for the ten keys |
+| fish, with `bind ctrl-enter …` and `bind ctrl-i …` | macOS; WSL | both fire; after running `nvim` and `:q`, Ctrl+C at the prompt clears the line |
+| PowerShell 7 and 5.1 + PSReadLine | Windows | byte-identical to today (Ctrl+Enter, Shift+Enter and Alt+Enter run the line, as today) |
+| Claude Code, default keybindings | macOS; WSL; Windows native | it answers `CSI ? u` and pushes `CSI > 5 u`; Shift+Enter inserts a newline and Enter submits. On Windows native this row passes if and only if §6.3 case 4 passes, and it is not released as fixed otherwise |
+| `kitten show-key -m kitty` | macOS | matches §4.4's kitty column for the ten keys and the F1–F4 rows |
 | `cat -v` / `showkey -a` | macOS; WSL | the legacy column is unchanged when no program has asked |
+| a program killed with flags on, then §2.4's remedy | WSL (`reset`); Windows pwsh (the `Write-Host` line) | after the remedy, Ctrl+C interrupts again |
 
 ---
 
 ## 7. Ticket cut
 
-**T-KEYBOARD-PROTOCOL is one ticket, size M.** The parser half is small because `vte` already dispatches everything. The encoder half is a table-driven rewrite of one function plus its call site. The real-ConPTY test is the largest single piece. The ticket is two commits on one branch, merged together:
+**T-KEYBOARD-PROTOCOL is one ticket, size M–L.** The parser half is small but now includes a vendored `vte` with three changed arms. The encoder half is a table-driven rewrite of one function plus its call site. The real-ConPTY test, with four readers, is the largest single piece. The ticket is two commits on one branch, merged together:
 
-1. `bt-term` + `vendor/alacritty_terminal`:
-   - kitty's state model per screen, with the cap and the mask (§2.2), and `SUPPORTED_KITTY_FLAGS = 1`;
-   - the refused-bits event and its log line;
-   - modifyOtherKeys and its query reply;
-   - `RIS`, the alternate-screen rule and the prompt rule (§2.4);
+1. `vendor/vte` + `vendor/alacritty_terminal` + `bt-term`:
+   - the vendored `vte` and its three arms (§3);
+   - kitty's state model per screen, with the cap, the pop rules and the mask (§2.2), and `SUPPORTED_KITTY_FLAGS = 1`;
+   - the refused-bits event (full `u16`) and its log line;
+   - modifyOtherKeys, its query reply and `CSI > m`;
+   - `RIS`, the alternate-screen policy, DECSTR preserved (§2.1);
    - `TerminalModes::keyboard`;
    - the tests of §6.1 and §6.3.
 2. `bt-app`:
    - `keyboard_bytes` takes `(key, key_without_modifiers, location, modifiers, application_cursor_mode, keyboard)`;
-   - the rules of §4.2 and §4.3;
-   - `key_encoding.tsv`, the generator and `docs/key-encoding.md`;
+   - the rules of §4.2 (F1–F4's flag-1 forms included) and §4.3;
+   - `key_encoding.tsv`, the generator, `docs/key-encoding.md`, and the independent oracle;
    - the tests of §6.2.
 
 It is not two tickets, because each half on its own is worse than neither. The state on its own makes Folio answer `CSI ? u`, so programs push flag 1 and then receive legacy bytes they were told they would not get; Claude Code, for one, would switch on its extended-keys mode for nothing. The encoder on its own has no mode to read.
+
+**Prerequisite: T-FKEYS, size S.** F1–F12 get their legacy forms (`SS3 P/Q/R/S`, `CSI 15~ … 24~`, with `CSI 1;m X` / `CSI n;m ~` for modifiers), with table rows and tests. It lands before T-KEYBOARD-PROTOCOL so that flag 1's F1–F4 rule has something to change, and so that the claim "supports the first tier" is complete. It is its own ticket because it changes bytes for programs that never ask.
 
 **Explicitly out of scope:**
 
 - kitty flags 2, 4, 8 and 16 (report event types, alternate keys, all keys as escape codes, associated text);
 - win32-input-mode (owner ruling 2026-09-28; but see Q1);
 - the Alt+Enter ESC-prefix hack (owner ruling 2026-09-28);
-- function keys (F-1);
-- `DECSTR`;
+- recovery from a dead program's flags at the prompt (§2.4: withdrawn, with the negative trace);
+- DECSTR itself (§2.1);
 - a user setting;
-- lock-modifier bits.
+- lock-modifier bits;
+- Alt+Backspace (F-3, its own ticket).
 
-**If the answer to Q1 is A, a second ticket follows: T-KEYBOARD-RECORDS (Windows), size S–M.** When the pane's kitty flags and modifyOtherKeys are both 0, some chords cannot be told apart in legacy bytes: a modified Enter, Tab, Backspace, Escape or Space, and Ctrl with a key that has no C0 code. Each such chord is written as a win32-input-mode down/up record pair, built like `SHIFT_ENTER_RECORDS`; every other key keeps its VT bytes. It depends on T-KEYBOARD-PROTOCOL, because it reads the same `KeyboardProtocol`, and on the record observation in §6.3.
+**Q1's two branches, and what follows from each:**
+
+- **Q1-A: T-KEYBOARD-RECORDS (Windows), size S–M, after T-KEYBOARD-PROTOCOL.** A chord whose legacy bytes cannot tell it apart (a modified Enter, Tab, Backspace, Escape or Space, and Ctrl with a key that has no C0 code) is written as a win32-input-mode down/up record pair, built like `SHIFT_ENTER_RECORDS`; every other key keeps its VT bytes. Three gates, all required:
+  1. **Track `?9001h`.** The adapter records whether win32-input-mode is currently requested (ConPTY sets it at the session's start and again after a `RIS`, and a nested ConPTY can turn it off). Records are written only while it is on **and** the pane's kitty flags and modifyOtherKeys are both 0. "No program asked for kitty or modifyOtherKeys" alone is not proof that the transport is there.
+  2. **Assert through a real ConPTY for all three readers**: a key-record reader gets `Enter`+`Control`; a VT-input reader gets what ConPTY's own encoder produces for that record (asserted exactly, whatever it is, so a change in ConPTY is seen); a native Node/libuv reader gets bytes that are no worse than today's `\r` for Ctrl+Enter (asserted exactly).
+  3. **The PowerShell change is intended behaviour, stated in the CHANGELOG.** In PSReadLine's default Windows edit mode, Shift+Enter is `AddLine` and Ctrl+Enter is `InsertLineAbove`; today Folio collapses both to Enter, which runs the line. After T-KEYBOARD-RECORDS they do what PSReadLine binds them to, as in Windows Terminal. Alt+Enter is unbound there, so it does nothing instead of running the line. The ticket's acceptance row for PowerShell changes from "byte-identical" to these three expectations.
+
+  It owns the "Codex on Windows native" acceptance row, and #13 closes when it ships.
+- **Q1-B: the 2026-09-28 ruling stands.** No second ticket. #13 stays open, narrowed to "native Windows programs that read console key records (Codex, PSReadLine)". The acceptance matrix keeps "Codex, Windows native: unchanged" as the expected result. The reply on #13 is corrected to say what 0.4.7 fixes (macOS, WSL, and programs that ask for the protocol) and what it does not (Codex on Windows), and the CHANGELOG line says so too.
 
 **DESIGN.md entry, for the ticket to write when it lands** (English, dated, at the end, like the entries before it):
 
-> ### 2026-09-xx — A program that asks for the kitty keyboard protocol's disambiguate tier, or for xterm's modifyOtherKeys, gets it; Folio answers the query with what is in force and undoes a command's leftovers at its next prompt
+> ### 2026-09-xx — A program that asks for the kitty keyboard protocol's disambiguate tier, or for xterm's modifyOtherKeys, gets it, and Folio answers the query with what is in force
 >
-> 0.4.7 ticket T-KEYBOARD-PROTOCOL; design note `docs/plans/design/keyboard-protocol-2026-09-29.md` and its Codex review; issue #13. Each pane's terminal keeps, per screen, the kitty flags in force and a stack of eight saved values (`CSI > u`, `CSI < u`, `CSI = u`, `CSI ? u`); only flag 1 is honoured, other bits are dropped where they are parsed and named once in `diagnostics.log`. modifyOtherKeys (`CSI > 4 ; v m`, `CSI ? 4 m`) is one value per terminal. The alternate screen starts with no flags and its flags end with it; `RIS` clears both; at OSC 133 `A` on the primary screen after a `C`, the primary's flags and modifyOtherKeys return to their values at that `C`. The encoder reads the mode from `TerminalModes::keyboard` and encodes from `key_encoding.tsv` (generated into `docs/key-encoding.md`): under flag 1, Esc and every Alt, Ctrl and modified Enter/Tab/Backspace/Space chord is `CSI code;m u` with the un-shifted key as the code, plain Enter/Tab/Backspace stay `\r \t \x7f`, arrows ignore DECCKM, and non-text keypad keys take their keypad codes; under modifyOtherKeys, `CSI 27;m;k~` for xterm's classes; kitty wins when both are set. Super is never encoded; Option follows *Option key sends Alt*. A program that never asks — PSReadLine, cmd, Codex on Windows — receives exactly the bytes it received before.
+> 0.4.7 ticket T-KEYBOARD-PROTOCOL; design note `docs/plans/design/keyboard-protocol-2026-09-29.md` (revision (b)) and its Codex review; issue #13. Each pane's terminal keeps, per screen, the kitty flags in force and a stack of eight saved values (`CSI > u`, `CSI < u` — an explicit `0` pops nothing —, `CSI = u`, `CSI ? u`); only flag 1 is honoured, other bits are dropped where they are handled and named once in `diagnostics.log`. modifyOtherKeys (`CSI > 4 ; v m`, `CSI > m` resets it, `CSI ? 4 m`) is one value per terminal. `vte` is vendored for those three arms. By Folio's policy the alternate screen starts with no flags and its flags end with it (Windows Terminal does the same; Ghostty and WezTerm keep them); `RIS` clears both screens and modifyOtherKeys; `DECSTR`, which Folio does not implement, changes neither — unlike xterm, which resets modifyOtherKeys there. Nothing at a prompt touches the state: a program that dies with flags on leaves them until `reset`, a pop, or a new shell. The encoder reads the mode from `TerminalModes::keyboard` and encodes from `key_encoding.tsv` (generated into `docs/key-encoding.md`, with an independent oracle beside it): under flag 1, Esc and every Alt, Ctrl and modified Enter/Tab/Backspace/Space chord is `CSI code;m u` with the un-shifted key as the code, plain Enter/Tab/Backspace stay `\r \t \x7f`, arrows ignore DECCKM, F1–F4 take their CSI forms, and non-text keypad keys take their keypad codes; under modifyOtherKeys, `CSI 27;m;k~` (xterm's `formatOtherKeys=0`) for xterm's classes; kitty wins when both are set. Super is never encoded; Option follows *Option key sends Alt*. A program that never asks — PSReadLine, cmd, Codex on Windows — receives exactly the bytes it received before.
 
 **CHANGELOG line** (under *Added*):
 
-> - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter, Ctrl+I, Ctrl+M and Esc apart from Enter, Tab and a lone escape: Folio supports the first tier of the kitty keyboard protocol and xterm's modifyOtherKeys. This works for neovim, fish, helix, Claude Code, and Codex on macOS or in WSL; programs that do not ask, such as PowerShell, are unaffected.
+> - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter, Shift+Tab, Ctrl+I, Ctrl+M and Esc apart from Enter, Tab and a lone escape: Folio supports the first tier of the kitty keyboard protocol and xterm's modifyOtherKeys. neovim, fish, helix and Claude Code ask for it, and so does Codex on macOS and in WSL. Programs that do not ask, such as PowerShell, are unaffected, and so is Codex running natively on Windows.
 
-If the answer to Q1 is A, T-KEYBOARD-RECORDS adds: "On Windows, Ctrl+Enter, Shift+Enter and Alt+Enter also reach console programs such as Codex and PowerShell as those keys."
+The last clause holds under Q1-B. Under Q1-A, T-KEYBOARD-RECORDS removes it and adds its own line: "On Windows, Ctrl+Enter, Shift+Enter and Alt+Enter reach console programs such as Codex and PowerShell as those keys; in PowerShell, Shift+Enter now adds a line and Ctrl+Enter inserts one above, as in Windows Terminal." The "first tier" wording assumes T-FKEYS has merged; if it has not, the line names the chords only and drops "supports the first tier".
 
 ---
 
 ## 8. Found along the way, not in this ticket
 
-- **F-1** `keyboard_bytes` has no case for F1–F12, so a function key sends nothing to the child today, in every program. It needs its own ticket, covering the legacy forms and flag 1's `CSI P/Q/13~/S` for F1–F4.
+- **F-1** `keyboard_bytes` has no case for F1–F12, so a function key sends nothing to the child today, in every program. This is **T-FKEYS**, the prerequisite of §7.
 - **F-2** `Ctrl+Space` and `Ctrl+Shift+Space` send nothing. winit reports these as `NamedKey::Space`, and the control-alphabet case never sees them: it was written for `Key::Character`, even though its comment says `Ctrl+Space` is NUL. The legacy column keeps `—` for these rows, so this ticket does not change a legacy byte. A follow-up makes them NUL (0x00), as kitty's legacy table, xterm and the existing comment all say.
-- **F-3** `Alt+Backspace` sends `\x7f` with no ESC, so readline's backward-kill-word (`\e\x7f`) cannot be typed. Behind ConPTY, `ESC DEL` becomes an Alt+Backspace record, which PSReadLine also binds. This deserves its own look, with the same care as the Alt+Enter ruling.
+- **F-3** `Alt+Backspace` sends `\x7f` with no ESC, so readline's backward-kill-word (`\e\x7f`) cannot be typed. Behind ConPTY, `ESC DEL` becomes an Alt+Backspace record, which PSReadLine also binds. Its own ticket (the review agrees): the defect is in the legacy path, and changing it here would break this ticket's promise to programs that never ask.
 
 ---
 
 ## 9. Open questions for the owner
 
-**Q1. This ticket does not fix the problem for issue #13's reporter.** Codex on Windows reads key records and never asks for the protocol (§1). The reply on #13 (2026-09-28) says Ctrl+Enter should work after this version. There are two possible answers:
+**Q1. This ticket does not fix the problem for issue #13's reporter** (confirmed by the review). Codex on Windows reads key records and never asks for the protocol (§1). The reply on #13 (2026-09-28) says Ctrl+Enter should work after this version. There are two possible answers; §7 writes out everything that follows from each.
 
-- **A (recommended).** Add T-KEYBOARD-RECORDS. On Windows, when no program has asked for anything, Folio writes only the chords VT cannot express as win32-input-mode records: modified Enter, Tab, Backspace, Escape and Space, and Ctrl with keys that have no C0 code. Folio already uses this mechanism for a paste's Shift+Enter. This is narrower than adopting win32-input-mode, because every other key keeps its VT bytes, and it is how Windows Terminal and WezTerm get these chords to console programs. It does change PowerShell. Ctrl+Enter and Shift+Enter become PSReadLine's *InsertLineAbove* and *AddLine*, as in Windows Terminal, instead of running the line. Alt+Enter is unbound in PSReadLine, so it does nothing instead of running the line.
-- **B.** Keep the 2026-09-28 ruling, and correct the reply on #13 to say what this version fixes (macOS, WSL, and programs that ask) and what it does not fix (Codex on Windows).
+- **A (recommended): T-KEYBOARD-RECORDS.** On Windows, while ConPTY has win32-input-mode on and no program has asked for kitty or modifyOtherKeys, Folio writes only the chords VT cannot express as win32-input-mode records. Folio already does this for a paste's Shift+Enter; it is how Windows Terminal and WezTerm reach console programs. It fixes Codex's Ctrl+Enter and **changes PowerShell on purpose**: Shift+Enter becomes *AddLine* and Ctrl+Enter *InsertLineAbove*, as in Windows Terminal, instead of running the line; Alt+Enter does nothing instead of running the line. #13 closes when it ships.
+- **B: keep the 2026-09-28 ruling.** #13 stays open, narrowed to key-record programs on Windows; the reply and the CHANGELOG say that Codex on Windows is unchanged.
 
 **Q2. The keypad under flag 1.** The spec sends Numpad Enter as `CSI 57414u`, and the keypad arrows with Num Lock off as their own keypad codes; kitty, Ghostty and WT all do this. crossterm, neovim and fish decode these codes. A program that asked for flag 1 but does not know keypad codes would find that Numpad Enter stops working. **Recommended: follow the spec**, as §4.2 rule 5 does. The alternative is to encode keypad keys as their main-keyboard twins.
 
 **Q3. F-2 now or later.** Making `Ctrl+Space` send NUL changes a legacy byte, in a ticket whose promise is "a program that never asks is unaffected". **Recommended: later, as its own small ticket**, so that this ticket's promise stays literally true.
 
 ---
+
+## Revision (b), 2026-09-29 — what changed after Codex's review
+
+| Review finding | Change in this note |
+|---|---|
+| 1. Windows claims confirmed; the ticket does not fix #13's reporter | §0 item 9 and Q1 say T-KEYBOARD-PROTOCOL does not close #13; §7 writes out both branches — A with the review's three gates (track `?9001h`; assert record, VT and Node/libuv readers through a real ConPTY; the PSReadLine change stated as intended), B with #13 narrowed and "Codex, Windows native: unchanged" as the expected row |
+| 2. OSC 133 `C`→`A` restore is not ownership-safe | Withdrawn from §0, §2.1, §2.4, §6, §7, the DESIGN entry and the CHANGELOG. §2.4 records the nested-subshell negative trace, the crash-recovery gap, and what the person does (`reset`; a `Write-Host` line or *Restart shell* in PowerShell; a Folio reset verb as a possible later door); §6.1 pins that OSC 133 leaves the state alone |
+| 3. `CSI > m`, explicit `CSI < 0 u`, the cap test, large flag values, DECSTR | `vte` vendored for three arms (§3): `CSI > m` → modifyOtherKeys Off, explicit `0` pop is a no-op, flags reach the terminal as `u16` so the diagnostic names bits 8–15. Pop rule restated with the empty-stack reset (§2.2). Cap test corrected — seven pops reach 2, the eighth resets to 0 — and moved onto the unmasked state model (§6.1). DECSTR: kitty state preserved, modifyOtherKeys not reset, stated as a divergence from xterm (§2.1) |
+| 4. Alternate-screen clearing is Folio policy; defect 1 wording | §2.1 names the choice (WT clears; Ghostty and WezTerm preserve); §6.1 tests `?47`, `?1047`, `?1049` separately; §2.2 defect 1 now says title-stack corruption or a panic when it is empty; the cap of 8 is attributed as a choice (WT, Ghostty 8; WezTerm 128) |
+| 5. Attribution | modifyOtherKeys precedence cites kitty, Ghostty and WezTerm, not WT (§4.3); the vte reference table is named as the `formatOtherKeys=1` evidence for the classes, the wire form as xterm's default `formatOtherKeys=0`; "published" replaced by "read directly from the session-owned terminal state" (§0, §2.3) |
+| 6. Thread-door claim | unchanged (the review passed it); wording as in 5 |
+| 7. Size, tests, scope | size M–L; an independent hard-coded oracle beside the TSV (§6.2); explicit pop-zero test; all four ConPTY outcomes are assertions, including a native Node raw-stdin reader (§6.3); the Claude Code row has a pass/fail expectation (§6.4); F1–F4's flag-1 forms are in this ticket, on top of T-FKEYS as a prerequisite (§4.2 rule 7, §4.4, §7), and the CHANGELOG names the chords; Alt+Backspace stays separate (F-3); the Mac check is manual and touches nothing outside Folio's checkout there (§6.2) |
 
 ## Sources
 
