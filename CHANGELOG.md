@@ -6,6 +6,11 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Changed
+
+- The README says how to uninstall each kind of copy, and the zip's
+  `uninstall.cmd` prints its lines in Chinese as well as English.
+
 ### Fixed
 
 - F1–F12 reach the program (they sent nothing before); Shift, Alt and Ctrl
