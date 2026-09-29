@@ -6,6 +6,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.4.6-preview — 2026-09-29
 ### Added
 
 - Folio can update itself on Windows, and on macOS through the same card and
@@ -290,6 +293,19 @@ All notable changes to Folio are recorded here. The format follows
   compiler cannot see — a forged proof, a second maker of one, a rule switched
   off, a wait hidden in a macro or in something's clean-up — and names the one
   it finds. Nothing changes while Folio runs.
+
+### Known issues
+
+- If another program keeps the update journal (`.folio-update\journal.json`)
+  open for minutes right after the new files are in place, the new version
+  is left running unconfirmed; the next start restores the previous version,
+  which offers the update again (the checklist's D-14; 0.4.7 ends the trial
+  it started instead).
+- macOS: the first self-update makes macOS show its "software was added that
+  can run in the background" notice for Folio's login item — the updater's
+  recovery entry, removed once the update finishes.
+- Ctrl+Enter and Shift+Enter reach programs as Enter until the kitty keyboard
+  protocol lands (issue #13, 0.4.7).
 
 ## 0.4.5-preview — 2026-09-26
 

@@ -82,8 +82,6 @@
 - If another program keeps Folio's update record open for minutes right
   after an update, the new version runs without saving its changes, and the
   next start puts the previous version back.
-- After Folio was pointed at a local folder to rehearse an update, the
-  version found there is offered for a day.
 - macOS: the first self-update makes macOS show its "…software was added
   that can run in the background" notice for Folio's login item; it is
   the updater's recovery entry and is removed once the update finishes. <!-- U-32 -->
@@ -167,4 +165,4 @@ updates it downloads, which Settings ▸ General ▸ **Update check** switches o
 
 </details>
 
-Full changelog: [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.6-preview/CHANGELOG.md#046-preview--2026-09-28) · [v0.4.5-preview…v0.4.6-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.5-preview...v0.4.6-preview)
+Full changelog: [CHANGELOG.md](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.6-preview/CHANGELOG.md#046-preview--2026-09-29) · [v0.4.5-preview…v0.4.6-preview](https://github.com/lulu-loopp/folio-terminal/compare/v0.4.5-preview...v0.4.6-preview)

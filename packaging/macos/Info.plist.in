@@ -65,7 +65,7 @@
 	<string>@VERSION@</string>
 
 	<!-- **What an updater reads of this release before it installs it**
-	     (0.4.6 ticket U-9; `docs/plans/design/self-update-2026-09-16.md`
+	     (the self-update ticket U-9; `docs/plans/design/self-update-2026-09-16.md`
 	     revision (b), F-4 and F-8): the update protocol this build speaks, and
 	     the oldest Folio whose updater can install it. The Windows archive
 	     carries the same two facts inside the manifest `folio.exe` is built
