@@ -29,7 +29,6 @@
 #
 # The sites grouped by what they are waiting for: the U-44b triage ticket.
 crate	file	item	form	reason
-bt-app	src/main.rs	UserInputKind	allow	A2 converts the five call sites that will pass these
 bt-app	src/update_handoff.rs	Staged.lock	expect	a lock is held by owning it; nothing reads it (install_txn::Held's drop releases it)
 bt-app	src/update_job.rs	(module)	expect	the drivers land after the card: U-20/U-27 drive and report, U-21 quits ((b).5)
 bt-app	src/update_txn.rs	(module)	expect	the protocol lands before its drivers: U-11, U-12 and U-20…U-29 call it ((b).5)

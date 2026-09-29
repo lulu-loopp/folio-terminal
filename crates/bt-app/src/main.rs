@@ -20999,15 +20999,8 @@ enum MouseRoute {
 /// argument, and both questions are answered by methods **on this enum**. That is the same shape,
 /// in the same place, for the same reason as [`Self::returns_view_to_live`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-// The five members below `Keyboard` are the ones whose call sites A2 moves over — the IME commit,
-// the paste, the files row and the three mouse doors all write through this function today and
-// pass the one kind that existed. Naming them here first is what lets the ledger be built and
-// tested against the real vocabulary; `expect` rather than `allow` so that the first call site A2
-// converts takes the attribute away with it.
-#[allow(
-    dead_code,
-    reason = "A2 converts the five call sites that will pass these"
-)]
+// Every door that writes a user's input names its kind: the keyboard, the IME commit, the paste,
+// the files row and the three mouse doors (button, wheel, motion).
 enum UserInputKind {
     Keyboard,
     /// An IME **commit**. Composition updates nothing but the window's own preedit and puts no
