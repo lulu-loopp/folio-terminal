@@ -36,11 +36,13 @@
 //! * [`stop_trial`] — W9/M9's stop: asked to quit, 5 s of grace, then ended —
 //!   each through `bt_platform::install_flip::ask`, which touches nothing that
 //!   is not that very trial (pid, start instant and image);
-//! * [`unrecorded_trial`] and [`adopting`] — **a running trial the journal
-//!   does not know, recorded** (0.4.7 ticket U-37): a process of the new build
-//!   whose receipt is in `H\<txn>` naming it, recorded with that receipt's
-//!   nonce by the next lock holder, which its receipt then commits — never a
-//!   second trial beside it, never a rollback under it;
+//! * [`before_deciding`], [`survey`] and [`adopting`] — **what a lock holder
+//!   does before `decide`** (0.4.7 ticket U-37, design revision (h) H.3): a
+//!   running trial whose receipt names it exactly (pid and start instant) is
+//!   recorded and its receipt commits; a handed-back trial that never became
+//!   ready is ended; any other process of the new build, a held or unaskable
+//!   claim, or a process list that cannot be read defers — never a second
+//!   trial beside a candidate, never a rollback under it;
 //! * [`OWNER_FILE`] — **the window's owner** (U-34): the one process that has
 //!   taken the duty that a Folio window follows *Restart to update*, handed
 //!   from O to P explicitly ([`take_the_window`]); recovery that finds
@@ -146,9 +148,19 @@ pub(crate) enum Ended {
     Refused(String),
     /// A write or a read failed; the journal holds its last durable phase.
     Failed(String),
+    /// **Nothing was recorded, started or moved** (U-37, H.3): a process of the
+    /// new build that the journal does not record runs, the data directory is
+    /// held, or what runs or who holds it cannot be known.
+    Deferred(Deferral),
 }
 
 impl Ended {
+    /// **Whether this end deferred to a Folio proved to hold the data
+    /// directory** (H.3): the exit guard then owes no start.
+    pub(crate) fn deferred_to_a_holder(&self) -> bool {
+        matches!(self, Ended::Deferred(Deferral::Held))
+    }
+
     /// The process's exit code.
     pub(crate) fn code(&self) -> i32 {
         match self {
@@ -540,46 +552,62 @@ pub(crate) fn trial_runs(process: TrialProcess, images: &[&Path]) -> bool {
     .unwrap_or(false)
 }
 
-/// **A trial of this transaction that runs and has answered, and that the
-/// journal does not record** (0.4.7 ticket U-37; the macOS rehearsal's defect
-/// 9): a process running from the new build's executable `program` — not the
-/// `recorded` one — whose receipt, `H\<txn>\health-<nonce>`, is here and names
-/// its pid. Such a trial is one a road process started and could not record:
-/// the trial an exit guard starts where the disk names the new build
-/// (`Opens::Trial`, a nonce no journal records), a retrial over `Stuck` whose
-/// record failed, or a trial whose applier died before its record. It holds
-/// the data directory and the shared admission, so no second trial of the
-/// transaction can start beside it and no rollback can move under it; and it
-/// has already given the one evidence a commit asks for. **A lock holder
-/// records it** — [`adopting`] — and its receipt then commits the transaction
-/// as any trial's does. `None` when no such process runs, when none of the
-/// receipts here names a running one, or when the folder cannot be listed.
+/// **What a lock holder finds of the processes of the new build that the
+/// journal does not record** (0.4.7 ticket U-37, design revision (h) H.1 and
+/// H.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Survey {
+    /// A process runs whose receipt in `H\<txn>` names it exactly — its pid
+    /// **and** its start instant (the receipt's `started`, H.1 R3). It is
+    /// recorded with the receipt's own identity.
+    Adoptable {
+        process: TrialProcess,
+        receipt: Receipt,
+    },
+    /// Processes of the new build run, and no receipt names one of them
+    /// exactly: each is a trial nobody records, or a start about to become
+    /// one — whether or not it has taken the data directory yet (H.3 step 3).
+    Candidates(Vec<Running>),
+    /// No process of the new build runs, besides those excluded.
+    Nothing,
+    /// The process list, or `H\<txn>`, could not be read: whether a candidate
+    /// runs is not known (H.3's "unlistable").
+    Unlistable(String),
+}
+
+/// **Survey the processes of the new build's executable `program`** that the
+/// journal of `txn` does not record, leaving out `excluded` — each by its
+/// exact pid and start instant (the recorded trial of a `Stuck`, the one a
+/// holder has just ended, this recovery's own starter). H.1 R3 and R4: a
+/// receipt counts only when it is this transaction's, sits at its own nonce's
+/// name, carries `started`, and a running process has exactly
+/// `(receipt.pid, receipt.started)`. A stale receipt whose pid another process
+/// now has, a receipt without `started`, and a receipt of another transaction
+/// name nobody; several receipts are each asked, and at most one can name a
+/// running process exactly.
 ///
 /// The receipts are found by listing `H\<txn>` (`files::read_directory`, the
-/// product's one listing): the trial's nonce is its own, and its receipt is
-/// the one place it says it.
-pub(crate) fn unrecorded_trial(
-    home: &Home,
-    txn: TxnId,
-    program: &Path,
-    recorded: Option<TrialProcess>,
-) -> Option<(TrialProcess, Receipt)> {
-    let running: Vec<Running> = install_flip::running_from(program)
-        .ok()?
-        .into_iter()
-        .filter(|process| {
-            recorded
-                .is_none_or(|trial| (trial.pid, trial.started) != (process.pid, process.started))
-        })
-        .collect();
+/// product's one listing): the trial's nonce is its own, and its receipt is the
+/// one place it says it.
+pub(crate) fn survey(home: &Home, txn: TxnId, program: &Path, excluded: &[Running]) -> Survey {
+    let running: Vec<Running> = match install_flip::running_from(program) {
+        Ok(list) => list
+            .into_iter()
+            .filter(|process| !excluded.contains(process))
+            .collect(),
+        Err(error) => return Survey::Unlistable(format!("the process list: {error}")),
+    };
     if running.is_empty() {
-        return None;
+        return Survey::Nothing;
     }
     let folder = home.transaction(txn);
-    let crate::files::DirOutcome::Listed(listing) = crate::files::read_directory(&folder) else {
-        return None;
+    let listing = match crate::files::read_directory(&folder) {
+        crate::files::DirOutcome::Listed(listing) => listing,
+        crate::files::DirOutcome::Failed(fault) => {
+            return Survey::Unlistable(format!("{}: {fault:?}", folder.display()));
+        }
     };
-    listing
+    let adoptable = listing
         .entries
         .iter()
         .filter(|entry| {
@@ -591,25 +619,34 @@ pub(crate) fn unrecorded_trial(
         .find_map(|entry| {
             let path = folder.join(&entry.name);
             let receipt = read_receipt(&path)?.ok()?;
-            // A receipt at its own nonce's name, for this transaction.
+            // This transaction's, at its own nonce's name, naming its own
+            // start instant (H.1 R3).
             if receipt.txn != txn || path != home.receipt_path(txn, &receipt.nonce) {
                 return None;
             }
-            let process = running.iter().find(|process| process.pid == receipt.pid)?;
-            Some((
+            let exactly = Running {
+                pid: receipt.pid,
+                started: receipt.started?,
+            };
+            running.contains(&exactly).then_some((
                 TrialProcess {
-                    pid: process.pid,
-                    started: process.started,
+                    pid: exactly.pid,
+                    started: exactly.started,
                 },
                 receipt,
             ))
-        })
+        });
+    match adoptable {
+        Some((process, receipt)) => Survey::Adoptable { process, receipt },
+        None => Survey::Candidates(running),
+    }
 }
 
 /// **The record of a running trial the journal did not know** (U-37): over
 /// `Moving`, `TrialBegan`; over `Stuck`, `RetrialBegan` — with the nonce its
-/// own receipt carries, so that receipt then answers for it, and `began_ms`
-/// now (the record's instant; its receipt is already here).
+/// own receipt carries, so that receipt then answers for it, the process its
+/// receipt names exactly (H.1 R3), and `began_ms` now (the record's instant;
+/// its receipt is already here).
 pub(crate) fn adopting(over_stuck: bool, receipt: &Receipt, process: TrialProcess) -> Event {
     let (nonce, began_ms) = (receipt.nonce, now_ms());
     if over_stuck {
@@ -624,6 +661,131 @@ pub(crate) fn adopting(over_stuck: bool, receipt: &Receipt, process: TrialProces
             process,
             began_ms,
         }
+    }
+}
+
+/// **Why a lock holder deferred** instead of deciding (H.3 step 3): the
+/// transaction is left as it stands — nothing recorded, started or moved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Deferral {
+    /// A process of the new build runs that no receipt names (by its pid and
+    /// start instant): it is the window while it runs.
+    Candidate(Running),
+    /// The data directory's claim is held: a Folio runs on this data, and its
+    /// holder is the acknowledged window (U-34's delivery test).
+    Held,
+    /// Whether a candidate runs cannot be known.
+    Unlistable(String),
+    /// The data directory's claim could not be asked about
+    /// (`ClaimRefusal::QueryDenied`): no evidence either way.
+    Denied(String),
+}
+
+impl Deferral {
+    /// One line of it.
+    pub(crate) fn said(&self) -> String {
+        match self {
+            Deferral::Candidate(process) => format!(
+                "{} runs the new build and no receipt names it; nothing is started beside it",
+                process.pid
+            ),
+            Deferral::Held => {
+                String::from("a Folio holds the data directory; nothing is started beside it")
+            }
+            Deferral::Unlistable(why) => format!("what runs cannot be read ({why})"),
+            Deferral::Denied(why) => format!("the data directory cannot be asked about ({why})"),
+        }
+    }
+}
+
+pub(crate) use crate::cli::HandedBack;
+
+/// **What a lock holder does before `decide`** over `Moving`, or over a `Stuck`
+/// whose recorded trial no longer runs, with the new build live (H.3).
+#[derive(Debug)]
+pub(crate) enum BeforeDeciding {
+    /// Step 1: record this event (the adopted trial); it is the successor.
+    Adopt { event: Event, successor: Running },
+    /// Step 3: leave the transaction as it stands (`Ended::Deferred`).
+    Defer(Deferral),
+    /// Step 4: no candidate and the claim free — `decide` as before.
+    Decide,
+}
+
+/// **H.3's order**, both platforms: (1) adopt a running trial its receipt names
+/// exactly; (2) end the handed-back trial named by `--from-trial` when it is
+/// unready (`end`, W9's stop of that exact instance), then look again; (3) fail
+/// closed — a candidate seen, the claim held, what runs unreadable, or the
+/// claim question denied each defer; (4) otherwise decide. `excluded` are the
+/// exact instances that are no candidate (the recorded trial of a `Stuck`,
+/// this recovery's own starter); `data` is the data directory whose claim is
+/// asked.
+pub(crate) fn before_deciding(
+    home: &Home,
+    txn: TxnId,
+    program: &Path,
+    over_stuck: bool,
+    excluded: &[Running],
+    handed_back: Option<HandedBack>,
+    data: &Path,
+    end: &mut dyn FnMut(TrialProcess) -> Result<(), String>,
+) -> BeforeDeciding {
+    // The handed-back trial is never excluded, even when it is this recovery's
+    // own starter (the watchdog's hand-back): it is ended here, or it is a
+    // candidate (Codex's check of (h), round 3).
+    let mut excluded: Vec<Running> = excluded
+        .iter()
+        .copied()
+        .filter(|process| handed_back.is_none_or(|handed| handed.process != *process))
+        .collect();
+    let mut found = survey(home, txn, program, &excluded);
+    if let (Some(handed), Survey::Candidates(running)) = (handed_back, &found)
+        && !handed.ready
+        && running.contains(&handed.process)
+    {
+        let process = TrialProcess {
+            pid: handed.process.pid,
+            started: handed.process.started,
+        };
+        if let Err(why) = end(process) {
+            return BeforeDeciding::Defer(Deferral::Unlistable(format!(
+                "the handed-back trial {}: {why}",
+                process.pid
+            )));
+        }
+        excluded.push(handed.process);
+        found = survey(home, txn, program, &excluded);
+    }
+    let unlistable = match found {
+        Survey::Adoptable { process, receipt } => {
+            return BeforeDeciding::Adopt {
+                event: adopting(over_stuck, &receipt, process),
+                successor: Running {
+                    pid: process.pid,
+                    started: process.started,
+                },
+            };
+        }
+        Survey::Candidates(running) => {
+            return BeforeDeciding::Defer(Deferral::Candidate(running[0]));
+        }
+        Survey::Unlistable(why) => Some(why),
+        Survey::Nothing => None,
+    };
+    let claim = match crate::persist::try_claim(data) {
+        Ok(claim) => {
+            drop(claim);
+            None
+        }
+        Err(bt_platform::instance::ClaimRefusal::Held) => {
+            return BeforeDeciding::Defer(Deferral::Held);
+        }
+        Err(refusal) => Some(format!("{refusal:?}")),
+    };
+    match (unlistable, claim) {
+        (Some(why), _) => BeforeDeciding::Defer(Deferral::Unlistable(why)),
+        (None, Some(why)) => BeforeDeciding::Defer(Deferral::Denied(why)),
+        (None, None) => BeforeDeciding::Decide,
     }
 }
 
@@ -917,6 +1079,10 @@ pub(crate) enum Left {
     /// The recovery run at logon, with nothing done and nobody waiting (W8):
     /// nothing was started.
     NobodyWaiting,
+    /// **A Folio holds the data directory** (U-37, H.3's deferral over a held
+    /// claim): it is the window — U-34's own acknowledgement — and nothing was
+    /// started beside it.
+    Elsewhere,
     /// This program was started, and acknowledged: a Folio holds the data
     /// directory.
     Started(PathBuf),
@@ -938,6 +1104,9 @@ impl Left {
                 String::from("this process never took the duty to open Folio; nothing was started")
             }
             Left::NobodyWaiting => String::from("nobody is waiting; nothing was started"),
+            Left::Elsewhere => String::from(
+                "a Folio holds the data directory and opens Folio; nothing was started",
+            ),
             Left::Started(program) => format!("started {}", program.display()),
             Left::ShownHere(why) => {
                 format!("no start was delivered ({why}); the failure window was shown here")
@@ -981,6 +1150,8 @@ pub(crate) struct ExitGuard<L: Leave> {
     leave: L,
     successor: Option<Running>,
     waiting: bool,
+    /// A Folio is proved to hold the data directory (U-37, H.3).
+    elsewhere: bool,
     /// `Some` once this process knows it does not have the duty a window
     /// follows: the process that has it, if one is proven.
     not_mine: Option<Option<u32>>,
@@ -994,6 +1165,7 @@ impl<L: Leave> ExitGuard<L> {
             leave,
             successor: None,
             waiting: true,
+            elsewhere: false,
             not_mine: None,
             left: None,
         }
@@ -1023,6 +1195,12 @@ impl<L: Leave> ExitGuard<L> {
         self.waiting = false;
     }
 
+    /// **A Folio holds the data directory** (U-37, H.3): the road deferred to
+    /// it, and it is the window a start would only hand itself to.
+    pub(crate) fn window_elsewhere(&mut self) {
+        self.elsewhere = true;
+    }
+
     /// **Hand the duty on** to a guard constructed inside this one's scope,
     /// which now carries it: this one starts nothing when it is dropped.
     pub(crate) fn hand_on(&mut self) {
@@ -1043,6 +1221,7 @@ impl<L: Leave> ExitGuard<L> {
                 .filter(|successor| install_flip::still_running(*successor))
             {
                 Some(successor) => Left::Succeeded(successor.pid),
+                None if self.elsewhere => Left::Elsewhere,
                 None if !self.waiting => Left::NobodyWaiting,
                 None => self.start(),
             }
@@ -1200,5 +1379,6 @@ pub(crate) fn owed_at_logon(ended: &Ended) -> bool {
             | Ended::LockHeld
             | Ended::OldHeldTheLock
             | Ended::Abandoned
+            | Ended::Deferred(_)
     )
 }

@@ -971,11 +971,17 @@ Core Foundation's on macOS, the ownerless one on Windows). So a window
 follows Restart to update whatever the road met — a refused write, a
 hand-over past its 15 s, a refusal, a panic; the one exception is the
 recovery at logon that attempted nothing. **A trial nobody alive decides is
-decided anyway**: a lock holder records a running trial of the new build whose
-receipt is there, and that receipt commits; a trial whose transaction is still
-undecided 102 s after it started hands it back to the recovery build, and ends
-itself if it never became ready; on macOS the trial's launch (`open -W`) is
-watched, so one that ends before it is seen ends the applier's wait at once.
+decided anyway** (from a source build of 0.4.7 or later; every update from
+0.4.6 to any later version keeps the 0.4.6 road): a lock holder records a
+running trial of the new build only when its receipt names it exactly (pid and
+start instant), and that receipt commits; before it decides, it defers — records,
+starts and moves nothing — beside any other process of the new build, a held or
+unaskable data claim, or a process list it cannot read, while a person's start
+keeps its delivery; a trial whose transaction is still undecided hands it back
+to the recovery build at 102, 204, 408 and 816 s, one recovery at a time, and
+never ends itself — the recovery ends one that never became ready; on macOS the
+trial's launch (`open -n -W`) is watched, so one that ends before it is seen
+ends the applier's wait at once.
 An applier killed from outside after
 it has taken the window duty, and a live holder the recovery build deferred to
 that is then killed from outside, are outside the guarantee and are recovered
@@ -1017,7 +1023,8 @@ U-24's "a destructive journal on a home no road of this build recovers starts
 nothing". U-32 replaces U-31's "off for macOS until U-32" and U-29's "the card's
 folder is the one the rollback named". U-37 replaces U-29b's "a trial with a
 nonce no journal records … its receipt is never heard" where that trial still
-runs when a lock holder next looks: it is recorded, and its receipt commits.
+runs when a lock holder next looks and its receipt names it exactly: it is
+recorded, and its receipt commits.
 
 ### 37. The Explorer and Finder verbs — `folded`
 **Rule.** On Windows there is one verb in two registrations: the classic trees

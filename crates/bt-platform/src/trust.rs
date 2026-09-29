@@ -663,6 +663,19 @@ pub fn verify_sidecar(path: &Path) -> Result<Signed, Refusal> {
     signature(path, &Policy::System)
 }
 
+/// **The `VERSIONINFO` file version of the program at `path`** (0.4.7 ticket
+/// U-37): the version of a rescue copy, read by an update's trial before it
+/// hands its transaction back — only a rescue build that knows `--from-trial`
+/// is handed it. Read only, unsigned files included.
+///
+/// # Errors
+///
+/// [`Refusal::NoVersion`] when the file carries none; `Unsupported` off
+/// Windows.
+pub fn file_version(path: &Path) -> Result<FileVersion, Refusal> {
+    crate::file_reads::opaque(crate::file_reads::Lane::Update, || arm::file_version(path))
+}
+
 /// **The running build's capability**: flagged (`bt-app`'s
 /// `update::eligible()`, passed in) and signed with an identity.
 #[must_use]
@@ -702,6 +715,9 @@ mod arm {
         _expectation: &Expectation,
         _policy: &Policy,
     ) -> Result<Verified, Refusal> {
+        Err(Refusal::Unsupported)
+    }
+    pub(super) fn file_version(_path: &Path) -> Result<super::FileVersion, Refusal> {
         Err(Refusal::Unsupported)
     }
 }

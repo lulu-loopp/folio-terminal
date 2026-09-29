@@ -883,7 +883,8 @@ pub fn uninstall_cleanup(
 /// **What a line that opens with an update's own door asks for.**
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpdateDoor {
-    /// `--update-recover [<home>] [--then-launch <argument>...]`.
+    /// `--update-recover [<home>] [--from-trial <pid>:<started>:<ready|unready>]
+    /// [--then-launch <argument>...]`.
     Recover {
         /// The installation home, when the entrance names it: the macOS
         /// LaunchAgent does (`<parent>/.<Bundle>.folio-update`, F-3); the
@@ -894,6 +895,9 @@ pub enum UpdateDoor {
         /// an ordinary start handed itself over; `None` when the entrance at
         /// logon started the rescue build.
         then_launch: Option<Vec<OsString>>,
+        /// **The trial that handed its transaction back** (`--from-trial`,
+        /// U-37 H.4), when its watchdog started this run.
+        handed_back: Option<HandedBack>,
     },
     /// `--update-apply <home> <txn> <nonce>`: the installation home, named
     /// as `--update-recover <home>` names it, and the transaction and the
@@ -906,12 +910,58 @@ pub enum UpdateDoor {
     },
 }
 
+/// **A trial that handed its transaction back** (0.4.7 ticket U-37, design revision (h) H.4): the exact instance, and
+/// whether it became ready — the recovery ends an unready one after it holds
+/// the transaction (H.3 step 2), and leaves a ready one as a candidate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HandedBack {
+    pub process: bt_platform::install_flip::Running,
+    pub ready: bool,
+}
+
+impl HandedBack {
+    /// `<pid>:<started>:<ready|unready>`, as `--from-trial` carries it.
+    pub fn word(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.process.pid,
+            self.process.started,
+            if self.ready { "ready" } else { "unready" }
+        )
+    }
+
+    /// The instance `word` names, or `None` for any other shape.
+    pub fn parse(word: &str) -> Option<Self> {
+        let mut parts = word.split(':');
+        let (Some(pid), Some(started), Some(state), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        let ready = match state {
+            "ready" => true,
+            "unready" => false,
+            _ => return None,
+        };
+        Some(Self {
+            process: bt_platform::install_flip::Running {
+                pid: pid.parse().ok()?,
+                started: started.parse().ok()?,
+            },
+            ready,
+        })
+    }
+}
+
+/// `--from-trial`, spelled once (U-37, H.4): a frozen word of the recovery
+/// door's grammar from 0.4.7 — sent only to a rescue build of 0.4.7 or later.
+pub const FROM_TRIAL_FLAG: &str = "--from-trial";
+
 /// The one line `--update-apply` answers a malformed line with.
 pub const UPDATE_APPLY_USAGE: &str = "folio --update-apply <home> <txn> <nonce>";
 
 /// The one line `--update-recover` answers a malformed line with.
-pub const UPDATE_RECOVER_USAGE: &str =
-    "folio --update-recover [<home>] [--then-launch <argument>...]";
+pub const UPDATE_RECOVER_USAGE: &str = "folio --update-recover [<home>] [--from-trial <pid>:<started>:<ready|unready>] [--then-launch <argument>...]";
 
 /// **The rescue build's two doors, recognised by the first word and only the
 /// first** — [`explorer_command`]'s rule, for its reason: these processes
@@ -962,14 +1012,27 @@ pub fn update_door(
             if home.is_some() {
                 next = args.next();
             }
+            let mut handed_back = None;
+            if next.as_ref().and_then(|word| word.to_str()) == Some(FROM_TRIAL_FLAG) {
+                match args
+                    .next()
+                    .and_then(|word| word.to_str().and_then(HandedBack::parse))
+                {
+                    Some(handed) => handed_back = Some(handed),
+                    None => return Some(Err(UPDATE_RECOVER_USAGE)),
+                }
+                next = args.next();
+            }
             match next {
                 None => Ok(UpdateDoor::Recover {
                     home,
                     then_launch: None,
+                    handed_back,
                 }),
                 Some(word) if word.to_str() == Some(THEN_LAUNCH_FLAG) => Ok(UpdateDoor::Recover {
                     home,
                     then_launch: Some(args.collect()),
+                    handed_back,
                 }),
                 Some(_) => Err(UPDATE_RECOVER_USAGE),
             }
@@ -2105,7 +2168,8 @@ mod tests {
             update_door(args(&["--update-recover", home])),
             Some(Ok(UpdateDoor::Recover {
                 home: Some(PathBuf::from(home)),
-                then_launch: None
+                then_launch: None,
+                handed_back: None,
             }))
         );
         assert_eq!(
@@ -2118,14 +2182,16 @@ mod tests {
             ])),
             Some(Ok(UpdateDoor::Recover {
                 home: Some(PathBuf::from(home)),
-                then_launch: Some(args(&["--cwd", "/x"]))
+                then_launch: Some(args(&["--cwd", "/x"])),
+                handed_back: None,
             }))
         );
         assert_eq!(
             update_door(args(&["--update-recover"])),
             Some(Ok(UpdateDoor::Recover {
                 home: None,
-                then_launch: None
+                then_launch: None,
+                handed_back: None,
             }))
         );
         assert_eq!(
@@ -2159,14 +2225,16 @@ mod tests {
             update_door(line),
             Some(Ok(UpdateDoor::Recover {
                 home: None,
-                then_launch: Some(handed.clone())
+                then_launch: Some(handed.clone()),
+                handed_back: None,
             }))
         );
         assert_eq!(
             update_door(recover_command_line(None, &[])),
             Some(Ok(UpdateDoor::Recover {
                 home: None,
-                then_launch: Some(Vec::new())
+                then_launch: Some(Vec::new()),
+                handed_back: None,
             }))
         );
         let home = Path::new("/Applications/.Folio.app.folio-update");
@@ -2174,14 +2242,16 @@ mod tests {
             update_door(recover_command_line(Some(home), &handed)),
             Some(Ok(UpdateDoor::Recover {
                 home: Some(home.to_path_buf()),
-                then_launch: Some(handed.clone())
+                then_launch: Some(handed.clone()),
+                handed_back: None,
             }))
         );
         assert_eq!(
             update_door(args(&["--update-recover"])),
             Some(Ok(UpdateDoor::Recover {
                 home: None,
-                then_launch: None
+                then_launch: None,
+                handed_back: None,
             }))
         );
         assert_eq!(
@@ -2274,6 +2344,7 @@ mod tests {
             Some(Ok(UpdateDoor::Recover {
                 home: None,
                 then_launch: Some(args(&["--update-feed", url])),
+                handed_back: None,
             })),
             "a handed-over line is another start's, verbatim"
         );

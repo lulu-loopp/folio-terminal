@@ -149,6 +149,13 @@ only that log, in the test's own temporary folder. `BT_U34_ELECTION_CHILD` names
 transaction folder `bt-app`'s `update_handoff::tests::a_contender_killed_inside_the_election_releases_it`
 sets on the copy of its own test binary it then ends inside the window mark's election:
 only that test's child half reads it, and it writes only into that test's own
+temporary folder. `BT_U37_WATCH_CHILD` names the private folder `bt-app`'s
+`update_trial::tests::a_trial_watch_in_a_process_of_its_own_hands_back_its_identity_and_stays`
+sets on the copy of its own test binary that runs a trial's watch and records its
+hand-back line into that folder; `BT_U37_PARENT_TEST_CHILD` names the file
+`bt-platform`'s `install_flip::tests::this_process_names_its_parent_by_pid_and_an_earlier_start`
+sets on the copy of its own test binary that writes the parent it finds there. Only
+those tests' child halves read them, and they write only into the test's own
 temporary folder. `BT_TRUST_RELEASE_TAG` names the release (`v0.4.5-preview`)
 `bt-platform`'s ignored `trust::tests::the_released_windows_assets_carry_an_identity_oid`
 downloads to read real signatures from (E-6); unset or empty, it asks GitHub for the

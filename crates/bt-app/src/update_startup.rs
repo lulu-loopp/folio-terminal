@@ -1473,6 +1473,7 @@ mod tests {
                     nonce: nonce(),
                     pid: process.pid,
                     version: "0.4.7".to_owned(),
+                    started: None,
                 }))
                 .expect("the receipt of the recorded retrial commits");
             assert_eq!(committed.body.phase, Phase::Committed);
@@ -1613,6 +1614,7 @@ mod tests {
                 Some(Ok(cli::UpdateDoor::Recover {
                     home: Some(home.root().to_path_buf()),
                     then_launch: Some(argv.to_vec()),
+                    handed_back: None,
                 }))
             );
         }

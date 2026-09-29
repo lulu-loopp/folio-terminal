@@ -1052,6 +1052,11 @@ windows = { version = "0.62.2", features = [
     # namespace is called `Diagnostics::Debug` because a debugger is the other
     # thing that makes them; nothing here attaches to anything.
     "Win32_System_Diagnostics_Debug",
+    # `CreateToolhelp32Snapshot` / `Process32FirstW` / `Process32NextW`: this
+    # process's parent pid, which the update's recovery build excludes from
+    # the trials it counts (`install_flip::parent_of_this_process`, 0.4.7
+    # U-37).
+    "Win32_System_Diagnostics_ToolHelp",
     # `GetThreadContext` alone, which the `windows` crate files under `Kernel`
     # even though it sits beside `ReadProcessMemory` in `Diagnostics::Debug`.
     "Win32_System_Kernel",

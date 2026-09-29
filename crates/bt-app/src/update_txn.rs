@@ -444,18 +444,30 @@ impl Header {
 
 // ─────────────────────────────────── the receipt ───────────────────────────────────
 
-/// **The trial's receipt, v1** — `{v, txn, nonce, pid, version}`, written by N
-/// alone into `H\<txn>\health-<nonce>` once it has claimed the data directory,
-/// read its settings and session and drawn its first text (§C.5, F-1, F-14).
+/// **The trial's receipt, v1** — `{v, txn, nonce, pid, version}` and, since
+/// 0.4.7, the optional `started` — written by N alone into
+/// `H\<txn>\health-<nonce>` once it has claimed the data directory, read its
+/// settings and session and drawn its first text (§C.5, F-1, F-14).
 ///
 /// It is evidence, not a decision: only the lock holder turns it into
 /// `Committed`, and only while the journal says `Trial` ([`next`]).
+///
+/// **`started`** (0.4.7 ticket U-37, design revision (h) H.1): the trial's own
+/// start instant, read by the trial about itself, in the units the process
+/// list reports (`bt_platform::install_flip::Running::started`). It binds the
+/// receipt to the exact process that wrote it: a lock holder records a running
+/// trial the journal does not know only when some process runs with exactly
+/// this `(pid, started)`. The version stays 1: a reader of v1 ignores a field
+/// it does not know (no `deny_unknown_fields`, 0.4.6's reader included), and
+/// the ordinary commit of a recorded trial never reads it — the nonce the
+/// journal recorded binds that one.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Receipt {
     pub(crate) txn: TxnId,
     pub(crate) nonce: Nonce,
     pub(crate) pid: u32,
     pub(crate) version: String,
+    pub(crate) started: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -465,6 +477,8 @@ struct ReceiptWire {
     nonce: String,
     pid: u32,
     version: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    started: Option<u64>,
 }
 
 impl Receipt {
@@ -476,6 +490,7 @@ impl Receipt {
             nonce: Nonce::parse(&wire.nonce)?,
             pid: wire.pid,
             version: wire.version,
+            started: wire.started,
         })
     }
 
@@ -486,6 +501,7 @@ impl Receipt {
             nonce: self.nonce.to_string(),
             pid: self.pid,
             version: self.version.clone(),
+            started: self.started,
         })
         .expect("a receipt always serialises")
     }
@@ -2745,11 +2761,70 @@ mod tests {
             nonce,
             pid: TRIAL.pid,
             version: "0.4.7".to_owned(),
+            started: None,
         }
     }
 
     fn valid_receipt() -> Receipt {
         receipt(txn(), nonce(TRIAL_NONCE))
+    }
+
+    /// PIN (U-37, design revision (h) H.1 R2 and the rollout contract) — **a
+    /// 0.4.7 receipt, `started` and all, is read by 0.4.6's receipt reader
+    /// exactly as it always read one, and it commits a recorded trial by its
+    /// nonce whatever `started` says; a receipt without `started` is written
+    /// byte for byte as 0.4.6 wrote it.**
+    ///
+    /// In every update from 0.4.6 to any later version, the lock holder is the
+    /// 0.4.6 rescue build: it must still commit the new trial it recorded. The
+    /// fixture is `v0.4.6-preview`'s `ReceiptWire`, verbatim, with its reader's
+    /// two steps (the version, then the fields); that road has no adoption and
+    /// no `--from-trial` (a 0.4.7 trial hands nothing back to it:
+    /// `update_apply_windows::tests::a_trial_hands_back_only_to_a_rescue_build_that_knows_the_word`).
+    ///
+    /// MUTATION: serialise `started` as `null` when it is `None` (drop
+    /// `skip_serializing_if`), or version the receipt 2.
+    #[test]
+    fn a_0_4_6_reader_takes_a_0_4_7_receipt_as_it_always_did() {
+        /// `v0.4.6-preview:crates/bt-app/src/update_txn.rs`, `ReceiptWire`.
+        #[derive(Deserialize)]
+        struct ReceiptWire046 {
+            v: u64,
+            txn: String,
+            nonce: String,
+            pid: u32,
+            version: String,
+        }
+        let new = Receipt {
+            started: Some(133_000_000_000_000_000),
+            ..valid_receipt()
+        };
+        let bytes = new.encode();
+        let old: ReceiptWire046 = serde_json::from_slice(&bytes).expect("0.4.6 reads it");
+        assert_eq!(old.v, RECEIPT_VERSION);
+        assert_eq!(RECEIPT_VERSION, 1);
+        assert_eq!(
+            (old.txn, old.nonce, old.pid, old.version),
+            (
+                new.txn.to_string(),
+                new.nonce.to_string(),
+                new.pid,
+                new.version.clone()
+            )
+        );
+        assert_eq!(
+            next(&txn(), &trial_phase(), &Event::ReceiptAccepted(new.clone())),
+            Ok(Phase::Committed),
+            "a recorded trial commits by its nonce"
+        );
+        assert_eq!(Receipt::parse(&bytes), Ok(new));
+        let without = valid_receipt();
+        assert!(
+            !String::from_utf8(without.encode())
+                .unwrap()
+                .contains("started")
+        );
+        assert_eq!(Receipt::parse(&without.encode()), Ok(without));
     }
 
     /// The four folders a Windows member lives in, as the file system keeps

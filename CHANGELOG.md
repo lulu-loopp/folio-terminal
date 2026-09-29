@@ -10,11 +10,19 @@ All notable changes to Folio are recorded here. The format follows
 - An update whose new version could not be recorded as it started — its record
   kept out by another program holding it open, or a folder made read-only —
   no longer leaves the new version running with nothing it changes saved. Once
-  the record can be written, the next start, the next logon or, within two
-  minutes, the new version itself finishes the update, and a new version that
-  started properly is kept.
+  the record can be written, the next start, the next logon or the new version
+  itself finishes the update, and a new version that started properly is kept.
+  This needs the version you update from to be 0.4.7 or later.
 - On macOS, a new version that quits the moment it is started no longer leaves
-  about 90 seconds with no Folio window before the previous version comes back.
+  about 90 seconds with no Folio window before the previous version comes back,
+  when the version you update from is 0.4.7 or later.
+
+### Known issues
+
+- When updating from 0.4.6 to any later version, a new version whose start
+  could not be recorded (its record kept out by another program, or a folder
+  made read-only) runs without saving what it changes until the next start or
+  logon finishes the update.
 
 ## 0.4.6-preview — 2026-09-29
 ### Added
