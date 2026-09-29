@@ -192,12 +192,25 @@ machine, and whatever the machine has registered for any other scheme**
 (`mailto:`, `vscode:`, `ssh:` …), with no list of schemes; what the machine
 refuses is said on the hover line as a refused address. A single letter before a
 colon is a drive, not a scheme, and a path never leaves as a URI. **A link in a
-previewed document follows this row**, both halves.
+previewed document follows this row**, both halves. **An `[Image #k]`
+placeholder in an agent's input area is the same object again**: a pane learns
+`k → target` only from an `OSC 8` link whose whole label is `[Image #k]` (the most
+recent per number, at most 64, emptied when the shell starts a command), and on
+the live rows at and after the start of the shell's open region — the whole grid
+without integration or on the alternate screen, no row between regions — the
+placeholder becomes an implicit `file:` link once the verdict ledger says the
+file exists. A number with no learned target, in a pane that has learned one, is
+inferred as `<folder of the most recently learned target>/<k>.<its extension>`
+and is a link only once the verdict ledger says that file exists; a learned
+target wins, and nothing is inferred from an empty table.
 **From.** §7.1.5g *link activation and the five-arm routing table*; §7.1.5j ①
 (a hit folds into a `file:` target and feeds the existing table); §7.1.5k ①;
 trailing entry 2026-09-23 *Ctrl+click hands a share on another machine and a link
 of any scheme to the system; a plain click and a hover are unchanged, and a
-document's links answer the same row*.
+document's links answer the same row*; trailing entry 2026-09-29 *in an agent's
+input line, `[Image #N]` is a link to the picture the pane saw that agent link the
+same label to*, and the owner's ruling of 2026-09-29 that a number not yet
+linked is inferred beside the newest learned picture, bounded by the disk.
 **Overrides.** §7.1.5g's original "plain click does nothing, Ctrl hands it over"
 was reversed by the 2026-08-20 ruling *plain click stays in the window, Ctrl+click
 hands it over*, aligning hyperlinks with image references. The owner's rulings of

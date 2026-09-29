@@ -20,6 +20,11 @@ All notable changes to Folio are recorded here. The format follows
 - The README says how to uninstall each kind of copy, and the zip's
   `uninstall.cmd` prints its lines in Chinese as well as English.
 
+### Added
+
+- In Claude Code, `[Image #N]` in the input line is a link to the pasted
+  picture, with the same hover card as in the transcript.
+
 ### Fixed
 
 - F1–F12 reach the program (they sent nothing before); Shift, Alt and Ctrl

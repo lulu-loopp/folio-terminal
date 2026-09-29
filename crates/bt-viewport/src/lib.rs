@@ -1942,6 +1942,12 @@ pub struct ViewportProjection {
     /// The paths this pane drew and could not answer for, gathered so that whoever owns a worker
     /// can go and look. Bounded, because a full-screen program can print new names forever.
     printed_path_probes: BTreeSet<PathBuf>,
+    /// The first live-grid row an agent's input line can stand on (T-IMAGE-N): the rows at and
+    /// below it are where an `[Image #k]` placeholder is read as a link to the picture the pane
+    /// learned for `k`. `None` reads it nowhere. Pushed by the session before every projection,
+    /// beside [`Self::printed_path_links`], because it is the session that hears the shell's
+    /// boundaries.
+    input_area_first_live_row: Option<u32>,
     /// Where this pane's horizontal window sits along its content, as a **request**.
     ///
     /// A request and not the axis, because an origin only becomes legal in the company of an extent
@@ -2037,6 +2043,15 @@ impl PrintedPathPass<'_> {
         joined
     }
 
+    /// The `[Image #k]` placeholders one logical line of an agent's input area offers as links, with
+    /// every learned target nobody has asked the disk about recorded on the way past (T-IMAGE-N).
+    fn image_placeholder_links_in(&mut self, text: &str) -> Vec<(HyperlinkRange, String)> {
+        let mut unknown = BTreeSet::new();
+        let links = self.links.image_placeholder_links_in(text, &mut unknown);
+        self.record(unknown);
+        links
+    }
+
     fn record(&mut self, unknown: BTreeSet<PathBuf>) {
         for path in unknown {
             if self.probes.len() >= MAX_PRINTED_PATH_PROBES {
@@ -2099,6 +2114,7 @@ impl ViewportProjection {
             projection_dirty: true,
             printed_path_links: PrintedPathLinks::default(),
             printed_path_probes: BTreeSet::new(),
+            input_area_first_live_row: None,
             requested_x_origin: ContentColumn(0),
             extent: FlattenedExtent::new(),
             horizontal_index: HorizontalIndexStore::default(),
@@ -2193,6 +2209,15 @@ impl ViewportProjection {
             // than after another round trip).
             self.inference.clear();
         }
+    }
+
+    /// Tell this pane where an agent's input line can stand on its live grid (T-IMAGE-N): the
+    /// first live row after the shell's last command boundary, or `None` for nowhere.
+    ///
+    /// Only the live plane reads it, and the live plane is recognised afresh on every frame, so
+    /// storing it is the whole of the change — nothing cached was a function of it.
+    pub fn set_input_area_first_live_row(&mut self, row: Option<u32>) {
+        self.input_area_first_live_row = row;
     }
 
     /// Whether the last projection filled its question budget, so this frame may have seen names it
@@ -2518,6 +2543,7 @@ impl ViewportProjection {
                 links: &self.printed_path_links,
                 probes: &mut self.printed_path_probes,
             }),
+            self.input_area_first_live_row.map(|row| row as usize),
         );
         for (row_index, row) in rows.into_iter().enumerate() {
             if row.cells.len() != expected_columns {
@@ -2676,6 +2702,10 @@ impl ViewportProjection {
                 links: &self.printed_path_links,
                 probes: &mut live_path_probes,
             }),
+            // The input area is counted in live rows, and the sequence read here puts the staged
+            // rows in front of them.
+            self.input_area_first_live_row
+                .map(|row| implicit_live_base + row as usize),
         );
         let live_height = self.live_row_prefix.last().copied().unwrap_or_else(|| {
             i64::from(self.live_rows.get()).saturating_mul(self.cell_height_subpixels.get())
@@ -5120,6 +5150,7 @@ pub struct InferredLink {
 fn implicit_hyperlinks(
     rows: &[&CapturedRow],
     mut paths: Option<&mut PrintedPathPass<'_>>,
+    input_area_from: Option<usize>,
 ) -> Vec<Vec<ImplicitCellLink>> {
     let mut claims: Vec<Vec<ImplicitCellLink>> = rows.iter().map(|_| Vec::new()).collect();
     let mut lines = Vec::new();
@@ -5133,7 +5164,35 @@ fn implicit_hyperlinks(
         start = end + 1;
     }
     for line in &lines {
-        for inferred in inferred_links_in(&line.text, line.edge, paths.as_deref_mut()) {
+        let inferred = inferred_links_in(&line.text, line.edge, paths.as_deref_mut());
+        // T-IMAGE-N. An agent's input line carries its `[Image #k]` placeholders as text, while the
+        // transcript that same agent prints links each one with OSC 8 to the picture it saved; the
+        // pane learned those targets, and here — only on the rows at and after the input area's
+        // first row — the same text is a link to the same file once the disk has said it is there.
+        // A placeholder never overlaps the three kinds above (no separator, no dot), and the
+        // guard says so rather than trusting it.
+        let placeholders = match (paths.as_deref_mut(), input_area_from) {
+            (Some(paths), Some(from)) if line.first_row >= from => {
+                paths.image_placeholder_links_in(&line.text)
+            }
+            _ => Vec::new(),
+        };
+        let placeholders = placeholders
+            .into_iter()
+            .filter(|(range, _)| {
+                !inferred.iter().any(|link| {
+                    link.range.byte_start < range.byte_end && range.byte_start < link.range.byte_end
+                })
+            })
+            .map(|(range, uri)| InferredLink {
+                range,
+                uri,
+                // A file the disk has answered for wears the resting dots, as a verified printed
+                // path and an OSC 8 span do (§7.1.5j): one vocabulary, one meaning.
+                resting_dotted: true,
+            })
+            .collect::<Vec<_>>();
+        for inferred in inferred.into_iter().chain(placeholders) {
             claim_cells(
                 rows,
                 line,
@@ -5197,6 +5256,8 @@ fn implicit_hyperlinks(
 /// One logical line flattened for recognition: its text, where every cell of it sits, and the last
 /// visual cell of its final physical row.
 struct LogicalLine {
+    /// The index, in the row sequence being read, of the line's first physical row.
+    first_row: usize,
     text: String,
     /// `(row, column, byte range)` for every cell of the line, in reading order.
     spots: Vec<(usize, usize, std::ops::Range<usize>)>,
@@ -5228,7 +5289,12 @@ fn logical_line_of(line: &[&CapturedRow], base: usize) -> LogicalLine {
             byte_start: bytes.start,
             byte_end: bytes.end,
         });
-    LogicalLine { text, spots, edge }
+    LogicalLine {
+        first_row: base,
+        text,
+        spots,
+        edge,
+    }
 }
 
 /// Lay one inferred reference's claim over the cells its printed text occupies.
@@ -6657,7 +6723,7 @@ mod tests {
         for cell in &mut row.cells[..21] {
             cell.hyperlink = Some(CellHyperlink::implicit("file:///real-target"));
         }
-        let implicit = implicit_hyperlinks(&[&row], None);
+        let implicit = implicit_hyperlinks(&[&row], None, None);
         let mut cells = row.cells;
         mark_osc_8_dotted(&mut cells);
         apply_implicit_hyperlinks(&mut cells, &implicit[0]);
