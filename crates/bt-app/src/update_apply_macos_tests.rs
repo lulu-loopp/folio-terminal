@@ -3565,6 +3565,34 @@ fn the_nine_rows_of_h3_each_end_as_the_table_says() {
                 1,
                 "row {at}: its own trial"
             );
+            // The same cell for a person's start, on a second installation:
+            // it decides by starting its own recorded trial (the handed line
+            // after its words); that trial never answers, so the rollback
+            // follows, and the exit guard delivers the old build with its card
+            // and the handed line.
+            let install = exchanged_at_moving(&format!("row{at}-person"));
+            let (code, world) = recover_door(&install, args(&["--cwd", "/x"]), Fake::default());
+            assert!(
+                !said(&world, "deferred"),
+                "row {at} (person): {:?}",
+                world.said
+            );
+            let launched = world.launched.lock().unwrap().clone();
+            assert_eq!(launched.len(), 1, "row {at} (person): its own trial");
+            assert!(
+                launched[0].ends_with(&args(&["--cwd", "/x"])),
+                "row {at} (person): {launched:?}"
+            );
+            assert_eq!(code, 0, "row {at} (person): {:?}", world.said);
+            assert_eq!(
+                world.relaunched,
+                vec![(
+                    install.installed.clone(),
+                    failed_then(&install, &["--cwd", "/x"])
+                )],
+                "row {at} (person): {:?}",
+                world.said
+            );
             continue;
         };
         let (ended, world) = recovered(install.recovery(limits(5_000, 3_000)), Fake::default());

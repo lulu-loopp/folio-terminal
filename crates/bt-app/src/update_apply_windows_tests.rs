@@ -4029,6 +4029,25 @@ fn the_nine_rows_of_h3_each_end_as_the_table_says() {
             assert_eq!(code, 0, "row {at}: {:?}", world.said);
             assert!(!deferred(&world), "row {at}: {:?}", world.said);
             rolled_back_on_disk(&install);
+            // The same cell for a person's start, on a second installation
+            // (the first one's rollback changed its state): it decides — the
+            // rollback — and the exit guard delivers today's owed start, the
+            // installed build with `--update-failed` and the handed line.
+            let Some(install) = moved_in(&format!("row{at}-person")) else {
+                return;
+            };
+            let (code, world) =
+                recovered(&install, limits(5_000, 5_000), install.world(Trial::Silent));
+            assert_eq!(code, 0, "row {at} (person): {:?}", world.said);
+            assert!(!deferred(&world), "row {at} (person): {:?}", world.said);
+            rolled_back_on_disk(&install);
+            assert!(world.launched.is_empty(), "row {at} (person)");
+            assert_eq!(
+                world.opened,
+                vec![(install.installed.clone(), failed_then(&install, &handed()))],
+                "row {at} (person): {:?}",
+                world.said
+            );
             continue;
         };
         let (_code, world) =

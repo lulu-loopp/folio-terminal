@@ -3074,16 +3074,22 @@ is bounded to two per person's start, and it records nothing.
      After the commit, `ps` shows no `open -n -W` of the applier.
   2. `kill -9` of the trial within its first second: either `the trial ended before it could be seen`
      or `ended without a receipt`, and the rollback within about 5 s. Never 90 s.
-  3. **A real Gatekeeper refusal** (amended 2026-09-29 after Codex's review of `153f7cb2`, finding
-     5): B′, signed with the same Developer ID as A and B (so it passes Prepare's identity check),
-     **not notarized**, quarantined as the feed delivers it, on a machine that cannot reach Apple's
-     ticket service (or with no stapled ticket). Gatekeeper refuses its first launch. Expected: the
-     trial is never seen, and the U-38 early end or the deadline follows, then the rollback, then the
-     old build with its card. An executable made unrunnable (`chmod 000`) is a separate row,
-     "executable refused", and is not this one.
+  3. **Executable refused** (amended twice on 2026-09-29, by the coordinator's ruling after Codex's
+     review of `7172d964`): after the exchange, the installed bundle's executable is made unrunnable
+     (`chmod 000`). `open` exits non-zero, then the U-38 early end, then the rollback, then the old
+     build with its card.
+
+  **Why a launch-time Gatekeeper refusal is not a row.** It is answered before the launch, by
+  Prepare's assessment. `update_prepare_macos`'s `System::verify` runs `spctl --assess`, and
+  `bt_platform::macos_identity::identity_decision` refuses everything but *Notarized Developer ID*,
+  pinned by `macos_identity::tests::a_notarized_developer_id_acceptance_passes_only_with_the_identity`,
+  `…::an_acceptance_from_another_source_is_refused`, `…::an_explicit_rejection_is_refused` and
+  `…::an_ad_hoc_bundle_is_never_accepted_by_spctl`. A bundle that passes Prepare is, by construction,
+  one Gatekeeper accepts at launch. A refusal after Prepare would need the ticket revoked between
+  Prepare and the launch, which is outside the rehearsal.
 
   **What the owner produces for L3:** A at 0.4.7 or later, signed and notarized; B, signed and
-  notarized; B′, the same build as B, signed only.
+  notarized.
 
 ### H.6 What the docs say, corrected
 
