@@ -2653,7 +2653,10 @@ fn a_trial_that_dies_in_its_first_second_ends_the_wait_at_once() {
         "{:?}",
         world.said
     );
-    assert!(took < Duration::from_secs(10), "at once: {took:?}");
+    assert!(
+        took < Duration::from_secs(30),
+        "at once, not the 60 s deadline: {took:?}"
+    );
     rolled_back_on_disk(&install);
 }
 
@@ -4438,8 +4441,9 @@ fn trial_part(root: &Path) {
     )
     .unwrap();
     drop(watched);
-    // Stays up until the recovery or the parent ends it.
-    std::thread::sleep(Duration::from_secs(90));
+    // Stays up until the recovery or the parent ends it (the parent's own
+    // bound is shorter; this only keeps an orphan from living for ever).
+    std::thread::sleep(Duration::from_secs(600));
 }
 
 /// **The recovery's part** (a child running from the rescue runner, a copy of
@@ -4448,7 +4452,7 @@ fn trial_part(root: &Path) {
 /// journal and the real transaction lock; what it did, written down.
 fn rescue_part(root: &Path) {
     let plan = RoadPlan::read(root);
-    let started = Instant::now();
+    let started_ms = crate::update_apply::now_ms();
     let said = std::env::var(ROAD_LINE).unwrap();
     let mut words = said.lines();
     let program = PathBuf::from(words.next().unwrap());
@@ -4488,24 +4492,25 @@ fn rescue_part(root: &Path) {
     });
     let first = !root.join("lingered").exists();
     if first && plan.mode == "refused" {
-        // The first recovery lingers past the watchdog's next due time: the
-        // watch must not start another beside it.
+        // The first recovery lingers two periods — past the watchdog's next
+        // due time, which comes one period after the first: the watch must
+        // not start another beside it.
         std::fs::write(root.join("lingered"), b"").unwrap();
-        std::thread::sleep(Duration::from_millis(plan.every_ms * 3 / 2));
+        std::thread::sleep(Duration::from_millis(plan.every_ms * 2));
     }
+    let ended_ms = crate::update_apply::now_ms();
     let done = format!(
-        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        "{}\n{}:{}\n{}\n{}\n{}\n{}\n{}",
         me.pid,
-        started.elapsed().as_millis(),
+        started_ms,
+        ended_ms,
         code,
         program.display(),
         handed_back.word(),
         world.opened.len() + world.launched.len(),
         world.said.join(" | ")
     );
-    let at = crate::update_apply::now_ms();
-    let _ = started;
-    std::fs::write(root.join(format!("account-{at}-{}", me.pid)), done).unwrap();
+    std::fs::write(root.join(format!("account-{started_ms}-{}", me.pid)), done).unwrap();
 }
 
 /// The recoveries' accounts so far, in the order they ended.
@@ -4540,6 +4545,12 @@ fn rescues(root: &Path) -> Vec<Vec<String>> {
 /// refuses is deferred to, one recovery at a time, never with a trial
 /// launched beside it, and handed back no more than the watchdog's bound
 /// allows.**
+///
+/// The "refused" part asserts invariants, never a count within a window of
+/// time: it waits for the watch to say its schedule is spent (the trial's own
+/// log), then checks that the four due times were each a hand-back or a skip,
+/// that the cap held, and, from each recovery's recorded start and end
+/// instants, that no two were alive at once.
 ///
 /// The rescue executable on disk carries `VERSIONINFO` 0.4.7 (the product's
 /// gate is asked); the start itself is of the runner copy, as a rescue build
@@ -4615,7 +4626,9 @@ fn a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers() {
             .env(ROAD_ROOT, &root)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            // The watch's own lines: each due time's hand-back or skip, and
+            // the end of its schedule.
+            .stderr(std::fs::File::create(root.join("trial.err")).unwrap())
             .spawn()
             .unwrap();
         /// Ends the trial child by its own handle whatever this test does.
@@ -4629,7 +4642,9 @@ fn a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers() {
         let mut trial = Owned(child);
         let pid = trial.0.id();
         let started = install_flip::started_of(pid).unwrap();
-        let give_up = Instant::now() + Duration::from_secs(90);
+        // A bound for a slow runner only; nothing below counts what happens
+        // within a window of time.
+        let give_up = Instant::now() + Duration::from_secs(300);
         let until = |done: &mut dyn FnMut() -> bool| {
             while !done() {
                 assert!(
@@ -4674,11 +4689,34 @@ fn a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers() {
                 );
             }
             _ => {
-                // Due at 1, 2, 4 and 8 periods; the first recovery lingers
-                // past the second due time, which is spent without a start.
-                std::thread::sleep(Duration::from_millis(every_ms * 8 + 6_000));
+                // The schedule's end, as the watch says it; then every
+                // recovery it started has written its account.
+                let said = || std::fs::read_to_string(root.join("trial.err")).unwrap_or_default();
+                until(&mut || said().contains("the watchdog is spent"));
+                let lines = said();
+                let launched = lines.matches("it is handed back to").count();
+                let skipped = lines
+                    .matches("the recovery handed it before still runs")
+                    .count();
+                until(&mut || rescues(&root).len() >= launched);
+                // The invariants, not a count within a window of time: the
+                // four due times are each a hand-back or a skip beside a
+                // recovery still running; the cap holds; one recovery at a
+                // time; each deferred to the candidate and started nothing.
+                assert_eq!(launched + skipped, 4, "{lines}");
+                assert!((1..=4).contains(&launched), "{lines}");
                 let done = rescues(&root);
-                assert_eq!(done.len(), 3, "{done:?}");
+                assert_eq!(done.len(), launched, "{done:?}");
+                let span = |account: &[String]| -> (u64, u64) {
+                    let (from, to) = account[1].split_once(':').unwrap();
+                    (from.parse().unwrap(), to.parse().unwrap())
+                };
+                for pair in done.windows(2) {
+                    assert!(
+                        span(&pair[1]).0 >= span(&pair[0]).1,
+                        "never two recoveries at once: {pair:?}"
+                    );
+                }
                 for account in &done {
                     assert_eq!(account[5], "0", "no trial launched beside it: {account:?}");
                     assert!(account[6].contains("deferred"), "{account:?}");

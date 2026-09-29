@@ -1170,6 +1170,7 @@ mod tests {
         journal: &Path,
         every: Duration,
         answer: Option<bt_platform::install_flip::Running>,
+        begun: Instant,
     ) -> (
         std::thread::JoinHandle<()>,
         Arc<Mutex<Vec<(Duration, bool)>>>,
@@ -1178,7 +1179,6 @@ mod tests {
         let seen = Arc::clone(&handed);
         let watched = journal.to_path_buf();
         let watcher = std::thread::spawn(move || {
-            let begun = Instant::now();
             let mut hand_back = |ready: bool| {
                 seen.lock().unwrap().push((begun.elapsed(), ready));
                 answer
@@ -1220,20 +1220,33 @@ mod tests {
         std::fs::write(&journal, journal_bytes(TXN, trial_phase())).unwrap();
         let every = Duration::from_millis(40);
 
+        // Waited for by what happened, never by a window of time: a slow
+        // runner only makes it slower.
+        let until = |done: &dyn Fn() -> bool| {
+            let give_up = Instant::now() + Duration::from_secs(60);
+            while !done() {
+                assert!(Instant::now() < give_up, "the watch never got there");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
         let gate: &'static Gate = Box::leak(Box::new(Gate::new()));
-        let (watcher, handed) = watching(gate, &journal, every, None);
-        std::thread::sleep(Duration::from_millis(20));
-        assert!(handed.lock().unwrap().is_empty(), "not before one period");
-        std::thread::sleep(Duration::from_millis(70));
+        let begun = Instant::now();
+        let (watcher, handed) = watching(gate, &journal, every, None, begun);
+        until(&|| !handed.lock().unwrap().is_empty());
         gate.adopt_claim();
         assert!(gate.hand_receipt(), "the receipt falls due");
-        std::thread::sleep(Duration::from_millis(700));
+        let ready_from = begun.elapsed();
+        until(&|| handed.lock().unwrap().len() >= HAND_BACKS as usize);
+        std::thread::sleep(every * 4);
         let made = handed.lock().unwrap().clone();
-        assert_eq!(made.len(), HAND_BACKS as usize, "{made:?}");
-        for (at, (when, _)) in made.iter().enumerate() {
+        assert_eq!(made.len(), HAND_BACKS as usize, "never more: {made:?}");
+        for (at, (when, ready)) in made.iter().enumerate() {
             assert!(*when >= every * (1 << at), "due {at} at {when:?}");
+            if *when > ready_from {
+                assert!(*ready, "ready once the receipt fell due: {made:?}");
+            }
         }
-        assert!(!made[0].1 && made[3].1, "the readiness of each: {made:?}");
+        assert!(!made[0].1, "not ready at the first: {made:?}");
         std::fs::write(&journal, journal_bytes(TXN, Phase::Committed)).unwrap();
         watcher.join().expect("the watch stops at the commit");
 
@@ -1244,8 +1257,12 @@ mod tests {
             &journal,
             every,
             Some(crate::update_apply::this_process()),
+            Instant::now(),
         );
-        std::thread::sleep(Duration::from_millis(700));
+        until(&|| !handed.lock().unwrap().is_empty());
+        // Past every later due time (8 periods from the start): each is spent
+        // beside the recovery still running.
+        std::thread::sleep(every * 10);
         assert_eq!(
             handed.lock().unwrap().len(),
             1,
@@ -1284,7 +1301,13 @@ mod tests {
         assert!(gate.hand_receipt());
         gate.keep_receipt(job.clone());
         gate.owe_receipt();
-        let (watcher, handed) = watching(gate, &journal, Duration::from_millis(30), None);
+        let (watcher, handed) = watching(
+            gate,
+            &journal,
+            Duration::from_millis(30),
+            None,
+            Instant::now(),
+        );
         std::thread::sleep(Duration::from_millis(100));
         std::fs::create_dir_all(home.transaction(TXN)).unwrap();
         let give_up = Instant::now() + Duration::from_secs(10);
@@ -1365,7 +1388,8 @@ mod tests {
             // The child ends by itself, whatever the parent does: its watch
             // never decides, so it is left behind when this returns.
             drop(spawned);
-            std::thread::sleep(Duration::from_secs(30));
+            // The parent ends it by its handle; this only bounds an orphan.
+            std::thread::sleep(Duration::from_secs(600));
             return;
         }
         let root = scratch("watch-child");
