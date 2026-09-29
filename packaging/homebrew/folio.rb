@@ -8,7 +8,7 @@ cask "folio" do
   homepage "https://github.com/lulu-loopp/folio-terminal"
 
   depends_on arch: :arm64
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "Folio.app"
 
@@ -17,15 +17,17 @@ cask "folio" do
   # copy that drops extended attributes loses it. `uninstall_hook` is false:
   # Homebrew runs a cask's `uninstall` steps on `brew upgrade` and
   # `brew reinstall` as well, with nothing that tells them which, so Folio's
-  # cleanup runs from `zap` only.
-  postflight do
-    system_command "/usr/bin/xattr",
-                   args: [
-                     "-w",
-                     "io.github.lulu-loopp.folio.install",
-                     '{"v":1,"manager":"homebrew","uninstall_hook":false}',
-                     "#{appdir}/Folio.app",
-                   ]
+  # cleanup runs from `zap` only. A step list, not a Ruby block (Homebrew 7
+  # deprecates `postflight`): `{{appdir}}` is Homebrew's token, expanded when
+  # the step runs, not Ruby interpolation.
+  postflight_steps do
+    run "/usr/bin/xattr",
+        args: [
+          "-w",
+          "io.github.lulu-loopp.folio.install",
+          '{"v":1,"manager":"homebrew","uninstall_hook":false}',
+          "{{appdir}}/Folio.app",
+        ]
   end
 
   # `brew uninstall --zap`: Folio's cleanup, then its data. By the time a zap

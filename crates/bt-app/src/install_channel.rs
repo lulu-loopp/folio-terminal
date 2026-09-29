@@ -1458,7 +1458,7 @@ mod tests {
     /// reads as that manager's, with the hook the manifest runs.**
     ///
     /// The marker is written by scoop's `post_install` into `$dir` and by the
-    /// cask's `postflight` onto the bundle, from a literal in each manifest; a
+    /// cask's `postflight_steps` onto the bundle, from a literal in each manifest; a
     /// literal this parser refuses turns every managed copy into `Unknown`, and
     /// one that claims a hook the manifest does not run pre-ticks the Explorer
     /// row for a copy whose uninstall leaves it behind. So the literal is read
@@ -1483,7 +1483,9 @@ mod tests {
         );
         assert_eq!(scoop.as_bytes(), SCOOP_MARKER);
 
-        let postflight = &CASK[CASK.find("postflight do").expect("a postflight block")..];
+        let postflight = &CASK[CASK
+            .find("postflight_steps do")
+            .expect("a postflight_steps block")..];
         let postflight = &postflight[..postflight.find("\n  end").unwrap()];
         assert!(postflight.contains(MARKER_ATTRIBUTE), "{postflight}");
         let homebrew = Marker {

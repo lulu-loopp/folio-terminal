@@ -1,4 +1,4 @@
-# ui-probe.ps1 — autonomous UI acceptance probe for Folio (crate `bt-app`, binary `folio.exe`)
+﻿# ui-probe.ps1 — autonomous UI acceptance probe for Folio (crate `bt-app`, binary `folio.exe`)
 #
 # Lets the agent (or a human) drive the real window end to end without manual
 # interaction: launch → focus → inject keystrokes → capture physical pixels →
@@ -7,16 +7,16 @@
 #
 # Usage:
 #   .\ui-probe.ps1 launch [-TraceDpi] [-WaitSeconds 15]   → prints PID + HWND; keeps app running
-#   .\ui-probe.ps1 type -Pid <pid> -Text "echo hi"        → focuses window, injects text (Unicode SendInput)
-#   .\ui-probe.ps1 key  -Pid <pid> -Name Enter|Backspace|Escape|Shift|Tab|Space|Delete|Insert
+#   .\ui-probe.ps1 type -ProcId <pid> -Text "echo hi"        → focuses window, injects text (Unicode SendInput)
+#   .\ui-probe.ps1 key  -ProcId <pid> -Name Enter|Backspace|Escape|Shift|Tab|Space|Delete|Insert
 #                                        |Left|Up|Right|Down|Home|End|PageUp|PageDown
 #                                                      → the navigation cluster carries
 #                                                        KEYEVENTF_EXTENDEDKEY, without which
 #                                                        an arrow arrives as the numpad key
 #                                                        sharing its scancode
-#   .\ui-probe.ps1 chord -Pid <pid> -Mods cs -Key n      → Ctrl+Shift+N (c/s/a = ctrl/shift/alt)
-#   .\ui-probe.ps1 chord -Pid <pid> -Mods c -Name Tab    → Ctrl+Tab
-#   .\ui-probe.ps1 hold  -Pid <pid> -Mods c -Out h.png [-HoldMs 1200] [-Then s] [-ThenKey n]
+#   .\ui-probe.ps1 chord -ProcId <pid> -Mods cs -Key n      → Ctrl+Shift+N (c/s/a = ctrl/shift/alt)
+#   .\ui-probe.ps1 chord -ProcId <pid> -Mods c -Name Tab    → Ctrl+Tab
+#   .\ui-probe.ps1 hold  -ProcId <pid> -Mods c -Out h.png [-HoldMs 1200] [-Then s] [-ThenKey n]
 #                                                      → hold modifiers down with NO key after
 #                                                        them, photograph what that raises, then
 #                                                        optionally add more modifiers (-Then) and
@@ -30,10 +30,10 @@
 #                                                        `finally`: a modifier left down by a
 #                                                        crashed probe is a desktop that stays
 #                                                        broken after the probe is gone.
-#   .\ui-probe.ps1 capture -Pid <pid> -Out shot.png [-Margin 400]  → DPI-aware capture; Margin grows the
+#   .\ui-probe.ps1 capture -ProcId <pid> -Out shot.png [-Margin 400]  → DPI-aware capture; Margin grows the
 #                                                                    region beyond the window (IME popups
 #                                                                    are separate windows and live outside)
-#   .\ui-probe.ps1 wheel -Pid <pid> -X 900 -Y 400 -Delta -6 [-Mods s] [-Step 20]
+#   .\ui-probe.ps1 wheel -ProcId <pid> -X 900 -Y 400 -Delta -6 [-Mods s] [-Step 20]
 #                                                              → -Step is the WHEEL_DELTA per report:
 #                                                                120 = one mouse detent (the default),
 #                                                                20/40 = the run of small reports a
@@ -44,14 +44,14 @@
 #                                                                around the run, which is the only
 #                                                                way to reach a horizontal scroller
 #                                                                from a mouse with no tilt wheel
-#   .\ui-probe.ps1 wheel -Pid <pid> -X 900 -Y 400 -Delta 3 -Sideways
+#   .\ui-probe.ps1 wheel -ProcId <pid> -X 900 -Y 400 -Delta 3 -Sideways
 #                                                              → the same run on the HORIZONTAL
 #                                                                axis (MOUSEEVENTF_HWHEEL, which
 #                                                                Windows turns into WM_MOUSEHWHEEL):
 #                                                                a tilt wheel, or a touchpad's second
 #                                                                finger. -Delta keeps Win32's sign,
 #                                                                so positive is a tilt to the RIGHT
-#   .\ui-probe.ps1 wheel -Pid <pid> -X 1400 -Y 600 -Delta 1 -Mods c -PreHoldMs 1100 -Out z.png
+#   .\ui-probe.ps1 wheel -ProcId <pid> -X 1400 -Y 600 -Delta 1 -Mods c -PreHoldMs 1100 -Out z.png
 #                                                              → rest with the modifiers down before
 #                                                                the first notch, photographing what
 #                                                                the rest raised and what the notch
@@ -62,21 +62,21 @@
 #                                                                run that let the modifiers up first
 #                                                                could not tell the notch's answer
 #                                                                from the release's
-#   .\ui-probe.ps1 click -Pid <pid> -X 100 -Y 20 [-Mods c]     → left click at window+(X,Y) physical px;
+#   .\ui-probe.ps1 click -ProcId <pid> -X 100 -Y 20 [-Mods c]     → left click at window+(X,Y) physical px;
 #                                                                -Mods holds ctrl/shift/alt down around
 #                                                                the press, which is how Ctrl+click —
 #                                                                the terminal's link activation — is sent
-#   .\ui-probe.ps1 dblclick -Pid <pid> -X 100 -Y 20 [-GapMs 90] → two presses inside the multi-click
+#   .\ui-probe.ps1 dblclick -ProcId <pid> -X 100 -Y 20 [-GapMs 90] → two presses inside the multi-click
 #                                                                interval, from one process — two separate
 #                                                                `click` runs are never a double click
-#   .\ui-probe.ps1 burst -Pid <pid> -Out run.png [-Frames 8] [-EveryMs 30] [-ClickFirst -X .. -Y ..]
+#   .\ui-probe.ps1 burst -ProcId <pid> -Out run.png [-Frames 8] [-EveryMs 30] [-ClickFirst -X .. -Y ..]
 #                                                              → a run of captures from one process, to
 #                                                                photograph something that is moving; a
 #                                                                180ms transition is over before a second
 #                                                                `capture` invocation could start
-#   .\ui-probe.ps1 hover -Pid <pid> -X -160 -Y 20              → park the pointer; negative counts from
+#   .\ui-probe.ps1 hover -ProcId <pid> -X -160 -Y 20              → park the pointer; negative counts from
 #                                                                the right/bottom edge (the caption run)
-#   .\ui-probe.ps1 drag -Pid <pid> -X 40 -Y 120 -X2 400 -Y2 160 [-HoldMs 400]
+#   .\ui-probe.ps1 drag -ProcId <pid> -X 40 -Y 120 -X2 400 -Y2 160 [-HoldMs 400]
 #                                                              → press at (X,Y), travel, release at
 #                                                                (X2,Y2); this is how a text selection
 #                                                                is made, and the travel is required.
@@ -85,7 +85,7 @@
 #                                                                way to reach a dwell whose clock is a
 #                                                                frame clock (7.1.6k's spring-loaded
 #                                                                tab switch)
-#   .\ui-probe.ps1 close -Pid <pid>
+#   .\ui-probe.ps1 close -ProcId <pid>
 #
 # Capture is per-monitor-DPI-aware: pixels are 1:1 physical, so cell width can
 # be measured directly (expected: ceil(8.8 × scale) px per ASCII cell).
@@ -233,8 +233,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-$RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
-if (-not $ExePath) { $ExePath = Join-Path $RepoRoot "target\release\folio.exe" }
+# The repository root is asked for only when it is used: a copy of this probe
+# outside a checkout (the clean-VM harness puts one in `C:\folio-vm\updater`)
+# has no root two folders up, and every verb but `launch` needs none.
+if (-not $ExePath) {
+  $RepoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+  $ExePath = Join-Path $RepoRoot "target\release\folio.exe"
+}
 
 Add-Type @'
 using System;

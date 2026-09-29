@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     The release manifest `folio.exe` carries of its own archive, read out of the
     file and held against what is being packed or was packed. Dot-sourced by

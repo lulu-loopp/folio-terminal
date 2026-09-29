@@ -6,7 +6,16 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Internal
+
+- The clean-machine smoke copies into the virtual machine every file the
+  smoke script loads, read out of the script itself, so the release smoke runs
+  there as documented again. The updater's power-cut checklist has one set of
+  scripts in the repository, the ones the 0.4.6 rehearsals proved on Windows
+  and macOS, with the journal-hold and the refused-helper rows in its table.
+- The Homebrew cask uses the forms Homebrew 7 asks for (`depends_on macos:
+  :sonoma` and a `postflight_steps` step list); the tap takes them at the next
+  release.
 
 ## 0.4.6-preview — 2026-09-29
 ### Added

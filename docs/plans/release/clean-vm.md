@@ -15,6 +15,8 @@ panic 的可见提示;有 WebView2 的 VM 验顶层 gate 与四个拒绝面。�
 | `new-vm.ps1` | **建机**:写 `.vmx`、建盘、装 Windows、打 `clean` 快照(§3.5) |
 | `run-smoke-in-vm.ps1` | 宿主端驱动:回快照 → 开机 → 拷进去 → 跑 → 拷回来 → 关机 |
 | `in-guest.ps1` | 客户机端五个阶段:unpack / smoke / web / notice / explorer |
+| `guest-files.ps1` | 拷进客户机的清单从脚本自己的文字里读出(`smoke.ps1` 点源的文件及其旁边的文件),并在宿主上验 BOM、用 5.1 解析 |
+| `updater/` | 更新器的断电验收(§4.4):装候选版、逐行驱动、客户机端监视/按键/收集、macOS 三个脚本 |
 
 ISO 由用户下,**虚机由 `new-vm.ps1` 建**(Win11 的 vTPM 除外,见 §2.2a)。
 
@@ -653,30 +655,42 @@ $env:BT_WEB_DEV = 'mailto:someone@example.com'   # 外部 scheme
 出现的卡面记进证据;如果某一条出的不是拒绝卡而是别的东西,那本身就是门 5 该抓的发现,不是脚本的
 bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
 
-### 4.4 更新器(0.4.6)
+### 4.4 更新器(0.4.6 起)
 
-自更新的断电验收:给虚机安上一个有更新能力的签名候选版,让它下载并应用第二个候选版,在
-每一个持久化边界上硬断电,观察重启后的恢复行为。
+自更新的断电验收:给虚机装上一个有更新能力的签名候选版 A,让它从本地源下载并应用第二个
+候选版 B,在每一个持久化边界上硬断电(或持有一个文件),观察重启后下一位操作者做了什么。
 `self-update-2026-09-16.md` (b).2 的 W 表(Windows)与 M 表(macOS)定义了每一行的持久状态、
-磁盘内容和下一位操作者的动作。这一节把每一行变成一个可执行的步骤。
+磁盘内容和下一位操作者的动作;下面两张表的「预期」一栏写的是**已发布的规则**(与 (b).2 原文
+不同的地方逐行注明)。
 
-驱动工具在 `scripts/release/cleanvm/`:
+驱动工具在 `scripts/release/cleanvm/updater/`(2026-09-29 起;此前的 `hard-reset-in-vm.ps1`
+与 `in-guest-updater.ps1` 已删除,见本节末「这套脚本从哪来」):
 
 | 文件 | 干什么 |
 | --- | --- |
-| `hard-reset-in-vm.ps1` | 宿主端驱动:等客户机到达指定行 → `vmrun stop … hard` → 重新开机 → 拷出证据 |
-| `in-guest-updater.ps1` | 客户机端:监视日志的阶段标记,到达目标行时写哨兵文件 |
+| `install-candidate.ps1` | 回 `clean` → 拷入 A 的 zip 与 `in-guest.ps1` → 只跑 `unpack` 阶段 → 关机 → 打快照(如 `a-installed`)。Folio 不启动 |
+| `run-row.ps1` | 宿主端驱动:对 `-Row` 的每一行回快照 → 开机 → 拷入客户机脚本与源 → 起监视与按键 → 断电或定时收集 → 记录下一位操作者 |
+| `rows.ps1` | 行表(数据):每一行的按键计划、监视参数、收集时刻 |
+| `vm-door.ps1` | 所有 `vmrun` 调用走的一扇门:找 `vmrun`、`-vp`/`-gp` 打印成 `<hidden>`、等客户机能跑交互程序 |
+| `guest/watch.ps1` | 客户机端:盯日志阶段,到达目标行时冻结全部 `folio.exe` 并写哨兵;或按行持有文件 |
+| `guest/keys.ps1` | 客户机端:启动 Folio,经 `ui-probe.ps1` 按更新卡的键,每次按键前后截图 |
+| `guest/collect.ps1` | 客户机端:安装目录清单(带 SHA-256)、日志、`diagnostics.log`、Run 键、进程,打成 zip |
+| `mac/setup.sh`、`mac/row.sh`、`mac/teardown.sh` | macOS 的同一件事(见「macOS 步骤」) |
+| `../guest-files.ps1` | 拷进客户机的脚本先在宿主上验 BOM 并用 5.1 解析(§3.4a、§3.4b);`run-smoke-in-vm.ps1` 也用它 |
 
 宿主用的是 VMware Workstation 的 `vmrun`(和 `run-smoke-in-vm.ps1` 同一套探测与调用方式),
 不是 Hyper-V。设计笔记 E-7 写的是 Hyper-V;实际的客户机是 VMware,硬断电等价于
-`vmrun stop <vmx> hard`(切断虚拟电源,不发 ACPI 关机请求)。
+`vmrun stop <vmx> hard`(切断虚拟电源,不发 ACPI 关机请求)。**口令只走参数**
+(`-VmPassword`,与 `run-smoke-in-vm.ps1` 相同),脚本不读任何口令文件。
 
 #### 前提
 
 1. 两个候选版(A 和 B)都已签名、公证、带更新能力(`FOLIO_UPDATER=on`);A 还必须是更新
    卡已打开的构建(`OFFERS_ENABLED_WINDOWS` 自 U-31 起、`OFFERS_ENABLED_MACOS` 自 U-32 起)——`--update-feed`
-   只换来源,不打开卡片。B 不必发布到 GitHub,见第 3 条。
-2. A 版已经通过普通 zip 路径装进客户机的 `C:\folio-vm\folio\`(§4.1 的 `unpack` 阶段)。
+   只换来源,不打开卡片。B 的版本号高于 A,且 B 的发布清单里 `min_updater` 不高于 A 的版本
+   (否则 Prepare 拒绝,卡片只说 *The update is not verified.*,见 U-31 D-13)。B 不必发布到 GitHub。
+2. A 已由 `install-candidate.ps1` 装进客户机的 `C:\folio-vm\folio\` 并打了快照;每一行都从这个
+   快照开始。
 3. 后继版本 B 经命令行参数 `--update-feed <file-URL>` 注入(U-30b)。带这个参数启动的那个
    进程,检查新版时读本地文件夹里的 `releases.json`,按「更新」时从同一文件夹拷贝两个文件,
    不连 github.com;之后的校验和、归档读取与签名者检查一概不变——B 必须与 A 同一签名者签名,
@@ -710,88 +724,223 @@ bug。下载那一面需要网络,放在 Win11 联网的那一轮做。
         }
       ]
       ```
-   3. **拷进客户机** `C:\feed\`:`hard-reset-in-vm.ps1 -Feed <宿主上的 feed 文件夹>` 逐个文件拷入。
-   4. **带参数启动 A**:`C:\folio-vm\folio\folio.exe --update-feed file:///C:/feed/`。
-      `hard-reset-in-vm.ps1` 给了 `-Feed` 时,`in-guest-updater.ps1 -FeedUrl file:///C:/feed/`
-      就这样启动它,然后开始盯日志阶段。
+   3. **拷进客户机** `C:\feed\`:`run-row.ps1 -Feed <宿主上的 feed 文件夹>` 每一行都逐个文件拷入。
+   4. **带参数启动 A**:`guest/keys.ps1` 的第一步 `launchfeed` 以
+      `C:\folio-vm\folio\folio.exe --update-feed file:///C:/feed/` 启动它。
 
    **看什么**:`diagnostics.log` 启动段有一行 `update feed: file:///C:/feed/`;更新卡在最近
-   活动的普通窗口弹出,写 v<B>;按「更新」后日志 `H\journal.json` 经过 `Allocated` →
-   `Prepared`(作业到 `Verified`);退出 Folio 后 `Handoff` → `Armed` → `Moving` → `Trial` →
-   `Committed`,安装目录里的文件换成 B 的(`folio.exe --version` 报 B)——这些阶段就是下表
-   各行的断电点。Windows 的应用(`Handoff` 之后)要等 U-23 落地。试运行、应用者、恢复进程
-   都不带这个参数,也不需要:下载在 Prepare 就完成了。
+   活动的普通窗口弹出,写 v<B>;按「更新」后日志 `H\journal.json`(H 是
+   `<安装目录>\.folio-update`;`update_txn.rs` `Home::journal`)经过 `Allocated` → `Prepared`;
+   按「重启」后 `Handoff` → `Armed` → `Moving` → `Trial` → `Committed` → `Retired`,安装目录里的
+   文件换成 B 的。这些阶段就是下表各行的断电点。试运行、应用者、恢复进程都不带这个参数,
+   也不需要:下载在 Prepare 就完成了。**一次 `--update-feed` 运行之后,`update-check.json` 记住了
+   源的答复**:此后 24 小时内的普通启动仍会提示 v<B>,按下去去问 github.com(U-31 D-10)。
 
-   macOS 同理:资产是 `Folio-<B>-macos-arm64.dmg` 和 `SHA256SUMS-macos.txt`,URL 形如
-   `file:///Users/folio/feed/Folio-<B>-macos-arm64.dmg`,用
-   `open -n -a /Applications/Folio.app --args --update-feed file:///Users/folio/feed/` 启动。
-4. 客户机回到 `clean` 快照后再装候选版,每一行从同一个起点开始。
+   macOS 同理:资产是 `Folio-<B>-macos-arm64.dmg` 和 `SHA256SUMS-macos.txt`,由
+   `mac/setup.sh` 放进演练文件夹的 `feed/` 并写好 `releases.json`,URL 形如
+   `file://<演练文件夹>/feed/Folio-<B>-macos-arm64.dmg`。
 
 #### Windows 步骤(W1–W15)
 
 跑法:
 
 ```powershell
-# 先看一遍(-WhatIf 不碰虚机)
-pwsh -File scripts/release/cleanvm/hard-reset-in-vm.ps1 `
-    -Vmx <win11.vmx> -VmPassword <口令> -Row W1 -WhatIf
+# 1. 装 A,打快照(每换一个候选版做一次)
+pwsh -File scripts/release/cleanvm/updater/install-candidate.ps1 `
+    -Vmx <win11.vmx> -VmPassword <口令> -Zip <folio-<A>-windows-x64.zip> -Snapshot a-installed
 
-# 真跑(-Feed:宿主上按前提 3 建好的源文件夹;拷进客户机 C:\feed\,
-# 并以 --update-feed file:///C:/feed/ 启动已安装的 Folio)
-pwsh -File scripts/release/cleanvm/hard-reset-in-vm.ps1 `
-    -Vmx <win11.vmx> -VmPassword <口令> -Row W1 -Feed <feed 文件夹>
+# 2. 先看一遍(-WhatIf 不碰虚机,打印每一条 vmrun)
+pwsh -File scripts/release/cleanvm/updater/run-row.ps1 `
+    -Vmx <win11.vmx> -VmPassword <口令> -Snapshot a-installed -Feed <feed 文件夹> -Row W1 -WhatIf
+
+# 3. 真跑:一行、几行(逗号分隔)或全部(all = 行表顺序)
+pwsh -File scripts/release/cleanvm/updater/run-row.ps1 `
+    -Vmx <win11.vmx> -VmPassword <口令> -Snapshot a-installed -Feed <feed 文件夹> -Row W1,W2
+pwsh -File scripts/release/cleanvm/updater/run-row.ps1 `
+    -Vmx <win11.vmx> -VmPassword <口令> -Snapshot a-installed -Feed <feed 文件夹> -Row all
 ```
 
-不给 `-Feed` 时脚本不启动 Folio,由人在客户机里按前提 3 第 4 步启动。
+证据落在 `target/cleanvm/<虚机名>-<时间戳>/updater/<行>/`:每次收集一个文件夹
+(`after-logon`、`after-start1`、`after-start2`,或活行的 `t<秒>`、`then`),里面是
+`install-listing.txt`(每个文件的 SHA-256,`folio.exe` 带 FileVersion)、`journal.json`、
+`diagnostics.log`、`run-key.reg`、`processes.txt`、`updater-*.txt`(监视日志、日志历史、
+按键日志、哨兵、断电那一刻的记录 `updater-atmarker-<行>.txt`)和 `shots\`;旁边是宿主的
+`screen-<收集>.png` 和 `run.log`。整轮全部 21 行约 4–5 小时。
 
-证据落在 `target/cleanvm/<虚机名>-<时间戳>/updater/W1/`。
+**一行是怎么跑的**(每一条都是 U-31 实跑过的做法,括号里是当时的发现编号):
 
-| ✓ | 行 | 到达方式 | 断电时机 | 重启后检查 | 预期结果 |
-| --- | --- | --- | --- | --- | --- |
-| ☐ | W1 | 触发下载,不等下载完成 | 日志阶段为 `Allocated` | `H\<txn>` 是否被清理;旧安装完整;`diagnostics.log` 无更新条目 | 锁空闲时删除 `H\<txn>` 和日志,旧版正常启动 |
-| ☐ | W2 | 下载并校验完成,不按「更新」 | 日志阶段为 `Prepared` | `set\` 和 `rescue\` 存在且完整;旧安装不变 | 启动时不做任何事;作业持有者重新校验后可恢复或在第 2 次启动后丢弃 |
-| ☐ | W3 | 退出 Folio(触发 Handoff) | 日志阶段为 `Handoff` | 与 W2 相同;检查锁持有者是否发起 W4 的动作 | 第一个锁持有者从 W4 开始应用;若 admission 被拒则回退到 `Prepared` 并重新启动 |
-| ☐ | W4 | Handoff 后,Run 值已写但 `Armed` 未持久化 | Run 值写入后、`Armed` 写入前 | Run 值是否存在;`set\` 和 `backup\` 未被改动 | R 删除 Run 值,回退到 `Prepared`;无文件被移动 |
-| ☐ | W5 | `Armed` 已持久化 | 日志阶段为 `Armed` | Run 值持久;检查 admission 独占锁和进程检查 | 锁持有者取得独占 admission 并运行进程检查;被拒则删除入口、回退到 `Prepared` |
-| ☐ | W6 | 文件移动进行中 | 日志阶段为 `Moving`(部分文件已移) | 每个旧文件恰好在 install 或 backup 之一;每个新文件恰好在 set 或 install 之一(I1′) | 回退到 `RollbackIntent`(无 trial,无 receipt),然后执行 W9 的回滚 |
-| ☐ | W7 | 新版已安装、备份完成,trial 启动但无 receipt | 日志阶段为 `Trial`,无 receipt 文件 | 新版在安装目录;备份完整;trial 进程状态 | P 存活时等待 receipt 直到超时;P 已死时 R 等待;超时后进入 `RollbackIntent`(W9) |
-| ☐ | W8 | Trial 完成,receipt 存在 | 日志阶段为 `Trial`,receipt 文件已写 | receipt 的 `txn` 和 `nonce` 与日志匹配 | 锁持有者写 `Committed`,然后删除 Run 值、删除 `backup\`、标记为 `terminal` |
-| ☐ | W9 | 回滚进行中 | 日志阶段为 `RollbackIntent` | I1′ 不变式成立;trial 进程已停止 | 停止 trial 进程;取得独占 admission;将新文件移到 `rolledout\`;将备份移回;校验旧版清单 → `RolledBack`;失败 → `Stuck` |
-| ☐ | W10 | 回滚失败 | 日志阶段为 `Stuck` | I1′ 成立;日志、备份和 Run 值均保留 | 每次登录和每次启动重试 W9;卡片显示「Update incomplete.」并指出文件夹 |
-| ☐ | W11 | 回滚完成 | 日志阶段为 `RolledBack` | 旧安装已通过摘要校验 | 删除 Run 值;用 `--update-failed` 重新启动旧版;标记为 `terminal`;后续启动删除 `H\<txn>` |
-| ☐ | W12 | 提交完成,清理未完成 | 日志阶段为 `Committed`,部分清理已做 | 新版在安装目录;部分残留(backup、Run 值、rescue) | 完成剩余删除(debt);rescue 文件夹由下一次普通启动删除 |
-| ☐ | W13 | 更新被取消 | 日志阶段为 `Abandoned` | 旧安装不变,无文件被移动 | 删除入口(如有);删除 `H\<txn>`;标记为 `terminal` |
-| ☐ | W14 | 更新进行中,日志已达 `Armed`(Run 值已写);用另一程序以不含 delete 共享的方式持有 `H\journal.json`(例如 PowerShell `[IO.File]::Open(<路径>, 'Open', 'Read', 'ReadWrite')` 句柄),持续超过 2 秒 | 不断电;句柄持有覆盖 applier 的 `Armed` → `Moving` 写入 | 句柄一直持有时:`diagnostics.log` 包含重命名失败行和 `BT_UPDATE_APPLY started …`;日志停留在 `Armed`;Run 值 `FolioUpdate-<txn8>` 仍存在;无文件被移动 | applier 重试写入约 2 秒;若在此期间释放句柄则更新正常完成;若未释放,applier 以 `Failed` 结束并以 `--update-failed <journal>` 启动已安装版本(卡片显示「Update incomplete.」并指出文件夹);下次启动或登录回退到 `Prepared` |
-| ☐ | W15 | 按「重启以更新」前,用另一程序以完全不共享的方式持有 rescue 可执行文件 `H\<txn>\rescue\folio.exe`(例如 PowerShell `[IO.File]::Open(<路径>, 'Open', 'Read', 'None')` 句柄),使其启动被拒绝;旧 Folio 退出后再释放句柄。(启动仅迟缓——应答未在 15 秒 `HANDOFF_DEADLINE` 内到达——的路径由单元测试 `a_hand_over_with_no_answer_in_time_still_opens_folio_once` 覆盖,不属于本行。) | 不断电;句柄持有期间 applier 启动被拒绝 | `diagnostics.log` 包含交接结果行("its applier could not be started" / was abandoned);计时行("Handoff written in N ms, the applier's start took N ms")仅在启动调用先于旧 Folio 退出返回时存在;以及 "leaving after an update: started …";日志阶段为 `Abandoned`(terminal);`H\<txn>\owner` 记录旧 Folio 的 pid | applier 未运行,无文件被移动;旧 Folio 退出后接管窗口职责(无其他人接管)并以普通方式启动已安装版本一次(日志为 terminal);该启动退役事务并正常打开;出现一个 Folio 窗口 |
+- **两种行。** 断电行(W1–W13):按键计划一直走到监视器看见该行的状态,冻结、写哨兵;宿主
+  `vmrun stop hard`,不回快照直接开机,登录后 45 秒收集一次(Run 入口已跑),然后普通启动一次、
+  关窗再普通启动一次,各收集一次。活行(happy、W14、W14long、W15、E7、rollback、console1/2)
+  不断电,在驱动启动后的固定秒数收集,有的再跑第二段按键计划(happy 的两次普通启动、E7 的
+  放开后再按「重启」)。
+- **监视器绝不长时间打开日志。** `journal.json` 上任何一个打开的句柄都会让写入方的
+  rename-over 失败(`Access is denied`);第一版监视器每 25 ms 读一次,把应用者弄死在
+  Armed → Moving(H-6)。现在只在目录项(时间、大小、创建时间,`FindFirstFile` 不开文件)变了
+  才读一次并立刻关闭;活行在读到 `Handoff` 之后就再也不打开它(`-StopReadingAt Handoff`),
+  rollback 行从头到尾不打开(`-NoRead`)。
+- **冻结。** 到达该行状态的一瞬间挂起全部 `folio.exe`(`NtSuspendProcess`),写一份刷过盘的记录,
+  再写哨兵;宿主 1–5 秒后断电。只持续几毫秒的状态(W4–W9、W11–W13)在前一阶段读到后不睡眠
+  地自旋(W4 盯 Run 键,W8 盯 receipt,其余盯目录项)。**代价**:这几秒里客户机的惰性写回照常
+  进行,所以产品漏掉的一次 flush 会被掩盖,而不会暴露。
+- **驱动在隐藏控制台里、`-noWait` 启动。** 旧脚本不带 `-noWait`,宿主先干等监视器自己的
+  600 秒超时(H-2);用 `-activeWindow` 起的 PowerShell 会被客户机默认的 Windows Terminal
+  开成一扇压在 Folio 上面的窗,ui-probe 于是拒绝截图和按键。现在一律
+  `conhost.exe powershell.exe -WindowStyle Hidden`。
+- **按键。** Tab 点亮的是**最先画的**那个动词——提示卡上是 *Skip*,重启卡上是 *Later*
+  (`update_card.rs`,`enter_presses_nothing_until_the_ring_is_lit`)。所以「更新」和「重启」是
+  **Shift+Tab、Enter**(H-4);每次按键前后各拍一张环的截图。Windows 没给前台的窗(重启后常见,
+  任务栏按钮在闪)先用一次真点击拿前台:窗口 +(60, −60),ui-probe 先核像素归属再点(H-8)。
+  W13 的「取消」要落在几秒的下载里,用预先加载进进程的 ui-probe 类发键(H-9)。
+- **首启的两张卡。** 干净快照上每次冷启动都先出 *Welcome to Folio*,再出 PSReadLine 邀请,然后
+  才是更新卡;计划用两次 Escape(`later`,即 *Not now*)关掉它们,什么都不应用(H-5)。
+- **一台客户机同一时间只有一个驱动。** 停掉后台任务只停 shell 不停子进程,而 bash 边跑边读
+  脚本:U-31 有一段时间两个驱动同时在开同一台虚机,那段时间的每一行都作废(H-7)。
+
+| ✓ | 行 | 到达方式(`rows.ps1`) | 断电 / 持有 | 预期结果(已发布规则;U-31 A7 实测) |
+| --- | --- | --- | --- | --- |
+| ☐ | happy | 更新 → 重启 | 无 | 一条 `wrote [Armed, Moving, Trial, Committed, Retired]`;trial(B)就是那扇窗;`folio.exe` = B;Run 值没了;之后两次普通启动都不出卡,`H\<txn>` 与日志已删(只剩 `admission`、`lock`) |
+| ☐ | W1 | 更新,不等下载完成 | 日志 `Allocated` | 登录:无入口,原样;第一次普通启动 `an unfinished download of an earlier launch is cleared`,`H\<txn>` 和日志删掉;旧版正常启动 |
+| ☐ | W2 | 下载校验完成,不按「重启」 | `Prepared` | 第一次启动 `was prepared at an earlier launch and is verified again` → 重启卡,`deferred_launches 1`;第二次启动 `discarded at its second launch` |
+| ☐ | W3 | 按「重启」 | `Handoff`,Run 值未写 | 登录:无入口;第一次启动 R 把日志退回 `Prepared`(`Reverted`),打开旧版并出重启卡。**与 (b).2 原文不同**:原文说第一个锁持有者从 W4 开始应用;已发布规则是退回(DESIGN 2026-09-27,U-23) |
+| ☐ | W4 | 同上 | `Handoff`,Run 值已写、`Armed` 未落盘(自旋盯 Run 键) | 登录 R:删 Run 值,退回 `Prepared`,无文件被移动,打开旧版出重启卡 |
+| ☐ | W5 | 同上 | `Armed`,0 次移动 | 登录 R:`Reverted` → `Prepared`,删 Run 值,重启卡。**与 (b).2 原文不同**:不是「admission → Moving」,而是退回 |
+| ☐ | W6 | 同上 | `Moving`(部分文件已移) | I1′ 成立;登录 R:`RollbackIntent, RolledBack, Retired`,旧版按摘要复原,删 Run 值,以 `--update-failed` 打开(卡片文案见 U-31 D-7) |
+| ☐ | W7 | 同上 | `Trial`,无 receipt | 登录 R:`the trial <pid> gave no receipt` → 回滚 → `--update-failed` |
+| ☐ | W8 | 同上 | `Trial`,receipt 已写(自旋盯 receipt) | 登录 R:`Committed, Retired`,`nobody is waiting; nothing was started`(登录时不开窗,U-31 D-12 待裁);普通启动打开 B |
+| ☐ | W9 | 同上,trial 一出现就被结束 | `RollbackIntent` | 登录 R:`RolledBack, Retired`,`--update-failed` |
+| ☐ | W10 | 同上,且新的 `folio.msix` 被不共享地持有 | `Stuck` | 断电后持有消失;登录 R:`RolledBack, Retired`,`--update-failed`。持有仍在时卡片是 *Update incomplete.* 并指出文件夹(U-31 未拍到;诊断行指错了原因,D-9) |
+| ☐ | W11 | 同 W9 | `RolledBack` | 登录 R:`Retired`,删 Run 值,`--update-failed` |
+| ☐ | W12 | 同 W3 | `Committed`,receipt 在、Run 值还在 | 登录 R:`Retired`,不开窗(D-12);B 已装;下一次启动删 `H\<txn>` |
+| ☐ | W13 | 更新后 1–2 秒内取消 | `Abandoned` | 无日志、无 `H\<txn>`、无 Run 值;旧版完整。W13 的第一次普通启动不带源按「更新」:*Download stopped.*(D-10) |
+| ☐ | W14 | 更新 → 重启;Run 值一出现,监视器以 `Read`、共享 `Read`(无 delete、无 write)打开 `H\journal.json` 3 秒 | 不断电 | rename 重试扛过去:`wrote [Armed, Moving, Trial, Committed, Retired]`,trial 是那扇窗 |
+| ☐ | W14long | 同上,持有 120 秒 | 不断电 | 预期:应用者以 `Failed` 结束,以 `--update-failed <journal>` 打开已安装版本(卡片 *Update incomplete.*),下次启动或登录回退。**U-31 A7 实测不符(D-14,未关)**:在 Moving 之后持有时,留下的是一扇未提交的 trial、日志停在 `Moving`、Run 值还在 |
+| ☐ | W15 | 从 `Prepared` 起以 `Read`、共享 `None` 持有 `H\<txn>\rescue\folio.exe` 40 秒,再按「重启」 | 不断电 | `its applier could not be started` → `Abandoned`,无文件被移动;旧 Folio `leaving after an update: started …`,普通方式打开一次。(启动仅迟缓、应答未在 15 秒 `HANDOFF_DEADLINE` 内到达的路径由单元测试 `a_hand_over_with_no_answer_in_time_still_opens_folio_once` 覆盖) |
+| ☐ | E7 | 从 `Prepared` 起不共享地持有 `THIRD-PARTY-NOTICES.md` 200 秒,按「重启」 | 不断电 | `nothing is moved: held open by another process`,`wrote [Armed, Prepared]`,删 Run 值,旧版重新打开(约 60 秒无窗,D-15);放开后重启卡从暂存集合再按一次 → 提交 |
+| ☐ | rollback | 更新 → 重启;trial 一启动就被结束 | 不断电 | `the trial <pid> ended without a receipt` → `RollbackIntent, RolledBack, Retired`;旧版按摘要复原;`--update-failed` 卡 *The new version did not start. / Previous version restored.* |
+| ☐ | console1、console2 | 按键驱动在按下「重启」后退出(启动 Folio 的控制台随之消失) | 不断电 | 交接与提交照常,trial 是那扇窗(与 U-31 D-5 无关的对照) |
+
+每一行结束时都应当有一扇 Folio 窗(D-12 的 W8/W12 登录时除外,之后的普通启动打开)。
 
 #### macOS 步骤(M1–M11)
 
-macOS 的断电验收需要一台可处置的 macOS 虚机(见 §8 已知空白)。步骤格式与 Windows 相同,
-`hard` 等价于虚机级别的强制关机。
+没有可处置的 macOS 虚机(§8)。U-32 在所有者的 Mac mini 上,以所有者自己的账号跑了这张表
+(**「option B」**,所有者 2026-09-28 书面授权);除演练文件夹外只写三处,且都会复原:
 
-| ✓ | 行 | 到达方式 | 断电时机 | 重启后检查 | 预期结果 |
+- `~/Library/Application Support/Folio`:第一次 setup 时用 `ditto` 整个备份,每一行开始与结束、
+  以及 teardown 时从备份复原;
+- `~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<txn8>.plist`:每一行和 teardown 删除;
+- `$TMPDIR/folio-<uid>/`:Folio 自己的单实例 socket。
+
+**断电的替身比断电弱。** 所谓「切」是对演练文件夹里每个进程先 `SIGSTOP` 再 `kill -9`;内核的
+页缓存还在,所以没有一行能证明缺了 `fsync`/`F_FULLFSYNC` 或 rename 被撕裂。凡是带切的行,
+证据一律写「synthetic-process evidence, weaker than a power cut」。
+
+**前提。**
+
+1. A 与 B 的 dmg、B 的 `SHA256SUMS-macos.txt` 已在 Mac 上(文件名必须是
+   `Folio-<版本>-macos-arm64.dmg`,版本从文件名读);A 已签名、公证、`spctl` 接受。
+2. 控制台会话**已登录且未锁屏**,演练期间没人用这台 Mac:按键和截图都作用在真屏幕上;
+   锁屏会让每一行停在第一次按键(「not frontmost; nothing sent」)。
+3. 没有演练文件夹以外的 Folio 在跑。每个脚本自己查,查到就以退出码 3 停下;请人退出它,
+   脚本绝不结束它。
+4. 这个 ssh 会话能发键(辅助功能与 Automation → System Events 已授权);setup 用一个只读的
+   no-op 记录结果,不弹授权框。
+
+**演练文件夹**是 `$FOLIO_REHEARSAL`,默认 `~/folio-rehearsal`,三个脚本读同一个值:
+
+| 路径 | 是什么 |
+| --- | --- |
+| `a-pristine/Folio.app` | A,从镜像 `ditto` 出来一次;每一行都放一份新的副本到 `app/` |
+| `app/Folio.app` | 安装;它的 home H 是 `app/.Folio.app.folio-update` |
+| `H/journal.json` | 日志(不是 `H/<txn>/journal.json`) |
+| `H/<txn>/{stage,rescue,owner,health-<nonce>,mnt}` | 一个事务的文件 |
+| `feed/` | B 的 dmg、sums 文件与 `releases.json` |
+| `versions` | A、B 的版本(setup 写,row 读) |
+| `data-before/` | 数据文件夹的备份(`Folio/`,或没有时的 `ABSENT`) |
+| `evidence/` | `setup.txt`、`<行>.log`、`<行>/…`、`teardown.txt` |
+
+**跑法**(从 Windows 经 ssh;`<mac>` 是 Mac 的 ssh 主机名,`<dir>` 是 Mac 上放脚本的文件夹;
+ssh 字符串里不写变量,行名照字面替换):
+
+```text
+scp scripts/release/cleanvm/updater/mac/setup.sh scripts/release/cleanvm/updater/mac/row.sh scripts/release/cleanvm/updater/mac/teardown.sh <mac>:<dir>/
+ssh <mac> 'bash <dir>/setup.sh <A.dmg> <B.dmg> <B 的 SHA256SUMS-macos.txt>'          # 以 SETUP DONE 结束
+ssh <mac> 'nohup bash <dir>/row.sh <行> > ~/folio-rehearsal/evidence/<行>.log 2>&1 < /dev/null &'
+ssh <mac> 'tail -n 4 ~/folio-rehearsal/evidence/<行>.log'                              # 末行 ROW <行> END (<结果>)
+ssh <mac> 'bash <dir>/teardown.sh'                                                      # 以 TEARDOWN DONE 结束
+scp -r <mac>:folio-rehearsal/evidence <宿主上的证据文件夹>
+```
+
+脚本在仓库里是 LF;经别的途径拷过去的,先 `tr -d '\r'`。**一次只跑一行**(有演练进程在跑时
+row 拒绝开始);一行 3–8 分钟,19 行约 2 小时;重跑一行会把旧证据改名为 `<行>.prev-<时间>`。
+`--cut named` 只杀该行点名的角色、其余 `SIGCONT`;`--no-clean` 留下进程、plist、`app/` 与数据
+文件夹供手看。`<行>/RESULT.txt` 是 `done`、`row not reached: …`(监视器看到时状态已过,
+没有切,冻结的进程已继续,路照走并记录;重跑)、`no offer card`、`never Ready` 或
+`keys refused`。退出码:3 前提、4 不能发键、5 A 没启动。
+
+每一行做的事:复原数据文件夹、放一份新的 A → `open -n -a <文件夹>/app/Folio.app --args
+--update-feed file://<文件夹>/feed/` 启动 O → 等 `diagnostics.log` 出现 `is offered` →
+经 `osascript`/System Events 按键,每次先把 O 设为前台并按 pid 核实(更新/重启 = Shift+Tab、
+Enter;Later = Escape;取消 = Tab、Enter;退出 = Cmd+Q)→ 监视器(`evidence/<行>/watch.py`)
+每 2 ms 看一次 `H/journal.json` 的目录项(inode、mtime、size),变了才读(macOS 上读者不会挡住
+rename,与 W14 不同),到达该行条件时 `SIGSTOP` 文件夹里的每个进程,写 `at-cut.txt`、`cut.txt`
+→ 切:`kill -9`,`cut.txt` 只对真的送达了信号的 pid 记 `KILLED` → 下一位操作者:普通
+`open -n -a`,或登录替身 `launchctl bootstrap gui/<uid> <plist>`(launchd 拒绝时退而手动运行
+plist 的 `ProgramArguments`,日志写明是哪一种)→ 每一步收集证据 → 清理(只结束本文件夹的进程,
+`bootout` 本行 bootstrap 过的标签,删指向本文件夹的 plist,卸载挂载,复原 `app/` 与数据文件夹)。
+
+| ✓ | 行 | 怎么到 | 切 | 之后 | 预期(已发布规则;U-32 第 4 轮实测) |
 | --- | --- | --- | --- | --- | --- |
-| ☐ | M1 | 触发下载(dmg),不等完成 | 日志阶段为 `Allocated` | 旧 bundle 完整;`H/<txn>` 下的部分下载和可能的挂载点 | 锁空闲时卸载 `H` 下的挂载,删除 `H/<txn>` 和日志 |
-| ☐ | M2 | 下载校验完成 | 日志阶段为 `Prepared` | `stage/Folio.app`(新版)和 `rescue/Folio.app`(旧版克隆)存在 | 与 W2 相同 |
-| ☐ | M3 | 退出 Folio | 日志阶段为 `Handoff` | 与 M2 相同 | 与 W3 相同 |
-| ☐ | M4 | LaunchAgent plist 已持久化 | 日志阶段为 `Armed` | plist 存在;检查 admission 独占锁 | 与 W5 相同,然后以两份身份进入 `Exchanging` |
-| ☐ | M5 | 交换未执行 | 日志阶段为 `Exchanging`,活跃身份为旧版 | 旧 bundle 未变 | 删除 plist,回退到 `Prepared` |
-| ☐ | M6 | 交换已执行 | 日志阶段为 `Exchanging`,活跃身份为新版 | `stage` 里是旧 bundle | 进入 `RollbackIntent`,然后执行 M9 |
-| ☐ | M7 | Trial 启动,无 receipt | 日志阶段为 `Trial`,无 receipt | 新版活跃,旧版在 `stage` | 与 W7 相同 |
-| ☐ | M8 | Trial 完成,receipt 存在 | 日志阶段为 `Trial`,receipt 已写 | receipt 匹配 | `Committed`,然后删除 plist、删除 `stage/Folio.app` 和 rescue 克隆 |
-| ☐ | M9 | 回滚进行中 | 日志阶段为 `RollbackIntent` | 检查活跃身份是新还是旧 | 停止 trial;若活跃为新版则 `RENAME_SWAP` 换回;校验 → `RolledBack`;失败 → `Stuck` |
-| ☐ | M10 | 回滚失败 | 日志阶段为 `Stuck` | 一个完整 bundle 活跃,另一个在 `stage` | 每次登录(plist)和每次启动重试 M9 |
-| ☐ | M11 | 回滚完成 / 取消 / 提交后残留 | 日志阶段为 `RolledBack` / `Abandoned` / `Committed`-with-debt | 与 W11–W13 对应 | 与 W11–W13 相同;plist 在 terminal 状态持久化后删除 |
+| ☐ | happy | 更新 → 就绪 → 重启 | 无 | 稳定;截 trial;Cmd+Q;普通启动 ×2 | `Armed, Moving, Trial, Committed, Retired`;trial(B)是那扇窗;装的是 B;无 plist;之后不出卡,`H/<txn>` 与日志已删 |
+| ☐ | M1 | 更新 | `Allocated`(O) | 普通启动;Cmd+Q;普通启动 | 清掉:`H/<txn>` 与日志没了,无挂载,仍是 A,又出提示卡 |
+| ☐ | M2 | 更新 → 就绪 → Later → Cmd+Q | 无 | 普通启动;Cmd+Q;普通启动 | 第一次:重启卡,`deferred_launches 1`,无检查行;第二次:`discarded at its second launch` |
+| ☐ | M3 | 更新 → 就绪 → 重启 | `Handoff`(O,以及 P 若已存在) | 同上 | R 退回 `Prepared`,打开 A 并出重启卡 |
+| ☐ | M4 | 同上 | `Armed`(P;plist 已在) | 登录替身;Cmd+Q;普通启动 | 删 plist,`Prepared`,打开 A。**本构建上 Armed → Moving ≤ 24 ms,2 ms 轮询加 SIGSTOP 抓不住(U-32 三次未到达)**;同一恢复分支由 M5 覆盖,Armed 特有的持久结果见 U-32 第 1 轮 M4 |
+| ☐ | M5 | 同上 | `Moving`,仍是 A(P) | 登录替身;Cmd+Q;普通启动 | 删 plist,`Reverted` → `Prepared`,A 打开并出重启卡(设计笔记称此阶段 `Exchanging`;日志里是 `Moving`,活跃身份决定走向) |
+| ☐ | M6 | 同上 | `Moving`,已是 B(P) | 普通启动;稳定;Cmd+Q;普通启动 | R 以 `--update-trial` 启动 B(`Trial` 由 R 记)→ receipt → `Committed, Retired` |
+| ☐ | M7 | 同上 | `Trial`,无 `health-*`(P、N) | 登录替身;稳定;Cmd+Q;普通启动 | `RollbackIntent` → 换回 → `RolledBack`;A 以 `--update-failed` 打开,*Previous version restored.*;窗口在登录后存活(plist 带 `AbandonProcessGroup`) |
+| ☐ | M8 | 同上 | `Trial`,`health-<nonce>` 已在(P;`--cut all` 时 N 也杀) | 登录替身;稳定;普通启动 | `Committed, Retired`;登录时不开窗(D-12);普通启动打开 B |
+| ☐ | rollback (M9) | 同上;`Trial` 一记下监视器就 `SIGKILL` N | 仅 N | 稳定 | P:`RollbackIntent` → 换回 → `RolledBack`;A 以 `--update-failed` 重开,*The new version did not start. / Previous version restored.* |
+| ☐ | M9cut | 同 rollback | `RollbackIntent`(P) | 登录替身;稳定 | R 完成回滚;`--update-failed` 窗 |
+| ☐ | stuck-a (M10a) | 同 rollback;N 被杀后 `H/<txn>/stage` 改为只读 | 无 | 等 `Stuck`;复原 `stage`;Cmd+Q;普通启动;稳定 | P:换回被拒 → `Stuck`(attempts 1)→ P 以 B 起一次**记录在案的重试**(`Stuck.retrial`)→ 其 receipt 向前提交 → `Committed, Retired`;窗口是 B,卡片 *Folio <B> / Updated.*。**与旧表不同**(U-32 计划缺陷 8):B 健康时 R 重试 → `RolledBack` 这条路不会发生 |
+| ☐ | stuck-b (M10b) | 同 stuck-a | `Stuck` 且 P 尚未记下自己的重试(`stuck-noretrial`;P) | 普通启动(`stage` 仍只读);盯重试;稳定;复原 `stage` | R 见 `Stuck` 且 B 在位 → 以 B 起记录在案的重试(`RetrialBegan`,attempts 不变)→ receipt → `Committed`;启动时卡片 *Update incomplete.*(`shots/retrial-at-launch.png`),提交后 *Updated.*(`shots/retrial-after-commit.png`)。若 P 的重试已先记下,本行报 `row not reached`,重跑 |
+| ☐ | M11-rolledback | 同 rollback | `RolledBack`(P) | 普通启动;Cmd+Q;普通启动 | `Retired`;终态落盘后删 plist |
+| ☐ | M11-abandoned | 更新后约 1 秒内取消(下载卡上 Tab 点亮的是 Cancel) | 无 | 稳定;普通启动;Cmd+Q;普通启动 | `Abandoned`,随后退役。若取消落地前下载已完成,Tab 点亮的是就绪卡的 *Later*,日志是 `Prepared`:重跑 |
+| ☐ | M11-committed | 更新 → 就绪 → 重启 | `Committed`(P 与 trial) | 普通启动;Cmd+Q;普通启动 | `Retired`;删 plist;B |
+| ☐ | R-W15 | 就绪后对 `H/<txn>/rescue/Folio.app/Contents/MacOS/folio` `chmod 000`,重启,等 O 离开,复原 | 无 | 稳定 | `its applier could not be started` → `Abandoned`;O 普通启动 A 一次。(macOS 上打开着文件不会挡 exec,所以只用 `chmod 000`) |
+| ☐ | R-D5 | 同 R-W15,另对已安装的 `folio` 也 `chmod 000` | 无 | 复原 | O 启动自己被拒;系统提示框 *Folio / Update incomplete. <文件夹>*;`no start after the update was delivered`。提示框在其进程结束后仍留在屏幕上(U-32 缺陷 4,未关) |
+| ☐ | D14 | 更新 → 就绪 → 重启;`Moving` 读到 B 时停下所有进程、把 H 改为只读、再继续 | 无 | 等路走完;截图;复原 H;**Cmd+Q**;普通启动;稳定 | 路以 `Failed` 结束,日志停在 `Moving`,plist 保留,起一次 `--update-trial <txn> <nonce> --update-failed <journal>`,卡片 *Update incomplete.*;复原 H、**退出那扇未记录的 trial 窗**之后,普通启动走 M6 的路。(不退出就启动时,新进程被交给那扇窗,R 把一个健康的 B 回滚:U-32 缺陷 9,未关) |
+
+M 表的原始定义见 (b).2 的 macOS 表;上表与它的差别只在 M4/M5/M6 的阶段名(日志里是 `Moving`)
+与 M10 的两行。所有者自己的两步——§7.4(E-12:所有者本机、Gatekeeper 开着)与 cask 检查
+`scripts/release/check-cask-hooks.sh`——不在这些脚本里。
 
 #### 每一行检查什么(通用)
 
-对每一行,重启后收集以下证据:
+对每一行,重启后(或每个收集时刻)收集以下证据:
 
-1. **日志头部/阶段**:`H\<txn>\journal.json`(或 `H/<txn>/journal.json`)的当前阶段。
-2. **安装目录文件集**:`dir /s`(Windows)或 `find`(macOS)的输出。
-3. **`diagnostics.log`** 尾部:启动时的恢复动作记录(`BT_UPDATE_START` 行)。
+1. **日志阶段**:`H\journal.json`(或 `H/journal.json`)的当前阶段——不是 `H\<txn>\journal.json`。
+2. **安装目录文件集**:Windows 带 SHA-256(`install-listing.txt`),macOS 是 `ls -laR`。
+3. **`diagnostics.log`**:`BT_UPDATE_START` / `BT_UPDATE_APPLY` / `BT_UPDATE_RECOVER` 行(每条
+   目前写两遍,D-11)。
 4. **Run 值**(Windows):`reg export HKCU\SOFTWARE\Microsoft\Windows\CurrentVersion\Run`。
 5. **LaunchAgent plist**(macOS):`~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-*.plist`。
+6. **结束时有没有一扇 Folio 窗**,以及它的卡片(截图)。
+
+#### 这套脚本从哪来
+
+2026-09-27/28 的 U-31(Windows,候选版 A1–A7)和 U-32(macOS,两轮)没法用仓库里原来的
+`hard-reset-in-vm.ps1` / `in-guest-updater.ps1`:监视器找的是 `H\<txn>\journal.json`,构建写的
+是 `H\journal.json`,所以哪一行的哨兵都写不出来(H-1);宿主不带 `-noWait` 地等监视器(H-2);
+`ui-probe.ps1` 没有 BOM,放在一层目录下还会解析失败(H-3);文档说的 `Tab` 会按到 Skip/Later
+(H-4)。两次演练各自写了一套能用的,证据在 `tickets-046\reports\U-31-checklist.md`、
+`RC-046-vm-recheck.md` 与 `U-32-rehearsal.md`。T-CLEANVM-SCRIPTS(0.4.7)把这两套搬进
+`updater/`,删掉旧的两份脚本,只留一条路;搬的时候改了:行表收进 `rows.ps1`、口令只走参数、
+机器路径与账号名去掉、ui-probe 放在哪一层都能用;macOS 那套的 H2(未到达时冻结的进程不
+继续)、H3(没送达信号也记 `KILLED`)、H4(没有前台进程时 no-op 报错)、H6(D14 不退出 trial
+窗)修掉,stuck-a/b 的预期按 U-32 计划缺陷 8 改正。**这份仓库版本尚未整轮跑过**:下一次演练
+是它的第一次。
 
 ---
 
@@ -1116,9 +1265,9 @@ Error: Cannot read the virtual machine configuration file
 | 已验证:`new-vm.ps1` 的幂等拒绝与 `-Stage install` 的前置检查 | 本机跑过(用临时目录) |
 | **已验证**:两台机的 `clean` 快照已回到出厂 `Restricted`(五个作用域全 `Undefined`) | 2026-08-30 逐台实测,§3.4d |
 | **已验证**:加密机上 `deleteSnapshot` 报「Cannot read the virtual machine configuration file」并退 `-1`,而快照确实删掉了 | 同上;判据用 `listSnapshots` |
-| §4.4 更新器:后继版本注入口 | **已有(U-30b)** —— `--update-feed <file-URL>`,只在带它启动的进程里生效,校验和与签名者检查不变;见 §4.4 前提 3。Windows 的 `OFFERS_ENABLED_WINDOWS` 已由 U-31 打开;macOS 的 `OFFERS_ENABLED_MACOS` 已由 U-32 打开;仍待:`hard-reset-in-vm.ps1 -Feed` 未在真虚机上跑过 |
-| §4.4 更新器:macOS 断电验收虚机 | **不存在** —— Mac mini 无可处置的 macOS 客户机(见 §Clean-machine coverage 的数字);Mac mini 本身不做断电;`kill -9` 不等价于断电(进程死后文件系统缓存仍会落盘,内核不断电)。待硬件条件或 M 表近似方案裁决后补 |
-| §4.4 更新器:`hard-reset-in-vm.ps1` 和 `in-guest-updater.ps1` | **未验证** —— 脚本已写,`-WhatIf` 已跑通;未在真虚机上跑过 |
+| §4.4 更新器:后继版本注入口 | **已有(U-30b)** —— `--update-feed <file-URL>`,只在带它启动的进程里生效,校验和与签名者检查不变;见 §4.4 前提 3。Windows 的 `OFFERS_ENABLED_WINDOWS` 已由 U-31 打开;macOS 的 `OFFERS_ENABLED_MACOS` 已由 U-32 打开;U-31、RC-046 在真虚机上用过 |
+| §4.4 更新器:macOS 断电验收虚机 | **不存在** —— Mac mini 无可处置的 macOS 客户机(见 §Clean-machine coverage 的数字);Mac mini 本身不做断电。U-32 以 option B 在所有者账号里用 `SIGSTOP` + `kill -9` 跑了 M 表(§4.4「macOS 步骤」),这比断电弱:页缓存还在,缺 flush 看不出来 |
+| §4.4 更新器:`updater/` 下的仓库版驱动 | **部分已验证** —— 2026-09-29 由 U-31 / U-32 的演练脚本搬入(旧的 `hard-reset-in-vm.ps1`、`in-guest-updater.ps1` 删除);`-WhatIf` 与 `scripts/release/cleanvm-tests.ps1` 跑通;仓库版尚未在真虚机和 Mac 上整轮跑过,下一次演练验 |
 
 ### 参考链接(全部 2026-08-27 抓取)
 
