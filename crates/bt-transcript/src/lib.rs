@@ -212,7 +212,10 @@ fn release_url_tail(candidate: &str) -> usize {
 /// * the host is a valid DNS name of at least two labels ([`valid_dns_name`]);
 /// * a candidate begins only at a prose boundary ([`is_domain_leading_boundary`]) and ends at the
 ///   first byte that cannot belong to an address ([`is_url_terminator`]), with trailing prose
-///   punctuation released exactly as a URL's is ([`release_url_tail`]).
+///   punctuation released exactly as a URL's is ([`release_url_tail`]);
+/// * no candidate begins inside an `http(s)://` token ([`http_scheme_spans`]): a scheme owns its
+///   text even when its address is refused (§7.1.5k ④), so the `example.com` of
+///   `http://intranet/?next=example.com` is that address's query, not a host of its own.
 ///
 /// The range is the printed text; the caller prepends `https://` to open it, so a recognized domain
 /// becomes the same object a schemed URL is and is routed by one table (§7.38). A port or a
@@ -226,9 +229,22 @@ pub fn detect_bare_domains(text: &str) -> Vec<HyperlinkRange> {
         return Vec::new();
     }
     let bytes = text.as_bytes();
+    let scheme_spans = http_scheme_spans(text);
+    let mut next_span = 0usize;
     let mut ranges = Vec::new();
     let mut cursor = 0usize;
     while cursor < bytes.len() {
+        // The spans are ordered and disjoint, and the cursor only moves forward, so one index walks
+        // them: a span wholly behind the cursor is done, and a cursor inside one jumps to its end.
+        while next_span < scheme_spans.len() && scheme_spans[next_span].byte_end <= cursor {
+            next_span += 1;
+        }
+        if let Some(span) = scheme_spans.get(next_span)
+            && span.byte_start <= cursor
+        {
+            cursor = span.byte_end;
+            continue;
+        }
         // A host label opens on an ASCII alphanumeric that sits at a prose boundary. Every other
         // position is skipped in O(1), which is what keeps a screenful of prose from being read
         // more than once: after a boundary that fails, the next byte's predecessor is a host
@@ -257,22 +273,27 @@ pub fn detect_bare_domains(text: &str) -> Vec<HyperlinkRange> {
     ranges
 }
 
-/// Where a bare domain may begin: at the start of the line, or after a byte that cannot be part of
-/// a host or the path behind it.
+/// Where a bare domain may begin: at the start of the line, or after **any byte that cannot
+/// continue a host label** — the same class shape as [`is_url_leading_boundary`].
 ///
-/// A **non-ASCII** byte counts — since the scan reaches this test only from an ASCII host
-/// character, that byte is the last byte of a preceding CJK character, and `见microsoft.com`
-/// written without a space is exactly how the address arrives in the prose this is for. A host
-/// character does not open one: an ASCII alphanumeric, or the `.`/`-`/`_`/`/` a host or its path is
-/// spelled with, means the scan is in the middle of a longer token.
+/// A host label is spelled with ASCII letters, digits and `-`, joined by `.`, and `_` joins
+/// identifiers; a byte of that class in front of the candidate means the scan is inside a longer
+/// word (`xgithub.com`, `my_github.com`, `v2-github.com`), whose host is not the one it would
+/// offer. Every other byte ends what came before, so it is a boundary: whitespace, quotes and
+/// brackets, the `:` of `对比表:github.com/a/b`, the `=` of `url=example.com/x`, `,` and `;`, and
+/// every non-ASCII byte — the scan reaches this test only from an ASCII host character, so a byte
+/// `>= 0x80` behind it is the last byte of a preceding character, which is how `见microsoft.com`
+/// arrives in CJK prose.
 ///
-/// This stays narrower than [`is_url_leading_boundary`] on purpose: a bare host has no scheme to
-/// announce it, so an `@` (`user@example.com`), `/`, `:` or `=` in front of it is read as the
-/// middle of a longer token rather than as a place an address may start.
+/// Three bytes outside the class still do not open one, and this is where the rule differs from
+/// the scheme's. A scheme announces an address wherever it stands; a bare host is a guess, and in
+/// front of these bytes the guess is wrong:
+///
+/// * `@` — the host of `user@example.com` belongs to an e-mail address, not to a web address;
+/// * `/` and `\` — a host behind a path separator is a directory or file name inside a path
+///   (`/srv/example.com/index.html`, `sites\example.com`), which is the path scan's to verify.
 fn is_domain_leading_boundary(byte: u8) -> bool {
-    !byte.is_ascii()
-        || byte.is_ascii_whitespace()
-        || matches!(byte, b'"' | b'\'' | b'`' | b'(' | b'[' | b'{' | b'<')
+    !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'@' | b'/' | b'\\'))
 }
 
 fn bare_domain_is_valid(candidate: &str) -> bool {
@@ -2811,6 +2832,83 @@ mod tests {
         assert!(domains("localhost:5173").is_empty());
         assert!(domains("example.com:8080").is_empty());
         assert!(domains("user@example.com").is_empty());
+    }
+
+    /// RED (T-URL-BARE-COLON) — **a bare domain opens after any byte that cannot continue a host
+    /// label, so a host glued to CJK prose, to a colon or to an `=` is a link.**
+    ///
+    /// The owner's line `对比表:github.com/a/b` drew nothing: the byte in front of the host was an
+    /// ASCII `:`, and the leading boundary was a list — whitespace, quotes, opening brackets,
+    /// non-ASCII — that did not name it, exactly the gap T-URL-BOUNDARY closed for schemes. The
+    /// boundary is now the class: anything that is not an ASCII letter, digit, `-`, `.` or `_`.
+    /// Those still refuse (`xgithub.com`, `my_github.com`, `v2-github.com`, `9github.com`), and
+    /// three bytes outside the class stay refused on purpose: `@` (an e-mail's host) and the path
+    /// separators `/` and `\` (a directory or file named like a host inside a path).
+    ///
+    /// MUTATION: restore `is_domain_leading_boundary` to
+    /// `!byte.is_ascii() || byte.is_ascii_whitespace() || matches!(byte, b'"' | b'\'' | b'`' | b'(' | b'[' | b'{' | b'<')`.
+    #[test]
+    fn a_bare_domain_opens_after_any_byte_that_cannot_continue_a_label() {
+        for (text, expected) in [
+            ("对比表:github.com/a/b", Some("github.com/a/b")),
+            ("见:example.com", Some("example.com")),
+            ("对比表：github.com/a/b", Some("github.com/a/b")),
+            ("url=example.com/x", Some("example.com/x")),
+            ("a,example.com", Some("example.com")),
+            (";example.com", Some("example.com")),
+            ("（example.com）", Some("example.com")),
+            ("见，example.com/x。", Some("example.com/x")),
+            // Inside a longer word the `github.com` never lights on its own; the whole word may
+            // still be a host of its own, or not a host at all (`_` is not a label byte).
+            ("xgithub.com", Some("xgithub.com")),
+            ("my_github.com", None),
+            ("v2-github.com", Some("v2-github.com")),
+            ("9github.com", Some("9github.com")),
+            ("user@example.com", None),
+            ("mailto:user@example.com", None),
+            ("/etc/hosts.d", None),
+            ("/srv/example.com/index.html", None),
+            (r"sites\example.com", None),
+        ] {
+            assert_eq!(
+                domains(text),
+                expected.into_iter().collect::<Vec<_>>(),
+                "reading `{text}`"
+            );
+        }
+    }
+
+    /// RED (T-URL-BARE-COLON) — **no bare domain begins inside an `http(s)://` token, even one
+    /// whose address is refused.**
+    ///
+    /// A scheme owns its text (§7.1.5k ④). With `=`, `,` and `:` now opening a bare domain, the
+    /// query of a refused single-label address — `http://intranet/?next=example.com` — would offer
+    /// its `example.com` as a host of its own, a working link to somewhere the line never pointed
+    /// at. A balanced bracket inside such an address already did before the class rule
+    /// (`http://intranet/(example.com)`). An address the scheme scan accepts is untouched by this:
+    /// the projection gives it the line first.
+    ///
+    /// MUTATION: drop the `http_scheme_spans` skip at the top of `detect_bare_domains`' loop.
+    #[test]
+    fn a_bare_domain_never_begins_inside_a_schemes_text() {
+        for text in [
+            "http://intranet/?next=example.com",
+            "http://intranet/a,example.com",
+            "https://intranet/x:example.com/y",
+            "http://intranet/(example.com)",
+            "https://example.com/?next=github.com",
+        ] {
+            assert!(
+                domains(text).is_empty(),
+                "`{text}` must offer no bare domain, got {:?}",
+                domains(text)
+            );
+        }
+        assert_eq!(
+            domains("http://intranet/a then github.com/x"),
+            ["github.com/x"],
+            "the scheme's text ends where its address ends; what follows is its own"
+        );
     }
 
     /// Misjudgment self-check (user requirement 2026-08-28): a line mixing filenames, a version
