@@ -18,7 +18,10 @@ use alacritty_terminal::{
     },
     vte::{
         Params, Parser, Perform,
-        ansi::{Handler, NamedPrivateMode, PrivateMode, Processor, Rgb},
+        ansi::{
+            Handler, KeyboardModes, ModifyOtherKeys as VendorModifyOtherKeys, NamedPrivateMode,
+            PrivateMode, Processor, Rgb,
+        },
     },
 };
 use bt_transcript::CapturedRow;
@@ -149,6 +152,41 @@ pub struct TerminalModes {
     /// mode a *program* turns on, and something has to be able to see that it is
     /// still on after the program that wanted it is gone.
     pub focus_reporting: bool,
+    /// The key encoding a program asked for: the kitty keyboard protocol's flags in force on the
+    /// screen that is showing, and xterm's modifyOtherKeys. The encoder reads it at the moment of
+    /// the key, as it reads DECCKM (`docs/plans/design/keyboard-protocol-2026-09-29.md` §2.3).
+    pub keyboard: KeyboardProtocol,
+}
+
+/// **The kitty keyboard protocol flags Folio honours: the disambiguate tier (flag 1), and no
+/// other.**
+///
+/// A request's other bits are dropped where the request is handled, so `CSI ? u` answers with what
+/// is actually in force, and the first time a session sees a bit dropped it says so once in
+/// `diagnostics.log` (`DualPlaneSession::take_keyboard_protocol_notes`). Flags 2, 4, 8 and 16 wait
+/// until a program we care about needs them (owner ruling, 2026-09-28).
+pub const SUPPORTED_KITTY_FLAGS: u8 = 0b1;
+
+/// xterm's modifyOtherKeys, as a program last set it with `CSI > 4 ; v m`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ModifyOtherKeys {
+    /// `v = 0`, `CSI > 4 m`, `CSI > m`, or never asked.
+    #[default]
+    Off,
+    /// `v = 1`: every chord except those with a well-known legacy form.
+    One,
+    /// `v = 2`: every modified chord.
+    Two,
+}
+
+/// The key encoding a program asked for. `Default` is what a program that never asked gets: the
+/// legacy bytes, exactly as before the protocol existed here.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct KeyboardProtocol {
+    /// The kitty flags in force on the showing screen, already masked to
+    /// [`SUPPORTED_KITTY_FLAGS`].
+    pub kitty: u8,
+    pub modify_other_keys: ModifyOtherKeys,
 }
 
 /// Facts emitted by the alacritty compatibility seam. DESIGN.md §3.1 policy is intentionally
@@ -214,6 +252,14 @@ pub enum AdapterEvent {
     /// request is a question about what this session was already asserting, and the session is
     /// where it is answered — this seam says what the bytes said.
     AttentionRequest(crate::session::AttentionRequest),
+    /// A kitty keyboard protocol request asked for flags this terminal does not honour
+    /// ([`SUPPORTED_KITTY_FLAGS`]). `requested` is the whole `u16` as it was written; `in_force` is
+    /// what the showing screen holds after the request. Whether this is news is the session's
+    /// question — see `DualPlaneSession::take_keyboard_protocol_notes`.
+    KeyboardFlagsRefused {
+        requested: u16,
+        in_force: u8,
+    },
     GridWrites {
         screen: RemovalScreen,
         rows: Vec<u32>,
@@ -308,6 +354,17 @@ impl EventListener for CaptureListener {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(AdapterEvent::ResetTitle),
+            Event::KeyboardFlagsRefused {
+                requested,
+                in_force,
+            } => self
+                .adapter_events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(AdapterEvent::KeyboardFlagsRefused {
+                    requested,
+                    in_force,
+                }),
             _ => {}
         }
     }
@@ -678,6 +735,12 @@ impl TerminalAdapter {
             // is also the honest statement: a program cannot put text on this reader's clipboard,
             // and cannot read it back either.
             osc52: Osc52::Disabled,
+            // **The kitty keyboard protocol is answered, and only its first tier is honoured**
+            // (`docs/plans/design/keyboard-protocol-2026-09-29.md`). Upstream ships it switched off,
+            // which is why a request used to vanish here without an answer; the state it keeps is
+            // Folio's model, per screen, in the vendored `Term`.
+            kitty_keyboard: true,
+            kitty_keyboard_flags: KeyboardModes::from_bits_truncate(SUPPORTED_KITTY_FLAGS),
             ..Config::default()
         };
         let size = GridSize { columns, rows };
@@ -1639,6 +1702,14 @@ impl TerminalAdapter {
             sgr_mouse: mode.contains(TermMode::SGR_MOUSE),
             mouse_tracking,
             focus_reporting: mode.contains(TermMode::FOCUS_IN_OUT),
+            keyboard: KeyboardProtocol {
+                kitty: self.term.kitty_keyboard_flags() & SUPPORTED_KITTY_FLAGS,
+                modify_other_keys: match self.term.modify_other_keys() {
+                    VendorModifyOtherKeys::Reset => ModifyOtherKeys::Off,
+                    VendorModifyOtherKeys::EnableExceptWellDefined => ModifyOtherKeys::One,
+                    VendorModifyOtherKeys::EnableAll => ModifyOtherKeys::Two,
+                },
+            },
         }
     }
 
@@ -3200,6 +3271,7 @@ mod tests {
                 sgr_mouse: true,
                 mouse_tracking: MouseTracking::Drag,
                 focus_reporting: false,
+                keyboard: KeyboardProtocol::default(),
             }
         );
         terminal.feed(b"\x1b[?1004h");
@@ -4746,5 +4818,411 @@ mod tests {
                 .iter()
                 .all(|event| !matches!(event, AdapterEvent::GridWrites { .. }))
         );
+    }
+
+    // ── the kitty keyboard protocol and modifyOtherKeys (T-KEYBOARD-PROTOCOL) ─────────────────
+    //
+    // `docs/plans/design/keyboard-protocol-2026-09-29.md` §6.1, test by test. Each observes what
+    // a program can observe — `modes().keyboard` (what the encoder reads) and the replies the child
+    // is sent — and nothing inside the vendored `Term`.
+
+    fn kitty(terminal: &TerminalAdapter) -> u8 {
+        terminal.modes().keyboard.kitty
+    }
+
+    fn modify_other_keys(terminal: &TerminalAdapter) -> ModifyOtherKeys {
+        terminal.modes().keyboard.modify_other_keys
+    }
+
+    /// Feed `CSI ? u` and return the one reply it earned.
+    fn kitty_query(terminal: &mut TerminalAdapter) -> Vec<u8> {
+        terminal.take_pty_writes();
+        terminal.feed(b"\x1b[?u");
+        let replies = terminal.take_pty_writes();
+        assert_eq!(replies.len(), 1, "one query, one answer: {replies:?}");
+        replies.into_iter().next().unwrap()
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **a push, a pop, a set and the query each do what the kitty
+    /// protocol says, and the query answers with the flags in force.**
+    ///
+    /// Before this ticket the vendored switch `Config::kitty_keyboard` was off, so every one of
+    /// these sequences vanished without an answer; and the vendor's own model, switched on, answered
+    /// the query from the top of its stack, which a `CSI = … u` never touches (defect 2: a `= 0`
+    /// after a push still answered 1).
+    ///
+    /// MUTATION: set `kitty_keyboard: false` in `TerminalAdapter::new` (nothing is answered), or
+    /// answer `report_keyboard_mode` from the top saved value (the `= 0` query answers 1).
+    #[test]
+    fn a_push_a_pop_a_set_and_the_query_do_what_the_protocol_says() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        assert_eq!(terminal.modes().keyboard, KeyboardProtocol::default());
+
+        terminal.feed(b"\x1b[>1u");
+        assert_eq!(kitty(&terminal), 1);
+        assert_eq!(kitty_query(&mut terminal), b"\x1b[?1u");
+
+        terminal.feed(b"\x1b[=0u");
+        assert_eq!(kitty(&terminal), 0);
+        assert_eq!(
+            kitty_query(&mut terminal),
+            b"\x1b[?0u",
+            "the query answers what is in force, not the saved value a set never touched"
+        );
+
+        terminal.feed(b"\x1b[=1;2u");
+        assert_eq!(kitty(&terminal), 1, "mode 2 is a union");
+        terminal.feed(b"\x1b[=1;3u");
+        assert_eq!(kitty(&terminal), 0, "mode 3 is a difference");
+
+        let mut empty = TerminalAdapter::new(nz(8), nz(3));
+        empty.feed(b"\x1b[=1u\x1b[<u");
+        assert_eq!(kitty(&empty), 0, "a pop on an empty stack resets the flags");
+        assert_eq!(kitty_query(&mut empty), b"\x1b[?0u");
+
+        let mut deep = TerminalAdapter::new(nz(8), nz(3));
+        deep.feed(b"\x1b[>1u\x1b[>1u\x1b[<5u");
+        assert_eq!(
+            kitty(&deep),
+            0,
+            "a pop past the bottom empties the stack and resets"
+        );
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **`CSI < 0 u` pops nothing, and `CSI < u` pops exactly one.**
+    ///
+    /// Upstream `vte` read the count with `next_param_or(1)`, which cannot tell an explicit `0`
+    /// from an omitted count, so `CSI < 0 u` popped one. kitty's count "defaults to 1 if
+    /// unspecified" — an explicit `0` is specified — and Windows Terminal agrees. The vendored
+    /// `vte` arm passes `0` through.
+    ///
+    /// MUTATION: restore `handler.pop_keyboard_modes(next_param_or(1))` in `vendor/vte`'s
+    /// `('u', [b'<'])` arm and the first assertion reads 0.
+    #[test]
+    fn an_explicit_zero_pop_count_pops_nothing_and_an_omitted_one_pops_one() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.feed(b"\x1b[>1u\x1b[<0u");
+        assert_eq!(kitty(&terminal), 1, "`CSI < 0 u` pops nothing");
+        terminal.feed(b"\x1b[<u");
+        assert_eq!(
+            kitty(&terminal),
+            0,
+            "and the one saved value was still there for the next pop to restore"
+        );
+
+        // saved [0, 1], in force 0: an omitted count pops one, back to 1 — not both.
+        let mut one = TerminalAdapter::new(nz(8), nz(3));
+        one.feed(b"\x1b[>1u\x1b[>0u");
+        assert_eq!(kitty(&one), 0);
+        one.feed(b"\x1b[<u");
+        assert_eq!(kitty(&one), 1, "`CSI < u` pops one");
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **only flag 1 is honoured: a request's other bits are dropped
+    /// where it is handled, so the query answers 1 — and the refused bits reach the session whole,
+    /// bits 8–15 included.**
+    ///
+    /// `vte` 0.15 cast the flags to `u8` and truncated them to the five kitty flags before the
+    /// handler saw them, so bit 8 of `CSI > 257 u` vanished without trace. The vendored arm hands
+    /// the handler the `u16`; the terminal masks it and says what it dropped.
+    ///
+    /// MUTATION: set `kitty_keyboard_flags` to `KeyboardModes::all()` in `TerminalAdapter::new`
+    /// (the query answers 31), or truncate the flags to `u8` in `vendor/vte`'s `('u', [b'>'])` arm
+    /// (the second event's `requested` is 1).
+    #[test]
+    fn only_flag_one_is_honoured_and_the_refused_bits_are_reported_whole() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        let mut events = terminal.feed(b"\x1b[>31u");
+        assert_eq!(kitty(&terminal), 1);
+        assert_eq!(kitty_query(&mut terminal), b"\x1b[?1u");
+        events.extend(terminal.feed(b"\x1b[>257u"));
+        assert_eq!(kitty(&terminal), 1);
+        events.extend(terminal.feed(b"\x1b[=1u"));
+        let refused = events
+            .into_iter()
+            .filter_map(|event| match event {
+                AdapterEvent::KeyboardFlagsRefused {
+                    requested,
+                    in_force,
+                } => Some((requested, in_force)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refused,
+            [(31, 1), (257, 1)],
+            "each request that asked for more than flag 1 says so, and one that did not says nothing"
+        );
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **however many pushes arrive, a screen keeps eight saved values,
+    /// and the title stack is untouched — whether it holds entries or none.**
+    ///
+    /// Upstream's push checked its own stack's depth and then removed the *title* stack's oldest
+    /// entry: past 4096 pushes that lost a saved title, or panicked on an empty title stack, and the
+    /// keyboard stack itself was never trimmed. Five thousand pushes go past that threshold. After
+    /// them, seven pops still leave flag 1 in force and the eighth resets it — at most eight were
+    /// kept.
+    ///
+    /// MUTATION: drop the eviction in `KeyboardState::push` (the eighth pop leaves 1), or evict
+    /// from the title stack again (the empty-stack terminal panics; the saved title is lost).
+    #[test]
+    fn a_screen_keeps_eight_saved_values_and_the_title_stack_is_untouched() {
+        let pushes = b"\x1b[>1u".repeat(5000);
+
+        let mut untitled = TerminalAdapter::new(nz(8), nz(3));
+        untitled.feed(&pushes);
+        untitled.feed(&b"\x1b[<u".repeat(7));
+        assert_eq!(kitty(&untitled), 1);
+        untitled.feed(b"\x1b[<u");
+        assert_eq!(
+            kitty(&untitled),
+            0,
+            "the eighth pop empties a stack of eight"
+        );
+
+        let mut titled = TerminalAdapter::new(nz(8), nz(3));
+        titled.feed(b"\x1b]2;kept\x07\x1b[22t");
+        titled.feed(&pushes);
+        titled.feed(b"\x1b]2;other\x07");
+        assert_eq!(
+            titled.feed(b"\x1b[23t"),
+            [AdapterEvent::Title {
+                title: "kept".to_owned()
+            }],
+            "the saved title is still the one a pop brings back"
+        );
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **the alternate screen starts with no flags and its flags end
+    /// with it; the primary's come back whole, `CSI =` included.**
+    ///
+    /// Folio's policy (Windows Terminal's; Ghostty and WezTerm keep them), so a crashed `nvim`
+    /// cannot hand its flags to the next `less`; and the vendor's defects 3 and 4 — a switch
+    /// recomputed the primary's flags from its stack top (losing a `CSI = 1 u`), and the alternate
+    /// stack survived into the next alternate-screen session.
+    ///
+    /// **`?47` and `?1047` switch no screen in this terminal** — both reach the vendor's
+    /// unknown-mode branch (`session.rs`'s
+    /// `nested_and_unimplemented_screen_modes_leave_the_claim_where_the_screen_is` pins that), so
+    /// nothing reaches `swap_alt` and the flags stay those of the screen that is still showing. The
+    /// design note's table names the policy by "whatever reaches `swap_alt`"; this pins both halves.
+    ///
+    /// MUTATION: keep the alternate state across `swap_alt` (the second entry answers 1), or
+    /// recompute the primary's flags from its saved values on the way back (the `CSI =` flags are
+    /// 0 after the round trip).
+    #[test]
+    fn the_alternate_screen_starts_empty_and_the_primarys_flags_come_back_whole() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.feed(b"\x1b[>1u\x1b[?1049h");
+        assert!(terminal.modes().alternate_screen);
+        assert_eq!(kitty(&terminal), 0, "the alternate screen starts empty");
+        assert_eq!(kitty_query(&mut terminal), b"\x1b[?0u");
+        terminal.feed(b"\x1b[>1u\x1b[?1049l");
+        assert_eq!(kitty(&terminal), 1, "the primary's push is in force again");
+        terminal.feed(b"\x1b[?1049h");
+        assert_eq!(
+            kitty(&terminal),
+            0,
+            "the alternate screen's own push ended with it and does not come back"
+        );
+        terminal.feed(b"\x1b[?1049l");
+
+        let mut set = TerminalAdapter::new(nz(8), nz(3));
+        set.feed(b"\x1b[=1u\x1b[?1049h\x1b[?1049l");
+        assert_eq!(
+            kitty(&set),
+            1,
+            "a `CSI = 1 u` on the primary survives the round trip"
+        );
+
+        for mode in [&b"47"[..], &b"1047"[..]] {
+            let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+            let enter = [&b"\x1b[?"[..], mode, b"h"].concat();
+            let leave = [&b"\x1b[?"[..], mode, b"l"].concat();
+            terminal.feed(b"\x1b[>1u");
+            terminal.feed(&enter);
+            assert!(
+                !terminal.modes().alternate_screen,
+                "?{mode:?} switches no screen here"
+            );
+            assert_eq!(
+                kitty(&terminal),
+                1,
+                "so the showing screen's flags stay in force"
+            );
+            terminal.feed(b"\x1b[>0u");
+            terminal.feed(&leave);
+            assert_eq!(
+                kitty(&terminal),
+                0,
+                "and the push made meanwhile was the primary's"
+            );
+        }
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **`RIS` clears both screens' keyboard state and
+    /// modifyOtherKeys.**
+    ///
+    /// It is also the remedy a person has when a dead program left the keys encoded: `reset`
+    /// sends it (design note §2.4).
+    ///
+    /// MUTATION: leave `inactive_keyboard` alone in the vendored `reset_state` (the primary's flag
+    /// comes back after leaving the alternate screen), or leave `modify_other_keys` (Two survives).
+    #[test]
+    fn ris_clears_both_screens_and_modify_other_keys() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.feed(b"\x1b[>1u\x1b[?1049h\x1b[>1u\x1b[>4;2m");
+        assert_eq!(kitty(&terminal), 1);
+        assert_eq!(modify_other_keys(&terminal), ModifyOtherKeys::Two);
+        terminal.feed(b"\x1bc");
+        assert!(!terminal.modes().alternate_screen);
+        assert_eq!(terminal.modes().keyboard, KeyboardProtocol::default());
+        assert_eq!(kitty_query(&mut terminal), b"\x1b[?0u");
+        terminal.feed(b"\x1b[?1049h\x1b[?1049l\x1b[<u");
+        assert_eq!(
+            kitty(&terminal),
+            0,
+            "nothing of the primary's was kept aside"
+        );
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **modifyOtherKeys is set, reset and reported the way xterm
+    /// does it, and `CSI > m` resets it.**
+    ///
+    /// xterm: XTMODKEYS with no parameters resets every key-modifier resource to its initial value.
+    /// Upstream `vte` read `CSI > m` as resource 1 and dropped it; the vendored arm resets.
+    ///
+    /// MUTATION: remove the vendored `('m', [b'>']) if params.len() == 1 && !params.written(0)`
+    /// arm (the fourth assertion reads One), or answer XTQMODKEYS with nothing (the query is empty).
+    #[test]
+    fn modify_other_keys_is_set_reset_and_reported_as_xterm_does() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        assert_eq!(modify_other_keys(&terminal), ModifyOtherKeys::Off);
+        terminal.feed(b"\x1b[>4;2m");
+        assert_eq!(modify_other_keys(&terminal), ModifyOtherKeys::Two);
+        terminal.take_pty_writes();
+        terminal.feed(b"\x1b[?4m");
+        assert_eq!(terminal.take_pty_writes(), vec![b"\x1b[>4;2m".to_vec()]);
+        terminal.feed(b"\x1b[>4m");
+        assert_eq!(
+            modify_other_keys(&terminal),
+            ModifyOtherKeys::Off,
+            "`CSI > 4 m` is v = 0"
+        );
+        terminal.feed(b"\x1b[>4;1m");
+        assert_eq!(modify_other_keys(&terminal), ModifyOtherKeys::One);
+        terminal.feed(b"\x1b[>m");
+        assert_eq!(
+            modify_other_keys(&terminal),
+            ModifyOtherKeys::Off,
+            "`CSI > m` resets it"
+        );
+        terminal.feed(b"\x1b[>4;2m\x1b[>4;3m\x1b[>1;2m");
+        assert_eq!(
+            modify_other_keys(&terminal),
+            ModifyOtherKeys::Two,
+            "a value or a resource this terminal does not have changes nothing"
+        );
+        assert_eq!(kitty(&terminal), 0, "and none of it is the kitty state");
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **`DECSTR` leaves the kitty flags and modifyOtherKeys as they
+    /// were — a stated divergence from xterm**, which resets its key-modifier resources on a soft
+    /// reset.
+    ///
+    /// Folio does not implement DECSTR at all (`vte` 0.15 does not dispatch `CSI ! p`), and
+    /// resetting modifyOtherKeys alone would be one effect of a sequence whose others are all
+    /// missing (design note §2.1). A ticket that implements DECSTR resets modifyOtherKeys there
+    /// and changes this test.
+    ///
+    /// MUTATION: none in this ticket's product — the test pins the absence; turning DECSTR into a
+    /// reset of either value turns it red.
+    #[test]
+    fn decstr_leaves_the_kitty_flags_and_modify_other_keys_as_they_were_unlike_xterm() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.feed(b"\x1b[>1u\x1b[>4;2m\x1b[!p");
+        assert_eq!(
+            terminal.modes().keyboard,
+            KeyboardProtocol {
+                kitty: 1,
+                modify_other_keys: ModifyOtherKeys::Two,
+            }
+        );
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **`CSI ? u` followed by `CSI c` is answered in that order.**
+    ///
+    /// The protocol's detection recipe depends on it: "If an answer for the device attributes is
+    /// received without getting back an answer for the progressive enhancement the terminal does
+    /// not support this protocol".
+    ///
+    /// MUTATION: answer the kitty query anywhere but the ordered `PendingReply` queue, or not at
+    /// all (the first reply is DA1).
+    #[test]
+    fn the_kitty_query_is_answered_before_the_device_attributes_asked_after_it() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.feed(b"\x1b[?u\x1b[c");
+        let replies = terminal.take_pty_writes();
+        assert_eq!(replies.len(), 2, "{replies:?}");
+        assert_eq!(replies[0], b"\x1b[?0u");
+        assert!(
+            replies[1].starts_with(b"\x1b[?") && replies[1].ends_with(b"c"),
+            "then DA1: {:?}",
+            String::from_utf8_lossy(&replies[1])
+        );
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **a query that arrives while a resize is armed is answered once,
+    /// and the state the fork carries is the state the displayed branch had.**
+    ///
+    /// The resize oracle is fed the same bytes, so it reaches the same state; its listener's
+    /// replies are never drained to the PTY. Installing it as the displayed terminal keeps the
+    /// flags a program set during the transaction.
+    ///
+    /// MUTATION: stop discarding the canonical listener's output in `advance_parsers` (the query
+    /// is answered twice after the reconcile), or drop the keyboard state from `Term::fork` (the
+    /// flag is 0 after it).
+    #[test]
+    fn a_keyboard_query_during_a_resize_is_answered_once_and_the_flags_survive_it() {
+        let mut terminal = TerminalAdapter::new(nz(20), nz(6));
+        terminal.begin_resize_transaction();
+        terminal.resize(nz(12), nz(6));
+        terminal.feed(b"\x1b[>1u\x1b[>4;1m\x1b[?u");
+        let mut replies = terminal.take_pty_writes();
+        terminal.resize(nz(16), nz(6));
+        terminal.reconcile_resize_transaction_to_viewport();
+        replies.extend(terminal.take_pty_writes());
+        terminal.finish_resize_transaction();
+        replies.extend(terminal.take_pty_writes());
+        assert_eq!(replies, vec![b"\x1b[?1u".to_vec()]);
+        assert_eq!(
+            terminal.modes().keyboard,
+            KeyboardProtocol {
+                kitty: 1,
+                modify_other_keys: ModifyOtherKeys::One,
+            }
+        );
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **ConPTY's own teardown bytes leave the keyboard at 0 / Off and
+    /// type nothing at the pane.**
+    ///
+    /// ConPTY writes `\e[>4m\e[<u` on teardown (design note §1): one XTMODKEYS reset and one pop.
+    /// With flags a program pushed and modifyOtherKeys it set, both go back to where a program that
+    /// never asked leaves them.
+    ///
+    /// MUTATION: read `CSI > 4 m` as anything but v = 0 in `vendor/vte` (modifyOtherKeys stays
+    /// One), or make an omitted pop count pop nothing (the flag stays 1).
+    #[test]
+    fn conptys_teardown_leaves_the_keyboard_at_nothing_asked() {
+        let mut terminal = TerminalAdapter::new(nz(8), nz(3));
+        terminal.feed(b"\x1b[>1u\x1b[>4;1m\x1b[?1004h");
+        terminal.set_keyboard_focus(true);
+        terminal.take_pty_writes();
+        terminal.feed(b"\x1b[>4m\x1b[<u\x1b[?1004l\x1b[?1004h\x1b[?2031l\x1b[?2004l");
+        terminal.set_keyboard_focus(true);
+        assert!(terminal.take_pty_writes().is_empty());
+        assert_eq!(terminal.modes().keyboard, KeyboardProtocol::default());
     }
 }

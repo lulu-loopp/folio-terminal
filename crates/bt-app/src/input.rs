@@ -1,6 +1,7 @@
 use bt_platform::HostPlatform;
+use bt_term::{KeyboardProtocol, ModifyOtherKeys, SUPPORTED_KITTY_FLAGS};
 use winit::event::{ElementState, MouseButton};
-use winit::keyboard::{Key, ModifiersState, NamedKey, PhysicalKey};
+use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
 
 // ── The routing rule, and the one sentence it is (M1-7, probe X-3 §4) ───────
 //
@@ -479,7 +480,7 @@ pub(crate) fn alternate_scroll_bytes(lines: i32, application_cursor_mode: bool) 
     } else {
         NamedKey::ArrowDown
     };
-    let one = keyboard_bytes(
+    let one = legacy_bytes(
         &Key::Named(key),
         ModifiersState::empty(),
         application_cursor_mode,
@@ -647,7 +648,296 @@ pub(crate) fn injected_logical_key(
     Some(Key::Character(text.into()))
 }
 
+/// **The bytes one key press sends to the child** — the encoder, the last rung of
+/// `Runtime::keyboard_input`, and the only rung the keyboard protocols change
+/// (`docs/plans/design/keyboard-protocol-2026-09-29.md` §5).
+///
+/// `keyboard` is what the program in the pane asked for, read from the session at the
+/// moment of the key as DECCKM is (§2.3). **A program that never asked gets exactly the
+/// bytes it got before** — [`legacy_bytes`], unchanged, which
+/// `key_encoding_legacy_{windows,macos}.tsv` hold byte for byte. When the kitty protocol's flag 1 is in
+/// force the key is encoded by [`kitty_bytes`]; otherwise, when modifyOtherKeys is,
+/// by [`modify_other_keys_bytes`], with every chord xterm leaves alone keeping its
+/// legacy bytes. **When both are set, kitty wins**, as in kitty, Ghostty and WezTerm.
+/// `key_encoding.tsv` is the table all of it answers to.
+///
+/// `key_without_modifiers` is winit's key with no modifier applied — kitty's
+/// "unicode-key-code", the un-shifted key on whatever layout is in use — and
+/// `location` says whether it is a keypad key.
 pub(crate) fn keyboard_bytes(
+    key: &Key,
+    key_without_modifiers: &Key,
+    location: KeyLocation,
+    modifiers: ModifiersState,
+    application_cursor_mode: bool,
+    keyboard: KeyboardProtocol,
+) -> Option<Vec<u8>> {
+    if keyboard.kitty & SUPPORTED_KITTY_FLAGS != 0 {
+        return kitty_bytes(
+            key,
+            key_without_modifiers,
+            location,
+            modifiers,
+            application_cursor_mode,
+        );
+    }
+    let mode = keyboard.modify_other_keys;
+    if mode == ModifyOtherKeys::Off {
+        return legacy_bytes(key, modifiers, application_cursor_mode);
+    }
+    if withheld_from_every_protocol(key, modifiers) {
+        return None;
+    }
+    modify_other_keys_bytes(key, key_without_modifiers, modifiers, mode)
+        .or_else(|| legacy_bytes(key, modifiers, application_cursor_mode))
+}
+
+/// Rule 1 of both protocols (§4.2): a composing key, a paste chord, or a chord that holds
+/// Super sends nothing. Super never reaches the child — on Windows the key belongs to
+/// another program's verb (§7.54d), on a Mac Command belongs to the application
+/// (§13.13) — so no protocol ever reports bit 8.
+fn withheld_from_every_protocol(key: &Key, modifiers: ModifiersState) -> bool {
+    matches!(key, Key::Named(NamedKey::Process))
+        || is_paste_shortcut(key, modifiers)
+        || modifiers.super_key()
+}
+
+/// **The kitty keyboard protocol's disambiguate tier (flag 1)**, as kitty's own encoder
+/// (`kitty/key_encoding.c`) writes it — the first of these rules that matches (§4.2):
+///
+/// 1. a composing key, a paste chord or Super held — nothing;
+/// 2. printable text with no modifier but Shift — the text;
+/// 3. a keypad key that produced no text — `CSI code;m u` with the protocol's keypad code
+///    (owner ruling Q2, 2026-09-29), Numpad Enter included, so it is asked before rule 4;
+/// 4. Enter, Tab or Backspace of the main block with no modifier — `\r`, `\t`, `\x7f`, so
+///    `reset` can still be typed;
+/// 5. arrows, Home and End — `CSI X`, or `CSI 1;m X` with modifiers, **ignoring DECCKM**
+///    (kitty uses `SS3` only in legacy mode); Insert, Delete, PageUp and PageDown as ever;
+/// 6. F1, F2 and F4 — `CSI P/Q/S` or `CSI 1;m P/Q/S`; F3 — `CSI 13~` or `CSI 13;m~`
+///    (kitty dropped `CSI R`, which is the cursor position report); F5–F12 as ever;
+/// 7. every other key that has a code — `CSI code;m u`, `;m` left out when `m = 1`:
+///    Escape 27, Enter 13, Tab 9, Backspace 127, Space 32, and for a text key the
+///    un-shifted character of `key_without_modifiers`.
+///
+/// A text key whose layout gives it no single un-shifted character has no code, and keeps
+/// the bytes it has without the protocol.
+fn kitty_bytes(
+    key: &Key,
+    key_without_modifiers: &Key,
+    location: KeyLocation,
+    modifiers: ModifiersState,
+    application_cursor_mode: bool,
+) -> Option<Vec<u8>> {
+    if withheld_from_every_protocol(key, modifiers) {
+        return None;
+    }
+    let modifier = xterm_modifier(modifiers);
+    let at_most_shift = !modifiers.control_key() && !modifiers.alt_key();
+    match key {
+        Key::Character(text) if at_most_shift && !text.chars().any(char::is_control) => {
+            return Some(text.as_bytes().to_vec());
+        }
+        Key::Named(NamedKey::Space) if at_most_shift => return Some(b" ".to_vec()),
+        _ => {}
+    }
+    // The keypad before the plain-key exception: Numpad Enter is `KP_ENTER`, not `\r`.
+    if location == KeyLocation::Numpad
+        && let Key::Named(named) = key
+        && let Some(code) = keypad_code(*named)
+    {
+        return Some(csi_u(code, modifier));
+    }
+    match key {
+        Key::Named(NamedKey::Enter) if modifier == 1 => return Some(vec![b'\r']),
+        Key::Named(NamedKey::Tab) if modifier == 1 => return Some(vec![b'\t']),
+        Key::Named(NamedKey::Backspace) if modifier == 1 => return Some(vec![0x7f]),
+        _ => {}
+    }
+    let code = match key {
+        Key::Named(NamedKey::ArrowUp) => return Some(kitty_cursor_key(b'A', modifier)),
+        Key::Named(NamedKey::ArrowDown) => return Some(kitty_cursor_key(b'B', modifier)),
+        Key::Named(NamedKey::ArrowRight) => return Some(kitty_cursor_key(b'C', modifier)),
+        Key::Named(NamedKey::ArrowLeft) => return Some(kitty_cursor_key(b'D', modifier)),
+        Key::Named(NamedKey::Home) => return Some(kitty_cursor_key(b'H', modifier)),
+        Key::Named(NamedKey::End) => return Some(kitty_cursor_key(b'F', modifier)),
+        Key::Named(NamedKey::Insert) => return Some(tilde_key(2, modifier)),
+        Key::Named(NamedKey::Delete) => return Some(tilde_key(3, modifier)),
+        Key::Named(NamedKey::PageUp) => return Some(tilde_key(5, modifier)),
+        Key::Named(NamedKey::PageDown) => return Some(tilde_key(6, modifier)),
+        Key::Named(NamedKey::Escape) => 27,
+        Key::Named(NamedKey::Enter) => 13,
+        Key::Named(NamedKey::Tab) => 9,
+        Key::Named(NamedKey::Backspace) => 127,
+        Key::Named(NamedKey::Space) => 32,
+        Key::Named(named) => {
+            return kitty_function_key(*named, modifiers, bt_platform::host_platform());
+        }
+        Key::Character(_) => match unshifted_code(key, key_without_modifiers) {
+            Some(code) => code,
+            None => return legacy_bytes(key, modifiers, application_cursor_mode),
+        },
+        _ => return None,
+    };
+    Some(csi_u(code, modifier))
+}
+
+/// The protocol's code for a keypad key that produced no text (Num Lock off, or Enter):
+/// `KP_ENTER` 57414, `KP_LEFT` 57417 … `KP_DELETE` 57426, `KP_BEGIN` 57427.
+fn keypad_code(key: NamedKey) -> Option<u32> {
+    Some(match key {
+        NamedKey::Enter => 57414,
+        NamedKey::ArrowLeft => 57417,
+        NamedKey::ArrowRight => 57418,
+        NamedKey::ArrowUp => 57419,
+        NamedKey::ArrowDown => 57420,
+        NamedKey::PageUp => 57421,
+        NamedKey::PageDown => 57422,
+        NamedKey::Home => 57423,
+        NamedKey::End => 57424,
+        NamedKey::Insert => 57425,
+        NamedKey::Delete => 57426,
+        NamedKey::Clear => 57427,
+        _ => return None,
+    })
+}
+
+/// A text key's code under flag 1: the one character of the key without modifiers — the
+/// un-shifted key on the layout in use (`ф` is 1092) — or, where winit gives none, the
+/// key's own one character lower-cased. `None` for a key that has neither.
+fn unshifted_code(key: &Key, key_without_modifiers: &Key) -> Option<u32> {
+    one_character(key_without_modifiers)
+        .filter(|character| !character.is_control())
+        .or_else(|| {
+            one_character(key)
+                .filter(|character| !character.is_control())
+                .and_then(|character| {
+                    let mut lower = character.to_lowercase();
+                    let only = lower.next()?;
+                    lower.next().is_none().then_some(only)
+                })
+        })
+        .map(u32::from)
+}
+
+/// The key's one character: a `Character` of exactly one, or a dead key's own.
+fn one_character(key: &Key) -> Option<char> {
+    match key {
+        Key::Character(text) => {
+            let mut characters = text.chars();
+            let character = characters.next()?;
+            characters.next().is_none().then_some(character)
+        }
+        Key::Dead(Some(character)) => Some(*character),
+        _ => None,
+    }
+}
+
+fn csi_u(code: u32, modifier: u8) -> Vec<u8> {
+    if modifier == 1 {
+        format!("\x1b[{code}u").into_bytes()
+    } else {
+        format!("\x1b[{code};{modifier}u").into_bytes()
+    }
+}
+
+/// Arrows, Home and End under flag 1: the `CSI` form whatever DECCKM says.
+fn kitty_cursor_key(final_byte: u8, modifier: u8) -> Vec<u8> {
+    cursor_key(final_byte, modifier, false)
+}
+
+/// F1–F12 under flag 1 — kitty's `encode_function_key`: F1, F2 and F4 in their `CSI`
+/// forms, F3 as `CSI 13~` (kitty removed `CSI R`, the cursor position report's shape), and
+/// F5–F12 as [`function_key`] spells them, whose Super and `Alt+F4` refusals hold here too.
+fn kitty_function_key(
+    key: NamedKey,
+    modifiers: ModifiersState,
+    platform: HostPlatform,
+) -> Option<Vec<u8>> {
+    if platform == HostPlatform::Windows && key == NamedKey::F4 && modifiers.alt_key() {
+        return None;
+    }
+    let modifier = xterm_modifier(modifiers);
+    match key {
+        NamedKey::F1 => Some(kitty_cursor_key(b'P', modifier)),
+        NamedKey::F2 => Some(kitty_cursor_key(b'Q', modifier)),
+        NamedKey::F3 => Some(tilde_key(13, modifier)),
+        NamedKey::F4 => Some(kitty_cursor_key(b'S', modifier)),
+        _ => function_key(key, modifiers, platform),
+    }
+}
+
+/// **xterm's modifyOtherKeys**, in xterm's default wire form (`formatOtherKeys=0`):
+/// `CSI 27 ; m ; k ~`, or `None` for a chord the mode leaves to its legacy bytes (§4.3).
+///
+/// Which chords are encoded follows xterm's own reference table (`vte`'s
+/// `doc/modifyOtherKeys-example.txt`, the output of xterm's `modify-keys.pl`), by the
+/// class of the key without modifiers:
+///
+/// | class | mode 1 | mode 2 |
+/// |---|---|---|
+/// | Enter, Tab | every modified chord | every modified chord |
+/// | Escape | chords with Alt | every modified chord |
+/// | Backspace | none | every modified chord but Ctrl alone |
+/// | a key with a legacy Ctrl code (letters, Space, `@ [ \ ] ^ _ ?`) | chords with Alt | every modified chord, Shift alone included |
+/// | any other printable key | chords with Ctrl or Alt | chords with Ctrl or Alt |
+///
+/// `k` is the character with Shift applied and without Ctrl — xterm's keysym, so
+/// `Ctrl+Shift+a` is 65. On Windows the logical key is exactly that; on a Mac a Ctrl chord
+/// can arrive as its control character, and then `k` is the key without modifiers,
+/// upper-cased when Shift is held. Backspace's code is 127, because Folio's Backspace sends
+/// DEL (xterm's reference used 8 for its `^H`).
+fn modify_other_keys_bytes(
+    key: &Key,
+    key_without_modifiers: &Key,
+    modifiers: ModifiersState,
+    mode: ModifyOtherKeys,
+) -> Option<Vec<u8>> {
+    let (shift, alt, control) = (
+        modifiers.shift_key(),
+        modifiers.alt_key(),
+        modifiers.control_key(),
+    );
+    if !(shift || alt || control) {
+        return None;
+    }
+    let every = mode == ModifyOtherKeys::Two;
+    let (code, encoded) = match key {
+        Key::Named(NamedKey::Enter) => (13, true),
+        Key::Named(NamedKey::Tab) => (9, true),
+        Key::Named(NamedKey::Escape) => (27, alt || every),
+        Key::Named(NamedKey::Backspace) => (127, every && (shift || alt)),
+        Key::Named(NamedKey::Space) => (32, alt || every),
+        Key::Character(_) => {
+            let base = one_character(key_without_modifiers)
+                .or_else(|| one_character(key))
+                .filter(|character| !character.is_control())?;
+            let keysym = one_character(key)
+                .filter(|character| !character.is_control())
+                .or_else(|| {
+                    if shift {
+                        let mut upper = base.to_uppercase();
+                        let only = upper.next()?;
+                        upper.next().is_none().then_some(only)
+                    } else {
+                        Some(base)
+                    }
+                })?;
+            let has_a_control_code = control_byte(base.encode_utf8(&mut [0; 4])).is_some();
+            let encoded = if has_a_control_code {
+                alt || every
+            } else {
+                control || alt
+            };
+            (u32::from(keysym), encoded)
+        }
+        _ => return None,
+    };
+    encoded.then(|| format!("\x1b[27;{};{code}~", xterm_modifier(modifiers)).into_bytes())
+}
+
+/// **What a key sends when no program asked for a keyboard protocol** — the encoder as it
+/// was before T-KEYBOARD-PROTOCOL, byte for byte (`key_encoding_legacy_{windows,macos}.tsv`).
+pub(crate) fn legacy_bytes(
     key: &Key,
     modifiers: ModifiersState,
     application_cursor_mode: bool,
@@ -1164,7 +1454,7 @@ mod tests {
         let key = injected(Some("这")).expect("a character with no key is that character's key");
         assert_eq!(key, Key::Character("这".into()));
         assert_eq!(
-            keyboard_bytes(&key, ModifiersState::empty(), false),
+            legacy_bytes(&key, ModifiersState::empty(), false),
             Some("这".as_bytes().to_vec()),
             "the encoder had no verb for the key winit reported, which is where the text was lost"
         );
@@ -1176,7 +1466,7 @@ mod tests {
     fn injected_text_longer_than_a_character_is_still_that_text() {
         assert_eq!(injected(Some("你好")), Some(Key::Character("你好".into())));
         assert_eq!(
-            keyboard_bytes(
+            legacy_bytes(
                 &Key::Character("你好".into()),
                 ModifiersState::empty(),
                 false
@@ -1244,7 +1534,7 @@ mod tests {
                 "injected {text:?} is {key:?}"
             );
             assert!(
-                keyboard_bytes(&Key::Named(key), ModifiersState::empty(), false).is_some(),
+                legacy_bytes(&Key::Named(key), ModifiersState::empty(), false).is_some(),
                 "and {key:?} is a key the encoder answers"
             );
         }
@@ -1287,7 +1577,7 @@ mod tests {
                         format!("\x1b[1;{modifier}{}", char::from(final_byte))
                     };
                     assert_eq!(
-                        keyboard_bytes(&Key::Named(key), modifiers, application_mode),
+                        legacy_bytes(&Key::Named(key), modifiers, application_mode),
                         Some(expected.into_bytes()),
                         "key={key:?} application_mode={application_mode} modifiers={modifiers:?}"
                     );
@@ -1320,7 +1610,7 @@ mod tests {
                         format!("\x1b[{number};{modifier}~")
                     };
                     assert_eq!(
-                        keyboard_bytes(&Key::Named(key), modifiers, application_mode),
+                        legacy_bytes(&Key::Named(key), modifiers, application_mode),
                         Some(expected.into_bytes()),
                         "key={key:?} application_mode={application_mode} modifiers={modifiers:?}"
                     );
@@ -1361,7 +1651,7 @@ mod tests {
         for application_mode in [false, true] {
             for (key, bytes) in expected {
                 assert_eq!(
-                    keyboard_bytes(&Key::Named(key), ModifiersState::empty(), application_mode),
+                    legacy_bytes(&Key::Named(key), ModifiersState::empty(), application_mode),
                     Some(bytes.to_vec()),
                     "key={key:?} application_mode={application_mode}"
                 );
@@ -1405,7 +1695,7 @@ mod tests {
         for application_mode in [false, true] {
             for (key, modifiers, bytes) in cases {
                 assert_eq!(
-                    keyboard_bytes(&Key::Named(key), modifiers, application_mode),
+                    legacy_bytes(&Key::Named(key), modifiers, application_mode),
                     Some(bytes.to_vec()),
                     "key={key:?} modifiers={modifiers:?} application_mode={application_mode}"
                 );
@@ -1427,9 +1717,9 @@ mod tests {
     #[test]
     fn a_function_key_with_super_or_past_f12_sends_nothing() {
         let win = ModifiersState::SUPER;
-        assert_eq!(keyboard_bytes(&Key::Named(NamedKey::F1), win, false), None);
+        assert_eq!(legacy_bytes(&Key::Named(NamedKey::F1), win, false), None);
         assert_eq!(
-            keyboard_bytes(
+            legacy_bytes(
                 &Key::Named(NamedKey::F5),
                 win.union(ModifiersState::SHIFT),
                 false
@@ -1438,11 +1728,11 @@ mod tests {
             "and it is not talked out of it by a second modifier"
         );
         assert_eq!(
-            keyboard_bytes(&Key::Named(NamedKey::F13), ModifiersState::empty(), false),
+            legacy_bytes(&Key::Named(NamedKey::F13), ModifiersState::empty(), false),
             None
         );
         assert_eq!(
-            keyboard_bytes(&Key::Named(NamedKey::F13), ModifiersState::CONTROL, true),
+            legacy_bytes(&Key::Named(NamedKey::F13), ModifiersState::CONTROL, true),
             None
         );
     }
@@ -1502,7 +1792,7 @@ mod tests {
                 "{platform:?}"
             );
         }
-        let host = keyboard_bytes(&Key::Named(NamedKey::F4), alt, false);
+        let host = legacy_bytes(&Key::Named(NamedKey::F4), alt, false);
         if bt_platform::host_platform() == HostPlatform::Windows {
             assert_eq!(host, None);
         } else {
@@ -1513,23 +1803,23 @@ mod tests {
     #[test]
     fn tab_meta_and_legacy_controls_have_terminal_encodings() {
         assert_eq!(
-            keyboard_bytes(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT, false),
+            legacy_bytes(&Key::Named(NamedKey::Tab), ModifiersState::SHIFT, false),
             Some(b"\x1b[Z".to_vec())
         );
         assert_eq!(
-            keyboard_bytes(&Key::Character("x".into()), ModifiersState::ALT, false),
+            legacy_bytes(&Key::Character("x".into()), ModifiersState::ALT, false),
             Some(b"\x1bx".to_vec())
         );
         assert_eq!(
-            keyboard_bytes(&Key::Character("é".into()), ModifiersState::ALT, false),
+            legacy_bytes(&Key::Character("é".into()), ModifiersState::ALT, false),
             Some("\u{1b}é".as_bytes().to_vec())
         );
         assert_eq!(
-            keyboard_bytes(&Key::Named(NamedKey::Space), ModifiersState::ALT, false),
+            legacy_bytes(&Key::Named(NamedKey::Space), ModifiersState::ALT, false),
             Some(b"\x1b ".to_vec())
         );
         assert_eq!(
-            keyboard_bytes(&Key::Character("c".into()), ModifiersState::CONTROL, false),
+            legacy_bytes(&Key::Character("c".into()), ModifiersState::CONTROL, false),
             Some(vec![0x03])
         );
     }
@@ -1552,7 +1842,7 @@ mod tests {
             ("a", 0x01),
         ] {
             assert_eq!(
-                keyboard_bytes(
+                legacy_bytes(
                     &Key::Character(letter.into()),
                     ModifiersState::CONTROL,
                     false
@@ -1563,7 +1853,7 @@ mod tests {
         }
         // The layout that reports the produced control character.
         assert_eq!(
-            keyboard_bytes(
+            legacy_bytes(
                 &Key::Character("\u{2}".into()),
                 ModifiersState::CONTROL,
                 false
@@ -1572,20 +1862,20 @@ mod tests {
         );
         // The punctuation with a code, and one without.
         assert_eq!(
-            keyboard_bytes(&Key::Character("[".into()), ModifiersState::CONTROL, false),
+            legacy_bytes(&Key::Character("[".into()), ModifiersState::CONTROL, false),
             Some(vec![0x1b])
         );
         assert_eq!(
-            keyboard_bytes(&Key::Character("_".into()), ModifiersState::CONTROL, false),
+            legacy_bytes(&Key::Character("_".into()), ModifiersState::CONTROL, false),
             Some(vec![0x1f])
         );
         assert_eq!(
-            keyboard_bytes(&Key::Character("1".into()), ModifiersState::CONTROL, false),
+            legacy_bytes(&Key::Character("1".into()), ModifiersState::CONTROL, false),
             None
         );
         // Alt on top prefixes ESC.
         assert_eq!(
-            keyboard_bytes(
+            legacy_bytes(
                 &Key::Character("b".into()),
                 ModifiersState::CONTROL | ModifiersState::ALT,
                 false
@@ -1594,7 +1884,7 @@ mod tests {
         );
         // Ctrl+V stays the paste door and is not encoded here.
         assert_eq!(
-            keyboard_bytes(&Key::Character("v".into()), ModifiersState::CONTROL, false),
+            legacy_bytes(&Key::Character("v".into()), ModifiersState::CONTROL, false),
             None
         );
     }
@@ -1905,7 +2195,7 @@ mod tests {
             false,
         ));
         assert_eq!(
-            keyboard_bytes(&key, ModifiersState::CONTROL, false),
+            legacy_bytes(&key, ModifiersState::CONTROL, false),
             Some(vec![0x03])
         );
     }
@@ -1931,7 +2221,7 @@ mod tests {
         // winit reports the shifted letter in upper case on most layouts.
         assert!(is_paste_shortcut(&Key::Character("V".into()), ctrl_shift));
         // And the shifted paste never reaches the child as `^V`.
-        assert_eq!(keyboard_bytes(&paste, ctrl_shift, false), None);
+        assert_eq!(legacy_bytes(&paste, ctrl_shift, false), None);
         // The unshifted half is untouched.
         assert!(is_paste_shortcut(&paste, ModifiersState::CONTROL));
     }
@@ -1968,7 +2258,7 @@ mod tests {
         assert!(!is_paste_shortcut(&insert, ModifiersState::CONTROL));
         assert!(is_paste_shortcut(&insert, ModifiersState::SHIFT));
         assert_eq!(
-            keyboard_bytes(&insert, ModifiersState::CONTROL, false),
+            legacy_bytes(&insert, ModifiersState::CONTROL, false),
             Some(b"\x1b[2;5~".to_vec()),
             "with nothing selected the key is still the child's"
         );
@@ -1994,7 +2284,7 @@ mod tests {
             if !is_a_keystroke(*state, *is_synthetic) {
                 continue;
             }
-            if let Some(bytes) = keyboard_bytes(key, *modifiers, false) {
+            if let Some(bytes) = legacy_bytes(key, *modifiers, false) {
                 written.extend_from_slice(&bytes);
             }
         }
@@ -2123,23 +2413,20 @@ mod tests {
     #[test]
     fn the_windows_key_is_not_a_modifier_that_spells_anything() {
         let win = ModifiersState::SUPER;
-        assert_eq!(keyboard_bytes(&character("j"), win, false), None);
+        assert_eq!(legacy_bytes(&character("j"), win, false), None);
+        assert_eq!(legacy_bytes(&Key::Named(NamedKey::Space), win, false), None);
         assert_eq!(
-            keyboard_bytes(&Key::Named(NamedKey::Space), win, false),
-            None
-        );
-        assert_eq!(
-            keyboard_bytes(&character("j"), win.union(ModifiersState::SHIFT), false),
+            legacy_bytes(&character("j"), win.union(ModifiersState::SHIFT), false),
             None,
             "and it is not talked out of it by a second modifier"
         );
         // The same two keys with the Windows key up are the child's, unchanged.
         assert_eq!(
-            keyboard_bytes(&character("j"), ModifiersState::empty(), false),
+            legacy_bytes(&character("j"), ModifiersState::empty(), false),
             Some(b"j".to_vec())
         );
         assert_eq!(
-            keyboard_bytes(&Key::Named(NamedKey::Space), ModifiersState::empty(), false),
+            legacy_bytes(&Key::Named(NamedKey::Space), ModifiersState::empty(), false),
             Some(b" ".to_vec())
         );
     }
@@ -2166,7 +2453,7 @@ mod tests {
     fn a_control_chord_is_the_childs_on_macos() {
         for (letter, byte) in [("c", 0x03u8), ("d", 0x04), ("z", 0x1a), ("b", 0x02)] {
             assert_eq!(
-                keyboard_bytes(&character(letter), ModifiersState::CONTROL, false),
+                legacy_bytes(&character(letter), ModifiersState::CONTROL, false),
                 Some(vec![byte]),
                 "Ctrl+{letter} is the child's control code on every platform"
             );
@@ -2176,7 +2463,7 @@ mod tests {
         // shell should hear the letter of.
         for letter in ["c", "d", "z", "t", "w", "q"] {
             assert_eq!(
-                keyboard_bytes(&character(letter), CMD, false),
+                legacy_bytes(&character(letter), CMD, false),
                 None,
                 "Cmd+{letter} is the application's and sends nothing"
             );
@@ -2197,7 +2484,7 @@ mod tests {
     fn a_layouts_non_ascii_letter_reaches_the_child() {
         for letter in ["ü", "ä", "ö", "ß", "é", "å", "中"] {
             assert_eq!(
-                keyboard_bytes(&character(letter), ModifiersState::empty(), false),
+                legacy_bytes(&character(letter), ModifiersState::empty(), false),
                 Some(letter.as_bytes().to_vec()),
                 "{letter} is what the keyboard produced and the child hears it"
             );
@@ -2205,7 +2492,7 @@ mod tests {
         // With Alt genuinely held it is still `ESC` and the same bytes, which is
         // the one case the old guard let through and the reason the fault hid.
         assert_eq!(
-            keyboard_bytes(&character("«"), ModifiersState::ALT, false),
+            legacy_bytes(&character("«"), ModifiersState::ALT, false),
             Some(b"\x1b\xc2\xab".to_vec())
         );
     }
@@ -2228,7 +2515,7 @@ mod tests {
         let composed = effective_modifiers(ModifiersState::ALT, false, MAC);
         assert!(!composed.alt_key());
         assert_eq!(
-            keyboard_bytes(&character("å"), composed, false),
+            legacy_bytes(&character("å"), composed, false),
             Some("å".as_bytes().to_vec()),
             "Option is text, so the child hears the character and nothing else"
         );
@@ -2238,7 +2525,7 @@ mod tests {
         let meta = effective_modifiers(ModifiersState::ALT, true, MAC);
         assert!(meta.alt_key());
         assert_eq!(
-            keyboard_bytes(&character("a"), meta, false),
+            legacy_bytes(&character("a"), meta, false),
             Some(b"\x1ba".to_vec()),
         );
 
@@ -2556,5 +2843,762 @@ mod tests {
             "with nothing selected `Ctrl+C` is an interrupt"
         );
         assert!(should_copy_selection_on(&c, CMD, false, MAC));
+    }
+
+    // ── The keyboard protocols (T-KEYBOARD-PROTOCOL) ────────────────────────
+    //
+    // `docs/plans/design/keyboard-protocol-2026-09-29.md` §6.2. The table is data
+    // (`key_encoding.tsv`); the specs' own cases are literals beside it; what a program
+    // that never asked receives is held to what it received before
+    // (`key_encoding_legacy_{windows,macos}.tsv`, captured from the pre-ticket encoder).
+
+    const KEY_ENCODING: &str = include_str!("key_encoding.tsv");
+    const KEY_ENCODING_LEGACY_WINDOWS: &str = include_str!("key_encoding_legacy_windows.tsv");
+    const KEY_ENCODING_LEGACY_MACOS: &str = include_str!("key_encoding_legacy_macos.tsv");
+
+    const KITTY: KeyboardProtocol = KeyboardProtocol {
+        kitty: 1,
+        modify_other_keys: ModifyOtherKeys::Off,
+    };
+    const MOK1: KeyboardProtocol = KeyboardProtocol {
+        kitty: 0,
+        modify_other_keys: ModifyOtherKeys::One,
+    };
+    const MOK2: KeyboardProtocol = KeyboardProtocol {
+        kitty: 0,
+        modify_other_keys: ModifyOtherKeys::Two,
+    };
+    const UNASKED: KeyboardProtocol = KeyboardProtocol {
+        kitty: 0,
+        modify_other_keys: ModifyOtherKeys::Off,
+    };
+    const EVERY_MODE: [KeyboardProtocol; 4] = [UNASKED, KITTY, MOK1, MOK2];
+
+    fn protocol(mode: &str) -> KeyboardProtocol {
+        match mode {
+            "legacy" => UNASKED,
+            "kitty" => KITTY,
+            "mok1" => MOK1,
+            "mok2" => MOK2,
+            other => panic!("no mode `{other}`"),
+        }
+    }
+
+    /// `-`, or any of S, A, C in that order, as the table writes a chord.
+    fn chord(text: &str) -> ModifiersState {
+        let mut modifiers = ModifiersState::empty();
+        for letter in text.chars() {
+            modifiers |= match letter {
+                '-' => ModifiersState::empty(),
+                'S' => ModifiersState::SHIFT,
+                'A' => ModifiersState::ALT,
+                'C' => ModifiersState::CONTROL,
+                other => panic!("no modifier `{other}`"),
+            };
+        }
+        modifiers
+    }
+
+    /// What a US layout's key produces with Shift, as winit's logical key carries it on
+    /// Windows (Shift applied, Ctrl not).
+    fn us_shifted(character: char) -> char {
+        const PAIRS: &str = "`~1!2@3#4$5%6^7&8*9(0)-_=+[{]}\\|;:'\",<.>/?";
+        let pairs = PAIRS.chars().collect::<Vec<_>>();
+        pairs
+            .chunks(2)
+            .find(|pair| pair[0] == character)
+            .map_or_else(|| character.to_ascii_uppercase(), |pair| pair[1])
+    }
+
+    fn named(name: &str) -> Option<NamedKey> {
+        Some(match name {
+            "Enter" => NamedKey::Enter,
+            "Tab" => NamedKey::Tab,
+            "Backspace" => NamedKey::Backspace,
+            "Escape" => NamedKey::Escape,
+            "Space" => NamedKey::Space,
+            "ArrowUp" => NamedKey::ArrowUp,
+            "ArrowDown" => NamedKey::ArrowDown,
+            "ArrowLeft" => NamedKey::ArrowLeft,
+            "ArrowRight" => NamedKey::ArrowRight,
+            "Home" => NamedKey::Home,
+            "End" => NamedKey::End,
+            "Insert" => NamedKey::Insert,
+            "Delete" => NamedKey::Delete,
+            "PageUp" => NamedKey::PageUp,
+            "PageDown" => NamedKey::PageDown,
+            "F1" => NamedKey::F1,
+            "F2" => NamedKey::F2,
+            "F3" => NamedKey::F3,
+            "F4" => NamedKey::F4,
+            "F5" => NamedKey::F5,
+            "F6" => NamedKey::F6,
+            "F7" => NamedKey::F7,
+            "F8" => NamedKey::F8,
+            "F9" => NamedKey::F9,
+            "F10" => NamedKey::F10,
+            "F11" => NamedKey::F11,
+            "F12" => NamedKey::F12,
+            _ => return None,
+        })
+    }
+
+    /// The chord as winit hands it over on Windows with a US layout: `(logical key, key
+    /// without modifiers)`.
+    fn windows_us(name: &str, shift: bool) -> (Key, Key) {
+        if let Some(key) = named(name) {
+            return (Key::Named(key), Key::Named(key));
+        }
+        let mut characters = name.chars();
+        let base = characters.next().expect("a key name");
+        assert!(characters.next().is_none(), "one character: {name:?}");
+        let logical = if shift { us_shifted(base) } else { base };
+        (
+            Key::Character(logical.to_string().into()),
+            Key::Character(base.to_string().into()),
+        )
+    }
+
+    /// The table's escaped bytes: `CSI ` is ESC [; `\e`, `\r`, `\t`, `\xNN`; `—` is none.
+    fn unescape(text: &str) -> Option<Vec<u8>> {
+        if text == "—" {
+            return None;
+        }
+        let text = text.replace("CSI ", "\\e[");
+        let mut bytes = Vec::new();
+        let mut rest = text.as_str();
+        while let Some(character) = rest.chars().next() {
+            if let Some(escaped) = rest.strip_prefix('\\') {
+                let (byte, after) = match escaped.as_bytes().first() {
+                    Some(b'e') => (0x1b, &escaped[1..]),
+                    Some(b'r') => (b'\r', &escaped[1..]),
+                    Some(b't') => (b'\t', &escaped[1..]),
+                    Some(b'x') => (
+                        u8::from_str_radix(&escaped[1..3], 16).expect("two hex digits"),
+                        &escaped[3..],
+                    ),
+                    _ => panic!("no escape in {text:?}"),
+                };
+                bytes.push(byte);
+                rest = after;
+            } else {
+                let mut buffer = [0; 4];
+                bytes.extend_from_slice(character.encode_utf8(&mut buffer).as_bytes());
+                rest = &rest[character.len_utf8()..];
+            }
+        }
+        Some(bytes)
+    }
+
+    struct EncodingRow<'a> {
+        key: &'a str,
+        location: &'a str,
+        mods: &'a str,
+        decckm: &'a str,
+        mode: &'a str,
+        bytes: &'a str,
+        note: &'a str,
+    }
+
+    fn encoding_rows() -> Vec<EncodingRow<'static>> {
+        KEY_ENCODING
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .map(|line| {
+                let cells = line.split('\t').collect::<Vec<_>>();
+                assert_eq!(cells.len(), 7, "seven columns: {line:?}");
+                EncodingRow {
+                    key: cells[0],
+                    location: cells[1],
+                    mods: cells[2],
+                    decckm: cells[3],
+                    mode: cells[4],
+                    bytes: cells[5],
+                    note: cells[6],
+                }
+            })
+            .collect()
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **every row of `key_encoding.tsv` is what the encoder
+    /// sends**, and every `(table)` row is a chord the shortcut table claims, so the encoder
+    /// is never asked.
+    ///
+    /// The table is data: the design note's §4.4 was its first version, and from this ticket
+    /// on the TSV is the source (`docs/key-encoding.md` is generated from it). Each chord is
+    /// built as winit hands it over on Windows with a US layout.
+    ///
+    /// MUTATION: make `kitty_bytes` send `CSI Z` for Shift+Tab as legacy does (the
+    /// `Tab S kitty` row reads `CSI 9;2u`), or drop `Ctrl+Shift+M` from the shortcut table
+    /// (its `(table)` row is no longer claimed).
+    #[test]
+    fn every_row_of_the_key_encoding_table() {
+        let windows = crate::shortcuts::Shortcuts::defaults_for(HostPlatform::Windows);
+        let mut encoded = 0;
+        let mut claimed = 0;
+        for row in encoding_rows() {
+            let modifiers = chord(row.mods);
+            let (logical, base) = windows_us(row.key, modifiers.shift_key());
+            let where_ = format!(
+                "{} {} {} DECCKM {} {}",
+                row.key, row.location, row.mods, row.decckm, row.mode
+            );
+            if row.bytes == "(table)" {
+                assert!(
+                    windows
+                        .lookup(
+                            &logical,
+                            &base,
+                            modifiers,
+                            crate::shortcuts::Focus::default()
+                        )
+                        .is_some(),
+                    "{where_}: the table says the shortcut table claims this chord"
+                );
+                claimed += 1;
+                continue;
+            }
+            let location = match row.location {
+                "standard" => KeyLocation::Standard,
+                "numpad" => KeyLocation::Numpad,
+                other => panic!("no location `{other}`"),
+            };
+            let decckm = match row.decckm {
+                "off" => false,
+                "on" => true,
+                other => panic!("no DECCKM `{other}`"),
+            };
+            assert!(
+                matches!(row.note, "" | "system" | "n/a"),
+                "{where_}: no note `{}`",
+                row.note
+            );
+            let sent = keyboard_bytes(
+                &logical,
+                &base,
+                location,
+                modifiers,
+                decckm,
+                protocol(row.mode),
+            );
+            assert_eq!(
+                sent.as_deref().map(String::from_utf8_lossy),
+                unescape(row.bytes).as_deref().map(String::from_utf8_lossy),
+                "{where_}: the table says `{}`",
+                row.bytes
+            );
+            encoded += 1;
+        }
+        assert_eq!(
+            (encoded, claimed),
+            (343, 16),
+            "every row was read — a table that lost rows would pass a filter over nothing"
+        );
+    }
+
+    /// Render `key_encoding.tsv` as the document a reader opens.
+    fn key_encoding_document() -> String {
+        let mut order: Vec<(&str, &str, &str, &str)> = Vec::new();
+        let mut cells: std::collections::HashMap<(&str, &str, &str, &str), [String; 4]> =
+            std::collections::HashMap::new();
+        for row in encoding_rows() {
+            let id = (row.key, row.location, row.mods, row.decckm);
+            if !cells.contains_key(&id) {
+                order.push(id);
+            }
+            let column = ["legacy", "kitty", "mok1", "mok2"]
+                .iter()
+                .position(|mode| *mode == row.mode)
+                .expect("a known mode");
+            let value = match row.bytes {
+                "—" | "(table)" => row.bytes.to_owned(),
+                bytes => format!("`{bytes}`"),
+            };
+            let value = if row.note.is_empty() {
+                value
+            } else {
+                format!("{value} ({})", row.note)
+            };
+            cells.entry(id).or_default()[column] = value;
+        }
+        let mut document = String::from(
+            "# What each key sends\n\
+             \n\
+             <!-- generated from crates/bt-app/src/key_encoding.tsv by \
+             scripts/dev/generate-key-encoding-table.ps1; edit the table, not this page -->\n\
+             \n\
+             The bytes a key sends to the program in a pane, in each mode a program can ask for: \
+             nothing asked (*legacy*), the kitty keyboard protocol's first tier (*kitty flag 1*), \
+             or xterm's modifyOtherKeys (*1* or *2*). When a program asks for both, kitty wins. A \
+             program that never asks receives the legacy column, which is what Folio sent before \
+             either protocol existed here.\n\
+             \n\
+             `CSI` is `ESC [`. `—` sends nothing. *(table)* is a chord Folio's shortcut table \
+             claims on Windows, so no program receives it. *(system)* is taken by Windows first; \
+             *(n/a)* never arrives on Windows and is encoded for macOS. Chords are as a US layout \
+             produces them. The design is `docs/plans/design/keyboard-protocol-2026-09-29.md`.\n\
+             \n\
+             | Key | Where | Mods | DECCKM | legacy | kitty flag 1 | modifyOtherKeys 1 | modifyOtherKeys 2 |\n\
+             |---|---|---|---|---|---|---|---|\n",
+        );
+        for id in order {
+            let (key, location, mods, decckm) = id;
+            let [legacy, kitty, one, two] = &cells[&id];
+            let key = if key == "|" { "\\|" } else { key };
+            document.push_str(&format!(
+                "| {key} | {location} | {mods} | {decckm} | {legacy} | {kitty} | {one} | {two} |\n"
+            ));
+        }
+        document
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **`docs/key-encoding.md` is `key_encoding.tsv`, rendered.**
+    ///
+    /// The rendering is left in `target/key-encoding.md`, which
+    /// `scripts/dev/generate-key-encoding-table.ps1` copies into place — the pattern of
+    /// `window_waits.tsv` and ARCHITECTURE §5.3: one list, so the page and the test cannot
+    /// say different things.
+    ///
+    /// MUTATION: change any byte in `key_encoding.tsv` without regenerating the page.
+    #[test]
+    fn the_key_encoding_document_is_the_table() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let wanted = key_encoding_document();
+        let generated = root.join("target").join("key-encoding.md");
+        std::fs::create_dir_all(root.join("target")).expect("the workspace has a target directory");
+        std::fs::write(&generated, wanted.as_bytes()).expect("target/ is writable");
+        let held = std::fs::read_to_string(root.join("docs").join("key-encoding.md"))
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
+        assert!(
+            held == wanted,
+            "docs/key-encoding.md is not key_encoding.tsv — run \
+             scripts/dev/generate-key-encoding-table.ps1"
+        );
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **the cases the specifications themselves state**, as
+    /// literals, independent of `key_encoding.tsv`.
+    ///
+    /// A wrong TSV would make the generated page and the exhaustive test agree with each
+    /// other; these come from the kitty protocol's text and xterm's reference and are not read
+    /// from the table.
+    ///
+    /// MUTATION: send `CSI 27u`'s legacy `\e` for a lone Esc under flag 1, or honour DECCKM
+    /// for a plain arrow under flag 1 (`SS3 A`).
+    #[test]
+    fn the_protocols_normative_cases() {
+        let none = ModifiersState::empty();
+        let named = |key: NamedKey| Key::Named(key);
+        let text = |text: &str| Key::Character(text.into());
+        let flag1 = |key: &Key, base: &Key, modifiers: ModifiersState| {
+            keyboard_bytes(key, base, KeyLocation::Standard, modifiers, false, KITTY)
+        };
+        let esc = named(NamedKey::Escape);
+        let tab = named(NamedKey::Tab);
+        let enter = named(NamedKey::Enter);
+        let space = named(NamedKey::Space);
+        assert_eq!(flag1(&esc, &esc, none), Some(b"\x1b[27u".to_vec()));
+        assert_eq!(
+            flag1(&text("i"), &text("i"), ModifiersState::CONTROL),
+            Some(b"\x1b[105;5u".to_vec())
+        );
+        assert_eq!(flag1(&tab, &tab, none), Some(b"\t".to_vec()));
+        assert_eq!(
+            flag1(&text("m"), &text("m"), ModifiersState::CONTROL),
+            Some(b"\x1b[109;5u".to_vec())
+        );
+        assert_eq!(flag1(&enter, &enter, none), Some(b"\r".to_vec()));
+        assert_eq!(
+            flag1(&tab, &tab, ModifiersState::SHIFT),
+            Some(b"\x1b[9;2u".to_vec())
+        );
+        assert_eq!(
+            flag1(&text("a"), &text("a"), ModifiersState::ALT),
+            Some(b"\x1b[97;3u".to_vec())
+        );
+        assert_eq!(
+            flag1(&space, &space, ModifiersState::CONTROL),
+            Some(b"\x1b[32;5u".to_vec())
+        );
+        assert_eq!(
+            keyboard_bytes(&enter, &enter, KeyLocation::Numpad, none, false, KITTY),
+            Some(b"\x1b[57414u".to_vec())
+        );
+        assert_eq!(
+            flag1(&enter, &enter, ModifiersState::CONTROL),
+            Some(b"\x1b[13;5u".to_vec())
+        );
+        let up = named(NamedKey::ArrowUp);
+        assert_eq!(
+            keyboard_bytes(&up, &up, KeyLocation::Standard, none, true, KITTY),
+            Some(b"\x1b[A".to_vec())
+        );
+        let f1 = named(NamedKey::F1);
+        let f3 = named(NamedKey::F3);
+        assert_eq!(flag1(&f1, &f1, none), Some(b"\x1b[P".to_vec()));
+        assert_eq!(flag1(&f3, &f3, none), Some(b"\x1b[13~".to_vec()));
+
+        let mode = |key: &Key, base: &Key, modifiers: ModifiersState, protocol| {
+            keyboard_bytes(key, base, KeyLocation::Standard, modifiers, false, protocol)
+        };
+        assert_eq!(
+            mode(&enter, &enter, ModifiersState::CONTROL, MOK2),
+            Some(b"\x1b[27;5;13~".to_vec())
+        );
+        assert_eq!(
+            mode(&text("A"), &text("a"), ModifiersState::SHIFT, MOK2),
+            Some(b"\x1b[27;2;65~".to_vec())
+        );
+        assert_eq!(
+            mode(
+                &text("A"),
+                &text("a"),
+                ModifiersState::SHIFT | ModifiersState::CONTROL,
+                MOK2
+            ),
+            Some(b"\x1b[27;6;65~".to_vec())
+        );
+        assert_eq!(
+            mode(&text("a"), &text("a"), ModifiersState::CONTROL, MOK1),
+            Some(vec![0x01])
+        );
+        assert_eq!(
+            mode(&text("a"), &text("a"), ModifiersState::ALT, MOK1),
+            Some(b"\x1b[27;3;97~".to_vec())
+        );
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **a program that never asked receives exactly the bytes it
+    /// received before this ticket**, for every key of the sweep under all sixteen
+    /// combinations of Shift, Alt, Ctrl and Super, with DECCKM off and on.
+    ///
+    /// `key_encoding_legacy_windows.tsv` and `key_encoding_legacy_macos.tsv` were captured, each on
+    /// its platform, from the encoder as it stood on main before T-KEYBOARD-PROTOCOL. This is the promise the design note makes of PowerShell, cmd and
+    /// Codex on Windows: byte-identical.
+    ///
+    /// MUTATION: let the kitty rules run when no protocol is in force (Esc sends `CSI 27u`).
+    #[test]
+    fn a_program_that_never_asked_gets_exactly_the_bytes_it_got_before() {
+        let baseline = match bt_platform::host_platform() {
+            HostPlatform::Windows => KEY_ENCODING_LEGACY_WINDOWS,
+            HostPlatform::MacOs => KEY_ENCODING_LEGACY_MACOS,
+            other => panic!("no pre-ticket capture was made on {other:?}"),
+        };
+        let mut compared = 0;
+        for line in baseline
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+        {
+            let cells = line.split('\t').collect::<Vec<_>>();
+            let [key, bits, decckm, hex] = cells[..] else {
+                panic!("four columns: {line:?}");
+            };
+            let bits = bits.parse::<u8>().expect("modifier bits");
+            let mut modifiers = ModifiersState::empty();
+            for (bit, modifier) in [
+                (1, ModifiersState::SHIFT),
+                (2, ModifiersState::ALT),
+                (4, ModifiersState::CONTROL),
+                (8, ModifiersState::SUPER),
+            ] {
+                if bits & bit != 0 {
+                    modifiers |= modifier;
+                }
+            }
+            let (logical, base) = windows_us(key, modifiers.shift_key());
+            let sent = keyboard_bytes(
+                &logical,
+                &base,
+                KeyLocation::Standard,
+                modifiers,
+                decckm == "1",
+                UNASKED,
+            );
+            let sent = sent.map_or_else(
+                || "-".to_owned(),
+                |bytes| bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+            );
+            assert_eq!(sent, hex, "{key} mods {bits} DECCKM {decckm}");
+            compared += 1;
+        }
+        assert_eq!(compared, 2368, "the whole captured sweep");
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **no letter is special**: every letter `a`–`z`, under Ctrl
+    /// and under Alt+Ctrl, in all four modes.
+    ///
+    /// MUTATION: special-case `Ctrl+C` ahead of the protocols as the legacy path does (`c`
+    /// under flag 1 reads `\x03`).
+    #[test]
+    fn every_letter_under_ctrl_and_alt_ctrl_in_every_mode() {
+        let alt_ctrl = ModifiersState::ALT | ModifiersState::CONTROL;
+        for letter in 'a'..='z' {
+            let key = Key::Character(letter.to_string().into());
+            let code = u32::from(letter);
+            let control = (letter as u8) & 0x1f;
+            for (modifiers, m) in [(ModifiersState::CONTROL, 5), (alt_ctrl, 7)] {
+                let sent = |protocol| {
+                    keyboard_bytes(
+                        &key,
+                        &key,
+                        KeyLocation::Standard,
+                        modifiers,
+                        false,
+                        protocol,
+                    )
+                };
+                if is_paste_shortcut(&key, modifiers) {
+                    // The paste chord of this platform (`Ctrl+V` off a Mac) never reaches
+                    // the encoder's bytes in any mode: the paste door has it.
+                    for protocol in EVERY_MODE {
+                        assert_eq!(sent(protocol), None, "{letter} is the paste chord");
+                    }
+                    continue;
+                }
+                let legacy = if letter == 'c' || m == 5 {
+                    vec![control]
+                } else {
+                    vec![0x1b, control]
+                };
+                assert_eq!(sent(UNASKED), Some(legacy), "{letter} legacy");
+                assert_eq!(
+                    sent(KITTY),
+                    Some(format!("\x1b[{code};{m}u").into_bytes()),
+                    "{letter} kitty"
+                );
+                let mok1 = if m == 5 {
+                    vec![control]
+                } else {
+                    format!("\x1b[27;{m};{code}~").into_bytes()
+                };
+                assert_eq!(sent(MOK1), Some(mok1), "{letter} mok1");
+                assert_eq!(
+                    sent(MOK2),
+                    Some(format!("\x1b[27;{m};{code}~").into_bytes()),
+                    "{letter} mok2"
+                );
+            }
+        }
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **a text key's code is the layout's un-shifted key**: `é`
+    /// with Ctrl is `CSI 233;5u`, and Russian `ф` is 1092 — what kitty itself sends without
+    /// flag 4.
+    ///
+    /// MUTATION: take the code from the ASCII key under the character (`Ctrl+ф` reads 97).
+    #[test]
+    fn a_text_keys_code_is_the_layouts_unshifted_key() {
+        let e_acute = Key::Character("é".into());
+        assert_eq!(
+            keyboard_bytes(
+                &e_acute,
+                &e_acute,
+                KeyLocation::Standard,
+                ModifiersState::CONTROL,
+                false,
+                KITTY
+            ),
+            Some(b"\x1b[233;5u".to_vec())
+        );
+        let ef = Key::Character("ф".into());
+        let capital_ef = Key::Character("Ф".into());
+        assert_eq!(
+            keyboard_bytes(
+                &capital_ef,
+                &ef,
+                KeyLocation::Standard,
+                ModifiersState::SHIFT | ModifiersState::ALT,
+                false,
+                KITTY
+            ),
+            Some(b"\x1b[1092;4u".to_vec())
+        );
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **AltGr text is text in every mode, and Super sends nothing
+    /// in any protocol.**
+    ///
+    /// On Windows winit removes Ctrl and Alt while AltGr is held, so `@` on a German layout
+    /// arrives with no modifier and is text in all four modes. Super — the Windows key, or
+    /// Command on a Mac — is never encoded: a chord holding it sends nothing under either
+    /// protocol, and a letter with it sends nothing without one, as before. (Legacy keeps what
+    /// it sent before for the named keys: `Super+Enter` is `\r` there, which
+    /// `a_program_that_never_asked_gets_exactly_the_bytes_it_got_before` pins.)
+    ///
+    /// MUTATION: drop `modifiers.super_key()` from `withheld_from_every_protocol` (Super+Enter
+    /// reads `CSI 13;9u` under flag 1).
+    #[test]
+    fn altgr_text_is_text_and_super_sends_nothing() {
+        let at = Key::Character("@".into());
+        let q = Key::Character("q".into());
+        for protocol in EVERY_MODE {
+            assert_eq!(
+                keyboard_bytes(
+                    &at,
+                    &q,
+                    KeyLocation::Standard,
+                    ModifiersState::empty(),
+                    false,
+                    protocol
+                ),
+                Some(b"@".to_vec()),
+                "{protocol:?}"
+            );
+            let j = Key::Character("j".into());
+            assert_eq!(
+                keyboard_bytes(
+                    &j,
+                    &j,
+                    KeyLocation::Standard,
+                    ModifiersState::SUPER,
+                    false,
+                    protocol
+                ),
+                None,
+                "{protocol:?}"
+            );
+        }
+        let enter = Key::Named(NamedKey::Enter);
+        for protocol in [KITTY, MOK1, MOK2] {
+            for modifiers in [
+                ModifiersState::SUPER,
+                ModifiersState::SUPER | ModifiersState::CONTROL,
+                ModifiersState::SUPER | ModifiersState::SHIFT,
+            ] {
+                assert_eq!(
+                    keyboard_bytes(
+                        &enter,
+                        &enter,
+                        KeyLocation::Standard,
+                        modifiers,
+                        false,
+                        protocol
+                    ),
+                    None,
+                    "{protocol:?} {modifiers:?}"
+                );
+            }
+        }
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **on a Mac, Option types text unless the setting makes it
+    /// Alt**, under the protocol as without it.
+    ///
+    /// With *Option key sends Alt* off, `effective_modifiers` takes Alt away and `⌥a` is the
+    /// text `å`; with it on, Alt is Alt and flag 1 sends `CSI 97;3u`.
+    ///
+    /// MUTATION: encode the reported modifiers instead of the effective ones at the call site
+    /// (`⌥a` would read `CSI 97;3u` with the setting off).
+    #[test]
+    fn macos_option_types_text_unless_the_setting_makes_it_alt() {
+        let a = Key::Character("a".into());
+        let a_ring = Key::Character("å".into());
+        let off = effective_modifiers(ModifiersState::ALT, false, HostPlatform::MacOs);
+        assert_eq!(
+            keyboard_bytes(&a_ring, &a, KeyLocation::Standard, off, false, KITTY),
+            Some("å".as_bytes().to_vec())
+        );
+        let on = effective_modifiers(ModifiersState::ALT, true, HostPlatform::MacOs);
+        assert_eq!(
+            keyboard_bytes(&a, &a, KeyLocation::Standard, on, false, KITTY),
+            Some(b"\x1b[97;3u".to_vec())
+        );
+        // A Mac may hand a Ctrl chord over as the control character itself; the code is the
+        // key without modifiers, in both protocols.
+        let control_e = Key::Character("\u{5}".into());
+        let e = Key::Character("e".into());
+        let ctrl_shift = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(
+            keyboard_bytes(
+                &control_e,
+                &e,
+                KeyLocation::Standard,
+                ctrl_shift,
+                false,
+                KITTY
+            ),
+            Some(b"\x1b[101;6u".to_vec())
+        );
+        assert_eq!(
+            keyboard_bytes(
+                &control_e,
+                &e,
+                KeyLocation::Standard,
+                ctrl_shift,
+                false,
+                MOK2
+            ),
+            Some(b"\x1b[27;6;69~".to_vec())
+        );
+    }
+
+    /// Encode one key the way `Runtime::keyboard_input` does: the protocol read from the
+    /// terminal at the moment of the key.
+    fn encoded_by(
+        terminal: &bt_term::TerminalAdapter,
+        key: &Key,
+        modifiers: ModifiersState,
+    ) -> Vec<u8> {
+        keyboard_bytes(
+            key,
+            key,
+            KeyLocation::Standard,
+            modifiers,
+            terminal.application_cursor_mode(),
+            terminal.modes().keyboard,
+        )
+        .unwrap_or_default()
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **the golden replays: what Codex on Unix and Claude Code
+    /// write, and what they then receive.**
+    ///
+    /// Codex (crossterm): `CSI ? u`, then `CSI > 7 u` (disambiguate, event types, alternate
+    /// keys — Folio honours the first). Plain Enter stays `\r`, Ctrl+Enter is `CSI 13;5u`,
+    /// Shift+Enter `CSI 13;2u`, Esc `CSI 27u`, `a` is `a`, and no release event is sent for
+    /// anything. Its exit (`CSI < 1 u`, `CSI < u`, `CSI > 4 ; 0 m`) puts Ctrl+Enter back to
+    /// `\r`. Claude Code asks for `CSI > 5 u` and `CSI > 4 ; 2 m`: kitty wins, so Ctrl+Enter
+    /// is `CSI 13;5u` and not `CSI 27;5;13~`.
+    ///
+    /// MUTATION: prefer modifyOtherKeys over kitty in `keyboard_bytes` (the Claude Code replay
+    /// reads `CSI 27;5;13~`).
+    #[test]
+    fn the_golden_replays_of_codex_on_unix_and_claude_code() {
+        let enter = Key::Named(NamedKey::Enter);
+        let esc = Key::Named(NamedKey::Escape);
+        let a = Key::Character("a".into());
+        let one = std::num::NonZeroU32::new(24).expect("nonzero");
+        let mut codex = bt_term::TerminalAdapter::new(one, one);
+        codex.feed(b"\x1b[?u\x1b[>7u");
+        assert_eq!(codex.take_pty_writes(), vec![b"\x1b[?0u".to_vec()]);
+        assert_eq!(encoded_by(&codex, &enter, ModifiersState::empty()), b"\r");
+        assert_eq!(
+            encoded_by(&codex, &enter, ModifiersState::CONTROL),
+            b"\x1b[13;5u"
+        );
+        assert_eq!(
+            encoded_by(&codex, &enter, ModifiersState::SHIFT),
+            b"\x1b[13;2u"
+        );
+        assert_eq!(
+            encoded_by(&codex, &esc, ModifiersState::empty()),
+            b"\x1b[27u"
+        );
+        assert_eq!(encoded_by(&codex, &a, ModifiersState::empty()), b"a");
+        codex.feed(b"\x1b[<1u\x1b[<u\x1b[>4;0m");
+        assert_eq!(encoded_by(&codex, &enter, ModifiersState::CONTROL), b"\r");
+
+        let mut claude = bt_term::TerminalAdapter::new(one, one);
+        claude.feed(b"\x1b[?u\x1b[>5u\x1b[>4;2m");
+        assert_eq!(
+            encoded_by(&claude, &enter, ModifiersState::CONTROL),
+            b"\x1b[13;5u",
+            "kitty wins over modifyOtherKeys"
+        );
+        assert_eq!(
+            encoded_by(&claude, &enter, ModifiersState::SHIFT),
+            b"\x1b[13;2u"
+        );
     }
 }

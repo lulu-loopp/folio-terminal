@@ -25,6 +25,7 @@ members = [
     "vendor/alacritty_terminal",
     "vendor/mitex",
     "vendor/mitex-parser",
+    "vendor/vte",
 ]
 
 [workspace.package]
@@ -238,7 +239,12 @@ unicode-width = "0.2"
 # vendored `alacritty_terminal`, under `bt-term`, under `bt-app`, so the whole
 # stack including the test harness was rebuilt whenever the two selections
 # alternated. Naming `std` buys the same crate and makes the two agree.
-vte = { version = "0.15", default-features = false, features = ["std"] }
+#
+# Pinned exactly, and patched to `vendor/vte` below: Folio changes three of its
+# dispatch arms for the kitty keyboard protocol and xterm's modifyOtherKeys
+# (`vendor/vte/CHANGES-FOLIO.md`), and a 0.15.x out-resolving the copy would
+# undo them.
+vte = { version = "=0.15.0", default-features = false, features = ["std"] }
 wgpu = { version = "30.0.0", default-features = false, features = ["std", "dx12", "wgsl"] }
 winit = { version = "0.30.13", default-features = false, features = ["rwh_06"] }
 
@@ -302,3 +308,4 @@ alacritty_terminal = { path = "vendor/alacritty_terminal" }
 mitex = { path = "vendor/mitex" }
 mitex-parser = { path = "vendor/mitex-parser" }
 portable-pty = { path = "vendor/conpty/portable-pty" }
+vte = { path = "vendor/vte" }

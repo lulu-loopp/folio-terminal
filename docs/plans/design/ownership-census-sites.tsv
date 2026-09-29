@@ -410,7 +410,7 @@ LeafSession.session	write	crate	Runtime::return_to_live_for_input	call:release_p
 LeafSession.session	write	crate	TabState::clear_leaf_selection	call:set_view_selection	1
 LeafSession.session	write	crate	TabState::set_leaf_selection	call:set_view_selection	1
 LeafSession.session	write	crate	apply_leaf_metrics	call:set_ascii_baseline_subpixels,call:set_cell_height_subpixels,call:set_cell_width_subpixels,call:set_font_size_subpixels	4
-LeafSession.session	write	crate	drain_leaf_pty	call:feed_at,call:set_color_palette,call:set_keyboard_focus,call:take_notifications	4
+LeafSession.session	write	crate	drain_leaf_pty	call:feed_at,call:set_color_palette,call:set_keyboard_focus,call:take_keyboard_protocol_notes,call:take_notifications	5
 LeafSession.session	write	crate	forget_work_in_flight_for_seat	call:forget_work_in_flight	1
 LeafSession.session	write	crate	mark_leaf_seen	call:clear_attention	1
 LeafSession.session	write	crate	schedule_leaf_grid_change	call:resize_at	1

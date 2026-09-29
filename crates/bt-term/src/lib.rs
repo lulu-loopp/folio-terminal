@@ -14,9 +14,9 @@ mod scheduling;
 mod session;
 
 pub use adapter::{
-    AdapterEvent, MouseTracking, RemovalCause, RemovalContext, RemovalScope, RemovalScreen,
-    RemovedLiveRow, SCROLLBACK_LINES, TerminalAdapter, TerminalCursor, TerminalDamage,
-    TerminalModes,
+    AdapterEvent, KeyboardProtocol, ModifyOtherKeys, MouseTracking, RemovalCause, RemovalContext,
+    RemovalScope, RemovalScreen, RemovedLiveRow, SCROLLBACK_LINES, SUPPORTED_KITTY_FLAGS,
+    TerminalAdapter, TerminalCursor, TerminalDamage, TerminalModes,
 };
 pub use bounded_cache::{BoundedCache, Weighed};
 pub use bt_detect::DetectionTask;

@@ -1,6 +1,9 @@
 // MODIFIED BY THE FOLIO CONTRIBUTORS — not the upstream
 // alacritty_terminal 0.26.0 file of the same name.
-// Change: reformatted to this repository's rustfmt settings, and nothing else.
+// Change: one added variant, `Event::KeyboardFlagsRefused`, which the kitty
+// keyboard protocol's handlers in `term/mod.rs` send when a request asks for
+// flags the terminal does not honour. The rest is this repository's rustfmt
+// settings.
 // Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
 // Notice given under section 4(b) of the Apache License, Version 2.0.
 
@@ -65,6 +68,13 @@ pub enum Event {
 
     /// Child process exited.
     ChildExit(ExitStatus),
+
+    /// Folio: a kitty keyboard protocol request (`CSI > flags u`, `CSI = flags ; mode u`) asked
+    /// for flags this terminal does not honour ([`crate::term::Config::kitty_keyboard_flags`]).
+    ///
+    /// `requested` is the flags value exactly as written, all sixteen bits of it; `in_force` is
+    /// what the active screen holds once the request has been applied.
+    KeyboardFlagsRefused { requested: u16, in_force: u8 },
 }
 
 impl Debug for Event {
@@ -83,6 +93,13 @@ impl Debug for Event {
             Event::Bell => write!(f, "Bell"),
             Event::Exit => write!(f, "Exit"),
             Event::ChildExit(status) => write!(f, "ChildExit({status:?})"),
+            Event::KeyboardFlagsRefused {
+                requested,
+                in_force,
+            } => write!(
+                f,
+                "KeyboardFlagsRefused(requested {requested:#b}, in force {in_force:#b})"
+            ),
         }
     }
 }

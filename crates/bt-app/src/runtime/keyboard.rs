@@ -1967,16 +1967,26 @@ impl Runtime<'_> {
         // (§7.1.6h). Declined here rather than at the write, so that a folder tab
         // never reaches the "typing into the stand-in shell is what makes it
         // yours" bookkeeping in `send_user_input`.
-        let Some(application_cursor_mode) = self
-            .focused()
-            .map(|leaf| leaf.session.application_cursor_mode())
-        else {
+        //
+        // **The key encoding the program asked for is read here too, the way DECCKM
+        // always was** (T-KEYBOARD-PROTOCOL, design note §2.3): one read of the
+        // session-owned terminal state this thread already holds, at the moment of the
+        // key — no door, no lock, no wait.
+        let Some((application_cursor_mode, keyboard)) = self.focused().map(|leaf| {
+            (
+                leaf.session.application_cursor_mode(),
+                leaf.session.terminal_modes().keyboard,
+            )
+        }) else {
             return Ok(());
         };
         let Some(bytes) = input::keyboard_bytes(
             &event.logical_key,
+            &event.key_without_modifiers(),
+            event.location,
             self.window.modifiers,
             application_cursor_mode,
+            keyboard,
         ) else {
             return Ok(());
         };
