@@ -1014,3 +1014,6 @@ if ($failures.Count -gt 0) {
     throw "the dead-code gate failed: $($failures.Count) finding(s), each on its own line above"
 }
 Write-Host "the dead-code list only shrinks: $($sites.Count) sites, $dated dated."
+# Explicitly: `git show` of a base without the list leaves 1 in `$LASTEXITCODE`, and GitHub's
+# `pwsh` shell ends a step with `exit $LASTEXITCODE` (the note above `gates-can-fail` in ci.yml).
+exit 0

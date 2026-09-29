@@ -88,8 +88,17 @@ function New-Tree {
     return $root
 }
 
-function Invoke-Gate([string]$root) {
-    $output = & $pwsh -NoLogo -NoProfile -File (Join-Path $root 'scripts/ci/check-dead-code.ps1') 2>&1
+# `-AsCiStep` runs the gate the way a GitHub `pwsh` step does: the step's script, then
+# `exit $LASTEXITCODE`, so a native command's status left behind by a gate that passed
+# turns the step red (the first CI run of this gate went red exactly so).
+function Invoke-Gate([string]$root, [switch]$AsCiStep) {
+    $gatePath = Join-Path $root 'scripts/ci/check-dead-code.ps1'
+    if ($AsCiStep) {
+        $step = "& '$($gatePath.Replace("'", "''"))'`nif (Test-Path variable:\LASTEXITCODE) { exit `$LASTEXITCODE }"
+        $output = & $pwsh -NoLogo -NoProfile -Command $step 2>&1
+    } else {
+        $output = & $pwsh -NoLogo -NoProfile -File $gatePath 2>&1
+    }
     $code = $LASTEXITCODE
     $text = ($output | ForEach-Object { "$_" }) -join "`n"
     return [pscustomobject]@{ ExitCode = $code; Text = $text; Flat = ($text -replace '\s+', ' ') }
@@ -256,6 +265,15 @@ Test-Case 'a merge base without the list passes, and says it is the commit that 
     $result = Invoke-Gate (New-Tree -Name 'introduced' -Base $bare -Now $now)
     if ($result.ExitCode -ne 0) { throw "it exited $($result.ExitCode): $($result.Text)" }
     if ($result.Flat -notmatch 'this is the commit that introduces it, and it has 1 rows\.') { throw "it did not say so: $($result.Text)" }
+}
+
+Test-Case 'a gate that passed leaves a CI step green, even after a git call that failed' {
+    # The base has no list, so the gate's `git show` of it fails on the way to a pass.
+    $bare = @{ 'crates/demo/src/lib.rs' = $lib }
+    $now = @{ 'docs/plans/DEAD-CODE.tsv' = (Get-List @($listedRow)) }
+    $result = Invoke-Gate (New-Tree -Name 'as-ci-step' -Base $bare -Now $now) -AsCiStep
+    if ($result.ExitCode -ne 0) { throw "the step exited $($result.ExitCode): $($result.Text)" }
+    if ($result.Flat -notmatch 'the dead-code list only shrinks: 1 sites, 0 dated\.') { throw "the gate did not pass: $($result.Text)" }
 }
 
 Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue

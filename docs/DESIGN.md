@@ -13147,4 +13147,4 @@ U-33 shipped `at_launch` built and not called, under `#[expect(dead_code)]`, and
 
 **Product code** is every `.rs` under `crates/*/src` except `tests.rs`, `*_tests.rs`, files under a `tests/` directory in `src`, the files a crate reaches only through a `#[cfg(test)]` module declaration, and everything inside an item carrying `#[cfg(test)]`, found by a walk over the tokens rather than a pattern over the text.
 
-**Pinned by** `scripts/ci/check-dead-code.ps1` (CI `logic`), its thirteen cases in `scripts/ci/check-dead-code-tests.ps1` and the planted row in `gates-can-fail`. The triage of the 90 listed sites (which wait for a named ticket, which name a shipped one, which are test helpers in product files) is ticket U-44b.
+**Pinned by** `scripts/ci/check-dead-code.ps1` (CI `logic`), its fourteen cases in `scripts/ci/check-dead-code-tests.ps1` and the planted row in `gates-can-fail`. The triage of the 90 listed sites (which wait for a named ticket, which name a shipped one, which are test helpers in product files) is ticket U-44b.
