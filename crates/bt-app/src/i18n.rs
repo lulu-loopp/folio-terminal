@@ -336,29 +336,13 @@ const fn pick_platform(
 /// have to be renamed with it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Text {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
-        )
-    )]
+    // Printed by uninstall.cmd, which holds its own copy; the archive source pin
+    // compares the two, so these three exist for the tests alone.
+    #[cfg(test)]
     CleanupArchiveExit,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
-        )
-    )]
+    #[cfg(test)]
     CleanupArchiveReady,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Printed by uninstall.cmd; the archive source pin checks this copy."
-        )
-    )]
+    #[cfg(test)]
     CleanupArchiveIncomplete,
 
     CleanupRecovery,
@@ -4802,12 +4786,15 @@ impl Text {
                 "left (OS runtime lock files are kept to preserve single-instance exclusion)",
                 "已保留（运行时锁文件用于单实例互斥）",
             ),
+            #[cfg(test)]
             Self::CleanupArchiveExit => pick(lang, "Cleanup exit code:", "清理退出码："),
+            #[cfg(test)]
             Self::CleanupArchiveReady => pick(
                 lang,
                 "You can now delete the Folio application folder. Your settings and data were kept.",
                 "现在可以删除 Folio 应用文件夹。设置和数据已保留。",
             ),
+            #[cfg(test)]
             Self::CleanupArchiveIncomplete => pick(
                 lang,
                 "Cleanup did not complete. Read the result above before deleting the folder.",

@@ -531,17 +531,15 @@ pub struct Feed {
 #[derive(serde::Deserialize)]
 struct FeedRelease {
     tag_name: String,
-    #[expect(
-        dead_code,
-        reason = "required of the feed's shape (the releases list's); the check does not read it"
-    )]
-    name: String,
+    /// Required of the feed's shape (the releases list's); the check does not read it, hence
+    /// the leading underscore.
+    #[serde(rename = "name")]
+    _name: String,
     draft: bool,
-    #[expect(
-        dead_code,
-        reason = "required of the feed's shape (the releases list's); the check offers pre-releases as the page's list does"
-    )]
-    prerelease: bool,
+    /// Required of the feed's shape; the check offers pre-releases as the page's list does, so
+    /// it does not read it either.
+    #[serde(rename = "prerelease")]
+    _prerelease: bool,
     assets: Vec<FeedAsset>,
 }
 

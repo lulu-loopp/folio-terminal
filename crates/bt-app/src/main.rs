@@ -13151,7 +13151,7 @@ struct WindowRuntime {
     /// before there were any — it reads the preference once, at start-up.
     #[expect(
         dead_code,
-        reason = "held for its Drop; the subclass talks to the loop through the \
+        reason = "permanent: held for its Drop; the subclass talks to the loop through the \
                   event proxy it was built with, never through this field"
     )]
     system_settings_watch: Option<bt_platform::SystemSettingsWatch>,
@@ -20999,15 +20999,8 @@ enum MouseRoute {
 /// argument, and both questions are answered by methods **on this enum**. That is the same shape,
 /// in the same place, for the same reason as [`Self::returns_view_to_live`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-// The five members below `Keyboard` are the ones whose call sites A2 moves over — the IME commit,
-// the paste, the files row and the three mouse doors all write through this function today and
-// pass the one kind that existed. Naming them here first is what lets the ledger be built and
-// tested against the real vocabulary; `expect` rather than `allow` so that the first call site A2
-// converts takes the attribute away with it.
-#[allow(
-    dead_code,
-    reason = "A2 converts the five call sites that will pass these"
-)]
+// Every door that writes a user's input names its kind: the keyboard, the IME commit, the paste,
+// the files row and the three mouse doors (button, wheel, motion).
 enum UserInputKind {
     Keyboard,
     /// An IME **commit**. Composition updates nothing but the window's own preedit and puts no
@@ -21052,16 +21045,11 @@ impl UserInputKind {
     /// answer, a colour report, focus reporting, the PSReadLine repair — are not writes of a *kind*
     /// at all and never reach this door; they are structurally out of reach rather than excluded by
     /// a list (`attention` plan red line 10).
-    #[allow(dead_code, reason = "A2 gates the answer door on this")]
-    fn is_answer(self) -> bool {
-        self.answer_kind().is_some()
-    }
-
-    /// The same answer, in the vocabulary the ledger's `by=` field is written from.
     ///
-    /// `None` for the one kind that is not an answer, so that "a pointer sweep answered a request"
-    /// is a sentence that cannot be constructed rather than one that is checked for.
-    #[allow(dead_code, reason = "A2 passes the result of this to the ledger")]
+    /// Answered in the vocabulary the ledger's `by=` field is written from, and asked by the one
+    /// door every answer goes through (`answer_attention_in`). `None` for the one kind that is not
+    /// an answer, so that "a pointer sweep answered a request" is a sentence that cannot be
+    /// constructed rather than one that is checked for.
     fn answer_kind(self) -> Option<attention::AnswerKind> {
         Some(match self {
             Self::Keyboard => attention::AnswerKind::Keyboard,
@@ -36420,7 +36408,7 @@ impl Layered {
     /// reaches each band through the one call site that draws it — the same
     /// arrangement `GitFilterMenuLayout::rows` keeps, and for its reason: a list
     /// the product walked would be a second way of deciding what is on the glass.
-    #[allow(dead_code)]
+    #[cfg(test)]
     const ALL: [Self; 19] = [
         Self::Popup(Popup::Profile),
         Self::Popup(Popup::Root),
@@ -38994,7 +38982,8 @@ fn tear_pane_into_tab(
     if !from.seats.close_seat(metrics, seat.id) {
         return None;
     }
-    let mut torn = pane_into_new_tab(from, &seat, id, false, solve)?;
+    let pinned = seed::PinMigration::DraggedOutToNewTab.resulting_pin(from.pinned);
+    let mut torn = pane_into_new_tab(from, &seat, id, pinned, solve)?;
     torn.landing.start(now, motion);
     Some(torn)
 }
@@ -39551,7 +39540,7 @@ fn absorb_tab_sessions(source: &mut TabState, target: &mut TabState, arrived: &[
             target.focused_leaf = *now;
         }
     }
-    target.pinned |= source.pinned;
+    target.pinned |= seed::PinMigration::MergedInto.resulting_pin(source.pinned);
     debug_assert!(
         source.sessions.is_empty(),
         "T226: a merge takes the whole fleet, so no empty tab is left holding shells"
@@ -39615,7 +39604,7 @@ fn absorb_tab_into_layout(
     ejected_id: TabId,
     solve: impl FnOnce(&seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>),
 ) -> Option<TabState> {
-    let host_pinned = target.pinned;
+    let host_pinned = seed::PinMigration::PoppedOut.resulting_pin(target.pinned);
     absorb_tab_sessions(source, target, arrived);
     let ejected =
         displaced.and_then(|seat| pane_into_new_tab(target, seat, ejected_id, host_pinned, solve));

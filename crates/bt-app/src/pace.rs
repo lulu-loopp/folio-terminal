@@ -247,6 +247,10 @@ impl FrameClock {
     ///
     /// A window that has never presented is owed its first frame immediately:
     /// there is no picture on the glass to be a frame behind.
+    ///
+    /// Asked by the tests that pin the clock; the window asks
+    /// [`Self::deadline`] and [`Self::is_due`] instead.
+    #[cfg(test)]
     #[must_use]
     pub fn next_frame(&self, last_present: Option<Instant>, now: Instant) -> Instant {
         last_present.map_or(now, |last| last + self.interval)

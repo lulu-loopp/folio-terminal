@@ -93,7 +93,6 @@ impl TextField {
     /// and typed into. It is kept because it is the one constructor a *restore*
     /// would use, and because every test below would otherwise open with four
     /// lines of `insert`.
-    #[allow(dead_code)]
     #[must_use]
     pub fn holding(text: &str) -> Self {
         Self {
@@ -154,7 +153,6 @@ impl TextField {
 
     /// Where the caret is, as a byte index — what the tests assert against and
     /// what a second reader of this field would place a candidate window from.
-    #[allow(dead_code)]
     #[must_use]
     pub fn caret(&self) -> usize {
         self.caret

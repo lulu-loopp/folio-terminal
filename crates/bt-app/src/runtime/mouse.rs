@@ -2257,6 +2257,10 @@ impl Runtime<'_> {
             hit.column,
             self.window.modifiers,
         );
+        // The third mouse door classifies itself like the other two: the enum is where "a
+        // pointer sweep answers nothing" is decided (`UserInputKind::answer_kind`), not the
+        // absence of a call here (`attention` plan §11.3).
+        self.answer_attention(seat, UserInputKind::MouseMotion);
         self.send_mouse_input_to(seat, &bytes, "forward SGR mouse motion to PTY")
     }
 

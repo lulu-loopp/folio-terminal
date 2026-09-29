@@ -480,12 +480,11 @@ pub fn path_names_a_page(path: &std::path::Path) -> bool {
 
 /// Whether a name is a patch, which is read and never edited.
 ///
-/// `#[allow(dead_code)]`: this and [`is_editable`] are the block's *judgement*
-/// about which surface a file gets, and the surfaces that consume it — the diff
-/// view and the quick-edit textarea — are slices 2 and 3. The judgement is
-/// written and pinned by test now rather than then, because the mock-up got it
-/// wrong twice in two places (P58/P107) and a rule discovered at the second call
-/// site is a rule the first one has already broken.
+/// This and [`is_editable`] are the block's *judgement* about which surface a
+/// file gets, and the diff view and the quick-edit textarea are what consume
+/// it. The judgement was written and pinned by test before them, because the
+/// mock-up got it wrong twice in two places (P58/P107) and a rule discovered at
+/// the second call site is a rule the first one has already broken.
 ///
 /// The judgement is the name's rather than the type's because `.diff` and
 /// `.patch` sit inside the text list: they are text, they are shown as a diff,
@@ -497,7 +496,6 @@ pub fn path_names_a_page(path: &std::path::Path) -> bool {
 /// what [`PreviewBuffer::source`] says it is, decided in [`PreviewBuffer::view`],
 /// and never because somebody gave it a display name ending in `.diff` so that
 /// this rule would sweep it up.
-#[allow(dead_code)]
 pub fn is_diff_name(name: &str) -> bool {
     matches!(extension_of(name).as_str(), "diff" | "patch")
 }
@@ -4562,7 +4560,6 @@ pub enum PreviewSource {
     },
     /// One repository's commit graph. Keyed by the repo alone: there is one
     /// graph per repository and it is the same graph whoever asks.
-    #[allow(dead_code)]
     GitGraph { root: PathBuf },
     /// **One page** (Web 预览块 W2 片③) — the normalised, whole URL.
     ///
@@ -6247,7 +6244,6 @@ pub struct PreviewPool {
 impl PreviewPool {
     /// How many buffers are alive. The header's count badge is slice 4's; this
     /// is what the cap is asserted against.
-    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.buffers.len()
     }

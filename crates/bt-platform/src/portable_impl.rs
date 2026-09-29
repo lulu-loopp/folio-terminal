@@ -126,15 +126,10 @@ fn not_here(what: &str) -> String {
 /// watches.
 #[cfg(not(target_os = "macos"))]
 pub struct Compositor {
-    /// The window this tree would hang on. Held rather than used: M1-4 needs it
-    /// the moment there is a layer to put on the view, and a `Compositor` that
-    /// did not remember its window would be a different type by then.
-    #[expect(
-        dead_code,
-        reason = "M1-4 reads it to reach the window's view; holding it now is what keeps the \
-                  type's shape the same on both platforms"
-    )]
-    window: NativeWindow,
+    /// The window this tree would hang on, held so that this arm's type keeps
+    /// the shape of the other two; nothing reads it, because there is no layer
+    /// to put on a view here — hence the leading underscore.
+    _window: NativeWindow,
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -149,7 +144,7 @@ impl Compositor {
         window: NativeWindow,
     ) -> Result<Self, String> {
         let _ = token;
-        Ok(Self { window })
+        Ok(Self { _window: window })
     }
 
     /// The tree is told the window's new size. Nothing to tell.
@@ -270,7 +265,8 @@ pub struct CustomWindowFrame {
         not(target_os = "macos"),
         expect(
             dead_code,
-            reason = "only the macOS arm has a native title bar to reach back into"
+            reason = "permanent: read on macOS only; that arm alone has a native title bar to \
+                      reach back into"
         )
     )]
     window: NativeWindow,
@@ -504,13 +500,9 @@ impl Taskbar {
 pub struct SystemSettingsWatch {
     /// The callback, held so that its lifetime is the watch's exactly as on
     /// Windows — a wake that could fire after the watch was dropped is the one
-    /// defect this type's shape exists to make impossible.
-    #[expect(
-        dead_code,
-        reason = "M1-3 calls it from the notification observer; holding it now keeps the \
-                  ownership contract identical on both platforms"
-    )]
-    wake: Box<dyn Fn()>,
+    /// defect this type's shape exists to make impossible. Held for its drop and
+    /// never called here, hence the leading underscore.
+    _wake: Box<dyn Fn()>,
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
@@ -518,7 +510,7 @@ impl SystemSettingsWatch {
     /// Install the watch. Constructs, subscribes to nothing, and never wakes.
     pub fn install(window: NativeWindow, wake: Box<dyn Fn()>) -> Result<Self, String> {
         let _ = window;
-        Ok(Self { wake })
+        Ok(Self { _wake: wake })
     }
 }
 
@@ -614,15 +606,16 @@ pub type FilePickKind = ShellPickKind;
 /// nor AppKit gets, which §4.6 of the plan requires to keep building.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub struct MathContextMenu {
-    #[expect(dead_code, reason = "M2-3 pops the menu over this window")]
-    window: NativeWindow,
+    /// Held so that this arm's type keeps the shape of the other two; a refusal
+    /// needs no window, hence the leading underscore.
+    _window: NativeWindow,
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
 impl MathContextMenu {
     /// Install the deferred menu. Never fails.
     pub fn new(window: NativeWindow) -> Result<Self, String> {
-        Ok(Self { window })
+        Ok(Self { _window: window })
     }
 
     /// Ask for the menu. Refused, with the reason a toast can carry.
@@ -650,15 +643,16 @@ impl MathContextMenu {
 /// there was a sheet, which is not a modal loop at all.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub struct FolderPicker {
-    #[expect(dead_code, reason = "M2-3 sheets the panel onto this window")]
-    window: NativeWindow,
+    /// Held so that this arm's type keeps the shape of the other two; a refusal
+    /// needs no window, hence the leading underscore.
+    _window: NativeWindow,
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
 impl FolderPicker {
     /// Install the deferred chooser. Never fails.
     pub fn new(window: NativeWindow) -> Result<Self, String> {
-        Ok(Self { window })
+        Ok(Self { _window: window })
     }
 
     /// Ask for the chooser. Refused.
@@ -683,15 +677,16 @@ impl FolderPicker {
 /// program row unfiltered.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub struct ImagePicker {
-    #[expect(dead_code, reason = "M2-3 sheets the panel onto this window")]
-    window: NativeWindow,
+    /// Held so that this arm's type keeps the shape of the other two; a refusal
+    /// needs no window, hence the leading underscore.
+    _window: NativeWindow,
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
 impl ImagePicker {
     /// Install the deferred chooser. Never fails.
     pub fn new(window: NativeWindow) -> Result<Self, String> {
-        Ok(Self { window })
+        Ok(Self { _window: window })
     }
 
     /// Ask for the chooser. Refused.
@@ -715,15 +710,16 @@ impl ImagePicker {
 /// (`macos_dialogs::SaveFilePicker`).
 #[cfg(not(any(windows, target_os = "macos")))]
 pub struct SaveFilePicker {
-    #[expect(dead_code, reason = "a Linux arm would put its panel over this window")]
-    window: NativeWindow,
+    /// Held so that this arm's type keeps the shape of the other two; a refusal
+    /// needs no window, hence the leading underscore.
+    _window: NativeWindow,
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
 impl SaveFilePicker {
     /// Install the deferred dialog. Never fails.
     pub fn new(window: NativeWindow) -> Result<Self, String> {
-        Ok(Self { window })
+        Ok(Self { _window: window })
     }
 
     /// Ask for the dialog. Refused.
@@ -753,15 +749,16 @@ impl SaveFilePicker {
 /// appears wherever the system puts it. `update`'s caller already ignores the
 /// answer.
 pub struct ImeSystemCaret {
-    #[expect(dead_code, reason = "M1-8 decides whether this door survives at all")]
-    window: NativeWindow,
+    /// Held so that this arm's type keeps the shape of the Windows one; a caret
+    /// that moves nothing needs no window, hence the leading underscore.
+    _window: NativeWindow,
 }
 
 impl ImeSystemCaret {
     /// Infallible on both platforms — the type has no error to return.
     #[must_use]
     pub fn new(window: NativeWindow) -> Self {
-        Self { window }
+        Self { _window: window }
     }
 
     /// Move the caret. Nothing is moved; see the type's note.

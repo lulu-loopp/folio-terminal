@@ -36,14 +36,12 @@
 //! arrives in the shape the panel wants. What stays on the event loop is filing
 //! the answer into the seat that asked.
 //!
-//! **Half of this module has no caller yet, and says so.** This slice is the
-//! data plane; the page that draws it is G-2 and the diff wiring is G-3. The
-//! items only that page will call carry `#[allow(dead_code)]` rather than being
-//! left out, for the reason `PreviewSource`'s two git cases carry one: a model
-//! built one question at a time as the panel needs it is a model shaped by the
-//! panel's drawing order, and the shape that matters here is git's. Each such
-//! item names the slice that will call it, so an `allow` that outlives its excuse
-//! is visible rather than merely tolerated.
+//! **The model was built before the page that draws it** (G-1 before G-2 and
+//! G-3), because a model built one question at a time as the panel needs it is
+//! a model shaped by the panel's drawing order, and the shape that matters here
+//! is git's. The page and the diff view read it now; the few accessors only the
+//! tests ask (`count`, `fault`, `log_refs`, `GIT_NEVER_WORDS`) are
+//! `#[cfg(test)]`, because the page reaches the same facts another way.
 //!
 //! **The locale is forced to `C`.** Every child gets `LC_ALL=C`, because two of
 //! git's machine-readable outputs are not purely machine-readable: `git
@@ -487,7 +485,7 @@ pub enum GitWriteVerb {
 /// Read by that test and by nothing else, which is exactly what a boundary
 /// written as data looks like: the commands themselves come from
 /// [`write_arguments`], and this is the list they are held against.
-#[allow(dead_code)]
+#[cfg(test)]
 pub const GIT_NEVER_WORDS: [&str; 10] = [
     "merge",
     "rebase",
@@ -1146,7 +1144,6 @@ impl StatusCode {
 
     /// The badge's letter — git's own, so that a row and a `git status` in the
     /// pane beside it read the same. Drawn by G-2's two badges (R11).
-    #[allow(dead_code)]
     #[must_use]
     pub fn letter(self) -> char {
         match self {
@@ -1174,7 +1171,6 @@ impl StatusCode {
 ///
 /// The three headings are G-2's to draw; the membership rule is here, because it
 /// is a fact about git's letters rather than about a list.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitGroup {
     Staged,
@@ -1265,7 +1261,6 @@ impl GitStatusEntry {
     /// letters say nothing about it.
     ///
     /// Read by G-2, which colours a conflicted row with the error ink (R29).
-    #[allow(dead_code)]
     #[must_use]
     pub fn is_conflict(&self) -> bool {
         matches!(self.staged, Some(StatusCode::Unmerged))
@@ -1283,7 +1278,6 @@ impl GitStatusEntry {
     /// occupies both. Ignored (`!!`) belongs to no list at all: we never ask for
     /// it, and if a caller ever does, the honest place for a file git was told to
     /// forget is nowhere rather than under a heading that claims it changed.
-    #[allow(dead_code)]
     #[must_use]
     pub fn in_group(&self, group: GitGroup) -> bool {
         let real = |code: Option<StatusCode>| {
@@ -1329,7 +1323,6 @@ pub struct GitStatus {
 
 impl GitStatus {
     /// The entries of one list, in git's order.
-    #[allow(dead_code)]
     pub fn group(&self, group: GitGroup) -> impl Iterator<Item = &GitStatusEntry> {
         self.entries
             .iter()
@@ -1337,7 +1330,7 @@ impl GitStatus {
     }
 
     /// What a group heading counts (R7 — every heading carries its number).
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn count(&self, group: GitGroup) -> usize {
         self.group(group).count()
@@ -2866,7 +2859,7 @@ impl<T> GitSlot<T> {
 
     /// The reason there is no answer — G-2's empty states and its one-line
     /// banner (R17, W3).
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn fault(&self) -> Option<&GitFault> {
         match self {
@@ -3110,7 +3103,6 @@ impl GitCache {
     /// and by the manual refresh. It is the whole of R31's second invalidation
     /// moment: nothing else in this module ever decides on its own that what it
     /// knows has gone stale.
-    #[allow(dead_code)]
     pub fn refresh(&mut self) {
         self.status = GitSlot::Idle;
         self.refs = GitSlot::Idle;
@@ -3244,19 +3236,16 @@ impl GitCache {
     // whole slot rather than its contents, because "not asked yet", "asked",
     // "here it is" and "here is why not" are four different rows and a page that
     // could only see the third would draw an empty list for all four.
-    #[allow(dead_code)]
     #[must_use]
     pub fn repo(&self) -> &GitSlot<PathBuf> {
         &self.repo
     }
 
-    #[allow(dead_code)]
     #[must_use]
     pub fn status(&self) -> &GitSlot<GitStatus> {
         &self.status
     }
 
-    #[allow(dead_code)]
     #[must_use]
     pub fn refs(&self) -> &GitSlot<Vec<GitRefEntry>> {
         &self.refs
@@ -3267,7 +3256,7 @@ impl GitCache {
     /// Read by the tests that pin `set_log_refs`' contract; the window itself
     /// only ever *writes* it, because what the filter is is the seat's own state
     /// and this is where the question is built from.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn log_refs(&self) -> &[String] {
         &self.log_refs
@@ -3531,7 +3520,6 @@ impl GitCache {
         }
     }
 
-    #[allow(dead_code)]
     #[must_use]
     pub fn more_commits(&self) -> Option<GitQuestion> {
         let root = self.repo.ready()?;

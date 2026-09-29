@@ -366,13 +366,13 @@ impl SeedVault {
         &self.entries
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
@@ -486,12 +486,15 @@ pub fn pins_are_normalized<T>(tabs: &[T], is_pinned: impl Fn(&T) -> bool) -> boo
 }
 
 /// How a pin travels when panes move between tabs — `P1-11`, quoted into
-/// `docs/DESIGN.md` §7.1.4 as three rules. T5 owns the gestures; the rules live
-/// here so both tickets read the same sentence.
-#[allow(dead_code)]
+/// `docs/DESIGN.md` §7.1.4 as three rules. The gestures ask it rather than
+/// restate it: the merge in `absorb_tab_sessions` (N160①), the displaced pane
+/// in `absorb_tab_into_layout` (N160②) and the drag out in
+/// `tear_pane_into_tab`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PinMigration {
-    /// A tab is merged into a target: the target inherits the pin.
+    /// A tab is merged into a target: the target inherits the pin. Inheriting
+    /// adds a pin and never takes the target's own away (N160①), so the merge
+    /// ORs this answer into the target's.
     MergedInto,
     /// A pane is pushed back out to the strip: it keeps the origin tab's pin.
     PoppedOut,
@@ -500,7 +503,6 @@ pub enum PinMigration {
     DraggedOutToNewTab,
 }
 
-#[allow(dead_code)]
 impl PinMigration {
     /// Whether the resulting tab is pinned, given the origin tab's pin.
     #[must_use]

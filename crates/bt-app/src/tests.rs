@@ -23872,10 +23872,8 @@ fn anchored_mouse_forwarding_uses_live_viewport_rows_and_clamps_frozen_rows() {
         UserInputKind::MouseButton,
         UserInputKind::MouseWheel,
     ] {
-        assert!(answering.is_answer(), "{answering:?}");
         assert!(answering.answer_kind().is_some(), "{answering:?}");
     }
-    assert!(!UserInputKind::MouseMotion.is_answer());
     assert_eq!(UserInputKind::MouseMotion.answer_kind(), None);
 
     let mut session =
