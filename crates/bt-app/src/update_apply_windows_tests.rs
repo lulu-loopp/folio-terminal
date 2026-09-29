@@ -152,6 +152,7 @@ enum Trial {
 }
 
 type MoveHook = Box<dyn FnMut(&Move) + Send>;
+type SayHook = Box<dyn FnMut(&str) + Send>;
 type DisarmHook = Box<dyn FnMut() + Send>;
 
 /// **The stand-in world**: its lines kept, the entrance through the real door
@@ -189,6 +190,8 @@ struct Fake {
     refuse_every_start: bool,
     /// The failure windows shown in this process (U-34, round 2).
     shown: Vec<String>,
+    /// Looks at every line as it is said (U-37).
+    on_say: Option<SayHook>,
     /// **Acknowledge a start only as the product does** (U-37, H.3): a Folio
     /// holding the data directory, asked through `update_apply::claimed_within`
     /// for this long — a denied claim question is no acknowledgement.
@@ -197,6 +200,9 @@ struct Fake {
 
 impl World for Fake {
     fn say(&mut self, line: &str) {
+        if let Some(look) = &mut self.on_say {
+            look(line);
+        }
         if line.contains("could not be recorded") && !self.keep_held {
             // The scanner lets go: the rollback's own records go through.
             self.held = None;
@@ -445,6 +451,7 @@ impl Install {
             },
             starter: None,
             handed_back: None,
+            as_046: false,
         }
     }
 
@@ -467,6 +474,7 @@ impl Install {
             starts_die: 0,
             refuse_every_start: false,
             shown: Vec::new(),
+            on_say: None,
             real_ack: None,
         }
     }
@@ -3514,6 +3522,30 @@ fn adoption_needs_a_receipt_naming_the_exact_process() {
         );
     }
 
+    // Several receipts, none of them naming the running process exactly: no
+    // adoption.
+    let Some(install) = moved_in("exact-several-none") else {
+        return;
+    };
+    let running = install.start_trial();
+    receipt_as(&install, Nonce::new([0x61; 32]), &stale(&install, running));
+    let no_started = Nonce::new([0x65; 32]);
+    receipt_as(
+        &install,
+        no_started,
+        &Receipt {
+            txn: install.txn,
+            nonce: no_started,
+            pid: running.pid,
+            version: "0.4.7".to_owned(),
+            started: None,
+        },
+    );
+    let (_code, world) =
+        recovered_at_logon(&install, limits(5_000, 5_000), install.world(Trial::Silent));
+    assert!(deferred(&world), "several, none exact: {:?}", world.said);
+    assert_eq!(install.on_disk().body.phase, Phase::Moving);
+
     // Several receipts: a stale one, and the exact one, which commits.
     let Some(install) = moved_in("exact-several") else {
         return;
@@ -3875,5 +3907,768 @@ fn a_trial_hands_back_only_to_a_rescue_build_that_knows_the_word() {
                 ready: false
             })
         );
+    }
+}
+
+// ── design revision (h), round 5 (Codex's review of 153f7cb2) ───────────────
+
+/// **What H.3's step 3 is given, for one row of its table**: whether a process
+/// of the new build runs (and whether `H\<txn>` can be listed), and the data
+/// directory's claim.
+#[derive(Clone, Copy, Debug)]
+enum Candidate {
+    Seen,
+    NotSeen,
+    Unlistable,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Claim {
+    Held,
+    Free,
+    Denied,
+}
+
+/// **The row's world, made**: the candidate started (and `H\<txn>` moved aside
+/// for `Unlistable`, answered back by the returned guard), the claim held by
+/// this process or squatted.
+struct Row {
+    _candidate: Option<TrialProcess>,
+    _held: Option<bt_platform::instance::DataDirectoryClaim>,
+    _squat: Option<bt_platform::trust_harness::Squat>,
+    aside: Option<(PathBuf, PathBuf)>,
+}
+
+impl Drop for Row {
+    fn drop(&mut self) {
+        if let Some((folder, aside)) = self.aside.take() {
+            std::fs::rename(aside, folder).unwrap();
+        }
+    }
+}
+
+fn make_row(install: &Install, candidate: Candidate, claim: Claim) -> Row {
+    let running = match candidate {
+        Candidate::NotSeen => None,
+        _ => Some(install.start_trial()),
+    };
+    let aside = matches!(candidate, Candidate::Unlistable).then(|| {
+        let folder = install.home.transaction(install.txn);
+        let aside = folder.with_extension("aside");
+        std::fs::rename(&folder, &aside).unwrap();
+        (folder, aside)
+    });
+    let (held, squat) = match claim {
+        Claim::Held => (
+            Some(crate::persist::try_claim(&install.data).expect("the claim, held here")),
+            None,
+        ),
+        Claim::Free => (None, None),
+        Claim::Denied => (
+            None,
+            Some(bt_platform::trust_harness::squat_the_claim(&install.data).unwrap()),
+        ),
+    };
+    Row {
+        _candidate: running,
+        _held: held,
+        _squat: squat,
+        aside,
+    }
+}
+
+/// RED (U-37, design revision (h) H.3, the nine-row table) — **every row of
+/// H.3's table ends as the table says, at logon and for a person's start: a
+/// candidate seen defers and the guard starts nothing beside it; a held claim
+/// defers and the guard starts nothing (it is the window); a denied claim
+/// question or an unlistable folder with a free claim defers and a person's
+/// start is still delivered — its starts unacknowledged, the fallback, then
+/// the failure window here; only no candidate with a free claim decides.**
+///
+/// Codex's review of `153f7cb2`, finding 4: six of the nine cells had no test.
+///
+/// MUTATION: in `update_apply::before_deciding`, ask the claim before the
+/// candidates (a held claim then hides a candidate: the successor is lost).
+#[test]
+fn the_nine_rows_of_h3_each_end_as_the_table_says() {
+    use Candidate::{NotSeen, Seen, Unlistable};
+    use Claim::{Denied, Free, Held};
+    // The deferral the recovery says; and whether a person's start is
+    // delivered (U-34's starts and the window here) or not (a Folio is the
+    // window).
+    let rows: [(Candidate, Claim, Option<&str>, bool); 9] = [
+        (Seen, Held, Some("no receipt names it"), false),
+        (Seen, Free, Some("no receipt names it"), false),
+        (Seen, Denied, Some("no receipt names it"), false),
+        (
+            NotSeen,
+            Held,
+            Some("a Folio holds the data directory"),
+            false,
+        ),
+        (NotSeen, Free, None, false),
+        (NotSeen, Denied, Some("cannot be asked about"), true),
+        (
+            Unlistable,
+            Held,
+            Some("a Folio holds the data directory"),
+            false,
+        ),
+        (Unlistable, Free, Some("cannot be read"), true),
+        (Unlistable, Denied, Some("cannot be read"), true),
+    ];
+    for (at, (candidate, claim, deferral, delivered)) in rows.into_iter().enumerate() {
+        let Some(install) = moved_in(&format!("row{at}")) else {
+            return;
+        };
+        let row = make_row(&install, candidate, claim);
+        let Some(deferral) = deferral else {
+            let (code, world) =
+                recovered_at_logon(&install, limits(5_000, 5_000), install.world(Trial::Silent));
+            drop(row);
+            assert_eq!(code, 0, "row {at}: {:?}", world.said);
+            assert!(!deferred(&world), "row {at}: {:?}", world.said);
+            rolled_back_on_disk(&install);
+            continue;
+        };
+        let (_code, world) =
+            recovered_at_logon(&install, limits(5_000, 5_000), install.world(Trial::Silent));
+        assert!(
+            said_at(&world, deferral).is_some(),
+            "row {at} {candidate:?}/{claim:?}: {:?}",
+            world.said
+        );
+        assert!(world.opened.is_empty(), "row {at}: nobody waits at logon");
+        assert_eq!(install.on_disk().body.phase, Phase::Moving, "row {at}");
+        let mut person = install.world(Trial::Silent);
+        person.real_ack = Some(Duration::from_millis(600));
+        let (_code, world) = recovered(&install, limits(5_000, 5_000), person);
+        drop(row);
+        assert!(
+            said_at(&world, deferral).is_some(),
+            "row {at}: {:?}",
+            world.said
+        );
+        assert!(world.launched.is_empty(), "row {at}: no trial launched");
+        if delivered {
+            assert_eq!(world.opened.len(), 2, "row {at}: {:?}", world.said);
+            assert_eq!(world.shown.len(), 1, "row {at}");
+        } else {
+            assert!(world.opened.is_empty(), "row {at}: {:?}", world.said);
+        }
+        assert!(
+            install.holds(Place::Install, &install.new),
+            "row {at}: nothing moved"
+        );
+    }
+}
+
+/// RED (U-37; Codex's review of `153f7cb2`, finding 1) — **before a fresh
+/// `Stuck`'s retrial the same step fails closed, and its deferral is the
+/// road's end: over a held claim nothing is started beside its holder; a
+/// denied claim question or a transaction folder that cannot be listed end
+/// `Deferred`, and a person's start is delivered as H.3 says.**
+///
+/// A road declared the rollback, its first move back is refused (a foreign
+/// file where the new one goes), so the journal becomes `Stuck` with the new
+/// set live, and the recovery handed a person's start reaches its retrial.
+///
+/// MUTATION: in `Txn::retry_as_trial`, answer the earlier `ended` for
+/// `Pre::Stop` (the round-4 code).
+#[test]
+fn a_deferral_before_a_fresh_stuck_retrial_is_the_roads_end() {
+    for claim in [Claim::Held, Claim::Denied, Claim::Free] {
+        let Some(install) = Install::new(&format!("stuck-{claim:?}")) else {
+            return;
+        };
+        flipped_at(&install, Phase::RollbackIntent { trial: None });
+        block_rolledout(&install);
+        let unlistable = matches!(claim, Claim::Free);
+        let row = make_row(&install, Candidate::NotSeen, claim);
+        let mut world = install.world(Trial::Silent);
+        world.real_ack = Some(Duration::from_millis(600));
+        let _candidate = unlistable.then(|| install.start_trial());
+        if unlistable {
+            // The folder goes the moment the rollback says it is stuck,
+            // before the retrial's look.
+            let folder = install.home.transaction(install.txn);
+            world.on_say = Some(Box::new(move |line| {
+                if line.contains("the update is incomplete") {
+                    let _ = std::fs::rename(&folder, folder.with_extension("aside"));
+                }
+            }));
+        }
+        let (_code, world) = recovered(&install, limits(5_000, 5_000), world);
+        if unlistable {
+            let folder = install.home.transaction(install.txn);
+            std::fs::rename(folder.with_extension("aside"), &folder).unwrap();
+        }
+        drop(row);
+        let expected = match claim {
+            Claim::Held => "Deferred(Held)",
+            Claim::Denied => "Deferred(Denied(",
+            Claim::Free => "Deferred(Unlistable(",
+        };
+        assert!(
+            said_at(&world, expected).is_some(),
+            "{claim:?}: {:?}",
+            world.said
+        );
+        assert!(
+            matches!(install.on_disk().body.phase, Phase::Stuck { .. }),
+            "{claim:?}"
+        );
+        assert!(world.launched.is_empty(), "{claim:?}: no retrial");
+        if matches!(claim, Claim::Held) {
+            assert!(
+                world.opened.is_empty(),
+                "nothing beside the holder: {:?}",
+                world.said
+            );
+        } else {
+            assert_eq!(world.opened.len(), 2, "{claim:?}: {:?}", world.said);
+            assert_eq!(world.shown.len(), 1, "{claim:?}");
+        }
+    }
+}
+
+/// RED (U-37, design revision (h), the rollout contract; Codex's review of
+/// `153f7cb2`, finding 3(b)) — **the direct hop, as one road: a rescue build of
+/// 0.4.6's shape (no adoption, no deferral) with a trial of 0.4.7 — its receipt
+/// carrying `started` — commits the recorded trial by its nonce, and does not
+/// adopt an unrecorded one (it rolls back under it, as 0.4.6 does); the 0.4.7
+/// trial hands nothing back to a rescue build whose version is 0.4.6; and the
+/// same unrecorded trial beside a rescue build of 0.4.7 is adopted.**
+///
+/// MUTATION: in `Txn::before_deciding`, ignore `as_046` (a 0.4.6 road that
+/// adopts).
+#[test]
+fn the_direct_hop_from_0_4_6_ends_as_0_4_6_ends_it() {
+    let exact = |install: &Install, nonce: Nonce, process: TrialProcess| {
+        receipt_as(
+            install,
+            nonce,
+            &Receipt {
+                txn: install.txn,
+                nonce,
+                pid: process.pid,
+                version: "0.4.7".to_owned(),
+                started: Some(process.started),
+            },
+        );
+    };
+    let as_046 = |install: &Install| {
+        let mut road = install.road(limits(5_000, 5_000));
+        road.as_046 = true;
+        road
+    };
+    let run = |road: Road, mut world: Fake| {
+        on_a_worker(move |worker| {
+            let code = crate::update_recover::run_windows(worker, &road, None, &mut world);
+            (code, world)
+        })
+    };
+
+    // Recorded: 0.4.6 commits by the nonce, whatever `started` says.
+    let Some(install) = Install::new("hop-recorded") else {
+        return;
+    };
+    flipped_at(&install, Phase::Moving);
+    let trial = install.start_trial();
+    let nonce = Nonce::new([0x71; 32]);
+    install.write(Phase::Trial {
+        nonce,
+        process: trial,
+        began_ms: now_ms(),
+    });
+    exact(&install, nonce, trial);
+    let (code, world) = run(as_046(&install), install.world(Trial::Silent));
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert!(
+        wrote(&world).ends_with("[Committed, Retired]"),
+        "{:?}",
+        world.said
+    );
+
+    // Unrecorded: 0.4.6 does not adopt; it rolls back, as it always did.
+    let Some(install) = moved_in("hop-unrecorded") else {
+        return;
+    };
+    let trial = install.start_trial();
+    exact(&install, Nonce::new([0x72; 32]), trial);
+    let (_code, world) = run(as_046(&install), install.world(Trial::Silent));
+    assert!(
+        !wrote(&world).contains("Trial") && wrote(&world).contains("RollbackIntent"),
+        "{:?}",
+        world.said
+    );
+
+    // The 0.4.7 trial hands nothing back to a 0.4.6 rescue build.
+    let Some(install) = moved_in("hop-hand-back") else {
+        return;
+    };
+    std::fs::remove_file(&install.rescue).unwrap();
+    bt_platform::trust_harness::program(
+        &install.rescue,
+        FileVersion([0, 4, 6, 0]),
+        bt_platform::trust_harness::Behaviour::Returns,
+    )
+    .unwrap();
+    struct Refused(usize);
+    impl crate::update_trial::Starter for Refused {
+        fn start(&mut self, _program: &Path, _line: &[OsString]) -> io::Result<u32> {
+            self.0 += 1;
+            Ok(std::process::id())
+        }
+    }
+    let (home, txn) = (install.home.clone(), install.txn);
+    let starts = on_a_worker(move |worker| {
+        let mut refused = Refused(0);
+        let _ = crate::update_trial::hand_back(
+            worker,
+            &home,
+            txn,
+            true,
+            crate::update_trial::FROM_TRIAL_SINCE,
+            &mut refused,
+        );
+        refused.0
+    });
+    assert_eq!(starts, 0, "no hand-back to 0.4.6");
+
+    // The same unrecorded trial beside a rescue build of 0.4.7: adopted.
+    let trial = install.start_trial();
+    exact(&install, Nonce::new([0x73; 32]), trial);
+    let (code, world) = run(
+        install.road(limits(5_000, 5_000)),
+        install.world(Trial::Silent),
+    );
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert!(
+        wrote(&world).ends_with("[Trial, Committed, Retired]"),
+        "{:?}",
+        world.said
+    );
+}
+
+// ── the real road: a trial's watch hands back to a recovery of its own ──────
+
+/// The environment a child copy of this test binary reads its part from.
+const ROAD_CHILD: &str = "BT_U37_ROAD_CHILD";
+const ROAD_ROOT: &str = "BT_U37_ROAD_ROOT";
+const ROAD_LINE: &str = "BT_U37_ROAD_LINE";
+
+/// This test's own name, for its children.
+const ROAD_TEST: &str = "update_apply_windows::tests::a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers";
+
+/// **What the parent tells its children**, one fact a line in `road.txt`.
+struct RoadPlan {
+    home: PathBuf,
+    installed: PathBuf,
+    rescue: PathBuf,
+    runner: PathBuf,
+    data: PathBuf,
+    txn: TxnId,
+    /// `ready`, `unready` or `refused` (ready, its receipt never written).
+    mode: String,
+    every_ms: u64,
+}
+
+impl RoadPlan {
+    fn write(&self, root: &Path) {
+        let text = [
+            self.home.display().to_string(),
+            self.installed.display().to_string(),
+            self.rescue.display().to_string(),
+            self.runner.display().to_string(),
+            self.data.display().to_string(),
+            self.txn.to_string(),
+            self.mode.clone(),
+            self.every_ms.to_string(),
+        ]
+        .join("\n");
+        std::fs::write(root.join("road.txt"), text).unwrap();
+    }
+
+    fn read(root: &Path) -> Self {
+        let text = std::fs::read_to_string(root.join("road.txt")).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        Self {
+            home: PathBuf::from(lines[0]),
+            installed: PathBuf::from(lines[1]),
+            rescue: PathBuf::from(lines[2]),
+            runner: PathBuf::from(lines[3]),
+            data: PathBuf::from(lines[4]),
+            txn: TxnId::parse(lines[5]).unwrap(),
+            mode: lines[6].to_owned(),
+            every_ms: lines[7].parse().unwrap(),
+        }
+    }
+}
+
+/// **A stand-in world with no installation of its own** (the rescue child's).
+fn bare_world(home: Home) -> Fake {
+    Fake {
+        said: Vec::new(),
+        registry: Memory::default(),
+        opened: Vec::new(),
+        launched: Vec::new(),
+        children: Children::default(),
+        trial: Trial::Silent,
+        home,
+        on_move: None,
+        on_disarm: None,
+        hold_at_launch: false,
+        held: None,
+        keep_held: false,
+        panic_at_arm: false,
+        refuse_start_of: None,
+        starts_die: 0,
+        refuse_every_start: false,
+        shown: Vec::new(),
+        on_say: None,
+        real_ack: None,
+    }
+}
+
+/// **The trial's part** (a child running from `<install>\folio.exe`): the real
+/// watch over the real journal, with the product's `hand_back`, whose start is
+/// the rescue runner in its recovery part; ready or not; its receipt written
+/// as the product writes it, with its own start instant (unless `refused`).
+fn trial_part(root: &Path) {
+    let plan = RoadPlan::read(root);
+    let home = Home::of(HostPlatform::Windows, &plan.installed).unwrap();
+    assert_eq!(home.root(), plan.home.as_path());
+    let gate: &'static crate::update_trial::Gate =
+        Box::leak(Box::new(crate::update_trial::Gate::new()));
+    let me = crate::update_apply::this_process();
+    let ready = plan.mode != "unready";
+    if ready {
+        gate.ready_for_a_test();
+    }
+    if plan.mode == "ready" {
+        let nonce = Nonce::new([0x7a; 32]);
+        let receipt = Receipt {
+            txn: plan.txn,
+            nonce,
+            pid: me.pid,
+            version: "0.4.7".to_owned(),
+            started: Some(me.started),
+        };
+        install_txn::durable_create(&home.receipt_path(plan.txn, &nonce), &receipt.encode())
+            .unwrap();
+    }
+    struct Runner {
+        runner: PathBuf,
+        root: PathBuf,
+    }
+    impl crate::update_trial::Starter for Runner {
+        fn start(&mut self, program: &Path, line: &[OsString]) -> io::Result<u32> {
+            let mut said = program.display().to_string();
+            for word in line {
+                said.push('\n');
+                said.push_str(&word.to_string_lossy());
+            }
+            bt_platform::quiet_command(&self.runner)
+                .args(["--exact", ROAD_TEST, "--nocapture"])
+                .env(ROAD_CHILD, "rescue")
+                .env(ROAD_ROOT, &self.root)
+                .env(ROAD_LINE, said)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map(|child| child.id())
+        }
+    }
+    let every = Duration::from_millis(plan.every_ms);
+    let journal = home.journal();
+    let root = root.to_path_buf();
+    let watched = bt_platform::spawn_at_priority(
+        "bt-u37-road-trial",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |ctx| {
+            let mut runner = Runner {
+                runner: plan.runner.clone(),
+                root: root.clone(),
+            };
+            let mut hand_back = |ready: bool| {
+                crate::update_trial::hand_back(
+                    ctx,
+                    &home,
+                    plan.txn,
+                    ready,
+                    crate::update_trial::FROM_TRIAL_SINCE,
+                    &mut runner,
+                )
+            };
+            let mut watchdog = crate::update_trial::Watchdog {
+                every,
+                hand_back: &mut hand_back,
+            };
+            crate::update_trial::watch(
+                gate,
+                &journal,
+                plan.txn,
+                Duration::from_millis(20),
+                &|| {},
+                &mut watchdog,
+            );
+            std::fs::write(root.join("trial-decided"), b"").unwrap();
+        },
+    )
+    .unwrap();
+    drop(watched);
+    // Stays up until the recovery or the parent ends it.
+    std::thread::sleep(Duration::from_secs(90));
+}
+
+/// **The recovery's part** (a child running from the rescue runner, a copy of
+/// this test binary elsewhere): the line the trial's `hand_back` built, read by
+/// the recovery door's own grammar; the product's recovery over the real
+/// journal and the real transaction lock; what it did, written down.
+fn rescue_part(root: &Path) {
+    let plan = RoadPlan::read(root);
+    let started = Instant::now();
+    let said = std::env::var(ROAD_LINE).unwrap();
+    let mut words = said.lines();
+    let program = PathBuf::from(words.next().unwrap());
+    let line: Vec<OsString> = words.map(OsString::from).collect();
+    let Some(Ok(cli::UpdateDoor::Recover {
+        home: None,
+        then_launch: None,
+        handed_back: Some(handed_back),
+    })) = cli::update_door(line.clone())
+    else {
+        panic!("the recovery door's line: {line:?}");
+    };
+    let me = crate::update_apply::this_process();
+    let road = Road {
+        home: Home::of(HostPlatform::Windows, &plan.installed).unwrap(),
+        installed: plan.installed.clone(),
+        rescue: plan.rescue.clone(),
+        data: plan.data.clone(),
+        policy: Policy::System,
+        channel: None,
+        limits: Limits {
+            old_within: Duration::from_secs(10),
+            trial_within_ms: 5_000,
+            poll: Duration::from_millis(40),
+            quit_within: Duration::from_millis(300),
+            end_within: Duration::from_secs(10),
+        },
+        me,
+        starter: install_flip::parent_of_this_process(),
+        handed_back: Some(handed_back),
+        as_046: false,
+    };
+    let mut world = bare_world(road.home.clone());
+    let (code, world) = on_a_worker(move |worker| {
+        let code = crate::update_recover::run_windows(worker, &road, None, &mut world);
+        (code, world)
+    });
+    let first = !root.join("lingered").exists();
+    if first && plan.mode == "refused" {
+        // The first recovery lingers past the watchdog's next due time: the
+        // watch must not start another beside it.
+        std::fs::write(root.join("lingered"), b"").unwrap();
+        std::thread::sleep(Duration::from_millis(plan.every_ms * 3 / 2));
+    }
+    let done = format!(
+        "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+        me.pid,
+        started.elapsed().as_millis(),
+        code,
+        program.display(),
+        handed_back.word(),
+        world.opened.len() + world.launched.len(),
+        world.said.join(" | ")
+    );
+    let at = crate::update_apply::now_ms();
+    let _ = started;
+    std::fs::write(root.join(format!("account-{at}-{}", me.pid)), done).unwrap();
+}
+
+/// The recoveries' accounts so far, in the order they ended.
+fn rescues(root: &Path) -> Vec<Vec<String>> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .filter(|name| name.starts_with("account-"))
+        .collect();
+    names.sort();
+    names
+        .into_iter()
+        .map(|name| {
+            std::fs::read_to_string(root.join(name))
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        })
+        .collect()
+}
+
+/// RED (U-37, design revision (h) H.2, H.3 and H.4; Codex's review of
+/// `153f7cb2`, finding 3(a) and 3(c)) — **the real road, hermetic: a trial (a
+/// copy of this binary running from `<install>\folio.exe`, its real watch and
+/// the product's `hand_back`) hands its transaction back, with its exact
+/// identity, to a recovery (another copy, started by that hand-back, reading
+/// the line through the recovery door's grammar and taking the real
+/// transaction lock). A ready trial whose receipt names it is recorded and
+/// committed and stays running; an unready one is ended — that exact
+/// instance — and the rollback follows; a ready one whose receipt the home
+/// refuses is deferred to, one recovery at a time, never with a trial
+/// launched beside it, and handed back no more than the watchdog's bound
+/// allows.**
+///
+/// The rescue executable on disk carries `VERSIONINFO` 0.4.7 (the product's
+/// gate is asked); the start itself is of the runner copy, as a rescue build
+/// that records its argv would be.
+///
+/// MUTATIONS: in `update_trial::watch`, hand back beside a recovery still
+/// running (the "refused" part starts one more); in
+/// `update_apply::before_deciding`, skip the end of an unready handed-back
+/// trial (the "unready" part never ends the trial).
+#[test]
+fn a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers() {
+    if let Ok(part) = std::env::var(ROAD_CHILD) {
+        let root = PathBuf::from(std::env::var(ROAD_ROOT).unwrap());
+        match part.as_str() {
+            "trial" => trial_part(&root),
+            _ => rescue_part(&root),
+        }
+        return;
+    }
+    let this = std::env::current_exe().unwrap();
+    for (mode, every_ms) in [("ready", 1_500), ("unready", 1_500), ("refused", 2_000)] {
+        let Some(mut install) = Install::new(&format!("road-{mode}")) else {
+            return;
+        };
+        // The new set's `folio.exe` is a copy of this binary: the trial runs it.
+        let program = install.folder(Place::Set).join("folio.exe");
+        std::fs::remove_file(&program).unwrap();
+        std::fs::copy(&this, &program).unwrap();
+        let bytes = std::fs::read(&program).unwrap();
+        for member in &mut install.inventories.new {
+            if member.name == "folio.exe" {
+                member.digest = Digest::new(sha256(&bytes));
+                member.size = bytes.len() as u64;
+            }
+        }
+        for (name, held) in &mut install.new {
+            if name == "folio.exe" {
+                held.clone_from(&bytes);
+            }
+        }
+        // The rescue build on disk says 0.4.7: it takes a hand-back.
+        std::fs::remove_file(&install.rescue).unwrap();
+        bt_platform::trust_harness::program(
+            &install.rescue,
+            FileVersion([0, 4, 7, 0]),
+            bt_platform::trust_harness::Behaviour::Returns,
+        )
+        .unwrap();
+        flipped_at(&install, Phase::Moving);
+        let root = install
+            .home
+            .root()
+            .parent()
+            .unwrap()
+            .join(format!("road-{mode}"));
+        std::fs::create_dir_all(&root).unwrap();
+        let runner = root.join("rescue-runner.exe");
+        std::fs::copy(&this, &runner).unwrap();
+        RoadPlan {
+            home: install.home.root().to_path_buf(),
+            installed: install.installed.clone(),
+            rescue: install.rescue.clone(),
+            runner,
+            data: install.data.clone(),
+            txn: install.txn,
+            mode: mode.to_owned(),
+            every_ms,
+        }
+        .write(&root);
+        let child = bt_platform::quiet_command(&install.installed)
+            .args(["--exact", ROAD_TEST, "--nocapture"])
+            .env(ROAD_CHILD, "trial")
+            .env(ROAD_ROOT, &root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        /// Ends the trial child by its own handle whatever this test does.
+        struct Owned(std::process::Child);
+        impl Drop for Owned {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut trial = Owned(child);
+        let pid = trial.0.id();
+        let started = install_flip::started_of(pid).unwrap();
+        let give_up = Instant::now() + Duration::from_secs(90);
+        let until = |done: &mut dyn FnMut() -> bool| {
+            while !done() {
+                assert!(
+                    Instant::now() < give_up,
+                    "{mode}: the road did not get there"
+                );
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        match mode {
+            "ready" => {
+                until(&mut || root.join("trial-decided").exists());
+                until(&mut || !rescues(&root).is_empty());
+                assert_eq!(
+                    install.on_disk().body.phase,
+                    Phase::Retired {
+                        outcome: Outcome::Committed
+                    }
+                );
+                assert!(matches!(trial.0.try_wait(), Ok(None)), "the trial stays");
+                let done = rescues(&root);
+                assert_eq!(done.len(), 1, "{done:?}");
+                assert_eq!(done[0][3], install.rescue.display().to_string());
+                assert_eq!(done[0][4], format!("{pid}:{started}:ready"));
+                assert_eq!(done[0][5], "0", "nothing started or launched");
+                assert!(done[0][6].contains("it is recorded"), "{done:?}");
+            }
+            "unready" => {
+                until(&mut || !matches!(trial.0.try_wait(), Ok(None)));
+                until(&mut || !rescues(&root).is_empty());
+                let done = rescues(&root);
+                assert_eq!(done[0][4], format!("{pid}:{started}:unready"));
+                assert!(done[0][6].contains("is asked to"), "{done:?}");
+                assert!(
+                    matches!(
+                        install.on_disk().body.phase,
+                        Phase::Retired {
+                            outcome: Outcome::RolledBack
+                        }
+                    ),
+                    "{done:?}"
+                );
+            }
+            _ => {
+                // Due at 1, 2, 4 and 8 periods; the first recovery lingers
+                // past the second due time, which is spent without a start.
+                std::thread::sleep(Duration::from_millis(every_ms * 8 + 6_000));
+                let done = rescues(&root);
+                assert_eq!(done.len(), 3, "{done:?}");
+                for account in &done {
+                    assert_eq!(account[5], "0", "no trial launched beside it: {account:?}");
+                    assert!(account[6].contains("deferred"), "{account:?}");
+                    assert_eq!(account[4], format!("{pid}:{started}:ready"));
+                }
+                assert!(matches!(trial.0.try_wait(), Ok(None)), "the trial stays");
+                assert_eq!(install.on_disk().body.phase, Phase::Moving);
+            }
+        }
+        drop(trial);
     }
 }

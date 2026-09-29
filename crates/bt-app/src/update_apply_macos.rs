@@ -1343,7 +1343,9 @@ impl<'a> Txn<'a> {
                     }
                 };
             }
-            Ok(Pre::Stop(_)) => return ended,
+            // The deferral is the end (H.3): a held claim then starts
+            // nothing beside its holder (`ExitGuard::window_elsewhere`).
+            Ok(Pre::Stop(deferred)) => return deferred,
             Err(error) => {
                 hands.say(&format!("BT_UPDATE_ROLLBACK the trial over Stuck: {error}"));
                 return ended;

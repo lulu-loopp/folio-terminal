@@ -354,6 +354,15 @@ impl Gate {
         self.state().receipt_handed
     }
 
+    /// **Ready, for a test's trial in a process of its own**: its claim
+    /// adopted and its receipt fallen due, as a trial's first pane text makes
+    /// it.
+    #[cfg(test)]
+    pub(crate) fn ready_for_a_test(&self) {
+        self.adopt_claim();
+        let _ = self.hand_receipt();
+    }
+
     /// Keep the receipt as handed, for a write the watch owes again.
     fn keep_receipt(&self, job: ReceiptJob) {
         self.state().receipt_job = Some(job);

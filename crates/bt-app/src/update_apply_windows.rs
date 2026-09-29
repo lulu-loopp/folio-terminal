@@ -264,6 +264,11 @@ pub(crate) struct Road {
     pub(crate) starter: Option<Running>,
     /// **The trial that handed its transaction back** (`--from-trial`, H.4).
     pub(crate) handed_back: Option<HandedBack>,
+    /// **A rescue build older than 0.4.7, for the direct-hop test** (design
+    /// revision (h), the rollout contract): no adoption, no deferral — the road
+    /// every update from 0.4.6 takes, whose rescue build is 0.4.6.
+    #[cfg(test)]
+    pub(crate) as_046: bool,
 }
 
 impl Road {
@@ -282,6 +287,8 @@ impl Road {
             me: crate::update_apply::this_process(),
             starter: install_flip::parent_of_this_process(),
             handed_back: None,
+            #[cfg(test)]
+            as_046: false,
         }
     }
 
@@ -1229,6 +1236,10 @@ impl<'a> Txn<'a> {
         recorded: Option<TrialProcess>,
         world: &mut impl World,
     ) -> Result<Pre, String> {
+        #[cfg(test)]
+        if self.road.as_046 {
+            return Ok(Pre::Decide);
+        }
         let over_stuck = match &self.j.journal.body.phase {
             Phase::Moving => false,
             Phase::Stuck { .. } if recorded.is_none() => true,
@@ -1407,7 +1418,9 @@ impl<'a> Txn<'a> {
                     }
                 };
             }
-            Ok(Pre::Stop(_)) => return ended,
+            // The deferral is the end (H.3): a held claim then starts
+            // nothing beside its holder (`ExitGuard::window_elsewhere`).
+            Ok(Pre::Stop(deferred)) => return deferred,
             Err(error) => {
                 world.say(&format!("BT_UPDATE_ROLLBACK the trial over Stuck: {error}"));
                 return ended;

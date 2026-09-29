@@ -3074,8 +3074,16 @@ is bounded to two per person's start, and it records nothing.
      After the commit, `ps` shows no `open -n -W` of the applier.
   2. `kill -9` of the trial within its first second: either `the trial ended before it could be seen`
      or `ended without a receipt`, and the rollback within about 5 s. Never 90 s.
-  3. A Gatekeeper refusal of the bundle: `open` exits non-zero, then the U-38 early end, then the
-     rollback, then the old build with its card.
+  3. **A real Gatekeeper refusal** (amended 2026-09-29 after Codex's review of `153f7cb2`, finding
+     5): B′, signed with the same Developer ID as A and B (so it passes Prepare's identity check),
+     **not notarized**, quarantined as the feed delivers it, on a machine that cannot reach Apple's
+     ticket service (or with no stapled ticket). Gatekeeper refuses its first launch. Expected: the
+     trial is never seen, and the U-38 early end or the deadline follows, then the rollback, then the
+     old build with its card. An executable made unrunnable (`chmod 000`) is a separate row,
+     "executable refused", and is not this one.
+
+  **What the owner produces for L3:** A at 0.4.7 or later, signed and notarized; B, signed and
+  notarized; B′, the same build as B, signed only.
 
 ### H.6 What the docs say, corrected
 

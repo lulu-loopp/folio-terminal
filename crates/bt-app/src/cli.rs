@@ -961,7 +961,7 @@ pub const FROM_TRIAL_FLAG: &str = "--from-trial";
 pub const UPDATE_APPLY_USAGE: &str = "folio --update-apply <home> <txn> <nonce>";
 
 /// The one line `--update-recover` answers a malformed line with.
-pub const UPDATE_RECOVER_USAGE: &str = "folio --update-recover [<home>] [--from-trial <pid>:<started>:<ready|unready>] [--then-launch <argument>...]";
+pub const UPDATE_RECOVER_USAGE: &str = "folio --update-recover [<home>] [--from-trial <pid>:<started>:<ready|unready> | --then-launch <argument>...]";
 
 /// **The rescue build's two doors, recognised by the first word and only the
 /// first** — [`explorer_command`]'s rule, for its reason: these processes
@@ -1029,11 +1029,15 @@ pub fn update_door(
                     then_launch: None,
                     handed_back,
                 }),
-                Some(word) if word.to_str() == Some(THEN_LAUNCH_FLAG) => Ok(UpdateDoor::Recover {
-                    home,
-                    then_launch: Some(args.collect()),
-                    handed_back,
-                }),
+                // A hand-back is logon-shaped: nobody's start rides on it,
+                // so the two words never meet (design revision (h) H.4 A1).
+                Some(word) if word.to_str() == Some(THEN_LAUNCH_FLAG) && handed_back.is_none() => {
+                    Ok(UpdateDoor::Recover {
+                        home,
+                        then_launch: Some(args.collect()),
+                        handed_back,
+                    })
+                }
                 Some(_) => Err(UPDATE_RECOVER_USAGE),
             }
         }),
@@ -2195,8 +2199,141 @@ mod tests {
             }))
         );
         assert_eq!(
+            update_door(args(&[
+                "--update-recover",
+                home,
+                "--from-trial",
+                "940:133:unready"
+            ])),
+            Some(Ok(UpdateDoor::Recover {
+                home: Some(PathBuf::from(home)),
+                then_launch: None,
+                handed_back: Some(HandedBack {
+                    process: bt_platform::install_flip::Running {
+                        pid: 940,
+                        started: 133,
+                    },
+                    ready: false,
+                }),
+            }))
+        );
+        assert_eq!(
             update_door(args(&["--update-recover", home, "extra"])),
             Some(Err(UPDATE_RECOVER_USAGE))
+        );
+    }
+
+    /// RED (U-37, design revision (h) H.4 A1) — **`--from-trial` is the
+    /// recovery door's third kind of line: after the home, one exact word
+    /// `<pid>:<started>:<ready|unready>`, and nothing after it — never beside
+    /// `--then-launch` (a hand-back is logon-shaped: nobody's start rides on
+    /// it), never twice, never out of its place, never a malformed identity.**
+    ///
+    /// Codex's review of `153f7cb2`, finding 2: the mixed line was accepted and
+    /// gave one input two meanings — an exact trial to stop and a person's start
+    /// to deliver.
+    ///
+    /// MUTATION: in `update_door`, accept `--then-launch` after `--from-trial`.
+    #[test]
+    fn the_from_trial_word_stands_alone_and_exact() {
+        let home = "/Applications/.Folio.app.folio-update";
+        let handed = |pid: u32, started: u64, ready: bool| {
+            Some(HandedBack {
+                process: bt_platform::install_flip::Running { pid, started },
+                ready,
+            })
+        };
+        for (line, expected) in [
+            (
+                args(&["--update-recover", "--from-trial", "940:133:ready"]),
+                Some(Ok(UpdateDoor::Recover {
+                    home: None,
+                    then_launch: None,
+                    handed_back: handed(940, 133, true),
+                })),
+            ),
+            (
+                args(&[
+                    "--update-recover",
+                    home,
+                    "--from-trial",
+                    "7:18446744073709551615:unready",
+                ]),
+                Some(Ok(UpdateDoor::Recover {
+                    home: Some(PathBuf::from(home)),
+                    then_launch: None,
+                    handed_back: handed(7, u64::MAX, false),
+                })),
+            ),
+        ] {
+            assert_eq!(update_door(line.clone()), expected, "{line:?}");
+        }
+        for refused in [
+            // The mixed line.
+            &[
+                "--update-recover",
+                "--from-trial",
+                "940:133:ready",
+                "--then-launch",
+                "--cwd",
+                "x",
+            ][..],
+            &[
+                "--update-recover",
+                home,
+                "--from-trial",
+                "940:133:unready",
+                "--then-launch",
+            ][..],
+            // Malformed identities.
+            &["--update-recover", "--from-trial"][..],
+            &["--update-recover", "--from-trial", "940:133"][..],
+            &["--update-recover", "--from-trial", "940"][..],
+            &["--update-recover", "--from-trial", "x:133:ready"][..],
+            &["--update-recover", "--from-trial", "940:y:ready"][..],
+            &["--update-recover", "--from-trial", "940:133:maybe"][..],
+            &["--update-recover", "--from-trial", "940:133:ready:extra"][..],
+            &["--update-recover", "--from-trial", "-1:133:ready"][..],
+            &["--update-recover", "--from-trial", ""][..],
+            // Repeated, or out of its place.
+            &[
+                "--update-recover",
+                "--from-trial",
+                "940:133:ready",
+                "--from-trial",
+                "941:1:ready",
+            ][..],
+            &["--update-recover", "--from-trial", "940:133:ready", home][..],
+            &[
+                "--update-recover",
+                "--then-launch",
+                "--from-trial",
+                "940:133:ready",
+            ][..],
+        ] {
+            let line = args(refused);
+            let answer = update_door(line.clone());
+            if refused.get(1) == Some(&"--then-launch") {
+                // After `--then-launch` everything is another start's line,
+                // verbatim: the word is not the door's there.
+                assert!(
+                    matches!(
+                        &answer,
+                        Some(Ok(UpdateDoor::Recover {
+                            handed_back: None,
+                            then_launch: Some(_),
+                            ..
+                        }))
+                    ),
+                    "{line:?}: {answer:?}"
+                );
+                continue;
+            }
+            assert_eq!(answer, Some(Err(UPDATE_RECOVER_USAGE)), "{line:?}");
+        }
+        assert!(
+            UPDATE_RECOVER_USAGE
+                .contains("--from-trial <pid>:<started>:<ready|unready> | --then-launch")
         );
     }
 

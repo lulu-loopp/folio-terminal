@@ -3332,3 +3332,343 @@ fn a_launch_ended_by_a_signal_is_unknown_not_over() {
 fn args(words: &[&str]) -> Vec<OsString> {
     words.iter().map(OsString::from).collect()
 }
+
+// ── design revision (h), round 5 (Codex's review of 153f7cb2) ───────────────
+
+/// A receipt at `nonce`'s name carrying exactly `receipt`'s fields.
+fn receipt_as(install: &Install, nonce: Nonce, receipt: &Receipt) {
+    install_txn::durable_create(
+        &install.home.receipt_path(install.txn, &nonce),
+        &receipt.encode(),
+    )
+    .unwrap();
+}
+
+/// RED (U-37, design revision (h) H.1 R3–R4, on macOS) — **a running process
+/// of the new bundle is adopted only when a receipt names it exactly — pid and
+/// start instant; a reused pid at another instant, a receipt without
+/// `started`, another transaction's receipt and several receipts none of
+/// which names it exactly adopt nothing and the recovery defers; the exact one
+/// among several commits.**
+///
+/// MUTATION: in `update_apply::survey`, match a receipt to a running process
+/// by its pid alone.
+#[test]
+fn adoption_needs_a_receipt_naming_the_exact_process() {
+    if !on_macos() {
+        return;
+    }
+    let receipt = |install: &Install, nonce: Nonce, txn: TxnId, pid: u32, started: Option<u64>| {
+        receipt_as(
+            install,
+            nonce,
+            &Receipt {
+                txn,
+                nonce,
+                pid,
+                version: "2.0".to_owned(),
+                started,
+            },
+        );
+    };
+    for case in [
+        "reused",
+        "no-started",
+        "other-txn",
+        "several-none",
+        "several-exact",
+    ] {
+        let install = exchanged_at_moving(&format!("exact-{case}"));
+        let children = Children::default();
+        let running = a_candidate(&install, &children);
+        let other = TxnId::new([0x7e; 16]);
+        let (a, b) = (Nonce::new([0x61; 32]), Nonce::new([0x62; 32]));
+        match case {
+            "reused" => receipt(
+                &install,
+                a,
+                install.txn,
+                running.pid,
+                Some(running.started - 1),
+            ),
+            "no-started" => receipt(&install, a, install.txn, running.pid, None),
+            "other-txn" => receipt(&install, a, other, running.pid, Some(running.started)),
+            "several-none" => {
+                receipt(
+                    &install,
+                    a,
+                    install.txn,
+                    running.pid,
+                    Some(running.started - 1),
+                );
+                receipt(&install, b, install.txn, running.pid, None);
+            }
+            _ => {
+                receipt(
+                    &install,
+                    a,
+                    install.txn,
+                    running.pid,
+                    Some(running.started - 1),
+                );
+                receipt(&install, b, install.txn, running.pid, Some(running.started));
+            }
+        }
+        let (ended, world) = recovered(install.recovery(limits(5_000, 3_000)), Fake::default());
+        if case == "several-exact" {
+            assert_eq!(ended, Some(Ended::Committed), "{case}: {:?}", world.said);
+            assert!(
+                children.status(running.pid).is_none(),
+                "the adopted trial runs on"
+            );
+        } else {
+            assert!(
+                matches!(ended, Some(Ended::Deferred(_))),
+                "{case}: {ended:?} {:?}",
+                world.said
+            );
+            assert_eq!(
+                install.on_disk().unwrap().body.phase,
+                Phase::Moving,
+                "{case}"
+            );
+        }
+        assert!(world.launched.lock().unwrap().is_empty(), "{case}");
+    }
+}
+
+/// The claim of the data directory, as a row of H.3's table wants it.
+enum MacClaim {
+    Held,
+    Free,
+    Denied,
+}
+
+/// **The row's world**: the claim held here or squatted, and `H/<txn>` made
+/// unlistable (and put back when dropped).
+struct MacRow {
+    _held: Option<bt_platform::instance::DataDirectoryClaim>,
+    _squat: Option<bt_platform::trust_harness::Squat>,
+    shut: Option<PathBuf>,
+}
+
+impl Drop for MacRow {
+    fn drop(&mut self) {
+        if let Some(folder) = self.shut.take() {
+            run("/bin/chmod", &[OsStr::new("755"), folder.as_os_str()]);
+        }
+    }
+}
+
+fn mac_row(install: &Install, claim: &MacClaim, unlistable: bool) -> MacRow {
+    let (held, squat) = match claim {
+        MacClaim::Held => (
+            Some(crate::persist::try_claim(&install.data).expect("the claim, held here")),
+            None,
+        ),
+        MacClaim::Free => (None, None),
+        MacClaim::Denied => (
+            None,
+            Some(bt_platform::trust_harness::squat_the_claim(&install.data).unwrap()),
+        ),
+    };
+    let shut = unlistable.then(|| {
+        let folder = install.home.transaction(install.txn);
+        run("/bin/chmod", &[OsStr::new("300"), folder.as_os_str()]);
+        folder
+    });
+    MacRow {
+        _held: held,
+        _squat: squat,
+        shut,
+    }
+}
+
+/// RED (U-37, design revision (h) H.3, the nine-row table, on macOS) — **every
+/// row of H.3's table ends as the table says, at login and for a person's
+/// start** (see the Windows test of the same name): a candidate seen, or a
+/// held claim, defers and nothing is started beside it; a denied claim
+/// question or an unlistable folder with a free claim defers and a person's
+/// start is delivered — here unacknowledged, then the failure window; only no
+/// candidate with a free claim decides (over `Moving` with the new bundle
+/// live, the recovery's own recorded trial).
+///
+/// MUTATION: in `update_apply::before_deciding`, ask the claim before the
+/// candidates.
+#[test]
+fn the_nine_rows_of_h3_each_end_as_the_table_says() {
+    if !on_macos() {
+        return;
+    }
+    // (candidate seen, unlistable, claim, the deferral said, delivered)
+    let rows: [(bool, bool, MacClaim, Option<&str>, bool); 9] = [
+        (
+            true,
+            false,
+            MacClaim::Held,
+            Some("no receipt names it"),
+            false,
+        ),
+        (
+            true,
+            false,
+            MacClaim::Free,
+            Some("no receipt names it"),
+            false,
+        ),
+        (
+            true,
+            false,
+            MacClaim::Denied,
+            Some("no receipt names it"),
+            false,
+        ),
+        (
+            false,
+            false,
+            MacClaim::Held,
+            Some("a Folio holds the data directory"),
+            false,
+        ),
+        (false, false, MacClaim::Free, None, false),
+        (
+            false,
+            false,
+            MacClaim::Denied,
+            Some("cannot be asked about"),
+            true,
+        ),
+        (
+            true,
+            true,
+            MacClaim::Held,
+            Some("a Folio holds the data directory"),
+            false,
+        ),
+        (true, true, MacClaim::Free, Some("cannot be read"), true),
+        (true, true, MacClaim::Denied, Some("cannot be read"), true),
+    ];
+    for (at, (seen, unlistable, claim, deferral, delivered)) in rows.into_iter().enumerate() {
+        let install = exchanged_at_moving(&format!("row{at}"));
+        let children = Children::default();
+        if seen {
+            a_candidate(&install, &children);
+        }
+        let row = mac_row(&install, &claim, unlistable);
+        let Some(deferral) = deferral else {
+            let (_ended, world) =
+                recovered(install.recovery(limits(5_000, 1_000)), Fake::default());
+            drop(row);
+            assert!(!said(&world, "deferred"), "row {at}: {:?}", world.said);
+            assert_eq!(
+                world.launched.lock().unwrap().len(),
+                1,
+                "row {at}: its own trial"
+            );
+            continue;
+        };
+        let (ended, world) = recovered(install.recovery(limits(5_000, 3_000)), Fake::default());
+        assert!(
+            matches!(ended, Some(Ended::Deferred(_))),
+            "row {at}: {ended:?}"
+        );
+        assert!(said(&world, deferral), "row {at}: {:?}", world.said);
+        let person = Fake {
+            starts_die: true,
+            ..Fake::default()
+        };
+        let (_code, world) = recover_door(&install, args(&["--cwd", "/x"]), person);
+        drop(row);
+        assert!(said(&world, deferral), "row {at}: {:?}", world.said);
+        assert!(
+            world.launched.lock().unwrap().is_empty(),
+            "row {at}: no trial"
+        );
+        if delivered {
+            assert_eq!(world.relaunched.len(), 1, "row {at}: {:?}", world.said);
+            assert_eq!(world.shown.len(), 1, "row {at}");
+        } else {
+            assert!(
+                world.relaunched.is_empty(),
+                "row {at}: {:?}",
+                world.relaunched
+            );
+        }
+        assert_eq!(
+            install.on_disk().unwrap().body.phase,
+            Phase::Moving,
+            "row {at}"
+        );
+        assert_eq!(
+            version_of(&install.installed),
+            "2.0",
+            "row {at}: nothing swapped"
+        );
+    }
+}
+
+/// RED (U-37; Codex's review of `153f7cb2`, finding 1, on macOS) — **before a
+/// fresh `Stuck`'s retrial the same step fails closed, and its deferral is the
+/// road's end: over a held claim nothing is started beside its holder; a
+/// denied claim question or an unlistable folder end `Deferred` and a
+/// person's start is delivered.**
+///
+/// The rollback was declared and its swap back is refused, so the journal
+/// becomes `Stuck` with the new bundle live, and the recovery handed a
+/// person's start reaches its retrial.
+///
+/// MUTATION: in `Txn::retry_as_trial`, answer the earlier `ended` for
+/// `Pre::Stop` (the round-4 code).
+#[test]
+fn a_deferral_before_a_fresh_stuck_retrial_is_the_roads_end() {
+    if !on_macos() {
+        return;
+    }
+    for (tag, claim, unlistable, expected) in [
+        ("held", MacClaim::Held, false, "Deferred(Held)"),
+        ("denied", MacClaim::Denied, false, "Deferred(Denied("),
+        ("unlistable", MacClaim::Free, true, "Deferred(Unlistable("),
+    ] {
+        let install = Install::new(&format!("stuck-{tag}"));
+        install.arm();
+        install.exchanged();
+        install.write(Phase::RollbackIntent { trial: None });
+        let children = Children::default();
+        let row = mac_row(&install, &claim, false);
+        let mut world = Fake {
+            refuse_from: 0,
+            starts_die: true,
+            ..Fake::default()
+        };
+        if unlistable {
+            a_candidate(&install, &children);
+            let folder = install.home.transaction(install.txn);
+            world.on_say = Some(Box::new(move |line| {
+                if line.contains("the update is incomplete") {
+                    run("/bin/chmod", &[OsStr::new("300"), folder.as_os_str()]);
+                }
+            }));
+        }
+        let (_code, world) = recover_door(&install, args(&["--cwd", "/x"]), world);
+        if unlistable {
+            let folder = install.home.transaction(install.txn);
+            run("/bin/chmod", &[OsStr::new("755"), folder.as_os_str()]);
+        }
+        drop(row);
+        assert!(said(&world, expected), "{tag}: {:?}", world.said);
+        assert!(
+            matches!(install.on_disk().unwrap().body.phase, Phase::Stuck { .. }),
+            "{tag}"
+        );
+        assert!(
+            world.launched.lock().unwrap().is_empty(),
+            "{tag}: no retrial"
+        );
+        if tag == "held" {
+            assert!(world.relaunched.is_empty(), "{tag}: {:?}", world.relaunched);
+        } else {
+            assert_eq!(world.relaunched.len(), 1, "{tag}: {:?}", world.said);
+            assert_eq!(world.shown.len(), 1, "{tag}");
+        }
+    }
+}

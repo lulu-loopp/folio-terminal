@@ -975,8 +975,10 @@ decided anyway** (from a source build of 0.4.7 or later; every update from
 0.4.6 to any later version keeps the 0.4.6 road): a lock holder records a
 running trial of the new build only when its receipt names it exactly (pid and
 start instant), and that receipt commits; before it decides, it defers — records,
-starts and moves nothing — beside any other process of the new build, a held or
-unaskable data claim, or a process list it cannot read, while a person's start
+starts and moves nothing, also before a `Stuck` retrial — beside any other
+process of the new build, a held or unaskable data claim, a process list it
+cannot read, or a transaction folder whose receipts it cannot list, while a
+person's start
 keeps its delivery; a trial whose transaction is still undecided hands it back
 to the recovery build at 102, 204, 408 and 816 s, one recovery at a time, and
 never ends itself — the recovery ends one that never became ready; on macOS the

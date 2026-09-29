@@ -154,7 +154,10 @@ temporary folder. `BT_U37_WATCH_CHILD` names the private folder `bt-app`'s
 sets on the copy of its own test binary that runs a trial's watch and records its
 hand-back line into that folder; `BT_U37_PARENT_TEST_CHILD` names the file
 `bt-platform`'s `install_flip::tests::this_process_names_its_parent_by_pid_and_an_earlier_start`
-sets on the copy of its own test binary that writes the parent it finds there. Only
+sets on the copy of its own test binary that writes the parent it finds there. `BT_U37_ROAD_CHILD`, `BT_U37_ROAD_ROOT` and `BT_U37_ROAD_LINE` name the part
+(`trial` or `rescue`), the private folder and the hand-back line `bt-app`'s
+`update_apply_windows::tests::a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers`
+sets on the copies of its own test binary that play the trial and the recovery. Only
 those tests' child halves read them, and they write only into the test's own
 temporary folder. `BT_TRUST_RELEASE_TAG` names the release (`v0.4.5-preview`)
 `bt-platform`'s ignored `trust::tests::the_released_windows_assets_carry_an_identity_oid`
