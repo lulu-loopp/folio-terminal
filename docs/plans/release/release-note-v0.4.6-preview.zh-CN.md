@@ -52,6 +52,7 @@
 
 - Ctrl+Enter 和 Shift+Enter 仍然以 Enter 发送给程序；区分它们的 kitty 键盘协议将在 0.4.7 实现（[#13](https://github.com/lulu-loopp/folio-terminal/issues/13)）。
 - 更新完成后，如果另一程序在数分钟内持续占用 Folio 的更新记录，新版本运行期间无法保存更改，下次启动时恢复旧版。
+- macOS：首次自行更新时，macOS 会提示"已添加可在后台运行的软件"；该登录项是更新器的恢复入口，更新完成后自动移除。 <!-- U-32 -->
 
 <details>
 <summary>安装说明（SmartScreen、Gatekeeper、校验和）</summary>

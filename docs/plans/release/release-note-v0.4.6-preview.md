@@ -84,6 +84,9 @@
   next start puts the previous version back.
 - After Folio was pointed at a local folder to rehearse an update, the
   version found there is offered for a day.
+- macOS: the first self-update makes macOS show its "…software was added
+  that can run in the background" notice for Folio's login item; it is
+  the updater's recovery entry and is removed once the update finishes. <!-- U-32 -->
 
 <details>
 <summary>Install notes (SmartScreen, Gatekeeper, checksums)</summary>
