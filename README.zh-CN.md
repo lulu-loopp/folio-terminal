@@ -31,6 +31,22 @@ brew install --cask lulu-loopp/folio/folio
 
 其余内容见 [`docs/install.zh-CN.md`](docs/install.zh-CN.md)：压缩包里有什么、初次启动询问什么，以及系统弹出提示时该怎么办。
 
+## 卸载
+
+先退出 Folio，再按安装方式移除：
+
+- **Windows 压缩包**——双击 Folio 文件夹中的 `uninstall.cmd`（或在该目录运行 `folio.exe --uninstall-cleanup`），然后删除文件夹。
+- **scoop**——`scoop uninstall folio`，自动完成清理。
+- **macOS DMG**——运行 `/Applications/Folio.app/Contents/MacOS/folio --uninstall-cleanup`，然后将 **Folio** 拖入废纸篓。
+- **Homebrew**——`brew uninstall --zap folio`。
+
+<!-- winget: add when live. winget runs no cleanup for Folio (a portable zip, no
+uninstall hook): `folio --uninstall-cleanup`, then `winget uninstall WeiyiShi.Folio`.
+There is no MSIX install: the zip's folio.msix only carries the Explorer menu,
+and the cleanup unregisters it. -->
+
+清理移除 Folio 在自身文件夹外添加的内容——资源管理器或 Finder 的右键菜单、PowerShell 配置文件中的行、agent 钩子——设置和数据保留。如需一并删除，先为清理命令加上 `--purge` 再删除应用；Homebrew 的 `--zap` 已删除设置文件夹。[`docs/install.zh-CN.md`](docs/install.zh-CN.md#卸载) 说明清理命令退出码的含义。
+
 ## 功能
 
 <picture>

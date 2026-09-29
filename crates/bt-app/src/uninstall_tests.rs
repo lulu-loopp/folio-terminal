@@ -974,7 +974,11 @@ fn uninstall_archive_has_ten_files_and_cleanup_only_wrapper() {
         Text::CleanupArchiveReady,
         Text::CleanupArchiveIncomplete,
     ] {
+        // Both columns: the script prints each line in English, then in Chinese
+        // (T-UNINSTALL-DOCS), so a sentence changed in the table and not in the
+        // script, in either language, is red here.
         assert!(wrapper.contains(english(text)));
+        assert!(wrapper.contains(text.in_lang(Lang::Chinese)));
     }
     for forbidden in ["--purge", "rmdir", " del ", "Remove-Item"] {
         assert!(!wrapper.contains(forbidden));

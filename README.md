@@ -40,6 +40,30 @@ brew install --cask lulu-loopp/folio/folio
 [`docs/install.md`](docs/install.md) has the rest: what is in the archive, what
 the first run asks, and what to do if the system puts a panel in front of you.
 
+## Uninstall
+
+Quit Folio first, then take it out the way it came in:
+
+- **Windows zip** — double-click `uninstall.cmd` in Folio's folder (or run
+  `folio.exe --uninstall-cleanup` there), then delete the folder.
+- **scoop** — `scoop uninstall folio` runs the same cleanup for you.
+- **macOS DMG** — run
+  `/Applications/Folio.app/Contents/MacOS/folio --uninstall-cleanup`, then drag
+  **Folio** to the Bin.
+- **Homebrew** — `brew uninstall --zap folio`.
+
+<!-- winget: add when live. winget runs no cleanup for Folio (a portable zip, no
+uninstall hook): `folio --uninstall-cleanup`, then `winget uninstall WeiyiShi.Folio`.
+There is no MSIX install: the zip's folio.msix only carries the Explorer menu,
+and the cleanup unregisters it. -->
+
+The cleanup removes what Folio set up outside its folder — the Explorer or
+Finder menu, the line in your PowerShell profile, agent hooks — and keeps your
+settings and data. To remove those too, add `--purge` to the cleanup command
+before you delete the app; Homebrew's `--zap` already removes the settings
+folder. [`docs/install.md`](docs/install.md#uninstalling) says what the
+cleanup's exit codes mean.
+
 ## What it does
 
 <picture>
