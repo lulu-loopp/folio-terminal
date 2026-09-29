@@ -16079,7 +16079,7 @@ fn a_late_zoom_reprint_keeps_the_last_formula_frame_until_exact_source_reanchors
 #[test]
 fn keyboard_mapping_carries_the_layouts_letters_and_preserves_terminal_controls() {
     assert_eq!(
-        input::keyboard_bytes(
+        input::legacy_bytes(
             &Key::Character("hello".into()),
             ModifiersState::empty(),
             false
@@ -16087,11 +16087,11 @@ fn keyboard_mapping_carries_the_layouts_letters_and_preserves_terminal_controls(
         Some(b"hello".to_vec())
     );
     assert_eq!(
-        input::keyboard_bytes(&Key::Named(NamedKey::Enter), ModifiersState::empty(), false),
+        input::legacy_bytes(&Key::Named(NamedKey::Enter), ModifiersState::empty(), false),
         Some(vec![b'\r'])
     );
     assert_eq!(
-        input::keyboard_bytes(
+        input::legacy_bytes(
             &Key::Named(NamedKey::Backspace),
             ModifiersState::empty(),
             false
@@ -16099,11 +16099,11 @@ fn keyboard_mapping_carries_the_layouts_letters_and_preserves_terminal_controls(
         Some(vec![0x7f])
     );
     assert_eq!(
-        input::keyboard_bytes(&Key::Named(NamedKey::Space), ModifiersState::empty(), false),
+        input::legacy_bytes(&Key::Named(NamedKey::Space), ModifiersState::empty(), false),
         Some(vec![b' '])
     );
     assert_eq!(
-        input::keyboard_bytes(&Key::Character("c".into()), ModifiersState::CONTROL, false),
+        input::legacy_bytes(&Key::Character("c".into()), ModifiersState::CONTROL, false),
         Some(vec![0x03])
     );
     // Every bare `Ctrl+letter` is the shell's and is sent as its control
@@ -16111,7 +16111,7 @@ fn keyboard_mapping_carries_the_layouts_letters_and_preserves_terminal_controls(
     // `^L`, `^R` — the whole readline alphabet the shortcut table promised
     // to leave alone).
     assert_eq!(
-        input::keyboard_bytes(&Key::Character("x".into()), ModifiersState::CONTROL, false),
+        input::legacy_bytes(&Key::Character("x".into()), ModifiersState::CONTROL, false),
         Some(vec![0x18])
     );
     // **And a character outside ASCII is bytes like any other** (M1-7, X-3
@@ -16124,15 +16124,15 @@ fn keyboard_mapping_carries_the_layouts_letters_and_preserves_terminal_controls(
     // all (X-3 measured `你好` once, six bytes). What the guard did instead
     // was swallow `ü ä ö ß` on a German layout, on both platforms, whole.
     assert_eq!(
-        input::keyboard_bytes(&Key::Character("中".into()), ModifiersState::empty(), false),
+        input::legacy_bytes(&Key::Character("中".into()), ModifiersState::empty(), false),
         Some("中".as_bytes().to_vec())
     );
     assert_eq!(
-        input::keyboard_bytes(&Key::Character("ü".into()), ModifiersState::empty(), false),
+        input::legacy_bytes(&Key::Character("ü".into()), ModifiersState::empty(), false),
         Some("ü".as_bytes().to_vec())
     );
     assert_eq!(
-        input::keyboard_bytes(
+        input::legacy_bytes(
             &Key::Named(NamedKey::Process),
             ModifiersState::CONTROL,
             false
@@ -36341,7 +36341,7 @@ fn one_composition_commits_its_characters_exactly_once() {
     assert_eq!(committed, vec![0xe4, 0xbd, 0xa0, 0xe5, 0xa5, 0xbd]);
     // The key the commit came out of, which is every key pressed while a
     // composition is live.
-    let under_the_commit = input::keyboard_bytes(
+    let under_the_commit = input::legacy_bytes(
         &Key::Named(NamedKey::Process),
         ModifiersState::empty(),
         false,

@@ -6,6 +6,14 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,
+  Shift+Tab, Ctrl+I, Ctrl+M and Esc apart from Enter, Tab and a lone escape:
+  Folio supports the first tier of the kitty keyboard protocol and xterm's
+  modifyOtherKeys. neovim, fish, helix and Claude Code ask for it, and so
+  does Codex on macOS and in WSL. Programs that do not ask are unaffected.
+
 ### Fixed
 
 - F1–F12 reach the program (they sent nothing before); Shift, Alt and Ctrl

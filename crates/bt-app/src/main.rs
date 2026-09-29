@@ -40081,6 +40081,12 @@ fn drain_leaf_pty(leaf: &mut LeafSession, holds_the_keyboard: bool) -> Result<Dr
         // its first prompt exactly as the pane on screen does.
         let rail_began = leaf.hear_first_mark();
         let name_after = leaf.name_evidence();
+        // **A keyboard flag a program asked for and Folio does not honour** is written to the
+        // log the first time this session sees it (T-KEYBOARD-PROTOCOL, design note §3) — here,
+        // because every leaf's bytes pass through here, the pane on screen or not.
+        for line in leaf.session.take_keyboard_protocol_notes() {
+            diagnostics::note(&line);
+        }
         Ok(DrainOutcome {
             // Taken here because this is the one place every leaf of every tab
             // passes through on every turn, which is the same sentence
