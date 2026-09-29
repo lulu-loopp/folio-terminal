@@ -10,6 +10,9 @@ All notable changes to Folio are recorded here. The format follows
 
 - F1–F12 reach the program (they sent nothing before); Shift, Alt and Ctrl
   on them are encoded as in xterm.
+- A web address written without its scheme is recognised after a colon, an
+  equals sign or any other byte that cannot be part of a name, as an address
+  with a scheme already was.
 
 ### Internal
 
