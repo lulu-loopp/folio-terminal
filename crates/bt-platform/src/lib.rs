@@ -2901,6 +2901,129 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comm
     command
 }
 
+/// **What a start through [`quiet_command`] carries from this process** (0.4.7
+/// ticket U-39): the facts a refused start is read against — whether a console
+/// is attached, what the three standard handles the child inherits are, the
+/// working directory, and the creation flags the door sets. Asked only after
+/// a start was refused, so that a refusal the clean machine could not explain
+/// (`ERROR_NOT_SUPPORTED` from every start of one process, 0.4.6's D-5) is
+/// diagnosable from its one line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StartConditions {
+    /// Whether a console is attached to this process; `None` where the
+    /// platform has no such question.
+    pub console: Option<bool>,
+    /// What the standard input, output and error a child inherits are, as the
+    /// platform names their kind; `None` where they are not asked.
+    pub standard: Option<[String; 3]>,
+    /// This process's working directory, or why it could not be read.
+    pub working_directory: String,
+    /// The creation flags [`quiet_command`] sets (`0` where it sets none).
+    pub creation_flags: u32,
+}
+
+impl std::fmt::Display for StartConditions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.console {
+            Some(true) => write!(f, "console attached")?,
+            Some(false) => write!(f, "no console")?,
+            None => write!(f, "console not asked")?,
+        }
+        if let Some([input, output, error]) = &self.standard {
+            write!(
+                f,
+                ", standard handles inherited (in {input}, out {output}, err {error})"
+            )?;
+        } else {
+            write!(f, ", standard handles inherited")?;
+        }
+        write!(
+            f,
+            ", working directory {}, creation flags {:#010x}",
+            self.working_directory, self.creation_flags
+        )
+    }
+}
+
+/// **This process's [`StartConditions`], now.**
+#[must_use]
+pub fn start_conditions() -> StartConditions {
+    let working_directory = match std::env::current_dir() {
+        Ok(directory) => directory.display().to_string(),
+        Err(error) => format!("unreadable ({error})"),
+    };
+    #[cfg(windows)]
+    {
+        use windows::Win32::Storage::FileSystem::{
+            FILE_TYPE_CHAR, FILE_TYPE_DISK, FILE_TYPE_PIPE, GetFileType,
+        };
+        use windows::Win32::System::Console::{
+            GetConsoleProcessList, GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_INPUT_HANDLE,
+            STD_OUTPUT_HANDLE,
+        };
+        let mut attached = [0_u32; 4];
+        // SAFETY: the buffer is this function's own and its length is passed;
+        // the call only writes process ids into it.
+        let console = unsafe { GetConsoleProcessList(&mut attached) } > 0;
+        let kind = |which: STD_HANDLE| -> String {
+            // SAFETY: asks for one of this process's standard handles; nothing
+            // is opened, and the handle is not closed here (it is not ours).
+            match unsafe { GetStdHandle(which) } {
+                Err(error) => format!("unreadable ({error})"),
+                Ok(handle) if handle.is_invalid() || handle.0.is_null() => "none".to_owned(),
+                // SAFETY: a handle this process holds; the call reads its type.
+                Ok(handle) => match unsafe { GetFileType(handle) } {
+                    FILE_TYPE_DISK => "file".to_owned(),
+                    FILE_TYPE_CHAR => "character device".to_owned(),
+                    FILE_TYPE_PIPE => "pipe".to_owned(),
+                    _ => format!("unknown ({})", std::io::Error::last_os_error()),
+                },
+            }
+        };
+        StartConditions {
+            console: Some(console),
+            standard: Some([
+                kind(STD_INPUT_HANDLE),
+                kind(STD_OUTPUT_HANDLE),
+                kind(STD_ERROR_HANDLE),
+            ]),
+            working_directory,
+            creation_flags: CREATE_NO_WINDOW,
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        StartConditions {
+            console: None,
+            standard: None,
+            working_directory,
+            creation_flags: 0,
+        }
+    }
+}
+
+/// **A file's attributes as the platform keeps them**, for a line: the
+/// Windows attribute word in hex (`0x20` is `ARCHIVE`, `0x400` a reparse
+/// point, `0x1000` offline), the permission bits in octal elsewhere (U-39).
+#[must_use]
+pub fn attributes_of(metadata: &std::fs::Metadata) -> String {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        format!("attributes {:#x}", metadata.file_attributes())
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        format!("mode {:o}", metadata.permissions().mode())
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = metadata;
+        "attributes not asked".to_owned()
+    }
+}
+
 /// **Which executable a process id is running**, or `None` when this process may not ask.
 ///
 /// One question, asked with the smallest right there is: `PROCESS_QUERY_LIMITED_INFORMATION` is
