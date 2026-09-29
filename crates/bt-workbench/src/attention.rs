@@ -71,6 +71,7 @@ use bt_layout::SeatId;
 
 pub mod expiry;
 
+#[cfg(test)]
 use expiry::WAIT_TTL;
 
 /// How many outstanding strong credentials one pane may hold (`attention` plan §11.4.1).
