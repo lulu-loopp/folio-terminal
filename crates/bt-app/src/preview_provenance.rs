@@ -219,14 +219,6 @@ impl TextOrigin {
         self.len
     }
 
-    /// `#[allow(dead_code)]`: the pair of [`Self::len`], which clippy asks for
-    /// wherever there is a length and no product caller has yet needed.
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-
     /// Where the byte at `offset` came from, or `None` past the end.
     ///
     /// The per-byte question the tests ask of every fixture, and the one

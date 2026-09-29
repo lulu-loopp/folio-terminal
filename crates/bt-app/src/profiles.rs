@@ -13190,12 +13190,6 @@ impl GitFilterMenuLayout {
     pub fn rows(&self) -> &[GitFilterRow] {
         &self.rows
     }
-
-    #[allow(dead_code)]
-    #[must_use]
-    pub fn frame(&self) -> [f32; 4] {
-        self.frame
-    }
 }
 
 /// The rows a repository's branches make, top to bottom.

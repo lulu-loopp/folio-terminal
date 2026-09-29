@@ -30,10 +30,6 @@
 # The sites grouped by what they are waiting for: the U-44b triage ticket.
 crate	file	item	form	reason
 bt-app	src/main.rs	UserInputKind	allow	A2 converts the five call sites that will pass these
-bt-app	src/main.rs	UserInputKind::is_answer	allow	A2 gates the answer door on this
-bt-app	src/preview_provenance.rs	TextOrigin::is_empty	allow	
-bt-app	src/profiles.rs	GitFilterMenuLayout::frame	allow	
-bt-app	src/runtime/preview.rs	Runtime::next_animation_frame	allow	
 bt-app	src/seed.rs	PinMigration	allow	
 bt-app	src/seed.rs	impl PinMigration	allow	
 bt-app	src/update_handoff.rs	Staged.lock	expect	a lock is held by owning it; nothing reads it (install_txn::Held's drop releases it)

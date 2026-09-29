@@ -770,7 +770,7 @@ impl Event {
     ///
     /// The seat criterion is "an agent has spoken in this pane", and the only place that question
     /// can be answered without getting it wrong is **on the enum** — the same shape and the same
-    /// reason as `UserInputKind::is_answer()` one lane over: a path added later has to take a
+    /// reason as `UserInputKind::answer_kind()` one lane over: a path added later has to take a
     /// position here, in one `match` the compiler checks, rather than be remembered at whichever
     /// call site happens to construct it.
     ///

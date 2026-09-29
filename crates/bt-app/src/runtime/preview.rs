@@ -12631,16 +12631,6 @@ impl Runtime<'_> {
             .deadline(self.window.last_present_at)
     }
 
-    /// The gate's live answer, retained separately from the deadline getter:
-    /// before the first present the current turn is due immediately, while the
-    /// fold has no absolute frame epoch to retain yet.
-    #[allow(dead_code)]
-    fn next_animation_frame(&self, now: Instant) -> Instant {
-        self.window
-            .frame_clock
-            .next_frame(self.window.last_present_at, now)
-    }
-
     /// A state clock spent behind the frame gate cannot run before the glass is
     /// ready, but the clamp itself must remain an absolute instant.
     pub(crate) fn clamp_animation_deadline(&self, deadline: Instant) -> Instant {

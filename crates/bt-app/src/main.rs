@@ -21052,15 +21052,11 @@ impl UserInputKind {
     /// answer, a colour report, focus reporting, the PSReadLine repair — are not writes of a *kind*
     /// at all and never reach this door; they are structurally out of reach rather than excluded by
     /// a list (`attention` plan red line 10).
-    #[allow(dead_code, reason = "A2 gates the answer door on this")]
-    fn is_answer(self) -> bool {
-        self.answer_kind().is_some()
-    }
-
-    /// The same answer, in the vocabulary the ledger's `by=` field is written from.
     ///
-    /// `None` for the one kind that is not an answer, so that "a pointer sweep answered a request"
-    /// is a sentence that cannot be constructed rather than one that is checked for.
+    /// Answered in the vocabulary the ledger's `by=` field is written from, and asked by the one
+    /// door every answer goes through (`answer_attention_in`). `None` for the one kind that is not
+    /// an answer, so that "a pointer sweep answered a request" is a sentence that cannot be
+    /// constructed rather than one that is checked for.
     fn answer_kind(self) -> Option<attention::AnswerKind> {
         Some(match self {
             Self::Keyboard => attention::AnswerKind::Keyboard,
