@@ -14,7 +14,8 @@
         revertToSnapshot clean      the machine is the same machine every time
         start                       and it boots into an automatic logon
         (wait for VMware Tools)     because nothing below works without them
-        copy in                     the archive, smoke.ps1, in-guest.ps1
+        copy in                     the archive, smoke.ps1 and every file it
+                                    loads beside itself, in-guest.ps1
         run  unpack                 extract, and write down what this machine is
         run  smoke                  scripts/release/smoke.ps1, unchanged
         run  web                    a page, and whichever WebView2 card it earns
@@ -245,85 +246,37 @@ function Invoke-GuestPowerShell {
             '-NoProfile', '-ExecutionPolicy', 'Bypass') + $PowerShellArguments)
 }
 
-# ── What goes into the guest must be readable by Windows PowerShell 5.1 ──────
+# ── What goes into the guest, read out of the scripts ──────────────────────
 #
-# The guest runs `smoke.ps1` and `in-guest.ps1` under Windows PowerShell 5.1,
-# which reads a file with no byte-order mark in the machine's ANSI code page.
-# Both scripts carry non-ASCII text (an em dash in a message was enough), and
-# read as ANSI those bytes broke a quoted string and took a whole `switch` with
-# it — gate 5's first smoke on 2026-08-27 died in `unpack` with parse errors
-# nobody on the host could see. A UTF-8 BOM is the one spelling both editions
-# read the same way, so a guest-bound script without one is refused here, on
-# the host, before anything is copied.
-$guestBoundScripts = @(
-    (Join-Path $root 'scripts\release\smoke.ps1'),
-    (Join-Path $root 'scripts\release\cleanvm\in-guest.ps1')
-)
-foreach ($guestBound in $guestBoundScripts) {
-    $head = [byte[]](Get-Content -LiteralPath $guestBound -AsByteStream -TotalCount 3)
-    if (-not ($head.Count -eq 3 -and $head[0] -eq 0xEF -and $head[1] -eq 0xBB -and $head[2] -eq 0xBF)) {
-        throw "$guestBound has no UTF-8 byte-order mark; Windows PowerShell 5.1 in the guest would read it as ANSI"
-    }
+# `smoke.ps1` runs in the guest two folders deep, and it loads files from
+# beside itself: `release-manifest.ps1` (dot-sourced), and that one's
+# `archive-members.txt`. The list is derived from `smoke.ps1`'s own text
+# (`guest-files.ps1`), never written here: a hand list fell behind the day
+# `smoke.ps1` gained its dot-source, and the 0.4.6 release smoke died in the
+# guest on it (RC-046, H-10).
+. (Join-Path $PSScriptRoot 'guest-files.ps1')
+$smoke = Join-Path $root 'scripts\release\smoke.ps1'
+$inGuest = Join-Path $PSScriptRoot 'in-guest.ps1'
+foreach ($required in @($smoke, $inGuest)) {
+    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "missing $required" }
 }
+$smokeLoads = Get-GuestLoadedFiles -Script $smoke
+$smokeFolder = Split-Path -Parent $smoke
 
-# ── …and parseable by it, which is a different question ──────────────────────
+# ── …and readable by Windows PowerShell 5.1 ──────────────────────────────────
 #
-# The byte-order mark above only settles how the bytes are decoded. What the
-# guest then does with them is Windows PowerShell 5.1's business, and 5.1 is not
-# PowerShell 7: `Join-Path a b c` is a parameter binding error there rather than
-# a three-segment path, `??` and `?:` and `-AsByteStream` do not exist, and a
-# script written and tested in pwsh reads perfectly and dies on the machine that
-# matters. Gate 5's second smoke, on 2026-08-28, died exactly so, in the `smoke`
-# phase, on `Join-Path $PSScriptRoot '..' '..'`.
-#
-# So the check is made by 5.1 itself. `powershell.exe` is on every Windows and
-# is the same edition the guest will use; its parser is asked for errors and the
-# copy is refused before it happens.
-#
-# **A parser catches syntax, and that is all it catches.** The three-argument
-# `Join-Path` above parses perfectly: it is a *binding* error, raised when the
-# line runs. Nothing short of running the script finds that class of difference,
-# which is why the way to change either of these two files is to run
-# `powershell.exe -NoProfile -File scripts/release/smoke.ps1` on the host, on an
-# unpacked archive, before a virtual machine is booted at all.
-$windowsPowerShell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-if (-not (Test-Path -LiteralPath $windowsPowerShell -PathType Leaf)) {
-    throw "no Windows PowerShell at $windowsPowerShell; the guest-bound scripts cannot be checked against the edition the guest runs"
-}
-# The checker is a file rather than a `-Command` string: a path with a space in
-# it then travels as one argument instead of as something a second parser has to
-# put back together.
-$parseChecker = Join-Path ([IO.Path]::GetTempPath()) ('folio-parse-' + [Guid]::NewGuid().ToString('n') + '.ps1')
-# `-WhatIf:$false` on both ends of it: this script supports `-WhatIf`, and a dry
-# run is precisely when this check earns its keep — the temporary file is the
-# checker itself and not a change to anything a dry run is protecting.
-Set-Content -LiteralPath $parseChecker -Encoding UTF8 -WhatIf:$false -Value @'
-param([Parameter(Mandatory)] [string] $Path)
-$errors = $null
-[void][System.Management.Automation.Language.Parser]::ParseFile($Path, [ref] $null, [ref] $errors)
-if ($errors -and $errors.Count -gt 0) {
-    foreach ($problem in $errors) {
-        Write-Output ('  line {0}, column {1}: {2}' -f
-            $problem.Extent.StartLineNumber, $problem.Extent.StartColumnNumber, $problem.Message)
-    }
-    exit 1
-}
-exit 0
-'@
-try {
-    foreach ($guestBound in $guestBoundScripts) {
-        $said = (& $windowsPowerShell -NoProfile -ExecutionPolicy Bypass `
-                -File $parseChecker -Path $guestBound 2>&1 | Out-String).TrimEnd()
-        if ($LASTEXITCODE -ne 0) {
-            throw @"
-$guestBound does not parse under Windows PowerShell 5.1, which is the only
-edition the clean machine has:
-$said
-"@
-        }
-    }
-}
-finally { Remove-Item -LiteralPath $parseChecker -Force -WhatIf:$false -ErrorAction SilentlyContinue }
+# The guest runs every one of these under Windows PowerShell 5.1, which reads a
+# file with no byte-order mark in the machine's ANSI code page — gate 5's first
+# smoke on 2026-08-27 died in `unpack` on an em dash read so (clean-vm.md
+# §3.4a) — and whose dialect is not PowerShell 7's: `Join-Path a b c` is a
+# binding error there (§3.4b, the second smoke on 2026-08-28). So each script
+# is checked on the host for a UTF-8 byte-order mark and parsed by the host's
+# own `powershell.exe` before anything is copied. **A parser catches syntax,
+# and that is all it catches**: the way to change one of these files is still
+# to run it under `powershell.exe` on the host, on an unpacked archive, before
+# a virtual machine is booted at all.
+$guestBound = @($smoke, $inGuest) + @($smokeLoads | ForEach-Object { Join-Path $smokeFolder $_ })
+Assert-GuestReadable -Paths $guestBound
 
 # ── What has to be on the host before any of it means anything ───────────────
 
@@ -344,12 +297,6 @@ if (-not $Zip) {
 }
 if (-not (Test-Path -LiteralPath $Zip -PathType Leaf)) { throw "no archive at $Zip" }
 $Zip = (Resolve-Path -LiteralPath $Zip).Path
-
-$smoke = Join-Path $root 'scripts\release\smoke.ps1'
-$inGuest = Join-Path $PSScriptRoot 'in-guest.ps1'
-foreach ($required in @($smoke, $inGuest)) {
-    if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "missing $required" }
-}
 
 # The `.vmx` is the one thing a dry run is allowed not to have: the whole use of
 # a dry run is checking this script before there is a virtual machine.
@@ -453,16 +400,30 @@ Invoke-Vmrun -Step 'mkdir' -InGuest -Arguments @('createDirectoryInGuest', $Vmx,
 # uses it for its defaults, so it is put two directories deep in the guest as
 # well. A script dropped at `C:\folio-vm\smoke.ps1` would try to resolve `C:\..`
 # and fail before it ran a thing.
-foreach ($directory in @("$guestHome\scripts", "$guestHome\scripts\release")) {
+# The files `smoke.ps1` loads go beside it there, at the same relative paths.
+$guestRelease = "$guestHome\scripts\release"
+$guestFolders = @("$guestHome\scripts", $guestRelease)
+foreach ($loaded in $smokeLoads) {
+    $parent = Split-Path -Parent $loaded
+    while ($parent) {
+        $folder = "$guestRelease\$parent"
+        if ($guestFolders -notcontains $folder) { $guestFolders += $folder }
+        $parent = Split-Path -Parent $parent
+    }
+}
+foreach ($directory in ($guestFolders | Sort-Object Length)) {
     Invoke-Vmrun -Step 'mkdir' -InGuest -Arguments @('createDirectoryInGuest', $Vmx, $directory) -Tolerant | Out-Null
 }
 
 $archiveInGuest = Join-Path $guestHome ([IO.Path]::GetFileName($Zip))
 $copies = @(
     @{ From = $Zip;     To = $archiveInGuest }
-    @{ From = $smoke;   To = "$guestHome\scripts\release\smoke.ps1" }
+    @{ From = $smoke;   To = "$guestRelease\smoke.ps1" }
     @{ From = $inGuest; To = "$guestHome\in-guest.ps1" }
 )
+foreach ($loaded in $smokeLoads) {
+    $copies += @{ From = (Join-Path $smokeFolder $loaded); To = "$guestRelease\$loaded" }
+}
 foreach ($copy in $copies) {
     Invoke-Vmrun -Step 'copy in' -InGuest `
         -Arguments @('copyFileFromHostToGuest', $Vmx, $copy.From, $copy.To) | Out-Null

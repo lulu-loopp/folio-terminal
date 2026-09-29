@@ -8,12 +8,12 @@
 # given, put in a scratch tap, and taken through what the cask promises
 # (docs/RELEASING.md, "Distribution manifests"):
 #
-#   1. `brew install --cask`: `postflight` wrote the marker attribute
+#   1. `brew install --cask`: `postflight_steps` wrote the marker attribute
 #      `io.github.lulu-loopp.folio.install` on the installed bundle, and a Folio
 #      started from it says in `diagnostics.log` that it is managed by homebrew
 #      (with no uninstall hook: E-10).
 #   2. `brew upgrade --cask` to a bumped version, and `brew reinstall --cask`:
-#      the marker is there after each (the `postflight` writes it again), and
+#      the marker is there after each (`postflight_steps` write it again), and
 #      Folio's cleanup did not run (a planted update entrance is still there).
 #   3. plain `brew uninstall --cask`: the app is gone and the cleanup did not
 #      run — the consequence of `uninstall_hook: false`, recorded.

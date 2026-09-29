@@ -720,7 +720,7 @@ folder and keeps the reader's settings and data.
 
 | | scoop (`bucket/folio.json`) | Homebrew (`Casks/folio.rb`) |
 | --- | --- | --- |
-| **marker** | `post_install` writes `folio-install.json` into `$dir`, the version folder: `{"v":1,"manager":"scoop","uninstall_hook":true}` | `postflight` writes the attribute `io.github.lulu-loopp.folio.install` on the installed `Folio.app`: `{"v":1,"manager":"homebrew","uninstall_hook":false}` |
+| **marker** | `post_install` writes `folio-install.json` into `$dir`, the version folder: `{"v":1,"manager":"scoop","uninstall_hook":true}` | `postflight_steps` (a `run` step: `/usr/bin/xattr -w`, the bundle at `{{appdir}}/Folio.app`) writes the attribute `io.github.lulu-loopp.folio.install` on the installed `Folio.app`: `{"v":1,"manager":"homebrew","uninstall_hook":false}` |
 | **written again** | at every install and every `scoop update` (into the new version folder) | at every install, `brew upgrade` and `brew reinstall` — a copy made without extended attributes loses it, and the next of these puts it back |
 | **cleanup** | `pre_uninstall`, on `scoop uninstall` only | `zap`, on `brew uninstall --zap` only |
 | **the door's exit 2** (a Folio is running; nothing changed) | the hook throws and scoop stops with the app intact | cannot stop anything: Homebrew has already taken the app away before a zap step runs; the zap goes on |
@@ -1519,4 +1519,5 @@ is the accepted one, and it is this paragraph.
 
 The self-updater's recovery contract is tested by hard-resetting the VM at each
 durable boundary. The checklist is `docs/plans/release/clean-vm.md` §4.4; the
-harness is `scripts/release/cleanvm/hard-reset-in-vm.ps1`.
+harness is `scripts/release/cleanvm/updater/` (`install-candidate.ps1`, then
+`run-row.ps1 -Row <rows>`; the macOS rows are `updater/mac/row.sh`).

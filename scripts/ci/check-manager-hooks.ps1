@@ -117,12 +117,12 @@ try {
         }
     }
     foreach ($stanza in @('^cask "folio" do$', '^  version "', '^  sha256 "', '^  url "', '^  app "Folio\.app"$',
-            '^  postflight do$', '^  zap script: \{$', '^        must_succeed: false,$')) {
+            '^  depends_on macos: :sonoma$', '^  postflight_steps do$', '^  zap script: \{$', '^        must_succeed: false,$')) {
         Check ([regex]::IsMatch($caskText, "(?m)$stanza")) "the cask has /$stanza/"
     }
     $caskMarker = Get-QuotedMarker $caskText
     Check ($caskMarker -ceq '{"v":1,"manager":"homebrew","uninstall_hook":false}') `
-        "the cask's postflight writes the homebrew marker without a hook ($caskMarker)"
+        "the cask's postflight_steps write the homebrew marker without a hook ($caskMarker)"
 
     # ── 3. the renderer keeps the hooks ───────────────────────────────────────
     $package = Join-Path $work 'package'
