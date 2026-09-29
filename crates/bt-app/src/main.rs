@@ -38989,7 +38989,8 @@ fn tear_pane_into_tab(
     if !from.seats.close_seat(metrics, seat.id) {
         return None;
     }
-    let mut torn = pane_into_new_tab(from, &seat, id, false, solve)?;
+    let pinned = seed::PinMigration::DraggedOutToNewTab.resulting_pin(from.pinned);
+    let mut torn = pane_into_new_tab(from, &seat, id, pinned, solve)?;
     torn.landing.start(now, motion);
     Some(torn)
 }
@@ -39546,7 +39547,7 @@ fn absorb_tab_sessions(source: &mut TabState, target: &mut TabState, arrived: &[
             target.focused_leaf = *now;
         }
     }
-    target.pinned |= source.pinned;
+    target.pinned |= seed::PinMigration::MergedInto.resulting_pin(source.pinned);
     debug_assert!(
         source.sessions.is_empty(),
         "T226: a merge takes the whole fleet, so no empty tab is left holding shells"
@@ -39610,7 +39611,7 @@ fn absorb_tab_into_layout(
     ejected_id: TabId,
     solve: impl FnOnce(&seats::Seats) -> (SeatLayout, Option<seats::FitOverflow>),
 ) -> Option<TabState> {
-    let host_pinned = target.pinned;
+    let host_pinned = seed::PinMigration::PoppedOut.resulting_pin(target.pinned);
     absorb_tab_sessions(source, target, arrived);
     let ejected =
         displaced.and_then(|seat| pane_into_new_tab(target, seat, ejected_id, host_pinned, solve));
