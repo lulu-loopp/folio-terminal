@@ -638,6 +638,18 @@ under any card `a_modal_covers_the_window` names) is `Runtime::mouse_input`'s an
 the keyboard and the pointer while it is up: keys, pastes and presses reach
 nothing beneath it*. The row stays `not yet folded` (T5).
 
+Ruling added 2026-09-29 (owner, keyboard-protocol design note §7.1, Q1 = A;
+0.4.7 T-KEYBOARD-RECORDS), which narrows the 2026-09-28 ruling "win32-input-mode
+not planned": **on Windows, the chords VT cannot express go to the child as
+win32-input-mode key records** — Enter, Tab, Backspace and Space with Shift, Alt
+or Ctrl, Shift+Escape, and Ctrl with a key that has no C0 code — while ConPTY has
+the mode on and no program asked for kitty or modifyOtherKeys (a program that
+asked gets its protocol). Folio does not adopt the mode for any other key. The
+PowerShell change this makes (Shift+Enter adds a line, Ctrl+Enter inserts one
+above, Alt+Enter does nothing) is intended and disclosed. The set is the
+`records` column of `key_encoding.tsv`. Entry: DESIGN 2026-09-29 *On Windows, the
+chords VT cannot express reach console programs as win32-input-mode key records…*.
+
 ### 28. Mouse routing — `not yet folded` (the wheel half is folded, 2026-09-24)
 Entries: §7.1.5f, §7.1.5g, §7.1.5i; §7.21 and §7.22 *gesture disclosure*; §7.60
 *`T-WHEEL-TRACE`: the wheel has no road in a recording, so an aiming question

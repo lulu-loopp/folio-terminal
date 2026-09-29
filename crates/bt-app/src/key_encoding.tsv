@@ -14,7 +14,10 @@
 ##   location  `standard`, or `numpad` for a keypad key (winit's `KeyLocation::Numpad`)
 ##   mods      `-`, or any of S (Shift), A (Alt), C (Ctrl), in that order
 ##   decckm    `off` / `on` — DECCKM, application cursor keys
-##   mode      `legacy` (no program asked), `kitty` (flag 1 in force), `mok1` / `mok2` (modifyOtherKeys)
+##   mode      `legacy` (no program asked), `kitty` (flag 1 in force), `mok1` / `mok2` (modifyOtherKeys),
+##             `records` (on Windows, no program asked and ConPTY has win32-input-mode set: the chords
+##             VT cannot express are win32-input-mode key records `CSI Vk;Sc;Uc;Kd;Cs;Rc _`, down then
+##             up — T-KEYBOARD-RECORDS; every other chord is its legacy bytes)
 ##   bytes     `CSI ` stands for ESC [; `\e` ESC, `\r` CR, `\t` HT, `\xNN` one byte; `—` sends
 ##             nothing; `(table)` is a chord Folio's shortcut table claims on Windows, so the
 ##             encoder is never asked
@@ -23,363 +26,458 @@
 ##
 ## A chord is built as winit hands it over on Windows with a US layout: the logical key carries
 ## Shift and not Ctrl (`Ctrl+Shift+1` is `!`), and the key without modifiers is the unshifted one.
+## A record's character is what that layout types for the chord (`\n` for Ctrl+Enter, nothing — 0 —
+## for Ctrl+1 or Ctrl+Shift+Enter), measured with `ToUnicodeEx` against the US layout.
 # key	location	mods	decckm	mode	bytes	note
 Enter	standard	-	off	legacy	\r	
 Enter	standard	-	off	kitty	\r	
 Enter	standard	-	off	mok1	\r	
 Enter	standard	-	off	mok2	\r	
+Enter	standard	-	off	records	\r	
 Enter	standard	S	off	legacy	\r	
 Enter	standard	S	off	kitty	CSI 13;2u	
 Enter	standard	S	off	mok1	CSI 27;2;13~	
 Enter	standard	S	off	mok2	CSI 27;2;13~	
+Enter	standard	S	off	records	CSI 13;28;13;1;16;1_CSI 13;28;13;0;16;1_	
 Enter	standard	A	off	legacy	\r	
 Enter	standard	A	off	kitty	CSI 13;3u	
 Enter	standard	A	off	mok1	CSI 27;3;13~	
 Enter	standard	A	off	mok2	CSI 27;3;13~	
+Enter	standard	A	off	records	CSI 13;28;13;1;2;1_CSI 13;28;13;0;2;1_	
 Enter	standard	SA	off	legacy	\r	
 Enter	standard	SA	off	kitty	CSI 13;4u	
 Enter	standard	SA	off	mok1	CSI 27;4;13~	
 Enter	standard	SA	off	mok2	CSI 27;4;13~	
+Enter	standard	SA	off	records	CSI 13;28;13;1;18;1_CSI 13;28;13;0;18;1_	
 Enter	standard	C	off	legacy	\r	
 Enter	standard	C	off	kitty	CSI 13;5u	
 Enter	standard	C	off	mok1	CSI 27;5;13~	
 Enter	standard	C	off	mok2	CSI 27;5;13~	
+Enter	standard	C	off	records	CSI 13;28;10;1;8;1_CSI 13;28;10;0;8;1_	
 Enter	standard	SC	off	legacy	\r	n/a
 Enter	standard	SC	off	kitty	CSI 13;6u	
 Enter	standard	SC	off	mok1	CSI 27;6;13~	
 Enter	standard	SC	off	mok2	CSI 27;6;13~	
+Enter	standard	SC	off	records	CSI 13;28;0;1;24;1_CSI 13;28;0;0;24;1_	n/a
 Enter	standard	AC	off	legacy	\r	
 Enter	standard	AC	off	kitty	CSI 13;7u	
 Enter	standard	AC	off	mok1	CSI 27;7;13~	
 Enter	standard	AC	off	mok2	CSI 27;7;13~	
+Enter	standard	AC	off	records	CSI 13;28;0;1;10;1_CSI 13;28;0;0;10;1_	
 Enter	standard	SAC	off	legacy	\r	
 Enter	standard	SAC	off	kitty	CSI 13;8u	
 Enter	standard	SAC	off	mok1	CSI 27;8;13~	
 Enter	standard	SAC	off	mok2	CSI 27;8;13~	
+Enter	standard	SAC	off	records	CSI 13;28;0;1;26;1_CSI 13;28;0;0;26;1_	
 Tab	standard	-	off	legacy	\t	
 Tab	standard	-	off	kitty	\t	
 Tab	standard	-	off	mok1	\t	
 Tab	standard	-	off	mok2	\t	
+Tab	standard	-	off	records	\t	
 Tab	standard	S	off	legacy	CSI Z	
 Tab	standard	S	off	kitty	CSI 9;2u	
 Tab	standard	S	off	mok1	CSI 27;2;9~	
 Tab	standard	S	off	mok2	CSI 27;2;9~	
+Tab	standard	S	off	records	CSI 9;15;9;1;16;1_CSI 9;15;9;0;16;1_	
 Tab	standard	A	off	legacy	\t	system
 Tab	standard	A	off	kitty	CSI 9;3u	
 Tab	standard	A	off	mok1	CSI 27;3;9~	
 Tab	standard	A	off	mok2	CSI 27;3;9~	
+Tab	standard	A	off	records	CSI 9;15;9;1;2;1_CSI 9;15;9;0;2;1_	system
 Tab	standard	SA	off	legacy	CSI Z	
 Tab	standard	SA	off	kitty	CSI 9;4u	
 Tab	standard	SA	off	mok1	CSI 27;4;9~	
 Tab	standard	SA	off	mok2	CSI 27;4;9~	
+Tab	standard	SA	off	records	CSI 9;15;9;1;18;1_CSI 9;15;9;0;18;1_	
 Tab	standard	C	off	legacy	(table)	
 Tab	standard	C	off	kitty	(table)	
 Tab	standard	C	off	mok1	(table)	
 Tab	standard	C	off	mok2	(table)	
+Tab	standard	C	off	records	(table)	
 Tab	standard	SC	off	legacy	(table)	
 Tab	standard	SC	off	kitty	(table)	
 Tab	standard	SC	off	mok1	(table)	
 Tab	standard	SC	off	mok2	(table)	
+Tab	standard	SC	off	records	(table)	
 Tab	standard	AC	off	legacy	\t	
 Tab	standard	AC	off	kitty	CSI 9;7u	
 Tab	standard	AC	off	mok1	CSI 27;7;9~	
 Tab	standard	AC	off	mok2	CSI 27;7;9~	
+Tab	standard	AC	off	records	CSI 9;15;0;1;10;1_CSI 9;15;0;0;10;1_	
 Tab	standard	SAC	off	legacy	CSI Z	
 Tab	standard	SAC	off	kitty	CSI 9;8u	
 Tab	standard	SAC	off	mok1	CSI 27;8;9~	
 Tab	standard	SAC	off	mok2	CSI 27;8;9~	
+Tab	standard	SAC	off	records	CSI 9;15;0;1;26;1_CSI 9;15;0;0;26;1_	
 Backspace	standard	-	off	legacy	\x7f	
 Backspace	standard	-	off	kitty	\x7f	
 Backspace	standard	-	off	mok1	\x7f	
 Backspace	standard	-	off	mok2	\x7f	
+Backspace	standard	-	off	records	\x7f	
 Backspace	standard	S	off	legacy	\x7f	
 Backspace	standard	S	off	kitty	CSI 127;2u	
 Backspace	standard	S	off	mok1	\x7f	
 Backspace	standard	S	off	mok2	CSI 27;2;127~	
+Backspace	standard	S	off	records	CSI 8;14;8;1;16;1_CSI 8;14;8;0;16;1_	
 Backspace	standard	A	off	legacy	\x7f	
 Backspace	standard	A	off	kitty	CSI 127;3u	
 Backspace	standard	A	off	mok1	\x7f	
 Backspace	standard	A	off	mok2	CSI 27;3;127~	
+Backspace	standard	A	off	records	CSI 8;14;8;1;2;1_CSI 8;14;8;0;2;1_	
 Backspace	standard	SA	off	legacy	\x7f	
 Backspace	standard	SA	off	kitty	CSI 127;4u	
 Backspace	standard	SA	off	mok1	\x7f	
 Backspace	standard	SA	off	mok2	CSI 27;4;127~	
+Backspace	standard	SA	off	records	CSI 8;14;8;1;18;1_CSI 8;14;8;0;18;1_	
 Backspace	standard	C	off	legacy	\x7f	
 Backspace	standard	C	off	kitty	CSI 127;5u	
 Backspace	standard	C	off	mok1	\x7f	
 Backspace	standard	C	off	mok2	\x7f	
+Backspace	standard	C	off	records	CSI 8;14;127;1;8;1_CSI 8;14;127;0;8;1_	
 Backspace	standard	SC	off	legacy	\x7f	
 Backspace	standard	SC	off	kitty	CSI 127;6u	
 Backspace	standard	SC	off	mok1	\x7f	
 Backspace	standard	SC	off	mok2	CSI 27;6;127~	
+Backspace	standard	SC	off	records	CSI 8;14;0;1;24;1_CSI 8;14;0;0;24;1_	
 Backspace	standard	AC	off	legacy	\x7f	
 Backspace	standard	AC	off	kitty	CSI 127;7u	
 Backspace	standard	AC	off	mok1	\x7f	
 Backspace	standard	AC	off	mok2	CSI 27;7;127~	
+Backspace	standard	AC	off	records	CSI 8;14;0;1;10;1_CSI 8;14;0;0;10;1_	
 Backspace	standard	SAC	off	legacy	\x7f	
 Backspace	standard	SAC	off	kitty	CSI 127;8u	
 Backspace	standard	SAC	off	mok1	\x7f	
 Backspace	standard	SAC	off	mok2	CSI 27;8;127~	
+Backspace	standard	SAC	off	records	CSI 8;14;0;1;26;1_CSI 8;14;0;0;26;1_	
 Escape	standard	-	off	legacy	\e	
 Escape	standard	-	off	kitty	CSI 27u	
 Escape	standard	-	off	mok1	\e	
 Escape	standard	-	off	mok2	\e	
+Escape	standard	-	off	records	\e	
 Escape	standard	S	off	legacy	\e	
 Escape	standard	S	off	kitty	CSI 27;2u	
 Escape	standard	S	off	mok1	\e	
 Escape	standard	S	off	mok2	CSI 27;2;27~	
+Escape	standard	S	off	records	CSI 27;1;27;1;16;1_CSI 27;1;27;0;16;1_	
 Escape	standard	A	off	legacy	\e	
 Escape	standard	A	off	kitty	CSI 27;3u	
 Escape	standard	A	off	mok1	CSI 27;3;27~	
 Escape	standard	A	off	mok2	CSI 27;3;27~	
+Escape	standard	A	off	records	\e	
 Escape	standard	SA	off	legacy	\e	
 Escape	standard	SA	off	kitty	CSI 27;4u	
 Escape	standard	SA	off	mok1	CSI 27;4;27~	
 Escape	standard	SA	off	mok2	CSI 27;4;27~	
+Escape	standard	SA	off	records	\e	
 Escape	standard	C	off	legacy	\e	
 Escape	standard	C	off	kitty	CSI 27;5u	
 Escape	standard	C	off	mok1	\e	
 Escape	standard	C	off	mok2	CSI 27;5;27~	
+Escape	standard	C	off	records	\e	
 Escape	standard	SC	off	legacy	\e	
 Escape	standard	SC	off	kitty	CSI 27;6u	
 Escape	standard	SC	off	mok1	\e	
 Escape	standard	SC	off	mok2	CSI 27;6;27~	
+Escape	standard	SC	off	records	\e	
 Escape	standard	AC	off	legacy	\e	
 Escape	standard	AC	off	kitty	CSI 27;7u	
 Escape	standard	AC	off	mok1	CSI 27;7;27~	
 Escape	standard	AC	off	mok2	CSI 27;7;27~	
+Escape	standard	AC	off	records	\e	
 Escape	standard	SAC	off	legacy	\e	
 Escape	standard	SAC	off	kitty	CSI 27;8u	
 Escape	standard	SAC	off	mok1	CSI 27;8;27~	
 Escape	standard	SAC	off	mok2	CSI 27;8;27~	
+Escape	standard	SAC	off	records	\e	
 Space	standard	-	off	legacy	\x20	
 Space	standard	-	off	kitty	\x20	
 Space	standard	-	off	mok1	\x20	
 Space	standard	-	off	mok2	\x20	
+Space	standard	-	off	records	\x20	
 Space	standard	S	off	legacy	\x20	
 Space	standard	S	off	kitty	\x20	
 Space	standard	S	off	mok1	\x20	
 Space	standard	S	off	mok2	CSI 27;2;32~	
+Space	standard	S	off	records	CSI 32;57;32;1;16;1_CSI 32;57;32;0;16;1_	
 Space	standard	A	off	legacy	\e 	
 Space	standard	A	off	kitty	CSI 32;3u	
 Space	standard	A	off	mok1	CSI 27;3;32~	
 Space	standard	A	off	mok2	CSI 27;3;32~	
+Space	standard	A	off	records	CSI 32;57;32;1;2;1_CSI 32;57;32;0;2;1_	
 Space	standard	SA	off	legacy	\e 	
 Space	standard	SA	off	kitty	CSI 32;4u	
 Space	standard	SA	off	mok1	CSI 27;4;32~	
 Space	standard	SA	off	mok2	CSI 27;4;32~	
+Space	standard	SA	off	records	CSI 32;57;32;1;18;1_CSI 32;57;32;0;18;1_	
 Space	standard	C	off	legacy	—	
 Space	standard	C	off	kitty	CSI 32;5u	
 Space	standard	C	off	mok1	—	
 Space	standard	C	off	mok2	CSI 27;5;32~	
+Space	standard	C	off	records	CSI 32;57;32;1;8;1_CSI 32;57;32;0;8;1_	
 Space	standard	SC	off	legacy	—	
 Space	standard	SC	off	kitty	CSI 32;6u	
 Space	standard	SC	off	mok1	—	
 Space	standard	SC	off	mok2	CSI 27;6;32~	
+Space	standard	SC	off	records	CSI 32;57;0;1;24;1_CSI 32;57;0;0;24;1_	
 Space	standard	AC	off	legacy	—	
 Space	standard	AC	off	kitty	CSI 32;7u	
 Space	standard	AC	off	mok1	CSI 27;7;32~	
 Space	standard	AC	off	mok2	CSI 27;7;32~	
+Space	standard	AC	off	records	CSI 32;57;0;1;10;1_CSI 32;57;0;0;10;1_	
 Space	standard	SAC	off	legacy	—	
 Space	standard	SAC	off	kitty	CSI 32;8u	
 Space	standard	SAC	off	mok1	CSI 27;8;32~	
 Space	standard	SAC	off	mok2	CSI 27;8;32~	
+Space	standard	SAC	off	records	CSI 32;57;0;1;26;1_CSI 32;57;0;0;26;1_	
 e	standard	-	off	legacy	e	
 e	standard	-	off	kitty	e	
 e	standard	-	off	mok1	e	
 e	standard	-	off	mok2	e	
+e	standard	-	off	records	e	
 e	standard	S	off	legacy	E	
 e	standard	S	off	kitty	E	
 e	standard	S	off	mok1	E	
 e	standard	S	off	mok2	CSI 27;2;69~	
+e	standard	S	off	records	E	
 e	standard	A	off	legacy	\ee	
 e	standard	A	off	kitty	CSI 101;3u	
 e	standard	A	off	mok1	CSI 27;3;101~	
 e	standard	A	off	mok2	CSI 27;3;101~	
+e	standard	A	off	records	\ee	
 e	standard	SA	off	legacy	\eE	
 e	standard	SA	off	kitty	CSI 101;4u	
 e	standard	SA	off	mok1	CSI 27;4;69~	
 e	standard	SA	off	mok2	CSI 27;4;69~	
+e	standard	SA	off	records	\eE	
 e	standard	C	off	legacy	\x05	
 e	standard	C	off	kitty	CSI 101;5u	
 e	standard	C	off	mok1	\x05	
 e	standard	C	off	mok2	CSI 27;5;101~	
+e	standard	C	off	records	\x05	
 e	standard	SC	off	legacy	\x05	
 e	standard	SC	off	kitty	CSI 101;6u	
 e	standard	SC	off	mok1	\x05	
 e	standard	SC	off	mok2	CSI 27;6;69~	
+e	standard	SC	off	records	\x05	
 e	standard	AC	off	legacy	\e\x05	
 e	standard	AC	off	kitty	CSI 101;7u	
 e	standard	AC	off	mok1	CSI 27;7;101~	
 e	standard	AC	off	mok2	CSI 27;7;101~	
+e	standard	AC	off	records	\e\x05	
 e	standard	SAC	off	legacy	\e\x05	
 e	standard	SAC	off	kitty	CSI 101;8u	
 e	standard	SAC	off	mok1	CSI 27;8;69~	
 e	standard	SAC	off	mok2	CSI 27;8;69~	
+e	standard	SAC	off	records	\e\x05	
 i	standard	-	off	legacy	i	
 i	standard	-	off	kitty	i	
 i	standard	-	off	mok1	i	
 i	standard	-	off	mok2	i	
+i	standard	-	off	records	i	
 i	standard	S	off	legacy	I	
 i	standard	S	off	kitty	I	
 i	standard	S	off	mok1	I	
 i	standard	S	off	mok2	CSI 27;2;73~	
+i	standard	S	off	records	I	
 i	standard	A	off	legacy	\ei	
 i	standard	A	off	kitty	CSI 105;3u	
 i	standard	A	off	mok1	CSI 27;3;105~	
 i	standard	A	off	mok2	CSI 27;3;105~	
+i	standard	A	off	records	\ei	
 i	standard	SA	off	legacy	\eI	
 i	standard	SA	off	kitty	CSI 105;4u	
 i	standard	SA	off	mok1	CSI 27;4;73~	
 i	standard	SA	off	mok2	CSI 27;4;73~	
+i	standard	SA	off	records	\eI	
 i	standard	C	off	legacy	\t	
 i	standard	C	off	kitty	CSI 105;5u	
 i	standard	C	off	mok1	\t	
 i	standard	C	off	mok2	CSI 27;5;105~	
+i	standard	C	off	records	\t	
 i	standard	SC	off	legacy	\t	
 i	standard	SC	off	kitty	CSI 105;6u	
 i	standard	SC	off	mok1	\t	
 i	standard	SC	off	mok2	CSI 27;6;73~	
+i	standard	SC	off	records	\t	
 i	standard	AC	off	legacy	\e\t	
 i	standard	AC	off	kitty	CSI 105;7u	
 i	standard	AC	off	mok1	CSI 27;7;105~	
 i	standard	AC	off	mok2	CSI 27;7;105~	
+i	standard	AC	off	records	\e\t	
 i	standard	SAC	off	legacy	\e\t	
 i	standard	SAC	off	kitty	CSI 105;8u	
 i	standard	SAC	off	mok1	CSI 27;8;73~	
 i	standard	SAC	off	mok2	CSI 27;8;73~	
+i	standard	SAC	off	records	\e\t	
 m	standard	-	off	legacy	m	
 m	standard	-	off	kitty	m	
 m	standard	-	off	mok1	m	
 m	standard	-	off	mok2	m	
+m	standard	-	off	records	m	
 m	standard	S	off	legacy	M	
 m	standard	S	off	kitty	M	
 m	standard	S	off	mok1	M	
 m	standard	S	off	mok2	CSI 27;2;77~	
+m	standard	S	off	records	M	
 m	standard	A	off	legacy	\em	
 m	standard	A	off	kitty	CSI 109;3u	
 m	standard	A	off	mok1	CSI 27;3;109~	
 m	standard	A	off	mok2	CSI 27;3;109~	
+m	standard	A	off	records	\em	
 m	standard	SA	off	legacy	\eM	
 m	standard	SA	off	kitty	CSI 109;4u	
 m	standard	SA	off	mok1	CSI 27;4;77~	
 m	standard	SA	off	mok2	CSI 27;4;77~	
+m	standard	SA	off	records	\eM	
 m	standard	C	off	legacy	\r	
 m	standard	C	off	kitty	CSI 109;5u	
 m	standard	C	off	mok1	\r	
 m	standard	C	off	mok2	CSI 27;5;109~	
+m	standard	C	off	records	\r	
 m	standard	SC	off	legacy	(table)	
 m	standard	SC	off	kitty	(table)	
 m	standard	SC	off	mok1	(table)	
 m	standard	SC	off	mok2	(table)	
+m	standard	SC	off	records	(table)	
 m	standard	AC	off	legacy	\e\r	
 m	standard	AC	off	kitty	CSI 109;7u	
 m	standard	AC	off	mok1	CSI 27;7;109~	
 m	standard	AC	off	mok2	CSI 27;7;109~	
+m	standard	AC	off	records	\e\r	
 m	standard	SAC	off	legacy	\e\r	
 m	standard	SAC	off	kitty	CSI 109;8u	
 m	standard	SAC	off	mok1	CSI 27;8;77~	
 m	standard	SAC	off	mok2	CSI 27;8;77~	
+m	standard	SAC	off	records	\e\r	
 [	standard	-	off	legacy	[	
 [	standard	-	off	kitty	[	
 [	standard	-	off	mok1	[	
 [	standard	-	off	mok2	[	
+[	standard	-	off	records	[	
 [	standard	S	off	legacy	{	
 [	standard	S	off	kitty	{	
 [	standard	S	off	mok1	{	
 [	standard	S	off	mok2	CSI 27;2;123~	
+[	standard	S	off	records	{	
 [	standard	A	off	legacy	\e[	
 [	standard	A	off	kitty	CSI 91;3u	
 [	standard	A	off	mok1	CSI 27;3;91~	
 [	standard	A	off	mok2	CSI 27;3;91~	
+[	standard	A	off	records	\e[	
 [	standard	SA	off	legacy	\e{	
 [	standard	SA	off	kitty	CSI 91;4u	
 [	standard	SA	off	mok1	CSI 27;4;123~	
 [	standard	SA	off	mok2	CSI 27;4;123~	
+[	standard	SA	off	records	\e{	
 [	standard	C	off	legacy	\e	
 [	standard	C	off	kitty	CSI 91;5u	
 [	standard	C	off	mok1	\e	
 [	standard	C	off	mok2	CSI 27;5;91~	
+[	standard	C	off	records	\e	
 [	standard	SC	off	legacy	—	
 [	standard	SC	off	kitty	CSI 91;6u	
 [	standard	SC	off	mok1	—	
 [	standard	SC	off	mok2	CSI 27;6;123~	
+[	standard	SC	off	records	CSI 219;26;0;1;24;1_CSI 219;26;0;0;24;1_	
 [	standard	AC	off	legacy	\e\e	
 [	standard	AC	off	kitty	CSI 91;7u	
 [	standard	AC	off	mok1	CSI 27;7;91~	
 [	standard	AC	off	mok2	CSI 27;7;91~	
+[	standard	AC	off	records	\e\e	
 [	standard	SAC	off	legacy	—	
 [	standard	SAC	off	kitty	CSI 91;8u	
 [	standard	SAC	off	mok1	CSI 27;8;123~	
 [	standard	SAC	off	mok2	CSI 27;8;123~	
+[	standard	SAC	off	records	CSI 219;26;0;1;26;1_CSI 219;26;0;0;26;1_	
 1	standard	-	off	legacy	1	
 1	standard	-	off	kitty	1	
 1	standard	-	off	mok1	1	
 1	standard	-	off	mok2	1	
+1	standard	-	off	records	1	
 1	standard	S	off	legacy	!	
 1	standard	S	off	kitty	!	
 1	standard	S	off	mok1	!	
 1	standard	S	off	mok2	!	
+1	standard	S	off	records	!	
 1	standard	A	off	legacy	\e1	
 1	standard	A	off	kitty	CSI 49;3u	
 1	standard	A	off	mok1	CSI 27;3;49~	
 1	standard	A	off	mok2	CSI 27;3;49~	
+1	standard	A	off	records	\e1	
 1	standard	SA	off	legacy	\e!	
 1	standard	SA	off	kitty	CSI 49;4u	
 1	standard	SA	off	mok1	CSI 27;4;33~	
 1	standard	SA	off	mok2	CSI 27;4;33~	
+1	standard	SA	off	records	\e!	
 1	standard	C	off	legacy	—	
 1	standard	C	off	kitty	CSI 49;5u	
 1	standard	C	off	mok1	CSI 27;5;49~	
 1	standard	C	off	mok2	CSI 27;5;49~	
+1	standard	C	off	records	CSI 49;2;0;1;8;1_CSI 49;2;0;0;8;1_	
 1	standard	SC	off	legacy	(table)	
 1	standard	SC	off	kitty	(table)	
 1	standard	SC	off	mok1	(table)	
 1	standard	SC	off	mok2	(table)	
+1	standard	SC	off	records	(table)	
 1	standard	AC	off	legacy	—	
 1	standard	AC	off	kitty	CSI 49;7u	
 1	standard	AC	off	mok1	CSI 27;7;49~	
 1	standard	AC	off	mok2	CSI 27;7;49~	
+1	standard	AC	off	records	CSI 49;2;0;1;10;1_CSI 49;2;0;0;10;1_	
 1	standard	SAC	off	legacy	—	
 1	standard	SAC	off	kitty	CSI 49;8u	
 1	standard	SAC	off	mok1	CSI 27;8;33~	
 1	standard	SAC	off	mok2	CSI 27;8;33~	
+1	standard	SAC	off	records	CSI 49;2;0;1;26;1_CSI 49;2;0;0;26;1_	
 F1	standard	-	on	legacy	\eOP	
 F1	standard	-	on	kitty	CSI P	
 F1	standard	-	off	kitty	CSI P	
+F1	standard	-	on	records	\eOP	
 F1	standard	C	on	legacy	CSI 1;5P	
 F1	standard	C	on	kitty	CSI 1;5P	
 F1	standard	C	off	kitty	CSI 1;5P	
+F1	standard	C	on	records	CSI 1;5P	
 F3	standard	-	on	legacy	\eOR	
 F3	standard	-	on	kitty	CSI 13~	
 F3	standard	-	off	kitty	CSI 13~	
+F3	standard	-	on	records	\eOR	
 F3	standard	S	on	legacy	CSI 1;2R	
 F3	standard	S	on	kitty	CSI 13;2~	
 F3	standard	S	off	kitty	CSI 13;2~	
+F3	standard	S	on	records	CSI 1;2R	
 F4	standard	-	on	legacy	\eOS	
 F4	standard	-	on	kitty	CSI S	
 F4	standard	-	off	kitty	CSI S	
+F4	standard	-	on	records	\eOS	
 F5	standard	-	on	legacy	CSI 15~	
 F5	standard	-	on	kitty	CSI 15~	
 F5	standard	-	off	kitty	CSI 15~	
+F5	standard	-	on	records	CSI 15~	
 ArrowUp	standard	-	on	legacy	\eOA	
 ArrowUp	standard	-	on	kitty	CSI A	
 ArrowUp	standard	-	off	kitty	CSI A	
+ArrowUp	standard	-	on	records	\eOA	
 ArrowUp	standard	C	on	legacy	CSI 1;5A	
 ArrowUp	standard	C	on	kitty	CSI 1;5A	
 ArrowUp	standard	C	off	kitty	CSI 1;5A	
+ArrowUp	standard	C	on	records	CSI 1;5A	
 Home	standard	-	on	legacy	\eOH	
 Home	standard	-	on	kitty	CSI H	
 Home	standard	-	off	kitty	CSI H	
+Home	standard	-	on	records	\eOH	
 Enter	numpad	-	on	legacy	\r	
 Enter	numpad	-	on	kitty	CSI 57414u	
 Enter	numpad	-	off	kitty	CSI 57414u	
+Enter	numpad	-	on	records	\r	
 Enter	numpad	C	on	legacy	\r	
 Enter	numpad	C	on	kitty	CSI 57414;5u	
 Enter	numpad	C	off	kitty	CSI 57414;5u	
+Enter	numpad	C	on	records	CSI 13;28;10;1;264;1_CSI 13;28;10;0;264;1_	
 ArrowUp	numpad	-	on	legacy	\eOA	
 ArrowUp	numpad	-	on	kitty	CSI 57419u	
 ArrowUp	numpad	-	off	kitty	CSI 57419u	
+ArrowUp	numpad	-	on	records	\eOA	
 8	numpad	-	on	legacy	8	
 8	numpad	-	on	kitty	8	
 8	numpad	-	off	kitty	8	
+8	numpad	-	on	records	8	

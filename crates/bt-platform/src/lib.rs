@@ -3756,7 +3756,10 @@ mod windows_impl {
                 Ime::{
                     CPS_CANCEL, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
                 },
-                KeyboardAndMouse::{GetCapture, GetKeyboardLayout, SetFocus, VkKeyScanW},
+                KeyboardAndMouse::{
+                    GetCapture, GetKeyboardLayout, MAPVK_VSC_TO_VK_EX, MapVirtualKeyW, SetFocus,
+                    VkKeyScanW,
+                },
                 // One call that undoes one winit makes, and the four that answer
                 // the system's pan gesture — see
                 // [`let_the_system_translate_touch`].
@@ -6608,6 +6611,27 @@ mod windows_impl {
         // Low byte is the virtual key; the high byte is which modifiers reach
         // the character, and the caller's chord already says which it means.
         Some((answer as u16) & 0x00ff)
+    }
+
+    /// The virtual key **the installed layout** gives a key, from where the key
+    /// is: its set-1 scan code, `0xE0nn` for an `E0`-prefixed one.
+    ///
+    /// The mapping Windows itself applies to every key event before a
+    /// program sees it, asked for the calling thread's layout — the window
+    /// thread's, which is the one the key was typed on. The win32-input-mode
+    /// record a key encoder writes carries this number, because a console
+    /// reader that gets no character for a chord (`Ctrl+1`) asks the layout
+    /// what the key is from exactly it (T-KEYBOARD-RECORDS).
+    ///
+    /// `None` when the layout maps the scan code to no key.
+    #[must_use]
+    pub fn virtual_key_of_scan_code(scan_code: u16) -> Option<u16> {
+        // SAFETY: `MapVirtualKeyW` takes two integers by value and reads the
+        // calling thread's active layout; it has no pointer to misuse.
+        let answer = unsafe { MapVirtualKeyW(u32::from(scan_code), MAPVK_VSC_TO_VK_EX) };
+        u16::try_from(answer)
+            .ok()
+            .filter(|virtual_key| *virtual_key != 0)
     }
 
     pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
@@ -12129,8 +12153,9 @@ pub use windows_impl::{
     set_window_topmost, silence_std_streams, stand_window_at, standalone_alert,
     std_error_is_console, stop_flashing_window, system_backdrop_available, system_uses_light_apps,
     take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
-    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_screen_rect,
-    wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error, write_to_console,
+    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_key_of_scan_code,
+    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error,
+    write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -12152,7 +12177,7 @@ pub use portable_impl::{
     is_window_cloaked, leave_process, let_the_system_translate_touch, read_context_menu,
     redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
     set_system_backdrop, silence_std_streams, system_backdrop_available, thread_mouse_capture,
-    virtual_key_for_character, write_std_error, write_to_console,
+    virtual_key_for_character, virtual_key_of_scan_code, write_std_error, write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).

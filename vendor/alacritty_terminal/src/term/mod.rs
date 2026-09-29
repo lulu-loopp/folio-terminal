@@ -11,8 +11,8 @@
 // rather than recorded as set; a write-provenance flag stamped on every cell a
 // print puts down (`Term::set_write_provenance`); the kitty keyboard protocol's state
 // replaced by kitty's model per screen (cap eight, honoured-flags mask, refused bits
-// reported) and xterm's modifyOtherKeys; and the tests for all of it. The rest is this
-// repository's rustfmt settings.
+// reported) and xterm's modifyOtherKeys; DEC 9001 (win32-input-mode) recorded as a mode;
+// and the tests for all of it. The rest is this repository's rustfmt settings.
 // Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
 // Notice given under section 4(b) of the Apache License, Version 2.0.
 
@@ -184,6 +184,7 @@ bitflags! {
         const REPORT_ASSOCIATED_TEXT  = 1 << 22;
         const GRAPHEME_CLUSTERING     = 1 << 23;
         const THEME_UPDATE_NOTIFICATION = 1 << 24;
+        const WIN32_INPUT             = 1 << 25;
         const MOUSE_MODE              = Self::MOUSE_REPORT_CLICK.bits() | Self::MOUSE_MOTION.bits() | Self::MOUSE_DRAG.bits();
         const KITTY_KEYBOARD_PROTOCOL = Self::DISAMBIGUATE_ESC_CODES.bits()
                                       | Self::REPORT_EVENT_TYPES.bits()
@@ -3174,6 +3175,13 @@ impl<T: EventListener> Handler for Term<T> {
             self.mode.insert(TermMode::THEME_UPDATE_NOTIFICATION);
             return;
         }
+        // Folio: DEC 9001, win32-input-mode. ConPTY sets it at the head of every session to say
+        // it parses `CSI Vk;Sc;Uc;Kd;Cs;Rc _` key records in what it is sent; a nested ConPTY can
+        // clear it. The terminal only records it: the embedder's key encoder is the one reader.
+        if matches!(mode, PrivateMode::Unknown(9001)) {
+            self.mode.insert(TermMode::WIN32_INPUT);
+            return;
+        }
         let mode = match mode {
             PrivateMode::Named(mode) => mode,
             PrivateMode::Unknown(mode) => {
@@ -3251,6 +3259,10 @@ impl<T: EventListener> Handler for Term<T> {
         // Folio: see `set_private_mode`.
         if matches!(mode, PrivateMode::Unknown(2031)) {
             self.mode.remove(TermMode::THEME_UPDATE_NOTIFICATION);
+            return;
+        }
+        if matches!(mode, PrivateMode::Unknown(9001)) {
+            self.mode.remove(TermMode::WIN32_INPUT);
             return;
         }
         let mode = match mode {

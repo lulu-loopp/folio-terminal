@@ -1,7 +1,7 @@
 use bt_platform::HostPlatform;
 use bt_term::{KeyboardProtocol, ModifyOtherKeys, SUPPORTED_KITTY_FLAGS};
 use winit::event::{ElementState, MouseButton};
-use winit::keyboard::{Key, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
+use winit::keyboard::{Key, KeyCode, KeyLocation, ModifiersState, NamedKey, PhysicalKey};
 
 // ── The routing rule, and the one sentence it is (M1-7, probe X-3 §4) ───────
 //
@@ -664,6 +664,13 @@ pub(crate) fn injected_logical_key(
 /// `key_without_modifiers` is winit's key with no modifier applied — kitty's
 /// "unicode-key-code", the un-shifted key on whatever layout is in use — and
 /// `location` says whether it is a keypad key.
+///
+/// **On Windows, with neither protocol asked for, the chords VT cannot express go as
+/// win32-input-mode key records** while the transport says it parses them
+/// ([`KeyboardProtocol::win32_input_mode`], which ConPTY sets): [`key_records`], built from what
+/// `origin` says about the press (T-KEYBOARD-RECORDS, design note §7.3). A program that asked for
+/// kitty or modifyOtherKeys gets its protocol instead (§4.3), and every chord outside the set
+/// keeps its legacy bytes.
 pub(crate) fn keyboard_bytes(
     key: &Key,
     key_without_modifiers: &Key,
@@ -671,6 +678,7 @@ pub(crate) fn keyboard_bytes(
     modifiers: ModifiersState,
     application_cursor_mode: bool,
     keyboard: KeyboardProtocol,
+    origin: KeyOrigin<'_>,
 ) -> Option<Vec<u8>> {
     if keyboard.kitty & SUPPORTED_KITTY_FLAGS != 0 {
         return kitty_bytes(
@@ -683,6 +691,11 @@ pub(crate) fn keyboard_bytes(
     }
     let mode = keyboard.modify_other_keys;
     if mode == ModifyOtherKeys::Off {
+        if keyboard.win32_input_mode
+            && let Some(records) = key_records(key, modifiers, origin)
+        {
+            return Some(records);
+        }
         return legacy_bytes(key, modifiers, application_cursor_mode);
     }
     if withheld_from_every_protocol(key, modifiers) {
@@ -933,6 +946,247 @@ fn modify_other_keys_bytes(
         _ => return None,
     };
     encoded.then(|| format!("\x1b[27;{};{code}~", xterm_modifier(modifiers)).into_bytes())
+}
+
+/// **What the platform said about a key press beyond the key itself** — what a win32-input-mode
+/// record is built from (T-KEYBOARD-RECORDS). Read from winit's event at the one call site.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct KeyOrigin<'a> {
+    /// The platform the key was pressed on. Key records are the Windows console's form, so
+    /// [`key_records`] writes none anywhere else.
+    pub(crate) platform: HostPlatform,
+    /// Where the key is on the keyboard: the record's scan code ([`scan_code`]).
+    pub(crate) physical_key: PhysicalKey,
+    /// The text the press produced with every modifier applied — winit's
+    /// `text_with_all_modifiers`, on Windows the `WM_CHAR` the system translated the press into
+    /// (`\n` for Ctrl+Enter, DEL for Ctrl+Backspace, nothing for Ctrl+1). The record's
+    /// character, which is what a real key event carries.
+    pub(crate) text_with_all_modifiers: Option<&'a str>,
+    /// The installed layout's virtual key for a scan code: `bt_platform::virtual_key_of_scan_code`
+    /// in the product, a fixed layout in a test.
+    pub(crate) virtual_key_of_scan_code: fn(u16) -> Option<u16>,
+}
+
+/// `dwControlKeyState` bits (`wincon.h`) a record carries: which modifiers were down, and whether
+/// the key is one of the enhanced (`E0`-prefixed) keys. The left-hand modifier bits are used
+/// because winit does not say which hand was used, as `SHIFT_ENTER_RECORDS` does.
+const SHIFT_PRESSED: u16 = 0x0010;
+const LEFT_CTRL_PRESSED: u16 = 0x0008;
+const LEFT_ALT_PRESSED: u16 = 0x0002;
+const ENHANCED_KEY: u16 = 0x0100;
+
+/// **A chord VT cannot express, as the win32-input-mode down/up record pair ConPTY turns into
+/// that exact key event** — or `None` for a chord outside the set, or on a platform that is not
+/// Windows (T-KEYBOARD-RECORDS, `docs/plans/design/keyboard-protocol-2026-09-29.md` §7.3).
+///
+/// **The set** is the chords whose legacy bytes cannot tell them apart:
+///
+/// * Enter, Tab, Backspace or Space with Shift, Alt or Ctrl, and Escape with Shift — legacy
+///   sends `\r`, `\t`, DEL, a space (or nothing) and ESC whatever is held, so PSReadLine, cmd,
+///   .NET and Codex on Windows read Ctrl+Enter as Enter;
+/// * Ctrl with a text key that has no C0 code ([`control_byte`] has none: digits, most
+///   punctuation, non-ASCII letters), which legacy does not send at all.
+///
+/// A chord holding Super, a composing key and a paste chord are never in it
+/// ([`withheld_from_every_protocol`]). A Ctrl chord that has a C0 code (`Ctrl+I`, `Ctrl+M`,
+/// `Ctrl+[`, `Ctrl+Shift+A`) keeps it: ConPTY already turns the code into a key event, and the
+/// set is only what VT cannot say. **Escape with Ctrl or Alt keeps its ESC too**: ConPTY
+/// swallows that record and no reader gets anything (measured through the vendored ConPTY,
+/// `bt-pty`'s `keyboard_protocol_through_conpty`), while the ESC reaches it as Escape. Windows
+/// takes those chords for itself anyway (Ctrl+Esc, Alt+Esc, Ctrl+Shift+Esc).
+///
+/// **The record** is the form `SHIFT_ENTER_RECORDS` already writes, microsoft/terminal's
+/// win32-input-mode (`doc/specs/#4999 - Improved keyboard handling in Conpty.md`):
+/// `CSI Vk ; Sc ; Uc ; Kd ; Cs ; Rc _`, which ConPTY's `InputStateMachineEngine` parses on the
+/// final `_` into one `KEY_EVENT_RECORD`, field for field (`wVirtualKeyCode`, `wVirtualScanCode`,
+/// `UnicodeChar`, `bKeyDown`, `dwControlKeyState`, `wRepeatCount`). The pair is the key going down
+/// (`Kd` 1) and coming up (`Kd` 0), one repeat each:
+///
+/// * `Vk` — Enter `VK_RETURN` 13, Tab `VK_TAB` 9, Backspace `VK_BACK` 8, Escape `VK_ESCAPE` 27,
+///   Space `VK_SPACE` 32, the same on every layout; a text key's is the installed layout's for its
+///   scan code, except that a keypad digit or decimal key that produced text is `VK_NUMPAD0`–`9` /
+///   `VK_DECIMAL`, which Num Lock decides and a scan code does not ([`numpad_text_virtual_key`]);
+/// * `Sc` — the key's set-1 scan code, from where it is on the keyboard ([`scan_code`]; `0` for a
+///   named key whose position was not reported, which is what Windows reports for an injected
+///   key). A text key whose position or virtual key is unknown has no record, and keeps its
+///   legacy bytes;
+/// * `Uc` — the one UTF-16 unit the press produced with every modifier ([`KeyOrigin`]), `0` for
+///   a chord that types nothing (Ctrl+1, Ctrl+Shift+Enter). A press that produced more than one
+///   unit is not one key event, and keeps its legacy bytes;
+/// * `Cs` — `SHIFT_PRESSED`, `LEFT_CTRL_PRESSED`, `LEFT_ALT_PRESSED` for what is held, and
+///   `ENHANCED_KEY` for an `E0` key (Numpad Enter, the keypad's `/`).
+fn key_records(key: &Key, modifiers: ModifiersState, origin: KeyOrigin<'_>) -> Option<Vec<u8>> {
+    if origin.platform != HostPlatform::Windows || withheld_from_every_protocol(key, modifiers) {
+        return None;
+    }
+    let (shift, alt, control) = (
+        modifiers.shift_key(),
+        modifiers.alt_key(),
+        modifiers.control_key(),
+    );
+    let scan = scan_code(origin.physical_key);
+    let virtual_key: u16 = match key {
+        Key::Named(named) if shift || alt || control => match named {
+            NamedKey::Enter => 0x0D,
+            NamedKey::Tab => 0x09,
+            NamedKey::Backspace => 0x08,
+            NamedKey::Escape if !control && !alt => 0x1B,
+            NamedKey::Space => 0x20,
+            _ => return None,
+        },
+        Key::Character(text)
+            if control && control_byte(text).is_none() && !text.chars().any(char::is_control) =>
+        {
+            match numpad_text_virtual_key(origin.physical_key) {
+                Some(virtual_key) => virtual_key,
+                None => (origin.virtual_key_of_scan_code)(scan?)?,
+            }
+        }
+        _ => return None,
+    };
+    let character = match origin.text_with_all_modifiers {
+        None => 0,
+        Some(text) => {
+            let mut units = text.encode_utf16();
+            match (units.next(), units.next()) {
+                (None, _) => 0,
+                (Some(unit), None) => unit,
+                (Some(_), Some(_)) => return None,
+            }
+        }
+    };
+    let scan = scan.unwrap_or(0);
+    let mut state = 0;
+    if shift {
+        state |= SHIFT_PRESSED;
+    }
+    if control {
+        state |= LEFT_CTRL_PRESSED;
+    }
+    if alt {
+        state |= LEFT_ALT_PRESSED;
+    }
+    if scan & 0xFF00 == 0xE000 {
+        state |= ENHANCED_KEY;
+    }
+    let scan = scan & 0x00FF;
+    let record = |down: u8| format!("\x1b[{virtual_key};{scan};{character};{down};{state};1_");
+    Some(format!("{}{}", record(1), record(0)).into_bytes())
+}
+
+/// **A key's set-1 scan code, from where it is on the keyboard** — an `E0`-prefixed key as
+/// `0xE0nn` — or `None` for a key outside the ones a record can be written for (the keys that
+/// type text, and the five named keys of [`key_records`]). The numbers are the hardware's, the
+/// same ones winit's `physicalkey_to_scancode` answers on Windows, so the table answers the same
+/// on every host; a position winit could not name arrives with its raw scan code.
+fn scan_code(physical_key: PhysicalKey) -> Option<u16> {
+    let code = match physical_key {
+        PhysicalKey::Code(code) => code,
+        PhysicalKey::Unidentified(winit::keyboard::NativeKeyCode::Windows(scan)) if scan != 0 => {
+            return Some(scan);
+        }
+        PhysicalKey::Unidentified(_) => return None,
+    };
+    Some(match code {
+        KeyCode::Escape => 0x01,
+        KeyCode::Digit1 => 0x02,
+        KeyCode::Digit2 => 0x03,
+        KeyCode::Digit3 => 0x04,
+        KeyCode::Digit4 => 0x05,
+        KeyCode::Digit5 => 0x06,
+        KeyCode::Digit6 => 0x07,
+        KeyCode::Digit7 => 0x08,
+        KeyCode::Digit8 => 0x09,
+        KeyCode::Digit9 => 0x0A,
+        KeyCode::Digit0 => 0x0B,
+        KeyCode::Minus => 0x0C,
+        KeyCode::Equal => 0x0D,
+        KeyCode::Backspace => 0x0E,
+        KeyCode::Tab => 0x0F,
+        KeyCode::KeyQ => 0x10,
+        KeyCode::KeyW => 0x11,
+        KeyCode::KeyE => 0x12,
+        KeyCode::KeyR => 0x13,
+        KeyCode::KeyT => 0x14,
+        KeyCode::KeyY => 0x15,
+        KeyCode::KeyU => 0x16,
+        KeyCode::KeyI => 0x17,
+        KeyCode::KeyO => 0x18,
+        KeyCode::KeyP => 0x19,
+        KeyCode::BracketLeft => 0x1A,
+        KeyCode::BracketRight => 0x1B,
+        KeyCode::Enter => 0x1C,
+        KeyCode::KeyA => 0x1E,
+        KeyCode::KeyS => 0x1F,
+        KeyCode::KeyD => 0x20,
+        KeyCode::KeyF => 0x21,
+        KeyCode::KeyG => 0x22,
+        KeyCode::KeyH => 0x23,
+        KeyCode::KeyJ => 0x24,
+        KeyCode::KeyK => 0x25,
+        KeyCode::KeyL => 0x26,
+        KeyCode::Semicolon => 0x27,
+        KeyCode::Quote => 0x28,
+        KeyCode::Backquote => 0x29,
+        KeyCode::Backslash => 0x2B,
+        KeyCode::KeyZ => 0x2C,
+        KeyCode::KeyX => 0x2D,
+        KeyCode::KeyC => 0x2E,
+        KeyCode::KeyV => 0x2F,
+        KeyCode::KeyB => 0x30,
+        KeyCode::KeyN => 0x31,
+        KeyCode::KeyM => 0x32,
+        KeyCode::Comma => 0x33,
+        KeyCode::Period => 0x34,
+        KeyCode::Slash => 0x35,
+        KeyCode::NumpadMultiply => 0x37,
+        KeyCode::Space => 0x39,
+        KeyCode::Numpad7 => 0x47,
+        KeyCode::Numpad8 => 0x48,
+        KeyCode::Numpad9 => 0x49,
+        KeyCode::NumpadSubtract => 0x4A,
+        KeyCode::Numpad4 => 0x4B,
+        KeyCode::Numpad5 => 0x4C,
+        KeyCode::Numpad6 => 0x4D,
+        KeyCode::NumpadAdd => 0x4E,
+        KeyCode::Numpad1 => 0x4F,
+        KeyCode::Numpad2 => 0x50,
+        KeyCode::Numpad3 => 0x51,
+        KeyCode::Numpad0 => 0x52,
+        KeyCode::NumpadDecimal => 0x53,
+        KeyCode::IntlBackslash => 0x56,
+        KeyCode::NumpadEqual => 0x59,
+        KeyCode::IntlRo => 0x73,
+        KeyCode::IntlYen => 0x7D,
+        KeyCode::NumpadComma => 0x7E,
+        KeyCode::NumpadEnter => 0xE01C,
+        KeyCode::NumpadDivide => 0xE035,
+        _ => return None,
+    })
+}
+
+/// The virtual key of a keypad key that produced text. A digit key is `VK_NUMPAD0`–`9`, and the
+/// decimal key `VK_DECIMAL`, only while Num Lock is on, which a scan code cannot say (the layout
+/// maps the same scan codes to `VK_INSERT` … `VK_DELETE`); a key that produced text says it was
+/// on. `None` for every other key, whose virtual key the layout answers for its scan code.
+fn numpad_text_virtual_key(physical_key: PhysicalKey) -> Option<u16> {
+    let PhysicalKey::Code(code) = physical_key else {
+        return None;
+    };
+    Some(match code {
+        KeyCode::Numpad0 => 0x60,
+        KeyCode::Numpad1 => 0x61,
+        KeyCode::Numpad2 => 0x62,
+        KeyCode::Numpad3 => 0x63,
+        KeyCode::Numpad4 => 0x64,
+        KeyCode::Numpad5 => 0x65,
+        KeyCode::Numpad6 => 0x66,
+        KeyCode::Numpad7 => 0x67,
+        KeyCode::Numpad8 => 0x68,
+        KeyCode::Numpad9 => 0x69,
+        KeyCode::NumpadDecimal => 0x6E,
+        _ => return None,
+    })
 }
 
 /// **What a key sends when no program asked for a keyboard protocol** — the encoder as it
@@ -2859,18 +3113,29 @@ mod tests {
     const KITTY: KeyboardProtocol = KeyboardProtocol {
         kitty: 1,
         modify_other_keys: ModifyOtherKeys::Off,
+        win32_input_mode: false,
     };
     const MOK1: KeyboardProtocol = KeyboardProtocol {
         kitty: 0,
         modify_other_keys: ModifyOtherKeys::One,
+        win32_input_mode: false,
     };
     const MOK2: KeyboardProtocol = KeyboardProtocol {
         kitty: 0,
         modify_other_keys: ModifyOtherKeys::Two,
+        win32_input_mode: false,
     };
     const UNASKED: KeyboardProtocol = KeyboardProtocol {
         kitty: 0,
         modify_other_keys: ModifyOtherKeys::Off,
+        win32_input_mode: false,
+    };
+    /// No program asked, and ConPTY has win32-input-mode set — every Windows pane's state from
+    /// its first bytes (T-KEYBOARD-RECORDS).
+    const RECORDS: KeyboardProtocol = KeyboardProtocol {
+        kitty: 0,
+        modify_other_keys: ModifyOtherKeys::Off,
+        win32_input_mode: true,
     };
     const EVERY_MODE: [KeyboardProtocol; 4] = [UNASKED, KITTY, MOK1, MOK2];
 
@@ -2880,7 +3145,146 @@ mod tests {
             "kitty" => KITTY,
             "mok1" => MOK1,
             "mok2" => MOK2,
+            "records" => RECORDS,
             other => panic!("no mode `{other}`"),
+        }
+    }
+
+    fn no_virtual_key(_: u16) -> Option<u16> {
+        None
+    }
+
+    /// A press that says nothing about itself beyond its key: for the tests whose mode writes no
+    /// record, where the origin is never read.
+    const NOWHERE: KeyOrigin<'static> = KeyOrigin {
+        platform: HostPlatform::Windows,
+        physical_key: PhysicalKey::Unidentified(NativeKeyCode::Unidentified),
+        text_with_all_modifiers: None,
+        virtual_key_of_scan_code: no_virtual_key,
+    };
+
+    /// The US layout's virtual key for the scan codes of its digit row and punctuation, as
+    /// `MapVirtualKeyExW(…, MAPVK_VSC_TO_VK_EX, 0x04090409)` answered on 2026-09-29.
+    fn us_virtual_key(scan: u16) -> Option<u16> {
+        Some(match scan {
+            0x02..=0x0A => 0x31 + (scan - 0x02),
+            0x0B => 0x30,
+            0x0C => 0xBD,
+            0x0D => 0xBB,
+            0x1A => 0xDB,
+            0x1B => 0xDD,
+            0x27 => 0xBA,
+            0x28 => 0xDE,
+            0x29 => 0xC0,
+            0x2B => 0xDC,
+            0x33 => 0xBC,
+            0x34 => 0xBE,
+            0x35 => 0xBF,
+            0x1E => 0x41,
+            _ => return None,
+        })
+    }
+
+    /// Where a US keyboard has the key the table names.
+    fn us_physical(name: &str) -> PhysicalKey {
+        let code = match name {
+            "Enter" => KeyCode::Enter,
+            "Tab" => KeyCode::Tab,
+            "Backspace" => KeyCode::Backspace,
+            "Escape" => KeyCode::Escape,
+            "Space" => KeyCode::Space,
+            "1" => KeyCode::Digit1,
+            "2" => KeyCode::Digit2,
+            "3" => KeyCode::Digit3,
+            "4" => KeyCode::Digit4,
+            "5" => KeyCode::Digit5,
+            "6" => KeyCode::Digit6,
+            "7" => KeyCode::Digit7,
+            "8" => KeyCode::Digit8,
+            "9" => KeyCode::Digit9,
+            "0" => KeyCode::Digit0,
+            "-" => KeyCode::Minus,
+            "=" => KeyCode::Equal,
+            "[" => KeyCode::BracketLeft,
+            "]" => KeyCode::BracketRight,
+            "\\" => KeyCode::Backslash,
+            ";" => KeyCode::Semicolon,
+            "'" => KeyCode::Quote,
+            "`" => KeyCode::Backquote,
+            "," => KeyCode::Comma,
+            "." => KeyCode::Period,
+            "/" => KeyCode::Slash,
+            "e" => KeyCode::KeyE,
+            "i" => KeyCode::KeyI,
+            "m" => KeyCode::KeyM,
+            _ => return PhysicalKey::Unidentified(NativeKeyCode::Unidentified),
+        };
+        PhysicalKey::Code(code)
+    }
+
+    /// What the US layout types for a chord — the `WM_CHAR` Windows sends for it, which winit
+    /// hands over as `text_with_all_modifiers` — as `ToUnicodeEx` against the US layout answered
+    /// on 2026-09-29: Alt alone changes nothing; Ctrl with Shift or Alt types nothing on these
+    /// keys; Ctrl types Enter's LF, Backspace's DEL, Escape and Space as themselves, and a key's
+    /// C0 code where it has one.
+    fn us_text(name: &str, modifiers: ModifiersState) -> Option<String> {
+        let (shift, alt, control) = (
+            modifiers.shift_key(),
+            modifiers.alt_key(),
+            modifiers.control_key(),
+        );
+        if let Some(named) = named(name) {
+            let (plain, with_control) = match named {
+                NamedKey::Enter => ('\r', Some('\n')),
+                NamedKey::Tab => ('\t', None),
+                NamedKey::Backspace => ('\u{8}', Some('\u{7f}')),
+                NamedKey::Escape => ('\u{1b}', Some('\u{1b}')),
+                NamedKey::Space => (' ', Some(' ')),
+                _ => return None,
+            };
+            return match (control, shift || alt) {
+                (false, _) => Some(plain.to_string()),
+                (true, false) => with_control.map(String::from),
+                (true, true) => None,
+            };
+        }
+        let (logical, _) = windows_us(name, shift);
+        let Key::Character(logical) = logical else {
+            return None;
+        };
+        if !control {
+            return Some(logical.to_string());
+        }
+        if alt {
+            return None;
+        }
+        control_byte(&logical)
+            .filter(|byte| *byte < 0x20)
+            .map(|byte| char::from(byte).to_string())
+    }
+
+    /// A press as winit hands it over on Windows with a US layout, with what a record is built
+    /// from.
+    struct UsPress {
+        physical_key: PhysicalKey,
+        text: Option<String>,
+    }
+
+    impl UsPress {
+        fn new(name: &str, modifiers: ModifiersState) -> Self {
+            Self {
+                physical_key: us_physical(name),
+                text: us_text(name, modifiers),
+            }
+        }
+
+        fn on(&self, platform: HostPlatform) -> KeyOrigin<'_> {
+            KeyOrigin {
+                platform,
+                physical_key: self.physical_key,
+                text_with_all_modifiers: self.text.as_deref(),
+                virtual_key_of_scan_code: us_virtual_key,
+            }
         }
     }
 
@@ -3028,9 +3432,13 @@ mod tests {
     /// on the TSV is the source (`docs/key-encoding.md` is generated from it). Each chord is
     /// built as winit hands it over on Windows with a US layout.
     ///
+    /// The `records` rows (T-KEYBOARD-RECORDS) are Windows' with win32-input-mode set, whatever
+    /// host runs the test: the press is the US layout's, as `UsPress` builds it.
+    ///
     /// MUTATION: make `kitty_bytes` send `CSI Z` for Shift+Tab as legacy does (the
     /// `Tab S kitty` row reads `CSI 9;2u`), or drop `Ctrl+Shift+M` from the shortcut table
-    /// (its `(table)` row is no longer claimed).
+    /// (its `(table)` row is no longer claimed), or leave Space out of `key_records`' set (the
+    /// `Space C records` row reads `—`).
     #[test]
     fn every_row_of_the_key_encoding_table() {
         let windows = crate::shortcuts::Shortcuts::defaults_for(HostPlatform::Windows);
@@ -3073,6 +3481,14 @@ mod tests {
                 "{where_}: no note `{}`",
                 row.note
             );
+            let mut press = UsPress::new(row.key, modifiers);
+            if location == KeyLocation::Numpad {
+                press.physical_key = PhysicalKey::Code(match row.key {
+                    "Enter" => KeyCode::NumpadEnter,
+                    "ArrowUp" | "8" => KeyCode::Numpad8,
+                    other => panic!("no keypad key `{other}`"),
+                });
+            }
             let sent = keyboard_bytes(
                 &logical,
                 &base,
@@ -3080,6 +3496,7 @@ mod tests {
                 modifiers,
                 decckm,
                 protocol(row.mode),
+                press.on(HostPlatform::Windows),
             );
             assert_eq!(
                 sent.as_deref().map(String::from_utf8_lossy),
@@ -3091,7 +3508,7 @@ mod tests {
         }
         assert_eq!(
             (encoded, claimed),
-            (343, 16),
+            (432, 20),
             "every row was read — a table that lost rows would pass a filter over nothing"
         );
     }
@@ -3099,14 +3516,14 @@ mod tests {
     /// Render `key_encoding.tsv` as the document a reader opens.
     fn key_encoding_document() -> String {
         let mut order: Vec<(&str, &str, &str, &str)> = Vec::new();
-        let mut cells: std::collections::HashMap<(&str, &str, &str, &str), [String; 4]> =
+        let mut cells: std::collections::HashMap<(&str, &str, &str, &str), [String; 5]> =
             std::collections::HashMap::new();
         for row in encoding_rows() {
             let id = (row.key, row.location, row.mods, row.decckm);
             if !cells.contains_key(&id) {
                 order.push(id);
             }
-            let column = ["legacy", "kitty", "mok1", "mok2"]
+            let column = ["legacy", "kitty", "mok1", "mok2", "records"]
                 .iter()
                 .position(|mode| *mode == row.mode)
                 .expect("a known mode");
@@ -3133,20 +3550,28 @@ mod tests {
              program that never asks receives the legacy column, which is what Folio sent before \
              either protocol existed here.\n\
              \n\
+             On Windows, a program that never asks reads the *Windows records* column instead, \
+             while ConPTY has win32-input-mode on (it turns it on for every session): the chords \
+             whose legacy bytes cannot tell them apart — a modified Enter, Tab, Backspace or \
+             Space, Shift+Escape, and Ctrl with a key that has no control code — go as the key records \
+             `CSI Vk;Sc;Uc;Kd;Cs;Rc _` (down, then up), which ConPTY turns into those exact key \
+             events. Every other chord sends its legacy bytes. A program that asks for kitty or \
+             modifyOtherKeys gets that protocol instead.\n\
+             \n\
              `CSI` is `ESC [`. `—` sends nothing. *(table)* is a chord Folio's shortcut table \
              claims on Windows, so no program receives it. *(system)* is taken by Windows first; \
              *(n/a)* never arrives on Windows and is encoded for macOS. Chords are as a US layout \
              produces them. The design is `docs/plans/design/keyboard-protocol-2026-09-29.md`.\n\
              \n\
-             | Key | Where | Mods | DECCKM | legacy | kitty flag 1 | modifyOtherKeys 1 | modifyOtherKeys 2 |\n\
-             |---|---|---|---|---|---|---|---|\n",
+             | Key | Where | Mods | DECCKM | legacy | kitty flag 1 | modifyOtherKeys 1 | modifyOtherKeys 2 | Windows records |\n\
+             |---|---|---|---|---|---|---|---|---|\n",
         );
         for id in order {
             let (key, location, mods, decckm) = id;
-            let [legacy, kitty, one, two] = &cells[&id];
+            let [legacy, kitty, one, two, records] = &cells[&id];
             let key = if key == "|" { "\\|" } else { key };
             document.push_str(&format!(
-                "| {key} | {location} | {mods} | {decckm} | {legacy} | {kitty} | {one} | {two} |\n"
+                "| {key} | {location} | {mods} | {decckm} | {legacy} | {kitty} | {one} | {two} | {records} |\n"
             ));
         }
         document
@@ -3184,15 +3609,29 @@ mod tests {
     /// other; these come from the kitty protocol's text and xterm's reference and are not read
     /// from the table.
     ///
+    /// RED (T-KEYBOARD-RECORDS) for the records half: on Windows, with win32-input-mode set and
+    /// no protocol asked, the chords VT cannot express are the key records of microsoft/terminal's
+    /// win32-input-mode spec, the chords it can keep their bytes, and a program that asked wins.
+    ///
     /// MUTATION: send `CSI 27u`'s legacy `\e` for a lone Esc under flag 1, or honour DECCKM
-    /// for a plain arrow under flag 1 (`SS3 A`).
+    /// for a plain arrow under flag 1 (`SS3 A`), or drop the `keyboard.win32_input_mode` rung
+    /// from `keyboard_bytes` (Ctrl+Enter reads `\r`), or ask it before the kitty rung (the
+    /// Ctrl+Enter a program asked for reads a record pair).
     #[test]
     fn the_protocols_normative_cases() {
         let none = ModifiersState::empty();
         let named = |key: NamedKey| Key::Named(key);
         let text = |text: &str| Key::Character(text.into());
         let flag1 = |key: &Key, base: &Key, modifiers: ModifiersState| {
-            keyboard_bytes(key, base, KeyLocation::Standard, modifiers, false, KITTY)
+            keyboard_bytes(
+                key,
+                base,
+                KeyLocation::Standard,
+                modifiers,
+                false,
+                KITTY,
+                NOWHERE,
+            )
         };
         let esc = named(NamedKey::Escape);
         let tab = named(NamedKey::Tab);
@@ -3222,7 +3661,15 @@ mod tests {
             Some(b"\x1b[32;5u".to_vec())
         );
         assert_eq!(
-            keyboard_bytes(&enter, &enter, KeyLocation::Numpad, none, false, KITTY),
+            keyboard_bytes(
+                &enter,
+                &enter,
+                KeyLocation::Numpad,
+                none,
+                false,
+                KITTY,
+                NOWHERE
+            ),
             Some(b"\x1b[57414u".to_vec())
         );
         assert_eq!(
@@ -3231,7 +3678,7 @@ mod tests {
         );
         let up = named(NamedKey::ArrowUp);
         assert_eq!(
-            keyboard_bytes(&up, &up, KeyLocation::Standard, none, true, KITTY),
+            keyboard_bytes(&up, &up, KeyLocation::Standard, none, true, KITTY, NOWHERE),
             Some(b"\x1b[A".to_vec())
         );
         let f1 = named(NamedKey::F1);
@@ -3240,7 +3687,15 @@ mod tests {
         assert_eq!(flag1(&f3, &f3, none), Some(b"\x1b[13~".to_vec()));
 
         let mode = |key: &Key, base: &Key, modifiers: ModifiersState, protocol| {
-            keyboard_bytes(key, base, KeyLocation::Standard, modifiers, false, protocol)
+            keyboard_bytes(
+                key,
+                base,
+                KeyLocation::Standard,
+                modifiers,
+                false,
+                protocol,
+                NOWHERE,
+            )
         };
         assert_eq!(
             mode(&enter, &enter, ModifiersState::CONTROL, MOK2),
@@ -3267,6 +3722,153 @@ mod tests {
             mode(&text("a"), &text("a"), ModifiersState::ALT, MOK1),
             Some(b"\x1b[27;3;97~".to_vec())
         );
+
+        // **win32-input-mode records** (T-KEYBOARD-RECORDS, design note §7.3): what Windows
+        // Terminal sends for the same press, `CSI Vk;Sc;Uc;Kd;Cs;Rc _` down then up, with the
+        // US layout's character for the chord (`WM_CHAR`: LF for Ctrl+Enter, nothing for Ctrl+1).
+        let pressed = |key: &Key,
+                       location: KeyLocation,
+                       modifiers: ModifiersState,
+                       physical: KeyCode,
+                       typed: Option<&str>,
+                       protocol: KeyboardProtocol| {
+            keyboard_bytes(
+                key,
+                key,
+                location,
+                modifiers,
+                false,
+                protocol,
+                KeyOrigin {
+                    platform: HostPlatform::Windows,
+                    physical_key: PhysicalKey::Code(physical),
+                    text_with_all_modifiers: typed,
+                    virtual_key_of_scan_code: us_virtual_key,
+                },
+            )
+        };
+        let record = |key: &Key, modifiers: ModifiersState, physical: KeyCode, typed| {
+            pressed(
+                key,
+                KeyLocation::Standard,
+                modifiers,
+                physical,
+                typed,
+                RECORDS,
+            )
+        };
+        let ctrl = ModifiersState::CONTROL;
+        assert_eq!(
+            record(&enter, ctrl, KeyCode::Enter, Some("\n")),
+            Some(b"\x1b[13;28;10;1;8;1_\x1b[13;28;10;0;8;1_".to_vec()),
+            "Ctrl+Enter"
+        );
+        assert_eq!(
+            record(&enter, ModifiersState::SHIFT, KeyCode::Enter, Some("\r")),
+            Some(SHIFT_ENTER_RECORDS.to_vec()),
+            "Shift+Enter, the paste road's own record pair"
+        );
+        assert_eq!(
+            record(&enter, ModifiersState::ALT, KeyCode::Enter, Some("\r")),
+            Some(b"\x1b[13;28;13;1;2;1_\x1b[13;28;13;0;2;1_".to_vec()),
+            "Alt+Enter"
+        );
+        assert_eq!(
+            record(&tab, ModifiersState::SHIFT, KeyCode::Tab, Some("\t")),
+            Some(b"\x1b[9;15;9;1;16;1_\x1b[9;15;9;0;16;1_".to_vec()),
+            "Shift+Tab"
+        );
+        assert_eq!(
+            record(&space, ctrl, KeyCode::Space, Some(" ")),
+            Some(b"\x1b[32;57;32;1;8;1_\x1b[32;57;32;0;8;1_".to_vec()),
+            "Ctrl+Space"
+        );
+        assert_eq!(
+            record(
+                &named(NamedKey::Backspace),
+                ctrl,
+                KeyCode::Backspace,
+                Some("\u{7f}")
+            ),
+            Some(b"\x1b[8;14;127;1;8;1_\x1b[8;14;127;0;8;1_".to_vec()),
+            "Ctrl+Backspace"
+        );
+        assert_eq!(
+            record(&esc, ModifiersState::SHIFT, KeyCode::Escape, Some("\u{1b}")),
+            Some(b"\x1b[27;1;27;1;16;1_\x1b[27;1;27;0;16;1_".to_vec()),
+            "Shift+Escape"
+        );
+        assert_eq!(
+            record(&esc, ctrl, KeyCode::Escape, Some("\u{1b}")),
+            Some(b"\x1b".to_vec()),
+            "Ctrl+Escape keeps its ESC: ConPTY swallows that record"
+        );
+        assert_eq!(
+            record(&text("1"), ctrl, KeyCode::Digit1, None),
+            Some(b"\x1b[49;2;0;1;8;1_\x1b[49;2;0;0;8;1_".to_vec()),
+            "Ctrl+1: a key with no C0 code, which types nothing"
+        );
+        assert_eq!(
+            pressed(
+                &enter,
+                KeyLocation::Numpad,
+                ctrl,
+                KeyCode::NumpadEnter,
+                Some("\n"),
+                RECORDS
+            ),
+            Some(b"\x1b[13;28;10;1;264;1_\x1b[13;28;10;0;264;1_".to_vec()),
+            "Ctrl + Numpad Enter, an enhanced key"
+        );
+        // Outside the set: a chord VT already expresses keeps its legacy bytes.
+        assert_eq!(
+            record(&text("i"), ctrl, KeyCode::KeyI, Some("\t")),
+            Some(b"\t".to_vec()),
+            "Ctrl+I has a C0 code, and ConPTY turns it into Tab"
+        );
+        assert_eq!(
+            record(&enter, none, KeyCode::Enter, Some("\r")),
+            Some(b"\r".to_vec()),
+            "plain Enter"
+        );
+        assert_eq!(
+            record(&text("a"), ModifiersState::ALT, KeyCode::KeyA, Some("a")),
+            Some(b"\x1ba".to_vec()),
+            "Alt+a: ConPTY turns ESC a into Alt+a"
+        );
+        // A program that asked wins (§4.3): the transport's mode does not outrank it.
+        let asked = |protocol: KeyboardProtocol| KeyboardProtocol {
+            win32_input_mode: true,
+            ..protocol
+        };
+        assert_eq!(
+            record_with(&enter, ctrl, asked(KITTY)),
+            Some(b"\x1b[13;5u".to_vec())
+        );
+        assert_eq!(
+            record_with(&enter, ctrl, asked(MOK2)),
+            Some(b"\x1b[27;5;13~".to_vec())
+        );
+        fn record_with(
+            key: &Key,
+            modifiers: ModifiersState,
+            protocol: KeyboardProtocol,
+        ) -> Option<Vec<u8>> {
+            keyboard_bytes(
+                key,
+                key,
+                KeyLocation::Standard,
+                modifiers,
+                false,
+                protocol,
+                KeyOrigin {
+                    platform: HostPlatform::Windows,
+                    physical_key: PhysicalKey::Code(KeyCode::Enter),
+                    text_with_all_modifiers: Some("\n"),
+                    virtual_key_of_scan_code: us_virtual_key,
+                },
+            )
+        }
     }
 
     /// RED (T-KEYBOARD-PROTOCOL) — **a program that never asked receives exactly the bytes it
@@ -3314,6 +3916,7 @@ mod tests {
                 modifiers,
                 decckm == "1",
                 UNASKED,
+                NOWHERE,
             );
             let sent = sent.map_or_else(
                 || "-".to_owned(),
@@ -3323,6 +3926,267 @@ mod tests {
             compared += 1;
         }
         assert_eq!(compared, 2368, "the whole captured sweep");
+    }
+
+    /// The captured sweep of this host, as `(key, modifiers, DECCKM, hex or "-")`.
+    fn legacy_sweep() -> Vec<(&'static str, ModifiersState, bool, &'static str)> {
+        let baseline = match bt_platform::host_platform() {
+            HostPlatform::Windows => KEY_ENCODING_LEGACY_WINDOWS,
+            HostPlatform::MacOs => KEY_ENCODING_LEGACY_MACOS,
+            other => panic!("no pre-ticket capture was made on {other:?}"),
+        };
+        baseline
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .map(|line| {
+                let cells = line.split('\t').collect::<Vec<_>>();
+                let [key, bits, decckm, hex] = cells[..] else {
+                    panic!("four columns: {line:?}");
+                };
+                let bits = bits.parse::<u8>().expect("modifier bits");
+                let mut modifiers = ModifiersState::empty();
+                for (bit, modifier) in [
+                    (1, ModifiersState::SHIFT),
+                    (2, ModifiersState::ALT),
+                    (4, ModifiersState::CONTROL),
+                    (8, ModifiersState::SUPER),
+                ] {
+                    if bits & bit != 0 {
+                        modifiers |= modifier;
+                    }
+                }
+                (key, modifiers, decckm == "1", hex)
+            })
+            .collect()
+    }
+
+    fn hex_of(bytes: Option<Vec<u8>>) -> String {
+        bytes.map_or_else(
+            || "-".to_owned(),
+            |bytes| bytes.iter().map(|byte| format!("{byte:02x}")).collect(),
+        )
+    }
+
+    /// RED (T-KEYBOARD-RECORDS) — **the second run of the captured sweep, with win32-input-mode
+    /// set: on Windows the only rows that change are the chords VT cannot express, each now its
+    /// key record pair; on any other platform no row changes.**
+    ///
+    /// The sweep (`key_encoding_legacy_{windows,macos}.tsv`) was captured with no
+    /// win32-input-mode, which is why `a_program_that_never_asked_gets_exactly_the_bytes_it_got_before`
+    /// still passes unchanged: that run is a pane whose transport never asked for records. This
+    /// run is a Windows pane's real state — ConPTY sets the mode at the head of every session —
+    /// and says what T-KEYBOARD-RECORDS changes there, row by row: a modified Enter, Tab,
+    /// Backspace or Space, Shift+Escape, and Ctrl with a key that has no C0 code, never with
+    /// Super — 99 chords of the sweep, each with DECCKM off and on. The set and the record's fields are
+    /// written here from the win32-input-mode spec and the US layout's measured answers, not read
+    /// from `key_records`. The same run with the press said to come from a Mac changes nothing:
+    /// macOS is unchanged byte for byte.
+    ///
+    /// MUTATION: let `key_records` write for a Ctrl chord that has a C0 code (Ctrl+E reads a record
+    /// pair), or drop its `origin.platform != HostPlatform::Windows` refusal (the macOS run
+    /// differs).
+    #[test]
+    fn with_win32_input_mode_only_the_chords_vt_cannot_express_change() {
+        let sweep = legacy_sweep();
+        let mut changed = 0;
+        for &(key, modifiers, decckm, hex) in &sweep {
+            let (logical, base) = windows_us(key, modifiers.shift_key());
+            let press = UsPress::new(key, modifiers);
+            let sent = |platform| {
+                hex_of(keyboard_bytes(
+                    &logical,
+                    &base,
+                    KeyLocation::Standard,
+                    modifiers,
+                    decckm,
+                    RECORDS,
+                    press.on(platform),
+                ))
+            };
+            let where_ = format!("{key} {modifiers:?} DECCKM {decckm}");
+            assert_eq!(
+                sent(HostPlatform::MacOs),
+                hex,
+                "{where_}: a Mac is unchanged"
+            );
+
+            let (shift, alt, control) = (
+                modifiers.shift_key(),
+                modifiers.alt_key(),
+                modifiers.control_key(),
+            );
+            let named_key = match key {
+                "Enter" => Some((13, 0x1C)),
+                "Tab" => Some((9, 0x0F)),
+                "Backspace" => Some((8, 0x0E)),
+                "Escape" => Some((27, 0x01)),
+                "Space" => Some((32, 0x39)),
+                _ => None,
+            };
+            let typed_character = match &logical {
+                Key::Character(text) => text.chars().next(),
+                _ => None,
+            };
+            let expected = if modifiers.super_key() {
+                None
+            } else if let Some((virtual_key, scan)) = named_key {
+                // Escape with Ctrl or Alt keeps its ESC: ConPTY swallows that record.
+                let escape_swallowed = key == "Escape" && (control || alt);
+                ((shift || alt || control) && !escape_swallowed).then_some((virtual_key, scan))
+            } else if let Some(character) = typed_character
+                && control
+                && !character.is_ascii_alphabetic()
+                && !"@[\\]^_?".contains(character)
+            {
+                let PhysicalKey::Code(code) = press.physical_key else {
+                    panic!("{where_}: the US keyboard has this key");
+                };
+                let scan = scan_code(PhysicalKey::Code(code)).expect("a scan code");
+                Some((us_virtual_key(scan).expect("a US virtual key"), scan))
+            } else {
+                None
+            };
+            match expected {
+                None => assert_eq!(sent(HostPlatform::Windows), hex, "{where_}: unchanged"),
+                Some((virtual_key, scan)) => {
+                    let character = press
+                        .text
+                        .as_deref()
+                        .and_then(|text| text.encode_utf16().next())
+                        .unwrap_or(0);
+                    let state = 16 * u16::from(shift) + 8 * u16::from(control) + 2 * u16::from(alt);
+                    let wanted = format!(
+                        "\x1b[{virtual_key};{scan};{character};1;{state};1_\
+                         \x1b[{virtual_key};{scan};{character};0;{state};1_"
+                    );
+                    assert_eq!(
+                        sent(HostPlatform::Windows),
+                        hex_of(Some(wanted.into_bytes())),
+                        "{where_}: its record pair"
+                    );
+                    changed += 1;
+                }
+            }
+        }
+        assert_eq!(sweep.len(), 2368, "the whole captured sweep");
+        assert_eq!(
+            changed, 198,
+            "99 chords of the sweep, each with DECCKM off and on"
+        );
+    }
+
+    /// RED (T-KEYBOARD-RECORDS) — **a record is the press as Windows reported it, on any layout:
+    /// the layout's virtual key for where the key is, and the character it typed.**
+    ///
+    /// On a Russian layout `Ctrl+ф` has no C0 code in the text winit hands over (`ф`), so VT
+    /// cannot send it — but Windows types `^A` for it, because the key is `VK_A` there: the record
+    /// carries `VK_A` from the layout and `Uc` 1 from `WM_CHAR`, which is what Windows Terminal
+    /// sends. A keypad digit that typed text is `VK_NUMPAD1` whatever the layout maps its scan code
+    /// to, because Num Lock was on. A text key whose position or virtual key is unknown, or a
+    /// press that typed two UTF-16 units, is not one key event and keeps its legacy bytes; a named
+    /// key whose position was not reported still has its virtual key, with scan code 0.
+    ///
+    /// MUTATION: take the virtual key from the US table instead of `virtual_key_of_scan_code`
+    /// (the Russian record reads another key), or ask the layout for a keypad digit (it reads
+    /// `VK_END`, 35).
+    #[test]
+    fn a_record_is_the_press_as_windows_reported_it_on_any_layout() {
+        fn layout_answers_a_for_the_a_key_and_end_for_numpad_1(scan: u16) -> Option<u16> {
+            match scan {
+                0x1E => Some(0x41),
+                0x4F => Some(0x23),
+                _ => None,
+            }
+        }
+        let origin = |physical: PhysicalKey, typed| KeyOrigin {
+            platform: HostPlatform::Windows,
+            physical_key: physical,
+            text_with_all_modifiers: typed,
+            virtual_key_of_scan_code: layout_answers_a_for_the_a_key_and_end_for_numpad_1,
+        };
+        let sent = |key: &Key, location, modifiers, origin| {
+            keyboard_bytes(key, key, location, modifiers, false, RECORDS, origin)
+        };
+        let ctrl = ModifiersState::CONTROL;
+        let ef = Key::Character("ф".into());
+        assert_eq!(
+            sent(
+                &ef,
+                KeyLocation::Standard,
+                ctrl,
+                origin(PhysicalKey::Code(KeyCode::KeyA), Some("\u{1}"))
+            ),
+            Some(b"\x1b[65;30;1;1;8;1_\x1b[65;30;1;0;8;1_".to_vec())
+        );
+        let one = Key::Character("1".into());
+        assert_eq!(
+            sent(
+                &one,
+                KeyLocation::Numpad,
+                ctrl,
+                origin(PhysicalKey::Code(KeyCode::Numpad1), None)
+            ),
+            Some(b"\x1b[97;79;0;1;8;1_\x1b[97;79;0;0;8;1_".to_vec())
+        );
+        let slash = Key::Character("/".into());
+        assert_eq!(
+            keyboard_bytes(
+                &slash,
+                &slash,
+                KeyLocation::Numpad,
+                ctrl,
+                false,
+                RECORDS,
+                KeyOrigin {
+                    virtual_key_of_scan_code: |scan| (scan == 0xE035).then_some(0x6F),
+                    ..origin(PhysicalKey::Code(KeyCode::NumpadDivide), None)
+                }
+            ),
+            Some(b"\x1b[111;53;0;1;264;1_\x1b[111;53;0;0;264;1_".to_vec()),
+            "the keypad's `/` is an enhanced key"
+        );
+        // Unknown position, unknown virtual key, two units: legacy (nothing, for Ctrl+ф).
+        assert_eq!(
+            sent(
+                &ef,
+                KeyLocation::Standard,
+                ctrl,
+                origin(PhysicalKey::Unidentified(NativeKeyCode::Unidentified), None)
+            ),
+            None
+        );
+        assert_eq!(
+            sent(
+                &ef,
+                KeyLocation::Standard,
+                ctrl,
+                origin(PhysicalKey::Code(KeyCode::KeyQ), None)
+            ),
+            None
+        );
+        assert_eq!(
+            sent(
+                &ef,
+                KeyLocation::Standard,
+                ctrl,
+                origin(PhysicalKey::Code(KeyCode::KeyA), Some("\u{1F600}"))
+            ),
+            None
+        );
+        // An injected Enter (`VK_PACKET`, no position) with a modifier: `VK_RETURN`, scan code 0.
+        let enter = Key::Named(NamedKey::Enter);
+        assert_eq!(
+            sent(
+                &enter,
+                KeyLocation::Standard,
+                ModifiersState::SHIFT,
+                origin(
+                    PhysicalKey::Unidentified(NativeKeyCode::Windows(0)),
+                    Some("\r")
+                )
+            ),
+            Some(b"\x1b[13;0;13;1;16;1_\x1b[13;0;13;0;16;1_".to_vec())
+        );
     }
 
     /// RED (T-KEYBOARD-PROTOCOL) — **no letter is special**: every letter `a`–`z`, under Ctrl
@@ -3346,6 +4210,7 @@ mod tests {
                         modifiers,
                         false,
                         protocol,
+                        NOWHERE,
                     )
                 };
                 if is_paste_shortcut(&key, modifiers) {
@@ -3397,7 +4262,8 @@ mod tests {
                 KeyLocation::Standard,
                 ModifiersState::CONTROL,
                 false,
-                KITTY
+                KITTY,
+                NOWHERE,
             ),
             Some(b"\x1b[233;5u".to_vec())
         );
@@ -3410,7 +4276,8 @@ mod tests {
                 KeyLocation::Standard,
                 ModifiersState::SHIFT | ModifiersState::ALT,
                 false,
-                KITTY
+                KITTY,
+                NOWHERE,
             ),
             Some(b"\x1b[1092;4u".to_vec())
         );
@@ -3440,7 +4307,8 @@ mod tests {
                     KeyLocation::Standard,
                     ModifiersState::empty(),
                     false,
-                    protocol
+                    protocol,
+                    NOWHERE,
                 ),
                 Some(b"@".to_vec()),
                 "{protocol:?}"
@@ -3453,7 +4321,8 @@ mod tests {
                     KeyLocation::Standard,
                     ModifiersState::SUPER,
                     false,
-                    protocol
+                    protocol,
+                    NOWHERE,
                 ),
                 None,
                 "{protocol:?}"
@@ -3473,7 +4342,8 @@ mod tests {
                         KeyLocation::Standard,
                         modifiers,
                         false,
-                        protocol
+                        protocol,
+                        NOWHERE,
                     ),
                     None,
                     "{protocol:?} {modifiers:?}"
@@ -3496,12 +4366,20 @@ mod tests {
         let a_ring = Key::Character("å".into());
         let off = effective_modifiers(ModifiersState::ALT, false, HostPlatform::MacOs);
         assert_eq!(
-            keyboard_bytes(&a_ring, &a, KeyLocation::Standard, off, false, KITTY),
+            keyboard_bytes(
+                &a_ring,
+                &a,
+                KeyLocation::Standard,
+                off,
+                false,
+                KITTY,
+                NOWHERE
+            ),
             Some("å".as_bytes().to_vec())
         );
         let on = effective_modifiers(ModifiersState::ALT, true, HostPlatform::MacOs);
         assert_eq!(
-            keyboard_bytes(&a, &a, KeyLocation::Standard, on, false, KITTY),
+            keyboard_bytes(&a, &a, KeyLocation::Standard, on, false, KITTY, NOWHERE),
             Some(b"\x1b[97;3u".to_vec())
         );
         // A Mac may hand a Ctrl chord over as the control character itself; the code is the
@@ -3516,7 +4394,8 @@ mod tests {
                 KeyLocation::Standard,
                 ctrl_shift,
                 false,
-                KITTY
+                KITTY,
+                NOWHERE,
             ),
             Some(b"\x1b[101;6u".to_vec())
         );
@@ -3527,7 +4406,8 @@ mod tests {
                 KeyLocation::Standard,
                 ctrl_shift,
                 false,
-                MOK2
+                MOK2,
+                NOWHERE,
             ),
             Some(b"\x1b[27;6;69~".to_vec())
         );
@@ -3547,6 +4427,7 @@ mod tests {
             modifiers,
             terminal.application_cursor_mode(),
             terminal.modes().keyboard,
+            NOWHERE,
         )
         .unwrap_or_default()
     }
@@ -3599,6 +4480,92 @@ mod tests {
         assert_eq!(
             encoded_by(&claude, &enter, ModifiersState::SHIFT),
             b"\x1b[13;2u"
+        );
+    }
+
+    /// Encode one key the way `Runtime::keyboard_input` does on Windows, pressed on a US layout.
+    fn encoded_on_windows(
+        terminal: &bt_term::TerminalAdapter,
+        name: &str,
+        modifiers: ModifiersState,
+    ) -> Vec<u8> {
+        let (logical, base) = windows_us(name, modifiers.shift_key());
+        let press = UsPress::new(name, modifiers);
+        keyboard_bytes(
+            &logical,
+            &base,
+            KeyLocation::Standard,
+            modifiers,
+            terminal.application_cursor_mode(),
+            terminal.modes().keyboard,
+            press.on(HostPlatform::Windows),
+        )
+        .unwrap_or_default()
+    }
+
+    /// RED (T-KEYBOARD-RECORDS) — **the golden replay of a PowerShell pane: a session that never
+    /// asks, with ConPTY's `?9001h` seen, gets Ctrl+Enter as its key record pair; a program that
+    /// then asks for kitty gets `CSI 13;5u`; once it pops, the record pair again.**
+    ///
+    /// The bytes are ConPTY's session head (`\e[1t\e[c\e[?1004h\e[?9001h`, as a real ConPTY writes
+    /// it — `bt-term`'s `a_teardown_that_conpty_re_enables_does_not_type_at_the_pane` and the
+    /// adapter's doc record it) and then what a WSL or Node program writes. PSReadLine itself never
+    /// asks. Without `?9001h` — a transport that does not parse records — Ctrl+Enter stays `\r`.
+    ///
+    /// MUTATION: read `win32_input_mode` as true in `keyboard_bytes` whatever the terminal says
+    /// (the first pane, which never saw `?9001h`, reads a record pair).
+    #[test]
+    fn the_golden_replay_of_a_powershell_pane() {
+        let one = std::num::NonZeroU32::new(24).expect("nonzero");
+        let mut bare = bt_term::TerminalAdapter::new(one, one);
+        bare.feed(b"\x1b[1t\x1b[c\x1b[?1004h");
+        assert_eq!(
+            encoded_on_windows(&bare, "Enter", ModifiersState::CONTROL),
+            b"\r",
+            "no `?9001h`, no records"
+        );
+
+        let mut pane = bt_term::TerminalAdapter::new(one, one);
+        pane.feed(b"\x1b[1t\x1b[c\x1b[?1004h\x1b[?9001h");
+        let ctrl_enter = b"\x1b[13;28;10;1;8;1_\x1b[13;28;10;0;8;1_".as_slice();
+        assert_eq!(
+            encoded_on_windows(&pane, "Enter", ModifiersState::CONTROL),
+            ctrl_enter
+        );
+        assert_eq!(
+            encoded_on_windows(&pane, "Enter", ModifiersState::SHIFT),
+            SHIFT_ENTER_RECORDS
+        );
+        assert_eq!(
+            encoded_on_windows(&pane, "Enter", ModifiersState::empty()),
+            b"\r"
+        );
+        assert_eq!(
+            encoded_on_windows(&pane, "e", ModifiersState::empty()),
+            b"e"
+        );
+        pane.feed(b"\x1b[>1u");
+        assert_eq!(
+            encoded_on_windows(&pane, "Enter", ModifiersState::CONTROL),
+            b"\x1b[13;5u",
+            "a program that asked wins"
+        );
+        pane.feed(b"\x1b[<u");
+        assert_eq!(
+            encoded_on_windows(&pane, "Enter", ModifiersState::CONTROL),
+            ctrl_enter,
+            "and after its pop, the records again"
+        );
+        pane.feed(b"\x1b[>4;2m");
+        assert_eq!(
+            encoded_on_windows(&pane, "Enter", ModifiersState::CONTROL),
+            b"\x1b[27;5;13~",
+            "modifyOtherKeys wins too"
+        );
+        pane.feed(b"\x1b[>4m");
+        assert_eq!(
+            encoded_on_windows(&pane, "Enter", ModifiersState::CONTROL),
+            ctrl_enter
         );
     }
 }
