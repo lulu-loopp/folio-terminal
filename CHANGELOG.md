@@ -6,7 +6,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
-Nothing yet.
+### Fixed
+
+- F1–F12 reach the program (they sent nothing before); Shift, Alt and Ctrl
+  on them are encoded as in xterm.
 
 ## 0.4.6-preview — 2026-09-29
 ### Added

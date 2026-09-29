@@ -13110,3 +13110,19 @@ The owner's Folio printed `对比表:http://127.0.0.1:8765/sheets/services.html(
 **Before it merges** (the coordinator's ruling 3): two bundles built by the release road and signed and notarised by the owner — A, 0.4.6 with offers on, placed in a folder under the Mac mini worktree's temporary folder that stands in for `/Applications`, and B, 0.4.7, served through `--update-feed file:///…/feed/` — the happy path, the rollback, `Stuck`, M1–M11 with `kill -9` of the road process at the phase in place of a power cut (weaker evidence, recorded as such), one real `open -n -a` swap of the signed bundles, and on the owner's own Mac one real swap in `/Applications` with Gatekeeper on (E-12). The record is the ticket's rehearsal report.
 
 **Pinned by** `bt_platform`'s `macos_dialogs::tests::the_standalone_alert_returns_by_its_bound` and `launch_agent::tests::a_start_the_entrance_makes_outlives_the_entrance`; `bt_winres::plist::tests::the_rendered_bundle_is_well_formed_xml`; `update_job::tests::the_macos_gate_is_on` (the real classifier over what a Mac reads, the macOS gate, the card's paint and the row's foot); `update_startup::tests::on_disk::a_stuck_retrial_that_commits_shows_the_update_done` (the journal through `update_txn`'s own transitions, the real start pass, the job seeded from it, the commit read by the real watch) and `…::the_incomplete_card_names_its_own_homes_folder_whatever_the_word_says`; `update_handoff::tests::every_road_process_shows_its_failure_window_without_an_application`; on the Mac, `update_prepare_macos::tests::a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle` and the two twins above.
+
+### 2026-09-29 — Function keys reach the program: F1–F12 are encoded in xterm's legacy forms, with Shift, Alt and Ctrl, and the chrome's own claims on them are decided first (T-FKEYS)
+
+Until now `keyboard_bytes` had no case for a function key, so F1–F12 that no chrome rung claimed sent nothing to the program, in every program and on both platforms (vim's F1 help, htop's F10 quit, mc's menu row, PSReadLine's F2 and F7). The keyboard-protocol note of 2026-09-29 records it as F-1 and orders this fix before its own ticket, because its flag-1 rule for F1–F4 changes bytes that must exist first.
+
+**The forms** are xterm's, which are also kitty's legacy table. Without modifiers F1–F4 are `SS3 P`, `SS3 Q`, `SS3 R`, `SS3 S`, and F5–F12 are `CSI 15~`, `CSI 17~`, `CSI 18~`, `CSI 19~`, `CSI 20~`, `CSI 21~`, `CSI 23~`, `CSI 24~` (the gaps are the VT220's). DECCKM does not apply to function keys.
+
+**Modifiers** take xterm's parameter (Shift 2, Alt 3, Ctrl 5, and their sums). `SS3` carries no parameters, so a modified F1–F4 changes shape to `CSI 1;m P/Q/R/S`, the spelling of a modified arrow key; F5–F12 insert `;m` before the `~`.
+
+**Super** held on a function key sends nothing, as it does on every key: the Windows / Command key never reaches the child. F13 and above have no form here and still send nothing.
+
+**The chrome's claims come first** and are unchanged: `F3` / `Shift+F3` walk the matches while the search is open, `F12` opens the developer tools on a page, and `Shift+F10` raises a row's menu in the Files column. Each is decided above the encoder, so the key reaches the program only when that rung declined it.
+
+**Behind ConPTY** the bytes are the whole of Folio's part: ConPTY's input parser turns `SS3 P` and `CSI 15~` and their modified forms into `VK_F1`… key records for console programs.
+
+**Pinned by** `input::tests::every_function_key_reaches_the_program_in_its_legacy_form`, `…::a_modifier_on_a_function_key_is_encoded_as_in_xterm` and `…::a_function_key_with_super_or_past_f12_sends_nothing`; the chrome's claims by `shortcuts::tests::the_function_key_walk_answers_only_while_a_search_is_open`, `…::the_address_and_the_developer_tools_answer_only_over_a_page` and `files::tests::the_menu_key_and_shift_f10_are_the_two_names_of_one_request`.

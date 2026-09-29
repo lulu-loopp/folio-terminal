@@ -746,8 +746,58 @@ pub(crate) fn keyboard_bytes(
         Key::Named(NamedKey::Space) if !modifiers.control_key() && !modifiers.super_key() => {
             Some(meta_prefix(b" ", modifiers.alt_key()))
         }
+        // **F1–F12** (T-FKEYS): before this arm a function key no chrome rung
+        // claimed fell to `None` and the program heard nothing. Every other named
+        // key that reaches here has already been answered above, so the table
+        // decides; anything it does not list (F13 and up, media keys) stays
+        // `None`.
+        Key::Named(named) => function_key(*named, modifiers),
         _ => None,
     }
+}
+
+/// How a function key is spelled in xterm's legacy table (which is also kitty's
+/// legacy table): an `SS3` final byte for F1–F4, a `CSI n ~` number for F5–F12.
+#[derive(Clone, Copy)]
+enum FunctionKeyForm {
+    Ss3(u8),
+    Tilde(u8),
+}
+
+/// The twelve function keys a terminal encodes. The gaps in the numbers (no 16,
+/// no 22) are the VT220's, kept by every terminal since.
+const FUNCTION_KEYS: [(NamedKey, FunctionKeyForm); 12] = [
+    (NamedKey::F1, FunctionKeyForm::Ss3(b'P')),
+    (NamedKey::F2, FunctionKeyForm::Ss3(b'Q')),
+    (NamedKey::F3, FunctionKeyForm::Ss3(b'R')),
+    (NamedKey::F4, FunctionKeyForm::Ss3(b'S')),
+    (NamedKey::F5, FunctionKeyForm::Tilde(15)),
+    (NamedKey::F6, FunctionKeyForm::Tilde(17)),
+    (NamedKey::F7, FunctionKeyForm::Tilde(18)),
+    (NamedKey::F8, FunctionKeyForm::Tilde(19)),
+    (NamedKey::F9, FunctionKeyForm::Tilde(20)),
+    (NamedKey::F10, FunctionKeyForm::Tilde(21)),
+    (NamedKey::F11, FunctionKeyForm::Tilde(23)),
+    (NamedKey::F12, FunctionKeyForm::Tilde(24)),
+];
+
+/// A function key's bytes, or `None` for a key that is not one of the twelve or
+/// is held with Super (the Windows / Command key never reaches the child).
+///
+/// Without modifiers F1–F4 are `SS3 P/Q/R/S`; with them they change shape to
+/// `CSI 1;m P/Q/R/S`, which is [`cursor_key`]'s application-mode spelling —
+/// DECCKM itself does not apply to function keys, so the mode is not asked.
+/// F5–F12 are [`tilde_key`]'s `CSI n ~` / `CSI n;m ~`.
+fn function_key(key: NamedKey, modifiers: ModifiersState) -> Option<Vec<u8>> {
+    if modifiers.super_key() {
+        return None;
+    }
+    let (_, form) = FUNCTION_KEYS.iter().find(|(named, _)| *named == key)?;
+    let modifier = xterm_modifier(modifiers);
+    Some(match *form {
+        FunctionKeyForm::Ss3(final_byte) => cursor_key(final_byte, modifier, true),
+        FunctionKeyForm::Tilde(number) => tilde_key(number, modifier),
+    })
 }
 
 fn xterm_modifier(modifiers: ModifiersState) -> u8 {
@@ -1266,6 +1316,124 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// RED (T-FKEYS) — **every function key reaches the program, in xterm's
+    /// legacy form.**
+    ///
+    /// Before this ticket `keyboard_bytes` had no case for F1–F12, so a function
+    /// key no chrome rung claimed fell to `None` and the program heard nothing:
+    /// vim's `F1` help, htop's `F10` quit, mc's whole menu row, PSReadLine's
+    /// `F2`/`F7`. The twelve expectations are written out as literals rather than
+    /// rebuilt from the table, so a wrong number in the table cannot agree with
+    /// itself here; and DECCKM is asked both ways because it does not apply to
+    /// function keys — `SS3 P` is the bare form in either cursor mode.
+    ///
+    /// MUTATION: swap F11's `23` for `22` in `FUNCTION_KEYS` (or drop the
+    /// `Key::Named(named) => function_key(..)` arm) and this goes red.
+    #[test]
+    fn every_function_key_reaches_the_program_in_its_legacy_form() {
+        let expected: [(NamedKey, &[u8]); 12] = [
+            (NamedKey::F1, b"\x1bOP"),
+            (NamedKey::F2, b"\x1bOQ"),
+            (NamedKey::F3, b"\x1bOR"),
+            (NamedKey::F4, b"\x1bOS"),
+            (NamedKey::F5, b"\x1b[15~"),
+            (NamedKey::F6, b"\x1b[17~"),
+            (NamedKey::F7, b"\x1b[18~"),
+            (NamedKey::F8, b"\x1b[19~"),
+            (NamedKey::F9, b"\x1b[20~"),
+            (NamedKey::F10, b"\x1b[21~"),
+            (NamedKey::F11, b"\x1b[23~"),
+            (NamedKey::F12, b"\x1b[24~"),
+        ];
+        for application_mode in [false, true] {
+            for (key, bytes) in expected {
+                assert_eq!(
+                    keyboard_bytes(&Key::Named(key), ModifiersState::empty(), application_mode),
+                    Some(bytes.to_vec()),
+                    "key={key:?} application_mode={application_mode}"
+                );
+            }
+        }
+    }
+
+    /// RED (T-FKEYS) — **Shift, Alt and Ctrl on a function key are encoded as in
+    /// xterm: F1–F4 change shape to `CSI 1;m P/Q/R/S`, F5–F12 take `;m` before
+    /// the `~`.**
+    ///
+    /// F1 and F5 stand for the two shapes. The first is the one a hand-written
+    /// encoder gets wrong — `SS3` carries no parameters, so a modified F1 is not
+    /// `ESC O 5 P` but a CSI sequence with a `1` in front of the modifier, the
+    /// same spelling as a modified arrow key. The modifier values are xterm's
+    /// (Shift 2, Alt 3, Ctrl 5, Ctrl+Shift 6), written out rather than taken from
+    /// `xterm_modifier`.
+    ///
+    /// MUTATION: have `function_key` pass `1` instead of `xterm_modifier(..)` (drop
+    /// the modifier) and every line goes red.
+    #[test]
+    fn a_modifier_on_a_function_key_is_encoded_as_in_xterm() {
+        let cases: [(NamedKey, ModifiersState, &[u8]); 8] = [
+            (NamedKey::F1, ModifiersState::SHIFT, b"\x1b[1;2P"),
+            (NamedKey::F1, ModifiersState::ALT, b"\x1b[1;3P"),
+            (NamedKey::F1, ModifiersState::CONTROL, b"\x1b[1;5P"),
+            (
+                NamedKey::F1,
+                ModifiersState::CONTROL.union(ModifiersState::SHIFT),
+                b"\x1b[1;6P",
+            ),
+            (NamedKey::F5, ModifiersState::SHIFT, b"\x1b[15;2~"),
+            (NamedKey::F5, ModifiersState::ALT, b"\x1b[15;3~"),
+            (NamedKey::F5, ModifiersState::CONTROL, b"\x1b[15;5~"),
+            (
+                NamedKey::F5,
+                ModifiersState::CONTROL.union(ModifiersState::SHIFT),
+                b"\x1b[15;6~",
+            ),
+        ];
+        for application_mode in [false, true] {
+            for (key, modifiers, bytes) in cases {
+                assert_eq!(
+                    keyboard_bytes(&Key::Named(key), modifiers, application_mode),
+                    Some(bytes.to_vec()),
+                    "key={key:?} modifiers={modifiers:?} application_mode={application_mode}"
+                );
+            }
+        }
+    }
+
+    /// RED (T-FKEYS) — **a function key held with Super reaches nothing, and a
+    /// function key past F12 sends nothing.**
+    ///
+    /// Super is Folio's standing rule for every key (the Windows / Command key
+    /// is held to reach another program's verb and never reaches the child); a
+    /// table that encoded the other modifiers would otherwise spell `Win+F1` as a
+    /// bare `SS3 P`, since xterm has no bit for Super. F13 and up have no legacy
+    /// form this encoder writes, and the new arm must not invent one.
+    ///
+    /// MUTATION: drop the `modifiers.super_key()` return in `function_key` and
+    /// the Super lines go red.
+    #[test]
+    fn a_function_key_with_super_or_past_f12_sends_nothing() {
+        let win = ModifiersState::SUPER;
+        assert_eq!(keyboard_bytes(&Key::Named(NamedKey::F1), win, false), None);
+        assert_eq!(
+            keyboard_bytes(
+                &Key::Named(NamedKey::F5),
+                win.union(ModifiersState::SHIFT),
+                false
+            ),
+            None,
+            "and it is not talked out of it by a second modifier"
+        );
+        assert_eq!(
+            keyboard_bytes(&Key::Named(NamedKey::F13), ModifiersState::empty(), false),
+            None
+        );
+        assert_eq!(
+            keyboard_bytes(&Key::Named(NamedKey::F13), ModifiersState::CONTROL, true),
+            None
+        );
     }
 
     #[test]
