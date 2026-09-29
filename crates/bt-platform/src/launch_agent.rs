@@ -165,9 +165,21 @@ fn plist_string(what: &'static str, path: &Path) -> Result<String, Refusal> {
 }
 
 /// **The plist, from its fixed template**: `Label`, `ProgramArguments` =
-/// `[rescue_exe, "--update-recover", home]` and `RunAtLoad` = true. Nothing
-/// else — no `KeepAlive`, no environment — because the rescue build decides
-/// everything else from the journal in `home`.
+/// `[rescue_exe, "--update-recover", home]`, `RunAtLoad` = true and
+/// `AbandonProcessGroup` = true. Nothing else — no `KeepAlive`, no
+/// environment — because the rescue build decides everything else from the
+/// journal in `home`.
+///
+/// **`AbandonProcessGroup`** (U-32, the macOS rehearsal's defect 1): when a
+/// job's program exits, launchd ends every other process of its process
+/// group. The rescue build's last act at login is to start Folio — the old
+/// build after a revert or a rollback, with its card — and that start is its
+/// child, in its group: without this key the window wrote its log header and
+/// was ended seconds later, so nothing opened after login and *Previous
+/// version restored.* was lost with the retired journal. Measured on macOS 26
+/// with a job whose program starts a child and exits: the child is gone
+/// without the key and alive with it
+/// (`a_start_the_entrance_makes_outlives_the_entrance`).
 ///
 /// # Errors
 /// [`Refusal::Unwritable`] for a path a plist cannot carry.
@@ -190,6 +202,8 @@ pub fn plist(txn: &[u8; 16], rescue_exe: &Path, home: &Path) -> Result<String, R
          \t\t<string>{home}</string>\n\
          \t</array>\n\
          \t<key>RunAtLoad</key>\n\
+         \t<true/>\n\
+         \t<key>AbandonProcessGroup</key>\n\
          \t<true/>\n\
          </dict>\n\
          </plist>\n"
@@ -449,7 +463,8 @@ mod tests {
         );
         assert!(text.contains(&arguments), "{text}");
         assert!(text.contains("<key>RunAtLoad</key>\n\t<true/>"));
-        assert_eq!(text.matches("<key>").count(), 3, "three keys and no more");
+        assert!(text.contains("<key>AbandonProcessGroup</key>\n\t<true/>"));
+        assert_eq!(text.matches("<key>").count(), 4, "four keys and no more");
 
         let odd = PathBuf::from("/Volumes/A & B <x>/.Folio.app.folio-update");
         let text = plist(&TXN, &rescue(), &odd).unwrap();
@@ -605,6 +620,102 @@ mod tests {
         let _ = std::fs::remove_dir_all(&agents);
     }
 
+    /// RED (U-32, the macOS rehearsal's defect 1) — **a process the
+    /// entrance's program starts outlives the program: launchd does not end
+    /// it when the job's program exits.**
+    ///
+    /// At login the rescue build recovers, starts Folio and exits. launchd
+    /// ends the rest of a job's process group when its program exits, and the
+    /// window the recovery started — its child — died seconds after its log
+    /// header (rows M4, M7 and M9's cut of the rehearsal): nothing on the
+    /// screen after login. This runs the real thing in this account's own
+    /// launchd, under a label of its own that no Folio uses: the entrance
+    /// written by [`arm`], with a script standing in for the rescue build that
+    /// starts a long child, writes its pid and exits; the job is then
+    /// bootstrapped into `gui/<uid>`, the child looked for after the program
+    /// has gone, and the job booted out. The child is ended by the pid it
+    /// wrote.
+    ///
+    /// On a Mac with no GUI domain for this user (`launchctl` answers that the
+    /// domain does not support the action) there is no login to model and the
+    /// test says so and returns.
+    ///
+    /// MUTATION: drop `AbandonProcessGroup` from `plist`'s template.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_start_the_entrance_makes_outlives_the_entrance() {
+        let agents = scratch("outlives");
+        let txn: [u8; 16] = [0x32, 0x0b, 0xad, 0x9e, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7];
+        let pid_file = agents.join("child.pid");
+        let program = agents.join("rescue-stand-in.sh");
+        std::fs::write(
+            &program,
+            format!(
+                "#!/bin/sh\n/bin/sleep 60 &\necho $! > '{}'\n/bin/sleep 1\nexit 0\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let armed = arm(&agents, &txn, &program, &agents.join("home")).unwrap();
+        let plist = agents.join(armed.entrance());
+        let run = |program: &str, arguments: &[&OsStr]| {
+            crate::quiet_command(program)
+                .args(arguments)
+                .output()
+                .unwrap()
+        };
+        let launchctl = |arguments: &[&OsStr]| run("/bin/launchctl", arguments);
+        let uid = String::from_utf8(run("/usr/bin/id", &[OsStr::new("-u")]).stdout).unwrap();
+        let uid = uid.trim();
+        let domain = format!("gui/{uid}");
+        let booted = launchctl(&[
+            OsStr::new("bootstrap"),
+            OsStr::new(&domain),
+            plist.as_os_str(),
+        ]);
+        if !booted.status.success() {
+            let said = String::from_utf8_lossy(&booted.stderr).into_owned();
+            let _ = std::fs::remove_dir_all(&agents);
+            assert!(
+                said.contains("not support") || said.contains("Domain does not support"),
+                "launchctl bootstrap failed: {said}"
+            );
+            eprintln!("no GUI launchd domain for this user; nothing to model: {said}");
+            return;
+        }
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let child: u32 = loop {
+            if let Ok(text) = std::fs::read_to_string(&pid_file)
+                && let Ok(pid) = text.trim().parse()
+            {
+                break pid;
+            }
+            assert!(std::time::Instant::now() < give_up, "the job never ran");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        };
+        // The program sleeps one second and exits; give launchd time to act.
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        let pid = child.to_string();
+        let alive = run("/bin/kill", &[OsStr::new("-0"), OsStr::new(&pid)])
+            .status
+            .success();
+        let label = format!("{domain}/{}", label(&txn));
+        let _ = launchctl(&[OsStr::new("bootout"), OsStr::new(&label)]);
+        if alive {
+            // The pid the stand-in wrote for the child it started.
+            let _ = run("/bin/kill", &[OsStr::new(&pid)]);
+        }
+        let _ = std::fs::remove_dir_all(&agents);
+        assert!(
+            alive,
+            "launchd ended the child {child} when the entrance's program exited"
+        );
+    }
+
     /// RED (U-26) — **the real door writes a plist `plutil -lint` accepts,
     /// whose label, program arguments and `RunAtLoad` read back as written**,
     /// in a temporary folder standing in for `~/Library/LaunchAgents`.
@@ -650,6 +761,7 @@ mod tests {
         assert_eq!(extract("ProgramArguments.1"), RECOVER_FLAG);
         assert_eq!(extract("ProgramArguments.2"), home.to_str().unwrap());
         assert_eq!(extract("RunAtLoad"), "true");
+        assert_eq!(extract("AbandonProcessGroup"), "true");
         disarm(&agents, &TXN).unwrap();
         assert!(!path.exists());
         let _ = std::fs::remove_dir_all(&agents);

@@ -83,7 +83,7 @@ releases page.
 | **From where** | The same address as on Windows, `https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/<file>`, never "latest". The same `NSURLSession` stack and the same one header, `User-Agent: Folio`, as the check. |
 | **What is checked** | The image against its checksum; the `Folio.app` inside it against the signature of the Folio you are running (the same Developer ID), its version against the offer and its architecture against this Mac — once on the image and again after it is copied. Anything else is refused and nothing is changed. |
 | **Where it goes** | A hidden folder beside the application, `.Folio.app.folio-update` (in `/Applications` for a copy installed there): the new `Folio.app`, a copy of the running one to fall back on, the update's journal and its log. The image is attached there while it is read and detached after; the download itself is removed once it is read. |
-| **What is written outside that folder** | The application itself, replaced whole in one step with the new one. While that happens, one file, `~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`: it finishes or reverses, at your next login, an update cut off by a crash or a power loss. The update removes it when it ends, and `Folio.app/Contents/MacOS/folio --uninstall-cleanup` removes one left behind, together with the hidden folder. |
+| **What is written outside that folder** | The application itself, replaced whole in one step with the new one. While that happens, one file, `~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`: it finishes or reverses, at your next login, an update cut off by a crash or a power loss. While it exists, macOS may tell you that software from Folio's developer can run in the background. The update removes it when it ends, and `Folio.app/Contents/MacOS/folio --uninstall-cleanup` removes one left behind, together with the hidden folder. |
 | **How to switch it off** | Switch the update check off (above): no check, no card. |
 
 ### Settings and session
@@ -314,7 +314,7 @@ GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 
 | **来源** | 与 Windows 相同的地址：`https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/<file>`，不使用 "latest"。HTTP 栈和请求头与更新检查相同：`NSURLSession`、`User-Agent: Folio`。 |
 | **验证内容** | 映像与校验值比对；映像内的 `Folio.app` 与当前 Folio 的签名者比对（同一 Developer ID），版本与 offer 比对，架构与本机比对——在映像上验一次，拷贝后再验一次。不符则拒绝，不改动任何文件。 |
 | **存放位置** | 应用旁边的隐藏文件夹 `.Folio.app.folio-update`（安装在 `/Applications` 的副本即在该目录下）：新的 `Folio.app`、用于回退的当前版本副本、更新日志与记录。映像在读取期间挂载于此，读完即卸载；下载文件读完即删除。 |
-| **目录外写入** | 应用本身，以新版本一步整体替换。替换期间写入一个文件：`~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`——若更新被崩溃或断电中断，下次登录时由它完成或回滚。更新结束时删除；`Folio.app/Contents/MacOS/folio --uninstall-cleanup` 可清理残留文件及隐藏文件夹。 |
+| **目录外写入** | 应用本身，以新版本一步整体替换。替换期间写入一个文件：`~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`——若更新被崩溃或断电中断，下次登录时由它完成或回滚。该文件存在期间，macOS 可能提示你 Folio 开发者的软件可在后台运行。更新结束时删除；`Folio.app/Contents/MacOS/folio --uninstall-cleanup` 可清理残留文件及隐藏文件夹。 |
 | **如何关闭** | 关闭更新检查（上文）：不检查就没有卡片。 |
 
 ### 设置与会话
