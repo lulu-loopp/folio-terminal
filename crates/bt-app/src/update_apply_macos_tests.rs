@@ -3026,14 +3026,16 @@ fn a_trial_that_ends_before_it_is_seen_ends_the_wait_at_once() {
         return;
     }
     let install = Install::new("unseen");
-    let mut world = Fake::default();
-    world.on_launch_held = Some(Box::new(|_, _| {
-        bt_platform::quiet_command("/usr/bin/true")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-    }));
+    let world = Fake {
+        on_launch_held: Some(Box::new(|_, _| {
+            bt_platform::quiet_command("/usr/bin/true")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+        })),
+        ..Fake::default()
+    };
     let began = Instant::now();
     let (ended, world) = applied(install.road(limits(5_000, 30_000)), world);
     let took = began.elapsed();
