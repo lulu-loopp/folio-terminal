@@ -762,6 +762,7 @@ pwsh -File scripts/release/cleanvm/hard-reset-in-vm.ps1 `
 | ☐ | W12 | 提交完成,清理未完成 | 日志阶段为 `Committed`,部分清理已做 | 新版在安装目录;部分残留(backup、Run 值、rescue) | 完成剩余删除(debt);rescue 文件夹由下一次普通启动删除 |
 | ☐ | W13 | 更新被取消 | 日志阶段为 `Abandoned` | 旧安装不变,无文件被移动 | 删除入口(如有);删除 `H\<txn>`;标记为 `terminal` |
 | ☐ | W14 | 更新进行中,日志已达 `Armed`(Run 值已写);用另一程序以不含 delete 共享的方式持有 `H\journal.json`(例如 PowerShell `[IO.File]::Open(<路径>, 'Open', 'Read', 'ReadWrite')` 句柄),持续超过 2 秒 | 不断电;句柄持有覆盖 applier 的 `Armed` → `Moving` 写入 | 句柄一直持有时:`diagnostics.log` 包含重命名失败行和 `BT_UPDATE_APPLY started …`;日志停留在 `Armed`;Run 值 `FolioUpdate-<txn8>` 仍存在;无文件被移动 | applier 重试写入约 2 秒;若在此期间释放句柄则更新正常完成;若未释放,applier 以 `Failed` 结束并以 `--update-failed <journal>` 启动已安装版本(卡片显示「Update incomplete.」并指出文件夹);下次启动或登录回退到 `Prepared` |
+| ☐ | W14(长时持有) | 更新进行中;日志阶段达到 `Moving` 且文件已移动(Run 值已写);与 W14 相同方式不含 delete 共享持有 `H\journal.json`,持续 120 秒 | 不断电;句柄持有覆盖 applier 的 `TrialBegan` 写入及其回滚声明 | 句柄持有期间:`diagnostics.log` 包含 `the trial <pid> could not be recorded`,然后 `is asked to quit`,然后 `started …\folio.exe`;唯一的 Folio 窗口是以 trial 启动的新版,卡片显示「Update incomplete.」并指出文件夹;日志停留在 `Moving`;Run 值仍存在。释放句柄后,约两分钟内(trial 的 watchdog,该 trial 启动后 102 秒)或在下次启动/登录时立即完成:`BT_UPDATE_TRIAL … handed back to …\rescue\folio.exe`(仅 watchdog 路径),然后 `BT_UPDATE_RECOVER the trial <pid> runs and has answered, and the journal does not record it: it is recorded` | 日志最终为 `Retired{Committed}`;Run 值 `FolioUpdate-<txn8>` 已删除;安装目录为 B 版;唯一的窗口是句柄持有期间启动的 trial,保留不变,卡片现显示「Updated.」;持有期间在该窗口做的更改(如设置)保留。释放句柄后普通启动 Folio 立即到达相同终态,不再启动 B 的第二个进程 |
 | ☐ | W15 | 按「重启以更新」前,用另一程序以完全不共享的方式持有 rescue 可执行文件 `H\<txn>\rescue\folio.exe`(例如 PowerShell `[IO.File]::Open(<路径>, 'Open', 'Read', 'None')` 句柄),使其启动被拒绝;旧 Folio 退出后再释放句柄。(启动仅迟缓——应答未在 15 秒 `HANDOFF_DEADLINE` 内到达——的路径由单元测试 `a_hand_over_with_no_answer_in_time_still_opens_folio_once` 覆盖,不属于本行。) | 不断电;句柄持有期间 applier 启动被拒绝 | `diagnostics.log` 包含交接结果行("its applier could not be started" / was abandoned);计时行("Handoff written in N ms, the applier's start took N ms")仅在启动调用先于旧 Folio 退出返回时存在;以及 "leaving after an update: started …";日志阶段为 `Abandoned`(terminal);`H\<txn>\owner` 记录旧 Folio 的 pid | applier 未运行,无文件被移动;旧 Folio 退出后接管窗口职责(无其他人接管)并以普通方式启动已安装版本一次(日志为 terminal);该启动退役事务并正常打开;出现一个 Folio 窗口 |
 
 #### macOS 步骤(M1–M11)
@@ -782,6 +783,9 @@ macOS 的断电验收需要一台可处置的 macOS 虚机(见 §8 已知空白)
 | ☐ | M9 | 回滚进行中 | 日志阶段为 `RollbackIntent` | 检查活跃身份是新还是旧 | 停止 trial;若活跃为新版则 `RENAME_SWAP` 换回;校验 → `RolledBack`;失败 → `Stuck` |
 | ☐ | M10 | 回滚失败 | 日志阶段为 `Stuck` | 一个完整 bundle 活跃,另一个在 `stage` | 每次登录(plist)和每次启动重试 M9 |
 | ☐ | M11 | 回滚完成 / 取消 / 提交后残留 | 日志阶段为 `RolledBack` / `Abandoned` / `Committed`-with-debt | 与 W11–W13 对应 | 与 W11–W13 相同;plist 在 terminal 状态持久化后删除 |
+| ☐ | D14 | 交换已完成(日志阶段 `Exchanging`,新身份已活跃);此时将 home 设为只读(`chmod a-w <H>`),保持约 20 秒后恢复 | 不断电;只读 home 覆盖 applier 的 `TrialBegan` 写入及其回滚声明 | 只读期间:`diagnostics.log` 包含 `the trial <pid> could not be recorded`、`is asked to quit` 和以 trial 打开的新 bundle(「Update incomplete.」并指出文件夹);日志停留在 `Exchanging`;LaunchAgent plist 存在。若该 trial 的 receipt 在只读期间被拒:`receipt … not written …; the watch writes it again`,然后 `receipt … written by the trial's watch`。恢复后,约两分钟内(watchdog)或 `open -n` / 登录时立即完成:`… it is recorded` | `Committed` 然后 `Retired`;plist 已删除;旧 bundle 在 `stage/`、rescue 克隆已删除;窗口为 trial,卡片显示「Updated.」;该窗口打开时 `open -n` 不会启动留存的第二个副本,新版不被回滚(本行替代排演的缺陷 9) |
+
+macOS 上,trial 在被观察前结束(M9 在 `Trial` 之前被杀)不再耗费 90 秒:applier 看到启动结束(`the trial ended before it could be seen`)后立即回滚。
 
 #### 每一行检查什么(通用)
 

@@ -1485,6 +1485,7 @@ mod tests {
                 txn(),
                 std::time::Duration::from_millis(5),
                 &|| woke.set(true),
+                &mut crate::update_trial::watchdog_asleep(),
             );
             assert!(woke.get(), "the watch read the commit and woke the window");
 

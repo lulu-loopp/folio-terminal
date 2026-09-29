@@ -36,6 +36,11 @@
 //! * [`stop_trial`] — W9/M9's stop: asked to quit, 5 s of grace, then ended —
 //!   each through `bt_platform::install_flip::ask`, which touches nothing that
 //!   is not that very trial (pid, start instant and image);
+//! * [`unrecorded_trial`] and [`adopting`] — **a running trial the journal
+//!   does not know, recorded** (0.4.7 ticket U-37): a process of the new build
+//!   whose receipt is in `H\<txn>` naming it, recorded with that receipt's
+//!   nonce by the next lock holder, which its receipt then commits — never a
+//!   second trial beside it, never a rollback under it;
 //! * [`OWNER_FILE`] — **the window's owner** (U-34): the one process that has
 //!   taken the duty that a Folio window follows *Restart to update*, handed
 //!   from O to P explicitly ([`take_the_window`]); recovery that finds
@@ -388,7 +393,13 @@ pub(crate) struct Watch<'a> {
 /// actor ([`Watched::Committed`]); any other is said once and waited past. The
 /// recorded process no longer `alive` (by its pid, its start time and its
 /// image), or the deadline passed → [`Watched::NoReceipt`]. The launched trial
-/// found but not recorded → [`Watched::Unrecorded`].
+/// found but not recorded → [`Watched::Unrecorded`]. **While the launched
+/// trial has not been seen, `launch_over` says whether the launch itself has
+/// ended** (U-38): on macOS the `open -W` that started it, which returns when
+/// the application it opened ends — a launch over with nothing seen is a trial
+/// that ended before it could be seen, [`Watched::NoReceipt`] at once rather
+/// than at the deadline; on Windows the trial's pid is the child's own and is
+/// recorded at its launch, so it is never unseen.
 ///
 /// # Errors
 /// The journal records no trial and none was started, or a write after the
@@ -398,6 +409,7 @@ pub(crate) fn watch_trial(
     txn: &mut impl Recording,
     watch: &Watch<'_>,
     find: &mut dyn FnMut(u64, Option<&Receipt>) -> Option<TrialProcess>,
+    launch_over: &mut dyn FnMut() -> bool,
     alive: &mut dyn FnMut(TrialProcess) -> bool,
     say: &mut dyn FnMut(&str),
 ) -> Result<Watched, String> {
@@ -433,6 +445,10 @@ pub(crate) fn watch_trial(
         let receipt = read_receipt(&receipt_path);
         match recorded {
             None => {
+                // Asked before the look, so a launch that ended after the look
+                // is seen at the next turn, never taken for one that ended
+                // before its trial could be seen (U-38).
+                let over = launch_over();
                 let found = receipt.as_ref().and_then(|read| read.as_ref().ok());
                 if let Some(process) = find(began_ms, found) {
                     let event = if txn.journal().body.phase.kind() == PhaseKind::Stuck {
@@ -452,6 +468,13 @@ pub(crate) fn watch_trial(
                         return Ok(Watched::Unrecorded { process, why });
                     }
                     continue;
+                }
+                if over {
+                    // **The launch is over and its trial was never seen**
+                    // (U-38): it ended before the list showed it, or never
+                    // started — nothing is left to wait for.
+                    say("BT_UPDATE_APPLY the trial ended before it could be seen");
+                    return Ok(Watched::NoReceipt);
                 }
             }
             Some(process) => {
@@ -515,6 +538,93 @@ pub(crate) fn trial_runs(process: TrialProcess, images: &[&Path]) -> bool {
         images,
     )
     .unwrap_or(false)
+}
+
+/// **A trial of this transaction that runs and has answered, and that the
+/// journal does not record** (0.4.7 ticket U-37; the macOS rehearsal's defect
+/// 9): a process running from the new build's executable `program` — not the
+/// `recorded` one — whose receipt, `H\<txn>\health-<nonce>`, is here and names
+/// its pid. Such a trial is one a road process started and could not record:
+/// the trial an exit guard starts where the disk names the new build
+/// (`Opens::Trial`, a nonce no journal records), a retrial over `Stuck` whose
+/// record failed, or a trial whose applier died before its record. It holds
+/// the data directory and the shared admission, so no second trial of the
+/// transaction can start beside it and no rollback can move under it; and it
+/// has already given the one evidence a commit asks for. **A lock holder
+/// records it** — [`adopting`] — and its receipt then commits the transaction
+/// as any trial's does. `None` when no such process runs, when none of the
+/// receipts here names a running one, or when the folder cannot be listed.
+///
+/// The receipts are found by listing `H\<txn>` (`files::read_directory`, the
+/// product's one listing): the trial's nonce is its own, and its receipt is
+/// the one place it says it.
+pub(crate) fn unrecorded_trial(
+    home: &Home,
+    txn: TxnId,
+    program: &Path,
+    recorded: Option<TrialProcess>,
+) -> Option<(TrialProcess, Receipt)> {
+    let running: Vec<Running> = install_flip::running_from(program)
+        .ok()?
+        .into_iter()
+        .filter(|process| {
+            recorded
+                .is_none_or(|trial| (trial.pid, trial.started) != (process.pid, process.started))
+        })
+        .collect();
+    if running.is_empty() {
+        return None;
+    }
+    let folder = home.transaction(txn);
+    let crate::files::DirOutcome::Listed(listing) = crate::files::read_directory(&folder) else {
+        return None;
+    };
+    listing
+        .entries
+        .iter()
+        .filter(|entry| {
+            !entry.is_dir
+                && entry
+                    .name
+                    .starts_with(crate::update_txn::RECEIPT_FILE_PREFIX)
+        })
+        .find_map(|entry| {
+            let path = folder.join(&entry.name);
+            let receipt = read_receipt(&path)?.ok()?;
+            // A receipt at its own nonce's name, for this transaction.
+            if receipt.txn != txn || path != home.receipt_path(txn, &receipt.nonce) {
+                return None;
+            }
+            let process = running.iter().find(|process| process.pid == receipt.pid)?;
+            Some((
+                TrialProcess {
+                    pid: process.pid,
+                    started: process.started,
+                },
+                receipt,
+            ))
+        })
+}
+
+/// **The record of a running trial the journal did not know** (U-37): over
+/// `Moving`, `TrialBegan`; over `Stuck`, `RetrialBegan` — with the nonce its
+/// own receipt carries, so that receipt then answers for it, and `began_ms`
+/// now (the record's instant; its receipt is already here).
+pub(crate) fn adopting(over_stuck: bool, receipt: &Receipt, process: TrialProcess) -> Event {
+    let (nonce, began_ms) = (receipt.nonce, now_ms());
+    if over_stuck {
+        Event::RetrialBegan {
+            nonce,
+            process,
+            began_ms,
+        }
+    } else {
+        Event::TrialBegan {
+            nonce,
+            process,
+            began_ms,
+        }
+    }
 }
 
 /// **Stop the trial** (W9/M9; the coordinator's ruling 2 of U-29 and ruling 1

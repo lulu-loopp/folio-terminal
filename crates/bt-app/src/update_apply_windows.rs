@@ -142,7 +142,11 @@
 //! (`update_apply::the_window_is_theirs`, U-34): R writes nothing, waits for
 //! nothing and opens nothing; that process opens Folio. Any other process of
 //! the rescue image — an applier that never took the mark — is not waited
-//! for.
+//! for. **A running trial the journal does not record** (0.4.7 ticket U-37)
+//! — over `Moving`, or a `Stuck` whose recorded trial is gone, with the new
+//! set installed — is recorded by any lock holder when its receipt is here
+//! (`Txn::adopt`), and that receipt commits: the guard's trial with a nonce
+//! no journal records (`Opens::Trial`) is kept rather than rolled back under.
 //!
 //! Every phase is recorded through `update_apply::Journaled` (the protocol's
 //! refusal, the writer table, then `install_txn::durable_write`, asked again
@@ -1033,8 +1037,10 @@ impl<'a> Txn<'a> {
             &mut self.j,
             &watch,
             // The Windows trial's pid is the child's own, recorded at its
-            // launch: there is never one to find, so never one unrecorded.
+            // launch: there is never one to find, so never one unrecorded,
+            // and never a launch to watch instead (U-38).
             &mut |_, _| None,
+            &mut || false,
             &mut |process| trial_runs(process, &images),
             &mut |line| world.say(line),
         )?;
@@ -1084,6 +1090,9 @@ impl<'a> Txn<'a> {
             let receipt = nonce
                 .and_then(|nonce| read_receipt(&self.road.home.receipt_path(self.txn(), &nonce)))
                 .and_then(Result::ok);
+            if self.adopt(actor, trial.filter(|_| trial_alive), world)? {
+                continue;
+            }
             let located = Located::Members(self.locate()?);
             let action = decide(&Disk {
                 journal: &self.j.journal,
@@ -1171,6 +1180,63 @@ impl<'a> Txn<'a> {
         }
         let actor = tenure.unwrap_or_else(|| self.asker.actor(self.j.phase()));
         self.stuck(actor, "the rollback did not settle".to_owned(), world)
+    }
+
+    /// **A running trial the journal does not record, recorded** (U-37; the
+    /// macOS rehearsal's defect 9, on Windows too): over `Moving`, or over a
+    /// `Stuck` whose recorded trial no longer runs, with every new file
+    /// installed at its digest, a process of `<install>\folio.exe` whose
+    /// receipt is here (`update_apply::unrecorded_trial`) is recorded as the
+    /// trial it is (`update_apply::adopting`) — never a second trial started
+    /// beside it (it holds the data directory) and never a rollback under it
+    /// (it holds the admission). It is this holder's successor from here: the
+    /// window. `true` when it was recorded; the next step is `decide`'s, whose
+    /// answer for a trial with its receipt is the commit.
+    ///
+    /// # Errors
+    /// The record's failure; the trial runs on as the window.
+    fn adopt(
+        &mut self,
+        actor: Actor,
+        recorded: Option<TrialProcess>,
+        world: &mut impl World,
+    ) -> Result<bool, String> {
+        let over_stuck = match &self.j.journal.body.phase {
+            Phase::Moving => false,
+            Phase::Stuck { .. } if recorded.is_none() => true,
+            _ => return Ok(false),
+        };
+        let Ok(install) = self.folder(Place::Install) else {
+            return Ok(false);
+        };
+        if live_set(&self.inventories, &install) != Some(Live::New) {
+            return Ok(false);
+        }
+        let stale = match &self.j.journal.body.phase {
+            Phase::Stuck { trial, .. } => *trial,
+            _ => None,
+        };
+        let Some((process, receipt)) = crate::update_apply::unrecorded_trial(
+            &self.road.home,
+            self.txn(),
+            &self.road.installed,
+            stale,
+        ) else {
+            return Ok(false);
+        };
+        world.say(&format!(
+            "BT_UPDATE_RECOVER the trial {} runs and has answered, and the journal does not record it: it is recorded",
+            process.pid
+        ));
+        self.successor = Some(Running {
+            pid: process.pid,
+            started: process.started,
+        });
+        self.j.record(
+            actor,
+            &crate::update_apply::adopting(over_stuck, &receipt, process),
+        )?;
+        Ok(true)
     }
 
     /// **W9's moves** under exclusive admission: `rolledout\` made, then each

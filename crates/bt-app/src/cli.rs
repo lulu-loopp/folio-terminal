@@ -978,6 +978,19 @@ pub fn update_door(
     }
 }
 
+/// **The line the rescue build runs with when nobody's start is handed to it**
+/// — as the entrance at logon starts it: `--update-recover`, and the
+/// installation home where the rescue build cannot find it from its own path
+/// (a macOS rescue clone, F-3). A trial's watchdog hands its transaction back
+/// with it (0.4.7 ticket U-37): the trial is the window, so no start rides on
+/// the recovery.
+#[must_use]
+pub fn recover_line_at_logon(home: Option<&Path>) -> Vec<OsString> {
+    let mut line = vec![OsString::from(UPDATE_RECOVER_FLAG)];
+    line.extend(home.map(|home| home.as_os_str().to_owned()));
+    line
+}
+
 /// **The line an ordinary start hands itself to the rescue build with**:
 /// `--update-recover`, the installation home when the rescue build cannot find
 /// it from its own path (a macOS rescue clone, F-3; U-29), `--then-launch` and

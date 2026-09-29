@@ -196,6 +196,8 @@ impl Drop for Children {
 }
 
 type LaunchHook = Box<dyn FnMut(&Path, &[OsString]) -> io::Result<()> + Send>;
+/// A launch that hands back the process standing for `open -W` (U-38).
+type HeldLaunchHook = Box<dyn FnMut(&Path, &[OsString]) -> io::Result<Child> + Send>;
 type ExchangeHook = Box<dyn FnMut(&Path, &Path) + Send>;
 type SayHook = Box<dyn FnMut(&str) + Send>;
 
@@ -208,6 +210,8 @@ struct Fake {
     launched: Arc<Mutex<Vec<Vec<OsString>>>>,
     relaunched: Vec<(PathBuf, Vec<OsString>)>,
     on_launch: Option<LaunchHook>,
+    /// The launch, held as the product holds `open -W` (U-38).
+    on_launch_held: Option<HeldLaunchHook>,
     on_exchange: Option<ExchangeHook>,
     real_open: bool,
     /// Exchanges performed or refused so far.
@@ -230,6 +234,7 @@ impl Default for Fake {
             launched: Arc::default(),
             relaunched: Vec::new(),
             on_launch: None,
+            on_launch_held: None,
             on_exchange: None,
             real_open: false,
             exchanges: 0,
@@ -266,14 +271,17 @@ impl Hands for Fake {
         self.unverified.clone().map_or(Ok(()), Err)
     }
 
-    fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
+    fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<Launch> {
         self.launched.lock().unwrap().push(args.to_vec());
         if self.real_open {
             return (Machine { log: None }).launch_trial(bundle, args);
         }
+        if let Some(launch) = &mut self.on_launch_held {
+            return launch(bundle, args).map(Launch::of);
+        }
         match &mut self.on_launch {
-            Some(launch) => launch(bundle, args),
-            None => Ok(()),
+            Some(launch) => launch(bundle, args).map(|()| Launch::untracked()),
+            None => Ok(Launch::untracked()),
         }
     }
 
@@ -2884,4 +2892,157 @@ fn a_home_unwritable_after_the_exchange_leaves_the_new_build_as_a_trial_with_the
     assert_eq!(words[0], OsString::from(cli::UPDATE_TRIAL_FLAG));
     assert_eq!(words[1], OsString::from(install.txn.to_string()));
     assert_eq!(&words[3..], failed_then(&install, &[]).as_slice());
+}
+
+// ── the trial's gaps (U-37, U-38) ───────────────────────────────────────────
+
+/// **The macOS D14 shape through the road** (the rehearsal's D14, first half):
+/// the home made unwritable at the trial's launch and kept so — `TrialBegan`
+/// refused, the trial ended, `RollbackDeclared` refused — so the applier ends
+/// `Failed` at `Moving` and its exit guard starts the new bundle again as a
+/// trial with a nonce no journal records (the stand-in records the start).
+/// That second trial is then made as the product makes it: a process of the
+/// installed executable and its receipt at its own nonce. The home is
+/// writable again. What is returned: the installation, the processes, the
+/// second trial and the applier's world.
+fn failed_with_the_home_shut(tag: &str) -> (Install, Children, TrialProcess, Fake) {
+    let install = Install::new(tag);
+    let children = Children::default();
+    let started = children.clone();
+    let root = install.home.root().to_path_buf();
+    let shut: Arc<Mutex<Option<std::fs::Permissions>>> = Arc::default();
+    let at_launch = Arc::clone(&shut);
+    let world = launching(Box::new(move |bundle, _| {
+        started.start(bundle, "trial");
+        let before = std::fs::metadata(&root).unwrap().permissions();
+        let mut closed = before.clone();
+        closed.set_readonly(true);
+        std::fs::set_permissions(&root, closed).unwrap();
+        *at_launch.lock().unwrap() = Some(before);
+        Ok(())
+    }));
+    let (ended, world) = applied(install.road(limits(5_000, 20_000)), world);
+    if let Some(before) = shut.lock().unwrap().take() {
+        std::fs::set_permissions(install.home.root(), before).unwrap();
+    }
+    assert!(
+        matches!(ended, Ended::Failed(_)),
+        "{ended:?}: {:?}",
+        world.said
+    );
+    assert!(said(&world, "is asked to quit"), "{:?}", world.said);
+    assert_eq!(install.on_disk().unwrap().body.phase, Phase::Moving);
+    let [(bundle, words)] = world.relaunched.as_slice() else {
+        panic!("one start on the way out: {:?}", world.relaunched);
+    };
+    assert_eq!(bundle, &install.installed);
+    let nonce = trial_nonce(words);
+    let pid = children.start(&install.installed, "trial");
+    install.receipt(nonce, nonce, pid);
+    let second = recorded(&install.installed.join(EXE), pid);
+    (install, children, second, world)
+}
+
+/// RED (U-37) — **a trial whose start the journal could not record, running
+/// with its receipt written, is recorded by the next lock holder and its
+/// receipt commits the update: `[Trial, Committed, Retired]`, the new bundle
+/// kept, the LaunchAgent removed, and that trial left running as the
+/// window.**
+///
+/// The rehearsal's D14 (round 4): the trial 56947 could not be recorded and
+/// was ended; `RollbackDeclared` failed on the same unwritable home; the
+/// guard started 56955 as a trial no journal records, which nothing would
+/// ever commit or end. The recovery build — here as the LaunchAgent starts it
+/// at login, which is also the line the trial's own watchdog starts it with —
+/// now records such a trial.
+///
+/// MUTATION: in `Txn::adopt`, answer `Ok(false)` (never record it).
+#[test]
+fn a_running_trial_the_journal_could_not_record_is_recorded_and_committed_by_the_next_holder() {
+    if !on_macos() {
+        return;
+    }
+    let (install, children, second, _applier) = failed_with_the_home_shut("d14");
+    let (ended, world) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
+    assert_eq!(ended, Some(Ended::Committed), "{:?}", world.said);
+    assert!(
+        world.wrote().ends_with("[Trial, Committed, Retired]"),
+        "{}",
+        world.wrote()
+    );
+    assert_eq!(version_of(&install.installed), "2.0", "the new bundle");
+    assert!(!install.plist().exists(), "the LaunchAgent is removed");
+    assert!(
+        children.status(second.pid).is_none(),
+        "the trial runs on as the window"
+    );
+    assert!(world.launched.lock().unwrap().is_empty(), "no second trial");
+}
+
+/// RED (U-37; the rehearsal's defect 9) — **a person's start while that
+/// unrecorded trial runs commits the update and starts nothing beside it**:
+/// the recovery the start hands itself to records the running trial, whose
+/// receipt commits, and its exit guard leaves that trial as the window.
+///
+/// The rehearsal's D14, second half: `open -n` while 56955 was open; the
+/// recovery recorded a second trial (58221), which waited for the data
+/// directory 56955 held and left unanswered, and the recovery declared the
+/// rollback of a healthy 0.4.7 — `RollbackIntent`, `RollbackWaits`.
+///
+/// MUTATION: in `Txn::adopt`, answer `Ok(false)` (never record it).
+#[test]
+fn a_start_beside_an_unrecorded_trial_commits_it_and_starts_nothing_more() {
+    if !on_macos() {
+        return;
+    }
+    let (install, children, second, _applier) = failed_with_the_home_shut("defect9");
+    let (code, world) = recover_door(&install, Vec::new(), Fake::default());
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert!(
+        world.wrote().ends_with("[Trial, Committed, Retired]"),
+        "{}",
+        world.wrote()
+    );
+    assert!(children.status(second.pid).is_none(), "the trial runs on");
+    assert!(world.launched.lock().unwrap().is_empty(), "no second trial");
+    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+}
+
+/// RED (U-38; the rehearsal's defect 2) — **a trial that ends before the
+/// process list shows it ends the applier's wait at once**: its launch —
+/// `open -W`, which returns when the application it opened ends — is over
+/// and nothing was seen, so the road goes on as for a trial that gave no
+/// receipt, well inside its deadline.
+///
+/// The rehearsal's M9cut and M11-rolledback: the trial killed before it was
+/// seen, and 89.8 s without a window before `no receipt by the trial's
+/// deadline`. The stand-in for `open -W` here is a program that returns at
+/// once, and nothing of the new bundle ever runs.
+///
+/// MUTATION: in `Txn::watch_trial`, pass `&mut || false` as `launch_over`.
+#[test]
+fn a_trial_that_ends_before_it_is_seen_ends_the_wait_at_once() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("unseen");
+    let mut world = Fake::default();
+    world.on_launch_held = Some(Box::new(|_, _| {
+        bt_platform::quiet_command("/usr/bin/true")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+    }));
+    let began = Instant::now();
+    let (ended, world) = applied(install.road(limits(5_000, 30_000)), world);
+    let took = began.elapsed();
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(
+        said(&world, "ended before it could be seen"),
+        "{:?}",
+        world.said
+    );
+    assert!(took < Duration::from_secs(15), "at once: {took:?}");
+    assert_eq!(version_of(&install.installed), "1.0", "swapped back");
 }

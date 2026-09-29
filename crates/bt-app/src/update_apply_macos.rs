@@ -37,13 +37,17 @@
 //!    `renamex_np(RENAME_SWAP)` (`bt_platform::install_flip::exchange`). The
 //!    exclusive admission is let go right after, so the trial can take its
 //!    shared hold. Either identity changed → nothing swapped, `Reverted`.
-//! 5. **Trial** (M6 → M7): `open -n -a <bundle> --args --update-trial <txn>
-//!    <nonce>` with a fresh nonce, detached; then, polling through the wait
-//!    door until [`Limits::trial_within_ms`] after the launch: the trial's pid,
-//!    by listing the processes whose image is the installed executable and
-//!    started after the launch (LaunchServices reports none), and its receipt
-//!    `H/<txn>/health-<nonce>`. A pid (or a receipt, whose own pid is taken
-//!    when the list has none yet) → `Trial{nonce, process, began_ms}`, durable.
+//! 5. **Trial** (M6 → M7): `open -n -W -a <bundle> --args --update-trial <txn>
+//!    <nonce>` with a fresh nonce, held ([`Launch`]); then, polling through the
+//!    wait door until [`Limits::trial_within_ms`] after the launch: the trial's
+//!    pid, by listing the processes whose image is the installed executable
+//!    and started after the launch (LaunchServices reports none), and its
+//!    receipt `H/<txn>/health-<nonce>`. A pid (or a receipt, whose own pid is
+//!    taken when the list has none yet) → `Trial{nonce, process, began_ms}`,
+//!    durable. **The launch over and nothing seen** — `open -W` returns when
+//!    the application it opened ends — is a trial that ended before it could
+//!    be seen: no receipt, at once (0.4.7 ticket U-38; it used to cost the
+//!    whole deadline with no window).
 //! 6. **Commit** (M7 → M8): a receipt the journal accepts — this transaction's,
 //!    this trial's nonce, while the journal says `Trial` — →
 //!    `Committed{outcome: committed}`, durable; **then** the old bundle in
@@ -121,6 +125,10 @@
 //! bundle is live); `Trial` waited for, committed on its receipt or rolled
 //! back; `RollbackIntent`, `Stuck` and `RolledBack` rolled back and retired as
 //! above; `Committed` retired as after a commit (M11, "Committed-with-debt").
+//! **A running trial the journal does not record** — over `Moving` with the
+//! new bundle live, or a `Stuck` whose recorded trial is gone — is recorded
+//! when its receipt is here (`Txn::adopt`, U-37), and that receipt commits;
+//! a second trial is never started beside it (the rehearsal's defect 9).
 //! What opens after it is [`Recovered::opens`]: exactly one start.
 //!
 //! Every phase is recorded through `update_txn::Journal::advance` (which
@@ -190,6 +198,49 @@ impl Limits {
     };
 }
 
+/// **A trial's launch, held while its trial is unseen** (0.4.7 ticket U-38):
+/// LaunchServices reports no pid, so the trial is found in the process list,
+/// and a trial that ends before the list shows it once left the applier
+/// waiting out its whole deadline with no window (the rehearsal's defect 2:
+/// 89.8 s). The launch is `open -n -W`, which returns when the application it
+/// opened ends — or at once, when it could not be opened — so `open`'s own end
+/// is the trial's, seen without its pid ([`Launch::over`]). Ending `open`
+/// leaves the application running (measured on macOS 26), so the launch is
+/// ended when it is let go: once the trial is recorded its pid is what is
+/// watched, and nothing of the launch is left behind.
+pub(crate) struct Launch(Option<std::process::Child>);
+
+impl Launch {
+    /// The launch `child` (`open -W`, or a test's stand-in for it).
+    pub(crate) fn of(child: std::process::Child) -> Self {
+        Self(Some(child))
+    }
+
+    /// A launch nothing can be asked about: never over.
+    pub(crate) fn untracked() -> Self {
+        Self(None)
+    }
+
+    /// **Whether the launch has ended** — the application it opened has
+    /// ended, or never started. A launch whose state cannot be read is not.
+    pub(crate) fn over(&mut self) -> bool {
+        self.0
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
+    }
+}
+
+impl Drop for Launch {
+    /// `open -W` ended, by its own handle — never the application it opened
+    /// — and reaped when it has already gone.
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.kill();
+            let _ = child.try_wait();
+        }
+    }
+}
+
 /// **One lock holder's road**: the home the line named, the transaction, the
 /// applier's nonce O handed over (none for recovery, which applies nothing),
 /// and where the data directory and the LaunchAgents folder are.
@@ -230,13 +281,14 @@ pub(crate) trait Hands {
     /// # Errors
     /// Why not, as a sentence.
     fn verify_restored(&mut self, worker: &WorkerCtx, bundle: &Path) -> Result<(), String>;
-    /// Start the trial: `open -n -a <bundle> --args <args>`, detached — the
+    /// Start the trial: `open -n -W -a <bundle> --args <args>`, detached — the
     /// applier's after its exchange, and a recovery's over an exchange or a
-    /// `Stuck` whose new bundle is live (U-29b).
+    /// `Stuck` whose new bundle is live (U-29b) — and hold the launch, which
+    /// ends when the application it opened ends ([`Launch`], U-38).
     ///
     /// # Errors
     /// `open` could not be started.
-    fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()>;
+    fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<Launch>;
     /// **Whether a start just made was acknowledged** (U-34, round 2): a Folio
     /// holds the data directory `data` within
     /// `update_apply::ACKNOWLEDGED_WITHIN`, asked through `worker`'s wait door
@@ -1004,6 +1056,17 @@ impl<'a> Txn<'a> {
         if live.as_ref() == Ok(places.old) {
             self.revert(Actor::Recovery)
         } else if live.as_ref() == Ok(places.new) && stage.as_ref() == Ok(places.old) {
+            // A trial of it that runs and has answered is recorded, never a
+            // second one started beside it (U-37).
+            if self.adopt(
+                places,
+                Actor::Recovery,
+                (Some(places.new), Some(places.old)),
+                None,
+                world,
+            )? {
+                return self.settle(worker, places, None, world, &[]);
+            }
             self.begin_trial(worker, places, Actor::Recovery, world, &[])
         } else {
             self.declare_rollback(worker, places, Actor::Recovery, world)
@@ -1035,15 +1098,27 @@ impl<'a> Txn<'a> {
             args.extend(failed_words(&self.road.home));
         }
         args.extend_from_slice(handed);
-        if let Err(error) = hands.launch_trial(places.installed, &args) {
-            hands.say(&format!("BT_UPDATE_APPLY {OPEN} did not start: {error}"));
-            return if over_stuck {
-                Ok(self.still_stuck())
-            } else {
-                self.declare_rollback(worker, places, actor, hands)
-            };
-        }
-        match self.watch_trial(worker, places, actor, hands, Some((nonce, began_ms)))? {
+        let mut launch = match hands.launch_trial(places.installed, &args) {
+            Ok(launch) => launch,
+            Err(error) => {
+                hands.say(&format!("BT_UPDATE_APPLY {OPEN} did not start: {error}"));
+                return if over_stuck {
+                    Ok(self.still_stuck())
+                } else {
+                    self.declare_rollback(worker, places, actor, hands)
+                };
+            }
+        };
+        let watched = self.watch_trial(
+            worker,
+            places,
+            actor,
+            hands,
+            Some((nonce, began_ms)),
+            &mut launch,
+        );
+        drop(launch);
+        match watched? {
             Some(ended) => Ok(ended),
             None if self.phase() == PhaseKind::Stuck => Ok(self.still_stuck()),
             None => self.declare_rollback(worker, places, actor, hands),
@@ -1075,6 +1150,7 @@ impl<'a> Txn<'a> {
         actor: Actor,
         hands: &mut impl Hands,
         started: Option<(Nonce, u64)>,
+        launch: &mut Launch,
     ) -> Result<Option<Ended>, String> {
         // The new build is live for the whole wait: nothing is exchanged
         // under this lock meanwhile.
@@ -1123,6 +1199,7 @@ impl<'a> Txn<'a> {
             self,
             &watch,
             &mut find,
+            &mut || launch.over(),
             &mut |process| trial_runs(process, &images),
             &mut |line| hands.say(line),
         )?;
@@ -1312,6 +1389,15 @@ impl<'a> Txn<'a> {
             let receipt = nonce
                 .and_then(|nonce| read_receipt(&self.road.home.receipt_path(self.road.txn, &nonce)))
                 .and_then(Result::ok);
+            if self.adopt(
+                places,
+                actor,
+                (live.as_ref(), stage.as_ref()),
+                trial.filter(|_| trial_alive),
+                hands,
+            )? {
+                continue;
+            }
             let located = Located::Bundle { live, stage };
             let action = decide(&Disk {
                 journal: &self.journal,
@@ -1328,7 +1414,14 @@ impl<'a> Txn<'a> {
                     return self.begin_trial(worker, places, actor, hands, handed);
                 }
                 Action::AwaitReceipt { .. } => {
-                    if let Some(ended) = self.watch_trial(worker, places, actor, hands, None)? {
+                    if let Some(ended) = self.watch_trial(
+                        worker,
+                        places,
+                        actor,
+                        hands,
+                        None,
+                        &mut Launch::untracked(),
+                    )? {
                         return Ok(ended);
                     }
                     if self.phase() == PhaseKind::Stuck {
@@ -1412,6 +1505,60 @@ impl<'a> Txn<'a> {
         }
         let actor = tenure.unwrap_or_else(|| self.asker.actor(self.phase()));
         self.stuck(actor, "the rollback did not settle".to_owned(), hands)
+    }
+
+    /// **A running trial the journal does not record, recorded** (U-37; the
+    /// rehearsal's defect 9): over `Moving` with the new bundle live and the
+    /// old one in `stage/`, or over a `Stuck` whose recorded trial no longer
+    /// runs with the new bundle live, a process of the installed executable
+    /// whose receipt is here (`update_apply::unrecorded_trial`) is recorded as
+    /// the trial it is (`update_apply::adopting`) — never a second trial
+    /// started beside it, which would wait for the data directory it holds
+    /// and die unanswered, and never a swap back under it, which its shared
+    /// admission refuses. It is this holder's successor from here: the window.
+    /// `true` when it was recorded; `decide` then commits on its receipt.
+    ///
+    /// # Errors
+    /// The record's failure; the trial runs on as the window.
+    fn adopt(
+        &mut self,
+        places: &Places<'_>,
+        actor: Actor,
+        (live, stage): (Option<&BundleIdentity>, Option<&BundleIdentity>),
+        recorded: Option<TrialProcess>,
+        hands: &mut impl Hands,
+    ) -> Result<bool, String> {
+        let new_live = live == Some(places.new);
+        let over_stuck = match &self.journal.body.phase {
+            Phase::Moving if new_live && stage == Some(places.old) => false,
+            Phase::Stuck { .. } if new_live && recorded.is_none() => true,
+            _ => return Ok(false),
+        };
+        let stale = match &self.journal.body.phase {
+            Phase::Stuck { trial, .. } => *trial,
+            _ => None,
+        };
+        let Some((process, receipt)) = crate::update_apply::unrecorded_trial(
+            &self.road.home,
+            self.road.txn,
+            places.program,
+            stale,
+        ) else {
+            return Ok(false);
+        };
+        hands.say(&format!(
+            "BT_UPDATE_RECOVER the trial {} runs and has answered, and the journal does not record it: it is recorded",
+            process.pid
+        ));
+        self.successor = Some(Running {
+            pid: process.pid,
+            started: process.started,
+        });
+        self.record(
+            actor,
+            &crate::update_apply::adopting(over_stuck, &receipt, process),
+        )?;
+        Ok(true)
     }
 
     /// M11 after `RolledBack` is durable: the entrance, then `Retired` and
@@ -1558,6 +1705,21 @@ pub(crate) fn open_bundle(bundle: &Path, args: &[OsString]) -> io::Result<()> {
     open.spawn().map(drop)
 }
 
+/// **The trial's launch** (U-38): `open -n -W -a <bundle> --args <args>`,
+/// through the one door for a child, held ([`Launch`]) — `open -W` returns when
+/// the application it opened ends.
+///
+/// # Errors
+/// `open` could not be started.
+pub(crate) fn open_trial(bundle: &Path, args: &[OsString]) -> io::Result<Launch> {
+    let mut open = bt_platform::quiet_command(OPEN);
+    open.arg("-n").arg("-W").arg("-a").arg(bundle);
+    if !args.is_empty() {
+        open.arg("--args").args(args);
+    }
+    open.spawn().map(Launch::of)
+}
+
 /// This process's own world.
 struct Machine {
     /// Where each line is appended besides standard error: the data
@@ -1581,8 +1743,8 @@ impl Hands for Machine {
         verify_restored_here(bundle)
     }
 
-    fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
-        open_bundle(bundle, args)
+    fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<Launch> {
+        open_trial(bundle, args)
     }
 
     fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {

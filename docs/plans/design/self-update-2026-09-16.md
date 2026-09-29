@@ -2744,3 +2744,131 @@ disclosed in the 0.4.6 release note's Known issues. U-35 and U-36 are proposed
 
 **Not changed.** The transaction protocol, the recovery decisions, the exit
 guard's rule and the owner's ruling on external kills.
+
+## Revision 2026-09-29 (g) — a trial nobody alive decides (U-37, U-38)
+
+**Why.** Three findings share one gap: a trial of the new build running while
+no process that holds, or will hold, the transaction lock is deciding it.
+
+- **D-14** (the clean VM, A7, W14 with the journal held for 120 s after the
+  moves). U-34's rule fired — `the trial 7340 could not be recorded`, then
+  `is asked to quit` — and the trial was ended. The same handle refused the
+  rollback's declaration too, so the road ended `Failed` at `Moving`; the
+  exit guard read the disk (the new set live, nothing committed) and started
+  the new build as a trial with a nonce no journal records (`Opens::Trial`):
+  pid 940, writes held back, nothing to commit it and nothing to end it.
+- **The rehearsal's defect 9** (macOS D14, second half): a person's start
+  beside that trial handed itself to the recovery build, which recorded a
+  second trial; the second waited 30 s for the data directory the first held
+  (`update_trial::CLAIM_WAIT`) and left, and the recovery declared the
+  rollback of a working 0.4.7 (`RollbackWaits` under the first trial's
+  admission).
+- **The rehearsal's defect 2** (M9cut, M11-rolledback): a macOS trial that
+  ends before the process list shows it leaves the applier nothing to watch
+  — 89.8 s with no window before `no receipt by the trial's deadline`.
+
+**(g).1 The lock holder records a running trial the journal does not know.**
+At each step of `settle` (both platforms) and at the macOS applier's re-entry
+over `Moving`, before `decide`: over `Moving` with the new build live, or over
+a `Stuck` whose recorded trial no longer runs with the new build live, a
+process of the installed executable whose receipt `H\<txn>\health-<nonce>`
+names its pid (`update_apply::unrecorded_trial`, the receipts found by listing
+`H\<txn>` through `files::read_directory`) is recorded — `TrialBegan`, or
+`RetrialBegan` over `Stuck`, with its receipt's nonce and `began_ms` now
+(`update_apply::adopting`). The next `decide` answers `Commit` (its receipt
+matches); the holder's successor is that trial, so the exit guard starts
+nothing. The rights table already allows it: the recovery records `Trial`
+(macOS `BeginTrial` over `Moving`) and `Stuck` (the retrial); no transition
+and no right is added. Its evidence is the one a commit asks for: the process
+of the new image reached its first pane text and wrote its receipt; its
+identity is its pid and start instant, as for any recorded trial. Why listing
+rather than knowing the nonce: the trial's nonce is its own (a guard mints it,
+`Opens::words`), and its receipt is the one place it says it; the listing is
+the product's existing one, so no new vocabulary site (the window thread's
+inventory only shrinks). **Why record rather than start another trial or roll
+back**: a second trial cannot run beside it (the data directory is held; it
+waits, dies, and the rollback follows — defect 9), and a rollback cannot move
+under it (its shared admission). A running process of the new image with *no*
+receipt is not recorded (nothing says it is a trial of this transaction rather
+than a start about to hand itself over); its own watchdog deals with it.
+
+**(g).2 The trial's watchdog.** `update_trial::WATCHDOG` = the trial's
+deadline (90 s) + the stop's graces (5 s + 5 s) + the declaration's retry
+(2 s) = 102 s: every lock holder that watches a trial has decided it by then.
+A trial whose transaction is still undecided that long after its watch began —
+and again every 102 s while it stays so — starts the recovery build with the
+entrance's own line (`--update-recover`, the home on macOS:
+`cli::recover_line_at_logon`), from its watch worker (`quiet_command`, never
+waited on; the window thread is not involved). That recovery runs as at logon:
+it records the trial if it has answered and commits (the trial stays, its
+writes are released, its card says *Updated.*), or decides the transaction
+from the disk. **A trial that never became ready ends its own process** after
+the recovery is started (`bt_platform::leave_process`, exit code 3): it wrote
+no receipt and never will, nothing it holds back will ever land, and it holds
+the claim and the admission a rollback needs. Nothing is ended when the
+recovery could not be started. **The card on the way out**: none of its own —
+a trial that stays follows its transaction (*Updated.* at the commit), and one
+that leaves never showed its text; the next window is the recovery's (the old
+build with *Previous version restored.* on Windows, a recorded trial on macOS
+over `Moving`).
+
+**(g).3 A refused receipt is written again.** The storage worker writes the
+receipt once; when it answers a failure, the trial's watch writes the same
+bytes again (create-new; an existing receipt is the one owed) at each of its
+turns until it lands (`Gate::write_owed_receipt`). The macOS D14 shape — the
+home read-only while the trial starts — otherwise leaves a healthy trial with
+no receipt, which (g).1 cannot record.
+
+**(g).4 The macOS launch is watched (U-38).** The trial is started with
+`open -n -W -a`, which returns when the application it opened ends, or at once
+when it cannot be opened; the applier holds it (`update_apply_macos::Launch`)
+while the trial is unseen, and `update_apply::watch_trial` asks it before each
+look: a launch that is over with nothing seen ends the wait at once
+(`NoReceipt`, `the trial ended before it could be seen`). Chosen over the two
+alternatives: LaunchServices' `openApplicationAtURL` hands back the running
+application, but through an Objective-C completion block and an
+`NSRunningApplication` the platform door does not have, for the same fact; a
+short grace for "no process of the new bundle appeared" is a guess about how
+long a start takes. Measured on macOS 26: `open -n -W` returns 0.38 s after a
+program that exits at once, 6.3 s after one that lives 6 s, and at once (exit
+1) for an application that cannot be opened; ending `open` leaves the
+application running, so the launch is ended when the watch lets it go and no
+`open` outlives the road. **Windows** holds the trial's pid from its launch;
+a trial that dies in its first second is seen gone at the next look (pinned by
+`a_trial_that_dies_in_its_first_second_ends_the_wait_at_once`).
+
+**(g).5 D-14 as it ends now, and the brief's expectation.** During the
+refusal nothing changes (trial ended; `Failed` at `Moving`; the new build as a
+trial with *Update incomplete.*). After it: the first lock holder — a person's
+start, the logon, or at the latest that trial's watchdog — records it and
+commits: the new build, the entrance gone, the window kept. The brief asked
+for "the old build with `--update-failed`". With the moves done, the only old
+build is the rescue copy (a home with no journal, so no card), nothing can
+declare a rollback while the journal refuses, and by the time it can, a
+working new build is running and has answered; the owner's invariant ranks the
+new build first. A trial that has not answered is still rolled back, through
+(g).2. The coordinator decides whether the checklist row keeps this outcome.
+
+**Exits added to (e)'s table** (Windows; macOS the same):
+
+| process | exit | before | after | how |
+|---|---|---|---|---|
+| R (logon, or the watchdog's) | `Moving`/`Stuck`, a running trial with its receipt, unrecorded | rollback under it, or a second trial | the trial recorded and committed; it is the window, nothing started | `a_running_trial_the_journal_could_not_record_is_recorded_and_committed_by_the_next_holder` |
+| R (start) | the same, beside a person's start | a second trial, `RollbackWaits` (defect 9) | the same; nothing started | `a_start_beside_an_unrecorded_trial_commits_it_and_starts_nothing_more` |
+| T | undecided for 102 s, ready | runs on, writes held | starts R, stays | `an_undecided_trial_hands_its_transaction_back_every_watchdog_period` |
+| T | undecided for 102 s, never ready | runs on | starts R, ends itself | the same test (the hand-back's `ready` word) |
+| P (macOS) | a trial that ends before it is seen | 90 s wait | at once | `a_trial_that_ends_before_it_is_seen_ends_the_wait_at_once` |
+
+**Architecture.** (c′) New sources of a fact: the journal's `Trial`/`Retrial`
+record now also comes from a lock holder that did not start the trial (its
+readers — `decide`, the trial's watch through the header, `update_startup`
+through the header — read it as any record); the recovery build now also has
+the trial as its starter (besides the entrance and an ordinary start); a trial
+may now end itself (besides a person, and a lock holder's stop). No owner
+changes. No new door: the listing is `files::read_directory`, the start is
+`quiet_command`, the receipt is `install_txn::durable_create` as the storage
+worker's.
+
+**Not changed.** `next`, `decide`, the writer and effect tables, the exit
+guard's rule, U-34's rule that the applier ends a trial it could not record,
+the owner's ruling on external kills.

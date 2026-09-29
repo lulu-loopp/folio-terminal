@@ -5,8 +5,16 @@ All notable changes to Folio are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
+### Fixed
 
-Nothing yet.
+- An update whose new version could not be recorded as it started — its record
+  kept out by another program holding it open, or a folder made read-only —
+  no longer leaves the new version running with nothing it changes saved. Once
+  the record can be written, the next start, the next logon or, within two
+  minutes, the new version itself finishes the update, and a new version that
+  started properly is kept.
+- On macOS, a new version that quits the moment it is started no longer leaves
+  about 90 seconds with no Folio window before the previous version comes back.
 
 ## 0.4.6-preview — 2026-09-29
 ### Added

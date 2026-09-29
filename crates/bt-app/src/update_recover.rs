@@ -573,7 +573,11 @@ impl<W: World> Hands for Logged<'_, W> {
         self.world.verify_restored(worker, bundle)
     }
 
-    fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
+    fn launch_trial(
+        &mut self,
+        bundle: &Path,
+        args: &[OsString],
+    ) -> io::Result<update_apply_macos::Launch> {
         self.world.launch_trial(bundle, args)
     }
 
@@ -619,8 +623,12 @@ impl Hands for Machine {
         update_apply_macos::verify_restored_here(bundle)
     }
 
-    fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
-        update_apply_macos::open_bundle(bundle, args)
+    fn launch_trial(
+        &mut self,
+        bundle: &Path,
+        args: &[OsString],
+    ) -> io::Result<update_apply_macos::Launch> {
+        update_apply_macos::open_trial(bundle, args)
     }
 
     fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {
@@ -674,7 +682,11 @@ mod tests {
             panic!("a Windows home is never verified: {bundle:?}")
         }
 
-        fn launch_trial(&mut self, bundle: &Path, _: &[OsString]) -> io::Result<()> {
+        fn launch_trial(
+            &mut self,
+            bundle: &Path,
+            _: &[OsString],
+        ) -> io::Result<update_apply_macos::Launch> {
             panic!("a Windows home never starts a trial: {bundle:?}")
         }
 

@@ -146,6 +146,9 @@ enum Trial {
     Silent,
     /// Ends at once, writing nothing.
     Dies,
+    /// Runs, is recorded, and ends by itself within its first second,
+    /// writing nothing (U-38's Windows twin).
+    DiesSoon,
 }
 
 type MoveHook = Box<dyn FnMut(&Move) + Send>;
@@ -170,6 +173,10 @@ struct Fake {
     hold_at_launch: bool,
     /// The handle [`Fake::hold_at_launch`] opened.
     held: Option<std::fs::File>,
+    /// **Keep that handle past "could not be recorded"** (U-37, D-14): the
+    /// rollback's own records are refused too, as on the clean VM's 120 s
+    /// hold.
+    keep_held: bool,
     /// **Panic in the entrance's write** (U-34): a fault inside the road.
     panic_at_arm: bool,
     /// **A program that will not start** (U-34): its start is recorded and
@@ -186,7 +193,7 @@ struct Fake {
 
 impl World for Fake {
     fn say(&mut self, line: &str) {
-        if line.contains("could not be recorded") {
+        if line.contains("could not be recorded") && !self.keep_held {
             // The scanner lets go: the rollback's own records go through.
             self.held = None;
         }
@@ -236,6 +243,14 @@ impl World for Fake {
             Trial::Silent => return Ok(pid),
             Trial::Dies => {
                 self.children.end(pid);
+                return Ok(pid);
+            }
+            Trial::DiesSoon => {
+                let children = self.children.clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(300));
+                    children.end(pid);
+                });
                 return Ok(pid);
             }
             Trial::Answers => nonce,
@@ -435,6 +450,7 @@ impl Install {
             on_disarm: None,
             hold_at_launch: false,
             held: None,
+            keep_held: false,
             panic_at_arm: false,
             refuse_start_of: None,
             starts_die: 0,
@@ -2445,6 +2461,176 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_rolled_back() {
         "{:?}",
         world.said
     );
+}
+
+// ── the trial's gaps (U-37, U-38) ───────────────────────────────────────────
+
+/// **D-14's shape, as the clean VM's row W14 (120 s) met it**: the journal
+/// held without delete sharing from the trial's launch through the whole road
+/// — `TrialBegan` refused, the trial ended, the rollback's declaration refused
+/// too — so the applier ends `Failed` at `Moving` and its exit guard starts
+/// the new build again as a trial with a nonce no journal records. That
+/// second trial is then made as the product makes it: a process of the
+/// installed program, and its receipt at its own nonce (its first pane text).
+/// The handle is let go. What is returned: the installation, the second
+/// trial, and the applier's world.
+fn failed_with_the_journal_held(tag: &str) -> Option<(Install, TrialProcess, Fake)> {
+    let install = Install::new(tag)?;
+    let mut world = install.world(Trial::Silent);
+    world.hold_at_launch = true;
+    world.keep_held = true;
+    let (ended, mut world) = applied(&install, limits(20_000, 20_000), world);
+    let Ended::Failed(why) = &ended else {
+        panic!("{ended:?}: {:?}", world.said);
+    };
+    assert!(why.contains("rename"), "{why}");
+    // The rule fired: the trial it launched was ended ...
+    let unrecorded = said_at(&world, "could not be recorded").expect("said");
+    let asked = said_at(&world, "is asked to").expect("the trial is stopped");
+    assert!(unrecorded < asked, "{:?}", world.said);
+    assert_eq!(install.on_disk().body.phase, Phase::Moving);
+    assert!(
+        install.holds(Place::Install, &install.new),
+        "the new set is live"
+    );
+    // ... and the guard started the new build again, as a trial nobody
+    // records: the process D-14 found running.
+    assert_eq!(world.opened.len(), 1, "{:?}", world.said);
+    let (program, words) = &world.opened[0];
+    assert_eq!(program, &install.installed);
+    assert_eq!(words[0], OsString::from(cli::UPDATE_TRIAL_FLAG));
+    assert_eq!(words[3], OsString::from(cli::UPDATE_FAILED_FLAG));
+    let nonce = Nonce::parse(&words[2].to_string_lossy()).unwrap();
+    let second = install.start_trial();
+    install.receipt(nonce, nonce, second.pid);
+    world.held = None;
+    Some((install, second, world))
+}
+
+/// RED (U-37) — **a trial whose start the journal could not record, running
+/// with its receipt written, is recorded by the next lock holder and its
+/// receipt commits the update: `[Trial, Committed, Retired]`, the new set
+/// kept, the entrance removed, and that trial left running as the window —
+/// nothing else started.**
+///
+/// D-14 (the clean VM, A7, row W14 with a 120 s hold): the rule U-34 wrote
+/// fired — the trial 7340 was asked to quit and ended — but the rollback's
+/// declaration was refused by the same handle, the road ended `Failed` at
+/// `Moving`, and the exit guard started the new build again as a trial no
+/// journal records (pid 940), which nothing would ever commit or end. The
+/// recovery build — here as the entrance at logon starts it, which is also
+/// the line the trial's own watchdog starts it with — now records such a
+/// trial rather than rolling back under it.
+///
+/// MUTATION: in `Txn::adopt`, answer `Ok(false)` (never record it).
+#[test]
+fn a_running_trial_the_journal_could_not_record_is_recorded_and_committed_by_the_next_holder() {
+    // The applier's world is kept: its drop ends every process of the test.
+    let Some((install, second, _applier)) = failed_with_the_journal_held("d14") else {
+        return;
+    };
+    let (code, world) = recovered_at_logon(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Silent),
+    );
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert!(
+        wrote(&world).ends_with("[Trial, Committed, Retired]"),
+        "{:?}",
+        world.said
+    );
+    assert_eq!(
+        install.on_disk().body.phase,
+        Phase::Retired {
+            outcome: Outcome::Committed
+        }
+    );
+    assert!(install.holds(Place::Install, &install.new), "the new build");
+    assert!(!install.registry.holds(install.txn), "the entrance is gone");
+    assert!(runs(second), "the trial runs on as the window");
+    assert!(
+        world.launched.is_empty(),
+        "no second trial: {:?}",
+        world.said
+    );
+    assert!(world.opened.is_empty(), "nothing started: {:?}", world.said);
+}
+
+/// RED (U-37; the macOS rehearsal's defect 9, its Windows twin) — **a
+/// person's start while that unrecorded trial runs commits the update and
+/// starts nothing beside it**: the recovery the start hands itself to records
+/// the running trial, whose receipt commits, rather than rolling back a
+/// working new build under it.
+///
+/// The rehearsal's D14, second half: a new start while the unrecorded trial's
+/// window was open recorded a second trial, which waited for the data
+/// directory the first one held and died unanswered — and the recovery rolled
+/// back a healthy 0.4.7.
+///
+/// MUTATION: in `Txn::adopt`, answer `Ok(false)` (never record it).
+#[test]
+fn a_start_beside_an_unrecorded_trial_commits_it_and_starts_nothing_more() {
+    // The applier's world is kept: its drop ends every process of the test.
+    let Some((install, second, _applier)) = failed_with_the_journal_held("defect9") else {
+        return;
+    };
+    let (code, world) = recovered(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Silent),
+    );
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert!(
+        wrote(&world).ends_with("[Trial, Committed, Retired]"),
+        "{:?}",
+        world.said
+    );
+    assert!(runs(second), "the trial runs on as the window");
+    assert!(
+        world.launched.is_empty(),
+        "no second trial: {:?}",
+        world.said
+    );
+    assert!(world.opened.is_empty(), "{:?}", world.said);
+}
+
+/// PIN (U-38, the Windows twin of the macOS defect 2) — **a trial that dies
+/// within its first second ends the applier's wait at once**: the applier
+/// holds the trial's pid from its launch, records it, and sees it gone at its
+/// next look — the rollback begins within moments, not at the 60 s deadline.
+///
+/// The clean VM's M9cut-style kill landed 4 ms too late to show it on the
+/// Mac; here the trial ends by itself 300 ms after its launch, after `Trial`
+/// is recorded.
+///
+/// MUTATION: in `Txn::watch`, answer the trial alive whatever the process
+/// list says.
+#[test]
+fn a_trial_that_dies_in_its_first_second_ends_the_wait_at_once() {
+    let Some(install) = Install::new("dies-soon") else {
+        return;
+    };
+    let began = Instant::now();
+    let (ended, world) = applied(
+        &install,
+        limits(20_000, 60_000),
+        install.world(Trial::DiesSoon),
+    );
+    let took = began.elapsed();
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert!(
+        wrote(&world).contains("Trial, RollbackIntent"),
+        "recorded, then rolled back: {:?}",
+        world.said
+    );
+    assert!(
+        said_at(&world, "ended without a receipt").is_some(),
+        "{:?}",
+        world.said
+    );
+    assert!(took < Duration::from_secs(10), "at once: {took:?}");
+    rolled_back_on_disk(&install);
 }
 
 // ── the one exit guard (U-34) ───────────────────────────────────────────────
