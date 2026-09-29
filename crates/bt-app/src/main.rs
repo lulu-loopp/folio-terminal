@@ -36419,7 +36419,7 @@ impl Layered {
     /// reaches each band through the one call site that draws it — the same
     /// arrangement `GitFilterMenuLayout::rows` keeps, and for its reason: a list
     /// the product walked would be a second way of deciding what is on the glass.
-    #[allow(dead_code)]
+    #[cfg(test)]
     const ALL: [Self; 19] = [
         Self::Popup(Popup::Profile),
         Self::Popup(Popup::Root),

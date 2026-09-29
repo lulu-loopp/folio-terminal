@@ -29,41 +29,19 @@
 #
 # The sites grouped by what they are waiting for: the U-44b triage ticket.
 crate	file	item	form	reason
-bt-app	src/git_panel.rs	GitTreeBadges::is_empty	allow	
-bt-app	src/git.rs	GIT_NEVER_WORDS	allow	
-bt-app	src/git.rs	GitStatus::count	allow	
-bt-app	src/git.rs	GitSlot::fault	allow	
-bt-app	src/git.rs	GitCache::log_refs	allow	
-bt-app	src/i18n.rs	Text::CleanupArchiveExit	expect	Printed by uninstall.cmd; the archive source pin checks this copy.
-bt-app	src/i18n.rs	Text::CleanupArchiveReady	expect	Printed by uninstall.cmd; the archive source pin checks this copy.
-bt-app	src/i18n.rs	Text::CleanupArchiveIncomplete	expect	Printed by uninstall.cmd; the archive source pin checks this copy.
 bt-app	src/main.rs	WindowRuntime.system_settings_watch	expect	held for its Drop; the subclass talks to the loop through the event proxy it was built with, never through this field
 bt-app	src/main.rs	UserInputKind	allow	A2 converts the five call sites that will pass these
 bt-app	src/main.rs	UserInputKind::is_answer	allow	A2 gates the answer door on this
-bt-app	src/main.rs	Layered::ALL	allow	
 bt-app	src/preview_provenance.rs	TextOrigin::is_empty	allow	
-bt-app	src/preview_provenance.rs	TextOrigin::text_of	allow	
-bt-app	src/profiles.rs	TermMenuLayout::submenu_rows	allow	
-bt-app	src/profiles.rs	PaneMenuLayout::item	allow	
-bt-app	src/profiles.rs	PaneMenuLayout::zone	allow	
-bt-app	src/profiles.rs	TabMenuLayout::submenu_rows	allow	
-bt-app	src/profiles.rs	GitFilterMenuLayout::rows	allow	
 bt-app	src/profiles.rs	GitFilterMenuLayout::frame	allow	
 bt-app	src/runtime/preview.rs	Runtime::next_animation_frame	allow	
-bt-app	src/seed.rs	SeedVault::len	allow	
-bt-app	src/seed.rs	SeedVault::is_empty	allow	
 bt-app	src/seed.rs	PinMigration	allow	
 bt-app	src/seed.rs	impl PinMigration	allow	
-bt-app	src/settings.rs	SettingsLayout::advanced	allow	
-bt-app	src/settings.rs	SettingsLayout::reset_advanced	allow	
-bt-app	src/settings.rs	SettingsLayout::advanced_clip	allow	
 bt-app	src/update_handoff.rs	Staged.lock	expect	a lock is held by owning it; nothing reads it (install_txn::Held's drop releases it)
 bt-app	src/update_job.rs	(module)	expect	the drivers land after the card: U-20/U-27 drive and report, U-21 quits ((b).5)
 bt-app	src/update_txn.rs	(module)	expect	the protocol lands before its drivers: U-11, U-12 and U-20…U-29 call it ((b).5)
 bt-app	src/update.rs	FeedRelease.name	expect	required of the feed's shape (the releases list's); the check does not read it
 bt-app	src/update.rs	FeedRelease.prerelease	expect	required of the feed's shape (the releases list's); the check offers pre-releases as the page's list does
-bt-app	src/webhost.rs	claims_chord	allow	
-bt-app	src/webhost.rs	WebSeat::address	allow	F1b's transfer transaction is the caller
 bt-app	src/webnav.rs	(module)	allow	
 bt-platform	src/app_delegate.rs	TerminationAnswer::new	expect	M3-1: a termination request is made by AppKit, and there is no AppKit here
 bt-platform	src/instance.rs	DataDirectoryClaim.lock	expect	the field is the mechanism rather than data
@@ -82,4 +60,3 @@ bt-platform	src/trust_windows.rs	Engine.stores	expect	held for the engine's life
 bt-platform	src/webview_portable.rs	WebHost.gate	expect	the macOS arm calls it from -webView:decidePolicyForNavigationAction:
 bt-platform	src/webview_portable.rs	WebHost.request_gate	expect	the macOS arm asks it about a subframe; the rest is a compiled rule list
 bt-platform	src/webview_portable.rs	WebHost.wake	expect	the macOS arm wakes the loop when a delegate answers
-bt-workbench	src/attention.rs	AttentionLedger::is_agent_seat	allow	the eighth mark `Attached` is §7.1.5b's own row and is not built; the ruling it is built from is, and its witness is the three cells below

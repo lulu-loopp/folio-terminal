@@ -36,14 +36,12 @@
 //! arrives in the shape the panel wants. What stays on the event loop is filing
 //! the answer into the seat that asked.
 //!
-//! **Half of this module has no caller yet, and says so.** This slice is the
-//! data plane; the page that draws it is G-2 and the diff wiring is G-3. The
-//! items only that page will call carry `#[allow(dead_code)]` rather than being
-//! left out, for the reason `PreviewSource`'s two git cases carry one: a model
-//! built one question at a time as the panel needs it is a model shaped by the
-//! panel's drawing order, and the shape that matters here is git's. Each such
-//! item names the slice that will call it, so an `allow` that outlives its excuse
-//! is visible rather than merely tolerated.
+//! **The model was built before the page that draws it** (G-1 before G-2 and
+//! G-3), because a model built one question at a time as the panel needs it is
+//! a model shaped by the panel's drawing order, and the shape that matters here
+//! is git's. The page and the diff view read it now; the few accessors only the
+//! tests ask (`count`, `fault`, `log_refs`, `GIT_NEVER_WORDS`) are
+//! `#[cfg(test)]`, because the page reaches the same facts another way.
 //!
 //! **The locale is forced to `C`.** Every child gets `LC_ALL=C`, because two of
 //! git's machine-readable outputs are not purely machine-readable: `git
@@ -487,7 +485,7 @@ pub enum GitWriteVerb {
 /// Read by that test and by nothing else, which is exactly what a boundary
 /// written as data looks like: the commands themselves come from
 /// [`write_arguments`], and this is the list they are held against.
-#[allow(dead_code)]
+#[cfg(test)]
 pub const GIT_NEVER_WORDS: [&str; 10] = [
     "merge",
     "rebase",
@@ -1332,7 +1330,7 @@ impl GitStatus {
     }
 
     /// What a group heading counts (R7 — every heading carries its number).
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn count(&self, group: GitGroup) -> usize {
         self.group(group).count()
@@ -2861,7 +2859,7 @@ impl<T> GitSlot<T> {
 
     /// The reason there is no answer — G-2's empty states and its one-line
     /// banner (R17, W3).
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn fault(&self) -> Option<&GitFault> {
         match self {
@@ -3258,7 +3256,7 @@ impl GitCache {
     /// Read by the tests that pin `set_log_refs`' contract; the window itself
     /// only ever *writes* it, because what the filter is is the seat's own state
     /// and this is where the question is built from.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn log_refs(&self) -> &[String] {
         &self.log_refs

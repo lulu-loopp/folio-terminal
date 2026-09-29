@@ -1097,11 +1097,10 @@ impl AttentionLedger {
     /// event-level arrival mints nothing and holds nothing, and "there is an agent in this pane" is
     /// as much a state as any other; a bare `BEL` from `make` establishing a seat would be that red
     /// line broken by the one door built to respect it.
-    #[allow(
-        dead_code,
-        reason = "the eighth mark `Attached` is §7.1.5b's own row and is not built; the ruling \
-                  it is built from is, and its witness is the three cells below"
-    )]
+    ///
+    /// The eighth mark `Attached` (§7.1.5b) is not built, so the three cells that witness the ruling
+    /// are the only callers.
+    #[cfg(test)]
     pub(crate) fn is_agent_seat(&self, now: Instant) -> bool {
         self.any_asserted()
             || self

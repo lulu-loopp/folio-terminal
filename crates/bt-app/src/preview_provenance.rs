@@ -244,7 +244,7 @@ impl TextOrigin {
     ///
     /// `#[allow(dead_code)]`: v2's — a toolbar putting `**` round a word has to
     /// find the word again after the file moved under it.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn text_of(&self, source: usize) -> Option<usize> {
         self.runs.iter().find_map(|run| {

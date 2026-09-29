@@ -814,7 +814,7 @@ pub(crate) fn claim_for(claims: &[ClaimedChord], chord: WebChord) -> Option<&Cla
 /// not the verdict. This spelling exists for the reconciliation tests, whose
 /// whole subject is which keys a page keeps — a question that has a yes and a no
 /// and no verb at all.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn claims_chord(
     claims: &[ClaimedChord],
     virtual_key: u16,
@@ -3665,7 +3665,7 @@ impl WebSeat {
     // ── Moving one seat to another window (F1a) ────────────────────────────
 
     /// **Where this seat lives.** Read by everything that builds a controller.
-    #[allow(dead_code, reason = "F1b's transfer transaction is the caller")]
+    #[cfg(test)]
     pub(crate) fn address(&self) -> SeatAddress {
         self.address
     }

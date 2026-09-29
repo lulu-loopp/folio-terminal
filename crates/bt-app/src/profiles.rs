@@ -9944,7 +9944,7 @@ impl TermMenuLayout {
     }
 
     /// The child's row boxes, when one is up.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn submenu_rows(&self) -> Option<&[[f32; 4]]> {
         self.submenu
@@ -11397,7 +11397,7 @@ impl PaneMenuLayout {
     /// `SettingsLayout::row` arrangement and it is here for that function's
     /// reason: a pin that indexed `items` directly would be a pin that silently
     /// moved to the row below when a verb was inserted above it.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn item(&self, row: PaneMenuRow) -> [f32; 4] {
         let index = self
@@ -11417,7 +11417,7 @@ impl PaneMenuLayout {
 
     /// Where one of the picker's zones is drawn. [`Self::item`]'s sibling, and
     /// read by the same pins for the same reason.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn zone(&self, zone: SplitZone) -> [f32; 4] {
         let index = SplitZone::ALL
@@ -12749,7 +12749,7 @@ impl TabMenuLayout {
     /// row has to know where both of them are, and deriving the second from the
     /// padding constants would be a pin that agreed with the layout by
     /// arithmetic rather than by reading it.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn submenu_rows(&self) -> Option<&[[f32; 4]]> {
         self.submenu
@@ -13185,7 +13185,7 @@ impl GitFilterMenuLayout {
     ///
     /// Read by the tests that pin the layout; the window walks the rows through
     /// [`git_filter_menu_hit`] and never needs the list itself.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn rows(&self) -> &[GitFilterRow] {
         &self.rows

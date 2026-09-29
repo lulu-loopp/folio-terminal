@@ -9648,7 +9648,7 @@ impl SettingsLayout {
     /// is what keeps a pin from silently reading the row below the one it names.
     ///
     /// Drawing and hit-testing walk `rows` in order instead — they want every
-    /// row, not a named one — so at the moment the pins are the only callers.
+    /// row, not a named one; [`Self::slider_at`] asks for one by name.
     #[must_use]
     pub fn row(&self, row: SettingsRow) -> Option<&RowLayout> {
         self.rows.iter().find(|placed| placed.row == row)
@@ -9688,17 +9688,16 @@ impl SettingsLayout {
     /// on it (§7.1.6c-5).
     ///
     /// The draw and the hit test walk the field directly — they want everything
-    /// on the page, not a named part of it — so at the moment the pins are the
-    /// only callers, which is exactly [`Self::row`]'s situation and gets the
-    /// same note.
-    #[allow(dead_code)]
+    /// on the page, not a named part of it — so the pins are the only callers,
+    /// and this and its two siblings below are `#[cfg(test)]`.
+    #[cfg(test)]
     #[must_use]
     pub fn advanced(&self) -> Option<AdvancedLayout> {
         self.advanced
     }
 
     /// The open group's `Reset to defaults`, or `None` while it is shut.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn reset_advanced(&self) -> Option<[f32; 4]> {
         self.reset_advanced
@@ -9706,7 +9705,7 @@ impl SettingsLayout {
 
     /// The band this page's Advanced group has opened to, or `None` when no
     /// clock is easing it — see [`Self::advanced_clip`].
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn advanced_clip(&self) -> Option<[f32; 4]> {
         self.advanced_clip

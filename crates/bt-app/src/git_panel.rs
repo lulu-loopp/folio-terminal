@@ -4374,7 +4374,7 @@ impl GitTreeBadges {
     /// Read only by the tests, and kept because "nothing at all" is the state
     /// R32's gate exists to produce — a test that could only ask about rows it
     /// had thought to name would pass on a badge appearing somewhere it had not.
-    #[allow(dead_code)]
+    #[cfg(test)]
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.files.is_empty() && self.dirs.is_empty()
