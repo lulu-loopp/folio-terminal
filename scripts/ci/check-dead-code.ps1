@@ -997,8 +997,18 @@ try {
         if ($status -eq 0) { $base = @($found)[0] }
     }
     if ($base) {
-        $text = (& git show "${base}:${relative}" 2>$null) | Out-String
-        $inBase = ($LASTEXITCODE -eq 0)
+        # The list carries non-ASCII reasons (`§`, `–`). `git show` writes UTF-8 bytes, and
+        # PowerShell decodes a native command's output with the console's code page — GBK on a
+        # Chinese Windows — which turns those rows into different strings and makes every one
+        # of them look added. Decode as UTF-8 for this one read, as the file itself is read.
+        $consoleEncoding = [Console]::OutputEncoding
+        try {
+            [Console]::OutputEncoding = [Text.Encoding]::UTF8
+            $text = (& git show "${base}:${relative}" 2>$null) | Out-String
+            $inBase = ($LASTEXITCODE -eq 0)
+        } finally {
+            [Console]::OutputEncoding = $consoleEncoding
+        }
     }
 } finally {
     Pop-Location
