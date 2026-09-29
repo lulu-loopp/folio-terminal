@@ -2764,3 +2764,124 @@ fn a_trial_whose_start_cannot_be_recorded_is_ended_and_swapped_back() {
         vec![(install.installed.clone(), failed_then(&install, &[]))]
     );
 }
+
+/// TWIN (U-32; the Windows checklist's E-7 and W14) — **what another program
+/// holds open never stops the macOS exchange: a file inside the installed
+/// bundle and the journal itself, each held open for the whole road, and the
+/// update commits.**
+///
+/// On Windows a file held without sharing refuses its move (E-7: nothing
+/// moves, `Prepared`, the old build reopened) and a journal held without
+/// delete sharing refuses the rename over it (W14: asked again for 2 s). On
+/// macOS neither exists: the exchange is one `renamex_np(RENAME_SWAP)` of the
+/// two bundle directories, which an open file inside either does not stop,
+/// and a `rename(2)` replaces a target another process has open
+/// (`install_txn::Failure::refused_while_open` is `false` there). The held
+/// descriptor of the old `Info.plist` still reads the old bytes afterwards —
+/// the file moved to `stage/` and was removed only with it.
+///
+/// No MUTATION: this is the twin the addendum asks to be checked, and it
+/// holds on BASE.
+#[test]
+fn what_another_program_holds_open_never_stops_the_macos_exchange() {
+    use std::io::Read;
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("held-open");
+    let plist = install.installed.join("Contents").join("Info.plist");
+    let before = std::fs::read(&plist).unwrap();
+    let mut held_plist = std::fs::File::open(&plist).unwrap();
+    let held_journal = std::fs::File::open(install.home.journal()).unwrap();
+    let children = Children::default();
+    let world = launching(a_healthy_trial(&install, &children, None));
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), world);
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert!(
+        world
+            .wrote()
+            .contains("[Armed, Moving, Trial, Committed, Retired]"),
+        "{}",
+        world.wrote()
+    );
+    assert_eq!(version_of(&install.installed), "2.0");
+    let mut still = Vec::new();
+    held_plist.read_to_end(&mut still).unwrap();
+    assert_eq!(
+        still, before,
+        "the held file is the old one, still readable"
+    );
+    drop(held_journal);
+}
+
+/// TWIN (U-32; the Windows checklist's D-14) — **a home that stays unwritable
+/// from the trial's launch to the end of the road leaves the new build
+/// running as a trial with the *Update incomplete.* card, the journal at
+/// `Moving` and the LaunchAgent armed for the next start or login.**
+///
+/// D-14 on Windows: the journal held for 120 s right after the moves; the
+/// trial could not be recorded, was asked to quit, and the road ended
+/// `Failed` with the new build started again as a trial. The macOS road does
+/// the same, by the same rules: `TrialBegan` cannot be written, the trial is
+/// ended (U-34), `RollbackDeclared` cannot be written either, so the road
+/// ends `Failed`, and its exit guard starts what the disk names — the new
+/// bundle is live and nothing is committed, so it is started only as a trial
+/// (U-29b), with `--update-failed` because the header is `destructive`. The
+/// reader is told the update is incomplete and where; the trial's writes are
+/// held back; the next start or login finds `Moving` with the new bundle live
+/// and decides it by a trial again (M6).
+///
+/// No MUTATION of its own: the rules it exercises are pinned by
+/// `a_trial_whose_start_cannot_be_recorded_is_ended_and_swapped_back` and
+/// `a_new_live_bundle_is_never_started_plainly_before_committed`; this is
+/// the twin the addendum asks to be checked.
+#[test]
+fn a_home_unwritable_after_the_exchange_leaves_the_new_build_as_a_trial_with_the_card() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("unwritable-long");
+    let children = Children::default();
+    let started = children.clone();
+    let root = install.home.root().to_path_buf();
+    let shut: Arc<Mutex<Option<std::fs::Permissions>>> = Arc::default();
+    let at_launch = Arc::clone(&shut);
+    let world = launching(Box::new(move |bundle, _| {
+        started.start(bundle, "trial");
+        let before = std::fs::metadata(&root).unwrap().permissions();
+        let mut closed = before.clone();
+        closed.set_readonly(true);
+        std::fs::set_permissions(&root, closed).unwrap();
+        *at_launch.lock().unwrap() = Some(before);
+        Ok(())
+    }));
+    let (ended, world) = applied(install.road(limits(5_000, 20_000)), world);
+    if let Some(before) = shut.lock().unwrap().take() {
+        std::fs::set_permissions(install.home.root(), before).unwrap();
+    }
+    assert!(
+        matches!(ended, Ended::Failed(_)),
+        "{ended:?}: {:?}",
+        world.said
+    );
+    assert_eq!(install.on_disk().unwrap().body.phase, Phase::Moving);
+    assert!(install.plist().exists(), "the LaunchAgent is kept");
+    assert_eq!(
+        version_of(&install.installed),
+        "2.0",
+        "the new bundle is live"
+    );
+    let trial = children.started.lock().unwrap()[0];
+    assert!(
+        children.ended(trial).is_some(),
+        "the unrecorded trial is ended"
+    );
+    let [(bundle, words)] = world.relaunched.as_slice() else {
+        panic!("one start on the way out: {:?}", world.relaunched);
+    };
+    assert_eq!(bundle, &install.installed);
+    assert_eq!(words.len(), 5, "{words:?}");
+    assert_eq!(words[0], OsString::from(cli::UPDATE_TRIAL_FLAG));
+    assert_eq!(words[1], OsString::from(install.txn.to_string()));
+    assert_eq!(&words[3..], failed_then(&install, &[]).as_slice());
+}

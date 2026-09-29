@@ -59,7 +59,7 @@
 //! straight to [`State::Failed`]. The quit barrier is U-21 ([`Job::restart`], and the two answers the quit delivers
 //! to [`Job::apply`] on the window thread). Whether a reader sees any of this
 //! is [`Job::offers_enabled`], a build fact per platform: on for Windows since
-//! U-31, off for macOS until U-32 (and off everywhere else, where no release is
+//! U-31 and for macOS since U-32 (and off everywhere else, where no release is
 //! built). With offers off the job decides and never leaves `Idle`. Either way
 //! it says what it decided once per launch in `diagnostics.log`.
 
@@ -90,10 +90,13 @@ use crate::update_txn::{Home, Nonce, TxnId};
 /// apply and the rollback (U-23, U-24) and the clean-VM checklist (U-30) exist.
 const OFFERS_ENABLED_WINDOWS: bool = true;
 
-/// **Whether a macOS reader may be offered an update** — off until U-32 turns
-/// it on, after the macOS recovery contract has passed its experiments (owner
-/// ruling 2026-09-25, 2). Until then the job decides and never offers there.
-const OFFERS_ENABLED_MACOS: bool = false;
+/// **Whether a macOS reader may be offered an update** — on since U-32, once
+/// the macOS Prepare (U-27), the exchange, trial and commit (U-28), the
+/// rollback and `Stuck` (U-29), the recovery of every phase (U-29b), the
+/// launch pass (U-33) and the one exit guard (U-34) exist and the macOS
+/// recovery contract has passed its experiments (owner ruling 2026-09-25, 2;
+/// E-8's E1, the U-32 rehearsal).
+const OFFERS_ENABLED_MACOS: bool = true;
 
 /// The host the two files of an offer are fetched from (C11). GitHub
 /// redirects to its asset host; the redirect rules are the download door's
@@ -579,6 +582,14 @@ pub(crate) enum State {
     /// failure is an earlier launch's transaction, reported by the rollback
     /// that sent this one (`--update-failed`, U-29).
     Failed(Option<Offer>, Failure),
+    /// **The update this launch said was incomplete has completed** (U-32):
+    /// this process is the trial a lock holder started over a `Stuck`
+    /// transaction whose new build was live, its card stood at
+    /// [`Failure::Incomplete`] from the start, and the trial's watch then read
+    /// `Committed` — the receipt committed it forward. The card follows the
+    /// journal's final phase, not the phase at launch; the version is this
+    /// build's own.
+    Updated(String),
 }
 
 /// A state's name, for the table.
@@ -593,11 +604,12 @@ pub(crate) enum Kind {
     Quitting,
     Committing,
     Failed,
+    Updated,
 }
 
 impl Kind {
     /// Every state.
-    pub(crate) const ALL: [Self; 9] = [
+    pub(crate) const ALL: [Self; 10] = [
         Self::Pending,
         Self::Idle,
         Self::Available,
@@ -607,6 +619,7 @@ impl Kind {
         Self::Quitting,
         Self::Committing,
         Self::Failed,
+        Self::Updated,
     ];
 }
 
@@ -624,6 +637,7 @@ impl State {
             Self::Quitting(_) => Kind::Quitting,
             Self::Committing(_) => Kind::Committing,
             Self::Failed(..) => Kind::Failed,
+            Self::Updated(_) => Kind::Updated,
         }
     }
 
@@ -631,7 +645,7 @@ impl State {
     #[must_use]
     pub(crate) const fn offer(&self) -> Option<&Offer> {
         match self {
-            Self::Pending(_) | Self::Idle => None,
+            Self::Pending(_) | Self::Idle | Self::Updated(_) => None,
             Self::Available(offer)
             | Self::Downloading(offer, _)
             | Self::Staged(offer)
@@ -692,9 +706,9 @@ pub(crate) enum Handling {
 }
 
 /// **The state × verb table** (§B: "there is no reachable state in which a card
-/// verb exists with no handler"). One row per pair, 9 × 5;
+/// verb exists with no handler"). One row per pair, 10 × 5;
 /// `every_card_state_has_a_handler_for_every_verb` holds [`Job::answer`] to it.
-pub(crate) const TABLE: [(Kind, Verb, Handling); 45] = {
+pub(crate) const TABLE: [(Kind, Verb, Handling); 50] = {
     use Handling::{Moves, Prepares, Refused};
     use Kind as K;
     use Refusal::{Exiting, NoCard, NotOnThisCard, TheQuitAnswers};
@@ -751,6 +765,12 @@ pub(crate) const TABLE: [(Kind, Verb, Handling); 45] = {
         (K::Failed, V::Press, Refused(NotOnThisCard)),
         (K::Failed, V::Cancel, Refused(NotOnThisCard)),
         (K::Failed, V::Restart, Refused(NotOnThisCard)),
+        // Close — Close is Later (U-32).
+        (K::Updated, V::Later, Moves(K::Idle)),
+        (K::Updated, V::Skip, Refused(NotOnThisCard)),
+        (K::Updated, V::Press, Refused(NotOnThisCard)),
+        (K::Updated, V::Cancel, Refused(NotOnThisCard)),
+        (K::Updated, V::Restart, Refused(NotOnThisCard)),
     ]
 };
 
@@ -1311,6 +1331,10 @@ pub(crate) struct Job<W> {
     /// **This launch's job-owner pass** over the transaction an earlier
     /// launch left ([`Self::after_start`], U-33).
     launch: Launch,
+    /// **This launch was sent to say an update is incomplete** — its card
+    /// started at [`Failure::Incomplete`] ([`Self::after_rollback`]). Read by
+    /// [`Self::after_commit`] (U-32).
+    said_incomplete: bool,
 }
 
 impl<W: Copy + Eq> Default for Job<W> {
@@ -1366,6 +1390,7 @@ impl<W: Copy + Eq> Job<W> {
             abandoned: None,
             running: None,
             launch: Launch::Done,
+            said_incomplete: false,
         }
     }
 
@@ -1393,10 +1418,36 @@ impl<W: Copy + Eq> Job<W> {
     #[must_use]
     pub(crate) fn after_rollback(mut self, failure: Option<Failure>) -> Self {
         if let Some(failure) = failure {
+            self.said_incomplete = matches!(failure, Failure::Incomplete { .. });
             self.state = State::Failed(None, failure);
             self.offered_this_launch = true;
         }
         self
+    }
+
+    /// **This process's trial was committed** — the trial's watch read
+    /// `Committed` (`update_trial`, `AppEvent::TrialWritesReleased`), and
+    /// `version` is this build's (U-32, the coordinator's ruling 2).
+    ///
+    /// A launch sent to say the update was incomplete — the trial a lock
+    /// holder starts over a `Stuck` transaction whose new build is live
+    /// carries `--update-failed` (U-29b) — can still be committed forward by
+    /// its own receipt. Its card then follows the journal's final phase:
+    /// *Update incomplete.* becomes [`State::Updated`], and a card the reader
+    /// already closed comes back once to say so ([`Self::hand_over`] seats
+    /// it). Every other launch is unchanged: a trial that was never told
+    /// anything is not told this either. Answers whether the card changed.
+    pub(crate) fn after_commit(&mut self, version: &str) -> bool {
+        let standing = matches!(
+            self.state,
+            State::Failed(None, Failure::Incomplete { .. }) | State::Idle
+        );
+        if !(self.said_incomplete && standing) {
+            return false;
+        }
+        self.said_incomplete = false;
+        self.state = State::Updated(version.to_owned());
+        true
     }
 
     /// **What the start left for this launch's job owner** (U-33; (b).1 F-17
@@ -1609,8 +1660,9 @@ impl<W: Copy + Eq> Job<W> {
     /// (U-19).
     ///
     /// A card is up in the states C9 draws one for — `Available`, the
-    /// download's two (`Downloading`, `Staged`), `Verified` and `Failed` — in
-    /// the presenting window, unless the reader put it away. `Quitting` has
+    /// download's two (`Downloading`, `Staged`), `Verified`, `Failed` and
+    /// `Updated` (U-32) — in the presenting window, unless the reader put it
+    /// away. `Quitting` has
     /// the quit's own card and `Committing` none.
     #[must_use]
     pub(crate) fn card_window(&self) -> Option<W> {
@@ -1621,6 +1673,7 @@ impl<W: Copy + Eq> Job<W> {
                 | State::Staged(_)
                 | State::Verified(_)
                 | State::Failed(..)
+                | State::Updated(_)
         );
         self.presenter.filter(|_| drawn && !self.put_away)
     }
@@ -1649,7 +1702,8 @@ impl<W: Copy + Eq> Job<W> {
     /// window moves, the reader's answer does not. Answers whether the
     /// presenter changed.
     pub(crate) fn hand_over(&mut self, presenters: &Presenters<'_, W>) -> bool {
-        let has_a_card = self.state.offer().is_some() || matches!(self.state, State::Failed(..));
+        let has_a_card = self.state.offer().is_some()
+            || matches!(self.state, State::Failed(..) | State::Updated(_));
         if !has_a_card
             || self
                 .presenter
@@ -1704,16 +1758,26 @@ impl<W: Copy + Eq> Job<W> {
             self.said = true;
             line(&answer, self.offers)
         });
+        // **The offer does not wait for a window to be minted** (U-32, the
+        // macOS rehearsal's first row): the window directory this reads is
+        // published once a turn (`FolioApp::publish_window_directory`), and a
+        // check that settles before the first turn — a local release feed, a
+        // fast network, the macOS loop delivering its first user events before
+        // its first `about_to_wait` — found no window, left the job `Idle`,
+        // and no later `UpdateJobOffer` came to ask again: the card was never
+        // drawn although the line said it was offered. The card's one way of
+        // choosing a window is [`Self::hand_over`], asked once a turn; an
+        // offer minted with no presenter is seated there as soon as an
+        // ordinary window is open.
         if let (Ok(eligible), true) = (&answer, self.offers)
-            && let Some(window) = crate::most_recently_active_window(
-                presenters.visited,
-                presenters.open,
-                presenters.quake,
-            )
             && let Some(offer) = Offer::mint(mint(), &eligible.tag, evidence.platform)
         {
             self.state = State::Available(offer);
-            self.presenter = Some(window);
+            self.presenter = crate::most_recently_active_window(
+                presenters.visited,
+                presenters.open,
+                presenters.quake,
+            );
             self.offered_this_launch = true;
         }
         self.answer = Some(answer);
@@ -1863,7 +1927,7 @@ impl<W: Copy + Eq> Job<W> {
             )
             | (state @ State::Verified(_), Verb::Skip | Verb::Press | Verb::Cancel)
             | (
-                state @ State::Failed(..),
+                state @ (State::Failed(..) | State::Updated(_)),
                 Verb::Skip | Verb::Press | Verb::Cancel | Verb::Restart,
             ) => (state, Err(Refusal::NotOnThisCard)),
             (State::Downloading(..) | State::Staged(_), Verb::Cancel) => {
@@ -1884,7 +1948,7 @@ impl<W: Copy + Eq> Job<W> {
             (State::Verified(offer), Verb::Restart) => (State::Quitting(offer), Ok(Effect::None)),
             (state @ State::Quitting(_), _) => (state, Err(Refusal::TheQuitAnswers)),
             (state @ State::Committing(_), _) => (state, Err(Refusal::Exiting)),
-            (State::Failed(..), Verb::Later) => (State::Idle, Ok(Effect::None)),
+            (State::Failed(..) | State::Updated(_), Verb::Later) => (State::Idle, Ok(Effect::None)),
         };
         if matches!(next, State::Idle) {
             self.presenter = None;
@@ -1964,7 +2028,7 @@ mod tests {
     }
 
     /// A job whose offers are on, whatever the platform — the gate's own tests
-    /// read the product's (`the_windows_gate_is_on`, `the_macos_gate_is_still_off`).
+    /// read the product's (`the_windows_gate_is_on`, `the_macos_gate_is_on`).
     fn job() -> Job<u32> {
         Job::with_offers(true)
     }
@@ -2313,6 +2377,7 @@ mod tests {
             Kind::Quitting => State::Quitting(offer),
             Kind::Committing => State::Committing(offer),
             Kind::Failed => State::Failed(Some(offer), Failure::Unsupported),
+            Kind::Updated => State::Updated("0.4.7".to_owned()),
         };
         job
     }
@@ -2322,7 +2387,7 @@ mod tests {
     ///
     /// §B: "There is no reachable state in which a card verb exists with no
     /// handler: the enumeration above is total and is gated by a test." The
-    /// table has one row for each of the 45 pairs, and `Job::answer_verb` —
+    /// table has one row for each of the 50 pairs, and `Job::answer_verb` —
     /// the product's only driver in hand — does exactly what its row says; a
     /// refusal leaves the job as it was.
     ///
@@ -2645,7 +2710,8 @@ mod tests {
     ///
     /// §B, and §7.59's rule (`most_recently_active_window`): the summoned
     /// terminal is a companion that spends most of its life hidden. A run
-    /// whose only window is the summoned one keeps its offer for a window.
+    /// whose only window is the summoned one keeps its offer for a window,
+    /// which `Job::hand_over` seats once one is open (U-32).
     ///
     /// MUTATION: pass `None` for `presenters.quake` in `Job::consider` and the
     /// card goes up in the summoned terminal, `9`.
@@ -2673,21 +2739,72 @@ mod tests {
             },
             || txn(1),
         );
-        assert_eq!(
-            alone.state(),
-            &State::Idle,
-            "a card in the summoned terminal"
-        );
-        alone.consider(
-            gathered("v0.4.7", None, Some(Channel::Ours)),
+        assert_eq!(alone.presenter(), None, "never the summoned terminal");
+        assert_eq!(alone.card_window(), None, "no card is drawn yet");
+        alone.hand_over(&Presenters {
+            visited: &[9, 4],
+            open: &[9, 4],
+            quake: Some(9),
+        });
+        assert_eq!(alone.presenter(), Some(4), "the offer waited for a window");
+    }
+
+    /// RED (U-32, the macOS rehearsal's first row) — **an offer considered
+    /// before the first turn has published any window is still drawn: the
+    /// next turn's hand-over seats it in the one ordinary window, and its card
+    /// is painted there.**
+    ///
+    /// The window thread publishes its window directory once a turn, in
+    /// `about_to_wait`. On macOS, with a local feed, the check and the channel
+    /// both landed before that first turn: the job considered with no window
+    /// open (only the restored, hidden summoned terminal on its way), said
+    /// "v0.4.7 is offered", stayed `Idle`, and nothing asked it again — the
+    /// gear had its dot and no card ever appeared. This is the product's
+    /// order: `consider` with the directory the first turn has not written
+    /// yet, then `settle_update_card`'s `hand_over` with the one it writes.
+    ///
+    /// MUTATION: in `Job::consider`, mint the offer only when a window is
+    /// found (the `let Some(window) = …` guard of before).
+    #[test]
+    fn an_offer_considered_before_any_window_is_published_is_seated_and_painted_at_the_next_turn() {
+        let mut job: Job<u32> = Job::for_platform(HostPlatform::MacOs);
+        let line = job.consider(
+            Gathered {
+                platform: HostPlatform::MacOs,
+                ..gathered("v0.4.7", None, Some(Channel::Ours))
+            },
             &Presenters {
-                visited: &[9, 4],
-                open: &[9, 4],
-                quake: Some(9),
+                visited: &[1],
+                open: &[],
+                quake: None,
             },
             || txn(1),
         );
-        assert_eq!(alone.presenter(), Some(4), "the offer waited for a window");
+        assert_eq!(
+            line.as_deref(),
+            Some("Folio: update job — v0.4.7 is offered")
+        );
+        assert_eq!(job.card_window(), None, "no window is published yet");
+        assert!(job.hand_over(&Presenters {
+            visited: &[1, 9],
+            open: &[1, 9],
+            quake: Some(9),
+        }));
+        assert_eq!(
+            job.card_window(),
+            Some(1),
+            "the ordinary window, not the summoned one"
+        );
+        let paint = crate::update_card::paint(job.state()).expect("a card is painted");
+        assert_eq!(paint.heading.as_deref(), Some("Folio 0.4.7"));
+        assert_eq!(
+            paint.verbs,
+            vec![
+                crate::update_card::CardVerb::Update,
+                crate::update_card::CardVerb::Later,
+                crate::update_card::CardVerb::Skip
+            ]
+        );
     }
 
     /// RED (U-31) — **a Windows build offers: the job it holds raises the card
@@ -2741,38 +2858,85 @@ mod tests {
         );
     }
 
-    /// RED (U-18, renamed at U-31) — **a macOS build still offers nothing,
-    /// and the decision is still said once.**
+    /// RED (U-32) — **a macOS build offers: a copy that is ours gets the card
+    /// for a newer release, said once, and a copy Homebrew owns gets
+    /// `brew upgrade` on the General row and no card.**
     ///
-    /// The macOS recovery contract is U-32's; until it passes its experiments
-    /// macOS stays on the releases page (owner ruling 2026-09-25, 2). The job a
-    /// macOS build holds decides, writes one `diagnostics.log` line naming the
-    /// answer — no path, no account — and stays `Idle`. A platform no release
-    /// is built for has no gate to open.
+    /// U-18 built the job with its gate shut; U-31 opened it for Windows and
+    /// U-32 opens it for macOS, once the macOS roads — the Prepare (U-27), the
+    /// exchange, trial and commit (U-28), the rollback and `Stuck` (U-29), the
+    /// recovery of every phase (U-29b), the launch pass (U-33) and the one exit
+    /// guard (U-34) — exist and the rehearsal on two signed, notarised bundles
+    /// has run. The gate is still a build fact, read through the constructor
+    /// the application uses (`Job::for_platform`). The 2026-09-20 ruling holds
+    /// after it: each copy's channel comes out of the real classifier over
+    /// what a Mac reads (the marker is the bundle's extended attribute, there
+    /// is no scoop receipt), and what each copy shows is read the way the
+    /// window reads it — the card's paint and the row's foot. A platform no
+    /// release is built for still has no gate to open.
     ///
-    /// MUTATION: set `OFFERS_ENABLED_MACOS` to `true`.
+    /// MUTATION: set `OFFERS_ENABLED_MACOS` to `false`.
     #[test]
-    fn the_macos_gate_is_still_off() {
+    fn the_macos_gate_is_on() {
+        use crate::install_channel::{
+            Evidence, Marker, MarkerEvidence, OwnerEvidence, ReceiptEvidence, WingetEvidence,
+        };
+        use crate::update_card::{self, RowFoot};
         assert!(
-            !Job::<u32>::offers_enabled_on(HostPlatform::MacOs),
-            "offers stay off on macOS until U-32"
+            Job::<u32>::offers_enabled_on(HostPlatform::MacOs),
+            "U-32: offers are on for macOS"
         );
         assert!(!Job::<u32>::offers_enabled_on(HostPlatform::OtherUnix));
-        let mac = |tag: &str| Gathered {
-            platform: HostPlatform::MacOs,
-            ..gathered(tag, None, Some(Channel::Ours))
+        let read_on_a_mac = |marker: MarkerEvidence| {
+            install_channel::classify(&Evidence {
+                marker,
+                receipt: ReceiptEvidence::NotApplicable,
+                owner: OwnerEvidence::ThisAccount,
+                winget: WingetEvidence::NotApplicable,
+            })
         };
+        let mac = |tag: &str, channel: Channel| Gathered {
+            platform: HostPlatform::MacOs,
+            ..gathered(tag, None, Some(channel))
+        };
+
+        let ours = read_on_a_mac(MarkerEvidence::Absent);
+        assert_eq!(ours, Channel::Ours);
         let mut job: Job<u32> = Job::for_platform(HostPlatform::MacOs);
-        let line = job.consider(mac("v0.4.7"), &one_window(), || txn(1));
-        assert_eq!(job.state(), &State::Idle, "a card went up with offers off");
+        let line = job.consider(mac("v0.4.7", ours), &one_window(), || txn(1));
+        assert!(
+            matches!(job.state(), State::Available(offer) if offer.tag() == "v0.4.7"),
+            "no card on macOS: {:?}",
+            job.state()
+        );
+        assert!(
+            update_card::paint(job.state()).is_some(),
+            "the card is drawn"
+        );
+        assert_eq!(job.presenter(), Some(1));
         assert_eq!(
             line.as_deref(),
-            Some("Folio: update job — v0.4.7 would be offered; offers are off in this build")
+            Some("Folio: update job — v0.4.7 is offered")
         );
         assert_eq!(
-            job.consider(mac("v0.4.8"), &one_window(), || txn(1)),
+            job.consider(mac("v0.4.8", ours), &one_window(), || txn(2)),
             None,
             "the decision is said once per launch"
+        );
+
+        let homebrew = read_on_a_mac(MarkerEvidence::Present(Marker {
+            manager: Manager::Homebrew,
+            uninstall_hook: false,
+        }));
+        let mut managed: Job<u32> = Job::for_platform(HostPlatform::MacOs);
+        managed.consider(mac("v0.4.7", homebrew), &one_window(), || txn(3));
+        assert_eq!(managed.state(), &State::Idle, "a Homebrew copy got a card");
+        assert_eq!(update_card::paint(managed.state()), None);
+        assert_eq!(
+            update_card::row_foot(&managed),
+            RowFoot::Copy {
+                command: "brew upgrade --cask folio"
+            }
         );
     }
 

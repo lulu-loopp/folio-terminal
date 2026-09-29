@@ -1590,7 +1590,7 @@ impl Hands for Machine {
     }
 
     fn show_here(&mut self, text: &str) {
-        bt_platform::message_box(crate::APP_NAME, text);
+        bt_platform::standalone_alert(crate::APP_NAME, text);
     }
 }
 

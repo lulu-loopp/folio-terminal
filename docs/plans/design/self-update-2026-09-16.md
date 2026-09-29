@@ -2703,3 +2703,44 @@ back).
 
 **Not changed.** The recovery decisions (`decide`, the rollback), `at_start`
 and `hand_to_rescue`, the W1/W2 job-owner pass (U-33).
+
+## Revision 2026-09-28 (f) — the macOS gate, and three corrections the enabler needed (U-32)
+
+**The gate.** `OFFERS_ENABLED_MACOS = true` (b).5's U-32 row. Everything the
+macOS road does is (c), (d) and (e) as built; the rehearsal on two owner-signed,
+notarised bundles is the ticket's merge condition (its report,
+`U-32-rehearsal.md`).
+
+**The card follows the journal's final phase.** A trial started over `Stuck`
+carries `--update-failed`, so its card is *Update incomplete.* at launch; when
+its own receipt commits the transaction forward, the trial's watch reads
+`Committed` and the job moves that card (or a closed one) to
+`update_job::State::Updated` — *Updated.* (`Job::after_commit`, on
+`AppEvent::TrialWritesReleased`). Nothing else about the trial changes: the
+watch, the release of held writes and the receipt are U-13's and U-29b's.
+
+**The card's folder.** A start sent with `--update-failed <journal>` names its
+own home's folder on the card; the word's value is no longer read (U-29's open
+point 6).
+
+**The failure window without an application.** (e)'s last resort is shown with
+`bt_platform::standalone_alert`: on macOS `CFUserNotificationDisplayAlert`,
+which a process with no `NSApplication`, on any thread, can raise — AppKit's
+alert, which (e) used, cannot be raised by the applier or the recovery build and
+fell back to two log lines. Windows is unchanged (`MessageBoxW`). The box is
+synchronous: it *appears* by the delivery bound (for O at the latest at
+`LEAVE_WITHIN`, 75 s) and the process *returns* by the alert's bound — on macOS
+`STANDALONE_ALERT_WITHIN`, 15 minutes, after which the box is taken away and the
+process leaves as if it had been dismissed; on Windows `MessageBoxW` has no
+timeout, so the return is user-bounded, not bounded by Folio. That the box is
+presented at all is rehearsal evidence (R-D5).
+
+**Coordinator rulings, 2026-09-28.** D-12 is by design, pending the owner's nod:
+a logon recovery that finishes a commit opens nothing — nobody asked for Folio
+at logon, the next start is ordinary, and "every phase opens Folio" is about a
+Restart or a start. D-14 is owner-ruled for 0.4.7 on both platforms and is
+disclosed in the 0.4.6 release note's Known issues. U-35 and U-36 are proposed
+0.4.7 tickets pending the owner's nod, recorded by the coordinator in the index.
+
+**Not changed.** The transaction protocol, the recovery decisions, the exit
+guard's rule and the owner's ruling on external kills.

@@ -11966,6 +11966,15 @@ mod windows_impl {
             );
         }
     }
+
+    /// **Say one thing in a box from a process that has no application** —
+    /// the update's road processes' failure window (U-32). On Windows the
+    /// ownerless box above already is that box: `MessageBoxW` needs no window
+    /// and no thread of any kind. The macOS arm is the one that differs
+    /// (`macos_dialogs::standalone_alert`).
+    pub fn standalone_alert(title: &str, text: &str) {
+        message_box(title, text);
+    }
 }
 
 /// The three scheduling bands this application's threads run in.
@@ -12117,11 +12126,11 @@ pub use windows_impl::{
     pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
     register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
     set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
-    set_window_topmost, silence_std_streams, stand_window_at, std_error_is_console,
-    stop_flashing_window, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
-    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
-    top_level_window_at, virtual_key_for_character, virtual_screen_rect, wheel_scroll_amount,
-    window_is_exposed, work_area_at, write_std_error, write_to_console,
+    set_window_topmost, silence_std_streams, stand_window_at, standalone_alert,
+    std_error_is_console, stop_flashing_window, system_backdrop_available, system_uses_light_apps,
+    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
+    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_screen_rect,
+    wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error, write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -12168,7 +12177,9 @@ pub use portable_impl::Compositor;
 /// product rather than about a dialog, the macOS arm reads the portable
 /// module's copy, and a second definition would be two spellings of one choice.
 #[cfg(all(not(windows), not(target_os = "macos")))]
-pub use portable_impl::{FolderPicker, ImagePicker, MathContextMenu, SaveFilePicker, message_box};
+pub use portable_impl::{
+    FolderPicker, ImagePicker, MathContextMenu, SaveFilePicker, message_box, standalone_alert,
+};
 
 /// **The watch doors, on a platform whose filesystem does not speak** (M2-1).
 ///
@@ -12685,7 +12696,9 @@ mod compositor_arms_tests {
 mod macos_dialogs;
 
 #[cfg(target_os = "macos")]
-pub use macos_dialogs::{FolderPicker, ImagePicker, MathContextMenu, SaveFilePicker, message_box};
+pub use macos_dialogs::{
+    FolderPicker, ImagePicker, MathContextMenu, SaveFilePicker, message_box, standalone_alert,
+};
 
 /// **The directory watch, over FSEvents** (M2-1).
 ///

@@ -223,6 +223,43 @@ mod tests {
     ///
     /// MUTATION: write `1` into the template in place of `@PROTOCOL@` and move
     /// `PROTOCOL` to 2; or drop the two keys from the template.
+    /// RED (U-32, the macOS rehearsal's defect 3) — **the rendered
+    /// `Info.plist` is well-formed XML: every comment is closed, and none holds
+    /// a double hyphen or ends in a hyphen** (XML 1.0 §2.5).
+    ///
+    /// macOS reads the file anyway, so a malformed comment ships unnoticed —
+    /// codesign, Gatekeeper and a launch all accepted it — while every strict
+    /// XML reader refuses the whole file: Python's `plistlib` stopped at line
+    /// 22 of the shipped bundle, on a command line with `--` quoted in the
+    /// template's header comment, and the rehearsal's version reads with it.
+    ///
+    /// MUTATION: write the binary's command line, `--bin` and all, back into
+    /// the template's header comment.
+    #[test]
+    fn the_rendered_bundle_is_well_formed_xml() {
+        let template = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../packaging/macos/Info.plist.in"
+        ))
+        .expect("the bundle template is at packaging/macos/Info.plist.in");
+        let plist = render(&template, "0.3.0").expect("the shipped template renders");
+        let mut rest = plist.as_str();
+        let mut comments = 0;
+        while let Some(start) = rest.find("<!--") {
+            let after = &rest[start + 4..];
+            let end = after.find("-->").expect("every comment is closed");
+            let body = &after[..end];
+            assert!(
+                !body.contains("--") && !body.ends_with('-'),
+                "an XML comment may hold no `--` and may not end in `-`:{body}"
+            );
+            comments += 1;
+            rest = &after[end + 3..];
+        }
+        assert!(comments > 0, "the template's comments were read");
+        assert!(plist.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
+    }
+
     #[test]
     fn the_rendered_bundle_carries_the_update_protocol_and_min_updater() {
         use crate::release_manifest::{MIN_UPDATER, PROTOCOL};

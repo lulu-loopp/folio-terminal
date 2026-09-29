@@ -8,10 +8,12 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
-- Windows: Folio can update itself. When a newer release is published, a card
-  offers it and, once it is downloaded, restarts Folio into it; a Restart to
-  update row on Settings > General brings the card back. A copy installed with
-  scoop or winget is told to use its manager, with the command to copy.
+- Folio can update itself on Windows, and on macOS through the same card and
+  row. When a newer release is published, a card offers it and, once it is
+  downloaded, restarts Folio into it; a Restart to update row on Settings >
+  General brings the card back. A copy installed with scoop or winget is told
+  to use its manager, with the command to copy, and a Homebrew install on
+  macOS is told to run `brew upgrade --cask folio`.
 
 ### Changed
 
@@ -20,7 +22,7 @@ All notable changes to Folio are recorded here. The format follows
   use one word for each thing across every page.
 - The update card, the settings update row, the shortcut panel's zoom
   actions, the profile editor's login switch, and the shutdown screen all
-  carry Chinese translations; `CHINESE_PENDING` is empty.
+  carry Chinese translations. `CHINESE_PENDING` is empty.
 - When the settings gear wears its update dot, clicking it opens Settings at
   the update row, which wears the same dot for as long as you stay on the page;
   the About page's Version row names the newer version and carries the same
@@ -53,6 +55,10 @@ All notable changes to Folio are recorded here. The format follows
   "Update incomplete" card when the update did not finish, instead of leaving
   no window until the next sign-in; if Folio cannot be started at all, the
   updater itself says the update is incomplete and where.
+- An update whose card said "Update incomplete" and which then completed on
+  the next try says so on its card. On macOS, when the updater cannot start
+  Folio at all, its "Update incomplete" message is now shown in a box rather
+  than only written to the log.
 - macOS: the shipped shells start as login shells, so tools whose PATH is set
   in .zprofile — Homebrew's — are found; a profile can turn login on or off;
   a profile with arguments no longer reads as not installed.
@@ -98,14 +104,15 @@ All notable changes to Folio are recorded here. The format follows
   starting Folio always opens it. A new version that has not yet proven it
   starts is only ever opened as a trial whose changes are held back; if the
   old one cannot be put back, that trial can still complete the update. If
-  finishing fails, Folio opens with the update-incomplete card. Nothing can
-  start an update yet.
+  finishing fails, Folio opens with the update-incomplete card. (At the time
+  nothing could start an update on macOS; U-32 turned the macOS offer on.)
 - On macOS, the coming updater can now put the previous version back when a new
   one does not start: the new copy is asked to quit, the old app is swapped
   back in one step and opened again, and its update card says the previous
   version was restored. If putting it back fails, everything is kept, the card
   says the update is incomplete and shows the folder, and the next login or
-  start tries again, three times at most. Nothing can start an update yet.
+  start tries again, three times at most. (At the time nothing could start an
+  update on macOS; U-32 turned the macOS offer on.)
 - On Windows, the coming updater can now apply a prepared update: after Folio
   quits, a copy of the old build waits for it to be gone, checks the prepared
   files again, makes sure no file of the install folder is still in use, moves
@@ -120,7 +127,8 @@ All notable changes to Folio are recorded here. The format follows
   place in one step, starts it, and keeps the old one until the new one has
   opened a window with text in it; then the old copy is removed. If the new
   one does not get that far in 90 seconds, the update is marked for rolling
-  back (the rollback itself comes next). Nothing can start an update yet.
+  back (the rollback itself comes next). (At the time nothing could start an
+  update on macOS; U-32 turned the macOS offer on.)
 - On Windows, the coming updater can now prepare an update end to end, inside
   the install folder: it downloads the release, makes sure the disk has room
   (and says how much more it needs if not), checks that the new `folio.exe`
@@ -136,8 +144,8 @@ All notable changes to Folio are recorded here. The format follows
   beside the app and checks the copy again, and keeps a copy of the running
   app to fall back on. Any failure puts everything back and unmounts the
   image, and a copy run from a read-only place is sent to the releases page.
-  A leftover mounted image no longer stops Folio's own clean-up. Nothing can
-  start an update yet.
+  A leftover mounted image no longer stops Folio's own clean-up. (At the time
+  nothing could start an update on macOS; U-32 turned the macOS offer on.)
 - Every turn of Folio's window thread is now measured, and so is every call it
   makes that waits on the system. A turn that runs past its frame, waits too
   long in total, makes one call past its bound, or spends too long on

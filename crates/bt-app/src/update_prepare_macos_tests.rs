@@ -974,6 +974,172 @@ fn a_deferred_transaction_is_discarded_at_two_launches() {
     assert!(!home.journal().exists());
 }
 
+/// The start's world for a later launch of a waiting transaction: nothing is
+/// started, no entrance is removed and nothing is mounted (U-33's `Quiet`).
+#[derive(Default)]
+struct Quiet(Vec<String>);
+
+impl crate::update_startup::World for Quiet {
+    fn say(&mut self, line: &str) {
+        self.0.push(line.to_owned());
+    }
+
+    fn spawn_detached(&mut self, program: &Path, _: &[std::ffi::OsString]) -> std::io::Result<()> {
+        panic!("a later launch started {}", program.display())
+    }
+
+    fn retire_entrance(&mut self, _: TxnId) -> Result<(), String> {
+        panic!("a later launch of a waiting transaction removed an entrance")
+    }
+
+    fn mounts_under(&mut self, _: &Path) -> Result<Vec<PathBuf>, String> {
+        Ok(Vec::new())
+    }
+
+    fn on_a_worker(&mut self, _: crate::update_startup::OffThread) -> std::io::Result<()> {
+        panic!("a later launch handed a retirement to a worker")
+    }
+}
+
+/// RED (U-32) — **with offers on, a macOS launch after "download, Later,
+/// close" shows the verified card again from the staged bundle, without any
+/// download: `Verified` with the staged version, in the last active window,
+/// the staged transaction held — and it does not start the day's check.**
+///
+/// U-33 wired the job owner's pass into every launch, but on macOS its
+/// `Counted` answer only recorded the count while the gate was shut. With the
+/// gate on (U-32) a counted set goes through `update_prepare_macos::resume`
+/// — the revalidation of U-27, then the version the journal recorded at
+/// `Prepared` — for the first time in the product, and M2's "resume
+/// (revalidating) or discard after 2 launches" is the Mac's road too. Here the
+/// real Prepare stages a signed bundle, the process ends, and a later launch
+/// goes down the product's road — the start's pass, `Job::after_start`,
+/// `Job::consider` — with no transport at all.
+///
+/// MUTATION: in `update_prepare_macos::resume`, answer the running bundle's
+/// version (`old.version`) instead of the staged one.
+#[test]
+fn a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle() {
+    if !on_macos() {
+        return;
+    }
+    let scene = Scene::new("resume-at-launch", "Folio.app", |_| {});
+    let tools = Arc::new(TestTools::new(&scene.scratch));
+    let pressed = press(&driver(&scene, &tools), scene.release(), 1);
+    assert!(
+        matches!(pressed.state(), State::Verified(_)),
+        "{:?}",
+        pressed.state()
+    );
+    drop(pressed);
+
+    let exe = scene.running.join("Contents").join("MacOS").join("folio");
+    let home = Home::of(HostPlatform::MacOs, &exe).expect("a bundle's home");
+    assert_eq!(home, scene.home());
+    let mut quiet = Quiet::default();
+    let crate::update_startup::Verdict::Continue { waiting, .. } = crate::update_startup::run(
+        &crate::update_startup::Start {
+            own_exe: &exe,
+            home: &home,
+            argv: &[],
+            trial: None,
+            failed: None,
+        },
+        &mut quiet,
+    ) else {
+        panic!("a start with a waiting transaction continues");
+    };
+    assert!(quiet.0.is_empty(), "the start said {:?}", quiet.0);
+    assert_eq!(waiting.as_ref(), Some(&home), "left for the job owner");
+
+    let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let bundle = scene.running.clone();
+    let resumer_tools = Arc::clone(&tools);
+    let mut job: Job<u32> = Job::with_offers(true).after_start(
+        waiting,
+        Box::new(move |worker, staged, channel| {
+            resume(worker, staged, &bundle, &*resumer_tools, channel)
+        }),
+        {
+            let checked = Arc::clone(&checked);
+            move || checked.store(true, std::sync::atomic::Ordering::SeqCst)
+        },
+    );
+    let presenters = Presenters {
+        visited: &[1],
+        open: &[1],
+        quake: None,
+    };
+    let gathered = Gathered {
+        check: None,
+        channel: Some(Channel::Ours),
+        running: "0.4.6",
+        capable: true,
+        trial: false,
+        platform: HostPlatform::MacOs,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    let mut said = None;
+    loop {
+        if let Some(line) = job.consider(gathered.clone(), &presenters, || TxnId::new([0xAA; 16])) {
+            said = Some(line);
+        }
+        if job.state() != &State::Pending(crate::update_job::Pending::AwaitingTransaction) {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the launch pass never landed"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let State::Verified(offer) = job.state() else {
+        panic!("the verified card comes back: {:?}", job.state());
+    };
+    assert_eq!(offer.txn(), TxnId::new([1; 16]), "the transaction's own");
+    assert_eq!(offer.to_version(), "0.4.7", "the staged bundle's version");
+    assert_eq!(job.card_window(), Some(1), "in the last active window");
+    assert_eq!(
+        crate::update_card::paint(job.state()).map(|paint| paint.verbs),
+        Some(vec![
+            crate::update_card::CardVerb::Restart,
+            crate::update_card::CardVerb::Later
+        ]),
+        "the Restart to update card"
+    );
+    assert!(
+        job.staged().is_some(),
+        "the staged transaction is the job's"
+    );
+    assert!(
+        install_txn::try_hold(&home.lock(), install_txn::Hold::Exclusive)
+            .unwrap()
+            .is_none(),
+        "the job holds the transaction lock"
+    );
+    assert_eq!(
+        journal_on_disk(&home).body.phase,
+        Phase::Prepared {
+            deferred_launches: 1
+        },
+        "the launch is counted"
+    );
+    assert!(
+        !checked.load(std::sync::atomic::Ordering::SeqCst),
+        "a launch that resumed a staged set starts no check (the 24-hour rule)"
+    );
+    assert!(
+        said.as_deref()
+            .is_some_and(|line| line.contains("verified again")),
+        "{said:?}"
+    );
+    assert_eq!(
+        fixture::version_of(&scene.running),
+        "0.4.6",
+        "nothing installed changed"
+    );
+}
+
 /// RED (U-27) — **a staged transaction is revalidated before it is resumed,
 /// and a staged bundle changed since it was verified is refused and the
 /// transaction discarded.**

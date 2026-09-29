@@ -1714,6 +1714,14 @@ pub fn message_box(title: &str, text: &str) {
     eprintln!("{text}");
 }
 
+/// **A box from a process that has no application** (U-32) — the two lines,
+/// as [`message_box`] writes them here; the Windows arm is the ownerless box
+/// and the macOS arm Core Foundation's (`macos_dialogs::standalone_alert`).
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn standalone_alert(title: &str, text: &str) {
+    message_box(title, text);
+}
+
 /// **The same claim, made by calling the doors** — the behavioural twin of
 /// `deferred_service_tests`, which is a source pin and runs on Windows.
 ///

@@ -19,8 +19,10 @@
   in here too, and the generated plist would carry a sentence that had turned
   into a statement about a version number.
 
-  `cargo run -q -p bt-winres --bin render-info-plist` prints what this renders
-  to; `crates/bt-winres/src/plist.rs` is the renderer.
+  The `render-info-plist` binary of the `bt-winres` package prints what this
+  renders to; `crates/bt-winres/src/plist.rs` is the renderer. (No double
+  hyphen may stand anywhere in an XML comment, which is why that binary's
+  command line is not written out here.)
 
   This template is not signed and not installed; the generated plist is.
 -->

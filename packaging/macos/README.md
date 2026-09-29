@@ -90,7 +90,16 @@ Q6 of the plan, where they are also recorded.
 - Category `public.app-category.developer-tools`; display name `Folio`;
   executable `folio`.
 
-## What the updater does to an installed bundle (0.4.6, off until U-32)
+## What the updater does to an installed bundle (0.4.6)
+
+A copy offers itself the next release from 0.4.6 on (U-32): signed with the
+Developer ID, built with `FOLIO_UPDATER=on`, and not installed by Homebrew — a
+cask copy carries Homebrew's extended attribute on `Folio.app` and is sent to
+`brew upgrade --cask folio` instead. An ad-hoc or test-signed bundle can stage
+an update but its swap back always ends `Stuck`: the restored bundle is held to
+this process's own designated requirement, which only a Developer ID signature
+names (U-29), so a rehearsal of the updater needs two bundles signed and
+notarised by the owner.
 
 The bundle is replaced whole, in place, by one `renamex_np(RENAME_SWAP)` with
 the verified copy the updater staged in `.<Bundle>.app.folio-update/<txn>/stage/`
@@ -107,7 +116,10 @@ started again with `--update-failed <journal>` so its card says the previous
 version was restored. A swap back that fails keeps both bundles, the LaunchAgent
 and the journal; the copy in `.<Bundle>.app.folio-update/<txn>/rescue/` tries it
 again at the next login or start, three times at most, and the card names the
-`.folio-update` folder. If the copy doing any of this is stopped part way — a
+`.folio-update` folder — until a trial started over it commits the update
+forward, when the card says `Updated.`. When no start of Folio can be
+delivered at all, the process that was to open it says *Update incomplete.*
+and the folder in a system alert of its own. If the copy doing any of this is stopped part way — a
 crash, a power cut — the next login or the next start of Folio finishes it: an
 update that had swapped nothing goes back to waiting, one that had is decided
 by starting the new bundle as a trial, and a start always opens a window. The

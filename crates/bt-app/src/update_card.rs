@@ -29,7 +29,7 @@
 //! `runtime/update_card.rs`.
 //!
 //! **Who sees the card** is `update_job::Job::offers_enabled`: a Windows build
-//! since U-31; a macOS build reaches no state with a card until U-32.
+//! since U-31, a macOS build since U-32.
 
 use std::path::PathBuf;
 
@@ -223,6 +223,14 @@ pub(crate) fn paint(state: &State) -> Option<Paint> {
             ..bare(vec![CardVerb::Restart, CardVerb::Later])
         }),
         State::Failed(_, failure) => Some(failed(&reason(failure), &outcome(failure))),
+        // The trial over `Stuck` committed forward after its card said the
+        // update was incomplete (U-32): the version this build is, and one
+        // word.
+        State::Updated(version) => Some(Paint {
+            heading: Some(format!("Folio {version}")),
+            detail: Some(Text::UpdateCardUpdated.text().to_owned()),
+            ..bare(vec![CardVerb::Close])
+        }),
     }
 }
 

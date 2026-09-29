@@ -2910,6 +2910,8 @@ pub enum Text {
     UpdateCardRestored,
     /// After the reason, when the rollback did not finish; the journal's folder follows.
     UpdateCardIncomplete,
+    /// The trial over a `Stuck` transaction committed forward after its card said *Update incomplete.* (U-32).
+    UpdateCardUpdated,
     /// The reason a press fails while no driver exists (`update_job::Failure::Unsupported`).
     UpdateFailedUnsupported,
     /// The reason a driver that stopped gives (`update_job::Failure::Stopped`); U-20 names finer ones.
@@ -5526,6 +5528,7 @@ impl Text {
             Self::UpdateCardNothingChanged => pick(lang, "Nothing changed.", "什么都没变。"),
             Self::UpdateCardRestored => pick(lang, "Previous version restored.", "已恢复旧版。"),
             Self::UpdateCardIncomplete => pick(lang, "Update incomplete.", "更新未完成。"),
+            Self::UpdateCardUpdated => pick(lang, "Updated.", "已更新。"),
             Self::UpdateFailedUnsupported => pick(
                 lang,
                 "Folio cannot update itself here.",
@@ -5593,7 +5596,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 803] = [
+    pub const ALL: [Self; 804] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -6366,6 +6369,7 @@ impl Text {
         Self::UpdateCardNothingChanged,
         Self::UpdateCardRestored,
         Self::UpdateCardIncomplete,
+        Self::UpdateCardUpdated,
         Self::UpdateFailedUnsupported,
         Self::UpdateFailedStopped,
         Self::UpdateFailedBusy,

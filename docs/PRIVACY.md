@@ -10,8 +10,8 @@ vulnerability privately.
 Folio has no telemetry, no analytics and no crash reporting. Two things reach
 the network: a page you open in the web preview, fetched by the web engine your
 operating system provides — WebView2 on Windows, WebKit on macOS — and the
-update check below. On Windows the update check can lead to a third, and only
-when you press it: downloading the newer release (see *Updating* below).
+update check below. The update check can lead to a third, and only when you
+press it: downloading the newer release (see *Updating* below).
 
 Everything Folio remembers is on your machine, in two directories. Where those
 two are is the one thing in this document that depends on which machine you are
@@ -21,8 +21,8 @@ reading it on, and every row below that has two answers gives both.
 
 Folio asks GitHub whether a newer release exists. The check itself does nothing
 else with the answer: it draws a mark on the settings gear and a line in
-Settings > General. On Windows the answer can also bring up a card offering the
-newer release; nothing is downloaded until you press **Update** on it.
+Settings > General. The answer can also bring up a card offering the newer
+release; nothing is downloaded until you press **Update** on it.
 
 | | |
 | --- | --- |
@@ -66,9 +66,25 @@ a **Copy** button, and the manager does the updating.
 | **What is written outside Folio's folder** | While the new files are being swapped in, one value, `FolioUpdate-<id>`, under `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`: it finishes or reverses, at your next logon, an update cut off by a power loss. The update removes it when it ends, and `folio.exe --uninstall-cleanup` removes one left behind for this copy. If the Explorer menu's package is registered, it is registered again at the new version (the Explorer row's own undo, below, covers it). |
 | **How to switch it off** | Switch the update check off (above): no check, no card. |
 
-On macOS the line in Settings carries a button which opens the releases page in
-your browser, and that is the whole of what "update" means there: Folio does
-not replace itself on a Mac.
+### Updating (macOS)
+
+On a Mac the card and the row are the same, and so is what a press does until
+the restart; what differs is what is replaced and where the pieces live. A copy
+Homebrew installed gets no card: its row names `brew upgrade --cask folio`, with
+a **Copy** button. A copy macOS runs from a read-only place (an application
+opened where it was downloaded, without being moved, runs from a randomized
+copy), or from a folder your account may not write, cannot replace itself:
+**Update** says so before anything is written, and the card offers the
+releases page.
+
+| | |
+| --- | --- |
+| **What a press downloads** | Two files of the offered release, nothing else: the disk image (`Folio-<version>-macos-arm64.dmg`) and its checksum list (`SHA256SUMS-macos.txt`). |
+| **From where** | The same address as on Windows, `https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/<file>`, never "latest". The same `NSURLSession` stack and the same one header, `User-Agent: Folio`, as the check. |
+| **What is checked** | The image against its checksum; the `Folio.app` inside it against the signature of the Folio you are running (the same Developer ID), its version against the offer and its architecture against this Mac — once on the image and again after it is copied. Anything else is refused and nothing is changed. |
+| **Where it goes** | A hidden folder beside the application, `.Folio.app.folio-update` (in `/Applications` for a copy installed there): the new `Folio.app`, a copy of the running one to fall back on, the update's journal and its log. The image is attached there while it is read and detached after; the download itself is removed once it is read. |
+| **What is written outside that folder** | The application itself, replaced whole in one step with the new one. While that happens, one file, `~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`: it finishes or reverses, at your next login, an update cut off by a crash or a power loss. While it exists, macOS may tell you that software from Folio's developer can run in the background. The update removes it when it ends, and `Folio.app/Contents/MacOS/folio --uninstall-cleanup` removes one left behind, together with the hidden folder. |
+| **How to switch it off** | Switch the update check off (above): no check, no card. |
 
 ### Settings and session
 
@@ -208,6 +224,11 @@ profile. Do not put a secret in one.
   details.
 - **An update in progress, on Windows**: one `FolioUpdate-<id>` value under your
   account's `Run` key, removed when the update ends — *Updating* above.
+- **An update in progress, on macOS**: one LaunchAgent file,
+  `~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`,
+  removed when the update ends, and the hidden `.Folio.app.folio-update`
+  folder beside the application, which holds a staged update and keeps two
+  small lock files after it — *Updating (macOS)* above.
 - The PowerShell integration, when you ask for it, appends one line to the
   `$PROFILE` a PowerShell names for itself, after copying that file as it stood
   to a dated backup beside it. Delete the line to undo it.
@@ -246,16 +267,16 @@ the whole of it; the download it can lead to happens only when you press
 
 Folio 不向任何地方发送与你有关的数据。没有遥测、没有统计、没有崩溃上报。联网的只有两
 件事：你在网页预览里打开的那个页面，由操作系统自带的网页引擎抓取——Windows 上是
-WebView2，macOS 上是 WebKit；以及下面的更新检查。在 Windows 上，更新检查还可引出第三
-件——下载较新的版本（见下文「更新」一节），只在你主动按下时发生。
+WebView2，macOS 上是 WebKit；以及下面的更新检查。更新检查还可引出第三件——下载较新的
+版本（见下文「更新」一节），只在你主动按下时发生。
 
 Folio 记住的一切都在本机，分在两个目录里。
 
 ### 更新检查
 
 Folio 向 GitHub 询问是否存在更新的版本。检查本身对答案只做一件事：在设置齿轮上画一个标
-记，并在设置 > 常规里显示一行。在 Windows 上，答案还可能弹出一张卡片提供较新的版本；在
-你按下 **Update** 之前不会下载任何内容。
+记，并在设置 > 常规里显示一行。答案还可能弹出一张卡片提供较新的版本；在你按下
+**Update** 之前不会下载任何内容。
 
 | | |
 | --- | --- |
@@ -283,7 +304,18 @@ GitHub 收到的信息与任何请求一样：你的 IP 地址和时间。Folio 
 | **目录外写入** | 替换文件期间，在 `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run` 下写入一个 `FolioUpdate-<id>` 值：若更新被断电中断，下次登录时由它完成或回滚。更新结束时删除；`folio.exe --uninstall-cleanup` 可清理残留值。若已注册资源管理器菜单的包，则以新版本重新注册（撤销方式见下文资源管理器行）。 |
 | **如何关闭** | 关闭更新检查（上文）：不检查就没有卡片。 |
 
-macOS 上设置中的那一行带有一个按钮，点击后在浏览器中打开发布页——"更新"在 Mac 上的全部含义就是如此：Folio 在 Mac 上不替换自身。
+### 更新（macOS）
+
+在 Mac 上，卡片、设置行以及按下后到重启之前的流程与 Windows 相同；不同的是替换对象和文件所在位置。通过 Homebrew 安装的副本不会看到卡片：对应行显示 `brew upgrade --cask folio` 和一个 **Copy** 按钮。若 macOS 从只读位置运行该副本（下载后未移动就打开的应用会从一个随机副本运行），或该副本所在文件夹不允许当前账户写入，则无法自行替换：**Update** 会先告知，不写入任何内容，卡片转而提供发布页。
+
+| | |
+| --- | --- |
+| **按下后下载的内容** | 所选版本的两个文件：磁盘映像（`Folio-<version>-macos-arm64.dmg`）和校验列表（`SHA256SUMS-macos.txt`）。 |
+| **来源** | 与 Windows 相同的地址：`https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/<file>`，不使用 "latest"。HTTP 栈和请求头与更新检查相同：`NSURLSession`、`User-Agent: Folio`。 |
+| **验证内容** | 映像与校验值比对；映像内的 `Folio.app` 与当前 Folio 的签名者比对（同一 Developer ID），版本与 offer 比对，架构与本机比对——在映像上验一次，拷贝后再验一次。不符则拒绝，不改动任何文件。 |
+| **存放位置** | 应用旁边的隐藏文件夹 `.Folio.app.folio-update`（安装在 `/Applications` 的副本即在该目录下）：新的 `Folio.app`、用于回退的当前版本副本、更新日志与记录。映像在读取期间挂载于此，读完即卸载；下载文件读完即删除。 |
+| **目录外写入** | 应用本身，以新版本一步整体替换。替换期间写入一个文件：`~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`——若更新被崩溃或断电中断，下次登录时由它完成或回滚。该文件存在期间，macOS 可能提示你 Folio 开发者的软件可在后台运行。更新结束时删除；`Folio.app/Contents/MacOS/folio --uninstall-cleanup` 可清理残留文件及隐藏文件夹。 |
+| **如何关闭** | 关闭更新检查（上文）：不检查就没有卡片。 |
 
 ### 设置与会话
 
@@ -383,6 +415,7 @@ rm -rf ~/Library/WebKit/<Folio 的 bundle identifier> ~/Library/Caches/<Folio �
   目录里；写之前先在旁边留一份带日期的原件副本。细节见 `SECURITY.md`。
 - **更新进行中（Windows）**：在当前账户的 `Run` 键下写入一个 `FolioUpdate-<id>` 值，更新
   结束时删除——见上文「更新」一节。
+- **更新进行中（macOS）**：一个 LaunchAgent 文件 `~/Library/LaunchAgents/io.github.lulu-loopp.folio.update-<id>.plist`，更新结束时删除；应用旁边的隐藏文件夹 `.Folio.app.folio-update`，存放暂存的更新并在完成后保留两个小锁文件——见上文「更新（macOS）」一节。
 - PowerShell 整合被要求时，在 PowerShell 自己报出的 `$PROFILE` 末尾追加一行，追加前先
   在旁边留一份带日期的原件副本。删除该行可撤销。
 - **以上五项加上更新检查，正是初次设置卡所问的全部。** 它在从未运行过 Folio 的机器上
