@@ -142,7 +142,12 @@
 //! (`update_apply::the_window_is_theirs`, U-34): R writes nothing, waits for
 //! nothing and opens nothing; that process opens Folio. Any other process of
 //! the rescue image — an applier that never took the mark — is not waited
-//! for.
+//! for. **A running trial the journal does not record** (0.4.7 ticket U-37)
+//! — over `Moving`, or a `Stuck` whose recorded trial is gone, with the new
+//! set installed — is recorded by any lock holder when its receipt is here
+//! (`Txn::before_deciding`; revision (h): a receipt naming it by pid and start
+//! instant), and that receipt commits: the guard's trial with a nonce
+//! no journal records (`Opens::Trial`) is kept rather than rolled back under.
 //!
 //! Every phase is recorded through `update_apply::Journaled` (the protocol's
 //! refusal, the writer table, then `install_txn::durable_write`, asked again
@@ -167,9 +172,20 @@ use bt_platform::trust::Policy;
 use crate::cli;
 use crate::install_channel::Channel;
 use crate::update_apply::{
-    Ended, ExitGuard, Journaled, Leave, Limits, Opener, Opens, Watch, Watched, Window,
-    failed_words, now_ms, owed_at_logon, read_receipt, stop_trial, trial_runs, trial_words,
+    BeforeDeciding, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave, Limits, Opener,
+    Opens, Watch, Watched, Window, failed_words, now_ms, owed_at_logon, read_receipt, stop_trial,
+    trial_runs, trial_words,
 };
+
+/// **What H.3 answered before `decide`** (U-37).
+enum Pre {
+    /// A trial was adopted: take the next step from the disk again.
+    Again,
+    /// The road ends here: `Ended::Deferred`.
+    Stop(Ended),
+    /// `decide` as before.
+    Decide,
+}
 use crate::update_prepare_windows::{Resume, staged_as_verified};
 use crate::update_txn::{
     Action, Actor, Asker, Class, Digest, Disk, Effect, Event, Header, HeaderOutcome, Home,
@@ -242,6 +258,17 @@ pub(crate) struct Road {
     /// This process, by its pid and start time: what the window's mark names
     /// when this process takes it (`update_apply::OWNER_FILE`).
     pub(crate) me: Running,
+    /// **This process's starter** (U-37, H.3): its parent, by pid and an
+    /// earlier start instant (`install_flip::parent_of_this_process`, read at
+    /// entry) — an ordinary start that handed itself over is no candidate.
+    pub(crate) starter: Option<Running>,
+    /// **The trial that handed its transaction back** (`--from-trial`, H.4).
+    pub(crate) handed_back: Option<HandedBack>,
+    /// **A rescue build older than 0.4.7, for the direct-hop test** (design
+    /// revision (h), the rollout contract): no adoption, no deferral — the road
+    /// every update from 0.4.6 takes, whose rescue build is 0.4.6.
+    #[cfg(test)]
+    pub(crate) as_046: bool,
 }
 
 impl Road {
@@ -258,6 +285,10 @@ impl Road {
             channel,
             limits: Limits::PRODUCT,
             me: crate::update_apply::this_process(),
+            starter: install_flip::parent_of_this_process(),
+            handed_back: None,
+            #[cfg(test)]
+            as_046: false,
         }
     }
 
@@ -463,6 +494,9 @@ pub(crate) fn apply(
     let (ended, successor) =
         apply_under_the_lock(worker, road, txn, nonce, until, &mut *guard.inner().world);
     guard.succeeded_by(successor);
+    if ended.deferred_to_a_holder() {
+        guard.window_elsewhere();
+    }
     let left = guard.leave();
     guard
         .inner()
@@ -1033,8 +1067,10 @@ impl<'a> Txn<'a> {
             &mut self.j,
             &watch,
             // The Windows trial's pid is the child's own, recorded at its
-            // launch: there is never one to find, so never one unrecorded.
+            // launch: there is never one to find, so never one unrecorded,
+            // and never a launch to watch instead (U-38).
             &mut |_, _| None,
+            &mut || false,
             &mut |process| trial_runs(process, &images),
             &mut |line| world.say(line),
         )?;
@@ -1084,6 +1120,11 @@ impl<'a> Txn<'a> {
             let receipt = nonce
                 .and_then(|nonce| read_receipt(&self.road.home.receipt_path(self.txn(), &nonce)))
                 .and_then(Result::ok);
+            match self.before_deciding(worker, actor, trial.filter(|_| trial_alive), world)? {
+                Pre::Again => continue,
+                Pre::Stop(ended) => return Ok(ended),
+                Pre::Decide => {}
+            }
             let located = Located::Members(self.locate()?);
             let action = decide(&Disk {
                 journal: &self.j.journal,
@@ -1171,6 +1212,102 @@ impl<'a> Txn<'a> {
         }
         let actor = tenure.unwrap_or_else(|| self.asker.actor(self.j.phase()));
         self.stuck(actor, "the rollback did not settle".to_owned(), world)
+    }
+
+    /// **H.3, on Windows** (0.4.7 ticket U-37, design revision (h)): over
+    /// `Moving`, or over a `Stuck` whose recorded trial no longer runs, with
+    /// every new file installed at its digest, before `decide` —
+    /// `update_apply::before_deciding` over `<install>\folio.exe`, this road's
+    /// data directory, the handed-back trial of `--from-trial` and this
+    /// recovery's own starter. A trial its receipt names exactly is recorded
+    /// (`Pre::Again`: the next step is `decide`'s, whose answer for it is the
+    /// commit) and is this holder's successor; a handed-back trial that never
+    /// became ready is ended by W9's stop of that instance; any other process
+    /// of the new build, a held or unaskable claim, or a process list that
+    /// cannot be read ends the road `Ended::Deferred` with nothing recorded,
+    /// started or moved.
+    ///
+    /// # Errors
+    /// The adoption's record failed; the adopted trial runs on as the window.
+    fn before_deciding(
+        &mut self,
+        worker: &WorkerCtx,
+        actor: Actor,
+        recorded: Option<TrialProcess>,
+        world: &mut impl World,
+    ) -> Result<Pre, String> {
+        #[cfg(test)]
+        if self.road.as_046 {
+            return Ok(Pre::Decide);
+        }
+        let over_stuck = match &self.j.journal.body.phase {
+            Phase::Moving => false,
+            Phase::Stuck { .. } if recorded.is_none() => true,
+            _ => return Ok(Pre::Decide),
+        };
+        let Ok(install) = self.folder(Place::Install) else {
+            return Ok(Pre::Decide);
+        };
+        if live_set(&self.inventories, &install) != Some(Live::New) {
+            return Ok(Pre::Decide);
+        }
+        let stale = match &self.j.journal.body.phase {
+            Phase::Stuck { trial, .. } => *trial,
+            _ => None,
+        };
+        let excluded: Vec<Running> = stale
+            .map(|trial| Running {
+                pid: trial.pid,
+                started: trial.started,
+            })
+            .into_iter()
+            .chain(self.road.starter)
+            .collect();
+        let road = self.road;
+        let installed = road.installed.clone();
+        let may_end = self.j.may(actor, Effect::EndTrial);
+        let mut end = |process: TrialProcess| {
+            may_end.clone()?;
+            stop_trial(
+                worker,
+                process,
+                &[installed.as_path()],
+                (
+                    road.limits.quit_within,
+                    road.limits.end_within,
+                    road.limits.poll,
+                ),
+                &mut |line| world.say(line),
+            )
+        };
+        let what = crate::update_apply::Before {
+            home: &road.home,
+            txn: self.j.journal.txn,
+            program: &road.installed,
+            over_stuck,
+            excluded: &excluded,
+            handed_back: road.handed_back,
+            data: &road.data,
+        };
+        match crate::update_apply::before_deciding(&what, &mut end) {
+            BeforeDeciding::Decide => Ok(Pre::Decide),
+            BeforeDeciding::Defer(deferral) => {
+                world.say(&format!("BT_UPDATE_RECOVER deferred: {}", deferral.said()));
+                if let Deferral::Candidate(candidate) = &deferral {
+                    self.successor = Some(*candidate);
+                }
+                Ok(Pre::Stop(Ended::Deferred(deferral)))
+            }
+            BeforeDeciding::Adopt { event, successor } => {
+                world.say(&format!(
+                    "BT_UPDATE_RECOVER the trial {} runs and its receipt names it, and the journal does not record it: it is recorded",
+                    successor.pid
+                ));
+                self.successor = Some(successor);
+                self.j.record(actor, &event)?;
+                Ok(Pre::Again)
+            }
+        }
     }
 
     /// **W9's moves** under exclusive admission: `rolledout\` made, then each
@@ -1266,6 +1403,29 @@ impl<'a> Txn<'a> {
             Asker::LockHolder => Actor::Applier,
             _ => Actor::Recovery,
         };
+        // Never a retrial beside a candidate, over a held or unaskable claim,
+        // or when what runs cannot be read (H.3); a running trial its receipt
+        // names is recorded instead and commits.
+        match self.before_deciding(worker, actor, None, world) {
+            Ok(Pre::Decide) => {}
+            Ok(Pre::Again) => {
+                return match self.settle(worker, None, world) {
+                    Ok(committed @ (Ended::Committed | Ended::CommittedWithDebt(_))) => committed,
+                    Ok(_) => ended,
+                    Err(error) => {
+                        world.say(&format!("BT_UPDATE_ROLLBACK the trial over Stuck: {error}"));
+                        ended
+                    }
+                };
+            }
+            // The deferral is the end (H.3): a held claim then starts
+            // nothing beside its holder (`ExitGuard::window_elsewhere`).
+            Ok(Pre::Stop(deferred)) => return deferred,
+            Err(error) => {
+                world.say(&format!("BT_UPDATE_ROLLBACK the trial over Stuck: {error}"));
+                return ended;
+            }
+        }
         match self.begin_retrial(worker, actor, world, handed) {
             Ok(committed @ (Ended::Committed | Ended::CommittedWithDebt(_))) => committed,
             Ok(_) => ended,

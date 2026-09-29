@@ -105,6 +105,26 @@ pub fn started_of(pid: u32) -> Option<u64> {
     imp::started_of(pid)
 }
 
+/// **This process's parent, by its pid and start instant, when it started
+/// before this process did** (0.4.7 ticket U-37): the process that started
+/// this one, still running — `None` when it has gone, or when its pid now
+/// names a process that started after this one (a reused pid: a parent always
+/// starts first), or where there is no arm. macOS: `getppid`, which names
+/// `launchd` once the parent has gone (it reparents the orphan). Windows: the
+/// process snapshot's parent pid (`CreateToolhelp32Snapshot`), which Windows
+/// never updates when the parent exits. Read only.
+#[must_use]
+pub fn parent_of_this_process() -> Option<Running> {
+    let me = std::process::id();
+    let mine = imp::started_of(me)?;
+    let parent = imp::parent_pid(me)?;
+    let started = imp::started_of(parent)?;
+    (started < mine).then_some(Running {
+        pid: parent,
+        started,
+    })
+}
+
 /// **What [`ask`] asks of a process.**
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Ask {
@@ -245,6 +265,12 @@ mod imp {
         (written == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
     }
 
+    pub(super) fn parent_pid(me: u32) -> Option<u32> {
+        debug_assert_eq!(me, std::process::id());
+        // SAFETY: `getppid` takes nothing and cannot fail.
+        u32::try_from(unsafe { libc::getppid() }).ok()
+    }
+
     pub(super) fn signal(process: Running, ask: Ask) -> io::Result<bool> {
         let pid = libc::pid_t::try_from(process.pid)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a pid past pid_t"))?;
@@ -372,6 +398,36 @@ mod imp {
         // closed when `owned` is dropped.
         let owned = unsafe { OwnedHandle::from_raw_handle(process.0) };
         creation_of(HANDLE(owned.as_raw_handle()))
+    }
+
+    /// The parent pid the process snapshot records for `me`.
+    pub(super) fn parent_pid(me: u32) -> Option<u32> {
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        };
+        // SAFETY: a call taking a flag and a pid; it answers an error when no
+        // snapshot can be taken.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
+        // SAFETY: the snapshot was opened here, is owned by nothing else, and
+        // is closed when `owned` is dropped.
+        let owned = unsafe { OwnedHandle::from_raw_handle(snapshot.0) };
+        let snapshot = HANDLE(owned.as_raw_handle());
+        let mut entry = PROCESSENTRY32W {
+            dwSize: u32::try_from(size_of::<PROCESSENTRY32W>()).ok()?,
+            ..Default::default()
+        };
+        // SAFETY: `snapshot` is live for the call; `entry` is writable and its
+        // `dwSize` says how large it is.
+        let mut found = unsafe { Process32FirstW(snapshot, &raw mut entry) }.is_ok();
+        while found {
+            if entry.th32ProcessID == me {
+                return Some(entry.th32ParentProcessID);
+            }
+            // SAFETY: as above.
+            found = unsafe { Process32NextW(snapshot, &raw mut entry) }.is_ok();
+        }
+        None
     }
 
     /// The creation time of the live process behind `process`, or `None` once
@@ -533,6 +589,10 @@ mod imp {
     }
 
     pub(super) fn started_of(_pid: u32) -> Option<u64> {
+        None
+    }
+
+    pub(super) fn parent_pid(_me: u32) -> Option<u32> {
         None
     }
 
@@ -825,6 +885,48 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// RED (U-37) — **this process's parent is named by its pid and its start
+    /// instant, which comes before this process's own**; a child this process
+    /// starts names this process as its parent.
+    ///
+    /// The update's recovery build excludes its own starter — an ordinary
+    /// start that handed itself over — from the trials it counts, by exactly
+    /// this identity.
+    ///
+    /// MUTATION: in `parent_of_this_process`, answer `None`.
+    #[test]
+    #[cfg(any(windows, target_os = "macos"))]
+    fn this_process_names_its_parent_by_pid_and_an_earlier_start() {
+        let me = super::Running {
+            pid: std::process::id(),
+            started: super::started_of(std::process::id()).expect("this process runs"),
+        };
+        let parent = super::parent_of_this_process().expect("the test runner's parent runs");
+        assert_ne!(parent.pid, me.pid);
+        assert!(parent.started < me.started, "{parent:?} before {me:?}");
+        assert!(super::still_running(parent));
+        if let Ok(named) = std::env::var("BT_U37_PARENT_TEST_CHILD") {
+            // The child: say what it finds, for the parent to compare.
+            std::fs::write(named, format!("{}:{}", parent.pid, parent.started)).unwrap();
+            return;
+        }
+        let answer = std::env::temp_dir().join(format!("bt-u37-parent-{}", me.pid));
+        let _ = std::fs::remove_file(&answer);
+        let status = crate::quiet_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "install_flip::tests::this_process_names_its_parent_by_pid_and_an_earlier_start",
+                "--nocapture",
+            ])
+            .env("BT_U37_PARENT_TEST_CHILD", &answer)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let said = std::fs::read_to_string(&answer).unwrap();
+        let _ = std::fs::remove_file(&answer);
+        assert_eq!(said, format!("{}:{}", me.pid, me.started));
     }
 
     /// RED (U-23) — **a synthetic program started from a folder of the

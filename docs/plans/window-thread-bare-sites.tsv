@@ -100,7 +100,7 @@ bt-app	-	crate::uninstall::usable_recorded_directory	std::fs::metadata	1
 bt-app	-	crate::update::Claim::take	std::fs::File::create	1
 bt-app	-	crate::update::Claim::take	std::io::Write::write_fmt	2
 bt-app	-	crate::update_trial::take_the_claim_within	std::thread::sleep	1
-bt-app	-	crate::update_trial::watch	std::thread::sleep	2
+bt-app	-	crate::update_trial::watch	std::thread::sleep	1
 bt-app	-	crate::webhost::WebSeat::go_to	std::fs::canonicalize	1
 bt-app	[debug_assertions]	crate::hang_watch::run_selftest_if_due	std::thread::sleep	1
 bt-app	[windows]	crate::attention_copilot::run_probe	std::process::Command::output	1

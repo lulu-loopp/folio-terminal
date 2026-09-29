@@ -2954,7 +2954,14 @@ mod tests {
         journal.body.phase = Phase::Committed;
         let path = here.join("journal.json");
         std::fs::write(&path, journal.encode()).unwrap();
-        watch(&gate, &path, txn, Duration::from_millis(5), &|| {});
+        watch(
+            &gate,
+            &path,
+            txn,
+            Duration::from_millis(5),
+            &|| {},
+            &mut crate::update_trial::watchdog_asleep(),
+        );
         assert_eq!(gate.take_released(), vec![Writer::ExplorerRepair]);
 
         let released = probe_at_start(

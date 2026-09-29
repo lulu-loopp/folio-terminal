@@ -2744,3 +2744,434 @@ disclosed in the 0.4.6 release note's Known issues. U-35 and U-36 are proposed
 
 **Not changed.** The transaction protocol, the recovery decisions, the exit
 guard's rule and the owner's ruling on external kills.
+
+## Revision 2026-09-29 (g) — a trial nobody alive decides (U-37, U-38)
+
+**Why.** Three findings share one gap: a trial of the new build running while
+no process that holds, or will hold, the transaction lock is deciding it.
+
+- **D-14** (the clean VM, A7, W14 with the journal held for 120 s after the
+  moves). U-34's rule fired — `the trial 7340 could not be recorded`, then
+  `is asked to quit` — and the trial was ended. The same handle refused the
+  rollback's declaration too, so the road ended `Failed` at `Moving`; the
+  exit guard read the disk (the new set live, nothing committed) and started
+  the new build as a trial with a nonce no journal records (`Opens::Trial`):
+  pid 940, writes held back, nothing to commit it and nothing to end it.
+- **The rehearsal's defect 9** (macOS D14, second half): a person's start
+  beside that trial handed itself to the recovery build, which recorded a
+  second trial; the second waited 30 s for the data directory the first held
+  (`update_trial::CLAIM_WAIT`) and left, and the recovery declared the
+  rollback of a working 0.4.7 (`RollbackWaits` under the first trial's
+  admission).
+- **The rehearsal's defect 2** (M9cut, M11-rolledback): a macOS trial that
+  ends before the process list shows it leaves the applier nothing to watch
+  — 89.8 s with no window before `no receipt by the trial's deadline`.
+
+**(g).1 The lock holder records a running trial the journal does not know.**
+At each step of `settle` (both platforms) and at the macOS applier's re-entry
+over `Moving`, before `decide`: over `Moving` with the new build live, or over
+a `Stuck` whose recorded trial no longer runs with the new build live, a
+process of the installed executable whose receipt `H\<txn>\health-<nonce>`
+names its pid (`update_apply::unrecorded_trial`, the receipts found by listing
+`H\<txn>` through `files::read_directory`) is recorded — `TrialBegan`, or
+`RetrialBegan` over `Stuck`, with its receipt's nonce and `began_ms` now
+(`update_apply::adopting`). The next `decide` answers `Commit` (its receipt
+matches); the holder's successor is that trial, so the exit guard starts
+nothing. The rights table already allows it: the recovery records `Trial`
+(macOS `BeginTrial` over `Moving`) and `Stuck` (the retrial); no transition
+and no right is added. Its evidence is the one a commit asks for: the process
+of the new image reached its first pane text and wrote its receipt; its
+identity is its pid and start instant, as for any recorded trial. Why listing
+rather than knowing the nonce: the trial's nonce is its own (a guard mints it,
+`Opens::words`), and its receipt is the one place it says it; the listing is
+the product's existing one, so no new vocabulary site (the window thread's
+inventory only shrinks). **Why record rather than start another trial or roll
+back**: a second trial cannot run beside it (the data directory is held; it
+waits, dies, and the rollback follows — defect 9), and a rollback cannot move
+under it (its shared admission). A running process of the new image with *no*
+receipt is not recorded (nothing says it is a trial of this transaction rather
+than a start about to hand itself over); its own watchdog deals with it.
+
+**(g).2 The trial's watchdog.** `update_trial::WATCHDOG` = the trial's
+deadline (90 s) + the stop's graces (5 s + 5 s) + the declaration's retry
+(2 s) = 102 s: every lock holder that watches a trial has decided it by then.
+A trial whose transaction is still undecided that long after its watch began —
+and again every 102 s while it stays so — starts the recovery build with the
+entrance's own line (`--update-recover`, the home on macOS:
+`cli::recover_line_at_logon`), from its watch worker (`quiet_command`, never
+waited on; the window thread is not involved). That recovery runs as at logon:
+it records the trial if it has answered and commits (the trial stays, its
+writes are released, its card says *Updated.*), or decides the transaction
+from the disk. **A trial that never became ready ends its own process** after
+the recovery is started (`bt_platform::leave_process`, exit code 3): it wrote
+no receipt and never will, nothing it holds back will ever land, and it holds
+the claim and the admission a rollback needs. Nothing is ended when the
+recovery could not be started. **The card on the way out**: none of its own —
+a trial that stays follows its transaction (*Updated.* at the commit), and one
+that leaves never showed its text; the next window is the recovery's (the old
+build with *Previous version restored.* on Windows, a recorded trial on macOS
+over `Moving`).
+
+**(g).3 A refused receipt is written again.** The storage worker writes the
+receipt once; when it answers a failure, the trial's watch writes the same
+bytes again (create-new; an existing receipt is the one owed) at each of its
+turns until it lands (`Gate::write_owed_receipt`). The macOS D14 shape — the
+home read-only while the trial starts — otherwise leaves a healthy trial with
+no receipt, which (g).1 cannot record.
+
+**(g).4 The macOS launch is watched (U-38).** The trial is started with
+`open -n -W -a`, which returns when the application it opened ends, or at once
+when it cannot be opened; the applier holds it (`update_apply_macos::Launch`)
+while the trial is unseen, and `update_apply::watch_trial` asks it before each
+look: a launch that is over with nothing seen ends the wait at once
+(`NoReceipt`, `the trial ended before it could be seen`). Chosen over the two
+alternatives: LaunchServices' `openApplicationAtURL` hands back the running
+application, but through an Objective-C completion block and an
+`NSRunningApplication` the platform door does not have, for the same fact; a
+short grace for "no process of the new bundle appeared" is a guess about how
+long a start takes. Measured on macOS 26: `open -n -W` returns 0.38 s after a
+program that exits at once, 6.3 s after one that lives 6 s, and at once (exit
+1) for an application that cannot be opened; ending `open` leaves the
+application running, so the launch is ended when the watch lets it go and no
+`open` outlives the road. **Windows** holds the trial's pid from its launch;
+a trial that dies in its first second is seen gone at the next look (pinned by
+`a_trial_that_dies_in_its_first_second_ends_the_wait_at_once`).
+
+**(g).5 D-14 as it ends now, and the brief's expectation.** During the
+refusal nothing changes (trial ended; `Failed` at `Moving`; the new build as a
+trial with *Update incomplete.*). After it: the first lock holder — a person's
+start, the logon, or at the latest that trial's watchdog — records it and
+commits: the new build, the entrance gone, the window kept. The brief asked
+for "the old build with `--update-failed`". With the moves done, the only old
+build is the rescue copy (a home with no journal, so no card), nothing can
+declare a rollback while the journal refuses, and by the time it can, a
+working new build is running and has answered; the owner's invariant ranks the
+new build first. A trial that has not answered is still rolled back, through
+(g).2. The coordinator decides whether the checklist row keeps this outcome.
+
+**Exits added to (e)'s table** (Windows; macOS the same):
+
+| process | exit | before | after | how |
+|---|---|---|---|---|
+| R (logon, or the watchdog's) | `Moving`/`Stuck`, a running trial with its receipt, unrecorded | rollback under it, or a second trial | the trial recorded and committed; it is the window, nothing started | `a_running_trial_the_journal_could_not_record_is_recorded_and_committed_by_the_next_holder` |
+| R (start) | the same, beside a person's start | a second trial, `RollbackWaits` (defect 9) | the same; nothing started | `a_start_beside_an_unrecorded_trial_commits_it_and_starts_nothing_more` |
+| T | undecided for 102 s, ready | runs on, writes held | starts R, stays | `an_undecided_trial_hands_its_transaction_back_every_watchdog_period` |
+| T | undecided for 102 s, never ready | runs on | starts R, ends itself | the same test (the hand-back's `ready` word) |
+| P (macOS) | a trial that ends before it is seen | 90 s wait | at once | `a_trial_that_ends_before_it_is_seen_ends_the_wait_at_once` |
+
+**Architecture.** (c′) New sources of a fact: the journal's `Trial`/`Retrial`
+record now also comes from a lock holder that did not start the trial (its
+readers — `decide`, the trial's watch through the header, `update_startup`
+through the header — read it as any record); the recovery build now also has
+the trial as its starter (besides the entrance and an ordinary start); a trial
+may now end itself (besides a person, and a lock holder's stop). No owner
+changes. No new door: the listing is `files::read_directory`, the start is
+`quiet_command`, the receipt is `install_txn::durable_create` as the storage
+worker's.
+
+**Not changed.** `next`, `decide`, the writer and effect tables, the exit
+guard's rule, U-34's rule that the applier ends a trial it could not record,
+the owner's ruling on external kills.
+
+## Revision 2026-09-29 (h) — adoption only of a proved process; a watchdog that converges (U-37, round 2)
+
+The owner ruled D-14's end state on 2026-09-29: **forward adoption** (A). Codex's review of (g) as built
+(`U-37-review-codex-2026-09-29.md`) agrees, but only for an exactly authenticated, ready process.
+When identity or readiness cannot be proved, the road does not adopt: it goes back to the existing
+road (rollback on Windows, a recorded trial on macOS over `Moving`). This revision replaces (g).1–(g).5
+where they differ. Nothing in `next`, `decide`'s table or the writer/effect tables changes, except
+H.3's use of the existing `EndTrial` right.
+
+**Which update gets which half.** In an update, the applier and the recovery build are copies of the
+**old** build O, and the trial is the **new** build. For the first update through this code (0.4.6
+→ 0.4.7), everything the lock holder does is 0.4.6's:
+- no adoption, no deferral, no hand-back acceptance, no watched launch;
+- only the trial-side rules (H.1's receipt field, H.2) are 0.4.7's.
+
+**The rollout contract** (coordinator ruling 2026-09-29, option (b); Codex's check of (h), blocker 1).
+- H.3–H.5 are active only when the **source build** — the running build that prepared the update,
+  whose copy is the rescue build — is 0.4.7 or later. The target's version does not matter.
+- So D-14 remains for **every update whose source build is below 0.4.7**. That includes a 0.4.6
+  machine that skips 0.4.7 and updates straight to 0.4.8 or later. Its Prepare copies the running
+  0.4.6 into `rescue`, and every applier and header-named recovery of that update is 0.4.6.
+- `release_manifest::MIN_UPDATER` stays `0.4.6`.
+- **Why not option (a), raising `min_updater` to 0.4.7:**
+  - a 0.4.6 build that missed 0.4.7 would be refused every later offer;
+  - that build would stop offering updates at all;
+  - the owner's invariant (2026-09-28) says the old version must still offer the update
+    ("老版也要依旧提示可以更新").
+  - A D-14 limited to one known fault shape on one source version is the smaller cost.
+- The release note's Known issue says it exactly this way: **"updating from 0.4.6 to any later
+  version"** (H.6).
+
+### H.1 The receipt binds to the exact process
+
+- **Rule R1 — schema.** The receipt stays **v1**, `{v, txn, nonce, pid, version}`, plus one optional
+  field `started`: the trial's own start instant, read by the trial about itself
+  (`install_flip::started_of(own pid)`), in the platform's opaque units, the same units the process
+  list reports.
+- **Rule R2 — compatibility.** A v1 reader ignores unknown fields: `Receipt::parse` is serde without
+  `deny_unknown_fields`, and 0.4.6's is the same code. So a 0.4.6 rescue build reading a 0.4.7
+  trial's receipt commits exactly as before, by nonce. The ordinary commit of a **recorded** trial
+  never reads `started`; the nonce the journal recorded is the binding there.
+- **Rule R3 — adoption requires the exact instance.** A running process is adopted only when a receipt
+  in `H/<txn>` says all of the following:
+  - it is this transaction's (`receipt.txn == txn`);
+  - it sits at its own nonce's name (`health-<receipt.nonce>`);
+  - it carries `started`;
+  - some process running from the new build's executable has **exactly** `(pid, started) ==
+    (receipt.pid, receipt.started)`.
+
+  The record is `TrialBegan`/`RetrialBegan{nonce: receipt.nonce, process: (pid, started)}`: the
+  receipt's own identity, never the process list's.
+- **Rule R4 — negative cases.** Each ends in "no adoption", and the holder goes on to H.3's order:
+
+| case | why it is refused |
+|---|---|
+| a stale receipt, and its pid is reused by a process started at another instant | `started` differs |
+| an ordinary Folio process with that pid (a start that continued un-gated) | it wrote no receipt with its own `started` |
+| a receipt without `started` (a pre-0.4.7 trial) | never adoptable |
+| several receipts in one transaction | only a receipt whose exact `(pid, started)` runs counts; two that both match is impossible (one process per instant); the rest are stale and ignored |
+| a receipt of another transaction, or at another nonce's name | refused by `txn` and by its name |
+| a receipt folder that cannot be listed | no adoption |
+
+### H.2 The trial's watch converges
+
+Each turn of `folio-trial-watch`, in this order:
+1. **The receipt.** Take the storage worker's answer; write an owed receipt again. The retry pauses
+   250 ms and doubles up to a cap of 30 s. It logs one line at the first refusal and one at success.
+2. **The journal.** Read it. `NotFound` means Ended. A header means `Undecided`, `Committed` or
+   `Ended`. **Any other read error is `Unreadable`**: not an answer, and never a skip of steps 1 or 3.
+3. **The watchdog.** Its due times are 102 s, 204 s, 408 s and 816 s after the watch began: at most
+   **four hand-backs per trial process**. At a due time:
+   - last sight `Undecided`, and no earlier hand-back's recovery still running (its pid and start
+     instant, from the spawn) → one hand-back (H.4);
+   - `Unreadable` → no hand-back, since no holder could read it either; one line
+     `journal unreadable since …`; the due time is spent.
+
+   After the fourth due time the watchdog says so once and stops. The trial runs on as a window with
+   its writes held, and the next start or logon decides.
+4. Sleep the watch interval.
+
+**The bound, stated.**
+- Per trial process: ≤ 4 recovery launches, each single-flight. The recovery itself launches no trial
+  while the claim is held (H.3), so a hand-back adds no contender.
+- After one hour of a home that stays read-only, the trial's log has:
+  - ≤ 4 hand-back lines, plus 1 at the bound;
+  - 1 receipt-refused line;
+  - about 127 receipt write attempts (the backoff reaches 30 s).
+- The recoveries each log their own `Deferred` or `Failed` line, at most 4.
+- **No process count grows past trial + 1 recovery.** The watchdog's recovery is logon-shaped. While
+  its trial runs, that trial is a candidate (H.3 step 3), so every cell of H.3's table that such a
+  recovery can reach launches nothing. The one launching cell (no candidate, claim free) is
+  unreachable while the trial lives. A person's starts are counted separately, in H.3's table: each
+  adds at most U-34's two delivery starts.
+
+### H.3 What a lock holder does over `Moving` or an eligible `Stuck`
+
+This is in both appliers' `settle` and the macOS re-entry, before `decide`, and before a `Stuck`
+retrial (`retry_as_trial`). Order:
+1. **Adopt** (H.1, R3) → record, then `decide` commits; the adopted process is the successor.
+2. **The handed-back trial** (from H.4's line, exact `(pid, started)`, still running from the new
+   build's executable):
+   - `unready` → ended by this holder with W9's stop (asked to quit, then ended, only that instance:
+     `install_flip::ask`; `EndTrial` is the recovery's over `Moving` since U-34, and over `Stuck`
+     through `StopTrial`); the holder waits until it has left the list, then goes on to step 3;
+   - `ready` → left alone; step 3 defers.
+3. **Fail closed before `decide`** (Codex's check of (h), blocker 2). Two witnesses are asked.
+
+   **The candidate** is a live process running from the **new** installed executable (Windows
+   `<install>\folio.exe` with the new set live; macOS the live bundle's executable with the new
+   identity) that step 1 did not adopt. Three processes are excluded:
+   - the adopted one;
+   - the exact handed-back one that step 2 ended;
+   - **this recovery's own starter**: its parent process, by pid and start instant, when that
+     parent runs from the installed executable. That is an ordinary start that handed itself over.
+     It leaves as soon as the recovery is started and never takes the claim. It is read at the
+     recovery's entry, through a new `bt_platform::install_flip::parent_of_this_process` (Windows:
+     the process snapshot's parent pid; macOS: `getppid`), and it is taken as the parent only when
+     its start instant precedes this process's own.
+
+   The candidate witness has three answers:
+   - **seen**: one or more candidates;
+   - **not seen**;
+   - **unlistable**: the process list could not be read, or `H\<txn>` could not be listed in step 1
+     (receipts unknown).
+
+   A candidate is counted **whether or not it has taken the data claim yet**. That covers sequence
+   A: a trial started by the old applier or an exit guard, past `update_startup`, before
+   `take_the_claim`.
+
+   **The claim** (`persist::try_claim(data)`) has three answers: `Held`, free, or `QueryDenied`.
+
+   **Every answer except "not seen" with a free claim is `Ended::Deferred`** (exit 1): the holder
+   records nothing, starts nothing and moves nothing. `Deferred` at logon, or from a watchdog's
+   hand-back, is a no-op end: nobody is waiting (`owed_at_logon` is false; like `LockHeld`). **For
+   a person's handed start, the exit guard keeps U-34's delivery duty.** It starts nothing while a
+   known candidate still runs (the candidate is the successor, U-34 (a)). Otherwise it delivers:
+   its start counts only when a Folio acknowledges it with `ClaimRefusal::Held`, and `QueryDenied`
+   is no acknowledgement (round 4). Failing that, the next program; failing that, its own failure
+   window. The command line is never silently dropped. It is dropped only where a Folio is proved
+   to be the window: a live candidate, or a `Held` claim.
+4. **Otherwise** — no candidate seen, the claim free — **`decide`**, unchanged.
+
+**H.3's decision table.** Each cell covers the three kinds of line: `--from-trial` (the watchdog's
+hand-back), none (logon), and `--then-launch` (a person's start). With `--from-trial`, step 2
+first ends an `unready` named trial; a `ready` one is a candidate ("seen").
+
+| candidate | claim | holder | exit guard — logon or `--from-trial` | exit guard — a person's start | processes the road launches |
+|---|---|---|---|---|---|
+| seen | Held | Deferred | nothing (nobody waiting) | nothing: the candidate is the successor | 0 |
+| seen | free (pre-claim candidate) | Deferred | nothing | nothing while the candidate runs; if it has died by then, U-34's delivery | 0; if the candidate died, ≤ 2 starts, then the window |
+| seen | QueryDenied | Deferred | nothing | as the row above | as the row above |
+| not seen | Held | Deferred | nothing | nothing: the `Held` claim is U-34's acknowledgement (a Folio is the window) | 0 |
+| not seen | free | `decide` (today's road) | today's | today's | today's: Windows ≤ 1 start after the rollback; macOS 1 recorded trial over `Moving` |
+| not seen | QueryDenied | Deferred | nothing | U-34's delivery: the start the disk names, no `Held` acknowledgement, then the fallback (Windows), then the failure window shown by the recovery | ≤ 2 starts (Windows), ≤ 1 (macOS), then the window |
+| unlistable | Held | Deferred | nothing | nothing (a `Held` claim) | 0 |
+| unlistable | free | Deferred | nothing | U-34's delivery: acknowledged only by `Held` within 20 s; else the fallback, then the window | ≤ 2 starts (Windows), ≤ 1 (macOS), then the window |
+| unlistable | QueryDenied | Deferred | nothing | as "not seen, QueryDenied" | as "not seen, QueryDenied" |
+
+**Why a delivery start is not a contender.** A start the guard delivers where no candidate was seen
+is the new build as an unrecorded trial, or on Windows the rescue copy. Beside a Folio it cannot
+see, that start waits for the claim (`CLAIM_WAIT`, 30 s) and leaves, or hands its launch over. It
+is bounded to two per person's start, and it records nothing.
+
+### H.4 The hand-back is accepted by the recovery, never assumed by the trial
+
+- **Rule A1 — the line.** `--update-recover [<home>] --from-trial <pid>:<started>:<ready|unready>`,
+  with no `--then-launch`, so the run is a logon-shaped run. `--from-trial` is a new word of the
+  recovery door's grammar (`cli::update_door`). It is a frozen word from 0.4.7, and it is added to
+  ARCHITECTURE's frozen-words row.
+- **Rule A2 — only to a build that knows it.** The trial reads the rescue build's version before a
+  hand-back:
+  - Windows: the rescue executable's `VERSIONINFO`, through the reader the signature check already has (`trust_windows::file_version`, made reachable through `bt_platform::trust`);
+  - macOS: `CFBundleShortVersionString`, through `macos_update::short_version`, on the watch worker.
+
+  A version below 0.4.7, or none read, means no hand-back. That is every update whose source build
+  is below 0.4.7 — 0.4.6 → 0.4.7 and 0.4.6 → any later version (the rollout contract above) — and
+  H.2's watchdog is inert there.
+- **Rule A3 — the trial never ends itself.** (g).2's `leave_process(3)` is withdrawn. Ownership passes
+  only when the recovery holds the transaction lock and ends the named `unready` instance itself
+  (H.3 step 2). A recovery that dies in the loader, cannot take the lock, or refuses its line ends
+  nothing: the trial stays as the window, and the next due time (H.2) tries again, within the bound.
+
+### H.5 macOS: the watched launch, as it really behaves
+
+- **Rule L1 — the status is kept.** `Launch::over` answers `Exited(code)`, `Signalled` or `Running`
+  from `try_wait`'s `ExitStatus`:
+  - `Exited` — `open` returned: the application ended, or never opened → the U-38 early end;
+  - `Signalled` — the helper itself was killed → **unknown**: the launch is dropped from the watch,
+    which then waits for the trial as before, to its deadline.
+- **Rule L2 — the helper can outlive the applier.** `Launch` is ended by the applier's normal return
+  and by an unwinding panic. An applier ended from outside (SIGTERM or SIGKILL, which run no `Drop`)
+  leaves its `open -W`, which waits until the trial it opened ends, and then returns. That is
+  harmless: it starts nothing, and holds no lock, claim or admission. The docs say this; (g).4's
+  "no `open` outlives the road" is withdrawn.
+- **Rule L3 — the acceptance row** (the coordinator's Mac rehearsal, signed and notarized bundles, B
+  quarantined as the feed delivers it):
+  1. The first trial launch through `open -n -W`: `open` does not return before the trial is seen,
+     including during Gatekeeper's first-launch assessment. The trial is recorded and committed.
+     After the commit, `ps` shows no `open -n -W` of the applier.
+  2. `kill -9` of the trial within its first second: either `the trial ended before it could be seen`
+     or `ended without a receipt`, and the rollback within about 5 s. Never 90 s.
+  3. **Executable refused** (amended twice on 2026-09-29, by the coordinator's ruling after Codex's
+     review of `7172d964`): after the exchange, the installed bundle's executable is made unrunnable
+     (`chmod 000`). `open` exits non-zero, then the U-38 early end, then the rollback, then the old
+     build with its card.
+
+  **Why a launch-time Gatekeeper refusal is not a row.** It is answered before the launch, by
+  Prepare's assessment. `update_prepare_macos`'s `System::verify` runs `spctl --assess`, and
+  `bt_platform::macos_identity::identity_decision` refuses everything but *Notarized Developer ID*,
+  pinned by `macos_identity::tests::a_notarized_developer_id_acceptance_passes_only_with_the_identity`,
+  `…::an_acceptance_from_another_source_is_refused`, `…::an_explicit_rejection_is_refused` and
+  `…::an_ad_hoc_bundle_is_never_accepted_by_spctl`. A bundle that passes Prepare is, by construction,
+  one Gatekeeper accepts at launch. A refusal after Prepare would need the ticket revoked between
+  Prepare and the launch, which is outside the rehearsal.
+
+  **What the owner produces for L3:** A at 0.4.7 or later, signed and notarized; B, signed and
+  notarized.
+
+### H.6 What the docs say, corrected
+
+- **The outcome with no receipt is per platform.** (g).2 and (g).5 said "still rolled back"; that is
+  too broad. The recovery ends an `unready` handed-back trial (H.3 step 2), then decides:
+  - **Windows** over `Moving`: the rollback, then the old build with *Previous version restored.*;
+  - **macOS** over `Moving` with the new bundle live: a new, recorded trial (U-29b), which commits if
+    it answers and is rolled back if it does not.
+- **The release note's Known issue** (0.4.7 and every later note while `MIN_UPDATER` is 0.4.6):
+  D-14 remains when **updating from 0.4.6 to any later version**. That means the new version runs
+  unrecorded until the next start or logon finishes the update.
+- **CHANGELOG.** "within two minutes" goes. The entry says the update is finished by the next start,
+  the next logon, or the new version itself once the record can be written; it makes no time
+  promise.
+- **ARCHITECTURE rows that change** (in the phase-2 commit, with the code):
+  - **child-process census:** a new caller, `update_trial::hand_back` (the rescue build, from the
+    trial's watch worker; single-flight; ≤ 4 per trial);
+  - **the macOS `open -n -a` row:**
+    - the trial's launch is now `open -n -W -a`, held while the trial is unseen and ended when the
+      watch lets it go (L2's exception stated);
+    - the relaunch rows stay `open -n -a`, detached, never waited on;
+  - **the transaction row:**
+    - the receipt has two writers of the same bytes: the storage worker, and the trial's watch
+      again after a refusal;
+    - the receipt gains the optional `started`;
+    - the lock holder may record a trial it did not start (H.1, R3);
+  - **the frozen-words row:** `--from-trial` (A1);
+  - **the trial's held-back-writes row:** the watch's watchdog (H.2) and its bound.
+
+### H.7 Tests owed in phase 2
+
+All are through the real road, and each is mutation-checked red.
+
+**Identity (H.1):**
+- a stale receipt with a reused pid at another instant;
+- an ordinary Folio process with that pid;
+- several receipts in one transaction;
+- a receipt of another transaction;
+- a receipt without `started`.
+
+**Convergence (H.2):**
+- a journal kept unreadable across two shortened watchdog periods: the receipt answer and retry still
+  run, and there is no hand-back;
+- a home kept read-only across two shortened periods: exactly one recovery running at a time, the
+  launches ≤ the bound, and no trial launched beside the candidate.
+
+**Deferral (H.3):**
+- two contender recoveries against the real transaction lock: one adopts or defers, and the other
+  finds it done;
+- a held claim at `Moving` with no receipt: `Deferred`, nothing launched, nothing moved (Windows and
+  macOS).
+
+**Hand-back (H.4):**
+- a synthetic rescue executable that records its argv and its acceptance;
+- a child process that is a real trial watch, with a shortened period, hands back with `--from-trial`;
+- a recovery that ends that exact `unready` instance, whose exit is observed in the child;
+- a recovery that refuses its line leaves the trial running.
+
+**Launch (H.5):** a helper killed by a signal is unknown, not over (macOS).
+
+**The rollout contract — the direct hop:**
+- **0.4.6-shaped:** a rescue road shaped as 0.4.6's, with a trial of 0.4.7 or later. That means no
+  adoption, no deferral and no `--from-trial`, with the receipt read by 0.4.6's frozen reader, whose
+  wire struct is kept as a test fixture copied from the `v0.4.6-preview` tag and ignores `started`.
+  It ends as 0.4.6 ends it: a recorded trial commits by nonce, and an unrecorded one is not adopted.
+  The trial's watchdog does not hand back to a rescue whose version reads 0.4.6.
+- **0.4.7 or later:** the same trial beside a rescue of 0.4.7 or later is adopted.
+
+**Fail closed before `decide` (H.3 step 3)**, through the real road, on Windows and on macOS, each
+asserting both the recovery's decision and the exit guard's result:
+- **a pre-claim candidate:** a live process of the new installed executable, with no receipt and
+  the claim free:
+  - the result is `Deferred`: nothing recorded, launched or moved;
+  - at logon the guard starts nothing;
+  - for a person's start the guard's successor is that candidate, and it starts nothing;
+  - once the candidate is ended, the guard delivers.
+- **`QueryDenied`:** the claim's name is squatted (`trust_harness::squat_the_claim`) and no
+  candidate runs:
+  - the result is `Deferred`;
+  - at logon the guard starts nothing;
+  - for a person's start the guard makes its starts, none of them acknowledged, then its fallback,
+    then shows its own failure window. The handed line is never silently dropped.
+- **an unlistable candidate folder:** the result is `Deferred`.
+- **the recovery's own starter:** a live parent of the installed executable is not a candidate. A
+  person's start at `Moving` with nothing else running still reaches `decide`.

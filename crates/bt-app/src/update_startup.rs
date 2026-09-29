@@ -1473,6 +1473,7 @@ mod tests {
                     nonce: nonce(),
                     pid: process.pid,
                     version: "0.4.7".to_owned(),
+                    started: None,
                 }))
                 .expect("the receipt of the recorded retrial commits");
             assert_eq!(committed.body.phase, Phase::Committed);
@@ -1485,6 +1486,7 @@ mod tests {
                 txn(),
                 std::time::Duration::from_millis(5),
                 &|| woke.set(true),
+                &mut crate::update_trial::watchdog_asleep(),
             );
             assert!(woke.get(), "the watch read the commit and woke the window");
 
@@ -1612,6 +1614,7 @@ mod tests {
                 Some(Ok(cli::UpdateDoor::Recover {
                     home: Some(home.root().to_path_buf()),
                     then_launch: Some(argv.to_vec()),
+                    handed_back: None,
                 }))
             );
         }

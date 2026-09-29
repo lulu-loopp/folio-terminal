@@ -132,10 +132,18 @@ pub(crate) struct Door<'a> {
     pub(crate) data: &'a Path,
     pub(crate) agents: Option<&'a Path>,
     pub(crate) limits: Limits,
+    /// This process's starter (U-37, H.3): no candidate.
+    pub(crate) starter: Option<bt_platform::install_flip::Running>,
+    /// The trial that handed its transaction back (`--from-trial`, H.4).
+    pub(crate) handed_back: Option<crate::update_apply::HandedBack>,
 }
 
 /// **The door, for this process**: this executable must be a rescue build.
-pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>) -> i32 {
+pub(crate) fn run_here(
+    home: Option<PathBuf>,
+    then_launch: Option<Vec<OsString>>,
+    handed_back: Option<crate::update_apply::HandedBack>,
+) -> i32 {
     // **The smallest outer guard, first** (U-34, round 2, blocker 3): until the
     // road's own guard carries the duty, a person's start handed here that
     // cannot be finished ends in the failure window, shown by this process;
@@ -177,7 +185,10 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
     // One standalone main for both roads: a Windows member set is recovered
     // by the applier's own code (U-23, U-24), a macOS bundle by U-29/U-29b's.
     let windows = (platform == bt_platform::HostPlatform::Windows).then(|| {
-        crate::update_apply_windows::Road::of_this_copy(home.clone(), installed.clone(), exe)
+        let mut road =
+            crate::update_apply_windows::Road::of_this_copy(home.clone(), installed.clone(), exe);
+        road.handed_back = handed_back;
+        road
     });
     let data = crate::persist::storage_dir_unmoved();
     let agents = update_apply_macos::launch_agents();
@@ -188,6 +199,8 @@ pub(crate) fn run_here(home: Option<PathBuf>, then_launch: Option<Vec<OsString>>
         data: &data,
         agents: agents.as_deref(),
         limits: Limits::PRODUCT,
+        starter: bt_platform::install_flip::parent_of_this_process(),
+        handed_back,
     };
     match bt_platform::admission::enter_standalone_main("folio-update-recover", |worker| {
         // The road's guard takes the duty over as its first statement.
@@ -399,6 +412,8 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
                 data: door.data.to_path_buf(),
                 agents: door.agents.map(Path::to_path_buf),
                 limits: door.limits,
+                starter: door.starter,
+                handed_back: door.handed_back,
             };
             let mut logged = Logged {
                 world: &mut *guard.inner().world,
@@ -409,6 +424,9 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
             guard.succeeded_by(recovered.successor);
             if !recovered.waiting {
                 guard.nobody_waiting();
+            }
+            if recovered.ended.deferred_to_a_holder() {
+                guard.window_elsewhere();
             }
             (
                 format!("recovery ended {:?}", recovered.ended),
@@ -480,6 +498,9 @@ pub(crate) fn run_windows(
     guard.succeeded_by(recovered.successor);
     if !recovered.waiting {
         guard.nobody_waiting();
+    }
+    if recovered.ended.deferred_to_a_holder() {
+        guard.window_elsewhere();
     }
     let left = guard.leave();
     let now = header_of(&road.home);
@@ -573,7 +594,11 @@ impl<W: World> Hands for Logged<'_, W> {
         self.world.verify_restored(worker, bundle)
     }
 
-    fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
+    fn launch_trial(
+        &mut self,
+        bundle: &Path,
+        args: &[OsString],
+    ) -> io::Result<update_apply_macos::Launch> {
         self.world.launch_trial(bundle, args)
     }
 
@@ -619,8 +644,12 @@ impl Hands for Machine {
         update_apply_macos::verify_restored_here(bundle)
     }
 
-    fn launch_trial(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
-        update_apply_macos::open_bundle(bundle, args)
+    fn launch_trial(
+        &mut self,
+        bundle: &Path,
+        args: &[OsString],
+    ) -> io::Result<update_apply_macos::Launch> {
+        update_apply_macos::open_trial(bundle, args)
     }
 
     fn acknowledged(&mut self, worker: Option<&WorkerCtx>, data: &Path) -> bool {
@@ -674,7 +703,11 @@ mod tests {
             panic!("a Windows home is never verified: {bundle:?}")
         }
 
-        fn launch_trial(&mut self, bundle: &Path, _: &[OsString]) -> io::Result<()> {
+        fn launch_trial(
+            &mut self,
+            bundle: &Path,
+            _: &[OsString],
+        ) -> io::Result<update_apply_macos::Launch> {
             panic!("a Windows home never starts a trial: {bundle:?}")
         }
 
@@ -756,6 +789,8 @@ mod tests {
                     data: &data,
                     agents: None,
                     limits: Limits::PRODUCT,
+                    starter: None,
+                    handed_back: None,
                 };
                 let code = run(worker, &door, &mut world);
                 (code, world)

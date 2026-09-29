@@ -814,7 +814,7 @@ pwsh -File scripts/release/cleanvm/updater/run-row.ps1 `
 | ☐ | W12 | 同 W3 | `Committed`,receipt 在、Run 值还在 | 登录 R:`Retired`,不开窗(D-12);B 已装;下一次启动删 `H\<txn>` |
 | ☐ | W13 | 更新后 1–2 秒内取消 | `Abandoned` | 无日志、无 `H\<txn>`、无 Run 值;旧版完整。W13 的第一次普通启动不带源按「更新」:*Download stopped.*(D-10) |
 | ☐ | W14 | 更新 → 重启;Run 值一出现,监视器以 `Read`、共享 `Read`(无 delete、无 write)打开 `H\journal.json` 3 秒 | 不断电 | rename 重试扛过去:`wrote [Armed, Moving, Trial, Committed, Retired]`,trial 是那扇窗 |
-| ☐ | W14long | 同上,持有 120 秒 | 不断电 | 预期:应用者以 `Failed` 结束,以 `--update-failed <journal>` 打开已安装版本(卡片 *Update incomplete.*),下次启动或登录回退。**U-31 A7 实测不符(D-14,未关)**:在 Moving 之后持有时,留下的是一扇未提交的 trial、日志停在 `Moving`、Run 值还在 |
+| ☐ | W14long | 同上,持有 120 秒。**前提:A 为 0.4.7 或更高**(A = 0.4.6 时是已知问题:新版以未记录状态运行,直到下次启动或登录完成更新;本行不执行) | 不断电;句柄持有覆盖 applier 的 `TrialBegan` 写入及其回滚声明 | 句柄持有期间:`diagnostics.log` 包含 `the trial <pid> could not be recorded`,然后 `is asked to quit`,然后 `started …\folio.exe`;唯一的 Folio 窗口是以 trial 启动的新版,卡片显示「Update incomplete.」并指出文件夹;日志停留在 `Moving`;Run 值仍存在。释放句柄后,trial 的 watchdog 到期时(该 trial 启动后 102 s、204 s、408 s、816 s;至多四次,前一次恢复仍在运行时不启动下一次)或在下次启动/登录时立即完成:`BT_UPDATE_TRIAL … it is handed back to …\rescue\folio.exe (ready)`(仅 watchdog 路径),然后 `BT_UPDATE_RECOVER the trial <pid> runs and its receipt names it, and the journal does not record it: it is recorded`。句柄仍持有时,人手动启动触发的恢复记录 `BT_UPDATE_RECOVER deferred: …` 且不启动第二个进程 trial 窗口不会被自行结束;唯一可以结束从未变为 ready 的 trial 的是持有事务的恢复进程。日志最终为 `Retired{Committed}`;Run 值 `FolioUpdate-<txn8>` 已删除;安装目录为 B 版;唯一的窗口是句柄持有期间启动的 trial,保留不变,卡片现显示「Updated.」;持有期间在该窗口做的更改(如设置)保留。释放句柄后普通启动 Folio 立即到达相同终态,不再启动 B 的第二个进程 |
 | ☐ | W15 | 从 `Prepared` 起以 `Read`、共享 `None` 持有 `H\<txn>\rescue\folio.exe` 40 秒,再按「重启」 | 不断电 | `its applier could not be started` → `Abandoned`,无文件被移动;旧 Folio `leaving after an update: started …`,普通方式打开一次。(启动仅迟缓、应答未在 15 秒 `HANDOFF_DEADLINE` 内到达的路径由单元测试 `a_hand_over_with_no_answer_in_time_still_opens_folio_once` 覆盖) |
 | ☐ | E7 | 从 `Prepared` 起不共享地持有 `THIRD-PARTY-NOTICES.md` 200 秒,按「重启」 | 不断电 | `nothing is moved: held open by another process`,`wrote [Armed, Prepared]`,删 Run 值,旧版重新打开(约 60 秒无窗,D-15);放开后重启卡从暂存集合再按一次 → 提交 |
 | ☐ | rollback | 更新 → 重启;trial 一启动就被结束 | 不断电 | `the trial <pid> ended without a receipt` → `RollbackIntent, RolledBack, Retired`;旧版按摘要复原;`--update-failed` 卡 *The new version did not start. / Previous version restored.* |
@@ -910,11 +910,13 @@ plist 的 `ProgramArguments`,日志写明是哪一种)→ 每一步收集证据 
 | ☐ | M11-committed | 更新 → 就绪 → 重启 | `Committed`(P 与 trial) | 普通启动;Cmd+Q;普通启动 | `Retired`;删 plist;B |
 | ☐ | R-W15 | 就绪后对 `H/<txn>/rescue/Folio.app/Contents/MacOS/folio` `chmod 000`,重启,等 O 离开,复原 | 无 | 稳定 | `its applier could not be started` → `Abandoned`;O 普通启动 A 一次。(macOS 上打开着文件不会挡 exec,所以只用 `chmod 000`) |
 | ☐ | R-D5 | 同 R-W15,另对已安装的 `folio` 也 `chmod 000` | 无 | 复原 | O 启动自己被拒;系统提示框 *Folio / Update incomplete. <文件夹>*;`no start after the update was delivered`。提示框在其进程结束后仍留在屏幕上(U-32 缺陷 4,未关) |
-| ☐ | D14 | 更新 → 就绪 → 重启;`Moving` 读到 B 时停下所有进程、把 H 改为只读、再继续 | 无 | 等路走完;截图;复原 H;**Cmd+Q**;普通启动;稳定 | 路以 `Failed` 结束,日志停在 `Moving`,plist 保留,起一次 `--update-trial <txn> <nonce> --update-failed <journal>`,卡片 *Update incomplete.*;复原 H、**退出那扇未记录的 trial 窗**之后,普通启动走 M6 的路。(不退出就启动时,新进程被交给那扇窗,R 把一个健康的 B 回滚:U-32 缺陷 9,未关) |
+| ☐ | D14 | 更新 → 就绪 → 重启;`Moving` 读到 B 时停下所有进程、把 H 改为只读(`chmod a-w <H>`),约 20 秒后复原。**前提:A 为 0.4.7 或更高**(A = 0.4.6 时是已知问题:新版以未记录状态运行,直到下次启动或登录完成更新;本行不执行) | 不断电;只读 home 覆盖 applier 的 `TrialBegan` 写入及其回滚声明 | 等路走完;截图;复原 H;普通启动;稳定(trial 窗不必退出:新进程被交给它,不再回滚) | 只读期间:`diagnostics.log` 包含 `the trial <pid> could not be recorded`、`is asked to quit` 和以 trial 打开的新 bundle(「Update incomplete.」并指出文件夹);日志停留在 `Exchanging`;LaunchAgent plist 存在。若该 trial 的 receipt 在只读期间被拒:`receipt … not written …; the watch writes it again`,然后 `receipt … written by the trial's watch`。恢复后,trial 的 watchdog 到期时(该 trial 启动后 102 s、204 s、408 s、816 s;至多四次,前一次恢复仍在运行时不启动下一次)或 `open -n` / 登录时立即完成:`BT_UPDATE_RECOVER the trial <pid> runs and its receipt names it, and the journal does not record it: it is recorded`。home 仍为只读时,`open -n` 触发的恢复记录 `BT_UPDATE_RECOVER deferred: …` 且不启动第二个进程 `Committed` 然后 `Retired`;plist 已删除;旧 bundle 在 `stage/`、rescue 克隆已删除;窗口为 trial,卡片显示「Updated.」;该窗口打开时 `open -n` 不会启动留存的第二个副本,新版不被回滚;trial 窗口不会被自行结束;唯一可以结束从未变为 ready 的 trial 的是持有事务的恢复进程(本行替代排演的缺陷 9) |
 
 M 表的原始定义见 (b).2 的 macOS 表;上表与它的差别只在 M4/M5/M6 的阶段名(日志里是 `Moving`)
 与 M10 的两行。所有者自己的两步——§7.4(E-12:所有者本机、Gatekeeper 开着)与 cask 检查
 `scripts/release/check-cask-hooks.sh`——不在这些脚本里。
+
+macOS 上,trial 在被观察前结束(M9 在 `Trial` 之前被杀)不再耗费 90 秒:applier 看到启动结束(`the trial ended before it could be seen`)后立即回滚。此条适用于候选版 A 为 0.4.7 或更高;被信号杀死的 `open` 视为未知(applier 照常等待 trial 至截止时间)。
 
 #### 每一行检查什么(通用)
 

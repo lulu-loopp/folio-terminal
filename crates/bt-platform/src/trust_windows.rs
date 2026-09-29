@@ -697,7 +697,7 @@ pub(super) fn signature(path: &Path, policy: &Policy) -> Result<Signed, Refusal>
 
 // ── steps 4 to 6 ────────────────────────────────────────────────────────────
 
-fn file_version(path: &Path) -> Result<FileVersion, Refusal> {
+pub(super) fn file_version(path: &Path) -> Result<FileVersion, Refusal> {
     let file = wide(path)?;
     // SAFETY: the path is NUL-terminated.
     let size = unsafe { GetFileVersionInfoSizeW(PCWSTR(file.as_ptr()), None) };

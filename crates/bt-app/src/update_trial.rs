@@ -36,6 +36,22 @@
 //! so are the other diagnostics a run writes about itself — a hang report, the
 //! panic log — which are append-only accounts, not state a later run reads.
 //!
+//! # The watchdog (0.4.7 ticket U-37, design revision (h) H.2 and H.4)
+//!
+//! A trial whose transaction is still undecided [`WATCHDOG`] (102 s) after its
+//! watch began — longer than any lock holder alive takes to decide a trial it
+//! watches — is watched by nobody: its applier could not record it or died,
+//! or an exit guard started it with a nonce no journal records. It then hands
+//! its transaction back — at 102, 204, 408 and 816 s, [`HAND_BACKS`] times at
+//! most, never while the recovery it started before still runs: the recovery
+//! build is started from the watch worker with the entrance's own line and
+//! `--from-trial <pid>:<started>:<ready|unready>` ([`hand_back`]), only when
+//! that rescue build is 0.4.7 or later. The recovery records this trial if its
+//! receipt names it exactly and commits, ends it if it never became ready, and
+//! otherwise defers. **The trial never ends itself.** An unreadable journal is
+//! never handed back. A receipt the storage worker could not write is written
+//! again by the watch, with a growing pause, until it lands.
+//!
 //! # Readiness and the receipt (F-14, (b).2)
 //!
 //! Only N gives evidence of health, and its evidence is a file,
@@ -64,10 +80,11 @@ use std::sync::{Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use bt_platform::file_reads::{self, Lane};
+use bt_platform::install_flip::Running;
 
 use crate::persist;
 use crate::update_startup;
-use crate::update_txn::{Receipt, TrialSight, TxnId, trial_sight};
+use crate::update_txn::{Home, Receipt, TrialSight, TxnId, trial_sight};
 
 /// **Every durable writer a start makes, each held back by the gate while the
 /// start is a trial** — the inventory, one variant per writer and its site.
@@ -198,6 +215,12 @@ struct GateState {
     /// Where the storage worker answers for the receipt; the watch reads it
     /// and says in the log what became of it.
     receipt_answer: Option<mpsc::Receiver<persist::ReceiptWritten>>,
+    /// **The receipt as it was handed over** (U-37): what the watch writes
+    /// again when the storage worker's write was refused.
+    receipt_job: Option<ReceiptJob>,
+    /// The storage worker's write was refused and the watch has not yet
+    /// written it ([`Gate::write_owed_receipt`]).
+    receipt_owed: bool,
 }
 
 impl Gate {
@@ -212,6 +235,8 @@ impl Gate {
                 claim_adopted: false,
                 receipt_handed: false,
                 receipt_answer: None,
+                receipt_job: None,
+                receipt_owed: false,
             }),
         }
     }
@@ -318,6 +343,61 @@ impl Gate {
         self.state().claim_adopted = true;
     }
 
+    /// Where the storage worker answers for the receipt it was handed.
+    fn await_receipt(&self, answer: mpsc::Receiver<persist::ReceiptWritten>) {
+        self.state().receipt_answer = Some(answer);
+    }
+
+    /// **Whether this trial became ready** — its receipt fell due: the claim
+    /// adopted and its first pane text on the glass (U-37).
+    fn ready(&self) -> bool {
+        self.state().receipt_handed
+    }
+
+    /// **Ready, for a test's trial in a process of its own**: its claim
+    /// adopted and its receipt fallen due, as a trial's first pane text makes
+    /// it.
+    #[cfg(test)]
+    pub(crate) fn ready_for_a_test(&self) {
+        self.adopt_claim();
+        let _ = self.hand_receipt();
+    }
+
+    /// Keep the receipt as handed, for a write the watch owes again.
+    fn keep_receipt(&self, job: ReceiptJob) {
+        self.state().receipt_job = Some(job);
+    }
+
+    /// The storage worker's write of the receipt was refused: the watch owes
+    /// it.
+    fn owe_receipt(&self) {
+        self.state().receipt_owed = true;
+    }
+
+    /// **The receipt written again, create-new, when a write of it was
+    /// refused** (U-37): a home that refused it — made read-only, a scanner's
+    /// handle — may take it a moment later, and a receipt that never lands is
+    /// a healthy trial nobody can commit. `None` when nothing is owed; an
+    /// existing receipt is the one owed, never overwritten.
+    fn write_owed_receipt(&self) -> Option<Result<(), String>> {
+        let job = {
+            let state = self.state();
+            if !state.receipt_owed {
+                return None;
+            }
+            state.receipt_job.clone()?
+        };
+        let written = match bt_platform::install_txn::durable_create(&job.path, &job.bytes) {
+            Ok(()) => Ok(()),
+            Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
+            Err(failure) => Err(failure.to_string()),
+        };
+        if written.is_ok() {
+            self.state().receipt_owed = false;
+        }
+        Some(written)
+    }
+
     /// `true` once: the claim is adopted, the transaction undecided, and the
     /// receipt not yet handed over.
     fn hand_receipt(&self) -> bool {
@@ -399,7 +479,15 @@ pub(crate) fn begin_watch(wake: impl Fn() + Send + 'static) {
     let started = bt_platform::spawn_at_priority(
         "folio-trial-watch",
         bt_platform::ThreadPriority::BelowNormal,
-        move |_ctx| watch(&GATE, &journal, txn, WATCH_INTERVAL, &wake),
+        move |ctx| {
+            let mut hand_back =
+                |ready: bool| hand_back(ctx, home, txn, ready, FROM_TRIAL_SINCE, &mut Detached);
+            let mut watchdog = Watchdog {
+                every: WATCHDOG,
+                hand_back: &mut hand_back,
+            };
+            watch(&GATE, &journal, txn, WATCH_INTERVAL, &wake, &mut watchdog);
+        },
     );
     if let Err(error) = started {
         // No watch, so nothing will ever be released: the run writes nothing,
@@ -411,36 +499,131 @@ pub(crate) fn begin_watch(wake: impl Fn() + Send + 'static) {
     }
 }
 
-/// **The watch's loop**: read, decide, wait, until the transaction is decided.
-/// Read-only: the journal has one writer, and it is not this process.
-pub(crate) fn watch(gate: &Gate, journal: &Path, txn: TxnId, interval: Duration, wake: &dyn Fn()) {
+/// **How long a trial's transaction may stay undecided before the trial hands
+/// it back** (0.4.7 ticket U-37) — and again each time as long, while it stays
+/// so. Derived from the road's own budgets: a lock holder that watches a trial
+/// decides it by its deadline (`update_txn::TRIAL_DEADLINE_MS`, 90 s from the
+/// launch), and has stopped a trial that gave no receipt within the stop's
+/// two graces (5 s to quit, 5 s to end, `update_apply::Limits::PRODUCT`), its
+/// rollback's declaration asked again for at most
+/// `update_apply::JOURNAL_WRITE_WITHIN` (2 s) before that. A trial still
+/// undecided past their sum — 102 s — is watched by nobody alive: its applier
+/// could not record it or died, or it was started by an exit guard with a
+/// nonce no journal records (`update_apply::Opens::Trial`). The receipt
+/// normally lands within seconds of the launch, so the watchdog is never the
+/// way a healthy update ends.
+pub(crate) const WATCHDOG: Duration = Duration::from_millis(crate::update_txn::TRIAL_DEADLINE_MS)
+    .saturating_add(crate::update_apply::Limits::PRODUCT.quit_within)
+    .saturating_add(crate::update_apply::Limits::PRODUCT.end_within)
+    .saturating_add(crate::update_apply::JOURNAL_WRITE_WITHIN);
+
+/// **How many times a trial hands its transaction back** (design revision
+/// (h) H.2): at `every`, 2 × `every`, 4 × `every` and 8 × `every` after its
+/// watch began — 102 s, 204 s, 408 s and 816 s in the product — and never
+/// again; the next start or logon decides after that.
+pub(crate) const HAND_BACKS: u32 = 4;
+
+/// **The first pause before a refused receipt is written again**, doubled at
+/// each refusal up to [`RECEIPT_RETRY_CAP`] (H.2).
+pub(crate) const RECEIPT_RETRY_FIRST: Duration = Duration::from_millis(250);
+
+/// **The longest pause between two writes of a refused receipt** (H.2): about
+/// 127 attempts in an hour of a home that stays read-only.
+pub(crate) const RECEIPT_RETRY_CAP: Duration = Duration::from_secs(30);
+
+/// **The trial's watchdog** (U-37, H.2): at each due time of an undecided
+/// transaction, `hand_back` is called with whether this trial became ready
+/// (its receipt fell due) and answers the recovery it started, if any, by pid
+/// and start instant — in the product, [`hand_back`].
+pub(crate) struct Watchdog<'a> {
+    pub(crate) every: Duration,
+    pub(crate) hand_back: &'a mut dyn FnMut(bool) -> Option<Running>,
+}
+
+/// A watchdog that does not fire within any test.
+#[cfg(test)]
+pub(crate) fn watchdog_asleep() -> Watchdog<'static> {
+    Watchdog {
+        every: Duration::from_secs(3600),
+        hand_back: Box::leak(Box::new(|_: bool| None)),
+    }
+}
+
+/// **What one read of the journal told the watch** (H.2 step 2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Read {
+    /// The header, or no journal at all.
+    Seen(TrialSight),
+    /// Any other read error: not an answer about the transaction.
+    Unreadable,
+}
+
+/// **The watch's loop** (design revision (h) H.2), each turn in this order,
+/// until the transaction is decided: (1) the receipt — the storage worker's
+/// answer taken, a refused receipt written again, create-new, after a pause
+/// from [`RECEIPT_RETRY_FIRST`] doubling to [`RECEIPT_RETRY_CAP`]; (2) the
+/// journal read — a header decides, `NotFound` is the end, **any other error
+/// is `Unreadable`** and skips neither step 1 nor step 3; (3) the watchdog —
+/// at each of its [`HAND_BACKS`] due times, an `Undecided` transaction is
+/// handed back, single-flight (not while the recovery an earlier hand-back
+/// started still runs, by pid and start instant), and an `Unreadable` one is
+/// not (no holder could read it either); (4) the pause. Read-only on the
+/// journal: its one writer is not this process.
+pub(crate) fn watch(
+    gate: &Gate,
+    journal: &Path,
+    txn: TxnId,
+    interval: Duration,
+    wake: &dyn Fn(),
+    watchdog: &mut Watchdog<'_>,
+) {
+    let begun = Instant::now();
+    let mut spent: u32 = 0;
+    let mut recovery: Option<Running> = None;
+    let mut unreadable_since: Option<Instant> = None;
+    let (mut retry_at, mut pause) = (Instant::now(), RECEIPT_RETRY_FIRST);
     loop {
-        let bytes = match file_reads::read(Lane::UpdateJournal, journal) {
-            Ok(bytes) => Some(bytes),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            // Held by its writer for the instant of a rename, or a share that
-            // stopped answering: not an answer about the transaction.
-            Err(_) => {
-                std::thread::sleep(interval);
-                continue;
-            }
-        };
+        // (1) The receipt.
         if let Some(written) = gate.receipt_answered() {
             match written.result {
                 Ok(()) => eprintln!(
                     "BT_UPDATE_TRIAL receipt of {txn} written by {:?}",
                     written.by
                 ),
-                Err(error) => eprintln!(
-                    "BT_UPDATE_TRIAL receipt of {txn} not written by {:?}: {error}",
-                    written.by
-                ),
+                Err(error) => {
+                    eprintln!(
+                        "BT_UPDATE_TRIAL receipt of {txn} not written by {:?}: {error}; the watch writes it again",
+                        written.by
+                    );
+                    gate.owe_receipt();
+                    retry_at = Instant::now() + pause;
+                }
             }
         }
-        let sight = trial_sight(bytes.as_deref(), &txn);
-        match sight {
-            TrialSight::Undecided => std::thread::sleep(interval),
-            TrialSight::Committed => {
+        if Instant::now() >= retry_at {
+            match gate.write_owed_receipt() {
+                Some(Ok(())) => {
+                    eprintln!("BT_UPDATE_TRIAL receipt of {txn} written by the trial's watch");
+                }
+                Some(Err(_)) => {
+                    pause = pause.saturating_mul(2).min(RECEIPT_RETRY_CAP);
+                    retry_at = Instant::now() + pause;
+                }
+                None => {}
+            }
+        }
+        // (2) The journal.
+        let read = match file_reads::read(Lane::UpdateJournal, journal) {
+            Ok(bytes) => Read::Seen(trial_sight(Some(&bytes), &txn)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                Read::Seen(trial_sight(None, &txn))
+            }
+            // Held by its writer for the instant of a rename, or a share that
+            // stopped answering: not an answer about the transaction.
+            Err(_) => Read::Unreadable,
+        };
+        match read {
+            Read::Seen(sight @ TrialSight::Committed) => {
                 if gate.decide(sight) {
                     eprintln!(
                         "BT_UPDATE_TRIAL transaction {txn} is committed; its writes are released"
@@ -449,14 +632,41 @@ pub(crate) fn watch(gate: &Gate, journal: &Path, txn: TxnId, interval: Duration,
                 }
                 return;
             }
-            TrialSight::Ended => {
+            Read::Seen(sight @ TrialSight::Ended) => {
                 gate.decide(sight);
                 eprintln!(
                     "BT_UPDATE_TRIAL transaction {txn} ended without a commit; this run writes nothing"
                 );
                 return;
             }
+            Read::Seen(TrialSight::Undecided) => unreadable_since = None,
+            Read::Unreadable => {
+                unreadable_since.get_or_insert_with(Instant::now);
+            }
         }
+        // (3) The watchdog.
+        if spent < HAND_BACKS && Instant::now() >= begun + watchdog.every * (1 << spent) {
+            spent += 1;
+            if let Some(since) = unreadable_since {
+                eprintln!(
+                    "BT_UPDATE_TRIAL transaction {txn}: the journal has been unreadable for {} s; it is not handed back",
+                    since.elapsed().as_secs()
+                );
+            } else if recovery.is_some_and(bt_platform::install_flip::still_running) {
+                eprintln!(
+                    "BT_UPDATE_TRIAL transaction {txn} is undecided; the recovery handed it before still runs"
+                );
+            } else {
+                recovery = (watchdog.hand_back)(gate.ready());
+            }
+            if spent == HAND_BACKS {
+                eprintln!(
+                    "BT_UPDATE_TRIAL transaction {txn}: the watchdog is spent; the next start or logon decides"
+                );
+            }
+        }
+        // (4) The pause.
+        std::thread::sleep(interval);
     }
 }
 
@@ -518,7 +728,7 @@ pub(crate) struct ReceiptJob {
 /// **The storage worker has the receipt**: its answer is read by the watch,
 /// which says in the log what became of it.
 pub(crate) fn receipt_handed(answer: mpsc::Receiver<persist::ReceiptWritten>) {
-    GATE.state().receipt_answer = Some(answer);
+    GATE.await_receipt(answer);
 }
 
 /// **The trial is ready: its receipt, once** — asked by the window thread at
@@ -528,16 +738,149 @@ pub(crate) fn receipt_handed(answer: mpsc::Receiver<persist::ReceiptWritten>) {
 pub(crate) fn receipt_due() -> Option<ReceiptJob> {
     let (txn, nonce) = update_startup::trial()?;
     let home = update_startup::trial_home()?;
-    GATE.hand_receipt().then(|| ReceiptJob {
-        path: home.receipt_path(txn, &nonce),
-        bytes: Receipt {
-            txn,
-            nonce,
-            pid: std::process::id(),
-            version: crate::version::VERSION.to_owned(),
-        }
-        .encode(),
+    GATE.hand_receipt().then(|| {
+        let job = ReceiptJob {
+            path: home.receipt_path(txn, &nonce),
+            bytes: Receipt {
+                txn,
+                nonce,
+                pid: std::process::id(),
+                version: crate::version::VERSION.to_owned(),
+                // Its own start instant (H.1): what binds the receipt to
+                // this very process for a holder that did not start it.
+                started: bt_platform::install_flip::started_of(std::process::id()),
+            }
+            .encode(),
+        };
+        GATE.keep_receipt(job.clone());
+        job
     })
+}
+
+/// **The first version whose recovery build knows `--from-trial`** (design
+/// revision (h) H.4, rule A2): a trial hands its transaction back only to a
+/// rescue build of this version or later — for every update whose source build
+/// is older (0.4.6 to any later version) the watchdog is inert.
+pub(crate) const FROM_TRIAL_SINCE: (u16, u16, u16) = (0, 4, 7);
+
+/// **How a hand-back starts the recovery build** — the product's starts it
+/// detached through `quiet_command`; a test's records the line.
+pub(crate) trait Starter {
+    /// Start `program` with `line`, detached: the started process's pid.
+    ///
+    /// # Errors
+    /// It could not be started.
+    fn start(&mut self, program: &Path, line: &[std::ffi::OsString]) -> io::Result<u32>;
+}
+
+/// The product's [`Starter`]: `quiet_command`, the child dropped at once —
+/// never waited on or ended.
+pub(crate) struct Detached;
+
+impl Starter for Detached {
+    fn start(&mut self, program: &Path, line: &[std::ffi::OsString]) -> io::Result<u32> {
+        bt_platform::quiet_command(program)
+            .args(line)
+            .spawn()
+            .map(|child| child.id())
+    }
+}
+
+/// **The rescue build's version**, as `(major, minor, patch)`: on Windows the
+/// rescue executable's `VERSIONINFO` (`bt_platform::trust::file_version`), on
+/// macOS the rescue clone's `CFBundleShortVersionString`
+/// (`bt_platform::macos_update::short_version`, on this worker); `None` when it
+/// cannot be read.
+pub(crate) fn rescue_version(
+    worker: &bt_platform::admission::WorkerCtx,
+    home: &Home,
+    rescue: &str,
+) -> Option<(u16, u16, u16)> {
+    if home.installed_bundle().is_some() {
+        let version = bt_platform::macos_update::short_version(worker, Path::new(rescue)).ok()?;
+        let mut parts = version
+            .trim()
+            .split('.')
+            .map(|part| part.parse::<u16>().ok());
+        Some((
+            parts.next()??,
+            parts.next()??,
+            parts.next().unwrap_or(Some(0))?,
+        ))
+    } else {
+        let bt_platform::trust::FileVersion([major, minor, patch, _]) =
+            bt_platform::trust::file_version(Path::new(rescue)).ok()?;
+        Some((major, minor, patch))
+    }
+}
+
+/// **The trial's watchdog, in the product** (0.4.7 ticket U-37, design revision
+/// (h) H.4): this trial's transaction is still undecided at a due time, so
+/// nobody alive is deciding it — and it hands the transaction back to the
+/// recovery build with the entrance's own line and this trial's exact identity
+/// and state, `--from-trial <pid>:<started>:<ready|unready>`
+/// (`cli::recover_line_at_logon`, started through `starter` from this worker,
+/// never waited on) — **only to a rescue build of `since` or later** (rule A2;
+/// the product's is [`FROM_TRIAL_SINCE`]). The recovery, once it holds the
+/// transaction, records this trial when its receipt names it and commits; ends
+/// it when it never became ready; and otherwise defers while it runs (H.3).
+/// **This trial never ends itself** (rule A3): a recovery that dies in the
+/// loader, cannot take the lock or refuses the line leaves it running as the
+/// window, and the next due time tries again. It shows no card of its own.
+/// Answers the recovery it started, by pid and start instant.
+pub(crate) fn hand_back(
+    worker: &bt_platform::admission::WorkerCtx,
+    home: &Home,
+    txn: TxnId,
+    ready: bool,
+    since: (u16, u16, u16),
+    starter: &mut dyn Starter,
+) -> Option<Running> {
+    let Some(header) = file_reads::read(Lane::UpdateJournal, home.journal())
+        .ok()
+        .and_then(|bytes| crate::update_txn::Header::parse(&bytes).ok())
+    else {
+        // No journal to read: the watch reads the end on its next turn.
+        return None;
+    };
+    let program = home.rescue_program(&header.rescue);
+    match rescue_version(worker, home, &header.rescue) {
+        Some(version) if version >= since => {}
+        other => {
+            eprintln!(
+                "BT_UPDATE_TRIAL transaction {txn} is undecided; its rescue build ({other:?}) does not take a hand-back"
+            );
+            return None;
+        }
+    }
+    let me = std::process::id();
+    let process = Running {
+        pid: me,
+        started: bt_platform::install_flip::started_of(me)?,
+    };
+    let named = home.installed_bundle().map(|_| home.root());
+    let mut line = crate::cli::recover_line_at_logon(named);
+    line.push(std::ffi::OsString::from(crate::cli::FROM_TRIAL_FLAG));
+    line.push(std::ffi::OsString::from(
+        crate::cli::HandedBack { process, ready }.word(),
+    ));
+    match starter.start(&program, &line) {
+        Ok(pid) => {
+            eprintln!(
+                "BT_UPDATE_TRIAL transaction {txn} is undecided; it is handed back to {} ({})",
+                program.display(),
+                if ready { "ready" } else { "not ready" }
+            );
+            bt_platform::install_flip::started_of(pid).map(|started| Running { pid, started })
+        }
+        Err(error) => {
+            eprintln!(
+                "BT_UPDATE_TRIAL transaction {txn} is undecided and {} could not be started: {error}",
+                program.display()
+            );
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -545,7 +888,7 @@ mod tests {
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, mpsc};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
 
     use super::*;
@@ -739,9 +1082,16 @@ mod tests {
         let watch_woken = Arc::clone(&woken);
         let watched = journal.clone();
         let watcher = std::thread::spawn(move || {
-            watch(gate, &watched, TXN, Duration::from_millis(5), &|| {
-                watch_woken.fetch_add(1, Ordering::SeqCst);
-            });
+            watch(
+                gate,
+                &watched,
+                TXN,
+                Duration::from_millis(5),
+                &|| {
+                    watch_woken.fetch_add(1, Ordering::SeqCst);
+                },
+                &mut watchdog_asleep(),
+            );
         });
         std::thread::sleep(Duration::from_millis(60));
         assert_eq!(woken.load(Ordering::SeqCst), 0, "undecided: nothing yet");
@@ -791,9 +1141,16 @@ mod tests {
             let gate = Gate::new();
             assert!(gate.defer(true, Writer::Settings));
             let woken = AtomicUsize::new(0);
-            watch(&gate, &journal, TXN, Duration::from_millis(5), &|| {
-                woken.fetch_add(1, Ordering::SeqCst);
-            });
+            watch(
+                &gate,
+                &journal,
+                TXN,
+                Duration::from_millis(5),
+                &|| {
+                    woken.fetch_add(1, Ordering::SeqCst);
+                },
+                &mut watchdog_asleep(),
+            );
             assert_eq!(woken.load(Ordering::SeqCst), 0, "{ending:?}");
             assert!(gate.take_released().is_empty());
             assert!(gate.pending().is_empty(), "dropped");
@@ -802,6 +1159,364 @@ mod tests {
             assert!(gate.pending().is_empty(), "and nothing is held for later");
         }
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Watch `journal` on a thread of its own with the watchdog's period
+    /// `every`, `hand_back` answering each hand-back; the thread, and every
+    /// hand-back's instant (from the watch's start) and `ready` word.
+    #[allow(clippy::type_complexity)]
+    fn watching(
+        gate: &'static Gate,
+        journal: &Path,
+        every: Duration,
+        answer: Option<bt_platform::install_flip::Running>,
+    ) -> (
+        std::thread::JoinHandle<()>,
+        Arc<Mutex<Vec<(Duration, bool)>>>,
+    ) {
+        let handed: Arc<Mutex<Vec<(Duration, bool)>>> = Arc::default();
+        let seen = Arc::clone(&handed);
+        let watched = journal.to_path_buf();
+        let watcher = std::thread::spawn(move || {
+            let begun = Instant::now();
+            let mut hand_back = |ready: bool| {
+                seen.lock().unwrap().push((begun.elapsed(), ready));
+                answer
+            };
+            let mut watchdog = Watchdog {
+                every,
+                hand_back: &mut hand_back,
+            };
+            watch(
+                gate,
+                &watched,
+                TXN,
+                Duration::from_millis(5),
+                &|| {},
+                &mut watchdog,
+            );
+        });
+        (watcher, handed)
+    }
+
+    /// RED (U-37, design revision (h) H.2) — **an undecided transaction is
+    /// handed back at one, two, four and eight watchdog periods after the
+    /// watch began, never more; not while the recovery an earlier hand-back
+    /// started still runs; with the trial's readiness as it is at each; and
+    /// never once the transaction is decided.**
+    ///
+    /// Codex's review of `caea1099`, finding 2: the watchdog rearmed every
+    /// period for ever, and each hand-back could add a contender. Here with a
+    /// 40 ms period: a hand-back that answers no recovery is made four times;
+    /// one that answers a recovery still running (this process, by its pid and
+    /// start instant) is made once.
+    ///
+    /// MUTATION: in `watch`, hand back at every due time whatever `spent` and
+    /// the earlier recovery say.
+    #[test]
+    fn an_undecided_trial_hands_back_at_most_four_times_and_one_at_a_time() {
+        let root = scratch("watchdog");
+        let journal = root.join("journal.json");
+        std::fs::write(&journal, journal_bytes(TXN, trial_phase())).unwrap();
+        let every = Duration::from_millis(40);
+
+        let gate: &'static Gate = Box::leak(Box::new(Gate::new()));
+        let (watcher, handed) = watching(gate, &journal, every, None);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(handed.lock().unwrap().is_empty(), "not before one period");
+        std::thread::sleep(Duration::from_millis(70));
+        gate.adopt_claim();
+        assert!(gate.hand_receipt(), "the receipt falls due");
+        std::thread::sleep(Duration::from_millis(700));
+        let made = handed.lock().unwrap().clone();
+        assert_eq!(made.len(), HAND_BACKS as usize, "{made:?}");
+        for (at, (when, _)) in made.iter().enumerate() {
+            assert!(*when >= every * (1 << at), "due {at} at {when:?}");
+        }
+        assert!(!made[0].1 && made[3].1, "the readiness of each: {made:?}");
+        std::fs::write(&journal, journal_bytes(TXN, Phase::Committed)).unwrap();
+        watcher.join().expect("the watch stops at the commit");
+
+        std::fs::write(&journal, journal_bytes(TXN, trial_phase())).unwrap();
+        let gate: &'static Gate = Box::leak(Box::new(Gate::new()));
+        let (watcher, handed) = watching(
+            gate,
+            &journal,
+            every,
+            Some(crate::update_apply::this_process()),
+        );
+        std::thread::sleep(Duration::from_millis(700));
+        assert_eq!(
+            handed.lock().unwrap().len(),
+            1,
+            "never beside the recovery it started"
+        );
+        std::fs::write(&journal, journal_bytes(TXN, Phase::Committed)).unwrap();
+        watcher.join().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-37, H.2) — **a journal that cannot be read is no answer and no
+    /// excuse: the refused receipt is still written again, and nothing is
+    /// handed back while it stays unreadable — no holder could read it
+    /// either.**
+    ///
+    /// Codex's review of `caea1099`, finding 2: a read error `continue`d past
+    /// the receipt's retry and the watchdog's deadline.
+    ///
+    /// MUTATIONS: in `watch`, read the journal first and go back to the top of
+    /// the loop on a read error (the round-1 order); or hand back an
+    /// `Unreadable` transaction as an undecided one.
+    #[test]
+    fn an_unreadable_journal_still_retries_the_receipt_and_is_never_handed_back() {
+        let root = scratch("unreadable");
+        let home = Home::at(root.join("home"));
+        // A folder where the journal is: every read fails, and not with
+        // `NotFound`.
+        let journal = root.join("journal.json");
+        std::fs::create_dir_all(&journal).unwrap();
+        let job = ReceiptJob {
+            path: home.receipt_path(TXN, &nonce()),
+            bytes: b"{\"v\":1}".to_vec(),
+        };
+        let gate: &'static Gate = Box::leak(Box::new(Gate::new()));
+        gate.adopt_claim();
+        assert!(gate.hand_receipt());
+        gate.keep_receipt(job.clone());
+        gate.owe_receipt();
+        let (watcher, handed) = watching(gate, &journal, Duration::from_millis(30), None);
+        std::thread::sleep(Duration::from_millis(100));
+        std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while !job.path.exists() {
+            assert!(Instant::now() < give_up, "the receipt is written again");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(400));
+        assert!(handed.lock().unwrap().is_empty(), "never handed back");
+        std::fs::remove_dir_all(&journal).unwrap();
+        std::fs::write(&journal, journal_bytes(TXN, Phase::Committed)).unwrap();
+        watcher.join().unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-37, H.4 rules A1 and A3) — **a trial's watch, in a process of its
+    /// own, hands its transaction back to a rescue build that knows the word
+    /// with its own exact identity and state — `--from-trial
+    /// <pid>:<started>:unready` — and the process does not end itself.**
+    ///
+    /// The child is a copy of this test binary running the real watch and the
+    /// product's `hand_back`, whose start is recorded into a file (the rescue
+    /// build's argv); the rescue executable is a real program carrying
+    /// `VERSIONINFO` 0.4.7. The parent reads the line through the recovery
+    /// door's own grammar and ends the child by its handle. (Withdrawn (g).2
+    /// ended a not-ready trial with exit code 3 right after the start.)
+    ///
+    /// MUTATION: in `update_trial::hand_back`, leave the `--from-trial` word
+    /// out of the line.
+    #[test]
+    fn a_trial_watch_in_a_process_of_its_own_hands_back_its_identity_and_stays() {
+        if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
+            return;
+        }
+        if let Ok(root) = std::env::var("BT_U37_WATCH_CHILD") {
+            let root = PathBuf::from(root);
+            let home = Home::at(root.join("home"));
+            struct IntoAFile(PathBuf);
+            impl Starter for IntoAFile {
+                fn start(
+                    &mut self,
+                    program: &Path,
+                    line: &[std::ffi::OsString],
+                ) -> io::Result<u32> {
+                    let mut said = program.display().to_string();
+                    for word in line {
+                        said.push('\n');
+                        said.push_str(&word.to_string_lossy());
+                    }
+                    std::fs::write(&self.0, said)?;
+                    Ok(std::process::id())
+                }
+            }
+            let gate: &'static Gate = Box::leak(Box::new(Gate::new()));
+            let spawned = bt_platform::spawn_at_priority(
+                "bt-u37-watch-child",
+                bt_platform::ThreadPriority::BelowNormal,
+                move |ctx| {
+                    let mut starter = IntoAFile(root.join("line.txt"));
+                    let mut hand_back = |ready: bool| {
+                        hand_back(ctx, &home, TXN, ready, FROM_TRIAL_SINCE, &mut starter)
+                    };
+                    let mut watchdog = Watchdog {
+                        every: Duration::from_millis(100),
+                        hand_back: &mut hand_back,
+                    };
+                    watch(
+                        gate,
+                        &home.journal(),
+                        TXN,
+                        Duration::from_millis(10),
+                        &|| {},
+                        &mut watchdog,
+                    );
+                },
+            )
+            .unwrap();
+            // The child ends by itself, whatever the parent does: its watch
+            // never decides, so it is left behind when this returns.
+            drop(spawned);
+            std::thread::sleep(Duration::from_secs(30));
+            return;
+        }
+        let root = scratch("watch-child");
+        let home = Home::at(root.join("home"));
+        std::fs::create_dir_all(home.root()).unwrap();
+        let rescue = root.join("rescue-folio.exe");
+        bt_platform::trust_harness::program(
+            &rescue,
+            bt_platform::trust::FileVersion([0, 4, 7, 0]),
+            bt_platform::trust_harness::Behaviour::Returns,
+        )
+        .unwrap();
+        let mut journal = Journal::parse(&journal_bytes(TXN, trial_phase())).unwrap();
+        journal.rescue = rescue.display().to_string();
+        std::fs::write(home.journal(), journal.encode()).unwrap();
+        let child = bt_platform::quiet_command(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "update_trial::tests::a_trial_watch_in_a_process_of_its_own_hands_back_its_identity_and_stays",
+                "--nocapture",
+            ])
+            .env("BT_U37_WATCH_CHILD", &root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        /// Ends the child by its own handle whatever this test does.
+        struct Ended(std::process::Child);
+        impl Drop for Ended {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Ended(child);
+        let line = root.join("line.txt");
+        let give_up = Instant::now() + Duration::from_secs(60);
+        while !line.exists() {
+            assert!(Instant::now() < give_up, "the child hands back");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        let said = std::fs::read_to_string(&line).unwrap();
+        let mut words = said.lines();
+        assert_eq!(words.next(), Some(rescue.display().to_string().as_str()));
+        let line: Vec<std::ffi::OsString> = words.map(std::ffi::OsString::from).collect();
+        let Some(Ok(crate::cli::UpdateDoor::Recover {
+            home: None,
+            then_launch: None,
+            handed_back: Some(handed),
+        })) = crate::cli::update_door(line.clone())
+        else {
+            panic!("the recovery door's line: {line:?}");
+        };
+        let pid = child.0.id();
+        assert_eq!(
+            handed.process,
+            bt_platform::install_flip::Running {
+                pid,
+                started: bt_platform::install_flip::started_of(pid).unwrap(),
+            }
+        );
+        assert!(!handed.ready, "its first text never reached the glass");
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            matches!(child.0.try_wait(), Ok(None)),
+            "the trial does not end itself"
+        );
+        drop(child);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-37) — **a receipt whose write the storage worker could not make
+    /// is written again by the trial's watch once the home takes it**, create-
+    /// new, byte for byte the receipt that was handed over.
+    ///
+    /// The macOS rehearsal's D14: the home made read-only while the trial
+    /// starts refuses its one receipt, and a healthy trial nobody can commit
+    /// runs on with its writes held back. The real storage worker is asked
+    /// here; its transaction folder is missing, so its write is refused, and
+    /// the watch owes it; the folder then appears.
+    ///
+    /// MUTATION: in `Gate::write_owed_receipt`, answer `None` (never write it
+    /// again).
+    #[test]
+    fn a_refused_receipt_is_written_again_by_the_watch() {
+        let root = scratch("receipt-again");
+        let home = Home::at(root.join("home"));
+        let journal = root.join("journal.json");
+        std::fs::write(&journal, journal_bytes(TXN, trial_phase())).unwrap();
+        let mut store = persist::SessionStore::at(
+            root.join("data").join("session.json"),
+            root.join("data").join("session.lock"),
+        );
+        let job = ReceiptJob {
+            path: home.receipt_path(TXN, &nonce()),
+            bytes: Receipt {
+                txn: TXN,
+                nonce: nonce(),
+                pid: std::process::id(),
+                version: crate::version::VERSION.to_owned(),
+                started: None,
+            }
+            .encode(),
+        };
+        let gate: &'static Gate = Box::leak(Box::new(Gate::new()));
+        gate.adopt_claim();
+        assert!(gate.hand_receipt());
+        gate.keep_receipt(job.clone());
+        gate.await_receipt(store.write_receipt(job.clone()).expect("a writer"));
+        let watched = journal.clone();
+        let watcher = std::thread::spawn(move || {
+            watch(
+                gate,
+                &watched,
+                TXN,
+                Duration::from_millis(5),
+                &|| {},
+                &mut watchdog_asleep(),
+            );
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(!job.path.exists(), "the home refuses it for now");
+        std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+        let give_up = Instant::now() + Duration::from_secs(10);
+        while !job.path.exists() {
+            assert!(Instant::now() < give_up, "the watch writes it again");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(std::fs::read(&job.path).unwrap(), job.bytes);
+        std::fs::write(&journal, journal_bytes(TXN, Phase::Committed)).unwrap();
+        watcher.join().unwrap();
+        store.close();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// PIN (U-37) — **the watchdog's period is the road's own budgets summed**:
+    /// the trial's deadline, the stop's two graces and the declaration's retry
+    /// — past every decision a lock holder alive would make about a trial it
+    /// watches, and still under two minutes.
+    ///
+    /// MUTATION: `WATCHDOG` = the trial's deadline alone (90 s).
+    #[test]
+    fn the_watchdog_comes_after_every_decision_a_live_holder_makes() {
+        let limits = crate::update_apply::Limits::PRODUCT;
+        let decided = Duration::from_millis(limits.trial_within_ms)
+            + limits.quit_within
+            + limits.end_within
+            + crate::update_apply::JOURNAL_WRITE_WITHIN;
+        assert_eq!(WATCHDOG, decided);
+        assert!(WATCHDOG < Duration::from_secs(120), "{WATCHDOG:?}");
     }
 
     /// RED (U-13) — **the receipt is written by the storage worker, never by
@@ -828,6 +1543,7 @@ mod tests {
             nonce: nonce(),
             pid: std::process::id(),
             version: crate::version::VERSION.to_owned(),
+            started: None,
         };
         let path = home.receipt_path(TXN, &nonce());
         let answer = store
@@ -878,6 +1594,7 @@ mod tests {
                 nonce: nonce(),
                 pid,
                 version: "0.0.1".to_owned(),
+                started: None,
             }
             .encode();
             store

@@ -71328,9 +71328,11 @@ fn main() -> Result<()> {
     }
     if let Some(door) = cli::update_door(std::env::args_os().skip(1)) {
         let usage = match door {
-            Ok(cli::UpdateDoor::Recover { home, then_launch }) => {
-                std::process::exit(update_recover::run_here(home, then_launch))
-            }
+            Ok(cli::UpdateDoor::Recover {
+                home,
+                then_launch,
+                handed_back,
+            }) => std::process::exit(update_recover::run_here(home, then_launch, handed_back)),
             Ok(cli::UpdateDoor::Apply { home, txn, nonce }) => match bt_platform::host_platform() {
                 bt_platform::HostPlatform::MacOs => {
                     std::process::exit(update_apply_macos::run_here(&home, &txn, &nonce))
