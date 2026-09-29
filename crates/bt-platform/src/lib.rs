@@ -3463,6 +3463,37 @@ pub mod launch_pipe;
 /// A fifth unsafe boundary against a fifth thing: Win32 turned on the keyboard
 /// and the foreground **while another program has both**. See the module's own
 /// header for why the chord and the handover are one subject.
+/// **Whether an answer of `MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)` marks a dead key**: its top
+/// bit, which the function's documentation defines as "dead keys (diacritics) are indicated by
+/// setting the top bit of the return value". Nothing else in the answer is read — the low word is
+/// `0` for ordinary text keys on several layouts (Kazakh `VK_OEM_1`, which types `ж`), so a `0`
+/// says nothing about whether the key types (T-KEYBOARD-RECORDS). Pure, so a test can hold it on
+/// any host; `virtual_key_is_dead` is the one caller that has a real answer to give it.
+#[must_use]
+pub fn vk_to_char_marks_a_dead_key(answer: u32) -> bool {
+    answer & 0x8000_0000 != 0
+}
+
+#[cfg(test)]
+mod dead_key_answer_tests {
+    use super::vk_to_char_marks_a_dead_key;
+
+    /// RED (T-KEYBOARD-RECORDS, review round 4) — **only the top bit marks a dead key: the French
+    /// dead circumflex is one, and a `0` answer (Kazakh `ж` on `VK_OEM_1`) is not.**
+    ///
+    /// MUTATION: also treat a `0` answer as "not a text key" (the Kazakh assertion goes red), or
+    /// read the low word for the circumflex (the French assertion goes red).
+    #[test]
+    fn only_the_top_bit_marks_a_dead_key() {
+        // French `VK_OEM_6`: the dead `^`, reported with the top bit set.
+        assert!(vk_to_char_marks_a_dead_key(0x8000_005E));
+        // Kazakh `VK_OEM_1`: types `ж`, and the map answers 0.
+        assert!(!vk_to_char_marks_a_dead_key(0));
+        // An ordinary US key: `1`.
+        assert!(!vk_to_char_marks_a_dead_key(0x31));
+    }
+}
+
 pub mod hotkey;
 
 /// The first frame of a video, out of Media Foundation — see the module's own
@@ -6634,24 +6665,25 @@ mod windows_impl {
             .filter(|virtual_key| *virtual_key != 0)
     }
 
-    /// Whether **the installed layout** types an ordinary character on this
-    /// virtual key with no modifier held — not a dead key, and not a key that
-    /// types nothing.
+    /// Whether **the installed layout** makes this virtual key a dead key — one
+    /// that composes with the next key rather than typing.
     ///
-    /// `MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)` answers the unshifted character in
-    /// the low word, `0` when there is none, and "dead keys (diacritics) are
+    /// `MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)`: "dead keys (diacritics) are
     /// indicated by setting the top bit of the return value" (the function's
-    /// documentation). winit cannot say this any more: it reports a dead key's
-    /// key without modifiers as the character it would compose
-    /// (`platform_impl/windows/keyboard.rs`, "We convert dead keys into their
-    /// character"), so a key encoder that must refuse a composing key asks the
-    /// layout itself (T-KEYBOARD-RECORDS). One synchronous call on the calling
-    /// thread's layout, with no pointer and no wait.
+    /// documentation). Only that bit is read. The low word is not: it is `0` for
+    /// ordinary text keys on several layouts (Kazakh `VK_OEM_1`, which types `ж`),
+    /// so a `0` there says nothing about whether the key types. winit cannot say
+    /// "dead" any more: it reports a dead key's key without modifiers as the
+    /// character it would compose (`platform_impl/windows/keyboard.rs`, "We
+    /// convert dead keys into their character"), so a key encoder that must refuse
+    /// a composing key asks the layout itself (T-KEYBOARD-RECORDS). One
+    /// synchronous call on the calling thread's layout, with no pointer and no
+    /// wait.
     #[must_use]
-    pub fn virtual_key_types_a_character(virtual_key: u16) -> bool {
+    pub fn virtual_key_is_dead(virtual_key: u16) -> bool {
         // SAFETY: as for `virtual_key_of_scan_code`: two integers by value.
         let answer = unsafe { MapVirtualKeyW(u32::from(virtual_key), MAPVK_VK_TO_CHAR) };
-        answer != 0 && answer & 0x8000_0000 == 0
+        crate::vk_to_char_marks_a_dead_key(answer)
     }
 
     pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
@@ -12173,8 +12205,8 @@ pub use windows_impl::{
     set_window_topmost, silence_std_streams, stand_window_at, standalone_alert,
     std_error_is_console, stop_flashing_window, system_backdrop_available, system_uses_light_apps,
     take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
-    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_key_of_scan_code,
-    virtual_key_types_a_character, virtual_screen_rect, wheel_scroll_amount, window_is_exposed,
+    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_key_is_dead,
+    virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount, window_is_exposed,
     work_area_at, write_std_error, write_to_console,
 };
 
@@ -12197,8 +12229,8 @@ pub use portable_impl::{
     is_window_cloaked, leave_process, let_the_system_translate_touch, read_context_menu,
     redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
     set_system_backdrop, silence_std_streams, system_backdrop_available, thread_mouse_capture,
-    virtual_key_for_character, virtual_key_of_scan_code, virtual_key_types_a_character,
-    write_std_error, write_to_console,
+    virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code, write_std_error,
+    write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).

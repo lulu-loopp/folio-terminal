@@ -2002,7 +2002,7 @@ impl Runtime<'_> {
                 physical_key: event.physical_key,
                 text_with_all_modifiers: event.text_with_all_modifiers(),
                 virtual_key_of_scan_code: bt_platform::virtual_key_of_scan_code,
-                virtual_key_types_a_character: bt_platform::virtual_key_types_a_character,
+                virtual_key_is_dead: bt_platform::virtual_key_is_dead,
                 conpty,
             },
         ) else {

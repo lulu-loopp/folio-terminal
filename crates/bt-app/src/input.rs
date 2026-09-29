@@ -968,10 +968,9 @@ pub(crate) struct KeyOrigin<'a> {
     /// The installed layout's virtual key for a scan code: `bt_platform::virtual_key_of_scan_code`
     /// in the product, a fixed layout in a test.
     pub(crate) virtual_key_of_scan_code: fn(u16) -> Option<u16>,
-    /// Whether the installed layout types an ordinary character on a virtual key with no
-    /// modifier — `false` for a dead key: `bt_platform::virtual_key_types_a_character` in the
-    /// product, a fixed layout in a test.
-    pub(crate) virtual_key_types_a_character: fn(u16) -> bool,
+    /// Whether the installed layout makes a virtual key a dead key: `bt_platform::virtual_key_is_dead`
+    /// in the product, a fixed layout in a test.
+    pub(crate) virtual_key_is_dead: fn(u16) -> bool,
     /// Which pseudoconsole the pane runs on (`bt_pty::PtySession::conpty_kind`, fixed at spawn).
     /// Records are written only to the ConPTY Folio ships ([`key_records`]).
     pub(crate) conpty: ConPtyKind,
@@ -1008,9 +1007,10 @@ const ENHANCED_KEY: u16 = 0x0100;
 ///   A key whose key without modifiers is not text, or that has no scan code (a media key), is
 ///   not one; **nor is a dead key**, which winit reports as the character it would compose
 ///   (`keyboard.rs`: "We convert dead keys into their character"), so the installed layout is
-///   asked whether the virtual key types an ordinary character
-///   ([`KeyOrigin::virtual_key_types_a_character`], `MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)`, whose
-///   top bit marks a dead key). The French layout's dead `^` under Ctrl+Alt is refused.
+///   asked only whether the virtual key is a dead key ([`KeyOrigin::virtual_key_is_dead`], the top
+///   bit of `MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)`; its low word is `0` for ordinary keys on some
+///   layouts, so it is not read). The French layout's dead `^` under Ctrl+Alt is refused, the
+///   Kazakh layout's `ж` key is its record.
 ///
 /// **Only on the ConPTY Folio ships** ([`ConPtyKind::Shipped`]; coordinator's ruling,
 /// 2026-09-29). A process falls back to the operating system's ConPTY on its own when the
@@ -1094,7 +1094,7 @@ fn key_records(
                     key_without_modifiers,
                     Key::Character(text) if !text.chars().any(char::is_control)
                 )
-                && (origin.virtual_key_types_a_character)(*virtual_key) =>
+                && !(origin.virtual_key_is_dead)(*virtual_key) =>
         {
             *virtual_key
         }
@@ -3210,15 +3210,10 @@ mod tests {
         None
     }
 
-    fn no_character(_: u16) -> bool {
+    /// A layout with no dead keys — the US layout among them (`MapVirtualKeyExW(vk,
+    /// MAPVK_VK_TO_CHAR, 0x04090409)` sets the dead-key bit on none of its keys).
+    fn no_dead_keys(_: u16) -> bool {
         false
-    }
-
-    /// Whether the US layout types an ordinary character on a virtual key — it has no dead keys,
-    /// so every digit, letter and punctuation key does (`MapVirtualKeyExW(vk, MAPVK_VK_TO_CHAR,
-    /// 0x04090409)` sets the dead-key bit on none of them).
-    fn us_types_a_character(virtual_key: u16) -> bool {
-        matches!(virtual_key, 0x30..=0x39 | 0x41..=0x5A | 0xBA..=0xC0 | 0xDB..=0xDE)
     }
 
     /// A press that says nothing about itself beyond its key: for the tests whose mode writes no
@@ -3228,7 +3223,7 @@ mod tests {
         physical_key: PhysicalKey::Unidentified(NativeKeyCode::Unidentified),
         text_with_all_modifiers: None,
         virtual_key_of_scan_code: no_virtual_key,
-        virtual_key_types_a_character: no_character,
+        virtual_key_is_dead: no_dead_keys,
         conpty: ConPtyKind::Shipped,
     };
 
@@ -3386,7 +3381,7 @@ mod tests {
                 physical_key: self.physical_key,
                 text_with_all_modifiers: self.text.as_deref(),
                 virtual_key_of_scan_code: us_virtual_key,
-                virtual_key_types_a_character: us_types_a_character,
+                virtual_key_is_dead: no_dead_keys,
                 conpty: if platform == HostPlatform::Windows {
                     ConPtyKind::Shipped
                 } else {
@@ -4002,7 +3997,7 @@ mod tests {
                     physical_key: PhysicalKey::Code(physical),
                     text_with_all_modifiers: typed,
                     virtual_key_of_scan_code: us_virtual_key,
-                    virtual_key_types_a_character: us_types_a_character,
+                    virtual_key_is_dead: no_dead_keys,
                     conpty: ConPtyKind::Shipped,
                 },
             )
@@ -4126,7 +4121,7 @@ mod tests {
                     physical_key: PhysicalKey::Code(KeyCode::Enter),
                     text_with_all_modifiers: Some("\n"),
                     virtual_key_of_scan_code: us_virtual_key,
-                    virtual_key_types_a_character: us_types_a_character,
+                    virtual_key_is_dead: no_dead_keys,
                     conpty: ConPtyKind::Shipped,
                 },
             )
@@ -4382,32 +4377,45 @@ mod tests {
         );
     }
 
-    /// RED (T-KEYBOARD-RECORDS, review round 3) — **a dead key under Ctrl+Alt is not a record,
-    /// though winit reports its key without modifiers as text.**
+    /// RED (T-KEYBOARD-RECORDS, review rounds 3 and 4) — **a dead key under Ctrl+Alt is not a
+    /// record, though winit reports its key without modifiers as text; an ordinary key the map
+    /// answers `0` for is.**
     ///
     /// winit turns a dead key into the character it would compose when it builds
     /// `key_without_modifiers` (winit 0.30.13 `platform_impl/windows/keyboard.rs`, "We convert dead
     /// keys into their character"). On the French layout the dead `^` is `VK_OEM_6` (221) at scan
     /// code 26, and Ctrl+Alt types nothing on it, so the press arrives as
     /// `Key::Unidentified(NativeKey::Windows(221))` with the key without modifiers `^` — the same
-    /// shape as a text key. The layout itself tells them apart (`MapVirtualKeyW(vk,
-    /// MAPVK_VK_TO_CHAR)` sets the top bit for a dead key), and the encoder asks it: the dead key
-    /// sends what it sent before (nothing), while an ordinary key of the same layout (`&` on the
-    /// `1` key, `VK_1`) is still its record.
+    /// shape as a text key. On the Kazakh layout `VK_OEM_1` (186) at scan code 39 types `ж` and
+    /// Ctrl+Alt types nothing on it: the same shape again, and this one is a text key. The layout
+    /// tells them apart only by the top bit of `MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)`, which is set
+    /// for the circumflex; for `ж` the whole answer is `0`. Both layouts are modelled here by that
+    /// answer, read through the product's own reading of it (`bt_platform::vk_to_char_marks_a_dead_key`).
     ///
-    /// MUTATION: drop the `virtual_key_types_a_character` condition from `key_records`'
-    /// `Key::Unidentified` arm (the dead `^` reads `ESC[221;26;0;1;10;1_…`).
+    /// MUTATION: drop the `virtual_key_is_dead` condition from `key_records`' `Key::Unidentified`
+    /// arm (the dead `^` reads `ESC[221;26;0;1;10;1_…`), or refuse a key the map answers `0` for
+    /// (the Kazakh `ж` reads nothing).
     #[test]
     fn a_dead_key_under_ctrl_alt_is_not_a_record() {
-        fn french_types_a_character(virtual_key: u16) -> bool {
-            // `VK_OEM_6` is the dead circumflex on the French layout; its digits row types
-            // `& é " ' ( - è _ ç à` without a modifier.
-            virtual_key != 0xDD
+        /// `MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)` on the French layout: the dead circumflex on
+        /// `VK_OEM_6` carries the top bit; `VK_1` types `&`.
+        fn french_is_dead(virtual_key: u16) -> bool {
+            let answer = if virtual_key == 0xDD {
+                0x8000_005E
+            } else {
+                0x26
+            };
+            bt_platform::vk_to_char_marks_a_dead_key(answer)
+        }
+        /// The same map on the Kazakh layout: `0` for `VK_OEM_1`, which types `ж`.
+        fn kazakh_is_dead(virtual_key: u16) -> bool {
+            let answer = if virtual_key == 0xBA { 0 } else { 0x31 };
+            bt_platform::vk_to_char_marks_a_dead_key(answer)
         }
         let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
-        let sent = |logical: &Key, base: &str, physical| {
+        let sent = |virtual_key: u16, base: &str, physical, is_dead: fn(u16) -> bool| {
             keyboard_bytes(
-                logical,
+                &Key::Unidentified(NativeKey::Windows(virtual_key)),
                 &Key::Character(base.into()),
                 KeyLocation::Standard,
                 ctrl_alt,
@@ -4418,28 +4426,25 @@ mod tests {
                     physical_key: PhysicalKey::Code(physical),
                     text_with_all_modifiers: None,
                     virtual_key_of_scan_code: no_virtual_key,
-                    virtual_key_types_a_character: french_types_a_character,
+                    virtual_key_is_dead: is_dead,
                     conpty: ConPtyKind::Shipped,
                 },
             )
         };
         assert_eq!(
-            sent(
-                &Key::Unidentified(NativeKey::Windows(0xDD)),
-                "^",
-                KeyCode::BracketLeft
-            ),
+            sent(0xDD, "^", KeyCode::BracketLeft, french_is_dead),
             None,
-            "the dead circumflex"
+            "the French dead circumflex"
         );
         assert_eq!(
-            sent(
-                &Key::Unidentified(NativeKey::Windows(0x31)),
-                "&",
-                KeyCode::Digit1
-            ),
+            sent(0x31, "&", KeyCode::Digit1, french_is_dead),
             Some(b"\x1b[49;2;0;1;10;1_\x1b[49;2;0;0;10;1_".to_vec()),
-            "an ordinary key of the same layout"
+            "an ordinary key of the French layout"
+        );
+        assert_eq!(
+            sent(0xBA, "ж", KeyCode::Semicolon, kazakh_is_dead),
+            Some(b"\x1b[186;39;0;1;10;1_\x1b[186;39;0;0;10;1_".to_vec()),
+            "the Kazakh `ж`, which the map answers 0 for"
         );
     }
 
@@ -4538,7 +4543,7 @@ mod tests {
                     physical_key: physical,
                     text_with_all_modifiers: None,
                     virtual_key_of_scan_code: us_virtual_key,
-                    virtual_key_types_a_character: us_types_a_character,
+                    virtual_key_is_dead: no_dead_keys,
                     conpty: ConPtyKind::Shipped,
                 },
             )
@@ -4631,7 +4636,7 @@ mod tests {
             physical_key: physical,
             text_with_all_modifiers: typed,
             virtual_key_of_scan_code: layout_answers_a_for_the_a_key_and_end_for_numpad_1,
-            virtual_key_types_a_character: us_types_a_character,
+            virtual_key_is_dead: no_dead_keys,
             conpty: ConPtyKind::Shipped,
         };
         let sent = |key: &Key, location, modifiers, origin| {

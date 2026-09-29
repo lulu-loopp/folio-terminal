@@ -1193,11 +1193,11 @@ pub fn virtual_key_of_scan_code(scan_code: u16) -> Option<u16> {
     None
 }
 
-/// Whether the installed layout types an ordinary character on a Win32 virtual
-/// key. **There is no such question here**, for `virtual_key_of_scan_code`'s
-/// reason: the one reader writes a Windows console's key records.
+/// Whether the installed layout makes a Win32 virtual key a dead key. **There is
+/// no such question here**, for `virtual_key_of_scan_code`'s reason: the one
+/// reader writes a Windows console's key records.
 #[must_use]
-pub fn virtual_key_types_a_character(virtual_key: u16) -> bool {
+pub fn virtual_key_is_dead(virtual_key: u16) -> bool {
     let _ = virtual_key;
     false
 }
