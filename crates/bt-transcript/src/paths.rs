@@ -2767,6 +2767,9 @@ pub struct PrintedPathLinks {
     /// What the pane has learned about its `[Image #k]` placeholders: number -> the file a program
     /// linked it to (T-IMAGE-N). Read only by [`Self::image_placeholder_links_in`].
     image_placeholders: BTreeMap<u32, PathBuf>,
+    /// The target the pane learned most recently, the one fact an unlearned number is inferred
+    /// from (owner ruling 2026-09-29). `None` while nothing is learned.
+    latest_image_placeholder: Option<PathBuf>,
 }
 
 /// A reference an application cut across one or more real newlines, put back together — and the
@@ -2840,6 +2843,7 @@ impl PrintedPathLinks {
             verdicts,
             namespace: namespace.clone(),
             image_placeholders: BTreeMap::new(),
+            latest_image_placeholder: None,
         }
     }
 
@@ -3374,6 +3378,30 @@ impl ImagePlaceholderTargets {
         self.targets.get(&number).map(PathBuf::as_path)
     }
 
+    /// The target learned most recently — the newest end of the learning order.
+    #[must_use]
+    pub fn latest(&self) -> Option<&Path> {
+        self.order.back().and_then(|number| self.target(*number))
+    }
+
+    /// **Where a number this pane never saw linked would be, if the agent keeps it beside the
+    /// newest one** (owner ruling 2026-09-29): `<folder of the most recently learned target>/
+    /// <number>.<that target's extension>`.
+    ///
+    /// An inference, not a link: it names a candidate the pane's worker is asked about, and it is
+    /// a link only once the disk says the file is there. It is bounded to that one folder and that
+    /// one extension — never another folder, never a list of spellings tried in turn — and it goes
+    /// with the table when the table is emptied.
+    #[must_use]
+    pub fn inferred_target(latest: &Path, number: u32) -> Option<PathBuf> {
+        let folder = latest.parent()?;
+        let name = match latest.extension() {
+            Some(extension) => format!("{number}.{}", extension.to_string_lossy()),
+            None => number.to_string(),
+        };
+        Some(folder.join(name))
+    }
+
     /// Forget every number. Answers whether there was anything to forget.
     pub fn forget_all(&mut self) -> bool {
         let had = !self.targets.is_empty();
@@ -3399,16 +3427,21 @@ impl PrintedPathLinks {
     #[must_use]
     pub fn with_image_placeholders(mut self, placeholders: &ImagePlaceholderTargets) -> Self {
         self.image_placeholders = placeholders.targets.clone();
+        self.latest_image_placeholder = placeholders.latest().map(Path::to_path_buf);
         self
     }
 
     /// The `file:` links the `[Image #k]` placeholders on one line of text offer, and — into
-    /// `unknown` — every learned target nobody has been to the disk for yet.
+    /// `unknown` — every target nobody has been to the disk for yet.
     ///
-    /// **The verified-link rule, unchanged** (§7.1.5j): a number this pane never saw linked is
-    /// text; a target the disk has answered "no" for is text; a target nobody has asked about is
-    /// text *and a question*, put to the pane's worker through the same sink every printed path's
-    /// question goes through. Only a "yes" is a link.
+    /// **The verified-link rule, unchanged** (§7.1.5j): a target the disk has answered "no" for
+    /// is text; a target nobody has asked about is text *and a question*, put to the pane's worker
+    /// through the same sink every printed path's question goes through. Only a "yes" is a link.
+    ///
+    /// The target is the learned one when the number was learned — a learned target always wins
+    /// — and otherwise the one [`ImagePlaceholderTargets::inferred_target`] infers beside the most
+    /// recently learned target (owner ruling 2026-09-29). A pane that has learned nothing has no
+    /// folder to infer from, and its placeholders are text.
     ///
     /// The caller decides *where* this is read: the rows an agent's input line can stand on, and
     /// nowhere else (`bt_viewport`'s `implicit_hyperlinks`).
@@ -3422,14 +3455,24 @@ impl PrintedPathLinks {
         }
         let mut links = Vec::new();
         for (range, number) in image_placeholder_ranges(text) {
-            let Some(target) = self.image_placeholders.get(&number) else {
-                continue;
+            let target = match self.image_placeholders.get(&number) {
+                Some(learned) => learned.clone(),
+                None => {
+                    let Some(inferred) =
+                        self.latest_image_placeholder.as_deref().and_then(|latest| {
+                            ImagePlaceholderTargets::inferred_target(latest, number)
+                        })
+                    else {
+                        continue;
+                    };
+                    inferred
+                }
             };
-            match self.verdicts.get(target) {
-                Some(true) => links.push((range, local_path_to_file_uri(target))),
+            match self.verdicts.get(&target) {
+                Some(true) => links.push((range, local_path_to_file_uri(&target))),
                 Some(false) => {}
                 None => {
-                    unknown.insert(target.clone());
+                    unknown.insert(target);
                 }
             }
         }
@@ -9037,12 +9080,12 @@ mod image_placeholder_tests {
                 .map(|(range, uri)| (&line[range.byte_start..range.byte_end], uri.clone()))
                 .collect::<Vec<_>>(),
             vec![("[Image #3]", local_path_to_file_uri(&picture(3)))],
-            "3 is verified; 4 is unanswered, 5 is gone, 6 was never linked"
+            "3 is verified; 4 is unanswered, 5 is gone, 6 is only inferred and unanswered"
         );
         assert_eq!(
             unknown,
-            [picture(4)].into_iter().collect(),
-            "only the unanswered target is a question"
+            [picture(4), picture(6)].into_iter().collect(),
+            "only unanswered targets are questions: the learned 4, and 6 inferred beside 5"
         );
         let mut none = BTreeSet::new();
         assert!(
@@ -9051,6 +9094,65 @@ mod image_placeholder_tests {
                 .is_empty()
                 && none.is_empty(),
             "a pane that learned nothing links nothing and asks nothing"
+        );
+    }
+
+    /// RED (T-IMAGE-N, owner ruling 2026-09-29) — **a number the pane never saw linked is
+    /// inferred beside the most recently learned picture, and is a link only when the disk says
+    /// that file is there; a learned number keeps its learned target.**
+    ///
+    /// The inference is `<folder of the newest learned target>/<k>.<its extension>` and nothing
+    /// else: not another learned target's folder, not another extension. It is bounded by the
+    /// disk — a "yes" links, a "no" is text, silence is text and a question — so a wrong guess
+    /// costs one question and draws nothing.
+    ///
+    /// MUTATIONS: link an inferred target with no verdict, and `[Image #6]` is a link before
+    /// anybody asked; infer before looking the number up, and `[Image #3]` points at the newest
+    /// folder instead of the file the transcript linked.
+    #[test]
+    fn an_unlearned_number_is_inferred_beside_the_newest_picture_and_links_only_on_a_yes() {
+        let older = std::env::temp_dir().join("older-conversation");
+        let newer = std::env::temp_dir().join("newer-conversation");
+        let mut table = ImagePlaceholderTargets::default();
+        table.learn(3, older.join("3.png"));
+        table.learn(9, newer.join("9.jpg"));
+        let links = PrintedPathLinks::new(
+            None,
+            [
+                (older.join("3.png"), true),
+                (newer.join("3.jpg"), true),
+                (newer.join("4.jpg"), true),
+                (older.join("5.png"), true),
+                (newer.join("5.jpg"), false),
+            ]
+            .into_iter()
+            .collect(),
+        )
+        .with_image_placeholders(&table);
+        let line = "[Image #3] [Image #4] [Image #5] [Image #6]";
+        let mut unknown = BTreeSet::new();
+        let found = links.image_placeholder_links_in(line, &mut unknown);
+        assert_eq!(
+            found
+                .iter()
+                .map(|(range, uri)| (&line[range.byte_start..range.byte_end], uri.clone()))
+                .collect::<Vec<_>>(),
+            vec![
+                ("[Image #3]", local_path_to_file_uri(&older.join("3.png"))),
+                ("[Image #4]", local_path_to_file_uri(&newer.join("4.jpg"))),
+            ],
+            "3 keeps its learned file; 4 is inferred beside 9 and the disk said yes; 5's \
+             inferred file is gone (an older folder holding a 5 is never tried); 6 is unanswered"
+        );
+        assert_eq!(
+            unknown,
+            [newer.join("6.jpg")].into_iter().collect(),
+            "the unanswered inference is a question for the worker"
+        );
+        assert_eq!(
+            ImagePlaceholderTargets::inferred_target(&newer.join("9"), 4),
+            Some(newer.join("4")),
+            "a target without an extension infers a name without one"
         );
     }
 }

@@ -26269,7 +26269,8 @@ mod tests {
         );
         assert!(
             frame.hyperlink_at(2, 24).is_none(),
-            "a number the pane never saw linked is text"
+            "a number never linked, inferred beside the newest learned picture where nothing is, is \
+             text"
         );
         std::fs::remove_file(&present).unwrap();
         std::fs::remove_dir(&directory).unwrap();
@@ -26323,6 +26324,97 @@ mod tests {
             "and the frame after the answer draws the link"
         );
         std::fs::remove_file(&present).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED (T-IMAGE-N, owner ruling 2026-09-29) — **a freshly pasted `[Image #4]` the transcript
+    /// has not linked yet is inferred beside the newest learned picture, and lights only after the
+    /// worker says that file exists; an inferred file that is not there stays text.**
+    ///
+    /// The owner's case: the picture is pasted and not yet sent, so no link for 4 exists anywhere,
+    /// but 3 was linked into `<folder>/3.png`. The pane infers `<folder>/4.png` and asks its worker
+    /// through the one question door; until the answer lands the frame draws text.
+    ///
+    /// MUTATION: link an inferred target without its verdict in
+    /// `PrintedPathLinks::image_placeholder_links_in`, and the frame before the answer draws it.
+    #[test]
+    fn a_pasted_image_4_is_inferred_beside_the_learned_3_and_lights_when_the_disk_has_it() {
+        let directory = temporary_pictures(&["3.png", "4.png"]);
+        let (learned, inferred, absent) = (
+            directory.join("3.png"),
+            directory.join("4.png"),
+            directory.join("5.png"),
+        );
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        session
+            .feed(
+                format!(
+                    "{}\r\n> [Image #4] [Image #5]",
+                    image_placeholder_link(3, &learned)
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        let before_the_answer = session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        assert!(
+            before_the_answer.hyperlink_at(1, 2).is_none(),
+            "an inference nobody has answered is text"
+        );
+        let mut asked = Vec::new();
+        while let Some(task) = session.take_decoration_worker_task() {
+            if let SessionDecorationTask::VerifyPath(path) = task {
+                let verdict = verify_path(&path);
+                asked.push(path.clone());
+                session.complete_path_verification(path, verdict);
+            }
+        }
+        asked.sort();
+        let mut expected = vec![learned.clone(), inferred.clone(), absent.clone()];
+        expected.sort();
+        assert_eq!(asked, expected, "every candidate went to the worker");
+        let after = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            after.hyperlink_at(1, 2).map(|hit| hit.uri),
+            Some(bt_transcript::paths::local_path_to_file_uri(&inferred)),
+            "the inferred picture the disk holds is a link"
+        );
+        assert!(
+            after.hyperlink_at(1, 13).is_none(),
+            "an inferred picture the disk does not hold is text"
+        );
+        for file in [learned, inferred] {
+            std::fs::remove_file(file).unwrap();
+        }
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED (T-IMAGE-N, owner ruling 2026-09-29) — **with no learned picture there is no folder to
+    /// infer from: the placeholder is text and nothing is asked.**
+    ///
+    /// MUTATION: infer from any folder when nothing is learned (the pane's reference directory,
+    /// say), and a question goes out for a file no link ever named.
+    #[test]
+    fn with_no_learned_picture_a_placeholder_is_text_and_nothing_is_asked() {
+        let directory = temporary_pictures(&["4.png"]);
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        session.set_spawn_directory(Some(directory.clone()));
+        session.feed(b"> [Image #4]").unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+        assert!(
+            frame.hyperlink_at(0, 2).is_none(),
+            "the placeholder is text"
+        );
+        assert_eq!(
+            session.path_verdict(&directory.join("4.png")),
+            None,
+            "and nobody asked the disk about any file for it"
+        );
+        std::fs::remove_file(directory.join("4.png")).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }
 
