@@ -1,8 +1,8 @@
 # The kitty keyboard protocol's disambiguate tier and xterm's modifyOtherKeys in Folio's terminal — design note, 2026-09-29
 
-0.4.7 ticket KP-0 (docs only). T-KEYBOARD-PROTOCOL implements it after Codex's review. Base: main `38b5743b`. **Revision (b), 2026-09-29**, folds in Codex's review (`keyboard-protocol-review-codex-2026-09-29.md`, beside this note); the list of what changed is at the end, and the sections below are the current text.
+0.4.7 ticket KP-0 (docs only). T-KEYBOARD-PROTOCOL implements it after Codex's review. Base: main `38b5743b`. **Revision (b), 2026-09-29**, folds in Codex's review (`keyboard-protocol-review-codex-2026-09-29.md`, beside this note); **Revision (c), 2026-09-29**, records the owner's rulings on Q1–Q3 (§7.1). The lists of what changed are at the end, and the sections below are the current text.
 
-The owner's rulings of 2026-09-28 that this note works under: this is the first ticket of 0.4.7; there is **no Alt+Enter ESC-prefix hack** (PSReadLine reads a lone ESC as clear-line, and ConPTY turns `ESC CR` into an Alt+Enter key record); **only the disambiguate tier (flag 1) is built now**, and the other kitty flags wait until a program we care about needs them; **win32-input-mode is not planned**. §1 reports a fact that bears on the third ruling. It is question Q1 in §9, and it does not change what this note decides for T-KEYBOARD-PROTOCOL.
+The owner's rulings of 2026-09-28 that this note works under: this is the first ticket of 0.4.7; there is **no Alt+Enter ESC-prefix hack** (PSReadLine reads a lone ESC as clear-line, and ConPTY turns `ESC CR` into an Alt+Enter key record); **only the disambiguate tier (flag 1) is built now**, and the other kitty flags wait until a program we care about needs them; **win32-input-mode is not planned**. §1 reports a fact that bears on the third ruling. The owner ruled on it on 2026-09-29 (§7.1), narrowing "not planned" to T-KEYBOARD-RECORDS; that ruling does not change what this note decides for T-KEYBOARD-PROTOCOL.
 
 Notation: `CSI` is `\e[`; `\e` is ESC; `\r \t \x7f` are CR, HT, DEL. S, A and C are Shift, Alt and Ctrl. The kitty/xterm modifier number is `1 + S·1 + A·2 + C·4`, plus `Super·8`, which Folio never produces (§4.1).
 
@@ -17,8 +17,8 @@ Notation: `CSI` is `\e[`; `\e` is ESC; `\r \t \x7f` are CR, HT, DEL. S, A and C 
 5. **Encoding follows kitty's own encoder (`kitty/key_encoding.c`) for flag 1, and xterm for modifyOtherKeys** (xterm's reference table for which chords are encoded, xterm's default `formatOtherKeys=0` for the wire form). Folio's standing policies sit on top: Super never reaches the child, and on a Mac Option types text unless the setting makes it Alt. §4.4 has the full table; the ticket moves it into a TSV that the test and this document share, and keeps a separate hard-coded oracle for the normative spot checks.
 6. **No prompt-time recovery in this ticket.** A program that dies with flags on leaves them on until `RIS`, a pop, or a new shell (§2.4 says what the person does). Restoring at OSC 133 was proposed in the first draft and withdrawn: the marker cannot tell a nested shell's prompt from the outer shell's return, and restoring there can strip a live program's flags.
 7. **The shortcut table, the cards, the paste roads and IME composition are untouched.** The encoder is the last rung of the key ladder, and it is the only rung that changes.
-8. **One ticket, T-KEYBOARD-PROTOCOL, size M–L**, with two commits (the bt-term state with vendored `vte`, and the bt-app encoder) merged together. Either half on its own is worse than neither (§7). **T-FKEYS** (legacy F1–F12, which send nothing today) is its prerequisite, so the flag-1 forms of F1–F4 land here on top of it.
-9. **Flag 1 cannot reach some programs on Windows** (§1, confirmed by the review). A program that reads the console's key records never asks for the protocol, and could not read its bytes if it did. This covers Codex, PowerShell/PSReadLine, cmd and anything built on crossterm's Windows backend. **Issue #13's reporter (Codex on Windows 11) is one of them, so T-KEYBOARD-PROTOCOL does not close #13.** Q1 asks the owner whether Folio should send those chords the way Windows Terminal and WezTerm send them to such programs: as a win32-input-mode key record, for those chords only, in a second ticket. §9 writes out what each answer means. Whichever answer the owner gives, the reply on #13 needs correcting.
+8. **One ticket, T-KEYBOARD-PROTOCOL, size M–L**, with two commits (the bt-term state with vendored `vte`, and the bt-app encoder) merged together. Either half on its own is worse than neither (§7). **T-FKEYS** (legacy F1–F12, which send nothing today) is its prerequisite, so the flag-1 forms of F1–F4 land here on top of it. The full order is in §7.2: T-FKEYS → T-KEYBOARD-PROTOCOL → T-KEYBOARD-RECORDS, with T-CTRL-SPACE and T-ALT-BACKSPACE on their own.
+9. **Flag 1 cannot reach some programs on Windows** (§1, confirmed by the review). A program that reads the console's key records never asks for the protocol, and could not read its bytes if it did. This covers Codex, PowerShell/PSReadLine, cmd and anything built on crossterm's Windows backend. Issue #13's reporter (Codex on Windows 11) is one of them. **Owner ruling 2026-09-29 (Q1 = A):** those programs are reached by **T-KEYBOARD-RECORDS** (§7.3). It sends the chords VT cannot express as win32-input-mode key records, the way Windows Terminal and WezTerm do. Ctrl+Enter submit therefore works for Codex on Windows in 0.4.7, and #13 closes with that ticket. Its change to PowerShell is intended and is disclosed in the release note.
 
 ---
 
@@ -177,7 +177,7 @@ The encoder applies the first of these rules that matches:
 2. The key produces printable text (a `Character` with no control character, or `Space`), and no modifier other than Shift is held → **the text** (unchanged).
 3. Enter, Tab or Backspace with **no** modifier → `\r`, `\t`, `\x7f`. This is the spec's exception, so that `reset` can still be typed.
 4. Arrows, Home and End send `CSI 1;m X` with a modifier (unchanged) and `CSI X` without one — **the CSI form even under DECCKM**. Kitty's encoder uses `SS3` only in legacy mode (`encode_function_key`: `cursor_key_mode && legacy_mode`), and Ghostty does the same. Insert, Delete, PageUp and PageDown are unchanged.
-5. A keypad key that produced no text → `CSI code;m u`, using the spec's keypad code (`KP_ENTER` 57414, `KP_LEFT` 57417 … `KP_DELETE` 57426). This covers Numpad Enter, and the keypad's arrows, Home, End, Insert, Delete, PageUp and PageDown with Num Lock off. Keypad digits and operators produce text, so rule 2 handles them. (See Q2.)
+5. A keypad key that produced no text → `CSI code;m u`, using the spec's keypad code (`KP_ENTER` 57414, `KP_LEFT` 57417 … `KP_DELETE` 57426). This covers Numpad Enter, and the keypad's arrows, Home, End, Insert, Delete, PageUp and PageDown with Num Lock off. Keypad digits and operators produce text, so rule 2 handles them. (Owner ruling Q2, 2026-09-29: follow the spec.)
 6. Everything else that has a code → `CSI code;m u`, leaving out `;m` when `m = 1`. The codes are: Escape 27, Enter 13, Tab 9, Backspace 127, Space 32, and for a text key the character from `key_without_modifiers`. This rule covers Esc on its own, every Alt chord, every Ctrl chord (including `Ctrl+i`, `Ctrl+m`, `Ctrl+[` and `Ctrl+c`), Shift+Tab (`CSI 9;2u`, not `CSI Z`), Ctrl+digit, and every modified Enter, Tab, Backspace and Space.
 
 7. Function keys (on top of T-FKEYS, the prerequisite that gives F1–F12 their legacy forms: `SS3 P/Q/R/S` and `CSI 15~ … CSI 24~`, with modifiers `CSI 1;m P/Q/R/S` and `CSI n;m ~`): under flag 1, F1, F2 and F4 are `CSI P`, `CSI Q`, `CSI S` without modifiers and `CSI 1;m P/Q/S` with them; F3 is `CSI 13~` / `CSI 13;m~` (kitty removed `CSI R` because it collides with the cursor position report); F5–F12 are as legacy. This is kitty's `encode_function_key`. Folio's encoder has **no case for F-keys today**, so F1–F12 send nothing (§8 F-1); that legacy fix is T-FKEYS's, not this ticket's, because it changes bytes for programs that never asked.
@@ -389,7 +389,7 @@ These tests run on `TerminalAdapter`, observing `modes().keyboard` and `take_pty
 2. **A key-record reader** (PowerShell, `[Console]::ReadKey($true)` in a loop, printing `Key`, `Modifiers` and `KeyChar`):
    - sent `\e[13;5u`, it reads the characters `ESC [ 1 3 ; 5 u` as seven key events and no `Enter`+`Control` — asserted, because it is the fact that makes §1's third row true;
    - sent `\e[27;5;13~`, it reads nothing;
-   - sent Folio's win32-input-mode record pair for Ctrl+Enter (built like `SHIFT_ENTER_RECORDS`), it reads `Enter` with `Control`. This is the transport T-KEYBOARD-RECORDS would use (Q1-A).
+   - sent Folio's win32-input-mode record pair for Ctrl+Enter (built like `SHIFT_ENTER_RECORDS`), it reads `Enter` with `Control`. This is the transport T-KEYBOARD-RECORDS uses (§7.3).
 3. **A VT-input reader** (the same script after `SetConsoleMode(…ENABLE_VIRTUAL_TERMINAL_INPUT)`, reading `[Console]::In`): sent `\e[13;5u`, it reads exactly those bytes; sent `\e[27;5;13~`, it reads exactly those bytes.
 4. **A native Node raw-stdin reader** — the stand-in for Claude Code on Windows, whose transport this is: `node -e` with `process.stdin.setRawMode(true)`, writing `\e[?u` and printing every chunk it reads as hex. It receives `\e[?0u` for its query, and sent `\e[13;5u` it reads exactly those seven bytes. This case needs `node` on `PATH`. It runs in the ticket's acceptance run on the release machine, where Node is installed; when `node` is missing the test **fails** with that reason rather than skipping, and CI selects it out by name rather than letting it pass silently.
 
@@ -400,10 +400,10 @@ If 4 fails, §1's second row is wrong, and the ticket stops and reports before a
 | Program | Where | Expected (pass/fail) |
 |---|---|---|
 | Codex TUI, with the reporter's config (Ctrl+Enter submits, Enter inserts a newline) | macOS; WSL | Ctrl+Enter submits, Enter inserts a newline |
-| Codex TUI, same config | Windows native | **unchanged**: Ctrl+Enter inserts a newline, as today. Under Q1-B this is the expected result and #13 stays open (narrowed); under Q1-A, T-KEYBOARD-RECORDS owns this row and it becomes "Ctrl+Enter submits" |
+| Codex TUI, same config | Windows native | **unchanged by this ticket**: Ctrl+Enter inserts a newline, as today. T-KEYBOARD-RECORDS owns this row, where it becomes "Ctrl+Enter submits" (§7.3) |
 | neovim, with `:inoremap <C-CR> …` and a `:map <C-i>` distinct from `<Tab>` | macOS; WSL | both fire; Esc leaves insert mode immediately (no `ttimeout` wait) |
 | fish, with `bind ctrl-enter …` and `bind ctrl-i …` | macOS; WSL | both fire; after running `nvim` and `:q`, Ctrl+C at the prompt clears the line |
-| PowerShell 7 and 5.1 + PSReadLine | Windows | byte-identical to today (Ctrl+Enter, Shift+Enter and Alt+Enter run the line, as today) |
+| PowerShell 7 and 5.1 + PSReadLine | Windows | byte-identical to today after this ticket (Ctrl+Enter, Shift+Enter and Alt+Enter run the line). T-KEYBOARD-RECORDS changes this on purpose (§7.3, gate 3) |
 | Claude Code, default keybindings | macOS; WSL; Windows native | it answers `CSI ? u` and pushes `CSI > 5 u`; Shift+Enter inserts a newline and Enter submits. On Windows native this row passes if and only if §6.3 case 4 passes, and it is not released as fixed otherwise |
 | `kitten show-key -m kitty` | macOS | matches §4.4's kitty column for the ten keys and the F1–F4 rows |
 | `cat -v` / `showkey -a` | macOS; WSL | the legacy column is unchanged when no program has asked |
@@ -411,9 +411,31 @@ If 4 fails, §1's second row is wrong, and the ticket stops and reports before a
 
 ---
 
-## 7. Ticket cut
+## 7. Owner rulings and the ticket cut
 
-**T-KEYBOARD-PROTOCOL is one ticket, size M–L.** The parser half is small but now includes a vendored `vte` with three changed arms. The encoder half is a table-driven rewrite of one function plus its call site. The real-ConPTY test, with four readers, is the largest single piece. The ticket is two commits on one branch, merged together:
+### 7.1 Rulings (owner, 2026-09-29)
+
+- **Q1 = A.** Folio writes win32-input-mode records on Windows for the chords VT cannot express, in the follow-up ticket T-KEYBOARD-RECORDS, with the three gates of §7.3. This narrows the 2026-09-28 ruling "win32-input-mode not planned": Folio still does not adopt the mode for every key. The PowerShell change (Shift+Enter → *AddLine*, Ctrl+Enter → *InsertLineAbove*, Alt+Enter → nothing, instead of running the line) is **intended**, and the release note discloses it. **#13's wording is confirmed**: Ctrl+Enter submit works in 0.4.7 for Codex on Windows, through the records. #13 closes when T-KEYBOARD-RECORDS ships.
+- **Q2 = the spec.** Under flag 1, keypad keys that produce no text send their keypad codes (Numpad Enter → `CSI 57414u`), as §4.2 rule 5 says.
+- **Q3 = its own small ticket.** `Ctrl+Space` → NUL is T-CTRL-SPACE, not part of T-KEYBOARD-PROTOCOL.
+
+Record of the alternative not taken: *B — keep "win32-input-mode not planned", leave #13 open and narrowed to key-record programs on Windows, and ship "Codex, Windows native: unchanged".*
+
+### 7.2 The tickets, in order
+
+| # | Ticket | Size | Platform | Depends on |
+|---|---|---|---|---|
+| 1 | **T-FKEYS** — legacy F1–F12 | S | both | — (prerequisite) |
+| 2 | **T-KEYBOARD-PROTOCOL** — kitty flag 1 and modifyOtherKeys | M–L | both | T-FKEYS |
+| 3 | **T-KEYBOARD-RECORDS** — win32-input-mode records for the chords VT cannot express | M | Windows only | T-KEYBOARD-PROTOCOL |
+| 4 | **T-CTRL-SPACE** — `Ctrl+Space` / `Ctrl+Shift+Space` → NUL (F-2) | S | both | — |
+| 4 | **T-ALT-BACKSPACE** — `Alt+Backspace` → `\e\x7f` (F-3), with its ConPTY behaviour checked | S | both | — |
+
+T-CTRL-SPACE and T-ALT-BACKSPACE are independent of each other and of 1–3. Each changes a legacy byte for programs that never ask, so each carries its own acceptance, and whichever of them lands after T-KEYBOARD-PROTOCOL updates `key_encoding.tsv`'s legacy column in the same commit.
+
+**T-FKEYS (S).** F1–F12 get their legacy forms (`SS3 P/Q/R/S`, `CSI 15~ … 24~`, with `CSI 1;m X` / `CSI n;m ~` for modifiers), with table rows and tests. It lands first so that flag 1's F1–F4 rule has something to change, and so that the claim "supports the first tier" is complete. It is its own ticket because it changes bytes for programs that never ask.
+
+**T-KEYBOARD-PROTOCOL (M–L).** The parser half is small but includes a vendored `vte` with three changed arms. The encoder half is a table-driven rewrite of one function plus its call site. The real-ConPTY test, with four readers, is the largest single piece. Two commits on one branch, merged together:
 
 1. `vendor/vte` + `vendor/alacritty_terminal` + `bt-term`:
    - the vendored `vte` and its three arms (§3);
@@ -425,67 +447,71 @@ If 4 fails, §1's second row is wrong, and the ticket stops and reports before a
    - the tests of §6.1 and §6.3.
 2. `bt-app`:
    - `keyboard_bytes` takes `(key, key_without_modifiers, location, modifiers, application_cursor_mode, keyboard)`;
-   - the rules of §4.2 (F1–F4's flag-1 forms included) and §4.3;
+   - the rules of §4.2 (F1–F4's flag-1 forms and the keypad codes included) and §4.3;
    - `key_encoding.tsv`, the generator, `docs/key-encoding.md`, and the independent oracle;
    - the tests of §6.2.
 
-It is not two tickets, because each half on its own is worse than neither. The state on its own makes Folio answer `CSI ? u`, so programs push flag 1 and then receive legacy bytes they were told they would not get; Claude Code, for one, would switch on its extended-keys mode for nothing. The encoder on its own has no mode to read.
+It is not two tickets, because each half on its own is worse than neither. The state on its own makes Folio answer `CSI ? u`, so programs push flag 1 and then receive legacy bytes they were told they would not get; Claude Code, for one, would switch on its extended-keys mode for nothing. The encoder on its own has no mode to read. Its promise is literal: a program that never asks receives exactly the bytes it received before. PowerShell is byte-identical after this ticket, and changes only with T-KEYBOARD-RECORDS.
 
-**Prerequisite: T-FKEYS, size S.** F1–F12 get their legacy forms (`SS3 P/Q/R/S`, `CSI 15~ … 24~`, with `CSI 1;m X` / `CSI n;m ~` for modifiers), with table rows and tests. It lands before T-KEYBOARD-PROTOCOL so that flag 1's F1–F4 rule has something to change, and so that the claim "supports the first tier" is complete. It is its own ticket because it changes bytes for programs that never ask.
+Out of scope for T-KEYBOARD-PROTOCOL:
 
-**Explicitly out of scope:**
-
-- kitty flags 2, 4, 8 and 16 (report event types, alternate keys, all keys as escape codes, associated text);
-- win32-input-mode (owner ruling 2026-09-28; but see Q1);
+- kitty flags 2, 4, 8 and 16;
+- win32-input-mode records (T-KEYBOARD-RECORDS);
 - the Alt+Enter ESC-prefix hack (owner ruling 2026-09-28);
 - recovery from a dead program's flags at the prompt (§2.4: withdrawn, with the negative trace);
 - DECSTR itself (§2.1);
 - a user setting;
 - lock-modifier bits;
-- Alt+Backspace (F-3, its own ticket).
+- Ctrl+Space and Alt+Backspace (their own tickets).
 
-**Q1's two branches, and what follows from each:**
+### 7.3 T-KEYBOARD-RECORDS (M, Windows only)
 
-- **Q1-A: T-KEYBOARD-RECORDS (Windows), size S–M, after T-KEYBOARD-PROTOCOL.** A chord whose legacy bytes cannot tell it apart (a modified Enter, Tab, Backspace, Escape or Space, and Ctrl with a key that has no C0 code) is written as a win32-input-mode down/up record pair, built like `SHIFT_ENTER_RECORDS`; every other key keeps its VT bytes. Three gates, all required:
-  1. **Track `?9001h`.** The adapter records whether win32-input-mode is currently requested (ConPTY sets it at the session's start and again after a `RIS`, and a nested ConPTY can turn it off). Records are written only while it is on **and** the pane's kitty flags and modifyOtherKeys are both 0. "No program asked for kitty or modifyOtherKeys" alone is not proof that the transport is there.
-  2. **Assert through a real ConPTY for all three readers**: a key-record reader gets `Enter`+`Control`; a VT-input reader gets what ConPTY's own encoder produces for that record (asserted exactly, whatever it is, so a change in ConPTY is seen); a native Node/libuv reader gets bytes that are no worse than today's `\r` for Ctrl+Enter (asserted exactly).
-  3. **The PowerShell change is intended behaviour, stated in the CHANGELOG.** In PSReadLine's default Windows edit mode, Shift+Enter is `AddLine` and Ctrl+Enter is `InsertLineAbove`; today Folio collapses both to Enter, which runs the line. After T-KEYBOARD-RECORDS they do what PSReadLine binds them to, as in Windows Terminal. Alt+Enter is unbound there, so it does nothing instead of running the line. The ticket's acceptance row for PowerShell changes from "byte-identical" to these three expectations.
+On Windows, a chord whose legacy bytes cannot tell it apart is written as a win32-input-mode down/up record pair, built like `SHIFT_ENTER_RECORDS`. These chords are a modified Enter, Tab, Backspace, Escape or Space, and Ctrl with a key that has no C0 code. Every other key keeps its VT bytes. The set is a column of `key_encoding.tsv` ("records"), so the same table and oracle cover it. Three gates, all required:
 
-  It owns the "Codex on Windows native" acceptance row, and #13 closes when it ships.
-- **Q1-B: the 2026-09-28 ruling stands.** No second ticket. #13 stays open, narrowed to "native Windows programs that read console key records (Codex, PSReadLine)". The acceptance matrix keeps "Codex, Windows native: unchanged" as the expected result. The reply on #13 is corrected to say what 0.4.7 fixes (macOS, WSL, and programs that ask for the protocol) and what it does not (Codex on Windows), and the CHANGELOG line says so too.
+1. **Track `?9001h`.** The adapter records whether win32-input-mode is currently requested. ConPTY requests it at the start of the session and again after a `RIS`, and a nested ConPTY can turn it off. Records are written only while it is on **and** the pane's kitty flags and modifyOtherKeys are both 0. "No program asked for kitty or modifyOtherKeys" alone is not proof that the transport is there. When a program has asked for kitty or modifyOtherKeys, that program's protocol wins, as §4.3 already rules.
+2. **Assert the result through a real ConPTY for all three readers**, extending §6.3's test:
+   - a key-record reader gets `Enter` + `Control` for Ctrl+Enter, and likewise for each chord in the set;
+   - a VT-input reader gets what ConPTY's own encoder produces for that record, asserted exactly, so that a change in ConPTY is caught;
+   - a native Node/libuv reader gets bytes asserted exactly, and no worse than today's `\r` for Ctrl+Enter.
+3. **The PowerShell change is intended behaviour, and the release note discloses it.** In PSReadLine's default Windows edit mode, Shift+Enter is `AddLine` and Ctrl+Enter is `InsertLineAbove`. Today Folio collapses both to Enter, which runs the line. After this ticket they do what PSReadLine binds them to, as in Windows Terminal. Alt+Enter is unbound there, so it does nothing instead of running the line. The PowerShell acceptance row is these three expectations, on PowerShell 7 and 5.1.
 
-**DESIGN.md entry, for the ticket to write when it lands** (English, dated, at the end, like the entries before it):
+Acceptance, on the candidate build: Codex on Windows native, with the reporter's configuration: Ctrl+Enter submits and Enter inserts a newline. This row moves here from §6.4. The PowerShell row is as in gate 3. Claude Code on Windows native keeps T-KEYBOARD-PROTOCOL's row, because it asks for kitty, and kitty wins over records.
+
+### 7.4 Texts for the tickets to write when they land
+
+**DESIGN.md entry for T-KEYBOARD-PROTOCOL** (English, dated, at the end, like the entries before it):
 
 > ### 2026-09-xx — A program that asks for the kitty keyboard protocol's disambiguate tier, or for xterm's modifyOtherKeys, gets it, and Folio answers the query with what is in force
 >
-> 0.4.7 ticket T-KEYBOARD-PROTOCOL; design note `docs/plans/design/keyboard-protocol-2026-09-29.md` (revision (b)) and its Codex review; issue #13. Each pane's terminal keeps, per screen, the kitty flags in force and a stack of eight saved values (`CSI > u`, `CSI < u` — an explicit `0` pops nothing —, `CSI = u`, `CSI ? u`); only flag 1 is honoured, other bits are dropped where they are handled and named once in `diagnostics.log`. modifyOtherKeys (`CSI > 4 ; v m`, `CSI > m` resets it, `CSI ? 4 m`) is one value per terminal. `vte` is vendored for those three arms. By Folio's policy the alternate screen starts with no flags and its flags end with it (Windows Terminal does the same; Ghostty and WezTerm keep them); `RIS` clears both screens and modifyOtherKeys; `DECSTR`, which Folio does not implement, changes neither — unlike xterm, which resets modifyOtherKeys there. Nothing at a prompt touches the state: a program that dies with flags on leaves them until `reset`, a pop, or a new shell. The encoder reads the mode from `TerminalModes::keyboard` and encodes from `key_encoding.tsv` (generated into `docs/key-encoding.md`, with an independent oracle beside it): under flag 1, Esc and every Alt, Ctrl and modified Enter/Tab/Backspace/Space chord is `CSI code;m u` with the un-shifted key as the code, plain Enter/Tab/Backspace stay `\r \t \x7f`, arrows ignore DECCKM, F1–F4 take their CSI forms, and non-text keypad keys take their keypad codes; under modifyOtherKeys, `CSI 27;m;k~` (xterm's `formatOtherKeys=0`) for xterm's classes; kitty wins when both are set. Super is never encoded; Option follows *Option key sends Alt*. A program that never asks — PSReadLine, cmd, Codex on Windows — receives exactly the bytes it received before.
+> 0.4.7 ticket T-KEYBOARD-PROTOCOL; design note `docs/plans/design/keyboard-protocol-2026-09-29.md` (revision (c)) and its Codex review; owner rulings of 2026-09-29; issue #13. Each pane's terminal keeps, per screen, the kitty flags in force and a stack of eight saved values (`CSI > u`, `CSI < u` — an explicit `0` pops nothing —, `CSI = u`, `CSI ? u`); only flag 1 is honoured, other bits are dropped where they are handled and named once in `diagnostics.log`. modifyOtherKeys (`CSI > 4 ; v m`, `CSI > m` resets it, `CSI ? 4 m`) is one value per terminal. `vte` is vendored for those three arms. By Folio's policy the alternate screen starts with no flags and its flags end with it (Windows Terminal does the same; Ghostty and WezTerm keep them); `RIS` clears both screens and modifyOtherKeys; `DECSTR`, which Folio does not implement, changes neither — unlike xterm, which resets modifyOtherKeys there. Nothing at a prompt touches the state: a program that dies with flags on leaves them until `reset`, a pop, or a new shell. The encoder reads the mode from `TerminalModes::keyboard` and encodes from `key_encoding.tsv` (generated into `docs/key-encoding.md`, with an independent oracle beside it): under flag 1, Esc and every Alt, Ctrl and modified Enter/Tab/Backspace/Space chord is `CSI code;m u` with the un-shifted key as the code, plain Enter/Tab/Backspace stay `\r \t \x7f`, arrows ignore DECCKM, F1–F4 take their CSI forms, and non-text keypad keys take their keypad codes (owner ruling Q2); under modifyOtherKeys, `CSI 27;m;k~` (xterm's `formatOtherKeys=0`) for xterm's classes; kitty wins when both are set. Super is never encoded; Option follows *Option key sends Alt*. A program that never asks — PSReadLine, cmd, Codex on Windows — receives exactly the bytes it received before; on Windows, T-KEYBOARD-RECORDS is what reaches those.
 
-**CHANGELOG line** (under *Added*):
+**CHANGELOG line for T-KEYBOARD-PROTOCOL** (under *Added*):
 
-> - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter, Shift+Tab, Ctrl+I, Ctrl+M and Esc apart from Enter, Tab and a lone escape: Folio supports the first tier of the kitty keyboard protocol and xterm's modifyOtherKeys. neovim, fish, helix and Claude Code ask for it, and so does Codex on macOS and in WSL. Programs that do not ask, such as PowerShell, are unaffected, and so is Codex running natively on Windows.
+> - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter, Shift+Tab, Ctrl+I, Ctrl+M and Esc apart from Enter, Tab and a lone escape: Folio supports the first tier of the kitty keyboard protocol and xterm's modifyOtherKeys. neovim, fish, helix and Claude Code ask for it, and so does Codex on macOS and in WSL. Programs that do not ask are unaffected.
 
-The last clause holds under Q1-B. Under Q1-A, T-KEYBOARD-RECORDS removes it and adds its own line: "On Windows, Ctrl+Enter, Shift+Enter and Alt+Enter reach console programs such as Codex and PowerShell as those keys; in PowerShell, Shift+Enter now adds a line and Ctrl+Enter inserts one above, as in Windows Terminal." The "first tier" wording assumes T-FKEYS has merged; if it has not, the line names the chords only and drops "supports the first tier".
+**CHANGELOG lines for T-KEYBOARD-RECORDS** (under *Added* and *Changed*; the release note carries the second one as well):
+
+> - On Windows, Ctrl+Enter, Shift+Enter and Alt+Enter reach console programs such as Codex as those keys, so a Codex set up to submit with Ctrl+Enter now does.
+>
+> - In PowerShell, Shift+Enter now adds a line and Ctrl+Enter inserts one above, as in Windows Terminal, instead of running the command; Alt+Enter no longer runs it either. Press Enter to run.
+
+The "first tier" wording assumes T-FKEYS has merged first, as §7.2 orders it.
+
+**Issue #13.** The reply of 2026-09-28 stands as written: Ctrl+Enter submit works in 0.4.7, through the records. The issue is closed by T-KEYBOARD-RECORDS's merge, not by T-KEYBOARD-PROTOCOL's.
 
 ---
 
-## 8. Found along the way, not in this ticket
+## 8. Found along the way
 
-- **F-1** `keyboard_bytes` has no case for F1–F12, so a function key sends nothing to the child today, in every program. This is **T-FKEYS**, the prerequisite of §7.
-- **F-2** `Ctrl+Space` and `Ctrl+Shift+Space` send nothing. winit reports these as `NamedKey::Space`, and the control-alphabet case never sees them: it was written for `Key::Character`, even though its comment says `Ctrl+Space` is NUL. The legacy column keeps `—` for these rows, so this ticket does not change a legacy byte. A follow-up makes them NUL (0x00), as kitty's legacy table, xterm and the existing comment all say.
-- **F-3** `Alt+Backspace` sends `\x7f` with no ESC, so readline's backward-kill-word (`\e\x7f`) cannot be typed. Behind ConPTY, `ESC DEL` becomes an Alt+Backspace record, which PSReadLine also binds. Its own ticket (the review agrees): the defect is in the legacy path, and changing it here would break this ticket's promise to programs that never ask.
+- **F-1** `keyboard_bytes` has no case for F1–F12, so a function key sends nothing to the child today, in every program. **T-FKEYS**, the prerequisite (§7.2).
+- **F-2** `Ctrl+Space` and `Ctrl+Shift+Space` send nothing. winit reports these as `NamedKey::Space`, and the control-alphabet case never sees them: it was written for `Key::Character`, even though its comment says `Ctrl+Space` is NUL. **T-CTRL-SPACE** (owner ruling Q3) makes them NUL (0x00), as kitty's legacy table, xterm and the existing comment all say.
+- **F-3** `Alt+Backspace` sends `\x7f` with no ESC, so readline's backward-kill-word (`\e\x7f`) cannot be typed. Behind ConPTY, `ESC DEL` becomes an Alt+Backspace record, which PSReadLine also binds. **T-ALT-BACKSPACE**, with the same care as the Alt+Enter ruling: the ticket checks what PSReadLine does with it before changing the byte.
 
 ---
 
-## 9. Open questions for the owner
+## 9. Questions for the owner
 
-**Q1. This ticket does not fix the problem for issue #13's reporter** (confirmed by the review). Codex on Windows reads key records and never asks for the protocol (§1). The reply on #13 (2026-09-28) says Ctrl+Enter should work after this version. There are two possible answers; §7 writes out everything that follows from each.
-
-- **A (recommended): T-KEYBOARD-RECORDS.** On Windows, while ConPTY has win32-input-mode on and no program has asked for kitty or modifyOtherKeys, Folio writes only the chords VT cannot express as win32-input-mode records. Folio already does this for a paste's Shift+Enter; it is how Windows Terminal and WezTerm reach console programs. It fixes Codex's Ctrl+Enter and **changes PowerShell on purpose**: Shift+Enter becomes *AddLine* and Ctrl+Enter *InsertLineAbove*, as in Windows Terminal, instead of running the line; Alt+Enter does nothing instead of running the line. #13 closes when it ships.
-- **B: keep the 2026-09-28 ruling.** #13 stays open, narrowed to key-record programs on Windows; the reply and the CHANGELOG say that Codex on Windows is unchanged.
-
-**Q2. The keypad under flag 1.** The spec sends Numpad Enter as `CSI 57414u`, and the keypad arrows with Num Lock off as their own keypad codes; kitty, Ghostty and WT all do this. crossterm, neovim and fish decode these codes. A program that asked for flag 1 but does not know keypad codes would find that Numpad Enter stops working. **Recommended: follow the spec**, as §4.2 rule 5 does. The alternative is to encode keypad keys as their main-keyboard twins.
-
-**Q3. F-2 now or later.** Making `Ctrl+Space` send NUL changes a legacy byte, in a ticket whose promise is "a program that never asks is unaffected". **Recommended: later, as its own small ticket**, so that this ticket's promise stays literally true.
+None open. Q1, Q2 and Q3 were ruled on 2026-09-29 (§7.1).
 
 ---
 
@@ -500,6 +526,13 @@ The last clause holds under Q1-B. Under Q1-A, T-KEYBOARD-RECORDS removes it and 
 | 5. Attribution | modifyOtherKeys precedence cites kitty, Ghostty and WezTerm, not WT (§4.3); the vte reference table is named as the `formatOtherKeys=1` evidence for the classes, the wire form as xterm's default `formatOtherKeys=0`; "published" replaced by "read directly from the session-owned terminal state" (§0, §2.3) |
 | 6. Thread-door claim | unchanged (the review passed it); wording as in 5 |
 | 7. Size, tests, scope | size M–L; an independent hard-coded oracle beside the TSV (§6.2); explicit pop-zero test; all four ConPTY outcomes are assertions, including a native Node raw-stdin reader (§6.3); the Claude Code row has a pass/fail expectation (§6.4); F1–F4's flag-1 forms are in this ticket, on top of T-FKEYS as a prerequisite (§4.2 rule 7, §4.4, §7), and the CHANGELOG names the chords; Alt+Backspace stays separate (F-3); the Mac check is manual and touches nothing outside Folio's checkout there (§6.2) |
+
+## Revision (c), 2026-09-29 — the owner's rulings
+
+- §7 now carries the rulings, dated (Q1 = A, Q2 = the spec, Q3 = its own ticket). The B branch is reduced to a one-line record.
+- The ticket cut is T-FKEYS (S, prerequisite) → T-KEYBOARD-PROTOCOL (M–L) → T-KEYBOARD-RECORDS (M, Windows only) → T-CTRL-SPACE and T-ALT-BACKSPACE (S). T-KEYBOARD-RECORDS has its own section (§7.3), with the three gates and its acceptance.
+- The PowerShell change is stated as intended and gets a release-note line. #13's wording is confirmed, and the issue closes with T-KEYBOARD-RECORDS.
+- §0, §4.2, §6.4, §8, §9 and the DESIGN pointer entry follow the rulings.
 
 ## Sources
 
