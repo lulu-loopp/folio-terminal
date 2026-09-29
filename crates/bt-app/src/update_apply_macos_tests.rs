@@ -3587,7 +3587,7 @@ fn the_nine_rows_of_h3_each_end_as_the_table_says() {
             assert_eq!(
                 world.relaunched,
                 vec![(
-                    install.installed.clone(),
+                    install.installed.join(EXE),
                     failed_then(&install, &["--cwd", "/x"])
                 )],
                 "row {at} (person): {:?}",
