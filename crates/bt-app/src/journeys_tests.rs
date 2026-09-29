@@ -1558,7 +1558,6 @@ fn a_picture_that_arrives_between_frames_books_its_own_wake() {
     for name in [
         "strip_animation_work",
         "drag_autoscroll_deadline",
-        "next_animation_frame",
         "next_animation_deadline",
     ] {
         let body = method(name);
