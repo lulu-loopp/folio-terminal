@@ -13,6 +13,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- A `dead_code` allowance in product code is either on a list that only
+  shrinks or dated to a ticket, and CI fails it the day after its date.
 - The clean-machine smoke copies into the virtual machine every file the
   smoke script loads, read out of the script itself, so the release smoke runs
   there as documented again. The updater's power-cut checklist has one set of

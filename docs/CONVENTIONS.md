@@ -287,6 +287,8 @@ vendor 里曾有 `// IL/DL … deliberately never emit`——**与实际行为�
 
 不要用来绕过本文件的规则。局部豁免用 **`#[expect(lint, reason = "…")]`**（比 `allow` 好：豁免不再需要时会自己报错），理由写清楚。
 
+**`dead_code` 另有一道门（0.4.7 U-44）：造好的门在同一张票里接上，否则写明日期。** 产品代码（`crates/*/src` 下除测试文件、`#[cfg(test)]` 模块及只经测试模块到达的文件以外的 `.rs`）里的每一处 `allow(dead_code)` / `expect(dead_code)`（含 `cfg_attr` 里的）要么在 `docs/plans/DEAD-CODE.tsv` 上——这张表是门立起时树里已有的站点，逐字记下，只减不增——要么理由写成 `"<票号> until YYYY-MM-DD: <为什么>"`（如 `"U-41 until 2026-10-15: the card calls it"`），过了日期就红：接上、删掉，或换一张票重新写日期。优先用 `expect`：代码一被用上，属性本身就让编译失败。表上的站点改了理由、或站点没了而行还在，也红；站点去掉时同一次提交删掉它的行。门是 `scripts/ci/check-dead-code.ps1`，对照合并基准比较，和迁移债表同一个规矩。
+
 ## 九、M0 开工前必须先还的债
 
 按两轮工程审核（`docs/reviews/claude-review-conventions.md`）：

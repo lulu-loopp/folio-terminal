@@ -1437,11 +1437,16 @@ to another, or splits it, as per-window into per-pane — **first gets a
 one-page design note reviewed by Codex** (2026-09-23), before an implementer
 is dispatched; the note lives under `docs/plans/design/`, the review under
 `docs/plans/review/`. A pure feature ticket, one that moves no ownership, has
-no design note.
+no design note. **A door that is built is wired in the same ticket, or dated**
+(2026-09-29, U-44): an `allow(dead_code)` / `expect(dead_code)` in product code
+is a row of `docs/plans/DEAD-CODE.tsv`, which only shrinks, or its reason reads
+`<TICKET-ID> until YYYY-MM-DD: <why>` and it fails on the day after that date;
+`scripts/ci/check-dead-code.ps1` is the gate.
 **From.** `docs/CONVENTIONS.md` §十 rules 10 and 11 and the field in
 `docs/templates/brief.md`; the vocabulary is `docs/ARCHITECTURE.md` §4
 (ownership) and §6 (doors), and the debt ledger is
-`docs/plans/structural-debt.md`.
+`docs/plans/structural-debt.md`; the dead-code rule is `docs/CONVENTIONS.md` §八
+and the `DESIGN.md` entry of 2026-09-29 on it.
 **Overrides.** none found.
 
 ---

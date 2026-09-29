@@ -13138,3 +13138,13 @@ Until now `keyboard_bytes` had no case for a function key, so F1–F12 that no c
 **Behind ConPTY** the bytes are the whole of Folio's part: ConPTY's input parser turns `SS3 P` and `CSI 15~` and their modified forms into `VK_F1`… key records for console programs.
 
 **Pinned by** `input::tests::every_function_key_reaches_the_program_in_its_legacy_form`, `…::a_modifier_on_a_function_key_is_encoded_as_in_xterm`, `…::a_function_key_with_super_or_past_f12_sends_nothing` and `…::alt_f4_is_the_windows_close_and_reaches_no_child_there`; the chrome's claims by `shortcuts::tests::the_function_key_walk_answers_only_while_a_search_is_open`, `…::the_address_and_the_developer_tools_answer_only_over_a_page` and `files::tests::the_menu_key_and_shift_f10_are_the_two_names_of_one_request`.
+
+### 2026-09-29 — A `dead_code` allowance in product code is either on a list that only shrinks or dated to a ticket, and it fails on the day after its date (U-44)
+
+U-33 shipped `at_launch` built and not called, under `#[expect(dead_code)]`, and only U-31's checklist found it. The workspace held 90 such sites in product code, many with reasons naming tickets that shipped long ago ("A2 gates the answer door on this", "F1b's transfer transaction is the caller"), so the attribute no longer said whether its code was waiting for a ticket or had simply never been wired.
+
+**The rule** (coordinator's ticket U-44, 0.4.7): a door that is built is wired in the same ticket, or dated. Every `allow(dead_code)` / `expect(dead_code)` in product code — alone or inside a `cfg_attr` — is either a row of `docs/plans/DEAD-CODE.tsv`, the 90 sites of this commit exactly as they stood, or carries the reason `"<TICKET-ID> until YYYY-MM-DD: <why>"`; on the day after the date it fails as expired (wire it, delete it, or re-ticket it). The list only shrinks against the merge base, rows compared whole as the migration-debt list's are; a listed site whose reason changed fails, and so does a row whose site is gone. `expect` is preferred to `allow`, so the attribute fails the build once the code is used.
+
+**Product code** is every `.rs` under `crates/*/src` except `tests.rs`, `*_tests.rs`, files under a `tests/` directory in `src`, the files a crate reaches only through a `#[cfg(test)]` module declaration, and everything inside an item carrying `#[cfg(test)]`, found by a walk over the tokens rather than a pattern over the text.
+
+**Pinned by** `scripts/ci/check-dead-code.ps1` (CI `logic`), its thirteen cases in `scripts/ci/check-dead-code-tests.ps1` and the planted row in `gates-can-fail`. The triage of the 90 listed sites (which wait for a named ticket, which name a shipped one, which are test helpers in product files) is ticket U-44b.
