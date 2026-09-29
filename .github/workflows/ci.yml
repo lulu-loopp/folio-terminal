@@ -368,7 +368,8 @@ jobs:
           foreach ($vendored in @(
             @{ name = "alacritty_terminal"; dir = "vendor/alacritty_terminal"; version = "0.26.0" },
             @{ name = "mitex";              dir = "vendor/mitex";              version = "0.2.4"  },
-            @{ name = "mitex-parser";       dir = "vendor/mitex-parser";       version = "0.2.4"  }
+            @{ name = "mitex-parser";       dir = "vendor/mitex-parser";       version = "0.2.4"  },
+            @{ name = "vte";                dir = "vendor/vte";                version = "0.15.0" }
           )) {
             $want = [IO.Path]::GetFullPath("$($vendored.dir)/Cargo.toml", $PWD.Path)
             $pkg = $meta.packages | Where-Object {
@@ -522,10 +523,17 @@ jobs:
       # `crates/bt-pty/build.rs` extracts, and read what comes back. They are
       # the only tests in this workspace that can fail because of what the
       # operating system did.
+      #
+      # One of them is selected out by name: the keyboard protocol's case 4,
+      # a native Node reader (`keyboard_protocol_through_conpty.rs`). It needs
+      # `node` on PATH and fails, rather than skipping, when there is none, so
+      # that a green result means the reader ran; it runs in the ticket's
+      # acceptance on the release machine instead of on a runner whose Node is
+      # whatever the image carries (design note keyboard-protocol-2026-09-29, §6.3).
       - name: test bt-pty against real child processes
         shell: pwsh
         run: |
-          cargo test -p bt-pty --locked 2>&1 | Tee-Object -FilePath conpty-tests.log
+          cargo test -p bt-pty --locked -- --skip a_native_node_reader 2>&1 | Tee-Object -FilePath conpty-tests.log
           if ($LASTEXITCODE -ne 0) { throw "bt-pty tests failed" }
 
       - name: the sidecar is the one that was extracted

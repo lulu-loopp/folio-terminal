@@ -45,6 +45,13 @@ $crates = @(
         dir    = "vendor\mitex-parser"
         sha256 = "1A42A2F86C46D250802262387DFB1D6BB18AFFD2D99328BBE4DBD12CE294C3A4"
         added  = @("CHANGES-FOLIO.md", "src/depth.rs")
+    },
+    @{
+        name   = "vte"
+        version = "0.15.0"
+        dir    = "vendor\vte"
+        sha256 = "A5924018406CE0063CD67F8E008104968B74B563EE1B85DDE3ED1F7CB87D3DBD"
+        added  = @("CHANGES-FOLIO.md")
     }
 )
 

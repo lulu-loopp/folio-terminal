@@ -36,7 +36,7 @@ without differing.
 211 upstream files were compared. None was deleted, 23 differ, and one file was
 added: this one.
 
-Twenty of the twenty-two `.rs` files differ **only in formatting**. That is not
+Nineteen of the twenty-two `.rs` files differ **only in formatting**. That is not
 a judgement call: running `rustfmt --edition 2024` (this repository's
 `rustfmt.toml` is stock rustfmt pinned to the 2024 edition) over the *upstream*
 file produces the vendored file byte for byte. Upstream formats with its own
@@ -47,7 +47,7 @@ file produces the vendored file byte for byte. Upstream formats with its own
 | `Cargo.toml` | A path dependency on this repository's `bt-unicode` crate, which `src/term/mod.rs` needs for grapheme segmentation. |
 | `src/grid/mod.rs` | **Code.** Two new methods on `Grid<T>`: `take_history`, which drains the whole native scrollback oldest-first and resets `max_scroll_limit`, and `restore_history`, which puts a previously taken tail back. They exist so a resize transaction can move history out of the grid and back without going through reflow. Everything else in the file is formatting. |
 | `src/term/mod.rs` | **Code.** The bulk of Folio's divergence — see the section below. |
-| `src/event.rs` | Formatting only. |
+| `src/event.rs` | **Code.** One added variant, `Event::KeyboardFlagsRefused { requested, in_force }`, which the kitty keyboard protocol's handlers send when a request asks for flags the terminal does not honour (see `src/term/mod.rs` below). Everything else in the file is formatting. |
 | `src/event_loop.rs` | Formatting only. |
 | `src/grid/resize.rs` | Formatting only. |
 | `src/grid/row.rs` | Formatting only. |
@@ -189,6 +189,29 @@ file produces the vendored file byte for byte. Upstream formats with its own
   behind it, and Folio — which keeps its scrollback and its anchors outside the
   emulator — has to be able to read that screen at the one moment it is not the
   one on display.
+- **The kitty keyboard protocol's state, replaced by kitty's model, and xterm's
+  modifyOtherKeys** (`docs/plans/design/keyboard-protocol-2026-09-29.md` §2).
+  Upstream kept one stack per screen whose top stood for the flags in force, all
+  behind `Config::kitty_keyboard`, and that model had four defects: a push past
+  the cap removed the *title* stack's oldest entry (panicking on an empty one)
+  while its own stack was never trimmed; `CSI = … u` changed the mode but no stack
+  entry, so the query answered a stale top; a screen switch recomputed the mode
+  from the top and lost what `CSI =` had set; and the alternate stack outlived the
+  alternate screen. Each screen now holds a `KeyboardState` — the flags in force
+  and at most eight saved values (`KEYBOARD_MODE_STACK_MAX_DEPTH`), the oldest
+  evicted; a pop of `n` restores the `n`-th saved value or, emptying the stack,
+  resets the flags; `pop(0)` does nothing; a set changes only the flags in force;
+  the query answers them. The `TermMode` keyboard bits are derived from the showing
+  screen's flags after every change, so everything else that reads `TermMode` is
+  untouched. By Folio's policy the alternate screen starts with no flags and its
+  flags end with it (`swap_alt`); `RIS` clears both screens and modifyOtherKeys.
+  `Config::kitty_keyboard_flags` (every flag by default, so upstream's callers see
+  upstream's range) masks a request's flags where it is handled, and the bits it
+  drops are reported whole with `Event::KeyboardFlagsRefused`. The handlers take
+  the flags as a `u16` because the vendored `vte` hands them one
+  (`vendor/vte/CHANGES-FOLIO.md`). modifyOtherKeys is one value per terminal,
+  set by `set_modify_other_keys` and answered `CSI > 4 ; v m` by
+  `report_modify_other_keys`, both of which upstream left as the trait's no-ops.
 - **Tests** for all of the above, added alongside upstream's.
 
 Upstream's own test suite still runs against this copy: `vendor/alacritty_terminal`

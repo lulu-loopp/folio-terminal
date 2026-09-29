@@ -21,7 +21,7 @@ counted.
 `vendor/alacritty_terminal/` is the crates.io 0.26.0 archive with changes by the
 Folio contributors. Twenty-three of its 211 files differ; each of those carries a
 notice at the top of the file, as section 4(b) requires, and
-`vendor/alacritty_terminal/CHANGES-FOLIO.md` indexes them. Twenty of the
+`vendor/alacritty_terminal/CHANGES-FOLIO.md` indexes them. Nineteen of the
 twenty-three differ only because this workspace's `rustfmt` settings are not
 upstream's — provably so: `rustfmt --edition 2024` over the upstream file
 reproduces the vendored file byte for byte.
@@ -32,6 +32,25 @@ attribution notice to propagate under section 4(d).
 
 The Apache-2.0 text is reproduced in this document under the crate listing, and
 in the repository at `vendor/alacritty_terminal/LICENSE-APACHE`.
+
+---
+
+### `vte` 0.15.0, vendored and modified
+
+<https://github.com/alacritty/vte> — Apache License, Version 2.0, or the MIT
+License, at the licensee's option.
+
+`vendor/vte/` is the crates.io 0.15.0 archive with changes by the Folio
+contributors: three dispatch arms of the kitty keyboard protocol and xterm's
+modifyOtherKeys, and the parameter bookkeeping one of them needs. Every file that
+differs carries a notice at the top of the file, as section 4(b) of the Apache
+License requires, and `vendor/vte/CHANGES-FOLIO.md` indexes them.
+
+Upstream ships **no `NOTICE` file** with this crate, so there is no attribution
+notice to propagate under section 4(d). Both licence texts it carries are in the
+repository, at `vendor/vte/LICENSE-APACHE` and `vendor/vte/LICENSE-MIT`, and the
+MIT text Folio takes it under is reproduced in this document under the crate
+listing.
 
 ---
 

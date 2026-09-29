@@ -1463,6 +1463,12 @@ pub struct DualPlaneSession {
     /// answers the same, and a notification is an event that happens once. It leaves through
     /// [`Self::take_notifications`], which is the only reader, and it is empty at rest.
     notifications: Vec<TerminalNotification>,
+    /// **Every kitty keyboard flag a program in this session has asked for and been refused**, ORed
+    /// together over the session's life — the set a bit has to be new to to earn a line.
+    keyboard_flags_refused: u16,
+    /// The `diagnostics.log` lines those refusals earned and nobody has collected yet — one per
+    /// request that asked for a bit this session had not been asked for before.
+    keyboard_protocol_notes: Vec<String>,
     /// See [`SessionStatus::attention_request`] — the live value of the weak tier.
     attention_request: Option<u64>,
     /// **The weak tier's cursor: the next generation `=yes` will mint, and it never runs
@@ -2078,6 +2084,8 @@ impl DualPlaneSession {
             progress: None,
             bell: None,
             notifications: Vec::new(),
+            keyboard_flags_refused: 0,
+            keyboard_protocol_notes: Vec::new(),
             attention_request: None,
             next_attention_generation: 1,
             failure_exit_code: None,
@@ -2193,6 +2201,35 @@ impl DualPlaneSession {
     /// none of which this crate knows, and all of which it would have to guess at to answer here.
     pub fn take_notifications(&mut self) -> Vec<TerminalNotification> {
         std::mem::take(&mut self.notifications)
+    }
+
+    /// **The `diagnostics.log` lines this session's keyboard protocol requests earned**, taken.
+    ///
+    /// Folio honours the kitty protocol's first tier only
+    /// ([`crate::SUPPORTED_KITTY_FLAGS`]); a request's other bits are dropped where it is handled.
+    /// The first time a session sees a bit dropped it queues one line —
+    /// `keyboard protocol: flags 0b111 requested, 0b1 in force` — naming the whole request, bits
+    /// 8–15 included; a request that asks for nothing new queues nothing. No card, no setting: the
+    /// log is how a program that needs the other tiers makes itself known. The application's drain
+    /// is the one reader and writes each line to the log.
+    pub fn take_keyboard_protocol_notes(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.keyboard_protocol_notes)
+    }
+
+    /// Every kitty keyboard flag a program in this session has asked for and been refused.
+    pub fn keyboard_flags_refused(&self) -> u16 {
+        self.keyboard_flags_refused
+    }
+
+    fn note_refused_keyboard_flags(&mut self, requested: u16, in_force: u8) {
+        let refused = requested & !u16::from(crate::SUPPORTED_KITTY_FLAGS);
+        if refused & !self.keyboard_flags_refused == 0 {
+            return;
+        }
+        self.keyboard_flags_refused |= refused;
+        self.keyboard_protocol_notes.push(format!(
+            "keyboard protocol: flags {requested:#b} requested, {in_force:#b} in force"
+        ));
     }
 
     /// Clear both attention **latches** without changing progress, execution, or publication state.
@@ -10950,6 +10987,10 @@ impl DualPlaneSession {
                 LifecycleDirective::AttentionRequest(request) => {
                     self.apply_attention_request(request);
                 }
+                LifecycleDirective::KeyboardFlagsRefused {
+                    requested,
+                    in_force,
+                } => self.note_refused_keyboard_flags(requested, in_force),
                 LifecycleDirective::GridWrites { screen, rows } => {
                     let screen = match screen {
                         RemovalScreen::Primary => ScreenId::Primary,
@@ -37070,6 +37111,74 @@ mod tests {
             "the program drawing this prompt is the one that asked for the mouse"
         );
         assert!(modes.sgr_mouse);
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **the first time a session is asked for a keyboard flag it does
+    /// not honour, it queues one `diagnostics.log` line naming the whole request; asking again for
+    /// nothing new queues nothing.**
+    ///
+    /// Folio honours flag 1 only. The line is how we will learn that a program we care about needs
+    /// the others (design note §3): Codex on Unix asks for `>7u`, Claude Code for `>5u`. Bit 8 is
+    /// named too, which is what the vendored `vte` hands the handler a `u16` for.
+    ///
+    /// MUTATION: queue a line for every refusal rather than for new bits (the second `>31u` adds a
+    /// line), or drop `KeyboardFlagsRefused` in `CaptureListener` (no line at all).
+    #[test]
+    fn a_refused_keyboard_flag_is_named_once_in_the_diagnostics_log() {
+        let mut session = DualPlaneSession::new(nz(20), nz(4));
+        session.feed(b"\x1b[>31u").unwrap();
+        assert_eq!(session.terminal_modes().keyboard.kitty, 1);
+        assert_eq!(session.keyboard_flags_refused(), 0b11110);
+        assert_eq!(
+            session.take_keyboard_protocol_notes(),
+            ["keyboard protocol: flags 0b11111 requested, 0b1 in force"]
+        );
+        session.feed(b"\x1b[>31u\x1b[>7u\x1b[=5;1u").unwrap();
+        assert!(
+            session.take_keyboard_protocol_notes().is_empty(),
+            "no bit in these requests is new to this session"
+        );
+        session.feed(b"\x1b[>257u").unwrap();
+        assert_eq!(session.keyboard_flags_refused(), 0b1_0001_1110);
+        assert_eq!(
+            session.take_keyboard_protocol_notes(),
+            ["keyboard protocol: flags 0b100000001 requested, 0b1 in force"]
+        );
+        session.feed(b"\x1b[>1u\x1b[=1u").unwrap();
+        assert!(session.take_keyboard_protocol_notes().is_empty());
+    }
+
+    /// RED (T-KEYBOARD-PROTOCOL) — **OSC 133 does not touch the keyboard state: after `C`, a push
+    /// and an `A` on the primary screen, the flags are still 1.**
+    ///
+    /// The shape this ticket guarantees of design note §2.4's negative trace: a primary-screen
+    /// program pushes flag 1 and a nested shell's prompt marks the primary screen. Restoring the
+    /// flags at a prompt was proposed and withdrawn, because the marker cannot tell a nested
+    /// shell's prompt from the outer shell's return, and restoring there strips a live program's
+    /// encoding. A future proposal passes this or it is not ownership-safe.
+    ///
+    /// MUTATION: reset the kitty flags in the OSC 133 `A` handler (the way mouse modes are retired
+    /// there) and the flag reads 0.
+    #[test]
+    fn a_prompt_mark_leaves_a_live_programs_keyboard_flags_alone() {
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        let started = Instant::now();
+        session
+            .feed_at(
+                format!("{PROMPT_A}$ {PROMPT_B}tui{OUTPUT_C}\r\n\x1b[>1u").as_bytes(),
+                started,
+            )
+            .unwrap();
+        assert_eq!(session.terminal_modes().keyboard.kitty, 1);
+        session
+            .feed_at(format!("{PROMPT_A}sub$ {PROMPT_B}").as_bytes(), started)
+            .unwrap();
+        assert!(!session.terminal_modes().alternate_screen);
+        assert_eq!(
+            session.terminal_modes().keyboard.kitty,
+            1,
+            "a nested shell's prompt is not the end of the program that pushed the flag"
+        );
     }
 }
 

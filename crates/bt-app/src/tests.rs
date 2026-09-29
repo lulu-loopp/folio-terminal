@@ -5774,6 +5774,7 @@ pub(crate) fn every_wheel_situation() -> impl Iterator<Item = (bool, bt_term::Te
                                 sgr_mouse: true,
                                 mouse_tracking,
                                 focus_reporting: false,
+                                keyboard: bt_term::KeyboardProtocol::default(),
                             },
                             scrolled,
                         )
@@ -5879,6 +5880,7 @@ fn a_wheel_notch_belongs_to_the_pane_it_is_over_on_either_screen() {
         sgr_mouse: true,
         mouse_tracking: MouseTracking::Drag,
         focus_reporting: false,
+        keyboard: bt_term::KeyboardProtocol::default(),
     };
     assert_eq!(
         wheel_route(false, plain, false),
@@ -6043,6 +6045,7 @@ fn a_mac_reports_shift_wheel_sideways_and_this_window_stands_it_back_up() {
         sgr_mouse: true,
         mouse_tracking: MouseTracking::Off,
         focus_reporting: false,
+        keyboard: bt_term::KeyboardProtocol::default(),
     };
 
     // ① The rewrite undone, and the equality that is the whole of the fix.

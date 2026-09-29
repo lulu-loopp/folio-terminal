@@ -151,6 +151,11 @@ pub enum LifecycleDirective {
     Notification(crate::session::TerminalNotification),
     /// One `OSC 1337;RequestAttention=`, as it arrived.
     AttentionRequest(crate::session::AttentionRequest),
+    /// A kitty keyboard protocol request asked for flags this terminal drops.
+    KeyboardFlagsRefused {
+        requested: u16,
+        in_force: u8,
+    },
     GridWrites {
         screen: RemovalScreen,
         rows: Vec<u32>,
@@ -217,6 +222,13 @@ pub fn classify(event: AdapterEvent) -> LifecycleDirective {
         AdapterEvent::Progress(progress) => LifecycleDirective::Progress(progress),
         AdapterEvent::Notification(notification) => LifecycleDirective::Notification(notification),
         AdapterEvent::AttentionRequest(request) => LifecycleDirective::AttentionRequest(request),
+        AdapterEvent::KeyboardFlagsRefused {
+            requested,
+            in_force,
+        } => LifecycleDirective::KeyboardFlagsRefused {
+            requested,
+            in_force,
+        },
         AdapterEvent::GridWrites { screen, rows } => {
             LifecycleDirective::GridWrites { screen, rows }
         }

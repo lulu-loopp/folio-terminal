@@ -9,7 +9,9 @@
 // tracking; `Term::fork`; an origin-mode cursor fix, so that a relative move is
 // not measured from the scroll region twice; UTF-8 mouse reporting refused
 // rather than recorded as set; a write-provenance flag stamped on every cell a
-// print puts down (`Term::set_write_provenance`); and the tests for all of it. The rest is this
+// print puts down (`Term::set_write_provenance`); the kitty keyboard protocol's state
+// replaced by kitty's model per screen (cap eight, honoured-flags mask, refused bits
+// reported) and xterm's modifyOtherKeys; and the tests for all of it. The rest is this
 // repository's rustfmt settings.
 // Index: vendor/alacritty_terminal/CHANGES-FOLIO.md
 // Notice given under section 4(b) of the Apache License, Version 2.0.
@@ -40,8 +42,8 @@ use crate::term::color::Colors;
 use crate::vi_mode::{ViModeCursor, ViMotion};
 use crate::vte::ansi::{
     self, Attr, CharsetIndex, Color, CursorShape, CursorStyle, Handler, Hyperlink, KeyboardModes,
-    KeyboardModesApplyBehavior, NamedColor, NamedMode, NamedPrivateMode, PrivateMode, Rgb,
-    StandardCharset,
+    KeyboardModesApplyBehavior, ModifyOtherKeys, NamedColor, NamedMode, NamedPrivateMode,
+    PrivateMode, Rgb, StandardCharset,
 };
 
 pub mod cell;
@@ -140,8 +142,12 @@ const TITLE_STACK_MAX_DEPTH: usize = 4096;
 /// Default semantic escape characters.
 pub const SEMANTIC_ESCAPE_CHARS: &str = ",│`|:\"' ()[]{}<>\t";
 
-/// Max size of the keyboard modes.
-const KEYBOARD_MODE_STACK_MAX_DEPTH: usize = TITLE_STACK_MAX_DEPTH;
+/// How many saved values one screen's kitty keyboard stack holds.
+///
+/// Folio: eight, as Windows Terminal (`KittyStackMaxSize`) and Ghostty hold. The protocol requires
+/// a cap and says the oldest entry is the one evicted; it does not say how big. Upstream reused the
+/// title stack's 4096 here, and evicted from the title stack (see [`KeyboardState`]).
+pub const KEYBOARD_MODE_STACK_MAX_DEPTH: usize = 8;
 
 /// Default tab interval, corresponding to terminfo `it` value.
 const INITIAL_TABSTOPS: usize = 8;
@@ -217,6 +223,74 @@ impl Default for TermMode {
             | TermMode::LINE_WRAP
             | TermMode::ALTERNATE_SCROLL
             | TermMode::URGENCY_HINTS
+    }
+}
+
+/// Folio: one screen's kitty keyboard protocol state — **kitty's model**: the flags in force, and
+/// a stack of saved values.
+///
+/// It replaces upstream's single stack, whose top stood for the flags in force. That model had four
+/// defects: a push past the cap removed the *title* stack's oldest entry (and panicked when the
+/// title stack was empty) while its own stack was never trimmed; a `CSI = … u` changed the mode but
+/// no stack entry, so the query answered the stale top; a screen switch recomputed the mode from the
+/// top and lost what `CSI =` had set; and the alternate stack outlived the alternate screen.
+///
+/// The type knows nothing of which flags are honoured: [`Term`] masks a request before it gets
+/// here, so this can be exercised with every bit.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeyboardState {
+    current: u8,
+    saved: Vec<u8>,
+}
+
+impl KeyboardState {
+    /// The flags in force.
+    #[inline]
+    pub fn current(&self) -> u8 {
+        self.current
+    }
+
+    /// The saved values, oldest first.
+    #[inline]
+    pub fn saved(&self) -> &[u8] {
+        &self.saved
+    }
+
+    /// Save the flags in force and put `flags` in force. At the cap the oldest saved value is
+    /// evicted, as the protocol requires.
+    pub fn push(&mut self, flags: u8) {
+        if self.saved.len() >= KEYBOARD_MODE_STACK_MAX_DEPTH {
+            self.saved.remove(0);
+        }
+        self.saved.push(self.current);
+        self.current = flags;
+    }
+
+    /// Pop `count` saved values. `0` does nothing. Fewer than the stack holds: the last one popped
+    /// — the `count`-th from the top — is put in force. Otherwise the stack is emptied and the flags
+    /// are reset, as kitty says of a pop that empties the stack.
+    pub fn pop(&mut self, count: u16) {
+        let count = usize::from(count);
+        if count == 0 {
+            return;
+        }
+        if count < self.saved.len() {
+            let keep = self.saved.len() - count;
+            self.current = self.saved[keep];
+            self.saved.truncate(keep);
+        } else {
+            self.saved.clear();
+            self.current = 0;
+        }
+    }
+
+    /// Change the flags in force, and nothing else.
+    pub fn set(&mut self, flags: u8, apply: KeyboardModesApplyBehavior) {
+        self.current = match apply {
+            KeyboardModesApplyBehavior::Replace => flags,
+            KeyboardModesApplyBehavior::Union => self.current | flags,
+            KeyboardModesApplyBehavior::Difference => self.current & !flags,
+        };
     }
 }
 
@@ -516,11 +590,16 @@ pub struct Term<T> {
     /// term is set.
     title_stack: Vec<Option<String>>,
 
-    /// The stack for the keyboard modes.
-    keyboard_mode_stack: Vec<KeyboardModes>,
+    /// Folio: the kitty keyboard protocol's state of the screen that is showing.
+    keyboard: KeyboardState,
 
-    /// Currently inactive keyboard mode stack.
-    inactive_keyboard_mode_stack: Vec<KeyboardModes>,
+    /// Folio: the kitty keyboard protocol's state of the screen that is not showing. On the
+    /// alternate screen this is the primary's, kept as it was; on the primary screen it is the
+    /// alternate's, which is empty — see [`Self::swap_alt`].
+    inactive_keyboard: KeyboardState,
+
+    /// Folio: xterm's modifyOtherKeys, one value per terminal (not per screen), as in xterm.
+    modify_other_keys: ModifyOtherKeys,
 
     /// Information about damaged cells.
     damage: TermDamageState,
@@ -549,6 +628,11 @@ pub struct Config {
     /// Whether to enable kitty keyboard protocol.
     pub kitty_keyboard: bool,
 
+    /// Folio: the kitty keyboard protocol flags this terminal honours. A request's other bits are
+    /// dropped where it is handled — so a query answers with what is in force — and reported with
+    /// [`Event::KeyboardFlagsRefused`]. Every flag by default.
+    pub kitty_keyboard_flags: KeyboardModes,
+
     /// OSC52 support mode.
     pub osc52: Osc52,
 }
@@ -561,6 +645,7 @@ impl Default for Config {
             default_cursor_style: Default::default(),
             vi_mode_cursor_style: Default::default(),
             kitty_keyboard: Default::default(),
+            kitty_keyboard_flags: KeyboardModes::all(),
             osc52: Default::default(),
         }
     }
@@ -818,8 +903,9 @@ impl<T> Term<T> {
             config,
             grid,
             tabs,
-            inactive_keyboard_mode_stack: Default::default(),
-            keyboard_mode_stack: Default::default(),
+            keyboard: KeyboardState::default(),
+            inactive_keyboard: KeyboardState::default(),
+            modify_other_keys: ModifyOtherKeys::Reset,
             active_charset: Default::default(),
             vi_mode_cursor: Default::default(),
             cursor_style: Default::default(),
@@ -908,10 +994,12 @@ impl<T> Term<T> {
             self.grid.update_history(self.config.scrolling_history);
         }
 
-        if self.config.kitty_keyboard != old_config.kitty_keyboard {
-            self.keyboard_mode_stack = Vec::new();
-            self.inactive_keyboard_mode_stack = Vec::new();
-            self.mode.remove(TermMode::KITTY_KEYBOARD_PROTOCOL);
+        if self.config.kitty_keyboard != old_config.kitty_keyboard
+            || self.config.kitty_keyboard_flags != old_config.kitty_keyboard_flags
+        {
+            self.keyboard = KeyboardState::default();
+            self.inactive_keyboard = KeyboardState::default();
+            self.sync_keyboard_mode();
         }
 
         // Damage everything on config updates.
@@ -1187,17 +1275,20 @@ impl<T> Term<T> {
             self.inactive_grid.reset_region(..);
         }
 
-        mem::swap(
-            &mut self.keyboard_mode_stack,
-            &mut self.inactive_keyboard_mode_stack,
-        );
-        let keyboard_mode = self
-            .keyboard_mode_stack
-            .last()
-            .copied()
-            .unwrap_or(KeyboardModes::NO_MODE)
-            .into();
-        self.set_keyboard_mode(keyboard_mode, KeyboardModesApplyBehavior::Replace);
+        // Folio: **the alternate screen starts with no keyboard flags, and its flags end with it** —
+        // Folio's policy, not the protocol's, which only asks for a separate stack per screen.
+        // Windows Terminal does the same; Ghostty and WezTerm keep them. Clearing on both edges is
+        // what keeps a crashed full-screen program's flags from being handed to the next one. The
+        // primary's state waits in `inactive_keyboard`, untouched, and comes back whole — flags a
+        // `CSI = … u` set on it included, which upstream recomputed from its stack's top and lost.
+        if entering {
+            self.inactive_keyboard = KeyboardState::default();
+        }
+        mem::swap(&mut self.keyboard, &mut self.inactive_keyboard);
+        if !entering {
+            self.inactive_keyboard = KeyboardState::default();
+        }
+        self.sync_keyboard_mode();
 
         mem::swap(&mut self.grid, &mut self.inactive_grid);
         // The provenance belongs to the screen, not to the segment: what a command's output is on
@@ -2092,17 +2183,43 @@ impl<T> Term<T> {
         self.damage.damage_point(point);
     }
 
+    /// Folio: derive the `TermMode` keyboard bits from the showing screen's flags in force, so
+    /// every reader of `TermMode` keeps reading the one place it always read.
     #[inline]
-    fn set_keyboard_mode(&mut self, mode: TermMode, apply: KeyboardModesApplyBehavior) {
-        let active_mode = self.mode & TermMode::KITTY_KEYBOARD_PROTOCOL;
+    fn sync_keyboard_mode(&mut self) {
         self.mode &= !TermMode::KITTY_KEYBOARD_PROTOCOL;
-        let new_mode = match apply {
-            KeyboardModesApplyBehavior::Replace => mode,
-            KeyboardModesApplyBehavior::Union => active_mode.union(mode),
-            KeyboardModesApplyBehavior::Difference => active_mode.difference(mode),
-        };
-        trace!("Setting keyboard mode to {new_mode:?}");
-        self.mode |= new_mode;
+        self.mode |= KeyboardModes::from_bits_truncate(self.keyboard.current()).into();
+    }
+
+    /// Folio: the kitty keyboard protocol flags in force on the showing screen.
+    #[inline]
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        self.keyboard.current()
+    }
+
+    /// Folio: xterm's modifyOtherKeys, as the child last set it.
+    #[inline]
+    pub fn modify_other_keys(&self) -> ModifyOtherKeys {
+        self.modify_other_keys
+    }
+
+    /// Folio: the part of a requested flags value this terminal honours.
+    #[inline]
+    fn honoured_keyboard_flags(&self, requested: u16) -> u8 {
+        (requested & u16::from(self.config.kitty_keyboard_flags.bits())) as u8
+    }
+}
+
+impl<T: EventListener> Term<T> {
+    /// Folio: say so when a request asked for flags this terminal drops, with the whole request —
+    /// bits 8–15 included, which is what the vendored `vte` hands the handler a `u16` for.
+    fn report_refused_keyboard_flags(&mut self, requested: u16) {
+        if requested & !u16::from(self.config.kitty_keyboard_flags.bits()) != 0 {
+            self.event_proxy.send_event(Event::KeyboardFlagsRefused {
+                requested,
+                in_force: self.keyboard.current(),
+            });
+        }
     }
 }
 
@@ -2295,6 +2412,8 @@ impl<T: EventListener> Handler for Term<T> {
         }
     }
 
+    /// Folio: the flags **in force** on the showing screen — not the top of the stack, which a
+    /// `CSI = … u` never touches.
     #[inline]
     fn report_keyboard_mode(&mut self) {
         if !self.config.kitty_keyboard {
@@ -2302,33 +2421,21 @@ impl<T: EventListener> Handler for Term<T> {
         }
 
         trace!("Reporting active keyboard mode");
-        let current_mode = self
-            .keyboard_mode_stack
-            .last()
-            .unwrap_or(&KeyboardModes::NO_MODE)
-            .bits();
-        let text = format!("\x1b[?{current_mode}u");
+        let text = format!("\x1b[?{}u", self.keyboard.current());
         self.event_proxy.send_event(Event::PtyWrite(text));
     }
 
     #[inline]
-    fn push_keyboard_mode(&mut self, mode: KeyboardModes) {
+    fn push_keyboard_mode(&mut self, requested: u16) {
         if !self.config.kitty_keyboard {
             return;
         }
 
-        trace!("Pushing `{mode:?}` keyboard mode into the stack");
-
-        if self.keyboard_mode_stack.len() >= KEYBOARD_MODE_STACK_MAX_DEPTH {
-            let removed = self.title_stack.remove(0);
-            trace!(
-                "Removing '{removed:?}' from bottom of keyboard mode stack that exceeds its \
-                 maximum depth"
-            );
-        }
-
-        self.keyboard_mode_stack.push(mode);
-        self.set_keyboard_mode(mode.into(), KeyboardModesApplyBehavior::Replace);
+        trace!("Pushing `{requested:#b}` keyboard mode into the stack");
+        let honoured = self.honoured_keyboard_flags(requested);
+        self.keyboard.push(honoured);
+        self.sync_keyboard_mode();
+        self.report_refused_keyboard_flags(requested);
     }
 
     #[inline]
@@ -2338,28 +2445,39 @@ impl<T: EventListener> Handler for Term<T> {
         }
 
         trace!("Attempting to pop {to_pop} keyboard modes from the stack");
-        let new_len = self
-            .keyboard_mode_stack
-            .len()
-            .saturating_sub(to_pop as usize);
-        self.keyboard_mode_stack.truncate(new_len);
-
-        // Reload active mode.
-        let mode = self
-            .keyboard_mode_stack
-            .last()
-            .copied()
-            .unwrap_or(KeyboardModes::NO_MODE);
-        self.set_keyboard_mode(mode.into(), KeyboardModesApplyBehavior::Replace);
+        self.keyboard.pop(to_pop);
+        self.sync_keyboard_mode();
     }
 
     #[inline]
-    fn set_keyboard_mode(&mut self, mode: KeyboardModes, apply: KeyboardModesApplyBehavior) {
+    fn set_keyboard_mode(&mut self, requested: u16, apply: KeyboardModesApplyBehavior) {
         if !self.config.kitty_keyboard {
             return;
         }
 
-        self.set_keyboard_mode(mode.into(), apply);
+        let honoured = self.honoured_keyboard_flags(requested);
+        self.keyboard.set(honoured, apply);
+        self.sync_keyboard_mode();
+        self.report_refused_keyboard_flags(requested);
+    }
+
+    /// Folio: xterm's XTMODKEYS for the one key-modifier resource this terminal holds.
+    #[inline]
+    fn set_modify_other_keys(&mut self, mode: ModifyOtherKeys) {
+        trace!("Setting modifyOtherKeys to {mode:?}");
+        self.modify_other_keys = mode;
+    }
+
+    /// Folio: XTQMODKEYS, answered `CSI > 4 ; v m`.
+    #[inline]
+    fn report_modify_other_keys(&mut self) {
+        let value = match self.modify_other_keys {
+            ModifyOtherKeys::Reset => 0,
+            ModifyOtherKeys::EnableExceptWellDefined => 1,
+            ModifyOtherKeys::EnableAll => 2,
+        };
+        let text = format!("\x1b[>4;{value}m");
+        self.event_proxy.send_event(Event::PtyWrite(text));
     }
 
     #[inline]
@@ -2946,8 +3064,11 @@ impl<T: EventListener> Handler for Term<T> {
         self.title = None;
         self.selection = None;
         self.vi_mode_cursor = Default::default();
-        self.keyboard_mode_stack = Default::default();
-        self.inactive_keyboard_mode_stack = Default::default();
+        // Folio: RIS clears both screens' keyboard state and modifyOtherKeys. The mode bits go
+        // with the rest of `mode` just below.
+        self.keyboard = KeyboardState::default();
+        self.inactive_keyboard = KeyboardState::default();
+        self.modify_other_keys = ModifyOtherKeys::Reset;
         self.grapheme = GraphemeState::default();
         self.reported_pending_wrap = None;
 
@@ -5042,6 +5163,56 @@ mod tests {
         term.title = Some("Test".into());
         term.set_title(None);
         assert_eq!(term.title, None);
+    }
+
+    /// Folio, T-KEYBOARD-PROTOCOL — **the ninth push evicts the oldest saved value, and a pop that
+    /// empties the stack resets the flags rather than restoring the bottom value.**
+    ///
+    /// On the state model itself and with every bit available, because behind the adapter's mask
+    /// every value is 0 or 1 and an eviction would be invisible. From `current = 0`, push 1 … 9:
+    /// the ninth push evicts the 0, leaving saved `[1..=8]` and 9 in force. Seven pops reach 2 with
+    /// `[1]` saved; the eighth empties the stack and resets to 0 (kitty: "If a pop request is
+    /// received that empties the stack, all flags are reset"), not 1. `pop(0)` changes nothing.
+    ///
+    /// MUTATION: drop the `self.saved.remove(0)` eviction in `KeyboardState::push` and the stack
+    /// holds nine saved values; or restore `saved[0]` when a pop empties the stack and the last
+    /// assertion reads 1.
+    #[test]
+    fn the_keyboard_stack_evicts_its_oldest_value_and_an_emptying_pop_resets_the_flags() {
+        let mut state = KeyboardState::default();
+        for flags in 1..=9 {
+            state.push(flags);
+        }
+        assert_eq!(state.saved(), [1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(state.current(), 9);
+
+        let before = state.clone();
+        state.pop(0);
+        assert_eq!(state, before, "an explicit zero pops nothing");
+
+        for _ in 0..7 {
+            state.pop(1);
+        }
+        assert_eq!(state.current(), 2);
+        assert_eq!(state.saved(), [1]);
+        state.pop(1);
+        assert_eq!(state.current(), 0, "a pop that empties the stack resets the flags");
+        assert!(state.saved().is_empty());
+
+        let mut deep = KeyboardState::default();
+        deep.push(3);
+        deep.push(5);
+        deep.pop(5);
+        assert_eq!((deep.current(), deep.saved()), (0, &[][..]), "a count past the bottom");
+
+        let mut set = KeyboardState::default();
+        set.push(1);
+        set.set(4, ansi::KeyboardModesApplyBehavior::Union);
+        assert_eq!(set.current(), 5);
+        set.set(1, ansi::KeyboardModesApplyBehavior::Difference);
+        assert_eq!(set.current(), 4);
+        set.set(2, ansi::KeyboardModesApplyBehavior::Replace);
+        assert_eq!((set.current(), set.saved()), (2, &[0][..]), "a set touches no saved value");
     }
 
     #[test]
