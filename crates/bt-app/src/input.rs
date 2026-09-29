@@ -751,7 +751,7 @@ pub(crate) fn keyboard_bytes(
         // key that reaches here has already been answered above, so the table
         // decides; anything it does not list (F13 and up, media keys) stays
         // `None`.
-        Key::Named(named) => function_key(*named, modifiers),
+        Key::Named(named) => function_key(*named, modifiers, bt_platform::host_platform()),
         _ => None,
     }
 }
@@ -781,15 +781,26 @@ const FUNCTION_KEYS: [(NamedKey, FunctionKeyForm); 12] = [
     (NamedKey::F12, FunctionKeyForm::Tilde(24)),
 ];
 
-/// A function key's bytes, or `None` for a key that is not one of the twelve or
-/// is held with Super (the Windows / Command key never reaches the child).
+/// A function key's bytes, or `None` for a key that is not one of the twelve,
+/// is held with Super (the Windows / Command key never reaches the child), or
+/// is Windows' close chord, `Alt+F4` with or without Shift or Ctrl on top.
 ///
 /// Without modifiers F1–F4 are `SS3 P/Q/R/S`; with them they change shape to
 /// `CSI 1;m P/Q/R/S`, which is [`cursor_key`]'s application-mode spelling —
 /// DECCKM itself does not apply to function keys, so the mode is not asked.
 /// F5–F12 are [`tilde_key`]'s `CSI n ~` / `CSI n;m ~`.
-fn function_key(key: NamedKey, modifiers: ModifiersState) -> Option<Vec<u8>> {
+/// The platform is a value so a test on either machine can ask about the other.
+fn function_key(
+    key: NamedKey,
+    modifiers: ModifiersState,
+    platform: HostPlatform,
+) -> Option<Vec<u8>> {
     if modifiers.super_key() {
+        return None;
+    }
+    // Alt+F4 is Windows' close (DefWindowProc closes on WM_SYSKEYDOWN F4; Windows Terminal
+    // does not forward it): a close a dialog cancels must not have typed `CSI 1;3S` into the pane.
+    if platform == HostPlatform::Windows && key == NamedKey::F4 && modifiers.alt_key() {
         return None;
     }
     let (_, form) = FUNCTION_KEYS.iter().find(|(named, _)| *named == key)?;
@@ -1434,6 +1445,69 @@ mod tests {
             keyboard_bytes(&Key::Named(NamedKey::F13), ModifiersState::CONTROL, true),
             None
         );
+    }
+
+    /// RED (T-FKEYS, coordinator's ruling 2026-09-29) — **on Windows, Alt+F4 is
+    /// the system's close chord and never reaches the child; elsewhere it is
+    /// `CSI 1;3S` like any other modified F4.**
+    ///
+    /// DefWindowProc closes the window on `WM_SYSKEYDOWN F4`, and the key event
+    /// still arrives here on its way; if a dialog then cancels the close, the
+    /// pane must not have been typed `CSI 1;3S`. Windows Terminal does not
+    /// forward it either. Option+F4 has no system meaning on macOS, and none on
+    /// the other Unixes this build names, so there it is the program's. Shift
+    /// or Ctrl on top does not change Windows' answer. The platform is passed as
+    /// a value (bt-app asks `bt_platform::host_platform()` rather than naming a
+    /// platform in this file), so both halves run on every machine; the last
+    /// assertion is the host's own road through `keyboard_bytes`.
+    ///
+    /// MUTATION: drop the `platform == HostPlatform::Windows` return in
+    /// `function_key` and the Windows lines go red.
+    #[test]
+    fn alt_f4_is_the_windows_close_and_reaches_no_child_there() {
+        let alt = ModifiersState::ALT;
+        let chords = [
+            alt,
+            alt.union(ModifiersState::SHIFT),
+            alt.union(ModifiersState::CONTROL),
+            alt.union(ModifiersState::CONTROL)
+                .union(ModifiersState::SHIFT),
+        ];
+        for modifiers in chords {
+            assert_eq!(
+                function_key(NamedKey::F4, modifiers, HostPlatform::Windows),
+                None,
+                "{modifiers:?}"
+            );
+        }
+        assert_eq!(
+            function_key(NamedKey::F4, ModifiersState::CONTROL, HostPlatform::Windows),
+            Some(b"\x1b[1;5S".to_vec()),
+            "only Alt makes it the close chord"
+        );
+        assert_eq!(
+            function_key(NamedKey::F5, alt, HostPlatform::Windows),
+            Some(b"\x1b[15;3~".to_vec()),
+            "and only on F4"
+        );
+        for platform in [HostPlatform::MacOs, HostPlatform::OtherUnix] {
+            assert_eq!(
+                function_key(NamedKey::F4, alt, platform),
+                Some(b"\x1b[1;3S".to_vec()),
+                "{platform:?}"
+            );
+            assert_eq!(
+                function_key(NamedKey::F4, alt.union(ModifiersState::CONTROL), platform),
+                Some(b"\x1b[1;7S".to_vec()),
+                "{platform:?}"
+            );
+        }
+        let host = keyboard_bytes(&Key::Named(NamedKey::F4), alt, false);
+        if bt_platform::host_platform() == HostPlatform::Windows {
+            assert_eq!(host, None);
+        } else {
+            assert_eq!(host, Some(b"\x1b[1;3S".to_vec()));
+        }
     }
 
     #[test]

@@ -13119,10 +13119,10 @@ Until now `keyboard_bytes` had no case for a function key, so F1–F12 that no c
 
 **Modifiers** take xterm's parameter (Shift 2, Alt 3, Ctrl 5, and their sums). `SS3` carries no parameters, so a modified F1–F4 changes shape to `CSI 1;m P/Q/R/S`, the spelling of a modified arrow key; F5–F12 insert `;m` before the `~`.
 
-**Super** held on a function key sends nothing, as it does on every key: the Windows / Command key never reaches the child. F13 and above have no form here and still send nothing.
+**Super** held on a function key sends nothing, as it does on every key: the Windows / Command key never reaches the child. F13 and above have no form here and still send nothing. On Windows, Alt+F4 (with or without Shift or Ctrl on top) also sends nothing: it is the system's close chord, DefWindowProc closes the window on it and Windows Terminal does not forward it, so a close that a dialog cancels has typed nothing into the pane; on macOS and the other platforms it is `CSI 1;3S` (coordinator's ruling, 2026-09-29).
 
 **The chrome's claims come first** and are unchanged: `F3` / `Shift+F3` walk the matches while the search is open, `F12` opens the developer tools on a page, and `Shift+F10` raises a row's menu in the Files column. Each is decided above the encoder, so the key reaches the program only when that rung declined it.
 
 **Behind ConPTY** the bytes are the whole of Folio's part: ConPTY's input parser turns `SS3 P` and `CSI 15~` and their modified forms into `VK_F1`… key records for console programs.
 
-**Pinned by** `input::tests::every_function_key_reaches_the_program_in_its_legacy_form`, `…::a_modifier_on_a_function_key_is_encoded_as_in_xterm` and `…::a_function_key_with_super_or_past_f12_sends_nothing`; the chrome's claims by `shortcuts::tests::the_function_key_walk_answers_only_while_a_search_is_open`, `…::the_address_and_the_developer_tools_answer_only_over_a_page` and `files::tests::the_menu_key_and_shift_f10_are_the_two_names_of_one_request`.
+**Pinned by** `input::tests::every_function_key_reaches_the_program_in_its_legacy_form`, `…::a_modifier_on_a_function_key_is_encoded_as_in_xterm`, `…::a_function_key_with_super_or_past_f12_sends_nothing` and `…::alt_f4_is_the_windows_close_and_reaches_no_child_there`; the chrome's claims by `shortcuts::tests::the_function_key_walk_answers_only_while_a_search_is_open`, `…::the_address_and_the_developer_tools_answer_only_over_a_page` and `files::tests::the_menu_key_and_shift_f10_are_the_two_names_of_one_request`.
