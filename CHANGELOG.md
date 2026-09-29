@@ -6,6 +6,11 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- In Claude Code, `[Image #N]` in the input line is a link to the pasted
+  picture, with the same hover card as in the transcript.
+
 ### Fixed
 
 - F1–F12 reach the program (they sent nothing before); Shift, Alt and Ctrl

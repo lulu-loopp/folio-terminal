@@ -13,7 +13,7 @@
 
 use std::{
     cmp::Reverse,
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     path::{Path, PathBuf},
 };
 
@@ -2764,6 +2764,9 @@ pub struct PrintedPathLinks {
     verdicts: BTreeMap<PathBuf, bool>,
     /// Which spelling of an absolute path the shell in this pane prints (T-3, 2026-09-07).
     namespace: PrintedPathNamespace,
+    /// What the pane has learned about its `[Image #k]` placeholders: number -> the file a program
+    /// linked it to (T-IMAGE-N). Read only by [`Self::image_placeholder_links_in`].
+    image_placeholders: BTreeMap<u32, PathBuf>,
 }
 
 /// A reference an application cut across one or more real newlines, put back together — and the
@@ -2836,6 +2839,7 @@ impl PrintedPathLinks {
                 .and_then(|directory| namespace.to_local_directory(&directory)),
             verdicts,
             namespace: namespace.clone(),
+            image_placeholders: BTreeMap::new(),
         }
     }
 
@@ -3264,6 +3268,172 @@ impl PrintedPathLinks {
             // place rather than carrying a translated path on the candidate.
             PrintedPathSpelling::Foreign => self.namespace.to_local_path(text),
         }
+    }
+}
+
+/// How many `[Image #k]` placeholders one pane remembers a target for (T-IMAGE-N, 2026-09-29).
+///
+/// A ceiling on a table a program fills by printing, so that a stream of links cannot grow it
+/// without bound. Sixty-four is more pictures than one agent conversation pastes; past it the
+/// placeholder learned **longest ago** is forgotten first.
+pub const IMAGE_PLACEHOLDER_CAP: usize = 64;
+
+/// The number an `[Image #k]` label names, when the whole label (surrounding blanks aside) is
+/// exactly that placeholder — the shape Claude Code writes into its input line for a pasted picture
+/// and links, in the transcript it prints, to the file it saved.
+///
+/// Exact, because this reads the text of **one OSC 8 link**: a link whose label merely contains
+/// the placeholder among other words is not a statement about which file that number is.
+#[must_use]
+pub fn image_placeholder_number(label: &str) -> Option<u32> {
+    let label = label.trim();
+    match image_placeholder_ranges(label).as_slice() {
+        [(range, number)] if range.byte_start == 0 && range.byte_end == label.len() => {
+            Some(*number)
+        }
+        _ => None,
+    }
+}
+
+/// Every `[Image #k]` placeholder in one line of text, in reading order, with the number it names.
+///
+/// The brackets are the placeholder's own delimiters, so nothing around them is asked about: the
+/// chip stands wherever the reader's cursor was when the picture was pasted, in the middle of a
+/// word as readily as after a space.
+#[must_use]
+pub fn image_placeholder_ranges(text: &str) -> Vec<(HyperlinkRange, u32)> {
+    const OPEN: &str = "[Image #";
+    let mut found = Vec::new();
+    let mut from = 0usize;
+    while let Some(offset) = text[from..].find(OPEN) {
+        let start = from + offset;
+        let digits_start = start + OPEN.len();
+        let digits = text[digits_start..]
+            .bytes()
+            .take_while(u8::is_ascii_digit)
+            .count();
+        let close = digits_start + digits;
+        if digits > 0
+            && text.as_bytes().get(close) == Some(&b']')
+            && let Ok(number) = text[digits_start..close].parse::<u32>()
+        {
+            found.push((
+                HyperlinkRange {
+                    byte_start: start,
+                    byte_end: close + 1,
+                },
+                number,
+            ));
+            from = close + 1;
+        } else {
+            from = digits_start;
+        }
+    }
+    found
+}
+
+/// **What one pane has learned about its `[Image #k]` placeholders**: the file each number was
+/// linked to, the last time a program linked it (T-IMAGE-N, owner ask 2026-09-27).
+///
+/// Learned from one source only — an OSC 8 link whose label is the placeholder, printed into this
+/// pane — and never from a guess about where an agent keeps its pictures: the number is the key and
+/// the program's own link is the value. A later link for the same number replaces the earlier one
+/// and is then the newest; past [`IMAGE_PLACEHOLDER_CAP`] numbers, the one learned longest ago
+/// goes.
+///
+/// Nothing here says the file is still there. That is the pane's verdict ledger's question, asked
+/// off the window thread, and [`PrintedPathLinks::image_placeholder_links_in`] reads the answer.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ImagePlaceholderTargets {
+    targets: BTreeMap<u32, PathBuf>,
+    /// The numbers, learned-longest-ago first; always the same set as `targets`' keys.
+    order: VecDeque<u32>,
+}
+
+impl ImagePlaceholderTargets {
+    /// Remember that `number` names `target`. Answers whether anything changed, so a caller can
+    /// skip telling its projection about a link it had already learned.
+    pub fn learn(&mut self, number: u32, target: PathBuf) -> bool {
+        if self.targets.get(&number) == Some(&target) && self.order.back() == Some(&number) {
+            return false;
+        }
+        self.order.retain(|known| *known != number);
+        self.order.push_back(number);
+        self.targets.insert(number, target);
+        while self.order.len() > IMAGE_PLACEHOLDER_CAP {
+            if let Some(oldest) = self.order.pop_front() {
+                self.targets.remove(&oldest);
+            }
+        }
+        true
+    }
+
+    /// The file `number` was last linked to in this pane.
+    #[must_use]
+    pub fn target(&self, number: u32) -> Option<&Path> {
+        self.targets.get(&number).map(PathBuf::as_path)
+    }
+
+    /// Forget every number. Answers whether there was anything to forget.
+    pub fn forget_all(&mut self) -> bool {
+        let had = !self.targets.is_empty();
+        self.targets.clear();
+        self.order.clear();
+        had
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.targets.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+}
+
+impl PrintedPathLinks {
+    /// The same ledger, carrying what the pane has learned about its `[Image #k]` placeholders
+    /// (T-IMAGE-N). Built beside the verdicts it will be read against, so the two cannot disagree.
+    #[must_use]
+    pub fn with_image_placeholders(mut self, placeholders: &ImagePlaceholderTargets) -> Self {
+        self.image_placeholders = placeholders.targets.clone();
+        self
+    }
+
+    /// The `file:` links the `[Image #k]` placeholders on one line of text offer, and — into
+    /// `unknown` — every learned target nobody has been to the disk for yet.
+    ///
+    /// **The verified-link rule, unchanged** (§7.1.5j): a number this pane never saw linked is
+    /// text; a target the disk has answered "no" for is text; a target nobody has asked about is
+    /// text *and a question*, put to the pane's worker through the same sink every printed path's
+    /// question goes through. Only a "yes" is a link.
+    ///
+    /// The caller decides *where* this is read: the rows an agent's input line can stand on, and
+    /// nowhere else (`bt_viewport`'s `implicit_hyperlinks`).
+    pub fn image_placeholder_links_in(
+        &self,
+        text: &str,
+        unknown: &mut BTreeSet<PathBuf>,
+    ) -> Vec<(HyperlinkRange, String)> {
+        if self.image_placeholders.is_empty() {
+            return Vec::new();
+        }
+        let mut links = Vec::new();
+        for (range, number) in image_placeholder_ranges(text) {
+            let Some(target) = self.image_placeholders.get(&number) else {
+                continue;
+            };
+            match self.verdicts.get(target) {
+                Some(true) => links.push((range, local_path_to_file_uri(target))),
+                Some(false) => {}
+                None => {
+                    unknown.insert(target.clone());
+                }
+            }
+        }
+        links
     }
 }
 
@@ -8718,5 +8888,169 @@ mod insertion_spelling_tests {
                 Some(expected.into())
             );
         }
+    }
+}
+
+/// **`[Image #k]` placeholders** (T-IMAGE-N): the label, the pane's bounded table, and the
+/// verified-link rule over the input line. Platform-neutral: no fixture here is a disk path, and
+/// nothing here reads a disk.
+#[cfg(test)]
+mod image_placeholder_tests {
+    use super::*;
+
+    fn picture(number: u32) -> PathBuf {
+        std::env::temp_dir()
+            .join("image-placeholder-fixture")
+            .join(format!("{number}.png"))
+    }
+
+    /// RED (T-IMAGE-N) — **an OSC 8 label teaches a number only when the whole label is the
+    /// placeholder.**
+    ///
+    /// The label is the program's statement about which file a number is. A link whose text holds
+    /// the placeholder among other words — a sentence linking a whole message, say — says nothing
+    /// of the kind, and a near spelling (`[image #3]`, `[Image 3]`) is not the chip Claude Code
+    /// draws.
+    ///
+    /// MUTATION: make `image_placeholder_number` accept any label that contains a placeholder, and
+    /// `"see [Image #3] above"` teaches 3.
+    #[test]
+    fn a_link_teaches_a_number_only_when_its_whole_label_is_the_placeholder() {
+        assert_eq!(image_placeholder_number("[Image #3]"), Some(3));
+        assert_eq!(image_placeholder_number(" [Image #12] "), Some(12));
+        for not_one in [
+            "see [Image #3] above",
+            "[Image #3][Image #4]",
+            "[Image #]",
+            "[Image #3",
+            "[image #3]",
+            "[Image 3]",
+            "[Image #-3]",
+            "[Image #99999999999]",
+            "",
+        ] {
+            assert_eq!(image_placeholder_number(not_one), None, "{not_one:?}");
+        }
+    }
+
+    /// RED (T-IMAGE-N) — **every placeholder on a line is found where it stands, with its number,
+    /// and nothing that only resembles one is.**
+    ///
+    /// The chip lands wherever the cursor was, so a line can hold several, glued to prose on
+    /// either side.
+    ///
+    /// MUTATION: in the refused branch, resume one byte past the digits (`from = close + 1`) as
+    /// the accepted branch does, and `[Image #[Image #3]` loses its real placeholder.
+    #[test]
+    fn every_placeholder_on_a_line_is_found_where_it_stands() {
+        let line = "> look at[Image #1]and [Image #2] vs [Image #] [Image #[Image #3] [Image #4";
+        let found = image_placeholder_ranges(line)
+            .into_iter()
+            .map(|(range, number)| (&line[range.byte_start..range.byte_end], number))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            found,
+            vec![("[Image #1]", 1), ("[Image #2]", 2), ("[Image #3]", 3)]
+        );
+    }
+
+    /// RED (T-IMAGE-N) — **a later link for the same number replaces the earlier one.**
+    ///
+    /// Claude Code numbers the pictures of one conversation, and a second conversation in the same
+    /// pane starts again at 1. The table holds what the program said last.
+    ///
+    /// MUTATION: keep the first target in `learn` (`entry().or_insert`), and 3 still names
+    /// `a/3.png`.
+    #[test]
+    fn a_later_link_for_the_same_number_replaces_the_earlier_one() {
+        let mut table = ImagePlaceholderTargets::default();
+        let first = std::env::temp_dir().join("a").join("3.png");
+        let second = std::env::temp_dir().join("b").join("3.png");
+        assert!(table.learn(3, first.clone()));
+        assert_eq!(table.target(3), Some(first.as_path()));
+        assert!(
+            !table.learn(3, first),
+            "the same link again changes nothing"
+        );
+        assert!(table.learn(3, second.clone()));
+        assert_eq!(table.target(3), Some(second.as_path()));
+        assert_eq!(table.len(), 1);
+    }
+
+    /// RED (T-IMAGE-N) — **the sixty-fifth number evicts the one learned longest ago, and
+    /// re-learning a number makes it the newest.**
+    ///
+    /// A table a program fills by printing must be bounded; what it forgets first is what it
+    /// heard about longest ago, and a number the program linked again was heard about just now.
+    ///
+    /// MUTATION: skip the re-ordering in `learn` for a number already known, and 1 is evicted in
+    /// place of 2.
+    #[test]
+    fn the_sixty_fifth_number_evicts_the_one_learned_longest_ago() {
+        let mut table = ImagePlaceholderTargets::default();
+        for number in 1..=IMAGE_PLACEHOLDER_CAP as u32 {
+            table.learn(number, picture(number));
+        }
+        assert_eq!(table.len(), IMAGE_PLACEHOLDER_CAP);
+        // 1 is linked again, so 2 is now the one heard about longest ago.
+        table.learn(1, picture(1));
+        table.learn(65, picture(65));
+        assert_eq!(table.len(), IMAGE_PLACEHOLDER_CAP);
+        assert_eq!(table.target(2), None, "the oldest went");
+        assert_eq!(table.target(1), Some(picture(1).as_path()));
+        assert_eq!(table.target(65), Some(picture(65).as_path()));
+        table.learn(66, picture(66));
+        assert_eq!(table.target(3), None, "and then the next oldest");
+        assert!(table.forget_all());
+        assert!(table.is_empty());
+        assert!(!table.forget_all(), "nothing left to forget");
+    }
+
+    /// RED (T-IMAGE-N) — **a placeholder is a link only when its number was learned and the disk
+    /// has said its file is there; an unanswered target is text and a question.**
+    ///
+    /// The verified-link rule every printed path obeys (§7.1.5j), asked of the placeholder: the
+    /// ledger's "yes" makes the link, its "no" leaves text and asks nothing, and silence leaves text
+    /// and hands the target to the pane's worker through the same sink.
+    ///
+    /// MUTATION: link a learned target with no verdict (answer from the table alone), and 4 is a
+    /// link before anybody asked the disk.
+    #[test]
+    fn a_placeholder_is_a_link_only_when_the_disk_has_answered_for_its_file() {
+        let mut table = ImagePlaceholderTargets::default();
+        table.learn(3, picture(3));
+        table.learn(4, picture(4));
+        table.learn(5, picture(5));
+        let links = PrintedPathLinks::new(
+            None,
+            [(picture(3), true), (picture(5), false)]
+                .into_iter()
+                .collect(),
+        )
+        .with_image_placeholders(&table);
+        let line = "> [Image #3] [Image #4] [Image #5] [Image #6]";
+        let mut unknown = BTreeSet::new();
+        let found = links.image_placeholder_links_in(line, &mut unknown);
+        assert_eq!(
+            found
+                .iter()
+                .map(|(range, uri)| (&line[range.byte_start..range.byte_end], uri.clone()))
+                .collect::<Vec<_>>(),
+            vec![("[Image #3]", local_path_to_file_uri(&picture(3)))],
+            "3 is verified; 4 is unanswered, 5 is gone, 6 was never linked"
+        );
+        assert_eq!(
+            unknown,
+            [picture(4)].into_iter().collect(),
+            "only the unanswered target is a question"
+        );
+        let mut none = BTreeSet::new();
+        assert!(
+            PrintedPathLinks::new(None, BTreeMap::new())
+                .image_placeholder_links_in(line, &mut none)
+                .is_empty()
+                && none.is_empty(),
+            "a pane that learned nothing links nothing and asks nothing"
+        );
     }
 }

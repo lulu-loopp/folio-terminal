@@ -1045,8 +1045,8 @@ A bare absolute path a program printed in the terminal, made clickable.
 
 | hop | crate | entry | carries | lane |
 |---|---|---|---|---|
-| recognition | `bt-transcript` | `paths::detect_absolute_path_candidates`, `paths::may_read_unasked` | `PrintedPathCandidate` | the feed, synchronously |
-| verdict | `bt-term` | `session::verify_path`, `DualPlaneSession::ask_about_reprinted_path` / `re_ask_about_link_target`, the `path_verdicts` ledger | `PathVerdict` | asked on `bt-path-verify-worker`; the ledger is per pane and bounded |
+| recognition | `bt-transcript` | `paths::detect_absolute_path_candidates`, `paths::may_read_unasked`; an agent's `[Image #k]` placeholder through `paths::image_placeholder_ranges` against the pane's learned `ImagePlaceholderTargets` (T-IMAGE-N) | `PrintedPathCandidate` | the feed, synchronously |
+| verdict | `bt-term` | `session::verify_path`, `DualPlaneSession::ask_about_reprinted_path` / `re_ask_about_link_target`, the `path_verdicts` ledger; beside it the `image_placeholders` table, learned by `learn_image_placeholders_from_fresh_rows` from `OSC 8` labels | `PathVerdict` | asked on `bt-path-verify-worker`; the ledger and the table are per pane and bounded |
 | projection | `bt-viewport` | `implicit_hyperlinks`, `mark_osc_8_dotted`, `ViewportFrame::hyperlink_at` | `CellHyperlink` (defined in `bt-transcript`), `HyperlinkHit` | window thread, at frame build |
 | activation | `bt-app` | `Runtime::activate_hyperlink`, `hyperlink_activation` → `reference_activation` (the one table; a previewed document's links read it too, through `preview_link_activation`), `verified_target_of` | `bt_platform::VerifiedTarget` | window thread, from `mouse_input` |
 | hand-off | `bt-platform` | `handoff::resolved_for_a_door`, `handoff::open_local_path_verified`; a share on another machine under `Ctrl` through `handoff::open_local_path` (no ledger — a share is never asked about); any other scheme through `handoff::shell_execute` | the OS's acceptance or refusal | the OS hand-off lane (`bt-app::handoff_lane`), answered through `AppEvent::HandoffAnswered` |

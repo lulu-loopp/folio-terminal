@@ -1593,6 +1593,16 @@ pub struct DualPlaneSession {
     /// is still a link and is not asked about again, while a name the disk denied is read as one
     /// nobody has been to the disk for — because, for *this* printing, nobody has.
     reprinted_path_links: bt_transcript::paths::PrintedPathLinks,
+    /// **What this pane has learned about its `[Image #k]` placeholders** (T-IMAGE-N, owner ask
+    /// 2026-09-27): number -> the file a program's OSC 8 link on that exact label named.
+    ///
+    /// Part of the pane's reference table, beside the verdict ledger it is read against, and told
+    /// to the projection inside [`Self::printed_path_links`]. Written by one reader of the grid —
+    /// [`Self::learn_image_placeholders_from_fresh_rows`], over rows the program has just printed —
+    /// and emptied when the shell starts a command (`OSC 133 C` on the primary screen), because a
+    /// new program's `[Image #1]` is not the last one's. Bounded
+    /// ([`bt_transcript::paths::IMAGE_PLACEHOLDER_CAP`]) and dropped with the pane.
+    image_placeholders: bt_transcript::paths::ImagePlaceholderTargets,
     /// Which spelling of an absolute path the shell in this pane prints (T-3, 2026-09-07).
     ///
     /// Pushed in by the spawn, exactly as [`Self::set_spawn_directory`] is and for the same reason:
@@ -2107,6 +2117,7 @@ impl DualPlaneSession {
             path_verify_in_flight: BTreeSet::new(),
             printed_path_links: bt_transcript::paths::PrintedPathLinks::default(),
             reprinted_path_links: bt_transcript::paths::PrintedPathLinks::default(),
+            image_placeholders: bt_transcript::paths::ImagePlaceholderTargets::default(),
             path_namespace: bt_transcript::paths::PrintedPathNamespace::default(),
             printed_path_budget_full: false,
             spawn_directory: None,
@@ -2860,10 +2871,118 @@ impl DualPlaneSession {
         for path in self.paths_named_on_freshly_printed_rows() {
             self.ask_about_reprinted_path(path);
         }
+        // Read off the same rows and before the same watermark closes: one printing, one reading.
+        self.learn_image_placeholders_from_fresh_rows();
         for row in &mut self.live_rows {
             row.path_pass_revision = row.revision;
         }
         self.path_verify_tasks.len().saturating_sub(before)
+    }
+
+    /// **Learn which file each `[Image #k]` names, from the OSC 8 links the program just printed**
+    /// (T-IMAGE-N, owner ask 2026-09-27).
+    ///
+    /// Claude Code writes `[Image #k]` into its input line for a pasted picture, and in the
+    /// transcript it prints links that same label to the file it saved. The input line carries no
+    /// link, so the pane remembers the transcript's: a run of cells carrying one link whose label is
+    /// exactly the placeholder teaches `k -> target`. Nothing else teaches it — no path is guessed
+    /// and no agent's own files are read — so a number this pane never saw linked stays text.
+    ///
+    /// *Freshly printed* is the path ledger's own watermark ([`LiveRowStability::path_pass_revision`]):
+    /// a reflow is not a printing, so a resize does not re-teach a link the command boundary made
+    /// the pane forget. A link that scrolls away between two frames is not read; the transcript
+    /// prints the label again on the next message that uses it.
+    ///
+    /// A target learned for the first time, or changed, is put to the worker at once through the
+    /// pane's one question door ([`Self::ask_about_path`]): the answer is what lets the input line
+    /// light, and it arrives with a frame of its own.
+    fn learn_image_placeholders_from_fresh_rows(&mut self) {
+        let mut learned = Vec::new();
+        for (row, stability) in self.live_rows.iter().enumerate() {
+            if stability.revision == stability.path_pass_revision {
+                continue;
+            }
+            let Some(captured) = self.terminal.visible_row(row as u32) else {
+                continue;
+            };
+            let mut column = 0usize;
+            while column < captured.cells.len() {
+                let Some(link) = captured.cells[column].hyperlink.as_ref() else {
+                    column += 1;
+                    continue;
+                };
+                let mut label = String::new();
+                let mut end = column;
+                while end < captured.cells.len()
+                    && captured.cells[end]
+                        .hyperlink
+                        .as_ref()
+                        .is_some_and(|other| other.uri == link.uri)
+                {
+                    if !captured.cells[end].wide_spacer {
+                        label.push_str(&captured.cells[end].text);
+                    }
+                    end += 1;
+                }
+                if let Some(number) = bt_transcript::paths::image_placeholder_number(&label)
+                    && let Some(target) =
+                        bt_transcript::paths::file_uri_to_local_reference(&link.uri)
+                {
+                    learned.push((number, target));
+                }
+                column = end;
+            }
+        }
+        let mut changed = false;
+        for (number, target) in learned {
+            if self.image_placeholders.learn(number, target.clone()) {
+                changed = true;
+                self.ask_about_path(target);
+            }
+        }
+        if changed {
+            self.rebuild_printed_path_links();
+        }
+    }
+
+    /// **The first live row an agent's input line can stand on** (T-IMAGE-N): the rows at and below
+    /// it are where an `[Image #k]` placeholder may be read as a link.
+    ///
+    /// Claude Code does not mark its input area — it emits no `OSC 133` of its own — so the area is
+    /// read from the one boundary the pane *was* told: the start of the region the shell said is
+    /// open now. While a command runs that is its `C`, and everything the program has drawn since,
+    /// its input line included, stands after it; while the shell reads a line it is that line's `B`.
+    /// A region whose start has scrolled off the grid began above it, so the whole grid is after
+    /// it. A pane whose shell never spoke `OSC 133` has no boundary, and nothing is before it
+    /// either. An alternate screen belongs whole to the program that switched to it.
+    ///
+    /// `None` — read nowhere — between regions (`A` without `B`, after `D`), where no command and
+    /// no typed line is open, and for a start this grid can no longer place (a coordinate from
+    /// before a reflow the re-seat did not carry over): a wrong row would be a guess.
+    fn input_area_first_live_row(&self) -> Option<u32> {
+        if self.live_screen == ScreenId::Alternate {
+            return Some(0);
+        }
+        let start = match self.shell_phases.get(&ScreenId::Primary) {
+            None => return Some(0),
+            Some(ShellIntegrationPhase::Output(region)) => {
+                self.semantic_output_regions.get(region)?.start
+            }
+            Some(ShellIntegrationPhase::Input(region)) => {
+                self.semantic_input_regions.get(region)?.start
+            }
+            Some(ShellIntegrationPhase::Prompt | ShellIntegrationPhase::Finished) => return None,
+        };
+        match self.document.anchor(start).ok()? {
+            ContentAnchor::Live {
+                screen: ScreenId::Primary,
+                point,
+                generation,
+                ..
+            } if *generation == self.grid_generation => Some(point.row),
+            ContentAnchor::Live { .. } => None,
+            ContentAnchor::Staging { .. } | ContentAnchor::History { .. } => Some(0),
+        }
     }
 
     /// Every path named on a live row whose cells have changed since the last pass read them,
@@ -3144,7 +3263,11 @@ impl DualPlaneSession {
                 .map(|(path, verdict)| (path.clone(), verdict.exists))
                 .collect(),
             &namespace,
-        );
+        )
+        // The placeholders travel with the verdicts they are read against (T-IMAGE-N), and only in
+        // the frame's ledger: the re-ask pass below reads printed names, and a placeholder is not
+        // one.
+        .with_image_placeholders(&self.image_placeholders);
         // And the same ledger for text this pane has **just printed**, which is the one reading in
         // which a standing "no" is not an answer (owner ruling 2026-09-20). Built here, beside its
         // twin and from the same three inputs, so neither can drift from the other about a
@@ -5221,6 +5344,12 @@ impl DualPlaneSession {
                 if !matches!(phase, Some(ShellIntegrationPhase::Output(_))) {
                     let running = self.shell_commands_running.entry(screen).or_default();
                     *running = running.saturating_add(1);
+                    // A new program's `[Image #1]` is not the last one's (T-IMAGE-N): what the
+                    // pane learned about its placeholders belonged to the command that printed
+                    // the links. Primary only, as the command ledger is.
+                    if screen == ScreenId::Primary && self.image_placeholders.forget_all() {
+                        self.rebuild_printed_path_links();
+                    }
                 }
                 self.failure_exit_code = None;
                 self.progress = None;
@@ -8937,6 +9066,9 @@ impl DualPlaneSession {
         // and a verdict landing moves no geometry at all. Free when nothing changed: the
         // projection compares before it keeps.
         projection.set_printed_path_links(&self.printed_path_links);
+        // And where an agent's input line can stand (T-IMAGE-N), read afresh on every frame for
+        // the same reason: a boundary moves no geometry either.
+        projection.set_input_area_first_live_row(self.input_area_first_live_row());
         let (_, rows) = self.terminal.dimensions();
         let visible_rows = (0..rows.get())
             .filter_map(|row| self.terminal.visible_row(row))
@@ -26002,6 +26134,252 @@ mod tests {
         );
 
         std::fs::remove_file(&path).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// A fresh folder under the temp directory holding `present` as small files, and the folder.
+    fn temporary_pictures(present: &[&str]) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "betterterminal-image-placeholder-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        for name in present {
+            std::fs::write(directory.join(name), b"not decoded here").unwrap();
+        }
+        directory
+    }
+
+    /// The bytes of one OSC 8 link labelled `[Image #number]` pointing at `target`, as Claude Code
+    /// prints the placeholder in its transcript.
+    fn image_placeholder_link(number: u32, target: &Path) -> String {
+        format!(
+            "\u{1b}]8;;{}\u{1b}\\[Image #{number}]\u{1b}]8;;\u{1b}\\",
+            bt_transcript::paths::local_path_to_file_uri(target)
+        )
+    }
+
+    /// RED (T-IMAGE-N) — **an OSC 8 link labelled `[Image #3]` teaches the pane which file 3 is,
+    /// and a later link for 3 replaces it.**
+    ///
+    /// The transcript Claude Code prints links each placeholder to the picture it saved; that link
+    /// is the only thing the pane learns the number from. A link with any other label teaches
+    /// nothing, and the program linking the same number again is what it says now.
+    ///
+    /// MUTATION: delete the `learn_image_placeholders_from_fresh_rows` call from
+    /// `absorb_printed_path_probes`, and nothing is learned.
+    #[test]
+    fn an_osc_8_link_labelled_image_3_teaches_the_pane_which_file_3_is() {
+        let directory = temporary_pictures(&[]);
+        let (first, second, other) = (
+            directory.join("a-3.png"),
+            directory.join("b-3.png"),
+            directory.join("shot.png"),
+        );
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        session
+            .feed(
+                format!(
+                    "{}\r\n\u{1b}]8;;{}\u{1b}\\screenshot\u{1b}]8;;\u{1b}\\\r\n",
+                    image_placeholder_link(3, &first),
+                    bt_transcript::paths::local_path_to_file_uri(&other)
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        assert_eq!(
+            session.image_placeholders.target(3),
+            Some(first.as_path()),
+            "the link taught 3"
+        );
+        assert_eq!(
+            session.image_placeholders.len(),
+            1,
+            "and a link with another label taught nothing"
+        );
+
+        session
+            .feed(format!("{}\r\n", image_placeholder_link(3, &second)).as_bytes())
+            .unwrap();
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        assert_eq!(
+            session.image_placeholders.target(3),
+            Some(second.as_path()),
+            "the later link replaced the earlier one"
+        );
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED (T-IMAGE-N) — **in the input line, `[Image #3]` is a link to the picture the pane
+    /// learned for 3 when that file exists; a learned file that is gone, and a number never
+    /// linked, stay text.**
+    ///
+    /// The owner's ask of 2026-09-27: the input line carries the placeholder with no link, and the
+    /// hover card should show the picture before the message is sent. The link is laid by the
+    /// projection over exactly the placeholder's cells, targets the learned file as a `file:` link
+    /// does, and wears the resting dots every verified reference wears; the card and the click
+    /// rules are the ones every such link already has. Real files on the real disk, through the
+    /// real worker call, as the app's two-frame rhythm has it.
+    ///
+    /// MUTATION: drop the placeholder pass from `implicit_hyperlinks`, and `[Image #3]` is text.
+    #[test]
+    fn in_the_input_line_image_3_is_a_link_to_the_learned_picture_when_the_file_exists() {
+        let directory = temporary_pictures(&["3.png"]);
+        let (present, gone) = (directory.join("3.png"), directory.join("5.png"));
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        enable_path_detection(&mut session);
+        session
+            .feed(
+                format!(
+                    "{}\r\n{}\r\n> [Image #3] [Image #5] [Image #7]",
+                    image_placeholder_link(3, &present),
+                    image_placeholder_link(5, &gone)
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+
+        let hit = frame
+            .hyperlink_at(2, 2)
+            .expect("the placeholder whose file exists is a link");
+        assert_eq!(
+            hit.uri,
+            bt_transcript::paths::local_path_to_file_uri(&present),
+            "to the picture the transcript linked 3 to"
+        );
+        let (dotted, _) = underlined_columns(&frame, 2);
+        assert_eq!(
+            dotted,
+            (2..12).collect::<Vec<_>>(),
+            "the resting mark covers the placeholder and nothing else"
+        );
+        assert!(
+            frame.hyperlink_at(2, 13).is_none(),
+            "a learned picture that is not on the disk is text"
+        );
+        assert!(
+            frame.hyperlink_at(2, 24).is_none(),
+            "a number the pane never saw linked is text"
+        );
+        std::fs::remove_file(&present).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED (T-IMAGE-N) — **whether the picture exists is asked of the pane's worker, never of the
+    /// frame: until the answer lands the placeholder is text, and the question is the worker's.**
+    ///
+    /// The verified-link rule (§7.1.5j, audit 3 C-2): the window thread asks no filesystem about a
+    /// path a program named. A frame drawn after the pane learned 3 and before any worker answered
+    /// must draw text, and the question for 3's file must be waiting in the pane's own queue — the
+    /// door every printed path goes through — and nowhere else.
+    ///
+    /// MUTATION: answer a learned target from `Path::exists` in
+    /// `PrintedPathLinks::image_placeholder_links_in` instead of from the verdicts, and the second
+    /// frame draws the link before the worker has been asked anything.
+    #[test]
+    fn whether_the_picture_exists_is_the_workers_question_and_the_frame_waits_for_it() {
+        let directory = temporary_pictures(&["3.png"]);
+        let present = directory.join("3.png");
+        let mut session = DualPlaneSession::new(nz(60), nz(8));
+        session
+            .feed(format!("{}\r\n> [Image #3]", image_placeholder_link(3, &present)).as_bytes())
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        session.viewport_frame(&mut projection).unwrap();
+        session.absorb_printed_path_probes(&mut projection);
+        let before_the_answer = session.viewport_frame(&mut projection).unwrap();
+        assert!(
+            before_the_answer.hyperlink_at(1, 2).is_none(),
+            "no worker has answered, so the placeholder is text"
+        );
+        assert_eq!(session.path_verdict(&present), None, "nobody has answered");
+        let mut asked = Vec::new();
+        while let Some(task) = session.take_decoration_worker_task() {
+            if let SessionDecorationTask::VerifyPath(path) = task {
+                let verdict = verify_path(&path);
+                asked.push(path.clone());
+                session.complete_path_verification(path, verdict);
+            }
+        }
+        assert_eq!(
+            asked,
+            vec![present.clone()],
+            "the one question went to the worker"
+        );
+        let after = session.viewport_frame(&mut projection).unwrap();
+        assert_eq!(
+            after.hyperlink_at(1, 2).map(|hit| hit.uri),
+            Some(bt_transcript::paths::local_path_to_file_uri(&present).into()),
+            "and the frame after the answer draws the link"
+        );
+        std::fs::remove_file(&present).unwrap();
+        std::fs::remove_dir(&directory).unwrap();
+    }
+
+    /// RED (T-IMAGE-N) — **the input area is the rows after the shell's last boundary, and a new
+    /// command forgets what the last one's links taught.**
+    ///
+    /// Claude Code marks no input area of its own, so the pane reads it from the boundary it was
+    /// told: the `C` the shell put before the program's first byte. The same placeholder typed on
+    /// the command line above it is text; the program's input line below it is a link. When the
+    /// shell starts the next command, its `[Image #3]` is not the last program's picture.
+    ///
+    /// MUTATIONS: read the placeholder on every live row (`input_area_first_live_row` answering
+    /// `Some(0)`), and the command line's `[Image #3]` lights; keep the table across `C`, and the
+    /// next command's `[Image #3]` shows the last program's picture.
+    #[test]
+    fn the_input_area_is_after_the_last_boundary_and_a_new_command_forgets_the_last_ones_pictures()
+    {
+        let directory = temporary_pictures(&["3.png"]);
+        let present = directory.join("3.png");
+        let mut session = DualPlaneSession::new(nz(60), nz(10));
+        enable_path_detection(&mut session);
+        session
+            .feed(
+                format!(
+                    "\u{1b}]133;A\u{7}$ \u{1b}]133;B\u{7}echo [Image #3]\r\n\u{1b}]133;C\u{7}{}\r\n> [Image #3]",
+                    image_placeholder_link(3, &present)
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        let mut projection = session.new_projection(session.layout_key());
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+        assert!(
+            frame.hyperlink_at(0, 7).is_none(),
+            "the command line stands before the boundary"
+        );
+        assert_eq!(
+            frame.hyperlink_at(2, 2).map(|hit| hit.uri),
+            Some(bt_transcript::paths::local_path_to_file_uri(&present).into()),
+            "the program's input line stands after it"
+        );
+
+        session
+            .feed(
+                b"\r\n\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07next\r\n\x1b]133;C\x07> [Image #3]",
+            )
+            .unwrap();
+        let frame = frame_after_path_verification(&mut session, &mut projection);
+        assert!(
+            session.image_placeholders.is_empty(),
+            "the new command forgot the last one's placeholders"
+        );
+        assert!(
+            frame.hyperlink_at(4, 2).is_none(),
+            "so its `[Image #3]` is text"
+        );
+        std::fs::remove_file(&present).unwrap();
         std::fs::remove_dir(&directory).unwrap();
     }
 
