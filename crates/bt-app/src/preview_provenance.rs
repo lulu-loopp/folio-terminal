@@ -95,13 +95,11 @@
 //! `place_of` gives it. The invariant that does hold everywhere is that the two
 //! names have nothing *drawn* between them.
 //!
-//! **The two directions have no product caller yet, and say so.** The caret is
-//! T5 and the second direction is what tells it where the caret went when its
-//! block was re-parsed; the reverse-video toolbar that wants
-//! [`TextOrigin::text_of`] is v2's. They carry `#[allow(dead_code)]` naming the
-//! slice that will call them, which is the discipline `git.rs` states: an
-//! `allow` that outlives its excuse is then visible rather than merely
-//! tolerated. What is not deferred is the *mapping* — it is built on every
+//! **Both directions are the caret's (T5).** The first is where a click
+//! becomes a caret and the second tells it where the caret went when its block
+//! was re-parsed. [`TextOrigin::text_of`], which a reverse-video toolbar would
+//! want, is asked only by the tests: no ticket builds that toolbar. What is not
+//! deferred is the *mapping* — it is built on every
 //! parse, and it is held by test on every fixture, because a map discovered at
 //! its first call site is a map the parser has already got wrong.
 
@@ -231,9 +229,8 @@ impl TextOrigin {
 
     /// Where the byte at `offset` came from, or `None` past the end.
     ///
-    /// `#[allow(dead_code)]`: the per-byte question the tests ask of every
-    /// fixture; the product asks [`file_offset_of`], which rounds.
-    #[allow(dead_code)]
+    /// The per-byte question the tests ask of every fixture, and the one
+    /// `file_offset_at` asks before it rounds.
     #[must_use]
     pub fn origin_of(&self, offset: usize) -> Option<Origin> {
         let run = self.run_at(offset)?;
@@ -368,8 +365,7 @@ impl BlockOrigins {
 /// block range to fall back on even when the piece draws nothing the file
 /// spells (a picture written as HTML).
 ///
-/// `#[allow(dead_code)]`: T5's, which is where a click becomes a caret.
-#[allow(dead_code)]
+/// T5's, which is where a click becomes a caret.
 #[must_use]
 pub fn file_offset_of(
     place: &Place,
@@ -393,10 +389,9 @@ pub fn file_offset_of(
 ///
 /// `None` only for a document with no drawn text in it at all.
 ///
-/// `#[allow(dead_code)]`: T5's, which asks it once a keystroke — "the caret's
+/// T5's, which asks it once a keystroke — "the caret's
 /// block was re-parsed, where is the caret on the page now" — and v2's, which
 /// asks it of a selection the file changed under.
-#[allow(dead_code)]
 #[must_use]
 pub fn place_of(
     file_offset: usize,

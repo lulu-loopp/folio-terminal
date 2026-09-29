@@ -9649,7 +9649,6 @@ impl SettingsLayout {
     ///
     /// Drawing and hit-testing walk `rows` in order instead — they want every
     /// row, not a named one — so at the moment the pins are the only callers.
-    #[allow(dead_code)]
     #[must_use]
     pub fn row(&self, row: SettingsRow) -> Option<&RowLayout> {
         self.rows.iter().find(|placed| placed.row == row)

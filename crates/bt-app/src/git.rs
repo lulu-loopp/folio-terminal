@@ -1146,7 +1146,6 @@ impl StatusCode {
 
     /// The badge's letter — git's own, so that a row and a `git status` in the
     /// pane beside it read the same. Drawn by G-2's two badges (R11).
-    #[allow(dead_code)]
     #[must_use]
     pub fn letter(self) -> char {
         match self {
@@ -1174,7 +1173,6 @@ impl StatusCode {
 ///
 /// The three headings are G-2's to draw; the membership rule is here, because it
 /// is a fact about git's letters rather than about a list.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GitGroup {
     Staged,
@@ -1265,7 +1263,6 @@ impl GitStatusEntry {
     /// letters say nothing about it.
     ///
     /// Read by G-2, which colours a conflicted row with the error ink (R29).
-    #[allow(dead_code)]
     #[must_use]
     pub fn is_conflict(&self) -> bool {
         matches!(self.staged, Some(StatusCode::Unmerged))
@@ -1283,7 +1280,6 @@ impl GitStatusEntry {
     /// occupies both. Ignored (`!!`) belongs to no list at all: we never ask for
     /// it, and if a caller ever does, the honest place for a file git was told to
     /// forget is nowhere rather than under a heading that claims it changed.
-    #[allow(dead_code)]
     #[must_use]
     pub fn in_group(&self, group: GitGroup) -> bool {
         let real = |code: Option<StatusCode>| {
@@ -1329,7 +1325,6 @@ pub struct GitStatus {
 
 impl GitStatus {
     /// The entries of one list, in git's order.
-    #[allow(dead_code)]
     pub fn group(&self, group: GitGroup) -> impl Iterator<Item = &GitStatusEntry> {
         self.entries
             .iter()
@@ -3110,7 +3105,6 @@ impl GitCache {
     /// and by the manual refresh. It is the whole of R31's second invalidation
     /// moment: nothing else in this module ever decides on its own that what it
     /// knows has gone stale.
-    #[allow(dead_code)]
     pub fn refresh(&mut self) {
         self.status = GitSlot::Idle;
         self.refs = GitSlot::Idle;
@@ -3244,19 +3238,16 @@ impl GitCache {
     // whole slot rather than its contents, because "not asked yet", "asked",
     // "here it is" and "here is why not" are four different rows and a page that
     // could only see the third would draw an empty list for all four.
-    #[allow(dead_code)]
     #[must_use]
     pub fn repo(&self) -> &GitSlot<PathBuf> {
         &self.repo
     }
 
-    #[allow(dead_code)]
     #[must_use]
     pub fn status(&self) -> &GitSlot<GitStatus> {
         &self.status
     }
 
-    #[allow(dead_code)]
     #[must_use]
     pub fn refs(&self) -> &GitSlot<Vec<GitRefEntry>> {
         &self.refs
@@ -3531,7 +3522,6 @@ impl GitCache {
         }
     }
 
-    #[allow(dead_code)]
     #[must_use]
     pub fn more_commits(&self) -> Option<GitQuestion> {
         let root = self.repo.ready()?;

@@ -203,11 +203,8 @@ pub enum Credential {
     Announced,
     /// `OSC 1337;RequestAttention=yes`, taken back by `=no`. A program **wants** you.
     Weak,
-    /// `folio attention wait`. A program is **blocked on** you.
-    #[allow(
-        dead_code,
-        reason = "the pipe lane spells this tier as a `WaitKind` row today; the C slices name it"
-    )]
+    /// `folio attention wait`. A program is **blocked on** you. Nothing in the product makes one
+    /// yet: the pipe lane spells this tier as a `WaitKind` row today.
     Strong,
 }
 
@@ -224,10 +221,6 @@ pub enum Credential {
 /// the grid's own cells — a test that asserts the whole state would otherwise have to reconstruct
 /// it out of the two accessors, which is the reconstruction the derivation exists to make
 /// unnecessary.
-#[allow(
-    dead_code,
-    reason = "the derived state is what the grid's cells are spelled against"
-)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum State {
     /// Neither tier is asserting anything. Every leaf is born here.
@@ -294,7 +287,6 @@ pub enum Via {
     Osc777,
     /// kitty's `OSC 99`. **No producer in the parser yet** — named because the vocabulary is fixed
     /// here, so the day one arrives it is a row and not a value.
-    #[allow(dead_code, reason = "`bt-term` has no `OSC 99` parser yet")]
     Osc99,
     /// codex's `notify` program, whose only `type` today is `agent-turn-complete`.
     Notify,
@@ -602,10 +594,6 @@ pub enum IdSource {
     /// gap: a path may be written only from a verbatim quotation of an upstream payload, and none
     /// has been taken. The day one is, that is a data change in `attention_map` and nothing else —
     /// which is what `a_receipt_aims_as_narrowly_as_its_evidence_allows` exercises.
-    #[allow(
-        dead_code,
-        reason = "§12.1.6: no upstream identifier has been quoted yet"
-    )]
     Path(&'static str),
 }
 
@@ -700,10 +688,6 @@ impl MappingRow {
 /// deliberately holds both layers of `permission` so that `installed_rows` has something to choose
 /// between, and this is the checker that proves the *installed* set never does. A rule whose only
 /// witness is a test is still a rule; a rule with no witness at all is a comment.
-#[allow(
-    dead_code,
-    reason = "R2's checker; its witness is the catalogue's own red form"
-)]
 pub fn duplicated_tier(rows: &[MappingRow]) -> Option<(&'static str, WaitKind)> {
     for row in rows.iter().filter(|row| row.is_wait()) {
         let MappedAction::Wait { tier } = row.action else {
@@ -1060,10 +1044,6 @@ impl AttentionLedger {
     }
 
     /// [`State`], derived — see that type for why the window does not ask for it.
-    #[allow(
-        dead_code,
-        reason = "the derived state is what the grid's cells are spelled against"
-    )]
     pub fn state(&self) -> State {
         let Some(episode) = self.episode else {
             return State::Idle;

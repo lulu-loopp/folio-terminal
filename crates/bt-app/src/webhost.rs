@@ -466,7 +466,6 @@ impl WebMachine {
     /// only what the caller does first, which is to move the seat's address, so
     /// that the page this returns comes back in the window the person moved it
     /// to and not the one it left.
-    #[allow(dead_code, reason = "F1b's transfer transaction is the caller")]
     pub(crate) fn on_rehost_lost(&mut self) -> WebEffect {
         self.on_new_browser_version_available()
     }
@@ -1801,7 +1800,6 @@ pub(crate) struct SeatAddress {
 /// allow rather than being held out of the build until then, because the thing
 /// the slice has to get right is the contract and the contract is what a test
 /// can hold today.
-#[allow(dead_code, reason = "F1b's transfer transaction is the caller")]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum RehostReport {
     /// The live page moved: same document, same history, same heap, no
@@ -3706,7 +3704,6 @@ impl WebSeat {
     /// caller passes it when the moved tab is the one in front, because a person
     /// whose hand just carried this page somewhere has said where they are
     /// looking.
-    #[allow(dead_code, reason = "F1b's transfer transaction is the caller")]
     pub(crate) fn rehost(
         &mut self,
         from: &bt_platform::Compositor,

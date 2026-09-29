@@ -11439,7 +11439,6 @@ impl PaneMenuLayout {
     /// *between* the frame and the first row has to know where both of them are,
     /// and deriving the second from the padding constants would be a pin that
     /// agreed with the layout by arithmetic rather than by reading it.
-    #[allow(dead_code)]
     #[must_use]
     pub fn submenu_rows(&self) -> Option<&[[f32; 4]]> {
         self.submenu

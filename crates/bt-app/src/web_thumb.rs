@@ -696,14 +696,12 @@ impl WebThumbs {
     ///
     /// The key travels unchanged, because a tab keeps its `TabId` across a move
     /// (F1b) and a seat keeps its number inside that tab.
-    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
     #[must_use]
     pub fn take(&mut self, leaf: LeafId) -> Option<Entry> {
         self.pages.remove(&leaf)
     }
 
     /// [`Self::take`]'s other half, on the window the tab arrived in.
-    #[allow(dead_code, reason = "F1c's drag and F2's menu row press the transfer")]
     pub fn put(&mut self, leaf: LeafId, entry: Entry) {
         self.pages.insert(leaf, entry);
     }

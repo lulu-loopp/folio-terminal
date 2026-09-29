@@ -21061,7 +21061,6 @@ impl UserInputKind {
     ///
     /// `None` for the one kind that is not an answer, so that "a pointer sweep answered a request"
     /// is a sentence that cannot be constructed rather than one that is checked for.
-    #[allow(dead_code, reason = "A2 passes the result of this to the ledger")]
     fn answer_kind(self) -> Option<attention::AnswerKind> {
         Some(match self {
             Self::Keyboard => attention::AnswerKind::Keyboard,

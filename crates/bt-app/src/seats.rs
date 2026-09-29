@@ -611,7 +611,6 @@ impl Seats {
     /// for that function's reason: the question "which one" has exactly one
     /// honest answer and it is this field, so a test that reached for
     /// `seat_is_zoomed` in a loop would be re-deriving it.
-    #[allow(dead_code)]
     #[must_use]
     pub fn zoom(&self) -> Option<SeatId> {
         self.zoom
@@ -1804,7 +1803,6 @@ pub struct DropPlan {
     /// the object D4 is *about*, and the pin that holds the preview and the drop
     /// to the same rectangles reads it. U7 does not add a field here; it stops
     /// throwing this one away.
-    #[allow(dead_code)]
     pub tree: LayoutNode,
     /// That tree solved into the same viewport the live layout was solved into
     /// — and `None` when the drop is refused (H93/M147).
@@ -7632,7 +7630,6 @@ impl DropEdge {
     /// `Edit::RootRimDrop` — need the *same* answer. Two readings of "which
     /// side is left" is exactly the drift the mock-up's one-engine ruling
     /// (6352) is about, and a rule with a test on it does not drift.
-    #[allow(dead_code)]
     #[must_use]
     pub fn axis(self) -> Axis {
         match self {
@@ -7644,7 +7641,6 @@ impl DropEdge {
     /// Whether the arriving seat takes the *first* slot of the new split —
     /// `first = (zone === "left" || zone === "top")`. See [`Self::axis`] for why
     /// it is stated ahead of its caller.
-    #[allow(dead_code)]
     #[must_use]
     pub fn leading(self) -> bool {
         matches!(self, Self::Left | Self::Top)
