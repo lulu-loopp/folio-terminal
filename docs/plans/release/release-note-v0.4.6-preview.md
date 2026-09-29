@@ -4,14 +4,14 @@
 
 **Download:** [zip](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.6-preview/folio-0.4.6-windows-x64.zip) (Windows 10 1809+ / 11, 64-bit) · [dmg](https://github.com/lulu-loopp/folio-terminal/releases/download/v0.4.6-preview/Folio-0.4.6-macos-arm64.dmg) (macOS 14+, Apple silicon)
 
-**下载：** 上方 zip 与 dmg 即为完整下载，其余为校验和、物料清单与源码。[中文版发布说明](https://github.com/lulu-loopp/folio-terminal/blob/v0.4.6-preview/docs/plans/release/release-note-v0.4.6-preview.zh-CN.md)
+**下载：** 上方 zip 与 dmg 即为完整下载，其余为校验和、物料清单与源码。[中文版发布说明](https://github.com/lulu-loopp/folio-terminal/blob/main/docs/plans/release/release-note-v0.4.6-preview.zh-CN.md)
 
 ## Highlights
 
 - Folio updates itself on Windows: when a new release is out, a card offers
   it, downloads it and restarts Folio into it, and if the new version does
   not start, the previous one comes back.
-- The same self-update works on a Mac. <!-- U-32 -->
+- The same self-update works on a Mac.
 - A reboot or a logout saves your layout the way quitting does, pinned tabs
   and their panes included.
 - Pasting into the find bar, a settings field or the Git panel's search and
@@ -25,10 +25,10 @@
 
 - Windows: Folio can update itself from the update card; Settings ▸ General
   has a Restart to update row that brings the card back.
-- macOS: Folio can update itself the same way. <!-- U-32 -->
+- macOS: Folio can update itself the same way.
 - A copy installed with scoop or winget is shown its package manager's
   command to copy instead of updating itself.
-- A copy installed with Homebrew is shown its command the same way. <!-- U-32 -->
+- A copy installed with Homebrew is shown its command the same way.
 - If an update cannot finish, the installed Folio reopens with an "Update
   incomplete" card; CHANGELOG says what happens when an update is cut off.
 - An update downloaded but not installed — closed with Later, or cut off by
@@ -84,7 +84,7 @@
   next start puts the previous version back.
 - macOS: the first self-update makes macOS show its "…software was added
   that can run in the background" notice for Folio's login item; it is
-  the updater's recovery entry and is removed once the update finishes. <!-- U-32 -->
+  the updater's recovery entry and is removed once the update finishes.
 
 <details>
 <summary>Install notes (SmartScreen, Gatekeeper, checksums)</summary>
