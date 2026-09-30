@@ -1,4 +1,4 @@
-# U-41 — managed copies update through the same transaction (design, 2026-09-29, revision (b))
+# U-41 — managed copies update through the same transaction (design, 2026-09-29, revision (c))
 
 Design only: phase 1 of U-41, on `design/managed-update` from `main` at
 `6abd3f5e`. No product code was written, nothing was built, and no package
@@ -14,6 +14,10 @@ the phase-2 ticket that depends on it waits for it.
 (`U-41-review-codex-2026-09-29.md`, verdict *not yet*, fifteen findings) and the
 coordinator's rulings on it. It is amended in place; the ledger of what changed
 is §0. Where revision (a)'s text and this one differ, this one stands.
+
+**Revision (c)** answers Codex's check of `d468ff4c`
+(`U-41-review-codex-2026-09-29-b.md`: everything else closed, design (a) for
+winget stands, two blockers). It is amended in place; §0.1 is its ledger.
 
 **The rulings this answers**
 
@@ -65,6 +69,14 @@ journal layout (`Link`, scoop) and one field (`marker`, the bundle layouts).
 | F13 | experiments insufficient; pins | E-M1–E-M6 as Codex writes them; sources pinned; minimum manager versions (§6, §9) |
 | F14 | sizes and dependencies | re-cut (§7) |
 | F15 | owner questions | the answers are recorded (§8) |
+
+### 0.1 Revision (c)
+
+| blocker | Codex (check of `d468ff4c`) | what this revision does |
+|---|---|---|
+| B1 | the pinned source does not make `installed.db` winget's authoritative installed-version record | WG3 calls it the source-backed install history, correlation and intent catalogue; the claim that stale tracking data makes `winget list` or `winget upgrade` report the old version is withdrawn; (b)'s invariant test and recommendation (a) rest on what is proved; E-M3 gains the discriminating cases (§2.4) |
+| B2 | U-41e0 detects a broken public state but does not recover it | the release order saves both manifests' old bytes and blob ids, compensates every write that landed on any failure, names a release incident when compensation fails, gives the same instruction when publication fails or is abandoned, and carries failure-injection tests; U-41e0 is M (§5.1, §7) |
+| cut | U-41d promised a pin precondition that needs E-M4 and a winget process | U-41d is the hard-off constant and the regression that no winget copy raises a card; the eligibility precondition, pins included, moves to the future winget-road ticket (§7, §8) |
 
 ---
 
@@ -444,9 +456,42 @@ E-M2 (the launch surfaces follow `current`) and E-M5.
   `%LOCALAPPDATA%\Microsoft\WinGet\Packages\<PackageId>_<SourceId>\`
   (`GetPortableProductCode`, `PathName::PortablePackageUserRoot`); with
   `--scope machine`, `%ProgramFiles%\WinGet\Packages\<ProductCode>\` with its record under HKLM (`GetPortableInstallRoot`, the `PortableARPEntry` constructor); an upgrade keeps the recorded scope (`InitializePortableInstaller`) and writes HKLM and Program Files.
-- **WG3. What winget records.** **The portable index** `<ProductCode>.db` (`GetPortableIndexFileName`), Hidden, in the install folder, written for archive installs only: SQLite, table `portable(filepath TEXT UNIQUE COLLATE NOCASE, filetype INT64, sha256 BLOB, symlinktarget TEXT)` and a `metadata` table with `majorVersion`/`minorVersion` 1.0 (`Schema/Portable_1_0/PortableTable.cpp`, `SQLiteMetadataTable.cpp`). winget opens only 1.0 and refuses any other (`ERROR_NOT_SUPPORTED`, `APPINSTALLER_CLI_ERROR_CANNOT_WRITE_TO_UPLEVEL_INDEX`; `PortableIndex::CreateIPortableIndex`); there is no migration (the portable index: file,
-  schema, version) and **the uninstall record** `HKCU\…\Uninstall\<ProductCode>` (`RegisterARPEntry`, `SetAppsAndFeaturesMetadata`, `CreateTargetInstallDirectory`, `InstallFile`): `WinGetPackageIdentifier`, `WinGetSourceIdentifier`, `UninstallString` (`winget uninstall --product-code …`), `WinGetInstallerType`, `DisplayName`, `DisplayVersion`, `Publisher`, `InstallDate`, `URLInfoAbout`, `HelpLink`, `InstallLocation`, `InstallDirectoryCreated`, `InstallDirectoryAddedToPath` (the uninstall record's values), and the
-  `PATH` entry (`AddToPathVariable`, `PathVariable.cpp`): the folder holding the executable appended to `HKCU\Environment` `Path` (`REG_EXPAND_SZ`), and `WM_SETTINGCHANGE "Environment"` broadcast. **A tracking catalog**, `installed.db`, in the App Installer package's `LocalState\<source id>\` (`RecordInstall`, `GetPackageTrackingFilePath`): winget's general index schema, created at the latest schema version of the running winget (V1_7 at the pin; `CreateISQLiteIndex`), holding the installed version, `PinnedState`, architecture, locale and the install's intent. None of the four is documented as a public or stable contract (any other tracking state).
+- **WG3. What winget writes for a portable install** (four stores, none
+  documented as a public or stable contract):
+  - **the portable index** `<ProductCode>.db` (`GetPortableIndexFileName`),
+    Hidden, in the install folder, for archive installs only: SQLite, table
+    `portable(filepath TEXT UNIQUE COLLATE NOCASE, filetype INT64, sha256 BLOB,
+    symlinktarget TEXT)` and a `metadata` table with `majorVersion` /
+    `minorVersion` 1.0 (`Schema/Portable_1_0/PortableTable.cpp`,
+    `SQLiteMetadataTable.cpp`). winget opens only 1.0 and refuses any other
+    (`PortableIndex::CreateIPortableIndex`); there is no migration;
+  - **the uninstall record** `HKCU\…\Uninstall\<ProductCode>`
+    (`RegisterARPEntry`, `SetAppsAndFeaturesMetadata`,
+    `CreateTargetInstallDirectory`, `InstallFile`): `WinGetPackageIdentifier`,
+    `WinGetSourceIdentifier`, `UninstallString` (`winget uninstall
+    --product-code …`), `WinGetInstallerType`, `DisplayName`,
+    `DisplayVersion`, `Publisher`, `InstallDate`, `URLInfoAbout`, `HelpLink`,
+    `InstallLocation`, `InstallDirectoryCreated`, `InstallDirectoryAddedToPath`.
+    **This is where winget's installed version comes from**:
+    `CompositeInstalledVersion::GetProperty(Version)` answers the installed
+    source's version, which for this portable is `DisplayVersion`
+    (`CompositeSource.cpp`), apart from the separate ARP-version mapping;
+  - **the `PATH` entry** (`AddToPathVariable`, `PathVariable.cpp`): the folder
+    holding the executable appended to `HKCU\Environment` `Path`
+    (`REG_EXPAND_SZ`), and `WM_SETTINGCHANGE "Environment"` broadcast;
+  - **the source-backed install history, correlation and intent catalogue**
+    `installed.db`, in the App Installer package's `LocalState\<source id>\`
+    (`InstallFlow` `RecordInstall` → `PackageTrackingCatalog::RecordInstall`;
+    `GetPackageTrackingFilePath`), created at the running winget's latest
+    general-index schema (V1_7 at the pin; `CreateISQLiteIndex`). What the pinned
+    source shows it is: `RecordInstall` adds or updates the manifest of the
+    version installed and removes no older version, so a catalogue winget wrote
+    itself normally holds several versions; its entries **correlate** the
+    installed entry with its source and **supplement** architecture, locale,
+    pin and user-intent metadata, falling back to the latest tracked version
+    when the exact one is absent (`CompositeSource.cpp`); and an unreadable
+    catalogue is renamed and an empty one created (`CreateOrOpenTrackingIndex`).
+    It is not the record of which version is installed; `DisplayVersion` is.
 - **WG4. An upgrade's order** (`PortableInstaller::Install` →
   `ApplyDesiredState`): every expected (old) entry is removed, then for each
   desired entry the index row is written **before** its file is installed
@@ -466,9 +511,10 @@ E-M2 (the launch surfaces follow `current`) and E-M5.
 
 **Design (a): winget stays on the Copy row in 0.4.7.** `WINGET_ROAD = false`.
 The row names `winget upgrade --id WeiyiShi.Folio --exact` with **Copy**, as
-today. Eligibility code for winget may exist (the precondition reads: community
-source, per-user scope, no pin; U-41d) but never raises a card while the
-constant is off. **There is no catalogue probe in 0.4.7**: Folio starts no
+today. In 0.4.7 winget has only the hard-off constant (U-41d): no eligibility
+precondition, no pin read (`pinning.db` is winget's private schema) and no
+`winget` process. The precondition — community source, per-user scope, pins —
+belongs to a future winget-road ticket after E-M3, E-M4 and its own review. **There is no catalogue probe in 0.4.7**: Folio starts no
 `winget` process and sends nothing to Microsoft's source, so `PRIVACY.md` gains
 nothing for winget. The disclosure is one line in the note (this paragraph), in
 `CHANGELOG.md` under the release's **Changed** ("A copy installed with winget
@@ -497,7 +543,7 @@ What that requires, per the pinned source (WG3): Folio would have to write, cons
    - the **portable index**: SQLite at schema 1.0, which winget opens only at exactly 1.0. Folio could write it (a fixed, small table), but it is winget's internal format with no contract, and a winget that moves to 2.0 refuses Folio's file or migrates it on its own terms;
    - the **uninstall record**: thirteen registry values that Folio could write (it reads four already, U-4);
    - the **`PATH` entry**: `HKCU\Environment` and a broadcast, which Folio could perform;
-   - the **tracking catalog** `installed.db`: winget's general index, written at **the running winget's latest schema** (V1_7 at the pin; seven versions so far), inside the App Installer package's own `LocalState`. Folio cannot write this one consistently: its schema moves with winget releases, it is another packaged application's private data, and a record Folio did not update leaves `winget list` and `winget upgrade` reading a version the files are not.
+   - the **install history, correlation and intent catalogue** `installed.db`: winget's general index at the running winget's latest schema, inside the App Installer package's own `LocalState`. Folio has no supported way to write it. So a Folio swap **cannot reproduce winget's `RecordInstall` entry** for the new manifest, and it leaves the correlation and intent metadata (architecture, locale, pin state, user intent) sourced from the last version winget itself recorded. What `winget list`, an exact `winget upgrade`, `winget uninstall` and a later manager upgrade then do is not proved either way by the pinned source; E-M3 measures it.
 
 *The cut points.* Folio's own order could be made safe (index written after the
 files, record last, each step journaled), but the design has to coexist with
@@ -519,9 +565,25 @@ child, so the hazard does not arise inside it; it is the reason revision (a)'s
 winget-runs-the-step design is withdrawn outright rather than repaired with a
 longer bound.
 
-*Invariant test for (b):* **fails.** Offline, Folio could keep the files, the index, the uninstall record and `PATH` in step, but not winget's tracking catalog, whose schema is the running winget's and is not Folio's to write. So after an interrupted or a completed Folio swap, "the manager's own record agrees, or can be made to agree offline" does not hold. A design that writes three of winget's four stores and leaves the fourth to disagree is the "repair winget's state" hazard in another form.
+*Invariant test for (b):* **unproved** — not proved impossible. The files, the
+portable index, the uninstall record and `PATH` could be kept in step offline,
+and the installed version winget reads is `DisplayVersion`, which Folio could
+write. What cannot be shown is the rest of the test, "the manager's own record
+agrees, or can be made to agree offline": (b) mutates several undocumented
+winget-owned stores (an index winget refuses at any other schema, and registry
+values winget composes), it cannot claim equivalence to `RecordInstall`, and it
+has no reviewed way to take part in winget's cross-process install lock
+(`CrossProcessInstallLock`, WG6) or to compose with a person's concurrent forced
+operation (the cut points above).
 
-**Recommendation: (a).** Design (b) fails the invariant test on winget's tracking catalog; revision (a)'s design (winget runs the step) fails it on WG4's destructive order and on the lock-wait kill. Design (a) passes, costs nothing on the public source today (WG1), and leaves the adapter slot open: a winget road needs either a winget operation that is transactional (a staged install winget can roll back offline) or a documented record Folio may write, and it gets a design review of its own when one exists. Machine-scope winget copies stay on the
+**Recommendation: (a).** Revision (a)'s design (winget runs the step) fails the
+invariant test on WG4's destructive order with no rollback, and on the lock-wait
+kill. Design (b) is unproved for the reasons just given, and E-M3's
+discriminating cases are what would settle it; no 0.4.7 road waits on them.
+Design (a) passes, costs nothing on the public source today (WG1), and leaves the
+adapter slot open: a winget road needs a winget operation that is transactional
+offline, or a proved way to write winget's stores and share its lock, and it
+gets a design review of its own. Machine-scope winget copies stay on the
 Copy row under either design (F9): `install_channel` reads only the account's
 HKCU record, and a machine-scope upgrade may need elevation.
 
@@ -611,29 +673,59 @@ that changes a hook says so in its note and in §5.1's checklist.
 ### 5.1 The release order (U-41e0, can land now)
 
 `docs/RELEASING.md` today publishes the page first and updates the manifests
-after. The new order, each step a gate for the next:
+after. The new order publishes the tap and the bucket first, while the draft's
+assets still answer 404, so it must **recover** a public state it breaks, not only
+detect it (Codex, B2). `update-manifests.ps1 -Apply` already reads each file's
+contents and blob id through `gh api repos/<repo>/contents/<path>` and writes with
+that `sha`, so a file edited in between is a refused write (`Get-Manifest`,
+`Publish-Manifest`); the steps below build on that.
 
-1. Create the release as a **draft** with every asset, and verify it (the
+1. **Draft.** Create the release as a draft with every asset and verify it (the
    existing checks: signatures, `smoke.ps1`, the checksum files).
-2. `update-manifests.ps1 -FromRelease` renders the cask and the bucket from the
-   draft's checksum files (`gh release download` reads a draft for an account
-   with push rights); the printed difference is reviewed.
-3. `-Apply` writes both, then **reads both remote blobs back** and compares them
-   with what it rendered; if either differs, or only one write landed, it stops
-   and the page is **not** published until both are confirmed.
-4. Publish the page. The anonymous releases list — the feed — now names the
+2. **Render.** `update-manifests.ps1 -FromRelease` renders the cask and the bucket
+   from the draft's checksum files (`gh release download` reads a draft for an
+   account with push rights); the printed difference is reviewed.
+3. **Save.** Before either write, `-Apply` saves, for both manifests, the exact
+   old remote bytes and their blob ids to a local record
+   (`target/release-package/manifests-before.json`, beside the package), and
+   prints its path.
+4. **Apply and read back.** Both new files are written (each over its saved blob
+   id) and both are read back and compared with what was rendered.
+5. **Compensate on any failure.** If a write or a read-back fails, every write
+   that landed is undone: its saved old bytes are written over **its current blob
+   id**, and both repositories are read back and compared with the saved old
+   pair. Success: the script ends in failure with *nothing published; both
+   manifests are back to what they were*. If a compensating write conflicts (the
+   blob changed again) or fails, or the read-back is not the old pair, the script
+   stops with a **release incident**: a distinct exit code and a message naming
+   each repository, what it holds now, and the saved record to restore from by
+   hand. The page is not published either way.
+6. **Publish the page.** The anonymous releases list — the feed — now names the
    version; `update::run` offers it.
-5. Submit the winget manifest (`wingetcreate update …` or the hand PR,
-   `RELEASING.md` "winget") at once; the common feed is never held for winget.
-6. winget copies stay on the Copy row (design (a)).
+7. **If publication fails or is abandoned** after both manifests were applied,
+   the release procedure's instruction is the same compensation:
+   `update-manifests.ps1 -Revert <record>` writes the saved old bytes back over
+   the current blob ids and reads both back to the old pair, with the same
+   release incident if that fails. `RELEASING.md` says so at step 6, and the
+   release is not left with a published tap or bucket naming a draft.
+8. **winget.** Submit the winget manifest (`wingetcreate update …` or the hand PR,
+   `RELEASING.md` "winget") once the page is published; the common feed is never
+   held for winget, and winget copies stay on the Copy row (design (a)).
 
-Between steps 3 and 4, `brew upgrade` and `scoop update` see a version whose
-asset answers 404 (a draft's assets are not public): both download before they
-uninstall or relink, so the old install stays — a harmless unavailable download,
-where the old order left a possible downgrade after Folio had installed the new
-build (F6). `update-manifests.ps1` gains the read-back and the refusal to report
-success on a partial apply; `packaging/homebrew/folio.rb` gains
-`auto_updates true`; `check-manager-hooks.ps1` asserts both. `docs/install.md`
+Between steps 4 and 6, `brew upgrade` and `scoop update` see a version whose
+asset answers 404: both download before they uninstall or relink, so the old
+install stays — a harmless unavailable download, where the old order left a
+possible downgrade after Folio had installed the new build (F6); and step 5 or 7
+ends that window if the release does not go out.
+
+**Failure-injection tests** (in `scripts/release/`, beside the existing
+`*-tests.ps1`, over a stand-in for `gh` that records calls and fails where it is
+told): the first write succeeds and the second fails → the first is compensated
+and both read back as the old pair; both write and one read-back differs → both
+compensated; both write and the page is never published → `-Revert` restores the
+old pair; a compensating write answers 409 → the release-incident exit code and
+message, the saved record intact. `packaging/homebrew/folio.rb` gains
+`auto_updates true`, `check-manager-hooks.ps1` asserts it, and `docs/install.md`
 says that `brew install --cask lulu-loopp/folio/folio` trusts the cask (HB6).
 
 ### 5.2 The card and the row
@@ -714,7 +806,7 @@ what `scoop status`, `scoop list`, `scoop reset` and `scoop uninstall` print aft
 |---|---|---|
 | E-M1 (Homebrew) | notarized/stapled bundle; marker through stage and `RENAME_SWAP`; `codesign`, `spctl`, offline first launch; plain, named, and greedy upgrade with tap behind/equal/ahead; `brew uninstall --zap` after the Folio swap; custom appdir and moved-copy refusal | U-41b |
 | E-M2 (Scoop) | inspect `.shim` and Start-menu targets; invoke both after Folio relink and after cleanup; prove status/list/update/reset/uninstall accept the synthetic folder; include `hold`, URL installs, and the supported autoupdate grammar | U-41c |
-| E-M3 (winget) | retain the sibling home while upgrading and uninstalling, but also cut at every portable-index/file/ARP boundary; retry with and without network; verify record version/source/scope/location and PATH; run from the detached old rescue; cover a competing winget lock and the ten-minute boundary; cover `--purge` and explicitly exclude or test machine scope | any winget road (not 0.4.7 under (a)) |
+| E-M3 (winget) | retain the sibling home while upgrading and uninstalling, but also cut at every portable-index/file/ARP boundary; retry with and without network; verify record version/source/scope/location and PATH; run from the detached old rescue; cover a competing winget lock and the ten-minute boundary; cover `--purge` and explicitly exclude or test machine scope. **The discriminating cases for (b)**: after an otherwise consistent portable-index + uninstall-record + `PATH` update by Folio, with `installed.db` stale (the last winget-recorded version), empty, and absent, record what `winget list`, an exact `winget upgrade --id … --version …`, `winget uninstall`, and a later manager upgrade each do, online and offline | any winget road (not 0.4.7 under (a); no 0.4.7 road waits on it) |
 | E-M4 (winget catalogue) | missing-version exit code, cold/warm/disabled source cache, missing agreement, `--disable-interactivity`, proxy/offline, pin types, exact version, and whether `--accept-source-agreements` writes state | any winget probe (not 0.4.7 under (a)) |
 | E-M5 (Scoop cleanup/atomicity) | real `scoop cleanup` at SW2, between unlink/link, Trial and RollbackIntent, with power cuts; determine whether an atomic NTFS junction replacement is available. Scoop's own `reset` is demonstrably two calls, not atomic evidence. | U-41c |
 | E-M6 (multiple/moved copies) | managed plus unpacked copies sharing the data root; copied/moved Homebrew marker; moved Scoop tree; winget record for another location | U-41a |
@@ -729,12 +821,12 @@ unsupported): scoop **v0.1.0 or later** (the `install.json` glob of `Get-Install
 
 | # | title | size | inputs | builds |
 |---|---|---|---|---|
-| **U-41e0** | the release order | S | — (**can land now**) | §5.1: `RELEASING.md`'s order and gate, `update-manifests.ps1`'s read-back and partial-apply refusal, `auto_updates true` in the cask, `check-manager-hooks.ps1`, `docs/install.md`'s trust line |
+| **U-41e0** | the release order | M | — (**can land now**) | §5.1: `RELEASING.md`'s order; `update-manifests.ps1`'s saved record, read-back, compensation, `-Revert` and release-incident exit; the failure-injection tests; `auto_updates true` in the cask, `check-manager-hooks.ps1`, `docs/install.md`'s trust line |
 | U-41a1 | the journal and the adapter interface | M | — | `Layout::Link`, the `marker` field, the `Prepare`/`Activate`/`Prove-Recover` seam over the two existing layouts (no behaviour change: every W/M row test untouched and green), eligibility by adapter behind one constant each |
 | U-41a2 | homes, programs and identity | M | U-41a1, E-M6 | L1 (the link lookup and the `%LOCALAPPDATA%` home), L2 (retirement, the cleanup row), L3, L4 (final-path identity in the process check, H.3's witness, the trial's stop), the multiple-copy tests |
 | U-41b | Homebrew | S | U-41a1, E-M1 | R-H2 (the recorded target), the carry (M1–M5), the Homebrew constant on, the M rows with the marker |
 | U-41c | scoop | M–L | U-41a2, E-M2, E-M5 | the renderer and its equality check, the version-folder `Prepare` with `set\`/`backup\`, `install_flip::relink`, `Recover`, the SW rows with cleanup, the VM checklist |
-| U-41d | winget eligibility, off | S | U-41a1 | the precondition (community source, per-user scope, no pin) and `WINGET_ROAD = false`, with the test that it never raises a card. **L**, and a new design review, if design (b) is ever chosen |
+| U-41d | winget, hard off | S | U-41a1 | `WINGET_ROAD = false` and the regression that no winget copy raises a card; no precondition, no pin read, no winget process. The winget road — eligibility with pins, the adapter — is a future **L** ticket after E-M3, E-M4 and its own design review |
 | U-41e | docs, privacy, rules, cards | S | U-41b, U-41c, U-41d | `PRIVACY.md` (both halves), `RULES.md` row 41's narrowing, `ARCHITECTURE.md` rows, the CHANGELOG lines (including the winget disclosure), the release note |
 
 U-41a is split in two because it was L (F14): U-41a1 is the protocol with no new
@@ -747,11 +839,12 @@ U-41c needs both.
 
 1. **winget before it is live:** build it, with eligibility off until the design
    question of §2.4 is resolved; under design (a), winget copies keep the Copy
-   row in 0.4.7 (U-41d builds the precondition and the constant, off).
+   row in 0.4.7 (U-41d builds the hard-off constant and its regression; the
+   precondition waits for the winget-road ticket).
 2. **Holds and pins:** honoured before allocation; no card; the row names the
    exact command (`scoop unhold folio`; for winget, the exact `winget pin remove`
-   line once a winget road exists). Winget's pin types are measured in E-M4
-   before any winget road. Homebrew has no cask pin that stops an app's own
+   line once a winget road exists). Winget's pin types are measured in E-M4,
+   and the pin check is built by the winget-road ticket; 0.4.7 reads no pin. Homebrew has no cask pin that stops an app's own
    updater (§9), so no Homebrew case.
 3. **Carrying the marker:** yes, with M1–M5; `RULES.md` row 41 narrowed as §4
    says.
@@ -788,7 +881,7 @@ winget-cli:
 - `src/AppInstallerCLICore/Workflows/InstallFlow.cpp`: `ExecuteInstallerForType`, `ExemptFromSingleInstallLocking`, `RecordInstall`.
 - `src/AppInstallerCLICore/Workflows/UpdateFlow.cpp`: `SelectLatestApplicableVersion`, `EnsureUpdateVersionApplicable`; `Workflows/WorkflowBase.cpp`: `GetManifestWithVersionFromPackage`.
 - `src/AppInstallerCommonCore/PortableARPEntry.cpp`, `PathVariable.cpp`, `Runtime.cpp` (`GetPathDetailsFor`, `GetPortableInstallRoot`), `Public/AppInstallerSynchronization.h` (`CrossProcessInstallLock`).
-- `src/AppInstallerRepositoryCore/Microsoft/PortableIndex.cpp` (`CreateIPortableIndex`), `Microsoft/Schema/Portable_1_0/PortableTable.cpp`, `PackageTrackingCatalog.cpp` (`GetPackageTrackingFilePath`), `Microsoft/PinningIndex.cpp`, `PinningData.cpp` (`EvaluatePinnedStateForVersion`), `Microsoft/Schema/ISQLiteIndex.cpp` (`CreateISQLiteIndex`).
+- `src/AppInstallerRepositoryCore/CompositeSource.cpp` (`CompositeInstalledVersion::GetProperty`, the tracking-version fallback), `src/AppInstallerRepositoryCore/Microsoft/PortableIndex.cpp` (`CreateIPortableIndex`), `Microsoft/Schema/Portable_1_0/PortableTable.cpp`, `PackageTrackingCatalog.cpp` (`GetPackageTrackingFilePath`, `PackageTrackingCatalog::RecordInstall`, `CreateOrOpenTrackingIndex`), `Microsoft/PinningIndex.cpp`, `PinningData.cpp` (`EvaluatePinnedStateForVersion`), `Microsoft/Schema/ISQLiteIndex.cpp` (`CreateISQLiteIndex`).
 - `src/AppInstallerSharedLib/Public/AppInstallerErrors.h`, `SQLiteMetadataTable.cpp`.
 - `winget upgrade`: https://learn.microsoft.com/windows/package-manager/winget/upgrade; `winget show`: https://learn.microsoft.com/windows/package-manager/winget/show; settings: https://learn.microsoft.com/windows/package-manager/winget/settings; pinning: https://learn.microsoft.com/windows/package-manager/winget/pinning.
 - winget-pkgs FAQ: https://github.com/microsoft/winget-pkgs/blob/master/doc/FAQ.md.
@@ -800,4 +893,4 @@ Homebrew:
 
 Windows: `FSCTL_SET_REPARSE_POINT`, the driver reference: https://learn.microsoft.com/windows-hardware/drivers/ifs/fsctl-set-reparse-point.
 
-Folio (this repository): `docs/plans/design/self-update-2026-09-16.md` revisions (a)–(h); `docs/DESIGN.md` entries of 2026-09-26 to 2026-09-29 on `install_channel` (U-1, U-4), the hooks (U-2), the update job (U-18, U-31) and the harness; `docs/RELEASING.md` "Distribution manifests", "The hooks" and "winget"; `packaging/scoop/folio.json`, `packaging/homebrew/folio.rb`, `packaging/winget/`; `crates/bt-app/src/{install_channel, update_job, update_card, update_txn, update_startup, update_prepare, update_prepare_windows, update_prepare_macos, update_apply_windows}.rs`; the review `U-41-review-codex-2026-09-29.md`.
+Folio (this repository): `docs/plans/design/self-update-2026-09-16.md` revisions (a)–(h); `docs/DESIGN.md` entries of 2026-09-26 to 2026-09-29 on `install_channel` (U-1, U-4), the hooks (U-2), the update job (U-18, U-31) and the harness; `docs/RELEASING.md` "Distribution manifests", "The hooks" and "winget"; `packaging/scoop/folio.json`, `packaging/homebrew/folio.rb`, `packaging/winget/`; `crates/bt-app/src/{install_channel, update_job, update_card, update_txn, update_startup, update_prepare, update_prepare_windows, update_prepare_macos, update_apply_windows}.rs`; the reviews `U-41-review-codex-2026-09-29.md` and `U-41-review-codex-2026-09-29-b.md`.
