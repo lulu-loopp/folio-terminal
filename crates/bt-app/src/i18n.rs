@@ -4274,11 +4274,7 @@ impl Text {
             }
             Self::PaneMenuDuplicate => pick(lang, "Duplicate pane", "复制窗格"),
             Self::PaneMenuMoveToNewTab => pick(lang, "Move pane to new tab", "把窗格移到新标签"),
-            Self::ResetTerminalModes => pick(
-                lang,
-                "Reset terminal modes",
-                "重置终端模式",
-            ),
+            Self::ResetTerminalModes => pick(lang, "Reset terminal modes", "重置终端模式"),
             Self::PaneMenuSplitCaption => pick(lang, "SPLIT", "拆分"),
             Self::ClosePane => pick(lang, "Close pane", "关闭窗格"),
             Self::PaneChevronTip => pick(lang, "Split and more", "拆分等操作"),
