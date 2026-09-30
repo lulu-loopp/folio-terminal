@@ -31,6 +31,7 @@ bt_render::GpuContext::open		t: bt_render::WindowTarget	bt_render::GpuContext::o
 bt_pty::PtySession::spawn_shell_in		size: bt_pty::PtySize, wake: bt_pty::OutputWake	bt_pty::PtySession::spawn_shell_in("probe", &[], &[], size, wake, None)
 bt_pty::PtySession::resize		s: &bt_pty::PtySession, size: bt_pty::PtySize	s.resize(size)
 bt_pty::wait_for_retirements		d: std::time::Duration	bt_pty::wait_for_retirements(d)
+bt_platform::keyboard_layout_shift_table		worker: &bt_platform::admission::WorkerCtx, layout: &bt_platform::KeyboardLayout	bt_platform::keyboard_layout_shift_table(worker, layout)
 windows::Win32::UI::Shell::ShellExecuteW		o: windows::core::PCWSTR, n: windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD	unsafe { windows::Win32::UI::Shell::ShellExecuteW(None, o, o, o, o, n) }
 windows::Win32::System::Threading::SetEvent		h: windows::Win32::Foundation::HANDLE	unsafe { windows::Win32::System::Threading::SetEvent(h) }
 windows::Win32::Foundation::CloseHandle		h: windows::Win32::Foundation::HANDLE	unsafe { windows::Win32::Foundation::CloseHandle(h) }

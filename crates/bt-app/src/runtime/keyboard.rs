@@ -19,7 +19,7 @@ use bt_viewport::ViewportFrame;
 use std::time::Instant;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{Ime, KeyEvent};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, NativeKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 impl Runtime<'_> {
@@ -1988,6 +1988,22 @@ impl Runtime<'_> {
         }) else {
             return Ok(());
         };
+        let shifted_character = if keyboard.kitty == 0
+            && keyboard.modify_other_keys != bt_term::ModifyOtherKeys::Off
+            && self.window.modifiers.shift_key()
+            && let Key::Unidentified(NativeKey::Windows(virtual_key)) = &event.logical_key
+        {
+            bt_platform::active_keyboard_layout().map_or(
+                input::ShiftedCharacter::Unavailable,
+                |layout| {
+                    self.app
+                        .layout_tables
+                        .shifted_character(layout, *virtual_key)
+                },
+            )
+        } else {
+            input::ShiftedCharacter::Known(None)
+        };
         let Some(bytes) = input::keyboard_bytes(
             &event.logical_key,
             &event.key_without_modifiers(),
@@ -1996,13 +2012,16 @@ impl Runtime<'_> {
             application_cursor_mode,
             keyboard,
             // What a win32-input-mode record is built from (T-KEYBOARD-RECORDS): where the key
-            // is, what the system typed for it, and the installed layout's virtual key.
+            // is, what the system typed for it, and the installed layout's virtual key; and what
+            // the layout types on the key with Shift, for a protocol's Ctrl+Shift+Alt chord that
+            // arrived with no character (T-KEYBOARD-CTRLALT).
             input::KeyOrigin {
                 platform: bt_platform::host_platform(),
                 physical_key: event.physical_key,
                 text_with_all_modifiers: event.text_with_all_modifiers(),
                 virtual_key_of_scan_code: bt_platform::virtual_key_of_scan_code,
                 virtual_key_is_dead: bt_platform::virtual_key_is_dead,
+                shifted_character,
                 conpty,
             },
         ) else {

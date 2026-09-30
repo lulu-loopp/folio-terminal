@@ -6,6 +6,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+- On Windows, Ctrl+Alt with a letter or digit reaches programs that asked for
+  the kitty protocol or modifyOtherKeys.
+
 ### Added
 
 - In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder.

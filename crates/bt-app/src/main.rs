@@ -100,6 +100,7 @@ mod lane;
 #[cfg(test)]
 mod lane_contract_tests;
 mod launch_wire;
+mod layout_tables;
 mod linebreak;
 mod marks;
 mod menubar;
@@ -441,6 +442,10 @@ const PANIC_LOG_FILENAME: &str = "folio-panic.log";
 #[derive(Clone, Copy, Debug)]
 enum AppEvent {
     PtyOutput,
+    /// A keyboard layout's copied Shift table landed from the worker road.
+    /// The answer is in `App::layout_tables`; this event only breaks a parked
+    /// loop, and the next key lookup drains the channel too if the wake is lost.
+    LayoutTablesReady,
     /// **A system-wide preference has moved** (`bt_platform::SystemSettingsWatch`).
     ///
     /// The same family as everything below it and its own wake for the strongest
@@ -850,6 +855,7 @@ impl AppEvent {
             Self::UpdateJobOffer => Station::UpdateJobOffer,
             Self::UpdateJobProgress => Station::UpdateJobProgress,
             Self::PtyOutput
+            | Self::LayoutTablesReady
             | Self::GitChanged
             | Self::PreviewFileChanged
             | Self::FilesDirChanged
@@ -12326,6 +12332,10 @@ struct App {
     /// (`handoff_lane`). On the application, like the workers beside it: the ids it mints have to
     /// be unique across windows, because an answer finds its window by id.
     handoff_lane: handoff_lane::HandoffLane,
+    /// The process's per-HKL Shift tables and their dedicated worker road.
+    /// Registry reads and layout-DLL loads happen only on that worker; key
+    /// events read this map and never wait.
+    layout_tables: layout_tables::LayoutTables,
     math_worker: MathWorker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
@@ -42037,6 +42047,10 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::HandoffAnswered);
             }
         })?;
+        // This observation has no refusal: off Windows it is the empty list,
+        // and an empty list starts no layout-table worker at all.
+        let keyboard_layouts = bt_platform::keyboard_layouts();
+        let layout_tables = layout_tables::LayoutTables::spawn(proxy.clone(), keyboard_layouts)?;
         let files_worker = files::FilesWorker::spawn(proxy.clone())?;
         let file_index_worker = palette_index::IndexWorker::spawn(proxy.clone())?;
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;
@@ -42058,6 +42072,7 @@ impl Runtime<'_> {
             event_proxy: proxy.clone(),
             git_watch: git_watch::GitWatch::default(),
             handoff_lane,
+            layout_tables,
             math_worker,
             math_worker_running: true,
             math_worker_notice_pending: false,
@@ -63818,6 +63833,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // frames discarded with this arm draining, against 1 of 765 without
             // it.
             AppEvent::PtyOutput => Ok(()),
+            AppEvent::LayoutTablesReady => {
+                if let Some(app) = self.app.as_mut() {
+                    app.layout_tables.apply_answers();
+                }
+                Ok(())
+            }
             // **Nothing is done here**, on `GitChanged`'s own reasoning: the
             // press is already recorded by the message hook that posted this, and
             // what is owed is the turn that reads it. `about_to_wait` runs

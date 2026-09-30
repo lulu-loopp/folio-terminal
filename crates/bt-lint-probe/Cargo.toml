@@ -25,6 +25,7 @@ portable-pty.workspace = true
 wgpu.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+bt-platform = { path = "../bt-platform" }
 windows = { version = "0.62.2", features = [
     "Win32_Foundation",
     "Win32_System_Threading",

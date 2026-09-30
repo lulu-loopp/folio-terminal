@@ -1199,6 +1199,29 @@ pub fn virtual_key_is_dead(virtual_key: u16) -> bool {
     false
 }
 
+/// There is no Win32 keyboard layout on this platform.
+#[must_use]
+pub fn active_keyboard_layout() -> Option<crate::KeyboardLayout> {
+    None
+}
+
+/// There are no Win32 keyboard layouts on this platform.
+#[must_use]
+pub fn keyboard_layouts() -> Vec<crate::KeyboardLayout> {
+    Vec::new()
+}
+
+/// No-op for the Windows keyboard-layout-table door on a platform with no such
+/// system table. It still takes the worker capability, so the cross-platform
+/// signature preserves the door shape.
+#[must_use]
+pub fn keyboard_layout_shift_table(
+    _worker: &crate::admission::WorkerCtx,
+    _layout: &crate::KeyboardLayout,
+) -> Option<crate::KeyboardLayoutShiftTable> {
+    None
+}
+
 /// How far one wheel notch scrolls. M1-3 reads the scroll preference.
 ///
 /// The caller's own fallback is three lines plus one line of stderr, so
