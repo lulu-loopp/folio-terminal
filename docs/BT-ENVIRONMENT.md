@@ -159,7 +159,13 @@ sets on the copy of its own test binary that writes the parent it finds there. `
 `update_apply_windows::tests::a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers`
 sets on the copies of its own test binary that play the trial and the recovery. Only
 those tests' child halves read them, and they write only into the test's own
-temporary folder. `BT_TRUST_RELEASE_TAG` names the release (`v0.4.5-preview`)
+temporary folder. `BT_U42D_WINDOWS_SAY`, `BT_U42D_MACOS_SAY` and
+`BT_U42D_RECOVER_SAY` name the `diagnostics.log` in a test's own temporary folder
+that `bt-app`'s `update_apply_windows::tests::a_road_line_reaches_the_log_once_when_standard_error_is_that_log`,
+its `update_apply_macos` twin and `update_recover::tests::a_recovery_line_reaches_the_log_once_whatever_standard_error_is`
+set on the copy of their own test binary whose standard error is that same file:
+only those tests' child halves read them, and they write one line or two into
+that file. `BT_TRUST_RELEASE_TAG` names the release (`v0.4.5-preview`)
 `bt-platform`'s ignored `trust::tests::the_released_windows_assets_carry_an_identity_oid`
 downloads to read real signatures from (E-6); unset or empty, it asks GitHub for the
 latest release. It downloads into the temporary folder and writes nothing else.
@@ -174,7 +180,8 @@ Listed so that the check described at the top of this file can tell them apart
 from switches, and so nobody looks for a variable that does not exist.
 
 **Labels in a diagnostic line**, written into a message and never read:
-`BT_STARTUP`. (Others of this kind — the persistence, web, DPI, theme, focus and
+`BT_STARTUP`, `BT_UPDATE_SPAWN` (a refused start of an update's applier, and the
+starts after it, U-39). (Others of this kind — the persistence, web, DPI, theme, focus and
 resize labels — carry a space inside the same string literal and so are not names
 at all.)
 
