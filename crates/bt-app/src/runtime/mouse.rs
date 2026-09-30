@@ -1754,6 +1754,13 @@ impl Runtime<'_> {
             self.update_chrome_hover_target(None)?;
             return Ok(());
         }
+        // The uninstaller's confirmation card (T-UNINSTALL-UX), over the settings dialog: it takes
+        // the pointer outright, as the update card does.
+        if self.hover_uninstall_card(position.x, position.y)? {
+            self.note_tooltip(None)?;
+            self.update_chrome_hover_target(None)?;
+            return Ok(());
+        }
         if settings::geometry::pointer_moved(self, position.x, position.y)? {
             return Ok(());
         }
@@ -4137,6 +4144,17 @@ impl Runtime<'_> {
             if state == ElementState::Pressed && button == MouseButton::Left {
                 let target = restore::update_card_hit(&layout, position.x, position.y);
                 self.press_update_card(target)?;
+            }
+            return Ok(());
+        }
+        // The uninstaller's confirmation card (T-UNINSTALL-UX), in the order it is drawn. Every
+        // press is swallowed, beside the card as well as on it; the `×` is Cancel.
+        if let (Some(layout), Some(position)) =
+            (self.uninstall_card_layout(), self.window.pointer_position)
+        {
+            if state == ElementState::Pressed && button == MouseButton::Left {
+                let target = restore::update_card_hit(&layout, position.x, position.y);
+                self.press_uninstall_card(target)?;
             }
             return Ok(());
         }

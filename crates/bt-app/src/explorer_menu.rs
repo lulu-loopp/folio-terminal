@@ -121,6 +121,7 @@ use std::{
     time::Duration,
 };
 
+use bt_platform::admission::WorkerCtx;
 use bt_platform::msix::{self, PACKAGE_FILE_NAME};
 
 use crate::i18n::Text;
@@ -1013,13 +1014,9 @@ pub fn remove_from_explorer_menu() -> MenuRemovalReport {
 /// `Worker("folio-remove-explorer-menu")`.
 const REMOVAL_ENTRY: &str = "folio-remove-explorer-menu";
 
-/// **The role the `--uninstall-cleanup` process's main thread takes to wait for
-/// the Explorer registrations**: `Worker("folio-uninstall-cleanup")`.
-const CLEANUP_ENTRY: &str = "folio-uninstall-cleanup";
-
-/// Why neither entry can be refused where it is made: both doors are answered in
+/// Why the entry cannot be refused where it is made: the door is answered in
 /// `fn main` above the argument parse, so the process's main thread has no role,
-/// and each asks the Explorer question once.
+/// and it asks the Explorer question once.
 const ENTERED_ONCE: &str =
     "a door process's main thread has no role before it waits on Explorer, and waits once";
 
@@ -1108,55 +1105,56 @@ pub(crate) enum CleanupRegistration {
     Refused(String),
 }
 
-/// **This copy's two Explorer registrations, taken off the machine for
-/// `--uninstall-cleanup`**, under the same [`REMOVAL_TIMEOUT`].
+/// **This copy's two Explorer registrations, taken off the machine for the
+/// uninstaller's door**, under the same [`REMOVAL_TIMEOUT`], each named by its
+/// row of the table so the door can say it in its language.
 ///
-/// Its waiting thread is the `--uninstall-cleanup` process's main thread, which
-/// enters as [`CLEANUP_ENTRY`] before it waits, as [`remove_from_explorer_menu`]'s
-/// does.
-pub(crate) fn cleanup_registrations() -> Vec<(&'static str, CleanupRegistration)> {
-    cleanup_waited_on(both_registrations_cleaned)
+/// Its waiting thread is the door process's main thread, which entered as the
+/// worker `uninstall::DOOR_ENTRY` once for the whole run
+/// (`uninstall::standalone`) — the door's other waits are that worker's too
+/// (T-UNINSTALL-UX; it entered here, for this wait alone, until then).
+pub(crate) fn cleanup_registrations(worker: &WorkerCtx) -> Vec<(Text, CleanupRegistration)> {
+    cleanup_waited_on(worker, both_registrations_cleaned)
 }
 
 /// The two registrations, each with its answer.
-fn both_registrations_cleaned() -> Vec<(&'static str, CleanupRegistration)> {
+fn both_registrations_cleaned() -> Vec<(Text, CleanupRegistration)> {
     vec![
-        ("Explorer sparse package (per-copy)", cleanup_package()),
+        (Text::CleanupMarkExplorerPackage, cleanup_package()),
         (
-            "Explorer classic verbs (per-copy)",
+            Text::CleanupMarkExplorerClassic,
             crate::context_menu::cleanup_classic(),
         ),
     ]
 }
 
-/// [`cleanup_registrations`]' entry and wait, with the cleanup it waits on handed
-/// in — the real one there, and in a test one that removes nothing.
+/// [`cleanup_registrations`]' wait, on the door's worker, with the cleanup it
+/// waits on handed in — the real one there, and in a test one that removes
+/// nothing.
 fn cleanup_waited_on(
-    clean: fn() -> Vec<(&'static str, CleanupRegistration)>,
-) -> Vec<(&'static str, CleanupRegistration)> {
-    bt_platform::admission::enter_standalone_main(CLEANUP_ENTRY, |_ctx| {
-        let (send, receive) = mpsc::channel();
-        bt_platform::spawn_at_priority(
-            "folio-explorer-cleanup",
-            bt_platform::ThreadPriority::Normal,
-            move |_ctx| {
-                let _ = send.send(clean());
-            },
-        )
-        // What `std::thread::spawn` said when the system refused a thread, kept word for word.
-        .expect("failed to spawn thread");
-        receive.recv_timeout(REMOVAL_TIMEOUT).unwrap_or_else(|_| {
-            vec![(
-                "Explorer registrations (per-copy)",
-                CleanupRegistration::Refused(format!(
-                    "{} ({}s)",
-                    crate::i18n::Text::CleanupSystemUnknown.text(),
-                    REMOVAL_TIMEOUT.as_secs()
-                )),
-            )]
-        })
+    _worker: &WorkerCtx,
+    clean: fn() -> Vec<(Text, CleanupRegistration)>,
+) -> Vec<(Text, CleanupRegistration)> {
+    let (send, receive) = mpsc::channel();
+    bt_platform::spawn_at_priority(
+        "folio-explorer-cleanup",
+        bt_platform::ThreadPriority::Normal,
+        move |_ctx| {
+            let _ = send.send(clean());
+        },
+    )
+    // What `std::thread::spawn` said when the system refused a thread, kept word for word.
+    .expect("failed to spawn thread");
+    receive.recv_timeout(REMOVAL_TIMEOUT).unwrap_or_else(|_| {
+        vec![(
+            Text::CleanupMarkExplorer,
+            CleanupRegistration::Refused(format!(
+                "{} ({}s)",
+                Text::CleanupSystemUnknown.text(),
+                REMOVAL_TIMEOUT.as_secs()
+            )),
+        )]
     })
-    .expect(ENTERED_ONCE)
 }
 
 fn cleanup_package() -> CleanupRegistration {
@@ -2649,22 +2647,25 @@ mod tests {
         );
     }
 
-    /// RED (A1c, revision (c)6) — **the `--uninstall-cleanup` process waits for the Explorer
-    /// registrations on its main thread as a worker: the cleanup runs on
+    /// RED (A1c, revision (c)6; T-UNINSTALL-UX) — **the uninstaller's door waits for the
+    /// Explorer registrations on its main thread as a worker: the cleanup runs on
     /// `Worker("folio-explorer-cleanup")`, the main thread is `Worker("folio-uninstall-cleanup")`
-    /// after it, and the process's one entry is spent.**
+    /// while it waits, and the process's one entry is spent.**
     ///
     /// As the removal's case above, for the uninstaller's door: run alone in a process of its own,
-    /// with a cleanup handed in that removes nothing and reports the role it ran under.
+    /// through the door's own entry (`uninstall::standalone`, which both verbs take once since
+    /// T-UNINSTALL-UX), with a cleanup handed in that removes nothing and reports the role it ran
+    /// under.
     ///
-    /// MUTATION: run `cleanup_waited_on`'s body without `enter_standalone_main` and the main
-    /// thread is `Unset` afterwards, and a second entry is taken rather than refused.
+    /// MUTATION: in `uninstall::standalone`, run the body on a worker of the thread door instead
+    /// of entering the main thread, and the main thread is `Unset` afterwards and a second entry
+    /// is taken rather than refused.
     #[test]
     fn the_uninstall_cleanup_waits_on_its_main_thread_as_a_worker() {
         use bt_platform::admission::{Refused, Role, enter_standalone_main, role};
-        fn cleans_nothing() -> Vec<(&'static str, CleanupRegistration)> {
+        fn cleans_nothing() -> Vec<(Text, CleanupRegistration)> {
             vec![(
-                "probe",
+                Text::CleanupMarkExplorer,
                 CleanupRegistration::Refused(format!("{:?}", role())),
             )]
         }
@@ -2674,8 +2675,13 @@ mod tests {
         ) {
             return;
         }
-        let cleaned = cleanup_waited_on(cleans_nothing);
-        let [("probe", CleanupRegistration::Refused(ran_as))] = cleaned.as_slice() else {
+        let cleaned = crate::uninstall::standalone(|worker| {
+            assert_eq!(role(), Role::Worker("folio-uninstall-cleanup"));
+            cleanup_waited_on(worker, cleans_nothing)
+        });
+        let [(Text::CleanupMarkExplorer, CleanupRegistration::Refused(ran_as))] =
+            cleaned.as_slice()
+        else {
             panic!("the cleanup handed in is the one that answered");
         };
         assert_eq!(ran_as, r#"Worker("folio-explorer-cleanup")"#);

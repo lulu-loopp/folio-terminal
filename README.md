@@ -42,14 +42,15 @@ the first run asks, and what to do if the system puts a panel in front of you.
 
 ## Uninstall
 
-Quit Folio first, then take it out the way it came in:
+Take Folio out the way it came in:
 
-- **Windows zip** — double-click `uninstall.cmd` in Folio's folder (or run
-  `folio.exe --uninstall-cleanup` there), then delete the folder.
+- **Windows zip** — open **Settings ▸ About ▸ Uninstall Folio**, or quit Folio
+  and double-click `uninstall.cmd` in its folder. Either one removes Folio
+  completely, its folder included.
 - **scoop** — `scoop uninstall folio` runs the same cleanup for you.
-- **macOS DMG** — run
-  `/Applications/Folio.app/Contents/MacOS/folio --uninstall-cleanup`, then drag
-  **Folio** to the Bin.
+- **macOS DMG** — open **Settings ▸ About ▸ Uninstall Folio**, or quit Folio and
+  run `/Applications/Folio.app/Contents/MacOS/folio --uninstall`. Either one
+  removes Folio completely, the app included.
 - **Homebrew** — `brew uninstall --zap folio`.
 
 <!-- winget: add when live. winget runs no cleanup for Folio (a portable zip, no
@@ -57,12 +58,13 @@ uninstall hook): `folio --uninstall-cleanup`, then `winget uninstall WeiyiShi.Fo
 There is no MSIX install: the zip's folio.msix only carries the Explorer menu,
 and the cleanup unregisters it. -->
 
-The cleanup removes what Folio set up outside its folder — the Explorer or
+The uninstall removes what Folio set up outside its folder — the Explorer or
 Finder menu, the line in your PowerShell profile, agent hooks — and keeps your
-settings and data. To remove those too, add `--purge` to the cleanup command
-before you delete the app; Homebrew's `--zap` already removes the settings
-folder. [`docs/install.md`](docs/install.md#uninstalling) says what the
-cleanup's exit codes mean.
+settings and data. To remove those too, turn on **Also remove settings and
+data** in Settings, answer `n` in `uninstall.cmd`, or add `--remove-data`;
+Homebrew's `--zap` already removes the settings folder. Its lines are in the
+language Folio is set to. [`docs/install.md`](docs/install.md#uninstalling) says
+what its exit codes mean.
 
 ## What it does
 

@@ -853,30 +853,81 @@ where
         .is_some_and(|first| first.to_str() == Some(REMOVE_SHELL_INTEGRATION_FLAG))
 }
 
-/// Strict early grammar: these options never reach the window or handover paths.
+/// **`--uninstall`**, the uninstaller's verb for a person (T-UNINSTALL-UX), spelled once.
+pub const UNINSTALL_FLAG: &str = "--uninstall";
+/// **`--remove-data`**: `--uninstall`'s word for removing settings and data too.
+pub const REMOVE_DATA_FLAG: &str = "--remove-data";
+/// **`--after-pid <pid>`**: `--uninstall`'s word for "the Folio that asked, whose end
+/// the door waits for before it touches anything".
+pub const AFTER_PID_FLAG: &str = "--after-pid";
+
+/// **What a line that opens with one of the uninstaller's words asks for.**
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UninstallDoor {
+    /// `--uninstall-cleanup [--purge]` — the package managers' hook: the
+    /// cleanup, in English, and nothing else.
+    Cleanup { purge: bool },
+    /// `--uninstall [--remove-data] [--after-pid <pid>]` — a person's
+    /// uninstall (T-UNINSTALL-UX): the cleanup in the settings' language, then
+    /// the program's own files once the process that asked has gone. `after`
+    /// is the Folio that asked for its own uninstall, waited for first.
+    Uninstall {
+        remove_data: bool,
+        after: Option<u32>,
+    },
+}
+
+/// **The uninstaller's early grammar**: these words never reach the window or
+/// the hand-over paths.
+///
+/// Answered only when the first word is one of the two verbs' words, and then
+/// strictly: each word at most once (`--uninstall-cleanup` and `--uninstall`
+/// exactly once), `--after-pid` followed by a pid in decimal, and the two
+/// verbs' words never on one line — anything else is the usage line, which
+/// names both.
 pub fn uninstall_cleanup(
     args: impl IntoIterator<Item = OsString>,
-) -> Option<Result<bool, &'static str>> {
-    let mut args = args.into_iter();
-    let first = args.next()?;
-    let first = first.to_str()?;
-    if !matches!(first, "--uninstall-cleanup" | "--purge") {
+) -> Option<Result<UninstallDoor, &'static str>> {
+    let mut args = args.into_iter().peekable();
+    let first = args.peek()?.to_str()?;
+    if !matches!(first, "--uninstall-cleanup" | "--purge")
+        && ![UNINSTALL_FLAG, REMOVE_DATA_FLAG, AFTER_PID_FLAG].contains(&first)
+    {
         return None;
     }
     let usage = || crate::i18n::Text::CleanupUsage.in_lang(crate::i18n::Lang::English);
-    let mut cleanup = usize::from(first == "--uninstall-cleanup");
-    let mut purge = usize::from(first == "--purge");
-    for arg in args {
+    let (mut cleanup, mut purge, mut uninstall, mut remove_data) =
+        (0_usize, 0_usize, 0_usize, 0_usize);
+    let mut after: Option<Option<u32>> = None;
+    while let Some(arg) = args.next() {
         match arg.to_str() {
             Some("--uninstall-cleanup") => cleanup += 1,
             Some("--purge") => purge += 1,
+            Some(UNINSTALL_FLAG) => uninstall += 1,
+            Some(REMOVE_DATA_FLAG) => remove_data += 1,
+            Some(AFTER_PID_FLAG) if after.is_none() => {
+                after = Some(
+                    args.next()
+                        .and_then(|pid| pid.to_str().map(str::to_owned))
+                        .filter(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+                        .and_then(|pid| pid.parse().ok()),
+                );
+                if after == Some(None) {
+                    return Some(Err(usage()));
+                }
+            }
             _ => return Some(Err(usage())),
         }
     }
-    Some(if cleanup == 1 && purge <= 1 {
-        Ok(purge == 1)
-    } else {
-        Err(usage())
+    let cleanup_words = cleanup + purge;
+    let uninstall_words = uninstall + remove_data + usize::from(after.is_some());
+    Some(match (cleanup_words, uninstall_words) {
+        (_, 0) if cleanup == 1 && purge <= 1 => Ok(UninstallDoor::Cleanup { purge: purge == 1 }),
+        (0, _) if uninstall == 1 && remove_data <= 1 => Ok(UninstallDoor::Uninstall {
+            remove_data: remove_data == 1,
+            after: after.flatten(),
+        }),
+        _ => Err(usage()),
     })
 }
 

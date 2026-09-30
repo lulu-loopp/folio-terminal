@@ -337,13 +337,11 @@ const fn pick_platform(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Text {
     // Printed by uninstall.cmd, which holds its own copy; the archive source pin
-    // compares the two, so these three exist for the tests alone.
+    // compares the two, so these exist for the tests alone (T-UNINSTALL-UX).
     #[cfg(test)]
-    CleanupArchiveExit,
+    UninstallScriptQuestion,
     #[cfg(test)]
-    CleanupArchiveReady,
-    #[cfg(test)]
-    CleanupArchiveIncomplete,
+    UninstallScriptRunning,
 
     CleanupRecovery,
     CleanupRuntime,
@@ -365,6 +363,56 @@ pub enum Text {
     CleanupSystemUnknown,
     CleanupRecorded,
     CleanupMacHeld,
+    // The uninstaller's marks, kinds and own lines, in the settings' language, and the
+    // Settings rows and card that start it (T-UNINSTALL-UX).
+    CleanupMarkProfiles,
+    CleanupMarkPsReadLine,
+    CleanupMarkClaude,
+    CleanupMarkCodex,
+    CleanupMarkCopilot,
+    CleanupMarkExplorer,
+    CleanupMarkExplorerPackage,
+    CleanupMarkExplorerClassic,
+    CleanupMarkToast,
+    CleanupMarkEntrance,
+    CleanupMarkStartMenu,
+    CleanupMarkAutostart,
+    CleanupMarkHotkeys,
+    CleanupMarkRoaming,
+    CleanupMarkLegacy,
+    CleanupMarkLocal,
+    CleanupMarkApplicationSupport,
+    CleanupMarkWebKit,
+    CleanupMarkCaches,
+    CleanupMarkHttpStorages,
+    CleanupMarkPreferences,
+    CleanupMarkSavedState,
+    CleanupMarkUnixData,
+    CleanupMarkRecovery,
+    CleanupMarkUpdateEntrances,
+    CleanupMarkUpdateHome,
+    CleanupMarkRuntimeClaims,
+    CleanupMarkClipboard,
+    CleanupMarkPanicLog,
+    CleanupKindPerCopy,
+    CleanupKindPerAccount,
+    CleanupKindData,
+    UninstallProgramMark,
+    UninstallProgramScheduled,
+    UninstallProgramKept,
+    UninstallProgramManaged,
+    UninstallNotStarted,
+    RowUninstall,
+    UninstallVerb,
+    DescUninstall,
+    RowUninstallData,
+    DescUninstallData,
+    DescUninstallBy,
+    UninstallCardHeading,
+    UninstallCardKeeps,
+    UninstallCardRemoves,
+    UninstallCardUninstall,
+    UninstallCardCancel,
 
     // T-PASTE-1 refusal messages; Chinese is assigned to the copy lane.
     PastePathEncoding,
@@ -4787,19 +4835,111 @@ impl Text {
                 "已保留（运行时锁文件用于单实例互斥）",
             ),
             #[cfg(test)]
-            Self::CleanupArchiveExit => pick(lang, "Cleanup exit code:", "清理退出码："),
-            #[cfg(test)]
-            Self::CleanupArchiveReady => pick(
+            Self::UninstallScriptQuestion => pick(
                 lang,
-                "You can now delete the Folio application folder. Your settings and data were kept.",
-                "现在可以删除 Folio 应用文件夹。设置和数据已保留。",
+                "Keep settings and data? [Y/n]",
+                "保留设置和数据？[Y/n]",
             ),
             #[cfg(test)]
-            Self::CleanupArchiveIncomplete => pick(
+            Self::UninstallScriptRunning => pick(
                 lang,
-                "Cleanup did not complete. Read the result above before deleting the folder.",
-                "清理未完成。删除文件夹前请查看上方结果。",
+                "Folio is running. Quit Folio, then run uninstall.cmd again.",
+                "Folio 正在运行。退出 Folio 后重新运行 uninstall.cmd。",
             ),
+            Self::CleanupMarkProfiles => pick(lang, "PowerShell profiles", "PowerShell 配置文件"),
+            Self::CleanupMarkPsReadLine => pick(lang, "PSReadLine module", "PSReadLine 模块"),
+            Self::CleanupMarkClaude => pick(lang, "Claude Code hooks", "Claude Code 钩子"),
+            Self::CleanupMarkCodex => pick(lang, "Codex notify", "Codex 通知"),
+            Self::CleanupMarkCopilot => pick(lang, "Copilot hooks", "Copilot 钩子"),
+            Self::CleanupMarkExplorer => pick(lang, "Explorer registrations", "资源管理器注册"),
+            Self::CleanupMarkExplorerPackage => {
+                pick(lang, "Explorer sparse package", "资源管理器稀疏包")
+            }
+            Self::CleanupMarkExplorerClassic => {
+                pick(lang, "Explorer classic verbs", "资源管理器经典菜单")
+            }
+            Self::CleanupMarkToast => pick(lang, "Toast identity", "通知标识"),
+            Self::CleanupMarkEntrance => pick(lang, "Update entrance", "更新入口"),
+            Self::CleanupMarkStartMenu => pick(lang, "Start-menu shortcut", "开始菜单快捷方式"),
+            Self::CleanupMarkAutostart => pick(lang, "Autostart / login item", "自动启动项"),
+            Self::CleanupMarkHotkeys => pick(lang, "Quake / global hotkeys", "Quake / 全局快捷键"),
+            Self::CleanupMarkRoaming => pick(lang, "Roaming data", "漫游数据"),
+            Self::CleanupMarkLegacy => pick(lang, "Legacy data", "历史数据"),
+            Self::CleanupMarkLocal => pick(
+                lang,
+                "Local data (including WebView2)",
+                "本地数据（含 WebView2）",
+            ),
+            Self::CleanupMarkApplicationSupport => {
+                pick(lang, "Application Support", "Application Support")
+            }
+            Self::CleanupMarkWebKit => pick(lang, "WebKit", "WebKit"),
+            Self::CleanupMarkCaches => pick(lang, "Caches", "Caches"),
+            Self::CleanupMarkHttpStorages => pick(lang, "HTTPStorages", "HTTPStorages"),
+            Self::CleanupMarkPreferences => pick(lang, "Preferences", "Preferences"),
+            Self::CleanupMarkSavedState => {
+                pick(lang, "Saved Application State", "Saved Application State")
+            }
+            Self::CleanupMarkUnixData => pick(lang, "Unix data", "Unix 数据"),
+            Self::CleanupMarkRecovery => {
+                pick(lang, "User configuration recovery copies", "用户配置备份")
+            }
+            Self::CleanupMarkUpdateEntrances => pick(
+                lang,
+                "Update entrances (LaunchAgents)",
+                "更新入口（LaunchAgents）",
+            ),
+            Self::CleanupMarkUpdateHome => {
+                pick(lang, "Update home beside the bundle", "应用旁的更新目录")
+            }
+            Self::CleanupMarkRuntimeClaims => pick(lang, "Unix runtime claims", "Unix 运行时锁"),
+            Self::CleanupMarkClipboard => pick(lang, "Clipboard staging", "剪贴板暂存"),
+            Self::CleanupMarkPanicLog => pick(lang, "Panic log", "崩溃日志"),
+            Self::CleanupKindPerCopy => pick(lang, "per-copy", "按副本"),
+            Self::CleanupKindPerAccount => pick(lang, "per-account", "按账户"),
+            Self::CleanupKindData => pick(lang, "data", "数据"),
+            Self::UninstallProgramMark => pick(lang, "Program files", "程序文件"),
+            Self::UninstallProgramScheduled => {
+                pick(lang, "removed when this window closes", "关闭此窗口后移除")
+            }
+            Self::UninstallProgramKept => pick(
+                lang,
+                "kept (the cleanup did not complete)",
+                "已保留（清理未完成）",
+            ),
+            Self::UninstallProgramManaged => {
+                pick(lang, "left to the package manager:", "由包管理器管理：")
+            }
+            Self::UninstallNotStarted => pick(
+                lang,
+                "The uninstaller did not start, and nothing was removed.",
+                "卸载程序未启动，未移除任何内容。",
+            ),
+            Self::RowUninstall => pick(lang, "Uninstall Folio", "卸载 Folio"),
+            Self::UninstallVerb => pick(lang, "Uninstall…", "卸载…"),
+            Self::DescUninstall => pick(
+                lang,
+                "Removes Folio and what it added to this computer. Folio quits first.",
+                "移除 Folio 及其在本机添加的内容。Folio 先退出。",
+            ),
+            Self::RowUninstallData => {
+                pick(lang, "Also remove settings and data", "同时移除设置和数据")
+            }
+            Self::DescUninstallData => pick(
+                lang,
+                "On removes settings, sessions and web data too. Off keeps them.",
+                "开：一并移除设置、会话和网页数据。关：保留。",
+            ),
+            Self::DescUninstallBy => pick(lang, "Run {command}.", "运行 {command}。"),
+            Self::UninstallCardHeading => pick(lang, "Uninstall Folio?", "卸载 Folio？"),
+            Self::UninstallCardKeeps => pick(lang, "Settings and data stay.", "设置和数据保留。"),
+            Self::UninstallCardRemoves => pick(
+                lang,
+                "Settings and data are removed too.",
+                "设置和数据一并移除。",
+            ),
+            Self::UninstallCardUninstall => pick(lang, "Uninstall", "卸载"),
+            Self::UninstallCardCancel => pick(lang, "Cancel", "取消"),
             Self::CleanupRemoved => pick(lang, "removed", "已移除"),
             Self::CleanupAbsent => pick(lang, "not present", "不存在"),
             Self::CleanupLeft => pick(
@@ -4845,8 +4985,8 @@ impl Text {
             ),
             Self::CleanupUsage => pick(
                 lang,
-                "Use folio --uninstall-cleanup [--purge].",
-                "用法：folio --uninstall-cleanup [--purge]",
+                "Use folio --uninstall [--remove-data], or folio --uninstall-cleanup [--purge].",
+                "用法：folio --uninstall [--remove-data]，或 folio --uninstall-cleanup [--purge]",
             ),
             Self::CleanupSystemUnknown => pick(
                 lang,
@@ -5583,10 +5723,9 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 804] = [
-        Self::CleanupArchiveExit,
-        Self::CleanupArchiveReady,
-        Self::CleanupArchiveIncomplete,
+    pub const ALL: [Self; 851] = [
+        Self::UninstallScriptQuestion,
+        Self::UninstallScriptRunning,
         Self::CleanupRecovery,
         Self::CleanupRuntime,
         Self::CleanupRemoved,
@@ -5604,6 +5743,54 @@ impl Text {
         Self::CleanupSystemUnknown,
         Self::CleanupRecorded,
         Self::CleanupMacHeld,
+        Self::CleanupMarkProfiles,
+        Self::CleanupMarkPsReadLine,
+        Self::CleanupMarkClaude,
+        Self::CleanupMarkCodex,
+        Self::CleanupMarkCopilot,
+        Self::CleanupMarkExplorer,
+        Self::CleanupMarkExplorerPackage,
+        Self::CleanupMarkExplorerClassic,
+        Self::CleanupMarkToast,
+        Self::CleanupMarkEntrance,
+        Self::CleanupMarkStartMenu,
+        Self::CleanupMarkAutostart,
+        Self::CleanupMarkHotkeys,
+        Self::CleanupMarkRoaming,
+        Self::CleanupMarkLegacy,
+        Self::CleanupMarkLocal,
+        Self::CleanupMarkApplicationSupport,
+        Self::CleanupMarkWebKit,
+        Self::CleanupMarkCaches,
+        Self::CleanupMarkHttpStorages,
+        Self::CleanupMarkPreferences,
+        Self::CleanupMarkSavedState,
+        Self::CleanupMarkUnixData,
+        Self::CleanupMarkRecovery,
+        Self::CleanupMarkUpdateEntrances,
+        Self::CleanupMarkUpdateHome,
+        Self::CleanupMarkRuntimeClaims,
+        Self::CleanupMarkClipboard,
+        Self::CleanupMarkPanicLog,
+        Self::CleanupKindPerCopy,
+        Self::CleanupKindPerAccount,
+        Self::CleanupKindData,
+        Self::UninstallProgramMark,
+        Self::UninstallProgramScheduled,
+        Self::UninstallProgramKept,
+        Self::UninstallProgramManaged,
+        Self::UninstallNotStarted,
+        Self::RowUninstall,
+        Self::UninstallVerb,
+        Self::DescUninstall,
+        Self::RowUninstallData,
+        Self::DescUninstallData,
+        Self::DescUninstallBy,
+        Self::UninstallCardHeading,
+        Self::UninstallCardKeeps,
+        Self::UninstallCardRemoves,
+        Self::UninstallCardUninstall,
+        Self::UninstallCardCancel,
         Self::PastePathEncoding,
         Self::PastePathControl,
         Self::PastePathPowerShellQuote,
@@ -6416,7 +6603,7 @@ impl Text {
     /// program is not called. Every entry not on this list must differ between
     /// the columns and must carry Chinese in the Chinese one.
     #[cfg(test)]
-    const UNTRANSLATED: [Self; 4] = [
+    const UNTRANSLATED: [Self; 10] = [
         // The class of program the page is about, and the word every one of them
         // calls itself — Claude Code, codex — in Chinese prose as much as in
         // English. A page named 「代理」 would be naming a proxy server (user
@@ -6435,6 +6622,35 @@ impl Text {
         // `FilesViewFiles` is not `SeatFiles`: shortening the segmented
         // control must not be a change to a toast.
         Self::GitToastTitle,
+        // The uninstaller's report names six folders of `~/Library` by the names
+        // macOS gives them on disk (T-UNINSTALL-UX): a reader looks for exactly
+        // that name in Finder, and a translated one names no folder.
+        Self::CleanupMarkApplicationSupport,
+        Self::CleanupMarkWebKit,
+        Self::CleanupMarkCaches,
+        Self::CleanupMarkHttpStorages,
+        Self::CleanupMarkPreferences,
+        Self::CleanupMarkSavedState,
+    ];
+
+    /// **The uninstaller's inventory rows that name a Windows thing** — the second
+    /// exemption of `no_string_a_mac_reader_meets_names_a_windows_program`
+    /// (T-UNINSTALL-UX).
+    ///
+    /// Not [`Self::WINDOWS_ONLY_SURFACES`], whose claim is that no Mac draws the
+    /// entry: the uninstaller's report has one line per row of its inventory on
+    /// every platform, and on a Mac these say `not present`. The line names what
+    /// was looked for, and on a Mac that is the Windows thing the inventory lists.
+    /// Their words were printed in English on every platform before this ticket;
+    /// the table only gives them a Chinese column.
+    #[cfg(test)]
+    const UNINSTALL_REPORT_MARKS: &'static [Self] = &[
+        Self::CleanupMarkProfiles,
+        Self::CleanupMarkPsReadLine,
+        Self::CleanupMarkExplorer,
+        Self::CleanupMarkExplorerPackage,
+        Self::CleanupMarkExplorerClassic,
+        Self::CleanupMarkLocal,
     ];
 
     /// **The entries whose Chinese has not been written yet**, standing with the English in both
@@ -6800,6 +7016,16 @@ pub fn update_row_managed_in(lang: Lang, version: &str, command: &str) -> String
     Text::UpdateRowManaged
         .in_lang(lang)
         .replace("{version}", version)
+        .replace("{command}", command)
+}
+
+/// **The Settings row's sentence for a copy a package manager installed** —
+/// `Run scoop uninstall folio.` (T-UNINSTALL-UX), filled from
+/// [`Text::DescUninstallBy`].
+#[must_use]
+pub fn uninstall_by_in(lang: Lang, command: &str) -> String {
+    Text::DescUninstallBy
+        .in_lang(lang)
         .replace("{command}", command)
 }
 
@@ -9851,7 +10077,9 @@ mod tests {
         ];
         let mut wrong: Vec<String> = Vec::new();
         for entry in Text::ALL {
-            if Text::WINDOWS_ONLY_SURFACES.contains(&entry) {
+            if Text::WINDOWS_ONLY_SURFACES.contains(&entry)
+                || Text::UNINSTALL_REPORT_MARKS.contains(&entry)
+            {
                 continue;
             }
             for lang in Lang::ALL {

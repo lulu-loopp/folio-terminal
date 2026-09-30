@@ -2031,7 +2031,7 @@ pub(crate) fn storage_dir_as_it_stands() -> PathBuf {
 
 /// Which of the two names holds the files while nothing has been moved: the
 /// previous one only when it is there and the current one is not.
-fn as_it_stands(current: PathBuf, previous: PathBuf) -> PathBuf {
+pub(crate) fn as_it_stands(current: PathBuf, previous: PathBuf) -> PathBuf {
     if previous.is_dir() && !current.exists() {
         previous
     } else {

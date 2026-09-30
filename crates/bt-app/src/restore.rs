@@ -2956,9 +2956,11 @@ const UPDATE_BAR_LOGICAL_PX: f32 = 4.0;
 /// How much of the accent the indeterminate bar carries over the whole track.
 const UPDATE_BAR_INDETERMINATE_ALPHA: f32 = 0.35;
 
-/// Everything the update card draws that had to be measured with a real font.
+/// Everything the update card draws that had to be measured with a real font — and the
+/// uninstaller's confirmation card, which is this chassis with its own two verbs
+/// (T-UNINSTALL-UX): `V` is the card's verb type.
 #[derive(Clone, Debug, PartialEq)]
-pub struct UpdateCardContent {
+pub struct UpdateCardContent<V = crate::update_card::CardVerb> {
     /// The state's line, broken to lines that fit beside the `×`.
     pub heading: Vec<String>,
     pub bar: Option<crate::update_card::Bar>,
@@ -2967,19 +2969,19 @@ pub struct UpdateCardContent {
     /// The journal's folder, cut anywhere it has to be (it is one token).
     pub folder: Vec<String>,
     /// C9's verbs in C9's order, each with its word and that word's width.
-    pub verbs: Vec<(crate::update_card::CardVerb, &'static str, f32)>,
-    pub primary: Option<crate::update_card::CardVerb>,
+    pub verbs: Vec<(V, &'static str, f32)>,
+    pub primary: Option<V>,
 }
 
 /// **The card's words, measured** — `measure` is the caller's font, asked for a string at a size
 /// in a weight.
 #[must_use]
-pub fn update_card_content(
-    paint: &crate::update_card::Paint,
+pub fn update_card_content<V: crate::update_card::Verbs>(
+    paint: &crate::update_card::Paint<V>,
     surface_width: f32,
     scale: f32,
     measure: &mut dyn FnMut(&str, f32, ChromeLabelWeight) -> f32,
-) -> UpdateCardContent {
+) -> UpdateCardContent<V> {
     let px = |value: f32| value * scale;
     let room = content_width(surface_width, scale);
     let beside_close = room - px(PASTE_CLOSE_GAP_LOGICAL_PX + PASTE_CLOSE_LOGICAL_PX);
@@ -3025,7 +3027,7 @@ pub fn update_card_content(
 
 /// Every rectangle the update card draws and hit-tests.
 #[derive(Clone, Debug, PartialEq)]
-pub struct UpdateCardLayout {
+pub struct UpdateCardLayout<V = crate::update_card::CardVerb> {
     scale: f32,
     frame: [f32; 4],
     close: [f32; 4],
@@ -3033,15 +3035,15 @@ pub struct UpdateCardLayout {
     bar: Option<(crate::update_card::Bar, [f32; 4])>,
     detail: Vec<(String, [f32; 4])>,
     folder: Vec<(String, [f32; 4])>,
-    buttons: Vec<(crate::update_card::CardVerb, &'static str, [f32; 4])>,
-    primary: Option<crate::update_card::CardVerb>,
+    buttons: Vec<(V, &'static str, [f32; 4])>,
+    primary: Option<V>,
 }
 
-impl UpdateCardLayout {
+impl<V: crate::update_card::Verbs> UpdateCardLayout<V> {
     /// Where one verb's button stands, for the tests that press it.
     #[cfg(test)]
     #[must_use]
-    pub fn button(&self, verb: crate::update_card::CardVerb) -> Option<[f32; 4]> {
+    pub fn button(&self, verb: V) -> Option<[f32; 4]> {
         self.buttons
             .iter()
             .find(|(drawn, _, _)| *drawn == verb)
@@ -3063,12 +3065,12 @@ impl UpdateCardLayout {
 /// foot, the recommended one on the right — or, in a window too narrow for that row, stacked, the
 /// recommended one on top, as the paste card stacks.
 #[must_use]
-pub fn update_card_layout(
-    content: &UpdateCardContent,
+pub fn update_card_layout<V: crate::update_card::Verbs>(
+    content: &UpdateCardContent<V>,
     surface_width: f32,
     surface_height: f32,
     scale: f32,
-) -> UpdateCardLayout {
+) -> UpdateCardLayout<V> {
     let px = |value: f32| value * scale;
     let border = (FLOAT_WINDOW_BORDER_LOGICAL_PX * scale).max(1.0);
     let width = dialog_width(surface_width, scale);
@@ -3212,7 +3214,11 @@ pub fn update_card_layout(
 /// What a point is over. **Always an answer**: the card holds the pointer while it is up, so a
 /// press beside it is still the card's and answers nothing.
 #[must_use]
-pub fn update_card_hit(layout: &UpdateCardLayout, x: f64, y: f64) -> crate::update_card::Target {
+pub fn update_card_hit<V: crate::update_card::Verbs>(
+    layout: &UpdateCardLayout<V>,
+    x: f64,
+    y: f64,
+) -> crate::update_card::Target<V> {
     let (x, y) = (x as f32, y as f32);
     if contains(layout.close, x, y) {
         return crate::update_card::Target::Close;
@@ -3228,10 +3234,10 @@ pub fn update_card_hit(layout: &UpdateCardLayout, x: f64, y: f64) -> crate::upda
 
 /// The update card as one overlay layer — **no scrim**.
 #[must_use]
-pub fn update_card_build(
-    layout: &UpdateCardLayout,
-    hover: Option<crate::update_card::Target>,
-    ring: Option<crate::update_card::CardVerb>,
+pub fn update_card_build<V: crate::update_card::Verbs>(
+    layout: &UpdateCardLayout<V>,
+    hover: Option<crate::update_card::Target<V>>,
+    ring: Option<V>,
 ) -> Vec<OverlayLayer> {
     use crate::update_card::{Bar, Target};
     let palette = chrome_palette();

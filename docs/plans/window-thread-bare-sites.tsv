@@ -28,7 +28,6 @@ bt-app	-	crate::diagnostics::newest_crash_report	std::fs::read_dir	1
 bt-app	-	crate::diagnostics::open_run_log	std::fs::create_dir_all	1
 bt-app	-	crate::diagnostics::rotate_if_oversized	std::fs::metadata	1
 bt-app	-	crate::diagnostics::rotate_if_oversized	std::fs::rename	1
-bt-app	-	crate::explorer_menu::cleanup_waited_on	std::sync::mpsc::Receiver::recv_timeout	1
 bt-app	-	crate::explorer_menu::removal_waited_on	std::sync::mpsc::Receiver::recv_timeout	1
 bt-app	-	crate::explorer_menu::same_path	std::fs::canonicalize	1
 bt-app	-	crate::facts_of_a_file_the_user_chose	std::fs::metadata	1

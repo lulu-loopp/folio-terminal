@@ -1771,7 +1771,7 @@ const PINS: [Pin; 15] = [
     },
     Pin {
         writer: "enter_standalone_main",
-        owner: "bt-app crate::explorer_menu::cleanup_waited_on",
+        owner: "bt-app crate::uninstall::standalone",
         after: None,
     },
     Pin {

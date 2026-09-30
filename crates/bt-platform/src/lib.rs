@@ -3633,6 +3633,12 @@ pub mod install_flip;
 /// (`docs/plans/design/thread-door-2026-09-26.md` (j)13; U-28).
 pub mod wait;
 
+/// **A removal that waits for processes to end** — the uninstaller's last step: the
+/// items it is handed are removed by a process that outlives the caller, once none of the
+/// processes it waits for runs (0.4.7 T-UNINSTALL-UX). A script run by `cmd.exe` on Windows,
+/// `/bin/sh` on Unix, started through [`quiet_command`]; nothing here waits.
+pub mod deferred_removal;
+
 mod web_environment;
 mod webview;
 

@@ -43022,6 +43022,8 @@ impl Runtime<'_> {
                 .window
                 .settings
                 .update_row_marked(update::gear_mark_is_lit()),
+            // The panel's, for this visit (T-UNINSTALL-UX).
+            uninstall_remove_data: self.window.settings.uninstall_remove_data(),
             key_hints: self.app.settings_store.loaded().key_hints,
             option_sends_alt: self.app.settings_store.loaded().option_sends_alt,
             // The machine's own answer, cached at the three moments it can
@@ -43641,6 +43643,11 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::git_panel_requested(target) {
             self.apply_git_panel(enabled)?;
         }
+        // The uninstall's switch is the panel's, for this visit, and never the
+        // settings file's (T-UNINSTALL-UX).
+        if let Some(on) = settings::uninstall_remove_data_requested(target) {
+            self.window.settings.set_uninstall_remove_data(on);
+        }
         if let Some(enabled) = settings::update_check_requested(target) {
             self.apply_update_check(enabled);
         }
@@ -44136,7 +44143,12 @@ impl Runtime<'_> {
             // no value either: they carry every other row's.
             | Row::ExportSettings
             | Row::ImportSettings
-            | Row::SettingsFolder => {}
+            | Row::SettingsFolder
+            // And the uninstaller's rows (T-UNINSTALL-UX): a door, a switch that
+            // lives for one visit, and a fact about who installed this copy.
+            | Row::Uninstall
+            | Row::UninstallData
+            | Row::UninstallBy => {}
         }
         Ok(())
     }
@@ -44183,7 +44195,8 @@ impl Runtime<'_> {
             || self.window.first_run.is_open()
             || self.window.psreadline_invite.is_open()
             || self.paste_card_seat().is_some()
-            || self.update_card_is_up();
+            || self.update_card_is_up()
+            || self.uninstall_card_is_up();
         !card_above
             && self.window.settings.is_open()
             && self.window.settings.recording_row().is_none()
@@ -50947,6 +50960,23 @@ impl App {
     /// are three places for a fourth door to be written differently.
     fn ask_to_quit(&mut self) {
         self.quit_requested = true;
+    }
+
+    /// **Uninstall, on the Settings card** (T-UNINSTALL-UX): the ordinary quit is
+    /// asked for through the one door every quit goes through, and the process's
+    /// way out is armed to start the uninstaller as its last act
+    /// (`uninstall::leave_armed`). A quit that is then abandoned — *Cancel* on the
+    /// quit card, a session that could not be written — disarms it, and nothing
+    /// is uninstalled.
+    ///
+    /// A quit already asked for or under way owns the windows, and the press does
+    /// nothing: the quit it would ask for is already coming, for another reason.
+    fn uninstall_on_quit(&mut self, remove_data: bool) {
+        if self.quit.is_some() || self.quit_requested {
+            return;
+        }
+        uninstall::arm(remove_data);
+        self.ask_to_quit();
     }
 
     /// **Restart, on the update's verified card** (0.4.6 U-21,
@@ -62790,8 +62820,10 @@ impl FolioApp {
                     // Back to `Running` after a refused write; a quit cancelled at its card, or
                     // whose saves did not all land, never left it.
                     bt_platform::admission::quit_abandoned();
-                    // This process stays: it owes no window after Restart any more (U-34).
+                    // This process stays: it owes no window after Restart any more (U-34), and
+                    // no uninstaller after *Uninstall* on the Settings card (T-UNINSTALL-UX).
                     update_handoff::disarm();
+                    uninstall::disarm();
                     if let Some(app) = self.app.as_mut() {
                         app.quit = None;
                     }
@@ -66374,13 +66406,20 @@ fn window_layout_key(
 /// chances for the Language row and the settings file to disagree about what
 /// `System` means.
 fn resolved_language(stored: bt_persist::LanguageV1) -> i18n::Lang {
+    resolved_language_on(stored, &bt_platform::os_ui_language())
+}
+
+/// [`resolved_language`] on a machine whose OS reads `os_ui_language` — the
+/// uninstaller's door asks it with the machine's own, and its tests with a
+/// language of their choosing (T-UNINSTALL-UX).
+fn resolved_language_on(stored: bt_persist::LanguageV1, os_ui_language: &str) -> i18n::Lang {
     i18n::resolve(
         match stored {
             bt_persist::LanguageV1::System => i18n::LanguageMode::System,
             bt_persist::LanguageV1::English => i18n::LanguageMode::English,
             bt_persist::LanguageV1::Chinese => i18n::LanguageMode::Chinese,
         },
-        &bt_platform::os_ui_language(),
+        os_ui_language,
     )
 }
 
@@ -71230,7 +71269,7 @@ fn main() -> Result<()> {
     bt_platform::install_console_ctrl_handler();
     if let Some(request) = cli::uninstall_cleanup(std::env::args_os().skip(1)) {
         let code = match request {
-            Ok(purge) => uninstall::run(purge),
+            Ok(door) => uninstall::run(door),
             Err(reason) => {
                 bt_platform::write_std_error(format!("{reason}\n").as_bytes());
                 1
@@ -71672,6 +71711,11 @@ fn main() -> Result<()> {
     // An owner-thread door (`doors::TraceFlush`, row 17), admitted on the way out. A refusal
     // loses what is still queued, as the flush's own timeout does.
     let _ = bt_platform::admission::admitted::<doors::TraceFlush, _>(trace_sink::flush);
+    // **The uninstaller, after *Uninstall* on the Settings card, is the very last
+    // act** (T-UNINSTALL-UX): started detached, with `--after-pid` naming this
+    // process, so it touches nothing until this process has gone. Nothing for any
+    // other run.
+    uninstall::leave_armed();
     bt_platform::leave_process(code)
 }
 

@@ -1537,7 +1537,7 @@ mod tests {
         for words in [scoop, homebrew] {
             assert_eq!(
                 crate::cli::uninstall_cleanup(words.clone()),
-                Some(Ok(false)),
+                Some(Ok(crate::cli::UninstallDoor::Cleanup { purge: false })),
                 "{words:?}"
             );
         }

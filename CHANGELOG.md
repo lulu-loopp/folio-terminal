@@ -14,6 +14,9 @@ All notable changes to Folio are recorded here. The format follows
   Folio supports the first tier of the kitty keyboard protocol and xterm's
   modifyOtherKeys. neovim, fish, helix and Claude Code ask for it, and so
   does Codex on macOS and in WSL. Programs that do not ask are unaffected.
+- Settings has an Uninstall row; the zip's uninstall script removes Folio in
+  one step and speaks your language; settings and data stay unless you turn
+  on the option.
 
 ### Changed
 

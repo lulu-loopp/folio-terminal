@@ -153,12 +153,15 @@ bt_platform::WebHost::rehost	WebRehost
 
 # effects
 crate	arm	item	effects	kind	authority	door
+bt-app	-	crate::explorer_menu::cleanup_waited_on	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::gpu_door::open_first_window	bt_render::GpuContext::open 1, pollster::block_on 1	owner-door-body	WaitToken	GpuOpen
 bt-app	-	crate::persist::SessionWriter::close	std::thread::JoinHandle::join 1, std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
 bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
 bt-app	-	crate::pty_door::resize	bt_pty::PtySession::resize 1	owner-door-body	WaitToken	PtyResize
 bt-app	-	crate::pty_door::spawn_shell	bt_pty::PtySession::spawn_shell_in 1	owner-door-body	WaitToken	PtyBirth
 bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	owner-door-body	WaitToken	PaneRetirementWait
+bt-app	-	crate::uninstall::links_below	std::fs::read_dir 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::uninstall::names_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment

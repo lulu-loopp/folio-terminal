@@ -7,7 +7,7 @@
 # never writes.
 fact	declared	hub	proven_writers	writer_modules	writer_functions	access_functions	membership_functions	inner_functions	unknown_sites	status
 App.ime_first_focus_seen	bool	-	1	1	1	0	0	0	0	complete
-App.gpu	GpuContext	-	0	0	0	77	0	0	0	complete
+App.gpu	GpuContext	-	0	0	0	78	0	0	0	complete
 App.device_loss_pilot	DeviceLossPilot	-	n	3	3	0	0	0	0	complete
 App.favicons	Rc<RefCell<Favicons>>	-	0	0	0	0	0	1	0	complete
 App.favicons_changed	bool	-	n	2	2	0	0	0	0	complete
@@ -101,7 +101,7 @@ App.handoff_answer	Option<Receiver<HandedOff>>	-	1	1	1	0	0	0	0	complete
 WindowRuntime.ime_report	Report	-	n	3	4	0	0	0	0	complete
 WindowRuntime.ime_report_due	Option<Instant>	-	n	2	2	0	0	0	0	complete
 WindowRuntime.leaving	Option<Instant>	-	1	1	3	0	0	0	1	incomplete
-WindowRuntime.renderer	WindowRenderer	-	n	14	35	53	0	0	1	incomplete
+WindowRuntime.renderer	WindowRenderer	-	n	14	35	54	0	0	1	incomplete
 WindowRuntime.system_settings_watch	Option<SystemSettingsWatch>	-	0	0	0	0	0	0	0	complete
 WindowRuntime.session_end_watch	Option<SessionEndWatch>	-	0	0	0	0	0	0	0	complete
 WindowRuntime.tabs	Vec<TabState>	hub	0	0	0	136	11	0	6	incomplete
@@ -271,7 +271,7 @@ WindowRuntime.video_meta	BTreeMap<PreviewSurface, (String, f32)>	-	1	1	1	0	0	0	0
 WindowRuntime.search_scan	Option<SearchScanCache>	-	n	2	3	0	0	0	0	complete
 WindowRuntime.search_revision	u64	-	1	1	3	0	0	0	0	complete
 WindowRuntime.chrome_marks	ChromeMarkRasters	-	n	2	2	0	0	0	0	complete
-WindowRuntime.settings	SettingsPanel	-	n	6	25	7	0	0	0	complete
+WindowRuntime.settings	SettingsPanel	-	n	7	28	9	0	0	0	complete
 WindowRuntime.settings_geometry	Geometry	-	1	1	1	0	0	0	0	complete
 WindowRuntime.settings_scroll	f32	-	n	3	8	0	0	0	0	complete
 WindowRuntime.profile_menu	ProfileMenu	-	n	3	4	0	0	0	0	complete

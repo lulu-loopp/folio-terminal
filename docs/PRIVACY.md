@@ -253,6 +253,10 @@ profile. Do not put a secret in one.
 - Several `BT_*` environment variables make Folio write terminal content to a
   file you name — `BT_PTY_DUMP` writes every byte of every pane. None is set
   unless you set it. `docs/BT-ENVIRONMENT.md` lists all of them.
+- **Uninstalling** (Settings ▸ About ▸ Uninstall Folio, `uninstall.cmd` or
+  `folio --uninstall`) removes everything on this list that Folio wrote, and
+  Folio's own files; it keeps the settings and session directory above unless
+  you ask it to remove that too.
 
 **And what is not stored anywhere.** There is no telemetry, no analytics and no
 crash reporting on either platform: nothing above is sent, and nothing above is
@@ -423,6 +427,7 @@ rm -rf ~/Library/WebKit/<Folio 的 bundle identifier> ~/Library/Caches/<Folio �
   也不按。卡本身记下的只有一件事：它已经出现过。
 - 若干 `BT_*` 环境变量会让 Folio 把终端内容写到你指定的文件——`BT_PTY_DUMP` 写的是每个
   窗格的每一个字节。你不设，它们就都不生效。全部列在 `docs/BT-ENVIRONMENT.md`。
+- **卸载**（设置 ▸ 关于 ▸ 卸载 Folio、`uninstall.cmd` 或 `folio --uninstall`）移除上述 Folio 写入的全部内容以及 Folio 自身的文件；设置和会话目录保留，除非你要求一并移除。
 
 **不存于任何位置的。** 两个平台上没有遥测、没有统计、没有崩溃上报：上述内容不会被发送，写入它们的也只有以你身份运行的程序。更新检查是 Folio 唯一主动发出的请求，本文开头几节就是它的全部；检查可能引出的下载只在你按下 **Update** 时发生。
 

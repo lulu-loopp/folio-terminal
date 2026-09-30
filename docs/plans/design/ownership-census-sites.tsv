@@ -129,6 +129,7 @@ App.gpu	access	crate::runtime::terminal	Runtime::adopt_terminal_font	lend	1
 App.gpu	access	crate::runtime::terminal	Runtime::restart_shell	lend	1
 App.gpu	access	crate::runtime::terminal	Runtime::step_pane_text_scale	lend	1
 App.gpu	access	crate::runtime::tooltips	Runtime::tooltip_layer	lend	1
+App.gpu	access	crate::runtime::update_card	Runtime::uninstall_card_layout	lend	1
 App.gpu	access	crate::runtime::update_card	Runtime::update_card_layout	lend	1
 App.gpu	access	crate::runtime::web	Runtime::web_sheet_layers	lend	2
 App.gpu	access	crate::runtime::windows	Runtime::answer_restore	lend	1
@@ -1528,6 +1529,7 @@ WindowRuntime.renderer	access	crate::runtime::tabs	Runtime::tab_menu_layer	lend	
 WindowRuntime.renderer	access	crate::runtime::tabs	Runtime::tab_menu_layout	lend	1
 WindowRuntime.renderer	access	crate::runtime::terminal	Runtime::adopt_terminal_font	lend	1
 WindowRuntime.renderer	access	crate::runtime::tooltips	Runtime::tooltip_layer	lend	1
+WindowRuntime.renderer	access	crate::runtime::update_card	Runtime::uninstall_card_layout	lend	1
 WindowRuntime.renderer	access	crate::runtime::update_card	Runtime::update_card_layout	lend	1
 WindowRuntime.renderer	access	crate::runtime::web	Runtime::web_sheet_layers	lend	1
 WindowRuntime.resize_trace_logged_events	write	crate::runtime::dpi	Runtime::flush_resize_trace	assign	2
@@ -1594,7 +1596,7 @@ WindowRuntime.secondary_press	access	crate::runtime::mouse	Runtime::mouse_input	
 WindowRuntime.settings	write	crate	<Runtime as settings::geometry::PointerHost>::settings_hover	call:set_hover	1
 WindowRuntime.settings	write	crate	Runtime::apply_editor_choice	call:close_editor,call:press,call:push,call:remove	5
 WindowRuntime.settings	write	crate	Runtime::apply_row_verb	call:close_row_menu	1
-WindowRuntime.settings	write	crate	Runtime::apply_settings_choice_announcing	call:keep_focus_reachable	1
+WindowRuntime.settings	write	crate	Runtime::apply_settings_choice_announcing	call:keep_focus_reachable,call:set_uninstall_remove_data	2
 WindowRuntime.settings	write	crate	Runtime::drag_settings_menu_bar	call:scroll_menu	1
 WindowRuntime.settings	write	crate	Runtime::open_scheme_for_editing	call:close	1
 WindowRuntime.settings	write	crate	Runtime::open_settings_on_row	call:press,call:select_category	2
@@ -1609,6 +1611,7 @@ WindowRuntime.settings	write	crate	Runtime::show_settings_choice_at	call:scroll_
 WindowRuntime.settings	write	crate	Runtime::toggle_settings_panel	call:seed_quake_command,call:toggle	2
 WindowRuntime.settings	write	crate	Runtime::write_editor_field	assign	2
 WindowRuntime.settings	write	crate::runtime::configuration	Runtime::import_settings_from	call:keep_focus_reachable	1
+WindowRuntime.settings	write	crate::runtime::configuration	Runtime::open_configuration_door	call:raise_uninstall_card	1
 WindowRuntime.settings	write	crate::runtime::keyboard	Runtime::apply_shortcut_edit	call:keep_focus_reachable	1
 WindowRuntime.settings	write	crate::runtime::keyboard	Runtime::keyboard_input	call:key,call:set_hover	2
 WindowRuntime.settings	write	crate::runtime::mouse	Runtime::pointer_left	call:set_hover	1
@@ -1616,6 +1619,8 @@ WindowRuntime.settings	write	crate::runtime::preview	Runtime::apply_image_pick_r
 WindowRuntime.settings	write	crate::runtime::profiles	Runtime::delete_profile	call:close_editor	1
 WindowRuntime.settings	write	crate::runtime::profiles	Runtime::open_profile_editor	call:open_editor	1
 WindowRuntime.settings	write	crate::runtime::profiles	Runtime::take_profile_table	assign,call:close_editor,call:close_row_menu,call:keep_focus_reachable	4
+WindowRuntime.settings	write	crate::runtime::update_card	Runtime::answer_uninstall_card	call:put_uninstall_card_away	1
+WindowRuntime.settings	write	crate::runtime::update_card	Runtime::hover_uninstall_card	call:set_hover	1
 WindowRuntime.settings	access	crate	Runtime::apply_editor_choice	call:editor_mut	2
 WindowRuntime.settings	access	crate	Runtime::paste_into_settings_field	call:text_field_mut	1
 WindowRuntime.settings	access	crate	Runtime::reseed_editor_env	call:editor_mut	1
@@ -1623,6 +1628,8 @@ WindowRuntime.settings	access	crate	Runtime::settings_field_key	call:text_field_
 WindowRuntime.settings	access	crate	Runtime::write_editor_field	call:editor_mut	2
 WindowRuntime.settings	access	crate::runtime::preview	Runtime::apply_image_pick_result	call:editor_mut	1
 WindowRuntime.settings	access	crate::runtime::profiles	Runtime::take_profile_table	call:editor_mut	1
+WindowRuntime.settings	access	crate::runtime::update_card	Runtime::hover_uninstall_card	call:uninstall_card_mut	1
+WindowRuntime.settings	access	crate::runtime::update_card	Runtime::press_uninstall_card_key	call:uninstall_card_mut	1
 WindowRuntime.settings_geometry	write	crate	Runtime::settings_layout	call:clear,call:read	2
 WindowRuntime.settings_marks	write	crate::runtime::math	Runtime::refresh_overlay_with_formula	call:resolve_overlay	1
 WindowRuntime.settings_menu_bar_drag	write	crate	Runtime::settings_mouse_input	assign,call:take	2
