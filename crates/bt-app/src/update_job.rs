@@ -490,6 +490,11 @@ pub(crate) enum Failure {
     /// back** (U-29): a start sent with `--update-failed` found its
     /// transaction retired with the outcome `rolled_back`.
     RolledBack,
+    /// **The update stopped before the new version ever ran, and the previous
+    /// one was put back** (0.4.7 U-42a; 0.4.6's D-7): a start sent with
+    /// `--update-failed` found its transaction retired `rolled_back` with no
+    /// trial ever begun — a power cut during the moves (W6).
+    Interrupted,
     /// **The new version did not prove itself and putting the previous one
     /// back did not finish** (U-29): the transaction is still `rolled_back`
     /// and destructive — `Stuck`, or not begun — and `folder` is where its
@@ -530,6 +535,11 @@ pub(crate) enum Stop {
     Copy,
     /// The rescue copy of the running build could not be made.
     Clone,
+    /// **The release needs a newer updater than this build** (its manifest's
+    /// `min_updater`; 0.4.7 U-42c, 0.4.6's D-13): this build cannot update
+    /// itself to it, and the new version is downloaded by hand. Nothing was
+    /// changed.
+    TooOld,
     /// The volume the installation is on has too little space for the
     /// expanded release, its staged copy and the rescue copy (Windows, §C.2
     /// step 3): this many bytes more are needed. Nothing was expanded.
@@ -553,6 +563,7 @@ impl Stop {
             Self::Identity => "the new build is not the offered, signed Folio",
             Self::Copy => "the new build could not be copied",
             Self::Clone => "the running build could not be kept aside",
+            Self::TooOld => "the release needs a newer updater than this build",
             Self::Space { .. } => "the disk has too little space for the update",
             Self::Cancelled => "the update was cancelled",
         }

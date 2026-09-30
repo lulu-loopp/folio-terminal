@@ -981,6 +981,7 @@ mod tests {
             (
                 Phase::Retired {
                     outcome: Outcome::Committed,
+                    untried: false,
                 },
                 TrialSight::Committed,
             ),
@@ -999,11 +1000,12 @@ mod tests {
                 },
                 TrialSight::Undecided,
             ),
-            (Phase::RolledBack, TrialSight::Undecided),
+            (Phase::RolledBack { untried: false }, TrialSight::Undecided),
             (Phase::Abandoned, TrialSight::Ended),
             (
                 Phase::Retired {
                     outcome: Outcome::RolledBack,
+                    untried: false,
                 },
                 TrialSight::Ended,
             ),
@@ -1128,6 +1130,7 @@ mod tests {
                 TXN,
                 Phase::Retired {
                     outcome: Outcome::RolledBack,
+                    untried: false,
                 },
             )),
             None,

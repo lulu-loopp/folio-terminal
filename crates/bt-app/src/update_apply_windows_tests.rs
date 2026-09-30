@@ -1079,7 +1079,8 @@ fn committed_is_written_only_on_a_matching_receipt_while_trial() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     let header = install.header();
@@ -1246,7 +1247,8 @@ fn w12_finishes_the_deletions_and_never_rolls_back() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert!(
@@ -1419,7 +1421,8 @@ fn a_failed_health_reverses_the_moves_and_relaunches_the_old_build() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::RolledBack
+            outcome: Outcome::RolledBack,
+            untried: false,
         }
     );
     let header = install.header();
@@ -1592,7 +1595,8 @@ fn rollback_from_a_half_moved_install_uses_the_digests_not_the_phase() {
         assert_eq!(
             install.on_disk().body.phase,
             Phase::Retired {
-                outcome: Outcome::RolledBack
+                outcome: Outcome::RolledBack,
+                untried: phase != "trial",
             },
             "{case}: {:?}",
             world.said
@@ -1702,6 +1706,54 @@ fn a_failed_move_back_is_stuck_with_everything_kept() {
     );
 }
 
+/// RED (U-42b) — **W10: a new file held open with no sharing stops the
+/// rollback before anything moves back, and the reason names the held file
+/// — never the collision its old file would have met.**
+///
+/// 0.4.6's D-9: the held file hashed to nothing, the rollback took it for
+/// absent, moved the old file back onto its name and stopped at
+/// `the move of folio.msix to Install: … os error 183`. The hold here is the
+/// clean machine's (read, share none), on the real recovery road.
+///
+/// MUTATION: in `update_txn::rollback_moves`, skip the `unread` check — the
+/// rollback moves and stops at the collision (`os error 183`).
+#[test]
+fn a_new_file_held_without_sharing_is_named_as_the_rollback_s_reason() {
+    let Some(install) = Install::new("held-new") else {
+        return;
+    };
+    flipped_at(&install, Phase::RollbackIntent { trial: None });
+    let name = a_new_name_besides_the_program(&install);
+    let hold = install_flip::hold_unshared(&install.install().join(&name))
+        .expect("the test holds the new file");
+    let (code, world) = recovered(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Silent),
+    );
+    drop(hold);
+    assert_eq!(code, 0, "{:?}", world.said);
+    let Phase::Stuck { last_error, .. } = install.on_disk().body.phase else {
+        panic!("{:?} {:?}", install.on_disk().body.phase, world.said);
+    };
+    assert_eq!(
+        last_error,
+        format!(
+            "`{name}` in the install could not be read or moved out: held open by another program"
+        ),
+        "{:?}",
+        world.said
+    );
+    assert!(
+        install.holds(Place::Install, &install.new),
+        "nothing moved back: the new set is still installed"
+    );
+    assert!(
+        install.holds(Place::Backup, &install.old),
+        "and the old one is still in the backup"
+    );
+}
+
 /// RED (U-24) — **`Stuck` is tried again by every start, each failure counted,
 /// and after the bound nothing more is tried**: two starts record attempts 2
 /// and 3, the third records nothing and says the update is incomplete; the
@@ -1802,7 +1854,8 @@ fn stuck_with_the_new_set_live_starts_it_as_a_trial_and_its_receipt_commits() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert!(install.holds(Place::Install, &install.new));
@@ -1862,7 +1915,7 @@ fn rolled_back_is_retired_at_the_next_start() {
         return;
     };
     install.arm();
-    install.write(Phase::RolledBack);
+    install.write(Phase::RolledBack { untried: false });
     let (code, world) = recovered_at_logon(
         &install,
         limits(20_000, 20_000),
@@ -1872,7 +1925,8 @@ fn rolled_back_is_retired_at_the_next_start() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::RolledBack
+            outcome: Outcome::RolledBack,
+            untried: false,
         }
     );
     assert!(
@@ -2133,7 +2187,7 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
             "intent" => flipped_at(&install, Phase::RollbackIntent { trial: None }),
             "rolled-back" => {
                 install.arm();
-                install.write(Phase::RolledBack);
+                install.write(Phase::RolledBack { untried: false });
             }
             "stuck-new" => {
                 flipped_at(&install, stuck(1));
@@ -2168,7 +2222,14 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
         let phase = install.on_disk().body.phase;
         assert_eq!(phase.kind(), ends, "{tag}: {:?}", world.said);
         if let Some(outcome) = outcome {
-            assert_eq!(phase, Phase::Retired { outcome }, "{tag}");
+            assert_eq!(
+                phase,
+                Phase::Retired {
+                    outcome,
+                    untried: matches!(tag, "moving" | "intent")
+                },
+                "{tag}"
+            );
         }
         let expected = match opens {
             Installed => vec![(install.installed.clone(), handed())],
@@ -2566,7 +2627,8 @@ fn a_running_trial_the_journal_could_not_record_is_recorded_and_committed_by_the
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert!(install.holds(Place::Install, &install.new), "the new build");
@@ -2767,7 +2829,8 @@ fn the_logon_run_starts_nothing_only_when_nobody_is_waiting() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert!(world.opened.is_empty(), "{:?}", world.said);
@@ -3818,7 +3881,8 @@ fn two_recoveries_over_one_unrecorded_trial_commit_it_once() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert!(runs(second));
@@ -4661,7 +4725,8 @@ fn a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers() {
                 assert_eq!(
                     install.on_disk().body.phase,
                     Phase::Retired {
-                        outcome: Outcome::Committed
+                        outcome: Outcome::Committed,
+                        untried: false,
                     }
                 );
                 assert!(matches!(trial.0.try_wait(), Ok(None)), "the trial stays");
@@ -4682,7 +4747,8 @@ fn a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers() {
                     matches!(
                         install.on_disk().body.phase,
                         Phase::Retired {
-                            outcome: Outcome::RolledBack
+                            outcome: Outcome::RolledBack,
+                            ..
                         }
                     ),
                     "{done:?}"
@@ -4728,4 +4794,137 @@ fn a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers() {
         }
         drop(trial);
     }
+}
+
+/// **Run `name` in a copy of this test binary** whose standard error is the
+/// file `log`, opened for appending as a Folio's streams are
+/// (`diagnostics::choose_resident_channel`), with `child` naming `log` in its
+/// environment; answers the file's text afterwards.
+pub(crate) fn said_by_a_child_whose_stderr_is_the_log(
+    name: &str,
+    child: &str,
+    tag: &str,
+) -> String {
+    let folder = std::env::temp_dir().join(format!(
+        "bt-u42d-{tag}-{}-{}",
+        std::process::id(),
+        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
+    ));
+    std::fs::create_dir_all(&folder).unwrap();
+    let log = folder.join("diagnostics.log");
+    let stream = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    let status = bt_platform::quiet_command(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", name, "--test-threads=1"])
+        .env(child, &log)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stream))
+        .status()
+        .expect("the child runs");
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&folder);
+    assert!(status.success(), "the child failed: {text}");
+    text
+}
+
+/// RED (U-42d) — **a road process's line reaches `diagnostics.log` once,
+/// when its standard error is that same log.**
+///
+/// 0.4.6's D-11: every `BT_UPDATE_APPLY` and `BT_UPDATE_RECOVER` line was in
+/// the file twice. The applier inherits the standard error of the Folio that
+/// started it, which is that Folio's `diagnostics.log`, and it also appended
+/// each line to the log by name. The child here is a copy of this test
+/// binary whose standard error is the log, as the applier's is.
+///
+/// MUTATION: in `Machine::say`, write standard error too when a log is named
+/// — the line is in the file twice.
+#[test]
+fn a_road_line_reaches_the_log_once_when_standard_error_is_that_log() {
+    const CHILD: &str = "BT_U42D_WINDOWS_SAY";
+    if let Some(log) = std::env::var_os(CHILD) {
+        let mut machine = Machine {
+            log: Some(PathBuf::from(log)),
+        };
+        World::say(&mut machine, "BT_UPDATE_APPLY one line, once");
+        return;
+    }
+    let text = said_by_a_child_whose_stderr_is_the_log(
+        "update_apply_windows::tests::a_road_line_reaches_the_log_once_when_standard_error_is_that_log",
+        CHILD,
+        "windows",
+    );
+    assert_eq!(
+        text.matches("BT_UPDATE_APPLY one line, once").count(),
+        1,
+        "{text}"
+    );
+}
+
+/// RED (U-42d, D-15; review finding 5) — **the applier's wait for a held
+/// file sleeps one poll between two looks, so a hold let go is seen at the
+/// next look, and a hold that outlasts the window refuses exactly at its
+/// end.**
+///
+/// On the clean machine E-7's hold lasted 200 s, past the applier's 60 s, so
+/// the ~61 s with no window there was the whole wait run out. The clock and
+/// the pause here are the test's: each sleep moves the clock by exactly what
+/// was asked, so the count of polls is exact and nothing waits.
+///
+/// MUTATION: in `until_let_go`, sleep what is left of the window instead of
+/// `poll.min(left)`: the first sleep is the whole window.
+#[test]
+fn a_held_file_let_go_is_seen_at_the_next_poll() {
+    let poll = Duration::from_millis(250);
+    let window_length = Duration::from_secs(60);
+    let start = Instant::now();
+    let window = start + window_length;
+
+    // Held for three looks, then let go.
+    let clock = std::cell::Cell::new(start);
+    let mut looks = 0;
+    let mut sleeps = Vec::new();
+    let answer = until_let_go(
+        window,
+        poll,
+        &mut || clock.get(),
+        &mut || {
+            looks += 1;
+            Ok(if looks <= 3 {
+                vec!["folio.exe".to_owned()]
+            } else {
+                Vec::new()
+            })
+        },
+        &mut |pause| {
+            sleeps.push(pause);
+            clock.set(clock.get() + pause);
+        },
+    );
+    assert_eq!(answer, Ok(()));
+    assert_eq!(sleeps, vec![poll; 3], "one poll between two looks");
+    assert_eq!(clock.get() - start, 3 * poll, "seen at the next poll");
+
+    // Held for good: refused when the window has passed, never after it.
+    let clock = std::cell::Cell::new(start);
+    let mut slept = Duration::ZERO;
+    let answer = until_let_go(
+        window,
+        poll,
+        &mut || clock.get(),
+        &mut || Ok(vec!["folio.exe".to_owned()]),
+        &mut |pause| {
+            assert!(pause <= poll, "{pause:?} is more than one poll");
+            slept += pause;
+            clock.set(clock.get() + pause);
+        },
+    );
+    assert_eq!(
+        answer,
+        Err("held open by another process: folio.exe".to_owned())
+    );
+    assert_eq!(slept, window_length, "the window, and not a poll more");
 }

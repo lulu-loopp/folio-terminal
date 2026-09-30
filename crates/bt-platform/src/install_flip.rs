@@ -183,6 +183,36 @@ pub fn held_open(path: &Path) -> io::Result<bool> {
     imp::held_open(path)
 }
 
+/// **Hold the file at `path` open with no sharing, as another program
+/// would**, until the answer is dropped — a test's stand-in for the clean
+/// machine's W10 hold (`[IO.File]::Open(path, 'Open', 'Read', 'None')`;
+/// 0.4.7 ticket U-42b). Tests only: this crate's, and those of a crate that
+/// names the `trust-harness` feature on its dev-dependency (`bt-app`'s).
+///
+/// # Errors
+/// The file could not be opened; `Unsupported` off Windows, which has no
+/// sharing modes.
+#[cfg(any(test, feature = "trust-harness"))]
+#[doc(hidden)]
+pub fn hold_unshared(path: &Path) -> io::Result<std::fs::File> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = path;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "sharing modes are a Windows file system's",
+        ))
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
     use super::{Ask, Running};

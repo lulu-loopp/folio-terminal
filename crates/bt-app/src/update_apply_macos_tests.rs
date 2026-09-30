@@ -896,7 +896,8 @@ fn committed_is_written_only_on_a_matching_receipt_while_trial() {
     assert_eq!(
         journal.body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert_eq!(journal.header().outcome, HeaderOutcome::Committed);
@@ -944,7 +945,8 @@ fn the_old_bundle_is_removed_only_after_committed() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert!(
@@ -1307,7 +1309,8 @@ fn a_failed_health_swaps_back() {
     assert_eq!(
         journal.body.phase,
         Phase::Retired {
-            outcome: Outcome::RolledBack
+            outcome: Outcome::RolledBack,
+            untried: false,
         }
     );
     assert_eq!(journal.header().outcome, HeaderOutcome::RolledBack);
@@ -1409,7 +1412,8 @@ fn rollback_from_the_new_live_swaps_and_from_the_old_live_does_not() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Retired {
-            outcome: Outcome::RolledBack
+            outcome: Outcome::RolledBack,
+            untried: true,
         }
     );
 
@@ -1629,7 +1633,7 @@ fn rolled_back_is_retired_at_the_next_start() {
         return;
     }
     let install = Install::new("m11");
-    install.write(Phase::RolledBack);
+    install.write(Phase::RolledBack { untried: false });
     install.arm();
     let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
     assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
@@ -1640,7 +1644,8 @@ fn rolled_back_is_retired_at_the_next_start() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Retired {
-            outcome: Outcome::RolledBack
+            outcome: Outcome::RolledBack,
+            untried: false,
         }
     );
 
@@ -2190,7 +2195,7 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
         (
             "rolled-back",
             |install, _| {
-                install.write(Phase::RolledBack);
+                install.write(Phase::RolledBack { untried: false });
                 install.arm();
             },
             plain,
@@ -2432,7 +2437,8 @@ fn a_receipt_found_by_recovery_commits_forward() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Retired {
-            outcome: Outcome::RolledBack
+            outcome: Outcome::RolledBack,
+            untried: false,
         }
     );
 
@@ -3699,4 +3705,31 @@ fn a_deferral_before_a_fresh_stuck_retrial_is_the_roads_end() {
             assert_eq!(world.shown.len(), 1, "{tag}");
         }
     }
+}
+
+/// RED (U-42d) — **the macOS applier's line reaches `diagnostics.log` once,
+/// when its standard error is that same log** — the Windows test's twin
+/// (`update_apply_windows::tests::a_road_line_reaches_the_log_once_when_standard_error_is_that_log`).
+///
+/// MUTATION: in `Machine::say`, write standard error too when a log is named.
+#[test]
+fn a_road_line_reaches_the_log_once_when_standard_error_is_that_log() {
+    const CHILD: &str = "BT_U42D_MACOS_SAY";
+    if let Some(log) = std::env::var_os(CHILD) {
+        let mut machine = Machine {
+            log: Some((PathBuf::from(log), String::new())),
+        };
+        Hands::say(&mut machine, "BT_UPDATE_APPLY one line, once");
+        return;
+    }
+    let text = crate::update_apply_windows::tests::said_by_a_child_whose_stderr_is_the_log(
+        "update_apply_macos::tests::a_road_line_reaches_the_log_once_when_standard_error_is_that_log",
+        CHILD,
+        "macos",
+    );
+    assert_eq!(
+        text.matches("BT_UPDATE_APPLY one line, once").count(),
+        1,
+        "{text}"
+    );
 }

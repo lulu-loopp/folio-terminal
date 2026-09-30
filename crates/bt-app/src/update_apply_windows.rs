@@ -950,26 +950,25 @@ impl<'a> Txn<'a> {
                 ));
             }
         }
-        loop {
-            let mut held = Vec::new();
-            for member in &self.inventories.old_present {
-                match install_flip::held_open(&install.join(&member.name)) {
-                    Ok(false) => {}
-                    Ok(true) => held.push(member.name.as_str()),
-                    Err(error) => {
-                        return Err(format!("`{}` in the install: {error}", member.name));
+        until_let_go(
+            window,
+            self.road.limits.poll,
+            &mut Instant::now,
+            &mut || {
+                let mut held = Vec::new();
+                for member in &self.inventories.old_present {
+                    match install_flip::held_open(&install.join(&member.name)) {
+                        Ok(false) => {}
+                        Ok(true) => held.push(member.name.clone()),
+                        Err(error) => {
+                            return Err(format!("`{}` in the install: {error}", member.name));
+                        }
                     }
                 }
-            }
-            if held.is_empty() {
-                return Ok(());
-            }
-            let left = window.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(format!("held open by another process: {}", held.join(", ")));
-            }
-            bt_platform::wait::sleep_within(worker, self.road.limits.poll.min(left));
-        }
+                Ok(held)
+            },
+            &mut |pause| bt_platform::wait::sleep_within(worker, pause),
+        )
     }
 
     /// W6 → W7 → W8, or the rollback.
@@ -1161,6 +1160,11 @@ impl<'a> Txn<'a> {
                             "BT_UPDATE_RECOVER the trial {} gave no receipt",
                             process.pid
                         ));
+                    } else if self.j.phase() == PhaseKind::Moving {
+                        // No trial was begun: the moves were cut short (W6; U-42a).
+                        world.say(
+                            "BT_UPDATE_RECOVER the update was interrupted before the new version started",
+                        );
                     }
                     self.j.record(actor, &Event::RollbackDeclared)?;
                 }
@@ -1549,10 +1553,24 @@ impl<'a> Txn<'a> {
         }
         Ok(names
             .into_iter()
-            .map(|name| Seen {
-                name: name.to_owned(),
-                install: digest_at(&install.join(name)),
-                backup: digest_at(&backup.join(name)),
+            .map(|name| {
+                let mut unread = Vec::new();
+                let mut at = |place: Place, folder: &Path| match read_digest_at(&folder.join(name))
+                {
+                    Ok(digest) => digest,
+                    Err(why) => {
+                        unread.push((place, why));
+                        None
+                    }
+                };
+                let install = at(Place::Install, &install);
+                let backup = at(Place::Backup, &backup);
+                Seen {
+                    name: name.to_owned(),
+                    install,
+                    backup,
+                    unread,
+                }
             })
             .collect())
     }
@@ -1612,6 +1630,58 @@ impl<'a> Txn<'a> {
     }
 }
 
+/// **The SHA-256 of the regular file at `path`**, `None` where there is none,
+/// or why a file that is there could not be read — "held open by another
+/// program" when another process holds it with no sharing (U-42b; W10's
+/// hold), the read's own error otherwise.
+fn read_digest_at(path: &Path) -> Result<Option<Digest>, String> {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Ok(None);
+    };
+    if !meta.is_file() {
+        return Ok(None);
+    }
+    match crate::update_prepare::digest_of(path) {
+        Ok((digest, _)) => Ok(Digest::parse(&digest).ok()),
+        Err(error) => Err(match install_flip::held_open(path) {
+            Ok(true) => String::from("held open by another program"),
+            _ => error.to_string(),
+        }),
+    }
+}
+
+/// **Wait until nothing `held` names is held any more, within `window`**
+/// (E-7): ask, and while something is held sleep one `poll` (never past
+/// `window`) and ask again — so a hold let go is seen at the next poll, and a
+/// hold that outlasts `window` refuses with the names still held. `now` is the
+/// clock and `sleep` the pause (the worker's wait door in the product), so a
+/// test can count the polls (U-42d, review finding 5).
+///
+/// # Errors
+/// What `held` refused with, or the files still held when `window` passed.
+fn until_let_go(
+    window: Instant,
+    poll: std::time::Duration,
+    now: &mut dyn FnMut() -> Instant,
+    held: &mut dyn FnMut() -> Result<Vec<String>, String>,
+    sleep: &mut dyn FnMut(std::time::Duration),
+) -> Result<(), String> {
+    loop {
+        let names = held()?;
+        if names.is_empty() {
+            return Ok(());
+        }
+        let left = window.saturating_duration_since(now());
+        if left.is_zero() {
+            return Err(format!(
+                "held open by another process: {}",
+                names.join(", ")
+            ));
+        }
+        sleep(poll.min(left));
+    }
+}
+
 /// The SHA-256 of the regular file at `path`, or `None` where there is none.
 fn digest_at(path: &Path) -> Option<Digest> {
     let meta = std::fs::symlink_metadata(path).ok()?;
@@ -1623,17 +1693,26 @@ fn digest_at(path: &Path) -> Option<Digest> {
 }
 
 /// **This process's own world**: the current user's `Run` key, the system's
-/// processes, and lines on standard error and, when `log` names one, in a
-/// file.
+/// processes, and lines in the file `log` names — or on standard error while
+/// it names none.
 pub(crate) struct Machine {
     pub(crate) log: Option<PathBuf>,
 }
 
 impl World for Machine {
+    /// **One writer per line** (0.4.7 ticket U-42d; 0.4.6's D-11): the log
+    /// once one is named, standard error only before. The applier's standard
+    /// error is the one it inherited from the Folio that started it, whose
+    /// streams are that Folio's `diagnostics.log` — the same file `log`
+    /// names — so writing both put every line in the file twice.
     fn say(&mut self, line: &str) {
-        bt_platform::write_std_error(format!("{line}\n").as_bytes());
-        if let Some(log) = &self.log {
-            let _ = crate::diagnostics::append_note(log, line);
+        match &self.log {
+            Some(log) => {
+                let _ = crate::diagnostics::append_note(log, line);
+            }
+            None => {
+                bt_platform::write_std_error(format!("{line}\n").as_bytes());
+            }
         }
     }
 
@@ -1682,4 +1761,4 @@ impl World for Machine {
 
 #[cfg(test)]
 #[path = "update_apply_windows_tests.rs"]
-mod tests;
+pub(crate) mod tests;

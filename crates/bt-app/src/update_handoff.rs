@@ -142,6 +142,148 @@ impl Spawner for Unwaited {
     }
 }
 
+/// **Which copy of Folio a start names** (U-39): the rescue copy under the
+/// installation home, or the installed one — the two a hand-over and O's exit
+/// guard start.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FolioCopy {
+    Rescue,
+    Installed,
+}
+
+impl FolioCopy {
+    /// The copy `program` is: under `home`, the rescue copy; anywhere else
+    /// (or with no home to compare), the installed one.
+    #[must_use]
+    pub(crate) fn of(program: &Path, home: Option<&Home>) -> Self {
+        if home.is_some_and(|home| program.starts_with(home.root())) {
+            Self::Rescue
+        } else {
+            Self::Installed
+        }
+    }
+
+    fn said(self) -> &'static str {
+        match self {
+            Self::Rescue => "the rescue copy",
+            Self::Installed => "the installed copy",
+        }
+    }
+}
+
+/// **This process's starts through the update's spawner, counted** (U-39):
+/// how many were made and how many of them were refused. One per process in
+/// the product ([`STARTS`]); a test keeps its own.
+#[derive(Debug, Default)]
+pub(crate) struct StartCount {
+    made: u32,
+    refused: u32,
+}
+
+impl StartCount {
+    /// No start made yet.
+    #[must_use]
+    pub(crate) const fn new() -> Self {
+        Self {
+            made: 0,
+            refused: 0,
+        }
+    }
+}
+
+/// The product's count: every start of a hand-over and of O's exit guard.
+static STARTS: Mutex<StartCount> = Mutex::new(StartCount::new());
+
+/// **One start through `spawner`, counted in `starts`, and said when it
+/// matters** (U-39; 0.4.6's D-5: `os error 50` from the applier's start, and
+/// from every later start of the same process, with no cause on record).
+///
+/// A refused start says one line with everything a recurrence needs: which of
+/// this process's starts it was, the program and which copy it is, the exact
+/// error with its raw code, the image's state on the disk (whether it is
+/// there, its size and attributes, what its signature says), and this
+/// process's own state a start depends on
+/// ([`bt_platform::start_conditions`]: console, the inherited standard
+/// handles, working directory, creation flags). Once a start was refused,
+/// every later start says one line too, whatever its outcome, so "every later
+/// start failed" reads off the log. A start before any refusal says nothing.
+/// Nothing is changed about the start itself.
+pub(crate) fn counted_start(
+    starts: &Mutex<StartCount>,
+    spawner: &mut dyn Spawner,
+    program: &Path,
+    args: &[OsString],
+    copy: FolioCopy,
+    say: &mut dyn FnMut(&str),
+) -> io::Result<Running> {
+    let started = spawner.spawn_detached(program, args);
+    let (made, refused_before) = match starts.lock() {
+        Ok(mut starts) => {
+            starts.made = starts.made.saturating_add(1);
+            let before = starts.refused;
+            if started.is_err() {
+                starts.refused = starts.refused.saturating_add(1);
+            }
+            (starts.made, before)
+        }
+        // A panic elsewhere poisoned the count: the start is not said.
+        Err(_) => return started,
+    };
+    match &started {
+        Err(error) => say(&refused_line(made, refused_before, program, copy, error)),
+        Ok(child) if refused_before > 0 => say(&format!(
+            "BT_UPDATE_SPAWN start {made} of this process succeeded after {refused_before} refused: {} ({}), pid {}",
+            program.display(),
+            copy.said(),
+            child.pid
+        )),
+        Ok(_) => {}
+    }
+    started
+}
+
+/// **The line a refused start says** — see [`counted_start`].
+fn refused_line(
+    made: u32,
+    refused_before: u32,
+    program: &Path,
+    copy: FolioCopy,
+    error: &io::Error,
+) -> String {
+    let code = error.raw_os_error().map_or_else(
+        || String::from("no system code"),
+        |code| format!("system code {code}"),
+    );
+    let image = match std::fs::symlink_metadata(program) {
+        Err(error) => format!("not readable ({error})"),
+        Ok(meta) => {
+            let signature = match bt_platform::trust::verify_sidecar(program) {
+                Ok(signed) => format!("signed by {}", signed.subject),
+                Err(refusal) => format!("signature {refusal}"),
+            };
+            format!(
+                "{}, {} bytes, {}, {signature}",
+                if meta.file_type().is_symlink() {
+                    "a link"
+                } else if meta.is_file() {
+                    "a file"
+                } else {
+                    "not a file"
+                },
+                meta.len(),
+                bt_platform::attributes_of(&meta)
+            )
+        }
+    };
+    format!(
+        "BT_UPDATE_SPAWN start {made} of this process was refused ({refused_before} refused before it): {} ({}): {error} [{:?}, {code}]; the image: {image}; this process: {}",
+        program.display(),
+        copy.said(),
+        error.kind(),
+        bt_platform::start_conditions()
+    )
+}
+
 /// **The applier's command line** after its program: `--update-apply <home>
 /// <txn> <nonce>` (U-28's grammar, `cli::update_door`): the installation home,
 /// named because the macOS rescue clone cannot find it from its own path
@@ -249,7 +391,17 @@ impl HandedOff {
 /// `Abandoned`. One diagnostics line says how long the write and the start
 /// each took (U-34: a first start of the new rescue executable that a scanner
 /// holds is measured apart from the durable write).
-pub(crate) fn perform(mut job: HandoffJob) -> HandedOff {
+pub(crate) fn perform(job: HandoffJob) -> HandedOff {
+    perform_counted(job, &STARTS, &mut |line| crate::diagnostics::note(line))
+}
+
+/// [`perform`], with the start counted in `starts` and every line said to
+/// `say` — the product's are this process's count and `diagnostics.log`.
+pub(crate) fn perform_counted(
+    mut job: HandoffJob,
+    starts: &Mutex<StartCount>,
+    say: &mut dyn FnMut(&str),
+) -> HandedOff {
     let began = Instant::now();
     // No window's mark of an earlier attempt may stand once `Handoff` is on
     // the disk: the applier this hand-over starts takes a fresh one (U-34).
@@ -257,13 +409,20 @@ pub(crate) fn perform(mut job: HandoffJob) -> HandedOff {
         return HandedOff::NotRecorded(format!("the window's mark: {why}"));
     }
     if let Err(failure) = install_txn::durable_write(&job.journal, &job.handoff) {
-        crate::diagnostics::note(&took_line(job.txn, began.elapsed(), None));
+        say(&took_line(job.txn, began.elapsed(), None));
         return HandedOff::NotRecorded(failure.to_string());
     }
     let written = began.elapsed();
     let spawned = Instant::now();
-    let started = job.spawner.spawn_detached(&job.program, &job.args);
-    crate::diagnostics::note(&took_line(job.txn, written, Some(spawned.elapsed())));
+    let started = counted_start(
+        starts,
+        job.spawner.as_mut(),
+        &job.program,
+        &job.args,
+        FolioCopy::Rescue,
+        say,
+    );
+    say(&took_line(job.txn, written, Some(spawned.elapsed())));
     match started {
         Ok(applier) => HandedOff::Started { applier },
         Err(error) => HandedOff::NotStarted {
@@ -457,8 +616,21 @@ impl Leave for OldLeave<'_> {
         Some((self.program.to_path_buf(), words))
     }
 
+    /// Counted and said as the hand-over's start is ([`counted_start`]) —
+    /// except on the panic road (no worker), which opens no log.
     fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()> {
-        self.spawner.spawn_detached(program, words).map(drop)
+        if self.worker.is_none() {
+            return self.spawner.spawn_detached(program, words).map(drop);
+        }
+        counted_start(
+            &STARTS,
+            self.spawner,
+            program,
+            words,
+            FolioCopy::of(program, self.home),
+            &mut |line| crate::diagnostics::note(line),
+        )
+        .map(drop)
     }
 
     /// The rescue copy the journal names, with `--update-failed`: O's own
@@ -640,7 +812,8 @@ mod tests {
     use bt_platform::install_txn::{self, Hold};
 
     use super::{
-        HandedOff, HandoffJob, Leaving, Looked, Spawner, Staged, apply_command_line, look, perform,
+        FolioCopy, HandedOff, HandoffJob, Leaving, Looked, Spawner, Staged, StartCount,
+        apply_command_line, counted_start, look, perform, perform_counted,
     };
     use crate::persist::SessionStore;
     use crate::quit::{
@@ -1000,6 +1173,141 @@ mod tests {
             (QuitStep::Exit, Handoff::Done),
             "and the process leaves anyway"
         );
+    }
+
+    /// A spawner that stands for the system: it refuses every start with
+    /// `code` until told to accept, and then answers this test's own process.
+    struct Refusing {
+        code: Option<i32>,
+    }
+
+    impl Spawner for Refusing {
+        fn spawn_detached(&mut self, _program: &Path, _args: &[OsString]) -> io::Result<Running> {
+            match self.code {
+                Some(code) => Err(io::Error::from_raw_os_error(code)),
+                None => Ok(crate::update_apply::this_process()),
+            }
+        }
+
+        fn acknowledged(
+            &mut self,
+            _worker: Option<&bt_platform::admission::WorkerCtx>,
+            _data: &Path,
+        ) -> bool {
+            true
+        }
+    }
+
+    /// RED (U-39) — **an applier's start the system refuses says one line
+    /// that names the exact error, the program and which copy it is, the
+    /// image's state on the disk, this process's own state a start depends
+    /// on, and which of this process's starts it was; and every later start
+    /// of the same process says how it went.**
+    ///
+    /// 0.4.6's clean machine saw `os error 50` from the applier's start on A3–A5
+    /// (D-5), and from every later start of that process, and nothing on
+    /// record could say why: the hand-over's line held the error's text alone.
+    /// The start here is refused by the test's stand-in with the same code,
+    /// through the real hand-over, over a real rescue image on the disk.
+    ///
+    /// MUTATION: in `counted_start`, say nothing for a refused start (drop the
+    /// `refused_line` arm) — no `BT_UPDATE_SPAWN` line is said.
+    #[test]
+    fn a_refused_applier_start_says_the_error_the_image_and_this_process_and_every_later_start_says_how_it_went()
+     {
+        let folder = Folder::new("spawn-refused");
+        let staged = staged(&folder);
+        let rescue = staged.home.rescue_program(&staged.journal.rescue);
+        std::fs::write(&rescue, b"MZ not really a program").expect("the rescue image");
+        let starts = Mutex::new(StartCount::new());
+        let mut said = Vec::new();
+        let answered = perform_counted(
+            HandoffJob::new(&staged, nonce(), Box::new(Refusing { code: Some(50) }))
+                .expect("Prepared → Handoff"),
+            &starts,
+            &mut |line| said.push(line.to_owned()),
+        );
+        assert!(
+            matches!(&answered, HandedOff::NotStarted { .. }),
+            "{answered:?}"
+        );
+        let refused: Vec<&String> = said
+            .iter()
+            .filter(|line| line.starts_with("BT_UPDATE_SPAWN"))
+            .collect();
+        assert_eq!(refused.len(), 1, "one line at the refusal: {said:?}");
+        let line = refused[0];
+        for field in [
+            "start 1 of this process was refused (0 refused before it)",
+            &rescue.display().to_string(),
+            "(the rescue copy)",
+            &io::Error::from_raw_os_error(50).to_string(),
+            "system code 50",
+            "the image: a file, 23 bytes,",
+            "signature ",
+            "this process: ",
+            "standard handles inherited",
+            "working directory ",
+            "creation flags ",
+        ] {
+            assert!(line.contains(field), "{field:?} in {line}");
+        }
+        if bt_platform::host_platform() == HostPlatform::Windows {
+            for field in ["attributes 0x", "creation flags 0x08000000", "(in "] {
+                assert!(line.contains(field), "{field:?} in {line}");
+            }
+            assert!(
+                line.contains("console attached") || line.contains("no console"),
+                "{line}"
+            );
+        }
+
+        // The same process's later starts: refused again, then accepted.
+        let installed = folder.0.join("folio.exe");
+        for (code, expected) in [
+            (
+                Some(50),
+                "start 2 of this process was refused (1 refused before it)",
+            ),
+            (None, "start 3 of this process succeeded after 2 refused"),
+        ] {
+            said.clear();
+            let _ = counted_start(
+                &starts,
+                &mut Refusing { code },
+                &installed,
+                &[],
+                FolioCopy::of(&installed, Some(&staged.home)),
+                &mut |line| said.push(line.to_owned()),
+            );
+            assert_eq!(said.len(), 1, "{said:?}");
+            assert!(said[0].contains(expected), "{expected:?} in {}", said[0]);
+            assert!(said[0].contains("(the installed copy)"), "{}", said[0]);
+        }
+    }
+
+    /// PIN (U-39) — **a start before any refusal says nothing**: the count
+    /// is kept, and the log is not.
+    ///
+    /// MUTATION: in `counted_start`, drop the `refused_before > 0` guard — the
+    /// first, accepted start says a line.
+    #[test]
+    fn a_start_before_any_refusal_says_nothing() {
+        let starts = Mutex::new(StartCount::new());
+        let mut said = Vec::new();
+        let program = std::env::temp_dir().join("folio.exe");
+        assert!(
+            counted_start(
+                &starts,
+                &mut Refusing { code: None },
+                &program,
+                &[],
+                FolioCopy::Installed,
+                &mut |line| said.push(line.to_owned()),
+            )
+            .is_ok()
+        );
+        assert!(said.is_empty(), "{said:?}");
     }
 
     /// RED (U-21) — **a Cancel, a save that did not all go through, or a

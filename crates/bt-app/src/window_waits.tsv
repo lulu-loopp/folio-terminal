@@ -36,6 +36,10 @@
 ## `# doors` (admission identities) and `# owners` (FFI constructs) stay separate lists: neither is a
 ## list of `expect` holders, and no `# owners` module is exempt from the bare-site inventory.
 ##
+## A `worker-door-body` row's last field (door) is empty, and the row still ends in its tab: every
+## line of a section has exactly its header's seven cells. `.gitattributes` exempts this file from
+## `git diff --check`'s blank-at-eol rule for that reason alone.
+##
 ## `# owners` — where the constructs a lint cannot see through may be written (budget note §C-3):
 ## `msg_send!`/`msg_send_id!`, a raw `vtable(` call, `GetProcAddress`, an `extern` block, `#[link]`
 ## and `#[macro_export]`, each by owner — the product item it is written in, or the module when it
@@ -161,6 +165,7 @@ bt-app	-	crate::pty_door::spawn_shell	bt_pty::PtySession::spawn_shell_in 1	owner
 bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	owner-door-body	WaitToken	PaneRetirementWait
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
+bt-platform	[unix]	crate::instance::sweep_stale_claims_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
 
 # owners

@@ -315,9 +315,9 @@ impl Recording for Journaled<'_> {
 
 /// **§C.4's authoritative test that O is gone**: the data directory `data`'s
 /// claim, tried until it is had and let go at once, sleeping `poll` between
-/// tries through the wait door, until `until`. A claim that cannot be asked
-/// about is not asked again (`ClaimRefusal::QueryDenied`: no answer is
-/// coming).
+/// tries through the wait door, until `until`. A live holder or a transient
+/// sweep is asked about again; a claim that cannot be asked about is not
+/// (`ClaimRefusal::QueryDenied`: no answer is coming).
 ///
 /// # Errors
 /// Why O is taken to have stayed, as a sentence.
@@ -333,7 +333,10 @@ pub(crate) fn wait_for_the_claim(
                 drop(claim);
                 return Ok(());
             }
-            Err(bt_platform::instance::ClaimRefusal::Held) => {
+            Err(
+                bt_platform::instance::ClaimRefusal::Held
+                | bt_platform::instance::ClaimRefusal::Sweeping,
+            ) => {
                 let left = until.saturating_duration_since(Instant::now());
                 if left.is_zero() {
                     return Err("still held at the end of the wait".to_owned());
@@ -1052,10 +1055,11 @@ pub(crate) const ACKNOWLEDGED_WITHIN: Duration = Duration::from_secs(20);
 /// every quarter second through the wait door; without a worker to sleep on,
 /// asked once. Only `ClaimRefusal::Held` — a live holder — acknowledges. A
 /// claim this process could take is let go at once (the start that should
-/// hold it has not yet), and a question the platform did not answer
-/// (`ClaimRefusal::QueryDenied`) is no evidence that anybody holds anything:
-/// both are asked again until the bound, and then the start is not delivered
-/// (round 4, Codex's finding 12).
+/// hold it has not yet), and neither a question the platform did not answer
+/// (`ClaimRefusal::QueryDenied`) nor a sweep in progress
+/// (`ClaimRefusal::Sweeping`) is evidence that anybody holds anything: all
+/// three are asked again until the bound, and then the start is not delivered
+/// (round 4, Codex's finding 12; U-43 round 3).
 pub(crate) fn claimed_within(worker: Option<&WorkerCtx>, data: &Path, within: Duration) -> bool {
     let until = Instant::now() + within;
     loop {
@@ -1063,7 +1067,10 @@ pub(crate) fn claimed_within(worker: Option<&WorkerCtx>, data: &Path, within: Du
             // Only a live holder is a delivery. A question the platform did
             // not answer is no evidence that anybody holds anything (round 4).
             Err(bt_platform::instance::ClaimRefusal::Held) => return true,
-            Err(bt_platform::instance::ClaimRefusal::QueryDenied(_)) => {}
+            Err(
+                bt_platform::instance::ClaimRefusal::Sweeping
+                | bt_platform::instance::ClaimRefusal::QueryDenied(_),
+            ) => {}
             Ok(claim) => drop(claim),
         }
         let left = until.saturating_duration_since(Instant::now());

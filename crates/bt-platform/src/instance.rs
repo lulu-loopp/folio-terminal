@@ -110,21 +110,26 @@ unsafe impl Send for DataDirectoryClaim {}
 #[cfg(windows)]
 unsafe impl Sync for DataDirectoryClaim {}
 
-/// Why [`try_claim_data_directory`] did not hand this process the claim — **two
-/// answers, because they are two different facts** (`docs/plans/design/
+/// Why [`try_claim_data_directory`] did not hand this process the claim — **three
+/// answers, because they are three different facts** (`docs/plans/design/
 /// self-update-2026-09-16.md` §C.7 and its review row R-3).
 ///
 /// A caller that waits for a claim — the updated build waiting for the old one
 /// to let go — has to tell "somebody live holds it" from "the platform would
 /// not say". The first is a reason to ask again; the second is not evidence
 /// that anybody holds anything, and retrying it for thirty seconds would be
-/// waiting on an answer that is never coming. Both mean *not the writer*, which
-/// is all [`claim_data_directory`] keeps of them.
+/// waiting on an answer that is never coming. A sweep holding the guard is a
+/// third, transient answer: the caller asks again instead of treating the
+/// sweep as a live holder. All three mean *not the writer*, which is all
+/// [`claim_data_directory`] keeps of them.
 #[derive(Debug)]
 pub enum ClaimRefusal {
     /// Another live process holds the claim: on Windows the name already
     /// existed, on Unix the `flock` would have blocked.
     Held,
+    /// A stale-claim sweep is between locking and unlinking one file. No claim
+    /// was inspected, and the question should be asked again.
+    Sweeping,
     /// The question was not answered. On Windows the kernel refused to create
     /// or open the name (another kind of object under it, or a holder whose
     /// security this session may not open); on Unix the runtime directory could
@@ -135,7 +140,7 @@ pub enum ClaimRefusal {
 
 /// Take the claim on `directory`, or answer `None` because it was refused —
 /// [`try_claim_data_directory`] with the reason dropped, for every caller for
-/// which a refusal of either kind means the same thing.
+/// which every refusal means the same thing.
 ///
 /// **The claim is not released when this returns** — it is released when the
 /// returned value is dropped, which for the product is when the process ends.
@@ -147,7 +152,8 @@ pub fn claim_data_directory(directory: &Path) -> Option<DataDirectoryClaim> {
 }
 
 /// Take the claim on `directory`, or say why not: [`ClaimRefusal::Held`]
-/// because another live process already holds it, or
+/// because another live process already holds it, [`ClaimRefusal::Sweeping`]
+/// because a stale-claim sweep is in its one-file critical section, or
 /// [`ClaimRefusal::QueryDenied`] because the kernel would not answer.
 ///
 /// **The claim is not released when this returns** — see
@@ -677,21 +683,105 @@ pub fn attention_socket_path(directory: &Path) -> PathBuf {
 /// `flock` attaches to the description rather than to the file, so the lock is
 /// held exactly while this descriptor is open, dropped by `File`'s own `Drop`
 /// when this value goes, and dropped by the kernel when this process does —
-/// quit, killed or crashed. There is no `Drop` written here because there is
-/// nothing for one to do that closing the descriptor does not already do, and a
-/// hand-written one that also unlinked the lock file would be a claim that
-/// destroys the thing the next process is waiting on.
+/// quit, killed or crashed.
+///
+/// **And the lock file goes with the claim** (0.4.7 ticket U-43): the `Drop`
+/// below unlinks it while the lock is still held, so a claim let go leaves
+/// nothing in the runtime directory. Before, every data directory ever claimed
+/// left its `<tag>.lock` for good — 2,053 of them on the Mac the 0.4.6
+/// rehearsal ran on, one per temporary data directory a test run had claimed.
+/// The unlink is safe because nobody waits on this lock (`LOCK_NB`) and every
+/// taker checks, once it holds the lock, that the name still leads to the file
+/// it locked ([`try_claim_data_directory`]): a process that opened the file
+/// before the unlink finds the name gone or leading elsewhere, and opens it
+/// again.
 #[cfg(unix)]
 pub struct DataDirectoryClaim {
     /// The descriptor the `flock` is held on. Never read from and never written
-    /// to, which is the point rather than an oversight: what is in the file is
-    /// not the claim — the descriptor being open is, and `File`'s own drop
-    /// closing it is what releases it — hence the leading underscore.
-    _lock: std::fs::File,
+    /// to: what is in the file is not the claim — the descriptor being open is,
+    /// and `File`'s own drop closing it is what releases it.
+    lock: std::fs::File,
+    /// The lock file's name, unlinked at the drop while it still names
+    /// [`Self::lock`]'s file.
+    path: PathBuf,
+}
+
+#[cfg(unix)]
+impl Drop for DataDirectoryClaim {
+    fn drop(&mut self) {
+        // Still held here: nobody else can have taken the file, so a name that
+        // leads elsewhere is somebody else's file and is left alone.
+        if names_the_same_file(&self.lock, &self.path) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// **Whether `path` still leads to the open file `file`** — the same device
+/// and inode, the link itself never followed (U-43).
+#[cfg(unix)]
+fn names_the_same_file(file: &std::fs::File, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (file.metadata(), std::fs::symlink_metadata(path)) {
+        (Ok(held), Ok(named)) => held.dev() == named.dev() && held.ino() == named.ino(),
+        _ => false,
+    }
+}
+
+/// How many times a claim opens its lock file again when the name stopped
+/// leading to the file it locked (U-43): each retry means a holder let go and
+/// unlinked it in between, so a handful is already a crowd.
+#[cfg(unix)]
+const RELOCK_ATTEMPTS: u32 = 8;
+
+/// **The sweep's guard** (U-43, round 2): `sweep.guard` in the runtime
+/// folder, never removed and never swept (it is not a `*.lock`). A claim holds
+/// it shared from before it opens its lock file until it has decided; the
+/// start's sweep holds it exclusive around each file it locks, checks and
+/// unlinks, and neither side waits for the other. So a claim never meets a file
+/// a sweep is holding: it answers [`ClaimRefusal::Sweeping`] immediately.
+/// Without the guard, a claim that opened a stale file a sweep had just locked
+/// read "held" and, `bt_app::persist` remembering that answer for the process's
+/// life, ran as a Folio that saves nothing.
+#[cfg(unix)]
+const SWEEP_GUARD: &str = "sweep.guard";
+
+/// The runtime folder's [`SWEEP_GUARD`], opened (created on first use).
+#[cfg(unix)]
+fn sweep_guard(runtime: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(runtime.join(SWEEP_GUARD))
+}
+
+/// `flock(file, operation)`, answering whether it was granted.
+#[cfg(unix)]
+fn flock(file: &std::fs::File, operation: libc::c_int) -> bool {
+    use std::os::unix::io::AsRawFd;
+    // SAFETY: a descriptor the caller owns and keeps open across the call.
+    unsafe { libc::flock(file.as_raw_fd(), operation) == 0 }
+}
+
+#[cfg(all(unix, test))]
+std::thread_local! {
+    /// A test's step at the one instant it pins: after a claim opened its lock
+    /// file and before it locks it (U-43, round 2).
+    static AFTER_OPEN: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+    /// A test's step at the other: after a sweep locked a stale file and
+    /// before it unlinks it.
+    static BEFORE_UNLINK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 /// Take the claim on `directory`, or say why not: [`ClaimRefusal::Held`]
-/// because another live process already holds it, or
+/// because another live process already holds it, [`ClaimRefusal::Sweeping`]
+/// because the sweep guard is held exclusively, or
 /// [`ClaimRefusal::QueryDenied`] because the runtime directory, the lock file or
 /// `flock` itself would not answer.
 ///
@@ -714,32 +804,78 @@ pub struct DataDirectoryClaim {
 /// returned value is dropped, which for the product is when the process ends.
 #[cfg(unix)]
 pub fn try_claim_data_directory(directory: &Path) -> Result<DataDirectoryClaim, ClaimRefusal> {
+    let runtime = prepare_runtime_directory().map_err(ClaimRefusal::QueryDenied)?;
+    try_claim_data_directory_in(&runtime, directory)
+}
+
+#[cfg(unix)]
+fn try_claim_data_directory_in(
+    runtime: &Path,
+    directory: &Path,
+) -> Result<DataDirectoryClaim, ClaimRefusal> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
-    let runtime = prepare_runtime_directory().map_err(ClaimRefusal::QueryDenied)?;
     let tag = directory_tag(directory);
-    let lock = std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .mode(0o600)
-        .open(lock_path_in(&runtime, &tag))
-        .map_err(ClaimRefusal::QueryDenied)?;
-    // SAFETY: the descriptor is this call's own and stays open for as long as
-    // the value returned below lives.
-    let taken = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
-    if !taken {
-        // Read at once, before anything else can overwrite `errno`. Only
-        // `EWOULDBLOCK` says somebody holds the lock; anything else is `flock`
-        // declining to answer.
+    let path = lock_path_in(runtime, &tag);
+    // No sweep holds a file while this claim opens, locks and checks its own
+    // (U-43, round 2): held shared until the claim has decided.
+    let guard = sweep_guard(runtime).map_err(ClaimRefusal::QueryDenied)?;
+    if !flock(&guard, libc::LOCK_SH | libc::LOCK_NB) {
         let why = std::io::Error::last_os_error();
-        return Err(if why.kind() == std::io::ErrorKind::WouldBlock {
-            ClaimRefusal::Held
+        return if why.kind() == std::io::ErrorKind::WouldBlock {
+            Err(ClaimRefusal::Sweeping)
         } else {
-            ClaimRefusal::QueryDenied(why)
-        });
+            Err(ClaimRefusal::QueryDenied(why))
+        };
     }
+    let mut attempts = 0;
+    let lock = loop {
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .mode(0o600)
+            .open(&path)
+            .map_err(ClaimRefusal::QueryDenied)?;
+        #[cfg(test)]
+        AFTER_OPEN.with_borrow_mut(|step| step.as_mut().map(|step| step()));
+        // SAFETY: the descriptor is this call's own and stays open for as long as
+        // the value returned below lives.
+        let taken = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+        if !taken {
+            // Read at once, before anything else can overwrite `errno`. Only
+            // `EWOULDBLOCK` says somebody holds the lock; anything else is `flock`
+            // declining to answer.
+            let why = std::io::Error::last_os_error();
+            if why.kind() != std::io::ErrorKind::WouldBlock {
+                return Err(ClaimRefusal::QueryDenied(why));
+            }
+            // Held — unless the file was a leftover being unlinked under its
+            // lock by a claim's drop or the start's sweep (U-43): then the
+            // name is gone or leads elsewhere, and it is opened again.
+            if names_the_same_file(&lock, &path) {
+                return Err(ClaimRefusal::Held);
+            }
+            attempts += 1;
+            if attempts >= RELOCK_ATTEMPTS {
+                return Err(ClaimRefusal::Held);
+            }
+            continue;
+        }
+        // **The name must still lead to the file locked** (U-43): a holder that
+        // let go unlinked it, and a lock on a file nobody can find again is a
+        // second writer beside whoever creates the name next.
+        if names_the_same_file(&lock, &path) {
+            break lock;
+        }
+        attempts += 1;
+        if attempts >= RELOCK_ATTEMPTS {
+            return Err(ClaimRefusal::QueryDenied(std::io::Error::other(
+                "the lock file was replaced each time it was taken",
+            )));
+        }
+    };
     // **Both doors, and for one reason** (M4-7). The launch endpoint and the
     // attention endpoint are two socket files bound by this one process on the
     // strength of this one lock, so they go stale together and they are safe to
@@ -748,14 +884,110 @@ pub fn try_claim_data_directory(directory: &Path) -> Result<DataDirectoryClaim, 
     // listener answers — a failure quieter than the one it half fixed, because
     // `folio attention` would keep exiting zero.
     for endpoint in [
-        socket_path_in(&runtime, &tag),
-        attention_socket_path_in(&runtime, &tag),
+        socket_path_in(runtime, &tag),
+        attention_socket_path_in(runtime, &tag),
     ] {
         if std::fs::symlink_metadata(&endpoint).is_ok() {
             let _ = std::fs::remove_file(&endpoint);
         }
     }
-    Ok(DataDirectoryClaim { _lock: lock })
+    drop(guard);
+    Ok(DataDirectoryClaim { lock, path })
+}
+
+/// **How old an empty, unheld lock file must be before a start sweeps it**
+/// (U-43): an hour, so a claim being taken this instant — a file created and
+/// not yet locked — is never taken for a leftover.
+#[cfg(unix)]
+pub const STALE_CLAIM_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// **Sweep the lock files a claim left behind** in this user's runtime
+/// directory (U-43) — see [`sweep_stale_claims_in`]. Nothing on a platform
+/// whose claim is not a file (Windows: a kernel name). Answers how many were
+/// removed.
+#[must_use]
+pub fn sweep_stale_claims(worker: &crate::admission::WorkerCtx) -> usize {
+    #[cfg(unix)]
+    {
+        sweep_stale_claims_in(worker, &runtime_directory(), std::time::SystemTime::now())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = worker;
+        0
+    }
+}
+
+/// **The sweep, over the runtime directory `runtime`, at `now`** (U-43): the
+/// lock files a process killed before its claim's drop left behind — and a
+/// test process killed mid-run is the usual one.
+///
+/// Only what is certainly such a file: a regular file (never a link), named
+/// `*.lock`, empty, last modified at least [`STALE_CLAIM_AGE`] before `now`,
+/// **and not held** — the sweep takes its lock first, never waiting, so a
+/// live Folio's claim, however old its file, is skipped; and it unlinks only
+/// while it holds the lock and the name still leads to the file it locked,
+/// the same rule a claim's own drop keeps. Nothing else in the directory is
+/// touched: the endpoints are the claim's to clean up.
+///
+/// On a worker: it lists a directory.
+#[cfg(unix)]
+pub fn sweep_stale_claims_in(
+    _worker: &crate::admission::WorkerCtx,
+    runtime: &Path,
+    now: std::time::SystemTime,
+) -> usize {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::io::AsRawFd;
+
+    let Ok(guard) = sweep_guard(runtime) else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(runtime) else {
+        return 0;
+    };
+    let mut swept = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension() != Some(std::ffi::OsStr::new("lock")) {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        let old = metadata
+            .modified()
+            .ok()
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= STALE_CLAIM_AGE);
+        if !metadata.file_type().is_file() || metadata.len() != 0 || !old {
+            continue;
+        }
+        let Ok(file) = std::fs::OpenOptions::new()
+            .write(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+        else {
+            continue;
+        };
+        // A claim is being taken: it has the guard, and the rest is the next
+        // start's to sweep. Never waited for.
+        if !flock(&guard, libc::LOCK_EX | libc::LOCK_NB) {
+            break;
+        }
+        // SAFETY: the descriptor is this loop's own and is closed at the end
+        // of the iteration, which lets the lock go.
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            #[cfg(test)]
+            BEFORE_UNLINK.with_borrow_mut(|step| step.as_mut().map(|step| step()));
+            if names_the_same_file(&file, &path) && std::fs::remove_file(&path).is_ok() {
+                swept += 1;
+            }
+        }
+        drop(file);
+        flock(&guard, libc::LOCK_UN);
+    }
+    swept
 }
 
 /// A machine with neither a kernel object nor a descriptor to hold always
@@ -993,9 +1225,9 @@ mod tests {
         );
 
         let take = source
-            .split("#[cfg(unix)]\npub fn try_claim_data_directory")
+            .split("#[cfg(unix)]\nfn try_claim_data_directory_in")
             .nth(1)
-            .expect("the Unix arm has its own try_claim_data_directory");
+            .expect("the Unix arm has its own claim implementation");
         let take = take.split("\n}\n").next().unwrap_or_default();
         assert!(
             take.contains("libc::LOCK_EX | libc::LOCK_NB"),
@@ -1010,8 +1242,8 @@ mod tests {
         // listener answers, which is quieter than the failure it half fixes:
         // `folio attention` keeps exiting zero.
         for door in [
-            "socket_path_in(&runtime, &tag)",
-            "attention_socket_path_in(&runtime, &tag)",
+            "socket_path_in(runtime, &tag)",
+            "attention_socket_path_in(runtime, &tag)",
         ] {
             assert!(
                 take.contains(door),
@@ -1377,5 +1609,223 @@ mod tests {
             "bt-platform-instance-{}-{line}",
             std::process::id()
         ))
+    }
+
+    /// RED (U-43) — **a claim let go leaves no lock file behind, and a claim
+    /// taken again reuses the one name: a start leaves at most one lock file
+    /// in the runtime directory.**
+    ///
+    /// The 0.4.6 macOS rehearsal found 2,053 empty `<tag>.lock` files in
+    /// `$TMPDIR/folio-501`: every data directory ever claimed — a test run's
+    /// temporary ones, almost all of them — left its file for good.
+    ///
+    /// MUTATION: drop the `remove_file` from `DataDirectoryClaim`'s `Drop` —
+    /// the file outlives its claim.
+    #[cfg(unix)]
+    #[test]
+    fn a_claim_let_go_leaves_no_lock_file_and_a_start_leaves_at_most_one() {
+        let directory = scratch(line!());
+        std::fs::create_dir_all(&directory).expect("make the data directory");
+        let lock = lock_path_in(&runtime_directory(), &directory_tag(&directory));
+        let first = claim_data_directory(&directory).expect("the claim is taken");
+        assert!(lock.is_file(), "the claim's file is there while it is held");
+        drop(first);
+        assert!(!lock.exists(), "and gone with the claim");
+        for _ in 0..3 {
+            let held = claim_data_directory(&directory).expect("the claim is taken again");
+            assert!(lock.is_file());
+            drop(held);
+        }
+        assert!(!lock.exists(), "three starts, nothing left");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED (U-43) — **a claim whose file was replaced under it leaves the
+    /// replacement alone at its drop, and a claim taken over a file that is
+    /// unlinked before it locks it opens the name again.**
+    ///
+    /// The unlink at the drop is safe only because every taker checks that
+    /// the name still leads to the file it locked; the drop keeps the same
+    /// rule, so it never unlinks somebody else's file.
+    ///
+    /// MUTATION: unlink in the drop without `names_the_same_file` — the
+    /// replacement is removed.
+    #[cfg(unix)]
+    #[test]
+    fn a_claim_never_unlinks_a_lock_file_that_is_not_its_own() {
+        let directory = scratch(line!());
+        std::fs::create_dir_all(&directory).expect("make the data directory");
+        let lock = lock_path_in(&runtime_directory(), &directory_tag(&directory));
+        let held = claim_data_directory(&directory).expect("the claim is taken");
+        std::fs::remove_file(&lock).expect("the name is unlinked by hand");
+        std::fs::write(&lock, b"").expect("and somebody else's file takes it");
+        drop(held);
+        assert!(
+            lock.is_file(),
+            "the other file is not the claim's to remove"
+        );
+        let again = claim_data_directory(&directory).expect("the name is claimed again");
+        drop(again);
+        assert!(!lock.exists(), "and that claim's own file goes with it");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    /// RED (U-43, round 2) — **a sweep that holds a stale file holds the sweep
+    /// guard exclusive until it has unlinked it, and a claim holds it shared
+    /// from before it opens its lock file until it has locked and checked it,
+    /// so a claim never meets a file a sweep is holding.**
+    ///
+    /// The interleaving it rules out (Codex, U-SMALL-047 finding 1): a sweep
+    /// locks a stale `B.lock`, B's start opens that same file, B's lock is
+    /// refused while the name still leads to the file, B answers `Held`, and
+    /// `bt_app::persist` remembers it for B's whole life. Each half is pinned
+    /// at its own instant by a step the code runs there, on the thread that
+    /// runs it: inside the sweep's hold the product claim answers `Sweeping`
+    /// immediately; inside a claim's hold the sweep's exclusive hold is
+    /// refused.
+    ///
+    /// MUTATIONS: map the guard's `WouldBlock` to `Held` instead of `Sweeping`,
+    /// or drop the guard from the sweep: the first half is red. Drop the guard
+    /// from the claim: the second half is red.
+    #[cfg(unix)]
+    #[test]
+    fn a_claim_never_meets_a_file_a_sweep_is_holding() {
+        let runtime = scratch(line!());
+        std::fs::create_dir_all(&runtime).expect("make the folder");
+        let stale = runtime.join("stale.lock");
+        std::fs::write(&stale, b"").expect("a leftover");
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+        std::fs::File::options()
+            .write(true)
+            .open(&stale)
+            .and_then(|file| file.set_modified(old))
+            .expect("its time set");
+
+        let at = runtime.clone();
+        let claimed = runtime.join("claimed-data");
+        std::fs::create_dir_all(&claimed).expect("make the data directory");
+        let (swept, inside_the_sweep) = crate::spawn_at_priority(
+            "bt-u43-guard",
+            crate::ThreadPriority::BelowNormal,
+            move |worker| {
+                let seen = std::rc::Rc::new(std::cell::Cell::new(None::<&'static str>));
+                let step = std::rc::Rc::clone(&seen);
+                let guard_at = at.clone();
+                let claimed = claimed.clone();
+                BEFORE_UNLINK.set(Some(Box::new(move || {
+                    let answer = try_claim_data_directory_in(&guard_at, &claimed);
+                    step.set(Some(match answer {
+                        Err(ClaimRefusal::Sweeping) => "Sweeping",
+                        Err(ClaimRefusal::Held) => "Held",
+                        Err(ClaimRefusal::QueryDenied(_)) => "QueryDenied",
+                        Ok(claim) => {
+                            drop(claim);
+                            "Taken"
+                        }
+                    }));
+                })));
+                let swept = sweep_stale_claims_in(worker, &at, std::time::SystemTime::now());
+                BEFORE_UNLINK.set(None);
+                (swept, seen.get())
+            },
+        )
+        .expect("a worker")
+        .join()
+        .expect("the sweep answers");
+        assert_eq!(swept, 1, "the leftover is swept");
+        assert_eq!(
+            inside_the_sweep,
+            Some("Sweeping"),
+            "while the sweep holds the stale file, the claim answers without waiting"
+        );
+
+        let directory = scratch(line!()).join("data");
+        std::fs::create_dir_all(&directory).expect("make the data directory");
+        let seen = std::rc::Rc::new(std::cell::Cell::new(None::<bool>));
+        let step = std::rc::Rc::clone(&seen);
+        AFTER_OPEN.set(Some(Box::new(move || {
+            let guard = sweep_guard(&runtime_directory()).expect("the guard opens");
+            step.set(Some(flock(&guard, libc::LOCK_EX | libc::LOCK_NB)));
+        })));
+        let claim = claim_data_directory(&directory);
+        AFTER_OPEN.set(None);
+        assert!(claim.is_some(), "the claim is taken");
+        assert_eq!(
+            seen.get(),
+            Some(false),
+            "while a claim opens and locks its file, no sweep can take the guard"
+        );
+        drop(claim);
+        let _ = std::fs::remove_dir_all(&runtime);
+        let _ = std::fs::remove_dir_all(directory.parent().expect("its scratch"));
+    }
+
+    /// RED (U-43) — **the sweep removes an empty, unheld `*.lock` older than
+    /// an hour, and nothing else**: not a held one however old, not a fresh
+    /// one, not one with bytes in it, not a link, not a folder, not another
+    /// kind of file.
+    ///
+    /// MUTATION: skip the `flock` in `sweep_stale_claims_in` — the held lock
+    /// file is removed (a live Folio's claim).
+    #[cfg(unix)]
+    #[test]
+    fn the_sweep_removes_only_empty_unheld_lock_files_older_than_an_hour() {
+        use std::os::unix::io::AsRawFd;
+
+        let runtime = scratch(line!());
+        std::fs::create_dir_all(&runtime).expect("make the folder");
+        let now = std::time::SystemTime::now();
+        let two_hours_ago = now - std::time::Duration::from_secs(2 * 60 * 60);
+        let aged = |name: &str, bytes: &[u8], when: std::time::SystemTime| {
+            let path = runtime.join(name);
+            std::fs::write(&path, bytes).expect("a file");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .expect("reopened")
+                .set_modified(when)
+                .expect("its time set");
+            path
+        };
+        let stale = aged("stale.lock", b"", two_hours_ago);
+        let held = aged("held.lock", b"", two_hours_ago);
+        let fresh = aged("fresh.lock", b"", now);
+        let written = aged("written.lock", b"x", two_hours_ago);
+        let socket = aged("stale.sock", b"", two_hours_ago);
+        let target = aged("target", b"", two_hours_ago);
+        let link = runtime.join("link.lock");
+        std::os::unix::fs::symlink(&target, &link).expect("a link");
+        let folder = runtime.join("folder.lock");
+        std::fs::create_dir_all(&folder).expect("a folder");
+        let holder = std::fs::File::options()
+            .write(true)
+            .open(&held)
+            .expect("the holder opens it");
+        // SAFETY: the test's own descriptor, held for the sweep's length.
+        assert_eq!(
+            unsafe { libc::flock(holder.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
+            0
+        );
+
+        let swept = crate::spawn_at_priority(
+            "bt-u43-sweep",
+            crate::ThreadPriority::BelowNormal,
+            move |worker| sweep_stale_claims_in(worker, &runtime.clone(), now),
+        )
+        .expect("a worker")
+        .join()
+        .expect("the sweep answers");
+
+        assert_eq!(swept, 1);
+        assert!(!stale.exists(), "the leftover is swept");
+        for kept in [&held, &fresh, &written, &socket, &target, &link, &folder] {
+            assert!(
+                std::fs::symlink_metadata(kept).is_ok(),
+                "{} is not the sweep's",
+                kept.display()
+            );
+        }
+        drop(holder);
+        let _ = std::fs::remove_dir_all(stale.parent().expect("the folder"));
     }
 }

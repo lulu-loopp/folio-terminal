@@ -1159,7 +1159,9 @@ multi-line paste question's rules) are not this row's and are not folded here.
 Entries: §7.59 *a second launch is no longer a second process: it hands its one
 sentence to the copy already running, then exits*; §7.59a *a second launch opens a
 window, unless you say otherwise* (owner's ruling 2026-09-11); §7.59b *a launch
-needs one thing that sees it from end to end*.
+needs one thing that sees it from end to end*. The Unix stale-claim sweep and
+its `sweep.guard` protocol are one unreleased change; no released build may
+sweep without participating in that guard.
 
 ### 40. The attention pipe — `not yet folded` (its rule is folded in row 29)
 Entries: the attention plan's endpoint section; §7.51; §13.37.

@@ -1520,6 +1520,11 @@ impl<'a> Txn<'a> {
                             "BT_UPDATE_RECOVER the trial {} gave no receipt",
                             process.pid
                         ));
+                    } else if self.phase() == PhaseKind::Moving {
+                        // No trial was begun: the moves were cut short (W6; U-42a).
+                        hands.say(
+                            "BT_UPDATE_RECOVER the update was interrupted before the new version started",
+                        );
                     }
                     self.record(actor, &Event::RollbackDeclared)?;
                 }
@@ -1750,8 +1755,9 @@ impl Recording for Txn<'_> {
 
 /// **§C.4's authoritative test that O is gone**: the data directory's claim,
 /// tried until it is had and let go at once, sleeping between tries through
-/// the wait door, until `until`. A claim that cannot be asked about is not
-/// asked again (`ClaimRefusal::QueryDenied`: no answer is coming).
+/// the wait door, until `until`. A live holder or a transient sweep is asked
+/// about again; a claim that cannot be asked about is not
+/// (`ClaimRefusal::QueryDenied`: no answer is coming).
 fn wait_for_the_claim(worker: &WorkerCtx, road: &Road, until: Instant) -> Result<(), String> {
     loop {
         match crate::persist::try_claim(&road.data) {
@@ -1759,7 +1765,10 @@ fn wait_for_the_claim(worker: &WorkerCtx, road: &Road, until: Instant) -> Result
                 drop(claim);
                 return Ok(());
             }
-            Err(bt_platform::instance::ClaimRefusal::Held) => {
+            Err(
+                bt_platform::instance::ClaimRefusal::Held
+                | bt_platform::instance::ClaimRefusal::Sweeping,
+            ) => {
                 let left = until.saturating_duration_since(Instant::now());
                 if left.is_zero() {
                     return Err("still held at the end of the wait".to_owned());
@@ -1834,16 +1843,24 @@ pub(crate) fn open_trial(bundle: &Path, args: &[OsString]) -> io::Result<Launch>
 
 /// This process's own world.
 struct Machine {
-    /// Where each line is appended besides standard error: the data
-    /// directory's `diagnostics.log`, or `recover.log` in the home.
+    /// Where each line is appended: the data directory's `diagnostics.log`,
+    /// or `recover.log` in the home — standard error only while there is none.
     log: Option<(PathBuf, String)>,
 }
 
 impl Hands for Machine {
+    /// **One writer per line** (0.4.7 ticket U-42d; 0.4.6's D-11): the log
+    /// once one is named, standard error only before — the applier's standard
+    /// error is the `diagnostics.log` of the Folio that started it, so both
+    /// wrote every line twice.
     fn say(&mut self, line: &str) {
-        bt_platform::write_std_error(format!("{line}\n").as_bytes());
-        if let Some((log, _)) = &self.log {
-            let _ = crate::diagnostics::append_note(log, line);
+        match &self.log {
+            Some((log, _)) => {
+                let _ = crate::diagnostics::append_note(log, line);
+            }
+            None => {
+                bt_platform::write_std_error(format!("{line}\n").as_bytes());
+            }
         }
     }
 

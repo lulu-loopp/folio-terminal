@@ -272,7 +272,9 @@ fn reason(failure: &Failure) -> String {
         Failure::Stopped(Stop::Identity) => Text::UpdateFailedIdentity,
         Failure::Stopped(Stop::Copy) => Text::UpdateFailedCopy,
         Failure::Stopped(Stop::Clone) => Text::UpdateFailedClone,
+        Failure::Stopped(Stop::TooOld) => Text::UpdateFailedTooOld,
         Failure::RolledBack | Failure::Incomplete { .. } => Text::UpdateFailedTrial,
+        Failure::Interrupted => Text::UpdateFailedInterrupted,
         Failure::Stopped(Stop::Space { short_by }) => {
             return i18n::update_failed_space(&needed_megabytes(*short_by));
         }
@@ -293,7 +295,7 @@ fn needed_megabytes(bytes: u64) -> String {
 fn outcome(failure: &Failure) -> Outcome {
     match failure {
         Failure::Unsupported | Failure::Stopped(_) => Outcome::NothingChanged,
-        Failure::RolledBack => Outcome::Restored,
+        Failure::RolledBack | Failure::Interrupted => Outcome::Restored,
         Failure::Incomplete { folder } => Outcome::Incomplete {
             folder: folder.clone(),
         },

@@ -196,9 +196,10 @@ pub(crate) fn read_fault(
 /// nobody listening, an answer that never came. Those still open a window, and
 /// that window still writes nothing here.
 ///
-/// Asked once and remembered, because the claim is held for the life of the
-/// process: the answer cannot change while this process runs, and a second call
-/// that took a second claim would refuse itself.
+/// A settled answer is asked once and remembered, because the claim is held for
+/// the life of the process: the answer cannot change while this process runs,
+/// and a second call that took a second claim would refuse itself. A transient
+/// stale-claim sweep is not an answer and is asked again.
 pub fn is_storage_writer() -> bool {
     is_writer_of(&storage_dir())
 }
@@ -225,16 +226,46 @@ pub fn is_storage_writer() -> bool {
 /// that two spellings of one directory are one row, which is the same folding
 /// the kernel name itself is under.
 ///
-/// **A refusal is remembered too** (self-update R-3, as refined by revision
-/// 2026-09-25 (b)): a process told once that it is not the writer is not made
-/// the writer later by this question, because everything it opened in between
-/// was opened as a non-writer. The one road into the table for a claim taken
-/// after the first ask is [`adopt_claim`], and it does not overwrite an answer.
+/// **A settled refusal is remembered too** (self-update R-3, as refined by
+/// revision 2026-09-25 (b)): a process told once that it is not the writer is
+/// not made the writer later by this question, because everything it opened in
+/// between was opened as a non-writer. `Sweeping` is not a refusal of this
+/// directory and is not remembered. The one road into the table for a claim
+/// taken after the first ask is [`adopt_claim`], and it does not overwrite an
+/// answer.
 pub(crate) fn is_writer_of(directory: &Path) -> bool {
-    claim_table()
-        .entry(bt_platform::instance::claim_name(directory))
-        .or_insert_with(|| bt_platform::instance::claim_data_directory(directory))
-        .is_some()
+    let name = bt_platform::instance::claim_name(directory);
+    let mut table = claim_table();
+    if let Some(answer) = table.get(&name) {
+        return answer.is_some();
+    }
+    let answer = bt_platform::instance::try_claim_data_directory(directory);
+    remember_claim_answer(&mut table, name, answer)
+}
+
+/// Keep a settled claim answer for this process. `Sweeping` is not an answer
+/// about the directory: the launch can take its existing hand-over road, and
+/// the next [`is_writer_of`] ask goes to the platform again instead of
+/// inheriting a refusal from the sweep.
+fn remember_claim_answer(
+    table: &mut HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>,
+    name: String,
+    answer: Result<bt_platform::instance::DataDirectoryClaim, bt_platform::instance::ClaimRefusal>,
+) -> bool {
+    match answer {
+        Ok(claim) => {
+            table.insert(name, Some(claim));
+            true
+        }
+        Err(bt_platform::instance::ClaimRefusal::Sweeping) => false,
+        Err(
+            bt_platform::instance::ClaimRefusal::Held
+            | bt_platform::instance::ClaimRefusal::QueryDenied(_),
+        ) => {
+            table.insert(name, None);
+            false
+        }
+    }
 }
 
 /// **Let go of every claim this process holds** (0.4.6 U-34): O at its very
@@ -259,8 +290,8 @@ pub(crate) fn let_go_of_every_claim() {
 /// **The claim table** — one row per claim name, holding either the claim this
 /// process took (it is the writer, and the guard lives here for the life of
 /// the process) or `None` (it asked and was refused). Written by
-/// [`is_writer_of`] on a first ask and by [`adopt_claim`]; read by nothing
-/// else.
+/// [`is_writer_of`] on a first settled ask and by [`adopt_claim`]; a transient
+/// sweep leaves no row. Read by nothing else.
 fn claim_table() -> std::sync::MutexGuard<
     'static,
     HashMap<String, Option<bt_platform::instance::DataDirectoryClaim>>,
@@ -288,10 +319,10 @@ fn claims() -> &'static Mutex<HashMap<String, Option<bt_platform::instance::Data
 /// This one goes to the platform every time and leaves the table alone; the
 /// claim it hands back is the caller's until it gives it to [`adopt_claim`].
 ///
-/// The refusal says which of two things happened
-/// ([`bt_platform::instance::ClaimRefusal`]): a live holder, which is worth
-/// asking again, or a question the platform did not answer, which is not
-/// evidence that anybody holds anything.
+/// The refusal distinguishes a live holder, a transient sweep, and a question
+/// the platform did not answer ([`bt_platform::instance::ClaimRefusal`]). The
+/// first two are worth asking again; the last is not evidence that anybody
+/// holds anything.
 pub(crate) fn try_claim(
     directory: &Path,
 ) -> Result<bt_platform::instance::DataDirectoryClaim, bt_platform::instance::ClaimRefusal> {
@@ -3279,6 +3310,28 @@ pub(crate) mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// RED (U-43, round 3) — **a sweep is not a refusal of this process's
+    /// claim and is therefore never memoised in the claim table.** The launch
+    /// may take the existing hand-over road, but the next writer question asks
+    /// the platform again.
+    ///
+    /// MUTATION: insert `None` for `ClaimRefusal::Sweeping`; the row remains
+    /// after the transient answer and this test is red.
+    #[test]
+    fn a_sweep_is_never_remembered_as_a_claim_refusal() {
+        let mut table = HashMap::new();
+        let name = "swept-directory".to_owned();
+        assert!(!remember_claim_answer(
+            &mut table,
+            name.clone(),
+            Err(bt_platform::instance::ClaimRefusal::Sweeping),
+        ));
+        assert!(
+            !table.contains_key(&name),
+            "the next writer question must ask the platform again"
+        );
+    }
+
     /// **The claim on `directory`, asked for until it is let go** — within 5 s,
     /// and only a live holder is asked about again.
     ///
@@ -3294,9 +3347,10 @@ pub(crate) mod tests {
         loop {
             match try_claim(directory) {
                 Ok(claim) => return claim,
-                Err(bt_platform::instance::ClaimRefusal::Held)
-                    if std::time::Instant::now() < until =>
-                {
+                Err(
+                    bt_platform::instance::ClaimRefusal::Held
+                    | bt_platform::instance::ClaimRefusal::Sweeping,
+                ) if std::time::Instant::now() < until => {
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
                 Err(refusal) => panic!("asked again, the platform answers again: {refusal:?}"),

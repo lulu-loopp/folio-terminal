@@ -5,9 +5,6 @@ All notable changes to Folio are recorded here. The format follows
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## Unreleased
-### Fixed
-
-- A link a program sends whose text runs on into Chinese punctuation or an ideograph ends where a typed address would.
 
 ### Added
 
@@ -19,25 +16,30 @@ All notable changes to Folio are recorded here. The format follows
 - On Windows, Ctrl+Enter, Shift+Enter and Alt+Enter reach console programs
   such as Codex as those keys, so a Codex set up to submit with Ctrl+Enter
   now does.
+- In Claude Code, `[Image #N]` in the input line is a link to the pasted
+  picture, with the same hover card as in the transcript.
 
 ### Changed
 
 - In PowerShell, Shift+Enter now adds a line and Ctrl+Enter inserts one
   above, as in Windows Terminal, instead of running the command; Alt+Enter no
   longer runs it either. Press Enter to run.
-
-### Changed
-
 - The README says how to uninstall each kind of copy, and the zip's
   `uninstall.cmd` prints its lines in Chinese as well as English.
 
-### Added
-
-- In Claude Code, `[Image #N]` in the input line is a link to the pasted
-  picture, with the same hover card as in the transcript.
-
 ### Fixed
 
+- A link a program sends whose text runs on into Chinese punctuation or an ideograph ends where a typed address would.
+- After a power cut while an update was being installed, the card says the
+  update was interrupted, not that the new version did not start.
+- A release that needs a newer Folio to install it says this version is too
+  old to update itself, instead of "not verified".
+- An update stopped by a file another program holds open names that file.
+- Update lines are no longer written twice in `diagnostics.log`.
+- An update check read from a local test feed is not offered to later
+  ordinary starts.
+- On macOS, Folio no longer leaves an empty lock file behind for every data
+  folder it has used; old ones are cleared at start.
 - F1–F12 reach the program (they sent nothing before); Shift, Alt and Ctrl
   on them are encoded as in xterm.
 - A web address written without its scheme is recognised after a colon, an
