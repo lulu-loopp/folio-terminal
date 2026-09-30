@@ -13282,11 +13282,11 @@ SHA is skipped, and runs of the same SHA share one non-cancelling concurrency
 group.
 
 The ownership census remains a query: inventory and site reports are written
-under `target/`. Its gate commits only unknowns, which cannot grow by effect
-total, and annotations, each of which must name a decided owner. The rule to
-commit byte-equal inventory and site snapshots is retired. The rule to repair
-their red by regeneration is retired. The placeholder owner `proposed` is
-retired.
+under `target/`. Its gate commits only unknowns, whose whole-row multiset can
+only shrink, and annotations, each of which must name a decided owner. The rule
+to commit byte-equal inventory and site snapshots is retired. The rule to
+repair their red by regeneration is retired. The placeholder owner `proposed`
+is retired.
 
 The wholly-test literal, its count, and the number word in its test name are
 retired. The same test keeps the property-bearing half: every Rust source file

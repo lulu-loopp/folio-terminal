@@ -5,10 +5,11 @@
 # one tree, bt-source's `census` test holds the code to it: the code's unknowns
 # must be a subset of the list. This is the other half, across commits, as
 # `check-migration-debt.ps1` is for MIGRATION-DEBT.tsv (the census note's
-# revision (b)2 section 5): **the total number of unknown sites must not grow
-# against the merge base.** It compares totals, not rows, so a move of a
-# function (census-7) changes a row's key and passes as long as the total does
-# not rise; a row added by hand to let a new unknown past the test is refused.
+# revision (b)2 section 5): **the rows of unknown sites may only disappear
+# against the merge base.** Rows are compared whole and with multiplicity, so a
+# moved or replaced unknown is an added row even when another row disappeared
+# and the total stayed level. A row added by hand to let a new unknown past the
+# test is refused.
 #
 # The baseline is the list committed at `git merge-base HEAD origin/main`. When
 # the merge base has no list (the branch that introduces it), the baseline is
@@ -18,7 +19,8 @@
 #
 # It reads only the committed TSVs, through git and the working tree.
 # `.github/workflows/ci.yml` runs it in `logic`, and `gates-can-fail` plants a
-# hand-added row (it must go red) and a moved key (it must stay green).
+# hand-added row (it must go red), including when an old row is removed in the
+# same change and the number of rows and sites stays level.
 
 $ErrorActionPreference = "Stop"
 
@@ -32,20 +34,29 @@ $list = Join-Path $repo $relative
 # The commit that seeded the list (census-1).
 $seed = "7a53d4294eab7726813ca000119a496c27883708"
 
-# The total of the `sites` column over the data rows: not blank, not a comment,
-# not the column header.
-function Get-SiteTotal([string[]]$lines, [string]$where) {
-    $total = 0
+# A row is a data line: not blank, not a comment, not the column header.
+function Read-CensusRows([string[]]$lines, [string]$where) {
+    $rows = @()
     $header = $false
     foreach ($line in $lines) {
         if ($line.Length -eq 0 -or $line.StartsWith("#")) { continue }
-        if (-not $header) { $header = $true; continue }
+        if (-not $header) {
+            if ($line -ne "site`tmodule`tfunction`treason`tsites") {
+                throw "$where has the wrong column header: $line"
+            }
+            $header = $true
+            continue
+        }
         $columns = $line.Split("`t")
         if ($columns.Count -ne 5) { throw "$where has a row that is not five columns: $line" }
-        $total += [int]$columns[4]
+        $sites = 0
+        if (-not [int]::TryParse($columns[4], [ref]$sites) -or $sites -lt 1) {
+            throw "$where has a row whose sites column is not a positive integer: $line"
+        }
+        $rows += $line
     }
     if (-not $header) { throw "$where has no column header" }
-    return $total
+    return , $rows
 }
 
 if (-not (Test-Path -LiteralPath $list)) {
@@ -54,7 +65,7 @@ if (-not (Test-Path -LiteralPath $list)) {
 
 Push-Location $repo
 try {
-    $now = Get-SiteTotal ([IO.File]::ReadAllLines($list)) "$relative (working tree)"
+    $now = Read-CensusRows ([IO.File]::ReadAllLines($list)) "$relative (working tree)"
 
     $base = $null
     & git rev-parse --verify --quiet refs/remotes/origin/main *> $null
@@ -64,7 +75,7 @@ try {
         if ($status -eq 0) { $base = @($found)[0] }
     }
     if (-not $base) {
-        Write-Host "no merge base with origin/main in this clone - $relative has $now unknown sites and nothing to compare them against."
+        Write-Host "no merge base with origin/main in this clone - $relative has $($now.Count) rows and nothing to compare them against."
         Write-Host "This is not a pass: the comparison did not happen. Run 'git fetch origin main' and try again."
         exit 2
     }
@@ -81,17 +92,35 @@ try {
         }
         $from = "the seed $($seed.Substring(0, 12))"
     }
-    $before = Get-SiteTotal ($text -split "`r?`n") "$relative at $from"
+    $before = Read-CensusRows ($text -split "`r?`n") "$relative at $from"
 } finally {
     Pop-Location
 }
 
-Write-Host "$relative against ${from}: $before unknown sites -> $now."
+$allowed = @{}
+foreach ($row in $before) {
+    if ($allowed.ContainsKey($row)) { $allowed[$row] += 1 } else { $allowed[$row] = 1 }
+}
+$added = @()
+foreach ($row in $now) {
+    if ($allowed.ContainsKey($row) -and $allowed[$row] -gt 0) {
+        $allowed[$row] -= 1
+    } else {
+        $added += $row
+    }
+}
+$removed = $before.Count - ($now.Count - $added.Count)
+Write-Host "$relative against ${from}: $($before.Count) rows -> $($now.Count), $($added.Count) added, $removed removed."
 
-if ($now -gt $before) {
+if ($added.Count -gt 0) {
+    $details = ($added | ForEach-Object { "    $_" }) -join [Environment]::NewLine
     throw (
-        "the census's unknown sites grew from $before to $now against ${from}, and this list only shrinks. " +
+        "$($added.Count) row(s) were added to the census's unknown list against ${from}, and this list only shrinks:" +
+        [Environment]::NewLine + $details + [Environment]::NewLine +
         "Resolve the new site in the code (the rules are bt_source::FieldCensus's), or restructure it so " +
         "the census can read it; a row is never added to $relative to let a new unknown past the census test."
     )
 }
+
+Write-Host "ownership-census unknown rows only shrank. PASS"
+exit 0

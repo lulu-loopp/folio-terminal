@@ -632,7 +632,7 @@ mod tests {
     use std::ffi::OsString;
     use std::io;
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
 
     use bt_platform::HostPlatform;

@@ -18718,7 +18718,8 @@ mod tests {
                     continue;
                 }
                 let mut saying = Text::ALL
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|entry| entry.in_lang(Lang::English) == english);
                 let Some(entry) = saying.next() else { continue };
                 if saying.next().is_some() {
@@ -19775,7 +19776,8 @@ mod tests {
                     continue;
                 }
                 let mut saying = Text::ALL
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|entry| entry.in_lang(Lang::English) == english);
                 let Some(entry) = saying.next() else { continue };
                 if saying.next().is_some() {
@@ -19905,7 +19907,8 @@ mod tests {
                     continue;
                 }
                 let mut saying = Text::ALL
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .filter(|entry| entry.in_lang(Lang::English) == english);
                 let Some(entry) = saying.next() else { continue };
                 if saying.next().is_some() {
@@ -27297,7 +27300,8 @@ mod tests {
         for retired in ["Under Show more options", "On the first page"] {
             assert!(
                 !Text::ALL
-                    .into_iter()
+                    .iter()
+                    .copied()
                     .any(|entry| entry.in_lang(crate::i18n::Lang::English) == retired),
                 "{retired:?} was an answer in the picker of places, and the \
                  picker is gone"
