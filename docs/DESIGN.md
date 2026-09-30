@@ -13328,12 +13328,18 @@ configuration fence keeps only the allowed locations and the refusal of
 must actually exist, rather than text merely shaped like a citation.
 
 `docs/plans/TIMING-BOUND-TESTS.tsv` names every `#[test]` function whose own
-body — not a function it calls — waits on the real clock (`sleep`,
-`recv_timeout`, `recv_deadline`, `wait_timeout`, `park_timeout` and their
-variants) or measures it (`elapsed`), with its target, crate, wall-clock
-assumption and the seam that removes it. The first version attributed clock
-calls to the nearest test above them and listed source-reading tests for a
-product function's `Instant`; it was rebuilt from test bodies.
+body — not a function it calls — waits on the real clock through a stable
+standard-library wait (`sleep`, `sleep_ms`, `recv_timeout`, `wait_timeout`,
+`wait_timeout_ms`, `wait_timeout_while`, `park_timeout`, `park_timeout_ms`) or
+measures it (`elapsed`), with its target, crate, wall-clock assumption and the
+seam that removes it. The first version attributed clock calls to the nearest
+test above them and listed source-reading tests for a product function's
+`Instant`; it was rebuilt from test bodies. The scan matches the called name,
+not the callee, so the same test asserts that no workspace function or method
+is declared by a trigger's name: `focus_thumb`'s controlled `CardLoop::sleep_until`
+had put two deterministic tests on the list, `sleep_until` (not a stable
+`std::thread` item) is no trigger, and a future helper named like one is a
+finding to rename, not a silent row.
 `bt-source`'s `timing` test holds the tree to the list both ways — an unlisted
 timing-bound test and a row naming no such test are red — and
 `scripts/ci/check-timing-bound.ps1` lets whole rows only disappear against the

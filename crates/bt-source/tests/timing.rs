@@ -14,10 +14,19 @@
 //! first-party package's `src/`, `tests/`, `examples/` or `benches/`. It is
 //! **timing-bound** when its own body — the braces of that function, closures
 //! and nested items included — calls one of [`REAL_WAITS`] or [`MEASURES`]:
-//! a wait whose length is real time (`thread::sleep`, `recv_timeout`,
-//! `Condvar::wait_timeout`, …) or a reading of how much real time passed
-//! (`Instant::elapsed`). No function by those names is declared anywhere in this
-//! workspace, so each call is the standard library's.
+//! a stable standard-library wait whose length is real time (`thread::sleep`,
+//! `Receiver::recv_timeout`, `Condvar::wait_timeout`, `thread::park_timeout`
+//! and their variants) or a reading of how much real time passed
+//! (`Instant::elapsed`).
+//!
+//! The scan matches the called name, not the callee, so the names are only
+//! the standard library's while nothing in the workspace declares a function
+//! or method by one of them — and that is asserted, not assumed
+//! ([`no_workspace_function_is_named_like_a_real_wait`]). A controlled-clock
+//! helper named like a trigger is a finding to rename, never a test silently
+//! listed as timing-bound; `CardLoop::sleep_until` in `focus_thumb`'s tests,
+//! which advances a model clock, is why `sleep_until` is not a trigger (it is
+//! not a stable `std::thread` item either).
 //!
 //! # What it does not see, and who does
 //!
@@ -44,8 +53,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use bt_source::{
-    DiskScope, Index, ItemRecord, Package, Pattern, Search, Span, Universe, Vendor, View,
-    Workspace, is_vendored, needle, report, universes,
+    DiskScope, Index, ItemRecord, Package, Pattern, Search, Span, TargetId, TargetKind, TargetRoot,
+    Universe, Vendor, View, Workspace, is_vendored, needle, report, universes,
 };
 
 /// The list, from the workspace root.
@@ -54,13 +63,15 @@ const LIST: &str = "docs/plans/TIMING-BOUND-TESTS.tsv";
 /// The list's column header.
 const HEADER: &str = "test\tcrate\twall_clock_assumption\tdeterministic_seam";
 
-/// Calls that wait for a length of real time.
-const REAL_WAITS: [&str; 10] = [
+/// Stable standard-library calls that wait for a length of real time:
+/// `thread::sleep`, `thread::sleep_ms`, `Receiver::recv_timeout`,
+/// `Condvar::wait_timeout`, `Condvar::wait_timeout_ms`,
+/// `Condvar::wait_timeout_while`, `thread::park_timeout`,
+/// `thread::park_timeout_ms`.
+const REAL_WAITS: [&str; 8] = [
     "sleep",
     "sleep_ms",
-    "sleep_until",
     "recv_timeout",
-    "recv_deadline",
     "wait_timeout",
     "wait_timeout_ms",
     "wait_timeout_while",
@@ -179,67 +190,101 @@ impl Found {
     }
 }
 
-/// Every timing-bound test of every first-party package, by identity.
-fn scan() -> BTreeMap<String, Found> {
-    let workspace = Workspace::read(&workspace_root()).expect("this workspace");
-    let attribute = needle!(Pattern::text("#[test]"));
-    let calls: Vec<(&'static str, bool)> = REAL_WAITS
+/// Every timing-bound test of one index, added to `found` by identity.
+fn scan_index(index: &Index, package: &str, found: &mut BTreeMap<String, Found>) {
+    let attributes = spans(
+        index,
+        &Search::new(needle!(Pattern::text("#[test]")), View::CodeKeepingLiterals),
+    );
+    let hits: Vec<(&'static str, bool, Vec<Span>)> = REAL_WAITS
         .iter()
         .map(|name| (*name, false))
         .chain(MEASURES.iter().map(|name| (*name, true)))
+        .map(|(name, measures)| {
+            let search = Search::new(needle!(Pattern::call(name)), View::Identifiers);
+            (name, measures, spans(index, &search))
+        })
         .collect();
-    let mut found = BTreeMap::new();
-    for package in workspace.packages() {
-        if is_vendored(package.directory()) {
+    for item in index.items() {
+        let Some(body) = item.body() else { continue };
+        if !item.kind().is_callable() || inside(&attributes, item.declaration()).next().is_none() {
             continue;
         }
-        let index = Index::build(&universe_for(package))
-            .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
-        let attributes = spans(
-            &index,
-            &Search::new(attribute.clone(), View::CodeKeepingLiterals),
-        );
-        let hits: Vec<(&'static str, bool, Vec<Span>)> = calls
-            .iter()
-            .map(|(name, measures)| {
-                let search = Search::new(needle!(Pattern::call(name)), View::Identifiers);
-                (*name, *measures, spans(&index, &search))
-            })
-            .collect();
-        for item in index.items() {
-            let Some(body) = item.body() else { continue };
-            if !item.kind().is_callable()
-                || inside(&attributes, item.declaration()).next().is_none()
-            {
-                continue;
-            }
-            let mut waits = BTreeSet::new();
-            let mut measured = false;
-            for (name, measures, sites) in &hits {
-                if inside(sites, body).next().is_some() {
-                    if *measures {
-                        measured = true;
-                    } else {
-                        waits.insert(*name);
-                    }
+        let mut waits = BTreeSet::new();
+        let mut measured = false;
+        for (name, measures, sites) in &hits {
+            if inside(sites, body).next().is_some() {
+                if *measures {
+                    measured = true;
+                } else {
+                    waits.insert(*name);
                 }
             }
-            if waits.is_empty() && !measured {
-                continue;
-            }
-            for identity in identities(&index, item) {
-                found.insert(
-                    identity,
-                    Found {
-                        package: package.name().to_owned(),
-                        waits: waits.clone(),
-                        measures: measured,
-                    },
-                );
-            }
+        }
+        if waits.is_empty() && !measured {
+            continue;
+        }
+        for identity in identities(index, item) {
+            found.insert(
+                identity,
+                Found {
+                    package: package.to_owned(),
+                    waits: waits.clone(),
+                    measures: measured,
+                },
+            );
         }
     }
-    found
+}
+
+/// Every function or method an index declares under a trigger's name.
+fn declared_triggers(index: &Index) -> Vec<String> {
+    index
+        .items()
+        .iter()
+        .filter(|item| item.kind().is_callable())
+        .filter(|item| REAL_WAITS.contains(&item.name()) || MEASURES.contains(&item.name()))
+        .flat_map(|item| item.identities().map(|identity| identity.to_string()))
+        .collect()
+}
+
+/// Every first-party package's index.
+fn workspace_indices() -> Vec<(String, Index)> {
+    let workspace = Workspace::read(&workspace_root()).expect("this workspace");
+    workspace
+        .packages()
+        .iter()
+        .filter(|package| !is_vendored(package.directory()))
+        .map(|package| {
+            let index = Index::build(&universe_for(package))
+                .unwrap_or_else(|rejections| panic!("{}", report(&rejections)));
+            (package.name().to_owned(), index)
+        })
+        .collect()
+}
+
+/// The `timing` fixture: a controlled clock whose method is named like a wait,
+/// and a real sleep.
+fn fixture() -> Index {
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests")
+        .join("fixtures")
+        .join("timing");
+    let universe = Universe::declare(
+        "the timing fixture",
+        vec![TargetRoot {
+            id: TargetId {
+                package: "timing".to_owned(),
+                kind: TargetKind::Library,
+                name: "timing".to_owned(),
+            },
+            file: directory.join("lib.rs"),
+        }],
+        vec![DiskScope::under(&directory)],
+        Vendor::Excluded,
+    )
+    .expect("the fixture is there");
+    Index::build(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
 }
 
 /// The committed rows, by test identity, with their crate column.
@@ -293,7 +338,19 @@ fn leave_rendering(found: &BTreeMap<String, Found>) {
 /// that test.
 #[test]
 fn the_timing_bound_tests_are_exactly_the_listed_ones() {
-    let found = scan();
+    let mut found = BTreeMap::new();
+    let mut misnamed = Vec::new();
+    for (package, index) in workspace_indices() {
+        scan_index(&index, &package, &mut found);
+        misnamed.extend(declared_triggers(&index));
+    }
+    assert!(
+        misnamed.is_empty(),
+        "the scan reads these names as the standard library's real waits and measurements, and \
+         the workspace declares functions by them — rename each (a controlled clock is not a \
+         real wait), so no test calling it is listed as timing-bound:\n  {}",
+        misnamed.join("\n  ")
+    );
     leave_rendering(&found);
     let listed = committed();
     println!(
@@ -337,4 +394,46 @@ fn the_timing_bound_tests_are_exactly_the_listed_ones() {
         wrong_crate.len(),
         wrong_crate.join("\n"),
     );
+}
+
+/// RED (T-GATES-047 round 4) — **a controlled clock's method named like a wait
+/// is not a real wait, and a real `std::thread::sleep` still is.**
+///
+/// The fixture declares `CardLoop::sleep_until`, which advances a model clock
+/// the way `focus_thumb`'s card loop does, and two tests: one that calls it and
+/// one that sleeps. The scan must find only the second, and the fixture's own
+/// `sleep_until` must not be a declared trigger.
+///
+/// MUTATION: put `"sleep_until"` back into `REAL_WAITS` and the controlled
+/// test is found.
+#[test]
+fn a_controlled_sleep_until_is_not_a_real_wait_and_a_real_sleep_is() {
+    let index = fixture();
+    let mut found = BTreeMap::new();
+    scan_index(&index, "timing", &mut found);
+    let names: Vec<&str> = found.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        ["timing:lib:timing a_test_that_really_sleeps"],
+        "only the real sleep is timing-bound"
+    );
+    assert_eq!(declared_triggers(&index), Vec::<String>::new());
+}
+
+/// RED (T-GATES-047 round 4) — **nothing in the workspace declares a function
+/// or method by a trigger's name**, so every call the scan matches is the
+/// standard library's.
+///
+/// The list test asserts the same thing over the same indices before it
+/// compares; this one says it on its own, fixture-free.
+///
+/// MUTATION: put `"sleep_until"` back into `REAL_WAITS` and this names
+/// `focus_thumb`'s `CardLoop::sleep_until`.
+#[test]
+fn no_workspace_function_is_named_like_a_real_wait() {
+    let misnamed: Vec<String> = workspace_indices()
+        .iter()
+        .flat_map(|(_, index)| declared_triggers(index))
+        .collect();
+    assert!(misnamed.is_empty(), "{misnamed:#?}");
 }
