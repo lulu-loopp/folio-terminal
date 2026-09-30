@@ -75,10 +75,18 @@ jobs:
   # a red step with nothing in its log, because clippy's 101 was still sitting in
   # `$LASTEXITCODE` when the script ran out. The probe's exit code is read into a
   # variable of its own and never left where the shell will find it.
+  #
+  # **Every canary runs on every run; there is no path filter.** A canary's
+  # subject is not only its script: the lint canary's red depends on the crate it
+  # plants into (an `#![allow(clippy::todo)]` there turns it green) and the Rust
+  # gates live in the crates themselves, so a filter over the scripts would skip
+  # the one run that shows a gate lost its teeth. With the ignored-test canary
+  # moved into `logic`, the whole job costs minutes, not a second workspace
+  # build.
   gates-can-fail:
     if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       # Whole history, for one step: `check-migration-debt.ps1` compares the
       # debt list with `git merge-base HEAD origin/main`, and at the default
@@ -87,42 +95,16 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - name: decide whether a gate surface changed
-        id: gate_paths
-        shell: pwsh
-        run: |
-          $base = if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
-            "${{ github.event.pull_request.base.sha }}"
-          } else {
-            "${{ github.event.before }}"
-          }
-          if ([string]::IsNullOrWhiteSpace($base) -or $base -match '^0+$') {
-            $base = git rev-parse HEAD^
-          }
-          $paths = @(git diff --name-only "$base...HEAD")
-          $run = [bool]($paths | Where-Object {
-            $_ -like "scripts/ci/*" -or
-            $_ -like "scripts/check-*.ps1" -or
-            $_ -like "*/clippy.toml" -or
-            $_ -eq "clippy.toml" -or
-            $_ -like "*/Cargo.toml" -or
-            $_ -eq "Cargo.toml" -or
-            $_ -eq ".github/workflows/ci.yml"
-          })
-          "run=$($run.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
-          Write-Host "gate surface changed: $run"
       # The compiler and the shared cache both come from
       # `.github/actions/toolchain`, which is the one place in this repository
       # that decides what Rust a job is built with. `release.yml` calls the same
       # action, so the two files cannot drift apart again.
       - uses: ./.github/actions/toolchain
-        if: steps.gate_paths.outputs.run == 'true'
 
       # adapter.rs/cell_capture.rs are the vendor compatibility seam. Their job is to report
       # terminal facts; importing document, detection, or viewport policy here recreates the
       # layering bug Task 00b removed.
       - name: the adapter boundary gate can actually fail
-        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = "crates/bt-term/src/adapter.rs"
@@ -149,7 +131,6 @@ jobs:
       # `core-macos` and `core-linux` are the compiling half; this proves the
       # cheap half is not decoration.
       - name: the portable-core gate can actually fail
-        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = "crates/bt-doc/src/lib.rs"
@@ -171,7 +152,6 @@ jobs:
           exit 0
 
       - name: the lint gate can actually fail
-        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = "crates/bt-doc/src/lib.rs"
@@ -215,7 +195,6 @@ jobs:
       # without the variable, so the other two platforms print their numbers on
       # every run and assert only the memory budget.
       - name: the index's cost is inside the budgets of the split plan
-        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         continue-on-error: true
         env:
@@ -227,7 +206,6 @@ jobs:
       # added to it is a reader let past the tripwire; planting one proves the
       # comparison against the merge base is a comparison and not a read.
       - name: the migration-debt gate can actually fail
-        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = "docs/plans/MIGRATION-DEBT.tsv"
@@ -252,7 +230,6 @@ jobs:
       # scratch-repository suite plants growth and a duplicate and requires both
       # to fail, while no-base, unchanged and shrink cases pass.
       - name: the timing-bound gate can actually fail
-        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: ./scripts/ci/check-timing-bound-tests.ps1
 
@@ -263,7 +240,6 @@ jobs:
       # against scratch trees, one case per rule (a new undated site, an expired
       # one, a stale row, a changed reason, no merge base, and the rest).
       - name: the dead-code gate can actually fail
-        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = "docs/plans/DEAD-CODE.tsv"
@@ -290,7 +266,6 @@ jobs:
       # row passes the equality test, so the historical half is what refuses it:
       # plant the row and require red.
       - name: the bare-site inventory gate can actually fail
-        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = "docs/plans/window-thread-bare-sites.tsv"
@@ -315,7 +290,6 @@ jobs:
       # A planted row must go red even when one old row disappears beside it,
       # leaving both the row count and the summed `sites` column unchanged.
       - name: the census-unknowns gate fails on growth and an equal-count replacement
-        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = (Resolve-Path "docs/plans/design/ownership-census-unknowns.tsv").Path
