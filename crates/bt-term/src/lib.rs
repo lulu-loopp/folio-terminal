@@ -15,8 +15,8 @@ mod session;
 
 pub use adapter::{
     AdapterEvent, KeyboardProtocol, ModifyOtherKeys, MouseTracking, RemovalCause, RemovalContext,
-    RemovalScope, RemovalScreen, RemovedLiveRow, SCROLLBACK_LINES, SUPPORTED_KITTY_FLAGS,
-    TerminalAdapter, TerminalCursor, TerminalDamage, TerminalModes,
+    RemovalScope, RemovalScreen, RemovedLiveRow, RepaintControl, SCROLLBACK_LINES,
+    SUPPORTED_KITTY_FLAGS, TerminalAdapter, TerminalCursor, TerminalDamage, TerminalModes,
 };
 pub use bounded_cache::{BoundedCache, Weighed};
 pub use bt_detect::DetectionTask;

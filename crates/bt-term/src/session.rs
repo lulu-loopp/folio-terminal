@@ -43,8 +43,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     adapter::{
-        AdapterEvent, RemovalCause, RemovalScope, RemovalScreen, TerminalAdapter, TerminalDamage,
-        TerminalModes,
+        AdapterEvent, RemovalCause, RemovalScope, RemovalScreen, RepaintControl, TerminalAdapter,
+        TerminalDamage, TerminalModes,
     },
     cell_capture::{CapturedRowFingerprint, captured_row_is_blank},
     command_marks::{CommandMark, CommandMarkId, CommandMarkLedger},
@@ -303,8 +303,6 @@ pub struct MathLayoutOptions {
     /// Work around Claude Code stripping one slash from environment row separators. Disable this
     /// after Claude Code emits LaTeX `\\\\` row separators faithfully.
     pub restore_stripped_environment_newlines: bool,
-    /// Reject Claude Code's exact Jump-to-bottom overlay when it is written into a math row.
-    pub reject_claude_code_jump_chip_overlay: bool,
     /// Detect drive-rooted image paths printed as terminal text. Product code opts in; deterministic
     /// replay and generic session construction stay closed unless explicitly enabled.
     pub detect_image_paths: bool,
@@ -317,7 +315,6 @@ impl Default for MathLayoutOptions {
             block_max_height_px: None,
             vertical_padding_cell_milli: DEFAULT_MATH_VERTICAL_PADDING_CELL_MILLI,
             restore_stripped_environment_newlines: true,
-            reject_claude_code_jump_chip_overlay: true,
             detect_image_paths: false,
         }
     }
@@ -702,9 +699,9 @@ impl ProvenLiveRow {
 
     /// Column ranges of `input`'s row that still display this occurrence's proven source and may
     /// therefore be cleared. `None` = the row does not carry this row's source. Identification
-    /// requires the row to begin with this row's proven source (optionally interrupted by Claude
-    /// Code's Jump chip); the cleared set is then exactly the cells whose content equals the
-    /// proven source cell at the same column, so an overlay splitting the row (chip text, its
+    /// requires every cell outside one contiguous overlay run to equal this row's proven cells;
+    /// the cleared set is then exactly the cells whose content equals the
+    /// proven source cell at the same column, so an overlay splitting the row (its text, its
     /// highlight style, the trailing arrow) keeps every one of its own cells untouched while the
     /// leaked source on either side of it is removed.
     fn source_clear_ranges(&self, input: &LiveDetectionInput) -> Option<Vec<(u32, u32)>> {
@@ -713,7 +710,7 @@ impl ProvenLiveRow {
         }
         let identified = (input.text.starts_with(&self.text)
             && input.cell_boundaries.starts_with(&self.cell_boundaries))
-            || self.chip_split_matches(input);
+            || self.one_contiguous_overlay_matches(input);
         if !identified {
             return None;
         }
@@ -741,53 +738,76 @@ impl ProvenLiveRow {
         }
     }
 
-    /// The Jump chip overwrote this row mid-source: everything visible before the exact chip
-    /// signature must be this row's proven source prefix, byte- and boundary-identical.
-    fn chip_split_matches(&self, input: &LiveDetectionInput) -> bool {
-        let Some(visible_source) = chip_split_visible_prefix(&self.text, &input.text) else {
+    /// A repaint may replace one interior run of cells with transient chrome.
+    /// Its wording is irrelevant: the unchanged cells on both sides are the
+    /// witness that this is the proven row under an overlay.
+    fn one_contiguous_overlay_matches(&self, input: &LiveDetectionInput) -> bool {
+        let proven = boundary_cells(&self.text, &self.cell_boundaries);
+        let visible = boundary_cells(&input.text, &input.cell_boundaries);
+        if proven.len() < 3 || visible.len() < 3 {
             return false;
+        }
+        let same = |proven: &BoundaryCell<'_>, visible: &BoundaryCell<'_>| {
+            proven.columns == visible.columns && proven.text == visible.text
         };
-        let prefix_end = u32::try_from(visible_source.len()).unwrap_or(u32::MAX);
-        let proven_boundaries = self
-            .cell_boundaries
+        let prefix = proven
             .iter()
-            .take_while(|(byte, _)| *byte <= prefix_end);
-        let visible_boundaries = input
-            .cell_boundaries
+            .zip(&visible)
+            .take_while(|(a, b)| same(a, b))
+            .count();
+        if prefix == proven.len() && prefix == visible.len() {
+            return false;
+        }
+        let suffix = proven
             .iter()
-            .take_while(|(byte, _)| *byte <= prefix_end);
-        proven_boundaries.eq(visible_boundaries)
+            .rev()
+            .zip(visible.iter().rev())
+            .take_while(|(a, b)| same(a, b))
+            .count();
+        prefix > 0
+            && suffix > 0
+            && prefix + suffix < proven.len()
+            && prefix + suffix < visible.len()
     }
 }
 
-/// Claude Code's "jump to bottom" status chip. It is not content: the application paints it over
-/// whichever live row it lands on, so a row still carrying detector-proven source can come back
-/// with this exact signature stamped across its middle while the source underneath is untouched.
-const JUMP_CHIP_SIGNATURE: &str = "Jump to bottom (ctrl+End)";
-
-/// The prefix of `proven` which `overlaid` still displays in front of the Jump chip, when
-/// `overlaid` is the same line with that chip painted over it mid-way. `None` means `overlaid` is
-/// not `proven` under a chip: it carries no chip at all, the chip starts the row so nothing of the
-/// source survives in front of it, or what does survive is not `proven`'s own prefix — that is a
-/// genuinely different line, not an occluded one.
-///
-/// This is the single decision both occlusion-tolerant readers make: live math clears the leaked
-/// source cells around the chip on top of it (adding a cell-boundary check over the returned
-/// prefix), and live image paths keep matching their record to the row instead of retiring it.
-fn chip_split_visible_prefix<'a>(proven: &'a str, overlaid: &str) -> Option<&'a str> {
-    let (before_chip, _) = overlaid.split_once(JUMP_CHIP_SIGNATURE)?;
-    let visible = before_chip.trim_end();
-    if visible.is_empty() || !proven.starts_with(visible) {
-        return None;
+/// Strings from the image detector do not carry cell boundaries, so use the
+/// corresponding character rule: one changed interior run of equal terminal
+/// width, and the proven text on both sides. The overlay's wording is never inspected.
+fn one_contiguous_overlay_over_source(proven: &str, overlaid: &str) -> bool {
+    let proven: Vec<char> = proven.chars().collect();
+    let overlaid: Vec<char> = overlaid.chars().collect();
+    if proven.len() < 3 || overlaid.len() < 3 {
+        return false;
     }
-    Some(&proven[..visible.len()])
-}
-
-/// `overlaid` is the line `proven` was proven from, with the Jump chip painted across it. An
-/// overlay is a repaint of a row, never a new content point, so whatever the row proved keeps its
-/// identity for as long as the chip sits there.
-fn jump_chip_overlays_source(proven: &str, overlaid: &str) -> bool {
-    chip_split_visible_prefix(proven, overlaid).is_some()
+    let prefix = proven
+        .iter()
+        .zip(&overlaid)
+        .take_while(|(a, b)| a == b)
+        .count();
+    if prefix == proven.len() && prefix == overlaid.len() {
+        return false;
+    }
+    let suffix = proven
+        .iter()
+        .rev()
+        .zip(overlaid.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if prefix == 0
+        || suffix == 0
+        || prefix + suffix >= proven.len()
+        || prefix + suffix >= overlaid.len()
+    {
+        return false;
+    }
+    let proven_middle = proven[prefix..proven.len() - suffix]
+        .iter()
+        .collect::<String>();
+    let overlaid_middle = overlaid[prefix..overlaid.len() - suffix]
+        .iter()
+        .collect::<String>();
+    proven_middle.width() == overlaid_middle.width()
 }
 
 /// Whether inline image bands exist at all (user ruling 2026-08-03,
@@ -873,7 +893,7 @@ struct LiveOccurrencePlacement {
     occluded_source_rows: u32,
     /// `(terminal_row, column_ranges)` pairs outside the projected band whose current cells still
     /// show this occurrence's proven source. Viewport may clear only those exact cells — never
-    /// chrome, and never the cells of an application overlay (Jump chip) sharing the row.
+    /// chrome, and never the cells of an application overlay sharing the row.
     occluded_visible_rows: Vec<(u32, Vec<(u32, u32)>)>,
 }
 
@@ -1684,10 +1704,6 @@ pub struct DualPlaneSession {
     /// Has this producer ever closed a DECTCEM bracket it opened? Only then is a hide read as "a
     /// repaint is in progress" rather than as "this application does not want a cursor".
     repaint_bracket_closes: bool,
-    /// The tail of the last reads, so the repaint scanners can see a sequence the operating system
-    /// split between two of them. See [`FeedSeam`].
-    feed_seam_carry: [u8; FEED_SEAM_CARRY],
-    feed_seam_carry_len: u8,
     /// True while a primary-screen in-stream transcript reprint is in flight (a clear+home /
     /// erase-storm / synchronized-update repaint boundary was seen and, for a DEC 2026 update, has
     /// not yet committed). It engages the same off-band preservation the resize path uses so a
@@ -2148,8 +2164,6 @@ impl DualPlaneSession {
             repaint_transaction_deadline: None,
             cursor_hidden: false,
             repaint_bracket_closes: false,
-            feed_seam_carry: [0; FEED_SEAM_CARRY],
-            feed_seam_carry_len: 0,
             primary_repaint_in_progress: false,
             primary_repaint_snapshot: None,
             primary_repaint_dirty: false,
@@ -2610,9 +2624,9 @@ impl DualPlaneSession {
     /// Install `options`, and re-detect if the *detector's* answer to any question changes.
     ///
     /// Most of this struct is presentation — how tall a block may stand, how much air is around it
-    /// — and a pane that changes its mind about those keeps every verdict it holds. Two fields are
-    /// not: `restore_stripped_environment_newlines` and `reject_claude_code_jump_chip_overlay` are
-    /// read by [`Self::detection_options`], so a record proven under the old answer carries a
+    /// — and a pane that changes its mind about those keeps every verdict it holds. One field is
+    /// not: `restore_stripped_environment_newlines` is read by [`Self::detection_options`], so a
+    /// record proven under the old answer carries a
     /// `render_source` the new answer would not have produced, and leaving it standing would show
     /// a repaired formula to a reader who has just switched the repair off.
     ///
@@ -2649,9 +2663,6 @@ impl DualPlaneSession {
                 && self
                     .math_layout_options
                     .restore_stripped_environment_newlines,
-            reject_claude_code_jump_chip_overlay: self
-                .math_layout_options
-                .reject_claude_code_jump_chip_overlay,
             inline_formulas: self.inline_math_bands,
         }
     }
@@ -3646,9 +3657,9 @@ impl DualPlaneSession {
         if !bytes.is_empty() {
             self.screen_revision = self.screen_revision.wrapping_add(1);
         }
-        let seam = self.feed_seam(bytes);
-        self.remember_feed_seam(bytes);
-        let cursor_memory_reprint_boundary = contains_clear_home_snapshot_boundary(bytes, &seam);
+        let repaint_controls = self.terminal.repaint_controls(bytes);
+        let cursor_memory_reprint_boundary =
+            contains_clear_home_snapshot_boundary(&repaint_controls);
         if cursor_memory_reprint_boundary {
             self.cursor_logical_line_memory = None;
         }
@@ -3660,7 +3671,7 @@ impl DualPlaneSession {
                 self.document.entries().keys().next_back().copied(),
             ));
         }
-        self.observe_repaint_transaction(bytes, &seam, observed_at);
+        self.observe_repaint_transaction(&repaint_controls, observed_at);
         // A repaint boundary is either evidence in the stream's own bytes, or the producer's open
         // statement that it is rewriting the screen. The second is what carries a repaint whose
         // evidence is spread over reads that each look like nothing in particular.
@@ -3808,33 +3819,6 @@ impl DualPlaneSession {
             )
     }
 
-    /// The seam between the previous reads and this one, for the repaint scanners.
-    fn feed_seam(&self, bytes: &[u8]) -> FeedSeam {
-        let mut seam = FeedSeam {
-            at: self.feed_seam_carry_len as usize,
-            ..FeedSeam::default()
-        };
-        seam.bytes[..seam.at].copy_from_slice(&self.feed_seam_carry[..seam.at]);
-        let ahead = bytes.len().min(FEED_SEAM_CARRY);
-        seam.bytes[seam.at..seam.at + ahead].copy_from_slice(&bytes[..ahead]);
-        seam.len = seam.at + ahead;
-        seam
-    }
-
-    /// Keep this read's tail for the next one. A read shorter than the carry leaves the older bytes
-    /// in front of it, so a sequence spread over three or four one-byte reads is still seen whole.
-    fn remember_feed_seam(&mut self, bytes: &[u8]) {
-        if bytes.is_empty() {
-            return;
-        }
-        let kept = bytes.len().min(FEED_SEAM_CARRY);
-        let held = self.feed_seam_carry_len as usize;
-        let carried = held.min(FEED_SEAM_CARRY - kept);
-        self.feed_seam_carry.copy_within(held - carried..held, 0);
-        self.feed_seam_carry[carried..carried + kept].copy_from_slice(&bytes[bytes.len() - kept..]);
-        self.feed_seam_carry_len = (carried + kept) as u8;
-    }
-
     /// Follow the producer's repaint transaction across reads.
     ///
     /// **The hide is the announcement.** A producer that brackets its repaints hides the cursor
@@ -3847,14 +3831,14 @@ impl DualPlaneSession {
     /// A closed bracket is the only evidence worth trusting that this producer delimits repaints
     /// this way. An application that hides the cursor for its whole run and never shows it again is
     /// using DECTCEM as a mode, not as a bracket, and never has a window held on its behalf.
-    fn observe_repaint_transaction(&mut self, bytes: &[u8], seam: &FeedSeam, observed_at: Instant) {
+    fn observe_repaint_transaction(&mut self, controls: &[RepaintControl], observed_at: Instant) {
         if self
             .repaint_transaction_deadline
             .is_some_and(|deadline| observed_at >= deadline)
         {
             self.repaint_transaction_deadline = None;
         }
-        let toggles = cursor_visibility_toggles(bytes, seam);
+        let toggles = cursor_visibility_toggles(controls);
         match toggles.last {
             Some(true) => {
                 self.repaint_bracket_closes |= self.cursor_hidden || toggles.hid;
@@ -11382,7 +11366,10 @@ impl DualPlaneSession {
                             && *path == candidate.path
                             && *shape == candidate.shape
                             && (*source_text == candidate.source_text
-                                || jump_chip_overlays_source(source_text, &candidate.source_text)))
+                                || one_contiguous_overlay_over_source(
+                                    source_text,
+                                    &candidate.source_text,
+                                )))
                         .then_some(*occurrence)
                     });
             if let Some(occurrence) = matched_occurrence {
@@ -11446,18 +11433,18 @@ impl DualPlaneSession {
         if !create_and_retire {
             return;
         }
-        // A record whose line is currently under the Jump chip yields no candidate to match (the
-        // chip broke the path apart) yet has lost nothing: retiring it here would re-register the
-        // very same path as a fresh occurrence the moment the chip moves away, re-decoding the
+        // A record whose line is currently under an in-place overlay yields no candidate to match
+        // (the overlay broke the path apart) yet has lost nothing: retiring it here would
+        // re-register the very same path as a fresh occurrence the moment the overlay moves away, re-decoding the
         // artifact and re-placing the band somewhere independently computed.
         let retired = existing
             .into_iter()
             .filter_map(|(occurrence, _, source_text, _, start)| {
                 (!matched.contains(&occurrence)
                     && stable.get(start.row as usize).copied().unwrap_or(false)
-                    && !self
-                        .live_logical_line_text(start.row)
-                        .is_some_and(|line| jump_chip_overlays_source(&source_text, &line)))
+                    && !self.live_logical_line_text(start.row).is_some_and(|line| {
+                        one_contiguous_overlay_over_source(&source_text, &line)
+                    }))
                 .then_some(occurrence)
             })
             .collect::<BTreeSet<_>>();
@@ -15700,86 +15687,20 @@ fn anchor_shifted_right(start: &ContentAnchor, columns: u32) -> Option<ContentAn
     })
 }
 
-/// A chunk is a full-screen repaint transaction when it either clears-and-homes, or opens a DEC
-/// 2026 synchronized update, or homes and rewrites several lines with erase-to-EOL. Real TUIs
-/// (Claude Code) repaint with a synchronized `\x1b[?2026h … \x1b[?2026l` block that homes and
-/// erases each line (`\x1b[K`) rather than emitting `\x1b[2J`; keying the boundary only on `2J`
-/// missed every one of those repaints, so a formula flashed back to source across them.
-///
-/// The bytes are read together with the [`FeedSeam`] in front of them, so a sequence the operating
-/// system split between two reads counts as if it had arrived whole at the start of this one.
-fn contains_clear_home_snapshot_boundary(bytes: &[u8], seam: &FeedSeam) -> bool {
-    // Synchronized update: the parser withholds the intermediate state and commits one atomic
-    // frame at ESU, which is exactly the repaint transaction boundary we must preserve across.
-    if bytes.windows(8).any(|window| window == b"\x1b[?2026h") || seam.crosses(b"\x1b[?2026h") {
-        return true;
-    }
-    // A sequence that crosses the seam ends at the front of this read, so `0` is where the scan
-    // for whatever must follow it begins.
-    let cleared = bytes
-        .windows(4)
-        .position(|window| window == b"\x1b[2J")
-        .map(|at| at + 4)
-        .or_else(|| seam.crosses(b"\x1b[2J").then_some(0));
-    if let Some(clear) = cleared {
-        let suffix = &bytes[clear..];
-        if suffix.windows(3).any(|window| window == b"\x1b[H")
-            || suffix.windows(6).any(|window| window == b"\x1b[1;1H")
-        {
-            return true;
-        }
-    }
-    // A home followed by repeated erase-to-EOL line rewrites is a full repaint without 2J.
-    let homes_early = seam.crosses(b"\x1b[H")
-        || seam.crosses(b"\x1b[1;1H")
-        || bytes.windows(3).take(8).any(|window| window == b"\x1b[H")
-        || bytes
-            .windows(6)
-            .take(8)
-            .any(|window| window == b"\x1b[1;1H");
-    let erases = bytes
-        .windows(3)
-        .filter(|window| *window == b"\x1b[K")
-        .count()
-        + usize::from(seam.crosses(b"\x1b[K"));
-    homes_early && erases >= 3
-}
+/// Number of erased rows that, with a home, proves an incremental full-screen repaint.
+const FULL_REPAINT_LINE_ERASES: usize = 3;
 
-/// One less than the longest escape sequence the repaint scanners match (`\x1b[?2026h`): how much of
-/// one read has to be remembered for the next, so that a sequence the operating system split between
-/// two reads is still seen whole.
-const FEED_SEAM_CARRY: usize = 7;
-
-/// **A control sequence belongs to the byte stream, not to the read that happened to carry it.**
-///
-/// macOS caps a pty read at 1 KiB and the applications this matters for repaint in several KiB, so a
-/// repaint is delivered in pieces and a piece boundary can land inside an escape sequence. A scanner
-/// that only ever sees one read at a time misses the repaint's `\x1b[H` — or its closing
-/// `\x1b[?25h` — precisely then. This carries the previous reads' last few bytes so the seam between
-/// them and this one can be read like any other stretch of the stream.
-///
-/// Only matches that *cross* the seam are reported: one lying wholly in the carried tail was already
-/// counted when that read arrived, and one lying wholly in the new bytes is found by the ordinary
-/// scan. So every sequence is seen exactly once however the reads fall.
-#[derive(Default)]
-struct FeedSeam {
-    bytes: [u8; 2 * FEED_SEAM_CARRY],
-    len: usize,
-    at: usize,
-}
-
-impl FeedSeam {
-    fn crosses(&self, needle: &[u8]) -> bool {
-        if needle.len() > self.len {
-            return false;
-        }
-        self.bytes[..self.len]
-            .windows(needle.len())
-            .enumerate()
-            .any(|(start, window)| {
-                window == needle && start < self.at && start + needle.len() > self.at
-            })
-    }
+/// A chunk is a full-screen repaint when the adapter parsed a synchronized-update
+/// opener, a clear and a home in either order, or a home plus a line-erase storm.
+fn contains_clear_home_snapshot_boundary(controls: &[RepaintControl]) -> bool {
+    let synchronized = controls.contains(&RepaintControl::SynchronizedUpdateOpened);
+    let cleared = controls.contains(&RepaintControl::DisplayCleared);
+    let homed = controls.contains(&RepaintControl::CursorHomed);
+    let erased = controls
+        .iter()
+        .filter(|control| **control == RepaintControl::LineErased)
+        .count();
+    synchronized || (cleared && homed) || (homed && erased >= FULL_REPAINT_LINE_ERASES)
 }
 
 /// What the DECTCEM toggles in one read said, the seam in front of it included.
@@ -15796,18 +15717,13 @@ struct CursorVisibilityToggles {
     hid: bool,
 }
 
-fn cursor_visibility_toggles(bytes: &[u8], seam: &FeedSeam) -> CursorVisibilityToggles {
-    // A toggle that crosses the seam ends at the very start of this read, before anything the
-    // ordinary scan can find, so it is ordered as position zero and the rest one place later.
-    let last = |needle: &[u8]| {
-        bytes
-            .windows(needle.len())
-            .rposition(|window| window == needle)
-            .map(|at| at + 1)
-            .or_else(|| seam.crosses(needle).then_some(0))
-    };
-    let hidden = last(b"\x1b[?25l");
-    let shown = last(b"\x1b[?25h");
+fn cursor_visibility_toggles(controls: &[RepaintControl]) -> CursorVisibilityToggles {
+    let hidden = controls
+        .iter()
+        .rposition(|control| *control == RepaintControl::CursorHidden);
+    let shown = controls
+        .iter()
+        .rposition(|control| *control == RepaintControl::CursorShown);
     CursorVisibilityToggles {
         last: match (hidden, shown) {
             (None, None) => None,
@@ -16920,7 +16836,6 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(40), nz(4));
         session.set_math_layout_options(MathLayoutOptions {
             restore_stripped_environment_newlines: false,
-            reject_claude_code_jump_chip_overlay: false,
             ..MathLayoutOptions::default()
         });
         assert_eq!(
@@ -16928,7 +16843,6 @@ mod tests {
             DetectionOptions {
                 restore_stripped_environment_newlines: false,
                 restore_stripped_inline_environment_newlines: false,
-                reject_claude_code_jump_chip_overlay: false,
                 inline_formulas: true,
             }
         );
@@ -24398,7 +24312,7 @@ mod tests {
     }
 
     #[test]
-    fn occluded_clear_ranges_cover_source_on_both_sides_of_the_jump_chip() {
+    fn occluded_clear_ranges_cover_source_on_both_sides_of_a_generic_overlay() {
         fn ascii_boundaries(text: &str) -> Vec<(u32, u32)> {
             (0..=u32::try_from(text.len()).unwrap())
                 .map(|index| (index, index))
@@ -24411,13 +24325,13 @@ mod tests {
             continues: false,
             cell_boundaries: ascii_boundaries(proven_text),
         };
-        let chip = "Jump to bottom (ctrl+End)";
-        let chip_start = 10_usize;
-        let chip_end = chip_start + chip.len();
+        let overlay = "!!!!!!!!!!!!!!!";
+        let overlay_start = 10_usize;
+        let overlay_end = overlay_start + overlay.len();
         let input_text = format!(
-            "{}{chip}{}",
-            &proven_text[..chip_start],
-            &proven_text[chip_end..]
+            "{}{overlay}{}",
+            &proven_text[..overlay_start],
+            &proven_text[overlay_end..]
         );
         let input = LiveDetectionInput {
             source: LiveDetectionSource::Grid {
@@ -24430,19 +24344,16 @@ mod tests {
             cell_boundaries: ascii_boundaries(&input_text),
             site: InlineMathSite::Ineligible,
         };
-        // The chip overwrote columns 10..35 mid-source: the leaked prefix AND the leaked tail
-        // after the chip are cleared, while every chip glyph keeps its text and style. Column 24
-        // is a chip space which coincidentally equals the proven source's space at that column;
-        // clearing a space's text is visually identical because cell styles are never touched.
-        let expected_prefix = (0, u32::try_from(chip_start).unwrap());
-        let coincidental_space = (24, 25);
+        // The overlay overwrote an interior run: the leaked prefix AND the leaked tail
+        // after the overlay are cleared, while every overlay glyph keeps its text and style.
+        let expected_prefix = (0, u32::try_from(overlay_start).unwrap());
         let expected_tail = (
-            u32::try_from(chip_end).unwrap(),
+            u32::try_from(overlay_end).unwrap(),
             u32::try_from(proven_text.len()).unwrap(),
         );
         assert_eq!(
             proven.source_clear_ranges(&input),
-            Some(vec![expected_prefix, coincidental_space, expected_tail])
+            Some(vec![expected_prefix, expected_tail])
         );
 
         // A row which does not carry this source (fixed chrome) must never produce clear ranges.
@@ -24459,6 +24370,19 @@ mod tests {
             site: InlineMathSite::Ineligible,
         };
         assert_eq!(proven.source_clear_ranges(&chrome), None);
+    }
+
+    /// RED (B-AUDIT-046 TRM-1) — overlay recognition is structural and does
+    /// not depend on one application's current English wording.
+    ///
+    /// MUTATION: restore a literal signature check; the mixed-language overlay
+    /// is refused. Relax either witness edge; the two edge controls are admitted.
+    #[test]
+    fn one_contiguous_overlay_requires_unchanged_cells_on_both_sides() {
+        assert!(one_contiguous_overlay_over_source("a1234z", "a状态z"));
+        assert!(!one_contiguous_overlay_over_source("a1234z", "状态34z"));
+        assert!(!one_contiguous_overlay_over_source("a1234z", "a1234x"));
+        assert!(!one_contiguous_overlay_over_source("a1234z", "a12345z"));
     }
 
     #[test]
@@ -28918,21 +28842,22 @@ mod tests {
         std::fs::remove_dir(&directory).unwrap();
     }
 
-    /// Paint Claude Code's Jump chip over a live path line the way the application does: straight
-    /// onto the row, overwriting cells in place so the row keeps its width. Starting the chip on
+    /// Paint localized application chrome over a live path line: straight onto
+    /// the row, overwriting cells in place so the row keeps its width. Starting it on
     /// the path's root separator destroys the drive prefix, which is exactly what makes the
     /// detector blind to a path it had already proven.
-    fn jump_chip_overlaid_line(line: &str) -> String {
-        let chip_start = line.find('"').expect("path line is quoted") + 3;
-        let chip_end = chip_start + JUMP_CHIP_SIGNATURE.len();
+    fn application_overlay_line(line: &str) -> String {
+        const OVERLAY: &str = "Localized overlay status!";
+        let overlay_start = line.find('"').expect("path line is quoted") + 3;
+        let overlay_end = overlay_start + OVERLAY.len();
         assert!(
-            chip_end < line.len(),
-            "the chip must land inside the line, not extend it"
+            overlay_end < line.len(),
+            "the overlay must land inside the line, not extend it"
         );
         let overlaid = format!(
-            "{}{JUMP_CHIP_SIGNATURE}{}",
-            &line[..chip_start],
-            &line[chip_end..]
+            "{}{OVERLAY}{}",
+            &line[..overlay_start],
+            &line[overlay_end..]
         );
         assert_eq!(overlaid.len(), line.len(), "an overlay never reflows a row");
         assert!(
@@ -28954,12 +28879,12 @@ mod tests {
     }
 
     #[test]
-    fn a_jump_chip_over_a_live_path_line_keeps_one_occurrence_without_re_decoding() {
-        // Claude Code's "Jump to bottom (ctrl+End)" chip lands on whatever row it covers, including
-        // one already proven to carry an image path. Whole-line equality read that repaint as the
-        // source having vanished: the record retired, and the moment the chip moved away the same
+    fn a_generic_overlay_over_a_live_path_line_keeps_one_occurrence_without_re_decoding() {
+        // Application chrome can land on whatever row it covers, including one already proven to
+        // carry an image path. Whole-line equality read that repaint as the
+        // source having vanished: the record retired, and the moment the overlay moved away the same
         // path registered as a brand new occurrence, re-decoded and re-placed — the band the user
-        // sees blink out and float back. The chip is an overlay, so the occurrence is preserved.
+        // sees blink out and float back. It is an overlay, so the occurrence is preserved.
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(8));
         enable_path_detection(&mut session);
@@ -28984,17 +28909,17 @@ mod tests {
         let content_key = session.inline_image_records()[0]
             .content_key
             .clone()
-            .expect("the decoded artifact must be resident before the chip arrives");
+            .expect("the decoded artifact must be resident before the overlay arrives");
         let display_key = resident_display_key(&session, 0);
         let mut projection = session.new_projection(session.layout_key());
 
-        let overlaid = jump_chip_overlaid_line(&line);
+        let overlaid = application_overlay_line(&line);
         let mut assert_same_band = |session: &mut DualPlaneSession, phase: &str| {
             let records = session.inline_image_records();
             assert_eq!(
                 records.len(),
                 1,
-                "{phase}: the chip must not add a second occurrence: {records:?}"
+                "{phase}: the overlay must not add a second occurrence: {records:?}"
             );
             assert_eq!(
                 records[0].occurrence_id, occurrence,
@@ -29024,7 +28949,7 @@ mod tests {
             );
         };
 
-        // Several redraw/settle cycles with the chip resident: each one damages the row, each one
+        // Several redraw/settle cycles with the overlay resident: each one damages the row, each one
         // reads back stable, and none of them may retire the occurrence.
         for cycle in 0..3 {
             now += LIVE_MATH_STABLE_INTERVAL;
@@ -29032,16 +28957,16 @@ mod tests {
             assert_eq!(session.terminal().visible_text()[0], overlaid);
             now += LIVE_MATH_STABLE_INTERVAL;
             session.advance_live_stability(now);
-            assert_same_band(&mut session, &format!("chip cycle {cycle}"));
+            assert_same_band(&mut session, &format!("overlay cycle {cycle}"));
         }
 
-        // The chip moves away: the very same occurrence keeps the band, no re-registration.
+        // The overlay moves away: the very same occurrence keeps the band, no re-registration.
         now += LIVE_MATH_STABLE_INTERVAL;
         repaint_first_live_row(&mut session, &line, now);
         now += LIVE_MATH_STABLE_INTERVAL;
         session.advance_live_stability(now);
         assert_eq!(session.terminal().visible_text()[0], line);
-        assert_same_band(&mut session, "chip cleared");
+        assert_same_band(&mut session, "overlay cleared");
 
         std::fs::remove_file(&path).unwrap();
         std::fs::remove_dir(&directory).unwrap();
@@ -29049,7 +28974,7 @@ mod tests {
 
     #[test]
     fn a_live_path_line_rewritten_to_other_content_still_retires_its_occurrence() {
-        // Control for the chip tolerance above: tolerance is scoped to the exact overlay shape, so
+        // Control for the overlay tolerance above: tolerance is scoped to one interior run, so
         // a row whose source genuinely changed retires exactly as it always did.
         let (directory, path) = temporary_path_image();
         let mut session = DualPlaneSession::new(nz(160), nz(8));

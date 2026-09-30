@@ -937,15 +937,6 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 winit.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-# One spelling of "a path as a `file:` URI", shared with every other place this
-# workspace writes one (`bt_transcript::paths::local_path_to_file_uri`). It is
-# here for `src/msix.rs`, where the package location crosses into the deployment
-# API as a URI: a second, hand-rolled encoder is where a folder with a `#`, a
-# `?` or a `%` in its name becomes a registration that names a different folder
-# — R2-11, and the reason this edge exists at all. The crate is portable, has
-# `bt-unicode` as its only dependency of its own, and both are already in this
-# build.
-bt-transcript = { path = "../bt-transcript" }
 # The web preview's engine (`src/webview.rs`). It is a thin, generated binding
 # over the WebView2 SDK's COM interfaces on top of the same `windows` 0.62 this
 # crate already carries — three new packages (`webview2-com`,
@@ -1185,3 +1176,8 @@ dbg_macro = "deny"
 [dependencies]
 ttf-parser.workspace = true
 bt-unicode = { path = "../bt-unicode" }
+# One owner for encoding and decoding `file:` addresses. Windows package
+# registration uses the encoder; the platform path door on every target uses
+# the decoder, beside the viewport and terminal callers that already depend on
+# `bt-transcript`. Keeping those grammars together is why this edge is general.
+bt-transcript = { path = "../bt-transcript" }

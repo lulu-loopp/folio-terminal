@@ -1852,8 +1852,7 @@ fn default_families() -> &'static [bt_platform::MonospaceFamily] {
     })
 }
 
-fn with_automatic_cjk(families: Vec<bt_platform::CjkFamily>) -> Vec<bt_platform::CjkFamily> {
-    let mut families = bt_platform::order_cjk_families(families);
+fn with_automatic_cjk(mut families: Vec<bt_platform::CjkFamily>) -> Vec<bt_platform::CjkFamily> {
     families.retain(|family| !family.name.is_empty());
     families.insert(0, bt_platform::CjkFamily::default());
     families
@@ -1980,7 +1979,7 @@ pub fn begin_monospace_scan(in_force: &str, cjk_in_force: &str) {
                 ..Default::default()
             }]
         };
-        CJK_FAMILIES.publish(with_automatic_cjk(named), false);
+        CJK_FAMILIES.publish(named, false);
     }
     request_font_walk();
 }
@@ -2061,7 +2060,7 @@ impl FontLane {
             let generation = self.monospace.serving();
             let (monospace, cjk) = (self.walk)(generation);
             self.monospace.offer(generation, monospace);
-            self.cjk.offer(with_automatic_cjk(cjk));
+            self.cjk.offer(cjk);
             // After the answer is in the mailbox and never before: a wake that
             // raced the offer would send the loop to adopt nothing, and the frame
             // the reader is waiting for would then be owed to a wake that is not
@@ -16643,23 +16642,49 @@ mod tests {
             None
         );
     }
+    /// RED (B-AUDIT-046 PLT-1) — English and Chinese are independent
+    /// projections of the scan, not a Chinese list passed through English
+    /// ordering on the way to Automatic.
+    ///
+    /// MUTATION: sort again in `with_automatic_cjk`; both stored projections
+    /// become English alphabetical order and the Chinese assertion goes red.
     #[test]
     fn cjk_settings_publication_keeps_both_language_views_and_stored_names() {
         let slot = CjkFamilySlot::new();
-        let family = bt_platform::CjkFamily {
-            name: "Stored family".into(),
+        let chinese = bt_platform::CjkFamily {
+            name: "Z Chinese".into(),
             localized_names: vec![("zh-CN".into(), "Localized family".into())],
             coverage: bt_platform::CjkCoverage::from_code_pages(1 << 18),
             ..Default::default()
         };
-        slot.offer(vec![family]);
+        let japanese = bt_platform::CjkFamily {
+            name: "A Japanese".into(),
+            coverage: bt_platform::CjkCoverage::from_code_pages(1 << 17),
+            ..Default::default()
+        };
+        slot.offer(vec![chinese, japanese]);
         assert!(slot.adopted().is_empty());
         assert!(slot.publish(slot.take_offer().unwrap(), true));
         assert!(slot.scanned());
         let held = slot.published.read().unwrap();
-        assert_eq!(held.1[0][0].name, "");
+        assert_eq!(
+            held.1[0]
+                .iter()
+                .map(|family| family.name.as_str())
+                .collect::<Vec<_>>(),
+            ["", "A Japanese", "Z Chinese"],
+            "English keeps its own alphabetical projection"
+        );
+        assert_eq!(
+            held.1[1]
+                .iter()
+                .map(|family| family.name.as_str())
+                .collect::<Vec<_>>(),
+            ["", "Z Chinese", "A Japanese"],
+            "Chinese keeps its coverage-first projection"
+        );
         assert_eq!(held.1[1][1].display_name("zh-CN"), "Localized family");
-        assert!(held.1[1][1].has_name("Stored family"));
+        assert!(held.1[1][1].has_name("Z Chinese"));
     }
     /// One-off headless timing probe. No window, GPU, clipboard or input.
     #[test]

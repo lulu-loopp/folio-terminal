@@ -81,6 +81,7 @@ impl Runtime<'_> {
         let (scheme_documents, unreadable) = schemes::user_documents();
         let keybindings = KeybindingsV1 {
             schema_version: KEYBINDINGS_SCHEMA_VERSION,
+            writing_platform: persist::keybindings_platform(),
             bindings: self
                 .app
                 .shortcuts
@@ -189,7 +190,8 @@ impl Runtime<'_> {
         if let Some(part) = parts.keybindings {
             match part {
                 Ok(file) => {
-                    let (table, refused) = settings_bundle::import_shortcuts(&file);
+                    let (table, refused) =
+                        settings_bundle::import_shortcuts(&file, bt_platform::host_platform());
                     faults.extend(refused);
                     if table != self.app.shortcuts {
                         self.app.shortcuts = table;

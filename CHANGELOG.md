@@ -7,6 +7,18 @@ All notable changes to Folio are recorded here. The format follows
 ## Unreleased
 ### Fixed
 
+- Chinese font choices stay in Chinese coverage order instead of being sorted
+  back into English order before they are shown.
+- Creating and renaming files use the filesystem rules of the machine Folio is
+  running on; macOS names are no longer refused for Windows-only restrictions.
+- A hidden-profile guard protects the platform's real fallback shell, and
+  imported shortcuts carry Command between macOS and Ctrl on other platforms
+  without silently collapsing two modifiers into one.
+- Paths pasted into csh and tcsh are quoted with their history expansion rule,
+  alongside the existing bash, zsh, fish, PowerShell and cmd rules.
+- File links and opened file URLs now agree on Chinese escapes, drive roots,
+  localhost and UNC forms instead of decoding them differently.
+
 ### Added
 
 - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,

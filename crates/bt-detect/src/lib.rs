@@ -35,9 +35,6 @@ pub struct DetectionOptions {
     /// Restore a stripped separator inside a one-line tabular environment. The terminal session
     /// enables this only on primary: alternate-screen replay is a byte-pinned compatibility path.
     pub restore_stripped_inline_environment_newlines: bool,
-    /// Reject a display-math candidate containing Claude Code's exact scroll-review overlay text.
-    /// Disable this once Claude Code no longer writes that chip into terminal content rows.
-    pub reject_claude_code_jump_chip_overlay: bool,
     /// The user-facing "Inline formulas" switch: may a lone `$…$` run become mathematics at all?
     ///
     /// This gates **detection**, and that is the one way it differs from its sibling
@@ -56,7 +53,6 @@ impl Default for DetectionOptions {
         Self {
             restore_stripped_environment_newlines: true,
             restore_stripped_inline_environment_newlines: true,
-            reject_claude_code_jump_chip_overlay: true,
             inline_formulas: true,
         }
     }
@@ -1896,7 +1892,7 @@ fn scan_math_blocks_impl<'a>(
                 options.restore_stripped_environment_newlines,
                 options.restore_stripped_inline_environment_newlines,
             );
-            let valid = valid_display_body(body, &render, options);
+            let valid = valid_display_body(body, &render);
             if let Some(rec) = recorder.as_deref_mut() {
                 // The pending opener loses its closer to this self-contained block: it is genuinely
                 // unpaired (an odd-parity residue), not a legitimate rejection.
@@ -1960,7 +1956,7 @@ fn scan_math_blocks_impl<'a>(
                 options.restore_stripped_environment_newlines,
                 options.restore_stripped_inline_environment_newlines,
             );
-            let valid = valid_display_body(body, &render, options);
+            let valid = valid_display_body(body, &render);
             if let Some(rec) = recorder.as_deref_mut() {
                 rec.self_contained(
                     index,
@@ -2063,7 +2059,7 @@ fn scan_math_blocks_impl<'a>(
                     options.restore_stripped_inline_environment_newlines,
                 ),
             };
-            let valid = valid_display_body(&body, &render, options);
+            let valid = valid_display_body(&body, &render);
             if let Some(rec) = recorder.as_deref_mut() {
                 if valid {
                     rec.close_owned(index, body_end, closer_kind, start_index, index);
@@ -2330,8 +2326,8 @@ fn record_code_context_delimiter(recorder: &mut OwnershipRecorder, index: usize,
 /// one predicate. `active` is a stale `$$` opening about to meet its candidate closer on `text` at
 /// logical `index`. Returns true iff both decidable conditions hold, neither of which guesses the
 /// `$$`'s direction. First, **body-invalid**: the joined body from the stale opening through this
-/// closer is *not* valid display math (an empty/blank body, prose, CJK prose, oversize, or the Jump
-/// chip). A genuine block never trips this, so the pairing being consumed here is spurious. Second,
+/// closer is *not* valid display math (an empty/blank body, prose, CJK prose, or oversize). A
+/// genuine block never trips this, so the pairing being consumed here is spurious. Second,
 /// **forward-valid**: re-reading this `$$` as a *fresh opener* pairs forward into a valid display
 /// block, i.e. the real block starts here. This is the `3875209` convergence guard — if the `$$`
 /// were instead the true closer of a straddling block whose body merely tripped the body check,
@@ -2355,7 +2351,7 @@ fn phantom_opener_witness(
                         options.restore_stripped_environment_newlines,
                         options.restore_stripped_inline_environment_newlines,
                     );
-                    !valid_display_body(&body, &render, options)
+                    !valid_display_body(&body, &render)
                 }
                 None => true,
             };
@@ -2398,15 +2394,7 @@ fn grid_dollars_opens_valid_block(
     .any(|block| block.start == opener_id)
 }
 
-/// The chip a full-screen program draws over its own output, which lands in the middle of a formula
-/// and is not part of it. Named once because two places ask the same question of it: the body of a
-/// whole block, and one row of a clipped block's tail.
-const CLAUDE_CODE_JUMP_CHIP: &str = "Jump to bottom (ctrl+End)";
-
-fn valid_display_body(body: &str, render_source: &str, options: DetectionOptions) -> bool {
-    if options.reject_claude_code_jump_chip_overlay && body.contains(CLAUDE_CODE_JUMP_CHIP) {
-        return false;
-    }
+fn valid_display_body(body: &str, render_source: &str) -> bool {
     !body.trim().is_empty()
         && render_source.len() <= MAX_MATH_SOURCE_BYTES
         && !block_body_looks_like_prose(body)
@@ -3416,17 +3404,14 @@ fn clipped_tail(
     // unclaimed because of it.
     //
     // One upward pass and no joining. `valid_display_body` over a run of rows is the conjunction of
-    // three facts that each grow one way only — no row is prose, no row carries the overlay chip,
-    // and the joined length is inside the source limit — so the first row walking up that breaks one
+    // two facts that each grow one way only — no row is prose and the joined length is inside the
+    // source limit — so the first row walking up that breaks one
     // of them breaks it for every longer suffix too, and where the walk stops is the maximum.
     let mut body_start = first_dollars;
     let mut bytes = 0usize;
     let mut has_content = false;
     for index in (floor..first_dollars).rev() {
         let text = logical[index].text.as_str();
-        if options.reject_claude_code_jump_chip_overlay && text.contains(CLAUDE_CODE_JUMP_CHIP) {
-            break;
-        }
         if block_body_looks_like_prose(text) {
             break;
         }
@@ -5487,25 +5472,6 @@ mod tests {
             detect_math_blocks([(TranscriptId(1), r"\(x + y\)")]).is_empty(),
             "parenthesis inline detection must remain disabled"
         );
-    }
-
-    #[test]
-    fn claude_code_jump_chip_overlay_is_not_baked_into_display_math() {
-        let polluted = r"$$\hat{f}(\xi) = \int_{-\infty}^{\in Jump to bottom (ctrl+End) ↓ dx$$";
-        assert!(detect_block_math(polluted).is_empty());
-
-        let options = DetectionOptions {
-            reject_claude_code_jump_chip_overlay: false,
-            ..DetectionOptions::default()
-        };
-        assert_eq!(
-            detect_math_blocks_with_options([(TranscriptId(1), polluted)], options).len(),
-            1,
-            "the CC-specific workaround must be removable after the overlay bug is fixed"
-        );
-
-        let clean = r"$$\hat{f}(\xi) = \int_{-\infty}^{\infty} dx$$";
-        assert_eq!(detect_block_math(clean).len(), 1);
     }
 
     #[test]

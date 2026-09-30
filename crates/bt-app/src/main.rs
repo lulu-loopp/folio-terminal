@@ -1174,7 +1174,9 @@ fn line_continuation_mark(grammar: shell_literal::ShellGrammar) -> Option<char> 
     match grammar {
         shell_literal::ShellGrammar::Cmd => Some('^'),
         shell_literal::ShellGrammar::PowerShell => Some('`'),
-        shell_literal::ShellGrammar::Posix | shell_literal::ShellGrammar::Fish => Some('\\'),
+        shell_literal::ShellGrammar::Posix
+        | shell_literal::ShellGrammar::Fish
+        | shell_literal::ShellGrammar::Csh => Some('\\'),
         shell_literal::ShellGrammar::Nushell | shell_literal::ShellGrammar::Agent => None,
     }
 }
@@ -21606,23 +21608,6 @@ enum TabClick {
 /// share, so "the same tab" *is* the browser's own slop test. It also survives
 /// the one thing a pixel test would get wrong — a strip that scrolled between
 /// the two clicks, where the same tab is at a different address.
-/// **The nine characters Windows will not take in a file name**, plus the
-/// control range (user ruling 2026-08-19).
-///
-/// Checked before the filesystem is asked, because the filesystem's answer to a
-/// `?` in a name is an error code and the reader's question is "why did my name
-/// snap back" — and because a name that cannot exist is a fact about the draft,
-/// which is the class of refusal this surface answers in silence.
-#[must_use]
-fn name_is_writable(name: &str) -> bool {
-    !name.chars().any(|character| {
-        matches!(
-            character,
-            '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
-        ) || character.is_control()
-    })
-}
-
 /// **Whether renaming `old` to `new` would replace a different entry** — the
 /// question both rename doors ask before `std::fs::rename`, which replaces
 /// whatever `new` names on every platform (B-AUDIT-046 RT-3).

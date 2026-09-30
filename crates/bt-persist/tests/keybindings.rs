@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use bt_persist::{
     BindingOverrideV1, FallbackReason, KEYBINDINGS_MIGRATIONS, KEYBINDINGS_SCHEMA_VERSION,
-    KeybindingsV1, ReadReport, read_keybindings, write_keybindings_atomic,
+    KeybindingsPlatformV1, KeybindingsV1, ReadReport, read_keybindings, write_keybindings_atomic,
 };
 
 fn unique_dir(tag: &str) -> PathBuf {
@@ -49,6 +49,7 @@ fn the_departures_survive_a_round_trip_through_the_disk() {
     let path = dir.join("keybindings.json");
     let written = KeybindingsV1 {
         schema_version: KEYBINDINGS_SCHEMA_VERSION,
+        writing_platform: bt_persist::KeybindingsPlatformV1::Windows,
         bindings: vec![
             BindingOverrideV1 {
                 action: "new-tab".to_owned(),
@@ -153,12 +154,11 @@ fn a_file_from_a_future_build_is_refused_whole_rather_than_read_in_part() {
 }
 
 /// RED (2026-08-26) — **every version this file has ever carried reaches the
-/// current one**, and the emptiness of the migration table is a claim about
-/// today rather than a permanent licence.
+/// current one**, and every schema bump has exactly one structural step.
 ///
-/// `KEYBINDINGS_MIGRATIONS` is empty on purpose and its own doc says why: adding,
-/// renaming or retiring a shortcut row does not change this *document*, so it
-/// does not owe a version. What the emptiness must never mean is "there is a
+/// Adding, renaming or retiring a shortcut row does not change this document,
+/// but v2 added the platform that wrote its modifier dialect. What the table
+/// must never mean is "there is a
 /// version step nobody wrote a migration for" — a gap there does not raise an
 /// error, it makes an old file fall back to *no departures at all*, which on a
 /// machine that has customised its keyboard is every custom chord silently
@@ -171,10 +171,6 @@ fn a_file_from_a_future_build_is_refused_whole_rather_than_read_in_part() {
 /// which says the same thing and says one more: a table with two steps out of
 /// v1, or with v3 written before v2, is as broken as one with a hole in it, and
 /// a loop that only asked "is `version` in there somewhere" would pass on both.
-/// (It is also the only spelling that survives `-D warnings` while the version
-/// is 1: `1..1` is a range clippy can evaluate, and it is right that it is
-/// empty — that is the fact this test is about.)
-///
 /// MUTATION: bump `KEYBINDINGS_SCHEMA_VERSION` without adding a step — the count
 /// goes red, and the launch it stands for is the one where somebody's keyboard
 /// would have quietly reset.
@@ -208,6 +204,7 @@ fn every_version_of_this_file_has_a_step_that_reaches_the_current_one() {
         &path,
         &KeybindingsV1 {
             schema_version: KEYBINDINGS_SCHEMA_VERSION,
+            writing_platform: bt_persist::KeybindingsPlatformV1::Unknown,
             bindings: vec![BindingOverrideV1 {
                 action: "new-tab".to_owned(),
                 chord: Some("Ctrl+Shift+w".to_owned()),
@@ -219,4 +216,28 @@ fn every_version_of_this_file_has_a_step_that_reaches_the_current_one() {
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(read.schema_version, KEYBINDINGS_SCHEMA_VERSION);
     assert_eq!(read.bindings.len(), 1);
+}
+
+/// RED (B-AUDIT-046 SET-3) — a v1 file has no trustworthy source dialect, so
+/// its migration records `unknown` and leaves every literal modifier intact.
+///
+/// MUTATION: infer the platform running the migration; this fixture changes
+/// meaning merely by being moved to another machine.
+#[test]
+fn a_v1_keybindings_file_migrates_to_an_unknown_writing_platform() {
+    let dir = unique_dir("v1-platform");
+    let path = dir.join("keybindings.json");
+    std::fs::write(
+        &path,
+        r#"{
+  "schema_version": 1,
+  "bindings": [{"action":"new-tab","chord":"Cmd+Shift+T"}]
+}"#,
+    )
+    .unwrap();
+
+    let (read, report) = read_keybindings(&path);
+    assert_eq!(report, ReadReport::Loaded);
+    assert_eq!(read.writing_platform, KeybindingsPlatformV1::Unknown);
+    assert_eq!(read.bindings[0].chord.as_deref(), Some("Cmd+Shift+T"));
 }

@@ -1,4 +1,5 @@
-//! `keybindings.json` v1 — the shortcut table's **departures**, and nothing else.
+//! `keybindings.json` v2 — the shortcut table's **departures**, their writing
+//! platform, and nothing else.
 //!
 //! A file of its own beside `settings.json` (user ruling Q7 = B, 2026-08-17),
 //! which is what every product that ships an editable shortcut table does, and
@@ -33,12 +34,25 @@ use serde::{Deserialize, Serialize};
 /// v1 is the first, and there is nothing before it: a machine with no such file
 /// is a machine that has never customised a chord, which is the ordinary case
 /// and not a migration.
-pub const KEYBINDINGS_SCHEMA_VERSION: u32 = 1;
+pub const KEYBINDINGS_SCHEMA_VERSION: u32 = 2;
 
-/// `keybindings.json` v1:
+/// The keyboard dialect that wrote a shortcut document. `Unknown` is the
+/// migrated answer for v1 files, whose origin was not recorded.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeybindingsPlatformV1 {
+    #[default]
+    Unknown,
+    Windows,
+    MacOs,
+    OtherUnix,
+}
+
+/// `keybindings.json` v2:
 /// ```json
 /// {
-///   "schema_version": 1,
+///   "schema_version": 2,
+///   "writing_platform": "windows",
 ///   "bindings": [
 ///     { "action": "new-tab", "chord": "Ctrl+Shift+N" },
 ///     { "action": "open-search-alias", "chord": null }
@@ -48,6 +62,8 @@ pub const KEYBINDINGS_SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KeybindingsV1 {
     pub schema_version: u32,
+    #[serde(default)]
+    pub writing_platform: KeybindingsPlatformV1,
     /// The rows that depart from the defaults, in the table's own order.
     ///
     /// A `Vec` and not a map, because the file is meant to be read: a list keeps
@@ -81,6 +97,7 @@ impl Default for KeybindingsV1 {
     fn default() -> Self {
         Self {
             schema_version: KEYBINDINGS_SCHEMA_VERSION,
+            writing_platform: KeybindingsPlatformV1::Unknown,
             bindings: Vec::new(),
         }
     }
@@ -113,6 +130,7 @@ mod tests {
     fn an_explicitly_cleared_row_is_not_the_same_as_an_absent_one() {
         let file = KeybindingsV1 {
             schema_version: KEYBINDINGS_SCHEMA_VERSION,
+            writing_platform: KeybindingsPlatformV1::Unknown,
             bindings: vec![
                 BindingOverrideV1 {
                     action: "open-search-alias".to_owned(),
@@ -139,6 +157,7 @@ mod tests {
     fn a_row_is_named_and_never_numbered() {
         let file = KeybindingsV1 {
             schema_version: KEYBINDINGS_SCHEMA_VERSION,
+            writing_platform: KeybindingsPlatformV1::Unknown,
             bindings: vec![BindingOverrideV1 {
                 action: "goto-tab-9".to_owned(),
                 chord: Some("Ctrl+Shift+0".to_owned()),

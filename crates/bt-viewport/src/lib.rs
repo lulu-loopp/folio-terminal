@@ -5500,22 +5500,9 @@ fn cell_targets(cell: &CapturedCell, uri: &str) -> bool {
 /// the target is spelled when it is written as a path, which is a question about text; and
 /// `bt-viewport` does not depend on `bt-term` (the dependency runs the other way).
 fn file_uri_printed_form(uri: &str) -> Option<String> {
-    if !uri
-        .get(..5)
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("file:"))
-    {
-        return None;
-    }
-    let (authority, path) = match uri[5..].strip_prefix("//") {
-        // `file://host/path`, and `file:///path` as the empty-authority case of it.
-        Some(rest) => rest.split_once('/').unwrap_or((rest, "")),
-        // `file:/path` has no authority at all, which RFC 8089 also allows.
-        None => ("", uri[5..].strip_prefix('/').unwrap_or(&uri[5..])),
-    };
-    if path.is_empty() {
-        // An authority and no path names a machine, not a file on it, and so has no path spelling.
-        return None;
-    }
+    let address = bt_transcript::paths::decode_file_uri_address(uri).ok()?;
+    let authority = String::from_utf8(address.authority).ok()?;
+    let path = String::from_utf8(address.path).ok()?;
     // **The two ways a printed path differs from its URI that are the operating system's.** A
     // URI's separator is `/` on every platform; a Windows path's is `\`, and a POSIX path's is the
     // one it already has, so off Windows this substitution is the identity and writing it anyway
@@ -5525,11 +5512,24 @@ fn file_uri_printed_form(uri: &str) -> Option<String> {
     // a machine's name is a directory at this filesystem's root.
     #[cfg(windows)]
     let printed = {
-        let path = percent_decoded(path)?.replace('/', "\\");
+        let path = if authority.is_empty() || authority.eq_ignore_ascii_case("localhost") {
+            let bytes = path.as_bytes();
+            if bytes.len() >= 3
+                && bytes[0] == b'/'
+                && bytes[1].is_ascii_alphabetic()
+                && bytes[2] == b':'
+            {
+                path[1..].replace('/', "\\")
+            } else {
+                path.replace('/', "\\")
+            }
+        } else {
+            path.replace('/', "\\")
+        };
         if authority.is_empty() || authority.eq_ignore_ascii_case("localhost") {
             path
         } else {
-            format!("\\\\{}\\{path}", percent_decoded(authority)?)
+            format!("\\\\{authority}{path}")
         }
     };
     #[cfg(not(windows))]
@@ -5537,7 +5537,7 @@ fn file_uri_printed_form(uri: &str) -> Option<String> {
         if !(authority.is_empty() || authority.eq_ignore_ascii_case("localhost")) {
             return None;
         }
-        format!("/{}", percent_decoded(path)?)
+        path
     };
     Some(printed_path_folded(&printed))
 }
@@ -5552,32 +5552,6 @@ fn printed_path_folded(path: &str) -> String {
         drive.make_ascii_uppercase();
     }
     folded
-}
-
-/// One percent-decoded URI component, or `None` when the decoded bytes are not UTF-8.
-///
-/// Decoding is over the component as a whole rather than per segment, because the answer wanted
-/// here is what the path *looks like* printed: a `%2F` inside a name decodes to a `/` that the
-/// separator pass then turns into a `\`, which is exactly what an application printing that name
-/// would show. Nothing resolves this text against the filesystem — see [`file_uri_printed_form`].
-fn percent_decoded(component: &str) -> Option<String> {
-    let nibble = |byte: Option<&u8>| -> Option<u32> { (*byte? as char).to_digit(16) };
-    let bytes = component.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while let Some(byte) = bytes.get(index) {
-        if *byte == b'%'
-            && let (Some(high), Some(low)) =
-                (nibble(bytes.get(index + 1)), nibble(bytes.get(index + 2)))
-        {
-            decoded.push((high * 16 + low) as u8);
-            index += 3;
-        } else {
-            decoded.push(*byte);
-            index += 1;
-        }
-    }
-    String::from_utf8(decoded).ok()
 }
 
 /// The screen column at which the grapheme `offset` of a frozen logical line sits, *within the

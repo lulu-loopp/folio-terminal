@@ -17,12 +17,12 @@ use std::time::{Duration, Instant};
 use bt_platform::admission::{WaitToken, admitted, doors};
 
 use bt_persist::{
-    BindingOverrideV1, Debouncer, ExitState, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1, ProfilesV1,
-    ReadReport, SessionV1, SettingsV1, WriteAlertAction, WriteFailureTracker, create_sentinel,
-    probe_sentinel, read_keybindings, read_keybindings_keeping, read_profiles,
-    read_profiles_keeping, read_session, read_session_keeping, read_settings,
-    read_settings_keeping, remove_sentinel, write_keybindings_atomic, write_profiles_atomic,
-    write_settings_atomic,
+    BindingOverrideV1, Debouncer, ExitState, KEYBINDINGS_SCHEMA_VERSION, KeybindingsPlatformV1,
+    KeybindingsV1, ProfilesV1, ReadReport, SessionV1, SettingsV1, WriteAlertAction,
+    WriteFailureTracker, create_sentinel, probe_sentinel, read_keybindings,
+    read_keybindings_keeping, read_profiles, read_profiles_keeping, read_session,
+    read_session_keeping, read_settings, read_settings_keeping, remove_sentinel,
+    write_keybindings_atomic, write_profiles_atomic, write_settings_atomic,
 };
 
 /// The name the session document wears on disk, which is also what a notice
@@ -1663,6 +1663,7 @@ impl KeybindingsStore {
         }
         let file = KeybindingsV1 {
             schema_version: KEYBINDINGS_SCHEMA_VERSION,
+            writing_platform: keybindings_platform(),
             bindings: self.overrides.clone(),
         };
         self.writes.record(
@@ -1672,6 +1673,14 @@ impl KeybindingsStore {
             })
             .map_err(|error| error.to_string()),
         );
+    }
+}
+
+pub(crate) fn keybindings_platform() -> KeybindingsPlatformV1 {
+    match bt_platform::host_platform() {
+        bt_platform::HostPlatform::Windows => KeybindingsPlatformV1::Windows,
+        bt_platform::HostPlatform::MacOs => KeybindingsPlatformV1::MacOs,
+        bt_platform::HostPlatform::OtherUnix => KeybindingsPlatformV1::OtherUnix,
     }
 }
 

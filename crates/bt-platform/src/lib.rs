@@ -1965,43 +1965,9 @@ pub fn file_uri_to_path(uri: &str) -> Option<std::path::PathBuf> {
 /// something that is not there, and the window says so, rather than pretending.
 #[must_use]
 pub fn file_uri_to_path_on(uri: &str, platform: HostPlatform) -> Option<std::path::PathBuf> {
-    let (scheme, rest) = uri.split_once(':')?;
-    if !scheme.eq_ignore_ascii_case("file") {
-        return None;
-    }
-    // Fragment before query: `?` inside a fragment is fragment text, and cutting
-    // the other way round would leave it behind.
-    let rest = rest.split_once('#').map_or(rest, |(head, _)| head);
-    let rest = rest.split_once('?').map_or(rest, |(head, _)| head);
-    if rest
-        .chars()
-        .any(|character| character <= ' ' || character == '\u{7f}')
-    {
-        return None;
-    }
-    // **Which characters end the authority is the platform's answer**, for the
-    // reason the body below never translates one on Unix: a backslash is a
-    // separator on Windows and a legal byte of a name everywhere else, so
-    // `file://host\share` is a host-and-a-path there and a host with no path
-    // here.
-    let authority_ends_at: &[char] = match platform {
-        HostPlatform::Windows => &['/', '\\'],
-        HostPlatform::MacOs | HostPlatform::OtherUnix => &['/'],
-    };
-    let (host, path) = match rest.strip_prefix("//") {
-        // The authority runs to the next separator; without one there is a host
-        // and no path, which names a machine rather than a file on it.
-        Some(authority) => match authority.find(authority_ends_at) {
-            Some(cut) => (&authority[..cut], &authority[cut..]),
-            None => return None,
-        },
-        None => ("", rest),
-    };
-    let host = percent_decode_utf8(host)?;
-    let path = percent_decode_utf8(path)?;
-    if path.is_empty() {
-        return None;
-    }
+    let address = bt_transcript::paths::decode_file_uri_address(uri).ok()?;
+    let host = String::from_utf8(address.authority).ok()?;
+    let path = String::from_utf8(address.path).ok()?;
     let local = host.is_empty() || host.eq_ignore_ascii_case("localhost");
     match platform {
         HostPlatform::Windows => windows_path_of_file_uri(&host, path, local),
@@ -2097,33 +2063,7 @@ fn windows_path_of_file_uri(host: &str, path: String, local: bool) -> Option<std
 /// cannot disagree about what `%20` or a stray `%` means (B-AUDIT-046 PRV-2).
 #[must_use]
 pub fn percent_decode_utf8(text: &str) -> Option<String> {
-    if !text.contains('%') {
-        return Some(text.to_owned());
-    }
-    let source = text.as_bytes();
-    let mut decoded = Vec::with_capacity(source.len());
-    let mut at = 0;
-    while at < source.len() {
-        if source[at] == b'%' {
-            let high = hex_digit(*source.get(at + 1)?)?;
-            let low = hex_digit(*source.get(at + 2)?)?;
-            decoded.push(high << 4 | low);
-            at += 3;
-        } else {
-            decoded.push(source[at]);
-            at += 1;
-        }
-    }
-    String::from_utf8(decoded).ok()
-}
-
-fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    bt_transcript::paths::decode_uri_component_utf8(text)
 }
 
 // ── File identity and this machine's names (B-AUDIT-046) ───────────────────
@@ -2818,6 +2758,70 @@ pub enum HostPlatform {
     Windows,
     MacOs,
     OtherUnix,
+}
+
+/// Why a single directory-entry name cannot be used on a platform.
+///
+/// This is a string judgement only. [`Self::Taken`] is named here so the two
+/// file-name doors can carry one refusal type, but is decided by the caller
+/// against the directory it is changing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileNameRefusal {
+    Empty,
+    Separator,
+    Dots,
+    Reserved,
+    Trailing,
+    Unwritable,
+    Taken,
+}
+
+/// Judge one directory-entry name by the filesystem grammar of `platform`.
+///
+/// Windows reserves its device stems, trailing dots, both separators and the
+/// Win32 punctuation set. POSIX systems reserve only `/` and NUL; controls are
+/// refused on every platform because this UI cannot safely display them as a
+/// name. The trim is the product's input rule, shared by create and rename.
+#[must_use]
+pub fn judge_file_name(name: &str, platform: HostPlatform) -> Option<FileNameRefusal> {
+    use FileNameRefusal as R;
+
+    let name = name.trim();
+    if name.is_empty() {
+        return Some(R::Empty);
+    }
+    if matches!(name, "." | "..") {
+        return Some(R::Dots);
+    }
+    if name.contains('/') || (platform == HostPlatform::Windows && name.contains('\\')) {
+        return Some(R::Separator);
+    }
+    if name.chars().any(|character| {
+        character == '\0'
+            || character.is_control()
+            || (platform == HostPlatform::Windows
+                && matches!(character, ':' | '*' | '?' | '"' | '<' | '>' | '|'))
+    }) {
+        return Some(R::Unwritable);
+    }
+    if platform != HostPlatform::Windows {
+        return None;
+    }
+    if name.ends_with('.') {
+        return Some(R::Trailing);
+    }
+    let stem = name.split('.').next().unwrap_or(name).to_ascii_uppercase();
+    if matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || stem
+            .strip_prefix("COM")
+            .or_else(|| stem.strip_prefix("LPT"))
+            .is_some_and(|number| {
+                matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+            })
+    {
+        return Some(R::Reserved);
+    }
+    None
 }
 
 impl HostPlatform {
