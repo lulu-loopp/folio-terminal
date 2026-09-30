@@ -535,8 +535,10 @@ ignored by that holder's rule (`update_txn::next`), not by anything here.
 writes nothing, and ends at the transaction's decision (`update_trial`).
 
 **Keyboard layout Shift tables have one observation worker**
-(`folio-layout-tables`, T-KEYBOARD-CTRLALT round 4). At application startup it
-builds every HKL returned by `GetKeyboardLayoutList`; an active HKL absent from
+(`folio-layout-tables`, T-KEYBOARD-CTRLALT round 4), started only when
+`GetKeyboardLayoutList` returned at least one layout: off Windows the list is
+always empty, and there is no thread and no channel (round 7). At application
+startup it builds every HKL returned by `GetKeyboardLayoutList`; an active HKL absent from
 the application-owned map is offered on a bounded channel without waiting. The
 worker reads the layout registry value and loads, copies and frees the System32
 layout DLL through `bt_platform::keyboard_layout_shift_table`, publishes before

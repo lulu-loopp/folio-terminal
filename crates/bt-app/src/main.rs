@@ -42046,7 +42046,7 @@ impl Runtime<'_> {
             }
         })?;
         // This observation has no refusal: off Windows it is the empty list,
-        // and the worker consequently has no layout-table work to perform.
+        // and an empty list starts no layout-table worker at all.
         let keyboard_layouts = bt_platform::keyboard_layouts();
         let layout_tables = layout_tables::LayoutTables::spawn(proxy.clone(), keyboard_layouts)?;
         let files_worker = files::FilesWorker::spawn(proxy.clone())?;

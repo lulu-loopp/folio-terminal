@@ -18,6 +18,11 @@
 //! process ends. The first time an HKL becomes `Unavailable` for a reason
 //! other than the door's `None`, one diagnostics note names the layout and the
 //! reason.
+//!
+//! **No layouts, no worker.** An empty startup list — always the answer off
+//! Windows, where there are no Win32 keyboard layouts — makes an inert
+//! `LayoutTables`: no thread, no channels, and every lookup `Unavailable`
+//! without a request.
 
 use crate::AppEvent;
 use crate::input::ShiftedCharacter;
@@ -59,6 +64,8 @@ enum Refusal {
     RequestsFull,
     /// The worker's end of either channel is gone.
     WorkerGone,
+    /// The startup list was empty, so no worker was started.
+    NoWorker,
 }
 
 impl Refusal {
@@ -66,12 +73,13 @@ impl Refusal {
         match self {
             Self::RequestsFull => "the request queue is full",
             Self::WorkerGone => "the layout-table worker has stopped",
+            Self::NoWorker => "no keyboard layout was loaded at startup, so no worker was started",
         }
     }
 }
 
 /// The window's two channel ends while the worker is there, and why nothing
-/// is offered once it is gone.
+/// is offered when it is gone or was never started.
 enum Road {
     Open {
         requests: SyncSender<KeyboardLayout>,
@@ -92,22 +100,48 @@ pub(crate) struct LayoutTables {
 }
 
 impl LayoutTables {
+    /// Start the worker on the layouts loaded at startup. `startup` is the
+    /// platform's answer, and an empty one is the decision that there is no
+    /// worker: off Windows it is always empty.
     pub(crate) fn spawn(
         proxy: EventLoopProxy<AppEvent>,
         startup: Vec<KeyboardLayout>,
     ) -> std::io::Result<Self> {
-        let (tables, worker) = road(
+        Self::start(
             startup,
             Box::new(move || {
                 let _ = proxy.send_event(AppEvent::LayoutTablesReady);
             }),
             Box::new(crate::diagnostics::note),
-        );
-        let _worker = bt_platform::spawn_at_priority(
-            "folio-layout-tables",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |worker_ctx| worker.run(worker_ctx),
-        )?;
+            |worker| {
+                bt_platform::spawn_at_priority(
+                    "folio-layout-tables",
+                    bt_platform::ThreadPriority::BelowNormal,
+                    move |worker_ctx| worker.run(worker_ctx),
+                )
+                .map(drop)
+            },
+        )
+    }
+
+    /// [`Self::spawn`] with the thread start as a seam: an empty startup list
+    /// returns before the road exists and `start` is never called.
+    fn start(
+        startup: Vec<KeyboardLayout>,
+        wake: Box<dyn Fn() + Send>,
+        note: Box<dyn Fn(&str)>,
+        start: impl FnOnce(WorkerRoad) -> std::io::Result<()>,
+    ) -> std::io::Result<Self> {
+        if startup.is_empty() {
+            return Ok(Self {
+                road: Road::Closed(Refusal::NoWorker),
+                slots: HashMap::new(),
+                requests_in_flight: 0,
+                note,
+            });
+        }
+        let (tables, worker) = road(startup, wake, note);
+        start(worker)?;
         Ok(tables)
     }
 
@@ -382,6 +416,54 @@ mod tests {
             Box::new(move |line: &str| sink.borrow_mut().push(line.to_owned())),
         );
         (tables, worker, notes)
+    }
+
+    /// RED (T-KEYBOARD-CTRLALT, round 7) — **an empty startup list starts no
+    /// worker, and every lookup is `Unavailable` without a request.**
+    ///
+    /// The empty list is the platform's answer off Windows (and on Windows
+    /// when no layout is loaded), so there is no thread and no channel there.
+    /// The thread start is `LayoutTables::start`'s seam; a one-layout list is
+    /// the control that the seam is the one the product calls.
+    ///
+    /// MUTATION: remove the `startup.is_empty()` return in
+    /// `LayoutTables::start`: the empty list starts a worker.
+    #[test]
+    fn an_empty_startup_list_starts_no_worker_and_every_lookup_is_unavailable() {
+        let notes = Rc::new(RefCell::new(Vec::new()));
+        let sink = Rc::clone(&notes);
+        let started = RefCell::new(0);
+        let mut tables = LayoutTables::start(
+            Vec::new(),
+            Box::new(|| {}),
+            Box::new(move |line: &str| sink.borrow_mut().push(line.to_owned())),
+            |_| {
+                *started.borrow_mut() += 1;
+                Ok(())
+            },
+        )
+        .expect("an empty list cannot fail to start");
+        assert_eq!(*started.borrow(), 0, "an empty list started a worker");
+
+        let active = layout(0x0409_0409);
+        assert_eq!(
+            tables.shifted_character(active.clone(), VK_E),
+            ShiftedCharacter::Unavailable
+        );
+        assert_eq!(chord(&mut tables, &active).as_deref(), Some(UNSHIFTED));
+        assert_eq!(notes.borrow().len(), 1, "{:?}", notes.borrow());
+
+        let _control = LayoutTables::start(
+            vec![active],
+            Box::new(|| {}),
+            Box::new(|_: &str| {}),
+            |_| {
+                *started.borrow_mut() += 1;
+                Ok(())
+            },
+        )
+        .expect("the seam starts");
+        assert_eq!(*started.borrow(), 1);
     }
 
     /// RED (T-KEYBOARD-CTRLALT, round 4) — **the worker builds the current
