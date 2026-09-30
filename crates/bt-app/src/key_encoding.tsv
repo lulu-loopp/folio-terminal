@@ -29,8 +29,9 @@
 ## Ctrl+Alt (with or without Shift) on a text key is built as winit really hands it over on Windows:
 ## it keeps Ctrl while Alt is down (Ctrl+Alt may be AltGr), the US layout types nothing for any of
 ## those chords, so the key arrives with no character, `Key::Unidentified(NativeKey::Windows(vk))`.
-## No legacy or protocol rung sends anything for such a key; only `records` does (the `AC`/`SAC`
-## rows of `e`, `i`, `m`, `[`, `1`). On macOS the same chords arrive as their characters.
+## The legacy rung sends nothing for such a key; `records`, `kitty`, `mok1` and `mok2` encode it as
+## the text key it is (the `AC`/`SAC` rows of `e`, `i`, `m`, `[`, `1`; T-KEYBOARD-CTRLALT), with the
+## bytes the same chords have on macOS, where they arrive as their characters.
 ## A record's character is what that layout types for the chord (`\n` for Ctrl+Enter, nothing — 0 —
 ## for Ctrl+1 or Ctrl+Shift+Enter), measured with `ToUnicodeEx` against the US layout.
 # key	location	mods	decckm	mode	bytes	note
@@ -265,14 +266,14 @@ e	standard	SC	off	mok1	\x05
 e	standard	SC	off	mok2	CSI 27;6;69~	
 e	standard	SC	off	records	\x05	
 e	standard	AC	off	legacy	—	
-e	standard	AC	off	kitty	—	
-e	standard	AC	off	mok1	—	
-e	standard	AC	off	mok2	—	
+e	standard	AC	off	kitty	CSI 101;7u	
+e	standard	AC	off	mok1	CSI 27;7;101~	
+e	standard	AC	off	mok2	CSI 27;7;101~	
 e	standard	AC	off	records	CSI 69;18;0;1;10;1_CSI 69;18;0;0;10;1_	
 e	standard	SAC	off	legacy	—	
-e	standard	SAC	off	kitty	—	
-e	standard	SAC	off	mok1	—	
-e	standard	SAC	off	mok2	—	
+e	standard	SAC	off	kitty	CSI 101;8u	
+e	standard	SAC	off	mok1	CSI 27;8;69~	
+e	standard	SAC	off	mok2	CSI 27;8;69~	
 e	standard	SAC	off	records	CSI 69;18;0;1;26;1_CSI 69;18;0;0;26;1_	
 i	standard	-	off	legacy	i	
 i	standard	-	off	kitty	i	
@@ -305,14 +306,14 @@ i	standard	SC	off	mok1	\t
 i	standard	SC	off	mok2	CSI 27;6;73~	
 i	standard	SC	off	records	\t	
 i	standard	AC	off	legacy	—	
-i	standard	AC	off	kitty	—	
-i	standard	AC	off	mok1	—	
-i	standard	AC	off	mok2	—	
+i	standard	AC	off	kitty	CSI 105;7u	
+i	standard	AC	off	mok1	CSI 27;7;105~	
+i	standard	AC	off	mok2	CSI 27;7;105~	
 i	standard	AC	off	records	CSI 73;23;0;1;10;1_CSI 73;23;0;0;10;1_	
 i	standard	SAC	off	legacy	—	
-i	standard	SAC	off	kitty	—	
-i	standard	SAC	off	mok1	—	
-i	standard	SAC	off	mok2	—	
+i	standard	SAC	off	kitty	CSI 105;8u	
+i	standard	SAC	off	mok1	CSI 27;8;73~	
+i	standard	SAC	off	mok2	CSI 27;8;73~	
 i	standard	SAC	off	records	CSI 73;23;0;1;26;1_CSI 73;23;0;0;26;1_	
 m	standard	-	off	legacy	m	
 m	standard	-	off	kitty	m	
@@ -345,14 +346,14 @@ m	standard	SC	off	mok1	(table)
 m	standard	SC	off	mok2	(table)	
 m	standard	SC	off	records	(table)	
 m	standard	AC	off	legacy	—	
-m	standard	AC	off	kitty	—	
-m	standard	AC	off	mok1	—	
-m	standard	AC	off	mok2	—	
+m	standard	AC	off	kitty	CSI 109;7u	
+m	standard	AC	off	mok1	CSI 27;7;109~	
+m	standard	AC	off	mok2	CSI 27;7;109~	
 m	standard	AC	off	records	CSI 77;50;0;1;10;1_CSI 77;50;0;0;10;1_	
 m	standard	SAC	off	legacy	—	
-m	standard	SAC	off	kitty	—	
-m	standard	SAC	off	mok1	—	
-m	standard	SAC	off	mok2	—	
+m	standard	SAC	off	kitty	CSI 109;8u	
+m	standard	SAC	off	mok1	CSI 27;8;77~	
+m	standard	SAC	off	mok2	CSI 27;8;77~	
 m	standard	SAC	off	records	CSI 77;50;0;1;26;1_CSI 77;50;0;0;26;1_	
 [	standard	-	off	legacy	[	
 [	standard	-	off	kitty	[	
@@ -385,14 +386,14 @@ m	standard	SAC	off	records	CSI 77;50;0;1;26;1_CSI 77;50;0;0;26;1_
 [	standard	SC	off	mok2	CSI 27;6;123~	
 [	standard	SC	off	records	CSI 219;26;0;1;24;1_CSI 219;26;0;0;24;1_	
 [	standard	AC	off	legacy	—	
-[	standard	AC	off	kitty	—	
-[	standard	AC	off	mok1	—	
-[	standard	AC	off	mok2	—	
+[	standard	AC	off	kitty	CSI 91;7u	
+[	standard	AC	off	mok1	CSI 27;7;91~	
+[	standard	AC	off	mok2	CSI 27;7;91~	
 [	standard	AC	off	records	CSI 219;26;0;1;10;1_CSI 219;26;0;0;10;1_	
 [	standard	SAC	off	legacy	—	
-[	standard	SAC	off	kitty	—	
-[	standard	SAC	off	mok1	—	
-[	standard	SAC	off	mok2	—	
+[	standard	SAC	off	kitty	CSI 91;8u	
+[	standard	SAC	off	mok1	CSI 27;8;123~	
+[	standard	SAC	off	mok2	CSI 27;8;123~	
 [	standard	SAC	off	records	CSI 219;26;0;1;26;1_CSI 219;26;0;0;26;1_	
 1	standard	-	off	legacy	1	
 1	standard	-	off	kitty	1	
@@ -425,14 +426,14 @@ m	standard	SAC	off	records	CSI 77;50;0;1;26;1_CSI 77;50;0;0;26;1_
 1	standard	SC	off	mok2	(table)	
 1	standard	SC	off	records	(table)	
 1	standard	AC	off	legacy	—	
-1	standard	AC	off	kitty	—	
-1	standard	AC	off	mok1	—	
-1	standard	AC	off	mok2	—	
+1	standard	AC	off	kitty	CSI 49;7u	
+1	standard	AC	off	mok1	CSI 27;7;49~	
+1	standard	AC	off	mok2	CSI 27;7;49~	
 1	standard	AC	off	records	CSI 49;2;0;1;10;1_CSI 49;2;0;0;10;1_	
 1	standard	SAC	off	legacy	—	
-1	standard	SAC	off	kitty	—	
-1	standard	SAC	off	mok1	—	
-1	standard	SAC	off	mok2	—	
+1	standard	SAC	off	kitty	CSI 49;8u	
+1	standard	SAC	off	mok1	CSI 27;8;33~	
+1	standard	SAC	off	mok2	CSI 27;8;33~	
 1	standard	SAC	off	records	CSI 49;2;0;1;26;1_CSI 49;2;0;0;26;1_	
 F1	standard	-	on	legacy	\eOP	
 F1	standard	-	on	kitty	CSI P	

@@ -7,6 +7,9 @@ All notable changes to Folio are recorded here. The format follows
 ## Unreleased
 ### Fixed
 
+- On Windows, Ctrl+Alt with a letter or digit reaches programs that asked for
+  the kitty protocol or modifyOtherKeys.
+
 ### Added
 
 - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,

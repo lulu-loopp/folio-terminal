@@ -3788,8 +3788,9 @@ mod windows_impl {
                     CPS_CANCEL, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
                 },
                 KeyboardAndMouse::{
-                    GetCapture, GetKeyboardLayout, MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX,
-                    MapVirtualKeyW, SetFocus, VkKeyScanW,
+                    GetCapture, GetKeyboardLayout, MAPVK_VK_TO_CHAR, MAPVK_VK_TO_VSC,
+                    MAPVK_VSC_TO_VK_EX, MapVirtualKeyW, SetFocus, ToUnicodeEx, VK_SHIFT,
+                    VkKeyScanW,
                 },
                 // One call that undoes one winit makes, and the four that answer
                 // the system's pan gesture — see
@@ -6687,6 +6688,45 @@ mod windows_impl {
         // SAFETY: as for `virtual_key_of_scan_code`: two integers by value.
         let answer = unsafe { MapVirtualKeyW(u32::from(virtual_key), MAPVK_VK_TO_CHAR) };
         crate::vk_to_char_marks_a_dead_key(answer)
+    }
+
+    /// The character **the installed layout** types on this virtual key with
+    /// Shift alone held — `{` on the US layout's `VK_OEM_4`, `!` on its `VK_1`,
+    /// `E` on `VK_E` — or `None` when Shift types nothing there, types a dead key,
+    /// or types more than one character.
+    ///
+    /// winit hands a Ctrl+Alt chord the layout types nothing for over with no
+    /// character at all (`Key::Unidentified`), so the one character xterm's
+    /// modifyOtherKeys names a Ctrl+Shift+Alt chord by — the key's character with
+    /// Shift applied — is asked of the layout (T-KEYBOARD-CTRLALT). `ToUnicodeEx`
+    /// with a key state holding only Shift, and flag bit 2, which leaves the
+    /// keyboard state (a pending dead key among it) as it was (Windows 10 1607 and
+    /// later). One synchronous call on the calling thread's layout, with no wait.
+    #[must_use]
+    pub fn shifted_character_of_virtual_key(virtual_key: u16) -> Option<char> {
+        const LEAVE_THE_KEYBOARD_STATE_ALONE: u32 = 0x4;
+        let mut key_state = [0u8; 256];
+        key_state[usize::from(VK_SHIFT.0)] = 0x80;
+        let mut buffer = [0u16; 4];
+        // SAFETY: `MapVirtualKeyW` and `GetKeyboardLayout` take integers by value;
+        // `ToUnicodeEx` reads the 256-byte key state and writes at most the
+        // buffer's length, both borrowed live from this frame.
+        let written = unsafe {
+            let scan_code = MapVirtualKeyW(u32::from(virtual_key), MAPVK_VK_TO_VSC);
+            ToUnicodeEx(
+                u32::from(virtual_key),
+                scan_code,
+                &key_state,
+                &mut buffer,
+                LEAVE_THE_KEYBOARD_STATE_ALONE,
+                Some(GetKeyboardLayout(0)),
+            )
+        };
+        // Negative is a dead key, 0 is nothing typed.
+        let written = usize::try_from(written).ok().filter(|count| *count > 0)?;
+        let mut characters = char::decode_utf16(buffer.get(..written)?.iter().copied());
+        let character = characters.next()?.ok()?;
+        characters.next().is_none().then_some(character)
     }
 
     pub fn wheel_scroll_amount() -> Result<WheelScrollAmount, String> {
@@ -12205,12 +12245,12 @@ pub use windows_impl::{
     pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
     register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
     set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
-    set_window_topmost, silence_std_streams, stand_window_at, standalone_alert,
-    std_error_is_console, stop_flashing_window, system_backdrop_available, system_uses_light_apps,
-    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
-    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_key_is_dead,
-    virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount, window_is_exposed,
-    work_area_at, write_std_error, write_to_console,
+    set_window_topmost, shifted_character_of_virtual_key, silence_std_streams, stand_window_at,
+    standalone_alert, std_error_is_console, stop_flashing_window, system_backdrop_available,
+    system_uses_light_apps, take_keyboard_focus, taskbar_auto_hidden_from_state,
+    taskbar_is_auto_hidden, thread_mouse_capture, top_level_window_at, virtual_key_for_character,
+    virtual_key_is_dead, virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount,
+    window_is_exposed, work_area_at, write_std_error, write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -12231,9 +12271,9 @@ pub use portable_impl::{
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
     is_window_cloaked, leave_process, let_the_system_translate_touch, read_context_menu,
     redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
-    set_system_backdrop, silence_std_streams, system_backdrop_available, thread_mouse_capture,
-    virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code, write_std_error,
-    write_to_console,
+    set_system_backdrop, shifted_character_of_virtual_key, silence_std_streams,
+    system_backdrop_available, thread_mouse_capture, virtual_key_for_character,
+    virtual_key_is_dead, virtual_key_of_scan_code, write_std_error, write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).

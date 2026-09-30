@@ -1199,6 +1199,16 @@ pub fn virtual_key_is_dead(virtual_key: u16) -> bool {
     false
 }
 
+/// The character the installed layout types on a Win32 virtual key with Shift
+/// alone. **There is no such question here**, for `virtual_key_of_scan_code`'s
+/// reason: the one reader is a Windows press that arrived with no character
+/// (T-KEYBOARD-CTRLALT).
+#[must_use]
+pub fn shifted_character_of_virtual_key(virtual_key: u16) -> Option<char> {
+    let _ = virtual_key;
+    None
+}
+
 /// How far one wheel notch scrolls. M1-3 reads the scroll preference.
 ///
 /// The caller's own fallback is three lines plus one line of stderr, so

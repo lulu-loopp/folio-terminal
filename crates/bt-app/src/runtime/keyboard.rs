@@ -1996,13 +1996,16 @@ impl Runtime<'_> {
             application_cursor_mode,
             keyboard,
             // What a win32-input-mode record is built from (T-KEYBOARD-RECORDS): where the key
-            // is, what the system typed for it, and the installed layout's virtual key.
+            // is, what the system typed for it, and the installed layout's virtual key; and what
+            // the layout types on the key with Shift, for a protocol's Ctrl+Shift+Alt chord that
+            // arrived with no character (T-KEYBOARD-CTRLALT).
             input::KeyOrigin {
                 platform: bt_platform::host_platform(),
                 physical_key: event.physical_key,
                 text_with_all_modifiers: event.text_with_all_modifiers(),
                 virtual_key_of_scan_code: bt_platform::virtual_key_of_scan_code,
                 virtual_key_is_dead: bt_platform::virtual_key_is_dead,
+                shifted_character_of_virtual_key: bt_platform::shifted_character_of_virtual_key,
                 conpty,
             },
         ) else {

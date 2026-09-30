@@ -690,6 +690,7 @@ pub(crate) fn keyboard_bytes(
             location,
             modifiers,
             application_cursor_mode,
+            origin,
         );
     }
     let mode = keyboard.modify_other_keys;
@@ -704,7 +705,7 @@ pub(crate) fn keyboard_bytes(
     if withheld_from_every_protocol(key, modifiers) {
         return None;
     }
-    modify_other_keys_bytes(key, key_without_modifiers, modifiers, mode)
+    modify_other_keys_bytes(key, key_without_modifiers, modifiers, mode, origin)
         .or_else(|| legacy_bytes(key, modifiers, application_cursor_mode))
 }
 
@@ -736,13 +737,16 @@ fn withheld_from_every_protocol(key: &Key, modifiers: ModifiersState) -> bool {
 ///    un-shifted character of `key_without_modifiers`.
 ///
 /// A text key whose layout gives it no single un-shifted character has no code, and keeps
-/// the bytes it has without the protocol.
+/// the bytes it has without the protocol. A text key that arrived with no character — on
+/// Windows, Ctrl+Alt on a key the layout types nothing for ([`unidentified_text_key`]) — is
+/// a text key here too, with the same code (T-KEYBOARD-CTRLALT).
 fn kitty_bytes(
     key: &Key,
     key_without_modifiers: &Key,
     location: KeyLocation,
     modifiers: ModifiersState,
     application_cursor_mode: bool,
+    origin: KeyOrigin<'_>,
 ) -> Option<Vec<u8>> {
     if withheld_from_every_protocol(key, modifiers) {
         return None;
@@ -792,6 +796,10 @@ fn kitty_bytes(
             Some(code) => code,
             None => return legacy_bytes(key, modifiers, application_cursor_mode),
         },
+        Key::Unidentified(_) => {
+            unidentified_text_key(key, key_without_modifiers, modifiers, origin)?;
+            unshifted_code(key, key_without_modifiers)?
+        }
         _ => return None,
     };
     Some(csi_u(code, modifier))
@@ -902,11 +910,19 @@ fn kitty_function_key(
 /// can arrive as its control character, and then `k` is the key without modifiers,
 /// upper-cased when Shift is held. Backspace's code is 127, because Folio's Backspace sends
 /// DEL (xterm's reference used 8 for its `^H`).
+///
+/// A text key that arrived with no character — on Windows, Ctrl+Alt on a key the layout types
+/// nothing for ([`unidentified_text_key`]) — is classed by its key without modifiers like any
+/// text key, and its `k` is that character, or with Shift held the character the installed
+/// layout types on the key with Shift alone ([`KeyOrigin::shifted_character_of_virtual_key`]:
+/// `{` for Ctrl+Shift+Alt+`[` on a US layout), since the press itself carries none
+/// (T-KEYBOARD-CTRLALT).
 fn modify_other_keys_bytes(
     key: &Key,
     key_without_modifiers: &Key,
     modifiers: ModifiersState,
     mode: ModifyOtherKeys,
+    origin: KeyOrigin<'_>,
 ) -> Option<Vec<u8>> {
     let (shift, alt, control) = (
         modifiers.shift_key(),
@@ -917,6 +933,16 @@ fn modify_other_keys_bytes(
         return None;
     }
     let every = mode == ModifyOtherKeys::Two;
+    // A text key is classed by its key without modifiers (xterm's table); `keysym` is its code.
+    let text_key_class = |base: char, keysym: char| {
+        let has_a_control_code = control_byte(base.encode_utf8(&mut [0; 4])).is_some();
+        let encoded = if has_a_control_code {
+            alt || every
+        } else {
+            control || alt
+        };
+        (u32::from(keysym), encoded)
+    };
     let (code, encoded) = match key {
         Key::Named(NamedKey::Enter) => (13, true),
         Key::Named(NamedKey::Tab) => (9, true),
@@ -938,13 +964,18 @@ fn modify_other_keys_bytes(
                         Some(base)
                     }
                 })?;
-            let has_a_control_code = control_byte(base.encode_utf8(&mut [0; 4])).is_some();
-            let encoded = if has_a_control_code {
-                alt || every
+            text_key_class(base, keysym)
+        }
+        Key::Unidentified(_) => {
+            let virtual_key = unidentified_text_key(key, key_without_modifiers, modifiers, origin)?;
+            let base = one_character(key_without_modifiers)?;
+            let keysym = if shift {
+                (origin.shifted_character_of_virtual_key)(virtual_key)
+                    .filter(|character| !character.is_control())?
             } else {
-                control || alt
+                base
             };
-            (u32::from(keysym), encoded)
+            text_key_class(base, keysym)
         }
         _ => return None,
     };
@@ -971,6 +1002,11 @@ pub(crate) struct KeyOrigin<'a> {
     /// Whether the installed layout makes a virtual key a dead key: `bt_platform::virtual_key_is_dead`
     /// in the product, a fixed layout in a test.
     pub(crate) virtual_key_is_dead: fn(u16) -> bool,
+    /// The character the installed layout types on a virtual key with Shift alone:
+    /// `bt_platform::shifted_character_of_virtual_key` in the product, a fixed layout in a test.
+    /// modifyOtherKeys' `k` for Ctrl+Shift+Alt on a key that arrived with no character
+    /// ([`modify_other_keys_bytes`], T-KEYBOARD-CTRLALT).
+    pub(crate) shifted_character_of_virtual_key: fn(u16) -> Option<char>,
     /// Which pseudoconsole the pane runs on (`bt_pty::PtySession::conpty_kind`, fixed at spawn).
     /// Records are written only to the ConPTY Folio ships ([`key_records`]).
     pub(crate) conpty: ConPtyKind,
@@ -1081,22 +1117,10 @@ fn key_records(
                 None => (origin.virtual_key_of_scan_code)(scan?)?,
             }
         }
-        // Ctrl+Alt on a text key the layout types nothing for: winit keeps Ctrl while Alt is down
-        // (Ctrl+Alt may be AltGr) and, finding no text, hands the key over with no character but
-        // the virtual key Windows reported. It is a text key if its key without modifiers is
-        // text, the layout types an ordinary character on it (not a dead key, which winit also
-        // reports as text), and it has a position; anything else (a media key, a dead key, a key
-        // with no scan code) is not.
-        Key::Unidentified(NativeKey::Windows(virtual_key))
-            if control
-                && scan.is_some()
-                && matches!(
-                    key_without_modifiers,
-                    Key::Character(text) if !text.chars().any(char::is_control)
-                )
-                && !(origin.virtual_key_is_dead)(*virtual_key) =>
-        {
-            *virtual_key
+        // Ctrl+Alt on a text key the layout types nothing for: the record carries the virtual key
+        // Windows reported.
+        Key::Unidentified(_) => {
+            unidentified_text_key(key, key_without_modifiers, modifiers, origin)?
         }
         _ => return None,
     };
@@ -1128,6 +1152,40 @@ fn key_records(
     let scan = scan & 0x00FF;
     let record = |down: u8| format!("\x1b[{virtual_key};{scan};{character};{down};{state};1_");
     Some(format!("{}{}", record(1), record(0)).into_bytes())
+}
+
+/// **Whether a key that arrived with no character is an ordinary text key** — and if so, the
+/// virtual key Windows reported for it. The one answer the three rungs that encode such a key
+/// share: win32-input-mode records ([`key_records`]), kitty's flag 1 ([`kitty_bytes`]) and
+/// modifyOtherKeys ([`modify_other_keys_bytes`]) (T-KEYBOARD-CTRLALT).
+///
+/// On Windows winit keeps Ctrl while Alt is down, because Ctrl+Alt may be AltGr
+/// (`WindowsModifiers::remove_only_ctrl`, winit 0.30.13 `platform_impl/windows/keyboard_layout.rs`,
+/// applied in `keyboard.rs`'s key-event builder), and when `ToUnicodeEx` types nothing for that
+/// state it hands the key over as `Key::Unidentified(NativeKey::Windows(vk))` — on a US layout,
+/// every Ctrl+Alt and Ctrl+Shift+Alt chord on a text key. Such a press is a text key when Ctrl is
+/// held, its key without modifiers is text, it has a position ([`scan_code`]), and the installed
+/// layout does not make the virtual key a dead key ([`KeyOrigin::virtual_key_is_dead`]; winit
+/// reports a dead key's key without modifiers as the character it would compose). A media key, a
+/// key with no scan code and a dead key are not. Under either protocol the key's code is then its
+/// key without modifiers, as for any text key (design note §4.2, §4.3).
+fn unidentified_text_key(
+    key: &Key,
+    key_without_modifiers: &Key,
+    modifiers: ModifiersState,
+    origin: KeyOrigin<'_>,
+) -> Option<u16> {
+    let Key::Unidentified(NativeKey::Windows(virtual_key)) = key else {
+        return None;
+    };
+    (modifiers.control_key()
+        && scan_code(origin.physical_key).is_some()
+        && matches!(
+            key_without_modifiers,
+            Key::Character(text) if !text.chars().any(char::is_control)
+        )
+        && !(origin.virtual_key_is_dead)(*virtual_key))
+    .then_some(*virtual_key)
 }
 
 /// **A key's set-1 scan code, from where it is on the keyboard** — an `E0`-prefixed key as
@@ -3224,6 +3282,7 @@ mod tests {
         text_with_all_modifiers: None,
         virtual_key_of_scan_code: no_virtual_key,
         virtual_key_is_dead: no_dead_keys,
+        shifted_character_of_virtual_key: us_shifted_character,
         conpty: ConPtyKind::Shipped,
     };
 
@@ -3251,6 +3310,16 @@ mod tests {
                     .map(|letter| u16::from(letter.to_ascii_uppercase() as u8));
             }
         })
+    }
+
+    /// What the US layout types on a virtual key with Shift alone — `ToUnicodeEx` with only
+    /// `VK_SHIFT` down: the shifted character of the key whose virtual key it is ([`us_shifted`]),
+    /// `{` for `VK_OEM_4`, `!` for `VK_1`, `E` for `VK_E`.
+    fn us_shifted_character(virtual_key: u16) -> Option<char> {
+        "`1234567890-=[]\\;',./abcdefghijklmnopqrstuvwxyz"
+            .chars()
+            .find(|character| us_virtual_key_of(&character.to_string()) == Some(virtual_key))
+            .map(us_shifted)
     }
 
     /// The US layout's virtual key for the key the table names by its unshifted character.
@@ -3382,6 +3451,7 @@ mod tests {
                 text_with_all_modifiers: self.text.as_deref(),
                 virtual_key_of_scan_code: us_virtual_key,
                 virtual_key_is_dead: no_dead_keys,
+                shifted_character_of_virtual_key: us_shifted_character,
                 conpty: if platform == HostPlatform::Windows {
                     ConPtyKind::Shipped
                 } else {
@@ -3998,6 +4068,7 @@ mod tests {
                     text_with_all_modifiers: typed,
                     virtual_key_of_scan_code: us_virtual_key,
                     virtual_key_is_dead: no_dead_keys,
+                    shifted_character_of_virtual_key: us_shifted_character,
                     conpty: ConPtyKind::Shipped,
                 },
             )
@@ -4122,6 +4193,7 @@ mod tests {
                     text_with_all_modifiers: Some("\n"),
                     virtual_key_of_scan_code: us_virtual_key,
                     virtual_key_is_dead: no_dead_keys,
+                    shifted_character_of_virtual_key: us_shifted_character,
                     conpty: ConPtyKind::Shipped,
                 },
             )
@@ -4392,9 +4464,9 @@ mod tests {
     /// for the circumflex; for `ж` the whole answer is `0`. Both layouts are modelled here by that
     /// answer, read through the product's own reading of it (`bt_platform::vk_to_char_marks_a_dead_key`).
     ///
-    /// MUTATION: drop the `virtual_key_is_dead` condition from `key_records`' `Key::Unidentified`
-    /// arm (the dead `^` reads `ESC[221;26;0;1;10;1_…`), or refuse a key the map answers `0` for
-    /// (the Kazakh `ж` reads nothing).
+    /// MUTATION: drop the `virtual_key_is_dead` condition from `unidentified_text_key` (the dead
+    /// `^` reads `ESC[221;26;0;1;10;1_…`), or refuse a key the map answers `0` for (the Kazakh `ж`
+    /// reads nothing).
     #[test]
     fn a_dead_key_under_ctrl_alt_is_not_a_record() {
         /// `MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)` on the French layout: the dead circumflex on
@@ -4427,6 +4499,7 @@ mod tests {
                     text_with_all_modifiers: None,
                     virtual_key_of_scan_code: no_virtual_key,
                     virtual_key_is_dead: is_dead,
+                    shifted_character_of_virtual_key: us_shifted_character,
                     conpty: ConPtyKind::Shipped,
                 },
             )
@@ -4524,8 +4597,8 @@ mod tests {
     /// assumed. The record carries the virtual key Windows reported. A media key in the same
     /// shape (no text key under it) and a text key with no position are not records.
     ///
-    /// MUTATION: drop `key_records`' `Key::Unidentified(NativeKey::Windows(_))` arm (the
-    /// first three assertions read nothing).
+    /// MUTATION: drop `key_records`' `Key::Unidentified(_)` arm (the first three assertions read
+    /// nothing).
     #[test]
     fn ctrl_alt_on_a_text_key_as_winit_hands_it_over_is_a_record() {
         let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
@@ -4544,6 +4617,7 @@ mod tests {
                     text_with_all_modifiers: None,
                     virtual_key_of_scan_code: us_virtual_key,
                     virtual_key_is_dead: no_dead_keys,
+                    shifted_character_of_virtual_key: us_shifted_character,
                     conpty: ConPtyKind::Shipped,
                 },
             )
@@ -4608,6 +4682,164 @@ mod tests {
         );
     }
 
+    /// RED (T-KEYBOARD-CTRLALT) — **Ctrl+Alt and Ctrl+Shift+Alt on a letter or a digit reach a
+    /// program that asked for the kitty protocol or modifyOtherKeys on Windows, as winit really
+    /// hands the press over, with the bytes they have on a Mac.**
+    ///
+    /// winit keeps Ctrl while Alt is down on Windows (Ctrl+Alt may be AltGr), and the US layout
+    /// types nothing for these chords, so each arrives as `Key::Unidentified(NativeKey::Windows(vk))`
+    /// with its key without modifiers ([`windows_us_event`]); on a Mac the same chord arrives as
+    /// its character ([`windows_us`]). Both must be encoded alike. The bytes are written here from
+    /// the design note, not read from the encoder: the modifier value is `1 + Shift 1 + Alt 2 +
+    /// Ctrl 4` (§4.1's table: 7 for Ctrl+Alt, 8 with Shift); flag 1's code is the un-shifted key
+    /// (§4.2 rule 6: `e` 101, `1` 49); modifyOtherKeys' `k` is the character with Shift applied
+    /// (§4.3: `E` 69, `!` 33, `{` 123), and both modes encode these chords — `e` and `[` have a
+    /// legacy Ctrl code and Alt is held, `1` has none and Ctrl is held. A program that asked for
+    /// neither still gets nothing on Windows (the legacy column), as before.
+    ///
+    /// MUTATION: drop `kitty_bytes`' `Key::Unidentified(_)` arm (the Windows flag-1 assertions read
+    /// nothing), or drop `modify_other_keys_bytes`' `Key::Unidentified(_)` arm (the Windows
+    /// modifyOtherKeys assertions read nothing), or take the Ctrl+Shift+Alt `k` from the key
+    /// without modifiers instead of the layout's Shift character (Ctrl+Shift+Alt+1 reads 49).
+    #[test]
+    fn ctrl_alt_on_a_text_key_reaches_the_kitty_protocol_and_modify_other_keys_on_windows() {
+        let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
+        let ctrl_shift_alt = ctrl_alt | ModifiersState::SHIFT;
+        let cases: [(&str, ModifiersState, &str, &str); 6] = [
+            ("e", ctrl_alt, "\x1b[101;7u", "\x1b[27;7;101~"),
+            ("e", ctrl_shift_alt, "\x1b[101;8u", "\x1b[27;8;69~"),
+            ("1", ctrl_alt, "\x1b[49;7u", "\x1b[27;7;49~"),
+            ("1", ctrl_shift_alt, "\x1b[49;8u", "\x1b[27;8;33~"),
+            ("[", ctrl_alt, "\x1b[91;7u", "\x1b[27;7;91~"),
+            ("[", ctrl_shift_alt, "\x1b[91;8u", "\x1b[27;8;123~"),
+        ];
+        for (name, modifiers, kitty, modify_other_keys) in cases {
+            let press = UsPress::new(name, modifiers);
+            let (windows_logical, windows_base) = windows_us_event(name, modifiers);
+            assert!(
+                matches!(windows_logical, Key::Unidentified(NativeKey::Windows(_))),
+                "{name} {modifiers:?}: winit hands it over with no character on Windows"
+            );
+            let (mac_logical, mac_base) = windows_us(name, modifiers.shift_key());
+            for (logical, base, platform) in [
+                (&windows_logical, &windows_base, HostPlatform::Windows),
+                (&mac_logical, &mac_base, HostPlatform::MacOs),
+            ] {
+                let sent = |protocol| {
+                    keyboard_bytes(
+                        logical,
+                        base,
+                        KeyLocation::Standard,
+                        modifiers,
+                        false,
+                        protocol,
+                        press.on(platform),
+                    )
+                    .map(|bytes| String::from_utf8(bytes).expect("ASCII"))
+                };
+                let where_ = format!("{name} {modifiers:?} on {platform:?}");
+                assert_eq!(sent(KITTY).as_deref(), Some(kitty), "{where_}: flag 1");
+                assert_eq!(
+                    sent(MOK1).as_deref(),
+                    Some(modify_other_keys),
+                    "{where_}: modifyOtherKeys 1"
+                );
+                assert_eq!(
+                    sent(MOK2).as_deref(),
+                    Some(modify_other_keys),
+                    "{where_}: modifyOtherKeys 2"
+                );
+            }
+            let unasked = keyboard_bytes(
+                &windows_logical,
+                &windows_base,
+                KeyLocation::Standard,
+                modifiers,
+                false,
+                UNASKED,
+                press.on(HostPlatform::Windows),
+            );
+            assert_eq!(
+                unasked, None,
+                "{name} {modifiers:?}: nothing asked, nothing sent"
+            );
+        }
+    }
+
+    /// RED (T-KEYBOARD-CTRLALT) — **a dead key under Ctrl+Alt sends nothing under any protocol;
+    /// an ordinary key of the same layout is encoded.**
+    ///
+    /// The French dead `^` (`VK_OEM_6`, scan code 26) under Ctrl+Alt arrives in the same shape as
+    /// a text key — `Key::Unidentified`, with the key without modifiers `^` — because winit reports
+    /// a dead key as the character it would compose. The one eligibility the three rungs share
+    /// ([`unidentified_text_key`]) refuses it by the layout's dead-key bit, so neither protocol
+    /// encodes it, nor does a record. The French `1` key (`&` unshifted) is encoded as `&` (38).
+    ///
+    /// MUTATION: drop the `virtual_key_is_dead` condition from `unidentified_text_key` (the dead
+    /// `^` reads `CSI 94;7u` under flag 1).
+    #[test]
+    fn a_dead_key_under_ctrl_alt_sends_nothing_under_any_protocol() {
+        fn french_is_dead(virtual_key: u16) -> bool {
+            let answer = if virtual_key == 0xDD {
+                0x8000_005E
+            } else {
+                0x26
+            };
+            bt_platform::vk_to_char_marks_a_dead_key(answer)
+        }
+        fn french_shifted(virtual_key: u16) -> Option<char> {
+            (virtual_key == 0x31).then_some('1')
+        }
+        let ctrl_alt = ModifiersState::CONTROL | ModifiersState::ALT;
+        let sent = |virtual_key: u16, base: &str, physical, modifiers, protocol| {
+            keyboard_bytes(
+                &Key::Unidentified(NativeKey::Windows(virtual_key)),
+                &Key::Character(base.into()),
+                KeyLocation::Standard,
+                modifiers,
+                false,
+                protocol,
+                KeyOrigin {
+                    platform: HostPlatform::Windows,
+                    physical_key: PhysicalKey::Code(physical),
+                    text_with_all_modifiers: None,
+                    virtual_key_of_scan_code: no_virtual_key,
+                    virtual_key_is_dead: french_is_dead,
+                    shifted_character_of_virtual_key: french_shifted,
+                    conpty: ConPtyKind::Shipped,
+                },
+            )
+        };
+        for protocol in [UNASKED, KITTY, MOK1, MOK2, RECORDS] {
+            for modifiers in [ctrl_alt, ctrl_alt | ModifiersState::SHIFT] {
+                assert_eq!(
+                    sent(0xDD, "^", KeyCode::BracketLeft, modifiers, protocol),
+                    None,
+                    "the French dead circumflex, {modifiers:?}, {protocol:?}"
+                );
+            }
+        }
+        assert_eq!(
+            sent(0x31, "&", KeyCode::Digit1, ctrl_alt, KITTY),
+            Some(b"\x1b[38;7u".to_vec())
+        );
+        assert_eq!(
+            sent(0x31, "&", KeyCode::Digit1, ctrl_alt, MOK1),
+            Some(b"\x1b[27;7;38~".to_vec())
+        );
+        assert_eq!(
+            sent(
+                0x31,
+                "&",
+                KeyCode::Digit1,
+                ctrl_alt | ModifiersState::SHIFT,
+                MOK2
+            ),
+            Some(b"\x1b[27;8;49~".to_vec()),
+            "Shift on the French `&` key types `1`, and the layout says so"
+        );
+    }
+
     /// RED (T-KEYBOARD-RECORDS) — **a record is the press as Windows reported it, on any layout:
     /// the layout's virtual key for where the key is, and the character it typed.**
     ///
@@ -4637,6 +4869,7 @@ mod tests {
             text_with_all_modifiers: typed,
             virtual_key_of_scan_code: layout_answers_a_for_the_a_key_and_end_for_numpad_1,
             virtual_key_is_dead: no_dead_keys,
+            shifted_character_of_virtual_key: us_shifted_character,
             conpty: ConPtyKind::Shipped,
         };
         let sent = |key: &Key, location, modifiers, origin| {
