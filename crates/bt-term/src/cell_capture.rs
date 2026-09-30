@@ -42,6 +42,7 @@ pub(crate) fn captured_row_fingerprint(
     seed: u64,
 ) -> CapturedRowFingerprint {
     let mut hasher = RowHasher(seed);
+    let mut last_link: Option<(*const u8, usize)> = None;
     0x4254_524f_5731_u64.hash(&mut hasher);
     for column in 0..term.columns() {
         let cell = &term.grid()[Line(row as i32)][Column(column)];
@@ -51,10 +52,14 @@ pub(crate) fn captured_row_fingerprint(
         capture_color(cell.fg).hash(&mut hasher);
         capture_color(cell.bg).hash(&mut hasher);
         if let Some(link) = cell.hyperlink() {
+            let identity = (link.uri().as_ptr(), link.uri().len());
             true.hash(&mut hasher);
+            (last_link != Some(identity)).hash(&mut hasher);
             link.uri().hash(&mut hasher);
+            last_link = Some(identity);
         } else {
             false.hash(&mut hasher);
+            last_link = None;
         }
         cell.flags
             .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
@@ -199,14 +204,16 @@ pub(crate) fn to_captured_row(row: &[Cell]) -> CapturedRow {
             }
         })
         .collect();
-    CapturedRow {
+    let mut captured = CapturedRow {
         cells,
         continues,
         shell_mark: None,
         // The grid row's own length: every vendor row is dense to the terminal's width, so this
         // is the width the application was writing at when it ended this row.
         captured_columns: row.len() as u32,
-    }
+    };
+    captured.trim_program_url_hyperlink_spans();
+    captured
 }
 
 fn capture_flags(flags: Flags) -> CellFlags {
