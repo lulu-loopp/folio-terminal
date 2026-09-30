@@ -7,6 +7,17 @@ All notable changes to Folio are recorded here. The format follows
 ## Unreleased
 ### Fixed
 
+- After a power cut while an update was being installed, the card says the
+  update was interrupted, not that the new version did not start.
+- A release that needs a newer Folio to install it says this version is too
+  old to update itself, instead of "not verified".
+- An update stopped by a file another program holds open names that file.
+- Update lines are no longer written twice in `diagnostics.log`.
+- An update check read from a local test feed is not offered to later
+  ordinary starts.
+- On macOS, Folio no longer leaves an empty lock file behind for every data
+  folder it has used; old ones are cleared at start.
+
 ### Added
 
 - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,

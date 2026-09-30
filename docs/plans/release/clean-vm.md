@@ -805,14 +805,14 @@ pwsh -File scripts/release/cleanvm/updater/run-row.ps1 `
 | ☐ | W3 | 按「重启」 | `Handoff`,Run 值未写 | 登录:无入口;第一次启动 R 把日志退回 `Prepared`(`Reverted`),打开旧版并出重启卡。**与 (b).2 原文不同**:原文说第一个锁持有者从 W4 开始应用;已发布规则是退回(DESIGN 2026-09-27,U-23) |
 | ☐ | W4 | 同上 | `Handoff`,Run 值已写、`Armed` 未落盘(自旋盯 Run 键) | 登录 R:删 Run 值,退回 `Prepared`,无文件被移动,打开旧版出重启卡 |
 | ☐ | W5 | 同上 | `Armed`,0 次移动 | 登录 R:`Reverted` → `Prepared`,删 Run 值,重启卡。**与 (b).2 原文不同**:不是「admission → Moving」,而是退回 |
-| ☐ | W6 | 同上 | `Moving`(部分文件已移) | I1′ 成立;登录 R:`RollbackIntent, RolledBack, Retired`,旧版按摘要复原,删 Run 值,以 `--update-failed` 打开(卡片文案见 U-31 D-7) |
+| ☐ | W6 | 同上 | `Moving`(部分文件已移) | I1′ 成立;登录 R:`RollbackIntent, RolledBack, Retired`,旧版按摘要复原,删 Run 值,以 `--update-failed` 打开;卡 *The update was interrupted before the new version started. / Previous version restored.*;诊断行 `BT_UPDATE_RECOVER the update was interrupted before the new version started` |
 | ☐ | W7 | 同上 | `Trial`,无 receipt | 登录 R:`the trial <pid> gave no receipt` → 回滚 → `--update-failed` |
 | ☐ | W8 | 同上 | `Trial`,receipt 已写(自旋盯 receipt) | 登录 R:`Committed, Retired`,`nobody is waiting; nothing was started`(登录时不开窗,U-31 D-12 待裁);普通启动打开 B |
 | ☐ | W9 | 同上,trial 一出现就被结束 | `RollbackIntent` | 登录 R:`RolledBack, Retired`,`--update-failed` |
-| ☐ | W10 | 同上,且新的 `folio.msix` 被不共享地持有 | `Stuck` | 断电后持有消失;登录 R:`RolledBack, Retired`,`--update-failed`。持有仍在时卡片是 *Update incomplete.* 并指出文件夹(U-31 未拍到;诊断行指错了原因,D-9) |
+| ☐ | W10 | 同上,且新的 `folio.msix` 被不共享地持有 | `Stuck` | 断电后持有消失;登录 R:`RolledBack, Retired`,`--update-failed`。持有仍在时恢复在移回前停止(`Stuck`),原因 `` `folio.msix` in the install could not be read or moved out: held open by another program ``;卡片是 *Update incomplete.* 并指出文件夹 |
 | ☐ | W11 | 同 W9 | `RolledBack` | 登录 R:`Retired`,删 Run 值,`--update-failed` |
 | ☐ | W12 | 同 W3 | `Committed`,receipt 在、Run 值还在 | 登录 R:`Retired`,不开窗(D-12);B 已装;下一次启动删 `H\<txn>` |
-| ☐ | W13 | 更新后 1–2 秒内取消 | `Abandoned` | 无日志、无 `H\<txn>`、无 Run 值;旧版完整。W13 的第一次普通启动不带源按「更新」:*Download stopped.*(D-10) |
+| ☐ | W13 | 更新后 1–2 秒内取消 | `Abandoned` | 无日志、无 `H\<txn>`、无 Run 值;旧版完整。W13 的第一次普通启动不带 `--update-feed`,源的回答不保留,不出更新卡;检查直接问 github.com |
 | ☐ | W14 | 更新 → 重启;Run 值一出现,监视器以 `Read`、共享 `Read`(无 delete、无 write)打开 `H\journal.json` 3 秒 | 不断电 | rename 重试扛过去:`wrote [Armed, Moving, Trial, Committed, Retired]`,trial 是那扇窗 |
 | ☐ | W14long | 同上,持有 120 秒。**前提:A 为 0.4.7 或更高**(A = 0.4.6 时是已知问题:新版以未记录状态运行,直到下次启动或登录完成更新;本行不执行) | 不断电;句柄持有覆盖 applier 的 `TrialBegan` 写入及其回滚声明 | 句柄持有期间:`diagnostics.log` 包含 `the trial <pid> could not be recorded`,然后 `is asked to quit`,然后 `started …\folio.exe`;唯一的 Folio 窗口是以 trial 启动的新版,卡片显示「Update incomplete.」并指出文件夹;日志停留在 `Moving`;Run 值仍存在。释放句柄后,trial 的 watchdog 到期时(该 trial 启动后 102 s、204 s、408 s、816 s;至多四次,前一次恢复仍在运行时不启动下一次)或在下次启动/登录时立即完成:`BT_UPDATE_TRIAL … it is handed back to …\rescue\folio.exe (ready)`(仅 watchdog 路径),然后 `BT_UPDATE_RECOVER the trial <pid> runs and its receipt names it, and the journal does not record it: it is recorded`。句柄仍持有时,人手动启动触发的恢复记录 `BT_UPDATE_RECOVER deferred: …` 且不启动第二个进程 trial 窗口不会被自行结束;唯一可以结束从未变为 ready 的 trial 的是持有事务的恢复进程。日志最终为 `Retired{Committed}`;Run 值 `FolioUpdate-<txn8>` 已删除;安装目录为 B 版;唯一的窗口是句柄持有期间启动的 trial,保留不变,卡片现显示「Updated.」;持有期间在该窗口做的更改(如设置)保留。释放句柄后普通启动 Folio 立即到达相同终态,不再启动 B 的第二个进程 |
 | ☐ | W15 | 从 `Prepared` 起以 `Read`、共享 `None` 持有 `H\<txn>\rescue\folio.exe` 40 秒,再按「重启」 | 不断电 | `its applier could not be started` → `Abandoned`,无文件被移动;旧 Folio `leaving after an update: started …`,普通方式打开一次。(启动仅迟缓、应答未在 15 秒 `HANDOFF_DEADLINE` 内到达的路径由单元测试 `a_hand_over_with_no_answer_in_time_still_opens_folio_once` 覆盖) |
