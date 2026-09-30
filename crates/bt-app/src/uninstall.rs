@@ -8,7 +8,7 @@ use crate::{
 };
 use bt_platform::HostPlatform;
 use bt_platform::admission::WorkerCtx;
-use bt_platform::deferred_removal::{Item, Removal};
+use bt_platform::deferred_removal::{FailureWords, FileIdentity, Item, Removal, WaitFor};
 use bt_platform::install_flip::Running;
 use std::{
     ffi::OsString,
@@ -511,6 +511,9 @@ struct Scope {
     launch_agents: Option<PathBuf>,
     /// macOS: this bundle's installation home, `<parent>/.<Bundle>.folio-update`.
     update_home: Option<PathBuf>,
+    /// A private random child directory is made below this per-user root for
+    /// the native remover. In a sandbox it stays below `BT_UNINSTALL_ROOT`.
+    remover_home: PathBuf,
     sandbox: Option<PathBuf>,
     /// The language the door speaks: English for `--uninstall-cleanup`, the
     /// settings' for `--uninstall` ([`Scope::speaking`]).
@@ -630,6 +633,15 @@ impl Scope {
         } else {
             (None, None)
         };
+        let remover_home = if sandbox {
+            temp.join("Folio")
+        } else {
+            match platform {
+                HostPlatform::Windows => named("LOCALAPPDATA")?.join("Folio"),
+                HostPlatform::MacOs => home.join("Library/Application Support/Folio"),
+                HostPlatform::OtherUnix => temp.join("folio"),
+            }
+        };
         let mut agents: [Vec<PathBuf>; 3] = Default::default();
         for (index, (variable, default)) in [
             ("CLAUDE_CONFIG_DIR", ".claude"),
@@ -653,6 +665,7 @@ impl Scope {
             purge_roots,
             launch_agents,
             update_home,
+            remover_home,
             sandbox: sandbox.then(|| temp.clone()),
             lang: Lang::English,
         })
@@ -1290,6 +1303,15 @@ pub(crate) fn standalone<R>(body: impl FnOnce(&WorkerCtx) -> R) -> R {
     )
 }
 
+/// Enter the copied native remover's own standalone main. Its private argv
+/// word is checked before console adoption and before any window path.
+pub(crate) fn remover_standalone<R>(body: impl FnOnce(&WorkerCtx) -> R) -> R {
+    bt_platform::admission::enter_standalone_main("folio-uninstall-remove", body).expect(
+        "the native remover is answered first in `fn main`, on a main thread with no role, and \
+         enters once",
+    )
+}
+
 /// The door, for either verb: `--uninstall-cleanup [--purge]`, or
 /// `--uninstall [--remove-data] [--after-pid <pid>]` (T-UNINSTALL-UX).
 pub(crate) fn run(door: crate::cli::UninstallDoor) -> i32 {
@@ -1431,8 +1453,23 @@ fn uninstall(
     cleanup: impl FnOnce(&Scope) -> Report,
     program: impl FnOnce(&Scope) -> Vec<Entry>,
 ) -> Report {
+    uninstall_waiting(worker, scope, asker, within, waited_for, cleanup, program)
+}
+
+/// The same ordering with the process wait supplied as a behavior seam. Tests
+/// use a readiness/release handshake here, so the ordering proof contains no
+/// sleep chosen to make a child "probably" still alive.
+fn uninstall_waiting(
+    worker: &WorkerCtx,
+    scope: &Scope,
+    asker: Option<Running>,
+    within: Duration,
+    wait: impl FnOnce(&WorkerCtx, Running, Duration) -> bool,
+    cleanup: impl FnOnce(&Scope) -> Report,
+    program: impl FnOnce(&Scope) -> Vec<Entry>,
+) -> Report {
     if let Some(asker) = asker
-        && !waited_for(worker, asker, within)
+        && !wait(worker, asker, within)
     {
         return Report::blocked(Why::Said(Text::CleanupRunning)).in_lang(scope.lang);
     }
@@ -1523,16 +1560,16 @@ pub(crate) const fn manager_name(manager: Manager) -> &'static str {
 /// for a copy a package manager installed, its command and nothing removed.
 /// What is removed is derived from the running executable ([`program_plan`]);
 /// `schedule` is `bt_platform::deferred_removal::schedule` in the product, and
-/// the folder its script is written into is the system's temporary directory
-/// (the sandbox's in a test).
+/// the copied native remover lives in a random private directory below the
+/// account's Folio local-data directory (the sandbox's in a test).
 fn remove_the_program(
     worker: &WorkerCtx,
     scope: &Scope,
     channel: crate::install_channel::Channel,
     platform: HostPlatform,
-    members: impl FnOnce(&Path) -> Result<Vec<String>, String>,
+    members: impl FnOnce(&Path) -> Result<Vec<bt_winres::release_manifest::Member>, String>,
     after: &[Running],
-    schedule: impl FnOnce(&Removal, &Path) -> io::Result<()>,
+    schedule: impl FnOnce(&WorkerCtx, &Removal, &Path) -> io::Result<()>,
 ) -> Vec<Entry> {
     let label = program_label(scope.lang);
     if let crate::install_channel::Channel::Managed {
@@ -1550,15 +1587,47 @@ fn remove_the_program(
         Err(why) => return vec![Entry::new(label, Fate::Refused(why))],
     };
     let row = format!("{label}: {}", plan.root.display());
+    let mut waited = after.to_vec();
+    match bt_platform::install_flip::running_from(&plan.program) {
+        Ok(running) => {
+            for process in running {
+                if !waited.contains(&process) {
+                    waited.push(process);
+                }
+            }
+        }
+        Err(error) => {
+            return vec![Entry::new(label, Fate::Refused(Why::of(&error)))];
+        }
+    }
+    let fallback_name = plan
+        .program
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("folio"))
+        .to_os_string();
     let removal = Removal {
-        after: after.to_vec(),
+        program: plan.program,
+        program_identity: plan.program_identity,
+        after: waited
+            .into_iter()
+            .map(|process| WaitFor {
+                process,
+                name: bt_platform::install_flip::image_name(process)
+                    .unwrap_or_else(|| fallback_name.clone()),
+            })
+            .collect(),
         items: plan.items,
         folder: plan.folder,
+        words: FailureWords {
+            title: crate::APP_NAME.to_owned(),
+            still_running: Text::UninstallStillRunning.in_lang(scope.lang).to_owned(),
+            files_left: Text::UninstallFilesLeft.in_lang(scope.lang).to_owned(),
+            result_at: Text::UninstallResultAt.in_lang(scope.lang).to_owned(),
+        },
     };
-    let scripts = scope.sandbox.clone().unwrap_or_else(std::env::temp_dir);
     let mut entries = vec![Entry::new(
         &row,
-        match schedule(&removal, &scripts) {
+        match schedule(worker, &removal, &scope.remover_home) {
             Ok(()) => Fate::Scheduled,
             Err(error) => Fate::Refused(Why::of(&error)),
         },
@@ -1575,6 +1644,8 @@ fn remove_the_program(
 #[derive(Debug, PartialEq, Eq)]
 struct ProgramPlan {
     root: PathBuf,
+    program: PathBuf,
+    program_identity: FileIdentity,
     items: Vec<Item>,
     folder: Option<PathBuf>,
     not_ours: Vec<PathBuf>,
@@ -1601,44 +1672,78 @@ fn program_plan(
     worker: &WorkerCtx,
     exe: &Path,
     platform: HostPlatform,
-    members: impl FnOnce(&Path) -> Result<Vec<String>, String>,
+    members: impl FnOnce(&Path) -> Result<Vec<bt_winres::release_manifest::Member>, String>,
 ) -> Result<ProgramPlan, Why> {
+    let unresolved_root = crate::install_channel::install_root(exe, platform)
+        .filter(|root| root.parent().is_some())
+        .ok_or(Why::Said(Text::CleanupRoot))?;
+    if platform == HostPlatform::MacOs && exe.parent() != Some(unresolved_root.as_path()) {
+        refuse_bundle_chain(worker, &unresolved_root, exe)?;
+    }
     let exe =
         bt_platform::handoff::strip_verbatim_prefix(&bt_platform::instance::canonical_path(exe));
+    let program_identity = FileIdentity::of(&exe).map_err(|error| Why::of(&error))?;
     let root = crate::install_channel::install_root(&exe, platform)
         .filter(|root| root.parent().is_some())
         .ok_or(Why::Said(Text::CleanupRoot))?;
     if exe.parent() != Some(root.as_path()) {
-        links_below(worker, &root)?;
+        let items = tree_items(worker, &root)?;
         return Ok(ProgramPlan {
-            items: vec![Item::Directory(root.clone())],
+            items,
             root,
+            program: exe,
+            program_identity,
             folder: None,
             not_ours: Vec::new(),
         });
     }
     if platform != HostPlatform::Windows {
         return Ok(ProgramPlan {
-            items: vec![Item::File(exe)],
+            items: vec![Item::File {
+                path: exe.clone(),
+                expected: program_identity.clone(),
+            }],
             root,
+            program: exe,
+            program_identity,
             folder: None,
             not_ours: Vec::new(),
         });
     }
-    let mut names = members(&exe).map_err(Why::Other)?;
-    names.extend(
-        [
-            exe.file_name()
-                .map(|name| name.to_string_lossy().into_owned()),
-            Some(bt_platform::msix::PACKAGE_FILE_NAME.to_owned()),
-            Some(crate::install_channel::MARKER_FILE_NAME.to_owned()),
-            Some(crate::update_txn::WINDOWS_HOME.to_owned()),
-        ]
-        .into_iter()
-        .flatten(),
-    );
+    let members = members(&exe).map_err(Why::Other)?;
     let mut items = Vec::new();
-    for name in &names {
+    let mut not_ours = Vec::new();
+    for member in members {
+        let path = root.join(&member.name);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(Why::of(&error)),
+            Ok(meta) if bt_platform::cleanup::is_link(&meta) => {
+                return Err(Why::SaidOf(Text::CleanupLink, path.display().to_string()));
+            }
+            Ok(meta) if meta.is_file() => {
+                let actual = FileIdentity::of(&path).map_err(|error| Why::of(&error))?;
+                let expected = FileIdentity {
+                    size: member.size,
+                    sha256: member.sha256,
+                };
+                if actual == expected {
+                    items.push(Item::File { path, expected });
+                } else {
+                    not_ours.push(path);
+                }
+            }
+            Ok(_) => not_ours.push(path),
+        }
+    }
+    items.push(Item::File {
+        path: exe.clone(),
+        expected: program_identity.clone(),
+    });
+    for name in [
+        bt_platform::msix::PACKAGE_FILE_NAME,
+        crate::install_channel::MARKER_FILE_NAME,
+    ] {
         let path = root.join(name);
         match fs::symlink_metadata(&path) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -1646,29 +1751,84 @@ fn program_plan(
             Ok(meta) if bt_platform::cleanup::is_link(&meta) => {
                 return Err(Why::SaidOf(Text::CleanupLink, path.display().to_string()));
             }
-            Ok(meta) if meta.is_dir() => {
-                links_below(worker, &path)?;
-                items.push(Item::Directory(path));
+            Ok(meta) if meta.is_file() => {
+                let expected = FileIdentity::of(&path).map_err(|error| Why::of(&error))?;
+                items.push(Item::File { path, expected });
             }
-            Ok(_) => items.push(Item::File(path)),
+            Ok(_) => not_ours.push(path),
         }
     }
-    let not_ours = names_in(worker, &root)
-        .map_err(|error| Why::of(&error))?
-        .into_iter()
-        .filter(|name| {
-            !names
-                .iter()
-                .any(|ours| name.to_string_lossy().eq_ignore_ascii_case(ours))
-        })
-        .map(|name| root.join(name))
+    let update_home = root.join(crate::update_txn::WINDOWS_HOME);
+    match fs::symlink_metadata(&update_home) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(Why::of(&error)),
+        Ok(meta) if bt_platform::cleanup::is_link(&meta) => {
+            return Err(Why::SaidOf(
+                Text::CleanupLink,
+                update_home.display().to_string(),
+            ));
+        }
+        Ok(meta) if meta.is_dir() => {
+            items.extend(tree_items(worker, &update_home)?);
+        }
+        Ok(_) => not_ours.push(update_home),
+    }
+    let scheduled_names: Vec<OsString> = items
+        .iter()
+        .filter(|item| item.path().parent() == Some(root.as_path()))
+        .filter_map(|item| item.path().file_name().map(std::ffi::OsStr::to_os_string))
         .collect();
+    not_ours.extend(
+        unowned_names(
+            names_in(worker, &root).map_err(|error| Why::of(&error))?,
+            &scheduled_names,
+        )
+        .into_iter()
+        .map(|name| root.join(name)),
+    );
+    not_ours.sort();
+    not_ours.dedup();
     Ok(ProgramPlan {
         folder: Some(root.clone()),
         root,
+        program: exe,
+        program_identity,
         items,
         not_ours,
     })
+}
+
+/// Names not scheduled, compared exactly as the directory returned them. On a
+/// case-sensitive Windows directory `conpty.dll` and `CONPTY.DLL` are two
+/// objects; the latter is neither Folio's file nor hidden from the report.
+fn unowned_names(names: Vec<OsString>, scheduled: &[OsString]) -> Vec<OsString> {
+    names
+        .into_iter()
+        .filter(|name| !scheduled.contains(name))
+        .collect()
+}
+
+/// Refuse the unresolved `.app` name and every lexical component from it to
+/// the launch executable before canonicalization can erase an outer symlink.
+fn refuse_bundle_chain(worker: &WorkerCtx, bundle: &Path, exe: &Path) -> Result<(), Why> {
+    let relative = exe
+        .strip_prefix(bundle)
+        .map_err(|_| Why::Said(Text::CleanupRoot))?;
+    let mut path = bundle.to_path_buf();
+    refuse_one_link(worker, &path)?;
+    for component in relative.components() {
+        path.push(component.as_os_str());
+        refuse_one_link(worker, &path)?;
+    }
+    Ok(())
+}
+
+fn refuse_one_link(_worker: &WorkerCtx, path: &Path) -> Result<(), Why> {
+    let metadata = fs::symlink_metadata(path).map_err(|error| Why::of(&error))?;
+    if bt_platform::cleanup::is_link(&metadata) {
+        return Err(Why::SaidOf(Text::CleanupLink, path.display().to_string()));
+    }
+    Ok(())
 }
 
 /// **Every name in `folder`**, on the door's worker (a worker's door: a
@@ -1679,37 +1839,54 @@ fn names_in(_worker: &WorkerCtx, folder: &Path) -> io::Result<Vec<OsString>> {
         .collect()
 }
 
-/// **Refuse a link anywhere in the tree at `path`**, looked at without
-/// following one, on the door's worker (a worker's door: a directory walk).
-fn links_below(_worker: &WorkerCtx, path: &Path) -> Result<(), Why> {
+/// **Identify every file in the tree at `path` and every directory to remove
+/// after its files**, looked at without following links, on the door's worker.
+/// Directories are deepest first and are removed only when empty, so a file
+/// inserted after planning is never swept up by a recursive delete.
+fn tree_items(_worker: &WorkerCtx, path: &Path) -> Result<Vec<Item>, Why> {
     let mut pending = vec![path.to_path_buf()];
+    let mut files = Vec::new();
+    let mut directories = Vec::new();
     while let Some(path) = pending.pop() {
         let meta = fs::symlink_metadata(&path).map_err(|error| Why::of(&error))?;
         if bt_platform::cleanup::is_link(&meta) {
             return Err(Why::SaidOf(Text::CleanupLink, path.display().to_string()));
         }
-        if meta.is_dir() {
+        if meta.is_file() {
+            let expected = FileIdentity::of(&path).map_err(|error| Why::of(&error))?;
+            files.push(Item::File { path, expected });
+        } else if meta.is_dir() {
+            directories.push(path.clone());
             for entry in fs::read_dir(&path).map_err(|error| Why::of(&error))? {
                 pending.push(entry.map_err(|error| Why::of(&error))?.path());
             }
+        } else {
+            return Err(Why::Other(format!(
+                "{} is not a regular file or directory",
+                path.display()
+            )));
         }
     }
-    Ok(())
+    directories.sort_by(|left, right| {
+        right
+            .components()
+            .count()
+            .cmp(&left.components().count())
+            .then_with(|| left.cmp(right))
+    });
+    files.extend(directories.into_iter().map(Item::Directory));
+    Ok(files)
 }
 
 /// **The members of the release manifest the executable at `exe` carries** —
 /// the text the updater reads (`update_archive::EmbeddedManifest`), so the
 /// program's files are the files this build was installed as.
-fn installed_members(exe: &Path) -> Result<Vec<String>, String> {
+fn installed_members(exe: &Path) -> Result<Vec<bt_winres::release_manifest::Member>, String> {
     use crate::update_archive::ManifestSource;
     let text = crate::update_archive::EmbeddedManifest.manifest_text(exe)?;
     let manifest =
         bt_winres::release_manifest::Manifest::parse(&text).map_err(|error| error.to_string())?;
-    Ok(manifest
-        .members
-        .into_iter()
-        .map(|member| member.name)
-        .collect())
+    Ok(manifest.members)
 }
 
 /// **Whether Folio's way out owes the door a start, and with what** — set when
@@ -1756,7 +1933,7 @@ pub(crate) fn leave_armed() {
         return;
     };
     let started = std::env::current_exe().and_then(|exe| {
-        bt_platform::quiet_command(exe)
+        bt_platform::quiet_breakaway_command(exe)
             .args(door_words(remove_data, std::process::id()))
             .spawn()
     });

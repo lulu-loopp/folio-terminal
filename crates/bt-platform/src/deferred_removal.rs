@@ -1,505 +1,1245 @@
-//! **A removal that waits for processes to end** — the uninstaller's last step
-//! (0.4.7 ticket T-UNINSTALL-UX; `docs/DESIGN.md`, 2026-09-29, *One press
-//! uninstalls Folio*).
+//! **The uninstall remover** — a native copy of the running executable which
+//! outlives every process using the installed image, verifies each file again
+//! at the destructive boundary, and reports a truthful final result.
 //!
-//! A program cannot remove the folder it runs from while it runs: on Windows
-//! its image and every console standing in the folder hold it. So the door
-//! hands this module the items to remove and the processes to wait for, and
-//! [`schedule`] starts a process that outlives the door, through
-//! [`crate::quiet_command`], and returns at once. That process waits until
-//! none of the given processes runs, removes the items, removes the folder
-//! the caller names only if it is then empty, and leaves.
-//!
-//! **What is removed is the caller's decision, never this module's**: it is
-//! handed absolute paths and removes exactly those. The caller (`bt-app`'s
-//! `uninstall`) derives them from the running executable and refuses a link
-//! among them before it asks.
-//!
-//! * **Windows** — a script written into a folder the caller names (the
-//!   temporary directory in the product) through `install_txn::durable_create`
-//!   (a new file only), run by `cmd.exe /d /s /c`. **Every path reaches the
-//!   script through its environment, never through its text**: the script is
-//!   ASCII built only from this module's words and numbers, so no code page,
-//!   no `%`, `&`, `^` or `!` in a path can change what it runs. It waits by
-//!   asking `tasklist` for each process by pid **and** image name — a pid
-//!   Windows has handed to another program is not the one waited for — each
-//!   program by its path under `%SystemRoot%\System32` and never by a bare
-//!   name, because the `PATH` a console inherits may put another `find` first
-//!   (Git's GNU `find`, for a script run from Git Bash) — a
-//!   second between looks; then `del /a /f /q` for each file, `rd /s /q` for
-//!   each directory (which removes a junction inside it without entering it),
-//!   `rd` without `/s` for the folder, and the script deletes itself.
-//! * **macOS and Linux** — `/bin/sh -c` with the items as positional
-//!   arguments, in a process group of its own and deaf to `SIGHUP`, so the
-//!   terminal the door was run from can close; it waits with `kill -0` a
-//!   second at a time, then `/bin/rm -rf --` each item and `/bin/rmdir` the
-//!   folder — programs by path, as on Windows.
-//!
-//! Nothing here waits: the processes are looked up once, the script is
-//! written, the process is started, and the answer is whether it started.
+//! `schedule` creates an unpredictable directory below the caller's per-user
+//! Folio directory, copies the running executable there, holds the copy open
+//! against replacement until the child acknowledges readiness, and starts it
+//! as `--uninstall-remove`. No script or command interpreter is involved.
+//! The child waits by `(pid, start time)`, for at most five minutes, and then
+//! retries held removals with bounded backoff. A file is removed only when its
+//! current length and SHA-256 still equal the expected identity. Any failure is
+//! written beside the remover as `result.txt` and shown through
+//! `standalone_alert`; the alert names both the remaining paths and that file.
 
 use std::ffi::OsString;
-use std::io;
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
+use crate::admission::WorkerCtx;
 use crate::install_flip::Running;
 
-/// **One thing to remove**, by its absolute path and what it is.
+/// The private argv door served by the copied executable.
+pub const REMOVE_FLAG: &str = "--uninstall-remove";
+
+/// Every process wait, including a persistent parent shell, ends here.
+pub const REMOVAL_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+const WAIT_POLL: Duration = Duration::from_millis(100);
+const READY_WITHIN: Duration = Duration::from_secs(10);
+const DELETE_ATTEMPTS: usize = 10;
+const FIRST_DELETE_BACKOFF: Duration = Duration::from_millis(50);
+const MAX_DELETE_BACKOFF: Duration = Duration::from_secs(2);
+const READY_LINE: &str = "ready";
+const RESULT_NAME: &str = "result.txt";
+const COPY_NAME_WINDOWS: &str = "folio-remover.exe";
+const COPY_NAME_UNIX: &str = "folio-remover";
+const ENV_PREFIX: &str = "FOLIO_NATIVE_REMOVAL_";
+
+/// SHA-256 and length expected of one regular file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileIdentity {
+    pub size: u64,
+    pub sha256: String,
+}
+
+impl FileIdentity {
+    /// Read a regular, single-link file and identify its bytes.
+    ///
+    /// # Errors
+    /// The path is not a regular file, is shared by hard links, or could not be
+    /// read. The opened file, rather than a second path lookup, supplies all
+    /// three facts.
+    pub fn of(path: &Path) -> io::Result<Self> {
+        let metadata = fs::symlink_metadata(path)?;
+        if crate::cleanup::is_link(&metadata) {
+            return Err(io::Error::other(format!(
+                "{} is not a regular unlinked file",
+                path.display()
+            )));
+        }
+        let file = File::open(path)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err(io::Error::other(format!(
+                "{} is not a regular unlinked file",
+                path.display()
+            )));
+        }
+        if crate::file_replace::file_link_count(&file)? != 1 {
+            return Err(io::Error::other(format!(
+                "{} has more than one hard link",
+                path.display()
+            )));
+        }
+        let size = metadata.len();
+        Ok(Self {
+            size,
+            sha256: digest(file)?,
+        })
+    }
+}
+
+/// One thing the native remover may remove.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Item {
-    /// A file (or a link, which is removed and never followed).
-    File(PathBuf),
-    /// A directory, removed whole.
+    /// A regular, single-link file with the identity established by the plan.
+    File {
+        path: PathBuf,
+        expected: FileIdentity,
+    },
+    /// A directory removed only when empty, after its separately identified
+    /// files and deeper directories. There is no recursive deletion here.
     Directory(PathBuf),
 }
 
 impl Item {
-    /// The path this item removes.
     #[must_use]
     pub fn path(&self) -> &Path {
         match self {
-            Self::File(path) | Self::Directory(path) => path,
+            Self::File { path, .. } | Self::Directory(path) => path,
+        }
+    }
+
+    #[must_use]
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::File { .. } => "file",
+            Self::Directory(_) => "directory",
         }
     }
 }
 
-/// **What the started process is told**: the processes to outlive, the items,
-/// and the folder to remove afterwards if nothing is left in it.
+/// A process identity and the name used if the five-minute bound finds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WaitFor {
+    pub process: Running,
+    pub name: OsString,
+}
+
+/// Localized words which the windowless remover can use without reopening the
+/// settings after the cleanup has removed them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FailureWords {
+    pub title: String,
+    pub still_running: String,
+    pub files_left: String,
+    pub result_at: String,
+}
+
+/// The complete immutable removal handed to the copied executable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Removal {
-    /// The processes whose end is waited for. One that has already ended, or
-    /// whose pid now names a process that started at another instant, is not
-    /// waited for.
-    pub after: Vec<Running>,
-    /// What is removed, in this order.
+    /// The running executable copied to become the remover.
+    pub program: PathBuf,
+    /// The identity the copied bytes must have before they may be executed.
+    pub program_identity: FileIdentity,
+    pub after: Vec<WaitFor>,
     pub items: Vec<Item>,
-    /// Removed afterwards only if it is empty; `None` for none.
+    /// Removed after the items, and only when empty.
     pub folder: Option<PathBuf>,
+    pub words: FailureWords,
 }
 
-/// **The environment variable a path or a process reaches the script by** —
-/// `FOLIO_REMOVAL_<what>_<n>`, numbered from 1.
-fn variable(what: &str, index: usize) -> String {
-    format!("FOLIO_REMOVAL_{what}_{}", index + 1)
-}
-
-/// **Start the process that performs `removal`**, writing its script (on
-/// Windows) into `scripts`, and answer once it has started.
+/// Create the native remover under `private_root`, start it with breakaway
+/// semantics, and return only after it has parsed its immutable inherited
+/// environment and acknowledged readiness.
 ///
 /// # Errors
-/// The script could not be written, or the process could not be started;
-/// nothing is then removed. `Unsupported` where there is no arm.
-pub fn schedule(removal: &Removal, scripts: &Path) -> io::Result<()> {
-    let waited: Vec<(u32, OsString)> = removal
-        .after
-        .iter()
-        .filter(|process| crate::install_flip::still_running(**process))
-        .filter_map(|process| Some((process.pid, arm::image_name(process.pid)?)))
-        .collect();
-    arm::start(&waited, removal, scripts)
-}
-
-/// **The Windows script's text** for `waited` processes, `files` files,
-/// `directories` directories and whether there is a folder to remove after —
-/// counts only: every path and name is read from the environment
-/// ([`variable`]).
-#[cfg_attr(
-    not(any(windows, test)),
-    expect(
-        dead_code,
-        reason = "permanent: the Windows arm's script, read by the Windows arm and by the tests on every host"
-    )
-)]
-fn windows_script(waited: usize, items: &[bool], folder: bool) -> String {
-    let mut script = String::from(
-        "@echo off\r\n\
-         setlocal DisableDelayedExpansion\r\n\
-         cd /d \"%SystemRoot%\"\r\n\
-         :wait\r\n",
-    );
-    for index in 0..waited {
-        let pid = variable("PID", index);
-        let image = variable("IMAGE", index);
-        script.push_str(&format!(
-            "\"%SystemRoot%\\System32\\tasklist.exe\" /nh /fi \"PID eq %{pid}%\" \
-             /fi \"IMAGENAME eq %{image}%\" 2>nul \
-             | \"%SystemRoot%\\System32\\find.exe\" /i \"%{image}%\" >nul && goto pause\r\n"
-        ));
+/// The private directory/copy could not be made, the copy differed from the
+/// running executable, the job object refused breakaway, or the child did not
+/// reach its readiness handshake. Nothing has been removed in those cases.
+pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> io::Result<()> {
+    validate(removal, private_root)?;
+    fs::create_dir_all(private_root)?;
+    validate_private_root(private_root)?;
+    let private = private_directory(private_root)?;
+    let copy = private.join(if cfg!(windows) {
+        COPY_NAME_WINDOWS
+    } else {
+        COPY_NAME_UNIX
+    });
+    if let Err(error) = copy_new(&removal.program, &copy) {
+        discard_private(&copy, &private);
+        return Err(error);
     }
-    script.push_str(
-        "goto remove\r\n:pause\r\n\"%SystemRoot%\\System32\\PING.EXE\" -n 2 127.0.0.1 >nul\r\n\
-             goto wait\r\n:remove\r\n",
-    );
-    for (index, directory) in items.iter().enumerate() {
-        let item = variable("ITEM", index);
-        if *directory {
-            script.push_str(&format!("rd /s /q \"%{item}%\" 2>nul\r\n"));
-        } else {
-            script.push_str(&format!("del /a /f /q \"%{item}%\" 2>nul\r\n"));
+    match FileIdentity::of(&copy) {
+        Ok(identity) if identity == removal.program_identity => {}
+        Ok(_) => {
+            discard_private(&copy, &private);
+            return Err(io::Error::other(
+                "the private remover copy differs from the running executable",
+            ));
+        }
+        Err(error) => {
+            discard_private(&copy, &private);
+            return Err(error);
         }
     }
-    if folder {
-        script.push_str("rd \"%FOLIO_REMOVAL_FOLDER%\" 2>nul\r\n");
+
+    // On Windows this handle denies write and delete sharing until the child
+    // says it is running from the copy. After that the image section holds the
+    // executable. It closes the create-to-execute replacement window.
+    let copy_guard = match guard_copy(&copy) {
+        Ok(guard) => guard,
+        Err(error) => {
+            discard_private(&copy, &private);
+            return Err(error);
+        }
+    };
+    #[cfg(not(test))]
+    let mut command = crate::quiet_breakaway_command(&copy);
+    // libtest on Windows is commonly placed in a job which deliberately
+    // forbids breakaway. The product arm above treats that refusal as a failed
+    // schedule; this harness arm keeps the native-copy exercise runnable.
+    #[cfg(test)]
+    let mut command = crate::quiet_command(&copy);
+    command
+        .current_dir(&private)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // Not the terminal's foreground process group: closing the terminal
+        // must not hang up the native remover before it reports its result.
+        command.process_group(0);
     }
-    // The script's own file, last: `(goto)` leaves the batch context first, so
-    // `cmd` does not go back to read a line of a file that is gone.
-    script.push_str("(goto) 2>nul & del /f /q \"%~f0\"\r\n");
-    script
+    put_environment(&mut command, removal, &private);
+    #[cfg(not(test))]
+    command.arg(REMOVE_FLAG);
+    #[cfg(test)]
+    command.args([
+        "--exact",
+        "deferred_removal::tests::a_native_remover_copy_runs_the_plan",
+        "--nocapture",
+    ]);
+
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            drop(copy_guard);
+            discard_private(&copy, &private);
+            return Err(error);
+        }
+    };
+    let Some(ready) = child.stdout.take() else {
+        drop(copy_guard);
+        return stop_child(
+            child,
+            &copy,
+            &private,
+            io::Error::other("the remover has no readiness pipe"),
+        );
+    };
+    let Some(mut release) = child.stdin.take() else {
+        drop(copy_guard);
+        return stop_child(
+            child,
+            &copy,
+            &private,
+            io::Error::other("the remover has no release pipe"),
+        );
+    };
+    let (sent, received) = mpsc::sync_channel(1);
+    if let Err(error) = crate::spawn_at_priority(
+        "folio-remover-ready",
+        crate::ThreadPriority::BelowNormal,
+        move |_| {
+            let mut reader = BufReader::new(ready);
+            let answer = loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break Ok(line),
+                    Ok(_) if line.trim_end() == READY_LINE => break Ok(line),
+                    Ok(_) if line.starts_with("refused:") => break Ok(line),
+                    Ok(_) => {}
+                    Err(error) => break Err(error),
+                }
+            };
+            let _ = sent.send(answer);
+        },
+    ) {
+        drop(copy_guard);
+        return stop_child(child, &copy, &private, error);
+    }
+    let answer = received.recv_timeout(READY_WITHIN);
+    match answer {
+        Ok(Ok(line)) if line.trim_end() == READY_LINE => {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    drop(copy_guard);
+                    return stop_child(
+                        child,
+                        &copy,
+                        &private,
+                        io::Error::other(format!(
+                            "the remover exited after readiness with {status}"
+                        )),
+                    );
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    drop(copy_guard);
+                    return stop_child(child, &copy, &private, error);
+                }
+            }
+            // The child has parsed and authenticated the inherited plan but
+            // cannot touch it until this byte arrives. This makes readiness a
+            // real hand-off: the scheduler observes a live remover while the
+            // executable copy is still held against replacement.
+            if let Err(error) = release.write_all(b"go\n").and_then(|()| release.flush()) {
+                drop(copy_guard);
+                return stop_child(child, &copy, &private, error);
+            }
+            drop(release);
+            drop(copy_guard);
+            Ok(())
+        }
+        Ok(Ok(line)) => {
+            drop(copy_guard);
+            stop_child(
+                child,
+                &copy,
+                &private,
+                io::Error::other(format!("unexpected remover readiness: {line:?}")),
+            )
+        }
+        Ok(Err(error)) => {
+            drop(copy_guard);
+            stop_child(child, &copy, &private, error)
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            drop(copy_guard);
+            stop_child(
+                child,
+                &copy,
+                &private,
+                io::Error::new(io::ErrorKind::TimedOut, "the remover did not become ready"),
+            )
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            drop(copy_guard);
+            stop_child(
+                child,
+                &copy,
+                &private,
+                io::Error::other("the remover readiness pipe closed"),
+            )
+        }
+    }
 }
 
-/// **The Unix script** — constant: the pids come in one variable, the items
-/// as positional arguments, the folder in another variable.
-#[cfg_attr(
-    not(any(unix, test)),
-    expect(
-        dead_code,
-        reason = "permanent: the Unix arm's script, read by the Unix arm and by the tests on every host"
-    )
-)]
-const UNIX_SCRIPT: &str = "trap '' HUP INT\n\
-while :; do\n\
-  alive=\n\
-  for pid in $FOLIO_REMOVAL_PIDS; do\n\
-    kill -0 \"$pid\" 2>/dev/null && alive=1\n\
-  done\n\
-  [ -z \"$alive\" ] && break\n\
-  /bin/sleep 1\n\
-done\n\
-for item in \"$@\"; do\n\
-  /bin/rm -rf -- \"$item\"\n\
-done\n\
-if [ -n \"$FOLIO_REMOVAL_FOLDER\" ]; then\n\
-  /bin/rmdir -- \"$FOLIO_REMOVAL_FOLDER\" 2>/dev/null\n\
-fi\n";
+fn validate_private_root(path: &Path) -> io::Result<()> {
+    let metadata = fs::symlink_metadata(path)?;
+    if crate::cleanup::is_link(&metadata) || !metadata.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the private remover root is not an ordinary directory",
+        ));
+    }
+    let account = crate::install_evidence::current_account()?;
+    let owner = crate::install_evidence::owner_of(path)?;
+    if !account.owns(&owner) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the private remover root is not owned by this account",
+        ));
+    }
+    Ok(())
+}
+
+fn stop_child(mut child: Child, copy: &Path, private: &Path, error: io::Error) -> io::Result<()> {
+    let _ = child.kill();
+    let _ = child.wait();
+    discard_private(copy, private);
+    Err(error)
+}
+
+fn discard_private(copy: &Path, private: &Path) {
+    let _ = fs::remove_file(copy);
+    let _ = fs::remove_dir(private);
+}
+
+fn validate(removal: &Removal, private_root: &Path) -> io::Result<()> {
+    if !private_root.is_absolute() || !removal.program.is_absolute() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "the remover and its private root must be absolute",
+        ));
+    }
+    if removal.items.iter().any(|item| !item.path().is_absolute())
+        || removal
+            .folder
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "every removal path must be absolute",
+        ));
+    }
+    Ok(())
+}
+
+fn private_directory(root: &Path) -> io::Result<PathBuf> {
+    for _ in 0..32 {
+        let nonce = crate::attention_pipe::unguessable_bits();
+        let path = root.join(format!("uninstall-{nonce:032x}"));
+        #[cfg(unix)]
+        let made = {
+            use std::os::unix::fs::DirBuilderExt;
+            let mut builder = fs::DirBuilder::new();
+            builder.mode(0o700);
+            builder.create(&path)
+        };
+        #[cfg(not(unix))]
+        let made = fs::create_dir(&path);
+        match made {
+            Ok(()) => {
+                let account = crate::install_evidence::current_account()?;
+                let owner = crate::install_evidence::owner_of(&path)?;
+                if !account.owns(&owner) {
+                    let _ = fs::remove_dir(&path);
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "the private remover directory is not owned by this account",
+                    ));
+                }
+                return Ok(path);
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not create a fresh private remover directory",
+    ))
+}
+
+fn copy_new(from: &Path, to: &Path) -> io::Result<()> {
+    let mut source = File::open(from)?;
+    let mut target = OpenOptions::new().write(true).create_new(true).open(to)?;
+    io::copy(&mut source, &mut target)?;
+    target.sync_all()?;
+    fs::set_permissions(to, source.metadata()?.permissions())?;
+    Ok(())
+}
 
 #[cfg(windows)]
-mod arm {
-    use super::{Item, Removal, variable, windows_script};
-    use std::ffi::OsString;
-    use std::io;
-    use std::os::windows::process::CommandExt;
-    use std::path::Path;
+fn guard_copy(path: &Path) -> io::Result<File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 1;
+    OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(path)
+}
 
-    pub(super) fn image_name(pid: u32) -> Option<OsString> {
-        crate::process_image_path(pid)?
-            .file_name()
-            .map(std::ffi::OsStr::to_os_string)
+#[cfg(not(windows))]
+fn guard_copy(path: &Path) -> io::Result<File> {
+    File::open(path)
+}
+
+fn key(name: &str) -> String {
+    format!("{ENV_PREFIX}{name}")
+}
+
+fn indexed(name: &str, index: usize) -> String {
+    key(&format!("{name}_{index}"))
+}
+
+fn put_environment(command: &mut std::process::Command, removal: &Removal, private: &Path) {
+    command
+        .env(key("PRIVATE"), private)
+        .env(key("PROGRAM"), &removal.program)
+        .env(
+            key("PROGRAM_SIZE"),
+            removal.program_identity.size.to_string(),
+        )
+        .env(key("PROGRAM_SHA256"), &removal.program_identity.sha256)
+        .env(key("WAIT_COUNT"), removal.after.len().to_string())
+        .env(key("ITEM_COUNT"), removal.items.len().to_string())
+        .env(key("TITLE"), &removal.words.title)
+        .env(key("STILL_RUNNING"), &removal.words.still_running)
+        .env(key("FILES_LEFT"), &removal.words.files_left)
+        .env(key("RESULT_AT"), &removal.words.result_at);
+    if let Some(folder) = &removal.folder {
+        command.env(key("FOLDER"), folder);
+    }
+    for (index, waited) in removal.after.iter().enumerate() {
+        command
+            .env(indexed("WAIT_PID", index), waited.process.pid.to_string())
+            .env(
+                indexed("WAIT_STARTED", index),
+                waited.process.started.to_string(),
+            )
+            .env(indexed("WAIT_NAME", index), &waited.name);
+    }
+    for (index, item) in removal.items.iter().enumerate() {
+        command
+            .env(indexed("ITEM_KIND", index), item.kind())
+            .env(indexed("ITEM_PATH", index), item.path());
+        if let Item::File { expected, .. } = item {
+            command
+                .env(indexed("ITEM_SIZE", index), expected.size.to_string())
+                .env(indexed("ITEM_SHA256", index), &expected.sha256);
+        }
+    }
+}
+
+/// Run the private remover described by the inherited environment. This is the
+/// entire body of `folio.exe --uninstall-remove`.
+pub fn run_from_environment(worker: &WorkerCtx) -> i32 {
+    let parsed = removal_from_environment();
+    let (removal, private) = match parsed {
+        Ok(value) => value,
+        Err(error) => {
+            return failure_without_plan(error);
+        }
+    };
+    if writeln!(io::stdout(), "{READY_LINE}")
+        .and_then(|_| io::stdout().flush())
+        .is_err()
+    {
+        return 1;
+    }
+    let mut release = String::new();
+    if io::stdin().read_line(&mut release).is_err() || release.trim_end() != "go" {
+        return 1;
+    }
+    let result = perform(worker, &removal, REMOVAL_TIMEOUT);
+    finish(&removal.words, &private, &removal.program_identity, result)
+}
+
+fn failure_without_plan(error: io::Error) -> i32 {
+    let _ = writeln!(io::stdout(), "refused: {error}");
+    let _ = io::stdout().flush();
+    1
+}
+
+fn removal_from_environment() -> io::Result<(Removal, PathBuf)> {
+    let private = required_path("PRIVATE")?;
+    if !private
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.starts_with("uninstall-") && name.len() > "uninstall-".len())
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the remover directory has an invalid name",
+        ));
+    }
+    let program = required_path("PROGRAM")?;
+    let program_identity = FileIdentity {
+        size: required_number("PROGRAM_SIZE")?,
+        sha256: required_string("PROGRAM_SHA256")?,
+    };
+    let wait_count: usize = required_number("WAIT_COUNT")?;
+    let item_count: usize = required_number("ITEM_COUNT")?;
+    if wait_count > 1024 || item_count > 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the removal plan is too large",
+        ));
+    }
+    let mut after = Vec::with_capacity(wait_count);
+    for index in 0..wait_count {
+        after.push(WaitFor {
+            process: Running {
+                pid: required_indexed_number("WAIT_PID", index)?,
+                started: required_indexed_number("WAIT_STARTED", index)?,
+            },
+            name: required_indexed("WAIT_NAME", index)?,
+        });
+    }
+    let mut items = Vec::with_capacity(item_count);
+    for index in 0..item_count {
+        let kind = required_indexed("ITEM_KIND", index)?;
+        let path = PathBuf::from(required_indexed("ITEM_PATH", index)?);
+        match kind.to_str() {
+            Some("file") => items.push(Item::File {
+                path,
+                expected: FileIdentity {
+                    size: required_indexed_number("ITEM_SIZE", index)?,
+                    sha256: required_indexed("ITEM_SHA256", index)?
+                        .into_string()
+                        .map_err(|_| io::Error::other("a digest is not Unicode"))?,
+                },
+            }),
+            Some("directory") => items.push(Item::Directory(path)),
+            _ => return Err(io::Error::other("an item has an unknown kind")),
+        }
+    }
+    let removal = Removal {
+        program,
+        program_identity,
+        after,
+        items,
+        folder: std::env::var_os(key("FOLDER")).map(PathBuf::from),
+        words: FailureWords {
+            title: required_string("TITLE")?,
+            still_running: required_string("STILL_RUNNING")?,
+            files_left: required_string("FILES_LEFT")?,
+            result_at: required_string("RESULT_AT")?,
+        },
+    };
+    validate(&removal, &private)?;
+    let current = std::env::current_exe()?;
+    let current_parent = current
+        .parent()
+        .ok_or_else(|| io::Error::other("the remover executable has no parent"))?;
+    if fs::canonicalize(current_parent)? != fs::canonicalize(&private)? {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the remover is not running from its private directory",
+        ));
+    }
+    if FileIdentity::of(&current)? != removal.program_identity {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the remover copy no longer matches the planned program",
+        ));
+    }
+    Ok((removal, private))
+}
+
+fn required(name: &str) -> io::Result<OsString> {
+    std::env::var_os(key(name))
+        .ok_or_else(|| io::Error::other(format!("missing remover field {name}")))
+}
+
+fn required_string(name: &str) -> io::Result<String> {
+    required(name)?
+        .into_string()
+        .map_err(|_| io::Error::other(format!("remover field {name} is not Unicode")))
+}
+
+fn required_path(name: &str) -> io::Result<PathBuf> {
+    Ok(PathBuf::from(required(name)?))
+}
+
+fn required_number<T: std::str::FromStr>(name: &str) -> io::Result<T> {
+    required_string(name)?
+        .parse()
+        .map_err(|_| io::Error::other(format!("remover field {name} is not a number")))
+}
+
+fn required_indexed(name: &str, index: usize) -> io::Result<OsString> {
+    std::env::var_os(indexed(name, index))
+        .ok_or_else(|| io::Error::other(format!("missing remover field {name}_{index}")))
+}
+
+fn required_indexed_number<T: std::str::FromStr>(name: &str, index: usize) -> io::Result<T> {
+    required_indexed(name, index)?
+        .into_string()
+        .map_err(|_| io::Error::other(format!("remover field {name}_{index} is not Unicode")))?
+        .parse()
+        .map_err(|_| io::Error::other(format!("remover field {name}_{index} is not a number")))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Outcome {
+    Removed,
+    TimedOut(Vec<OsString>),
+    Left(Vec<PathBuf>),
+}
+
+fn perform(worker: &WorkerCtx, removal: &Removal, within: Duration) -> Outcome {
+    perform_with(
+        worker,
+        removal,
+        within,
+        DELETE_ATTEMPTS,
+        FIRST_DELETE_BACKOFF,
+    )
+}
+
+fn perform_with(
+    worker: &WorkerCtx,
+    removal: &Removal,
+    within: Duration,
+    attempts: usize,
+    first_backoff: Duration,
+) -> Outcome {
+    let until = Instant::now() + within;
+    loop {
+        let mut running: Vec<OsString> = removal
+            .after
+            .iter()
+            .filter(|waited| crate::install_flip::still_running(waited.process))
+            .map(|waited| waited.name.clone())
+            .collect();
+        let images = match crate::install_flip::running_from(&removal.program) {
+            Ok(images) => images,
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => Vec::new(),
+            Err(_) => return Outcome::Left(vec![removal.program.clone()]),
+        };
+        for process in images {
+            let name = crate::install_flip::image_name(process).unwrap_or_else(|| {
+                removal
+                    .program
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("folio"))
+                    .to_os_string()
+            });
+            if !running.contains(&name) {
+                running.push(name);
+            }
+        }
+        if running.is_empty() {
+            break;
+        }
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Outcome::TimedOut(running);
+        }
+        crate::wait::sleep_within(worker, WAIT_POLL.min(left));
     }
 
-    pub(super) fn start(
-        waited: &[(u32, OsString)],
-        removal: &Removal,
-        scripts: &Path,
-    ) -> io::Result<()> {
-        let kinds: Vec<bool> = removal
-            .items
-            .iter()
-            .map(|item| matches!(item, Item::Directory(_)))
-            .collect();
-        let text = windows_script(waited.len(), &kinds, removal.folder.is_some());
-        let script = scripts.join(format!(
-            "folio-removal-{}-{}.cmd",
-            std::process::id(),
-            crate::install_flip::started_of(std::process::id()).unwrap_or(0)
-        ));
-        crate::install_txn::durable_create(&script, text.as_bytes())
-            .map_err(|failure| io::Error::new(failure.error.kind(), failure.to_string()))?;
-        let mut command = crate::quiet_command_named(Path::new("cmd.exe")).ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                "cmd.exe is not where Windows keeps it",
-            )
-        })?;
-        // `/s`: the quotes around the whole command are taken off and the rest
-        // run as written, so the script's path — itself read from the
-        // environment — needs no rule about which characters it may hold.
-        // Started standing in the scripts' folder, never in the one it removes.
-        command
-            .raw_arg("/d /s /c \"\"%FOLIO_REMOVAL_SCRIPT%\"\"")
-            .current_dir(scripts)
-            .env("FOLIO_REMOVAL_SCRIPT", &script);
-        for (index, (pid, image)) in waited.iter().enumerate() {
-            command
-                .env(variable("PID", index), pid.to_string())
-                .env(variable("IMAGE", index), image);
+    let mut remaining: Vec<&Item> = removal.items.iter().collect();
+    let mut folder_left = removal.folder.as_deref();
+    let mut backoff = first_backoff;
+    for attempt in 0..attempts {
+        remaining.retain(|item| !remove_item(item).unwrap_or(false));
+        if remaining.is_empty()
+            && let Some(folder) = folder_left
+            && remove_empty_folder(folder).unwrap_or(false)
+        {
+            folder_left = None;
         }
-        for (index, item) in removal.items.iter().enumerate() {
-            command.env(variable("ITEM", index), item.path());
+        if remaining.is_empty() && folder_left.is_none() {
+            return Outcome::Removed;
         }
-        if let Some(folder) = &removal.folder {
-            command.env("FOLIO_REMOVAL_FOLDER", folder);
+        if attempt + 1 < attempts {
+            crate::wait::sleep_within(worker, backoff);
+            backoff = (backoff * 2).min(MAX_DELETE_BACKOFF);
         }
-        match command.spawn() {
-            Ok(_child) => Ok(()),
+    }
+    let mut left: Vec<PathBuf> = remaining
+        .into_iter()
+        .filter(|item| item.path().exists())
+        .map(|item| item.path().to_path_buf())
+        .collect();
+    if let Some(folder) = folder_left.filter(|folder| folder.exists()) {
+        left.push(folder.to_path_buf());
+    }
+    if left.is_empty() {
+        Outcome::Removed
+    } else {
+        Outcome::Left(left)
+    }
+}
+
+fn remove_item(item: &Item) -> io::Result<bool> {
+    match item {
+        Item::File { path, expected } => remove_verified_file(path, expected),
+        Item::Directory(path) => remove_empty_folder(path),
+    }
+}
+
+fn remove_verified_file(path: &Path, expected: &FileIdentity) -> io::Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    if crate::cleanup::is_link(&metadata) || !metadata.is_file() {
+        return Ok(false);
+    }
+    let file = File::open(path)?;
+    if crate::file_replace::file_link_count(&file)? != 1 {
+        return Ok(false);
+    }
+    if file.metadata()?.len() != expected.size || digest(file)? != expected.sha256 {
+        return Ok(false);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const READ_ONLY: u32 = 1;
+        if metadata.file_attributes() & READ_ONLY != 0 {
+            let mut permissions = metadata.permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(path, permissions)?;
+        }
+    }
+    fs::remove_file(path)?;
+    Ok(!path.exists())
+}
+
+fn remove_empty_folder(path: &Path) -> io::Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error),
+    };
+    if crate::cleanup::is_link(&metadata) || !metadata.is_dir() {
+        return Ok(false);
+    }
+    match fs::remove_dir(path) {
+        Ok(()) => Ok(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(true),
+        Err(error) => Err(error),
+    }
+}
+
+fn digest(mut file: File) -> io::Result<String> {
+    let mut hasher = bt_winres::digest::Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(bt_winres::digest::hex(&hasher.finish()))
+}
+
+fn finish(
+    words: &FailureWords,
+    private: &Path,
+    remover_identity: &FileIdentity,
+    outcome: Outcome,
+) -> i32 {
+    let result = private.join(RESULT_NAME);
+    let failure = failure_summary(words, outcome);
+    if let Some(failure) = failure {
+        let text = format!("{failure}\n{}\n{}", words.result_at, result.display());
+        let written = fs::write(&result, format!("{text}\n"));
+        let self_result = retire_self(private, remover_identity);
+        let mut shown = match written {
+            Ok(()) => text,
+            Err(error) => format!("{failure}\n{error}"),
+        };
+        if let Err(error) = self_result {
+            shown = format!("{shown}\n{}\n{error}", words.files_left);
+        };
+        show_failure(&words.title, &shown);
+        1
+    } else {
+        match retire_self(private, remover_identity) {
+            Ok(()) => 0,
             Err(error) => {
-                // Never started: the script it would have deleted is ours to delete.
-                let _ = std::fs::remove_file(&script);
-                Err(error)
+                let executable = std::env::current_exe()
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_else(|_| "folio-remover".to_owned());
+                let text = format!(
+                    "{}\n{}\n{}\n{}\n{error}",
+                    words.files_left,
+                    executable,
+                    words.result_at,
+                    result.display()
+                );
+                let _ = fs::write(&result, format!("{text}\n"));
+                show_failure(&words.title, &text);
+                1
             }
         }
     }
 }
 
-#[cfg(unix)]
-mod arm {
-    use super::{Removal, UNIX_SCRIPT};
-    use std::ffi::OsString;
-    use std::io;
-    use std::os::unix::process::CommandExt;
-    use std::path::Path;
+#[cfg(not(test))]
+fn show_failure(title: &str, text: &str) {
+    crate::standalone_alert(title, text);
+}
 
-    /// No name is needed: `kill -0` asks by pid alone.
-    pub(super) fn image_name(_pid: u32) -> Option<OsString> {
-        Some(OsString::new())
-    }
+// A failing remover test must never open an ownerless native window. The text
+// and result-file contract are exercised through `failure_text` instead.
+#[cfg(test)]
+fn show_failure(_title: &str, _text: &str) {}
 
-    pub(super) fn start(
-        waited: &[(u32, OsString)],
-        removal: &Removal,
-        _scripts: &Path,
-    ) -> io::Result<()> {
-        let pids: Vec<String> = waited.iter().map(|(pid, _)| pid.to_string()).collect();
-        let mut command = crate::quiet_command("/bin/sh");
-        command
-            .arg("-c")
-            .arg(UNIX_SCRIPT)
-            .arg("folio-removal")
-            .args(removal.items.iter().map(super::Item::path))
-            .env("FOLIO_REMOVAL_PIDS", pids.join(" "))
-            .env(
-                "FOLIO_REMOVAL_FOLDER",
-                removal.folder.as_deref().unwrap_or(Path::new("")),
-            )
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .current_dir("/")
-            // Not in the terminal's foreground group: a terminal that closes
-            // hangs up that group, and the script outlives it.
-            .process_group(0);
-        command.spawn().map(drop)
+fn failure_summary(words: &FailureWords, outcome: Outcome) -> Option<String> {
+    match outcome {
+        Outcome::Removed => None,
+        Outcome::TimedOut(names) => Some(format!(
+            "{}\n{}",
+            words.still_running,
+            names
+                .iter()
+                .map(|name| name.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("\n")
+        )),
+        Outcome::Left(paths) => Some(format!(
+            "{}\n{}",
+            words.files_left,
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join("\n")
+        )),
     }
 }
 
+fn failure_text(words: &FailureWords, result: &Path, outcome: Outcome) -> Option<String> {
+    failure_summary(words, outcome)
+        .map(|failure| format!("{failure}\n{}\n{}", words.result_at, result.display()))
+}
+
+fn retire_self(private: &Path, expected: &FileIdentity) -> io::Result<()> {
+    let executable = std::env::current_exe()?;
+    if FileIdentity::of(&executable)? != *expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the remover executable was replaced",
+        ));
+    }
+    self_delete(&executable)?;
+    let _ = fs::remove_dir(private);
+    if let Some(per_user_folio) = private.parent() {
+        // The default keep-data road leaves this non-empty. The remove-data
+        // road may have emptied it before scheduling us; do not recreate an
+        // otherwise-deleted data folder merely to host the remover.
+        let _ = fs::remove_dir(per_user_folio);
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn self_delete(path: &Path) -> io::Result<()> {
+    fs::remove_file(path)
+}
+
+#[cfg(windows)]
+fn self_delete(path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_FLAG_DELETE,
+        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        FILE_DISPOSITION_INFO_EX, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
+        FileDispositionInfoEx, OPEN_EXISTING, SetFileInformationByHandle,
+    };
+    use windows::core::PCWSTR;
+
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    // SAFETY: the terminated path lives across the call; the returned handle
+    // is immediately placed in `OwnedHandle`.
+    let opened = unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            DELETE.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL,
+            None,
+        )
+    }
+    .map_err(|_| io::Error::last_os_error())?;
+    // SAFETY: `opened` is owned by this call alone.
+    let owned = unsafe { OwnedHandle::from_raw_handle(opened.0) };
+    let disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: windows::Win32::Storage::FileSystem::FILE_DISPOSITION_INFO_EX_FLAGS(
+            FILE_DISPOSITION_FLAG_DELETE.0
+                | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.0
+                | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE.0,
+        ),
+    };
+    // SAFETY: the handle and fixed-size structure are live for the call.
+    unsafe {
+        SetFileInformationByHandle(
+            HANDLE(owned.as_raw_handle()),
+            FileDispositionInfoEx,
+            &raw const disposition as *const _,
+            u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO_EX>())
+                .expect("FILE_DISPOSITION_INFO_EX fits u32"),
+        )
+    }
+    .map_err(|_| io::Error::last_os_error())
+}
+
 #[cfg(not(any(windows, unix)))]
-mod arm {
-    use super::Removal;
-    use std::ffi::OsString;
-    use std::io;
-    use std::path::Path;
-
-    pub(super) fn image_name(_pid: u32) -> Option<OsString> {
-        None
-    }
-
-    pub(super) fn start(
-        _waited: &[(u32, OsString)],
-        _removal: &Removal,
-        _scripts: &Path,
-    ) -> io::Result<()> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "deferred_removal starts its remover on Windows and Unix only",
-        ))
-    }
+fn self_delete(_path: &Path) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "native self-removal is unsupported on this platform",
+    ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Item, Removal, UNIX_SCRIPT, schedule, windows_script};
-    use crate::install_flip::Running;
-    use std::path::PathBuf;
-    use std::time::{Duration, Instant};
+    use super::*;
+    use std::sync::{Arc, Barrier};
 
-    /// A fresh folder under the temporary directory, with this test's tag.
     fn sandbox(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
-            "folio-deferred-removal-{tag}-{}",
-            std::process::id()
+            "folio-native-removal-{tag}-{}-{:032x}",
+            std::process::id(),
+            crate::attention_pipe::unguessable_bits()
         ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&root).unwrap();
         root
     }
 
-    /// A child that lives about `seconds` and then ends by itself.
-    fn short_lived(seconds: u32) -> std::process::Child {
-        #[cfg(windows)]
-        let mut command = {
-            let mut command = crate::quiet_command_named(std::path::Path::new("ping.exe")).unwrap();
-            command.args(["-n", &(seconds + 1).to_string(), "127.0.0.1"]);
-            command
-        };
-        #[cfg(not(windows))]
-        let mut command = {
-            let mut command = crate::quiet_command("/bin/sleep");
-            command.arg(seconds.to_string());
-            command
-        };
-        command.stdout(std::process::Stdio::null()).spawn().unwrap()
+    fn identity(path: &Path) -> FileIdentity {
+        FileIdentity::of(path).unwrap()
     }
 
-    fn running(child: &std::process::Child) -> Running {
-        let pid = child.id();
-        Running {
-            pid,
-            started: crate::install_flip::started_of(pid).unwrap_or(0),
+    fn words() -> FailureWords {
+        FailureWords {
+            title: "Folio".to_owned(),
+            still_running: "Still running:".to_owned(),
+            files_left: "Folio could not remove:".to_owned(),
+            result_at: "Details were saved to:".to_owned(),
         }
     }
 
-    /// Wait (bounded) until `done` holds.
-    fn eventually(within: Duration, mut done: impl FnMut() -> bool) -> bool {
-        let start = Instant::now();
-        while start.elapsed() < within {
-            if done() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        done()
-    }
-
-    /// RED (T-UNINSTALL-UX) — **the remover removes nothing while a process it
-    /// waits for runs, and once that process has ended it removes exactly the
-    /// items it was handed, then the folder they emptied, and then its own
-    /// script — and nothing beside them.**
-    ///
-    /// The real producer end to end: a real script in a real temporary folder,
-    /// started through the real door, waiting on a real child that ends by
-    /// itself a few seconds later. The folder holds a file and a directory
-    /// with a file in it (the program and its update home), and a sibling of
-    /// the folder stands outside it.
-    ///
-    /// MUTATION: in the Windows script, jump to `:remove` without the
-    /// `tasklist` look (or, on Unix, drop the `kill -0` loop): the folder is
-    /// gone while the child still runs.
-    #[test]
-    fn the_folder_goes_only_after_the_waited_process_ends_and_nothing_beside_it() {
-        if cfg!(not(any(windows, unix))) {
-            return;
-        }
-        let root = sandbox("waits");
-        let folder = root.join("Folio");
-        let home = folder.join(".folio-update");
-        std::fs::create_dir_all(home.join("aa")).unwrap();
-        std::fs::write(folder.join("folio.exe"), b"program").unwrap();
-        std::fs::write(home.join("aa").join("journal.json"), b"{}").unwrap();
-        let sibling = root.join("sibling.txt");
-        std::fs::write(&sibling, b"keep").unwrap();
-        let scripts = root.join("temp");
-        std::fs::create_dir_all(&scripts).unwrap();
-
-        let mut child = short_lived(3);
-        let removal = Removal {
-            after: vec![running(&child)],
-            items: vec![
-                Item::File(folder.join("folio.exe")),
-                Item::Directory(home.clone()),
-            ],
-            folder: Some(folder.clone()),
-        };
-        schedule(&removal, &scripts).expect("the remover starts");
-
-        std::thread::sleep(Duration::from_millis(1200));
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "the child still runs, so what follows is a look while it runs"
-        );
-        assert!(
-            folder.join("folio.exe").exists() && home.exists(),
-            "nothing is removed while the waited process runs"
-        );
-
-        child.wait().unwrap();
-        assert!(
-            eventually(Duration::from_secs(30), || !folder.exists()),
-            "the items and the folder they emptied are gone once the process has ended"
-        );
-        assert_eq!(std::fs::read(&sibling).unwrap(), b"keep");
-        assert!(
-            eventually(Duration::from_secs(10), || std::fs::read_dir(&scripts)
-                .unwrap()
-                .next()
-                .is_none()),
-            "the script deleted itself"
-        );
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-
-    /// RED (T-UNINSTALL-UX) — **a folder that still holds something the remover
-    /// was not handed stays, with that something in it.**
-    ///
-    /// The person's own file beside `folio.exe` (a zip unpacked into
-    /// `Downloads`): the program's files go, the folder and the file stay.
-    ///
-    /// MUTATION: remove the folder with `rd /s /q` (Unix: `rm -rf`) instead of
-    /// `rd` alone (`rmdir`).
-    #[test]
-    fn a_folder_with_a_file_nobody_named_keeps_it() {
-        if cfg!(not(any(windows, unix))) {
-            return;
-        }
-        let root = sandbox("keeps");
-        let folder = root.join("Downloads");
-        std::fs::create_dir_all(&folder).unwrap();
-        std::fs::write(folder.join("folio.exe"), b"program").unwrap();
-        std::fs::write(folder.join("thesis.pdf"), b"mine").unwrap();
-        let scripts = root.join("temp");
-        std::fs::create_dir_all(&scripts).unwrap();
-
-        let removal = Removal {
+    fn removal(program: &Path, item: Item, folder: Option<PathBuf>) -> Removal {
+        Removal {
+            program: program.to_path_buf(),
+            program_identity: identity(program),
             after: Vec::new(),
-            items: vec![Item::File(folder.join("folio.exe"))],
-            folder: Some(folder.clone()),
-        };
-        schedule(&removal, &scripts).expect("the remover starts");
-        assert!(
-            eventually(Duration::from_secs(30), || !folder
-                .join("folio.exe")
-                .exists()),
-            "the program's file goes"
-        );
-        assert!(
-            eventually(Duration::from_secs(10), || std::fs::read_dir(&scripts)
-                .unwrap()
-                .next()
-                .is_none()),
-            "the script has finished"
-        );
-        assert_eq!(std::fs::read(folder.join("thesis.pdf")).unwrap(), b"mine");
-        std::fs::remove_dir_all(&root).unwrap();
+            items: vec![item],
+            folder,
+            words: words(),
+        }
     }
 
-    /// PIN (T-UNINSTALL-UX) — **the Windows script's text is this module's own
-    /// words and numbers: every path and name is an environment variable.**
-    ///
-    /// What keeps a `%`, a `&` or a non-ASCII letter in a path from changing
-    /// what the script runs is that no path is ever in its text.
-    ///
-    /// MUTATION: write an item's path into the script instead of `%FOLIO_REMOVAL_ITEM_n%`.
+    fn on_worker<T: Send + 'static>(body: impl FnOnce(&WorkerCtx) -> T + Send + 'static) -> T {
+        match crate::spawn_at_priority(
+            "folio-native-removal-test",
+            crate::ThreadPriority::BelowNormal,
+            body,
+        )
+        .unwrap()
+        .join()
+        {
+            Ok(answer) => answer,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    /// RED (T-UNINSTALL-UX round 2, mutation `skip_boundary_digest`) — a file
+    /// replaced after planning is not deleted and is named by the outcome.
     #[test]
-    fn the_windows_script_names_every_path_by_a_variable() {
-        let script = windows_script(2, &[false, true], true);
-        assert!(script.is_ascii());
-        for needed in [
-            "%FOLIO_REMOVAL_PID_1%",
-            "%FOLIO_REMOVAL_IMAGE_2%",
-            "del /a /f /q \"%FOLIO_REMOVAL_ITEM_1%\"",
-            "rd /s /q \"%FOLIO_REMOVAL_ITEM_2%\"",
-            "rd \"%FOLIO_REMOVAL_FOLDER%\"",
-            "del /f /q \"%~f0\"",
-        ] {
-            assert!(script.contains(needed), "{needed}\n{script}");
+    fn a_post_plan_replacement_is_not_deleted() {
+        let root = sandbox("replacement");
+        let file = root.join("folio.exe");
+        fs::write(&file, b"planned").unwrap();
+        let expected = identity(&file);
+        fs::write(&file, b"personal replacement").unwrap();
+        let item = Item::File {
+            path: file.clone(),
+            expected,
+        };
+        assert!(!remove_item(&item).unwrap());
+        assert_eq!(fs::read(&file).unwrap(), b"personal replacement");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// RED (T-UNINSTALL-UX round 2, mutation `accept_multiple_links`) — the
+    /// identity reader refuses a hard-linked file before it can enter a plan.
+    #[test]
+    fn a_hard_link_is_not_an_owned_file() {
+        let root = sandbox("hard-link");
+        let file = root.join("folio.exe");
+        let twin = root.join("mine.exe");
+        fs::write(&file, b"same object").unwrap();
+        fs::hard_link(&file, &twin).unwrap();
+        let error = FileIdentity::of(&file).unwrap_err().to_string();
+        assert!(error.contains("hard link"), "{error}");
+        assert_eq!(fs::read(&twin).unwrap(), b"same object");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// RED (T-UNINSTALL-UX round 2, mutation `drop_copy_guard`) — while the
+    /// scheduler holds the copy through the readiness hand-off, a replacement
+    /// attempt is refused. The barrier is the attempt's handshake; the timeout
+    /// is only an outer deadlock cap.
+    #[cfg(windows)]
+    #[test]
+    fn the_private_remover_cannot_be_replaced_before_readiness() {
+        let root = sandbox("guard");
+        let copy = root.join(COPY_NAME_WINDOWS);
+        fs::write(&copy, b"remover").unwrap();
+        let guard = guard_copy(&copy).unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+        let entered = Arc::clone(&barrier);
+        let target = copy.clone();
+        let attempt = crate::spawn_at_priority(
+            "folio-remover-replacement-test",
+            crate::ThreadPriority::BelowNormal,
+            move |_| {
+                entered.wait();
+                let replacement = target.with_extension("replacement");
+                fs::write(&replacement, b"attacker").unwrap();
+                let answer =
+                    fs::remove_file(&target).and_then(|()| fs::rename(&replacement, &target));
+                let _ = fs::remove_file(replacement);
+                answer
+            },
+        )
+        .unwrap();
+        barrier.wait();
+        let answer = attempt.join().unwrap();
+        assert!(
+            answer.is_err(),
+            "the held executable name cannot be replaced"
+        );
+        drop(guard);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// RED (T-UNINSTALL-UX round 2, mutation `one_shot_held_delete`) — a
+    /// Windows image/file held without delete sharing is left for the bounded
+    /// retry loop; it is deleted only after that handle closes.
+    #[cfg(windows)]
+    #[test]
+    fn a_held_folio_file_is_not_reported_removed() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let root = sandbox("held-image");
+        let file = root.join("folio.exe");
+        fs::write(&file, b"owned image").unwrap();
+        let expected = identity(&file);
+        let held = OpenOptions::new()
+            .read(true)
+            .share_mode(1)
+            .open(&file)
+            .unwrap();
+        let plan = removal(
+            &file,
+            Item::File {
+                path: file.clone(),
+                expected: expected.clone(),
+            },
+            None,
+        );
+        let outcome =
+            on_worker(move |worker| perform_with(worker, &plan, Duration::ZERO, 1, Duration::ZERO));
+        assert_eq!(outcome, Outcome::Left(vec![file.clone()]));
+        assert!(file.exists());
+        drop(held);
+        assert!(remove_verified_file(&file, &expected).unwrap());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// RED (T-UNINSTALL-UX round 2, mutation `trust_planned_identity`) — the
+    /// destructive boundary checks both length and digest, not either alone.
+    #[test]
+    fn equal_length_changed_bytes_are_left() {
+        let root = sandbox("equal-length");
+        let file = root.join("conpty.dll");
+        fs::write(&file, b"owned").unwrap();
+        let expected = identity(&file);
+        fs::write(&file, b"mine!").unwrap();
+        let item = Item::File {
+            path: file.clone(),
+            expected,
+        };
+        assert!(!remove_item(&item).unwrap());
+        assert_eq!(fs::read(&file).unwrap(), b"mine!");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// RED (T-UNINSTALL-UX round 2, mutation `restore_recursive_directory_delete`) —
+    /// a file inserted into a planned tree is not in the byte-identity plan,
+    /// so the directory remains non-empty and the personal file survives.
+    #[test]
+    fn a_post_plan_file_keeps_its_directory() {
+        let root = sandbox("late-tree-file");
+        let tree = root.join("Folio.app");
+        fs::create_dir(&tree).unwrap();
+        let personal = tree.join("mine.txt");
+        fs::write(&personal, b"mine").unwrap();
+        assert!(remove_item(&Item::Directory(tree.clone())).is_err());
+        assert_eq!(fs::read(&personal).unwrap(), b"mine");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// RED (T-UNINSTALL-UX round 2, mutation `wait_by_pid_only`) — a reused
+    /// pid/start pair is not waited for. `still_running` is the one identity
+    /// authority; changing the recorded instant makes it false.
+    #[test]
+    fn a_pid_with_another_start_instant_is_not_the_waited_process() {
+        let pid = std::process::id();
+        let started = crate::install_flip::started_of(pid).unwrap();
+        assert!(crate::install_flip::still_running(Running { pid, started }));
+        assert!(!crate::install_flip::still_running(Running {
+            pid,
+            started: started.wrapping_add(1),
+        }));
+    }
+
+    /// RED (T-UNINSTALL-UX round 2, mutation `omit_result_path_from_failure`) —
+    /// a final failure names the live process or remaining path and the result
+    /// file where the same answer can be found.
+    #[test]
+    fn a_final_failure_names_what_remains_and_the_result_file() {
+        let result = Path::new("private/result.txt");
+        let running = failure_text(
+            &words(),
+            result,
+            Outcome::TimedOut(vec![OsString::from("folio.exe")]),
+        )
+        .unwrap();
+        assert!(running.contains("Still running:\nfolio.exe"), "{running}");
+        assert!(
+            running.contains(&format!("Details were saved to:\n{}", result.display())),
+            "{running}"
+        );
+
+        let path = PathBuf::from("install/folio.exe");
+        let left = failure_text(&words(), result, Outcome::Left(vec![path.clone()])).unwrap();
+        assert!(left.contains("Folio could not remove:"), "{left}");
+        assert!(left.contains(&path.display().to_string()), "{left}");
+        assert!(left.contains(&result.display().to_string()), "{left}");
+    }
+
+    /// RED (T-UNINSTALL-UX round 2, mutation `do_not_release_ready_remover`) —
+    /// the test helper's native copy uses the same product handshake and then
+    /// removes the sandbox file and the empty folder. The only clock is the
+    /// outer deadlock ceiling around observing the already-produced result.
+    #[test]
+    fn a_native_remover_copy_runs_the_plan() {
+        if std::env::var_os(key("PRIVATE")).is_some() {
+            crate::admission::enter_standalone_main("folio-uninstall-remove-test", |worker| {
+                assert_eq!(run_from_environment(worker), 0);
+            })
+            .unwrap();
+            return;
         }
-        assert!(!script.contains("rd /s /q \"%FOLIO_REMOVAL_FOLDER%\""));
-        // Every program by its path: a `find` earlier on `PATH` (Git's) never answers.
-        for program in ["tasklist.exe", "find.exe", "PING.EXE"] {
-            assert!(
-                script.contains(&format!("\"%SystemRoot%\\System32\\{program}\"")),
-                "{program}"
-            );
+        if cfg!(not(any(windows, unix))) {
+            return;
         }
-        assert!(UNIX_SCRIPT.contains("/bin/rm -rf -- \"$item\""));
-        assert!(UNIX_SCRIPT.contains("/bin/rmdir -- \"$FOLIO_REMOVAL_FOLDER\""));
+        let root = sandbox("native");
+        let install = root.join("install");
+        let private = root.join("local/Folio");
+        fs::create_dir_all(&install).unwrap();
+        let file = install.join("sidecar.bin");
+        fs::write(&file, b"owned").unwrap();
+        let program = root.join("source-test-program.exe");
+        fs::copy(std::env::current_exe().unwrap(), &program).unwrap();
+        let plan = removal(
+            &program,
+            Item::File {
+                path: file.clone(),
+                expected: identity(&file),
+            },
+            Some(install.clone()),
+        );
+        let private_after = private.clone();
+        on_worker(move |worker| schedule(worker, &plan, &private)).unwrap();
+        let until = Instant::now() + Duration::from_secs(30);
+        while (install.exists() || private_after.exists()) && Instant::now() < until {
+            std::thread::yield_now();
+        }
+        assert!(!install.exists(), "the native remover completed its plan");
+        assert!(
+            !private_after.exists(),
+            "the native remover removed its private copy last"
+        );
+        let _ = fs::remove_dir_all(root);
     }
 }

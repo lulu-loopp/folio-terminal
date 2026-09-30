@@ -35,10 +35,12 @@ brew install --cask lulu-loopp/folio/folio
 
 按安装方式卸载：
 
-- **Windows 压缩包**——打开**设置 ▸ 关于 ▸ 卸载 Folio**，或退出 Folio 后双击其文件夹中的 `uninstall.cmd`。两种方式均完整移除 Folio，包括文件夹。
+- **Windows 压缩包**——打开**设置 ▸ 关于 ▸ 卸载 Folio**，或退出 Folio 后双击其文件夹中的 `uninstall.cmd`。
 - **scoop**——`scoop uninstall folio`，自动完成清理。
 - **macOS DMG**——打开**设置 ▸ 关于 ▸ 卸载 Folio**，或退出 Folio 后运行 `/Applications/Folio.app/Contents/MacOS/folio --uninstall`。两种方式均完整移除 Folio，包括应用。
 - **Homebrew**——`brew uninstall --zap folio`。
+
+<!-- zh: pending --> Folio's files are removed and its folder only if it is then empty.
 
 <!-- winget: add when live. winget runs no cleanup for Folio (a portable zip, no
 uninstall hook): `folio --uninstall-cleanup`, then `winget uninstall WeiyiShi.Folio`.

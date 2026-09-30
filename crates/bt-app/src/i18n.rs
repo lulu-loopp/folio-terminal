@@ -402,6 +402,9 @@ pub enum Text {
     UninstallProgramKept,
     UninstallProgramManaged,
     UninstallNotStarted,
+    UninstallStillRunning,
+    UninstallFilesLeft,
+    UninstallResultAt,
     RowUninstall,
     UninstallVerb,
     DescUninstall,
@@ -4915,6 +4918,21 @@ impl Text {
                 "The uninstaller did not start, and nothing was removed.",
                 "卸载程序未启动，未移除任何内容。",
             ),
+            Self::UninstallStillRunning => pick(
+                lang,
+                "Still running:",
+                "Still running:", // zh: pending opus46
+            ),
+            Self::UninstallFilesLeft => pick(
+                lang,
+                "Folio could not remove:",
+                "Folio could not remove:", // zh: pending opus46
+            ),
+            Self::UninstallResultAt => pick(
+                lang,
+                "Details were saved to:",
+                "Details were saved to:", // zh: pending opus46
+            ),
             Self::RowUninstall => pick(lang, "Uninstall Folio", "卸载 Folio"),
             Self::UninstallVerb => pick(lang, "Uninstall…", "卸载…"),
             Self::DescUninstall => pick(
@@ -5723,7 +5741,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 851] = [
+    pub const ALL: [Self; 854] = [
         Self::UninstallScriptQuestion,
         Self::UninstallScriptRunning,
         Self::CleanupRecovery,
@@ -5780,6 +5798,9 @@ impl Text {
         Self::UninstallProgramKept,
         Self::UninstallProgramManaged,
         Self::UninstallNotStarted,
+        Self::UninstallStillRunning,
+        Self::UninstallFilesLeft,
+        Self::UninstallResultAt,
         Self::RowUninstall,
         Self::UninstallVerb,
         Self::DescUninstall,
@@ -6650,7 +6671,6 @@ impl Text {
         Self::CleanupMarkExplorer,
         Self::CleanupMarkExplorerPackage,
         Self::CleanupMarkExplorerClassic,
-        Self::CleanupMarkLocal,
     ];
 
     /// **The entries whose Chinese has not been written yet**, standing with the English in both
@@ -6755,7 +6775,14 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 6] = [
+        (Self::UninstallStillRunning, HostPlatform::Windows),
+        (Self::UninstallStillRunning, HostPlatform::MacOs),
+        (Self::UninstallFilesLeft, HostPlatform::Windows),
+        (Self::UninstallFilesLeft, HostPlatform::MacOs),
+        (Self::UninstallResultAt, HostPlatform::Windows),
+        (Self::UninstallResultAt, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

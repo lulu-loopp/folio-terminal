@@ -2901,6 +2901,25 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comm
     command
 }
 
+/// Build a quiet child which must live beyond an inherited kill-on-close job.
+///
+/// Windows accepts `CREATE_BREAKAWAY_FROM_JOB` only when the containing job
+/// permits a breakaway. A refusal is returned by `spawn`, so callers can say
+/// that the hand-off did not happen instead of reporting a detached child that
+/// the job will kill with its parent. Off Windows there is no inherited job
+/// object and this is the ordinary quiet child door.
+#[must_use]
+pub fn quiet_breakaway_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    let mut command = quiet_command(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
+    }
+    command
+}
+
 /// **Which executable a process id is running**, or `None` when this process may not ask.
 ///
 /// One question, asked with the smallest right there is: `PROCESS_QUERY_LIMITED_INFORMATION` is
@@ -3789,9 +3808,9 @@ mod windows_impl {
                 GetCursorPos, GetSystemMetrics, GetWindowRect, HTBOTTOM, HTBOTTOMLEFT,
                 HTBOTTOMRIGHT, HTCAPTION, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
                 HWND_NOTOPMOST, HWND_TOPMOST, IsIconic, IsZoomed, MB_ICONINFORMATION, MB_OK,
-                MB_SETFOREGROUND, MF_STRING, MINMAXINFO, MessageBoxW, NCCALCSIZE_PARAMS,
-                PostMessageW, RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER,
-                SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+                MB_SETFOREGROUND, MF_STRING, MINMAXINFO, NCCALCSIZE_PARAMS, PostMessageW,
+                RegisterWindowMessageW, SM_CXFRAME, SM_CXPADDEDBORDER, SM_CXVIRTUALSCREEN,
+                SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
                 SPI_GETCLIENTAREAANIMATION, SPI_GETWHEELSCROLLLINES, SWP_FRAMECHANGED,
                 SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SetCaretPos,
                 SetClassLongPtrW, SetWindowPos, SystemParametersInfoW, TPM_RETURNCMD,
@@ -11964,23 +11983,41 @@ mod windows_impl {
     /// nobody sees is the same as no box, and this one carries the only
     /// explanation of a launch that is about to exit.
     pub fn message_box(title: &str, text: &str) {
+        const ALERT_WITHIN_MS: u32 = 15 * 60 * 1000;
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBoxTimeoutW(
+                hwnd: HWND,
+                text: PCWSTR,
+                caption: PCWSTR,
+                kind: u32,
+                language: u16,
+                milliseconds: u32,
+            ) -> i32;
+        }
         let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
         let text: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+        let kind = (MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND).0;
+        // SAFETY: both terminated strings live across the synchronous call.
+        // `MessageBoxTimeoutW` is the system's MessageBoxW implementation with
+        // an elapsed-time bound; after fifteen minutes the window is taken
+        // away and the standalone process can finish.
         unsafe {
-            MessageBoxW(
-                Some(HWND::default()),
+            MessageBoxTimeoutW(
+                HWND::default(),
                 PCWSTR(text.as_ptr()),
                 PCWSTR(title.as_ptr()),
-                MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND,
+                kind,
+                0,
+                ALERT_WITHIN_MS,
             );
         }
     }
 
     /// **Say one thing in a box from a process that has no application** —
     /// the update's road processes' failure window (U-32). On Windows the
-    /// ownerless box above already is that box: `MessageBoxW` needs no window
-    /// and no thread of any kind. The macOS arm is the one that differs
-    /// (`macos_dialogs::standalone_alert`).
+    /// ownerless, fifteen-minute-bounded box above is that box. The macOS arm
+    /// is the one that differs (`macos_dialogs::standalone_alert`).
     pub fn standalone_alert(title: &str, text: &str) {
         message_box(title, text);
     }

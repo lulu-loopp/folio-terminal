@@ -1185,3 +1185,4 @@ dbg_macro = "deny"
 [dependencies]
 ttf-parser.workspace = true
 bt-unicode = { path = "../bt-unicode" }
+bt-winres = { path = "../bt-winres" }

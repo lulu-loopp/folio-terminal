@@ -71259,6 +71259,14 @@ fn report_frame_shape_stop(error: &anyhow::Error, path: &Path, announce: impl Fn
 }
 
 fn main() -> Result<()> {
+    // The private native remover's stdout is its readiness pipe. Answer this
+    // door before console adoption can replace that inherited handle, and
+    // before any code capable of constructing a window.
+    if cli::uninstall_remove(std::env::args_os().skip(1)) {
+        let code =
+            uninstall::remover_standalone(bt_platform::deferred_removal::run_from_environment);
+        std::process::exit(code);
+    }
     // First, so that even the panic hook's own words have somewhere to land
     // when a shell launched this window-subsystem process to read its traces.
     // **For the front door only** — see `diagnostics::enter_resident_run`, which

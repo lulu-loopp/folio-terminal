@@ -45,13 +45,14 @@ the first run asks, and what to do if the system puts a panel in front of you.
 Take Folio out the way it came in:
 
 - **Windows zip** — open **Settings ▸ About ▸ Uninstall Folio**, or quit Folio
-  and double-click `uninstall.cmd` in its folder. Either one removes Folio
-  completely, its folder included.
+  and double-click `uninstall.cmd` in its folder.
 - **scoop** — `scoop uninstall folio` runs the same cleanup for you.
 - **macOS DMG** — open **Settings ▸ About ▸ Uninstall Folio**, or quit Folio and
   run `/Applications/Folio.app/Contents/MacOS/folio --uninstall`. Either one
   removes Folio completely, the app included.
 - **Homebrew** — `brew uninstall --zap folio`.
+
+Folio's files are removed and its folder only if it is then empty.
 
 <!-- winget: add when live. winget runs no cleanup for Folio (a portable zip, no
 uninstall hook): `folio --uninstall-cleanup`, then `winget uninstall WeiyiShi.Folio`.

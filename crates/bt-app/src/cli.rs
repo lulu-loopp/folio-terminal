@@ -47,7 +47,7 @@
 //! happens when the folder is gone" rule can be pinned by a test that touches
 //! no disk.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use crate::i18n;
@@ -860,6 +860,14 @@ pub const REMOVE_DATA_FLAG: &str = "--remove-data";
 /// **`--after-pid <pid>`**: `--uninstall`'s word for "the Folio that asked, whose end
 /// the door waits for before it touches anything".
 pub const AFTER_PID_FLAG: &str = "--after-pid";
+
+/// The copied native remover's private door. It accepts no other word and is
+/// intentionally absent from the public usage line.
+pub fn uninstall_remove(args: impl IntoIterator<Item = OsString>) -> bool {
+    let mut args = args.into_iter();
+    args.next().as_deref() == Some(OsStr::new(bt_platform::deferred_removal::REMOVE_FLAG))
+        && args.next().is_none()
+}
 
 /// **What a line that opens with one of the uninstaller's words asks for.**
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2549,5 +2557,21 @@ mod tests {
             uninstall_cleanup(args(&["--uninstall-cleanup", "--update-feed", url])),
             Some(Err(_))
         ));
+    }
+
+    /// RED (T-UNINSTALL-UX round 2, mutation `accept_private_door_tail`) — the
+    /// native remover door is exact and private: one word only, with neither a
+    /// value nor another public verb.
+    #[test]
+    fn the_native_remover_door_accepts_only_its_exact_word() {
+        assert!(uninstall_remove(args(&["--uninstall-remove"])));
+        for refused in [
+            &[][..],
+            &["--uninstall-remove=1"],
+            &["--uninstall-remove", "--remove-data"],
+            &["--uninstall"],
+        ] {
+            assert!(!uninstall_remove(args(refused)), "{refused:?}");
+        }
     }
 }
