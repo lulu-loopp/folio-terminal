@@ -1,6 +1,6 @@
 # Formulas inside a multiplexer pane: detection reads the pane's own rectangle, not screen lines — design note, 2026-09-29
 
-0.4.7 ticket 69, phase 1 (docs only). Base: main `6abd3f5e`. **Revision (b), 2026-09-29**, folds in Codex's review of revision (a) at `aca459a1` (`69-review-codex-2026-09-29.md`, verdict "not yet", eleven findings) and the owner's rulings of the same day (§10). What changed is listed at the end; the sections below are the current text.
+0.4.7 ticket 69, phase 1 (docs only). Base: main `6abd3f5e`. **Revision (b), 2026-09-29**, folds in Codex's review of revision (a) at `aca459a1` (`69-review-codex-2026-09-29.md`, verdict "not yet", eleven findings) and the owner's rulings of the same day (§10). **Revision (c), 2026-09-29**, folds in Codex's check of (b) at `6375a616` (`69-review-codex-2026-09-29-b.md`, three blockers) and the coordinator's ruling on frame changes. What changed is listed at the end; the sections below are the current text.
 
 The owner's ruling of 2026-09-29: ticket 69 ships in 0.4.7, and the never-merged branch `fix/formulas-behind-a-border` (nine commits of 2026-09-16/17, ending at `0fa4af14`) is **the specification and the evidence, not a rebase target**. The branch is kept as a patch (`fix_formulas-behind-a-border.patch`, with its commit list, in the coordinator's stale-branch folder; triage in `stale-branches-2026-09-26.md` §2). Its three Codex reviews travelled inside the patch and never reached main. Below, "the branch" means that patch at `0fa4af14`, and "hunk X" names the file the hunk changes. Facts about main come from grep on `6abd3f5e`, never from line numbers.
 
@@ -10,7 +10,7 @@ The owner's ruling of 2026-09-29: ticket 69 ships in 0.4.7, and the never-merged
 
 1. **The defect is still on main.** Inside `herdr`, or in a `tmux` split, every pane row reaches the host grid as `<frame cells>│<pane text>`. The detector reads that as one line. `<25 blanks>│$$` is indented code, and its trimmed form opens on `│`, not `$$`, so nothing in the pane is ever typeset. `bt-detect` on main has `lib.rs`, `ledger.rs` and `table.rs` and no border or region API. Nothing in `docs/DESIGN.md`, `docs/RULES.md` or `CHANGELOG.md` mentions herdr or tmux panes.
 2. **A pane is a rectangle, not a column span** (Codex finding 1). The frame is read from the captured grid as a **guillotine layout tree** (§2.2): the screen, minus at most one edge status row, is cut by full vertical rules and by anchored horizontal rules, recursively. The leaves are the panes. Each pane is scanned alone from a neutral checkpoint, and every existing gate of the detector runs unchanged over the pane's own lines. A fence opened in the top-right pane of a 2×2 layout does not reach the bottom-right pane.
-3. **A frame is told from a table** (finding 2; the ticket's invariant stands). A cut must carry a vertical stroke on **every** row of its rectangle, and at least one side of it must be *clipped* (§2.3): text that starts or ends at the cell next to the rule. That is what a program clipping a pane produces, and what a table, box art or a padded listing never produces. A leaf that holds only digits and blanks marks a numbered listing (a side-by-side diff), and it refuses the whole frame. A full-height Unicode table, box-drawing art and a side-by-side diff therefore **never** split the screen.
+3. **A frame is told from a table** (finding 2; the ticket's invariant stands). A cut must carry a vertical stroke on **every** row of its rectangle, and at least one side of it must be *clipped* (§2.3): text that starts or ends at the cell next to the rule. That is what a program clipping a pane produces, and what a table, box art or a padded listing never produces. A leaf that holds only digits and blanks marks a numbered listing (a side-by-side diff), and it refuses the whole frame. A horizontal rule cuts only where a vertical rule already proven a frame anchors it, so a rectangle whose every rule is padded is a table and is cut in **neither** direction. A full-height Unicode table, box-drawing art and a side-by-side diff therefore **never** split the screen.
 4. **A formula the unsplit screen proves is never cut** (R5, a veto only). Before any cut is accepted, the unsplit capture is scanned exactly as today. A cut through the cells of any block that scan proves is refused. This holds on every row, rule rows included, so the branch's "deliberate loss" of `$x │+y$` is gone. The owner's rule of 2026-09-17 on the status row is **kept** (§2.4). Codex's counter-example shows that R5 cannot replace it: a sliced status row can manufacture a clean `$$` that the unsplit screen never proved.
 5. **Owner: `bt-detect`.** The frame is a pure function of one live capture, and `bt-detect` derives it once. The door is one new type, `bt_detect::LiveCapture`: the inputs, the parser checkpoint and options they are scanned under, and the frame, measured once on first ask (§3). `bt-term` stays the only reader of the grid. **This is an ownership split** (finding 9): a live occurrence's extent, fit, fold width, drawing limits and hit area move from "the pane's full width" to "the rectangle it was proven in". It needs this reviewed note, rows in ARCHITECTURE §4.4, and nothing more (§8).
 6. **One release deliverable, two implementation tickets** (owner, 2026-09-29; finding 10). **69a T-PANE-COLUMNS** (the frame, detection, presentation, the oracle) and then **69b T-PANE-IDENTITY** (math identity, stability, damage and completion keyed by pane). **Neither is released alone.** Both land on main before the 0.4.7 tag. The motivating case is two agents side by side, and with 69a alone that case fails: whole-row damage from a busy neighbour keeps a pane's formulas from ever arming.
@@ -44,7 +44,7 @@ The root rectangle is every grid row, minus **at most one** edge row. The topmos
 - without it, a cut exists that fails with it (the row does not carry the stroke the cut needs), and
 - it carries **no delimiter the math grammar recognises**: `$`, `\[ \] \( \)`, or `\begin{…}`/`\end{…}` of a math environment (the branch's `line_carries_math_delimiter`; owner's ruling 2026-09-17, kept on 2026-09-29, §2.4).
 
-An excluded status row belongs to **no pane** and is not scanned by any of them.
+An excluded status row belongs to **no pane** and no pane scans it. It is read by exactly one thing: the **screen-fence pass** (R9), which advances the fence state across it and never looks for math there. In 69b that state is the screen tier's `screen_fence_state` (§8.2).
 
 ### 2.2 The layout tree (guillotine cuts)
 
@@ -58,11 +58,18 @@ An excluded status row belongs to **no pane** and is not scanned by any of them.
    If any vertical cuts exist, cut `R` at all of them into column strips. A cut column belongs to no strip, and a strip of zero width is dropped (two adjacent rules; a rule in the first or last column, Codex B-7). Then recurse on each strip.
 2. **Otherwise, horizontal cuts.** Row `r`, with `top ≤ r < bottom`, is a horizontal cut of `R` when all of these hold:
    - **(H1)** every column of `R` carries a horizontal stroke at `r`;
-   - **(H2)** the row is **anchored**: a cell of that row inside `R`, or the cell just outside `R` at either end of it, is a junction whose vertical stroke continues into the row above or below;
+   - **(H2)** the row is **anchored by a frame**: a cell of that row inside `R`, or the cell just outside `R` at either end of it, is a junction whose vertical stroke continues into an adjacent band, and in that band the junction's column is a **proven frame rule**. That means it passes V1 and V2 (§2.3) over the band's rows: the rows between this row and the next full horizontal-stroke row, or the edge of `R`. A horizontal rule never cuts on its own evidence. It cuts only where a vertical rule already shown to be a multiplexer's, and not a table's, meets it;
    - **(R5)** no block proven on the unsplit screen crosses it.
 
    If any exist, cut `R` into row bands; a cut row belongs to no band, and an empty band is dropped. Then recurse.
 3. **Otherwise `R` is a leaf: a pane.**
+
+**A padded rectangle is a table, in both directions** (Codex check of (b), blocker 1). If every vertical-stroke column of `R` that satisfies V1 fails V2, then `R` is a table or box art. H2 then has no proven frame rule to anchor on, so `R` is cut in neither direction and stays one leaf. That leaf is the whole screen when `R` is the root. Take the 40×11 padded table: row 0 `┌────┬────┐`, row 20 `├────┼────┤`, row 39 `└────┴────┘`, and `│ a  │ b  │` elsewhere.
+- The inner rule at column 5 is padded on both sides, so it fails V2.
+- The outer rules at columns 0 and 10 have no columns on their outer side. That is not a blank gutter (V2b requires one), and on their inner side they are padded. So they fail V2 too.
+- Rows 0, 20 and 39 carry full horizontal strokes, but their junctions and corners stand on unproven columns, so none of them is anchored.
+
+The whole table is one pane (`a_padded_full_height_table_is_never_cut_in_either_direction`).
 
 **Why guillotine.** tmux's layout is a tree of vertical and horizontal splits, and so are herdr's sidebar-plus-pane, vim's `:vsplit`/`:split` and zellij's tiled layout. A full-width `─` row with no junction (a Markdown horizontal rule an agent renders, or a separator under a heading) is not anchored and never cuts. So a screen with only a horizontal split is read whole, as today; that cost is accepted and tested (§5).
 
@@ -79,7 +86,7 @@ The one fact that separates them is what put the rule there. A **multiplexer cli
 
 **(V2a) Clipped.** A side of the rule is **clipped** when, among the rows of `R` on which that side's pane (from the rule to the next rule or edge of `R`) holds any text, a majority have text in the cell next to the rule. The rule passes V2a when either side is clipped.
 
-**(V2b) A blank gutter is harmless.** The rule also passes when one side is blank on every row of `R` (herdr's sidebar gutter, an empty pane). No text can cross a rule with nothing on one side of it, so the cut cannot take anything apart.
+**(V2b) A blank gutter is harmless.** The rule also passes when one side is blank on every row of `R` **and that side has at least one column** (herdr's sidebar gutter, an empty pane). A rule in the first or last column of the screen has no columns on its outer side. That is not a gutter, so such a rule must be clipped to be a frame. No text can cross a rule with nothing on one side of it, so the cut cannot take anything apart.
 
 **(V2c) A numbered listing is not a layout.** After the tree is built, if any leaf holds only decimal digits and blanks on every row (and is not entirely blank), the **whole frame** is refused. That leaf is a line-number gutter, so the screen is a side-by-side diff (`delta --side-by-side`: `  12 │code…│  12 │code…`) or a numbered listing, not panes. Other diff tools are already excluded: `diff -y` draws ASCII, and `vimdiff` has two status rows (below).
 
@@ -90,7 +97,7 @@ The one fact that separates them is what put the rule there. A **multiplexer cli
 | herdr / herdr compact | ✓ | right side clipped (pane text at the rule); left blank | yes |
 | tmux split, shell output in either pane | ✓ | right side clipped (lines start at the pane's column 0) | yes |
 | tmux 2×2 / nested | ✓ per rectangle | as above | yes |
-| a Unicode table, full height (`│ a │ b │`, `┌┬┐ ├┼┤ └┴┘`) | ✓ | padded both sides on every row | **no** |
+| a Unicode table, full height (`│ a │ b │`, `┌┬┐ ├┼┤ └┴┘`) | ✓ | padded both sides on every row; its horizontal rules have no proven anchor (H2) | **no**, in either direction |
 | box-drawing art or a boxed banner, padded | ✓ | padded | **no** |
 | side-by-side diff (delta) | ✓ | clipped, but a digits-only leaf | **no** (V2c) |
 | vim `:vsplit` | fails §2.1: two non-rule rows (window status + command line) | — | **no** (accepted, §5) |
@@ -112,7 +119,7 @@ The price: in a true tmux split, a line on which the unsplit reading happens to 
 
 **The status-row delimiter rule stays** (owner's ruling 2026-09-17, confirmed 2026-09-29 after Codex's finding 3). Revision (a) proposed replacing it with R5, and that would be unsafe. Take a 40×20 screen with a candidate rule at column 8 on rows 1–39. Row 0, the one status row, reads `status!!!$$`, so column 8 holds the last `!`. The pane to the right of the rule has `x^2` on row 1 and a clean `$$` on row 2. The unsplit row 0 is `status!!!$$`, so today's scanner proves nothing and R5 has nothing to veto. Slice row 0 at the rule, and the right pane reads `$$ / x^2 / $$`: a display block the unsplit screen never proved, manufactured by the slice. The delimiter rule refuses the exemption, because the row carries `$`. Revision (a)'s other argument, that an incomplete edge formula "gains a second row" and so moves to a middle row, was also wrong: its opener stays on row 0.
 
-In this revision an excluded status row is not scanned at all (§2.1), which also prevents that manufacture. The rule is kept anyway, as ruled. **R5 is a veto only, never a weakening of another guard.**
+In this revision no pane scans an excluded status row (§2.1); only the screen-fence pass reads it, and never for math. That also prevents the manufacture. The rule is kept anyway, as ruled. **R5 is a veto only, never a weakening of another guard.**
 
 ### 2.5 Panes, their text, their scans
 
@@ -122,7 +129,7 @@ In this revision an excluded status row is not scanned at all (§2.1), which als
 
 **R9. Fences** (owner's rulings 2026-09-16 and 2026-09-17, restated for rectangles):
 - a fence opened **inside a pane** is that pane's own fence. That pane's scan refuses what it covers, as it always has, and no other pane is affected. That includes the pane below a horizontal cut, because a horizontal cut restarts the scan.
-- a fence opened **on a row no pane owns** (the excluded status row) is **the screen's**, and it suppresses every pane's blocks on the rows it covers.
+- a fence opened **on a row no pane owns** (the excluded status row) is **the screen's**, and it suppresses every pane's blocks on the rows it covers. It is found by the screen-fence pass, which walks the unsplit rows for fence state only. Closing it on a row no pane owns releases the panes. In 69b, a change in that state invalidates every pane's math (§8.2, screen tier).
 - a fence already **open before the first grid row** (the caller's checkpoint, advanced through the frozen tail: the branch's `grid_initial_context`) is the screen's, and it suppresses from the top (Codex round 2).
 
 **R10. What a pane is to presentation.**
@@ -139,7 +146,7 @@ In this revision an excluded status row is not scanned at all (§2.1), which als
 
 ### 2.6 In five sentences
 
-The captured grid is cut into pane rectangles by a guillotine tree: full-height vertical rules and junction-anchored horizontal rules, at most one math-free edge status row set aside. A rule is a cut only if it carries its stroke on every row of its rectangle, the text beside it is clipped at it rather than padded away from it, and no formula the unsplit screen proves passes through it; a numbered gutter refuses the whole frame. Each pane is scanned alone from a neutral checkpoint over its own rows and columns with every existing gate unchanged, its cells taken from the captured boundaries. A fence opened inside a pane is that pane's; one opened on the status row or before the screen began is the screen's and suppresses every pane. A full-height Unicode table, box art, a side-by-side diff, a table inside a TUI and a screen with no frame are never split, and a screen with no frame is one pane whose scan is byte-for-byte today's.
+The captured grid is cut into pane rectangles by a guillotine tree: full-height vertical rules and horizontal rules anchored on a vertical rule already proven a frame, at most one math-free edge status row set aside. A rule is a cut only if it carries its stroke on every row of its rectangle, the text beside it is clipped at it rather than padded away from it, and no formula the unsplit screen proves passes through it; a numbered gutter refuses the whole frame. Each pane is scanned alone from a neutral checkpoint over its own rows and columns with every existing gate unchanged, its cells taken from the captured boundaries. A fence opened inside a pane is that pane's; one opened on the status row or before the screen began is the screen's and suppresses every pane. A full-height Unicode table, box art, a side-by-side diff, a table inside a TUI and a screen with no frame are never split, and a screen with no frame is one pane whose scan is byte-for-byte today's.
 
 ---
 
@@ -320,6 +327,7 @@ From Codex's finding 11, in full:
 |---|---|
 | `a_fence_in_the_top_right_does_not_suppress_the_bottom_right` | the aligned 2×2 of finding 1: four panes; a top-right fence opener with no closer; the bottom-right `$$ / x^2 / $$` at rows 22–24 is proven, anchored at column 11 |
 | `a_non_aligned_nested_split_recovers_the_top_right_pane` | rule on rows 0–18, row 19 `──────────┴──────────`, rows 20–39 full width: three panes; the top-right formula proven |
+| `a_padded_full_height_table_is_never_cut_in_either_direction` | Codex's 40×11 table (row 0 `┌────┬────┐`, row 20 `├────┼────┤`, row 39 `└────┴────┘`, `│ a  │ b  │` elsewhere, no math): one whole-screen pane. There is no vertical cut (every rule padded, no outer gutter), and no horizontal cut (no anchor on a proven frame rule) |
 | `full_height_box_art_is_not_a_pane_frame` | a padded box diagram with `│` on every row: one pane |
 | `a_side_by_side_diff_is_not_a_pane_frame` | delta-shaped rows `  12 │$$…│  12 │$$…`: one pane (the gutter rule); the diffed `$$` lines stay source |
 | `a_status_slice_cannot_manufacture_a_clean_display_opener` | finding 3's 40×20 screen: row 0 `status!!!$$` is not excluded, there is no frame, and there are zero blocks |
@@ -356,7 +364,8 @@ The branch's unit tests move into the new module and are re-stated for rectangle
 |---|---|
 | `a_formula_in_one_pane_settles_while_the_other_pane_writes` | finding 6's screen: 40×100 split at column 50; a left block on rows 10–12; a spinner changes column 80 of row 11 every 50 ms. The left block arms and lands, and is not re-armed |
 | `a_spinner_in_one_pane_advances_the_row_but_not_the_other_panes_math` | the same screen: row 11's global `revision` advances, the path watermark sees a changed row (`revision != path_pass_revision`), and the left pane's math revision does not advance |
-| `a_frame_change_invalidates_every_pane_keyed_state` | two successive captures, the rule moving from column 50 to 60: every pane-keyed candidate, task, hold and record of a pane whose rectangle changed is retired; records of an unchanged rectangle keep their state |
+| `a_frame_change_invalidates_every_pane_keyed_state` | capture A: 40×100, rule at column 50; capture B: the same rule plus a junction-anchored horizontal split at row 20 inside the right pane only. On B, every pane-keyed candidate, signature, slice clock, task, hold and record is dropped, **the left pane's included although its rectangle is unchanged**; both panes' formulas re-arm and land again |
+| `a_fence_opened_on_the_status_row_suppresses_every_pane_and_its_closing_releases_them` | 40×100: row 0 an excluded status row `status ready`, rows 1–39 split at column 50, settled formulas in both panes. Repaint only row 0 to three backticks: the frame is unchanged, `screen_fence_state` changes, every record retires, and no pane re-arms. Repaint row 0 back to `status ready`: both panes re-arm and their formulas land again. A task resolved before the opening is refused at completion |
 | `two_panes_closing_on_the_same_row_both_typeset`; `two_panes_starting_on_the_same_row_both_keep_their_records` | the B-4 collisions |
 | `completion_ignores_the_other_panes_half_of_the_row` | `live_task_is_current` compares only the pane's slice |
 
@@ -376,17 +385,22 @@ The branch's unit tests move into the new module and are re-stated for rectangle
 
 ### 8.2 69b T-PANE-IDENTITY
 
-The damage fact today is `TerminalDamage = Full | Rows(Vec<u32>)`, deliberately without column bounds (its doc comment in `adapter.rs`). So "which pane did a write touch" is not something damage can report. It can only be learned by **fingerprinting each pane's slice of every damaged row** against the previous capture's frame. The state becomes two tiers:
+The damage fact today is `TerminalDamage = Full | Rows(Vec<u32>)`, deliberately without column bounds (its doc comment in `adapter.rs`). So "which pane did a write touch" is not something damage can report. It can only be learned by **fingerprinting each pane's slice of every damaged row** against the previous capture's frame. The state becomes three tiers:
 
 | tier | facts | stay or move |
 |---|---|---|
 | **global row tier** (unchanged owner: `DualPlaneSession::live_rows`, `LiveRowStability`) | `revision`, `content_fingerprint`, `last_damage_at`, `settled_revision`, `path_pass_revision` | **stay**. `revision` remains the freshness authority for printed paths and image placeholders (`absorb_printed_path_probes` compares it with `path_pass_revision`) and is still copied into `LiveDetectionSource::Grid { revision }`. Image arming keeps reading `settled_revision` |
 | **pane math tier** (new: a map keyed by `(row, PaneRect)` on `DualPlaneSession`, present only while the current frame has more than one pane) | a slice fingerprint (over the captured cells in the pane's columns), `math_revision`, `last_math_damage_at`, `settled_math_revision`, `candidate_signature` | **new**, except `candidate_signature`, which **moves** here from `LiveRowStability` (it is math-only) |
+| **screen tier** (new: one value on `DualPlaneSession`, beside `current_frame`) | `screen_fence_state`: whether a **screen-owned** fence is open at each pane row, derived from the incoming checkpoint (the fence state before the first grid row, carried through the frozen tail) and from the screen-fence pass over the rows no pane owns (the excluded status row), together with the identity of the frame it was computed for | **new**. It is the only math dependency that no pane's slice can see |
 
 - **Damage.** For each damaged row (`Rows`, or every row on `Full`), the row is captured once, as today's fingerprint already does through `TerminalAdapter::visible_row_fingerprint`'s capture cache. The global tier updates as today. Then each pane of the **current frame** that covers the row compares its slice fingerprint: only a pane whose slice changed advances its math clock, clears its candidate signature and re-arms its bands (`rearm_live_bands_containing` becomes pane-scoped).
 - **Unframed screens.** The current frame is one whole-screen pane, so the math tier is the row tier and behaviour is today's.
 - **The current frame.** The session keeps `current_frame: Arc<ScreenFrame>`: the `Arc` from the capture that `schedule_live_artifacts` last scheduled with. It is replaced at the next scheduling and compared **by value** (the pane rectangles), never by pointer. This reconciles "the frame dies with the capture" with the damage path. The session holds its own `Arc` to the frame, not the capture, so the capture's inputs are released when their holders go.
-- **Frame change = full math invalidation.** When a new capture's rectangles differ from the current frame's, the pane math tier is rebuilt from scratch. Tasks in flight whose pane no longer exists are refused at completion (the pane-equality check). Repaint holds and records whose rectangle no longer exists are retired to source. Records of a rectangle that persists unchanged keep their state. A write that moves a rule changes the old panes' slice fingerprints, so those bump, and the next capture sees the frame change.
+- **Any frame change clears every pane's math tier** (coordinator's ruling 2026-09-29, Codex check of (b), blocker 2). When a new capture's set of rectangles differs in any way from the current frame's, every pane-keyed fact is dropped: candidates, candidate signatures, slice fingerprints, math clocks, tasks in flight (refused at completion by the pane-equality check), repaint holds and records. Every record retires to source. The rectangles are rebuilt from the new frame, and the formulas re-arm and re-typeset from there. **There is no retention clause.** A pane whose rectangle is byte-for-byte unchanged is cleared too: when capture B adds a horizontal split inside the right pane of capture A's 40×100 split at column 50, the left pane's formulas are cleared and re-typeset as well. The cost is accepted: a frame change is a resize or relayout of the multiplexer, which is rare, and a re-typeset takes at most a few hundred milliseconds (one stability interval plus the math worker's round trip). The rule is one sentence, and no path can keep a record whose pane identity was minted against a different frame. A write that moves a rule changes the old panes' slice fingerprints, so those bump, and the next capture sees the frame change.
+- **A screen-fence change clears every pane's math tier the same way** (Codex check of (b), blocker 3). `screen_fence_state` is recomputed whenever the revision of any row no pane owns advances (the global row tier sees it: the excluded row is damaged like any other), and whenever the incoming checkpoint changes. If it differs from the stored value, the effect is exactly a frame change: every pane-keyed fact is dropped and every pane re-arms against the new screen fence.
+  - *Opening:* the status row is repainted to three backticks, which still carry no math delimiter, so the row stays excluded and no pane slice changes. The screen tier sees the new fence, every pane's records retire, and nothing re-arms inside the fence.
+  - *Closing:* the row is repainted back. The screen tier changes again, and the panes re-arm.
+  - Completion also compares the task's `screen_fence_state` with the current one, so a task resolved before the change is refused.
 - **Identity.** `live_decorations` is keyed by `(start row, PaneRect)`. Candidates and the per-pane `live_detection_context_signature` are keyed by `(closing row, PaneRect)`. Repaint occupancy, refused-table retirement and completion's dependency comparison work within the pane (the pane's slice text).
 - **(d) ownership change: yes**: per screen row → per (row, pane) for math identity and math stability; the global row facts are unchanged. This note is its design note.
 
@@ -420,6 +434,8 @@ Lanes: `bt-detect`, `bt-viewport` and `bt-render` filters locally; `bt-term --li
 - **The branch's "deliberate loss" of a formula written across an intact rule is withdrawn.** R5 now refuses that cut too.
 - **Accepted conservative failures** (§5): vim `:vsplit`, a status row with a delimiter, a plain horizontal split, and a pane every line of which is indented beside an unclipped neighbour.
 
+**Ruled 2026-09-29 (coordinator), revision (c):** any frame change, and any change of the screen-owned fence state, clears every pane's math tier; nothing is retained across it (§8.2).
+
 No question remains open for the owner.
 
 ---
@@ -437,6 +453,12 @@ No question remains open for the owner.
 9. 69a is recorded as an ownership split; the lifetime of the `OnceLock<Arc<ScreenFrame>>`; the record holds the capture; the repaint-probe exception to "one constructor" (finding 9).
 10. One release deliverable, two tickets, sizes raised; finding 11's tests in full (findings 10, 11; owner Q1).
 11. R5 now applies on rule rows too, withdrawing the branch's deliberate loss; the nine-tenths share is replaced by V1 (§10).
+
+## Revision (c), 2026-09-29 — what changed after Codex's check of (b)
+
+1. Horizontal cuts need a proven frame: H2 anchors only on a junction whose column passes V1 and V2 in the adjacent band. A rectangle whose every rule is padded is a table and is cut in neither direction. V2b's gutter must have at least one column, so a rule on the screen's edge must be clipped. Test `a_padded_full_height_table_is_never_cut_in_either_direction` (blocker 1).
+2. Any frame change clears every pane's math tier: tasks, holds and records retire, rectangles are rebuilt, and the retention clause is removed. `a_frame_change_invalidates_every_pane_keyed_state` pins the unchanged-rectangle case, and the cost is stated as accepted (blocker 2; coordinator's ruling).
+3. A screen tier: `screen_fence_state`, from the incoming checkpoint and the screen-fence pass over the rows no pane owns, tied to the frame identity. It is recomputed when such a row's revision advances or the checkpoint changes; a change clears every pane's math tier like a frame change, and completion compares it. The wording of §2.1/§2.4/R9 is reconciled: no pane scans the excluded row, and only the screen-fence pass reads it, for fence state. Test `a_fence_opened_on_the_status_row_suppresses_every_pane_and_its_closing_releases_them` (blocker 3).
 
 ---
 
