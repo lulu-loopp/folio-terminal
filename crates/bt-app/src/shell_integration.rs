@@ -1465,15 +1465,20 @@ fn add_profile_with_forms(
 ) -> std::io::Result<ProfileWrite> {
     let existing = read_profile_for_edit(profile)?;
     let original = existing.as_deref().unwrap_or_default();
-    let decoded = profile_marks::Decoded::read(original)?;
     let changed = profile_marks::rewrite(original, forms, profile_marks::Action::Migrate)?;
-    let bytes = if let Some(bytes) = changed {
-        bytes
-    } else if decoded.text.lines().any(|text| forms.owns(text)) {
-        return Ok(ProfileWrite {
-            profile: profile.to_path_buf(),
-            backup: None,
-        });
+    let migrated = changed.as_deref().unwrap_or(original);
+    let decoded = profile_marks::Decoded::read(migrated)?;
+    let bytes = if decoded.text.lines().any(|text| forms.owns(text)) {
+        match managed_profile_line_last(migrated, forms, line)? {
+            Some(bytes) => bytes,
+            None if changed.is_some() => changed.expect("the migrated bytes exist"),
+            None => {
+                return Ok(ProfileWrite {
+                    profile: profile.to_path_buf(),
+                    backup: None,
+                });
+            }
+        }
     } else {
         let newline = if decoded.text.contains("\r\n") {
             "\r\n"
@@ -1500,6 +1505,57 @@ fn add_profile_with_forms(
         profile: profile.to_path_buf(),
         backup,
     })
+}
+
+/// Move Folio's one owned line after every prompt customizer in the profile.
+/// Other lines keep their bytes and order; duplicate historical forms collapse
+/// to the one managed spelling. `None` means the managed line is already the
+/// last nonblank line and needs no write or backup.
+fn managed_profile_line_last(
+    bytes: &[u8],
+    forms: &profile_marks::Forms,
+    line: &str,
+) -> std::io::Result<Option<Vec<u8>>> {
+    let decoded = profile_marks::Decoded::read(bytes)?;
+    let live = decoded
+        .text
+        .lines()
+        .filter(|candidate| !candidate.trim().is_empty())
+        .collect::<Vec<_>>();
+    if live
+        .last()
+        .is_some_and(|candidate| candidate.trim() == line)
+        && live
+            .iter()
+            .filter(|candidate| forms.owns(candidate))
+            .count()
+            == 1
+    {
+        return Ok(None);
+    }
+
+    let newline = if decoded.text.contains("\r\n") {
+        "\r\n"
+    } else if decoded.text.contains('\n') {
+        "\n"
+    } else {
+        "\r\n"
+    };
+    let mut text = String::new();
+    for raw in decoded.text.split_inclusive('\n') {
+        let body = raw.strip_suffix('\n').unwrap_or(raw);
+        let body = body.strip_suffix('\r').unwrap_or(body);
+        if !forms.owns(body) {
+            text.push_str(raw);
+        }
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        text.push_str(newline);
+    }
+    text.push_str(line);
+    text.push_str(newline);
+    let output = decoded.encode(&text);
+    Ok((output != bytes).then_some(output))
 }
 
 /// Refuse links/reparse points, including ancestors. PowerShell already
@@ -1707,14 +1763,18 @@ fn backup_path(profile: &Path, at: std::time::SystemTime) -> PathBuf {
 /// projection ([`crate::seats::Seats::set_notices`]); this is the record.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Offer {
-    /// Nothing to say. This pane is not a PowerShell, or its `$PROFILE` already
-    /// dot-sources the script, or the reader has ended the asking, or this run
-    /// has already asked somewhere else ([`offer_once_per_run`]).
+    /// Nothing to say. This pane is not a PowerShell, the reader has ended the
+    /// asking, or this run has already asked somewhere else
+    /// ([`offer_once_per_run`]).
     #[default]
     Silent,
     /// Owed, and this is the file it is about. Shown once the shell has spoken —
     /// see [`Offer::showing`].
     Owed(PathBuf),
+    /// The profile dot-sources Folio, so the running shell is expected to emit
+    /// marks. If its first visible prompt does not, another prompt wrapper has
+    /// displaced or bypassed the hook and the pane reports that fact.
+    Expected,
     /// The line has been written into that file.
     Added,
     /// Dismissed with the `×` or with Esc. **Not** the same as [`Self::Silent`]:
@@ -1747,8 +1807,9 @@ impl Offer {
         }
         match self {
             Self::Owed(_) if spoken => Some(crate::notice::Notice::Offer),
+            Self::Expected if spoken => Some(crate::notice::Notice::MarksNotSeen),
             Self::Added => Some(crate::notice::Notice::Added),
-            Self::Silent | Self::Owed(_) | Self::Closed => None,
+            Self::Silent | Self::Owed(_) | Self::Expected | Self::Closed => None,
         }
     }
 
@@ -1757,7 +1818,7 @@ impl Offer {
     pub fn profile(&self) -> Option<&Path> {
         match self {
             Self::Owed(profile) => Some(profile.as_path()),
-            Self::Silent | Self::Added | Self::Closed => None,
+            Self::Silent | Self::Expected | Self::Added | Self::Closed => None,
         }
     }
 }
@@ -1781,7 +1842,7 @@ pub fn offer_for(profile: &Path) -> Offer {
     match bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, profile)
         .and_then(|bytes| profile_marks::Decoded::read(&bytes))
     {
-        Ok(decoded) if profile_suppresses_integration_offer(&decoded.text) => Offer::Silent,
+        Ok(decoded) if profile_suppresses_integration_offer(&decoded.text) => Offer::Expected,
         Ok(_) | Err(_) => Offer::Owed(profile.to_path_buf()),
     }
 }
@@ -1804,9 +1865,9 @@ pub fn offer_for(profile: &Path) -> Offer {
 /// rather than a claim that it has nothing to be asked about.
 ///
 /// **A pane that owes nothing spends nothing.** A `$PROFILE` that already
-/// dot-sources the script answers `Silent` and leaves the ask where it was, so a
-/// reader whose first PowerShell is integrated and whose second is not is still
-/// asked once — about the second.
+/// dot-sources the script answers [`Offer::Expected`] and leaves the ask where
+/// it was, so a reader whose first PowerShell is integrated and whose second is
+/// not is still asked once — about the second.
 ///
 /// **It is not written to disk, and that is the whole difference between this
 /// and `Don't show again`.** The flag dies with the process, so tomorrow's
@@ -3707,11 +3768,11 @@ mod tests {
     /// state the machine this was written on is in, and a build that offered
     /// here would be offering to install something that is installed.
     #[test]
-    fn a_profile_that_already_loads_the_script_owes_nothing() {
+    fn a_profile_that_loads_the_script_expects_marks_in_its_first_prompt() {
         let documents = temp_dir("installed");
         let profile = documents.join(PROFILE_LEAF);
         std::fs::write(&profile, LINE).unwrap();
-        assert_eq!(offer_for(&profile), Offer::Silent);
+        assert_eq!(offer_for(&profile), Offer::Expected);
         let absent = documents.join("never-written.ps1");
         assert_eq!(
             offer_for(&absent),
@@ -3761,7 +3822,7 @@ mod tests {
         let installed = documents.join("installed.ps1");
         std::fs::write(&installed, LINE).unwrap();
         let mut spent = false;
-        assert_eq!(offer_once_per_run(&installed, &mut spent), Offer::Silent);
+        assert_eq!(offer_once_per_run(&installed, &mut spent), Offer::Expected);
         assert!(
             !spent,
             "a shell that is already integrated asked nothing, so it spent nothing"
@@ -3800,6 +3861,17 @@ mod tests {
         assert_eq!(Offer::Added.showing(true, true), None);
         assert_eq!(Offer::Closed.showing(true, false), None);
         assert_eq!(Offer::Silent.showing(true, false), None);
+        assert_eq!(Offer::Expected.showing(false, false), None);
+        assert_eq!(
+            Offer::Expected.showing(true, false),
+            Some(crate::notice::Notice::MarksNotSeen),
+            "an installed line without first-prompt marks is diagnosable"
+        );
+        assert_eq!(
+            Offer::Expected.showing(true, true),
+            None,
+            "a mark retracts the diagnosis"
+        );
     }
 
     /// Which programs are asked about at all.
@@ -3905,6 +3977,40 @@ mod tests {
         assert!(profile_suppresses_integration_offer(
             &std::fs::read_to_string(&profile).unwrap()
         ));
+    }
+
+    /// RED (T-MARKS-CONDA) — **Folio's managed line is the last live line in
+    /// the profile, after a prompt customizer such as `conda init`.**
+    ///
+    /// MUTATION: return idempotently as soon as an owned line is found in
+    /// `add_profile_with_forms`; the line remains above conda and this goes red.
+    #[test]
+    fn profile_marks_installer_places_folio_after_conda_prompt_wrapper() {
+        let documents = temp_dir("conda-order");
+        let profile = documents.join("PowerShell").join(PROFILE_LEAF);
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        let conda = "# >>> conda initialize >>>\n. 'D:\\App\\Base\\anaconda3\\shell\\condabin\\conda-hook.ps1'\n# <<< conda initialize <<<\n";
+        std::fs::write(&profile, format!("{LINE}\n{conda}")).unwrap();
+
+        let written = add_to_profile(&profile, LINE, EPOCH_DAY).expect("the repair");
+        assert!(
+            written.backup.is_some(),
+            "moving an existing line is a write"
+        );
+        let after = std::fs::read_to_string(&profile).unwrap();
+        assert_eq!(after.matches(LINE).count(), 1, "one managed line: {after}");
+        assert!(
+            after.find("conda-hook.ps1").unwrap() < after.rfind(LINE).unwrap(),
+            "Folio loads after the prompt wrapper: {after}"
+        );
+        assert_eq!(
+            after
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .next_back(),
+            Some(LINE),
+            "the installer keeps the integration last"
+        );
     }
 
     /// A file with no trailing newline still gets one before the blank line, or

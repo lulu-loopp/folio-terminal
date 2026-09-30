@@ -49824,6 +49824,24 @@ impl Runtime<'_> {
                 verb: palette::Verb::Run(binding.action),
             });
         }
+        // This recovery verb deliberately has no chord: it is present wherever
+        // a terminal owns the keyboard, and carries the same stable address as
+        // a place row so a pane that exits while the palette is open cannot
+        // redirect it to a neighbour.
+        if focus.terminal {
+            let tab = &self.window.tabs[self.window.active_tab];
+            let seat = tab.focused_leaf;
+            if tab.sessions.contains_key(&seat) {
+                into.push(palette::Candidate {
+                    section: palette::Section::Actions,
+                    label: profiles::reset_terminal_modes_text().to_owned(),
+                    hint: None,
+                    mark: None,
+                    awaiting: false,
+                    verb: palette::Verb::ResetTerminalModes { tab: tab.id, seat },
+                });
+            }
+        }
     }
 
     /// **Every pane of this window**, tab by tab.
@@ -73498,6 +73516,8 @@ mod palette_wiring_tests {
         for door in [
             // Actions: the shortcut table's own dispatch.
             "self.run_shortcut(action)",
+            // The recovery row: the pane menu's session-owned door.
+            "self.reset_terminal_modes(seat)",
             // Places and commands both begin by putting the tab in front —
             // `jump_to_attention`'s own two steps.
             "self.activate_tab(index, false)?",
@@ -73522,6 +73542,21 @@ mod palette_wiring_tests {
             locate.contains("self.open_files_path_to(seat, &key)?"),
             "and a file is revealed through the column's own reveal"
         );
+    }
+
+    /// RED (T-RESET-MODES) — the command palette supplies the same recovery
+    /// verb as the pane menu, addressed to the focused terminal by stable ids.
+    ///
+    /// MUTATION: remove the `focus.terminal` block from
+    /// `push_action_candidates`; the first assertion goes red.
+    #[test]
+    fn pane_menu_reset_terminal_modes_is_also_a_command_palette_action() {
+        let supply = method_body("Runtime", "push_action_candidates");
+        assert!(supply.contains("palette::Verb::ResetTerminalModes"));
+        assert!(supply.contains("profiles::reset_terminal_modes_text()"));
+        let run = method_body("Runtime", "run_palette_row");
+        assert!(run.contains("palette::Verb::ResetTerminalModes { tab, seat }"));
+        assert!(run.contains("self.reset_terminal_modes(seat)"));
     }
 
     /// PIN — **the settings wrapper is three bricks in one order**, and the

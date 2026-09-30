@@ -2304,6 +2304,19 @@ impl DualPlaneSession {
         self.terminal.modes()
     }
 
+    /// Restore the program-owned terminal modes in this session without sending
+    /// input to its child. Adapter events are applied here so an implicit
+    /// `?1049l` updates the dual-plane screen owner just like an in-stream one.
+    pub fn reset_program_modes(&mut self) -> Result<(), SessionError> {
+        let events = self.terminal.reset_program_modes();
+        let damage = self.terminal.take_damage();
+        let observed_at = Instant::now();
+        self.apply_events(events, observed_at)?;
+        self.observe_live_damage(damage, observed_at);
+        self.sync_staging_tail();
+        Ok(())
+    }
+
     /// Protocol replies are returned to the owning app, which is the only PTY writer.
     pub fn take_pty_writes(&self) -> Vec<Vec<u8>> {
         self.terminal.take_pty_writes()

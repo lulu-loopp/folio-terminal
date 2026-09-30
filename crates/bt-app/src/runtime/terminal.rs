@@ -677,6 +677,19 @@ impl Runtime<'_> {
         self.repaint_pane_change(seat)
     }
 
+    /// Restore the program-owned protocol state in one pane. This is a session
+    /// effect only: unlike restarting or clearing, it neither writes to the PTY
+    /// nor replaces the child.
+    pub(in crate::runtime) fn reset_terminal_modes(&mut self, seat: SeatId) -> Result<()> {
+        let Some(leaf) = self.sessions.get_mut(&seat) else {
+            return Ok(());
+        };
+        leaf.session.reset_program_modes()?;
+        self.apply_pointer_cursor();
+        self.refresh_chrome();
+        self.repaint_pane_change(seat)
+    }
+
     /// `Restart shell…` — **the same seat, the same profile, the same folder**
     /// (`docs/M2-restart-shell-contract.md` §1.1).
     ///

@@ -24458,6 +24458,52 @@ fn a_hover_with_no_press_in_flight_reads_the_modes_as_they_are() {
     );
 }
 
+/// RED (T-RESET-MODES) — the pane recovery action turns a dead program's mouse
+/// stream off and makes the next modified key use the legacy encoder.
+///
+/// MUTATION: make `DualPlaneSession::reset_program_modes` skip the adapter
+/// reset; both postconditions stay in their program-owned state and go red.
+#[test]
+fn pane_menu_reset_terminal_modes_stops_mouse_motion_and_restores_legacy_keys() {
+    let mut session =
+        DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+    session
+        .feed(b"\x1b[?1003h\x1b[?1006h\x1b[>1u\x1b[>4;2m\x1b[?1h")
+        .unwrap();
+    assert!(
+        route_forwarded_mouse_motion(None, session.terminal_modes(), ModifiersState::empty())
+            .is_some()
+    );
+
+    session.reset_program_modes().unwrap();
+    let modes = session.terminal_modes();
+    assert_eq!(
+        route_forwarded_mouse_motion(None, modes, ModifiersState::empty()),
+        None,
+        "pointer motion is Folio's again"
+    );
+    let enter = Key::Named(NamedKey::Enter);
+    let encoded = input::keyboard_bytes(
+        &enter,
+        &enter,
+        winit::keyboard::KeyLocation::Standard,
+        ModifiersState::SHIFT,
+        session.application_cursor_mode(),
+        modes.keyboard,
+        input::KeyOrigin {
+            platform: bt_platform::HostPlatform::OtherUnix,
+            physical_key: winit::keyboard::PhysicalKey::Unidentified(
+                winit::keyboard::NativeKeyCode::Unidentified,
+            ),
+            text_with_all_modifiers: None,
+            virtual_key_of_scan_code: |_| None,
+            virtual_key_is_dead: |_| false,
+            conpty: bt_pty::ConPtyKind::NotConPty,
+        },
+    );
+    assert_eq!(encoded, Some(vec![b'\r']), "Shift+Enter is legacy again");
+}
+
 /// PIN (user ruling, 2026-08-20 — the repeal §7.1.5f wrote its own warrant
 /// for) — **the same verified target on the alternate screen is ours too.**
 ///

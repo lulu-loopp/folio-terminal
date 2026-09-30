@@ -125,6 +125,10 @@ pub enum Notice {
     /// a report of one thing that happened and the only thing left to decide is
     /// whether to make it true now or when the next shell starts.
     Added,
+    /// Folio's profile line was present, but the pane's first visible prompt
+    /// carried no shell-integration marks. No verb: this is a diagnosis, and the
+    /// close button is the acknowledgement.
+    MarksNotSeen,
     /// **A preview's file was rewritten under unsaved edits** (user ruling
     /// 2026-08-29). Two verbs, and they are the two answers a person can give:
     /// take the file, or keep what you typed.
@@ -142,6 +146,7 @@ impl Notice {
         match self {
             Self::Offer => Text::PowerShellNoticeBody.text(),
             Self::Added => Text::PowerShellNoticeAdded.text(),
+            Self::MarksNotSeen => Text::PowerShellMarksNotSeen.text(),
             Self::DiskChanged => Text::PreviewDiskChanged.text(),
             Self::DiskDeleted => Text::PreviewDiskDeleted.text(),
         }
@@ -153,6 +158,7 @@ impl Notice {
         match self {
             Self::Offer => &[NoticeVerb::Add, NoticeVerb::Never],
             Self::Added => &[NoticeVerb::Restart],
+            Self::MarksNotSeen => &[],
             // **Reload on the right**, nearest the `×`: it is the destructive
             // one, and the layout drops words leftmost-first when the pane
             // narrows — so the word that survives a narrow pane must be the one

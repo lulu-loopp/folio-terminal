@@ -1681,6 +1681,8 @@ pub enum Text {
     PaneMenuNewInFolder,
     PaneMenuDuplicate,
     PaneMenuMoveToNewTab,
+    /// Restore the modes a dead program left active in this pane.
+    ResetTerminalModes,
     /// The picker's caption, upper-cased at the source with the group labels it
     /// shares its grammar with.
     PaneMenuSplitCaption,
@@ -1970,6 +1972,9 @@ pub enum Text {
     /// line is in the file, and the shell already running was started before it
     /// and cannot see it.
     PowerShellNoticeAdded,
+    /// The profile names Folio's script, but the first visible prompt did not
+    /// carry any OSC 133 marks.
+    PowerShellMarksNotSeen,
 
     // ── the preview's disk strip (§7.1.3, user ruling 2026-08-29) ──────────
     // The same strip and therefore the same block shape. **Four entries**: two
@@ -4272,6 +4277,11 @@ impl Text {
             }
             Self::PaneMenuDuplicate => pick(lang, "Duplicate pane", "复制窗格"),
             Self::PaneMenuMoveToNewTab => pick(lang, "Move pane to new tab", "把窗格移到新标签"),
+            Self::ResetTerminalModes => pick(
+                lang,
+                "Reset terminal modes",
+                "Reset terminal modes", // zh: pending T-RESET-MODES
+            ),
             Self::PaneMenuSplitCaption => pick(lang, "SPLIT", "拆分"),
             Self::ClosePane => pick(lang, "Close pane", "关闭窗格"),
             Self::PaneChevronTip => pick(lang, "Split and more", "拆分等操作"),
@@ -4699,6 +4709,11 @@ impl Text {
                 lang,
                 "Added to $PROFILE. Takes effect in a new shell.",
                 "已加进 $PROFILE。新开的 shell 生效。",
+            ),
+            Self::PowerShellMarksNotSeen => pick(
+                lang,
+                "marks not seen — another prompt module may be wrapping the prompt",
+                "未检测到标记——另一个提示符模块可能包装了提示符。",
             ),
             // 「文件在磁盘上已更改」 — the fact, said plainly. It does not say
             // *who* changed it, because this window does not know and a guess
@@ -5583,7 +5598,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 804] = [
+    pub const ALL: [Self; 806] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -6084,6 +6099,7 @@ impl Text {
         Self::PaneMenuNewInFolder,
         Self::PaneMenuDuplicate,
         Self::PaneMenuMoveToNewTab,
+        Self::ResetTerminalModes,
         Self::PaneMenuSplitCaption,
         Self::ClosePane,
         Self::PaneChevronTip,
@@ -6158,6 +6174,7 @@ impl Text {
         Self::PowerShellNoticeAdd,
         Self::PowerShellNoticeNever,
         Self::PowerShellNoticeAdded,
+        Self::PowerShellMarksNotSeen,
         Self::PreviewDiskChanged,
         Self::PreviewDiskKeep,
         Self::PreviewDiskReload,
@@ -6504,6 +6521,7 @@ impl Text {
         Self::RowPowerShellOffer,
         Self::DescPowerShellOffer,
         Self::PowerShellNoticeBody,
+        Self::PowerShellMarksNotSeen,
         Self::ShellIntegrationPending,
         // Only the Windows PowerShell discovery worker can emit this refusal.
         Self::ShellProfileProbeFailed,
@@ -6539,7 +6557,10 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
+    const CHINESE_PENDING: [(Self, HostPlatform); 2] = [
+        (Self::ResetTerminalModes, HostPlatform::Windows),
+        (Self::ResetTerminalModes, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

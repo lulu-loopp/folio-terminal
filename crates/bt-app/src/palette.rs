@@ -483,6 +483,8 @@ const LONG_SECTION_CAP: usize = 8;
 pub enum Verb {
     /// Carry out one row of the shortcut table.
     Run(Action),
+    /// Restore a terminal's program-controlled modes without writing to its child.
+    ResetTerminalModes { tab: TabId, seat: SeatId },
     /// Put the keyboard in one pane, activating its tab first.
     ///
     /// **The tab is named by its id and not by where it was sitting.** A

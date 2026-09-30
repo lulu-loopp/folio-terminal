@@ -456,7 +456,7 @@ mod tests {
         let profile = root.join("profile.ps1");
         for line in [r". 'D:\x\folio.ps1'", r". 'D:\x\FOLIO.PS1'", MANAGED_LINE] {
             fs::write(&profile, line).unwrap();
-            assert_eq!(offer_for(&profile), Offer::Silent, "{line}");
+            assert_eq!(offer_for(&profile), Offer::Expected, "{line}");
         }
         fs::write(&profile, "  # . 'D:\\x\\folio.ps1'\r\n").unwrap();
         assert_eq!(offer_for(&profile), Offer::Owed(profile));

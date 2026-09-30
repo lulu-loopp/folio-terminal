@@ -7,7 +7,13 @@ All notable changes to Folio are recorded here. The format follows
 ## Unreleased
 ### Fixed
 
+- PowerShell shell-integration marks survive prompt wrappers such as conda
+  regardless of initialization order; Folio also explains when an installed
+  integration has produced no marks.
+
 ### Added
+
+- A pane can reset the terminal modes a program left behind (pane menu ▸ Reset terminal modes).
 
 - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,
   Shift+Tab, Ctrl+I, Ctrl+M and Esc apart from Enter, Tab and a lone escape:
