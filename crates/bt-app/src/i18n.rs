@@ -4277,7 +4277,7 @@ impl Text {
             Self::ResetTerminalModes => pick(
                 lang,
                 "Reset terminal modes",
-                "Reset terminal modes", // zh: pending T-RESET-MODES
+                "重置终端模式",
             ),
             Self::PaneMenuSplitCaption => pick(lang, "SPLIT", "拆分"),
             Self::ClosePane => pick(lang, "Close pane", "关闭窗格"),
@@ -6547,10 +6547,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 2] = [
-        (Self::ResetTerminalModes, HostPlatform::Windows),
-        (Self::ResetTerminalModes, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
