@@ -5,6 +5,7 @@
 use std::{collections::VecDeque, num::NonZeroUsize, sync::Arc};
 
 use bitflags::bitflags;
+use unicode_properties::{GeneralCategoryGroup, UnicodeGeneralCategory};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub mod paths;
@@ -1000,16 +1001,17 @@ impl CapturedRow {
                 first = end;
                 continue;
             };
-            let prefix_len = if span_starts_with(&self.cells[first..end], uri) {
-                uri.len()
+            let matched_prefix = if span_starts_with(&self.cells[first..end], uri) {
+                uri
             } else if scheme_len < uri.len()
                 && span_starts_with(&self.cells[first..end], &uri[scheme_len..])
             {
-                uri.len() - scheme_len
+                &uri[scheme_len..]
             } else {
                 first = end;
                 continue;
             };
+            let prefix_len = declared_url_prefix_len(matched_prefix);
             let Some(boundary_after_prefix) = self.cells[first..end]
                 .iter()
                 .filter(|cell| !cell.wide_spacer)
@@ -1044,6 +1046,23 @@ fn span_starts_with(cells: &[CapturedCell], prefix: &str) -> bool {
         .filter(|cell| !cell.wide_spacer)
         .flat_map(|cell| cell.text.bytes());
     prefix.bytes().all(|byte| label.next() == Some(byte))
+}
+
+/// Protect IRI text inside a declared target without letting sentence punctuation become part of
+/// the visible address. ASCII keeps the shared terminator class, whose exclusions include `.`.
+fn declared_url_prefix_len(prefix: &str) -> usize {
+    prefix
+        .char_indices()
+        .find_map(|(offset, character)| {
+            let is_boundary = if character.is_ascii() {
+                is_url_terminator(character as u8)
+            } else {
+                character.is_whitespace()
+                    || character.general_category_group() == GeneralCategoryGroup::Punctuation
+            };
+            is_boundary.then_some(offset)
+        })
+        .unwrap_or(prefix.len())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
