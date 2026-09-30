@@ -72,6 +72,250 @@ use winit::event::{Ime, KeyEvent, MouseScrollDelta};
 use winit::keyboard::{Key, NamedKey};
 
 impl Runtime<'_> {
+    /// Prefer the live column's order, including watcher refreshes. A preview
+    /// outside the tree uses the very same worker and comparator.
+    fn preview_folder_listing(
+        &self,
+        surface: PreviewSurface,
+        folder: &Path,
+    ) -> Option<&crate::files::DirListing> {
+        let tab = self.preview_tab(surface)?;
+        for (seat, state) in &tab.files {
+            let Some(key) = crate::files::key_under_root(&state.root, folder) else {
+                continue;
+            };
+            if !crate::files::visible_dirs(state).contains(&key) {
+                continue;
+            }
+            if let Some(crate::files::DirNode::Listed(listing)) =
+                tab.file_trees.get(seat).and_then(|cache| cache.get(&key))
+            {
+                return Some(listing);
+            }
+        }
+        for win in self.window.float.live_windows() {
+            let Some(tree) = win.files() else { continue };
+            let Some(key) = crate::files::key_under_root(&tree.files.root, folder) else {
+                continue;
+            };
+            if !crate::files::visible_dirs(&tree.files).contains(&key) {
+                continue;
+            }
+            if let Some(crate::files::DirNode::Listed(listing)) = tree.cache.get(&key) {
+                return Some(listing);
+            }
+        }
+        None
+    }
+
+    pub(in crate::runtime) fn request_preview_neighbours(&mut self) {
+        for surface in self.preview_picture_hosts() {
+            let Some(folder) = self
+                .preview_picture(surface)
+                .filter(|image| crate::preview_neighbours::media(&image.path))
+                .and_then(|image| image.path.parent())
+                .map(Path::to_path_buf)
+            else {
+                continue;
+            };
+            if self.preview_folder_listing(surface, &folder).is_some() {
+                continue;
+            }
+            if self
+                .preview_pane(surface)
+                .and_then(|pane| pane.neighbours.as_ref())
+                .is_some_and(|held| {
+                    held.path == folder && (held.listing.is_some() || held.asked_by == surface)
+                })
+            {
+                continue;
+            }
+            self.preview_pane_mut(surface).neighbours = Some(crate::preview_neighbours::Folder {
+                path: folder.clone(),
+                listing: None,
+                asked_by: surface,
+            });
+            if !self.app.files_worker.request(crate::files::DirRequest {
+                window: self.window_id(),
+                host: crate::files::FilesHost::Preview(surface),
+                key: folder.to_string_lossy().into_owned(),
+                path: folder,
+            }) {
+                self.disable_files_worker();
+            }
+        }
+    }
+
+    pub(in crate::runtime) fn accept_preview_neighbours(
+        &mut self,
+        surface: PreviewSurface,
+        key: &str,
+        outcome: crate::files::DirOutcome,
+    ) -> bool {
+        // Never vivify a closed pane or attach a delayed answer to a new folder.
+        let Some(pane) = self.preview_pane(surface) else {
+            return false;
+        };
+        let same_folder_held = pane
+            .neighbours
+            .as_ref()
+            .is_some_and(|held| held.path == Path::new(key));
+        let same_folder_shown = pane
+            .image
+            .as_ref()
+            .is_some_and(|image| image.path.parent() == Some(Path::new(key)));
+        if !(same_folder_held && same_folder_shown) {
+            return false;
+        }
+        let crate::files::DirOutcome::Listed(listing) = outcome else {
+            return false;
+        };
+        self.preview_pane_mut(surface)
+            .neighbours
+            .as_mut()
+            .unwrap()
+            .listing = Some(listing);
+        true
+    }
+
+    fn preview_neighbour(
+        &self,
+        surface: PreviewSurface,
+        direction: crate::preview_neighbours::Direction,
+    ) -> Option<PathBuf> {
+        let pane = self.preview_pane(surface)?;
+        let path = &pane.image.as_ref()?.path;
+        let folder = path.parent()?;
+        let listing = self.preview_folder_listing(surface, folder).or_else(|| {
+            pane.neighbours
+                .as_ref()
+                .filter(|held| held.path == folder)?
+                .listing
+                .as_ref()
+        })?;
+        crate::preview_neighbours::neighbour(
+            path,
+            &crate::preview_neighbours::paths(path, listing),
+            direction,
+        )
+    }
+
+    fn preview_neighbour_buttons(&self, surface: PreviewSurface) -> [Option<[f32; 4]>; 2] {
+        use crate::preview_neighbours::Direction::{Next, Previous};
+        let scale = self.window.renderer.scale_factor() as f32;
+        let Some(body) = self.preview_surface_body_rect(surface, scale) else {
+            return [None, None];
+        };
+        let hovered = match surface {
+            PreviewSurface::Seat(leaf) => self.window.seat_pointer.pane_hover == Some(leaf.seat),
+            _ => self
+                .window
+                .pointer_position
+                .and_then(|at| self.preview_surface_at(at))
+                .is_some_and(|(here, _)| here == surface),
+        };
+        crate::preview_neighbours::buttons(
+            body,
+            scale,
+            hovered,
+            self.preview_keyboard_surface() == Some(surface),
+            [
+                self.preview_neighbour(surface, Previous).is_some(),
+                self.preview_neighbour(surface, Next).is_some(),
+            ],
+        )
+    }
+
+    fn preview_neighbour_layer(&self, surface: PreviewSurface) -> Option<marks::OverlayLayer> {
+        let buttons = self.preview_neighbour_buttons(surface);
+        if buttons == [None, None] {
+            return None;
+        }
+        let palette = bt_render::chrome_palette();
+        let scale = self.window.renderer.scale_factor() as f32;
+        let mut layer = marks::OverlayLayer::default();
+        for (button, degrees) in buttons.into_iter().zip([90, 270]) {
+            let Some(rect) = button else { continue };
+            layer.sprites.push(marks::ChromeSprite::new(
+                marks::ChromeMark::ControlPill {
+                    radius_px: (16.0 * scale).round() as u32,
+                },
+                rect,
+                palette.pane_head,
+            ));
+            let inset = 9.0 * scale;
+            // The existing disclosure chevron from icons.rs, turned to the two
+            // sides; no new drawing or translatable caption.
+            layer.sprites.push(marks::ChromeSprite::new(
+                marks::ChromeMark::Chevron {
+                    turned_degrees: degrees,
+                },
+                [
+                    rect[0] + inset,
+                    rect[1] + inset,
+                    rect[2] - inset,
+                    rect[3] - inset,
+                ],
+                palette.title_text,
+            ));
+        }
+        Some(layer)
+    }
+
+    fn press_preview_neighbour(&mut self, position: PhysicalPosition<f64>) -> Result<bool> {
+        let Some((surface, direction)) = self.preview_neighbour_at(position) else {
+            return Ok(false);
+        };
+        if matches!(surface, PreviewSurface::Seat(_)) {
+            self.focus_pane_at(position)?;
+        }
+        self.step_preview_neighbour(surface, direction)?;
+        Ok(true)
+    }
+
+    pub(in crate::runtime) fn preview_neighbour_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(PreviewSurface, crate::preview_neighbours::Direction)> {
+        // A glance or another float above this pane owns its pixels.
+        if self.file_peek_holds([position.x as f32, position.y as f32]) {
+            return None;
+        }
+        let (surface, _) = self.preview_surface_at(position)?;
+        if let Some(win) = self
+            .window
+            .float
+            .hit_order()
+            .find(|win| file_peek::contains(win.frame, [position.x as f32, position.y as f32]))
+            && surface != PreviewSurface::Float(win.epoch)
+        {
+            return None;
+        }
+        for (button, direction) in self.preview_neighbour_buttons(surface).into_iter().zip([
+            crate::preview_neighbours::Direction::Previous,
+            crate::preview_neighbours::Direction::Next,
+        ]) {
+            if button.is_some_and(|rect| {
+                file_peek::contains(rect, [position.x as f32, position.y as f32])
+            }) {
+                return Some((surface, direction));
+            }
+        }
+        None
+    }
+
+    fn step_preview_neighbour(
+        &mut self,
+        surface: PreviewSurface,
+        direction: crate::preview_neighbours::Direction,
+    ) -> Result<()> {
+        let Some(path) = self.preview_neighbour(surface, direction) else {
+            return Ok(());
+        };
+        self.open_preview_onto(surface, path.clone())?;
+        self.select_preview_neighbour_in_files(&path)
+    }
+
     /// **Ask the worker for everything a revived tab's preview panes are
     /// showing.**
     ///
@@ -4556,7 +4800,9 @@ impl Runtime<'_> {
                 let Some(body) = self.preview_surface_body_rect(surface, scale) else {
                     return Vec::new();
                 };
-                self.preview_body_bar_layers(surface, body, scale)
+                let mut layers = self.preview_body_bar_layers(surface, body, scale);
+                layers.extend(self.preview_neighbour_layer(surface));
+                layers
             })
             .collect()
     }
@@ -4698,6 +4944,9 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
+        if self.press_preview_neighbour(position)? {
+            return Ok(true);
+        }
         let at = [position.x as f32, position.y as f32];
         let now = Instant::now();
         for surface in self.video_pointer_surfaces() {
@@ -5000,7 +5249,9 @@ impl Runtime<'_> {
         let Some(body) = self.preview_surface_body_rect(surface, scale) else {
             return Vec::new();
         };
-        self.preview_body_bar_layers(surface, body, scale)
+        let mut layers = self.preview_body_bar_layers(surface, body, scale);
+        layers.extend(self.preview_neighbour_layer(surface));
+        layers
     }
 
     /// The body bar the pointer is on, and the surface wearing it.
@@ -6581,15 +6832,25 @@ impl Runtime<'_> {
         let Some(surface) = self.preview_keyboard_surface() else {
             return Ok(false);
         };
-        // **A player's five keys, before every reading below** (user ruling
+        // File travel owns plain arrows even while a video is playing. Shift
+        // arrows continue through to the player's existing seek commands.
+        if let Some(direction) = self.preview_picture(surface).and_then(|image| {
+            crate::preview_neighbours::key(
+                &image.path,
+                &event.logical_key,
+                self.window.modifiers,
+                event.state.is_pressed(),
+            )
+        }) {
+            self.step_preview_neighbour(surface, direction)?;
+            return Ok(true);
+        }
+        // **A player's five keys, after file travel** (user ruling
         // 2026-08-28; §7.44 ②).
         //
-        // Space, `←`/`→`, `↑`/`↓` and `M`, and they are asked *first* because
-        // every one of them means something else to the surface underneath: the
-        // arrows scroll a document, Space pages one. A surface that is playing a
-        // recording is a surface whose arrows are a playhead — which is what the
-        // shell page's own `keydown` said by being inside the page, and is now
-        // said by being the first rung.
+        // Space, Shift+`←`/`→`, `↑`/`↓` and `M` reach the player before
+        // document scrolling. Plain horizontal arrows were consumed above,
+        // including at the ends and while the folder listing is pending.
         //
         // **On whichever surface holds the keyboard**, which is the whole of
         // §7.34 reaching this ruling: `preview_keyboard_surface` has already
@@ -9669,7 +9930,7 @@ impl Runtime<'_> {
     /// a window torn out of another tab is still standing, and a picture that
     /// stopped being refit the moment you looked somewhere else would freeze at
     /// whatever size it was last seen at.
-    fn preview_picture_hosts(&self) -> Vec<PreviewSurface> {
+    pub(in crate::runtime) fn preview_picture_hosts(&self) -> Vec<PreviewSurface> {
         // The seat half is the tab's own rule, asked of the tab
         // ([`TabState::seat_pictures`]), because that is the answer
         // [`Self::pane_draws`] has to agree with frame by frame and two
