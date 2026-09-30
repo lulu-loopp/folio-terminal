@@ -3002,6 +3002,83 @@ pub fn start_conditions() -> StartConditions {
     }
 }
 
+/// **Whether this process's standard error is the file at `path`** — the
+/// same file, by identity: volume serial and file index on Windows, device
+/// and inode on Unix (0.4.7 ticket U-42d). A process a resident Folio started
+/// inherits that Folio's streams, which are its `diagnostics.log`; a line it
+/// both writes to standard error and appends to that log by name is there
+/// twice. `false` when standard error is a console, a pipe, nothing, or a
+/// file that is not `path`, and when either cannot be asked.
+#[must_use]
+pub fn standard_error_is(path: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+        use windows::Win32::System::Console::{GetStdHandle, STD_ERROR_HANDLE};
+        let identity = |handle: HANDLE| {
+            let mut info = BY_HANDLE_FILE_INFORMATION::default();
+            // SAFETY: a handle this process holds; the call fills `info`.
+            unsafe { GetFileInformationByHandle(handle, &raw mut info) }
+                .ok()
+                .map(|()| {
+                    (
+                        info.dwVolumeSerialNumber,
+                        info.nFileIndexHigh,
+                        info.nFileIndexLow,
+                    )
+                })
+        };
+        // SAFETY: asks for this process's standard error; nothing is opened
+        // and the handle is not closed here (it is not ours).
+        let Ok(error) = (unsafe { GetStdHandle(STD_ERROR_HANDLE) }) else {
+            return false;
+        };
+        if error.is_invalid() || error.0.is_null() {
+            return false;
+        }
+        // No access asked: the file is opened for its identity alone, and
+        // every sharing mode is granted so that nobody's write is refused.
+        let Ok(file) = std::fs::OpenOptions::new()
+            .access_mode(0)
+            .share_mode(0x7)
+            .open(path)
+        else {
+            return false;
+        };
+        match (identity(error), identity(HANDLE(file.as_raw_handle()))) {
+            (Some(stream), Some(named)) => stream == named,
+            _ => false,
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // SAFETY: `fstat` fills the zeroed buffer this function owns.
+        let mut stream: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(libc::STDERR_FILENO, &raw mut stream) } != 0 {
+            return false;
+        }
+        #[expect(
+            clippy::cast_sign_loss,
+            clippy::unnecessary_cast,
+            reason = "permanent: `dev_t` is signed on macOS and unsigned on Linux; std's `MetadataExt::dev` casts it the same way"
+        )]
+        let device = stream.st_dev as u64;
+        std::fs::symlink_metadata(path)
+            .is_ok_and(|named| named.dev() == device && named.ino() == stream.st_ino)
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = path;
+        false
+    }
+}
+
 /// **A file's attributes as the platform keeps them**, for a line: the
 /// Windows attribute word in hex (`0x20` is `ARCHIVE`, `0x400` a reparse
 /// point, `0x1000` offline), the permission bits in octal elsewhere (U-39).

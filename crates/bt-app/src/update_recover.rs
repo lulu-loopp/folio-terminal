@@ -395,6 +395,7 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
     });
     let home = door.home;
     let (log, whereabouts) = log_file(home, door.data);
+    let appended = appended_to(&log);
     let first = header_of(home);
     // A macOS bundle is the layout this door recovers (U-29, U-29b); a
     // Windows member set is `run_windows`'s.
@@ -417,7 +418,7 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
             };
             let mut logged = Logged {
                 world: &mut *guard.inner().world,
-                log: &log,
+                log: appended,
             };
             let recovered =
                 update_apply_macos::recover(worker, &road, &mut logged, door.then_launch);
@@ -457,7 +458,7 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
     );
     let world = &mut *guard.inner().world;
     world.say(&line);
-    if !crate::diagnostics::append_note(&log, &line) {
+    if appended.is_some_and(|log| !crate::diagnostics::append_note(log, &line)) {
         world.say(&format!(
             "BT_UPDATE_RECOVER the line above could not be appended to {}",
             log.display()
@@ -486,12 +487,13 @@ pub(crate) fn run_windows(
         worker: Some(worker),
     });
     let (log, whereabouts) = log_file(&road.home, &road.data);
+    let appended = appended_to(&log);
     let recovered = crate::update_apply_windows::recover(
         worker,
         road,
         &mut LoggedWindows {
             world: &mut *guard.inner().world,
-            log: &log,
+            log: appended,
         },
         then_launch,
     );
@@ -512,7 +514,7 @@ pub(crate) fn run_windows(
     );
     let world = &mut *guard.inner().world;
     world.say(&line);
-    if !crate::diagnostics::append_note(&log, &line) {
+    if appended.is_some_and(|log| !crate::diagnostics::append_note(log, &line)) {
         world.say(&format!(
             "BT_UPDATE_RECOVER the line above could not be appended to {}",
             log.display()
@@ -525,7 +527,9 @@ pub(crate) fn run_windows(
 /// recovery's lines, which the run at logon would otherwise lose.
 struct LoggedWindows<'w, W> {
     world: &'w mut W,
-    log: &'w Path,
+    /// `None` when the world's standard error is the log already
+    /// ([`appended_to`]).
+    log: Option<&'w Path>,
 }
 
 impl<W: crate::update_apply_windows::World> crate::update_apply_windows::World
@@ -533,7 +537,9 @@ impl<W: crate::update_apply_windows::World> crate::update_apply_windows::World
 {
     fn say(&mut self, line: &str) {
         self.world.say(line);
-        let _ = crate::diagnostics::append_note(self.log, line);
+        if let Some(log) = self.log {
+            let _ = crate::diagnostics::append_note(log, line);
+        }
     }
 
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
@@ -577,13 +583,17 @@ impl<W: crate::update_apply_windows::World> crate::update_apply_windows::World
 /// rollback's lines, which the run at logon would otherwise lose.
 struct Logged<'w, W> {
     world: &'w mut W,
-    log: &'w Path,
+    /// `None` when the world's standard error is the log already
+    /// ([`appended_to`]).
+    log: Option<&'w Path>,
 }
 
 impl<W: World> Hands for Logged<'_, W> {
     fn say(&mut self, line: &str) {
         self.world.say(line);
-        let _ = crate::diagnostics::append_note(self.log, line);
+        if let Some(log) = self.log {
+            let _ = crate::diagnostics::append_note(log, line);
+        }
     }
 
     fn exchange(&mut self, live: &Path, staged: &Path) -> Result<(), String> {
@@ -609,6 +619,18 @@ impl<W: World> Hands for Logged<'_, W> {
     fn show_here(&mut self, text: &str) {
         self.world.show_here(text);
     }
+}
+
+/// **The log the door appends its lines to by name**, or `None` when this
+/// process's standard error is that very file (0.4.7 U-42d; 0.4.6's D-11):
+/// the recovery a trial's watchdog starts inherits the trial's streams, which
+/// are its `diagnostics.log`, so the world's own line is already there and a
+/// second append would write it twice. Every other road (the logon, an
+/// ordinary start's hand-over, made before its streams are redirected) has a
+/// standard error that is not the log, and the append is the line's only way
+/// into it.
+fn appended_to(log: &Path) -> Option<&Path> {
+    (!bt_platform::standard_error_is(log)).then_some(log)
 }
 
 /// **Where the one line is kept**: the data directory's `diagnostics.log`
@@ -892,6 +914,68 @@ mod tests {
         assert_eq!(world.spawned, vec![(installed, handed())]);
         assert!(world.said[0].contains("no transaction in"));
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-42d, review finding 3) — **the recovery door's lines reach
+    /// `diagnostics.log` once when its standard error is that same log** (the
+    /// recovery a trial's watchdog starts), through both of the door's worlds:
+    /// the Windows road's and the macOS road's; and once, by the append, when
+    /// its standard error is not the log.
+    ///
+    /// 0.4.6's D-11 on the door's road: the world wrote the line to standard
+    /// error, which was the trial's `diagnostics.log`, and the door appended
+    /// the same bytes to that file by name. The child here is a copy of this
+    /// test binary whose standard error is the log.
+    ///
+    /// MUTATION: make `appended_to` answer the log whatever standard error is:
+    /// each line is in the file twice.
+    #[test]
+    fn a_recovery_line_reaches_the_log_once_whatever_standard_error_is() {
+        const CHILD: &str = "BT_U42D_RECOVER_SAY";
+        if let Some(log) = std::env::var_os(CHILD) {
+            let log = PathBuf::from(log);
+            let mut windows = crate::update_apply_windows::Machine { log: None };
+            crate::update_apply_windows::World::say(
+                &mut LoggedWindows {
+                    world: &mut windows,
+                    log: appended_to(&log),
+                },
+                "BT_UPDATE_RECOVER the Windows road, once",
+            );
+            let mut macos = Machine;
+            Hands::say(
+                &mut Logged {
+                    world: &mut macos,
+                    log: appended_to(&log),
+                },
+                "BT_UPDATE_RECOVER the macOS road, once",
+            );
+            return;
+        }
+        let text = crate::update_apply_windows::tests::said_by_a_child_whose_stderr_is_the_log(
+            "update_recover::tests::a_recovery_line_reaches_the_log_once_whatever_standard_error_is",
+            CHILD,
+            "recover",
+        );
+        for line in [
+            "BT_UPDATE_RECOVER the Windows road, once",
+            "BT_UPDATE_RECOVER the macOS road, once",
+        ] {
+            assert_eq!(text.matches(line).count(), 1, "{line}: {text}");
+        }
+
+        // Standard error elsewhere (this test process's): the append is the
+        // line's one way into the log.
+        let folder = std::env::temp_dir().join(format!(
+            "bt-u42d-recover-{}-{}",
+            std::process::id(),
+            bt_platform::attention_pipe::unguessable_bits() % 1_000_000
+        ));
+        std::fs::create_dir_all(&folder).unwrap();
+        let log = folder.join("diagnostics.log");
+        std::fs::write(&log, b"").unwrap();
+        assert_eq!(appended_to(&log), Some(log.as_path()));
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// RED (U-22, coordinator ruling 2026-09-27) — **the one line is appended
