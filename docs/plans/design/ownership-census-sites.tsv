@@ -141,6 +141,8 @@ App.ime_first_focus_seen	write	crate	Runtime::observe_ime_focus	assign	1
 App.keybindings_fault	write	crate::runtime::keyboard	Runtime::announce_keybindings_fault	call:take	1
 App.keybindings_store	write	crate	App::release_trial_writes	call:release_trial	1
 App.keybindings_store	write	crate::runtime::keyboard	Runtime::store_keybindings	call:store	1
+App.layout_tables	write	crate	<FolioApp as ApplicationHandler<AppEvent>>::user_event	call:apply_answers	1
+App.layout_tables	write	crate::runtime::keyboard	Runtime::keyboard_input	call:shifted_character	1
 App.math_worker_notice_pending	access	crate	FolioApp::drain_math_answers	lend	1
 App.math_worker_notice_pending	access	crate::runtime::frame	Runtime::publish_frame_inner	lend	3
 App.math_worker_notice_pending	access	crate::runtime::frame	Runtime::redraw	lend	1

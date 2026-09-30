@@ -29,6 +29,7 @@ App.file_indexes	-	OBS	files	the 2026-09-25 table
 App.first_run_attempted	-	LIFE	first_run	the 2026-09-25 table
 App.handoff_lane	-	RES	handoff	the 2026-09-25 table
 App.keybindings_store	-	DUR	keyboard	proposed by census-1
+App.layout_tables	-	OBS	keyboard	round 5: the application-owned per-HKL observation map is written only when a key requests a miss or a worker answer lands
 App.pending_application_change	-	PROJ	diagnostics	the 2026-09-25 table
 App.pending_handover	-	LIFE	windows	the 2026-09-25 table
 App.pending_new_windows	-	LIFE	windows	the 2026-09-25 table

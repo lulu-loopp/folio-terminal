@@ -42045,8 +42045,10 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::HandoffAnswered);
             }
         })?;
-        let layout_tables =
-            layout_tables::LayoutTables::spawn(proxy.clone(), bt_platform::keyboard_layouts())?;
+        // This observation has no refusal: off Windows it is the empty list,
+        // and the worker consequently has no layout-table work to perform.
+        let keyboard_layouts = bt_platform::keyboard_layouts();
+        let layout_tables = layout_tables::LayoutTables::spawn(proxy.clone(), keyboard_layouts)?;
         let files_worker = files::FilesWorker::spawn(proxy.clone())?;
         let file_index_worker = palette_index::IndexWorker::spawn(proxy.clone())?;
         let preview_worker = preview::PreviewWorker::spawn(proxy.clone())?;

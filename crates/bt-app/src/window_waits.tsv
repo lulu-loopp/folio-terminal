@@ -163,7 +163,7 @@ bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	ow
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
-bt-app	-	crate::layout_tables::build_on_system	bt_platform::keyboard_layout_shift_table 1	worker-door-body	WorkerCtx
+bt-app	-	crate::layout_tables::build_on_system	bt_platform::keyboard_layout_shift_table 1	worker-door-body	WorkerCtx	
 
 # owners
 construct	owner	count

@@ -1211,9 +1211,9 @@ pub fn keyboard_layouts() -> Vec<crate::KeyboardLayout> {
     Vec::new()
 }
 
-/// Refuse the Windows keyboard-layout-table door on a platform with no such
+/// No-op for the Windows keyboard-layout-table door on a platform with no such
 /// system table. It still takes the worker capability, so the cross-platform
-/// signature preserves the refusal pin.
+/// signature preserves the door shape.
 #[must_use]
 pub fn keyboard_layout_shift_table(
     _worker: &crate::admission::WorkerCtx,

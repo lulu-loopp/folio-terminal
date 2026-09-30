@@ -15,6 +15,7 @@ App.tab_ids	TabIds	-	n	2	7	0	0	0	0	complete
 App.animation_serials	u64	-	1	1	1	0	0	0	0	complete
 App.event_proxy	EventLoopProxy<AppEvent>	-	0	0	0	0	0	0	0	complete
 App.handoff_lane	HandoffLane	-	n	2	2	0	0	0	0	complete
+App.layout_tables	LayoutTables	-	n	2	2	0	0	0	0	complete
 App.math_worker	MathWorker	-	0	0	0	0	0	0	0	complete
 App.math_worker_running	bool	-	0	0	0	5	0	0	0	complete
 App.math_worker_notice_pending	bool	-	0	0	0	5	0	0	0	complete
