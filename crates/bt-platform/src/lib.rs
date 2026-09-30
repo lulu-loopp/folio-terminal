@@ -6791,7 +6791,7 @@ mod windows_impl {
         // SAFETY: `module` is live until `FreeLibrary` below; the export is
         // `PKBDTABLES KbdLayerDescriptor(VOID)`, and every pointer it leads to
         // lies in the module's static data, read only before the module is freed.
-        let table = unsafe {
+        unsafe {
             let descriptor = GetProcAddress(module, s!("KbdLayerDescriptor")).map(|export| {
                 std::mem::transmute::<
                     unsafe extern "system" fn() -> isize,
@@ -6801,8 +6801,7 @@ mod windows_impl {
             let table = descriptor.and_then(|descriptor| shift_table_of_tables(descriptor()));
             let _ = FreeLibrary(module);
             table
-        };
-        table
+        }
     }
 
     /// The Shift column of a layout's `KBDTABLES`, as [`shift_table_of_layout`]
