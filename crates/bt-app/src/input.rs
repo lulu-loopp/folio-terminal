@@ -974,10 +974,11 @@ fn modify_other_keys_bytes(
                     ShiftedCharacter::Known(character) => {
                         character.filter(|character| !character.is_control())?
                     }
-                    // xterm's default `formatOtherKeys=0` names a key by the
-                    // unshifted keysym when the shifted keysym is not known yet.
-                    // The layout worker replaces this one-chord degradation
-                    // before the next lookup (design note revision (g)).
+                    // Folio's own rule, not xterm's: while the layout's table is
+                    // not known, `k` is the un-shifted character. The chord
+                    // still reaches the program as Ctrl+Shift+Alt on that key,
+                    // where the encoder before this road sent nothing for it
+                    // (design note revision (g)).
                     ShiftedCharacter::Pending => base,
                 }
             } else {
@@ -996,8 +997,9 @@ pub(crate) enum ShiftedCharacter {
     /// The table is present; its cell is either one character or deliberately
     /// none (dead, ligature, surrogate, or no Shift character).
     Known(Option<char>),
-    /// The table is still being built. For this chord only, modifyOtherKeys uses
-    /// the unshifted character, xterm's `formatOtherKeys=0` fallback.
+    /// The table is still being built. modifyOtherKeys uses the un-shifted
+    /// character, Folio's own rule for a table it does not have (the wire form
+    /// is still xterm's `formatOtherKeys=0`).
     Pending,
 }
 

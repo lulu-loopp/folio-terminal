@@ -267,8 +267,9 @@ mod tests {
     ///
     /// No sleep and no product thread: the test makes the chord, advances the
     /// worker by one queued request, adopts the published answer, and makes the
-    /// chord again. xterm's default `formatOtherKeys=0` fallback is `e` (101);
-    /// the delivered US Shift table changes the next chord to `E` (69).
+    /// chord again. While the table is not known the chord's `k` is the
+    /// un-shifted `e` (101), Folio's own rule; the delivered US Shift table
+    /// changes the next chord to `E` (69).
     ///
     /// MUTATION: remove the miss request in `LayoutTables::shifted_character`:
     /// the second chord remains `CSI 27;8;101~` forever.
