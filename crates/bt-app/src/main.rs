@@ -71768,7 +71768,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 15] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 16] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -71802,6 +71802,8 @@ mod platform_gate_tests {
         "shell_literal.rs",
         // Native junction and sharing-mode fixtures, never product platform policy.
         "uninstall_tests.rs",
+        // Only the symlinked-log regression fixture; the recovery road is portable.
+        "update_recover.rs",
         // WSL.
         "wsl.rs",
     ];
