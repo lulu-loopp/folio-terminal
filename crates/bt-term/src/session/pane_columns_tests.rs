@@ -44,17 +44,42 @@ fn seat_inline_metrics(session: &mut DualPlaneSession) {
     session.set_ascii_baseline_subpixels(NonZeroI64::new(19 * SUBPIXELS_PER_PX).unwrap());
 }
 
-/// Resolve and rasterize every queued live task with the real engine, as the worker does.
+/// Resolve and rasterize every queued live task with the real engine, as the worker does, and
+/// count the proven blocks whose completion was accepted.
 fn complete_for_real(session: &mut DualPlaneSession) -> usize {
     let engine = MathEngine::new();
     let mut completed = 0;
     while let Some(mut task) = session.take_live_worker_task() {
         let result = render_live_detection_task(&engine, &mut task, [220, 220, 220]);
-        if session.complete_live_worker_result(task, result) {
+        let proven = task.resolved;
+        if session.complete_live_worker_result(task, result) && proven {
             completed += 1;
         }
     }
     completed
+}
+
+/// **What the other pane prints**: an ordinary sentence. A multiplexer's neighbour is another
+/// program's output, and a sentence is what keeps the unsplit reading from pairing one pane's `$$`
+/// with the other's — the scan's prose guard refuses a body with a sentence in it — which is what
+/// real output does. A neighbour of bare words would let the unsplit screen prove a block across the
+/// rule, and R5 would then (rightly) refuse the split: the note's stated price.
+fn prose(row: usize) -> String {
+    format!("a pane printed this sentence on row {row}")
+}
+
+/// A scan that closes a block, taken off the queue and resolved; everything queued before it is
+/// completed as the worker would.
+fn take_a_proven_task(session: &mut DualPlaneSession) -> LiveDetectionTask {
+    loop {
+        let mut task = session
+            .take_live_worker_task()
+            .expect("a scan that proves a block");
+        if resolve_live_detection_task(&mut task) {
+            return task;
+        }
+        session.complete_live_worker_result(task, Err(MathRenderError::NotDetected));
+    }
 }
 
 fn frame_of(session: &DualPlaneSession) -> ViewportFrame {
@@ -449,13 +474,19 @@ fn the_oracle_does_not_back_a_stale_region_from_another_regions_equal_source() {
     };
     let rows = (0..20_usize)
         .map(|row| {
-            let left = row.checked_sub(1).map_or("", block);
-            let right = row.checked_sub(6).map_or("", block);
-            format!("{left:<20}\u{2502}{right}")
+            let left = match row.checked_sub(1).map_or("", block) {
+                "" => prose(row),
+                text => text.to_owned(),
+            };
+            let right = match row.checked_sub(6).map_or("", block) {
+                "" => prose(row),
+                text => text.to_owned(),
+            };
+            format!("{left:<60}\u{2502}{right}")
         })
         .collect::<Vec<_>>();
     let start = Instant::now();
-    let mut session = DualPlaneSession::new(nz(40), nz(20));
+    let mut session = DualPlaneSession::new(nz(120), nz(20));
     session.feed_at(&repaint(&rows), start).unwrap();
     session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
     assert_eq!(
@@ -465,7 +496,7 @@ fn the_oracle_does_not_back_a_stale_region_from_another_regions_equal_source() {
     let right = session
         .live_decorations
         .values()
-        .find(|record| record.pane.left == 21)
+        .find(|record| record.pane.left == 61)
         .cloned()
         .expect("the right pane's record");
     assert!(session.held_unbacked_records().is_empty());
@@ -474,7 +505,10 @@ fn the_oracle_does_not_back_a_stale_region_from_another_regions_equal_source() {
     for row in 6..=8u32 {
         session
             .feed_at(
-                &rewrite_row(row, &format!("{:<20}\u{2502}", "")),
+                &rewrite_row(
+                    row,
+                    &format!("{:<60}\u{2502}{}", prose(row as usize), prose(row as usize)),
+                ),
                 start + LIVE_MATH_STABLE_INTERVAL,
             )
             .unwrap();
@@ -487,6 +521,47 @@ fn the_oracle_does_not_back_a_stale_region_from_another_regions_equal_source() {
     assert_eq!(reported[0].band_start_row, right.band_start_row);
 }
 
+/// RED (69a) — **a block in one pane does not displace a block in the other pane on the same rows.**
+/// The left pane's block stands on rows 5–7 and the right pane's on rows 6–8. Installing one used to
+/// retire every record whose rows it overlapped, so the second to land took the first down and its
+/// candidate stayed spent: one formula of the two stayed source. A record is displaced only by a
+/// block in its own columns.
+///
+/// MUTATION: drop the pane-columns clause from the displacement in `apply_live_worker_completion`.
+#[test]
+fn a_block_in_one_pane_does_not_displace_the_other_panes_block_on_its_rows() {
+    let rows = (0..20_usize)
+        .map(|row| {
+            let left = match row {
+                5 | 7 => "$$".to_owned(),
+                6 => "p^2".to_owned(),
+                _ => prose(row),
+            };
+            let right = match row {
+                6 | 8 => "$$".to_owned(),
+                7 => "q^2".to_owned(),
+                _ => prose(row),
+            };
+            format!("{left:<60}\u{2502}{right}")
+        })
+        .collect::<Vec<_>>();
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz(120), nz(20));
+    session.feed_at(&repaint(&rows), start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    assert_eq!(
+        complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+        2
+    );
+    let mut panes = session
+        .live_decorations
+        .values()
+        .map(|record| record.pane)
+        .collect::<Vec<_>>();
+    panes.sort();
+    assert_eq!(panes, vec![rect(0, 20, 0, 60), rect(0, 20, 61, 120)]);
+}
+
 // ---- §7.4: ticket 69b (T-PANE-IDENTITY) -------------------------------------------------------
 
 /// A 40×100 split at column 50 with a display block in the left pane on rows 10–12, and a spinner
@@ -495,14 +570,14 @@ fn spinner_screen(spinner: char) -> Vec<String> {
     (0..40)
         .map(|row| {
             let left = match row {
-                10 | 12 => "$$",
-                11 => "x^2",
-                _ => "left",
+                10 | 12 => "$$".to_owned(),
+                11 => "x^2".to_owned(),
+                _ => prose(row),
             };
             let right = if row == 11 {
                 format!("{:<29}{spinner}", "working")
             } else {
-                format!("right {row}")
+                prose(row)
             };
             format!("{left:<50}\u{2502}{right}")
         })
@@ -607,14 +682,14 @@ fn two_pane_screen(horizontal: bool) -> Vec<String> {
                 _ => "",
             };
             let left = match block(5) {
-                "" => "left",
-                text => text,
+                "" => prose(row),
+                text => text.to_owned(),
             };
             if horizontal && row == 20 {
                 return format!("{left:<50}\u{251c}{}", "\u{2500}".repeat(49));
             }
             let right = match block(25) {
-                "" => format!("right {row}"),
+                "" => prose(row),
                 text => text.to_owned(),
             };
             format!("{left:<50}\u{2502}{right}")
@@ -699,8 +774,7 @@ fn a_fence_opened_on_the_status_row_suppresses_every_pane_and_its_closing_releas
         .feed_at(&repaint(&screen("status ready")), start)
         .unwrap();
     session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
-    let mut in_flight = session.take_live_worker_task().expect("a scan");
-    assert!(resolve_live_detection_task(&mut in_flight));
+    let in_flight = take_a_proven_task(&mut session);
     assert_eq!(
         complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
         1
@@ -733,25 +807,31 @@ fn a_fence_opened_on_the_status_row_suppresses_every_pane_and_its_closing_releas
 }
 
 /// Two panes that each hold a display block ending on row 12 (`starts` = the rows they open on).
+///
+/// The left pane writes `\[ … \]` and the right `$$ … $$`: two bare `$$` on one screen row read,
+/// unsplit, as one complete display `$$ … │$$` across the rule, which R5 rightly refuses to cut
+/// (finding F-2 of the T-PANE-COLUMNS report); these tests are about the panes' identity, not that.
 fn same_row_screen(left_start: usize, right_start: usize) -> Vec<String> {
     (0..40)
         .map(|row| {
-            let block = |first: usize, last: usize| {
-                if row == first || row == last {
-                    "$$"
+            let block = |first: usize, last: usize, open: &'static str, close: &'static str| {
+                if row == first {
+                    open
+                } else if row == last {
+                    close
                 } else if (first..last).contains(&row) {
                     "z^2"
                 } else {
                     ""
                 }
             };
-            let left = match block(left_start, 12) {
-                "" => "left",
-                text => text,
+            let left = match block(left_start, 12, "\\[", "\\]") {
+                "" => prose(row),
+                text => text.to_owned(),
             };
-            let right = match block(right_start, 12) {
-                "" => "right",
-                text => text,
+            let right = match block(right_start, 12, "$$", "$$") {
+                "" => prose(row),
+                text => text.to_owned(),
             };
             format!("{left:<50}\u{2502}{right}")
         })
@@ -776,7 +856,13 @@ fn two_panes_closing_on_the_same_row_both_typeset() {
         complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
         2
     );
-    assert_eq!(session.live_decorations.len(), 2);
+    let mut panes = session
+        .live_decorations
+        .values()
+        .map(|record| record.pane)
+        .collect::<Vec<_>>();
+    panes.sort();
+    assert_eq!(panes, vec![rect(0, 40, 0, 50), rect(0, 40, 51, 100)]);
 }
 
 /// RED (69b) — **two panes starting on the same row both keep their records** (the branch's B-4).
@@ -789,15 +875,17 @@ fn two_panes_closing_on_the_same_row_both_typeset() {
 fn two_panes_starting_on_the_same_row_both_keep_their_records() {
     let rows = (0..40)
         .map(|row| {
+            // `\[ … \]` left and `$$ … $$` right, for the reason `same_row_screen` gives.
             let left = match row {
-                10 | 12 => "$$",
-                11 => "a^2",
-                _ => "left",
+                10 => "\\[".to_owned(),
+                12 => "\\]".to_owned(),
+                11 => "a^2".to_owned(),
+                _ => prose(row),
             };
             let right = match row {
-                10 | 14 => "$$",
-                11..=13 => "b^2",
-                _ => "right",
+                10 | 14 => "$$".to_owned(),
+                11..=13 => "b^2".to_owned(),
+                _ => prose(row),
             };
             format!("{left:<50}\u{2502}{right}")
         })
@@ -807,7 +895,13 @@ fn two_panes_starting_on_the_same_row_both_keep_their_records() {
     session.feed_at(&repaint(&rows), start).unwrap();
     session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
     complete_detected_live_tasks(&mut session, synthetic_raster(40, 40));
-    assert_eq!(session.live_decorations.len(), 2);
+    let mut panes = session
+        .live_decorations
+        .values()
+        .map(|record| record.pane)
+        .collect::<Vec<_>>();
+    panes.sort();
+    assert_eq!(panes, vec![rect(0, 40, 0, 50), rect(0, 40, 51, 100)]);
 }
 
 /// RED (69b) — **completion ignores the other pane's half of the row.** A task for the left pane's
@@ -826,10 +920,7 @@ fn completion_ignores_the_other_panes_half_of_the_row() {
         .feed_at(&repaint(&spinner_screen('|')), start)
         .unwrap();
     session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
-    let mut task = session
-        .take_live_worker_task()
-        .expect("the left block's scan");
-    assert!(resolve_live_detection_task(&mut task));
+    let task = take_a_proven_task(&mut session);
     session
         .feed_at(
             &rewrite_row(11, &spinner_screen('/')[11]),
