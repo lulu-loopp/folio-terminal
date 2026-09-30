@@ -770,6 +770,7 @@ mod tests {
                 txn,
                 rescue: rescue.display().to_string(),
                 body: Body {
+                    adapter: crate::update_txn::Adapter::Ours,
                     phase,
                     layout: Layout::Members(Inventories {
                         old_shipped: Vec::new(),

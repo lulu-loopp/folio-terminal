@@ -445,11 +445,19 @@ impl Evidence {
         };
         match self.channel {
             Channel::Ours => {}
+            // A managed copy takes its manager's adapter only where that
+            // road is built (managed-update §1.5); everywhere else, its row
+            // keeps the manager's command.
             Channel::Managed { manager, .. } => {
-                return Err(NotEligible::Managed {
-                    manager,
-                    command: manager_command(manager),
-                });
+                if !crate::update_adapter::built_on(
+                    crate::update_adapter::of_manager(manager),
+                    self.platform,
+                ) {
+                    return Err(NotEligible::Managed {
+                        manager,
+                        command: manager_command(manager),
+                    });
+                }
             }
             Channel::NotOurs => return Err(NotEligible::NotOurs),
             Channel::Unknown => return Err(NotEligible::Unknown),

@@ -401,6 +401,7 @@ impl Install {
                 .display()
                 .to_string(),
             body: Body {
+                adapter: crate::update_txn::Adapter::Ours,
                 phase,
                 layout: Layout::Bundle {
                     old: self.old.clone(),

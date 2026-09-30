@@ -421,6 +421,7 @@ impl Install {
             txn: self.txn,
             rescue: self.rescue.display().to_string(),
             body: Body {
+                adapter: crate::update_txn::Adapter::Ours,
                 phase,
                 layout: Layout::Members(self.inventories.clone()),
             },

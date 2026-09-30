@@ -925,6 +925,7 @@ mod tests {
             txn,
             rescue: "rescue".to_owned(),
             body: Body {
+                adapter: crate::update_txn::Adapter::Ours,
                 phase,
                 layout: Layout::Members(Inventories {
                     old_shipped: Vec::new(),

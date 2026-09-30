@@ -102,7 +102,9 @@ use crate::update_job::{
 use crate::update_prepare::{
     WORKER, abandon, digest_of, discard, fetching, finish, matches_its_sum,
 };
-use crate::update_txn::{Digest, Event, Home, Inventories, Journal, Layout, Member, Place, TxnId};
+use crate::update_txn::{
+    Adapter, Digest, Event, Home, Inventories, Journal, Layout, Member, Place, TxnId,
+};
 
 /// The new release's executable, which carries its manifest.
 const EXECUTABLE: &str = update_archive::EXECUTABLE;
@@ -265,22 +267,32 @@ impl Road<'_> {
 
 // ── step 1: the road, and the running build ─────────────────────────────────
 
-/// **Whether the copy whose executable is `exe` may take the Windows road, and
-/// its home**: installed as [`Channel::Ours`] — which on Windows is decided
-/// only for a folder this account owns and may write (C2, F-2) — with an
+/// **Whether the copy whose executable is `exe` may take the Windows road, its
+/// home, and the adapter it takes**: installed as a channel whose adapter's
+/// road is built on Windows (`update_adapter::built_on`; managed-update §1.5)
+/// — in this build only [`Channel::Ours`], which on Windows is decided only
+/// for a folder this account owns and may write (C2, F-2) — with an
 /// installation home beside the executable.
 ///
 /// # Errors
-/// [`NotEligible::NotOurs`] / [`NotEligible::Unknown`] for a channel other
-/// than `Ours` (a managed copy never reaches a press, and is answered as not
-/// ours here); [`NotEligible::NotWritable`] for an executable with no folder.
-pub(crate) fn eligible(exe: &Path, channel: Option<Channel>) -> Result<Home, NotEligible> {
-    match channel {
-        Some(Channel::Ours) => {}
-        Some(Channel::NotOurs | Channel::Managed { .. }) => return Err(NotEligible::NotOurs),
+/// [`NotEligible::NotOurs`] / [`NotEligible::Unknown`] for another channel
+/// (a managed copy whose road is not built never reaches a press, and is
+/// answered as not ours here); [`NotEligible::NotWritable`] for an executable
+/// with no folder.
+pub(crate) fn eligible(
+    exe: &Path,
+    channel: Option<Channel>,
+) -> Result<(Home, Adapter), NotEligible> {
+    let adapter = match channel {
         Some(Channel::Unknown) | None => return Err(NotEligible::Unknown),
-    }
-    Home::of(bt_platform::HostPlatform::Windows, exe).ok_or(NotEligible::NotWritable)
+        Some(channel) => crate::update_adapter::of_channel(channel)
+            .filter(|&adapter| {
+                crate::update_adapter::built_on(adapter, bt_platform::HostPlatform::Windows)
+            })
+            .ok_or(NotEligible::NotOurs)?,
+    };
+    let home = Home::of(bt_platform::HostPlatform::Windows, exe).ok_or(NotEligible::NotWritable)?;
+    Ok((home, adapter))
 }
 
 /// The stop a road refusal is reported as.
@@ -340,7 +352,7 @@ fn file_version(version: &str) -> Option<FileVersion> {
 
 /// **The Prepare, on its worker** — the module header's eight steps.
 fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
-    let home = eligible(road.exe, road.channel).map_err(|why| stop_for(&why))?;
+    let (home, adapter) = eligible(road.exe, road.channel).map_err(|why| stop_for(&why))?;
     road.go_on()?;
     let running = running(road.exe, road.policy)?;
     let name = road.exe.file_name().ok_or(Stop::NotWritable)?;
@@ -368,7 +380,8 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
             old_present: Vec::new(),
             new: Vec::new(),
         }),
-    );
+    )
+    .naming(adapter);
     install_txn::durable_write(&home.journal(), &allocated.encode()).map_err(|_| Stop::Journal)?;
 
     // From here a refusal abandons the transaction and leaves nothing.
@@ -754,8 +767,8 @@ pub(crate) fn staged_as_verified(
     let Layout::Members(inventories) = &journal.body.layout else {
         return Err(Stop::Journal);
     };
-    let found = eligible(resume.exe, resume.channel).map_err(|why| stop_for(&why))?;
-    if &found != home {
+    let (found, adapter) = eligible(resume.exe, resume.channel).map_err(|why| stop_for(&why))?;
+    if &found != home || adapter != journal.body.adapter {
         return Err(Stop::NotOurs);
     }
     let name = resume.exe.file_name().ok_or(Stop::NotWritable)?;

@@ -852,11 +852,49 @@ impl Phase {
 
 // ───────────────────────────────────── the journal ─────────────────────────────────────
 
+/// **Whose road the transaction takes** — the adapter the body names
+/// (`docs/plans/design/managed-update-2026-09-29.md` §1.1 R1, R2; 0.4.7
+/// ticket U-41a1): chosen once, at the press, from how the copy was installed
+/// (`update_adapter::of_channel`), and read from the journal — never from the
+/// channel — by the applier, the recovery and every later lock holder, which
+/// call its `Prepare`, `Activate` and `Prove / Recover` through it.
+///
+/// [`Adapter::Ours`] is the only one this build's roads take: the others are
+/// named so that a journal can record them, and their roads are off
+/// (`update_adapter::built_on`), so a managed copy keeps its row's command.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum Adapter {
+    /// Folio's own road: the member set on Windows, the bundle on macOS.
+    #[default]
+    Ours,
+    Homebrew,
+    Scoop,
+    Winget,
+}
+
+impl Adapter {
+    /// Whether this is [`Adapter::Ours`] — which the journal does not write,
+    /// so that an ordinary copy's journal is the bytes 0.4.6 wrote.
+    #[must_use]
+    pub(crate) fn is_ours(&self) -> bool {
+        *self == Adapter::Ours
+    }
+}
+
 /// The journal's body, owned by the rescue build's version (F-8).
+///
+/// **`adapter`** (0.4.7 ticket U-41a1) follows the receipt's rule for a field
+/// added to a v1 document (U-37, H.1; `Receipt::started`): absent when it is
+/// [`Adapter::Ours`], so an ordinary copy's journal is written byte for byte
+/// as 0.4.6 wrote it; a body without it (0.4.6's) reads as `Ours`; and a
+/// reader ignores a field it does not know (no `deny_unknown_fields`, 0.4.6's
+/// reader included).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Body {
     pub(crate) phase: Phase,
     pub(crate) layout: Layout,
+    #[serde(default, skip_serializing_if = "Adapter::is_ours")]
+    pub(crate) adapter: Adapter,
 }
 
 /// **`H\journal.json`**: the frozen header's `txn` and `rescue`, and the body.
@@ -892,8 +930,17 @@ impl Journal {
             body: Body {
                 phase: Phase::Allocated,
                 layout,
+                adapter: Adapter::Ours,
             },
         }
+    }
+
+    /// **The journal naming `adapter`** — what the press records at
+    /// `Allocated` (managed-update R2); every later phase carries it.
+    #[must_use]
+    pub(crate) fn naming(mut self, adapter: Adapter) -> Self {
+        self.body.adapter = adapter;
+        self
     }
 
     pub(crate) fn header(&self) -> Header {
@@ -959,6 +1006,7 @@ impl Journal {
             body: Body {
                 phase,
                 layout: self.body.layout.clone(),
+                adapter: self.body.adapter,
             },
             ..self.clone()
         })
@@ -2792,7 +2840,11 @@ mod tests {
         Journal {
             txn: txn(),
             rescue: r"C:\Folio\.folio-update\7a7a\rescue\folio.exe".to_owned(),
-            body: Body { phase, layout },
+            body: Body {
+                phase,
+                layout,
+                adapter: Adapter::Ours,
+            },
         }
     }
 
@@ -2874,6 +2926,141 @@ mod tests {
                 .contains("started")
         );
         assert_eq!(Receipt::parse(&without.encode()), Ok(without));
+    }
+
+    /// `v0.4.6-preview:crates/bt-app/src/update_txn.rs`, `Body`: the phase
+    /// and the layout, and nothing else. Its two fields are read here with
+    /// today's `Phase` and `Layout`, whose own additions since (U-42a's
+    /// `untried`) follow the same rule and are pinned by their own tests.
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    struct Body046 {
+        phase: Phase,
+        layout: Layout,
+    }
+
+    /// The whole journal as 0.4.6 wrote it: the header's five fields and
+    /// the body.
+    #[derive(Serialize)]
+    struct JournalWire046<'a> {
+        #[serde(flatten)]
+        header: HeaderWire,
+        body: &'a Body046,
+    }
+
+    /// The body as 0.4.6 read it (`BodyOnly`, verbatim).
+    #[derive(Deserialize)]
+    struct BodyOnly046 {
+        body: Body046,
+    }
+
+    /// PIN (U-41a1, managed-update §1.3, U-37's H.1 rule for a v1
+    /// document) — **a journal 0.4.6 wrote, which names no adapter, reads as
+    /// `Ours`, and an ordinary copy's journal is written byte for byte as
+    /// 0.4.6 wrote it.**
+    ///
+    /// A 0.4.6 copy that is updated to 0.4.7 leaves a journal no adapter was
+    /// recorded in, and every lock holder after it reads the adapter from the
+    /// journal (R2): an absent field must be the road every existing
+    /// transaction is on. And the header and body an ordinary copy writes
+    /// stay 0.4.6's bytes, so nothing an ordinary update leaves on the disk
+    /// changes with this field — the receipt's rule (`started`, U-37).
+    ///
+    /// MUTATION: drop `#[serde(default)]` from `Body::adapter` (the 0.4.6
+    /// journal is refused as malformed), or drop its `skip_serializing_if`
+    /// (an ordinary journal gains `"adapter":"Ours"`).
+    #[test]
+    fn a_journal_that_names_no_adapter_reads_as_ours_and_ours_is_written_as_0_4_6_wrote_it() {
+        for (phase, layout) in [
+            (Phase::Allocated, members_layout()),
+            (
+                Phase::Prepared {
+                    deferred_launches: 1,
+                },
+                bundle_layout(),
+            ),
+            (Phase::Moving, members_layout()),
+            (
+                Phase::Stuck {
+                    trial: None,
+                    last_error: "the move of `folio.exe` failed".to_owned(),
+                    attempts: 2,
+                    retrial: None,
+                },
+                bundle_layout(),
+            ),
+        ] {
+            let ours = journal(phase.clone(), layout.clone());
+            let old = Body046 { phase, layout };
+            let written_by_046 = serde_json::to_vec(&JournalWire046 {
+                header: ours.header().wire(),
+                body: &old,
+            })
+            .unwrap();
+            let read = Journal::parse(&written_by_046).expect("a 0.4.6 journal is read");
+            assert_eq!(read.body.adapter, Adapter::Ours, "no adapter is ours");
+            assert_eq!(read, ours);
+            assert_eq!(
+                ours.encode(),
+                written_by_046,
+                "an ordinary journal is 0.4.6's bytes"
+            );
+        }
+    }
+
+    /// PIN (U-41a1, the same rule) — **a journal that names another adapter
+    /// is read by 0.4.6's body reader exactly as it always read one, and by
+    /// this build with its adapter; a body field this build does not know is
+    /// ignored the same way.**
+    ///
+    /// The body is written and read by the rescue build's own version (F-8),
+    /// so a 0.4.6 build never has to act on a journal a 0.4.7 road wrote; but
+    /// the rule that lets fields be added to a v1 document without a version
+    /// — every reader ignores what it does not know — is what keeps the
+    /// header's readers (every later start) and the body's apart, and it has
+    /// to hold in both directions: 0.4.6 reading this build's body, and this
+    /// build reading a later one's.
+    ///
+    /// MUTATION: give `Body` `#[serde(deny_unknown_fields)]` — the body a
+    /// later build wrote is refused.
+    #[test]
+    fn a_body_reader_ignores_an_adapter_or_any_field_it_does_not_know() {
+        for adapter in [Adapter::Homebrew, Adapter::Scoop, Adapter::Winget] {
+            let named = journal(
+                Phase::Prepared {
+                    deferred_launches: 0,
+                },
+                bundle_layout(),
+            )
+            .naming(adapter);
+            let bytes = named.encode();
+            let BodyOnly046 { body } = serde_json::from_slice(&bytes).expect("0.4.6 reads it");
+            assert_eq!(
+                body,
+                Body046 {
+                    phase: Phase::Prepared {
+                        deferred_launches: 0
+                    },
+                    layout: bundle_layout(),
+                },
+                "{adapter:?}: 0.4.6 reads the phase and the layout as they are"
+            );
+            assert_eq!(Journal::parse(&bytes), Ok(named.clone()), "{adapter:?}");
+            let advanced = named.advance(&Event::Discarded).unwrap();
+            assert_eq!(
+                advanced.body.adapter, adapter,
+                "every later phase carries it"
+            );
+        }
+
+        let ours = journal(Phase::Moving, members_layout());
+        let mut later: serde_json::Value = serde_json::from_slice(&ours.encode()).unwrap();
+        later["body"]["recorded_by_a_later_build"] = serde_json::json!({"说明": "未知字段"});
+        let bytes = serde_json::to_vec(&later).unwrap();
+        assert_eq!(
+            Journal::parse(&bytes),
+            Ok(ours),
+            "a field this build does not know is not a refusal"
+        );
     }
 
     /// The four folders a Windows member lives in, as the file system keeps

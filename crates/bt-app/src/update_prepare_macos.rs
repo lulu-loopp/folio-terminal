@@ -86,7 +86,7 @@ use crate::update_job::{
 #[cfg(test)]
 pub(crate) use crate::update_prepare::{AtLaunch, at_launch, sum_for};
 use crate::update_prepare::{WORKER, abandon, discard, fetching, finish, matches_its_sum};
-use crate::update_txn::{BundleIdentity, Cdhash, Event, Home, Journal, Layout, TxnId};
+use crate::update_txn::{Adapter, BundleIdentity, Cdhash, Event, Home, Journal, Layout, TxnId};
 
 /// **The bundle's name on the release image** (`scripts/release/macos/dmg.sh`
 /// stages `Folio.app` beside a link to `/Applications`).
@@ -262,25 +262,33 @@ impl Road<'_> {
 
 // ── step 1: the road ────────────────────────────────────────────────────────
 
-/// **Whether `bundle` may take the macOS road, and its home**: an `.app` with
-/// a parent, installed as [`Channel::Ours`], standing in a folder this process
+/// **Whether `bundle` may take the macOS road, its home, and the adapter it
+/// takes**: an `.app` with a parent, installed as a channel whose adapter's
+/// road is built on macOS (`update_adapter::built_on`; managed-update §1.5 —
+/// in this build only [`Channel::Ours`]), standing in a folder this process
 /// may write that is not on a read-only mount (a translocated bundle is: C7).
 ///
 /// # Errors
 /// [`NotEligible::NotWritable`] for a read-only or unwritable folder, or one
 /// that cannot be asked; [`NotEligible::NotOurs`] / [`NotEligible::Unknown`]
-/// for a channel other than `Ours` (a managed copy never reaches a press, and
-/// is answered as not ours here).
-pub(crate) fn eligible(bundle: &Path, channel: Option<Channel>) -> Result<Home, NotEligible> {
-    match channel {
-        Some(Channel::Ours) => {}
-        Some(Channel::NotOurs | Channel::Managed { .. }) => return Err(NotEligible::NotOurs),
+/// for another channel (a managed copy whose road is not built never reaches
+/// a press, and is answered as not ours here).
+pub(crate) fn eligible(
+    bundle: &Path,
+    channel: Option<Channel>,
+) -> Result<(Home, Adapter), NotEligible> {
+    let adapter = match channel {
         Some(Channel::Unknown) | None => return Err(NotEligible::Unknown),
-    }
+        Some(channel) => crate::update_adapter::of_channel(channel)
+            .filter(|&adapter| {
+                crate::update_adapter::built_on(adapter, bt_platform::HostPlatform::MacOs)
+            })
+            .ok_or(NotEligible::NotOurs)?,
+    };
     let home = Home::for_bundle(bundle).ok_or(NotEligible::NotWritable)?;
     let folder = bundle.parent().ok_or(NotEligible::NotWritable)?;
     match bt_platform::install_evidence::may_write_into(folder) {
-        Ok(true) => Ok(home),
+        Ok(true) => Ok((home, adapter)),
         Ok(false) | Err(_) => Err(NotEligible::NotWritable),
     }
 }
@@ -297,7 +305,7 @@ fn stop_for(why: &NotEligible) -> Stop {
 
 /// **The Prepare, on its worker** — the module header's six steps.
 fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
-    let home = eligible(road.bundle, road.channel).map_err(|why| stop_for(&why))?;
+    let (home, adapter) = eligible(road.bundle, road.channel).map_err(|why| stop_for(&why))?;
     road.go_on()?;
     // The running bundle's identity is read before anything is written: a
     // bundle with none cannot be cloned, and so cannot be updated.
@@ -331,7 +339,8 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
             old: old.clone(),
             to_version: road.offer.to_version().to_owned(),
         },
-    );
+    )
+    .naming(adapter);
     install_txn::durable_write(&home.journal(), &allocated.encode()).map_err(|_| Stop::Journal)?;
 
     // From here a refusal abandons the transaction and leaves nothing.
@@ -586,8 +595,8 @@ fn still_valid(
     let Layout::Bundle { old, new } = &staged.journal.body.layout else {
         return Err(Stop::Journal);
     };
-    let home = eligible(bundle, channel).map_err(|why| stop_for(&why))?;
-    if home != staged.home {
+    let (home, adapter) = eligible(bundle, channel).map_err(|why| stop_for(&why))?;
+    if home != staged.home || adapter != staged.journal.body.adapter {
         return Err(Stop::NotOurs);
     }
     if identity(worker, bundle).map_err(|_| Stop::Identity)? != *old {
