@@ -7,6 +7,7 @@
 //! projection, and what the frame then holds — every row's cells, every math placement's geometry,
 //! the oracle's ledger and its held-unbacked list — is compared with a fixture captured from main
 //! `7b2e0841` before any line of 69a was written.
+#![allow(clippy::disallowed_methods)]
 
 use std::{fmt::Write as _, num::NonZeroU32, time::Duration, time::Instant};
 

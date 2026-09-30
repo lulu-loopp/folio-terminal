@@ -1,5 +1,6 @@
 //! **Math on a screen a multiplexer has framed** (ticket 69a, T-PANE-COLUMNS; the design note
 //! `docs/plans/design/pane-columns-2026-09-29.md`).
+#![allow(clippy::disallowed_methods)]
 
 use std::sync::Arc;
 
