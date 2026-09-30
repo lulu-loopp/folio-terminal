@@ -1,0 +1,194 @@
+# T-GATES-047 timing-bound test census. A row names a test whose verdict depends on real elapsed time.
+# Columns: test, crate, wall_clock_assumption, deterministic_seam.
+test	crate	wall_clock_assumption	deterministic_seam
+bt-app::attention_wire::a_permission_request_crosses_the_endpoint_and_mints_an_episode	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::focus_thumb::an_idle_window_in_the_mode_costs_almost_nothing_per_frame	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::focus_thumb::the_budget_holds_under_ten_tabs_of_full_blast_output	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::git::a_child_that_will_not_finish_is_killed_and_reported	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::handoff_lane::a_flood_of_presses_is_refused_rather_than_waited_on	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::hang_watch_accounting::a_real_admission_is_one_call_on_its_doors_record_and_its_turns_union	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::hang_watch::a_report_and_its_line_do_not_wait_for_the_console	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::hang_watch::measure_cpu_sampler_and_station_cost	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::highlight::a_five_thousand_line_rust_file_is_walked	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::main::no_window_is_left_holding_yesterday_when_the_loop_goes_to_sleep	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::main::only_the_paint_and_the_frame_clock_can_read_the_settling_register	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::main::only_the_writer_binds_the_data_directorys_endpoints	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::main::the_system_preference_event_re_reads_the_desktops_canvas	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::main::the_transfer_has_a_door_a_person_can_press_and_no_environment_variable	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::persist::a_quit_leaves_a_writer_that_never_answers_behind	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::persist::is_writer_of_still_remembers_a_refusal	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::persist::letting_go_of_the_claims_never_waits_for_a_held_table	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::persist::the_autosave_hands_the_document_over_and_hears_the_verdict_later	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::preview_typing::md_typing_path_benchmark	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::preview_typing::md_typing_path_eager_benchmark	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::preview_typing::typing_width_work_is_confined_to_changed_lines	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::preview_wrap::large_document_timing_counts_shaper_calls	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::preview::md_loading_worker_benchmark	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::search::a_hundred_thousand_lines_rebuild_in_a_time_worth_printing	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::search::a_slice_of_history_costs_a_quarter_of_a_frame	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::settings::cjk_settings_layout_timing_probe	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::shell_integration::a_login_row_starts_a_login_shell	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::shell_integration::profile_runtime::our_own_writer_waits_behind_a_slow_holder_of_ours_past_any_deadline	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::shell_integration::profile_runtime::shell_integration_record_lock_refuses_overlap_and_releases_on_drop	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::taskbar_lane::the_lanes_answer_is_read_without_waiting_and_an_older_answer_never_overwrites_a_newer_one	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::tests::a_card_torn_off_carries_its_engine_with_it	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::tests::a_keystroke_relays_a_full_head_read_inside_a_frame	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::tests::a_notification_placed_before_the_first_answer_uses_the_default_and_is_re_placed_when_the_answer_says_auto_hidden	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::tests::a_one_character_edit_reuses_unmodified_document_work	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::tests::a_share_handed_over_meets_the_same_program_list	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::tests::a_turn_asks_the_shell_nothing_about_the_taskbar	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::tests::hostile_math_is_refused_and_the_real_decoration_worker_survives	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::tests::real_powershell_input_reaches_a_viewport_owned_frame	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::tests::the_tick_that_empties_the_picture_list_still_hands_it_over	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::tests::under_reduced_motion_no_fade_offers_the_group_path	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::trace_sink::a_busy_producer_lock_drops_instead_of_waiting	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::trace_sink::a_failed_trace_open_reports_without_the_process_stderr_lock	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::trace_sink::a_full_queue_refuses_at_once_and_counts_what_it_dropped	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::trace_sink::a_stalled_writer_never_delays_a_producer_and_the_count_grows	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::trace_sink::shutdown_does_not_wait_forever_for_a_stalled_writer	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::trace_sink::the_writer_does_not_wait_for_the_process_stderr_lock	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::update_apply_macos_tests::a_dead_trial_rolls_back_at_once	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_apply_macos_tests::a_launch_ended_by_a_signal_is_unknown_not_over	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_macos_tests::a_manual_launch_of_the_new_version_completes_the_transaction	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_macos_tests::a_receipt_found_by_recovery_commits_forward	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_macos_tests::a_trial_that_ends_before_it_is_seen_ends_the_wait_at_once	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_apply_macos_tests::p_waits_for_o_and_releases_the_claim	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_macos_tests::rolled_back_leaves_only_what_the_old_build_reads	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_macos_tests::swap_leaves_no_instant_without_a_bundle	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_macos_tests::the_stuck_bound_still_holds_when_the_new_bundle_is_live	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_macos_tests::the_trial_is_asked_to_quit_before_it_is_killed	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_apply_windows_tests::a_dead_trial_rolls_back_at_once	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_apply_windows_tests::a_failed_health_reverses_the_moves_and_relaunches_the_old_build	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_apply_windows_tests::a_journal_write_refused_for_a_moment_is_asked_again_and_the_update_completes	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_windows_tests::a_journal_write_refused_for_good_still_opens_the_installed_build_with_the_incomplete_card	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_apply_windows_tests::a_late_applier_after_os_wait_meets_os_replacement_and_never_commits	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_windows_tests::a_live_applier_at_handoff_is_left_alone_on_both_platforms	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_apply_windows_tests::a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_windows_tests::a_trial_that_dies_in_its_first_second_ends_the_wait_at_once	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_apply_windows_tests::an_applier_finding_os_mark_waits_for_o_to_leave_and_applies	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_windows_tests::an_applier_that_dies_before_its_mark_leaves_the_window_to_o	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_apply_windows_tests::an_applier_that_never_takes_the_mark_loses_the_window_after_os_wait	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_apply_windows_tests::armed_is_durable_before_moving	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_windows_tests::o_waits_for_the_applier_it_started_and_the_update_applies	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_windows_tests::p_waits_for_o_and_releases_the_claim	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_windows_tests::the_applier_waits_for_o_within_one_budget	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_apply_windows_tests::the_direct_hop_from_0_4_6_ends_as_0_4_6_ends_it	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_apply_windows_tests::the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_apply_windows_tests::the_window_is_handed_over_by_one_mark_and_opened_exactly_once	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_handoff::a_contender_killed_inside_the_election_releases_it	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_handoff::a_contender_waits_for_the_election_and_never_overwrites_a_live_owner	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_handoff::a_start_is_acknowledged_only_by_a_folio_holding_the_data_directory	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_handoff::close_during_each_phase_preserves_recovery	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_handoff::handoff_is_durable_before_the_spawn	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::update_handoff::the_panic_road_never_waits_for_a_held_armed_slot	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_prepare_macos_tests::a_later_macos_launch_shows_the_verified_card_from_the_staged_bundle	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_prepare_windows_tests::a_cancelled_prepare_reports_only_after_it_lets_the_lock_go	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::update_prepare_windows_tests::a_feed_asset_signed_by_another_signer_is_refused_as_identity	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_prepare_windows_tests::cancel_leaves_no_transaction	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::update_trial::a_refused_receipt_is_written_again_by_the_watch	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_trial::a_trial_adopts_its_claim_before_anything_asks_who_writes	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::update_trial::a_trial_watch_in_a_process_of_its_own_hands_back_its_identity_and_stays	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_trial::an_existing_receipt_is_not_overwritten	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::update_trial::an_undecided_trial_hands_back_at_most_four_times_and_one_at_a_time	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update_trial::an_unreadable_journal_still_retries_the_receipt_and_is_never_handed_back	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_trial::pending_writes_are_released_when_the_watch_reads_committed	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::update_trial::the_receipt_is_written_off_the_window_thread	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::update_trial::the_watch_stops_on_an_end_without_a_commit_and_drops_the_pending_writes	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::update::skip_racing_check_and_seen_keeps_all_fields	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::web_spare::the_receipt_is_written_by_a_real_commit_and_retried_after_a_failed_write	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::web_thumb::the_page_lane_stays_far_inside_the_projection_budget	bt-app	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-app::web_thumb::the_shrinker_finishes_a_picture_as_a_worker_the_door_started	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-app::window_waits_tests::the_effects_section_is_the_effect_functions_inside_the_doors	bt-app	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-app::wsl::the_first_frame_and_the_first_pane_do_not_wait_for_a_distribution	bt-app	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-math::lib::a_formula_may_not_ask_for_more_cells_than_it_can_be_drawn_with	bt-math	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::admission_tests::the_attention_endpoint_delivers_on_a_worker_the_door_started	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::attention_pipe_unix::a_line_crosses_the_endpoint_and_the_same_value_arrives	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::attention_pipe_unix::every_client_that_attaches_is_accounted_for	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::attention_pipe::a_flood_far_past_any_real_producer_still_loses_nothing	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::attention_pipe::a_line_written_the_instant_the_endpoint_opens_arrives_whole	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::attention_pipe::a_whole_turn_of_hooks_arrives_with_none_of_them_lost	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::attention_pipe::an_oversized_frame_is_dropped_and_counted	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::attention_pipe::every_client_that_attaches_is_accounted_for	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::attention_pipe::the_verb_gives_up_on_an_endpoint_that_does_not_exist	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::handoff::open_local_path_hands_a_file_to_the_workspace	bt-platform	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-platform::hang::a_run_loop_that_never_turns_is_silent_and_does_not_hold_the_asker	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::hang::the_macos_liveness_question_is_put_to_the_run_loop_in_the_common_modes	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::hang::the_system_crash_reports_are_looked_for_in_the_accounts_own_home	bt-platform	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-platform::http::an_announced_length_over_the_ceiling_is_refused_before_the_body	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::http::cancel_interrupts_idle_wait	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::http::redirect_loop_and_trickle_body_hit_deadlines	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::install_flip::a_file_a_running_process_maps_is_held_open	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::install_txn::a_durable_lock_wait_gives_up_at_its_deadline_and_not_before	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::install_txn::admission_child_holds_shared_until_told	bt-platform	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-platform::install_txn::admission_shared_blocks_exclusive_across_processes	bt-platform	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-platform::launch_agent::a_start_the_entrance_makes_outlives_the_entrance	bt-platform	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-platform::launch_pipe_unix::a_client_that_never_confirms_commits_nothing	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::launch_pipe_unix::a_line_the_grammar_refuses_is_dropped_without_a_reply_and_without_effect	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::launch_pipe_unix::a_request_crosses_the_launch_endpoint_and_is_answered	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::launch_pipe_unix::a_server_that_never_answers_costs_the_launch_its_budget_and_no_more	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::launch_pipe_unix::an_endpoint_nobody_is_listening_on_refuses_at_once	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::launch_pipe::a_client_that_never_confirms_commits_nothing	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::launch_pipe::a_line_the_grammar_refuses_is_dropped_without_a_reply_and_without_effect	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::launch_pipe::a_request_crosses_the_launch_endpoint_and_is_answered	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::launch_pipe::a_server_that_never_answers_costs_the_launch_its_budget_and_no_more	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::launch_pipe::an_endpoint_nobody_is_listening_on_refuses_at_once	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::lib::a_change_made_after_start_returns_is_never_missed	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::lib::a_named_watch_reports_the_entry_that_moved	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::lib::a_shallow_watch_hears_its_own_directory_and_not_the_tree_below_it	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::lib::a_watched_directory_reports_a_change_and_stops_when_dropped	bt-platform	worker answers within the test's numeric receive and poll windows	completion signal plus controlled sleeper
+bt-platform::lib::the_lookup_by_name_answers_the_files_the_walk_does	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::lib::the_machines_cjk_families_are_named_and_locatable	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::macos_dialogs::the_standalone_alert_returns_by_its_bound	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::macos_http::a_closed_port_is_refused_inside_the_deadline	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::macos_http::a_plain_http_address_is_refused_without_a_round_trip	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::macos_http::a_port_in_the_host_is_refused_before_the_network	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::macos_http::an_announced_length_over_the_ceiling_is_refused_before_the_body	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::macos_http::cancel_interrupts_idle_wait	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::macos_http::redirect_loop_and_trickle_body_hit_deadlines	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::macos_update_mount_tests::attach_is_bounded	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::macos_watch::a_tree_watch_hears_a_file_three_levels_down	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::macos_watch::a_watch_is_live_before_start_returns	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::macos_watch::an_overflow_is_reported_as_a_rescan	bt-platform	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-platform::macos_watch::dropping_the_watch_stops_the_stream_without_a_crash	bt-platform	worker answers within the test's numeric receive and poll windows	completion signal plus controlled sleeper
+bt-platform::video::a_question_that_cannot_finish_is_given_up_on	bt-platform	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-platform::video::a_shutdown_waits_for_the_readers_still_inside_the_platform	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::video::engine::a_frame_arrives_after_play_and_position_advances	bt-platform	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-platform::video::engine::a_quicktime_file_plays_where_the_browser_would_not_open_it	bt-platform	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-platform::video::engine::a_software_adapter_still_serves_frames	bt-platform	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-platform::video::engine::an_engine_that_never_reached_its_source_leaves_the_ledger_balanced	bt-platform	worker answers within the test's numeric receive and poll windows	completion signal plus controlled sleeper
+bt-platform::video::engine::nothing_that_is_not_a_video_plays	bt-platform	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-platform::video::engine::opening_a_video_never_blocks_the_window_thread	bt-platform	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-platform::video::engine::the_verbs_reach_the_engine	bt-platform	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-platform::webview::the_environment_asks_for_the_overlay_scrollbars_and_for_no_browser_arguments	bt-platform	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-pty::lib::a_child_that_exited_answers_the_second_asker_too	bt-pty	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-pty::lib::a_pane_is_taken_apart_on_a_thread_of_its_own	bt-pty	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-pty::lib::a_recall_carved_into_the_prompt_is_the_child_s_own_console_buffer	bt-pty	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-pty::lib::a_shutdown_stops_waiting_for_a_child_that_will_not_end	bt-pty	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-pty::lib::a_shutdown_stops_waiting_for_a_reader_that_does_not_return	bt-pty	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-pty::lib::a_unix_child_is_heard_exits_with_its_own_code_and_is_reaped	bt-pty	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-pty::lib::a_write_returns_to_the_caller_even_though_nothing_is_taking_it	bt-pty	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-pty::lib::closing_the_input_ring_releases_its_thread_and_refuses_what_comes_after	bt-pty	asynchronous answer arrives before the numeric receive timeout	completion signal or controlled receiver
+bt-pty::lib::full_ring_blocks_writer_until_term_drains_bytes	bt-pty	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-pty::lib::mistimed_cpr_narrow_resize_probe	bt-pty	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-pty::lib::narrow_resize_conpty_reflow_probe	bt-pty	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-pty::lib::real_conpty_child_receives_color_environment_even_under_inherited_no_color	bt-pty	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-pty::lib::real_conpty_delivers_command_output_without_exceeding_ring	bt-pty	state changes within the test's numeric sleep or poll window	event notification or controlled sleeper
+bt-render::lib::cjk_settings_measurement_timing_probe	bt-render	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-source::tests::measure::the_index_costs_what_the_plan_budgeted	bt-source	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-source::tests::real_workspace::every_member_crate_enumerates_without_a_refusal	bt-source	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-term::inline_image::a_long_line_without_terminators_is_scanned_in_time_proportional_to_its_length	bt-term	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-term::session::finalized_line_ingest_stays_linear_without_live_handoffs	bt-term	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-term::session::nonexistent_path_fails_quietly_and_never_becomes_clickable	bt-term	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-term::session::nonexistent_path_is_plain_text_at_rest_and_peeks_nothing	bt-term	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-term::session::wide_same_content_repaint_fingerprint_overhead_is_bounded	bt-term	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-term::tests::lifecycle_matrix::a_repaint_carrying_proven_formulas_stays_within_its_close_budget	bt-term	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-term::tests::lifecycle_matrix::a_repaint_of_an_unchanged_screen_stays_within_its_dormant_record_budget	bt-term	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-term::tests::lifecycle_matrix::g1_local_scroll_region_never_enters_history	bt-term	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-term::tests::lifecycle_matrix::g1_primary_tui_explicit_scroll_repaint_is_fast_and_never_becomes_transcript	bt-term	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-term::tests::lifecycle_matrix::recalled_input_keeps_its_prompt_head_and_never_welds_to_the_banner_after_widen	bt-term	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-term::tests::lifecycle_matrix::settling_a_gesture_over_a_long_history_stays_within_its_budget	bt-term	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-transcript::lib::the_byte_ceiling_costs_an_ordinary_pane_nothing	bt-transcript	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-transcript::paths::a_full_screenful_is_scanned_in_a_time_worth_printing	bt-transcript	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-transcript::search::a_hundred_thousand_lines_are_scanned_in_a_time_worth_printing	bt-transcript	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-transcript::search::a_pathological_backtracking_pattern_is_ordinary_work_here	bt-transcript	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock
+bt-viewport::tests::horizontal_budget::an_indexed_seek_is_never_dearer_than_the_scan_it_replaces	bt-viewport	operation finishes below the test's numeric elapsed-time ceiling	operation counter or benchmark clock

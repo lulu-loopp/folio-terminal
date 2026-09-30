@@ -26,9 +26,9 @@ row 21's paste-only (§4.5, §5).
 C1, C2, A3, A4, A7a, A9, L1–L3b, S1, S2, T1–T4, V5, V11, B4, R1, R2; §3 row 21;
 §5, §5.2). AR — `docs/ARCHITECTURE.md` (§2 processes, §4 ownership, §5.1
 lanes, §12). OC — `docs/plans/design/ownership-census-2026-09-25.md` (§2's rows,
-cited as "census row n") and its generated inventory
-`docs/plans/design/ownership-census-inventory.tsv` (cited as "inventory
-`<field>`"). WB — `docs/plans/design/agent-workbench-0.5-2026-09-20.md` (§6,
+cited as "census row n") and the census inventory query (now rendered under
+`target/ownership-census/`, cited as "inventory `<field>`"). WB —
+`docs/plans/design/agent-workbench-0.5-2026-09-20.md` (§6,
 §11.7–§11.9, §13.2, §13.3). RS — `docs/plans/remote/research-2026-09-10.md` (§3,
 §8, §8.8's tickets T1–T13, §9). TF — the tool-face design note of 2026-09-24 and
 the owner's rulings at its end (the coordinator's records; RM §0.1). MC — the

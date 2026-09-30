@@ -217,7 +217,7 @@ ledger's.
 | D-8 | the asking/telling family has no taxonomy | K-3 · C-4 | census-5a (note) and census-5b, after the ruling | 0.4.6 — the owner rules the table first | open — 28 surfaces inventoried and seven kinds proposed for the ruling in `docs/plans/design/ownership-census-2026-09-25.md` §3–§4 (2026-09-25) |
 | D-9 | configuration entrances: the fourth row | K-4 · C-4 | none yet | 0.4.7 — the fourth entrance's design, the tool face; the entrance itself arrives with 0.5's outward interface | open — §9 table written; export ruled not an entrance on `5f433943` |
 | D-10 | diagnostics have plumbing but no event model | K-5 · C-4 | none yet | 0.4.6 — the operation vocabulary; its event carrier waits for a subscriber | open |
-| D-11 | the split fixes file size, not coupling — the ownership census | K-7 · C-4 | census-1 | 0.4.6, with D-32 | repaid (census-1) — the census is `bt_source::FieldCensus` over `bt-app`, its inventory, site rows and unknowns committed under `docs/plans/design/ownership-census-*.tsv` and held by `bt-source`'s `census` test; the unknowns are listed and shrink-only, so a fact with one is `incomplete`, never single-writer. D-32 (census-7) is what the census was taken for, and stays open |
+| D-11 | the split fixes file size, not coupling — the ownership census | K-7 · C-4 | census-1 | 0.4.6, with D-32 | repaid (census-1) — the census is `bt_source::FieldCensus` over `bt-app`; inventory and site rows are query reports under `target/`, while decided owner annotations and the shrink-only unknown totals are committed and held by `bt-source`'s `census` test, so a fact with an unknown is `incomplete`, never single-writer. D-32 (census-7) is what the census was taken for, and stays open |
 | D-12 | `bt-platform` is a drawer | K-11 | none yet | 0.4.7 — the first extraction, after the `bt-app` move ends with D-32 in 0.4.6 | open |
 | D-13 | the `bt-pty → bt-term` edge | K-12 · C-4 · split prep P21 | P21 | 0.4.6 | open |
 | D-14 | `bt-term → bt-platform` is broader than its manifest | C-4 · K-11 | none yet | 0.4.6 | open |
@@ -226,7 +226,7 @@ ledger's.
 | D-17 | preview selections have no revisioned mapping to the document | C-4 | none yet | 0.4.7 — the first slice, with D-1's first slice | open |
 | D-18 | the census reads a query's argument as a file-bound subject | split prep, 2026-09-22 | census-2 (the census note's revision (b)) | 0.4.6 — D-29…D-32 need a true census | repaid (census-2, 0.4.6) — each subject is item-bound or file-bound by how the test reads it (`ITEM_QUERIES` and the helpers derived from it); only a file-bound subject read out of `main.rs` is a reader 2a must retarget; `--self-check` holds the fixture |
 | D-19 | MIGRATION-DEBT class P0 — the documentation generators (3 rows) | `docs/plans/MIGRATION-DEBT.tsv`; split prep §6 | P0 | 0.4.6 | open |
-| D-20 | MIGRATION-DEBT class P10 — the portable-core walk (1 row) | same | P10 | 0.4.6 | open |
+| D-20 | MIGRATION-DEBT class P10 — the platform-file walk (1 row) | same | P10 | 0.4.6 | open — narrowed by T-GATES-047: the script twin and agreement pin are gone; the one Rust directory walk remains on MIGRATION-DEBT |
 | D-21 | MIGRATION-DEBT class P12 — `bt-platform`'s walkers and the `stand_in` guard (5 rows) | same | P12 | 0.4.6 | open |
 | D-22 | MIGRATION-DEBT class P13 — the remaining source-text walks (3 rows) | same | P13 | 0.4.6 | open |
 | D-23 | MIGRATION-DEBT class P14 — named-body pins (192 rows) | same | P14 | 0.4.6 | open |
@@ -1035,9 +1035,10 @@ file's `ticket` column.
   directory walk and named files, named files out of git blobs, named modules;
   anchors `scripts/dev/bt-app-graph.py`, `scripts/dev/bt-app-split-freshness.py`.
   0.4.6, because D-29…D-32 regenerate the inventory through them.
-- **D-20 · P10 (1 row).** The portable-core directory walk and its Rust twin;
-  anchor `scripts/check-portable-core.ps1`, the agreement test
-  `the_gate_and_its_script_walk_the_same_files`. 0.4.6: small.
+- **D-20 · P10 (1 row, narrowed).** `bt_app::platform_gate_tests`' Rust
+  directory walk remains. The portable-core script's former duplicate reader
+  and their agreement test are retired; the script now checks only portable
+  crates as a cheap local gate.
 - **D-21 · P12 (5 rows).** `bt-platform`'s three directory walkers and the
   `stand_in` guard, one ticket because they share a file. 0.4.6: CI-only
   work.

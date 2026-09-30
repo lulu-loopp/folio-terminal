@@ -48,22 +48,6 @@
 /// on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum FileScoped {
-    /// `scripts/check-portable-core.ps1`, `Read-RustStringArray` reading
-    /// `FILES_THAT_MAY_NAME_A_PLATFORM` out of `crates/bt-app/src/main.rs`.
-    ///
-    /// The plan names this entry 1 (§6.3, P10) and gives three reasons, each of
-    /// which is about a file rather than about an item. The array is declared
-    /// beside `fn main`, which can never leave `main.rs`, so the file this
-    /// reader names is fixed by the language. The script is the one gate that
-    /// answers in five seconds on a tree that does not compile, which is what it
-    /// is for — a reader that asked `bt-source` would need the workspace to
-    /// build first. And the array's own entries are file names: what it pins is
-    /// which *files* may decide what platform this is, so a reading that stopped
-    /// naming files would stop being the rule.
-    ///
-    /// P10 adds `the_gate_and_its_script_walk_the_same_files` beside it; the
-    /// array reader itself is unchanged, then and at P20.
-    PortableCoreArray,
     /// `scripts/check-vendor-notices.ps1`, the `added` list naming
     /// `src/depth.rs` inside `vendor/mitex-parser`.
     ///
@@ -86,19 +70,13 @@ pub enum FileScoped {
 }
 
 impl FileScoped {
-    /// Every entry. The allowlist is small enough to be an array and is meant to
-    /// stay that way — the plan's §7.2 end state is at most four.
-    pub const ALL: [Self; 3] = [
-        Self::PortableCoreArray,
-        Self::VendoredAddedFiles,
-        Self::TheTripwireItself,
-    ];
+    /// Every entry. The allowlist is small enough to be an array and only shrinks.
+    pub const ALL: [Self; 2] = [Self::VendoredAddedFiles, Self::TheTripwireItself];
 
     /// Where the reader lives, from the workspace root, with forward slashes.
     #[must_use]
     pub const fn path(self) -> &'static str {
         match self {
-            Self::PortableCoreArray => "scripts/check-portable-core.ps1",
             Self::VendoredAddedFiles => "scripts/check-vendor-notices.ps1",
             Self::TheTripwireItself => "crates/bt-source/tests/tripwire.rs",
         }
@@ -110,10 +88,6 @@ impl FileScoped {
     #[must_use]
     pub const fn reason(self) -> &'static str {
         match self {
-            Self::PortableCoreArray => {
-                "the array is declared beside `fn main`, the gate answers on a tree that does not \
-                 compile, and what it pins is which files may name a platform"
-            }
             Self::VendoredAddedFiles => {
                 "which files of a vendored copy are not upstream's is a fact about files, in a \
                  tree this workspace's declarations do not describe"

@@ -1,4 +1,4 @@
-//! **The ownership census is a query, held by a diff gate** — ticket census-1,
+//! **The ownership census is a query with a narrow judgement gate** — ticket census-1,
 //! the census note's revision (b)2 "Ticket A, re-specified"
 //! (`docs/plans/design/ownership-census-2026-09-25.md`).
 //!
@@ -7,17 +7,15 @@
 //! name shared between a writing and a reading type, `get_mut` alone, each
 //! receiver shape, `Runtime`'s own fields before its `Deref`, and the gate's
 //! two refusals. The last two tests run the query over `bt-app` itself and hold
-//! it to the committed files under `docs/plans/design/`:
+//! it over `bt-app` itself:
 //!
-//! * `ownership-census-inventory` — one row per field of the four structs;
-//! * `ownership-census-sites` — fact × column × module × function;
-//! * `ownership-census-unknowns` — the unresolved sites, shrink-only;
-//! * `ownership-census-annotations` — hand-edited class and proposed owner
-//!   of every proven multi-writer fact.
+//! * inventory and sites are query output under `target/ownership-census/`;
+//! * `ownership-census-unknowns` is the committed shrink-only unresolved set;
+//! * `ownership-census-annotations` names the owner of every proven
+//!   multi-writer fact.
 //!
-//! Every run leaves its rendering in `target/ownership-census/`, which is what
-//! `scripts/generate-ownership-census.ps1` copies over the first three. The
-//! unknown list is rendered for copying only when it has not grown.
+//! Every run leaves all renderings in `target/ownership-census/`. Only the
+//! unknown list is copied, and only when it has not grown.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -97,7 +95,7 @@ fn committed_as_rendered(census: &FieldCensus) -> Committed {
 
 /// An annotation file covering exactly the proven multi-writer facts.
 fn annotations_for(census: &FieldCensus) -> String {
-    let mut text = String::from("fact\tpart\tclass\tproposed_owner\tnote\n");
+    let mut text = String::from("fact\tpart\tclass\towner\tnote\n");
     for fact in census.multi_writer_facts() {
         text.push_str(&format!("{fact}\t-\tVIEW\tfixture\t-\n"));
     }
@@ -438,7 +436,7 @@ fn the_gate_refuses_a_grown_unknown_set_and_lets_it_shrink() {
 /// RED (census-1) — **every proven multi-writer fact has an annotation row,
 /// and no annotation row is stale.**
 ///
-/// The class and proposed-owner columns are hand-edited judgements the code
+/// The class and owner columns are hand-edited judgements the code
 /// cannot regenerate (revision (b)2 §7), so the gate asks only two things of
 /// them: that the facts the query proves are written from more than one module
 /// are all annotated, and that nothing else is.
@@ -453,7 +451,7 @@ fn the_gate_refuses_a_missing_annotation_and_a_stale_one() {
         ["App.gpu", "WindowRuntime.dirty_gate"]
     );
     let mut committed = committed_as_rendered(&census);
-    committed.annotations = "fact\tpart\tclass\tproposed_owner\tnote\nWindowRuntime.dirty_gate\tthe pending request\tDUR\tgate\t-\nApp.notes\t-\tVIEW\tnotes\t-\n".to_owned();
+    committed.annotations = "fact\tpart\tclass\towner\tnote\nWindowRuntime.dirty_gate\tthe pending request\tDUR\tgate\t-\nApp.notes\t-\tVIEW\tnotes\t-\n".to_owned();
     let messages: Vec<String> = census
         .judge(&committed)
         .iter()
@@ -501,19 +499,50 @@ fn the_census() -> &'static FieldCensus {
     })
 }
 
-/// The committed census, as text; a file that is not there is empty.
-fn committed_census() -> Committed {
+/// The two committed judgements, with query-only renderings filled from this
+/// run so ordinary writer movement is report data, not a gate.
+fn committed_census(census: &FieldCensus) -> Committed {
     let design = workspace_root().join("docs").join("plans").join("design");
     let text = |name: &str| {
         std::fs::read_to_string(design.join(format!("ownership-census-{name}.tsv")))
             .unwrap_or_default()
     };
     Committed {
-        inventory: text("inventory"),
-        sites: text("sites"),
+        inventory: census.render_inventory(),
+        sites: census.render_sites(),
         unknowns: text("unknowns"),
         annotations: text("annotations"),
     }
+}
+
+fn annotation_owners_are_decided(text: &str) -> Result<(), String> {
+    let mut rows = text
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'));
+    let header = rows.next().unwrap_or_default();
+    if header != "fact\tpart\tclass\towner\tnote" {
+        return Err(format!(
+            "annotation header is not the owner schema: {header:?}"
+        ));
+    }
+    for row in rows {
+        let columns: Vec<&str> = row.split('\t').collect();
+        if columns.len() != 5 {
+            return Err(format!("annotation row is not five columns: {row}"));
+        }
+        let owner = columns[3].trim();
+        if owner.is_empty()
+            || owner == "-"
+            || owner == "—"
+            || owner.to_ascii_lowercase().contains("proposed")
+        {
+            return Err(format!(
+                "{} needs a decided owner, not {owner:?}",
+                columns[0]
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Leave the renderings where the copier looks for them.
@@ -542,34 +571,31 @@ fn leave_renderings(census: &FieldCensus, committed: &Committed) {
     }
 }
 
-/// RED (census-1) — **the committed census is what the code says**: the
-/// inventory and the site rows equal the committed files, the unknowns are a
-/// subset of the committed list, and every proven multi-writer fact is
-/// annotated.
+/// RED (T-GATES-047) — **the census gates judgements, not snapshots**: unknowns
+/// may shrink but not grow, and every proven multi-writer fact has an annotation
+/// that names its decided owner. Inventory and site rows remain query output.
 ///
-/// This is the gate. A change that adds a writer, moves one, resolves an
-/// unknown or makes a fact single-writer changes a committed row, and the
-/// ticket that makes the change says so in the diff — which is what the note's
-/// §6 A asked for and what (b)2 §6 bounds to what can be proven.
+/// A moved or added resolved writer changes the report but needs no generated
+/// file edit. A new multi-writer fact or unknown still requires judgement.
 ///
-/// MUTATION: add `self.window.title = String::new();` to any `Runtime` method
-/// in `bt-app` and this names the new site row.
+/// MUTATION: remove the owner from one annotation row; this refuses it by fact.
 #[test]
-fn the_committed_census_is_what_the_code_says() {
+fn the_committed_census_has_decided_owners_and_no_new_unknowns() {
     let census = the_census();
-    let committed = committed_census();
+    let committed = committed_census(census);
     leave_renderings(census, &committed);
     assert!(
         census.unparsed().is_empty(),
         "every declaration parses: {:#?}",
         census.unparsed()
     );
+    annotation_owners_are_decided(&committed.annotations)
+        .unwrap_or_else(|failure| panic!("{failure}"));
     let differences = census.judge(&committed);
     assert!(
         differences.is_empty(),
-        "{} difference(s) between bt-app and the committed census under docs/plans/design/ — \
-         run scripts/generate-ownership-census.ps1 to bring the inventory and the site rows up \
-         to date, and annotate or remove what it names by hand:\n{}",
+        "{} ownership judgement difference(s): resolve a new unknown, or add/remove a decided \
+         owner annotation for the multi-writer fact it names:\n{}",
         differences.len(),
         differences
             .iter()

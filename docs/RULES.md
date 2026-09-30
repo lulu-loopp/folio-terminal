@@ -1275,11 +1275,12 @@ asserting it constructs no command and spawns no thread.
 ### 46. The `bt-platform` boundary — `folded` as the layering rule; the crate's own shape is `not yet folded`
 **Rule.** Platform-specific code lives behind `bt-platform`'s interface and no
 crate below `bt-app` calls the platform directly; `bt-app` is the one crate that
-may ask what platform it is on, and only in the files its own list names. Two
-guards, answering different questions about different files:
-`scripts/check-portable-core.ps1` over the thirteen named portable crates and
-over `bt-app`'s list, and `scripts/check-adapter-boundary.ps1` over the two
-vendor-seam files, which may not import a policy crate.
+may ask what platform it is on, and only in the files its own list names.
+`scripts/check-portable-core.ps1` is the local guard over the fifteen named
+portable crates; CI's macOS and Linux compiles are its authoritative CI proof.
+`bt_app::platform_gate_tests` alone holds `bt-app`'s file list.
+`scripts/check-adapter-boundary.ps1` holds the separate two vendor-seam files,
+which may not import a policy crate.
 **From.** §13.1 *the rule is one sentence, and it is not new*; §13.2 *the portable
 core, named one crate at a time*; §13.3 *two guards, and they are two different
 things*; §2 of `docs/CONVENTIONS.md` (policy does not enter the vendor, and not
@@ -1333,6 +1334,11 @@ Entries: the scripts themselves; `docs/plans/bt-app-split-inventory-2026-09-21.m
 (`CONVENTIONS` §三), and when the pins stop naming files the rules they enforce
 are stated in prose here, because a guard that outlives the understanding of its
 rule becomes superstition.
+Canary work runs only when its gate surface changes; the ignored-test canary
+runs after the ordinary workspace test has warmed the build. Historical
+inventories compare stable property keys with the merge base, not source
+locations or a movable seed. `TIMING-BOUND-TESTS.tsv` is a whole-row
+shrink-only list of tests whose verdict still assumes a numeric wall-clock bound.
 
 ### 52. Doors — a side effect has one named entrance — `folded`
 **Rule.** A side effect with a door has exactly one named entrance and a pin that
@@ -1340,7 +1346,8 @@ keeps it the only one. **File bytes** go through `bt_platform::file_reads` on on
 of ten named lanes (`inline_image`, `peek`, `animation`, `preview`, `pdf`,
 `git_pipe`, `settings`, `fonts`, `attention`, `other`), with the source guard
 `bt_app::file_reads_source_tests` against `file_reads_doors.txt` failing the
-build when a product read appears outside an inventoried door. **Child
+build when a product read appears outside an inventoried lane-bearing door;
+that manifest records the admitted item and lane, not occurrence counts. **Child
 processes** are constructed only by `bt_platform::quiet_command` /
 `quiet_command_named`: silent, an absolute program path resolved beforehand, an
 explicit working directory. **Hand-offs to the operating system** — the seven

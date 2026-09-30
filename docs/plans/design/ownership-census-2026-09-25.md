@@ -645,6 +645,16 @@ What the first run says, at `3e657f9e`: 154 fields have proven writers in more t
 
 **Added at the census-1 merge (2026-09-26).** The receiver rule gains a fixed list for one dependency type, keyed by type as the std list is: `winit::keyboard::ModifiersState`'s readers (`shift_key`, `control_key`, `alt_key`, `super_key`, `state`, `bits`, …) resolve as reads; a name not on the list stays unknown. This took 20 of the 101 unknown sites out of the list at the merge, and U-19's two new multi-writer facts (`App.update_job`, `WindowRuntime.update_card`) received proposed annotation rows.
 
+## Revision 2026-09-30 (e): inventory and sites return to query output (T-GATES-047)
+
+The byte-equal inventory and sites snapshots described by revision (c) are no
+longer committed. Every census run still writes both under
+`target/ownership-census/`; they are the query used for ownership work, not a
+gate on routine source movement. The committed gate surfaces are the unknown
+list, whose effect totals only shrink, and annotations, each of which names a
+decided `owner` rather than a proposed one. The generator copies only the
+unknown rendering.
+
 ## Revision 2026-09-27 (d): two kinds of subject (census-2)
 
 Ticket census-2 repaid D-18 in `scripts/dev/bt-app-split-freshness.py`'s `census`. **A reader's subject is now one of two kinds, told apart by how the test reads it**, and the pins table carries the kind per subject (`subject_bindings`), the queries the test makes (`item_queries`), and which moving subjects must be retargeted (`retarget`) and which follow the item (`follows`):

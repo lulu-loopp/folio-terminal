@@ -1231,10 +1231,12 @@ mod tests {
         gate: Arc<(Mutex<bool>, std::sync::Condvar)>,
         asked: Arc<Mutex<Asked>>,
         journal: PathBuf,
+        entered: mpsc::Sender<()>,
     }
 
     impl Spawner for Held {
         fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<Running> {
+            self.entered.send(()).expect("the test is listening");
             let (open, turn) = &*self.gate;
             let give_up = Instant::now() + Duration::from_secs(60);
             let mut opened = open.lock().expect("the gate");
@@ -1314,10 +1316,12 @@ mod tests {
         walk_to_the_way_out(&mut quit, &mut job, |_, _| {});
         let gate = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
         let asked = Arc::new(Mutex::new(Asked::default()));
+        let (entered, start_entered) = mpsc::channel();
         let held = Held {
             gate: Arc::clone(&gate),
             asked: Arc::clone(&asked),
             journal: staged.home.journal(),
+            entered,
         };
         let handoff =
             HandoffJob::new(&staged, nonce(), Box::new(held)).expect("Prepared → Handoff");
@@ -1336,7 +1340,14 @@ mod tests {
             ),
             Looked::Waiting
         );
-        let line = look_until_over(&answer, &quit, |_| sent + crate::quit::HANDOFF_DEADLINE);
+        let line = match look(
+            Some(&answer),
+            TxnId::new(TXN),
+            quit.handoff_is_overdue(sent + crate::quit::HANDOFF_DEADLINE),
+        ) {
+            Looked::Over { line, .. } => line,
+            other => panic!("an overdue hand-over did not end: {other:?}"),
+        };
         assert!(line.contains("did not answer in time"), "{line}");
         quit.handed_off();
         assert_eq!(
@@ -1345,11 +1356,10 @@ mod tests {
         );
 
         // W9's instant: `Handoff` has landed and the applier's start is stuck.
-        let give_up = Instant::now() + Duration::from_secs(20);
-        while on_disk(&staged.home).body.phase.kind() != PhaseKind::Handoff {
-            assert!(Instant::now() < give_up, "Handoff never landed");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        start_entered
+            .recv()
+            .expect("the held start says Handoff is durable before it begins");
+        assert_eq!(on_disk(&staged.home).body.phase.kind(), PhaseKind::Handoff);
         // O leaves: nobody took the window's mark, so O takes it and starts.
         let txn = TxnId::new(TXN);
         let old = crate::update_apply::this_process();
@@ -1365,8 +1375,8 @@ mod tests {
         *gate.0.lock().expect("the gate") = true;
         gate.1.notify_all();
         let late = answer
-            .recv_timeout(Duration::from_secs(20))
-            .expect("the worker answers at last");
+            .recv()
+            .expect("the worker answers after it is released");
         assert!(matches!(late, HandedOff::Started { .. }), "{late:?}");
         assert_eq!(asked.lock().expect("the record").calls.len(), 1);
         let late_applier = Running { pid: 1, started: 1 };

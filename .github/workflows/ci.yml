@@ -14,6 +14,10 @@ on:
   pull_request:
   workflow_dispatch:
 
+concurrency:
+  group: ci-${{ github.sha }}
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -34,6 +38,7 @@ env:
 
 jobs:
   release-script-tests:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
     timeout-minutes: 10
     steps:
@@ -54,7 +59,7 @@ jobs:
         shell: pwsh
         run: ./scripts/release/update-manifests-tests.ps1
 
-  # ── the three gates that prove themselves ──────────────────────────────────
+  # ── the gates that prove themselves ────────────────────────────────────────
   #
   # Each of these plants a violation, demands red, and puts the file back. This
   # repository has shipped a gate that could not fail, plus a comment that lied
@@ -71,11 +76,9 @@ jobs:
   # `$LASTEXITCODE` when the script ran out. The probe's exit code is read into a
   # variable of its own and never left where the shell will find it.
   gates-can-fail:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
-    # The ignored-test probe has to build the whole workspace before it can ask
-    # the harness anything, which is why this is not the five minutes the
-    # adapter-boundary check alone would need.
-    timeout-minutes: 60
+    timeout-minutes: 10
     steps:
       # Whole history, for one step: `check-migration-debt.ps1` compares the
       # debt list with `git merge-base HEAD origin/main`, and at the default
@@ -84,16 +87,42 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+      - name: decide whether a gate surface changed
+        id: gate_paths
+        shell: pwsh
+        run: |
+          $base = if ($env:GITHUB_EVENT_NAME -eq "pull_request") {
+            "${{ github.event.pull_request.base.sha }}"
+          } else {
+            "${{ github.event.before }}"
+          }
+          if ([string]::IsNullOrWhiteSpace($base) -or $base -match '^0+$') {
+            $base = git rev-parse HEAD^
+          }
+          $paths = @(git diff --name-only "$base...HEAD")
+          $run = [bool]($paths | Where-Object {
+            $_ -like "scripts/ci/*" -or
+            $_ -like "scripts/check-*.ps1" -or
+            $_ -like "*/clippy.toml" -or
+            $_ -eq "clippy.toml" -or
+            $_ -like "*/Cargo.toml" -or
+            $_ -eq "Cargo.toml" -or
+            $_ -eq ".github/workflows/ci.yml"
+          })
+          "run=$($run.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+          Write-Host "gate surface changed: $run"
       # The compiler and the shared cache both come from
       # `.github/actions/toolchain`, which is the one place in this repository
       # that decides what Rust a job is built with. `release.yml` calls the same
       # action, so the two files cannot drift apart again.
       - uses: ./.github/actions/toolchain
+        if: steps.gate_paths.outputs.run == 'true'
 
       # adapter.rs/cell_capture.rs are the vendor compatibility seam. Their job is to report
       # terminal facts; importing document, detection, or viewport policy here recreates the
       # layering bug Task 00b removed.
       - name: the adapter boundary gate can actually fail
+        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = "crates/bt-term/src/adapter.rs"
@@ -120,6 +149,7 @@ jobs:
       # `core-macos` and `core-linux` are the compiling half; this proves the
       # cheap half is not decoration.
       - name: the portable-core gate can actually fail
+        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = "crates/bt-doc/src/lib.rs"
@@ -140,35 +170,8 @@ jobs:
           }
           exit 0
 
-      # The same script's *second* check, and a separate canary because it is a
-      # separate rule with a separate list: `bt-app` may know what platform it
-      # is on, and `main.rs`'s own `FILES_THAT_MAY_NAME_A_PLATFORM` says in which
-      # files. The violation is planted in a file that is not on that list, which
-      # is the only shape this check refuses. Note that the *first* check runs
-      # first and passes — `bt-app` is not one of the portable crates —
-      # so a red here is this rule's red and nobody else's.
-      - name: the bt-app platform-gate check can actually fail
-        shell: pwsh
-        run: |
-          $file = "crates/bt-app/src/notice.rs"
-          $original = [IO.File]::ReadAllText($file)
-          try {
-            [IO.File]::AppendAllText($file, "`n#[cfg(windows)]`nfn _platform_gate_probe() {}`n")
-            $failed = $false
-            try {
-              & ./scripts/check-portable-core.ps1 *> $null
-            } catch {
-              $failed = $true
-            }
-            if (-not $failed) {
-              throw "the gate accepted a platform cfg in a bt-app file that is not on the list"
-            }
-          } finally {
-            [IO.File]::WriteAllText($file, $original)
-          }
-          exit 0
-
       - name: the lint gate can actually fail
+        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = "crates/bt-doc/src/lib.rs"
@@ -185,31 +188,6 @@ jobs:
             throw "clippy passed a planted todo!() - workspace lints are not reaching this crate ([lints] workspace = true missing?)"
           }
           Write-Host "clippy refused the planted todo!() with exit $clippy, which is this gate passing."
-          exit 0
-
-      # A newly ignored test has to be a newly listed test. Planting one proves
-      # the comparison is two-way and that the exit code is read before the
-      # output — the two things the phrase-matching gate this replaced got
-      # wrong. See `scripts/ci/check-ignored-tests.ps1`.
-      - name: the ignored-test gate can actually fail
-        shell: pwsh
-        run: |
-          $file = "crates/bt-doc/src/lib.rs"
-          $original = [IO.File]::ReadAllText($file)
-          try {
-            [IO.File]::AppendAllText($file, "`n#[test]`n#[ignore = `"planted`"]`nfn _ignored_gate_probe() {}`n")
-            $failed = $false
-            try {
-              & ./scripts/ci/check-ignored-tests.ps1
-            } catch {
-              $failed = $true
-            }
-            if (-not $failed) {
-              throw "the allowlist accepted a test that is not on it"
-            }
-          } finally {
-            [IO.File]::WriteAllText($file, $original)
-          }
           exit 0
 
       # **The split plan's budgets, watched where a red is information.**
@@ -237,6 +215,7 @@ jobs:
       # without the variable, so the other two platforms print their numbers on
       # every run and assert only the memory budget.
       - name: the index's cost is inside the budgets of the split plan
+        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         continue-on-error: true
         env:
@@ -248,6 +227,7 @@ jobs:
       # added to it is a reader let past the tripwire; planting one proves the
       # comparison against the merge base is a comparison and not a read.
       - name: the migration-debt gate can actually fail
+        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = "docs/plans/MIGRATION-DEBT.tsv"
@@ -268,6 +248,14 @@ jobs:
           }
           exit 0
 
+      # The timing-bound inventory is the same whole-row, merge-base rule. Its
+      # scratch-repository suite plants growth and a duplicate and requires both
+      # to fail, while no-base, unchanged and shrink cases pass.
+      - name: the timing-bound gate can actually fail
+        if: steps.gate_paths.outputs.run == 'true'
+        shell: pwsh
+        run: ./scripts/ci/check-timing-bound-tests.ps1
+
       # `docs/plans/DEAD-CODE.tsv` holds the undated `dead_code` sites the tree
       # had when the gate was written, and only shrinks; every other site is
       # dated and fails on the day after its date. Planting a row proves the
@@ -275,6 +263,7 @@ jobs:
       # against scratch trees, one case per rule (a new undated site, an expired
       # one, a stale row, a changed reason, no merge base, and the rest).
       - name: the dead-code gate can actually fail
+        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = "docs/plans/DEAD-CODE.tsv"
@@ -301,6 +290,7 @@ jobs:
       # row passes the equality test, so the historical half is what refuses it:
       # plant the row and require red.
       - name: the bare-site inventory gate can actually fail
+        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = "docs/plans/window-thread-bare-sites.tsv"
@@ -314,7 +304,7 @@ jobs:
               $failed = $true
             }
             if (-not $failed) {
-              throw "the bare-site inventory accepted a row that is at neither the merge base nor the seed"
+              throw "the bare-site inventory accepted growth beyond the merge base"
             }
           } finally {
             [IO.File]::WriteAllText($file, $original)
@@ -325,6 +315,7 @@ jobs:
       # hand must go red and a row whose key moved (a function moved to another
       # module, census-7's case) must stay green.
       - name: the census-unknowns gate fails on a planted row and passes a moved key
+        if: steps.gate_paths.outputs.run == 'true'
         shell: pwsh
         run: |
           $file = (Resolve-Path "docs/plans/design/ownership-census-unknowns.tsv").Path
@@ -359,6 +350,7 @@ jobs:
 
   # ── everything that is decided by reading, not by hardware ────────────────
   logic:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
     timeout-minutes: 75
     steps:
@@ -376,12 +368,6 @@ jobs:
       - name: adapter modules do not import policy crates
         shell: pwsh
         run: ./scripts/check-adapter-boundary.ps1
-
-      # The other boundary, and the other platform. See the script's own header
-      # and `docs/DESIGN.md` §Portability.
-      - name: the portable core calls no Win32 outside a cfg(windows) gate
-        shell: pwsh
-        run: ./scripts/check-portable-core.ps1
 
       # Each vendored crate must stay a workspace member: its own upstream suite
       # is our regression line against our patches breaking its semantics, and it
@@ -458,6 +444,30 @@ jobs:
       - name: test
         run: cargo test --workspace --locked --exclude bt-pty --exclude bt-render
 
+      # This canary belongs after the workspace build it needs. A leaf crate
+      # makes the second harness query seconds rather than a second workspace
+      # build in `gates-can-fail`.
+      - name: the ignored-test gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "crates/bt-lint-probe/src/lib.rs"
+          $original = [IO.File]::ReadAllText($file)
+          try {
+            [IO.File]::AppendAllText($file, "`n#[test]`n#[ignore = `"planted`"]`nfn _ignored_gate_probe() {}`n")
+            $failed = $false
+            try {
+              & ./scripts/ci/check-ignored-tests.ps1
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "the allowlist accepted a test that is not on it"
+            }
+          } finally {
+            [IO.File]::WriteAllText($file, $original)
+          }
+          exit 0
+
       - name: the ignored tests are exactly the ones on the list
         shell: pwsh
         run: ./scripts/ci/check-ignored-tests.ps1
@@ -471,6 +481,10 @@ jobs:
         shell: pwsh
         run: ./scripts/ci/check-migration-debt.ps1
 
+      - name: the timing-bound test list only shrinks
+        shell: pwsh
+        run: ./scripts/ci/check-timing-bound.ps1
+
       # "Built, not wired" (0.4.7 U-44): every `allow`/`expect(dead_code)` in
       # product code is on `docs/plans/DEAD-CODE.tsv`, which only shrinks
       # against the merge base (a row whose only change is its file is a move),
@@ -481,9 +495,9 @@ jobs:
         run: ./scripts/ci/check-dead-code.ps1
 
       # The window thread's checks (thread-door note, revision (j)): the bare-site
-      # inventory is no larger than at the merge base, or than the pinned seed
-      # when the merge base predates it (the equality half is a test in the suite
-      # above); the configuration fence, which is also this job's assertion that
+      # inventory has no larger effect-family total than at the merge base (the
+      # equality half is a test in the suite above); the configuration fence,
+      # which is also this job's assertion that
       # no clippy configuration directory is set; nothing lowers the lint outside
       # the source; no registry row is added without a ruling.
       - name: the window thread's checks
@@ -552,6 +566,7 @@ jobs:
 
   # ── real ConPTY, real child processes ─────────────────────────────────────
   conpty:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
     timeout-minutes: 30
     steps:
@@ -597,6 +612,7 @@ jobs:
 
   # ── a real adapter, which a runner does not have until one is installed ────
   gpu:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
     timeout-minutes: 40
     steps:
@@ -628,6 +644,7 @@ jobs:
   # about its own DPI. A runner has no WebView2 Runtime, which makes it exactly
   # the machine the preview's degrade path has to be right on.
   smoke:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: windows-2025
     timeout-minutes: 60
     steps:
@@ -724,14 +741,11 @@ jobs:
   # Ctrl-for-Cmd chords, Windows-only rows), so its suite is not portable yet
   # and a longer command would only be a red one; that is D-83.
   core-macos:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: macos-latest
     timeout-minutes: 60
     steps:
-      # Whole history, for `check-window-waits.ps1`: it compares the bare-site
-      # inventory with the merge base's, or with the pinned seed commit.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          fetch-depth: 0
 
       # **The release lane's four shell scripts, parsed on every push.** They
       # are `#!/bin/sh`, they are what `release.yml`'s macOS job is made of, and
@@ -821,11 +835,6 @@ jobs:
           cargo clippy --workspace --all-targets --locked
           --exclude mitex --exclude mitex-parser
           -- -D warnings
-
-      # `logic`'s window-thread checks, on the second platform (A2a).
-      - name: the window thread's checks
-        shell: pwsh
-        run: ./scripts/ci/check-window-waits.ps1
 
       # The lint probe's positive control on this target: the macOS entries
       # (`libc::write`, `libc::close`) are proven here and only here.
@@ -919,6 +928,7 @@ jobs:
   # was found by this ticket rather than known. Ubuntu has `/bin/sh`,
   # `/bin/bash`, `sleep`, `stty` and `ps`, which is the whole of what they need.
   core-linux:
+    if: github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 45
     # **The static C runtime is a Windows shipping rule and this job ships

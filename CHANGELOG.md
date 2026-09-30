@@ -60,6 +60,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- CI's structural gates now hold derived enum coverage and stable properties
+  instead of hand-maintained counts, snapshots and source-location inventories;
+  timing-bound tests are listed shrink-only and four existing seams remove their
+  named clock assumptions.
 - A `dead_code` allowance in product code is either on a list that only
   shrinks or dated to a ticket, and CI fails it the day after its date.
 - Eighty-six of that list's ninety sites are decided: the stale attributes

@@ -3703,7 +3703,9 @@ fn the_recoverys_own_starter_is_no_candidate() {
         return;
     };
     let starter = install.start_trial();
-    let mut road = install.road(limits(5_000, 5_000));
+    // No elapsed-time grace is part of this invariant: the starter is excluded
+    // before the candidate decision, and the recovery may decide immediately.
+    let mut road = install.road(limits(0, 0));
     road.starter = Some(Running {
         pid: starter.pid,
         started: starter.started,

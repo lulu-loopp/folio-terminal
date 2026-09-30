@@ -2232,14 +2232,16 @@ pub(crate) mod tests {
             .hand_over_final(Instant::now())
             .expect("handed over")
             .expect("this store writes");
-        let until = Instant::now() + RECEIPT_CEILING;
-        let landed = loop {
-            if let Some(answer) = store.landing_of(first, Instant::now()) {
-                break answer;
-            }
-            assert!(Instant::now() < until, "the writer never answered");
-            std::thread::sleep(Duration::from_millis(1));
-        };
+        let receipt = store
+            .writer
+            .receipts
+            .recv()
+            .expect("the writer answers for the earlier document");
+        assert_eq!(receipt.generation, first);
+        store.apply_receipt(receipt, Instant::now());
+        let landed = store
+            .landing_of(first, Instant::now())
+            .expect("the signalled receipt answers this generation");
         assert_eq!(landed, Ok(()), "an earlier document has landed");
 
         store.record(photograph.clone(), Instant::now());
@@ -2266,9 +2268,7 @@ pub(crate) mod tests {
             None,
             "nor is an older receipt arriving late"
         );
-        let receipt = real
-            .recv_timeout(RECEIPT_CEILING)
-            .expect("the writer answers for the photograph");
+        let receipt = real.recv().expect("the writer answers for the photograph");
         assert_eq!(receipt.generation, second);
         relay.send(receipt).expect("the relay");
         assert_eq!(store.landing_of(second, Instant::now()), Some(Ok(())));

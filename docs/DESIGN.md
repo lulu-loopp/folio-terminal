@@ -11432,7 +11432,7 @@ One thing outside the two crates had to move with it, and it is the good kind of
 ### 2026-09-21 — Two lists and a tripwire: what still names a file, and what may
 Hundreds of guards in this workspace pin facts about the program by reading its own source text, and every one of them is bound to a *file*: when an item leaves `main.rs`, a reader bound to `main.rs` does not go red, it reads a smaller universe and stays green. `crates/bt-source` is the mechanism that replaces the binding. This is the ticket that draws the line the mechanism will be built behind (`docs/plans/bt-app-split-prep.md` §6.1, P2): every remaining reader gets a row on one of two lists, and a third thing refuses a reader that is on neither. No reader is migrated here and no product code is touched.
 **The temporary list is `docs/plans/MIGRATION-DEBT.tsv`** — 747 rows, one per reader that still names a file, each carrying the file, the owning item, the mechanism, what it pins, the ticket that will migrate it and whether Step 2a disturbs it. Tab-separated and not a table in prose, because the thing that reads it is a comparison: a row is a line, "was a row added" is a set difference over lines, and a tab-separated field needs no escaping for anything these rows carry. Its header says three things plainly and they are all three true: **it only shrinks**, **it is temporary** (it reaches zero at P20 and is deleted), and **it is not a completeness proof** — it was seeded from the 2026-09-21 census plus a lexical sweep, and a reader assembled at run time is in neither. Two numbers in it checked themselves against the plan's own count, taken independently six days earlier: 29 of the `file_reads_doors.txt` rows are keyed to `main.rs` and 21 of those to a method the move takes, which is exactly what Appendix B records.
-**The permanent list is a type**, `bt_source::FileScoped`, and `Scope` has no constructor that takes a path — a scope naming a file has to name which of the three entries it is, and each entry's reason is the doc comment on its own variant. `scripts/check-portable-core.ps1` is entry 1, as the plan names it: the array it reads is declared beside `fn main`, which can never leave `main.rs`; it is the one gate that answers on a tree that does not compile; and what it pins *is* a list of file names. `scripts/check-vendor-notices.ps1` is entry 2, because "these files in this vendored copy are not upstream's" is a fact about files in the only sense there is one, in a tree this workspace's declarations do not describe. The tripwire itself is entry 3, because files are its whole subject.
+**The permanent list is a type**, `bt_source::FileScoped`, and `Scope` has no constructor that takes a path — a scope naming a file has to name one of its entries, and each entry's reason is the doc comment on its own variant. Since T-GATES-047 it has two entries: `scripts/check-vendor-notices.ps1`, because "these files in this vendored copy are not upstream's" is a fact about files in the only sense there is one, in a tree this workspace's declarations do not describe; and the tripwire itself, because files are its whole subject. The retired portable-core array reader is no longer an entry.
 **Two candidates were considered and refused, and the reasons are the useful part.** `bt_environment_doc_tests` reads `docs/BT-ENVIRONMENT.md` by name and its subject really is that document — but the entry would be keyed to `crates/bt-app/src/diagnostics.rs`, which also holds a directory walk that is genuine debt, and allowlisting the file would blind the guard to the debt beside the document. The document is safe because nothing moves it, not because a list says so. `scripts/check-adapter-boundary.ps1` reads as if its concern were `adapter.rs` and `cell_capture.rs`; it is not, it is the adapter *module*, and the day either file gains a submodule the gate stops covering it without a word. Both are on the debt list.
 **The tripwire is `crates/bt-source/tests/tripwire.rs`**, and it is plain text matching: no universe, no parse, no query layer. That is the point — it is the guard *against* the mechanism, so a bug in the mechanism must not be able to switch it off. It lives in `bt-source`'s integration tests rather than beside a door, because it has no door: `bt_platform`'s two workspace-walking guards are inline modules in the file that declares what they guard, and this one guards the workspace's source-reading itself, whose two lists are both this crate's business. It looks for four shapes in `.rs` and `.ps1` — an `include_str!` naming a `.rs` file, a path-shaped `.rs` literal handed to a path or read call inside a function that reads one, a `Scope::File` construction, and a directory read rooted at the manifest directory that picks files out by extension — and it matches **by file**, which is the granularity both lists have. Its limits are written into it rather than discovered later: comments are not stripped (an over-approximation is the safe direction), a reader split across two functions is seen only if both name the path, it reads no Python, and a second reader in a file that already has a row does not fire. It is proved by planting a reader of each of the four shapes in a temporary tree of its own — never a fixture in this repository, which would be a reader the list then had to carry — and requiring all four to be found and refused. Its own needles are assembled from halves, for `quiet_door_tests`' reason: spelled whole they would be readers in the file that looks for them.
 **`scripts/ci/check-migration-debt.ps1` is what keeps the direction.** It compares the list with `git merge-base HEAD origin/main` and fails on any added row; rows are compared whole and with multiplicity, so a duplicate is an addition, and the commented header is not compared so the prose above the list can be rewritten freely. It passes when there is nothing to compare against — no `origin/main`, no merge base, no list at the base, which is how the commit that introduces the list passes — and the two CI jobs that run it check out with `fetch-depth: 0` so that "nothing to compare against" cannot quietly become the normal case. It runs in `logic` beside the other gates and plants a row in `gates-can-fail`, because this repository has shipped a gate that could not fail and a green run means nothing until the red one has been seen.
@@ -13264,3 +13264,58 @@ Corrects one clause of the entry above (T-KEYBOARD-RECORDS, round 4; design note
 ### 2026-09-29 — The tap and the bucket are written and read back before the release page is published, and every write that landed is put back if anything fails or the page does not go out (U-41e0)
 
 0.4.7 ticket U-41e0, the release order of `docs/plans/design/managed-update-2026-09-29.md` §5.1, closing Codex's blocker 2 (a partial apply left a public 404 with nothing to recover it). `docs/RELEASING.md` now builds the directory, then runs eight steps: draft and verify; render from the draft's checksum files; save; apply and read back; put back on any failure; publish; `-Revert` if publication fails or is abandoned; winget. `update-manifests.ps1 -Apply` saves both files' exact bytes and blob ids to `target/release-package/manifests-before.json` before either write, adds each write's new blob id to it as the write lands, reads both back, and on any failure writes the saved bytes back over the blob id its own write left — never over a blob id it merely finds, so another edit made since is a 409 rather than an edit lost — and reads both back as the saved pair. Exit 1 is a failure put back; exit 3 is a **release incident**, with one line per repository naming what it holds and the record to restore from by hand. `-Revert <record>` is the put-back alone. `-Apply` run again is idempotent: over a pair that already holds this release's files it exits 0 and leaves the record untouched; over one such file it counts that file as a landed write, keeps what it held before from the earlier record of the same version, and writes only the other. Every read of a file takes its bytes and blob id from one answer, where the renderer used to read them in two. `scripts/release/update-manifests-tests.ps1` runs the four failure cases against a stand-in for `gh`, in CI's `release-script-tests`. The cask's `auto_updates true` and the install document's trust line, which §5.1 also names, are not part of this change: they belong with the Homebrew adapter (U-41b), because on today's build a cask that declares `auto_updates` is one plain `brew upgrade` stops updating while Folio does not yet update a Homebrew copy itself.
+
+### 2026-09-30 — Gates hold derived sets and stable properties, and tests that still decide by a numeric wall clock are a shrink-only list (T-GATES-047)
+
+The 0.4.6 gate audit is the ruling. `Text` is declared once: the table macro
+emits both the enum and test-only `Text::ALL`, so an added variant cannot be
+absent from the language checks. `window_waits_tests::PINS` is a slice, not a
+length that changes with the registry. `EventKind::ALL` needs the same treatment,
+but its declaration is in the updater-owned `update_txn.rs`; this slice does not
+cross that week's file boundary, and slice 2 must derive it there.
+
+The canaries run when a gate surface changes. The ignored-test canary follows
+the ordinary workspace test and plants its row in leaf crate `bt-lint-probe`, so
+it reuses the build. The remaining canary job is path-gated; the timing-list
+script's scratch suite is its positive control. A manual dispatch of a `main`
+SHA is skipped, and runs of the same SHA share one non-cancelling concurrency
+group.
+
+The ownership census remains a query: inventory and site reports are written
+under `target/`. Its gate commits only unknowns, which cannot grow by effect
+total, and annotations, each of which must name a decided owner. The rule to
+commit byte-equal inventory and site snapshots is retired. The rule to repair
+their red by regeneration is retired. The placeholder owner `proposed` is
+retired.
+
+The wholly-test literal, its count, and the number word in its test name are
+retired. The same test keeps the property-bearing half: every Rust source file
+is reached by a declaration, and the two independent declaration walks agree.
+The file-read manifest's per-site occurrence counts and function-name keys are
+retired; it keeps the admitted item-to-lane property and the parser-backed
+coverage of file-reading adapters.
+
+The portable-core script's `bt-app` half, its second reader, its reader-agreement
+test, and its script canary are retired; the Rust platform-file test owns that
+property. The script's portable-crate half remains a cheap local gate, while CI
+uses its macOS and Linux compiles, so the duplicate Windows CI invocation is
+retired. The duplicate macOS run of the text-only window-waits gate is retired.
+
+The bare-site gate no longer keys history by file, item or function and no
+longer accepts a movable seed: it compares totals per `(crate, effect entry)`
+with the merge base. Its rule to pin `clippy.toml` byte hashes is retired; the
+configuration fence keeps only the allowed locations and the refusal of
+`CLIPPY_CONF_DIR`. A registry row now cites a DESIGN date whose dated heading
+must actually exist, rather than text merely shaped like a citation.
+
+`docs/plans/TIMING-BOUND-TESTS.tsv` names every test found in test code whose
+verdict uses `Instant`, a numeric `Duration`, `sleep`, or `recv_timeout`, with
+its crate, wall-clock assumption and the seam that removes it. Its whole rows
+may only disappear against the merge base; with no base list, the gate says so
+loudly and succeeds. The session-receipt test now waits for the writer's event,
+the no-answer hand-off test drives an already-overdue look and waits for the
+detached worker's entered event, and the U-37 starter exclusion uses its
+zero-grace controlled-clock limit. The named every-road failure-window test was
+already a source-property test with no clock and remains so. The bounded U-37
+hand-back test already asserts the count invariant; the other timing-bound tests
+are listed rather than silently converted in this slice.

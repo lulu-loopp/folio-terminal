@@ -190,11 +190,11 @@ fn the_identities_bt_app_declares_twice_are_the_ten() {
 /// traversal cannot classify.**
 ///
 /// §2.7's claim is that the mechanism outlives 2a, so the facts it rests on are
-/// asserted rather than remembered: `psreadline::asset` and
-/// `shell_integration::profile_marks::managed_line` are the two definitions,
-/// neither constructs an item (so neither can be making a `Runtime` method that
-/// this index does not hold), and the only invocation shapes reported are the
-/// ones listed below.
+/// asserted rather than remembered: `i18n::text_entries` constructs only the
+/// closed `Text` enum and its test list, while `psreadline::asset` and
+/// `shell_integration::profile_marks::managed_line` construct no item (so none
+/// can be making a `Runtime` method that this index does not hold); the only
+/// invocation shapes reported are the ones listed below.
 ///
 /// MUTATION: write a `macro_rules!` arm in `bt-app` that expands to a `fn` and
 /// the `ItemConstructingArm` assertion goes red; add an `include!` and the
@@ -211,8 +211,8 @@ fn the_macro_facts_of_this_tree_are_asserted() {
         .collect();
     assert_eq!(
         definitions,
-        ["asset", "managed_line"],
-        "bt-app has exactly two `macro_rules!` definitions"
+        ["text_entries", "asset", "managed_line"],
+        "bt-app has exactly the three named `macro_rules!` definitions"
     );
 
     let mut by_shape: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -234,13 +234,18 @@ fn the_macro_facts_of_this_tree_are_asserted() {
         MacroShape::SourceInclusion,
         MacroShape::ModulePath,
         MacroShape::CompileError,
-        MacroShape::ItemConstructingArm,
     ] {
         assert!(
             !by_shape.contains_key(&format!("{absent:?}")),
             "bt-app has no {absent:?} today: {by_shape:#?}"
         );
     }
+
+    let item_arms = by_shape
+        .get(&format!("{:?}", MacroShape::ItemConstructingArm))
+        .expect("Text's declaration macro is the one item-constructing arm");
+    assert_eq!(item_arms.len(), 1, "{item_arms:#?}");
+    assert!(item_arms[0].contains("pub enum Text"), "{item_arms:#?}");
 
     let line_numbers: Vec<&bt_source::UnsupportedMacroShape> = index
         .unsupported_macro_shapes()
