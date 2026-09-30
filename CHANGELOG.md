@@ -74,6 +74,9 @@ All notable changes to Folio are recorded here. The format follows
 - The Homebrew cask uses the forms Homebrew 7 asks for (`depends_on macos:
   :sonoma` and a `postflight_steps` step list); the tap takes them at the next
   release.
+- The Homebrew tap and the scoop bucket are updated and read back before the
+  release page is published, and put back from a saved record if a write fails
+  or the page does not go out; the winget pull request follows publication.
 
 ## 0.4.6-preview — 2026-09-29
 ### Added
