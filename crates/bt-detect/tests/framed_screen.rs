@@ -1343,8 +1343,14 @@ fn a_capture_shares_its_frame_between_the_tasks_that_hold_it() {
 /// formula on the same row is ticket 69b's: in 69a a candidate row is filled from the first pane
 /// whose block closes on it — `two_panes_closing_on_the_same_row_both_typeset`.)
 ///
+/// Since revision (e), E3(b) exempts this block too (its first `$` is left of the rule and its last
+/// right of it), so the one-box geometry alone no longer turns the test red: for a block whose
+/// delimiters stand on one side, the box and the segments cross the same rules (revision (f),
+/// item 6). The test pins the segment geometry wherever the exemption does not apply.
+///
 /// MUTATION: refuse a cut through the rectangle from a block's first cell to its last (one box over
-/// the whole inline group) in `Measure::vertical_cut_crosses_a_proof`.
+/// the whole inline group) in `Measure::vertical_cut_crosses_a_proof`, together with the strong
+/// opposite-side veto (`Measure::delimiters_straddle_column` answering `false`).
 #[test]
 fn a_formula_in_each_pane_on_one_row_does_not_refuse_the_cut() {
     let screen = (0..20)
