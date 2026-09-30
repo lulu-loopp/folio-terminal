@@ -181,9 +181,12 @@ again on 2026-09-20 (re-ask on reprint).
 **Rule.** An HTTP(S) link whose visible text starts with its target, with or
 without the scheme, ends before the first post-prefix byte in the terminator
 class used by bare addresses; its trailing text loses the link and resting
-dots. ASCII sentence punctuation is outside that class and stays linked. A
-program-chosen label and a non-HTTP(S) target stay whole, and the target is
-unchanged. The scope is one captured row: a soft-wrapped continuation fragment
+dots. ASCII sentence punctuation is outside that class and stays linked. The
+protected prefix ends where the declared target itself stops being
+address-shaped, at its first Unicode punctuation or whitespace character, so
+an IRI target's ideographs stay linked while a target that runs on into
+Chinese is cut there like its label. A program-chosen label and a non-HTTP(S)
+target stay whole, and the target is unchanged. The scope is one captured row: a soft-wrapped continuation fragment
 that does not begin with the target stays linked (T-71B;
 `bt-transcript::CapturedRow`, invoked by `bt-term::cell_capture` before
 transcript or viewport clipping; trailing DESIGN entry 2026-09-30). An `OSC 8`
