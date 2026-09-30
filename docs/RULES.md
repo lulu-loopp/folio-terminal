@@ -1334,11 +1334,17 @@ Entries: the scripts themselves; `docs/plans/bt-app-split-inventory-2026-09-21.m
 (`CONVENTIONS` §三), and when the pins stop naming files the rules they enforce
 are stated in prose here, because a guard that outlives the understanding of its
 rule becomes superstition.
-Canary work runs only when its gate surface changes; the ignored-test canary
-runs after the ordinary workspace test has warmed the build. Historical
-inventories compare stable property keys with the merge base, not source
-locations or a movable seed. `TIMING-BOUND-TESTS.tsv` is a whole-row
-shrink-only list of tests whose verdict still assumes a numeric wall-clock bound.
+Every canary runs on every CI run — a canary's red depends on the crate it
+plants into as much as on its script, so no path filter decides when it is
+needed; the ignored-test canary runs after the ordinary workspace test has
+warmed the build. Historical inventories compare stable property keys with the
+merge base, not source locations or a movable seed. `TIMING-BOUND-TESTS.tsv`
+lists every test whose own body waits on the real clock (`sleep`,
+`recv_timeout`, `wait_timeout`, …) or measures it (`elapsed`): `bt-source`'s
+`timing` test holds the tree to the list, and
+`scripts/ci/check-timing-bound.ps1` lets its whole rows only disappear against
+the merge base. A clock a test reaches only through a function it calls is not
+seen by that scan; review owns finding it.
 
 ### 52. Doors — a side effect has one named entrance — `folded`
 **Rule.** A side effect with a door has exactly one named entrance and a pin that
@@ -1346,8 +1352,10 @@ keeps it the only one. **File bytes** go through `bt_platform::file_reads` on on
 of ten named lanes (`inline_image`, `peek`, `animation`, `preview`, `pdf`,
 `git_pipe`, `settings`, `fonts`, `attention`, `other`), with the source guard
 `bt_app::file_reads_source_tests` against `file_reads_doors.txt` failing the
-build when a product read appears outside an inventoried lane-bearing door;
-that manifest records the admitted item and lane, not occurrence counts. **Child
+build when a product read appears in an item the manifest does not admit;
+the manifest is a set of item keys with no occurrence counts, so a second read
+inside an admitted item is not a new row, and the lane each counting adapter
+charges is checked beside it. **Child
 processes** are constructed only by `bt_platform::quiet_command` /
 `quiet_command_named`: silent, an absolute program path resolved beforehand, an
 explicit working directory. **Hand-offs to the operating system** — the seven

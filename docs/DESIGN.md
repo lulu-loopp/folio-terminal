@@ -13265,35 +13265,54 @@ Corrects one clause of the entry above (T-KEYBOARD-RECORDS, round 4; design note
 
 0.4.7 ticket U-41e0, the release order of `docs/plans/design/managed-update-2026-09-29.md` §5.1, closing Codex's blocker 2 (a partial apply left a public 404 with nothing to recover it). `docs/RELEASING.md` now builds the directory, then runs eight steps: draft and verify; render from the draft's checksum files; save; apply and read back; put back on any failure; publish; `-Revert` if publication fails or is abandoned; winget. `update-manifests.ps1 -Apply` saves both files' exact bytes and blob ids to `target/release-package/manifests-before.json` before either write, adds each write's new blob id to it as the write lands, reads both back, and on any failure writes the saved bytes back over the blob id its own write left — never over a blob id it merely finds, so another edit made since is a 409 rather than an edit lost — and reads both back as the saved pair. Exit 1 is a failure put back; exit 3 is a **release incident**, with one line per repository naming what it holds and the record to restore from by hand. `-Revert <record>` is the put-back alone. `-Apply` run again is idempotent: over a pair that already holds this release's files it exits 0 and leaves the record untouched; over one such file it counts that file as a landed write, keeps what it held before from the earlier record of the same version, and writes only the other. Every read of a file takes its bytes and blob id from one answer, where the renderer used to read them in two. `scripts/release/update-manifests-tests.ps1` runs the four failure cases against a stand-in for `gh`, in CI's `release-script-tests`. The cask's `auto_updates true` and the install document's trust line, which §5.1 also names, are not part of this change: they belong with the Homebrew adapter (U-41b), because on today's build a cask that declares `auto_updates` is one plain `brew upgrade` stops updating while Folio does not yet update a Homebrew copy itself.
 
-### 2026-09-30 — Gates hold derived sets and stable properties, and tests that still decide by a numeric wall clock are a shrink-only list (T-GATES-047)
+### 2026-09-30 — Gates hold derived sets and stable properties, and tests whose own body waits on or measures the real clock are a shrink-only list the tree is held to (T-GATES-047)
 
 The 0.4.6 gate audit is the ruling. `Text` is declared once: the table macro
 emits both the enum and test-only `Text::ALL`, so an added variant cannot be
-absent from the language checks. `window_waits_tests::PINS` is a slice, not a
-length that changes with the registry. `EventKind::ALL` needs the same treatment,
-but its declaration is in the updater-owned `update_txn.rs`; this slice does not
-cross that week's file boundary, and slice 2 must derive it there.
+absent from the language checks. That macro is the one item-constructing arm
+`bt-source`'s contract admits, and it admits it by shape: the arm may emit
+`pub enum Text` and an `impl Text` holding only `ALL`, and any other item in
+it — an `impl Runtime` beside the enum, a `fn` inside the `impl` — is refused
+(`contract::an_extra_item_inside_the_admitted_arm_is_refused`).
+`window_waits_tests::PINS` is a slice, not a length that changes with the
+registry. `EventKind::ALL` needs the same treatment, but its declaration is in
+the updater-owned `update_txn.rs`; this slice does not cross that week's file
+boundary, and slice 2 must derive it there.
 
-The canaries run when a gate surface changes. The ignored-test canary follows
-the ordinary workspace test and plants its row in leaf crate `bt-lint-probe`, so
-it reuses the build. The remaining canary job is path-gated; the timing-list
-script's scratch suite is its positive control. A manual dispatch of a `main`
-SHA is skipped, and runs of the same SHA share one non-cancelling concurrency
-group.
+Every canary runs on every CI run. A path filter over the gate scripts was
+tried and withdrawn: a canary's red depends on the crate it plants into (an
+`#![allow(clippy::todo)]` there disarms the lint canary) and the Rust gates
+live in the crates, so the filter would have skipped exactly the run that shows
+a gate lost its teeth, and on a manual dispatch it compared only the last
+commit. The ignored-test canary follows the ordinary workspace test and plants
+its row in leaf crate `bt-lint-probe`, so it reuses the build, and the job
+without it costs minutes. The timing-list script's scratch suite is that gate's
+positive control. A manual dispatch of a `main` SHA is skipped, and runs of the
+same SHA share one non-cancelling concurrency group.
 
 The ownership census remains a query: inventory and site reports are written
-under `target/`. Its gate commits only unknowns, whose whole-row multiset can
-only shrink, and annotations, each of which must name a decided owner. The rule
-to commit byte-equal inventory and site snapshots is retired. The rule to
-repair their red by regeneration is retired. The placeholder owner `proposed`
-is retired.
+under `target/`. Its committed surfaces are the unknowns, whose whole rows can
+only disappear against the merge base, with multiplicity, so one removed row
+beside one planted row is refused though the count and the summed sites stay
+level; and the annotations, which keep census-1's `proposed_owner` column and
+its proposals — a ticket does not confirm an ownership proposal, the owner
+does. The `census` test requires a row for every proven multi-writer fact and
+none for anything else; `scripts/ci/check-census-unknowns.ps1` refuses an
+annotation row added against the merge base that names no owner or says
+"proposed". The rule to commit byte-equal inventory and site snapshots is
+retired, and with it the rule to repair their red by regeneration. What those
+snapshots caught and nothing now does: a second writer of a fact in the same
+module, and a sole writer that moves to another module.
 
 The wholly-test literal, its count, and the number word in its test name are
 retired. The same test keeps the property-bearing half: every Rust source file
 is reached by a declaration, and the two independent declaration walks agree.
-The file-read manifest's per-site occurrence counts and function-name keys are
-retired; it keeps the admitted item-to-lane property and the parser-backed
-coverage of file-reading adapters.
+The tripwire keeps its independent floor — more than 150 readers found (195 today),
+or it did not read this workspace. The file-read manifest's per-site occurrence
+counts are retired: its rows stay keys — an item, or a file and a function for
+the rows still on MIGRATION-DEBT — compared as a set, so a second read inside an
+admitted item is not a new row; the lane each counting adapter charges is still
+checked.
 
 The portable-core script's `bt-app` half, its second reader, its reader-agreement
 test, and its script canary are retired; the Rust platform-file test owns that
@@ -13308,14 +13327,24 @@ configuration fence keeps only the allowed locations and the refusal of
 `CLIPPY_CONF_DIR`. A registry row now cites a DESIGN date whose dated heading
 must actually exist, rather than text merely shaped like a citation.
 
-`docs/plans/TIMING-BOUND-TESTS.tsv` names every test found in test code whose
-verdict uses `Instant`, a numeric `Duration`, `sleep`, or `recv_timeout`, with
-its crate, wall-clock assumption and the seam that removes it. Its whole rows
-may only disappear against the merge base; with no base list, the gate says so
-loudly and succeeds. The session-receipt test now waits for the writer's event,
-the no-answer hand-off test drives an already-overdue look and waits for the
-detached worker's entered event, and the U-37 starter exclusion uses its
-zero-grace controlled-clock limit. The named every-road failure-window test was
-already a source-property test with no clock and remains so. The bounded U-37
-hand-back test already asserts the count invariant; the other timing-bound tests
-are listed rather than silently converted in this slice.
+`docs/plans/TIMING-BOUND-TESTS.tsv` names every `#[test]` function whose own
+body — not a function it calls — waits on the real clock (`sleep`,
+`recv_timeout`, `recv_deadline`, `wait_timeout`, `park_timeout` and their
+variants) or measures it (`elapsed`), with its target, crate, wall-clock
+assumption and the seam that removes it. The first version attributed clock
+calls to the nearest test above them and listed source-reading tests for a
+product function's `Instant`; it was rebuilt from test bodies.
+`bt-source`'s `timing` test holds the tree to the list both ways — an unlisted
+timing-bound test and a row naming no such test are red — and
+`scripts/ci/check-timing-bound.ps1` lets whole rows only disappear against the
+merge base, so a new test that waits on the clock is refused either way. Two
+things the scan does not see are review's to find: a clock reached only through
+a helper or product function the test calls, and a measurement written as
+`Instant::now() - start`. `Instant` and `Duration` as values are not the clock;
+most tests build controlled clocks from them. The session-receipt test now waits
+for the writer's event, the no-answer hand-off test drives an already-overdue
+look and waits for the detached worker's entered event, and the U-37 starter
+exclusion uses its zero-grace controlled-clock limit. The named every-road
+failure-window test was already a source-property test with no clock and
+remains so. The other timing-bound tests are listed, not converted, in this
+slice.
