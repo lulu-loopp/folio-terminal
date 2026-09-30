@@ -3066,7 +3066,14 @@ pub fn standard_error_is(path: &std::path::Path) -> bool {
         let Ok(stream) = stream.metadata() else {
             return false;
         };
-        std::fs::metadata(path)
+        // The name is opened the way `append_note` opens it (appending, never
+        // creating) and asked for the identity of the file that open reached,
+        // so a symlinked log compares as the file the append will write to.
+        let Ok(named) = std::fs::OpenOptions::new().append(true).open(path) else {
+            return false;
+        };
+        named
+            .metadata()
             .is_ok_and(|named| named.dev() == stream.dev() && named.ino() == stream.ino())
     }
     #[cfg(not(any(windows, unix)))]

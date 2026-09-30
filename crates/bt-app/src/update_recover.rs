@@ -981,7 +981,7 @@ mod tests {
     /// RED (U-42d, round 3) — **a symlinked log name is compared with the
     /// target both standard error and `append_note` actually open.**
     ///
-    /// MUTATION: change `standard_error_is` back to `symlink_metadata`; each
+    /// MUTATION: make `standard_error_is` compare `symlink_metadata(path)` instead of the opened file; each
     /// recovery line occurs twice.
     #[cfg(unix)]
     #[test]
@@ -1023,7 +1023,7 @@ mod tests {
     /// symlink the recovery appends to. `append_note` follows the link, so the
     /// identity comparison must follow it too.
     ///
-    /// MUTATION: change `standard_error_is` back to `symlink_metadata`; each
+    /// MUTATION: make `standard_error_is` compare `symlink_metadata(path)` instead of the opened file; each
     /// recovery line occurs twice and the caller's count is red.
     #[cfg(unix)]
     fn said_by_a_child_whose_stderr_is_the_symlinked_log(name: &str, child: &str) -> String {
