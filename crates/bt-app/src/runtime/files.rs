@@ -1120,41 +1120,45 @@ impl Runtime<'_> {
     /// Ask for one folder of one file tree again, wherever that tree lives.
     ///
     /// [`Self::refresh_files_dir`]'s body, addressed the way the worker's own
-    /// traffic is: a docked column is a [`LeafId`] and a float is an epoch, and
-    /// the watcher speaks to both because both draw folders that can go out of
-    /// date. A tree that has gone while the ask was being assembled resolves to
-    /// no root and asks nothing, which is the same cancellation a landed answer
-    /// with nowhere to go already is.
+    /// traffic is: a docked column is a [`LeafId`], a float is an epoch, and a
+    /// preview is its surface. The watcher speaks to all three because all three
+    /// hold listings that can go out of date. A host that has gone while the ask
+    /// was being assembled resolves to no path and asks nothing, which is the
+    /// same cancellation a landed answer with nowhere to go already is.
     ///
     /// **Nothing is marked pending here.** A refresh is not a first reading: the
     /// rows already on screen are the truth until a better one lands, and a
     /// `Pending` node would replace a listed folder with "Loading …" for as long
     /// as the disk took.
     fn ask_files_dir(&mut self, host: files::FilesHost, key: &str) {
-        let root = match host {
-            files::FilesHost::Preview(_) => return,
+        let path = match host {
+            files::FilesHost::Preview(surface) => self
+                .preview_pane(surface)
+                .and_then(|pane| pane.neighbours.as_ref())
+                .filter(|held| held.path == Path::new(key))
+                .map(|held| held.path.clone()),
             files::FilesHost::Docked(leaf) => self
                 .window
                 .tabs
                 .iter()
                 .find(|tab| tab.id == leaf.tab)
                 .and_then(|tab| tab.files.get(&leaf.seat))
-                .map(|state| state.root.clone()),
+                .map(|state| files::full_path(&state.root, key)),
             files::FilesHost::Float(epoch) => self
                 .window
                 .float
                 .live(epoch)
                 .and_then(float::FloatWin::files)
-                .map(|files| files.files.root.clone()),
+                .map(|files| files::full_path(&files.files.root, key)),
         };
-        let Some(root) = root else {
+        let Some(path) = path else {
             return;
         };
         let request = files::DirRequest {
             window: self.window_id(),
             host,
             key: key.to_owned(),
-            path: files::full_path(&root, key),
+            path,
         };
         if !self.app.files_worker.request(request) {
             self.disable_files_worker();
@@ -1179,8 +1183,8 @@ impl Runtime<'_> {
         }
         let mut asks: Vec<(files::FilesHost, String)> = Vec::new();
         // What moved: every tree showing that folder, which is not one tree —
-        // two columns and a float can be looking at one directory, and all of
-        // them are about to be out of date together.
+        // two columns, a float and a preview can be looking at one directory,
+        // and all of them are about to be out of date together.
         for directory in &due {
             let Some(trees) = showing.get(directory) else {
                 continue;
@@ -1234,9 +1238,9 @@ impl Runtime<'_> {
     /// **Every folder this window has the contents of on the glass, and which
     /// trees are showing it.**
     ///
-    /// The gate `files_watch` follows, and the whole of it. Two kinds of tree
-    /// answer and they answer with the same thing — a folder on a disk: a docked
-    /// column of the tab on screen, and a live float.
+    /// The gate `files_watch` follows, and the whole of it. Three hosts answer
+    /// with the same thing — a folder on a disk: a docked column of the tab on
+    /// screen, a live float, and a media preview that holds a neighbour listing.
     ///
     /// **The tab on screen and not every tab**, which is the opposite of
     /// [`Self::watched_preview_files`] and for a reason about the subject. A
@@ -1283,6 +1287,26 @@ impl Runtime<'_> {
                     .push((files::FilesHost::Float(win.id()), key));
             }
         }
+        for surface in self.preview_picture_hosts() {
+            let Some(pane) = self.preview_pane(surface) else {
+                continue;
+            };
+            let Some(folder) = pane.image.as_ref().and_then(|image| image.path.parent()) else {
+                continue;
+            };
+            let Some(held) = pane
+                .neighbours
+                .as_ref()
+                .filter(|held| held.path == folder && held.listing.is_some())
+            else {
+                continue;
+            };
+            let path = held.path.clone();
+            showing.entry(path.clone()).or_default().push((
+                files::FilesHost::Preview(surface),
+                path.to_string_lossy().into_owned(),
+            ));
+        }
         showing
     }
 
@@ -1293,7 +1317,10 @@ impl Runtime<'_> {
     /// it is the one state in which a read is coming anyway.
     fn files_dir_answered(&self, host: files::FilesHost, key: &str) -> bool {
         match host {
-            files::FilesHost::Preview(_) => false,
+            files::FilesHost::Preview(surface) => self
+                .preview_pane(surface)
+                .and_then(|pane| pane.neighbours.as_ref())
+                .is_some_and(|held| held.path == Path::new(key) && held.listing.is_some()),
             files::FilesHost::Docked(leaf) => self
                 .window
                 .tabs
@@ -2833,14 +2860,13 @@ impl Runtime<'_> {
             self.window.files_locate.insert(seat, key);
         }
         for (id, key) in floating {
-            if let Some(tree) = self
-                .window
-                .float
-                .live_mut(id)
-                .and_then(float::FloatWin::files_mut)
-            {
-                tree.files.sel = Some(key);
-            }
+            let Some(win) = self.window.float.live_mut(id) else {
+                continue;
+            };
+            let Some(tree) = win.files_mut() else {
+                continue;
+            };
+            tree.files.sel = Some(key);
         }
         self.settle_files_locate();
         self.mark_session_dirty(Instant::now());

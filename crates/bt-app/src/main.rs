@@ -74023,6 +74023,139 @@ mod palette_wiring_tests {
     }
 }
 
+/// Runtime seams for same-folder media travel. The model tests name the pure
+/// decisions; these pins hold the window wiring that supplies and spends them.
+#[cfg(test)]
+mod preview_arrows_runtime_tests {
+    use std::path::{Path, PathBuf};
+
+    use bt_source::{Index, ItemQuery};
+
+    use crate::files::{DirEntry, DirListing};
+    use crate::preview_neighbours::{Direction, neighbour, paths};
+
+    fn source() -> &'static Index {
+        Index::of_package("bt-app")
+    }
+
+    fn method_body(owner: &str, name: &str) -> &'static str {
+        source()
+            .body_of(&ItemQuery::method(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    fn listing(names: &[&str]) -> DirListing {
+        DirListing {
+            entries: names
+                .iter()
+                .map(|name| DirEntry {
+                    name: (*name).into(),
+                    is_dir: false,
+                    is_symlink: false,
+                })
+                .collect(),
+            ..DirListing::default()
+        }
+    }
+
+    /// RED (T-PREVIEW-ARROWS round 2) — a preview-only folder stays on the
+    /// files watch after its first answer, and a refreshed listing is the next
+    /// step's authority.
+    ///
+    /// MUTATION: remove the `preview_picture_hosts` arm from
+    /// `watched_files_dirs`. The assertions over that door fail; without that
+    /// row the worker never supplies the second listing demonstrated here.
+    #[test]
+    fn preview_arrows_watch_a_preview_only_folder_and_skip_a_removed_file() {
+        let current = Path::new("folder/a.png");
+        let before = paths(current, &listing(&["a.png", "b.png", "c.png"]));
+        assert_eq!(
+            neighbour(current, &before, Direction::Next),
+            Some(PathBuf::from("folder/b.png"))
+        );
+        let refreshed = paths(current, &listing(&["a.png", "c.png"]));
+        assert_eq!(
+            neighbour(current, &refreshed, Direction::Next),
+            Some(PathBuf::from("folder/c.png"))
+        );
+        assert!(!refreshed.contains(&PathBuf::from("folder/b.png")));
+
+        let watched = method_body("Runtime", "watched_files_dirs");
+        assert!(
+            watched.contains("self.preview_picture_hosts()")
+                && watched.contains("held.listing.is_some()")
+                && watched.contains("files::FilesHost::Preview(surface)"),
+            "a preview holding that listing is not registered with the files watcher:\n{watched}"
+        );
+        let answered = method_body("Runtime", "files_dir_answered");
+        assert!(
+            answered.contains("files::FilesHost::Preview(surface)")
+                && answered.contains("held.listing.is_some()"),
+            "arming the preview's watch does not refresh its already-answered listing:\n{answered}"
+        );
+        let ask = method_body("Runtime", "ask_files_dir");
+        assert!(
+            ask.contains("files::FilesHost::Preview(surface)") && ask.contains("held.path.clone()"),
+            "watch news cannot re-ask the preview's folder through the files door:\n{ask}"
+        );
+        let accept = method_body("Runtime", "apply_files_results");
+        assert!(
+            accept.contains("self.accept_preview_neighbours(surface"),
+            "the refreshed listing has no route back to the preview:\n{accept}"
+        );
+    }
+
+    /// RED (T-PREVIEW-ARROWS round 2) — the browsing-key runtime seam keeps
+    /// one surface from key classification through opening, and the ordinary
+    /// image landing is what changes the head's source.
+    ///
+    /// MUTATION: replace `open_preview_onto(surface, path.clone())` in
+    /// `step_preview_neighbour` with the surface-choosing
+    /// `open_preview_image(path.clone())`. This test fails at the seam while
+    /// the model tests remain green.
+    #[test]
+    fn preview_arrows_key_steps_opens_on_the_same_surface_and_updates_its_head() {
+        let browse = method_body("Runtime", "preview_browse_key");
+        let classified = browse
+            .find("crate::preview_neighbours::key(")
+            .expect("the browsing key is classified by the media-step model");
+        let stepped = browse
+            .find("self.step_preview_neighbour(surface, direction)?")
+            .expect("the classified key reaches the runtime step");
+        assert!(classified < stepped, "classification precedes the step");
+
+        let step = method_body("Runtime", "step_preview_neighbour");
+        let chosen = step
+            .find("self.preview_neighbour(surface, direction)")
+            .expect("the step asks for this surface's neighbour");
+        let opened = step
+            .find("self.open_preview_onto(surface, path.clone())?")
+            .expect("the step opens on the surface that received the key");
+        assert!(
+            chosen < opened,
+            "the neighbour is chosen before it is opened"
+        );
+
+        let open = method_body("Runtime", "open_preview_onto");
+        assert!(
+            open.contains("self.open_preview_image_on(surface, path)"),
+            "media does not retain the named surface through the ordinary opener:\n{open}"
+        );
+        let landing = method_body("Runtime", "open_preview_image_on");
+        assert!(
+            landing.contains(
+                "self.preview_pane_mut(surface).image = Some(PreviewImageState::new(path));"
+            ),
+            "the opened path is not installed on that surface:\n{landing}"
+        );
+        let head = method_body("TabState", "preview_head_name");
+        assert!(
+            head.contains("Some(image) => Some(image.title())"),
+            "the preview head no longer reads the image installed on its pane:\n{head}"
+        );
+    }
+}
+
 /// **Edit ▸ Copy and Edit ▸ Paste, once AppKit's responder chain has declined
 /// them** (T-MAC-EDIT-CLIPBOARD, `docs/DESIGN.md` §13.26 ⑨).
 ///

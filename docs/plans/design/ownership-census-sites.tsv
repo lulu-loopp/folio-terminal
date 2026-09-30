@@ -471,6 +471,7 @@ TabState.files	write	crate::runtime::files	Runtime::heal_files_selections	assign
 TabState.files	write	crate::runtime::files	Runtime::open_files_path_to	assign,call:insert	2
 TabState.files	write	crate::runtime::files	Runtime::open_files_row_new	call:insert	1
 TabState.files	write	crate::runtime::files	Runtime::seat_a_files_column	call:insert	1
+TabState.files	write	crate::runtime::files	Runtime::select_preview_neighbour_in_files	assign	1
 TabState.files	write	crate::runtime::files	Runtime::set_files_view	assign	1
 TabState.files	write	crate::runtime::git	Runtime::press_git_row	assign,call:entry	2
 TabState.files	write	crate::runtime::git	Runtime::select_git_row	assign	1
@@ -485,6 +486,7 @@ TabState.files	access	crate::runtime::files	Runtime::open_files_path_to	call:get
 TabState.files	access	crate::runtime::files	Runtime::open_files_row_new	call:get_mut	1
 TabState.files	access	crate::runtime::files	Runtime::press_files_row	call:get_mut	1
 TabState.files	access	crate::runtime::files	Runtime::reroot_files_column	call:get_mut	1
+TabState.files	access	crate::runtime::files	Runtime::select_preview_neighbour_in_files	call:get_mut	1
 TabState.files	access	crate::runtime::files	Runtime::set_files_view	call:get_mut	1
 TabState.files	access	crate::runtime::git	Runtime::select_git_row	call:get_mut	1
 TabState.files_lit	write	crate::runtime::preview	Runtime::advance_strip_animation	call:retarget	1
@@ -962,6 +964,7 @@ WindowRuntime.file_peek_press	access	crate::runtime::peek	Runtime::promote_file_
 WindowRuntime.files_focus	write	crate::runtime::files	Runtime::files_tree_key	call:navigated	1
 WindowRuntime.files_focus	write	crate::runtime::files	Runtime::set_files_keyboard	call:arrive	1
 WindowRuntime.files_locate	write	crate::runtime::files	Runtime::open_files_path_to	call:insert	1
+WindowRuntime.files_locate	write	crate::runtime::files	Runtime::select_preview_neighbour_in_files	call:insert	1
 WindowRuntime.files_locate	write	crate::runtime::files	Runtime::settle_files_locate	call:remove	1
 WindowRuntime.files_name_widths	write	crate::runtime::floats	Runtime::refresh_chrome_with_overlay	assign	1
 WindowRuntime.files_notice	write	crate::runtime::frame	Runtime::publish_frame_inner	assign	1
@@ -988,6 +991,7 @@ WindowRuntime.float	write	crate	Runtime::focus_pane_at	call:blur	1
 WindowRuntime.float	write	crate	Runtime::focus_the_pane_a_path_landed_in	call:blur	1
 WindowRuntime.float	write	crate::runtime::dpi	Runtime::resize_floats_to_content	assign	1
 WindowRuntime.float	write	crate::runtime::files	Runtime::fold_files_row	call:turn_row	1
+WindowRuntime.float	write	crate::runtime::files	Runtime::select_preview_neighbour_in_files	assign	1
 WindowRuntime.float	write	crate::runtime::floats	Runtime::advance_float	call:dismiss,call:grace_expired,call:sweep,call:take_due	4
 WindowRuntime.float	write	crate::runtime::floats	Runtime::ask_float_directories	call:mark_pending	1
 WindowRuntime.float	write	crate::runtime::floats	Runtime::dismiss_float	call:dismiss	1
@@ -1014,6 +1018,7 @@ WindowRuntime.float	write	crate::runtime::preview	Runtime::pop_out_preview	call:
 WindowRuntime.float	access	crate::runtime::dpi	Runtime::resize_floats_to_content	call:live_mut	1
 WindowRuntime.float	access	crate::runtime::files	Runtime::apply_files_results	call:live_mut	1
 WindowRuntime.float	access	crate::runtime::files	Runtime::fold_files_row	call:files_mut,call:live_mut,lend	3
+WindowRuntime.float	access	crate::runtime::files	Runtime::select_preview_neighbour_in_files	call:files_mut,call:live_mut	2
 WindowRuntime.float	access	crate::runtime::floats	Runtime::ask_float_directories	call:files_mut,call:live_windows_mut	2
 WindowRuntime.float	access	crate::runtime::floats	Runtime::expand_float_commit	call:live_mut	1
 WindowRuntime.float	access	crate::runtime::floats	Runtime::load_more_float_commits	call:live_mut	1

@@ -9930,7 +9930,7 @@ impl Runtime<'_> {
     /// a window torn out of another tab is still standing, and a picture that
     /// stopped being refit the moment you looked somewhere else would freeze at
     /// whatever size it was last seen at.
-    fn preview_picture_hosts(&self) -> Vec<PreviewSurface> {
+    pub(in crate::runtime) fn preview_picture_hosts(&self) -> Vec<PreviewSurface> {
         // The seat half is the tab's own rule, asked of the tab
         // ([`TabState::seat_pictures`]), because that is the answer
         // [`Self::pane_draws`] has to agree with frame by frame and two

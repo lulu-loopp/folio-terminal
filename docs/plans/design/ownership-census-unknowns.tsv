@@ -8,7 +8,6 @@ site	module	function	reason	sites
 ?.attention_clock	crate	attention_ledger_deadline	call `deadline` through a receiver that does not resolve: what `flat_map` returns	1
 ?.files	crate::git_graph	build	call `get` through a receiver that does not resolve: what `as_ref` returns: the value of a block, a branch or a loop	1
 ?.files	crate::git_graph	build	call `len` through a receiver that does not resolve: a closure parameter without a type	1
-?.files	crate::runtime::files	Runtime::ask_files_dir	call `clone` through a receiver that does not resolve: a closure parameter without a type	1
 ?.files	crate::runtime::floats	Runtime::expand_float_commit	call `as_deref` through a receiver that does not resolve: what `and_then` returns	1
 ?.files	crate::runtime::floats	Runtime::expand_float_commit	call `clone_from` through a receiver that does not resolve: what `and_then` returns	1
 ?.files	crate::runtime::floats	Runtime::reveal_float_root	call `clone` through a receiver that does not resolve: a closure parameter without a type	1
