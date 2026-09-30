@@ -3707,8 +3707,15 @@ macro_rules! folder_body {
     };
 }
 
-const FOLDER_OUTLINE_BODY: &str =
-    folder_body!(r#"fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round""#);
+// A centred 1.2-unit pen makes the raw silhouette's 12.8 x 10.3 box 14.0 x
+// 11.5. Fit that complete struck rendition back onto the filled box, about the
+// box's own centre: x = 12.8 / 14.0, y = 10.3 / 11.5. This is an affine fit of
+// the one shared silhouette, not a separately drawn inset path.
+const FOLDER_OUTLINE_BODY: &str = concat!(
+    r#"<g transform="translate(8 8.25) scale(.9142857143 .8956521739) translate(-8 -8.25)">"#,
+    folder_body!(r#"fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round""#),
+    "</g>",
+);
 
 /// The `<symbol>` bodies, byte for byte from `docs/design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
@@ -4312,8 +4319,8 @@ const SYMBOL_BODY: [&str; 69] = [
         r#"<rect x="3.9" y="2.2" width="8.2" height="11.6" rx="4.1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
         r#"<rect x="7.3" y="4.45" width="1.4" height="2.9" rx="0.7" fill="currentColor"/>"#,
     ),
-    // Both outline identities share the filled folder's exact silhouette.
-    // The house pen is centred on that edge, without an inset or an open flap.
+    // Both outline identities share the filled folder's exact path. The whole
+    // struck rendition is fitted back onto the filled silhouette's ink box.
     FOLDER_OUTLINE_BODY, // #i-folder-line
     FOLDER_OUTLINE_BODY, // #i-folder-open-line
     // `#i-play` — the solid triangle, cut on the house's ink band and set by
@@ -4577,6 +4584,32 @@ mod tests {
             assert!(outline.contains(r#"fill="none""#));
             assert!(!outline.contains(r#"fill="currentColor""#));
             assert_eq!(mark.design_stroke_units(), Some(1.2));
+        }
+    }
+
+    /// MUTATION: remove the outline body's fit and its ink grows to 14.0 x 11.5.
+    #[test]
+    fn every_outline_folder_has_the_filled_glyphs_ink_box() {
+        // `ink_extent_units` samples a sixteen-unit grid at 256 pixels. Allow
+        // two samples for the two independently antialiased raster edges.
+        const GRID_TOLERANCE_UNITS: f32 = 2.0 * HOUSE_GRID_UNITS / 256.0;
+        let filled = ChromeMark::Folder
+            .ink_extent_units()
+            .expect("the filled folder is a quoted symbol");
+        for mark in [ChromeMark::FolderOutline, ChromeMark::FolderOpenOutline] {
+            let outline = mark
+                .ink_extent_units()
+                .expect("an outline folder is a quoted symbol");
+            assert!(
+                (outline[0] - filled[0]).abs() <= GRID_TOLERANCE_UNITS
+                    && (outline[1] - filled[1]).abs() <= GRID_TOLERANCE_UNITS,
+                "{} draws {:.3} x {:.3} units of ink where the filled folder draws {:.3} x {:.3}",
+                mark.drawing_id(),
+                outline[0],
+                outline[1],
+                filled[0],
+                filled[1],
+            );
         }
     }
 

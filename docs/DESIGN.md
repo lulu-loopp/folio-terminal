@@ -13264,3 +13264,9 @@ Corrects one clause of the entry above (T-KEYBOARD-RECORDS, round 4; design note
 ### 2026-09-30 — Outline folders share the filled silhouette
 
 Both outline folder identities now stroke the filled folder's exact path, with no fill or inset. Browse, Reveal and the pane-head folder use this shared artwork. The pen stays at the house's 1.2 units on the 16-unit grid; the filled artwork is unchanged. This supersedes the separate open-flap outline described above. A path-equality test guards both outline variants (T-FOLDER-GLYPH). The existing picture-size test allows 27% spread for the outline folder's larger ink bounds; all other marks retain the 20% limit.
+
+### 2026-09-30 — The struck folder fits the filled silhouette's ink box
+
+The two outline identities still carry the filled folder's exact path data and the house's 1.2-unit pen. The complete struck rendition is scaled about that silhouette's centre by the filled-to-struck ink ratios, so its real raster ink returns to the filled glyph's 12.8 by 10.3 box without a second inset drawing. The 20% picture-size rule therefore applies to every mark again.
+
+`every_outline_folder_strokes_the_filled_folders_exact_path` guards the one path, `every_outline_folder_has_the_filled_glyphs_ink_box` guards the fitted ink box, and `the_pane_heads_run_lays_one_width_of_ink` measures the real raster ink for both neighbours.

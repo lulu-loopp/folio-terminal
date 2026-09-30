@@ -1561,15 +1561,17 @@ mod tests {
     /// levelling its *picture* is what levelling a cross means.
     #[test]
     fn the_pane_heads_run_lays_one_width_of_ink() {
-        // How many logical pixels of ink the mark lays across the head: the box
-        // it is given, times the fraction of its own box its artwork covers.
+        // How many logical pixels of ink the mark actually lays across the
+        // head, measured from its raster and scaled into the box it is given.
         let ink = |mark: ChromeMark| {
-            let [width, _] = MarkSlot::CompactHead.mark_box_logical_px(mark);
-            if mark.draws_edge_to_edge() {
-                width
-            } else {
-                width * marks::HOUSE_INK_RATIO
-            }
+            let [width, height] = MarkSlot::CompactHead.mark_box_logical_px(mark);
+            let [view_width, view_height] = mark
+                .view_box_units()
+                .expect("a pane-head mark has a quoted view box");
+            let [ink_across, _] = mark
+                .ink_extent_units()
+                .expect("a pane-head mark has measurable ink");
+            ink_across * (width / view_width).min(height / view_height)
         };
         let chevron = ink(ChromeMark::chevron(0.0));
         let folder = ink(ChromeMark::FolderOutline);
@@ -1671,18 +1673,8 @@ mod tests {
                     |so_far, one| if one.1 < so_far.1 { one } else { so_far },
                 );
             for (id, picture) in pictures {
-                // T-FOLDER-GLYPH: centring the house pen on the filled path
-                // grows only the outline folder's ink from 12.8 x 10.3 to
-                // 14.0 x 11.5 units. Its diagonal is about 26% above the
-                // chevron's; allow 27% for raster rounding. Other drawings
-                // keep the original 20% gate, including the close button.
-                let limit = if matches!(id, "i-folder-line" | "i-folder-open-line") {
-                    0.27
-                } else {
-                    OPTICAL_PICTURE_SPREAD
-                };
                 let spread = picture / smallest.1 - 1.0;
-                if spread <= limit {
+                if spread <= OPTICAL_PICTURE_SPREAD {
                     continue;
                 }
                 wrong.push(format!(
@@ -2415,8 +2407,8 @@ mod tests {
                 "{shape} is written down as filled ({why}) and is struck",
             );
         }
-        // And the two renditions are two drawings of one object: the object's
-        // is solid, the act's is struck, and they are not the same shape.
+        // And the two renditions are one object's shared silhouette: the
+        // object's is solid and the act's is struck.
         assert!(!marks::ChromeMark::Folder.is_struck());
         assert!(marks::ChromeMark::FolderOutline.is_struck());
         assert!(!marks::ChromeMark::FolderOpen.is_struck());
