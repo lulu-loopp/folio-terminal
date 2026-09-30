@@ -288,8 +288,9 @@ jobs:
 
       # The census's unknown list is compared by whole rows with multiplicity.
       # A planted row must go red even when one old row disappears beside it,
-      # leaving both the row count and the summed `sites` column unchanged.
-      - name: the census-unknowns gate fails on growth and an equal-count replacement
+      # leaving both the row count and the summed `sites` column unchanged. The
+      # same script refuses an annotation row added with no owner or "proposed".
+      - name: the census-unknowns gate fails on growth, an equal-count replacement and a proposed annotation
         shell: pwsh
         run: |
           $file = (Resolve-Path "docs/plans/design/ownership-census-unknowns.tsv").Path
@@ -326,6 +327,22 @@ jobs:
             }
           } finally {
             [IO.File]::WriteAllText($file, $original)
+          }
+          $annotations = (Resolve-Path "docs/plans/design/ownership-census-annotations.tsv").Path
+          $original = [IO.File]::ReadAllText($annotations)
+          try {
+            [IO.File]::AppendAllText($annotations, "App.planted`t-`tVIEW`twindows`tproposed at the probe merge`n")
+            $failed = $false
+            try {
+              & ./scripts/ci/check-census-unknowns.ps1
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) {
+              throw "the census's annotations accepted an added row that says proposed"
+            }
+          } finally {
+            [IO.File]::WriteAllText($annotations, $original)
           }
           exit 0
 

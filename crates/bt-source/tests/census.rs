@@ -11,8 +11,8 @@
 //!
 //! * inventory and sites are query output under `target/ownership-census/`;
 //! * `ownership-census-unknowns` is the committed shrink-only unresolved set;
-//! * `ownership-census-annotations` names the owner of every proven
-//!   multi-writer fact.
+//! * `ownership-census-annotations` is the hand-edited class and proposed
+//!   owner of every proven multi-writer fact.
 //!
 //! Every run leaves all renderings in `target/ownership-census/`. Only the
 //! unknown list is copied, and only when it has not grown.
@@ -95,7 +95,7 @@ fn committed_as_rendered(census: &FieldCensus) -> Committed {
 
 /// An annotation file covering exactly the proven multi-writer facts.
 fn annotations_for(census: &FieldCensus) -> String {
-    let mut text = String::from("fact\tpart\tclass\towner\tnote\n");
+    let mut text = String::from("fact\tpart\tclass\tproposed_owner\tnote\n");
     for fact in census.multi_writer_facts() {
         text.push_str(&format!("{fact}\t-\tVIEW\tfixture\t-\n"));
     }
@@ -436,7 +436,7 @@ fn the_gate_refuses_a_grown_unknown_set_and_lets_it_shrink() {
 /// RED (census-1) — **every proven multi-writer fact has an annotation row,
 /// and no annotation row is stale.**
 ///
-/// The class and owner columns are hand-edited judgements the code
+/// The class and proposed-owner columns are hand-edited judgements the code
 /// cannot regenerate (revision (b)2 §7), so the gate asks only two things of
 /// them: that the facts the query proves are written from more than one module
 /// are all annotated, and that nothing else is.
@@ -451,7 +451,7 @@ fn the_gate_refuses_a_missing_annotation_and_a_stale_one() {
         ["App.gpu", "WindowRuntime.dirty_gate"]
     );
     let mut committed = committed_as_rendered(&census);
-    committed.annotations = "fact\tpart\tclass\towner\tnote\nWindowRuntime.dirty_gate\tthe pending request\tDUR\tgate\t-\nApp.notes\t-\tVIEW\tnotes\t-\n".to_owned();
+    committed.annotations = "fact\tpart\tclass\tproposed_owner\tnote\nWindowRuntime.dirty_gate\tthe pending request\tDUR\tgate\t-\nApp.notes\t-\tVIEW\tnotes\t-\n".to_owned();
     let messages: Vec<String> = census
         .judge(&committed)
         .iter()
@@ -515,30 +515,28 @@ fn committed_census(census: &FieldCensus) -> Committed {
     }
 }
 
-fn annotation_owners_are_decided(text: &str) -> Result<(), String> {
+/// The annotation file's shape: census-1's header, and five columns a row with
+/// something in the owner column. Whether a proposal is confirmed is not this
+/// test's to say — the owner rules on it — and a row *added* against the merge
+/// base that names no owner or says "proposed" is refused by
+/// `scripts/ci/check-census-unknowns.ps1`, which is the half that can see the
+/// merge base.
+fn annotation_rows_are_well_formed(text: &str) -> Result<(), String> {
     let mut rows = text
         .lines()
+        .map(|line| line.trim_end_matches('\r'))
         .filter(|line| !line.is_empty() && !line.starts_with('#'));
     let header = rows.next().unwrap_or_default();
-    if header != "fact\tpart\tclass\towner\tnote" {
+    if header != "fact\tpart\tclass\tproposed_owner\tnote" {
         return Err(format!(
-            "annotation header is not the owner schema: {header:?}"
+            "the annotation header is not census-1's: {header:?}"
         ));
     }
     for row in rows {
         let columns: Vec<&str> = row.split('\t').collect();
-        if columns.len() != 5 {
-            return Err(format!("annotation row is not five columns: {row}"));
-        }
-        let owner = columns[3].trim();
-        if owner.is_empty()
-            || owner == "-"
-            || owner == "—"
-            || owner.to_ascii_lowercase().contains("proposed")
-        {
+        if columns.len() != 5 || columns[3].trim().is_empty() {
             return Err(format!(
-                "{} needs a decided owner, not {owner:?}",
-                columns[0]
+                "an annotation row is not five columns with an owner column: {row}"
             ));
         }
     }
@@ -571,16 +569,18 @@ fn leave_renderings(census: &FieldCensus, committed: &Committed) {
     }
 }
 
-/// RED (T-GATES-047) — **the census gates judgements, not snapshots**: unknowns
-/// may shrink but not grow, and every proven multi-writer fact has an annotation
-/// that names its decided owner. Inventory and site rows remain query output.
+/// RED (T-GATES-047) — **the census gates judgements, not snapshots**: the
+/// unknowns may shrink but not grow, every proven multi-writer fact has an
+/// annotation row, and no row names a fact that is not one. Inventory and site
+/// rows are query output under `target/ownership-census/`.
 ///
-/// A moved or added resolved writer changes the report but needs no generated
-/// file edit. A new multi-writer fact or unknown still requires judgement.
+/// A moved or added resolved writer changes the report and needs no committed
+/// edit. A new multi-writer fact or a new unknown still needs a judgement.
 ///
-/// MUTATION: remove the owner from one annotation row; this refuses it by fact.
+/// MUTATION: delete the annotation row of one proven multi-writer fact
+/// (`App.quit`) and this names it as missing.
 #[test]
-fn the_committed_census_has_decided_owners_and_no_new_unknowns() {
+fn the_committed_census_has_annotations_and_no_new_unknowns() {
     let census = the_census();
     let committed = committed_census(census);
     leave_renderings(census, &committed);
@@ -589,13 +589,13 @@ fn the_committed_census_has_decided_owners_and_no_new_unknowns() {
         "every declaration parses: {:#?}",
         census.unparsed()
     );
-    annotation_owners_are_decided(&committed.annotations)
+    annotation_rows_are_well_formed(&committed.annotations)
         .unwrap_or_else(|failure| panic!("{failure}"));
     let differences = census.judge(&committed);
     assert!(
         differences.is_empty(),
-        "{} ownership judgement difference(s): resolve a new unknown, or add/remove a decided \
-         owner annotation for the multi-writer fact it names:\n{}",
+        "{} ownership judgement difference(s): resolve a new unknown, or add/remove the \
+         annotation row of the multi-writer fact it names (a new row names its owner):\n{}",
         differences.len(),
         differences
             .iter()

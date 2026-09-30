@@ -651,9 +651,18 @@ The byte-equal inventory and sites snapshots described by revision (c) are no
 longer committed. Every census run still writes both under
 `target/ownership-census/`; they are the query used for ownership work, not a
 gate on routine source movement. The committed gate surfaces are the unknown
-list, whose whole rows only shrink with multiplicity, and annotations, each of
-which names a decided `owner` rather than a proposed one. The generator copies
-only the unknown rendering.
+list, whose whole rows only shrink with multiplicity, and the annotations,
+which keep census-1's `proposed_owner` column and notes: the `census` test
+requires a row for every proven multi-writer fact and none for anything else,
+and `scripts/ci/check-census-unknowns.ps1` refuses an annotation row added
+against the merge base that names no owner or says "proposed". The proposals
+already in the file stay proposals until the owner rules on them; a ticket does
+not confirm them. The generator copies only the unknown rendering.
+
+What the snapshots caught that nothing now does: a second writer of a fact in
+the same module, and a sole writer that moves to another module, change no
+committed file. Both are visible in the report under `target/`, to a reader who
+compares it.
 
 ## Revision 2026-09-27 (d): two kinds of subject (census-2)
 

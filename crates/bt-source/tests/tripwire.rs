@@ -531,14 +531,15 @@ fn complaint(
 fn no_source_reader_names_a_file_outside_the_two_lists() {
     let root = workspace_root();
     let hits = scan(&root);
+    // The independent traversal floor: a walk that lost its way finds a handful
+    // of readers, not hundreds, and the list comparison below cannot tell — a
+    // lone listed reader is no stray. 195 on 2026-09-30, after T-GATES-047
+    // retired the portable-core array reader and its twins; the floor sits
+    // below that with room for the list to keep shrinking.
     assert!(
-        root.join("Cargo.toml").is_file(),
-        "{} is the workspace root",
-        root.display()
-    );
-    assert!(
-        !hits.is_empty(),
-        "the source-reader scan found nothing under {}",
+        hits.len() > 150,
+        "the scan found {} readers, which is not this workspace — it read {} as its root",
+        hits.len(),
         root.display()
     );
 

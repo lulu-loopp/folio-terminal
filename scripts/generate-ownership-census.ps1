@@ -1,7 +1,7 @@
 # Writes the ownership census under docs/plans/design/ from the query.
 #
 # The query is not in this file. It is bt_source::FieldCensus, and the test
-# `the_committed_census_has_decided_owners_and_no_new_unknowns` in bt-source's
+# `the_committed_census_has_annotations_and_no_new_unknowns` in bt-source's
 # `census` test target runs it over bt-app, checks the two committed judgements,
 # and leaves its rendering in target/ownership-census/. A copy written in
 # PowerShell would have to parse Rust — and a script that reads Rust source is
@@ -39,7 +39,7 @@ foreach ($name in $names) {
 Push-Location $repo
 try {
     & cargo test -p bt-source --locked --test census -- --exact `
-        the_committed_census_has_decided_owners_and_no_new_unknowns | Out-Host
+        the_committed_census_has_annotations_and_no_new_unknowns | Out-Host
 } finally {
     Pop-Location
 }
