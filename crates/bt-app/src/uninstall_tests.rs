@@ -77,6 +77,13 @@ fn link_free_temp_dir() -> PathBuf {
     PathBuf::from(head).join(rest)
 }
 
+/// The spelling production hands to the removal boundary: resolved to its
+/// existing target, with Windows' verbatim prefix returned to an ordinary
+/// drive or share spelling.
+fn resolved(path: &Path) -> PathBuf {
+    bt_platform::handoff::strip_verbatim_prefix(&bt_platform::instance::canonical_path(path))
+}
+
 fn sandbox(tag: &str) -> (PathBuf, Scope) {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1770,11 +1777,11 @@ fn the_uninstall_with_remove_data_removes_the_data_roots_and_the_program() {
 #[test]
 fn a_link_among_the_programs_files_refuses_the_removal() {
     let (root, scope) = sandbox("uninstall-link");
-    let app = scope.exe.parent().unwrap().to_path_buf();
+    let app = seed_program(&scope);
     let outside = root.join("outside");
     fs::create_dir_all(&outside).unwrap();
     fs::write(outside.join("sentinel"), b"keep").unwrap();
-    fs::create_dir_all(app.join(".folio-update")).unwrap();
+    fs::remove_dir_all(app.join(".folio-update/aa")).unwrap();
     plant_directory_link(&app.join(".folio-update/aa"), &outside);
     let scope = std::sync::Arc::new(scope);
     let (code, stdout) = {
@@ -1954,9 +1961,6 @@ fn a_bundle_is_removed_whole_and_a_loose_executable_alone() {
             .expect("a plan"),
         )
     });
-    let resolved = |path: &Path| {
-        bt_platform::handoff::strip_verbatim_prefix(&bt_platform::instance::canonical_path(path))
-    };
     let bundle_root = resolved(&root.join("Applications/Folio.app"));
     assert_eq!(bundle.items.len(), 5);
     assert!(
@@ -2422,18 +2426,41 @@ fn every_running_installed_image_is_in_the_removers_wait_census() {
         "bt-uninstall-running-helper-ready",
         bt_platform::ThreadPriority::BelowNormal,
         move |_| {
-            let mut line = String::new();
-            let answer = std::io::BufReader::new(stdout).read_line(&mut line);
-            let _ = ready_tx.send((answer, line));
+            let mut reader = std::io::BufReader::new(stdout);
+            let mut ready_tx = Some(ready_tx);
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) => {
+                        if let Some(ready_tx) = ready_tx.take() {
+                            let _ = ready_tx.send(Err(std::io::Error::new(
+                                std::io::ErrorKind::UnexpectedEof,
+                                "the installed image ended before readiness",
+                            )));
+                        }
+                        break;
+                    }
+                    Ok(_) if line.trim_end() == "ready" => {
+                        if let Some(ready_tx) = ready_tx.take() {
+                            let _ = ready_tx.send(Ok(()));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        if let Some(ready_tx) = ready_tx.take() {
+                            let _ = ready_tx.send(Err(error));
+                        }
+                        break;
+                    }
+                }
+            }
         },
     )
     .unwrap();
-    let (read, line) = ready_rx
+    ready_rx
         .recv_timeout(Duration::from_secs(10))
-        .expect("outer deadlock ceiling: the installed image announces readiness");
-    assert!(read.unwrap() > 0);
-    assert_eq!(line.trim_end(), "ready");
-    reader.join().unwrap();
+        .expect("outer deadlock ceiling: the installed image announces readiness")
+        .unwrap();
     let running = Running {
         pid: child.id(),
         started: bt_platform::install_flip::started_of(child.id()).unwrap(),
@@ -2463,5 +2490,6 @@ fn every_running_installed_image_is_in_the_removers_wait_census() {
     assert!(removal.after.iter().any(|wait| wait.process == running));
     drop(child.stdin.take());
     child.wait().unwrap();
+    reader.join().unwrap();
     fs::remove_dir_all(root).unwrap();
 }

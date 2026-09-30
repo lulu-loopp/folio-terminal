@@ -880,6 +880,7 @@ fn failure_summary(words: &FailureWords, outcome: Outcome) -> Option<String> {
     }
 }
 
+#[cfg(test)]
 fn failure_text(words: &FailureWords, result: &Path, outcome: Outcome) -> Option<String> {
     failure_summary(words, outcome)
         .map(|failure| format!("{failure}\n{}\n{}", words.result_at, result.display()))
@@ -915,48 +916,85 @@ fn self_delete(path: &Path) -> io::Result<()> {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_FLAG_DELETE,
-        FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
-        FILE_DISPOSITION_INFO_EX, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-        FileDispositionInfoEx, OPEN_EXISTING, SetFileInformationByHandle,
+        CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_INFO, FILE_RENAME_INFO,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, FileRenameInfo,
+        OPEN_EXISTING, SetFileInformationByHandle,
     };
     use windows::core::PCWSTR;
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    // SAFETY: the terminated path lives across the call; the returned handle
-    // is immediately placed in `OwnedHandle`.
-    let opened = unsafe {
-        CreateFileW(
-            PCWSTR(wide.as_ptr()),
-            DELETE.0,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            None,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL,
-            None,
+    let open = || {
+        // SAFETY: the terminated path lives across the call; the returned
+        // handle is immediately placed in `OwnedHandle`.
+        let opened = unsafe {
+            CreateFileW(
+                PCWSTR(wide.as_ptr()),
+                DELETE.0,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                None,
+                OPEN_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                None,
+            )
+        }
+        .map_err(|_| io::Error::last_os_error())?;
+        // SAFETY: `opened` is owned by this call alone.
+        Ok::<_, io::Error>(unsafe { OwnedHandle::from_raw_handle(opened.0) })
+    };
+
+    // A mapped Windows image cannot be given POSIX delete disposition at its
+    // ordinary stream. Renaming that stream first detaches the mapped image
+    // from the file's deletable name without introducing another filesystem
+    // entry. The containing directory is unpredictable and account-owned, so
+    // this fixed stream name belongs to this fresh copy alone.
+    let owned = open()?;
+    let stream: Vec<u16> = std::ffi::OsStr::new(":folio-remover")
+        .encode_wide()
+        .collect();
+    let header = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let length = header + stream.len() * std::mem::size_of::<u16>();
+    let mut buffer = vec![0u64; length.div_ceil(std::mem::size_of::<u64>()) + 1];
+    let rename = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: `buffer` is aligned for `FILE_RENAME_INFO`, has `length` bytes,
+    // and `FileNameLength` describes the copied UTF-16 stream name.
+    unsafe {
+        (*rename).Anonymous.ReplaceIfExists = false.into();
+        (*rename).RootDirectory = HANDLE::default();
+        (*rename).FileNameLength = u32::try_from(stream.len() * 2)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a stream name too long"))?;
+        std::ptr::copy_nonoverlapping(
+            stream.as_ptr(),
+            buffer.as_mut_ptr().cast::<u8>().add(header).cast::<u16>(),
+            stream.len(),
+        );
+        SetFileInformationByHandle(
+            HANDLE(owned.as_raw_handle()),
+            FileRenameInfo,
+            rename.cast(),
+            u32::try_from(length)
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "rename data too long"))?,
         )
     }
     .map_err(|_| io::Error::last_os_error())?;
-    // SAFETY: `opened` is owned by this call alone.
-    let owned = unsafe { OwnedHandle::from_raw_handle(opened.0) };
-    let disposition = FILE_DISPOSITION_INFO_EX {
-        Flags: windows::Win32::Storage::FileSystem::FILE_DISPOSITION_INFO_EX_FLAGS(
-            FILE_DISPOSITION_FLAG_DELETE.0
-                | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.0
-                | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE.0,
-        ),
+    drop(owned);
+
+    let owned = open()?;
+    let disposition = FILE_DISPOSITION_INFO {
+        DeleteFile: true.into(),
     };
     // SAFETY: the handle and fixed-size structure are live for the call.
     unsafe {
         SetFileInformationByHandle(
             HANDLE(owned.as_raw_handle()),
-            FileDispositionInfoEx,
+            FileDispositionInfo,
             &raw const disposition as *const _,
-            u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO_EX>())
-                .expect("FILE_DISPOSITION_INFO_EX fits u32"),
+            u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>())
+                .expect("FILE_DISPOSITION_INFO fits u32"),
         )
     }
-    .map_err(|_| io::Error::last_os_error())
+    .map_err(|_| io::Error::last_os_error())?;
+    drop(owned);
+    Ok(())
 }
 
 #[cfg(not(any(windows, unix)))]
