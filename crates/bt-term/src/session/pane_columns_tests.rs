@@ -562,12 +562,9 @@ fn a_block_in_one_pane_does_not_displace_the_other_panes_block_on_its_rows() {
     assert_eq!(panes, vec![rect(0, 20, 0, 60), rect(0, 20, 61, 120)]);
 }
 
-/// RED (69a) — **a pane's rows are armed as the pane reads them** (note §4 step 2). A pipe table
-/// printed in the right pane: read as whole screen rows, `…sentence │| a | b |` does not start
-/// with a pipe and arms nothing, so the table would never be scanned; walked pane by pane, its rows
-/// arm and the table is proven in the right pane's columns.
-///
-/// MUTATION: walk the whole capture in `live_candidate_rows` instead of each pane.
+/// **A pipe table is armed from its pane's text** (note §4 step 2). Read as whole screen rows,
+/// `…sentence │| a | b |` does not start with a pipe; read in the right pane, the table is proven
+/// in that pane's columns. The direct per-pane walk and T08 mutation are pinned separately below.
 #[test]
 fn a_pipe_table_in_a_pane_is_armed_in_that_pane() {
     let rows = (0..12_usize)
@@ -600,6 +597,101 @@ fn a_pipe_table_in_a_pane_is_armed_in_that_pane() {
             .map(|record| (record.span.kind, record.pane))
             .collect::<Vec<_>>()
     );
+}
+
+/// RED (69a round 2, E5) — the production arming loop walks each pane exactly once before 69a
+/// unions row numbers. T08's one whole-capture walk changes both the observed rectangles and lists.
+#[test]
+fn arming_walks_each_pane_once_and_reports_each_panes_candidate_rows() {
+    let rows = (0..12)
+        .map(|row| {
+            let left = match row {
+                3 | 5 => "$$".to_owned(),
+                4 => "x^2".to_owned(),
+                _ => format!("left {row}"),
+            };
+            let right = match row {
+                5 => "| name | value |".to_owned(),
+                6 => "| --- | --- |".to_owned(),
+                _ => format!("right {row}"),
+            };
+            format!("{left:<50}\u{2502}{right}")
+        })
+        .collect::<Vec<_>>();
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz(100), nz(12));
+    session.feed_at(&repaint(&rows), start).unwrap();
+    let capture = session.live_capture();
+    let stable = vec![true; 12];
+    let _ = take_arming_walks();
+    let union = live_candidate_rows(&capture, &stable, session.inline_math_bands);
+    let walks = take_arming_walks();
+    assert_eq!(walks.len(), 2);
+    assert_eq!(walks[0].0, rect(0, 12, 0, 50));
+    assert_eq!(walks[1].0, rect(0, 12, 51, 100));
+    assert_eq!(walks[0].1, vec![3, 5]);
+    assert_eq!(walks[1].1, vec![6]);
+    assert_eq!(union, vec![3, 5, 6]);
+}
+
+/// RED (69a round 2, E4) — the session retains only topology. The Arc holding capture rows dies
+/// with the last capture holder while the current frame remains installed.
+#[test]
+fn the_sessions_frame_topology_does_not_retain_capture_rows() {
+    let rows = (0..40)
+        .map(|row| format!("ordinary output {row}"))
+        .collect::<Vec<_>>();
+    let mut session = DualPlaneSession::new(nz(100), nz(40));
+    session.feed(&repaint(&rows)).unwrap();
+    let capture = session.live_capture();
+    let rows = Arc::downgrade(capture.inputs());
+    session.observe_frame(capture.frame());
+    drop(capture);
+    assert!(rows.upgrade().is_none());
+    let topology = session.current_frame.as_ref().expect("installed topology");
+    assert_eq!(topology.panes(), &[rect(0, 40, 0, 100)]);
+    assert_eq!(topology.status_row(), None);
+    assert!(topology.screen_fence_state().is_empty());
+}
+
+/// RED (69a round 2, E8 identity) — provenance is part of frame identity even when the rectangles
+/// and fence state are byte-for-byte unchanged.
+#[test]
+fn a_foreground_program_change_invalidates_every_pane_even_when_rectangles_match() {
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz(100), nz(40));
+    session.apply_foreground_program(ForegroundProgram::known("tmux"));
+    session.feed_at(&repaint(&herdr_screen()), start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    assert!(complete_for_real(&mut session) > 0);
+    let old = Arc::clone(session.current_frame.as_ref().expect("the first frame"));
+    assert!(!session.live_decorations.is_empty());
+
+    session.apply_foreground_program(ForegroundProgram::Unknown);
+    let capture = session.live_capture();
+    assert_eq!(old.panes(), capture.frame().panes());
+    let invalidations = session.live_invalidation_count;
+    session.observe_frame(capture.frame());
+    assert!(session.live_decorations.is_empty());
+    assert!(session.live_invalidation_count > invalidations);
+    assert_eq!(
+        session
+            .current_frame
+            .as_ref()
+            .expect("the replacement frame")
+            .foreground_program(),
+        &ForegroundProgram::Unknown
+    );
+}
+
+/// RED (69a round 2, E8 cadence) — OSC 133's command-start marker books one immediate
+/// foreground-program observation and the request is spent exactly once.
+#[test]
+fn an_osc_133_command_start_requests_one_immediate_foreground_observation() {
+    let mut session = DualPlaneSession::new(nz(100), nz(40));
+    session.feed(b"\x1b]133;B\x07").unwrap();
+    assert!(session.take_foreground_program_probe_request());
+    assert!(!session.take_foreground_program_probe_request());
 }
 
 // ---- §7.4: ticket 69b (T-PANE-IDENTITY) -------------------------------------------------------

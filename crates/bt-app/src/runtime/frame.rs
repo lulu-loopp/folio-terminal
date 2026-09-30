@@ -6,11 +6,12 @@ use crate::{
     FrameTraces, GhostFace, HyperlinkActivation, PaneDraw, PointerTarget, PresentIntent, Runtime,
     STARTUP_PTY_POLL_INTERVAL, SearchRefresh, TabPress, a_bare_redraw_still_owes_a_present,
     advance_periodic_deadline, apply_hover_marks, attention_ledger_deadline, chrome_over,
-    chrome_tick_reuses_picture, dispatch_tab_decoration_tasks, earliest_named_deadline, files, git,
-    hang_watch, hyperlink_activation, ime_outbound, mark_leaf_painted, math_copy_window,
-    native_window, present_diagnostics, present_gate, preview, pty_drain_says_nothing_new,
-    pty_frame_is_unchanged, sample_window_place, seats, settings, settling, startup_poll_delay,
-    take_math_worker_notice, trace_sink, trace_unchanged_present, webhost,
+    chrome_tick_reuses_picture, dispatch_tab_decoration_tasks, earliest_named_deadline, files,
+    foreground_program_deadline, git, hang_watch, hyperlink_activation, ime_outbound,
+    mark_leaf_painted, math_copy_window, native_window, present_diagnostics, present_gate, preview,
+    pty_drain_says_nothing_new, pty_frame_is_unchanged, sample_window_place, seats, settings,
+    settling, startup_poll_delay, take_math_worker_notice, trace_sink, trace_unchanged_present,
+    webhost,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -195,6 +196,7 @@ impl Runtime<'_> {
             let tasks = self.app.math_worker.tasks.clone();
             let scale_tasks = self.app.math_worker.scale_tasks.clone();
             let path_tasks = self.app.math_worker.path_tasks.clone();
+            let foreground_tasks = self.app.foreground_program_worker.requests.clone();
             let window = self.window_id();
             dispatch_tab_decoration_tasks(
                 window,
@@ -202,6 +204,8 @@ impl Runtime<'_> {
                 &tasks,
                 &scale_tasks,
                 &path_tasks,
+                &foreground_tasks,
+                Instant::now(),
                 &mut self.app.math_worker_running,
                 &mut self.app.math_worker_notice_pending,
             );
@@ -304,6 +308,8 @@ impl Runtime<'_> {
                     &tasks,
                     &scale_tasks,
                     &path_tasks,
+                    &foreground_tasks,
+                    Instant::now(),
                     &mut self.app.math_worker_running,
                     &mut self.app.math_worker_notice_pending,
                 );
@@ -1264,6 +1270,7 @@ impl Runtime<'_> {
                 let tasks = self.app.math_worker.tasks.clone();
                 let scale_tasks = self.app.math_worker.scale_tasks.clone();
                 let path_tasks = self.app.math_worker.path_tasks.clone();
+                let foreground_tasks = self.app.foreground_program_worker.requests.clone();
                 let window = self.window_id();
                 dispatch_tab_decoration_tasks(
                     window,
@@ -1271,6 +1278,8 @@ impl Runtime<'_> {
                     &tasks,
                     &scale_tasks,
                     &path_tasks,
+                    &foreground_tasks,
+                    Instant::now(),
                     &mut self.app.math_worker_running,
                     &mut self.app.math_worker_notice_pending,
                 );
@@ -2138,7 +2147,7 @@ impl Runtime<'_> {
         if application_clocks {
             hang_watch::during(hang_watch::Station::WebWarmup, || self.warm_web_engine(now));
         }
-        const DEADLINE_OWNERS: [&str; 53] = [
+        const DEADLINE_OWNERS: [&str; 54] = [
             "startup poll",
             "IME cursor",
             "shell caret",
@@ -2150,6 +2159,7 @@ impl Runtime<'_> {
             "resize finish",
             "synchronized update",
             "live stability",
+            "foreground program",
             "PTY coalesce",
             "attention credential",
             "tooltip",
@@ -2226,6 +2236,7 @@ impl Runtime<'_> {
             resize_finish_deadline,
             synchronized_update_deadline,
             live_stability_deadline,
+            foreground_program_deadline(&self.window.tabs),
             // **The bounded wait for the rest of a burst**, and the wake that keeps
             // [`coalesce::Pending`]'s invariant true: a deferred publication is never `Some`
             // without this line booking the turn that pays it. A window whose panes are not

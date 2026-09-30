@@ -15,8 +15,8 @@ use std::{
 
 use bt_detect::{
     DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionOptions,
-    DetectionTask, InlineJoinedFragment, InlineMathRun, InlineMathSite, LiveCapture,
-    LiveDetectionInput, LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES,
+    DetectionTask, ForegroundProgram, InlineJoinedFragment, InlineMathRun, InlineMathSite,
+    LiveCapture, LiveDetectionInput, LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES,
     MathCellSegment, MathSourceLine, MathSpan, PaneRect, PlaceholderArtifact, ScreenFrame,
     StaleArtifact, advance_detection_context, detect_math_blocks_with_sites,
     frozen_resync_scan_with_options, resolve_detection_task, resolve_live_detection_task,
@@ -1685,8 +1685,13 @@ pub struct DualPlaneSession {
     /// released when their holders go. Compared by value — the rectangles, the status row and the
     /// screen-owned fence state, never the pointer — with each new capture's frame; a difference is
     /// a frame change and clears every pane's math (`invalidate_every_pane`). Two frames of screens
-    /// no frame cuts are the same frame whatever their sizes, so an ordinary screen never sees one.
+    /// no frame cuts and the same foreground identity agree whatever their sizes.
     current_frame: Option<Arc<ScreenFrame>>,
+    /// E8's session-owned provenance fact. Addressed worker answers are its only writer; every new
+    /// capture consumes a snapshot.
+    foreground_program: ForegroundProgram,
+    foreground_program_probe_requested: bool,
+    foreground_program_frame_candidate: bool,
     feed_turn: Option<FeedTurn>,
     alternate_repaint_snapshot: Option<AlternateRepaintSnapshot>,
     alternate_repaint_in_progress: bool,
@@ -2159,6 +2164,9 @@ impl DualPlaneSession {
             offscreen_restore_pass_count: 0,
             live_grid_blocks_memo: None,
             current_frame: None,
+            foreground_program: ForegroundProgram::Unknown,
+            foreground_program_probe_requested: false,
+            foreground_program_frame_candidate: false,
             feed_turn: None,
             alternate_repaint_snapshot: None,
             alternate_repaint_in_progress: false,
@@ -2211,6 +2219,29 @@ impl DualPlaneSession {
     /// Monotonic count of frames acknowledged by `record_published_frame`.
     pub fn published_revision(&self) -> u64 {
         self.published_revision
+    }
+
+    /// Apply the addressed foreground-program answer for this pane. The application verifies the
+    /// shell incarnation before calling; this session is the fact's one owner.
+    pub fn apply_foreground_program(&mut self, program: ForegroundProgram) {
+        self.foreground_program = program;
+    }
+
+    #[must_use]
+    pub fn foreground_program(&self) -> &ForegroundProgram {
+        &self.foreground_program
+    }
+
+    /// Spend an OSC 133 command-start request for an immediate E8 observation.
+    pub fn take_foreground_program_probe_request(&mut self) -> bool {
+        std::mem::take(&mut self.foreground_program_probe_requested)
+    }
+
+    /// Whether the latest measured capture contains a possible frame rule, which arms the app's
+    /// five-second observation cadence without doing process work here.
+    #[must_use]
+    pub fn foreground_program_probe_is_armed(&self) -> bool {
+        self.foreground_program_frame_candidate
     }
 
     fn advance_published_revision(&mut self) {
@@ -4827,6 +4858,7 @@ impl DualPlaneSession {
         self.reconcile_live_image_paths(true, stable);
 
         let capture = self.live_capture();
+        self.foreground_program_frame_candidate = capture.has_frame_candidate();
         self.observe_frame(capture.frame());
         let candidates = live_candidate_rows(&capture, stable, self.inline_math_bands);
         let context_signature = live_detection_context_signature(&capture, self.inline_math_bands);
@@ -5333,6 +5365,7 @@ impl DualPlaneSession {
                     .insert(screen, ShellIntegrationPhase::Prompt);
             }
             ShellIntegrationMarker::CommandStart => {
+                self.foreground_program_probe_requested = true;
                 // Duplicate/nested B markers are tolerated without moving the authoritative start.
                 if matches!(phase, Some(ShellIntegrationPhase::Input(_))) {
                     return;
@@ -7101,7 +7134,12 @@ impl DualPlaneSession {
         });
         inputs.extend(grid_inputs);
         let initial_context = self.live_initial_detection_context(&inputs);
-        LiveCapture::new(inputs, initial_context, self.detection_options())
+        LiveCapture::with_foreground_program(
+            inputs,
+            initial_context,
+            self.detection_options(),
+            self.foreground_program.clone(),
+        )
     }
 
     /// The checkpoint immediately before the capture's first input.
@@ -7451,7 +7489,7 @@ impl DualPlaneSession {
     fn scan_live_grid(&self, capture: &LiveCapture) -> Vec<LiveDetectionTask> {
         // Asked of every pane's own lines: a framed row is two panes' text, and only a pane's slice
         // is a line anybody printed.
-        let armed = capture.frame().panes().iter().any(|pane| {
+        let armed = capture.pane_scans().iter().any(|pane| {
             let inputs = pane.inputs();
             inputs
                 .iter()
@@ -12069,13 +12107,15 @@ impl DualPlaneSession {
             if let Some(capture) = captures.iter().find(|capture| {
                 capture.initial_context() == record.capture.initial_context()
                     && capture.options() == record.capture.options()
+                    && capture.foreground_program() == record.capture.foreground_program()
             }) {
                 return capture.clone();
             }
-            let capture = LiveCapture::new(
+            let capture = LiveCapture::with_foreground_program(
                 Arc::clone(&inputs),
                 record.capture.initial_context().clone(),
                 record.capture.options(),
+                record.capture.foreground_program().clone(),
             );
             captures.push(capture.clone());
             capture
@@ -14158,11 +14198,12 @@ impl LiveDecorationRecord {
 }
 
 /// **Whether two frames are the same frame** (note §8.2): compared by value — the rectangles, the
-/// status row and the screen-owned fence state — and two frames of screens no frame cuts are always
-/// the same frame, whatever size the screen was, so an ordinary screen never sees a frame change.
+/// status row, screen-owned fence state, and foreground identity. Two unframed screens with the
+/// same foreground identity agree whatever their size.
 fn frames_agree(left: &ScreenFrame, right: &ScreenFrame) -> bool {
-    (!left.is_framed() && !right.is_framed())
-        || (left.same_layout(right) && left.screen_fence_state() == right.screen_fence_state())
+    left.foreground_program() == right.foreground_program()
+        && ((!left.is_framed() && !right.is_framed())
+            || (left.same_layout(right) && left.screen_fence_state() == right.screen_fence_state()))
 }
 
 /// The same capture under other detection options: the capture itself when they already agree, so
@@ -14171,10 +14212,11 @@ fn capture_under(capture: &LiveCapture, options: DetectionOptions) -> LiveCaptur
     if capture.options() == options {
         capture.clone()
     } else {
-        LiveCapture::new(
+        LiveCapture::with_foreground_program(
             Arc::clone(capture.inputs()),
             capture.initial_context().clone(),
             options,
+            capture.foreground_program().clone(),
         )
     }
 }
@@ -14191,7 +14233,7 @@ fn pane_holding(capture: &LiveCapture, start: GridPoint) -> Option<PaneRect> {
     frame
         .panes()
         .iter()
-        .map(|pane| pane.rect)
+        .copied()
         .find(|rect| rect.contains_row(start.row) && rect.contains_column(start.column))
 }
 
@@ -14505,8 +14547,7 @@ fn size_resolved_live_task_band(task: &mut LiveDetectionTask) {
 fn live_detection_context_signature(capture: &LiveCapture, inline_formulas: bool) -> u64 {
     let mut hasher = DefaultHasher::new();
     for input in capture
-        .frame()
-        .panes()
+        .pane_scans()
         .iter()
         .flat_map(|pane| pane.inputs().iter())
     {
@@ -15630,10 +15671,11 @@ fn live_task_is_current(
     {
         current.clone()
     } else {
-        LiveCapture::new(
+        LiveCapture::with_foreground_program(
             Arc::clone(current_inputs),
             task.capture.initial_context().clone(),
             task.capture.options(),
+            task.capture.foreground_program().clone(),
         )
     };
     current_task.pane = current_task.capture.screen_rect();
@@ -15691,24 +15733,43 @@ fn byte_offset_at_column(boundaries: &[(u32, u32)], column: u32, text_len: usize
 fn live_candidate_rows(capture: &LiveCapture, stable: &[bool], inline_formulas: bool) -> Vec<u32> {
     let frame = capture.frame();
     let screen_fence = frame.screen_fence_state();
-    let mut candidates = frame
-        .panes()
-        .iter()
-        .flat_map(|pane| {
-            live_candidate_rows_in_pane(
-                pane.inputs(),
-                pane.initial_context().clone(),
-                stable,
-                inline_formulas,
-            )
-        })
-        .filter(|row| !screen_fence.covers(*row))
-        .collect::<Vec<_>>();
-    if frame.panes().len() > 1 {
+    let mut candidates = Vec::new();
+    for pane in capture.pane_scans() {
+        let pane_candidates = live_candidate_rows_in_pane(
+            pane.inputs(),
+            pane.initial_context().clone(),
+            stable,
+            inline_formulas,
+        );
+        #[cfg(test)]
+        ARMING_WALKS.with(|walks| {
+            walks
+                .borrow_mut()
+                .push((pane.rect, pane_candidates.clone()));
+        });
+        candidates.extend(
+            pane_candidates
+                .into_iter()
+                .filter(|row| !screen_fence.covers(*row)),
+        );
+    }
+    if capture.pane_scans().len() > 1 {
         candidates.sort_unstable();
         candidates.dedup();
     }
     candidates
+}
+
+#[cfg(test)]
+thread_local! {
+    static ARMING_WALKS: std::cell::RefCell<Vec<(PaneRect, Vec<u32>)>> = const {
+        std::cell::RefCell::new(Vec::new())
+    };
+}
+
+#[cfg(test)]
+fn take_arming_walks() -> Vec<(PaneRect, Vec<u32>)> {
+    ARMING_WALKS.with(|walks| std::mem::take(&mut *walks.borrow_mut()))
 }
 
 fn live_candidate_rows_in_pane(

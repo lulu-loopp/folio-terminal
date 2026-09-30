@@ -6,10 +6,11 @@ use std::sync::Arc;
 
 use bt_detect::{
     BlockKind, DelimiterKind, DetectionContext, DetectionOptions, DetectionRevision,
-    GridGeneration, GridPoint, InlineMathSite, LayoutKey, LiveCapture, LiveDetectionInput,
-    LiveDetectionSource, LiveDetectionTask, MathMode, MathSpan, PaneRect, SUBPIXELS_PER_PX,
-    ScreenId, advance_detection_context, live_detection_isolation_gap,
+    ForegroundProgram, GridGeneration, GridPoint, InlineMathSite, LayoutKey, LiveCapture,
+    LiveDetectionInput, LiveDetectionSource, LiveDetectionTask, MathMode, MathSpan, PaneRect,
+    SUBPIXELS_PER_PX, ScreenId, advance_detection_context, live_detection_isolation_gap,
     live_detection_ownership_ledger, resolve_live_detection_task, resolve_live_detection_tasks,
+    trusted_multiplexers,
 };
 use bt_transcript::TranscriptId;
 
@@ -273,7 +274,20 @@ fn plain_screens() -> Vec<Screen> {
     table[0] = table_rule('\u{250c}', '\u{252c}', '\u{2510}', &[7, 10]);
     table[2] = table_rule('\u{251c}', '\u{253c}', '\u{2524}', &[7, 10]);
     table[39] = table_rule('\u{2514}', '\u{2534}', '\u{2518}', &[7, 10]);
-    screens.push(Screen::alt("full-height-unicode-table", 20, table));
+    screens.push(Screen::alt("full-height-unicode-table", 20, table.clone()));
+    screens.push(Screen::alt(
+        "full-height-unicode-table-blank-right-margin",
+        40,
+        table.clone(),
+    ));
+    screens.push(Screen::alt(
+        "full-height-unicode-table-blank-left-margin",
+        40,
+        table
+            .into_iter()
+            .map(|row| format!("{}{}", " ".repeat(20), row))
+            .collect(),
+    ));
 
     let mut codex_table = vec!["\u{2502} a  \u{2502} b  \u{2502}".to_owned(); 40];
     codex_table[0] = table_rule('\u{250c}', '\u{252c}', '\u{2510}', &[4, 4]);
@@ -340,7 +354,9 @@ fn plain_screens() -> Vec<Screen> {
         .collect();
     screens.push(Screen::alt("rule-moved-mid-capture", 80, moved));
 
-    let mut across = vec!["log       \u{2502}text".to_owned(); 40];
+    // Keep the main corpus's exact formula result while making the ordinary rows padded on both
+    // sides of the rule. E3's accepted-loss case has its own clipped-rule pin below.
+    let mut across = vec!["log       \u{2502} text".to_owned(); 40];
     across[20] = "$x        \u{2502}+y$".to_owned();
     screens.push(Screen::alt("formula-across-a-rule", 80, across));
 
@@ -393,12 +409,7 @@ fn dump(screen: &Screen) -> String {
         !capture.frame().is_framed(),
         "{} was cut into {:?}",
         screen.name,
-        capture
-            .frame()
-            .panes()
-            .iter()
-            .map(|pane| pane.rect)
-            .collect::<Vec<_>>()
+        capture.frame().panes().iter().copied().collect::<Vec<_>>()
     );
     let mut out = String::new();
     writeln!(out, "== {}", screen.name).unwrap();
@@ -499,6 +510,20 @@ fn framed_capture_from(width: u32, rows: &[String], context: DetectionContext) -
     LiveCapture::new(screen.inputs(), screen.initial_context, screen.options)
 }
 
+fn framed_capture_with_program(
+    width: u32,
+    rows: &[String],
+    program: ForegroundProgram,
+) -> LiveCapture {
+    let screen = Screen::alt("framed-with-program", width, rows.to_vec());
+    LiveCapture::with_foreground_program(
+        screen.inputs(),
+        screen.initial_context,
+        screen.options,
+        program,
+    )
+}
+
 fn rect(top: u32, bottom: u32, left: u32, right: u32) -> PaneRect {
     PaneRect {
         top,
@@ -509,12 +534,7 @@ fn rect(top: u32, bottom: u32, left: u32, right: u32) -> PaneRect {
 }
 
 fn panes(capture: &LiveCapture) -> Vec<PaneRect> {
-    capture
-        .frame()
-        .panes()
-        .iter()
-        .map(|pane| pane.rect)
-        .collect()
+    capture.frame().panes().iter().copied().collect()
 }
 
 /// One proven block: `(pane, mode, render source, start, end)`.
@@ -569,7 +589,7 @@ fn assert_read_whole(capture: &LiveCapture) {
         panes(capture)
     );
     assert_eq!(panes(capture), vec![capture.screen_rect()]);
-    let pane = &frame.panes()[0];
+    let pane = &capture.pane_scans()[0];
     assert!(Arc::ptr_eq(pane.inputs(), capture.inputs()));
     assert_eq!(pane.initial_context(), capture.initial_context());
 }
@@ -864,13 +884,6 @@ fn full_height_table() -> Vec<String> {
 /// pane is the capture itself, so the blocks, anchors and cells are the unsplit scan's exactly (the
 /// same screen is in the plain-screen baseline).
 ///
-/// **The residual cost, pinned beside it.** The same table on a screen wider than itself has a blank
-/// column right of its outer rule, which V2b reads as a gutter: the outer rule is cut and the
-/// table's own horizontal rules, anchored on it, cut the strip into bands. Every formula the whole
-/// screen proves is still proven, at the same cells — a cut along a table's own rules takes
-/// nothing apart — but the screen is framed. The note's §0.3 invariant is about a table as wide as
-/// its screen; this case is reported to the review (T-PANE-COLUMNS report, finding F-1).
-///
 /// MUTATION: read a side as clipped when any row touches the rule (drop the majority in
 /// `Measure::v2`).
 #[test]
@@ -879,16 +892,26 @@ fn a_full_height_unicode_table_is_not_a_pane_frame() {
     assert_read_whole(&capture);
     let whole = proven(&capture);
     assert_eq!(whole.len(), 37);
+}
 
-    let wider = framed_capture(40, &full_height_table());
-    assert!(wider.frame().is_framed());
-    let anchors = |blocks: &[Proven]| {
-        blocks
-            .iter()
-            .map(|block| (block.2.clone(), block.3, block.4))
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(anchors(&proven(&wider)), anchors(&whole));
+/// RED (69a round 2, E1) — the blank right margin is not an empty pane: the candidate outer rule
+/// is joined to parallel table boundaries on three rows, so V2b refuses the connected enclosure.
+#[test]
+fn a_full_height_unicode_table_with_a_blank_right_margin_is_not_a_pane_frame() {
+    let capture = framed_capture(40, &full_height_table());
+    assert_read_whole(&capture);
+    assert_eq!(proven(&capture).len(), 37);
+}
+
+/// RED (69a round 2, E1) — the connected-enclosure refusal is symmetric.
+#[test]
+fn a_full_height_unicode_table_with_a_blank_left_margin_is_not_a_pane_frame() {
+    let screen = full_height_table()
+        .into_iter()
+        .map(|row| format!("{}{}", " ".repeat(20), row))
+        .collect::<Vec<_>>();
+    let capture = framed_capture(40, &screen);
+    assert_read_whole(&capture);
 }
 
 fn aligned_two_by_two(right: impl Fn(usize) -> String) -> Vec<String> {
@@ -1069,6 +1092,42 @@ fn a_status_slice_cannot_manufacture_a_clean_display_opener() {
     assert!(proven(&capture).is_empty());
 }
 
+/// RED (69a round 2, E2) — the top status row blocks only the vertical cut in the top child; the
+/// root horizontal cut exists with or without it, so root-only comparison misses the exclusion.
+#[test]
+fn a_status_row_that_blocks_only_a_nested_cut_is_excluded() {
+    let mut screen = (0..40)
+        .map(|row| {
+            if row == 0 {
+                "status ready".to_owned()
+            } else if row < 20 {
+                format!("{:<10}\u{2502}right {row}", format!("top {row}"))
+            } else if row == 20 {
+                format!(
+                    "{}\u{2534}{}\u{252c}{}",
+                    "\u{2500}".repeat(10),
+                    "\u{2500}".repeat(19),
+                    "\u{2500}".repeat(10)
+                )
+            } else {
+                format!("{:<30}\u{2502}r {row}", format!("lower {row}"))
+            }
+        })
+        .collect::<Vec<_>>();
+    screen[0].push_str(&" ".repeat(29));
+    let capture = framed_capture(41, &screen);
+    assert_eq!(capture.frame().status_row(), Some(0));
+    assert_eq!(
+        panes(&capture),
+        vec![
+            rect(1, 20, 0, 10),
+            rect(1, 20, 11, 41),
+            rect(21, 40, 0, 30),
+            rect(21, 40, 31, 41),
+        ]
+    );
+}
+
 /// RED (69a) — **a vim `:vsplit` with two status rows keeps today's behaviour** (accepted conservative
 /// failure, §5): only one edge row may be set aside, and the window status and the command line are
 /// two.
@@ -1161,8 +1220,7 @@ fn a_rule_column_that_changes_mid_capture_is_not_sliced_at_the_stale_column() {
     };
     assert!(
         capture
-            .frame()
-            .panes()
+            .pane_scans()
             .iter()
             .all(|pane| pane.inputs().iter().all(|input| input.source != stale))
     );
@@ -1193,26 +1251,6 @@ fn an_exempt_edge_wide_cluster_maps_through_the_captured_boundaries() {
             GridPoint { row: 5, column: 9 }
         )
     );
-}
-
-/// RED (69a) — **a formula written across an intact rule refuses the cut** (R5, on rule rows too):
-/// `$x        │+y$` is proven by the unsplit scan, so the cut at column 10 would take it apart and is
-/// refused. The branch's "deliberate loss" is withdrawn.
-///
-/// MUTATION: skip `vertical_cut_crosses_a_proof` in `Measure::vertical_cuts`.
-#[test]
-fn a_formula_written_across_an_intact_rule_refuses_the_cut() {
-    let mut screen = vec!["log       \u{2502}text".to_owned(); 40];
-    screen[20] = "$x        \u{2502}+y$".to_owned();
-    let capture = framed_capture(80, &screen);
-    assert_read_whole(&capture);
-    let blocks = proven(&capture);
-    assert_eq!(blocks.len(), 1);
-    assert_eq!(blocks[0].3, GridPoint { row: 20, column: 0 });
-
-    // The same screen without the formula is cut there, so the refusal is R5's.
-    let clean = framed_capture(80, &vec!["log       \u{2502}text".to_owned(); 40]);
-    assert_eq!(panes(&clean), vec![rect(0, 40, 0, 10), rect(0, 40, 11, 80)]);
 }
 
 /// RED (69a) — **a display block across unframed rows keeps the screen whole** (§6.3): thirty-seven
@@ -1265,7 +1303,7 @@ fn a_cluster_straddling_the_rule_belongs_to_neither_side() {
     let capture = framed_capture(20, &screen);
     assert_eq!(capture.frame().status_row(), Some(9));
     assert_eq!(panes(&capture), vec![rect(0, 9, 0, 4), rect(0, 9, 5, 20)]);
-    for pane in capture.frame().panes() {
+    for pane in capture.pane_scans() {
         assert!(
             pane.inputs().iter().all(|input| !input.text.contains('能')),
             "{:?} took the straddling cluster",
@@ -1323,6 +1361,198 @@ fn a_formula_in_each_pane_on_one_row_does_not_refuse_the_cut() {
     let blocks = proven(&capture);
     assert_eq!(count(&blocks, left, MathMode::Inline), 20);
     assert_eq!(blocks.len(), 20);
+}
+
+fn clipped_rule_screen(mut rows: impl FnMut(usize) -> (String, String)) -> Vec<String> {
+    (0..40)
+        .map(|row| {
+            let (left, right) = rows(row);
+            format!("{left:<50}\u{2502}{right}")
+        })
+        .collect()
+}
+
+/// RED (69a round 2, E3(b)) — independent delimiters printed by two agents do not synthesize an
+/// R5 veto across a rule that already passed V1 and V2.
+#[test]
+fn two_panes_delimiters_do_not_form_an_r5_veto() {
+    let same_row = clipped_rule_screen(|row| {
+        if row == 10 {
+            ("$$".to_owned(), "$$".to_owned())
+        } else {
+            (format!("left {row}"), format!("right {row}"))
+        }
+    });
+    assert_eq!(
+        panes(&framed_capture(101, &same_row)),
+        vec![rect(0, 40, 0, 50), rect(0, 40, 51, 101)]
+    );
+
+    let multi_row = clipped_rule_screen(|row| match row {
+        10 => ("$$".to_owned(), "right ten".to_owned()),
+        13 => ("left thirteen".to_owned(), "done $$".to_owned()),
+        _ => (format!("left {row}"), format!("right {row}")),
+    });
+    assert_eq!(
+        panes(&framed_capture(101, &multi_row)),
+        vec![rect(0, 40, 0, 50), rect(0, 40, 51, 101)]
+    );
+}
+
+/// RED (69a round 2, E3(b)) — ACCEPTED loss: on an untrusted screen, opposite-side delimiters at
+/// a proven clipped rule are classified as two panes' text, even if they were one real formula.
+#[test]
+fn a_formula_across_a_proven_frame_is_two_panes_text() {
+    let screen = clipped_rule_screen(|row| {
+        if row == 10 {
+            ("$x".to_owned(), "+ y$".to_owned())
+        } else {
+            (format!("left {row}"), format!("right {row}"))
+        }
+    });
+    let capture = framed_capture(101, &screen);
+    assert_eq!(
+        panes(&capture),
+        vec![rect(0, 40, 0, 50), rect(0, 40, 51, 101)],
+        "ACCEPTED: a real formula crossing a proven frame is read as two panes' text"
+    );
+    assert!(proven(&capture).is_empty());
+}
+
+/// RED (69a round 2, E3(b)) — no V2 proof means no exemption; the genuine cross-rule formula
+/// remains whole.
+#[test]
+fn a_formula_across_an_unproven_rule_still_vetoes() {
+    let screen = (0..40)
+        .map(|row| {
+            if row == 10 {
+                format!("{:<49} \u{2502} {:<49}", "$x", "+ y$")
+            } else {
+                format!(
+                    "{:<49} \u{2502} {:<49}",
+                    format!("left {row}"),
+                    format!("right {row}")
+                )
+            }
+        })
+        .collect::<Vec<_>>();
+    let capture = framed_capture(101, &screen);
+    assert_read_whole(&capture);
+    assert_eq!(proven(&capture).len(), 1);
+}
+
+/// RED (69a round 2, E3 delimiter granularity) — a display formula's middle segment crosses the
+/// proven rule, but the opening and closing delimiters are both left of it, so the segment still
+/// vetoes the cut.
+#[test]
+fn a_middle_segment_crossing_a_proven_rule_is_not_exempt_when_both_delimiters_are_on_one_side() {
+    let screen = clipped_rule_screen(|row| match row {
+        10 => ("$$".to_owned(), String::new()),
+        11 => ("a".repeat(50), "b".repeat(10)),
+        12 => ("123456789$$".to_owned(), "right twelve".to_owned()),
+        _ => (format!("left {row}"), format!("right {row}")),
+    });
+    let fixture = Screen::alt("middle-segment", 101, screen);
+    let capture = LiveCapture::new(fixture.inputs(), fixture.initial_context, fixture.options);
+    assert_read_whole(&capture);
+    assert!(proven(&capture).iter().any(|block| {
+        block.1 == MathMode::Display
+            && block.3.row == 10
+            && block.4.row == 12
+            && block.2.contains('\u{2502}')
+    }));
+}
+
+fn padded_outer_rule() -> Vec<String> {
+    (0..40)
+        .map(|row| format!("{:<49} \u{2502}  right {row}", format!("left {row}")))
+        .collect()
+}
+
+/// RED (69a round 2, E8) — trusted tmux provenance lets the root full-height divider pass on V1
+/// alone even though padding makes ordinary V2 refuse it.
+#[test]
+fn trusted_tmux_frames_a_padded_outer_rule_that_v2_refuses() {
+    let capture =
+        framed_capture_with_program(101, &padded_outer_rule(), ForegroundProgram::known("tmux"));
+    assert_eq!(
+        panes(&capture),
+        vec![rect(0, 40, 0, 50), rect(0, 40, 51, 101)]
+    );
+}
+
+/// RED (69a round 2, E8) — byte-for-byte the same screen stays on E3(b)'s ordinary path when the
+/// worker has no local provenance.
+#[test]
+fn the_same_padded_outer_rule_is_not_a_frame_when_provenance_is_unknown() {
+    let screen = padded_outer_rule();
+    assert_read_whole(&framed_capture(101, &screen));
+    assert_read_whole(&framed_capture_with_program(
+        101,
+        &screen,
+        ForegroundProgram::known("powershell"),
+    ));
+}
+
+/// RED (69a round 2, E8) — trust proves only the root divider. H2 may anchor a child split on that
+/// divider, but the padded table rule found inside the resulting child still needs V2 and remains
+/// content.
+#[test]
+fn a_padded_table_inside_a_trusted_tmux_pane_is_still_one_pane() {
+    let screen = (0..40)
+        .map(|row| {
+            if row == 20 {
+                format!("{:<50}\u{251c}{}", "left 20", "\u{2500}".repeat(50))
+            } else if row < 20 {
+                format!(
+                    "{:<50}\u{2502}{:<19} \u{2502}  table value {row}",
+                    format!("left {row}"),
+                    format!("table key {row}")
+                )
+            } else {
+                format!("{:<50}\u{2502}bottom right {row}", format!("left {row}"))
+            }
+        })
+        .collect::<Vec<_>>();
+    let capture = framed_capture_with_program(101, &screen, ForegroundProgram::known("tmux"));
+    assert_eq!(
+        panes(&capture),
+        vec![
+            rect(0, 40, 0, 50),
+            rect(0, 20, 51, 101),
+            rect(21, 40, 51, 101),
+        ]
+    );
+}
+
+/// RED (69a round 2, E8) — the data file is the only operational allowlist.
+#[test]
+fn trusted_multiplexers_are_read_from_the_allowlist_data() {
+    let loaded = trusted_multiplexers();
+    assert_eq!(loaded.len(), 4);
+    let mut unique = loaded.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    assert_eq!(unique.len(), loaded.len());
+    assert!(loaded.iter().all(|name| {
+        !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+    }));
+    for name in loaded {
+        assert!(
+            framed_capture_with_program(101, &padded_outer_rule(), ForegroundProgram::known(name),)
+                .frame()
+                .is_framed(),
+            "{name} from the data file did not establish root trust"
+        );
+    }
+    assert_read_whole(&framed_capture_with_program(
+        101,
+        &padded_outer_rule(),
+        ForegroundProgram::known("not-a-multiplexer"),
+    ));
 }
 
 /// RED (69a) — **a framed pane is scanned from a neutral checkpoint** (R8). The capture's checkpoint

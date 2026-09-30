@@ -133,6 +133,7 @@ bt_render::GpuContext::open	all	a cross-crate entrance that waits inside
 bt_pty::PtySession::spawn_shell_in	all	a cross-crate entrance that waits inside
 bt_pty::PtySession::resize	all	a cross-crate entrance that waits inside
 bt_pty::wait_for_retirements	all	a cross-crate entrance that waits inside
+bt_platform::foreground_program::imp::snapshot	all	one worker-only ToolHelp/libproc process-table observation
 windows::Win32::UI::Shell::ShellExecuteW	windows	waits for the shell
 windows::Win32::System::Threading::SetEvent	windows	counted by call site, does not wait
 windows::Win32::Foundation::CloseHandle	windows	counted by call site, does not wait
@@ -153,6 +154,7 @@ bt_platform::WebHost::rehost	WebRehost
 
 # effects
 crate	arm	item	effects	kind	authority	door
+bt-app	-	crate::foreground_program::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::gpu_door::open_first_window	bt_render::GpuContext::open 1, pollster::block_on 1	owner-door-body	WaitToken	GpuOpen
 bt-app	-	crate::persist::SessionWriter::close	std::thread::JoinHandle::join 1, std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
 bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
@@ -160,6 +162,7 @@ bt-app	-	crate::pty_door::resize	bt_pty::PtySession::resize 1	owner-door-body	Wa
 bt-app	-	crate::pty_door::spawn_shell	bt_pty::PtySession::spawn_shell_in 1	owner-door-body	WaitToken	PtyBirth
 bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	owner-door-body	WaitToken	PaneRetirementWait
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
+bt-platform	-	crate::foreground_program::foreground_program	bt_platform::foreground_program::imp::snapshot 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
 
@@ -172,6 +175,7 @@ construct	owner	count
 #[link]	bt-platform crate::macos_watch	1
 extern block	bt-platform crate::hotkey::macos_hotkey	1
 extern block	bt-platform crate::launch_pipe::peer_executable	1
+extern block	bt-platform crate::foreground_program::imp	1
 extern block	bt-platform crate::macos_app	1
 extern block	bt-platform crate::macos_dialogs	1
 extern block	bt-platform crate::macos_impl	1

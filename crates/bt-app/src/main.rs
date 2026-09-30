@@ -67,6 +67,7 @@ mod files_watch;
 mod first_run;
 mod float;
 mod focus_thumb;
+mod foreground_program;
 mod formula_tools;
 mod git;
 mod git_graph;
@@ -11383,20 +11384,23 @@ fn dispatch_tab_decoration_tasks(
     tasks: &mpsc::Sender<MathWorkerRequest>,
     scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
     path_tasks: &mpsc::Sender<PathWorkerRequest>,
+    foreground_tasks: &mpsc::Sender<foreground_program::Request>,
+    now: Instant,
     running: &mut bool,
     notice_pending: &mut bool,
 ) -> bool {
     let tab_id = tab.id;
     let mut disabled = false;
     for (seat, leaf) in tab.leaves_mut() {
-        disabled |= dispatch_pending_math_tasks(
-            ShellAddress {
-                window,
-                leaf: LeafId {
-                    tab: tab_id,
-                    seat: *seat,
-                },
+        let address = ShellAddress {
+            window,
+            leaf: LeafId {
+                tab: tab_id,
+                seat: *seat,
             },
+        };
+        disabled |= dispatch_pending_math_tasks(
+            address,
             &mut leaf.session,
             tasks,
             scale_tasks,
@@ -11404,6 +11408,29 @@ fn dispatch_tab_decoration_tasks(
             running,
             notice_pending,
         );
+        let command_started = leaf.session.take_foreground_program_probe_request();
+        let candidate = leaf.session.foreground_program_probe_is_armed();
+        if leaf
+            .foreground_program_cadence
+            .should_request(now, command_started, candidate)
+        {
+            let sent = leaf
+                .pty
+                .as_ref()
+                .and_then(PtySession::shell_process_id)
+                .is_some_and(|shell| {
+                    foreground_tasks
+                        .send(foreground_program::Request {
+                            address,
+                            incarnation: leaf.incarnation,
+                            shell,
+                        })
+                        .is_ok()
+                });
+            if !sent {
+                leaf.foreground_program_cadence.answered();
+            }
+        }
     }
     disabled
 }
@@ -11434,6 +11461,7 @@ struct DpiSnapshot {
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
 struct LeafSession {
     pty: Option<PtySession>,
+    foreground_program_cadence: foreground_program::Cadence,
     /// **Which shell this is, told apart from the one that stood here before**
     /// (review X-1).
     ///
@@ -12325,6 +12353,7 @@ struct App {
     /// be unique across windows, because an answer finds its window by id.
     handoff_lane: handoff_lane::HandoffLane,
     math_worker: MathWorker,
+    foreground_program_worker: foreground_program::Worker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
     /// **The repositories the kernel has been asked to report changes in**
@@ -27693,6 +27722,16 @@ fn attention_ledger_deadline(tabs: &[TabState]) -> Option<Instant> {
         .min()
 }
 
+fn foreground_program_deadline(tabs: &[TabState]) -> Option<Instant> {
+    tabs.iter()
+        .flat_map(TabState::leaves)
+        .filter_map(|(_, leaf)| {
+            leaf.foreground_program_cadence
+                .deadline(leaf.session.foreground_program_probe_is_armed())
+        })
+        .min()
+}
+
 fn emit_attention_lines(trace: Option<&attention_trace::Trace>, lines: Vec<String>) {
     for line in lines {
         attention_trace::emit(trace, || line);
@@ -38194,6 +38233,7 @@ fn create_leaf_session(
         // when there is no ConPTY — see the field.
         wake: pty.is_some().then_some(wake),
         pty,
+        foreground_program_cadence: foreground_program::Cadence::default(),
         paste_recipient: profiles::paste_recipient(
             profiles::index_of_id(&profile),
             &bt_pty::SystemShellEnvironment,
@@ -42019,6 +42059,12 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::MathReady);
             }
         })?;
+        let foreground_program_worker = foreground_program::Worker::spawn({
+            let proxy = proxy.clone();
+            move || {
+                let _ = proxy.send_event(AppEvent::MathReady);
+            }
+        })?;
         let handoff_lane = handoff_lane::HandoffLane::spawn({
             let proxy = proxy.clone();
             move || {
@@ -42047,6 +42093,7 @@ impl Runtime<'_> {
             git_watch: git_watch::GitWatch::default(),
             handoff_lane,
             math_worker,
+            foreground_program_worker,
             math_worker_running: true,
             math_worker_notice_pending: false,
             files_worker,
@@ -60401,6 +60448,17 @@ impl FolioApp {
         (batch, gone)
     }
 
+    fn drain_foreground_program_answers(&mut self) -> Vec<foreground_program::Answer> {
+        let mut batch = Vec::new();
+        let Some(app) = self.app.as_mut() else {
+            return batch;
+        };
+        while let Ok(answer) = app.foreground_program_worker.answers.try_recv() {
+            batch.push(answer);
+        }
+        batch
+    }
+
     /// **Give every hand-off answer to the window that asked for it** (`handoff_lane`).
     ///
     /// Each answer is offered to every open window and claimed by the one whose duties hold its
@@ -63877,7 +63935,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }
             AppEvent::MathReady => {
                 let (mut batch, gone) = self.drain_math_answers();
-                self.for_each_window(|runtime| runtime.apply_math_results(&mut batch, gone))
+                let mut foreground = self.drain_foreground_program_answers();
+                self.for_each_window(|runtime| {
+                    runtime.apply_math_results(&mut batch, gone)?;
+                    runtime.apply_foreground_program_results(&mut foreground)
+                })
             }
             AppEvent::FilesReady => {
                 let (mut batch, gone) = self.drain_files_answers();

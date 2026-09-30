@@ -44024,6 +44024,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         // takes one from.
         incarnation: next_incarnation(),
         pty: None,
+        foreground_program_cadence: foreground_program::Cadence::default(),
         // No ConPTY, so no reader thread, so nothing to wake — see the field.
         wake: None,
         // Aimed at the tail, like every shell that has not been aimed.
@@ -44081,6 +44082,53 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         // A fixture is not a restore, so nothing is owed to its prompt.
         pending_typing: None,
     }
+}
+
+/// RED (69a round 2, E8) — a worker answer lands only in the addressed shell incarnation. The
+/// platform fake-tree pin proves WSL/ssh produce `Unknown`; this pin proves that answer is stored
+/// as unknown, while an unlisted local image remains known for ordinary E3(b).
+#[test]
+fn an_addressed_foreground_answer_stores_unknown_and_preserves_an_unlisted_local_name() {
+    let mut leaf = leaf_saying("foreground answer");
+    let incarnation = leaf.incarnation;
+    assert_eq!(
+        foreground_program::apply_answer(
+            &mut leaf,
+            incarnation,
+            bt_platform::foreground_program::ForegroundProgram::Unknown,
+        ),
+        Some(false)
+    );
+    assert_eq!(
+        leaf.session.foreground_program(),
+        &bt_detect::ForegroundProgram::Unknown
+    );
+
+    assert_eq!(
+        foreground_program::apply_answer(
+            &mut leaf,
+            incarnation,
+            bt_platform::foreground_program::ForegroundProgram::Known("powershell".to_owned()),
+        ),
+        Some(true)
+    );
+    assert_eq!(
+        leaf.session.foreground_program(),
+        &bt_detect::ForegroundProgram::known("powershell")
+    );
+
+    assert_eq!(
+        foreground_program::apply_answer(
+            &mut leaf,
+            incarnation + 1,
+            bt_platform::foreground_program::ForegroundProgram::Unknown,
+        ),
+        None
+    );
+    assert_eq!(
+        leaf.session.foreground_program(),
+        &bt_detect::ForegroundProgram::known("powershell")
+    );
 }
 
 /// What the shell filed under `seat` has on its screen — the identity check.
@@ -44215,6 +44263,7 @@ fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
     let (tasks, requests) = mpsc::channel();
     let (scale_tasks, _scale_requests) = mpsc::channel();
     let (path_tasks, _path_requests) = mpsc::channel();
+    let (foreground_tasks, _foreground_requests) = mpsc::channel();
     let mut running = true;
     let mut notice_pending = false;
     assert!(
@@ -44224,6 +44273,8 @@ fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
             &tasks,
             &scale_tasks,
             &path_tasks,
+            &foreground_tasks,
+            Instant::now(),
             &mut running,
             &mut notice_pending,
         ),

@@ -5,7 +5,10 @@
 pub mod frame;
 mod ledger;
 pub mod table;
-pub use frame::{LiveCapture, Pane, PaneRect, ScreenFenceState, ScreenFrame};
+pub use frame::{
+    ForegroundProgram, LiveCapture, PaneRect, PaneScan, ScreenFenceState, ScreenFrame,
+    trusted_multiplexers,
+};
 pub use ledger::{
     ContainmentVerdict, LedgerEntry, LegitimateRejection, OrphanKind, OwnershipLedger,
     SourceIntegrityAnnotation, StructuralDelimiterKind, TokenFate,
@@ -3154,8 +3157,7 @@ pub fn frozen_resync_scan_with_options<'a>(
 /// history prefix, so each pane's two scans coincide.
 pub fn live_detection_isolation_gap(capture: &LiveCapture) -> usize {
     capture
-        .frame()
-        .panes()
+        .pane_scans()
         .iter()
         .map(|pane| {
             pane_isolation_gap(
@@ -3245,8 +3247,8 @@ pub fn live_detection_ownership_ledger(
     capture: &LiveCapture,
 ) -> BTreeMap<PaneRect, OwnershipLedger> {
     let frame = capture.frame();
-    frame
-        .panes()
+    capture
+        .pane_scans()
         .iter()
         .map(|pane| {
             (
@@ -3686,11 +3688,11 @@ fn screen_fence_suppresses(
 
 /// Every pane of a capture's frame, scanned alone (R8), with the blocks a screen-owned fence covers
 /// taken out (R9). An unframed screen is one pane: the capture itself, from its own checkpoint.
-fn pane_scans(capture: &LiveCapture) -> Vec<(&Pane, LiveScan)> {
+fn resolved_pane_scans(capture: &LiveCapture) -> Vec<(&PaneScan, LiveScan)> {
     let frame = capture.frame();
     let screen_fence = frame.screen_fence_state();
-    frame
-        .panes()
+    capture
+        .pane_scans()
         .iter()
         .map(|pane| {
             let mut scan = live_scan(pane.inputs(), pane.initial_context(), capture.options());
@@ -3705,7 +3707,7 @@ fn pane_scans(capture: &LiveCapture) -> Vec<(&Pane, LiveScan)> {
 
 /// The refused tables of every pane, first row each, in pane order and without repeats: a refusal is
 /// a refusal wherever it was proven (69a; 69b keys it by pane).
-fn refused_rows_across_panes(scans: &[(&Pane, LiveScan)]) -> Vec<u32> {
+fn refused_rows_across_panes(scans: &[(&PaneScan, LiveScan)]) -> Vec<u32> {
     let mut rows = Vec::new();
     for (_, scan) in scans {
         for row in refused_table_rows(&scan.scan, &scan.row_to_logical) {
@@ -3720,9 +3722,9 @@ fn refused_rows_across_panes(scans: &[(&Pane, LiveScan)]) -> Vec<u32> {
 /// The first pane whose scan closes a block on `candidate_row`, with that block and the pane's
 /// logical lines (69a: the candidate is looked up pane by pane; 69b keys candidates by pane).
 fn block_closing_on<'a>(
-    scans: &'a [(&'a Pane, LiveScan)],
+    scans: &'a [(&'a PaneScan, LiveScan)],
     candidate_row: u32,
-) -> Option<(&'a Pane, &'a DetectedMathBlock, &'a [LiveLogicalLine])> {
+) -> Option<(&'a PaneScan, &'a DetectedMathBlock, &'a [LiveLogicalLine])> {
     scans.iter().find_map(|(pane, scan)| {
         let id = scan.row_to_logical.get(&candidate_row)?;
         scan.scan
@@ -3747,7 +3749,7 @@ pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
     }
     // The capture is shared (one `Arc`), so holding it here while the task is written is free.
     let capture = task.capture.clone();
-    let scans = pane_scans(&capture);
+    let scans = resolved_pane_scans(&capture);
     if !scans
         .iter()
         .any(|(_, scan)| scan.row_to_logical.contains_key(&task.candidate_row))
@@ -3771,7 +3773,7 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
         return;
     };
     let capture = first.capture.clone();
-    let scans = pane_scans(&capture);
+    let scans = resolved_pane_scans(&capture);
     let refused = refused_rows_across_panes(&scans);
     for task in tasks {
         if task.resolved || task.detection_complete {
@@ -3814,7 +3816,7 @@ fn apply_live_detected_block(
     task: &mut LiveDetectionTask,
     block: &DetectedMathBlock,
     logical: &[LiveLogicalLine],
-    pane: &Pane,
+    pane: &PaneScan,
 ) -> bool {
     let mut occurrence = block.span.clone();
     let Some(cell_segments) =

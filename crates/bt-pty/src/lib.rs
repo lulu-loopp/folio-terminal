@@ -1553,6 +1553,18 @@ pub struct PtySession {
     shell_fallback: Option<ShellFallback>,
 }
 
+/// The process id of the shell at the root of one pane's pseudoconsole tree. The PTY remains the
+/// process owner; this copy is only the typed address of E8's foreground-program observation.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct ShellProcessId(u32);
+
+impl ShellProcessId {
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
 /// What happened, for the window to say it in its own words.
 ///
 /// **A fact, not a sentence**, and the change is the whole of this ticket's third item. The
@@ -2078,6 +2090,12 @@ impl PtySession {
 
     pub fn child_id(&self) -> Option<u32> {
         self.child.as_ref().and_then(|child| child.process_id())
+    }
+
+    /// The shell process at the root of this pane's process tree.
+    #[must_use]
+    pub fn shell_process_id(&self) -> Option<ShellProcessId> {
+        self.child_id().map(ShellProcessId)
     }
 
     /// Has the child ended, and how — asked as many times as anyone likes.

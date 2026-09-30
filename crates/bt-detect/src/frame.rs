@@ -1,7 +1,7 @@
 //! **The frame of a live capture: which rectangles of the screen are panes a multiplexer draws.**
 //!
 //! Ticket 69a (T-PANE-COLUMNS); the specification is `docs/plans/design/pane-columns-2026-09-29.md`,
-//! revision (c), and every rule below carries the note's name for it.
+//! revisions (c)–(e), and every rule below carries the note's name for it.
 //!
 //! A multiplexer does not pass its panes' bytes through. It repaints the host screen itself, and every
 //! pane row carries the frame: `<frame cells>│<pane text>`. Read as one line, `<25 blanks>│$$` is
@@ -11,10 +11,11 @@
 //! is scanned alone, from a neutral checkpoint, over its own rows and columns, with every gate of the
 //! scanner unchanged (R8).
 //!
-//! **The door is [`LiveCapture`]** (§3). It holds one capture — the inputs, the parser checkpoint
-//! before them and the options they are scanned under — and measures its frame once, on first ask, by
-//! whichever lane asks. The frame lives exactly as long as the last holder of the capture. Nothing
-//! else in the product constructs a frame, and nothing else slices a grid row into a pane.
+//! **The door is [`LiveCapture`]** (§3). It holds one capture — the inputs, parser checkpoint,
+//! options, and foreground-program fact — and measures it once on first ask, by whichever lane
+//! asks. Its capture-local pane scans live exactly as long as the last holder of the capture; its
+//! lightweight [`ScreenFrame`] topology may also be retained by the session. Nothing else in the
+//! product constructs a frame, and nothing else slices a grid row into a pane.
 //!
 //! **What a cut is.** A column `c` of a rectangle `R` is a vertical cut when
 //! - (V1) every row of `R` carries a vertical stroke at `c`, `R` has at least three rows, and the
@@ -88,16 +89,57 @@ impl PaneRect {
     }
 }
 
-/// One pane of a frame: its rectangle, and the capture's rows as that pane reads them (R7) together
-/// with the checkpoint its scan starts from (R8).
+/// The foreground program captured for one frame measurement (revision (e), E8).
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub enum ForegroundProgram {
+    #[default]
+    Unknown,
+    Known(String),
+}
+
+impl ForegroundProgram {
+    #[must_use]
+    pub fn known(image_name: impl Into<String>) -> Self {
+        Self::Known(image_name.into())
+    }
+
+    #[must_use]
+    pub fn image_name(&self) -> Option<&str> {
+        match self {
+            Self::Unknown => None,
+            Self::Known(image_name) => Some(image_name),
+        }
+    }
+}
+
+/// The one parser for the trusted-multiplexer data. Product classification and its test both call
+/// this function; Rust carries no second operational list (revision (e), E8).
+#[must_use]
+pub fn trusted_multiplexers() -> Vec<&'static str> {
+    include_str!("multiplexer_allowlist.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect()
+}
+
+fn foreground_is_trusted(program: &ForegroundProgram) -> bool {
+    program
+        .image_name()
+        .is_some_and(|image| trusted_multiplexers().contains(&image))
+}
+
+/// One pane's capture-local scan: the topology rectangle, the capture's rows as that pane reads
+/// them (R7), and the checkpoint its scan starts from (R8). This value dies with the capture and is
+/// never retained by [`ScreenFrame`].
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Pane {
+pub struct PaneScan {
     pub rect: PaneRect,
     inputs: Arc<[LiveDetectionInput]>,
     initial_context: DetectionContext,
 }
 
-impl Pane {
+impl PaneScan {
     /// The pane's own lines. For the one whole-screen pane of an unframed screen this is the
     /// capture's input list itself — the same `Arc`, history tail included. For a framed pane it is
     /// one input per grid row of the rectangle, holding only the clusters wholly inside its columns,
@@ -143,22 +185,17 @@ impl ScreenFenceState {
 /// status row it set aside, and the screen-owned fence state.
 #[derive(Debug, Eq, PartialEq)]
 pub struct ScreenFrame {
-    panes: Vec<Pane>,
+    panes: Vec<PaneRect>,
     status_row: Option<u32>,
     screen_fence: ScreenFenceState,
+    foreground_program: ForegroundProgram,
 }
 
 impl ScreenFrame {
     /// The panes, in reading order (top, then left).
     #[must_use]
-    pub fn panes(&self) -> &[Pane] {
+    pub fn panes(&self) -> &[PaneRect] {
         &self.panes
-    }
-
-    /// The pane with exactly this rectangle.
-    #[must_use]
-    pub fn pane(&self, rect: PaneRect) -> Option<&Pane> {
-        self.panes.iter().find(|pane| pane.rect == rect)
     }
 
     /// The edge row set aside as a status row (§2.1), if any.
@@ -180,18 +217,22 @@ impl ScreenFrame {
         &self.screen_fence
     }
 
-    /// **Whether two frames are the same layout** — the same rectangles and the same status row,
-    /// compared by value and never by pointer (§8.2, "the current frame"). A frame that differs from
-    /// the previous capture's is a frame change (R12).
+    /// The compact provenance identity captured with this topology. It contains one canonical leaf
+    /// image name or `Unknown`, never a process tree.
+    #[must_use]
+    pub fn foreground_program(&self) -> &ForegroundProgram {
+        &self.foreground_program
+    }
+
+    /// **Whether two frames are the same layout identity** — rectangles, status row, and compact
+    /// foreground program, compared by value and never by pointer (§8.2, "the current frame"). A
+    /// frame that differs from the previous capture's is a frame change (R12).
     #[must_use]
     pub fn same_layout(&self, other: &Self) -> bool {
         self.status_row == other.status_row
             && self.panes.len() == other.panes.len()
-            && self
-                .panes
-                .iter()
-                .zip(&other.panes)
-                .all(|(left, right)| left.rect == right.rect)
+            && self.panes == other.panes
+            && self.foreground_program == other.foreground_program
     }
 }
 
@@ -203,9 +244,9 @@ thread_local! {
 }
 
 /// **The door** (§3): one live capture, the only thing every live entry point of the detector
-/// accepts. It owns the derivation of its frame, measured once on first ask (by whichever lane asks —
-/// the window thread's arming today) and never written again; the frame lives exactly as long as the
-/// last holder of the capture.
+/// accepts. It owns the derivation measured once on first ask (by whichever lane asks — the window
+/// thread's arming today) and never written again. Capture-local scans live exactly as long as the
+/// last holder of the capture; only their lightweight topology may outlive it in the session.
 #[derive(Clone)]
 pub struct LiveCapture(Arc<CaptureInner>);
 
@@ -214,7 +255,16 @@ struct CaptureInner {
     /// The parser checkpoint immediately before `inputs[0]`.
     initial_context: DetectionContext,
     options: DetectionOptions,
-    frame: OnceLock<Arc<ScreenFrame>>,
+    foreground_program: ForegroundProgram,
+    frame: OnceLock<Arc<CaptureFrame>>,
+}
+
+/// The once-measured, capture-local value: lightweight topology plus the scans that borrow this
+/// capture's rows. Only the topology can escape into a session-owned identity.
+struct CaptureFrame {
+    topology: Arc<ScreenFrame>,
+    pane_scans: Vec<PaneScan>,
+    has_frame_candidate: bool,
 }
 
 impl LiveCapture {
@@ -224,10 +274,21 @@ impl LiveCapture {
         initial_context: DetectionContext,
         options: DetectionOptions,
     ) -> Self {
+        Self::with_foreground_program(inputs, initial_context, options, ForegroundProgram::Unknown)
+    }
+
+    #[must_use]
+    pub fn with_foreground_program(
+        inputs: impl Into<Arc<[LiveDetectionInput]>>,
+        initial_context: DetectionContext,
+        options: DetectionOptions,
+        foreground_program: ForegroundProgram,
+    ) -> Self {
         Self(Arc::new(CaptureInner {
             inputs: inputs.into(),
             initial_context,
             options,
+            foreground_program,
             frame: OnceLock::new(),
         }))
     }
@@ -249,18 +310,46 @@ impl LiveCapture {
         self.0.options
     }
 
-    /// The frame, measured on the first ask.
     #[must_use]
-    pub fn frame(&self) -> &Arc<ScreenFrame> {
+    pub fn foreground_program(&self) -> &ForegroundProgram {
+        &self.0.foreground_program
+    }
+
+    fn measured(&self) -> &Arc<CaptureFrame> {
         self.0.frame.get_or_init(|| {
             #[cfg(test)]
             FRAMES_MEASURED.with(|count| count.set(count.get() + 1));
-            Arc::new(ScreenFrame::measure(
+            Arc::new(CaptureFrame::measure(
                 &self.0.inputs,
                 &self.0.initial_context,
                 self.0.options,
+                self.0.foreground_program.clone(),
             ))
         })
+    }
+
+    /// The frame, measured on the first ask.
+    #[must_use]
+    pub fn frame(&self) -> &Arc<ScreenFrame> {
+        &self.measured().topology
+    }
+
+    /// The capture-local pane scans measured with the topology.
+    #[must_use]
+    pub fn pane_scans(&self) -> &[PaneScan] {
+        &self.measured().pane_scans
+    }
+
+    #[must_use]
+    pub fn pane_scan(&self, rect: PaneRect) -> Option<&PaneScan> {
+        self.pane_scans().iter().find(|pane| pane.rect == rect)
+    }
+
+    /// Whether the cheap frame tally saw a possible rule. The app uses this only to arm E8's
+    /// low-cadence provenance observation; it is capture-local, not topology identity.
+    #[must_use]
+    pub fn has_frame_candidate(&self) -> bool {
+        self.measured().has_frame_candidate
     }
 
     /// The whole screen as one rectangle — every grid row, every captured column — without measuring
@@ -275,9 +364,8 @@ impl LiveCapture {
     /// `None` for a rectangle that is neither.
     #[must_use]
     pub fn pane_inputs(&self, rect: PaneRect) -> Option<&Arc<[LiveDetectionInput]>> {
-        self.frame()
-            .pane(rect)
-            .map(Pane::inputs)
+        self.pane_scan(rect)
+            .map(PaneScan::inputs)
             .or_else(|| (rect == self.screen_rect()).then(|| self.inputs()))
     }
 
@@ -293,6 +381,7 @@ impl PartialEq for LiveCapture {
         self.ptr_eq(other)
             || (self.0.options == other.0.options
                 && self.0.initial_context == other.0.initial_context
+                && self.0.foreground_program == other.0.foreground_program
                 && self.0.inputs == other.0.inputs)
     }
 }
@@ -306,6 +395,7 @@ impl std::fmt::Debug for LiveCapture {
             .field("inputs", &self.0.inputs)
             .field("initial_context", &self.0.initial_context)
             .field("options", &self.0.options)
+            .field("foreground_program", &self.0.foreground_program)
             .finish_non_exhaustive()
     }
 }
@@ -530,6 +620,13 @@ struct ProvenCells {
     right: u32,
 }
 
+#[derive(Clone, Debug)]
+struct ProvenBlock {
+    cells: Vec<ProvenCells>,
+    opening: ProvenCells,
+    closing: ProvenCells,
+}
+
 /// A candidate cut, for comparing two readings of the root (§2.1's status-row test).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Cut {
@@ -548,7 +645,8 @@ struct Measure<'a> {
     /// One entry per grid row, in row order.
     cells: Vec<Vec<Cell>>,
     grid: Vec<&'a LiveDetectionInput>,
-    unsplit: OnceLock<Vec<ProvenCells>>,
+    unsplit: OnceLock<Vec<ProvenBlock>>,
+    trusted_root: bool,
 }
 
 impl<'a> Measure<'a> {
@@ -561,7 +659,7 @@ impl<'a> Measure<'a> {
     }
 
     /// R5's evidence: the live cells of every block today's scan proves over the unsplit capture.
-    fn unsplit(&self) -> &[ProvenCells] {
+    fn unsplit(&self) -> &[ProvenBlock] {
         self.unsplit.get_or_init(|| {
             let scan = live_scan(self.inputs, self.initial_context, self.options);
             scan.scan
@@ -570,23 +668,53 @@ impl<'a> Measure<'a> {
                 .filter_map(|block| {
                     live_occurrence_segments(&block.span, block.start, &scan.logical, self.inputs)
                 })
-                .flatten()
-                .filter_map(|segment| match segment.source_line {
-                    MathSourceLine::LiveGrid(row) => Some(ProvenCells {
-                        row,
-                        left: segment.cell_start,
-                        right: segment.cell_end,
-                    }),
-                    MathSourceLine::Transcript(_) => None,
+                .filter_map(|segments| {
+                    let cells = segments
+                        .into_iter()
+                        .filter_map(|segment| match segment.source_line {
+                            MathSourceLine::LiveGrid(row) => Some(ProvenCells {
+                                row,
+                                left: segment.cell_start,
+                                right: segment.cell_end,
+                            }),
+                            MathSourceLine::Transcript(_) => None,
+                        })
+                        .collect::<Vec<_>>();
+                    let first = *cells.first()?;
+                    let last = *cells.last()?;
+                    Some(ProvenBlock {
+                        opening: ProvenCells {
+                            right: first.left.saturating_add(1).min(first.right),
+                            ..first
+                        },
+                        closing: ProvenCells {
+                            left: last.right.saturating_sub(1).max(last.left),
+                            ..last
+                        },
+                        cells,
+                    })
                 })
                 .collect()
         })
     }
 
+    fn delimiters_cross_vertical(block: &ProvenBlock, column: u32) -> bool {
+        (block.opening.left < column && block.closing.right > column)
+            || (block.closing.left < column && block.opening.right > column)
+    }
+
+    fn delimiters_cross_horizontal(block: &ProvenBlock, row: u32) -> bool {
+        (block.opening.row < row && block.closing.row > row)
+            || (block.closing.row < row && block.opening.row > row)
+    }
+
     /// (R5) Does a block the unsplit screen proves have a cell in column `column` on a row of `rect`?
     fn vertical_cut_crosses_a_proof(&self, rect: PaneRect, column: u32) -> bool {
-        self.unsplit().iter().any(|proof| {
-            rect.contains_row(proof.row) && proof.left <= column && column < proof.right
+        self.unsplit().iter().any(|block| {
+            !Self::delimiters_cross_vertical(block, column)
+                && block.cells.iter().any(|proof| {
+                    rect.contains_row(proof.row) && proof.left <= column && column < proof.right
+                })
         })
     }
 
@@ -594,9 +722,12 @@ impl<'a> Measure<'a> {
     /// A block's rows are consecutive and every one of them carries a segment, so a block standing
     /// above and below the row stands on it too.
     fn horizontal_cut_crosses_a_proof(&self, rect: PaneRect, row: u32) -> bool {
-        self.unsplit()
-            .iter()
-            .any(|proof| proof.row == row && proof.left < rect.right && proof.right > rect.left)
+        self.unsplit().iter().any(|block| {
+            !Self::delimiters_cross_horizontal(block, row)
+                && block.cells.iter().any(|proof| {
+                    proof.row == row && proof.left < rect.right && proof.right > rect.left
+                })
+        })
     }
 
     /// (V1) Every row of `rect` carries a vertical stroke at `column`, `rect` has at least three
@@ -654,10 +785,10 @@ impl<'a> Measure<'a> {
             .copied()
             .unwrap_or(rect.right);
         let sides = [
-            (left_edge..column, column.checked_sub(1)),
-            (column + 1..right_edge, Some(column + 1)),
+            (left_edge..column, column.checked_sub(1), true),
+            (column + 1..right_edge, Some(column + 1), false),
         ];
-        sides.into_iter().any(|(columns, adjacent)| {
+        let evidence = sides.map(|(columns, adjacent, blank_on_left)| {
             let width = columns.end.saturating_sub(columns.start);
             let (with_text, touching) = match adjacent {
                 Some(adjacent) if width > 0 => self.side_text(rect, columns, adjacent),
@@ -667,7 +798,51 @@ impl<'a> Measure<'a> {
             let clipped = with_text > 0 && touching * 2 > with_text;
             // (V2b) a blank gutter, at least one column wide.
             let gutter = width > 0 && with_text == 0;
-            clipped || gutter
+            (clipped, gutter, blank_on_left)
+        });
+        if evidence.iter().any(|(clipped, _, _)| *clipped) {
+            return true;
+        }
+        evidence.iter().any(|(_, gutter, blank_on_left)| {
+            *gutter && !self.connected_padded_enclosure(rect, column, neighbours, *blank_on_left)
+        })
+    }
+
+    /// E1: V2b alone does not make the outer edge of a connected padded enclosure a frame.
+    fn connected_padded_enclosure(
+        &self,
+        rect: PaneRect,
+        column: u32,
+        candidates: &[u32],
+        blank_on_left: bool,
+    ) -> bool {
+        candidates.iter().copied().any(|parallel| {
+            let on_nonblank_side = if blank_on_left {
+                parallel > column
+            } else {
+                parallel < column
+            };
+            if !on_nonblank_side {
+                return false;
+            }
+            let (start, end) = if parallel < column {
+                (parallel, column)
+            } else {
+                (column, parallel)
+            };
+            rect.rows()
+                .filter(|row| {
+                    let first = self.cell(*row, start).strokes();
+                    let last = self.cell(*row, end).strokes();
+                    first.vertical()
+                        && first.horizontal()
+                        && last.vertical()
+                        && last.horizontal()
+                        && (start..=end)
+                            .all(|joined| self.cell(*row, joined).strokes().horizontal())
+                })
+                .nth(1)
+                .is_some()
         })
     }
 
@@ -679,13 +854,19 @@ impl<'a> Measure<'a> {
     }
 
     /// Whether `column` is a proven frame rule (V1 and V2) over `rect`.
-    fn proven_rule(&self, rect: PaneRect, column: u32) -> bool {
+    fn proven_rule(&self, rect: PaneRect, column: u32, root: PaneRect) -> bool {
+        if self.trusted_root && self.v1(root, column) {
+            return true;
+        }
         let candidates = self.v1_columns(rect);
         candidates.contains(&column) && self.v2(rect, column, &candidates)
     }
 
-    fn vertical_cuts(&self, rect: PaneRect) -> Vec<u32> {
+    fn vertical_cuts(&self, rect: PaneRect, root: PaneRect) -> Vec<u32> {
         let candidates = self.v1_columns(rect);
+        if self.trusted_root && rect == root {
+            return candidates;
+        }
         candidates
             .iter()
             .copied()
@@ -706,7 +887,7 @@ impl<'a> Measure<'a> {
 
     /// (H1, H2, R5) The horizontal cuts of `rect`. `outer` is the rectangle `rect` was cut from, whose
     /// columns include the cells just outside `rect` at either end.
-    fn horizontal_cuts(&self, rect: PaneRect, outer: PaneRect) -> Vec<u32> {
+    fn horizontal_cuts(&self, rect: PaneRect, outer: PaneRect, root: PaneRect) -> Vec<u32> {
         let full = rect
             .rows()
             .filter(|row| self.h1(rect, *row))
@@ -714,7 +895,7 @@ impl<'a> Measure<'a> {
         full.iter()
             .copied()
             .filter(|row| {
-                self.anchored(rect, outer, *row, &full)
+                self.anchored(rect, outer, root, *row, &full)
                     && !self.horizontal_cut_crosses_a_proof(rect, *row)
             })
             .collect()
@@ -722,7 +903,14 @@ impl<'a> Measure<'a> {
 
     /// (H2) A junction on `row` — inside `rect`, or the cell just outside it at either end — whose
     /// vertical stroke continues into an adjacent band, where its column is a proven frame rule.
-    fn anchored(&self, rect: PaneRect, outer: PaneRect, row: u32, full: &[u32]) -> bool {
+    fn anchored(
+        &self,
+        rect: PaneRect,
+        outer: PaneRect,
+        root: PaneRect,
+        row: u32,
+        full: &[u32],
+    ) -> bool {
         let above = full
             .iter()
             .rev()
@@ -766,29 +954,74 @@ impl<'a> Measure<'a> {
                 left: columns.0,
                 right: columns.1,
             };
-            (strokes.up && above < row && self.proven_rule(band(above, row), column))
+            (strokes.up && above < row && self.proven_rule(band(above, row), column, root))
                 || (strokes.down
                     && row + 1 < below
-                    && self.proven_rule(band(row + 1, below), column))
+                    && self.proven_rule(band(row + 1, below), column, root))
         })
     }
 
-    /// The cuts of `rect` at the top level: its vertical cuts, or — when it has none — its horizontal
-    /// ones.
-    fn top_level_cuts(&self, rect: PaneRect, outer: PaneRect) -> Vec<Cut> {
-        let vertical = self.vertical_cuts(rect);
+    /// Every recursive cut with the rectangle it cuts. Status-row comparison normalises the one
+    /// candidate edge out of the full reading so an unchanged cut does not look new merely because
+    /// its root boundary moved by one row.
+    fn recursive_cuts(
+        &self,
+        rect: PaneRect,
+        outer: PaneRect,
+        root: PaneRect,
+        cuts: &mut Vec<(PaneRect, Cut)>,
+    ) {
+        let vertical = self.vertical_cuts(rect, root);
         if !vertical.is_empty() {
-            return vertical.into_iter().map(Cut::Vertical).collect();
+            cuts.extend(vertical.iter().map(|column| (rect, Cut::Vertical(*column))));
+            let mut left = rect.left;
+            for cut in vertical.iter().copied().chain(std::iter::once(rect.right)) {
+                if cut > left {
+                    self.recursive_cuts(
+                        PaneRect {
+                            left,
+                            right: cut,
+                            ..rect
+                        },
+                        rect,
+                        root,
+                        cuts,
+                    );
+                }
+                left = cut + 1;
+            }
+            return;
         }
-        self.horizontal_cuts(rect, outer)
-            .into_iter()
-            .map(Cut::Horizontal)
-            .collect()
+        let horizontal = self.horizontal_cuts(rect, outer, root);
+        cuts.extend(horizontal.iter().map(|row| (rect, Cut::Horizontal(*row))));
+        if horizontal.is_empty() {
+            return;
+        }
+        let mut top = rect.top;
+        for cut in horizontal
+            .iter()
+            .copied()
+            .chain(std::iter::once(rect.bottom))
+        {
+            if cut > top {
+                self.recursive_cuts(
+                    PaneRect {
+                        top,
+                        bottom: cut,
+                        ..rect
+                    },
+                    outer,
+                    root,
+                    cuts,
+                );
+            }
+            top = cut + 1;
+        }
     }
 
     /// §2.2's `split`: the leaves of the guillotine tree under `rect`.
-    fn split(&self, rect: PaneRect, outer: PaneRect, leaves: &mut Vec<PaneRect>) {
-        let vertical = self.vertical_cuts(rect);
+    fn split(&self, rect: PaneRect, outer: PaneRect, root: PaneRect, leaves: &mut Vec<PaneRect>) {
+        let vertical = self.vertical_cuts(rect, root);
         if !vertical.is_empty() {
             let mut left = rect.left;
             for cut in vertical.iter().copied().chain(std::iter::once(rect.right)) {
@@ -800,6 +1033,7 @@ impl<'a> Measure<'a> {
                             ..rect
                         },
                         rect,
+                        root,
                         leaves,
                     );
                 }
@@ -807,7 +1041,7 @@ impl<'a> Measure<'a> {
             }
             return;
         }
-        let horizontal = self.horizontal_cuts(rect, outer);
+        let horizontal = self.horizontal_cuts(rect, outer, root);
         if !horizontal.is_empty() {
             let mut top = rect.top;
             for cut in horizontal
@@ -823,6 +1057,7 @@ impl<'a> Measure<'a> {
                             ..rect
                         },
                         outer,
+                        root,
                         leaves,
                     );
                 }
@@ -834,17 +1069,29 @@ impl<'a> Measure<'a> {
     }
 }
 
-impl ScreenFrame {
-    /// The one whole-screen pane: the capture itself, scanned from its own checkpoint.
-    fn unframed(inputs: &Arc<[LiveDetectionInput]>, initial_context: &DetectionContext) -> Self {
+impl CaptureFrame {
+    /// The one whole-screen pane: topology owns only its rectangle; the capture-local scan owns the
+    /// capture rows and checkpoint.
+    fn unframed(
+        inputs: &Arc<[LiveDetectionInput]>,
+        initial_context: &DetectionContext,
+        foreground_program: ForegroundProgram,
+        has_frame_candidate: bool,
+    ) -> Self {
+        let rect = screen_rect(inputs);
         Self {
-            panes: vec![Pane {
-                rect: screen_rect(inputs),
+            topology: Arc::new(ScreenFrame {
+                panes: vec![rect],
+                status_row: None,
+                screen_fence: ScreenFenceState::default(),
+                foreground_program,
+            }),
+            pane_scans: vec![PaneScan {
+                rect,
                 inputs: Arc::clone(inputs),
                 initial_context: initial_context.clone(),
             }],
-            status_row: None,
-            screen_fence: ScreenFenceState::default(),
+            has_frame_candidate,
         }
     }
 
@@ -853,6 +1100,7 @@ impl ScreenFrame {
         inputs: &Arc<[LiveDetectionInput]>,
         initial_context: &DetectionContext,
         options: DetectionOptions,
+        foreground_program: ForegroundProgram,
     ) -> Self {
         // The fast exit, run on every capture: no grid row holds a box-drawing glyph.
         if !grid_inputs(inputs).any(|(_, input)| {
@@ -861,7 +1109,7 @@ impl ScreenFrame {
                 .chars()
                 .any(|character| ('\u{2500}'..='\u{257F}').contains(&character))
         }) {
-            return Self::unframed(inputs, initial_context);
+            return Self::unframed(inputs, initial_context, foreground_program, false);
         }
         let screen = screen_rect(inputs);
         let grid = grid_inputs(inputs)
@@ -879,6 +1127,7 @@ impl ScreenFrame {
                 .collect(),
             grid,
             unsplit: OnceLock::new(),
+            trusted_root: foreground_is_trusted(&foreground_program),
         };
         // The cheap tally: V2, R5 and the recursion run only when some column carries the plain
         // rule on at least three rows — V1's floor, which every cut needs somewhere: a vertical cut
@@ -900,7 +1149,7 @@ impl ScreenFrame {
                 .is_some()
         });
         if !any_rule {
-            return Self::unframed(inputs, initial_context);
+            return Self::unframed(inputs, initial_context, foreground_program, false);
         }
         let without = |row: u32| PaneRect {
             top: if row == screen.top {
@@ -923,28 +1172,42 @@ impl ScreenFrame {
 
         // §2.1: at most one edge row, set aside only when doing so makes a cut it breaks, and only
         // when it carries no math delimiter. The bottom row is asked first (tmux's default place).
-        let full_cuts = measure.top_level_cuts(screen, screen);
+        let mut full_cuts = Vec::new();
+        measure.recursive_cuts(screen, screen, screen, &mut full_cuts);
         let status_row = edges.iter().copied().find(|row| {
             let text = measure.grid[(row - screen.top) as usize].text.as_str();
             if line_carries_math_delimiter(text) {
                 return false;
             }
             let rect = without(*row);
-            measure
-                .top_level_cuts(rect, rect)
-                .iter()
-                .any(|cut| !full_cuts.contains(cut))
+            let mut sliced_cuts = Vec::new();
+            measure.recursive_cuts(rect, rect, rect, &mut sliced_cuts);
+            let normalise = |mut cut_rect: PaneRect| {
+                if *row == screen.top && cut_rect.top == screen.top {
+                    cut_rect.top = cut_rect.top.saturating_add(1);
+                }
+                if *row + 1 == screen.bottom && cut_rect.bottom == screen.bottom {
+                    cut_rect.bottom = cut_rect.bottom.saturating_sub(1);
+                }
+                cut_rect
+            };
+            sliced_cuts.iter().any(|candidate| {
+                !full_cuts
+                    .iter()
+                    .any(|(full_rect, full_cut)| (normalise(*full_rect), *full_cut) == *candidate)
+            })
         });
         let root = status_row.map_or(screen, without);
         let mut leaves = Vec::new();
-        measure.split(root, root, &mut leaves);
+        measure.split(root, root, root, &mut leaves);
         if leaves.len() <= 1 {
-            return Self::unframed(inputs, initial_context);
+            return Self::unframed(inputs, initial_context, foreground_program, true);
         }
         leaves.sort_by_key(|rect| (rect.top, rect.left));
-        let panes = leaves
-            .into_iter()
-            .map(|rect| Pane {
+        let pane_scans = leaves
+            .iter()
+            .copied()
+            .map(|rect| PaneScan {
                 rect,
                 inputs: measure
                     .grid
@@ -959,7 +1222,7 @@ impl ScreenFrame {
             .collect::<Vec<_>>();
         // (V2c) A leaf of digits and blanks is a line-number gutter: a side-by-side diff or a numbered
         // listing, never panes. It refuses the whole frame.
-        if panes.iter().any(|pane| {
+        if pane_scans.iter().any(|pane| {
             let mut digits = false;
             let only_digits = pane.inputs.iter().all(|input| {
                 input.text.chars().all(|character| {
@@ -969,13 +1232,18 @@ impl ScreenFrame {
             });
             only_digits && digits
         }) {
-            return Self::unframed(inputs, initial_context);
+            return Self::unframed(inputs, initial_context, foreground_program, true);
         }
-        let screen_fence = screen_fence_pass(inputs, initial_context, &panes, &measure);
+        let screen_fence = screen_fence_pass(inputs, initial_context, &leaves, &measure);
         Self {
-            panes,
-            status_row,
-            screen_fence,
+            topology: Arc::new(ScreenFrame {
+                panes: leaves,
+                status_row,
+                screen_fence,
+                foreground_program,
+            }),
+            pane_scans,
+            has_frame_candidate: true,
         }
     }
 }
@@ -987,7 +1255,7 @@ impl ScreenFrame {
 fn screen_fence_pass(
     inputs: &[LiveDetectionInput],
     initial_context: &DetectionContext,
-    panes: &[Pane],
+    panes: &[PaneRect],
     measure: &Measure<'_>,
 ) -> ScreenFenceState {
     let mut context = initial_context.clone();
@@ -1001,7 +1269,7 @@ fn screen_fence_pass(
         let LiveDetectionSource::Grid { row, .. } = input.source else {
             continue;
         };
-        let owned = panes.iter().any(|pane| pane.rect.contains_row(row));
+        let owned = panes.iter().any(|pane| pane.contains_row(row));
         if owned {
             if context.is_commonmark_code() {
                 covered_rows.push(row);
@@ -1124,7 +1392,7 @@ mod tests {
             .frame()
             .panes()
             .iter()
-            .map(|pane| (pane.rect.left, pane.rect.right))
+            .map(|pane| (pane.left, pane.right))
             .collect()
     }
 
@@ -1160,8 +1428,8 @@ mod tests {
         assert_eq!(frame.status_row(), Some(10));
         assert_eq!(columns(&capture), vec![(0, 5), (6, 40)]);
         assert!(
-            frame
-                .panes()
+            capture
+                .pane_scans()
                 .iter()
                 .all(|pane| pane.rect.rows() == (0..10) && pane.inputs().len() == 10)
         );
@@ -1179,12 +1447,7 @@ mod tests {
         // `┼` then anchors row 4 on that proven rule, and each strip is cut there too.
         let joined = capture(12, &rows);
         assert_eq!(
-            joined
-                .frame()
-                .panes()
-                .iter()
-                .map(|pane| pane.rect)
-                .collect::<Vec<_>>(),
+            joined.frame().panes().iter().copied().collect::<Vec<_>>(),
             vec![
                 PaneRect {
                     top: 0,
