@@ -1132,6 +1132,7 @@ impl Runtime<'_> {
     /// as the disk took.
     fn ask_files_dir(&mut self, host: files::FilesHost, key: &str) {
         let root = match host {
+            files::FilesHost::Preview(_) => return,
             files::FilesHost::Docked(leaf) => self
                 .window
                 .tabs
@@ -1292,6 +1293,7 @@ impl Runtime<'_> {
     /// it is the one state in which a read is coming anyway.
     fn files_dir_answered(&self, host: files::FilesHost, key: &str) -> bool {
         match host {
+            files::FilesHost::Preview(_) => false,
             files::FilesHost::Docked(leaf) => self
                 .window
                 .tabs
@@ -1317,6 +1319,10 @@ impl Runtime<'_> {
         let mut changed = lane_gone;
         for response in answers_for(batch, |response| self.owns(response.owner())) {
             match response.host {
+                files::FilesHost::Preview(surface) => {
+                    changed |=
+                        self.accept_preview_neighbours(surface, &response.key, response.outcome);
+                }
                 // A tab or a column that closed while its read was in flight
                 // has nowhere to put the answer, and that is not a failure —
                 // it is the cancellation, arriving as a dropped result.
@@ -2781,6 +2787,65 @@ impl Runtime<'_> {
             self.open_files_path_to(seat, &key)?;
         }
         Ok(())
+    }
+
+    /// Follow media travel only in columns already showing this row. Use the
+    /// glance-foot locate's selection/reveal door without unfolding or re-rooting.
+    pub(in crate::runtime) fn select_preview_neighbour_in_files(
+        &mut self,
+        path: &Path,
+    ) -> Result<()> {
+        let trees = self.files_tree_contents();
+        let targets: Vec<_> = self
+            .files
+            .iter()
+            .filter_map(|(seat, state)| {
+                let key = files::key_under_root(&state.root, path)?;
+                trees
+                    .get(seat)?
+                    .rows
+                    .iter()
+                    .any(|row| row.key == key)
+                    .then_some((*seat, key))
+            })
+            .collect();
+        let floating: Vec<_> = self
+            .window
+            .float
+            .live_windows()
+            .filter_map(|win| {
+                let tree = win.files()?;
+                let key = files::key_under_root(&tree.files.root, path)?;
+                files::tree_view(&tree.files, &tree.cache)
+                    .rows
+                    .iter()
+                    .any(|row| row.key == key)
+                    .then_some((win.epoch, key))
+            })
+            .collect();
+        if targets.is_empty() && floating.is_empty() {
+            return Ok(());
+        }
+        for (seat, key) in targets {
+            if let Some(state) = self.files.get_mut(&seat) {
+                state.sel = Some(key.clone());
+            }
+            self.window.files_locate.insert(seat, key);
+        }
+        for (id, key) in floating {
+            if let Some(tree) = self
+                .window
+                .float
+                .live_mut(id)
+                .and_then(float::FloatWin::files_mut)
+            {
+                tree.files.sel = Some(key);
+            }
+        }
+        self.settle_files_locate();
+        self.mark_session_dirty(Instant::now());
+        self.refresh_chrome();
+        self.present_chrome_change()
     }
 
     /// **Spend whatever one drop put on this window** (GitHub issue #1 ②).

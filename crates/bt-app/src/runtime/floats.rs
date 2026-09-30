@@ -47,6 +47,7 @@ impl Runtime<'_> {
         // back at the end rather than kept. There is no early return in this
         // body — the bracket is exact.
         let leaving_station = hang_watch::enter(hang_watch::Station::Chrome);
+        self.request_preview_neighbours();
         let scale = self.window.renderer.scale_factor() as f32;
         let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
         // **The window's own drag handler is told what the bar is wearing now**

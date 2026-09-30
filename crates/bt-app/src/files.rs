@@ -86,6 +86,8 @@ pub enum FilesHost {
     Docked(LeafId),
     /// The floating window, showing the view minted at this epoch.
     Float(u64),
+    /// A media preview asks through the same directory worker as a column.
+    Preview(crate::PreviewSurface),
 }
 
 /// "Read this directory for this tree of this window."
@@ -137,6 +139,10 @@ impl DirResponse {
         match self.host {
             FilesHost::Docked(leaf) => crate::AnswerOwner::Tab(leaf.tab),
             FilesHost::Float(_) => crate::AnswerOwner::Window(self.window),
+            FilesHost::Preview(crate::PreviewSurface::Seat(leaf)) => {
+                crate::AnswerOwner::Tab(leaf.tab)
+            }
+            FilesHost::Preview(_) => crate::AnswerOwner::Window(self.window),
         }
     }
 }

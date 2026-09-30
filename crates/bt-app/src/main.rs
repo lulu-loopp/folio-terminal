@@ -119,6 +119,7 @@ mod present_gate;
 mod preview;
 mod preview_edit;
 mod preview_live;
+mod preview_neighbours;
 mod preview_press;
 mod preview_provenance;
 mod preview_select;
@@ -4642,6 +4643,7 @@ fn preview_tab_index_among(tabs: &[TabState], tab: TabId) -> Option<usize> {
 /// would be three booleans that can all say yes.
 #[derive(Default)]
 struct PreviewPane {
+    neighbours: Option<preview_neighbours::Folder>,
     /// The picture on this surface, if it is showing one. Mutually exclusive
     /// with [`Self::buffer`] — the two doors clear each other on the way in.
     image: Option<PreviewImageState>,
