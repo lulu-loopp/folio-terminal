@@ -350,6 +350,8 @@ LeafSession.bell_reported	write	crate	settle_attention	assign	2
 LeafSession.card_skip	access	crate	aim_card_window	lend	1
 LeafSession.column_awake	write	crate::runtime::terminal	Runtime::wake_terminal_column	assign	1
 LeafSession.conpty_grid	write	crate	release_due_leaf_resize	assign	1
+LeafSession.foreground_program_cadence	write	crate::foreground_program	apply_answer	call:answered	1
+LeafSession.foreground_program_cadence	write	crate::foreground_program	request	call:answered,call:should_request	2
 LeafSession.frame_image_references	write	crate::runtime::frame	Runtime::publish_frame_inner	assign	1
 LeafSession.frame_image_references	write	crate::runtime::panes	Runtime::rescan_pane_references	assign	2
 LeafSession.grid	write	crate	release_due_leaf_resize	assign	1
@@ -415,6 +417,8 @@ LeafSession.session	write	crate	forget_work_in_flight_for_seat	call:forget_work_
 LeafSession.session	write	crate	mark_leaf_seen	call:clear_attention	1
 LeafSession.session	write	crate	schedule_leaf_grid_change	call:resize_at	1
 LeafSession.session	write	crate	settle_attention	call:clear_attention	1
+LeafSession.session	write	crate::foreground_program	apply_answer	call:apply_foreground_program	1
+LeafSession.session	write	crate::foreground_program	request	call:take_foreground_program_probe_request	1
 LeafSession.session	write	crate::runtime::dpi	Runtime::finish_resize_if_quiescent	call:finish_resize_if_quiescent	1
 LeafSession.session	write	crate::runtime::frame	Runtime::publish_frame_inner	call:absorb_printed_path_probes,call:record_published_frame,call:release_presentation_hold_for_user_input,call:schedule_visible_artifacts,call:trace_decorations	5
 LeafSession.session	write	crate::runtime::frame	Runtime::redraw	call:absorb_printed_path_probes,call:schedule_visible_artifacts	2
@@ -754,6 +758,7 @@ TabState.sessions	access	crate::runtime::clipboard	Runtime::press_paste_card_key
 TabState.sessions	access	crate::runtime::clipboard	Runtime::send_paste	call:get_mut	1
 TabState.sessions	access	crate::runtime::dpi	Runtime::flush_pending_pty_resize	call:iter_mut	1
 TabState.sessions	access	crate::runtime::frame	Runtime::redraw	call:get_mut	3
+TabState.sessions	access	crate::runtime::math	Runtime::apply_foreground_program_results	call:get_mut	1
 TabState.sessions	access	crate::runtime::math	Runtime::present_math_toggle	call:get_mut	1
 TabState.sessions	access	crate::runtime::math	Runtime::press_math_toggle	call:get_mut	1
 TabState.sessions	access	crate::runtime::math	Runtime::sample_math_toggle	call:get_mut	1
@@ -1760,6 +1765,7 @@ WindowRuntime.tabs	access	crate::runtime::git	Runtime::step_graph_search	index	1
 WindowRuntime.tabs	access	crate::runtime::git	Runtime::step_graph_seeks	index	3
 WindowRuntime.tabs	access	crate::runtime::math	Runtime::advance_live_math_if_due	index,lend	2
 WindowRuntime.tabs	access	crate::runtime::math	Runtime::apply_display_formulas	lend	1
+WindowRuntime.tabs	access	crate::runtime::math	Runtime::apply_foreground_program_results	index	1
 WindowRuntime.tabs	access	crate::runtime::math	Runtime::apply_inline_formulas	lend	1
 WindowRuntime.tabs	access	crate::runtime::math	Runtime::apply_math_results	lend	6
 WindowRuntime.tabs	access	crate::runtime::math	Runtime::present_math_toggle	index	1

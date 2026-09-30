@@ -620,11 +620,19 @@ struct ProvenCells {
     right: u32,
 }
 
+/// Where one delimiter of a proven block stands: its grid row (`None` for a line of the frozen
+/// history above the grid) and the cell column of its first (opening) or last (closing) cell.
+#[derive(Clone, Copy, Debug)]
+struct Delimiter {
+    row: Option<u32>,
+    column: u32,
+}
+
 #[derive(Clone, Debug)]
 struct ProvenBlock {
     cells: Vec<ProvenCells>,
-    opening: ProvenCells,
-    closing: ProvenCells,
+    opening: Delimiter,
+    closing: Delimiter,
 }
 
 /// A candidate cut, for comparing two readings of the root (§2.1's status-row test).
@@ -658,7 +666,8 @@ impl<'a> Measure<'a> {
             .unwrap_or_default()
     }
 
-    /// R5's evidence: the live cells of every block today's scan proves over the unsplit capture.
+    /// R5's evidence: the live cells of every block today's scan proves over the unsplit capture,
+    /// with the cells of its opening and closing delimiters.
     fn unsplit(&self) -> &[ProvenBlock] {
         self.unsplit.get_or_init(|| {
             let scan = live_scan(self.inputs, self.initial_context, self.options);
@@ -669,6 +678,25 @@ impl<'a> Measure<'a> {
                     live_occurrence_segments(&block.span, block.start, &scan.logical, self.inputs)
                 })
                 .filter_map(|segments| {
+                    // A display block's segments cover each of its lines whole, and a line opens
+                    // with its opener and ends with its closer; an inline run is bounded by its
+                    // own delimiters. So the first cell of the first segment is the opening
+                    // delimiter and the last cell of the last segment the closing one, wherever
+                    // they stand: a block that opened in the frozen history opened above every
+                    // grid row.
+                    let delimiter = |segment: &crate::MathCellSegment, column: u32| Delimiter {
+                        row: match segment.source_line {
+                            MathSourceLine::LiveGrid(row) => Some(row),
+                            MathSourceLine::Transcript(_) => None,
+                        },
+                        column,
+                    };
+                    let opening = segments
+                        .first()
+                        .map(|first| delimiter(first, first.cell_start))?;
+                    let closing = segments
+                        .last()
+                        .map(|last| delimiter(last, last.cell_end.saturating_sub(1)))?;
                     let cells = segments
                         .into_iter()
                         .filter_map(|segment| match segment.source_line {
@@ -680,38 +708,36 @@ impl<'a> Measure<'a> {
                             MathSourceLine::Transcript(_) => None,
                         })
                         .collect::<Vec<_>>();
-                    let first = *cells.first()?;
-                    let last = *cells.last()?;
-                    Some(ProvenBlock {
-                        opening: ProvenCells {
-                            right: first.left.saturating_add(1).min(first.right),
-                            ..first
-                        },
-                        closing: ProvenCells {
-                            left: last.right.saturating_sub(1).max(last.left),
-                            ..last
-                        },
+                    (!cells.is_empty()).then_some(ProvenBlock {
                         cells,
+                        opening,
+                        closing,
                     })
                 })
                 .collect()
         })
     }
 
-    fn delimiters_cross_vertical(block: &ProvenBlock, column: u32) -> bool {
-        (block.opening.left < column && block.closing.right > column)
-            || (block.closing.left < column && block.opening.right > column)
+    /// E3(b): the block's opening and closing delimiters stand in columns on either side of the
+    /// vertical rule at `column` — two panes' text, not one formula.
+    fn delimiters_straddle_column(block: &ProvenBlock, column: u32) -> bool {
+        let (opening, closing) = (block.opening.column, block.closing.column);
+        (opening < column && closing > column) || (closing < column && opening > column)
     }
 
-    fn delimiters_cross_horizontal(block: &ProvenBlock, row: u32) -> bool {
-        (block.opening.row < row && block.closing.row > row)
-            || (block.closing.row < row && block.opening.row > row)
+    /// E3(b): the block's opening and closing delimiters stand on rows on either side of the
+    /// horizontal rule at `row` (a delimiter in the frozen history stands above every grid row).
+    fn delimiters_straddle_row(block: &ProvenBlock, row: u32) -> bool {
+        let above = |delimiter: Delimiter| delimiter.row.is_none_or(|at| at < row);
+        let below = |delimiter: Delimiter| delimiter.row.is_some_and(|at| at > row);
+        (above(block.opening) && below(block.closing))
+            || (above(block.closing) && below(block.opening))
     }
 
     /// (R5) Does a block the unsplit screen proves have a cell in column `column` on a row of `rect`?
     fn vertical_cut_crosses_a_proof(&self, rect: PaneRect, column: u32) -> bool {
         self.unsplit().iter().any(|block| {
-            !Self::delimiters_cross_vertical(block, column)
+            !Self::delimiters_straddle_column(block, column)
                 && block.cells.iter().any(|proof| {
                     rect.contains_row(proof.row) && proof.left <= column && column < proof.right
                 })
@@ -723,7 +749,7 @@ impl<'a> Measure<'a> {
     /// above and below the row stands on it too.
     fn horizontal_cut_crosses_a_proof(&self, rect: PaneRect, row: u32) -> bool {
         self.unsplit().iter().any(|block| {
-            !Self::delimiters_cross_horizontal(block, row)
+            !Self::delimiters_straddle_row(block, row)
                 && block.cells.iter().any(|proof| {
                     proof.row == row && proof.left < rect.right && proof.right > rect.left
                 })
@@ -1447,7 +1473,7 @@ mod tests {
         // `┼` then anchors row 4 on that proven rule, and each strip is cut there too.
         let joined = capture(12, &rows);
         assert_eq!(
-            joined.frame().panes().iter().copied().collect::<Vec<_>>(),
+            joined.frame().panes().to_vec(),
             vec![
                 PaneRect {
                     top: 0,
@@ -1530,7 +1556,7 @@ mod tests {
         let mut rows = vec!["ab │text"; 6];
         rows[2] = "ab │    $$x$$";
         let capture = capture(20, &rows);
-        let right = &capture.frame().panes()[1];
+        let right = &capture.pane_scans()[1];
         assert_eq!(right.rect.columns(), 4..20);
         assert_eq!(right.inputs()[2].text, "    $$x$$");
         assert_eq!(right.inputs()[2].cell_boundaries.first(), Some(&(0, 4)));

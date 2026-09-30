@@ -409,7 +409,7 @@ fn dump(screen: &Screen) -> String {
         !capture.frame().is_framed(),
         "{} was cut into {:?}",
         screen.name,
-        capture.frame().panes().iter().copied().collect::<Vec<_>>()
+        capture.frame().panes().to_vec()
     );
     let mut out = String::new();
     writeln!(out, "== {}", screen.name).unwrap();
@@ -534,7 +534,7 @@ fn rect(top: u32, bottom: u32, left: u32, right: u32) -> PaneRect {
 }
 
 fn panes(capture: &LiveCapture) -> Vec<PaneRect> {
-    capture.frame().panes().iter().copied().collect()
+    capture.frame().panes().to_vec()
 }
 
 /// One proven block: `(pane, mode, render source, start, end)`.
@@ -1441,26 +1441,95 @@ fn a_formula_across_an_unproven_rule_still_vetoes() {
     assert_eq!(proven(&capture).len(), 1);
 }
 
-/// RED (69a round 2, E3 delimiter granularity) — a display formula's middle segment crosses the
-/// proven rule, but the opening and closing delimiters are both left of it, so the segment still
-/// vetoes the cut.
+/// A 40×101 screen whose rule at column 50 stands on rows 0–19 only: row 20 is a full `─` row
+/// with `┴` at the rule, rows 21–39 one full-width pane. With `block`, a display opens with `$$`
+/// at row 17 column 0, its row 18 runs `a`×50 `│` `b`×10 across the rule, and it closes with a
+/// bare `$$` on row 21 — both delimiters left of column 50.
+fn band_screen(block: bool) -> Vec<String> {
+    (0..40)
+        .map(|row| match row {
+            20 => format!("{}\u{2534}{}", "\u{2500}".repeat(50), "\u{2500}".repeat(50)),
+            21 if block => "$$".to_owned(),
+            21.. => format!("lower {row}"),
+            _ => {
+                let (left, right) = match row {
+                    17 if block => ("$$".to_owned(), format!("right {row}")),
+                    18 if block => ("a".repeat(50), "b".repeat(10)),
+                    _ => (format!("left {row}"), format!("right {row}")),
+                };
+                format!("{left:<50}\u{2502}{right}")
+            }
+        })
+        .collect()
+}
+
+/// RED (69a round 2, E3 delimiter granularity) — **a middle segment crossing a proven rule is not
+/// exempt when both delimiters are on one side of it.**
+///
+/// E3(b) exempts a block from R5 only when its opening and closing delimiters stand on opposite
+/// sides of the proven rule, never merely because one of its segments crosses it. The note's own
+/// screen for this pin (revision (e), E3) cannot be proven by the grammar: on a rectangle whose
+/// rule stands on every row, every grid line ends at or right of the rule, so a closer that ends
+/// its line stands right of it (revision (f), item 2). The realisable shape is a rule whose
+/// rectangle is a band: the display opens at row 17 and closes at row 21, both at column 0, and
+/// its rows 17–19 cross the band's rule at column 50. At the horizontal rule (row 20) its
+/// delimiters are on opposite rows, so that cut goes through — E3(b)'s accepted loss, the same in
+/// both readings. In the top band its delimiters are both left of column 50, so its crossing
+/// segments veto the vertical cut and the band stays one pane. The control, the same screen
+/// without the block, cuts the band at column 50: the rule is proven there, and only the block
+/// refuses it.
+///
+/// MUTATION: exempt every proved block whose segment crosses a proven rule (make
+/// `Measure::delimiters_straddle_column` answer `true`).
 #[test]
 fn a_middle_segment_crossing_a_proven_rule_is_not_exempt_when_both_delimiters_are_on_one_side() {
-    let screen = clipped_rule_screen(|row| match row {
-        10 => ("$$".to_owned(), String::new()),
-        11 => ("a".repeat(50), "b".repeat(10)),
-        12 => ("123456789$$".to_owned(), "right twelve".to_owned()),
-        _ => (format!("left {row}"), format!("right {row}")),
-    });
-    let fixture = Screen::alt("middle-segment", 101, screen);
-    let capture = LiveCapture::new(fixture.inputs(), fixture.initial_context, fixture.options);
-    assert_read_whole(&capture);
-    assert!(proven(&capture).iter().any(|block| {
-        block.1 == MathMode::Display
-            && block.3.row == 10
-            && block.4.row == 12
-            && block.2.contains('\u{2502}')
-    }));
+    assert_eq!(
+        panes(&framed_capture(101, &band_screen(false))),
+        vec![
+            rect(0, 20, 0, 50),
+            rect(0, 20, 51, 101),
+            rect(21, 40, 0, 101)
+        ],
+        "control: the band's rule at column 50 is a proven frame"
+    );
+    assert_eq!(
+        panes(&framed_capture(101, &band_screen(true))),
+        vec![rect(0, 20, 0, 101), rect(21, 40, 0, 101)],
+        "the block's crossing segments veto the band's vertical cut"
+    );
+}
+
+/// RED (69a round 2, revision (f) item 1) — **a delimiter on a line of the frozen history stands
+/// above every grid row.**
+///
+/// A display opens with `$$` on the last history line, runs through the grid's top rule row
+/// (`─`×50 `┬` `─`×50) and the rows of a proven rule at column 50, and closes at the end of the
+/// right pane's row 3. Its delimiters are on opposite sides of the rule at column 50 (history
+/// column 0, grid column 57) and on opposite sides of the top rule row (history above it, row 3
+/// below it), so neither cut is vetoed (E3(b)): the screen is cut at column 50, and each strip at
+/// row 0, which belongs to no pane.
+///
+/// MUTATION: take a history delimiter's row as the first grid row in `Measure::unsplit` (the block
+/// then seems to open on row 0 itself, not above it, and its row-0 segment vetoes the row-0 cuts).
+#[test]
+fn a_delimiter_in_the_frozen_history_stands_above_every_grid_row() {
+    let grid = (0..40)
+        .map(|row| match row {
+            0 => format!("{}\u{252c}{}", "\u{2500}".repeat(50), "\u{2500}".repeat(50)),
+            3 => format!("{:<50}\u{2502}done $$", "left 3"),
+            _ => format!("{:<50}\u{2502}right {row}", format!("left {row}")),
+        })
+        .collect();
+    let screen = Screen {
+        history: lines(&["$$"]),
+        site: InlineMathSite::CommandOutput,
+        ..Screen::alt("history-opener", 101, grid)
+    };
+    let capture = LiveCapture::new(screen.inputs(), screen.initial_context, screen.options);
+    assert_eq!(
+        panes(&capture),
+        vec![rect(1, 40, 0, 50), rect(1, 40, 51, 101)]
+    );
 }
 
 fn padded_outer_rule() -> Vec<String> {

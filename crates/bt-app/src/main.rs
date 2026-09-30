@@ -11369,6 +11369,15 @@ fn leaf_session_mut(
         .map(|leaf| &mut leaf.session)
 }
 
+/// The worker lanes a tab's decoration dispatch hands work to, cloned out of [`App`] so the
+/// dispatch can borrow the tab and the worker flags mutably at the same time.
+struct DecorationSenders {
+    math: mpsc::Sender<MathWorkerRequest>,
+    scale: mpsc::Sender<ScaleWorkerRequest>,
+    path: mpsc::Sender<PathWorkerRequest>,
+    foreground: mpsc::Sender<foreground_program::Request>,
+}
+
 /// Collect every pane of the tab on screen, not merely the one holding the keyboard.
 ///
 /// A leaf queues its own decoration work as its own bytes are drained — that half was always per
@@ -11381,10 +11390,7 @@ fn leaf_session_mut(
 fn dispatch_tab_decoration_tasks(
     window: WindowId,
     tab: &mut TabState,
-    tasks: &mpsc::Sender<MathWorkerRequest>,
-    scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
-    path_tasks: &mpsc::Sender<PathWorkerRequest>,
-    foreground_tasks: &mpsc::Sender<foreground_program::Request>,
+    senders: &DecorationSenders,
     now: Instant,
     running: &mut bool,
     notice_pending: &mut bool,
@@ -11402,35 +11408,13 @@ fn dispatch_tab_decoration_tasks(
         disabled |= dispatch_pending_math_tasks(
             address,
             &mut leaf.session,
-            tasks,
-            scale_tasks,
-            path_tasks,
+            &senders.math,
+            &senders.scale,
+            &senders.path,
             running,
             notice_pending,
         );
-        let command_started = leaf.session.take_foreground_program_probe_request();
-        let candidate = leaf.session.foreground_program_probe_is_armed();
-        if leaf
-            .foreground_program_cadence
-            .should_request(now, command_started, candidate)
-        {
-            let sent = leaf
-                .pty
-                .as_ref()
-                .and_then(PtySession::shell_process_id)
-                .is_some_and(|shell| {
-                    foreground_tasks
-                        .send(foreground_program::Request {
-                            address,
-                            incarnation: leaf.incarnation,
-                            shell,
-                        })
-                        .is_ok()
-                });
-            if !sent {
-                leaf.foreground_program_cadence.answered();
-            }
-        }
+        foreground_program::request(leaf, address, &senders.foreground, now);
     }
     disabled
 }
@@ -27725,10 +27709,7 @@ fn attention_ledger_deadline(tabs: &[TabState]) -> Option<Instant> {
 fn foreground_program_deadline(tabs: &[TabState]) -> Option<Instant> {
     tabs.iter()
         .flat_map(TabState::leaves)
-        .filter_map(|(_, leaf)| {
-            leaf.foreground_program_cadence
-                .deadline(leaf.session.foreground_program_probe_is_armed())
-        })
+        .filter_map(|(_, leaf)| foreground_program::deadline(leaf))
         .min()
 }
 
@@ -50815,6 +50796,15 @@ impl Runtime<'_> {
 }
 
 impl App {
+    fn decoration_senders(&self) -> DecorationSenders {
+        DecorationSenders {
+            math: self.math_worker.tasks.clone(),
+            scale: self.math_worker.scale_tasks.clone(),
+            path: self.math_worker.path_tasks.clone(),
+            foreground: self.foreground_program_worker.requests.clone(),
+        }
+    }
+
     /// **Write what an update's trial held back, now that it is committed**
     /// (`update_trial`, F-7) — each released writer run again, in
     /// [`update_trial::Writer`]'s order: the folder before anything written

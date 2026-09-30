@@ -16,6 +16,7 @@ App.animation_serials	u64	-	1	1	1	0	0	0	0	complete
 App.event_proxy	EventLoopProxy<AppEvent>	-	0	0	0	0	0	0	0	complete
 App.handoff_lane	HandoffLane	-	n	2	2	0	0	0	0	complete
 App.math_worker	MathWorker	-	0	0	0	0	0	0	0	complete
+App.foreground_program_worker	Worker	-	0	0	0	0	0	0	0	complete
 App.math_worker_running	bool	-	0	0	0	5	0	0	0	complete
 App.math_worker_notice_pending	bool	-	0	0	0	5	0	0	0	complete
 App.git_watch	GitWatch	-	1	1	1	0	0	0	0	complete
@@ -104,7 +105,7 @@ WindowRuntime.leaving	Option<Instant>	-	1	1	3	0	0	0	1	incomplete
 WindowRuntime.renderer	WindowRenderer	-	n	14	35	53	0	0	1	incomplete
 WindowRuntime.system_settings_watch	Option<SystemSettingsWatch>	-	0	0	0	0	0	0	0	complete
 WindowRuntime.session_end_watch	Option<SessionEndWatch>	-	0	0	0	0	0	0	0	complete
-WindowRuntime.tabs	Vec<TabState>	hub	0	0	0	136	11	0	6	incomplete
+WindowRuntime.tabs	Vec<TabState>	hub	0	0	0	137	11	0	6	incomplete
 WindowRuntime.active_tab	usize	-	n	3	8	4	0	0	0	complete
 WindowRuntime.pty_wake	PtyWakeSignal	-	0	0	0	0	0	0	0	complete
 WindowRuntime.table_paints	HashMap<TableBlockKey, TablePaint>	-	1	1	1	0	0	0	0	complete
@@ -375,7 +376,7 @@ WindowRuntime.lawful_client_size	Option<PhysicalSize<u32>>	-	1	1	1	0	0	0	0	compl
 WindowRuntime.dpi_settlement	DpiSettlement	-	1	1	2	0	0	0	0	complete
 WindowRuntime.dpi_rectangle	DpiRectangle	-	1	1	3	0	0	0	0	complete
 TabState.id	TabId	-	0	0	0	0	0	0	0	complete
-TabState.sessions	BTreeMap<SeatId, LeafSession>	hub	0	0	0	46	6	0	1	incomplete
+TabState.sessions	BTreeMap<SeatId, LeafSession>	hub	0	0	0	47	6	0	1	incomplete
 TabState.files	BTreeMap<SeatId, FilesLeafState>	-	n	4	14	10	0	0	15	incomplete
 TabState.file_trees	BTreeMap<SeatId, DirCache>	-	n	3	18	2	0	0	0	complete
 TabState.git_trees	BTreeMap<SeatId, GitCache>	-	n	4	13	6	0	0	0	complete
@@ -422,6 +423,7 @@ TabState.landing	LandTween	-	1	1	1	0	0	0	0	complete
 TabState.last_drawn_offset	Option<i32>	-	1	1	1	0	0	0	0	complete
 TabState.last_drawn_landing	Option<u8>	-	1	1	1	0	0	0	0	complete
 LeafSession.pty	Option<PtySession>	-	n	3	3	4	0	0	1	incomplete
+LeafSession.foreground_program_cadence	Cadence	-	1	1	2	0	0	0	0	complete
 LeafSession.incarnation	u64	-	0	0	0	0	0	0	0	complete
 LeafSession.wake	Option<Arc<LeafWake>>	-	0	0	0	0	0	0	0	complete
 LeafSession.profile	String	-	0	0	0	0	0	0	2	incomplete
@@ -430,7 +432,7 @@ LeafSession.integration	Integration	-	0	0	0	0	0	0	1	incomplete
 LeafSession.program	Option<PathBuf>	-	0	0	0	0	0	0	1	incomplete
 LeafSession.spawn_place	Option<PathBuf>	-	0	0	0	0	0	0	0	complete
 LeafSession.pending_typing	Option<(String, bool)>	-	1	1	2	0	0	0	0	complete
-LeafSession.session	DualPlaneSession	-	n	9	35	6	0	0	5	incomplete
+LeafSession.session	DualPlaneSession	-	n	10	37	6	0	0	5	incomplete
 LeafSession.attention	AttentionLedger	-	n	2	7	0	0	0	1	incomplete
 LeafSession.bell_reported	bool	-	1	1	1	0	0	0	0	complete
 LeafSession.attention_clock	WaitClock	-	1	1	2	0	0	0	1	incomplete

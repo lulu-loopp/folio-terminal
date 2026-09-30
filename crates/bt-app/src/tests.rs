@@ -44260,20 +44260,23 @@ fn every_pane_of_a_tab_hands_its_decoration_work_to_the_worker() {
             .advance_live_stability(settled + Duration::from_secs(1));
     }
 
-    let (tasks, requests) = mpsc::channel();
-    let (scale_tasks, _scale_requests) = mpsc::channel();
-    let (path_tasks, _path_requests) = mpsc::channel();
-    let (foreground_tasks, _foreground_requests) = mpsc::channel();
+    let (math, requests) = mpsc::channel();
+    let (scale, _scale_requests) = mpsc::channel();
+    let (path, _path_requests) = mpsc::channel();
+    let (foreground, _foreground_requests) = mpsc::channel();
+    let senders = DecorationSenders {
+        math,
+        scale,
+        path,
+        foreground,
+    };
     let mut running = true;
     let mut notice_pending = false;
     assert!(
         !dispatch_tab_decoration_tasks(
             WindowId::from(1_u64),
             &mut tab,
-            &tasks,
-            &scale_tasks,
-            &path_tasks,
-            &foreground_tasks,
+            &senders,
             Instant::now(),
             &mut running,
             &mut notice_pending,

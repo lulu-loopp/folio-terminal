@@ -193,18 +193,12 @@ impl Runtime<'_> {
             // this publish has read its one, and the next is the next turn's.
             self.refresh_search(SearchRefresh::Output)?;
             let active = self.window.active_tab;
-            let tasks = self.app.math_worker.tasks.clone();
-            let scale_tasks = self.app.math_worker.scale_tasks.clone();
-            let path_tasks = self.app.math_worker.path_tasks.clone();
-            let foreground_tasks = self.app.foreground_program_worker.requests.clone();
+            let senders = self.app.decoration_senders();
             let window = self.window_id();
             dispatch_tab_decoration_tasks(
                 window,
                 &mut self.window.tabs[active],
-                &tasks,
-                &scale_tasks,
-                &path_tasks,
-                &foreground_tasks,
+                &senders,
                 Instant::now(),
                 &mut self.app.math_worker_running,
                 &mut self.app.math_worker_notice_pending,
@@ -305,10 +299,7 @@ impl Runtime<'_> {
                 dispatch_tab_decoration_tasks(
                     window,
                     &mut self.window.tabs[active],
-                    &tasks,
-                    &scale_tasks,
-                    &path_tasks,
-                    &foreground_tasks,
+                    &senders,
                     Instant::now(),
                     &mut self.app.math_worker_running,
                     &mut self.app.math_worker_notice_pending,
@@ -1267,18 +1258,12 @@ impl Runtime<'_> {
             hang_watch::at(projection_parent);
             let dispatch_parent = hang_watch::enter(hang_watch::Station::RedrawDispatch);
             if owes_the_engine {
-                let tasks = self.app.math_worker.tasks.clone();
-                let scale_tasks = self.app.math_worker.scale_tasks.clone();
-                let path_tasks = self.app.math_worker.path_tasks.clone();
-                let foreground_tasks = self.app.foreground_program_worker.requests.clone();
+                let senders = self.app.decoration_senders();
                 let window = self.window_id();
                 dispatch_tab_decoration_tasks(
                     window,
                     &mut self.window.tabs[active],
-                    &tasks,
-                    &scale_tasks,
-                    &path_tasks,
-                    &foreground_tasks,
+                    &senders,
                     Instant::now(),
                     &mut self.app.math_worker_running,
                     &mut self.app.math_worker_notice_pending,

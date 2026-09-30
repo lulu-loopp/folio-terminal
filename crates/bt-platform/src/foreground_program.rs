@@ -53,6 +53,13 @@ fn crosses_remote_boundary(image: &str) -> bool {
     matches!(image, "ssh" | "wsl" | "wslhost" | "wslservice" | "wslrelay")
 }
 
+/// A console host is the machinery that draws a console, never a program running in one: Windows
+/// starts one beside every process that is given a console of its own, so it is not an answer and
+/// does not make its parent an inner node of the tree.
+fn is_console_host(image: &str) -> bool {
+    matches!(image, "conhost" | "openconsole")
+}
+
 #[derive(Clone, Copy)]
 enum LeafOrder {
     DeepestThenYoungest,
@@ -67,10 +74,15 @@ fn choose_foreground(
     let mut frontier = vec![(shell_pid, 0usize)];
     let mut best: Option<(usize, u64, u32, Option<String>)> = None;
     while let Some((parent, depth)) = frontier.pop() {
-        for child in processes.iter().filter(|process| process.parent == parent) {
+        let children = |parent: u32| {
+            processes.iter().filter(move |process| {
+                process.parent == parent && !is_console_host(&canonical_image(&process.image))
+            })
+        };
+        for child in children(parent) {
             let image = canonical_image(&child.image);
             let boundary = crosses_remote_boundary(&image);
-            let has_children = processes.iter().any(|process| process.parent == child.pid);
+            let has_children = children(child.pid).next().is_some();
             if !boundary && has_children {
                 frontier.push((child.pid, depth + 1));
                 continue;
@@ -114,7 +126,11 @@ mod imp {
         },
     };
 
-    pub(super) fn snapshot(_shell_pid: u32) -> Option<Vec<ProcessEntry>> {
+    /// One ToolHelp snapshot of the process table, narrowed to the shell's descendants before any
+    /// process is opened: a start time is read only for a process on the shell's tree, and a
+    /// process that started before the parent its snapshot entry names is not that parent's child
+    /// (the parent's pid was reused), so its subtree is not the shell's.
+    pub(super) fn snapshot(shell_pid: u32) -> Option<Vec<ProcessEntry>> {
         // SAFETY: the call takes a flag and pid and returns an owned snapshot handle.
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.ok()?;
         // SAFETY: the handle was created above and is owned by this scope.
@@ -126,21 +142,43 @@ mod imp {
         };
         // SAFETY: the snapshot is live and `entry` is writable with its size initialized.
         let mut found = unsafe { Process32FirstW(snapshot, &raw mut entry) }.is_ok();
-        let mut processes = Vec::new();
+        let mut table = Vec::new();
         while found {
             let end = entry
                 .szExeFile
                 .iter()
                 .position(|unit| *unit == 0)
                 .unwrap_or(entry.szExeFile.len());
-            processes.push(ProcessEntry {
-                pid: entry.th32ProcessID,
-                parent: entry.th32ParentProcessID,
-                image: String::from_utf16_lossy(&entry.szExeFile[..end]),
-                started: crate::install_flip::started_of(entry.th32ProcessID).unwrap_or(0),
-            });
+            table.push((
+                entry.th32ProcessID,
+                entry.th32ParentProcessID,
+                String::from_utf16_lossy(&entry.szExeFile[..end]),
+            ));
             // SAFETY: the snapshot and writable entry satisfy the same contract as the first call.
             found = unsafe { Process32NextW(snapshot, &raw mut entry) }.is_ok();
+        }
+        let shell_started = crate::install_flip::started_of(shell_pid)?;
+        let mut processes = Vec::new();
+        let mut parents = vec![(shell_pid, shell_started)];
+        while let Some((parent, parent_started)) = parents.pop() {
+            for (pid, _, image) in table
+                .iter()
+                .filter(|(pid, entry_parent, _)| *entry_parent == parent && *pid != parent)
+            {
+                let Some(started) = crate::install_flip::started_of(*pid) else {
+                    continue;
+                };
+                if started < parent_started {
+                    continue;
+                }
+                parents.push((*pid, started));
+                processes.push(ProcessEntry {
+                    pid: *pid,
+                    parent,
+                    image: image.clone(),
+                    started,
+                });
+            }
         }
         Some(processes)
     }
@@ -275,7 +313,6 @@ mod tests {
     #[cfg(any(windows, target_os = "macos"))]
     use std::{
         fs,
-        process::Command,
         time::{Duration, Instant, SystemTime},
     };
 
@@ -296,6 +333,29 @@ mod tests {
         ];
         assert_eq!(
             choose_foreground(&table, 10, LeafOrder::DeepestThenYoungest),
+            ForegroundProgram::Known("tmux".to_owned())
+        );
+    }
+
+    /// RED (69a round 2, E8 door) — **a console host is never the foreground program.** Windows
+    /// starts `conhost.exe` beside a process that is given a console of its own; it is younger and
+    /// deeper than the program it serves, so without this rule it would win every walk.
+    ///
+    /// MUTATION: drop the `is_console_host` filter from `choose_foreground`'s children.
+    #[test]
+    fn a_console_host_is_never_the_foreground_program() {
+        let table = [
+            process(11, 10, "helper.exe", 20),
+            process(12, 11, "tmux.exe", 30),
+            process(13, 12, "conhost.exe", 40),
+            process(14, 11, "OpenConsole.exe", 50),
+        ];
+        assert_eq!(
+            choose_foreground(&table, 10, LeafOrder::DeepestThenYoungest),
+            ForegroundProgram::Known("tmux".to_owned())
+        );
+        assert_eq!(
+            choose_foreground(&table, 10, LeafOrder::Youngest),
             ForegroundProgram::Known("tmux".to_owned())
         );
     }
@@ -379,7 +439,7 @@ mod tests {
         );
         let ready = std::path::PathBuf::from(std::env::var_os(HELPER_READY).expect("ready path"));
         let stop = std::env::var_os(HELPER_STOP).expect("stop path");
-        let mut grandchild = Command::new(named)
+        let mut grandchild = crate::quiet_command(named)
             .args([
                 "--exact",
                 "foreground_program::tests::helper_named_grandchild_waits_for_the_parent",
@@ -399,17 +459,15 @@ mod tests {
             .duration_since(SystemTime::UNIX_EPOCH)
             .expect("system clock after epoch")
             .as_nanos();
-        let sandbox = std::env::current_dir()
-            .expect("current directory")
-            .join("target")
-            .join(format!("foreground-program-{}-{nonce}", std::process::id()));
+        let sandbox =
+            std::env::temp_dir().join(format!("foreground-program-{}-{nonce}", std::process::id()));
         fs::create_dir(&sandbox).expect("create helper sandbox under target");
         let current = std::env::current_exe().expect("current test executable");
         let named = sandbox.join(if cfg!(windows) { "tmux.exe" } else { "tmux" });
         let ready = sandbox.join("ready");
         let stop = sandbox.join("stop");
         fs::copy(&current, &named).expect("copy the test executable under an allowlisted name");
-        let mut child = Command::new(&current)
+        let mut child = crate::quiet_command(&current)
             .args([
                 "--exact",
                 "foreground_program::tests::helper_child_spawns_the_named_grandchild",

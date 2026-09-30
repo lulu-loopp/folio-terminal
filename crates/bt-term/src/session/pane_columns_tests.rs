@@ -611,8 +611,8 @@ fn arming_walks_each_pane_once_and_reports_each_panes_candidate_rows() {
                 _ => format!("left {row}"),
             };
             let right = match row {
-                5 => "| name | value |".to_owned(),
-                6 => "| --- | --- |".to_owned(),
+                6 => "| name | value |".to_owned(),
+                7 => "| --- | --- |".to_owned(),
                 _ => format!("right {row}"),
             };
             format!("{left:<50}\u{2502}{right}")
@@ -630,8 +630,8 @@ fn arming_walks_each_pane_once_and_reports_each_panes_candidate_rows() {
     assert_eq!(walks[0].0, rect(0, 12, 0, 50));
     assert_eq!(walks[1].0, rect(0, 12, 51, 100));
     assert_eq!(walks[0].1, vec![3, 5]);
-    assert_eq!(walks[1].1, vec![6]);
-    assert_eq!(union, vec![3, 5, 6]);
+    assert_eq!(walks[1].1, vec![6, 7]);
+    assert_eq!(union, vec![3, 5, 6, 7]);
 }
 
 /// RED (69a round 2, E4) — the session retains only topology. The Arc holding capture rows dies
@@ -665,15 +665,29 @@ fn a_foreground_program_change_invalidates_every_pane_even_when_rectangles_match
     session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
     assert!(complete_for_real(&mut session) > 0);
     let old = Arc::clone(session.current_frame.as_ref().expect("the first frame"));
-    assert!(!session.live_decorations.is_empty());
+    let before = session
+        .live_decorations
+        .values()
+        .map(|record| record.identity.occurrence_id)
+        .collect::<Vec<_>>();
+    assert!(!before.is_empty());
 
+    // The worker's answer changes only the provenance: the next capture measures the same
+    // rectangles and the same screen fence.
     session.apply_foreground_program(ForegroundProgram::Unknown);
     let capture = session.live_capture();
+    assert!(old.is_framed());
     assert_eq!(old.panes(), capture.frame().panes());
-    let invalidations = session.live_invalidation_count;
-    session.observe_frame(capture.frame());
-    assert!(session.live_decorations.is_empty());
-    assert!(session.live_invalidation_count > invalidations);
+    assert_eq!(old.status_row(), capture.frame().status_row());
+    assert_eq!(
+        old.screen_fence_state(),
+        capture.frame().screen_fence_state()
+    );
+    drop(capture);
+
+    // The next scheduling pass (every frame boundary runs one) observes the new identity: every
+    // record of the old frame retires, and every pane re-arms and lands again.
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL * 2);
     assert_eq!(
         session
             .current_frame
@@ -681,6 +695,20 @@ fn a_foreground_program_change_invalidates_every_pane_even_when_rectangles_match
             .expect("the replacement frame")
             .foreground_program(),
         &ForegroundProgram::Unknown
+    );
+    assert!(
+        session
+            .live_decorations
+            .values()
+            .all(|record| !before.contains(&record.identity.occurrence_id)),
+        "a record measured under the old provenance survived"
+    );
+    assert!(complete_for_real(&mut session) > 0, "the panes re-arm");
+    assert!(
+        session
+            .live_decorations
+            .values()
+            .all(|record| !before.contains(&record.identity.occurrence_id))
     );
 }
 

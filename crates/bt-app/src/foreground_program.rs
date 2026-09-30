@@ -70,6 +70,48 @@ fn run(
     }
 }
 
+/// Ask the worker about `leaf`'s shell when its cadence says so: at once after an OSC 133 command
+/// start, and every [`OBSERVATION_INTERVAL`] while the pane's last capture held a frame candidate.
+/// A pane without a shell process (or a worker that has gone) books no request, so the cadence is
+/// not left waiting for an answer that cannot come.
+pub(crate) fn request(
+    leaf: &mut LeafSession,
+    address: ShellAddress,
+    requests: &mpsc::Sender<Request>,
+    now: Instant,
+) {
+    let command_started = leaf.session.take_foreground_program_probe_request();
+    let candidate = leaf.session.foreground_program_probe_is_armed();
+    if !leaf
+        .foreground_program_cadence
+        .should_request(now, command_started, candidate)
+    {
+        return;
+    }
+    let sent = leaf
+        .pty
+        .as_ref()
+        .and_then(bt_pty::PtySession::shell_process_id)
+        .is_some_and(|shell| {
+            requests
+                .send(Request {
+                    address,
+                    incarnation: leaf.incarnation,
+                    shell,
+                })
+                .is_ok()
+        });
+    if !sent {
+        leaf.foreground_program_cadence.answered();
+    }
+}
+
+/// When `leaf`'s cadence next asks, for the window's wake-up deadline.
+pub(crate) fn deadline(leaf: &LeafSession) -> Option<Instant> {
+    leaf.foreground_program_cadence
+        .deadline(leaf.session.foreground_program_probe_is_armed())
+}
+
 /// Land one answer only in the shell incarnation that asked. `None` is a stale answer; `Some`
 /// says whether the compact session-owned fact changed.
 pub(crate) fn apply_answer(
@@ -154,16 +196,17 @@ mod tests {
 
     #[test]
     fn a_frame_candidate_asks_at_the_five_second_boundary() {
+        const FIVE_SECONDS: Duration = Duration::from_secs(5);
         let start = Instant::now();
         let mut cadence = Cadence::default();
         assert!(!cadence.should_request(start, false, true));
-        assert_eq!(cadence.deadline(true), Some(start + OBSERVATION_INTERVAL));
+        assert_eq!(cadence.deadline(true), Some(start + FIVE_SECONDS));
         assert!(!cadence.should_request(
-            start + OBSERVATION_INTERVAL - Duration::from_nanos(1),
+            start + FIVE_SECONDS - Duration::from_nanos(1),
             false,
             true
         ));
-        assert!(cadence.should_request(start + OBSERVATION_INTERVAL, false, true));
+        assert!(cadence.should_request(start + FIVE_SECONDS, false, true));
         assert_eq!(cadence.deadline(true), None);
     }
 
