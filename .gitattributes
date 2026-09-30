@@ -99,3 +99,9 @@ docs/spikes/artifacts/win-landing/probes/** -text
 # notice on files nobody here has touched.
 vendor/mitex/** -text
 vendor/mitex-parser/** -text
+
+# The window thread's registry: a `# effects` row of kind `worker-door-body` has an
+# empty last field (no admission door), and its line keeps the tab that makes it
+# seven cells — the registry's own parser counts them. So that line ends in a tab,
+# and `git diff --check` is told this file's lines may (U-SMALL-047 round 2).
+crates/bt-app/src/window_waits.tsv whitespace=-blank-at-eol
