@@ -14,6 +14,15 @@ All notable changes to Folio are recorded here. The format follows
   Folio supports the first tier of the kitty keyboard protocol and xterm's
   modifyOtherKeys. neovim, fish, helix and Claude Code ask for it, and so
   does Codex on macOS and in WSL. Programs that do not ask are unaffected.
+- On Windows, Ctrl+Enter, Shift+Enter and Alt+Enter reach console programs
+  such as Codex as those keys, so a Codex set up to submit with Ctrl+Enter
+  now does.
+
+### Changed
+
+- In PowerShell, Shift+Enter now adds a line and Ctrl+Enter inserts one
+  above, as in Windows Terminal, instead of running the command; Alt+Enter no
+  longer runs it either. Press Enter to run.
 
 ### Changed
 

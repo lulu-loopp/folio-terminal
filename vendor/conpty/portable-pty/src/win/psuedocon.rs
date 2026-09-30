@@ -90,6 +90,7 @@ impl std::fmt::Display for ConPtySource {
 struct LoadedConPty {
     funcs: ConPtyFuncs,
     source: ConPtySource,
+    fallback: Option<String>,
 }
 
 enum ConPtyFuncs {
@@ -187,27 +188,50 @@ fn load_conpty() -> LoadedConPty {
     // upstream bare `conpty.dll` name also searches PATH, which can silently select an unrelated
     // host when the packaged sidecar is absent. Requiring the paired OpenConsole executable keeps
     // the supported choices strict: the packaged pair or the operating-system implementation.
-    if std::env::var_os("BT_CONPTY_FORCE_SYSTEM").is_none() {
-        if let Ok(application) = std::env::current_exe() {
-            if let Some(directory) = application.parent() {
-                let dll = directory.join("conpty.dll");
-                let host = directory.join("OpenConsole.exe");
-                if dll.is_file() && host.is_file() {
-                    if let Ok(funcs) = SidecarConPtyFuncs::open(&dll) {
-                        return LoadedConPty {
-                            funcs: ConPtyFuncs::Sidecar(funcs),
-                            source: ConPtySource::Sidecar { dll },
-                        };
+    // Folio: every way of ending up on the operating system's implementation is named, so a pane
+    // that runs on it can say why (`conpty_fallback_reason`).
+    let fallback = if std::env::var_os("BT_CONPTY_FORCE_SYSTEM").is_some() {
+        "BT_CONPTY_FORCE_SYSTEM is set".to_owned()
+    } else {
+        match std::env::current_exe() {
+            Err(error) => format!("the running executable's path is unknown ({error})"),
+            Ok(application) => match application.parent() {
+                None => "the running executable has no directory".to_owned(),
+                Some(directory) => {
+                    let dll = directory.join("conpty.dll");
+                    let host = directory.join("OpenConsole.exe");
+                    if !dll.is_file() {
+                        format!("{} is missing", dll.display())
+                    } else if !host.is_file() {
+                        format!("{} is missing", host.display())
+                    } else {
+                        match SidecarConPtyFuncs::open(&dll) {
+                            Ok(funcs) => {
+                                return LoadedConPty {
+                                    funcs: ConPtyFuncs::Sidecar(funcs),
+                                    source: ConPtySource::Sidecar { dll },
+                                    fallback: None,
+                                };
+                            }
+                            Err(error) => format!("{} did not load ({error:?})", dll.display()),
+                        }
                     }
                 }
-            }
+            },
         }
-    }
+    };
 
     LoadedConPty {
         funcs: ConPtyFuncs::System(kernel),
         source: ConPtySource::System,
+        fallback: Some(fallback),
     }
+}
+
+/// Folio: why the process runs on the operating system's ConPTY rather than the packaged pair, or
+/// `None` when it runs on the packaged pair.
+pub fn conpty_fallback_reason() -> Option<String> {
+    CONPTY.fallback.clone()
 }
 
 lazy_static! {

@@ -1971,11 +1971,19 @@ impl Runtime<'_> {
         // **The key encoding the program asked for is read here too, the way DECCKM
         // always was** (T-KEYBOARD-PROTOCOL, design note §2.3): one read of the
         // session-owned terminal state this thread already holds, at the moment of the
-        // key — no door, no lock, no wait.
-        let Some((application_cursor_mode, keyboard)) = self.focused().map(|leaf| {
+        // key — no door, no lock, no wait. The same read carries whether ConPTY has
+        // win32-input-mode set (T-KEYBOARD-RECORDS, §7.3 gate 1), and the pane's own record of
+        // which ConPTY it runs on.
+        let Some((application_cursor_mode, keyboard, conpty)) = self.focused().map(|leaf| {
             (
                 leaf.session.application_cursor_mode(),
                 leaf.session.terminal_modes().keyboard,
+                // Which pseudoconsole the pane runs on, fixed when it was spawned: records go
+                // only to the ConPTY Folio ships. A pane with no ConPTY behind it writes none.
+                leaf.pty.as_ref().map_or(
+                    bt_pty::ConPtyKind::NotConPty,
+                    bt_pty::PtySession::conpty_kind,
+                ),
             )
         }) else {
             return Ok(());
@@ -1987,6 +1995,16 @@ impl Runtime<'_> {
             self.window.modifiers,
             application_cursor_mode,
             keyboard,
+            // What a win32-input-mode record is built from (T-KEYBOARD-RECORDS): where the key
+            // is, what the system typed for it, and the installed layout's virtual key.
+            input::KeyOrigin {
+                platform: bt_platform::host_platform(),
+                physical_key: event.physical_key,
+                text_with_all_modifiers: event.text_with_all_modifiers(),
+                virtual_key_of_scan_code: bt_platform::virtual_key_of_scan_code,
+                virtual_key_is_dead: bt_platform::virtual_key_is_dead,
+                conpty,
+            },
         ) else {
             return Ok(());
         };

@@ -121,6 +121,10 @@ file produces the vendored file byte for byte. Upstream formats with its own
 - **Private mode 2031.** The dark/light theme-change notification subscription
   that kitty, foot, contour and WezTerm all speak is accepted and reported
   rather than falling into the unknown-mode branch.
+- **Private mode 9001.** win32-input-mode, which ConPTY sets at the head of every
+  session, is recorded as `TermMode::WIN32_INPUT` (set, reset, and cleared by `RIS`
+  with the rest of the modes) rather than falling into the unknown-mode branch;
+  Folio's key encoder reads it to decide whether ConPTY will parse a key record.
 - **An origin-mode cursor fix.** `goto` is the one entry point whose line is
   measured from the top of the scroll region, so it is the only one that adds the
   region's offset; the relative moves (`CUU`, `CUD`, `CNL`, `CPL`, and `CHA`,
