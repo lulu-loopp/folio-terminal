@@ -4864,51 +4864,67 @@ fn a_road_line_reaches_the_log_once_when_standard_error_is_that_log() {
     );
 }
 
-/// PIN (U-42d; 0.4.6's D-15) — **the applier's wait for a held file ends
-/// when the file is let go, not at the wait's deadline**: a hold let go a
-/// moment into a 60 s wait is followed by the moves at the poll's cadence.
+/// RED (U-42d, D-15; review finding 5) — **the applier's wait for a held
+/// file sleeps one poll between two looks, so a hold let go is seen at the
+/// next look, and a hold that outlasts the window refuses exactly at its
+/// end.**
 ///
 /// On the clean machine E-7's hold lasted 200 s, past the applier's 60 s, so
-/// the ~61 s with no window there was the whole wait run out; the wait itself
-/// already asked again every poll (`ready_to_move`). This pins that it ends at
-/// the release.
+/// the ~61 s with no window there was the whole wait run out. The clock and
+/// the pause here are the test's: each sleep moves the clock by exactly what
+/// was asked, so the count of polls is exact and nothing waits.
 ///
-/// MUTATION: in `ready_to_move`, sleep what is left of the window instead of
-/// `poll.min(left)` — the moves come at the deadline, not the release.
+/// MUTATION: in `until_let_go`, sleep what is left of the window instead of
+/// `poll.min(left)`: the first sleep is the whole window.
 #[test]
-fn a_held_file_let_go_ends_the_applier_s_wait_at_once() {
-    let Some(install) = Install::new("held-released") else {
-        return;
-    };
-    let old = install.children.start(&install.installed, &[]);
-    let mut world = install.world(Trial::Answers);
-    let first = Arc::new(Mutex::new(None::<Instant>));
-    let seen = Arc::clone(&first);
-    world.on_move = Some(Box::new(move |_| {
-        seen.lock().unwrap().get_or_insert_with(Instant::now);
-    }));
-    let window = Duration::from_secs(60);
-    let applier = start(
-        install.road(limits(60_000, 20_000)),
-        install.txn,
-        install.applier,
-        world,
+fn a_held_file_let_go_is_seen_at_the_next_poll() {
+    let poll = Duration::from_millis(250);
+    let window_length = Duration::from_secs(60);
+    let start = Instant::now();
+    let window = start + window_length;
+
+    // Held for three looks, then let go.
+    let clock = std::cell::Cell::new(start);
+    let mut looks = 0;
+    let mut sleeps = Vec::new();
+    let answer = until_let_go(
+        window,
+        poll,
+        &mut || clock.get(),
+        &mut || {
+            looks += 1;
+            Ok(if looks <= 3 {
+                vec!["folio.exe".to_owned()]
+            } else {
+                Vec::new()
+            })
+        },
+        &mut |pause| {
+            sleeps.push(pause);
+            clock.set(clock.get() + pause);
+        },
     );
-    until_journal(&install, PhaseKind::Armed);
-    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(answer, Ok(()));
+    assert_eq!(sleeps, vec![poll; 3], "one poll between two looks");
+    assert_eq!(clock.get() - start, 3 * poll, "seen at the next poll");
+
+    // Held for good: refused when the window has passed, never after it.
+    let clock = std::cell::Cell::new(start);
+    let mut slept = Duration::ZERO;
+    let answer = until_let_go(
+        window,
+        poll,
+        &mut || clock.get(),
+        &mut || Ok(vec!["folio.exe".to_owned()]),
+        &mut |pause| {
+            assert!(pause <= poll, "{pause:?} is more than one poll");
+            slept += pause;
+            clock.set(clock.get() + pause);
+        },
+    );
     assert_eq!(
-        install.on_disk().body.phase,
-        Phase::Armed,
-        "nothing moves while the file is held"
+        answer,
+        Err("held open by another process: folio.exe".to_owned())
     );
-    install.children.end(old);
-    let released = Instant::now();
-    let (ended, world) = applier.join().unwrap();
-    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
-    let moved = first.lock().unwrap().expect("the moves came");
-    assert!(
-        moved.saturating_duration_since(released) < window / 4,
-        "the wait ended {:?} after the release, as if it had waited out its window",
-        moved.saturating_duration_since(released)
-    );
+    assert_eq!(slept, window_length, "the window, and not a poll more");
 }

@@ -950,26 +950,25 @@ impl<'a> Txn<'a> {
                 ));
             }
         }
-        loop {
-            let mut held = Vec::new();
-            for member in &self.inventories.old_present {
-                match install_flip::held_open(&install.join(&member.name)) {
-                    Ok(false) => {}
-                    Ok(true) => held.push(member.name.as_str()),
-                    Err(error) => {
-                        return Err(format!("`{}` in the install: {error}", member.name));
+        until_let_go(
+            window,
+            self.road.limits.poll,
+            &mut Instant::now,
+            &mut || {
+                let mut held = Vec::new();
+                for member in &self.inventories.old_present {
+                    match install_flip::held_open(&install.join(&member.name)) {
+                        Ok(false) => {}
+                        Ok(true) => held.push(member.name.clone()),
+                        Err(error) => {
+                            return Err(format!("`{}` in the install: {error}", member.name));
+                        }
                     }
                 }
-            }
-            if held.is_empty() {
-                return Ok(());
-            }
-            let left = window.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(format!("held open by another process: {}", held.join(", ")));
-            }
-            bt_platform::wait::sleep_within(worker, self.road.limits.poll.min(left));
-        }
+                Ok(held)
+            },
+            &mut |pause| bt_platform::wait::sleep_within(worker, pause),
+        )
     }
 
     /// W6 → W7 → W8, or the rollback.
@@ -1648,6 +1647,38 @@ fn read_digest_at(path: &Path) -> Result<Option<Digest>, String> {
             Ok(true) => String::from("held open by another program"),
             _ => error.to_string(),
         }),
+    }
+}
+
+/// **Wait until nothing `held` names is held any more, within `window`**
+/// (E-7): ask, and while something is held sleep one `poll` (never past
+/// `window`) and ask again — so a hold let go is seen at the next poll, and a
+/// hold that outlasts `window` refuses with the names still held. `now` is the
+/// clock and `sleep` the pause (the worker's wait door in the product), so a
+/// test can count the polls (U-42d, review finding 5).
+///
+/// # Errors
+/// What `held` refused with, or the files still held when `window` passed.
+fn until_let_go(
+    window: Instant,
+    poll: std::time::Duration,
+    now: &mut dyn FnMut() -> Instant,
+    held: &mut dyn FnMut() -> Result<Vec<String>, String>,
+    sleep: &mut dyn FnMut(std::time::Duration),
+) -> Result<(), String> {
+    loop {
+        let names = held()?;
+        if names.is_empty() {
+            return Ok(());
+        }
+        let left = window.saturating_duration_since(now());
+        if left.is_zero() {
+            return Err(format!(
+                "held open by another process: {}",
+                names.join(", ")
+            ));
+        }
+        sleep(poll.min(left));
     }
 }
 
