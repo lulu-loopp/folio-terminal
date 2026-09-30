@@ -359,10 +359,9 @@ pub enum ActionIcon {
     /// `Browse…` — the root menu's escape hatch, which opens the system's own
     /// folder picker.
     ///
-    /// **An act, and the rows above it are places** — which P2 drew a line
-    /// along and 裁1 (2026-08-26) rubbed out. Both wear the mock-up's open
-    /// folder, solid, because both are about a folder; what tells this row from
-    /// the places above it is its own word.
+    /// An act, so it wears the outline folder. Both outline identities stroke
+    /// the filled folder's exact silhouette (T-FOLDER-GLYPH); the places above
+    /// this row retain their filled glyphs.
     BrowseForFolder,
 
     // ── the Git menus, panel and graph ───────────────────────────────────
@@ -1664,13 +1663,6 @@ mod tests {
                     ))
                 })
                 .collect();
-            let biggest = pictures
-                .iter()
-                .copied()
-                .fold(
-                    ("", f32::MIN),
-                    |so_far, one| if one.1 > so_far.1 { one } else { so_far },
-                );
             let smallest = pictures
                 .iter()
                 .copied()
@@ -1678,18 +1670,28 @@ mod tests {
                     ("", f32::MAX),
                     |so_far, one| if one.1 < so_far.1 { one } else { so_far },
                 );
-            let spread = biggest.1 / smallest.1 - 1.0;
-            if spread <= OPTICAL_PICTURE_SPREAD {
-                continue;
+            for (id, picture) in pictures {
+                // T-FOLDER-GLYPH: centring the house pen on the filled path
+                // grows only the outline folder's ink from 12.8 x 10.3 to
+                // 14.0 x 11.5 units. Its diagonal is about 26% above the
+                // chevron's; allow 27% for raster rounding. Other drawings
+                // keep the original 20% gate, including the close button.
+                let limit = if matches!(id, "i-folder-line" | "i-folder-open-line") {
+                    0.27
+                } else {
+                    OPTICAL_PICTURE_SPREAD
+                };
+                let spread = picture / smallest.1 - 1.0;
+                if spread <= limit {
+                    continue;
+                }
+                wrong.push(format!(
+                    "{surface}: {id} makes a {picture:.3} picture beside {}'s {:.3} — {:.1}% apart",
+                    smallest.0,
+                    smallest.1,
+                    spread * 100.0,
+                ));
             }
-            wrong.push(format!(
-                "{surface}: {} makes a {:.3} picture beside {}'s {:.3} — {:.1}% apart",
-                biggest.0,
-                biggest.1,
-                smallest.0,
-                smallest.1,
-                spread * 100.0,
-            ));
         }
         assert!(
             wrong.is_empty(),

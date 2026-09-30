@@ -20,6 +20,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- The outline folder icon is the filled folder's own shape, so the two read as one.
+
 - In PowerShell, Shift+Enter now adds a line and Ctrl+Enter inserts one
   above, as in Windows Terminal, instead of running the command; Alt+Enter no
   longer runs it either. Press Enter to run.

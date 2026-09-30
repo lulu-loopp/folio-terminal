@@ -322,11 +322,8 @@ pub enum ChromeMark {
     /// `#i-folder-open-line` — the act of opening a folder somewhere else, on
     /// [`Self::FolderOutline`]'s division.
     ///
-    /// The back plate becomes the shut folder's own top-left profile and the
-    /// front flap a struck quadrilateral, both landing on the same ink band the
-    /// filled pair does. The flap is *open at the top left*, which is the one
-    /// thing that tells this from [`Self::FolderOutline`] at a menu row's
-    /// fourteen pixels.
+    /// Shares [`Self::FolderOutline`]'s stroked closed-folder silhouette.
+    /// The legacy identity keeps the action registry and raster cache stable.
     FolderOpenOutline,
     /// `#i-wheel` — **a mouse seen from above, with its wheel**: not a verb, but
     /// the half of a chord that has no key cap to be written on.
@@ -625,12 +622,9 @@ pub enum ChromeMark {
     /// `#i-folder-line` — **the act.** A menu row or a head button *about* a
     /// folder: `Open files pane`, `New terminal in folder…`.
     ///
-    /// The same silhouette to the digit — this drawing's path is
-    /// [`Self::Folder`]'s own edge, pulled in half a pen so the stroke's outer
-    /// edge lands exactly where the fill's did. Two drawings of one object,
-    /// which is what makes the split a *policy* rather than a second folder:
-    /// what tells them apart is whether the row is a thing or a verb, and the
-    /// two never appear in the same column.
+    /// [`Self::Folder`]'s exact path with no fill and the house's 1.2-unit pen.
+    /// The stroke is centred on the silhouette, not inset into a second shape.
+    /// Both outline identities use the same body (T-FOLDER-GLYPH).
     ///
     /// **The report this closes** (P1's own, 2026-08-26, and the 2026-08-27
     /// acceptance in the same words): the pane menu's ink mass came into a
@@ -3702,6 +3696,20 @@ const SYMBOL_VIEW_BOX: [&str; 69] = [
     "0 0 16 16", // #i-speaker-mute
 ];
 
+// One silhouette, two paints. Keep the filled body's expanded bytes unchanged.
+macro_rules! folder_body {
+    ($paint:literal) => {
+        concat!(
+            r#"<path d="M1.6 4.2c0-.6.5-1.1 1.1-1.1h3.1l1.3 1.5h6.2c.6 0 1.1.5 1.1 1.1v6.6c0 .6-.5 1.1-1.1 1.1H2.7c-.6 0-1.1-.5-1.1-1.1z" "#,
+            $paint,
+            "/>"
+        )
+    };
+}
+
+const FOLDER_OUTLINE_BODY: &str =
+    folder_body!(r#"fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round""#);
+
 /// The `<symbol>` bodies, byte for byte from `docs/design/ui-mockup.html` (the
 /// `<svg style="display:none">` block near the top of `<body>`).
 const SYMBOL_BODY: [&str; 69] = [
@@ -3777,7 +3785,7 @@ const SYMBOL_BODY: [&str; 69] = [
         r#"<path d="M8.9 2.3v3.3h3.4" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>"#,
     ),
     // #i-folder
-    r#"<path d="M1.6 4.2c0-.6.5-1.1 1.1-1.1h3.1l1.3 1.5h6.2c.6 0 1.1.5 1.1 1.1v6.6c0 .6-.5 1.1-1.1 1.1H2.7c-.6 0-1.1-.5-1.1-1.1z" fill="currentColor"/>"#,
+    folder_body!(r#"fill="currentColor""#),
     // #i-panel — the pen to the house's `1.2`, and the frame pulled off the
     // box's own edge into the band (清单甲 6 and 13). It was `0.9 – 15.1` of
     // ink in a sixteen, which is a frame drawn *outside* the air every other
@@ -4304,24 +4312,10 @@ const SYMBOL_BODY: [&str; 69] = [
         r#"<rect x="3.9" y="2.2" width="8.2" height="11.6" rx="4.1" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
         r#"<rect x="7.3" y="4.45" width="1.4" height="2.9" rx="0.7" fill="currentColor"/>"#,
     ),
-    // `#i-folder-line` — `#i-folder`'s own edge, drawn.
-    //
-    // The path is the fill's silhouette pulled in half a pen on every side, so
-    // the stroke's outer edge lands exactly where the solid's did: ink `1.6 –
-    // 14.4` across and `3.1 – 13.4` down, the filled folder's to the digit. Two
-    // renditions of one object, on `#p-shell-line`'s precedent one family over.
-    r#"<path d="M2.2 4.3a.6.6 0 0 1 .6-.6h2.6l1.3 1.4h6.5a.6.6 0 0 1 .6.6v6.5a.6.6 0 0 1-.6.6H2.8a.6.6 0 0 1-.6-.6z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
-    // `#i-folder-open-line` — the same object with its flap open.
-    //
-    // The back is the shut folder's top-left profile, stopping where the flap
-    // covers it; the flap is a quadrilateral leaning right, standing on the
-    // shut folder's own floor. Both land in the band the filled pair does, and
-    // the *opening at the top left* is what tells the two apart in a menu
-    // column at fourteen pixels — not a change of size and not a second colour.
-    concat!(
-        r#"<path d="M2.2 11.5V4.3a.6.6 0 0 1 .6-.6h2.6l1.3 1.4h6.5a.6.6 0 0 1 .6.6v1.7" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
-        r#"<path d="M2.2 12.8l2.4-5.4h9.2l-2.4 5.4z" fill="none" stroke="currentColor" stroke-width="1.2" stroke-linejoin="round"/>"#,
-    ),
+    // Both outline identities share the filled folder's exact silhouette.
+    // The house pen is centred on that edge, without an inset or an open flap.
+    FOLDER_OUTLINE_BODY, // #i-folder-line
+    FOLDER_OUTLINE_BODY, // #i-folder-open-line
     // `#i-play` — the solid triangle, cut on the house's ink band and set by
     // its **centroid** rather than by its bounding box.
     //
@@ -4549,6 +4543,42 @@ fn tab_body_inset_path(width: u32, height: u32, radius: u32, inset: f32) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// MUTATION: restore either old outline path and silhouette equality fails.
+    #[test]
+    fn every_outline_folder_strokes_the_filled_folders_exact_path() {
+        let paths = |body: &'static str| -> Vec<&'static str> {
+            body.split("<path ")
+                .skip(1)
+                .map(|path| {
+                    path.split("d=\"")
+                        .nth(1)
+                        .unwrap()
+                        .split('"')
+                        .next()
+                        .unwrap()
+                })
+                .collect()
+        };
+        let filled = SYMBOL_BODY[symbol_index(ChromeMark::Folder)];
+        assert_eq!(paths(filled).len(), 1);
+        for mark in [ChromeMark::FolderOutline, ChromeMark::FolderOpenOutline] {
+            let outline = SYMBOL_BODY[symbol_index(mark)];
+            assert_eq!(
+                paths(outline),
+                paths(filled),
+                "{} silhouette",
+                mark.drawing_id()
+            );
+            assert_eq!(
+                SYMBOL_VIEW_BOX[symbol_index(mark)],
+                SYMBOL_VIEW_BOX[symbol_index(ChromeMark::Folder)]
+            );
+            assert!(outline.contains(r#"fill="none""#));
+            assert!(!outline.contains(r#"fill="currentColor""#));
+            assert_eq!(mark.design_stroke_units(), Some(1.2));
+        }
+    }
 
     fn sprite(mark: ChromeMark, width: f32, height: f32, color: [u8; 3]) -> ChromeSprite {
         ChromeSprite::new(mark, [0.0, 0.0, width, height], color)
