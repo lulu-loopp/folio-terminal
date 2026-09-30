@@ -452,11 +452,15 @@ fn copy_verified(
 
 /// **A bundle is the offered Folio**: [`Tools::verify`], its
 /// `CFBundleShortVersionString` equal to `version`, and its main executable
-/// carrying the offer's architecture ([`MACOS_ARCHITECTURE`]). Answers its
-/// identity — cdhash and version — for the journal.
+/// carrying the offer's architecture ([`MACOS_ARCHITECTURE`]); and **this
+/// build may update itself to it** — its sealed `FolioMinUpdater` no newer
+/// than this build (0.4.7 U-42c, the Windows archive reader's `min_updater`
+/// rule). Answers its identity — cdhash and version — for the journal.
 ///
 /// # Errors
-/// [`Stop::Identity`], whichever of them failed.
+/// [`Stop::TooOld`] when the bundle needs a newer updater (with one line in
+/// `diagnostics.log`); [`Stop::Identity`] for every other check, a missing
+/// or unreadable `FolioMinUpdater` included.
 pub(crate) fn check(
     worker: &WorkerCtx,
     tools: &dyn Tools,
@@ -473,6 +477,16 @@ pub(crate) fn check(
         macos_update::architectures(&code.executable).map_err(|_| Stop::Identity)?;
     if !architectures.iter().any(|name| name == MACOS_ARCHITECTURE) {
         return Err(Stop::Identity);
+    }
+    let needs = macos_update::min_updater(worker, bundle).map_err(|_| Stop::Identity)?;
+    let needed = crate::update::Version::parse(&needs).ok_or(Stop::Identity)?;
+    let this = crate::update::Version::parse(crate::version::VERSION).ok_or(Stop::Identity)?;
+    if this < needed {
+        crate::diagnostics::note(&format!(
+            "Folio: update job — the new bundle needs an updater of {needs} or later, and this is {}",
+            crate::version::VERSION
+        ));
+        return Err(Stop::TooOld);
     }
     Ok(BundleIdentity {
         cdhash: Cdhash::parse(&code.cdhash).map_err(|_| Stop::Identity)?,

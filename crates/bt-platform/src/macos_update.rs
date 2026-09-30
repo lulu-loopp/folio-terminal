@@ -944,8 +944,28 @@ pub fn code_identity(
 /// [`Refusal::NotHere`] off macOS; [`Refusal::Program`] when `plutil` refuses
 /// (no such file, no such key) or answers nothing.
 pub fn short_version(
+    worker: &crate::admission::WorkerCtx,
+    bundle: &Path,
+) -> Result<String, Refusal> {
+    plist_string(worker, bundle, "CFBundleShortVersionString")
+}
+
+/// **`FolioMinUpdater` of the bundle at `bundle`** — the oldest Folio that
+/// may update itself to it, sealed in its `Info.plist` like the version
+/// (0.4.6 ticket U-9; read by the macOS Prepare since 0.4.7 ticket U-42c).
+///
+/// # Errors
+/// As [`short_version`]'s.
+pub fn min_updater(worker: &crate::admission::WorkerCtx, bundle: &Path) -> Result<String, Refusal> {
+    plist_string(worker, bundle, "FolioMinUpdater")
+}
+
+/// **One string of the bundle's `Info.plist`** — `plutil -extract <key> raw
+/// -o - <bundle>/Contents/Info.plist`, within [`PLIST_WITHIN`].
+fn plist_string(
     _worker: &crate::admission::WorkerCtx,
     bundle: &Path,
+    key: &str,
 ) -> Result<String, Refusal> {
     if crate::host_platform() != HostPlatform::MacOs {
         return Err(Refusal::NotHere);
@@ -955,7 +975,7 @@ pub fn short_version(
         PLUTIL,
         &[
             OsStr::new("-extract"),
-            OsStr::new("CFBundleShortVersionString"),
+            OsStr::new(key),
             OsStr::new("raw"),
             OsStr::new("-o"),
             OsStr::new("-"),

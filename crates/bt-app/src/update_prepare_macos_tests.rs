@@ -126,6 +126,23 @@ pub(crate) mod fixture {
     /// **A signed synthetic bundle** `<parent>/<name>` of `version`, whose one
     /// resource says `notice`.
     pub(crate) fn bundle(parent: &Path, name: &str, version: &str, notice: &str) -> PathBuf {
+        bundle_needing(
+            parent,
+            name,
+            version,
+            notice,
+            bt_winres::release_manifest::MIN_UPDATER,
+        )
+    }
+
+    /// [`bundle`], whose sealed `FolioMinUpdater` is `needs` (U-42c).
+    pub(crate) fn bundle_needing(
+        parent: &Path,
+        name: &str,
+        version: &str,
+        notice: &str,
+        needs: &str,
+    ) -> PathBuf {
         let bundle = parent.join(name);
         let macos = bundle.join("Contents").join("MacOS");
         std::fs::create_dir_all(&macos).unwrap();
@@ -154,6 +171,7 @@ pub(crate) mod fixture {
                  <key>CFBundleIdentifier</key><string>{IDENTIFIER}</string>\
                  <key>CFBundlePackageType</key><string>APPL</string>\
                  <key>CFBundleShortVersionString</key><string>{version}</string>\
+                 <key>FolioMinUpdater</key><string>{needs}</string>\
                  </dict></plist>\n"
             ),
         )
@@ -281,7 +299,10 @@ pub(crate) mod fixture {
     }
 }
 
-use fixture::{Scratch, answer, attach, blank_image, bundle, image_of, listing, mounted, on_macos};
+use fixture::{
+    Scratch, answer, attach, blank_image, bundle, bundle_needing, image_of, listing, mounted,
+    on_macos,
+};
 
 /// The offer every test presses: `v0.4.7`, for macOS.
 fn offer(txn: u8) -> Offer {
@@ -787,6 +808,42 @@ fn quarantine_is_preserved_end_to_end() {
         ],
     );
     assert_eq!(String::from_utf8_lossy(&read.stdout).trim(), QUARANTINE);
+}
+
+/// RED (U-42c) — **a bundle whose sealed `FolioMinUpdater` is newer than
+/// this build fails as "too old to update itself", not as "not verified",
+/// and leaves nothing.**
+///
+/// Codex, U-SMALL-047 finding 2: the macOS Prepare checked the signature,
+/// the version and the architecture and never read the minimum, so a release
+/// that needs a newer updater was staged and swapped in. The bundle here is
+/// the scene's, signed after its `Info.plist` says it needs 99.0.0.
+///
+/// MUTATION: in `check`, drop the `this < needed` refusal: the job verifies.
+#[test]
+fn a_bundle_that_needs_a_newer_updater_says_this_version_is_too_old() {
+    if !on_macos() {
+        return;
+    }
+    let scene = Scene::new("too-old", "Folio.app", |new| {
+        let parent = new.parent().expect("the source folder");
+        std::fs::remove_dir_all(new).unwrap();
+        bundle_needing(parent, IMAGE_BUNDLE, "0.4.7", "the new build", "99.0.0");
+    });
+    let tools = Arc::new(TestTools::new(&scene.scratch));
+    let job = press(&driver(&scene, &tools), scene.release(), 0x2c);
+    assert!(
+        matches!(
+            job.state(),
+            State::Failed(_, Failure::Stopped(Stop::TooOld))
+        ),
+        "{:?}",
+        job.state()
+    );
+    let home = scene.home();
+    assert!(!home.transaction(TxnId::new([0x2c; 16])).exists());
+    assert!(!home.journal().exists());
+    assert!(mounted(home.root()).is_empty());
 }
 
 /// RED (U-27) — **the copy is verified again where it lies**: a copy altered
