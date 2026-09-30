@@ -21361,6 +21361,7 @@ mod tests {
                 PaneMenuRow::Duplicate,
                 PaneMenuRow::MoveToNewTab,
                 PaneMenuRow::MoveToNewWindow,
+                PaneMenuRow::ResetTerminalModes,
                 PaneMenuRow::ClosePane,
             ],
             "a lone window draws no row for moving a pane into another one"
