@@ -314,3 +314,6 @@ if ($failures.Count -gt 0) {
     exit 1
 }
 Write-Host 'update-manifests.ps1 puts back every write that landed, and names an incident when it cannot'
+# Explicit: the cases leave the last child's exit code (3, the incident case) in
+# $LASTEXITCODE, and CI's pwsh shell ends a step with it.
+exit 0
