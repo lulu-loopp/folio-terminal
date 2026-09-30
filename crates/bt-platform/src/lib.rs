@@ -6818,7 +6818,50 @@ mod windows_impl {
     #[cfg(test)]
     mod shifted_character_tests {
         use super::*;
-        use windows::Win32::UI::Input::KeyboardAndMouse::{KLF_NOTELLSHELL, LoadKeyboardLayoutW};
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetKeyboardLayoutList, KLF_NOTELLSHELL, LoadKeyboardLayoutW, UnloadKeyboardLayout,
+        };
+
+        /// The session's loaded layouts (`GetKeyboardLayoutList`).
+        fn loaded_layouts() -> Vec<HKL> {
+            // SAFETY: a `None` buffer asks only for the count.
+            let count = unsafe { GetKeyboardLayoutList(None) };
+            let mut layouts = vec![HKL(std::ptr::null_mut()); usize::try_from(count).unwrap_or(0)];
+            // SAFETY: the buffer is live and exactly as long as the slice says.
+            let written = unsafe { GetKeyboardLayoutList(Some(&mut layouts)) };
+            layouts.truncate(usize::try_from(written).unwrap_or(0));
+            layouts
+        }
+
+        /// A layout this test loaded, unloaded again when the test ends — passing or
+        /// failing — if the session did not have it before, so a test run leaves the
+        /// machine's layout list as it found it.
+        struct BorrowedLayout {
+            layout: HKL,
+            was_loaded: bool,
+        }
+
+        impl BorrowedLayout {
+            fn load(klid: windows::core::PCWSTR) -> Self {
+                let before = loaded_layouts();
+                // SAFETY: a static wide string by pointer; the call returns a handle.
+                let layout = unsafe { LoadKeyboardLayoutW(klid, KLF_NOTELLSHELL) }
+                    .expect("the layout loads");
+                Self {
+                    layout,
+                    was_loaded: before.contains(&layout),
+                }
+            }
+        }
+
+        impl Drop for BorrowedLayout {
+            fn drop(&mut self) {
+                if !self.was_loaded {
+                    // SAFETY: the handle `LoadKeyboardLayoutW` returned, by value.
+                    let _ = unsafe { UnloadKeyboardLayout(self.layout) };
+                }
+            }
+        }
         use windows::core::w;
 
         /// RED (T-KEYBOARD-CTRLALT, round 2) — **a pending dead key does not change the
@@ -6832,8 +6875,9 @@ mod windows_impl {
         /// and a layout it has no table for yet is answered `None` while a dead key is
         /// pending rather than with the composition. The dead key is set up with
         /// `ToUnicodeEx` itself on this thread (no window, no key injected), and
-        /// consumed at the end. The French layout is loaded into the session with
-        /// `KLF_NOTELLSHELL` (a test host's list gains it).
+        /// consumed at the end. The French layout is loaded with `KLF_NOTELLSHELL` and,
+        /// unless the session already had it, unloaded when the test ends, failing or
+        /// not ([`BorrowedLayout`]), so the machine's layout list is left as it was.
         ///
         /// MUTATION: make `shifted_characters_on` translate on every call instead of
         /// reading its table (the pending assertion reads `Ê`), or drop its
@@ -6843,9 +6887,8 @@ mod windows_impl {
             const VK_E: u16 = 0x45;
             const VK_1: u16 = 0x31;
             const VK_OEM_6: u16 = 0xDD;
-            // SAFETY: a static wide string by pointer; the call returns a handle.
-            let french = unsafe { LoadKeyboardLayoutW(w!("0000040C"), KLF_NOTELLSHELL) }
-                .expect("the French layout loads");
+            let borrowed = BorrowedLayout::load(w!("0000040C"));
+            let french = borrowed.layout;
             let press = |virtual_key: u16, shift: bool| -> i32 {
                 let mut key_state = [0u8; 256];
                 if shift {
