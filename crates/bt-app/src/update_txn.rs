@@ -1760,6 +1760,12 @@ pub(crate) struct Seen {
     pub(crate) name: String,
     pub(crate) install: Option<Digest>,
     pub(crate) backup: Option<Digest>,
+    /// **A file that is there and could not be read**, by place, and why —
+    /// never absent (0.4.7 U-42b; 0.4.6's D-9: the new `folio.msix` held open
+    /// with no sharing hashed to nothing, the rollback took it for absent,
+    /// and the old file's move back collided with it). Empty where every file
+    /// there was read.
+    pub(crate) unread: Vec<(Place, String)>,
 }
 
 /// **The replaced thing as found on disk**: by digest for a Windows member
@@ -2069,10 +2075,19 @@ pub(crate) fn rollback_moves(
     let mut out = Vec::new();
     let mut back = Vec::new();
     for name in inventories.names() {
-        let (install, backup) = seen
-            .iter()
-            .find(|entry| entry.name == name)
-            .map_or((None, None), |entry| (entry.install, entry.backup));
+        let entry = seen.iter().find(|entry| entry.name == name);
+        // A file that is there and could not be read is neither absent nor
+        // any digest: the rollback cannot say what it is, cannot move it out,
+        // and cannot put the old file where it stands (U-42b).
+        if let Some((place, why)) = entry.and_then(|entry| entry.unread.first()) {
+            return Err(match place {
+                Place::Install => {
+                    format!("`{name}` in the install could not be read or moved out: {why}")
+                }
+                _ => format!("the old `{name}` in the backup could not be read: {why}"),
+            });
+        }
+        let (install, backup) = entry.map_or((None, None), |entry| (entry.install, entry.backup));
         let old = inventories.old(name).map(|member| member.digest);
         let new = inventories.new_member(name).map(|member| member.digest);
         if install.is_some() && install == old {
@@ -2916,6 +2931,7 @@ mod tests {
                         name: name.to_owned(),
                         install: self.install.get(name).copied(),
                         backup: self.backup.get(name).copied(),
+                        unread: Vec::new(),
                     })
                     .collect(),
             )

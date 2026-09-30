@@ -1706,6 +1706,54 @@ fn a_failed_move_back_is_stuck_with_everything_kept() {
     );
 }
 
+/// RED (U-42b) — **W10: a new file held open with no sharing stops the
+/// rollback before anything moves back, and the reason names the held file
+/// — never the collision its old file would have met.**
+///
+/// 0.4.6's D-9: the held file hashed to nothing, the rollback took it for
+/// absent, moved the old file back onto its name and stopped at
+/// `the move of folio.msix to Install: … os error 183`. The hold here is the
+/// clean machine's (read, share none), on the real recovery road.
+///
+/// MUTATION: in `update_txn::rollback_moves`, skip the `unread` check — the
+/// rollback moves and stops at the collision (`os error 183`).
+#[test]
+fn a_new_file_held_without_sharing_is_named_as_the_rollback_s_reason() {
+    let Some(install) = Install::new("held-new") else {
+        return;
+    };
+    flipped_at(&install, Phase::RollbackIntent { trial: None });
+    let name = a_new_name_besides_the_program(&install);
+    let hold = install_flip::hold_unshared(&install.install().join(&name))
+        .expect("the test holds the new file");
+    let (code, world) = recovered(
+        &install,
+        limits(20_000, 20_000),
+        install.world(Trial::Silent),
+    );
+    drop(hold);
+    assert_eq!(code, 0, "{:?}", world.said);
+    let Phase::Stuck { last_error, .. } = install.on_disk().body.phase else {
+        panic!("{:?} {:?}", install.on_disk().body.phase, world.said);
+    };
+    assert_eq!(
+        last_error,
+        format!(
+            "`{name}` in the install could not be read or moved out: held open by another program"
+        ),
+        "{:?}",
+        world.said
+    );
+    assert!(
+        install.holds(Place::Install, &install.new),
+        "nothing moved back: the new set is still installed"
+    );
+    assert!(
+        install.holds(Place::Backup, &install.old),
+        "and the old one is still in the backup"
+    );
+}
+
 /// RED (U-24) — **`Stuck` is tried again by every start, each failure counted,
 /// and after the bound nothing more is tried**: two starts record attempts 2
 /// and 3, the third records nothing and says the update is incomplete; the

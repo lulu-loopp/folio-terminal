@@ -1554,10 +1554,24 @@ impl<'a> Txn<'a> {
         }
         Ok(names
             .into_iter()
-            .map(|name| Seen {
-                name: name.to_owned(),
-                install: digest_at(&install.join(name)),
-                backup: digest_at(&backup.join(name)),
+            .map(|name| {
+                let mut unread = Vec::new();
+                let mut at = |place: Place, folder: &Path| match read_digest_at(&folder.join(name))
+                {
+                    Ok(digest) => digest,
+                    Err(why) => {
+                        unread.push((place, why));
+                        None
+                    }
+                };
+                let install = at(Place::Install, &install);
+                let backup = at(Place::Backup, &backup);
+                Seen {
+                    name: name.to_owned(),
+                    install,
+                    backup,
+                    unread,
+                }
             })
             .collect())
     }
@@ -1614,6 +1628,26 @@ impl<'a> Txn<'a> {
                 .map_err(|failure| failure.to_string())?;
         }
         self.j.record(actor, &Event::Retired)
+    }
+}
+
+/// **The SHA-256 of the regular file at `path`**, `None` where there is none,
+/// or why a file that is there could not be read — "held open by another
+/// program" when another process holds it with no sharing (U-42b; W10's
+/// hold), the read's own error otherwise.
+fn read_digest_at(path: &Path) -> Result<Option<Digest>, String> {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return Ok(None);
+    };
+    if !meta.is_file() {
+        return Ok(None);
+    }
+    match crate::update_prepare::digest_of(path) {
+        Ok((digest, _)) => Ok(Digest::parse(&digest).ok()),
+        Err(error) => Err(match install_flip::held_open(path) {
+            Ok(true) => String::from("held open by another program"),
+            _ => error.to_string(),
+        }),
     }
 }
 
