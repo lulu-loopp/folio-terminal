@@ -734,7 +734,9 @@ pub struct OfferState {
 
 impl OfferState {
     /// The owner of `dir`'s state file, with the file read into memory — for
-    /// a process that asks the releases page ([`Self::load_for`]).
+    /// a process that asks the releases page ([`Self::load_for`]). The tests'
+    /// spelling; the product names the feed ([`load`]).
+    #[cfg(test)]
     #[must_use]
     pub fn load(dir: &Path, enabled: bool) -> Self {
         Self::load_for(dir, enabled, false)
