@@ -133,6 +133,7 @@ bt_render::GpuContext::open	all	a cross-crate entrance that waits inside
 bt_pty::PtySession::spawn_shell_in	all	a cross-crate entrance that waits inside
 bt_pty::PtySession::resize	all	a cross-crate entrance that waits inside
 bt_pty::wait_for_retirements	all	a cross-crate entrance that waits inside
+bt_platform::keyboard_layout_shift_table	windows	the worker-only keyboard-layout-table door: one registry read and one System32 DLL load, copied and freed before return
 windows::Win32::UI::Shell::ShellExecuteW	windows	waits for the shell
 windows::Win32::System::Threading::SetEvent	windows	counted by call site, does not wait
 windows::Win32::Foundation::CloseHandle	windows	counted by call site, does not wait
@@ -162,6 +163,7 @@ bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	ow
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
+bt-app	-	crate::layout_tables::build_on_system	bt_platform::keyboard_layout_shift_table 1	worker-door-body	WorkerCtx
 
 # owners
 construct	owner	count
@@ -195,4 +197,5 @@ msg_send!	bt-platform crate::video::macos_player::EndWatch::watching	1
 msg_send!	bt-platform crate::video::macos_player::alloc_off_the_window_thread	1
 msg_send!	bt-platform crate::webview::macos::Gate::new	1
 msg_send!	bt-platform crate::webview::macos::ask	1
+GetProcAddress	bt-platform crate::windows_impl::shift_table_of_layout	1
 vtable(	bt-platform crate::video::engine::Machinery::take_frame	1

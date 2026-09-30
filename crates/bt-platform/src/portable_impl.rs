@@ -1199,22 +1199,26 @@ pub fn virtual_key_is_dead(virtual_key: u16) -> bool {
     false
 }
 
-/// The character the installed layout types on a Win32 virtual key with Shift
-/// alone. **There is no such question here**, for `virtual_key_of_scan_code`'s
-/// reason: the one reader is a Windows press that arrived with no character
-/// (T-KEYBOARD-CTRLALT).
+/// There is no Win32 keyboard layout on this platform.
 #[must_use]
-pub fn shifted_character_of_virtual_key(virtual_key: u16) -> Option<char> {
-    let _ = virtual_key;
+pub fn active_keyboard_layout() -> Option<crate::KeyboardLayout> {
     None
 }
 
-/// The character a named Windows layout types on a virtual key with Shift
-/// alone. **There is no such layout here**, for
-/// `shifted_character_of_virtual_key`'s reason.
+/// There are no Win32 keyboard layouts on this platform.
 #[must_use]
-pub fn shifted_character_on_layout(klid: &str, virtual_key: u16) -> Option<char> {
-    let _ = (klid, virtual_key);
+pub fn keyboard_layouts() -> Vec<crate::KeyboardLayout> {
+    Vec::new()
+}
+
+/// Refuse the Windows keyboard-layout-table door on a platform with no such
+/// system table. It still takes the worker capability, so the cross-platform
+/// signature preserves the refusal pin.
+#[must_use]
+pub fn keyboard_layout_shift_table(
+    _worker: &crate::admission::WorkerCtx,
+    _layout: &crate::KeyboardLayout,
+) -> Option<crate::KeyboardLayoutShiftTable> {
     None
 }
 

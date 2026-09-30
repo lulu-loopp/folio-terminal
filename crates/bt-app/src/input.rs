@@ -914,7 +914,7 @@ fn kitty_function_key(
 /// A text key that arrived with no character — on Windows, Ctrl+Alt on a key the layout types
 /// nothing for ([`unidentified_text_key`]) — is classed by its key without modifiers like any
 /// text key, and its `k` is that character, or with Shift held the character the installed
-/// layout types on the key with Shift alone ([`KeyOrigin::shifted_character_of_virtual_key`]:
+/// layout types on the key with Shift alone ([`KeyOrigin::shifted_character`]:
 /// `{` for Ctrl+Shift+Alt+`[` on a US layout), since the press itself carries none
 /// (T-KEYBOARD-CTRLALT).
 fn modify_other_keys_bytes(
@@ -967,11 +967,19 @@ fn modify_other_keys_bytes(
             text_key_class(base, keysym)
         }
         Key::Unidentified(_) => {
-            let virtual_key = unidentified_text_key(key, key_without_modifiers, modifiers, origin)?;
+            unidentified_text_key(key, key_without_modifiers, modifiers, origin)?;
             let base = one_character(key_without_modifiers)?;
             let keysym = if shift {
-                (origin.shifted_character_of_virtual_key)(virtual_key)
-                    .filter(|character| !character.is_control())?
+                match origin.shifted_character {
+                    ShiftedCharacter::Known(character) => {
+                        character.filter(|character| !character.is_control())?
+                    }
+                    // xterm's default `formatOtherKeys=0` names a key by the
+                    // unshifted keysym when the shifted keysym is not known yet.
+                    // The layout worker replaces this one-chord degradation
+                    // before the next lookup (design note revision (g)).
+                    ShiftedCharacter::Pending => base,
+                }
             } else {
                 base
             };
@@ -980,6 +988,17 @@ fn modify_other_keys_bytes(
         _ => return None,
     };
     encoded.then(|| format!("\x1b[27;{};{code}~", xterm_modifier(modifiers)).into_bytes())
+}
+
+/// Whether the layout worker has delivered the Shift character for this key.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ShiftedCharacter {
+    /// The table is present; its cell is either one character or deliberately
+    /// none (dead, ligature, surrogate, or no Shift character).
+    Known(Option<char>),
+    /// The table is still being built. For this chord only, modifyOtherKeys uses
+    /// the unshifted character, xterm's `formatOtherKeys=0` fallback.
+    Pending,
 }
 
 /// **What the platform said about a key press beyond the key itself** — what a win32-input-mode
@@ -1002,11 +1021,11 @@ pub(crate) struct KeyOrigin<'a> {
     /// Whether the installed layout makes a virtual key a dead key: `bt_platform::virtual_key_is_dead`
     /// in the product, a fixed layout in a test.
     pub(crate) virtual_key_is_dead: fn(u16) -> bool,
-    /// The character the installed layout types on a virtual key with Shift alone:
-    /// `bt_platform::shifted_character_of_virtual_key` in the product, a fixed layout in a test.
-    /// modifyOtherKeys' `k` for Ctrl+Shift+Alt on a key that arrived with no character
+    /// The character the installed layout types on this key with Shift alone,
+    /// or that its table is still pending on the worker road. modifyOtherKeys'
+    /// `k` for Ctrl+Shift+Alt on a key that arrived with no character
     /// ([`modify_other_keys_bytes`], T-KEYBOARD-CTRLALT).
-    pub(crate) shifted_character_of_virtual_key: fn(u16) -> Option<char>,
+    pub(crate) shifted_character: ShiftedCharacter,
     /// Which pseudoconsole the pane runs on (`bt_pty::PtySession::conpty_kind`, fixed at spawn).
     /// Records are written only to the ConPTY Folio ships ([`key_records`]).
     pub(crate) conpty: ConPtyKind,
@@ -3282,7 +3301,7 @@ mod tests {
         text_with_all_modifiers: None,
         virtual_key_of_scan_code: no_virtual_key,
         virtual_key_is_dead: no_dead_keys,
-        shifted_character_of_virtual_key: us_shifted_character,
+        shifted_character: ShiftedCharacter::Known(None),
         conpty: ConPtyKind::Shipped,
     };
 
@@ -3445,13 +3464,16 @@ mod tests {
         }
 
         fn on(&self, platform: HostPlatform) -> KeyOrigin<'_> {
+            let shifted_character = scan_code(self.physical_key)
+                .and_then(us_virtual_key)
+                .and_then(us_shifted_character);
             KeyOrigin {
                 platform,
                 physical_key: self.physical_key,
                 text_with_all_modifiers: self.text.as_deref(),
                 virtual_key_of_scan_code: us_virtual_key,
                 virtual_key_is_dead: no_dead_keys,
-                shifted_character_of_virtual_key: us_shifted_character,
+                shifted_character: ShiftedCharacter::Known(shifted_character),
                 conpty: if platform == HostPlatform::Windows {
                     ConPtyKind::Shipped
                 } else {
@@ -4068,7 +4090,7 @@ mod tests {
                     text_with_all_modifiers: typed,
                     virtual_key_of_scan_code: us_virtual_key,
                     virtual_key_is_dead: no_dead_keys,
-                    shifted_character_of_virtual_key: us_shifted_character,
+                    shifted_character: ShiftedCharacter::Known(None),
                     conpty: ConPtyKind::Shipped,
                 },
             )
@@ -4193,7 +4215,7 @@ mod tests {
                     text_with_all_modifiers: Some("\n"),
                     virtual_key_of_scan_code: us_virtual_key,
                     virtual_key_is_dead: no_dead_keys,
-                    shifted_character_of_virtual_key: us_shifted_character,
+                    shifted_character: ShiftedCharacter::Known(None),
                     conpty: ConPtyKind::Shipped,
                 },
             )
@@ -4499,7 +4521,7 @@ mod tests {
                     text_with_all_modifiers: None,
                     virtual_key_of_scan_code: no_virtual_key,
                     virtual_key_is_dead: is_dead,
-                    shifted_character_of_virtual_key: us_shifted_character,
+                    shifted_character: ShiftedCharacter::Known(None),
                     conpty: ConPtyKind::Shipped,
                 },
             )
@@ -4617,7 +4639,7 @@ mod tests {
                     text_with_all_modifiers: None,
                     virtual_key_of_scan_code: us_virtual_key,
                     virtual_key_is_dead: no_dead_keys,
-                    shifted_character_of_virtual_key: us_shifted_character,
+                    shifted_character: ShiftedCharacter::Known(None),
                     conpty: ConPtyKind::Shipped,
                 },
             )
@@ -4805,7 +4827,7 @@ mod tests {
                     text_with_all_modifiers: None,
                     virtual_key_of_scan_code: no_virtual_key,
                     virtual_key_is_dead: french_is_dead,
-                    shifted_character_of_virtual_key: french_shifted,
+                    shifted_character: ShiftedCharacter::Known(french_shifted(virtual_key)),
                     conpty: ConPtyKind::Shipped,
                 },
             )
@@ -4845,23 +4867,19 @@ mod tests {
     ///
     /// winit hands the chord over as it does with nothing pending — `Key::Unidentified(VK_E)`,
     /// key without modifiers `e`, no text — while the dead key stays pending in the keyboard
-    /// state, where a Shift translation of `VK_E` answers `Ê` (202). The lookup here is the
-    /// product's own, on the French layout's tables (`bt_platform::shifted_character_on_layout`,
-    /// the reader `shifted_character_of_virtual_key` uses for the active layout), which no
-    /// keyboard state enters; `bt-platform`'s `a_pending_dead_key_leaves_the_shift_character_alone`
-    /// sets the dead key pending for real and holds the same answer. On a Mac there is no
-    /// Windows layout, the lookup has no answer, and the chord (which never arrives there in
-    /// this shape) sends nothing.
+    /// state, where a Shift translation of `VK_E` answers `Ê` (202). The modelled worker answer
+    /// is the French layout table's `E`; `bt-platform`'s
+    /// `a_pending_dead_key_leaves_the_shift_character_alone` reads that table for real while the
+    /// dead key is pending. On a Mac there is no Windows layout, the table has no answer, and the
+    /// chord (which never arrives there in this shape) sends nothing.
     ///
     /// MUTATION: take the Ctrl+Shift+Alt `k` from a translation of the key instead of the
     /// layout's table (`bt-platform`'s test reads `Ê`), or from the key without modifiers
     /// (`CSI 27;8;101~`).
     #[test]
     fn after_a_dead_key_ctrl_shift_alt_e_is_still_xterms_e() {
-        fn french(virtual_key: u16) -> Option<char> {
-            bt_platform::shifted_character_on_layout("0000040C", virtual_key)
-        }
         let ctrl_shift_alt = ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT;
+        let on_windows = bt_platform::host_platform() == HostPlatform::Windows;
         let sent = |protocol| {
             keyboard_bytes(
                 &Key::Unidentified(NativeKey::Windows(0x45)),
@@ -4876,12 +4894,11 @@ mod tests {
                     text_with_all_modifiers: None,
                     virtual_key_of_scan_code: no_virtual_key,
                     virtual_key_is_dead: no_dead_keys,
-                    shifted_character_of_virtual_key: french,
+                    shifted_character: ShiftedCharacter::Known(on_windows.then_some('E')),
                     conpty: ConPtyKind::Shipped,
                 },
             )
         };
-        let on_windows = bt_platform::host_platform() == HostPlatform::Windows;
         for protocol in [MOK1, MOK2] {
             assert_eq!(
                 sent(protocol),
@@ -4921,7 +4938,7 @@ mod tests {
             text_with_all_modifiers: typed,
             virtual_key_of_scan_code: layout_answers_a_for_the_a_key_and_end_for_numpad_1,
             virtual_key_is_dead: no_dead_keys,
-            shifted_character_of_virtual_key: us_shifted_character,
+            shifted_character: ShiftedCharacter::Known(None),
             conpty: ConPtyKind::Shipped,
         };
         let sent = |key: &Key, location, modifiers, origin| {

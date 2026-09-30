@@ -19,7 +19,7 @@ use bt_viewport::ViewportFrame;
 use std::time::Instant;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::{Ime, KeyEvent};
-use winit::keyboard::{Key, ModifiersState, NamedKey};
+use winit::keyboard::{Key, ModifiersState, NamedKey, NativeKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 
 impl Runtime<'_> {
@@ -1988,6 +1988,24 @@ impl Runtime<'_> {
         }) else {
             return Ok(());
         };
+        let shifted_character = if keyboard.kitty == 0
+            && keyboard.modify_other_keys != bt_term::ModifyOtherKeys::Off
+            && self.window.modifiers.shift_key()
+            && let Key::Unidentified(NativeKey::Windows(virtual_key)) = &event.logical_key
+        {
+            bt_platform::active_keyboard_layout()
+                .and_then(|layout| {
+                    self.app
+                        .layout_tables
+                        .shifted_character(layout, *virtual_key)
+                })
+                .map_or(
+                    input::ShiftedCharacter::Pending,
+                    input::ShiftedCharacter::Known,
+                )
+        } else {
+            input::ShiftedCharacter::Known(None)
+        };
         let Some(bytes) = input::keyboard_bytes(
             &event.logical_key,
             &event.key_without_modifiers(),
@@ -2005,7 +2023,7 @@ impl Runtime<'_> {
                 text_with_all_modifiers: event.text_with_all_modifiers(),
                 virtual_key_of_scan_code: bt_platform::virtual_key_of_scan_code,
                 virtual_key_is_dead: bt_platform::virtual_key_is_dead,
-                shifted_character_of_virtual_key: bt_platform::shifted_character_of_virtual_key,
+                shifted_character,
                 conpty,
             },
         ) else {
