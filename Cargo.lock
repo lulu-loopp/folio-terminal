@@ -340,6 +340,7 @@ dependencies = [
 name = "bt-lint-probe"
 version = "0.4.6"
 dependencies = [
+ "bt-platform",
  "bt-pty",
  "bt-render",
  "libc",

@@ -161,6 +161,7 @@ bt-app	-	crate::pty_door::resize	bt_pty::PtySession::resize 1	owner-door-body	Wa
 bt-app	-	crate::pty_door::spawn_shell	bt_pty::PtySession::spawn_shell_in 1	owner-door-body	WaitToken	PtyBirth
 bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	owner-door-body	WaitToken	PaneRetirementWait
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
+bt-app	-	crate::layout_tables::WorkerRoad::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
 bt-app	-	crate::layout_tables::build_on_system	bt_platform::keyboard_layout_shift_table 1	worker-door-body	WorkerCtx	
@@ -197,5 +198,5 @@ msg_send!	bt-platform crate::video::macos_player::EndWatch::watching	1
 msg_send!	bt-platform crate::video::macos_player::alloc_off_the_window_thread	1
 msg_send!	bt-platform crate::webview::macos::Gate::new	1
 msg_send!	bt-platform crate::webview::macos::ask	1
-GetProcAddress	bt-platform crate::windows_impl::shift_table_of_layout	1
+GetProcAddress	bt-platform crate::windows_impl::shift_table_of_layout	2
 vtable(	bt-platform crate::video::engine::Machinery::take_frame	1
