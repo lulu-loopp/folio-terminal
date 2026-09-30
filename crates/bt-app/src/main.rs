@@ -49824,24 +49824,17 @@ impl Runtime<'_> {
                 verb: palette::Verb::Run(binding.action),
             });
         }
-        // This recovery verb deliberately has no chord: it is present wherever
-        // a terminal owns the keyboard, and carries the same stable address as
-        // a place row so a pane that exits while the palette is open cannot
-        // redirect it to a neighbour.
-        if focus.terminal {
-            let tab = &self.window.tabs[self.window.active_tab];
-            let seat = tab.focused_leaf;
-            if tab.sessions.contains_key(&seat) {
-                into.push(palette::Candidate {
-                    section: palette::Section::Actions,
-                    label: profiles::reset_terminal_modes_text().to_owned(),
-                    hint: None,
-                    mark: None,
-                    awaiting: false,
-                    verb: palette::Verb::ResetTerminalModes { tab: tab.id, seat },
-                });
-            }
-        }
+        // The pane menu's recovery verb, which is not a row of the shortcut
+        // table: see `palette::reset_terminal_modes_candidate` for when it is
+        // offered and how it is addressed.
+        let tab = &self.window.tabs[self.window.active_tab];
+        let session = tab
+            .sessions
+            .contains_key(&tab.focused_leaf)
+            .then_some(tab.focused_leaf);
+        into.extend(palette::reset_terminal_modes_candidate(
+            focus, tab.id, session,
+        ));
     }
 
     /// **Every pane of this window**, tab by tab.
@@ -73544,16 +73537,17 @@ mod palette_wiring_tests {
         );
     }
 
-    /// RED (T-RESET-MODES) — the command palette supplies the same recovery
-    /// verb as the pane menu, addressed to the focused terminal by stable ids.
+    /// PIN (T-RESET-MODES) — **the palette's action list is given the recovery
+    /// row, and running it reaches the pane menu's own door.** When the row is
+    /// offered and how it is addressed is behaviour, pinned in
+    /// `palette::reset_row_tests`; this pins only the wiring on both sides.
     ///
-    /// MUTATION: remove the `focus.terminal` block from
-    /// `push_action_candidates`; the first assertion goes red.
+    /// MUTATION: drop the `into.extend(palette::reset_terminal_modes_candidate(…))`
+    /// from `push_action_candidates`; the first assertion goes red.
     #[test]
     fn pane_menu_reset_terminal_modes_is_also_a_command_palette_action() {
         let supply = method_body("Runtime", "push_action_candidates");
-        assert!(supply.contains("palette::Verb::ResetTerminalModes"));
-        assert!(supply.contains("profiles::reset_terminal_modes_text()"));
+        assert!(supply.contains("into.extend(palette::reset_terminal_modes_candidate("));
         let run = method_body("Runtime", "run_palette_row");
         assert!(run.contains("palette::Verb::ResetTerminalModes { tab, seat }"));
         assert!(run.contains("self.reset_terminal_modes(seat)"));
