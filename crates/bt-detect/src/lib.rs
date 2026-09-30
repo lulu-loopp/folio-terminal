@@ -2,8 +2,10 @@
 
 #![cfg_attr(test, allow(clippy::disallowed_methods))]
 
+pub mod frame;
 mod ledger;
 pub mod table;
+pub use frame::{LiveCapture, Pane, PaneRect, ScreenFenceState, ScreenFrame};
 pub use ledger::{
     ContainmentVerdict, LedgerEntry, LegitimateRejection, OrphanKind, OwnershipLedger,
     SourceIntegrityAnnotation, StructuralDelimiterKind, TokenFate,
@@ -323,10 +325,15 @@ pub struct LiveDetectionTask {
     pub cell_width_subpixels: i64,
     pub cell_height_subpixels: i64,
     pub ascii_baseline_subpixels: i64,
-    pub options: DetectionOptions,
-    /// Exact parser checkpoint immediately before `inputs[0]`.
-    pub initial_context: DetectionContext,
-    pub inputs: Arc<[LiveDetectionInput]>,
+    /// The one live capture this task reads (§3 of the pane-columns note): the inputs, the exact
+    /// parser checkpoint immediately before them and the options they are scanned under, and the
+    /// frame measured from them once.
+    pub capture: LiveCapture,
+    /// **The pane this block was proven in** — the whole screen until the task is resolved, then the
+    /// rectangle of the capture's frame whose scan closed a block on `candidate_row`. Written by
+    /// `apply_live_detected_block` beside `start` and `end`; on an unframed screen always the whole
+    /// screen.
+    pub pane: PaneRect,
     pub start: GridPoint,
     pub end: GridPoint,
     /// Inclusive live-grid row band reserved for presentation. Detection initializes this to the
@@ -3140,7 +3147,27 @@ pub fn frozen_resync_scan_with_options<'a>(
 /// placement history and never sees a block that was never placed — stays green. Compared by render
 /// source, so a block detected in both (bridged or plain) does not count. Returns `0` for a pure
 /// grid context (no frozen prefix) since the two scans then coincide.
-pub fn live_detection_isolation_gap(
+///
+/// **Per pane** (T-PANE-COLUMNS, note §4 step 7): the gap is summed over the panes of the capture's
+/// frame, each measured over its own inputs from its own checkpoint. On an unframed screen that is
+/// the one whole-screen pane and today's value; on a framed screen every pane is scanned without a
+/// history prefix, so each pane's two scans coincide.
+pub fn live_detection_isolation_gap(capture: &LiveCapture) -> usize {
+    capture
+        .frame()
+        .panes()
+        .iter()
+        .map(|pane| {
+            pane_isolation_gap(
+                pane.inputs(),
+                pane.initial_context().clone(),
+                capture.options(),
+            )
+        })
+        .sum()
+}
+
+fn pane_isolation_gap(
     inputs: &[LiveDetectionInput],
     initial_context: DetectionContext,
     options: DetectionOptions,
@@ -3208,10 +3235,38 @@ pub fn live_detection_isolation_gap(
 /// never a second heuristic. The result feeds the split source-integrity / detector-containment red
 /// gate (batch ⑥) and, via its lineage and dependency-interval fields, the certified-checkpoint work
 /// of batch 2.
+///
+/// **One ledger per pane, keyed by the pane's rectangle** (T-PANE-COLUMNS, note §4 step 7) — never a
+/// union of source sets, because a source one pane owns says nothing about a record another pane
+/// holds. `OwnershipLedger::owns_source` keeps its meaning inside one pane. On an unframed screen the
+/// map holds exactly one ledger, today's. A block a screen-owned fence suppresses (R9) is not the
+/// product's: its delimiters are accounted as code context and its source is not owned.
 pub fn live_detection_ownership_ledger(
+    capture: &LiveCapture,
+) -> BTreeMap<PaneRect, OwnershipLedger> {
+    let frame = capture.frame();
+    frame
+        .panes()
+        .iter()
+        .map(|pane| {
+            (
+                pane.rect,
+                pane_ownership_ledger(
+                    pane.inputs(),
+                    pane.initial_context().clone(),
+                    capture.options(),
+                    frame.screen_fence_state(),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn pane_ownership_ledger(
     inputs: &[LiveDetectionInput],
     initial_context: DetectionContext,
     options: DetectionOptions,
+    screen_fence: &ScreenFenceState,
 ) -> OwnershipLedger {
     let logical = live_logical_lines(inputs);
     let boundary = live_grid_boundary_index(&logical, inputs);
@@ -3250,6 +3305,30 @@ pub fn live_detection_ownership_ledger(
     // The ledger's fallback reclassification is keyed to the closer alone: the body rows carry no
     // delimiter of their own, so the tail's extent has nothing to say about any entry's fate.
     let mut ledger = recorder.finish(boundary, source_of, clipped.map(|tail| tail.closer));
+    // R9: a block a screen-owned fence covers is not the product's. Its delimiters are code context
+    // to the product, so that is the fate the ledger records for them.
+    let row_to_logical = live_grid_logical_ids(&logical, inputs);
+    let suppressed = result
+        .blocks
+        .iter()
+        .filter(|block| screen_fence_suppresses(screen_fence, block, &row_to_logical))
+        .map(|block| {
+            (
+                u32::try_from(block.start.0.saturating_sub(1)).unwrap_or(u32::MAX),
+                u32::try_from(block.end.0.saturating_sub(1)).unwrap_or(u32::MAX),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    for entry in &mut ledger.entries {
+        if let TokenFate::Owned {
+            block_start,
+            block_end,
+        } = entry.fate
+            && suppressed.contains(&(block_start, block_end))
+        {
+            entry.fate = TokenFate::Rejected(LegitimateRejection::CommonMarkCodeContext);
+        }
+    }
     // Batch ③: carry the display blocks the same scan Owned, keyed by the exact `original_source` the
     // presentation layer preserves holds on. Inline `$…$` runs never enter a hold, so they are
     // excluded here — this vector is exactly the Owned structural-display set (`ledger.detected()`).
@@ -3257,6 +3336,7 @@ pub fn live_detection_ownership_ledger(
         .blocks
         .iter()
         .filter(|block| block.span.mode == MathMode::Display)
+        .filter(|block| !screen_fence_suppresses(screen_fence, block, &row_to_logical))
         .map(|block| block.span.original_source.clone())
         .collect();
     ledger
@@ -3551,69 +3631,28 @@ fn frozen_occurrence_segments(
     Some(mapped)
 }
 
-/// Resolve a live-grid candidate through the exact same conservative detector as frozen history.
-/// Temporary transcript IDs are a detector-local indexing device; they never escape as anchors.
-pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
-    if task.resolved {
-        return true;
-    }
-    if task.detection_complete {
-        return false;
-    }
-    let logical = live_logical_lines(&task.inputs);
-    let row_to_logical = live_grid_logical_ids(&logical, &task.inputs);
-    let Some(candidate_id) = row_to_logical.get(&task.candidate_row).copied() else {
-        task.detection_complete = true;
-        return false;
-    };
-    let live_grid_boundary = live_grid_boundary_index(&logical, &task.inputs);
-    let sites = live_logical_sites(&logical);
-    let clipped = clipped_tail(
-        &logical,
-        live_grid_first_index(&logical, &task.inputs),
-        &task.initial_context,
-        task.options,
-        Some(&sites),
-    );
-    let scan = scan_live_math_blocks_in_context(
-        logical.iter().map(|line| (line.id, line.text.as_str())),
-        task.initial_context.clone(),
-        task.options,
-        Some(&sites),
-        Some(&live_logical_captured_columns(&logical)),
-        live_grid_boundary,
-        clipped,
-    );
-    task.refused_table_rows = refused_table_rows(&scan, &row_to_logical);
-    let detected = scan
-        .blocks
-        .into_iter()
-        .find(|block| block.end == candidate_id);
-    task.detection_complete = true;
-    let Some(block) = detected else {
-        return false;
-    };
-    apply_live_detected_block(task, &block, &logical)
+/// One authoritative scan of one list of live inputs from one checkpoint: the logical lines, the
+/// logical line each grid row belongs to, and the scanner's result. The sequence is exactly the one
+/// every live entry point always ran; a pane's scan is this over the pane's own inputs (R8).
+pub(crate) struct LiveScan {
+    pub(crate) logical: Vec<LiveLogicalLine>,
+    pub(crate) row_to_logical: BTreeMap<u32, TranscriptId>,
+    pub(crate) scan: MathScanResult,
 }
 
-/// Resolve every candidate from one stable snapshot with one O(n) scanner pass. Non-matches are
-/// marked complete as well, preserving the observable candidate queue without repeating the scan
-/// once per delimiter-looking row.
-pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
-    let Some(first) = tasks.first() else {
-        return;
-    };
-    let inputs = Arc::clone(&first.inputs);
-    let initial_context = first.initial_context.clone();
-    let options = first.options;
-    let logical = live_logical_lines(&inputs);
-    let row_to_logical = live_grid_logical_ids(&logical, &inputs);
-    let live_grid_boundary = live_grid_boundary_index(&logical, &inputs);
+pub(crate) fn live_scan(
+    inputs: &[LiveDetectionInput],
+    initial_context: &DetectionContext,
+    options: DetectionOptions,
+) -> LiveScan {
+    let logical = live_logical_lines(inputs);
+    let row_to_logical = live_grid_logical_ids(&logical, inputs);
+    let live_grid_boundary = live_grid_boundary_index(&logical, inputs);
     let sites = live_logical_sites(&logical);
     let clipped = clipped_tail(
         &logical,
-        live_grid_first_index(&logical, &inputs),
-        &initial_context,
+        live_grid_first_index(&logical, inputs),
+        initial_context,
         options,
         Some(&sites),
     );
@@ -3626,31 +3665,128 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
         live_grid_boundary,
         clipped,
     );
-    let blocks = scan
-        .blocks
+    LiveScan {
+        logical,
+        row_to_logical,
+        scan,
+    }
+}
+
+/// Does a screen-owned fence (R9) cover any grid row of this block?
+fn screen_fence_suppresses(
+    screen_fence: &ScreenFenceState,
+    block: &DetectedMathBlock,
+    row_to_logical: &BTreeMap<u32, TranscriptId>,
+) -> bool {
+    !screen_fence.is_empty()
+        && row_to_logical
+            .iter()
+            .any(|(row, id)| (block.start..=block.end).contains(id) && screen_fence.covers(*row))
+}
+
+/// Every pane of a capture's frame, scanned alone (R8), with the blocks a screen-owned fence covers
+/// taken out (R9). An unframed screen is one pane: the capture itself, from its own checkpoint.
+fn pane_scans(capture: &LiveCapture) -> Vec<(&Pane, LiveScan)> {
+    let frame = capture.frame();
+    let screen_fence = frame.screen_fence_state();
+    frame
+        .panes()
         .iter()
-        .map(|block| (block.end, block))
-        .collect::<BTreeMap<_, _>>();
+        .map(|pane| {
+            let mut scan = live_scan(pane.inputs(), pane.initial_context(), capture.options());
+            let row_to_logical = &scan.row_to_logical;
+            scan.scan
+                .blocks
+                .retain(|block| !screen_fence_suppresses(screen_fence, block, row_to_logical));
+            (pane, scan)
+        })
+        .collect()
+}
+
+/// The refused tables of every pane, first row each, in pane order and without repeats: a refusal is
+/// a refusal wherever it was proven (69a; 69b keys it by pane).
+fn refused_rows_across_panes(scans: &[(&Pane, LiveScan)]) -> Vec<u32> {
+    let mut rows = Vec::new();
+    for (_, scan) in scans {
+        for row in refused_table_rows(&scan.scan, &scan.row_to_logical) {
+            if !rows.contains(&row) {
+                rows.push(row);
+            }
+        }
+    }
+    rows
+}
+
+/// The first pane whose scan closes a block on `candidate_row`, with that block and the pane's
+/// logical lines (69a: the candidate is looked up pane by pane; 69b keys candidates by pane).
+fn block_closing_on<'a>(
+    scans: &'a [(&'a Pane, LiveScan)],
+    candidate_row: u32,
+) -> Option<(&'a Pane, &'a DetectedMathBlock, &'a [LiveLogicalLine])> {
+    scans.iter().find_map(|(pane, scan)| {
+        let id = scan.row_to_logical.get(&candidate_row)?;
+        scan.scan
+            .blocks
+            .iter()
+            .find(|block| block.end == *id)
+            .map(|block| (*pane, block, scan.logical.as_slice()))
+    })
+}
+
+/// Resolve a live-grid candidate through the exact same conservative detector as frozen history.
+/// Temporary transcript IDs are a detector-local indexing device; they never escape as anchors.
+///
+/// The capture's frame decides what is scanned: each pane alone, over its own rows and columns, and
+/// on an unframed screen the one whole-screen pane, which is the capture itself.
+pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
+    if task.resolved {
+        return true;
+    }
+    if task.detection_complete {
+        return false;
+    }
+    // The capture is shared (one `Arc`), so holding it here while the task is written is free.
+    let capture = task.capture.clone();
+    let scans = pane_scans(&capture);
+    if !scans
+        .iter()
+        .any(|(_, scan)| scan.row_to_logical.contains_key(&task.candidate_row))
+    {
+        task.detection_complete = true;
+        return false;
+    }
+    task.refused_table_rows = refused_rows_across_panes(&scans);
+    task.detection_complete = true;
+    let Some((pane, block, logical)) = block_closing_on(&scans, task.candidate_row) else {
+        return false;
+    };
+    apply_live_detected_block(task, block, logical, pane)
+}
+
+/// Resolve every candidate from one stable snapshot with one O(n) scanner pass per pane. Non-matches
+/// are marked complete as well, preserving the observable candidate queue without repeating the scan
+/// once per delimiter-looking row.
+pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
+    let Some(first) = tasks.first() else {
+        return;
+    };
+    let capture = first.capture.clone();
+    let scans = pane_scans(&capture);
+    let refused = refused_rows_across_panes(&scans);
     for task in tasks {
         if task.resolved || task.detection_complete {
             continue;
         }
-        if task.initial_context != initial_context
-            || task.inputs.as_ref() != inputs.as_ref()
-            || task.options != options
-        {
+        if task.capture != capture {
             let _ = resolve_live_detection_task(task);
             continue;
         }
         task.detection_complete = true;
-        task.refused_table_rows = refused_table_rows(&scan, &row_to_logical);
-        let Some(block) = row_to_logical
-            .get(&task.candidate_row)
-            .and_then(|id| blocks.get(id))
-        else {
+        task.refused_table_rows = refused.clone();
+        let Some((pane, block, logical)) = block_closing_on(&scans, task.candidate_row) else {
             continue;
         };
-        let _ = apply_live_detected_block(task, block, &logical);
+        let _ = apply_live_detected_block(task, block, logical, pane);
     }
 }
 
@@ -3678,10 +3814,11 @@ fn apply_live_detected_block(
     task: &mut LiveDetectionTask,
     block: &DetectedMathBlock,
     logical: &[LiveLogicalLine],
+    pane: &Pane,
 ) -> bool {
     let mut occurrence = block.span.clone();
     let Some(cell_segments) =
-        live_occurrence_segments(&occurrence, block.start, logical, &task.inputs)
+        live_occurrence_segments(&occurrence, block.start, logical, pane.inputs())
     else {
         return false;
     };
@@ -3729,6 +3866,7 @@ fn apply_live_detected_block(
     };
     task.band_start_row = start_row;
     task.band_end_row = end_row;
+    task.pane = pane.rect;
     task.span = occurrence;
     task.resolved = true;
     true
@@ -5038,9 +5176,10 @@ mod tests {
     #[test]
     fn m1_9k_math_occurrence_separates_source_render_kind_and_exact_live_cells() {
         let mut task = live_task(&[r"$$\text{", "中}$$"], 1);
-        let inputs = Arc::make_mut(&mut task.inputs);
+        let mut inputs = task.capture.inputs().to_vec();
         inputs[0].continues = true;
         inputs[1].cell_boundaries = vec![(0, 0), (3, 2), (4, 3), (5, 4), (6, 5)];
+        replace_inputs(&mut task, inputs);
         assert!(resolve_live_detection_task(&mut task));
         assert_eq!(task.span.original_source, r"$$\text{中}$$");
         assert_eq!(task.span.render_source, r"\text{中}");
@@ -6150,6 +6289,25 @@ abla f",
     }
 
     fn live_task(lines: &[&str], candidate_row: u32) -> LiveDetectionTask {
+        let capture = LiveCapture::new(
+            lines
+                .iter()
+                .enumerate()
+                .map(|(row, text)| LiveDetectionInput {
+                    source: LiveDetectionSource::Grid {
+                        row: row as u32,
+                        revision: 1,
+                    },
+                    text: (*text).to_owned(),
+                    continues: false,
+                    captured_columns: 0,
+                    cell_boundaries: scalar_boundaries(text),
+                    site: InlineMathSite::Ineligible,
+                })
+                .collect::<Vec<_>>(),
+            DetectionContext::default(),
+            DetectionOptions::default(),
+        );
         LiveDetectionTask {
             candidate_row,
             screen: ScreenId::Alternate,
@@ -6159,25 +6317,8 @@ abla f",
             cell_width_subpixels: 9 * SUBPIXELS_PER_PX,
             cell_height_subpixels: 18 * SUBPIXELS_PER_PX,
             ascii_baseline_subpixels: 14 * SUBPIXELS_PER_PX,
-            options: DetectionOptions::default(),
-            initial_context: DetectionContext::default(),
-            inputs: Arc::from(
-                lines
-                    .iter()
-                    .enumerate()
-                    .map(|(row, text)| LiveDetectionInput {
-                        source: LiveDetectionSource::Grid {
-                            row: row as u32,
-                            revision: 1,
-                        },
-                        text: (*text).to_owned(),
-                        continues: false,
-                        captured_columns: 0,
-                        cell_boundaries: scalar_boundaries(text),
-                        site: InlineMathSite::Ineligible,
-                    })
-                    .collect::<Vec<_>>(),
-            ),
+            pane: capture.screen_rect(),
+            capture,
             start: GridPoint {
                 row: candidate_row,
                 column: 0,
@@ -6228,7 +6369,9 @@ abla f",
             ],
             4,
         );
-        Arc::make_mut(&mut task.inputs)[1].continues = true;
+        let mut inputs = task.capture.inputs().to_vec();
+        inputs[1].continues = true;
+        replace_inputs(&mut task, inputs);
         assert!(resolve_live_detection_task(&mut task));
         assert!(task.span.render_source.contains("x &= 0 \\+ 1\ny &= 2"));
         assert!(!task.span.render_source.contains("x &= 0 \\\\+ 1"));
@@ -6270,7 +6413,7 @@ abla f",
     #[test]
     fn live_block_split_across_frozen_boundary_anchors_on_the_live_closer() {
         let mut task = live_task(&["placeholder"], 0);
-        task.inputs = boundary_inputs(&[
+        task.capture = boundary_capture(&[
             (
                 LiveDetectionSource::History {
                     id: TranscriptId(296),
@@ -6318,7 +6461,7 @@ abla f",
     #[test]
     fn fully_frozen_block_is_not_anchored_by_the_live_path() {
         let mut task = live_task(&["tail"], 0);
-        task.inputs = boundary_inputs(&[
+        task.capture = boundary_capture(&[
             (
                 LiveDetectionSource::History {
                     id: TranscriptId(10),
@@ -6346,6 +6489,30 @@ abla f",
             ),
         ]);
         assert!(!resolve_live_detection_task(&mut task));
+    }
+
+    /// A task's capture with other inputs, under the same checkpoint and options.
+    fn replace_inputs(task: &mut LiveDetectionTask, inputs: Vec<LiveDetectionInput>) {
+        task.capture = LiveCapture::new(
+            inputs,
+            task.capture.initial_context().clone(),
+            task.capture.options(),
+        );
+    }
+
+    fn boundary_capture(rows: &[(LiveDetectionSource, &str)]) -> LiveCapture {
+        LiveCapture::new(
+            boundary_inputs(rows),
+            DetectionContext::default(),
+            DetectionOptions::default(),
+        )
+    }
+
+    /// The ledger of an unframed capture: its one whole-screen pane's.
+    fn only_ledger(capture: &LiveCapture) -> OwnershipLedger {
+        let ledgers = live_detection_ownership_ledger(capture);
+        assert_eq!(ledgers.len(), 1, "an unframed capture has one pane");
+        ledgers.into_values().next().unwrap()
     }
 
     fn boundary_inputs(rows: &[(LiveDetectionSource, &str)]) -> Arc<[LiveDetectionInput]> {
@@ -6377,8 +6544,11 @@ abla f",
     }
 
     fn ledger_of(rows: &[(LiveDetectionSource, &str)], ctx: DetectionContext) -> OwnershipLedger {
-        let inputs = boundary_inputs(rows);
-        live_detection_ownership_ledger(&inputs, ctx, DetectionOptions::default())
+        only_ledger(&LiveCapture::new(
+            boundary_inputs(rows),
+            ctx,
+            DetectionOptions::default(),
+        ))
     }
 
     /// A soft-wrapped line is scanned as one string, so its site must be the *conjunction* of its
@@ -6479,11 +6649,11 @@ abla f",
             boundary,
             clipped,
         );
-        let ledger = live_detection_ownership_ledger(
-            &inputs,
+        let ledger = only_ledger(&LiveCapture::new(
+            Arc::clone(&inputs),
             DetectionContext::default(),
             DetectionOptions::default(),
-        );
+        ));
         assert_eq!(
             ledger.detected(),
             blocks.len(),
@@ -7597,7 +7767,7 @@ abla f",
     #[test]
     fn odd_dollar_parity_in_frozen_history_does_not_strand_the_live_grid_block() {
         let mut task = live_task(&["a", "b", "c"], 2);
-        task.inputs = boundary_inputs(&[
+        task.capture = boundary_capture(&[
             // A complete, well-paired display block already in history.
             (
                 LiveDetectionSource::History {
@@ -7660,7 +7830,7 @@ abla f",
     #[test]
     fn boundary_resync_never_renders_prose_after_abandoning_a_poison_opener() {
         let mut task = live_task(&["a", "b", "c"], 2);
-        task.inputs = boundary_inputs(&[
+        task.capture = boundary_capture(&[
             (
                 LiveDetectionSource::History {
                     id: TranscriptId(203),
@@ -7699,7 +7869,7 @@ abla f",
     #[test]
     fn a_frozen_opener_with_a_prose_seam_body_is_abandoned_not_bridged() {
         let mut task = live_task(&["a"], 0);
-        task.inputs = boundary_inputs(&[
+        task.capture = boundary_capture(&[
             (
                 LiveDetectionSource::History {
                     id: TranscriptId(300),
