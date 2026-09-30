@@ -221,7 +221,11 @@ hands it over*, aligning hyperlinks with image references. The owner's rulings o
 ### 7. Math and table detection (`bt-detect`) — `not yet folded`
 Entries: §4.6b *a window may begin in the middle of a block without needing
 history first*; §4.6d *two formulas on one line do not suppress each other, and a
-row separator need not be an ampersand to be read*; the `bt-detect` crate doc.
+row separator need not be an ampersand to be read*; the `bt-detect` crate doc;
+trailing entry 2026-09-29 *A formula inside a multiplexer's pane is detected in
+that pane's own rectangle and drawn inside it* (T-PANE-COLUMNS, with the design
+note `docs/plans/design/pane-columns-2026-09-29.md` and the `bt_detect::frame`
+module doc).
 
 ### 8. Selection — three models, by ruling — `folded`
 **Rule.** This window keeps three selection models on purpose, each in its own
@@ -426,7 +430,9 @@ admits the renderer under the dependency bar.
 
 ### 21. Math typesetting — `not yet folded`
 Entries: §4.6 and its lettered continuations; §5 is a stub; the `bt-math` crate
-doc, which carries the worker stack contract.
+doc, which carries the worker stack contract; trailing entry 2026-09-29 *A
+formula inside a multiplexer's pane is detected in that pane's own rectangle and
+drawn inside it* (a live block's band, fold, limits and marks are its pane's).
 
 ### 22. Animation and pacing — `folded`
 **Rule.** One frame clock per window, its interval taken from the display and
