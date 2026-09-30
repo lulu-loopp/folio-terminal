@@ -518,8 +518,8 @@ which is the same answer.
 Last, and only from the machine that just signed: the release is created by hand,
 out of the directory the signed files are in.
 
-The whole order, both platforms, with the four things 0.4.0 was caught out by
-written into the steps they belong to:
+The directory comes first, both platforms, with the four things 0.4.0 was
+caught out by written into the steps they belong to:
 
 1. **The Mac lane** — build, `bundle.sh`, `sign.sh --no-spctl`, `notarize.sh`,
    `dmg.sh`, the rename, `checksums.sh`. **The owner runs this half themselves,
@@ -546,23 +546,76 @@ written into the steps they belong to:
    the three from the Mac — and every version in a name is this release's.
    Re-run `smoke.ps1` if anything was moved in or out since it last ran: it
    refuses a directory carrying another release's version.
-5. **`gh release create --draft`**, below, over that directory. The body is
-   **copied from the file in `docs/plans/release/`**, with its first line — the
-   banner saying what the file is — dropped; see **Release note shape**.
-6. **Verify the assets on the draft, before the button.** **A published release
-   is immutable in every way that matters**: the tag is what `/releases/latest`
-   and every link in the note resolve through, the checksum files and the two
-   distribution manifests are all about these exact bytes, and an asset replaced
-   afterwards is an asset some people already have under a hash that no longer
-   matches. Deleting the release and making it again is not a repair either —
-   the tag has been fetched, the download counters reset, and anyone who
-   installed in between has a build nothing describes. So the draft is where the
-   file list, the version in every name, the note's links and the checksums are
-   read; the button is the last irreversible thing in this document.
-7. **winget**, and **the two distribution manifests** —
-   `scripts/release/update-manifests.ps1`, under **Distribution manifests**
-   below. All of them name the release page, so all of them come after it
-   exists.
+
+Then **the release order** (0.4.7, U-41e0). **The tap and the bucket are
+written and read back before the page is published, and every write that
+landed is put back if the page does not go out.** Until 0.4.6 the page went up
+first and the two manifests after it, so for as long as that took `brew
+upgrade` and `scoop update` offered the previous version to a machine Folio had
+already updated. In this order, the window between the manifests and the page
+is one where the managers name a version whose download still answers 404 —
+both download before they uninstall or relink anything, so an install stays as
+it was — and steps 5 and 7 close it if the release does not go out.
+
+1. **Draft.** `gh release create --draft`, below, over that directory. The body
+   is **copied from the file in `docs/plans/release/`**, with its first line —
+   the banner saying what the file is — dropped; see **Release note shape**.
+   Then **verify the assets on the draft.** **A published release is immutable
+   in every way that matters**: the tag is what `/releases/latest` and every
+   link in the note resolve through, the checksum files and the two
+   distribution manifests are all about these exact bytes, and an asset
+   replaced afterwards is an asset some people already have under a hash that
+   no longer matches. Deleting the release and making it again is not a repair
+   either — the tag has been fetched, the download counters reset, and anyone
+   who installed in between has a build nothing describes. So the draft is
+   where the file list, the version in every name, the note's links and the
+   checksums are read.
+2. **Render.** `./scripts/release/update-manifests.ps1 -Version <version>
+   -FromRelease` renders the cask and the bucket file from the **draft's**
+   checksum files (`gh release download` reads a draft for an account that may
+   push to this repository). Read the difference it prints.
+3. **Save.** `./scripts/release/update-manifests.ps1 -Version <version>
+   -FromRelease -Apply -Account <login>`. Before either write it saves, for
+   both repositories, the exact bytes each file holds now and its blob id, to
+   `target/release-package/manifests-before.json`, and prints the path. That
+   file is **the record**; keep it until the page is published.
+4. **Apply and read back.** The same command writes both files, each over the
+   blob id it saved, and reads both back and compares them with what it
+   rendered. Exit 0 means both repositories hold this release's files.
+5. **On any failure, it puts them back.** If a write or a read-back fails,
+   every write that landed is written back from the record, over the blob id
+   that write left, and both repositories are read back as the saved pair. Exit
+   1 and *nothing published; both manifests are back to what they were*: fix
+   what the output names and go again from step 2. **Exit 3 is a release
+   incident** — a write-back failed or was refused, or the repositories do not
+   read back as the saved pair: do not publish, and follow **Distribution
+   manifests ▸ A release incident** below.
+6. **Publish the page** — the button, on the draft. From here the releases
+   list names the version, and the update check offers it. Then check the
+   managers: `brew fetch --cask lulu-loopp/folio/folio` downloads the image
+   and compares the hash, and `scoop install folio` from the bucket does the
+   same for the archive, so each either agrees with the page or says which of
+   the two is wrong.
+7. **If publication fails, or the release is abandoned** after step 4, put the
+   manifests back — **the release is not left with a tap or a bucket naming a
+   draft**:
+
+   ```powershell
+   ./scripts/release/update-manifests.ps1 -Revert target/release-package/manifests-before.json -Account <login>
+   ```
+
+   It writes the saved files back over the blob ids step 4 left and reads both
+   back: exit 0 and *both manifests are back to what they were*, or exit 3, the
+   same release incident. It leaves a repository that already holds its saved
+   file alone, so running it again is harmless. `-Apply` run again is harmless
+   too: over a pair it already wrote it says *already applied; the record is left
+   as it is* and exits 0; over one file it already wrote it writes only the
+   other, and keeps that file's saved bytes from the earlier record.
+8. **winget.** Once the page is published: the version's folder under
+   `packaging/winget/manifests/`, validated, and a pull request to
+   `microsoft/winget-pkgs` — **winget ▸ What to change for a release**,
+   **Validating before submitting** and **Submitting** below. The page is never
+   held for winget, and a winget copy keeps the **Copy** row in 0.4.7.
 
 ```powershell
 # The version is read and not typed. It is in [workspace.package], and the tag,
@@ -591,7 +644,7 @@ $arguments = @('release', 'create', $tag) + $assets + @(
 The list is built and splatted rather than written on one line: `gh` is a native
 command, and an array interpolated into one takes its own view of quoting the day
 a path has a space in it. `--draft` because a person reads the page and presses
-the button. No `--prerelease`: from v0.4.1 the release is the one GitHub calls
+the button, and because the manifests are written between the two (steps 2–5). No `--prerelease`: from v0.4.1 the release is the one GitHub calls
 latest, so `/releases/latest` answers (see **The tag** above); the update check
 reads the list endpoint and is unaffected either way.
 
@@ -660,7 +713,9 @@ one line each.
 ## Distribution manifests
 
 Two repositories describe this release's assets to a package manager, and both
-are updated after the release page exists, because both name it:
+are written **before** the page is published and read back, with the draft
+already holding the assets they name (**Making the release page ▸ the release
+order**, steps 2–7):
 
 | | |
 | --- | --- |
@@ -702,9 +757,57 @@ both repositories, and each write is made over the blob this run read, so a file
 edited in between is a refused write rather than a lost edit. No credential is
 in this repository: the authorisation is whatever `gh auth status` already has.
 
-Check them afterwards — `brew fetch --cask lulu-loopp/folio/folio` downloads the
-image and compares the hash, so it either agrees with the release page or says
-which of the two is wrong.
+What it does, in order, one line of output per outcome:
+
+1. saves both files' bytes and blob ids to `manifests-before.json` in the
+   package directory — the record — and prints its path;
+2. writes the two files, each over its saved blob id, and adds the blob id each
+   write leaves to the record as it lands;
+3. reads both back and compares them with what it rendered;
+4. on any failure in 2 or 3, puts back every write that landed: the saved bytes
+   over the blob id the write left (or, if the write's answer was lost, the one
+   a read finds holding this release's file), then reads both back and
+   compares them with the saved pair.
+
+Its exit code is the answer: **0** both repositories hold this release's files;
+**1** refused, or failed and put back — nothing published, both as they were;
+**3** a release incident. `-Revert <record>` is step 4 alone, for a release
+whose page was not published after an `-Apply` that succeeded, with the same
+exit codes.
+
+A write-back is only ever made over the blob id this run's own write left, so
+a file somebody else changed after it is a 409 and an incident, never an edit
+written over. The tests, `scripts/release/update-manifests-tests.ps1`, run the
+script against a stand-in for `gh` that keeps the two repositories in a folder
+and fails where each case tells it to: the second write failing after the first
+landed, a read-back that differs, a page that never goes out, and a write-back
+answered 409.
+
+### A release incident
+
+Exit 3. The output ends with one line per repository — the file it held before,
+this release's file, or a file that is neither, each with its blob id — and the
+record's path. **The page is not published.** For each repository that does
+not hold the file it held before:
+
+1. Find out what moved it: `gh api "repos/<repo>/commits?path=<path>"` lists
+   the commits to that file, newest first. A commit that is not this run's is
+   somebody's edit, and whether it stays is a decision, not a step.
+2. Write the saved file back by hand, over the blob id it holds now:
+
+   ```powershell
+   $record = Get-Content -Raw target/release-package/manifests-before.json | ConvertFrom-Json
+   $entry = $record.Repositories | Where-Object Repository -eq '<repo>'
+   $now = gh api "repos/$($entry.Repository)/contents/$($entry.Path)" --jq .sha
+   gh api --method PUT "repos/$($entry.Repository)/contents/$($entry.Path)" `
+       -f "message=Folio $($record.Version): put back by hand" `
+       -f "content=$($entry.Before.Content)" -f "sha=$now"
+   ```
+
+3. Run `update-manifests.ps1 -Revert <record>`: with both files back it writes
+   nothing, reads both, and exits 0 only when they are the saved pair.
+
+Then start the release again from step 2 of the order, or abandon it.
 
 `scripts/release/macos/cask.sh` remains the one-file route for the cask alone,
 and is what **macOS ▸ The Homebrew tap** below describes; it is the answer to
@@ -933,9 +1036,10 @@ the archive.
 
 ### What to change for a release
 
-**The version's folder is made at release time, out of the last one.** The
-manifests in this repository are `0.2.2`'s. A new version's three files are a
-copy of that folder under the new number, with the values below changed in the
+**The version's folder is made at release time, out of the last one** — step 8
+of the release order. A new version's three files are a copy of the newest
+version folder under `packaging/winget/manifests/w/WeiyiShi/Folio/` under the
+new number, with the values below changed in the
 copy — and one of those values, `InstallerSha256`, does not exist until
 `package.ps1` has signed and hashed the archive, so a folder created at
 release-prep time is a folder with a hash from the previous release in it or a
@@ -1018,6 +1122,22 @@ The subsequent-version equivalent is `wingetcreate update WeiyiShi.Folio
 --version <version> --urls <the zip>|x64 --submit`, which downloads the asset to
 compute the hash itself and adds a folder rather than replacing one. Versions
 accumulate in `winget-pkgs` the same way they accumulate on the releases page.
+`wingetcreate update` starts from the package as `winget-pkgs` already has it,
+so it is for after a first submission has been merged.
+
+**microsoft/winget-pkgs#431006 is still open, and it is the 0.4.0 submission.**
+It is not edited into a later version: `winget-pkgs` takes one package version
+per pull request, and a version's folder is added, never renamed. So each
+release — 0.4.7 first — opens **a new pull request** by the hand route above,
+with its own branch `WeiyiShi.Folio-<version>` and its own folder
+`manifests/w/WeiyiShi/Folio/<version>`, and links #431006 in its description.
+What happens to #431006 — merged as 0.4.0, or closed as superseded — is the
+moderators' decision; nothing in this repository waits on it. Before opening
+it, check: the folder path and the three files' `PackageIdentifier` and
+`PackageVersion` agree; `InstallerSha256` is the zip's line of the published
+`SHA256SUMS.txt`, upper case; the `InstallerUrl` answers now that the page is
+published; `winget validate` passes; and the clean-machine install above shows
+what it has to.
 
 Before opening it, read the checklist in that repository's pull-request
 template, and expect these to be what is asked about:
@@ -1268,15 +1388,17 @@ fields in it change at every release: `version`, which the download URL is built
 out of, and `sha256`, which Homebrew checks the image against before it unpacks
 anything. Until they are changed, `brew` installs the previous release.
 
-**This is the last step, and it happens after the release page is published**,
-because the URL the cask names has to resolve and the hash has to be the hash of
-the file that was uploaded.
+**It is written while the release is still a draft, and read back before the
+page is published** — steps 2–5 of the release order (**Making the release
+page**) — so the hash is the hash of the file uploaded to the draft, and a write
+that cannot be finished is put back.
 
 **The ordinary way to do it is `update-manifests.ps1`** — see **Distribution
 manifests** above, which does this file and the scoop bucket in one command from
 the Windows machine. What follows is the same edit made on the Mac, one file at
 a time, and it is what `update-manifests.ps1` is a copy of rather than the other
-way round.
+way round. **It keeps no record and puts nothing back**, so it is not the
+release's route: it is for the tap alone, outside a release.
 
 ```sh
 gh api repos/lulu-loopp/homebrew-folio/contents/Casks/folio.rb --jq .content \

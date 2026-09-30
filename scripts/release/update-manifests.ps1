@@ -85,8 +85,40 @@
     rather than after it. No credential is read from this repository and none is
     written into it: the authorisation is whatever `gh auth status` already has.
 
+    **`-Apply` runs before the release page is published** (`docs/RELEASING.md`,
+    the release order), while the draft's assets still answer 404 to everybody
+    else, so a write it cannot finish is a write it takes back:
+
+    1. It saves, for both repositories, the exact bytes each file holds now and
+       its blob id, to `manifests-before.json` in the package directory, and
+       prints the path. That file is the record.
+    2. It writes both files, each over the blob id it saved, and reads both
+       back and compares them with what it rendered.
+    3. If a write or a read-back fails, every write that landed is undone: the
+       saved bytes are written over the blob id that write left, and both
+       repositories are read back and compared with the saved pair. It then
+       exits 1: nothing is published, and both manifests are what they were.
+    4. If a write-back fails or is refused (the file moved again), or the
+       repositories do not read back as the saved pair, it is a **release
+       incident**: exit 3, and one line per repository saying what it holds
+       now, and the record to restore from by hand. The page is not published
+       either way.
+
+    Run again, it writes only what is not there yet: if both repositories
+    already hold this release's files it says so and exits 0 without touching
+    the record; if one does, that one counts as a write an earlier run landed,
+    and what it held before is kept from the earlier run's record.
+
+.PARAMETER Revert
+    **Put both repositories back to what a record says they held**, the same
+    write-back and read-back as step 3 of `-Apply`, with the same exit 3 when it
+    cannot. For a release whose manifests were applied and whose page was then
+    not published — publication failed, or the release was abandoned. The
+    argument is the record `-Apply` printed. A repository that already holds
+    its saved file is left alone, so running it twice is the same as once.
+
 .PARAMETER Account
-    The `gh` login that `-Apply` must be signed in as.
+    The `gh` login that `-Apply` or `-Revert` must be signed in as.
 
 .EXAMPLE
     ./scripts/release/update-manifests.ps1 -Version 0.4.3
@@ -96,22 +128,30 @@
 
 .EXAMPLE
     ./scripts/release/update-manifests.ps1 -Version 0.4.3 -FromRelease -Apply -Account lulu-loopp
+
+.EXAMPLE
+    ./scripts/release/update-manifests.ps1 -Revert target/release-package/manifests-before.json
+
+.NOTES
+    Exit codes: 0 done; 1 refused, or a failed `-Apply` whose writes were all
+    put back; 3 a release incident — a repository that could not be put back.
 #>
 
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Render')]
 param(
-    [Parameter(Mandatory = $true)] [string] $Version,
-    [string] $Tag,
-    [string] $PackageDirectory,
-    [switch] $FromRelease,
-    [string] $CaskFile,
-    [string] $ScoopFile,
-    [string] $OutDirectory,
-    [switch] $Apply,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Render')] [string] $Version,
+    [Parameter(ParameterSetName = 'Render')] [string] $Tag,
+    [Parameter(ParameterSetName = 'Render')] [string] $PackageDirectory,
+    [Parameter(ParameterSetName = 'Render')] [switch] $FromRelease,
+    [Parameter(ParameterSetName = 'Render')] [string] $CaskFile,
+    [Parameter(ParameterSetName = 'Render')] [string] $ScoopFile,
+    [Parameter(ParameterSetName = 'Render')] [string] $OutDirectory,
+    [Parameter(ParameterSetName = 'Render')] [switch] $Apply,
+    [Parameter(Mandatory = $true, ParameterSetName = 'Revert')] [string] $Revert,
     [string] $Account,
-    [string] $Repository = 'lulu-loopp/folio-terminal',
-    [string] $CaskRepository = 'lulu-loopp/homebrew-folio',
-    [string] $ScoopRepository = 'lulu-loopp/scoop-folio'
+    [Parameter(ParameterSetName = 'Render')] [string] $Repository = 'lulu-loopp/folio-terminal',
+    [Parameter(ParameterSetName = 'Render')] [string] $CaskRepository = 'lulu-loopp/homebrew-folio',
+    [Parameter(ParameterSetName = 'Render')] [string] $ScoopRepository = 'lulu-loopp/scoop-folio'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -126,6 +166,173 @@ $root = (Resolve-Path (Join-Path (Join-Path $here '..') '..')).Path
 
 $caskName = 'Casks/folio.rb'
 $scoopName = 'bucket/folio.json'
+
+# A release incident: a repository this run wrote and could not put back.
+# Distinct from 1, which every refusal and every failure that was put back ends
+# with, so that whatever runs this can tell "stop" from "stop and repair".
+$incidentExit = 3
+
+# ── the two repositories, through `gh api` ───────────────────────────────────
+
+# `gh`'s own words on stderr are kept and its exit code decides. `Continue`, in
+# this function's scope only, so that a line on stderr is a line to report
+# rather than — under Windows PowerShell 5.1 — a terminating error.
+function Invoke-Gh {
+    param([string[]] $Arguments)
+
+    $ErrorActionPreference = 'Continue'
+    $said = @(& gh @Arguments 2>&1)
+    $code = $LASTEXITCODE
+    $out = @($said | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } |
+        ForEach-Object { "$_" })
+    $err = @($said | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } |
+        ForEach-Object { "$_".Trim() } | Where-Object { $_ })
+    return [pscustomobject]@{ Exit = $code; Out = ($out -join "`n"); Error = ($err -join ' ') }
+}
+
+# A file's bytes and its blob id, out of **one** read: the two are a pair, and
+# the blob id is what a later write is made over. The bytes are kept as base64,
+# re-encoded, so that two reads of the same bytes compare equal as strings.
+function Read-Remote {
+    param([string] $Repo, [string] $Path)
+
+    $said = Invoke-Gh @('api', "repos/$Repo/contents/$Path")
+    if ($said.Exit -ne 0) { throw "gh api exited $($said.Exit) reading $Repo/${Path}: $($said.Error)" }
+    $doc = $said.Out | ConvertFrom-Json
+    $bytes = [Convert]::FromBase64String(($doc.content -replace '\s', ''))
+    return [pscustomobject]@{ Blob = "$($doc.sha)"; Content = [Convert]::ToBase64String($bytes); Bytes = $bytes }
+}
+
+# One commit, over the blob id `$Over`: GitHub answers 409 if the file has
+# moved from it, so a file somebody changed in between is a refused write rather
+# than a lost edit. Answers the blob id the write left and the commit's page.
+function Write-Remote {
+    param([string] $Repo, [string] $Path, [string] $Content, [string] $Over, [string] $Message)
+
+    $said = Invoke-Gh @('api', '--method', 'PUT', "repos/$Repo/contents/$Path",
+        '-f', "message=$Message",
+        '-f', "content=$Content",
+        '-f', "sha=$Over")
+    if ($said.Exit -ne 0) { throw "gh api exited $($said.Exit) writing $Repo/${Path}: $($said.Error)" }
+    $doc = $said.Out | ConvertFrom-Json
+    return [pscustomobject]@{ Blob = "$($doc.content.sha)"; Url = "$($doc.commit.html_url)" }
+}
+
+# The account, and its push permission on every repository, before the first
+# write rather than after it.
+function Assert-Writer {
+    param([string[]] $Repositories)
+
+    $said = Invoke-Gh @('api', 'user', '--jq', '.login')
+    if ($said.Exit -ne 0) { throw 'gh is not signed in; there is nothing to write with' }
+    $login = $said.Out.Trim()
+    if ($Account -and $login -ne $Account) {
+        throw "gh is signed in as $login and -Account names $Account"
+    }
+    foreach ($repo in $Repositories) {
+        $said = Invoke-Gh @('api', "repos/$repo", '--jq', '.permissions.push')
+        if ($said.Exit -ne 0) { throw "gh api exited $($said.Exit) reading ${repo}: $($said.Error)" }
+        if ($said.Out.Trim() -ne 'true') {
+            throw "$login may not push to $repo, so this would be a write that is refused halfway"
+        }
+    }
+    Write-Host ''
+    Write-Host "writing as $login"
+}
+
+function Save-Record {
+    param($Record, [string] $Path)
+
+    [System.IO.File]::WriteAllText($Path, ($Record | ConvertTo-Json -Depth 6) + "`n",
+        [System.Text.UTF8Encoding]::new($false))
+}
+
+# What a repository holds, in the record's terms.
+function Get-Holding {
+    param($Entry, $Now, [string] $Version)
+
+    if ($Now.Content -ceq $Entry.Before.Content) { return "the file it held before (blob $($Now.Blob))" }
+    if ($Now.Content -ceq $Entry.Rendered) { return "Folio $Version's file (blob $($Now.Blob))" }
+    return "a file that is neither the saved one nor Folio $Version's (blob $($Now.Blob))"
+}
+
+# **Every write that landed is undone**, and then both repositories are read
+# back and compared with the saved pair. A write is undone over the blob id it
+# left — the one its answer named, or, when the answer was lost, the one a read
+# finds holding this release's bytes — so a file that moved again since is a
+# 409 and an incident, never somebody else's edit written over. A repository
+# that already holds its saved bytes is not written at all.
+# True when both read back as the saved pair; otherwise the incident is printed.
+function Restore-Manifests {
+    param($Record, [string] $RecordPath)
+
+    foreach ($entry in $Record.Repositories) {
+        $where = "$($entry.Repository)/$($entry.Path)"
+        try {
+            $now = Read-Remote -Repo $entry.Repository -Path $entry.Path
+            if ($now.Content -ceq $entry.Before.Content) {
+                Write-Host "$where — holds what it held before, nothing to put back"
+                continue
+            }
+            $over = if ($entry.Applied) { $entry.Applied }
+                    elseif ($now.Content -ceq $entry.Rendered) { $now.Blob }
+                    else { $null }
+            if (-not $over) {
+                Write-Host "$where — not put back: it holds $(Get-Holding $entry $now $Record.Version), which this run did not write"
+                continue
+            }
+            $done = Write-Remote -Repo $entry.Repository -Path $entry.Path -Content $entry.Before.Content `
+                -Over $over -Message "Folio $($Record.Version): put back, the release did not go out"
+            Write-Host "$where — put back, $($done.Url)"
+        }
+        catch {
+            Write-Host "$where — not put back: $($_.Exception.Message)"
+        }
+    }
+
+    $restored = $true
+    $lines = @()
+    foreach ($entry in $Record.Repositories) {
+        $where = "$($entry.Repository)/$($entry.Path)"
+        try {
+            $now = Read-Remote -Repo $entry.Repository -Path $entry.Path
+            if ($now.Content -cne $entry.Before.Content) { $restored = $false }
+            $lines += "  $where holds $(Get-Holding $entry $now $Record.Version)"
+        }
+        catch {
+            $restored = $false
+            $lines += "  $where could not be read: $($_.Exception.Message)"
+        }
+    }
+    if ($restored) {
+        foreach ($entry in $Record.Repositories) {
+            Write-Host "$($entry.Repository)/$($entry.Path) — reads back as it was"
+        }
+        return $true
+    }
+    Write-Host ''
+    Write-Host 'RELEASE INCIDENT: the manifests are not what they were, and the page must not be published.'
+    foreach ($line in $lines) { Write-Host $line }
+    Write-Host "  the record is ${RecordPath}: each repository's Before.Content is the file it held, as base64,"
+    Write-Host '  to be written back by hand over the blob it holds now, once whatever moved it is understood.'
+    return $false
+}
+
+# ── -Revert: a release whose manifests were applied and whose page was not ────
+
+if ($PSCmdlet.ParameterSetName -eq 'Revert') {
+    $recordPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Revert)
+    if (-not (Test-Path -LiteralPath $recordPath -PathType Leaf)) { throw "there is no record at $recordPath" }
+    $record = [System.IO.File]::ReadAllText($recordPath) | ConvertFrom-Json
+    Write-Host "putting back Folio $($record.Version)'s manifests, from $recordPath"
+    Assert-Writer -Repositories @($record.Repositories | ForEach-Object { $_.Repository })
+    if (Restore-Manifests -Record $record -RecordPath $recordPath) {
+        Write-Host ''
+        Write-Host 'both manifests are back to what they were'
+        exit 0
+    }
+    exit $incidentExit
+}
 
 if ($Version -notmatch '^\d+\.\d+\.\d+$') {
     throw ("'$Version' is not a version. It is the one in [workspace.package], with no 'v' and " +
@@ -155,6 +362,11 @@ function Get-Sum {
            'missing from it is an asset that was not published under that name.')
 }
 
+# The package directory is also where `-Apply` keeps its record, so it has a
+# value under `-FromRelease` too.
+if (-not $PackageDirectory) { $PackageDirectory = Join-Path $root 'target\release-package' }
+$PackageDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PackageDirectory)
+
 $sums = $null
 $macSums = $null
 if ($FromRelease) {
@@ -171,8 +383,6 @@ if ($FromRelease) {
     $macSums = Join-Path $into 'SHA256SUMS-macos.txt'
 }
 else {
-    if (-not $PackageDirectory) { $PackageDirectory = Join-Path $root 'target\release-package' }
-    $PackageDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($PackageDirectory)
     $sums = Join-Path $PackageDirectory 'SHA256SUMS.txt'
     $macSums = Join-Path $PackageDirectory 'SHA256SUMS-macos.txt'
 }
@@ -208,19 +418,17 @@ function Get-Manifest {
         return [pscustomobject]@{
             Text      = [System.IO.File]::ReadAllText($Local)
             Published = $null
+            Content   = $null
             Blob      = $null
             Source    = $Local
         }
     }
-    $encoded = & gh api "repos/$Repo/contents/$Path" --jq '.content'
-    if ($LASTEXITCODE -ne 0) { throw "gh api exited $LASTEXITCODE reading $Repo/$Path" }
-    $blob = & gh api "repos/$Repo/contents/$Path" --jq '.sha'
-    if ($LASTEXITCODE -ne 0) { throw "gh api exited $LASTEXITCODE reading $Repo/$Path" }
-    $bytes = [Convert]::FromBase64String(($encoded -join '').Trim())
+    $published = Read-Remote -Repo $Repo -Path $Path
     return [pscustomobject]@{
         Text      = [System.IO.File]::ReadAllText($Packaged)
-        Published = [System.Text.Encoding]::UTF8.GetString($bytes)
-        Blob      = $blob.Trim()
+        Published = [System.Text.Encoding]::UTF8.GetString($published.Bytes)
+        Content   = $published.Content
+        Blob      = $published.Blob
         Source    = "$Packaged, published as $Repo/$Path"
     }
 }
@@ -370,47 +578,133 @@ if (-not $Apply) {
 
 # ── what `-Apply` does ───────────────────────────────────────────────────────
 #
-# One commit per repository, over the blob this run read, so a file somebody
-# edited in between is a refused write rather than a lost edit — `gh api` is
-# handed the `sha` that came back with the contents and GitHub answers 409 if it
-# has moved.
+# Save, write, read back; and on any failure, put back. See `-Apply` above and
+# `docs/RELEASING.md`'s release order: this runs before the page is published,
+# so a public state it changes is one it must be able to return.
 
-$login = (& gh api user --jq '.login')
-if ($LASTEXITCODE -ne 0) { throw 'gh is not signed in; -Apply has nothing to write with' }
-$login = $login.Trim()
-if ($Account -and $login -ne $Account) {
-    throw "gh is signed in as $login and -Account names $Account"
-}
-foreach ($repo in @($CaskRepository, $ScoopRepository)) {
-    $push = (& gh api "repos/$repo" --jq '.permissions.push')
-    if ($LASTEXITCODE -ne 0) { throw "gh api exited $LASTEXITCODE reading $repo" }
-    if ($push.Trim() -ne 'true') {
-        throw "$login may not push to $repo, so this would be a write that is refused halfway"
+foreach ($read in @($cask, $scoop)) {
+    if (-not $read.Blob) {
+        throw ("$($read.Source) is a local file, so there is no published file to write over or to " +
+               'put back. Run without -CaskFile / -ScoopFile to apply.')
     }
 }
-Write-Host ''
-Write-Host "applying as $login"
+[System.IO.Directory]::CreateDirectory($PackageDirectory) | Out-Null
+$recordPath = Join-Path $PackageDirectory 'manifests-before.json'
 
-function Publish-Manifest {
-    param([string] $Repo, [string] $Path, [string] $Text, [string] $Blob)
+# **Running `-Apply` again is safe.** A repository that already holds this
+# release's file holds a write an earlier run landed. Both: nothing to do, and
+# the record — the only place the files from before this release are kept — is
+# not touched. One: that one is recorded as landed, with the file from before
+# taken from the earlier run's record, so `-Revert` still puts back what the
+# repository held before the release rather than this release's own file.
+$caskRendered = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($caskText))
+$scoopRendered = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($scoopText))
+if ($cask.Content -ceq $caskRendered -and $scoop.Content -ceq $scoopRendered) {
+    Write-Host ''
+    Write-Host "both repositories already hold Folio $Version's manifests: already applied; the record is left as it is"
+    exit 0
+}
+Assert-Writer -Repositories @($CaskRepository, $ScoopRepository)
 
-    if (-not $Blob) {
-        throw ("$Repo/$Path was read from a local file, so there is no blob to write over. " +
-               'Run without -CaskFile / -ScoopFile to apply.')
-    }
-    $content = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Text))
-    $arguments = @(
-        'api', '--method', 'PUT', "repos/$Repo/contents/$Path",
-        '-f', "message=Folio $Version",
-        '-f', "content=$content",
-        '-f', "sha=$Blob",
-        '--jq', '.commit.html_url')
-    $url = & gh @arguments
-    if ($LASTEXITCODE -ne 0) { throw "gh api exited $LASTEXITCODE writing $Repo/$Path" }
-    Write-Host "$Repo/$Path — $url"
+$earlier = $null
+if (Test-Path -LiteralPath $recordPath -PathType Leaf) {
+    $earlier = [System.IO.File]::ReadAllText($recordPath) | ConvertFrom-Json
+    if ($earlier.Version -ne $Version) { $earlier = $null }
 }
 
-Publish-Manifest -Repo $CaskRepository -Path $caskName -Text $caskText -Blob $cask.Blob
-Publish-Manifest -Repo $ScoopRepository -Path $scoopName -Text $scoopText -Blob $scoop.Blob
+function New-Entry {
+    param([string] $Repo, [string] $Path, $Read, [string] $Rendered)
+
+    $entry = [pscustomobject]@{
+        Repository = $Repo
+        Path       = $Path
+        Before     = [pscustomobject]@{ Blob = $Read.Blob; Content = $Read.Content }
+        Rendered   = $Rendered
+        Applied    = $null
+    }
+    if ($Read.Content -cne $Rendered) { return $entry }
+
+    $entry.Applied = $Read.Blob
+    $kept = $null
+    if ($earlier) {
+        $kept = @($earlier.Repositories | Where-Object { $_.Repository -eq $Repo -and $_.Path -eq $Path }) |
+            Select-Object -First 1
+    }
+    if ($kept) {
+        $entry.Before = [pscustomobject]@{ Blob = $kept.Before.Blob; Content = $kept.Before.Content }
+        Write-Host "$Repo/$Path — already holds Folio $Version's file (blob $($Read.Blob)); what it held before is kept from the earlier record"
+    }
+    else {
+        Write-Host "$Repo/$Path — already holds Folio $Version's file (blob $($Read.Blob)), and no earlier record says what it held before"
+    }
+    return $entry
+}
+
+# 1. Save: the bytes and blob ids the difference above was printed against —
+# one read each — before either write.
+$record = [pscustomobject]@{
+    Version      = $Version
+    Tag          = $Tag
+    Repositories = @(
+        (New-Entry -Repo $CaskRepository -Path $caskName -Read $cask -Rendered $caskRendered),
+        (New-Entry -Repo $ScoopRepository -Path $scoopName -Read $scoop -Rendered $scoopRendered))
+}
+Save-Record -Record $record -Path $recordPath
+Write-Host "saved what both repositories hold to $recordPath"
+
+# 2. Write both, each over its saved blob id. The blob id each write leaves
+# goes into the record as it lands, so a write-back is made over exactly it.
+$failed = $false
+foreach ($entry in $record.Repositories) {
+    $where = "$($entry.Repository)/$($entry.Path)"
+    if ($entry.Applied) { continue }
+    try {
+        $written = Write-Remote -Repo $entry.Repository -Path $entry.Path -Content $entry.Rendered `
+            -Over $entry.Before.Blob -Message "Folio $Version"
+        $entry.Applied = $written.Blob
+        Save-Record -Record $record -Path $recordPath
+        Write-Host "$where — written, $($written.Url)"
+    }
+    catch {
+        Write-Host "$where — not written: $($_.Exception.Message)"
+        $failed = $true
+        break
+    }
+}
+
+# 3. Read both back.
+if (-not $failed) {
+    foreach ($entry in $record.Repositories) {
+        $where = "$($entry.Repository)/$($entry.Path)"
+        try {
+            $now = Read-Remote -Repo $entry.Repository -Path $entry.Path
+            if ($now.Content -ceq $entry.Rendered) {
+                Write-Host "$where — reads back as written"
+            }
+            else {
+                Write-Host "$where — reads back as $(Get-Holding $entry $now $Version), not as written"
+                $failed = $true
+            }
+        }
+        catch {
+            Write-Host "$where — could not be read back: $($_.Exception.Message)"
+            $failed = $true
+        }
+    }
+}
+
+# 4. On any failure, put back every write that landed.
+if ($failed) {
+    Write-Host ''
+    Write-Host 'putting back every write that landed'
+    if (Restore-Manifests -Record $record -RecordPath $recordPath) {
+        Write-Host ''
+        Write-Host 'nothing published; both manifests are back to what they were'
+        exit 1
+    }
+    exit $incidentExit
+}
+
 Write-Host ''
-Write-Host 'check them: brew fetch --cask lulu-loopp/folio/folio, and scoop install from the bucket.'
+Write-Host "both repositories hold Folio $Version's manifests. Publish the page next; if it is not"
+Write-Host "published, put them back: update-manifests.ps1 -Revert $recordPath"
