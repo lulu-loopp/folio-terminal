@@ -28,7 +28,7 @@ use crate::update_job::{
     Applied, Bytes, Failure, Fetching, Gathered, Job, Presenters, Progress, Request, State, Verb,
 };
 use crate::update_prepare::{AtLaunch, at_launch, sum_for};
-use crate::update_txn::{Class, Header, HeaderOutcome, Phase};
+use crate::update_txn::{Class, Header, HeaderOutcome, Phase, PhaseKind};
 
 /// The running build's `VERSIONINFO`, and the offer's.
 const RUNNING: FileVersion = FileVersion([0, 4, 6, 0]);
@@ -1849,4 +1849,146 @@ fn a_later_launch_that_finds_the_lock_held_changes_nothing_and_offers_nothing() 
     assert_eq!(std::fs::read(home.journal()).unwrap(), journal);
     assert!(home.transaction(txn).join("download").exists());
     drop(holder);
+}
+
+// ── the layout's Prepare (U-41a1) ───────────────────────────────────────────
+
+/// What the road asked of a layout's Prepare, and the journal on disk when
+/// it asked: `None` where there was none yet.
+type PrepareCall = (
+    &'static str,
+    Option<(PhaseKind, crate::update_txn::Adapter)>,
+);
+
+/// **A fake layout's Prepare** — the harness U-41b and U-41c build theirs on
+/// (managed-update §6): every call recorded with the journal on disk,
+/// delegated to Folio's own layout unless it is told to refuse with `refuse`.
+#[derive(Clone, Default)]
+struct PrepareRecorder {
+    calls: Arc<Mutex<Vec<PrepareCall>>>,
+    refuse: Option<Stop>,
+}
+
+impl PrepareRecorder {
+    fn note(&self, point: &'static str, home: &Home) {
+        let on_disk = std::fs::read(home.journal()).ok().map(|bytes| {
+            let journal = Journal::parse(&bytes).unwrap();
+            (journal.body.phase.kind(), journal.body.adapter)
+        });
+        self.calls.lock().unwrap().push((point, on_disk));
+    }
+
+    fn calls(&self) -> Vec<PrepareCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl PreparePoint for PrepareRecorder {
+    fn allocated(&self, running: &Running) -> Layout {
+        self.calls.lock().unwrap().push(("allocated", None));
+        Ours.allocated(running)
+    }
+
+    fn prepare(
+        &self,
+        road: &Road<'_>,
+        home: &Home,
+        running: &Running,
+        rescue: &Path,
+    ) -> Result<Layout, Stop> {
+        self.note("prepare", home);
+        match &self.refuse {
+            Some(stop) => Err(*stop),
+            None => Ours.prepare(road, home, running, rescue),
+        }
+    }
+}
+
+/// RED (U-41a1, managed-update §1.1 R1–R2, §1.3) — **the press calls the
+/// Prepare of the layout its channel names once, with the journal at
+/// `Allocated` on disk and naming that adapter, and records what the layout
+/// answers at `Prepared`.**
+///
+/// The fake layout delegates to Folio's own, so the road is the real U-20
+/// Prepare over a real signed release; what the harness adds is the proof
+/// that the road reaches the layout through its adapter, at the one boundary
+/// the note gives `Prepare`, and that the adapter the press chose is in the
+/// journal before anything is acquired.
+///
+/// MUTATION: in `prepare_on`, acquire through `Ours` in place of the layout
+/// the adapter names (`layout.prepare` → `Ours.prepare`) — the recorder hears
+/// no `prepare`.
+#[test]
+fn the_press_calls_the_prepare_of_the_layout_its_adapter_names_once_at_allocated() {
+    let Some(scene) = Scene::new("layout-prepare") else {
+        return refused_off_windows();
+    };
+    let recorder = PrepareRecorder::default();
+    let driver = scene
+        .driver(TestTools::real())
+        .laid_out(Arc::new(recorder.clone()));
+    let job = press(&driver, Arc::new(Release::of(scene.archive.clone())), 1);
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+    assert_eq!(
+        recorder.calls(),
+        vec![
+            ("allocated", None),
+            (
+                "prepare",
+                Some((PhaseKind::Allocated, crate::update_txn::Adapter::Ours))
+            ),
+        ]
+    );
+    let journal = journal_on_disk(&scene.home());
+    assert_eq!(
+        journal.body.phase,
+        Phase::Prepared {
+            deferred_launches: 0
+        }
+    );
+    assert_eq!(journal.body.adapter, crate::update_txn::Adapter::Ours);
+    assert!(
+        !inventories(&journal).new.is_empty(),
+        "the layout's answer is recorded"
+    );
+}
+
+/// RED (U-41a1, managed-update §3.2 F4/F12's journal column) — **a layout
+/// that refuses its Prepare abandons the transaction: the card says its stop
+/// and that nothing changed, and nothing of the transaction is left — no
+/// folder, no journal, the lock free — with the install untouched.**
+///
+/// The abandonment is the road's, common to every layout: `Abandoned`, then
+/// cleared (`update_prepare::abandon`), as for every other Prepare failure.
+///
+/// MUTATION: in `prepare_on`, acquire through `Ours` in place of the layout
+/// the adapter names — the refusal is never met and the job is `Verified`.
+#[test]
+fn a_layout_that_refuses_its_prepare_abandons_and_leaves_nothing() {
+    let Some(scene) = Scene::new("layout-refuses") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+    let recorder = PrepareRecorder {
+        refuse: Some(Stop::Copy),
+        ..PrepareRecorder::default()
+    };
+    let driver = scene
+        .driver(TestTools::real())
+        .laid_out(Arc::new(recorder.clone()));
+    let job = press(&driver, Arc::new(Release::of(scene.archive.clone())), 2);
+    failed_with(&job, 2, Stop::Copy);
+    scene.left_nothing(2);
+    assert_eq!(scene.installed(), before, "nothing installed was changed");
+    assert_eq!(
+        recorder.calls().last(),
+        Some(&(
+            "prepare",
+            Some((PhaseKind::Allocated, crate::update_txn::Adapter::Ours))
+        ))
+    );
 }

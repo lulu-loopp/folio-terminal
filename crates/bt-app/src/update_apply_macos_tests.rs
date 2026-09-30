@@ -3735,3 +3735,235 @@ fn a_road_line_reaches_the_log_once_when_standard_error_is_that_log() {
         "{text}"
     );
 }
+
+// ── the layout's points (U-41a1) ────────────────────────────────────────────
+
+/// One of a layout's points on this road.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Point {
+    Activate,
+    ActivateBack,
+    Locate,
+}
+
+/// **A fake layout: every call the road makes of it, with the phase the
+/// journal on disk stood at when it was made** — the harness U-41b builds
+/// Homebrew's road tests on (managed-update §6). It delegates to Folio's own
+/// layout, so the road it is handed runs over the real bundles; told to, it
+/// refuses its `Activate` with nothing exchanged.
+#[derive(Clone)]
+pub(crate) struct Recorder {
+    pub(crate) calls: Arc<Mutex<Vec<(Point, PhaseKind)>>>,
+    /// `H/journal.json`.
+    pub(crate) journal: PathBuf,
+    pub(crate) refuse_activate: bool,
+}
+
+impl Recorder {
+    fn of(install: &Install) -> Self {
+        Self {
+            calls: Arc::default(),
+            journal: install.home.journal(),
+            refuse_activate: false,
+        }
+    }
+
+    fn note(&self, point: Point) {
+        let durable = Journal::parse(&std::fs::read(&self.journal).unwrap())
+            .unwrap()
+            .body
+            .phase
+            .kind();
+        self.calls.lock().unwrap().push((point, durable));
+    }
+
+    fn calls(&self) -> Vec<(Point, PhaseKind)> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl ApplyPoints for Recorder {
+    fn activate(&self, places: &Places<'_>, hands: &mut dyn Hands) -> Result<(), String> {
+        self.note(Point::Activate);
+        if self.refuse_activate {
+            return Err("the fake layout refuses to activate (test)".to_owned());
+        }
+        Ours.activate(places, hands)
+    }
+
+    fn activate_back(&self, places: &Places<'_>, hands: &mut dyn Hands) -> Result<(), String> {
+        self.note(Point::ActivateBack);
+        Ours.activate_back(places, hands)
+    }
+
+    fn locate(
+        &self,
+        worker: &WorkerCtx,
+        places: &Places<'_>,
+    ) -> (Option<BundleIdentity>, Option<BundleIdentity>) {
+        self.note(Point::Locate);
+        Ours.locate(worker, places)
+    }
+}
+
+/// `install`'s road, over `recorder` in place of Folio's own layout.
+fn recorded_road(install: &Install, recorder: &Recorder, limits: Limits) -> Road {
+    Road {
+        layouts: crate::update_adapter::Layouts::of(Arc::new(recorder.clone())),
+        ..install.road(limits)
+    }
+}
+
+/// RED (U-41a1, managed-update §1.1 R1–R2) — **the macOS road calls the
+/// layout its journal names, each point once at the phase the note's table
+/// gives it: `Activate` once, with `Moving` durable; `Activate` back once,
+/// with `RollbackIntent` durable; the locator at every step `decide` takes;
+/// and a journal naming an adapter this build has not built is refused
+/// before any of its points is called or anything is exchanged.**
+///
+/// The harness ([`Recorder`]) reads the journal on disk at each call and
+/// delegates to Folio's own layout, so the committed road and the road whose
+/// trial dies are the real M rows over the real bundles.
+///
+/// MUTATION: in `Txn::at_armed`, exchange through `world.exchange` in place
+/// of the layout the journal names (`self.layout.activate`) — the recorder
+/// hears no `Activate` and the sequences go red.
+#[test]
+fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("points");
+    let (home, txn) = (install.home.clone(), install.txn);
+    let world = launching(Box::new(move |_, args| {
+        let nonce = trial_nonce(args);
+        let receipt = Receipt {
+            txn,
+            nonce,
+            pid: std::process::id(),
+            version: "2.0".to_owned(),
+            started: None,
+        };
+        install_txn::durable_create(&home.receipt_path(txn, &nonce), &receipt.encode()).unwrap();
+        Ok(())
+    }));
+    let recorder = Recorder::of(&install);
+    let road = recorded_road(&install, &recorder, limits(5_000, 5_000));
+    let (ended, world) = applied(road, world);
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert_eq!(
+        recorder.calls(),
+        vec![(Point::Activate, PhaseKind::Moving)],
+        "a committed road: Activate at Moving"
+    );
+    assert_eq!(version_of(&install.installed), "2.0");
+
+    let install = Install::new("points-back");
+    let children = Children::default();
+    let started = children.clone();
+    let world = launching(Box::new(move |bundle, _| {
+        started.start(bundle, "trial");
+        Ok(())
+    }));
+    let killer = {
+        let children = children.clone();
+        let journal = install.home.journal();
+        std::thread::spawn(move || {
+            let give_up = Instant::now() + Duration::from_secs(20);
+            while Instant::now() < give_up {
+                let trial = std::fs::read(&journal)
+                    .ok()
+                    .and_then(|bytes| Journal::parse(&bytes).ok())
+                    .is_some_and(|journal| journal.body.phase.kind() == PhaseKind::Trial);
+                if trial {
+                    for pid in children.started.lock().unwrap().clone() {
+                        children.end(pid);
+                    }
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        })
+    };
+    let recorder = Recorder::of(&install);
+    let road = recorded_road(&install, &recorder, limits(5_000, 20_000));
+    let (ended, world) = applied(road, world);
+    killer.join().unwrap();
+    assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
+    assert_eq!(
+        recorder.calls(),
+        vec![
+            (Point::Activate, PhaseKind::Moving),
+            (Point::Locate, PhaseKind::RollbackIntent),
+            (Point::ActivateBack, PhaseKind::RollbackIntent),
+            (Point::Locate, PhaseKind::RollbackIntent),
+            (Point::Locate, PhaseKind::RolledBack),
+        ],
+        "a rolled-back road: the locator before each of decide's steps, Activate back once"
+    );
+    assert_eq!(version_of(&install.installed), "1.0");
+
+    let install = Install::new("points-homebrew");
+    let named = install
+        .journal_at(Phase::Handoff {
+            applier: install.applier,
+        })
+        .naming(crate::update_txn::Adapter::Homebrew);
+    install_txn::durable_write(&install.home.journal(), &named.encode()).unwrap();
+    let recorder = Recorder::of(&install);
+    let road = recorded_road(&install, &recorder, limits(2_000, 2_000));
+    let (ended, world) = applied(road, Fake::default());
+    assert!(
+        matches!(&ended, Ended::Refused(why) if why.contains("Homebrew")),
+        "{ended:?} {:?}",
+        world.said
+    );
+    assert!(
+        recorder.calls().is_empty(),
+        "no point of any layout is called"
+    );
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert!(world.launched.lock().unwrap().is_empty(), "no trial");
+}
+
+/// RED (U-41a1, M5 of the self-update note, managed-update §3.2 F7's first
+/// half) — **a layout that refuses its `Activate` with the old bundle still
+/// live is reverted: the entrance removed, the journal back at `Prepared`,
+/// no trial, and the old build relaunched plainly.**
+///
+/// The road's answer to a refused `Activate` is common and decided by what is
+/// live, never by the phase: the refusal left the old bundle live, which is
+/// M5's "swap not performed".
+///
+/// MUTATION: in `Txn::at_armed`, go on to the trial after a refused
+/// `Activate` — a trial is launched and the journal records `Trial`.
+#[test]
+fn a_layout_that_refuses_to_activate_is_reverted_with_the_old_bundle_live() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("refuses");
+    let recorder = Recorder {
+        refuse_activate: true,
+        ..Recorder::of(&install)
+    };
+    let road = recorded_road(&install, &recorder, limits(5_000, 5_000));
+    let (ended, world) = applied(road, Fake::default());
+    assert_eq!(ended, Ended::Reverted, "{:?}", world.said);
+    assert!(
+        world.wrote().contains("[Armed, Moving, Prepared]"),
+        "{}",
+        world.wrote()
+    );
+    assert!(said(&world, "the fake layout refuses to activate"));
+    assert_eq!(
+        install.on_disk().map(|journal| journal.body.phase),
+        Some(Phase::Prepared {
+            deferred_launches: 0
+        })
+    );
+    assert!(!install.plist().exists(), "the entrance is removed");
+    assert!(world.launched.lock().unwrap().is_empty(), "no trial");
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert_eq!(recorder.calls(), vec![(Point::Activate, PhaseKind::Moving)]);
+}
