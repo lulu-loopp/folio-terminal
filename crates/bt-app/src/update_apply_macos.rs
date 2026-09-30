@@ -1839,16 +1839,24 @@ pub(crate) fn open_trial(bundle: &Path, args: &[OsString]) -> io::Result<Launch>
 
 /// This process's own world.
 struct Machine {
-    /// Where each line is appended besides standard error: the data
-    /// directory's `diagnostics.log`, or `recover.log` in the home.
+    /// Where each line is appended: the data directory's `diagnostics.log`,
+    /// or `recover.log` in the home — standard error only while there is none.
     log: Option<(PathBuf, String)>,
 }
 
 impl Hands for Machine {
+    /// **One writer per line** (0.4.7 ticket U-42d; 0.4.6's D-11): the log
+    /// once one is named, standard error only before — the applier's standard
+    /// error is the `diagnostics.log` of the Folio that started it, so both
+    /// wrote every line twice.
     fn say(&mut self, line: &str) {
-        bt_platform::write_std_error(format!("{line}\n").as_bytes());
-        if let Some((log, _)) = &self.log {
-            let _ = crate::diagnostics::append_note(log, line);
+        match &self.log {
+            Some((log, _)) => {
+                let _ = crate::diagnostics::append_note(log, line);
+            }
+            None => {
+                bt_platform::write_std_error(format!("{line}\n").as_bytes());
+            }
         }
     }
 

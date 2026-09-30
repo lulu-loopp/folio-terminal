@@ -1662,17 +1662,26 @@ fn digest_at(path: &Path) -> Option<Digest> {
 }
 
 /// **This process's own world**: the current user's `Run` key, the system's
-/// processes, and lines on standard error and, when `log` names one, in a
-/// file.
+/// processes, and lines in the file `log` names — or on standard error while
+/// it names none.
 pub(crate) struct Machine {
     pub(crate) log: Option<PathBuf>,
 }
 
 impl World for Machine {
+    /// **One writer per line** (0.4.7 ticket U-42d; 0.4.6's D-11): the log
+    /// once one is named, standard error only before. The applier's standard
+    /// error is the one it inherited from the Folio that started it, whose
+    /// streams are that Folio's `diagnostics.log` — the same file `log`
+    /// names — so writing both put every line in the file twice.
     fn say(&mut self, line: &str) {
-        bt_platform::write_std_error(format!("{line}\n").as_bytes());
-        if let Some(log) = &self.log {
-            let _ = crate::diagnostics::append_note(log, line);
+        match &self.log {
+            Some(log) => {
+                let _ = crate::diagnostics::append_note(log, line);
+            }
+            None => {
+                bt_platform::write_std_error(format!("{line}\n").as_bytes());
+            }
         }
     }
 
@@ -1721,4 +1730,4 @@ impl World for Machine {
 
 #[cfg(test)]
 #[path = "update_apply_windows_tests.rs"]
-mod tests;
+pub(crate) mod tests;

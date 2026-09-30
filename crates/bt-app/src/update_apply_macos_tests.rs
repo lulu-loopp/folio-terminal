@@ -3706,3 +3706,30 @@ fn a_deferral_before_a_fresh_stuck_retrial_is_the_roads_end() {
         }
     }
 }
+
+/// RED (U-42d) — **the macOS applier's line reaches `diagnostics.log` once,
+/// when its standard error is that same log** — the Windows test's twin
+/// (`update_apply_windows::tests::a_road_line_reaches_the_log_once_when_standard_error_is_that_log`).
+///
+/// MUTATION: in `Machine::say`, write standard error too when a log is named.
+#[test]
+fn a_road_line_reaches_the_log_once_when_standard_error_is_that_log() {
+    const CHILD: &str = "BT_U42D_MACOS_SAY";
+    if let Some(log) = std::env::var_os(CHILD) {
+        let mut machine = Machine {
+            log: Some((PathBuf::from(log), String::new())),
+        };
+        Hands::say(&mut machine, "BT_UPDATE_APPLY one line, once");
+        return;
+    }
+    let text = crate::update_apply_windows::tests::said_by_a_child_whose_stderr_is_the_log(
+        "update_apply_macos::tests::a_road_line_reaches_the_log_once_when_standard_error_is_that_log",
+        CHILD,
+        "macos",
+    );
+    assert_eq!(
+        text.matches("BT_UPDATE_APPLY one line, once").count(),
+        1,
+        "{text}"
+    );
+}

@@ -4795,3 +4795,120 @@ fn a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers() {
         drop(trial);
     }
 }
+
+/// **Run `name` in a copy of this test binary** whose standard error is the
+/// file `log`, opened for appending as a Folio's streams are
+/// (`diagnostics::choose_resident_channel`), with `child` naming `log` in its
+/// environment; answers the file's text afterwards.
+pub(crate) fn said_by_a_child_whose_stderr_is_the_log(
+    name: &str,
+    child: &str,
+    tag: &str,
+) -> String {
+    let folder = std::env::temp_dir().join(format!(
+        "bt-u42d-{tag}-{}-{}",
+        std::process::id(),
+        bt_platform::attention_pipe::unguessable_bits() % 1_000_000
+    ));
+    std::fs::create_dir_all(&folder).unwrap();
+    let log = folder.join("diagnostics.log");
+    let stream = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .unwrap();
+    let status = bt_platform::quiet_command(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", name, "--test-threads=1"])
+        .env(child, &log)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::from(stream))
+        .status()
+        .expect("the child runs");
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&folder);
+    assert!(status.success(), "the child failed: {text}");
+    text
+}
+
+/// RED (U-42d) — **a road process's line reaches `diagnostics.log` once,
+/// when its standard error is that same log.**
+///
+/// 0.4.6's D-11: every `BT_UPDATE_APPLY` and `BT_UPDATE_RECOVER` line was in
+/// the file twice. The applier inherits the standard error of the Folio that
+/// started it, which is that Folio's `diagnostics.log`, and it also appended
+/// each line to the log by name. The child here is a copy of this test
+/// binary whose standard error is the log, as the applier's is.
+///
+/// MUTATION: in `Machine::say`, write standard error too when a log is named
+/// — the line is in the file twice.
+#[test]
+fn a_road_line_reaches_the_log_once_when_standard_error_is_that_log() {
+    const CHILD: &str = "BT_U42D_WINDOWS_SAY";
+    if let Some(log) = std::env::var_os(CHILD) {
+        let mut machine = Machine {
+            log: Some(PathBuf::from(log)),
+        };
+        World::say(&mut machine, "BT_UPDATE_APPLY one line, once");
+        return;
+    }
+    let text = said_by_a_child_whose_stderr_is_the_log(
+        "update_apply_windows::tests::a_road_line_reaches_the_log_once_when_standard_error_is_that_log",
+        CHILD,
+        "windows",
+    );
+    assert_eq!(
+        text.matches("BT_UPDATE_APPLY one line, once").count(),
+        1,
+        "{text}"
+    );
+}
+
+/// PIN (U-42d; 0.4.6's D-15) — **the applier's wait for a held file ends
+/// when the file is let go, not at the wait's deadline**: a hold let go a
+/// moment into a 60 s wait is followed by the moves at the poll's cadence.
+///
+/// On the clean machine E-7's hold lasted 200 s, past the applier's 60 s, so
+/// the ~61 s with no window there was the whole wait run out; the wait itself
+/// already asked again every poll (`ready_to_move`). This pins that it ends at
+/// the release.
+///
+/// MUTATION: in `ready_to_move`, sleep what is left of the window instead of
+/// `poll.min(left)` — the moves come at the deadline, not the release.
+#[test]
+fn a_held_file_let_go_ends_the_applier_s_wait_at_once() {
+    let Some(install) = Install::new("held-released") else {
+        return;
+    };
+    let old = install.children.start(&install.installed, &[]);
+    let mut world = install.world(Trial::Answers);
+    let first = Arc::new(Mutex::new(None::<Instant>));
+    let seen = Arc::clone(&first);
+    world.on_move = Some(Box::new(move |_| {
+        seen.lock().unwrap().get_or_insert_with(Instant::now);
+    }));
+    let window = Duration::from_secs(60);
+    let applier = start(
+        install.road(limits(60_000, 20_000)),
+        install.txn,
+        install.applier,
+        world,
+    );
+    until_journal(&install, PhaseKind::Armed);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(
+        install.on_disk().body.phase,
+        Phase::Armed,
+        "nothing moves while the file is held"
+    );
+    install.children.end(old);
+    let released = Instant::now();
+    let (ended, world) = applier.join().unwrap();
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    let moved = first.lock().unwrap().expect("the moves came");
+    assert!(
+        moved.saturating_duration_since(released) < window / 4,
+        "the wait ended {:?} after the release, as if it had waited out its window",
+        moved.saturating_duration_since(released)
+    );
+}
