@@ -3061,9 +3061,8 @@ pub fn standard_error_is(path: &std::path::Path) -> bool {
         use std::os::unix::io::FromRawFd;
         // SAFETY: descriptor 2 is this process's standard error; it is only
         // `fstat`ed through std, and `ManuallyDrop` keeps it from being closed.
-        let stream = std::mem::ManuallyDrop::new(unsafe {
-            std::fs::File::from_raw_fd(libc::STDERR_FILENO)
-        });
+        let stream =
+            std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(libc::STDERR_FILENO) });
         let Ok(stream) = stream.metadata() else {
             return false;
         };
