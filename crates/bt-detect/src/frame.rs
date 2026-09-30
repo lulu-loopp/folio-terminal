@@ -514,12 +514,18 @@ fn line_carries_math_delimiter(text: &str) -> bool {
     })
 }
 
-/// The cell rectangle of one block the unsplit screen proves (R5): its first to last live row, and
-/// its smallest `cell_start` to largest `cell_end` over its live cell segments.
+/// The cells of one block the unsplit screen proves (R5), one live row's run of them at a time: the
+/// block's live cell segments. A cut through any of them is a cut through the block.
+///
+/// Segment by segment and not as one rectangle over the block (revision (d) of the note): an inline
+/// occurrence groups every `$…$` run of its line, so a rectangle from its first run's first cell to
+/// its last run's last cell would cover the rule between two panes that each hold a formula on the
+/// same row, and refuse every such split — while no cell of either formula is on the rule. A display
+/// block's segments cover each of its rows whole, so a rule anywhere inside one of its lines is still
+/// a cut through it.
 #[derive(Clone, Copy, Debug)]
-struct ProvenRect {
-    first_row: u32,
-    last_row: u32,
+struct ProvenCells {
+    row: u32,
     left: u32,
     right: u32,
 }
@@ -542,7 +548,7 @@ struct Measure<'a> {
     /// One entry per grid row, in row order.
     cells: Vec<Vec<Cell>>,
     grid: Vec<&'a LiveDetectionInput>,
-    unsplit: OnceLock<Vec<ProvenRect>>,
+    unsplit: OnceLock<Vec<ProvenCells>>,
 }
 
 impl<'a> Measure<'a> {
@@ -554,65 +560,43 @@ impl<'a> Measure<'a> {
             .unwrap_or_default()
     }
 
-    /// R5's evidence: every block today's scan proves over the unsplit capture, as a cell rectangle.
-    fn unsplit(&self) -> &[ProvenRect] {
+    /// R5's evidence: the live cells of every block today's scan proves over the unsplit capture.
+    fn unsplit(&self) -> &[ProvenCells] {
         self.unsplit.get_or_init(|| {
             let scan = live_scan(self.inputs, self.initial_context, self.options);
             scan.scan
                 .blocks
                 .iter()
                 .filter_map(|block| {
-                    let segments = live_occurrence_segments(
-                        &block.span,
-                        block.start,
-                        &scan.logical,
-                        self.inputs,
-                    )?;
-                    let live = segments
-                        .iter()
-                        .filter_map(|segment| match segment.source_line {
-                            MathSourceLine::LiveGrid(row) => Some((row, segment)),
-                            MathSourceLine::Transcript(_) => None,
-                        });
-                    live.fold(None::<ProvenRect>, |rect, (row, segment)| {
-                        Some(match rect {
-                            None => ProvenRect {
-                                first_row: row,
-                                last_row: row,
-                                left: segment.cell_start,
-                                right: segment.cell_end,
-                            },
-                            Some(rect) => ProvenRect {
-                                first_row: rect.first_row.min(row),
-                                last_row: rect.last_row.max(row),
-                                left: rect.left.min(segment.cell_start),
-                                right: rect.right.max(segment.cell_end),
-                            },
-                        })
-                    })
+                    live_occurrence_segments(&block.span, block.start, &scan.logical, self.inputs)
+                })
+                .flatten()
+                .filter_map(|segment| match segment.source_line {
+                    MathSourceLine::LiveGrid(row) => Some(ProvenCells {
+                        row,
+                        left: segment.cell_start,
+                        right: segment.cell_end,
+                    }),
+                    MathSourceLine::Transcript(_) => None,
                 })
                 .collect()
         })
     }
 
-    /// (R5) Does a block the unsplit screen proves cross column `column` on the rows of `rect`?
+    /// (R5) Does a block the unsplit screen proves have a cell in column `column` on a row of `rect`?
     fn vertical_cut_crosses_a_proof(&self, rect: PaneRect, column: u32) -> bool {
         self.unsplit().iter().any(|proof| {
-            proof.first_row < rect.bottom
-                && proof.last_row >= rect.top
-                && proof.left <= column
-                && column < proof.right
+            rect.contains_row(proof.row) && proof.left <= column && column < proof.right
         })
     }
 
-    /// (R5) Does a block the unsplit screen proves cross row `row` in the columns of `rect`?
+    /// (R5) Does a block the unsplit screen proves have a cell on row `row` in the columns of `rect`?
+    /// A block's rows are consecutive and every one of them carries a segment, so a block standing
+    /// above and below the row stands on it too.
     fn horizontal_cut_crosses_a_proof(&self, rect: PaneRect, row: u32) -> bool {
-        self.unsplit().iter().any(|proof| {
-            proof.left < rect.right
-                && proof.right > rect.left
-                && proof.first_row <= row
-                && row <= proof.last_row
-        })
+        self.unsplit()
+            .iter()
+            .any(|proof| proof.row == row && proof.left < rect.right && proof.right > rect.left)
     }
 
     /// (V1) Every row of `rect` carries a vertical stroke at `column`, `rect` has at least three

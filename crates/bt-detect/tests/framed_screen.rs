@@ -630,7 +630,8 @@ fn the_herdr_sidebar_no_longer_hides_the_pane() {
 /// RED (69a) — **the herdr compact sidebar no longer hides the pane**: the same picture three
 /// columns wide, the pane from column 4.
 ///
-/// MUTATION: drop V2b (the blank gutter) from `Measure::v2`.
+/// MUTATION: count the rule's own column into the pane on its right (`left = cut` in
+/// `Measure::split`).
 #[test]
 fn the_herdr_compact_sidebar_no_longer_hides_the_pane() {
     let capture = framed_capture(100, &herdr("   "));
@@ -862,7 +863,8 @@ fn full_height_table() -> Vec<String> {
 /// nothing apart — but the screen is framed. The note's §0.3 invariant is about a table as wide as
 /// its screen; this case is reported to the review (T-PANE-COLUMNS report, finding F-1).
 ///
-/// MUTATION: count box glyphs as text in `row_cells` (the junction rows then clip the rules).
+/// MUTATION: read a side as clipped when any row touches the rule (drop the majority in
+/// `Measure::v2`).
 #[test]
 fn a_full_height_unicode_table_is_not_a_pane_frame() {
     let capture = framed_capture(20, &full_height_table());
@@ -985,18 +987,35 @@ fn a_padded_full_height_table_is_never_cut_in_either_direction() {
     assert_read_whole(&framed_capture(11, &table));
 }
 
-/// RED (69a) — **full-height box art is not a pane frame**: a padded box diagram drawn from column 0,
-/// `│` on every row, text inside it standing off both rules.
+/// RED (69a) — **full-height box art is not a pane frame**: a padded boxed banner drawn from column
+/// 0, `│` on every row, one line of text inside it standing off both rules. Its top and bottom rows
+/// are strokes touching the rules, and a stroke is frame, not text: counted as text they would be
+/// two of the three rows "with text" on each side, touching the rule, and the box would read as
+/// clipped.
 ///
-/// MUTATION: count a rule in the first column as having a gutter (drop V2b's "at least one column").
+/// MUTATION: count a stroke cell as text in `Measure::side_text`.
 #[test]
 fn full_height_box_art_is_not_a_pane_frame() {
     let mut art = vec!["\u{2502}                              \u{2502}".to_owned(); 20];
     art[0] = table_rule('\u{256d}', '\u{2500}', '\u{256e}', &[30]);
-    art[5] = "\u{2502}  $$ x^2 $$ in a box          \u{2502}".to_owned();
     art[10] = "\u{2502}  Welcome to the banner       \u{2502}".to_owned();
     art[19] = table_rule('\u{2570}', '\u{2500}', '\u{256f}', &[30]);
     assert_read_whole(&framed_capture(32, &art));
+}
+
+/// RED (69a) — **a blank gutter beside a pane that indents is a frame** (V2b). The pane's lines all
+/// start two cells past the rule, so neither side is clipped; the left side is blank on every row
+/// and three columns wide, which no text can cross, so the rule is a frame (herdr's sidebar, an
+/// empty pane).
+///
+/// MUTATION: drop V2b (`gutter = false` in `Measure::v2`).
+#[test]
+fn a_blank_gutter_beside_an_indented_pane_is_a_frame() {
+    let screen = (0..20)
+        .map(|row| format!("   \u{2502}  output {row}"))
+        .collect::<Vec<_>>();
+    let capture = framed_capture(40, &screen);
+    assert_eq!(panes(&capture), vec![rect(0, 20, 0, 3), rect(0, 20, 4, 40)]);
 }
 
 /// RED (69a) — **a side-by-side diff is not a pane frame** (V2c): delta's rows are clipped at the
@@ -1268,4 +1287,32 @@ fn a_capture_shares_its_frame_between_the_tasks_that_hold_it() {
     let first = candidate(&screen, &capture, 4);
     let second = candidate(&screen, &capture, 12);
     assert!(Arc::ptr_eq(first.capture.frame(), second.capture.frame()));
+}
+
+/// RED (69a) — **a formula in each pane on one row does not refuse the cut** (R5, asked of the
+/// block's cells). The unsplit scan groups every `$…$` run of a line into one inline occurrence,
+/// so a row holding `$a_n$` left of the rule and `$b_n$` right of it proves one occurrence whose
+/// runs stand on both sides. No cell of either formula is on the rule, so the cut takes nothing
+/// apart: the screen is split, and the left pane proves its formula on every row. (The right pane's
+/// formula on the same row is ticket 69b's: in 69a a candidate row is filled from the first pane
+/// whose block closes on it — `two_panes_closing_on_the_same_row_both_typeset`.)
+///
+/// MUTATION: refuse a cut through the rectangle from a block's first cell to its last (one box over
+/// the whole inline group) in `Measure::vertical_cut_crosses_a_proof`.
+#[test]
+fn a_formula_in_each_pane_on_one_row_does_not_refuse_the_cut() {
+    let screen = (0..20)
+        .map(|row| {
+            format!(
+                "{:<30}\u{2502}right $b_{row}$ too",
+                format!("left $a_{row}$ here")
+            )
+        })
+        .collect::<Vec<_>>();
+    let capture = framed_capture(60, &screen);
+    let (left, right) = (rect(0, 20, 0, 30), rect(0, 20, 31, 60));
+    assert_eq!(panes(&capture), vec![left, right]);
+    let blocks = proven(&capture);
+    assert_eq!(count(&blocks, left, MathMode::Inline), 20);
+    assert_eq!(blocks.len(), 20);
 }
