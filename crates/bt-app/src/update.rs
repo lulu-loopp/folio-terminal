@@ -718,7 +718,8 @@ pub struct OfferState {
     /// ([`Self::release_trial`]).
     owed: AtomicBool,
     /// **This process's check reads a local release feed** (`--update-feed`,
-    /// U-30b): its answers are stamped [`UpdateCheckV1::local_answer`]; a
+    /// U-30b): its stamps and answers are marked
+    /// [`UpdateCheckV1::local_stamp`] and [`UpdateCheckV1::local_tag`]; a
     /// process without the flag forgets such an answer (U-42e,
     /// [`forget_a_local_answer`]).
     local: bool,
@@ -942,8 +943,9 @@ impl OfferState {
             too_soon = !due(state.checked_at_ms, now_ms);
             if !too_soon {
                 state.checked_at_ms = now_ms;
-                // The stamp is the feed's too: a start without it asks again.
-                state.local_answer |= local;
+                // Whose stamp this is: a start without the feed asks again at
+                // once over a feed's (U-42e).
+                state.local_stamp = local;
             }
             !too_soon
         });
@@ -959,7 +961,7 @@ impl OfferState {
                 // or a Skip made while the request was on the wire included.
                 let _ = self.transact(|state| {
                     state.latest_tag = Some(tag.clone());
-                    state.local_answer |= local;
+                    state.local_tag = local;
                     true
                 });
                 Outcome::Answered(tag)
@@ -1162,20 +1164,24 @@ pub fn load(dir: &Path, enabled: bool) {
     let _ = OWNER.set(OfferState::load_for(dir, enabled, feed().is_some()));
 }
 
-/// **Forget what a local release feed answered** (0.4.7 ticket U-42e; 0.4.6's
-/// D-10): the tag and the stamp, so a start without `--update-feed` neither
-/// offers a rehearsal's tag for a day nor sends a press to a releases page
-/// that has no such release — its next check asks the page at once. The
-/// reader's own marks (`seen_tag`, `skipped_tag`) are theirs and stay.
-/// Answers whether anything was forgotten.
+/// **Forget what a local release feed wrote** (0.4.7 ticket U-42e; 0.4.6's
+/// D-10): its tag, so a start without `--update-feed` neither offers a
+/// rehearsal's tag for a day nor sends a press to a releases page that has no
+/// such release; and its stamp, so that start's check asks the page at once.
+/// Each by its own mark: a feed check that got no answer leaves the page's
+/// tag, which is kept (review finding 4). The reader's own marks (`seen_tag`,
+/// `skipped_tag`) are theirs and stay. Answers whether anything was forgotten.
 fn forget_a_local_answer(state: &mut UpdateCheckV1) -> bool {
-    if !state.local_answer {
-        return false;
+    let forgot = state.local_stamp || state.local_tag;
+    if state.local_stamp {
+        state.checked_at_ms = 0;
+        state.local_stamp = false;
     }
-    state.latest_tag = None;
-    state.checked_at_ms = 0;
-    state.local_answer = false;
-    true
+    if state.local_tag {
+        state.latest_tag = None;
+        state.local_tag = false;
+    }
+    forgot
 }
 
 /// Whether the gear wears its mark — the chrome's one question, asked of the
@@ -2661,9 +2667,10 @@ mod tests {
             Outcome::Answered("v0.4.7".to_owned())
         );
         assert_eq!(rehearsal.offer("0.4.6").as_deref(), Some("v0.4.7"));
+        let feeds = state_of(&home);
         assert!(
-            state_of(&home).local_answer,
-            "the file says whose answer it is"
+            feeds.local_stamp && feeds.local_tag,
+            "the file says whose stamp and answer they are"
         );
 
         let plain = OfferState::load_for(&home, true, false);
@@ -2676,7 +2683,53 @@ mod tests {
         assert_eq!(page.calls(), 1);
         let after = state_of(&home);
         assert_eq!(after.latest_tag.as_deref(), Some("v0.4.6"));
-        assert!(!after.local_answer);
+        assert!(!after.local_stamp && !after.local_tag);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// RED (U-42e, review finding 4) — **a feed check that gets no answer
+    /// leaves the page's tag the page's: the next plain start still offers
+    /// it, and asks the page again at once over the feed's stamp.**
+    ///
+    /// Codex's sequence: a legitimate answer from github.com, its day passed;
+    /// a start with an unreadable `--update-feed` writes its stamp and gets no
+    /// answer; the next plain start took the mixed file for a feed's answer
+    /// and erased the page's tag with it. The stamp and the tag now say whose
+    /// they are each on their own.
+    ///
+    /// MUTATION: in `forget_a_local_answer`, forget the tag whenever anything
+    /// is forgotten (`if forgot`): the plain start offers nothing.
+    #[test]
+    fn a_feed_check_with_no_answer_keeps_the_pages_tag() {
+        let home = dir("feed-refused");
+        let page = Counting::ok("v0.4.7");
+        assert_eq!(
+            OfferState::load_for(&home, true, false).run(CHECK_INTERVAL_MS, &page),
+            Outcome::Answered("v0.4.7".to_owned())
+        );
+        let unreadable = Feed::at(&format!("{}/", url_of(&home.join("no-such-feed"))));
+        assert_eq!(
+            OfferState::load_for(&home, true, true).run(
+                2 * CHECK_INTERVAL_MS,
+                check_source(Some(&unreadable), &page)
+            ),
+            Outcome::Refused
+        );
+        let mixed = state_of(&home);
+        assert!(mixed.local_stamp && !mixed.local_tag, "{mixed:?}");
+
+        let plain = OfferState::load_for(&home, true, false);
+        assert_eq!(
+            plain.offer("0.4.6").as_deref(),
+            Some("v0.4.7"),
+            "the page's tag is still offered"
+        );
+        assert_eq!(
+            plain.run(2 * CHECK_INTERVAL_MS + 1, check_source(None, &page)),
+            Outcome::Answered("v0.4.7".to_owned()),
+            "the feed's stamp is forgotten, so the page is asked now"
+        );
+        assert_eq!(page.calls(), 2);
         let _ = std::fs::remove_dir_all(&home);
     }
 
