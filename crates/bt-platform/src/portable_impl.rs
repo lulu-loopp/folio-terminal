@@ -1209,6 +1209,11 @@ pub fn shifted_character_of_virtual_key(virtual_key: u16) -> Option<char> {
     None
 }
 
+/// Builds the Windows layout's table of Shift characters ahead of a chord.
+/// **There is no such table here**, for `shifted_character_of_virtual_key`'s
+/// reason.
+pub fn learn_shifted_characters() {}
+
 /// How far one wheel notch scrolls. M1-3 reads the scroll preference.
 ///
 /// The caller's own fallback is three lines plus one line of stderr, so

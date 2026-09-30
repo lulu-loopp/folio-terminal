@@ -1988,6 +1988,10 @@ impl Runtime<'_> {
         }) else {
             return Ok(());
         };
+        // The layout's table of Shift characters, built while no dead key is pending, so that a
+        // Ctrl+Shift+Alt chord typed right after one gets the layout's own character under
+        // modifyOtherKeys, not the dead key's composition (T-KEYBOARD-CTRLALT, round 2).
+        bt_platform::learn_shifted_characters();
         let Some(bytes) = input::keyboard_bytes(
             &event.logical_key,
             &event.key_without_modifiers(),

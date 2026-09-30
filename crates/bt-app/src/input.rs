@@ -4840,6 +4840,61 @@ mod tests {
         );
     }
 
+    /// RED (T-KEYBOARD-CTRLALT, round 2) — **after the French dead `^`, Ctrl+Shift+Alt+E under
+    /// modifyOtherKeys is `CSI 27;8;69~`, xterm's `E`, not the composition `Ê`.**
+    ///
+    /// winit hands the chord over as it does with nothing pending — `Key::Unidentified(VK_E)`,
+    /// key without modifiers `e`, no text — and the dead key stays pending in the thread's
+    /// keyboard state. A Shift lookup that translated now would answer `Ê` (202) and the chord
+    /// would read `CSI 27;8;202~`. The lookup is modelled here by the two answers
+    /// `bt_platform::shifted_character_of_virtual_key` can give in that state, which
+    /// `bt-platform`'s `a_pending_dead_key_leaves_the_shift_character_alone` proves on the real
+    /// French layout: `E` from the table it built before the dead key, or `None` if it has none,
+    /// which sends nothing rather than a wrong `k`. Flag 1 is `CSI 101;8u` either way (it reads
+    /// the key without modifiers).
+    ///
+    /// MUTATION: have the model answer the composition `Ê` (the first assertion reads
+    /// `CSI 27;8;202~`), or fall back to the key without modifiers when the lookup has no answer
+    /// (the second reads `CSI 27;8;101~`).
+    #[test]
+    fn after_a_dead_key_ctrl_shift_alt_e_is_still_xterms_e() {
+        fn french_table(virtual_key: u16) -> Option<char> {
+            (virtual_key == 0x45).then_some('E')
+        }
+        fn no_table_yet(_: u16) -> Option<char> {
+            None
+        }
+        let ctrl_shift_alt = ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT;
+        let sent = |shifted: fn(u16) -> Option<char>, protocol| {
+            keyboard_bytes(
+                &Key::Unidentified(NativeKey::Windows(0x45)),
+                &Key::Character("e".into()),
+                KeyLocation::Standard,
+                ctrl_shift_alt,
+                false,
+                protocol,
+                KeyOrigin {
+                    platform: HostPlatform::Windows,
+                    physical_key: PhysicalKey::Code(KeyCode::KeyE),
+                    text_with_all_modifiers: None,
+                    virtual_key_of_scan_code: no_virtual_key,
+                    virtual_key_is_dead: no_dead_keys,
+                    shifted_character_of_virtual_key: shifted,
+                    conpty: ConPtyKind::Shipped,
+                },
+            )
+        };
+        for protocol in [MOK1, MOK2] {
+            assert_eq!(
+                sent(french_table, protocol),
+                Some(b"\x1b[27;8;69~".to_vec()),
+                "{protocol:?}"
+            );
+            assert_eq!(sent(no_table_yet, protocol), None, "{protocol:?}");
+        }
+        assert_eq!(sent(no_table_yet, KITTY), Some(b"\x1b[101;8u".to_vec()));
+    }
+
     /// RED (T-KEYBOARD-RECORDS) — **a record is the press as Windows reported it, on any layout:
     /// the layout's virtual key for where the key is, and the character it typed.**
     ///
