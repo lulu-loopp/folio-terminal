@@ -71450,6 +71450,24 @@ fn main() -> Result<()> {
     if let Some(url) = request.update_feed.as_deref() {
         diagnostics::note(&update::use_feed(url));
     }
+    // **The lock files a killed Folio's claim left behind** (0.4.7 U-43): swept
+    // once per start, on a worker of its own, after this process's own claim
+    // is taken; only empty, unheld `*.lock` files older than an hour in
+    // Folio's runtime folder. Windows' claim is a kernel name, with no file.
+    if bt_platform::host_platform() != bt_platform::HostPlatform::Windows {
+        let _ = bt_platform::spawn_at_priority(
+            "folio-claim-sweep",
+            bt_platform::ThreadPriority::BelowNormal,
+            |worker| {
+                let swept = bt_platform::instance::sweep_stale_claims(worker);
+                if swept > 0 {
+                    diagnostics::note(&format!(
+                        "Folio: {swept} stale claim files were swept from the runtime folder"
+                    ));
+                }
+            },
+        );
+    }
     // **And the witness to the day this thread stops answering** (§1.5).
     // Started from here, on the window thread, before the loop exists: it needs
     // this thread's id, and it needs `%APPDATA%` resolved by the thread that is
