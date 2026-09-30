@@ -3066,7 +3066,7 @@ pub fn standard_error_is(path: &std::path::Path) -> bool {
         let Ok(stream) = stream.metadata() else {
             return false;
         };
-        std::fs::symlink_metadata(path)
+        std::fs::metadata(path)
             .is_ok_and(|named| named.dev() == stream.dev() && named.ino() == stream.ino())
     }
     #[cfg(not(any(windows, unix)))]

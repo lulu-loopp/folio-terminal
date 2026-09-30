@@ -137,8 +137,11 @@ unlinks under the lock, and whose leftovers — empty, unheld, older than an hou
 each start sweeps on its `folio-claim-sweep` worker
 (`instance::sweep_stale_claims`); the claim holds `sweep.guard` shared and the
 sweep holds it exclusive one file at a time, so a claim never meets a file the
-sweep is holding, U-43). The table has two writers: `persist::is_writer_of`, which takes the
-claim on the first ask and remembers the answer, a refusal included; and
+sweep is holding, U-43). Both guard locks are non-blocking: a sweep stops its
+pass while a claim holds the guard, and a claim answers the transient
+`ClaimRefusal::Sweeping` while the sweep holds it, so there is no owner-thread
+wait. The table has two writers: `persist::is_writer_of`, which takes the claim
+on the first ask and remembers a settled answer, but never `Sweeping`; and
 `persist::adopt_claim`, which puts a claim already taken with
 `persist::try_claim` (asks now, remembers nothing) into the same row before
 anything asks — the updated build's road (`docs/plans/design/self-update-2026-09-16.md`
@@ -432,7 +435,10 @@ line per start.
 2026-09-27; class *identity, admission and lifecycle*). The claim table
 (`persist::is_writer_of`, `persist::adopt_claim`) is written only by the
 process that will be the resident Folio: `main`'s `is_writer_of(&storage)`,
-and before it `update_trial::take_the_claim` for an update's trial. A process
+and before it `update_trial::take_the_claim` for an update's trial.
+`is_writer_of` asks the kernel without waiting; `ClaimRefusal::Sweeping` is
+transient, follows the existing hand-over road, and is not written into the
+table, so the next writer question asks again. A process
 with no window never asks it: `--explorer-command` (`explorer_menu::serve`) and
 the front door's refusal (`say_at_the_front_door`, which carries `--version`
 and `--help`) read their language through `main::door_language` →
@@ -749,6 +755,9 @@ testing, and producing frame candidates.
 Numbered because each is an exception and each carries an owner. A call not on
 this list that blocks on something outside the process is a defect.
 "Ticket to be issued" means the version is ruled and the id is not yet minted.
+The single-instance claim is not a row: both its claim lock and its shared
+`sweep.guard` lock use `LOCK_NB`; an exclusive sweep answers
+`ClaimRefusal::Sweeping`, never an owner-thread wait.
 
 **The table is generated** (2026-09-26, 0.4.6 ticket A1a): its one source is the
 registry `crates/bt-app/src/window_waits.tsv`, and
@@ -962,7 +971,7 @@ happen" has one answer and a guard can hold it.
 | mounting the update image, macOS | `bt_platform::macos_update` (U-17) — `attach(worker, image, mount_dir)` runs `hdiutil attach -nobrowse -readonly -noautoopen -mountrandom` and answers a `Mount` (no `Clone`, no `Drop`, `#[must_use]`) that only `detach(worker, mount)` consumes; `with_image` attaches, hands the mount point to its body and detaches whatever the body answers; `mounts_under(root)` reads the mount table (`getfsstat`, `MNT_NOWAIT`) for every mount point strictly below `root`'s real path, so a mount under the home is found with no record, and `detach_all_under` is M1's step before `H/<txn>` is deleted; refused by name off macOS | `macos_update::mount_tests`: every exit road over a stand-in `hdiutil` with its own mount table, the attach's deadline, the device-table grammar from fixture output, and on macOS a real image attached under a temporary home and found without a record |
 | exchanging the installed macOS bundle with the staged one, the processes running from a file, and whether a file is held open | `bt_platform::install_flip` (U-28, U-23) — `exchange(live, staged)`: `renamex_np(RENAME_SWAP)` through `install_txn`'s `Surface` (`Replace::Swap`, `durable_exchange_with`), then `F_FULLFSYNC` on each folder; Windows' arm refuses a swap by name (its flip is one `install_txn::durable_move` per file), and so does every platform without an arm. `running_from(executable)`: macOS `proc_listallpids` and `proc_pidpath`, matched by device and inode, each with its start instant (`proc_pidinfo` `PROC_PIDTBSDINFO`); Windows (U-23) `K32EnumProcesses` and `QueryFullProcessImageNameW`, matched by volume serial number and file index, each with its creation time (`GetProcessTimes`; a process that has exited is not running); `still_running`, `started_of`; **`parent_of_this_process` (0.4.7 U-37)** — this process's parent by pid and start instant, only when it started before this one (macOS `getppid`, Windows the process snapshot's parent pid, `CreateToolhelp32Snapshot`): the recovery build's own starter, which is no candidate; read only, no wait, not reachable from the window thread; refused elsewhere. `held_open(path)` (Windows, U-23): an open for reading and writing with no sharing, closed at once — a sharing violation (any other handle, or a running image's section) is `true`; E-7's process check. **Since U-29 one effect on a process**: `ask(process, images, Ask::Quit | Ask::End)` sends `SIGTERM` or `SIGKILL` only after `runs_from` shows that pid, with that start instant, running from one of `images` — the rollback's stop of a trial LaunchServices started (not the stopper's child). **Windows since U-24**: the process opened (`PROCESS_TERMINATE`) and its creation time read again from that handle, so a pid reused since the list is never touched; `Quit` posts `WM_CLOSE` to each of its visible, unowned, non-tool top-level windows (a person's close; Folio listens to no other quit road, so a process with no such window is asked by nothing and its grace runs out), `End` is `TerminateProcess` on the same handle; refused elsewhere. | `install_flip::tests` (the order over the recording fake, a real exchange of two folders, this test process found by its image, a started synthetic program listed while it runs and not after, a running image held open) and `update_apply_macos::tests`, `update_apply_windows::tests` |
 | a worker's sleep | `bt_platform::wait::sleep_within(&WorkerCtx, Duration)` (U-28; thread-door note (j)13) — one `std::thread::sleep`, asked for with the worker's capability, so no window thread can call it | `window_waits.tsv` `# effects` row `worker-door-body` / `WorkerCtx`, no admission identity; `hang_watch::window_waits_tests` counts its body as a door, never as inventory |
-| the runtime folder's listing (Unix) | `bt_platform::instance::sweep_stale_claims_in(&WorkerCtx, …)` (U-43) — one `std::fs::read_dir` of Folio's runtime folder, on the start's `folio-claim-sweep` worker | `window_waits.tsv` `# effects` row `worker-door-body` / `WorkerCtx`, arm `[unix]`; counted as a door, never as inventory |
+| the runtime folder's listing (Unix) | `bt_platform::instance::sweep_stale_claims_in(&WorkerCtx, …)` (U-43) — one `std::fs::read_dir` of Folio's runtime folder, on the start's `folio-claim-sweep` worker; its per-file `sweep.guard` lock is exclusive and non-blocking, as the claim's shared lock is, so neither side adds an owner-thread wait and a contended claim answers `ClaimRefusal::Sweeping` | `window_waits.tsv` `# effects` row `worker-door-body` / `WorkerCtx`, arm `[unix]`; counted as a door, never as inventory |
 | constructing a child process | `bt_platform::quiet_command_named` (and `quiet_command`) — absolute path resolved by `handoff::program_on_path` | pinned as the only `Command` construction |
 | handing something to the operating system | `bt_platform::handoff` — the only `ShellExecuteW` and `NSWorkspace` sites in the workspace; the seven verbs are private to it and reached only through `ShellThread::hand_over`, and a `ShellThread` is entered only with the `WorkerCtx` the thread door lends (A1b), so a hand-off can happen only on a thread the door started | its own module, one function per verb; `compile_fail` doctests on `hand_over` name each verb by both spellings; `handoff_lane::no_handoff_runs_on_the_window_thread` |
 | reaching the network | `bt_platform::http` — `https_get` (one `GET` into memory: the update check) and `https_download` (one `GET` streamed to a file under a ceiling, U-7), over the operating system's own stack (WinHTTP, `NSURLSession`), `https` only, no caller headers; the download's ceiling, temporary file, deadlines and stage vocabulary are `bt_platform::https_download`'s, shared by both real arms | `update_check_transport_tests` holds the three arms to one signature per door and one set of request types |

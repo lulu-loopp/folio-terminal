@@ -110,21 +110,26 @@ unsafe impl Send for DataDirectoryClaim {}
 #[cfg(windows)]
 unsafe impl Sync for DataDirectoryClaim {}
 
-/// Why [`try_claim_data_directory`] did not hand this process the claim — **two
-/// answers, because they are two different facts** (`docs/plans/design/
+/// Why [`try_claim_data_directory`] did not hand this process the claim — **three
+/// answers, because they are three different facts** (`docs/plans/design/
 /// self-update-2026-09-16.md` §C.7 and its review row R-3).
 ///
 /// A caller that waits for a claim — the updated build waiting for the old one
 /// to let go — has to tell "somebody live holds it" from "the platform would
 /// not say". The first is a reason to ask again; the second is not evidence
 /// that anybody holds anything, and retrying it for thirty seconds would be
-/// waiting on an answer that is never coming. Both mean *not the writer*, which
-/// is all [`claim_data_directory`] keeps of them.
+/// waiting on an answer that is never coming. A sweep holding the guard is a
+/// third, transient answer: the caller asks again instead of treating the
+/// sweep as a live holder. All three mean *not the writer*, which is all
+/// [`claim_data_directory`] keeps of them.
 #[derive(Debug)]
 pub enum ClaimRefusal {
     /// Another live process holds the claim: on Windows the name already
     /// existed, on Unix the `flock` would have blocked.
     Held,
+    /// A stale-claim sweep is between locking and unlinking one file. No claim
+    /// was inspected, and the question should be asked again.
+    Sweeping,
     /// The question was not answered. On Windows the kernel refused to create
     /// or open the name (another kind of object under it, or a holder whose
     /// security this session may not open); on Unix the runtime directory could
@@ -135,7 +140,7 @@ pub enum ClaimRefusal {
 
 /// Take the claim on `directory`, or answer `None` because it was refused —
 /// [`try_claim_data_directory`] with the reason dropped, for every caller for
-/// which a refusal of either kind means the same thing.
+/// which every refusal means the same thing.
 ///
 /// **The claim is not released when this returns** — it is released when the
 /// returned value is dropped, which for the product is when the process ends.
@@ -147,7 +152,8 @@ pub fn claim_data_directory(directory: &Path) -> Option<DataDirectoryClaim> {
 }
 
 /// Take the claim on `directory`, or say why not: [`ClaimRefusal::Held`]
-/// because another live process already holds it, or
+/// because another live process already holds it, [`ClaimRefusal::Sweeping`]
+/// because a stale-claim sweep is in its one-file critical section, or
 /// [`ClaimRefusal::QueryDenied`] because the kernel would not answer.
 ///
 /// **The claim is not released when this returns** — see
@@ -732,11 +738,11 @@ const RELOCK_ATTEMPTS: u32 = 8;
 /// folder, never removed and never swept (it is not a `*.lock`). A claim holds
 /// it shared from before it opens its lock file until it has decided; the
 /// start's sweep holds it exclusive around each file it locks, checks and
-/// unlinks, and never waits for it. So a claim never meets a file a sweep is
-/// holding: without it, a claim that opened a stale file a sweep had just
-/// locked read "held" and, `bt_app::persist` remembering that answer for the
-/// process's life, ran as a Folio that saves nothing. A claim waits at most
-/// for the one file a sweep is on.
+/// unlinks, and neither side waits for the other. So a claim never meets a file
+/// a sweep is holding: it answers [`ClaimRefusal::Sweeping`] immediately.
+/// Without the guard, a claim that opened a stale file a sweep had just locked
+/// read "held" and, `bt_app::persist` remembering that answer for the process's
+/// life, ran as a Folio that saves nothing.
 #[cfg(unix)]
 const SWEEP_GUARD: &str = "sweep.guard";
 
@@ -774,7 +780,8 @@ std::thread_local! {
 }
 
 /// Take the claim on `directory`, or say why not: [`ClaimRefusal::Held`]
-/// because another live process already holds it, or
+/// because another live process already holds it, [`ClaimRefusal::Sweeping`]
+/// because the sweep guard is held exclusively, or
 /// [`ClaimRefusal::QueryDenied`] because the runtime directory, the lock file or
 /// `flock` itself would not answer.
 ///
@@ -797,17 +804,30 @@ std::thread_local! {
 /// returned value is dropped, which for the product is when the process ends.
 #[cfg(unix)]
 pub fn try_claim_data_directory(directory: &Path) -> Result<DataDirectoryClaim, ClaimRefusal> {
+    let runtime = prepare_runtime_directory().map_err(ClaimRefusal::QueryDenied)?;
+    try_claim_data_directory_in(&runtime, directory)
+}
+
+#[cfg(unix)]
+fn try_claim_data_directory_in(
+    runtime: &Path,
+    directory: &Path,
+) -> Result<DataDirectoryClaim, ClaimRefusal> {
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::io::AsRawFd;
 
-    let runtime = prepare_runtime_directory().map_err(ClaimRefusal::QueryDenied)?;
     let tag = directory_tag(directory);
-    let path = lock_path_in(&runtime, &tag);
+    let path = lock_path_in(runtime, &tag);
     // No sweep holds a file while this claim opens, locks and checks its own
     // (U-43, round 2): held shared until the claim has decided.
-    let guard = sweep_guard(&runtime).map_err(ClaimRefusal::QueryDenied)?;
-    if !flock(&guard, libc::LOCK_SH) {
-        return Err(ClaimRefusal::QueryDenied(std::io::Error::last_os_error()));
+    let guard = sweep_guard(runtime).map_err(ClaimRefusal::QueryDenied)?;
+    if !flock(&guard, libc::LOCK_SH | libc::LOCK_NB) {
+        let why = std::io::Error::last_os_error();
+        return if why.kind() == std::io::ErrorKind::WouldBlock {
+            Err(ClaimRefusal::Sweeping)
+        } else {
+            Err(ClaimRefusal::QueryDenied(why))
+        };
     }
     let mut attempts = 0;
     let lock = loop {
@@ -864,8 +884,8 @@ pub fn try_claim_data_directory(directory: &Path) -> Result<DataDirectoryClaim, 
     // listener answers — a failure quieter than the one it half fixed, because
     // `folio attention` would keep exiting zero.
     for endpoint in [
-        socket_path_in(&runtime, &tag),
-        attention_socket_path_in(&runtime, &tag),
+        socket_path_in(runtime, &tag),
+        attention_socket_path_in(runtime, &tag),
     ] {
         if std::fs::symlink_metadata(&endpoint).is_ok() {
             let _ = std::fs::remove_file(&endpoint);
@@ -1205,9 +1225,9 @@ mod tests {
         );
 
         let take = source
-            .split("#[cfg(unix)]\npub fn try_claim_data_directory")
+            .split("#[cfg(unix)]\nfn try_claim_data_directory_in")
             .nth(1)
-            .expect("the Unix arm has its own try_claim_data_directory");
+            .expect("the Unix arm has its own claim implementation");
         let take = take.split("\n}\n").next().unwrap_or_default();
         assert!(
             take.contains("libc::LOCK_EX | libc::LOCK_NB"),
@@ -1222,8 +1242,8 @@ mod tests {
         // listener answers, which is quieter than the failure it half fixes:
         // `folio attention` keeps exiting zero.
         for door in [
-            "socket_path_in(&runtime, &tag)",
-            "attention_socket_path_in(&runtime, &tag)",
+            "socket_path_in(runtime, &tag)",
+            "attention_socket_path_in(runtime, &tag)",
         ] {
             assert!(
                 take.contains(door),
@@ -1660,11 +1680,13 @@ mod tests {
     /// refused while the name still leads to the file, B answers `Held`, and
     /// `bt_app::persist` remembers it for B's whole life. Each half is pinned
     /// at its own instant by a step the code runs there, on the thread that
-    /// runs it: inside the sweep's hold a claim's shared hold on the guard is
-    /// refused; inside a claim's hold the sweep's exclusive hold is refused.
+    /// runs it: inside the sweep's hold the product claim answers `Sweeping`
+    /// immediately; inside a claim's hold the sweep's exclusive hold is
+    /// refused.
     ///
-    /// MUTATION: drop the guard from either side (the claim's `LOCK_SH`, or
-    /// the sweep's `LOCK_EX | LOCK_NB`): that half's hold is granted.
+    /// MUTATIONS: map the guard's `WouldBlock` to `Held` instead of `Sweeping`,
+    /// or drop the guard from the sweep: the first half is red. Drop the guard
+    /// from the claim: the second half is red.
     #[cfg(unix)]
     #[test]
     fn a_claim_never_meets_a_file_a_sweep_is_holding() {
@@ -1680,16 +1702,27 @@ mod tests {
             .expect("its time set");
 
         let at = runtime.clone();
+        let claimed = runtime.join("claimed-data");
+        std::fs::create_dir_all(&claimed).expect("make the data directory");
         let (swept, inside_the_sweep) = crate::spawn_at_priority(
             "bt-u43-guard",
             crate::ThreadPriority::BelowNormal,
             move |worker| {
-                let seen = std::rc::Rc::new(std::cell::Cell::new(None::<bool>));
+                let seen = std::rc::Rc::new(std::cell::Cell::new(None::<&'static str>));
                 let step = std::rc::Rc::clone(&seen);
                 let guard_at = at.clone();
+                let claimed = claimed.clone();
                 BEFORE_UNLINK.set(Some(Box::new(move || {
-                    let guard = sweep_guard(&guard_at).expect("the guard opens");
-                    step.set(Some(flock(&guard, libc::LOCK_SH | libc::LOCK_NB)));
+                    let answer = try_claim_data_directory_in(&guard_at, &claimed);
+                    step.set(Some(match answer {
+                        Err(ClaimRefusal::Sweeping) => "Sweeping",
+                        Err(ClaimRefusal::Held) => "Held",
+                        Err(ClaimRefusal::QueryDenied(_)) => "QueryDenied",
+                        Ok(claim) => {
+                            drop(claim);
+                            "Taken"
+                        }
+                    }));
                 })));
                 let swept = sweep_stale_claims_in(worker, &at, std::time::SystemTime::now());
                 BEFORE_UNLINK.set(None);
@@ -1702,8 +1735,8 @@ mod tests {
         assert_eq!(swept, 1, "the leftover is swept");
         assert_eq!(
             inside_the_sweep,
-            Some(false),
-            "while the sweep holds the stale file, no claim can take the guard"
+            Some("Sweeping"),
+            "while the sweep holds the stale file, the claim answers without waiting"
         );
 
         let directory = scratch(line!()).join("data");

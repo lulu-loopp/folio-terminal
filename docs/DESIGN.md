@@ -13260,3 +13260,9 @@ The owner's ask of 2026-09-27 (index 145): Claude Code writes `[Image #N]` into 
 **U-42e.** `local_answer` is two flags, `local_stamp` (written by every check) and `local_tag` (written by every answer), because one flag could not say whose the stamp and the tag were when they came from different checks. A feed check that got no answer left the page's tag, and the next plain start erased it. A plain start forgets each part only when it is the feed's.
 
 **Privacy.** A refused start's line keeps the working directory whole; it is one of D-5's open questions. `docs/PRIVACY.md` (EN and ZH) says that `diagnostics.log` can carry the program's, the install's and the working directory's full paths.
+
+### 2026-09-30 — U-SMALL-047 round 3: the Unix claim never waits for the sweep, and a symlinked diagnostics name is compared with the file an append opens
+
+The claim takes `sweep.guard` shared with `LOCK_NB`. An exclusive sweep answers `ClaimRefusal::Sweeping` immediately; `persist::is_writer_of` does not memoise that transient answer, so the existing hand-over road runs and the next writer question asks again. The sweep's exclusive guard remains non-blocking too. No released build contains U-43's sweep without this guard; coexistence with a pre-guard sweep build is ruled out rather than supported by a second protocol.
+
+On Unix, `standard_error_is` follows the diagnostics path as `diagnostics::append_note` does, so a symlinked `diagnostics.log` is compared by the target's device and inode and each recovery line still has one writer. Pinned by `instance::tests::a_claim_never_meets_a_file_a_sweep_is_holding`, `persist::tests::a_sweep_is_never_remembered_as_a_claim_refusal`, `update_recover::tests::a_recovery_line_reaches_the_log_once_whatever_standard_error_is`, and its Unix symlink case `a_symlinked_log_path_is_the_same_standard_error_target`.

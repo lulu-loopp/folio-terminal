@@ -1755,8 +1755,9 @@ impl Recording for Txn<'_> {
 
 /// **§C.4's authoritative test that O is gone**: the data directory's claim,
 /// tried until it is had and let go at once, sleeping between tries through
-/// the wait door, until `until`. A claim that cannot be asked about is not
-/// asked again (`ClaimRefusal::QueryDenied`: no answer is coming).
+/// the wait door, until `until`. A live holder or a transient sweep is asked
+/// about again; a claim that cannot be asked about is not
+/// (`ClaimRefusal::QueryDenied`: no answer is coming).
 fn wait_for_the_claim(worker: &WorkerCtx, road: &Road, until: Instant) -> Result<(), String> {
     loop {
         match crate::persist::try_claim(&road.data) {
@@ -1764,7 +1765,10 @@ fn wait_for_the_claim(worker: &WorkerCtx, road: &Road, until: Instant) -> Result
                 drop(claim);
                 return Ok(());
             }
-            Err(bt_platform::instance::ClaimRefusal::Held) => {
+            Err(
+                bt_platform::instance::ClaimRefusal::Held
+                | bt_platform::instance::ClaimRefusal::Sweeping,
+            ) => {
                 let left = until.saturating_duration_since(Instant::now());
                 if left.is_zero() {
                     return Err("still held at the end of the wait".to_owned());
