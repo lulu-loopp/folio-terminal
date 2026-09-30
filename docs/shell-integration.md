@@ -93,8 +93,9 @@ draw, which takes the name back and keeps the customizer in the chain — the sa
 their order; only the outermost one reads the status and writes the markers.
 `scripts/shell-integration/tests/exit-status.ps1` runs the whole table above in a real PowerShell
 of each generation, three times over: this script alone, conda installed before it, conda installed
-after it. `conda-order.ps1` additionally pins the re-hoist itself: after the first draw Folio owns
-the global `prompt` name again, with conda and the reader's original prompt retained in its chain.
+after it. `conda-order.ps1` pins the re-hoist itself: after the first draw Folio owns the global
+`prompt` name again, with conda's wrapper and the reader's original prompt kept in its chain, and each
+of them runs once per draw.
 
 **The residue, stated.** A cmdlet that fails while an older native failure is still in
 `$LASTEXITCODE` is reported with that older code — `3` where `1` was meant. Nothing distinguishes
@@ -104,10 +105,7 @@ right and only the digits are borrowed, which is exactly what the reader would s
 `$LASTEXITCODE` themselves. A customizer installed after this script gets **one** prompt — the one
 that discovers it — reported with its laundered status. And a customizer that replaces `prompt`
 without calling the function it displaced takes the markers away entirely; there is nothing left of
-Folio in that session to notice, and no status is better than a wrong one. In a PowerShell pane
-whose profile contains Folio's managed line, running a command before any OSC 133 marker arrives
-makes the integration status say “marks not seen — another prompt module may be wrapping the
-prompt”. That is a diagnosis, not an attempt to infer or rewrite somebody else's prompt.
+Folio in that session to notice, and no status is better than a wrong one.
 
 ## OSC 7: the authoritative working directory
 
@@ -203,16 +201,12 @@ file*, where `\\wsl.localhost\<distro>\…` is exactly the name that works.
 
 ## Injecting the script
 
-PowerShell's script is **opt-in**: you can dot-source it into `$PROFILE` yourself, or confirm the
-PowerShell integration row in Folio. The confirmed installer owns only its one guarded line,
-backs the profile up, and places that line after every existing live line so prompt customizers
-such as conda initialize first. Re-running the installer repairs an older managed line that is no
-longer last. The bash script is installed automatically, for one session at a time, and the
-asymmetry is the shells':
+PowerShell's script is **opt-in and manual**: you dot-source it into `$PROFILE` yourself, and this
+product never writes there. The bash script is installed automatically, for one session at a time,
+and the asymmetry is the shells':
 
 * `pwsh` has one startup file at one well-known path and no argument that would source a second one
-  after it, so persistent opt-in necessarily edits the profile, with the backup and owned-line
-  limits above.
+  after it, so the only automatic injection available would be editing a file that belongs to you.
 * `bash --init-file <file>` names the startup file for one interactive shell and touches nothing on
   disk.
 

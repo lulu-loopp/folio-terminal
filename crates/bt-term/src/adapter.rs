@@ -410,23 +410,51 @@ fn discard_listener_output(listener: &CaptureListener) {
         .clear();
 }
 
+/// The mouse modes a program owns and a shell never uses: the three tracking
+/// levels (`1000`/`1002`/`1003`) and the two report encodings the vendor terminal
+/// knows (`1005`/`1006`; `1015` is not a mode this terminal can be in). One list
+/// for the two roads that retire them — the prompt's
+/// ([`TerminalAdapter::retire_program_input_modes`]) and the person's
+/// ([`TerminalAdapter::reset_program_modes`]).
+const PROGRAM_MOUSE_MODES: [NamedPrivateMode; 5] = [
+    NamedPrivateMode::ReportMouseClicks,
+    NamedPrivateMode::ReportCellMouseMotion,
+    NamedPrivateMode::ReportAllMouseMotion,
+    NamedPrivateMode::Utf8Mouse,
+    NamedPrivateMode::SgrMouse,
+];
+
+/// **What carries this pane's bytes, as far as the modes the carrier itself
+/// keeps on are concerned.** A program's modes are the program's; these are not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PtyTransport {
+    /// A Windows pseudoconsole. It turns focus reporting (`1004`) on at the head
+    /// of every session, before any program runs, and consumes `CSI I`/`CSI O`
+    /// itself to hand the console app a `FOCUS_EVENT` (`docs/DESIGN.md` §7.1.5i,
+    /// user ruling 2026-08-21). It also sets win32-input-mode (`9001`), which no
+    /// reset here touches on any transport.
+    ConPty,
+    /// A Unix pty, or no pseudoconsole at all: nothing between Folio and the
+    /// program keeps a mode on, so every mode is the program's.
+    Unix,
+}
+
 /// Restore the modes a program is allowed to leave behind, using the vendor's
 /// own handlers so every secondary effect is the same as the corresponding
-/// reset sequence. This deliberately does not perform a terminal reset: the
-/// title stack, colours, cursor style, scrollback and ConPTY's transport-owned
-/// win32-input mode are not program-mode cleanup.
-fn reset_program_modes_on(term: &mut Term<CaptureListener>) {
-    for mode in [
-        NamedPrivateMode::ReportMouseClicks,
-        NamedPrivateMode::ReportCellMouseMotion,
-        NamedPrivateMode::ReportAllMouseMotion,
-        NamedPrivateMode::Utf8Mouse,
-        NamedPrivateMode::SgrMouse,
+/// sequence. This deliberately does not perform a terminal reset: the title
+/// stack, colours, cursor style, scrollback and ConPTY's win32-input mode are not
+/// program-mode cleanup. Focus reporting goes back to what the `transport` keeps.
+fn reset_program_modes_on(term: &mut Term<CaptureListener>, transport: PtyTransport) {
+    for mode in PROGRAM_MOUSE_MODES.into_iter().chain([
         NamedPrivateMode::BracketedPaste,
         NamedPrivateMode::CursorKeys,
-        NamedPrivateMode::ReportFocusInOut,
-    ] {
+    ]) {
         term.unset_private_mode(PrivateMode::Named(mode));
+    }
+    let focus = PrivateMode::Named(NamedPrivateMode::ReportFocusInOut);
+    match transport {
+        PtyTransport::ConPty => term.set_private_mode(focus),
+        PtyTransport::Unix => term.unset_private_mode(focus),
     }
 
     // `?1049l` semantics: only swap when the alternate screen is active. The
@@ -436,6 +464,9 @@ fn reset_program_modes_on(term: &mut Term<CaptureListener>) {
     term.unset_private_mode(PrivateMode::Named(
         NamedPrivateMode::SwapScreenAndSetRestoreCursor,
     ));
+    // `?25h`: a full-screen program hides the cursor, and one that died never
+    // showed it again.
+    term.set_private_mode(PrivateMode::Named(NamedPrivateMode::ShowCursor));
     term.pop_keyboard_modes(u16::MAX);
     term.set_modify_other_keys(VendorModifyOtherKeys::Reset);
     term.unset_keypad_application_mode();
@@ -1793,13 +1824,7 @@ impl TerminalAdapter {
     /// every other byte: a shadow terminal that disagreed about the modes would
     /// answer a resize as a different terminal.
     pub fn retire_program_input_modes(&mut self) {
-        for mode in [
-            NamedPrivateMode::ReportMouseClicks,
-            NamedPrivateMode::ReportCellMouseMotion,
-            NamedPrivateMode::ReportAllMouseMotion,
-            NamedPrivateMode::Utf8Mouse,
-            NamedPrivateMode::SgrMouse,
-        ] {
+        for mode in PROGRAM_MOUSE_MODES {
             self.term.unset_private_mode(PrivateMode::Named(mode));
             if let Some(canonical) = self.resize_canonical.as_mut() {
                 canonical.term.unset_private_mode(PrivateMode::Named(mode));
@@ -1811,16 +1836,21 @@ impl TerminalAdapter {
     /// pane, without writing a byte to the child.
     ///
     /// This is the app-side counterpart of the program's ordinary teardown, not
-    /// RIS or DECSTR: it turns off mouse tracking and its encodings, focus
-    /// reporting, bracketed paste, DECCKM and application keypad mode; returns
-    /// from the alternate screen; and clears kitty keyboard state on both
-    /// screens plus modifyOtherKeys. The title stack is intentionally outside
-    /// the operation. A resize transaction's canonical terminal is stepped in
-    /// lockstep so the next reconcile cannot resurrect the abandoned modes.
-    pub fn reset_program_modes(&mut self) -> Vec<AdapterEvent> {
-        reset_program_modes_on(&mut self.term);
+    /// RIS or DECSTR: it turns off mouse tracking and its encodings, bracketed
+    /// paste, DECCKM and application keypad mode; puts focus reporting back to
+    /// what the `transport` keeps (on under ConPTY, off on a Unix pty); returns
+    /// from the alternate screen; shows the cursor; and clears kitty keyboard
+    /// state on both screens plus modifyOtherKeys. The title stack and
+    /// win32-input-mode are outside the operation.
+    ///
+    /// **During an open resize transaction** the canonical fork — the branch the
+    /// next reconcile installs as the displayed terminal — is reset in the same
+    /// call, so the reset holds across the reconcile instead of being replaced by
+    /// a fork that still has the abandoned modes and screen.
+    pub fn reset_program_modes(&mut self, transport: PtyTransport) -> Vec<AdapterEvent> {
+        reset_program_modes_on(&mut self.term, transport);
         if let Some(canonical) = self.resize_canonical.as_mut() {
-            reset_program_modes_on(&mut canonical.term);
+            reset_program_modes_on(&mut canonical.term, transport);
             discard_listener_output(&canonical.listener);
         }
 
@@ -5216,18 +5246,26 @@ mod tests {
     }
 
     /// RED (T-RESET-MODES) — **the app-side reset retires every program-owned
-    /// mode, restores the primary screen, empties both kitty stacks, preserves
-    /// the title stack and queues no bytes for the child.**
+    /// mode, restores the primary screen and the cursor, empties the kitty stack,
+    /// preserves the title stack and queues no bytes for the child.**
     ///
-    /// MUTATION: omit `CursorKeys` from `reset_program_modes_on`; this test fails
-    /// at `application_cursor_mode()` while the rest of the reset still passes.
+    /// The program here is the 2026-09-30 incident's shape: a full-screen agent
+    /// on the alternate screen with motion tracking, SGR reports, the kitty
+    /// protocol, modifyOtherKeys, bracketed paste, DECCKM and keypad mode on and
+    /// the cursor hidden, which died without its teardown. On a Unix pty focus
+    /// reporting is the program's too, so it goes with the rest.
+    ///
+    /// MUTATION: omit `CursorKeys` from `reset_program_modes_on` (fails at
+    /// `application_cursor_mode()`); omit the `ShowCursor` set (fails at
+    /// `cursor().visible`); omit the `SwapScreenAndSetRestoreCursor` unset (fails at
+    /// `PrimaryRestored`); omit `pop_keyboard_modes` (fails at the kitty flags).
     #[test]
     fn reset_program_modes_restores_the_shell_without_writing_to_it() {
         let mut terminal = TerminalAdapter::new(nz(24), nz(4));
-        terminal.feed(b"primary\x1b]2;kept\x07\x1b[22t\x1b]2;program\x07");
+        terminal.feed("主屏 primary\x1b]2;kept\x07\x1b[22t\x1b]2;program\x07".as_bytes());
         terminal.feed(
             b"\x1b[?1003h\x1b[?1006h\x1b[>1u\x1b[>1u\x1b[>4;2m\
-              \x1b[?2004h\x1b[?1h\x1b[?1004h\x1b=\x1b[?1049halternate\x1b[>1u\x1b[>1u",
+              \x1b[?2004h\x1b[?1h\x1b[?1004h\x1b=\x1b[?1049h\x1b[?25lalternate\x1b[>1u\x1b[>1u",
         );
         assert!(terminal.modes().alternate_screen);
         assert_eq!(terminal.modes().mouse_tracking, MouseTracking::Motion);
@@ -5238,9 +5276,10 @@ mod tests {
         assert!(terminal.application_cursor_mode());
         assert!(terminal.bracketed_paste_mode());
         assert!(terminal.term.mode().contains(TermMode::APP_KEYPAD));
+        assert!(!terminal.cursor().visible);
 
         terminal.take_pty_writes();
-        let events = terminal.reset_program_modes();
+        let events = terminal.reset_program_modes(PtyTransport::Unix);
         assert!(events.contains(&AdapterEvent::PrimaryRestored));
         assert_eq!(terminal.modes().mouse_tracking, MouseTracking::Off);
         assert!(!terminal.modes().sgr_mouse);
@@ -5250,11 +5289,12 @@ mod tests {
         assert!(!terminal.application_cursor_mode());
         assert!(!terminal.bracketed_paste_mode());
         assert!(!terminal.term.mode().contains(TermMode::APP_KEYPAD));
+        assert!(terminal.cursor().visible, "the cursor is shown again");
         assert!(
             terminal
                 .visible_text()
                 .iter()
-                .any(|row| row.contains("primary")),
+                .any(|row| row.replace(' ', "").contains("主屏primary")),
             "the primary grid is showing again: {:?}",
             terminal.visible_text()
         );
@@ -5263,13 +5303,9 @@ mod tests {
             "the child receives nothing"
         );
 
-        // A pop cannot recover either saved primary value, and a fresh alternate
-        // screen cannot recover the abandoned alternate value.
+        // A pop cannot recover either saved primary value.
         terminal.feed(b"\x1b[<u");
         assert_eq!(kitty(&terminal), 0, "the primary stack is empty");
-        terminal.feed(b"\x1b[?1049h");
-        assert_eq!(kitty(&terminal), 0, "the alternate stack is empty too");
-        terminal.feed(b"\x1b[?1049l");
 
         assert_eq!(
             terminal.feed(b"\x1b[23t"),
@@ -5278,6 +5314,93 @@ mod tests {
             }],
             "program-mode cleanup does not consume the title stack"
         );
+    }
+
+    /// RED (T-RESET-MODES, coordinator ruling 1) — **the reset puts focus
+    /// reporting back to what the transport keeps: on under ConPTY, off on a Unix
+    /// pty; win32-input-mode is left as it is on both.**
+    ///
+    /// ConPTY sends `?9001h` and `?1004h` at the head of every session and
+    /// consumes `CSI I`/`CSI O` itself (`docs/DESIGN.md` §7.1.5i, user ruling
+    /// 2026-08-21): switching 1004 off there would end every focus report to that
+    /// console for the rest of the pane's life. On a Unix pty nothing keeps it
+    /// on, and a leftover 1004 types `\e[I`/`\e[O` at the shell.
+    ///
+    /// MUTATION: unset `ReportFocusInOut` for every transport (the ConPTY rows go
+    /// red), or leave it alone for every transport (the Unix row goes red).
+    #[test]
+    fn reset_program_modes_leaves_focus_reporting_where_the_transport_keeps_it() {
+        // ConPTY's session head, then a program's own ask for focus events.
+        let mut conpty = TerminalAdapter::new(nz(24), nz(4));
+        conpty.feed(b"\x1b[?9001h\x1b[?1004h\x1b[?1049h\x1b[?1004h");
+        conpty.reset_program_modes(PtyTransport::ConPty);
+        assert!(conpty.focus_reporting(), "ConPTY's own subscription stays");
+        assert!(conpty.modes().keyboard.win32_input_mode);
+
+        // A program under ConPTY that turned the transport's subscription off.
+        let mut switched_off = TerminalAdapter::new(nz(24), nz(4));
+        switched_off.feed(b"\x1b[?9001h\x1b[?1004h\x1b[?1004l");
+        switched_off.reset_program_modes(PtyTransport::ConPty);
+        assert!(
+            switched_off.focus_reporting(),
+            "the reset restores the transport's setting, not merely keeps it"
+        );
+
+        let mut unix = TerminalAdapter::new(nz(24), nz(4));
+        unix.feed(b"\x1b[?1004h");
+        unix.reset_program_modes(PtyTransport::Unix);
+        assert!(
+            !unix.focus_reporting(),
+            "on a Unix pty 1004 was the program's"
+        );
+        assert!(!unix.modes().keyboard.win32_input_mode);
+        assert!(unix.take_pty_writes().is_empty());
+        assert!(conpty.take_pty_writes().is_empty());
+    }
+
+    /// RED (T-RESET-MODES) — **a reset during an open resize transaction holds
+    /// across the reconcile.**
+    ///
+    /// The reconcile installs the canonical fork as the displayed terminal, and
+    /// that fork is armed at the start of the transaction — before the reset. A
+    /// reset of the displayed branch alone would last until the next committed
+    /// size and then be replaced by a terminal that is still on the alternate
+    /// screen with the mouse tracked.
+    ///
+    /// MUTATION: drop the `resize_canonical` branch of
+    /// `TerminalAdapter::reset_program_modes`; every assertion after the reconcile
+    /// goes red.
+    #[test]
+    fn a_reset_during_an_open_resize_survives_the_reconcile() {
+        let mut terminal = TerminalAdapter::new(nz(24), nz(4));
+        terminal.feed("主屏 primary".as_bytes());
+        terminal.feed(b"\x1b[?1049h\x1b[?1003h\x1b[?1006h\x1b[?25l\x1b[>1ualternate");
+        terminal.begin_resize_transaction();
+        terminal.resize(nz(30), nz(4));
+
+        terminal.reset_program_modes(PtyTransport::Unix);
+        assert!(!terminal.modes().alternate_screen);
+
+        terminal.reconcile_resize_transaction_to_viewport();
+        terminal.finish_resize_transaction();
+        let modes = terminal.modes();
+        assert!(
+            !modes.alternate_screen,
+            "the reconcile did not reinstate 1049"
+        );
+        assert_eq!(modes.mouse_tracking, MouseTracking::Off);
+        assert!(!modes.sgr_mouse);
+        assert_eq!(modes.keyboard, KeyboardProtocol::default());
+        assert!(terminal.cursor().visible);
+        assert!(
+            terminal
+                .visible_text()
+                .iter()
+                .any(|row| row.replace(' ', "").contains("主屏primary")),
+            "{:?}",
+            terminal.visible_text()
+        );
+        assert!(terminal.take_pty_writes().is_empty());
     }
 
     /// RED (T-KEYBOARD-PROTOCOL) — **`CSI ? u` followed by `CSI c` is answered in that order.**

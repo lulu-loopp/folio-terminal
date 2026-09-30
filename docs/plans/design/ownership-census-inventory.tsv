@@ -375,7 +375,7 @@ WindowRuntime.lawful_client_size	Option<PhysicalSize<u32>>	-	1	1	1	0	0	0	0	compl
 WindowRuntime.dpi_settlement	DpiSettlement	-	1	1	2	0	0	0	0	complete
 WindowRuntime.dpi_rectangle	DpiRectangle	-	1	1	3	0	0	0	0	complete
 TabState.id	TabId	-	0	0	0	0	0	0	0	complete
-TabState.sessions	BTreeMap<SeatId, LeafSession>	hub	0	0	0	46	6	0	1	incomplete
+TabState.sessions	BTreeMap<SeatId, LeafSession>	hub	0	0	0	47	6	0	1	incomplete
 TabState.files	BTreeMap<SeatId, FilesLeafState>	-	n	4	14	10	0	0	15	incomplete
 TabState.file_trees	BTreeMap<SeatId, DirCache>	-	n	3	18	2	0	0	0	complete
 TabState.git_trees	BTreeMap<SeatId, GitCache>	-	n	4	13	6	0	0	0	complete
@@ -430,7 +430,7 @@ LeafSession.integration	Integration	-	0	0	0	0	0	0	1	incomplete
 LeafSession.program	Option<PathBuf>	-	0	0	0	0	0	0	1	incomplete
 LeafSession.spawn_place	Option<PathBuf>	-	0	0	0	0	0	0	0	complete
 LeafSession.pending_typing	Option<(String, bool)>	-	1	1	2	0	0	0	0	complete
-LeafSession.session	DualPlaneSession	-	n	9	35	6	0	0	5	incomplete
+LeafSession.session	DualPlaneSession	-	n	9	36	6	0	0	5	incomplete
 LeafSession.attention	AttentionLedger	-	n	2	7	0	0	0	1	incomplete
 LeafSession.bell_reported	bool	-	1	1	1	0	0	0	0	complete
 LeafSession.attention_clock	WaitClock	-	1	1	2	0	0	0	1	incomplete

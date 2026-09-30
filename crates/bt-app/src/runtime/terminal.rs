@@ -677,14 +677,25 @@ impl Runtime<'_> {
         self.repaint_pane_change(seat)
     }
 
-    /// Restore the program-owned protocol state in one pane. This is a session
-    /// effect only: unlike restarting or clearing, it neither writes to the PTY
-    /// nor replaces the child.
+    /// `Reset terminal modes` — restore the program-owned protocol state in one
+    /// pane. A session effect only: unlike restarting or clearing, it neither
+    /// writes to the PTY nor replaces the child. The pane's own record of which
+    /// pseudoconsole it runs on, fixed when it was spawned, says which modes the
+    /// transport keeps (focus reporting under ConPTY).
     pub(in crate::runtime) fn reset_terminal_modes(&mut self, seat: SeatId) -> Result<()> {
         let Some(leaf) = self.sessions.get_mut(&seat) else {
             return Ok(());
         };
-        leaf.session.reset_program_modes()?;
+        let transport = match leaf.pty.as_ref().map_or(
+            bt_pty::ConPtyKind::NotConPty,
+            bt_pty::PtySession::conpty_kind,
+        ) {
+            bt_pty::ConPtyKind::Shipped | bt_pty::ConPtyKind::Inbox => {
+                bt_term::PtyTransport::ConPty
+            }
+            bt_pty::ConPtyKind::NotConPty => bt_term::PtyTransport::Unix,
+        };
+        leaf.session.reset_program_modes(transport)?;
         self.apply_pointer_cursor();
         self.refresh_chrome();
         self.repaint_pane_change(seat)

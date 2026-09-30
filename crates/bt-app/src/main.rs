@@ -73884,15 +73884,15 @@ mod palette_wiring_tests {
     /// met by a list that can shrink under a held answer, and the answer is a
     /// `TabId` resolved at the moment the verb runs.
     ///
-    /// MUTATION: carry the ordinal and index `window.tabs` with it — the two
+    /// MUTATION: carry the ordinal and index `window.tabs` with it — the three
     /// `tab_index_of` calls go and this goes red.
     #[test]
     fn a_palette_row_names_its_tab_by_an_address_that_cannot_be_reused() {
         let run = method_body("Runtime", "run_palette_row");
         assert_eq!(
             run.matches("self.tab_index_of(tab)").count(),
-            2,
-            "both the place and the command resolve the id when they run it"
+            3,
+            "the place, the command and the terminal reset each resolve the id when they run it"
         );
         assert!(
             !run.contains("self.window.tabs[tab]"),

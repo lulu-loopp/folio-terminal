@@ -435,6 +435,7 @@ LeafSession.session	write	crate::runtime::preview	Runtime::apply_line_wrapping	c
 LeafSession.session	write	crate::runtime::tabs	Runtime::apply_tables	call:set_table_bands	1
 LeafSession.session	write	crate::runtime::terminal	Runtime::apply_scrollback_lines	call:set_frozen_quota	1
 LeafSession.session	write	crate::runtime::terminal	Runtime::drain_pty	call:begin_feed_turn,call:end_feed_turn	2
+LeafSession.session	write	crate::runtime::terminal	Runtime::reset_terminal_modes	call:reset_program_modes	1
 LeafSession.session	access	crate	dispatch_tab_decoration_tasks	lend	1
 LeafSession.session	access	crate	leaf_session_mut	lend	1
 LeafSession.session	access	crate	release_due_leaf_resize	lend	1
@@ -775,6 +776,7 @@ TabState.sessions	access	crate::runtime::search	Runtime::clear_search_highlights
 TabState.sessions	access	crate::runtime::search	Runtime::install_search_highlights	call:get_mut	1
 TabState.sessions	access	crate::runtime::search	Runtime::reveal_current_search_hit	call:get_mut	1
 TabState.sessions	access	crate::runtime::terminal	Runtime::jump_to_command_mark	call:get_mut	1
+TabState.sessions	access	crate::runtime::terminal	Runtime::reset_terminal_modes	call:get_mut	1
 TabState.sessions	access	crate::runtime::terminal	Runtime::scroll_view_exact_in	call:get_mut	1
 TabState.sessions	access	crate::runtime::terminal	Runtime::spend_powershell_intent	call:values_mut	1
 TabState.sessions	access	crate::runtime::terminal	Runtime::step_pane_text_scale	call:get_mut	1

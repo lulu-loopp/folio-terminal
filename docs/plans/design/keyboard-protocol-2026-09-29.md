@@ -116,8 +116,7 @@ A program that pushes flag 1 and dies without popping it leaves the pane encodin
 
 - In a Unix shell (WSL, ssh, macOS): type `reset` and Enter. Plain letters and Enter are unaffected, `reset` sends `RIS`, and `RIS` clears both screens' state and modifyOtherKeys (§2.1).
 - In PowerShell: type ``Write-Host -NoNewline "`e[<99u`e[>4m"`` and Enter. This pops every saved value, which resets the flags, and turns modifyOtherKeys off; the bytes pass through ConPTY to Folio (§1). `` `e `` is PowerShell 7's escape; in Windows PowerShell 5.1, write `$([char]27)` in its place. Or use the pane's *Restart shell*, or open a new tab.
-- A Folio reset verb was the possible later door. Revision (g) records the
-  shipped answer: the broader **Reset terminal modes** pane verb.
+- A Folio "reset keyboard protocol" verb is a possible later door. It is recorded here, not proposed.
 
 ---
 
@@ -586,9 +585,9 @@ Added after the review's second pass (`KR-review-codex-2026-09-29-b`, round 3):
 - **A dead key is not a text key.** winit reports a dead key's key without modifiers as the character it composes (`keyboard.rs`: "We convert dead keys into their character"), so on the French layout the dead `^` (`VK_OEM_6`, 221, scan code 26) under Ctrl+Alt arrives in the same shape as a text key and was written as `ESC[221;26;0;1;10;1_…`. The encoder now also asks the installed layout, through `bt_platform::virtual_key_types_a_character` — `MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)`, whose documented top bit marks a dead key and whose `0` marks a key that types nothing; one synchronous call, no wait — and refuses anything that is not an ordinary character. Pinned by `a_dead_key_under_ctrl_alt_is_not_a_record` (French layout substituted in the test, as the US one is elsewhere).
 - **Round 4 (`KR-review-codex-2026-09-29-c`): only "is it dead" is asked.** The round-3 predicate also refused a `0` answer, and `MAPVK_VK_TO_CHAR` answers `0` for ordinary text keys on several layouts — Kazakh `VK_OEM_1` (186, scan code 39) types `ж`, arrives under Ctrl+Alt unidentified with the key without modifiers `ж`, and was wrongly refused. The key without modifiers being text already says the key types; the layout is now asked only whether it is dead: `bt_platform::virtual_key_is_dead`, the top bit of the answer and nothing else (`bt_platform::vk_to_char_marks_a_dead_key`, pure and pinned on `0x8000005E` → dead, `0` → not). `a_dead_key_under_ctrl_alt_is_not_a_record` models both layouts by their map answers: the French `^` is refused, the Kazakh `ж` is `ESC[186;39;0;1;10;1_ESC[186;39;0;0;10;1_`.
 
-## Revision (g), 2026-09-30 — §2.4's later door now exists
+## Revision (g), 2026-09-30 — §2.4's later door exists
 
-T-RESET-MODES answers §2.4's deferred recovery with an explicit pane verb rather than a prompt-time heuristic. **Reset terminal modes** restores the primary screen and clears both screens' kitty values and stacks, modifyOtherKeys, mouse tracking and encoding, focus reporting, bracketed paste, DECCKM and application keypad through `TerminalAdapter::reset_program_modes`; it preserves the title stack and writes nothing to the child. The nested-shell negative trace remains unchanged: OSC 133 still never mutates keyboard state, and only the person asking for the pane verb crosses this door.
+T-RESET-MODES answers §2.4's "a Folio verb is a possible later door" with an explicit pane verb rather than a prompt-time rule. **Reset terminal modes** (the pane head's `⌄` menu and the command palette) goes through `TerminalAdapter::reset_program_modes`: it returns to the primary screen, clears the kitty flags and stack (the alternate screen's are discarded by the return, as `?1049l` discards them), sets modifyOtherKeys to off, and also retires the mouse modes, bracketed paste, DECCKM and keypad mode and shows the cursor. Focus reporting goes back to what the transport keeps; win32-input-mode is left alone. It writes nothing to the child. The nested-shell negative trace is unchanged: OSC 133 still never mutates keyboard state, and only a person choosing the verb crosses this door.
 
 ## Sources
 
