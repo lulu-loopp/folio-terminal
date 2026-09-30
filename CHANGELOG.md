@@ -7,6 +7,8 @@ All notable changes to Folio are recorded here. The format follows
 ## Unreleased
 ### Fixed
 
+- A link a program sends whose text runs on into Chinese punctuation or an ideograph ends where a typed address would.
+
 ### Added
 
 - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,

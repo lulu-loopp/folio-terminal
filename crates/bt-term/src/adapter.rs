@@ -1553,10 +1553,9 @@ impl TerminalAdapter {
     /// invalidates this cache, because content is the key** — a row that
     /// changed hashes differently and is captured again.
     ///
-    /// The one field the fingerprint leaves out is a hyperlink's *id*, which
-    /// the vendor synthesizes per emission; [`CellHyperlink`] compares and
-    /// hashes on the uri alone for that exact reason, so two captures the
-    /// fingerprint calls equal are equal everywhere this workspace looks.
+    /// The fingerprint leaves out a hyperlink's *id*, which the vendor synthesizes per emission,
+    /// but keeps the stable positions where hyperlink objects begin and end. That preserves the
+    /// program-declared spans without making a repaint's newly synthesized id invalidate the row.
     pub fn visible_row(&self, row: u32) -> Option<CapturedRow> {
         if row >= self.rows.get() {
             return None;
