@@ -415,6 +415,7 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
                 limits: door.limits,
                 starter: door.starter,
                 handed_back: door.handed_back,
+                layouts: update_apply_macos::own_layouts(),
             };
             let mut logged = Logged {
                 world: &mut *guard.inner().world,

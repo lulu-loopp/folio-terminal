@@ -93,6 +93,7 @@ use bt_platform::trust::{self, Expectation, FileVersion, Policy, Refusal};
 use bt_winres::release_manifest::{self, Manifest};
 
 use crate::install_channel::Channel;
+use crate::update_adapter::Layouts;
 use crate::update_archive::{self, Deadline, EmbeddedManifest, Expected, ManifestSource, Reason};
 use crate::update_handoff::Staged;
 use crate::update_job::{
@@ -171,6 +172,9 @@ pub(crate) struct WinPrepare {
     /// Which roots a signature may end in: the system's, in the product.
     policy: Policy,
     tools: Arc<dyn Tools>,
+    /// The layouts this road's Prepare is called through, by the adapter
+    /// the press names ([`PreparePoint`]).
+    layouts: Layouts<dyn PreparePoint>,
 }
 
 impl WinPrepare {
@@ -185,6 +189,7 @@ impl WinPrepare {
                 channel: crate::install_channel::channel(),
                 policy: Policy::System,
                 tools: Arc::new(System),
+                layouts: Layouts::of(Arc::new(Ours)),
             }),
             Err(_) => Box::new(Unsupported),
         }
@@ -204,6 +209,7 @@ impl WinPrepare {
             channel,
             policy,
             tools,
+            layouts: Layouts::of(Arc::new(Ours)),
         }
     }
 }
@@ -215,11 +221,12 @@ impl Driver for WinPrepare {
         transport: &SharedTransport,
         post: &Poster,
     ) -> Result<(), Refused> {
-        let (exe, policy, tools, transport) = (
+        let (exe, policy, tools, transport, layouts) = (
             self.exe.clone(),
             self.policy.clone(),
             Arc::clone(&self.tools),
             Arc::clone(transport),
+            self.layouts.clone(),
         );
         let (offer, post, channel) = (offer.clone(), post.clone(), self.channel);
         bt_platform::spawn_at_priority(
@@ -234,6 +241,7 @@ impl Driver for WinPrepare {
                     tools: tools.as_ref(),
                     channel,
                     policy: &policy,
+                    layouts: &layouts,
                 };
                 finish(worker, &post, prepare_on(worker, &road));
             },
@@ -244,7 +252,7 @@ impl Driver for WinPrepare {
 }
 
 /// Everything one Prepare works from.
-struct Road<'a> {
+pub(crate) struct Road<'a> {
     exe: &'a Path,
     offer: &'a Offer,
     transport: &'a dyn Transport,
@@ -252,6 +260,56 @@ struct Road<'a> {
     tools: &'a dyn Tools,
     channel: Option<Channel>,
     policy: &'a Policy,
+    layouts: &'a Layouts<dyn PreparePoint>,
+}
+
+/// **A layout's `Prepare` on the Windows road** (0.4.7 ticket U-41a1;
+/// managed-update §1.1 R1, §1.3): what the journal records at `Allocated`,
+/// and — on the job's worker, under the transaction lock, between the
+/// journal at `Allocated` and the one at `Prepared` — everything the
+/// transaction acquires, answered as the layout `Prepared` records. The road
+/// around it is common: the road check, the home, the lock, both journal
+/// writes, and the abandonment of a Prepare that refused (`Abandoned`, then
+/// cleared: *Nothing changed.*).
+pub(crate) trait PreparePoint: Send + Sync {
+    /// What `Allocated` records, from the running build.
+    fn allocated(&self, running: &Running) -> Layout;
+
+    /// Everything the transaction acquires; the layout `Prepared` records.
+    ///
+    /// # Errors
+    /// The [`Stop`] the card names; the road abandons the transaction.
+    fn prepare(
+        &self,
+        road: &Road<'_>,
+        home: &Home,
+        running: &Running,
+        rescue: &Path,
+    ) -> Result<Layout, Stop>;
+}
+
+/// **Folio's own layout** (`Layout::Members`): the offer's zip, expanded,
+/// verified and staged into `H\<txn>\set\`, and the rescue copy (U-20).
+pub(crate) struct Ours;
+
+impl PreparePoint for Ours {
+    fn allocated(&self, running: &Running) -> Layout {
+        Layout::Members(Inventories {
+            old_shipped: running.shipped.clone(),
+            old_present: Vec::new(),
+            new: Vec::new(),
+        })
+    }
+
+    fn prepare(
+        &self,
+        road: &Road<'_>,
+        home: &Home,
+        running: &Running,
+        rescue: &Path,
+    ) -> Result<Layout, Stop> {
+        acquire(road, home, running, rescue).map(Layout::Members)
+    }
 }
 
 impl Road<'_> {
@@ -307,7 +365,7 @@ fn stop_for(why: &NotEligible) -> Stop {
 /// expectation a new file is held to, at the offer's version), its image's
 /// digest and length (the rescue copy is held to them), and the names it
 /// shipped (F-8's old shipped list).
-struct Running {
+pub(crate) struct Running {
     identity: Expectation,
     digest: String,
     size: u64,
@@ -353,6 +411,7 @@ fn file_version(version: &str) -> Option<FileVersion> {
 /// **The Prepare, on its worker** — the module header's eight steps.
 fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
     let (home, adapter) = eligible(road.exe, road.channel).map_err(|why| stop_for(&why))?;
+    let layout = road.layouts.named(adapter).map_err(|_| Stop::NotOurs)?;
     road.go_on()?;
     let running = running(road.exe, road.policy)?;
     let name = road.exe.file_name().ok_or(Stop::NotWritable)?;
@@ -372,27 +431,20 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
     if std::fs::symlink_metadata(home.journal()).is_ok() {
         return Err(Stop::Busy);
     }
-    let allocated = Journal::allocate(
-        txn,
-        rescue_text,
-        Layout::Members(Inventories {
-            old_shipped: running.shipped.clone(),
-            old_present: Vec::new(),
-            new: Vec::new(),
-        }),
-    )
-    .naming(adapter);
+    let allocated = Journal::allocate(txn, rescue_text, layout.allocated(&running)).naming(adapter);
     install_txn::durable_write(&home.journal(), &allocated.encode()).map_err(|_| Stop::Journal)?;
 
     // From here a refusal abandons the transaction and leaves nothing.
-    let staged = acquire(road, &home, &running, &rescue).and_then(|inventories| {
-        let prepared = allocated
-            .prepare_with(Layout::Members(inventories))
-            .map_err(|_| Stop::Journal)?;
-        install_txn::durable_write(&home.journal(), &prepared.encode())
-            .map_err(|_| Stop::Journal)?;
-        Ok(prepared)
-    });
+    let staged = layout
+        .prepare(road, &home, &running, &rescue)
+        .and_then(|recorded| {
+            let prepared = allocated
+                .prepare_with(recorded)
+                .map_err(|_| Stop::Journal)?;
+            install_txn::durable_write(&home.journal(), &prepared.encode())
+                .map_err(|_| Stop::Journal)?;
+            Ok(prepared)
+        });
     match staged {
         Ok(journal) => Ok(Staged {
             home,

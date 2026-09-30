@@ -144,6 +144,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bt_platform::admission::WorkerCtx;
@@ -153,6 +154,7 @@ use bt_platform::install_txn::{self, Held, Hold};
 use bt_platform::{HostPlatform, launch_agent};
 
 use crate::cli;
+use crate::update_adapter::Layouts;
 use crate::update_apply::{
     BeforeDeciding, Deferral, ExitGuard, Leave, Recording, Watch, Watched, Window, stop_trial,
     trial_runs,
@@ -292,6 +294,77 @@ pub(crate) struct Road {
     pub(crate) starter: Option<Running>,
     /// **The trial that handed its transaction back** (`--from-trial`, H.4).
     pub(crate) handed_back: Option<crate::update_apply::HandedBack>,
+    /// **The layouts this road calls**, by the adapter the journal names
+    /// (managed-update R2): [`own_layouts`] in the product.
+    pub(crate) layouts: Layouts<dyn ApplyPoints>,
+}
+
+/// **A layout's `Activate` and `Prove / Recover` on the macOS road** (0.4.7
+/// ticket U-41a1; managed-update §1.1 R1): the road calls these, through the
+/// adapter its journal names (`update_adapter::Layouts`), and nothing else
+/// about it depends on the layout — the locks, the admission, the process
+/// check, the identity checks before the exchange, the phases and their
+/// rights, the trial, the commit and the rollback's decision
+/// (`update_txn::decide`) are common.
+///
+/// * [`ApplyPoints::activate`] — after `Moving` is durable, before
+///   `TrialBegan`: the staged bundle made the live one;
+/// * [`ApplyPoints::activate_back`] — after `RollbackIntent` is durable,
+///   under the admission: the old bundle made the live one again;
+/// * [`ApplyPoints::locate`] — which bundle is live and which is staged, read
+///   from the disk: what `decide` is handed at every step.
+pub(crate) trait ApplyPoints: Send + Sync {
+    /// **Activate forward**, through `hands`' exchange.
+    ///
+    /// # Errors
+    /// The exchange's refusal; the road decides what follows by what is live.
+    fn activate(&self, places: &Places<'_>, hands: &mut dyn Hands) -> Result<(), String>;
+
+    /// **Activate back**, through `hands`' exchange.
+    ///
+    /// # Errors
+    /// The exchange's refusal; the road records `Stuck`.
+    fn activate_back(&self, places: &Places<'_>, hands: &mut dyn Hands) -> Result<(), String>;
+
+    /// **The identities of the live bundle and of the staged one**, each
+    /// `None` where none can be read: `update_txn::Located::Bundle`'s two
+    /// sides.
+    fn locate(
+        &self,
+        worker: &WorkerCtx,
+        places: &Places<'_>,
+    ) -> (Option<BundleIdentity>, Option<BundleIdentity>);
+}
+
+/// **Folio's own layout** (`Layout::Bundle`, U-28/U-29): one
+/// `renamex_np(RENAME_SWAP)` of the installed bundle with the staged one,
+/// forward and back, and each side read by its identity.
+pub(crate) struct Ours;
+
+impl ApplyPoints for Ours {
+    fn activate(&self, places: &Places<'_>, hands: &mut dyn Hands) -> Result<(), String> {
+        hands.exchange(places.installed, places.stage)
+    }
+
+    fn activate_back(&self, places: &Places<'_>, hands: &mut dyn Hands) -> Result<(), String> {
+        hands.exchange(places.installed, places.stage)
+    }
+
+    fn locate(
+        &self,
+        worker: &WorkerCtx,
+        places: &Places<'_>,
+    ) -> (Option<BundleIdentity>, Option<BundleIdentity>) {
+        let live = crate::update_prepare_macos::identity(worker, places.installed).ok();
+        let stage = crate::update_prepare_macos::identity(worker, places.stage).ok();
+        (live, stage)
+    }
+}
+
+/// **The layouts of this road** as the product has them: [`Ours`] alone.
+#[must_use]
+pub(crate) fn own_layouts() -> Layouts<dyn ApplyPoints> {
+    Layouts::of(Arc::new(Ours))
 }
 
 /// **The effects of a lock holder that a test stands in for**: its lines, the
@@ -509,6 +582,7 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
                 limits: Limits::PRODUCT,
                 starter: install_flip::parent_of_this_process(),
                 handed_back: None,
+                layouts: own_layouts(),
             };
             match bt_platform::admission::enter_standalone_main("folio-update-apply", |worker| {
                 apply(worker, &road, &mut world)
@@ -804,7 +878,7 @@ impl Bundles {
 }
 
 /// The paths and identities one road acts on.
-struct Places<'a> {
+pub(crate) struct Places<'a> {
     installed: &'a Path,
     program: &'a Path,
     stage: &'a Path,
@@ -832,6 +906,8 @@ struct Txn<'a> {
     _lock: Held,
     plist: Option<PathBuf>,
     written: Vec<PhaseKind>,
+    /// The layout the journal names, whose points this road calls.
+    layout: Arc<dyn ApplyPoints>,
     /// **The successor this holder leaves behind**: the trial it started, once
     /// found and recorded (`TrialBegan`, `RetrialBegan`), or the applier found
     /// at `Handoff`. While it runs it is the window and the exit guard starts
@@ -885,6 +961,10 @@ impl<'a> Txn<'a> {
         let Layout::Bundle { old, new } = journal.body.layout.clone() else {
             return Err(Ended::Refused("the journal is not a bundle's".to_owned()));
         };
+        let layout = road
+            .layouts
+            .named(journal.body.adapter)
+            .map_err(|not_built| Ended::Refused(not_built.to_string()))?;
         let inside = program.strip_prefix(&installed).unwrap_or(&program);
         let stage_program = stage.join(inside);
         let txn = Txn {
@@ -898,6 +978,7 @@ impl<'a> Txn<'a> {
                 .as_ref()
                 .map(|agents| agents.join(launch_agent::file_name(road.txn.bytes()))),
             written: Vec::new(),
+            layout,
             successor: None,
         };
         Ok((
@@ -1073,7 +1154,9 @@ impl<'a> Txn<'a> {
             return self.revert(Actor::Applier);
         }
         self.may(Actor::Applier, Effect::Swap)?;
-        if let Err(error) = world.exchange(places.installed, places.stage) {
+        // Activate, forward: the layout's (managed-update R1).
+        let activated = self.layout.activate(places, world);
+        if let Err(error) = activated {
             world.say(&format!("BT_UPDATE_APPLY the exchange: {error}"));
             // Decided by what is live, as recovery decides it (M5, M6).
             drop(admission);
@@ -1447,8 +1530,7 @@ impl<'a> Txn<'a> {
                 }
                 _ => (None, None),
             };
-            let live = crate::update_prepare_macos::identity(worker, places.installed).ok();
-            let stage = crate::update_prepare_macos::identity(worker, places.stage).ok();
+            let (live, stage) = self.layout.locate(worker, places);
             // The trial's executable is the new bundle's, wherever it is now.
             let images: Vec<&Path> = [(&live, places.program), (&stage, places.stage_program)]
                 .into_iter()
@@ -1559,7 +1641,8 @@ impl<'a> Txn<'a> {
                         }
                     };
                     self.may(actor, Effect::Swap)?;
-                    let swapped = hands.exchange(places.installed, places.stage);
+                    // Activate, back: the layout's (managed-update R1).
+                    let swapped = self.layout.activate_back(places, hands);
                     drop(admission);
                     if let Err(error) = swapped {
                         return self.stuck(actor, format!("the exchange back: {error}"), hands);

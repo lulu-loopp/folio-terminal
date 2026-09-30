@@ -78,6 +78,7 @@ use bt_platform::install_txn::{self, Hold};
 use bt_platform::macos_update::{self, Failed};
 
 use crate::install_channel::Channel;
+use crate::update_adapter::Layouts;
 use crate::update_handoff::Staged;
 use crate::update_job::{
     Driver, MACOS_ARCHITECTURE, NotEligible, Offer, Poster, Refused, SharedTransport, Step, Stop,
@@ -168,6 +169,9 @@ pub(crate) struct MacPrepare {
     tools: Arc<dyn Tools>,
     /// How this copy was installed, as the start read it.
     channel: Option<Channel>,
+    /// The layouts this road's Prepare is called through, by the adapter
+    /// the press names ([`PreparePoint`]).
+    layouts: Layouts<dyn PreparePoint>,
 }
 
 impl MacPrepare {
@@ -184,6 +188,7 @@ impl MacPrepare {
                 bundle,
                 tools: Arc::new(System),
                 channel: crate::install_channel::channel(),
+                layouts: Layouts::of(Arc::new(Ours)),
             }),
             None => Box::new(Unsupported),
         }
@@ -196,6 +201,7 @@ impl MacPrepare {
             bundle,
             tools,
             channel,
+            layouts: Layouts::of(Arc::new(Ours)),
         }
     }
 }
@@ -213,10 +219,11 @@ impl Driver for MacPrepare {
         transport: &SharedTransport,
         post: &Poster,
     ) -> Result<(), Refused> {
-        let (bundle, tools, transport) = (
+        let (bundle, tools, transport, layouts) = (
             self.bundle.clone(),
             Arc::clone(&self.tools),
             Arc::clone(transport),
+            self.layouts.clone(),
         );
         let (offer, post, channel) = (offer.clone(), post.clone(), self.channel);
         bt_platform::spawn_at_priority(
@@ -230,6 +237,7 @@ impl Driver for MacPrepare {
                     post: &post,
                     tools: tools.as_ref(),
                     channel,
+                    layouts: &layouts,
                 };
                 finish(worker, &post, prepare_on(worker, &road));
             },
@@ -240,13 +248,70 @@ impl Driver for MacPrepare {
 }
 
 /// Everything one Prepare works from.
-struct Road<'a> {
+pub(crate) struct Road<'a> {
     bundle: &'a Path,
     offer: &'a Offer,
     transport: &'a dyn Transport,
     post: &'a Poster,
     tools: &'a dyn Tools,
     channel: Option<Channel>,
+    layouts: &'a Layouts<dyn PreparePoint>,
+}
+
+/// **A layout's `Prepare` on the macOS road** (0.4.7 ticket U-41a1;
+/// managed-update §1.1 R1, §1.3): what the journal records at `Allocated`
+/// from the running bundle's identity, and — on the job's worker, under the
+/// transaction lock, between the journal at `Allocated` and the one at
+/// `Prepared` — everything the transaction acquires, answered as the layout
+/// `Prepared` records. The road around it is common: the road check, the
+/// running bundle's identity, the home, the lock, both journal writes, and
+/// the abandonment of a Prepare that refused (`Abandoned`, then cleared:
+/// *Nothing changed.*).
+pub(crate) trait PreparePoint: Send + Sync {
+    /// What `Allocated` records: the running bundle's identity `old`, and
+    /// what the offer names.
+    fn allocated(&self, road: &Road<'_>, old: &BundleIdentity) -> Layout;
+
+    /// Everything the transaction acquires, into `rescue`, `stage` and
+    /// `mount`; the layout `Prepared` records.
+    ///
+    /// # Errors
+    /// The [`Stop`] the card names; the road abandons the transaction.
+    fn prepare(
+        &self,
+        worker: &WorkerCtx,
+        road: &Road<'_>,
+        home: &Home,
+        txn: TxnId,
+        places: [&Path; 3],
+        old: BundleIdentity,
+    ) -> Result<Layout, Stop>;
+}
+
+/// **Folio's own layout** (`Layout::BundleIntent` → `Layout::Bundle`): the
+/// offer's image, checked, its bundle copied into `stage/` and checked again,
+/// and the rescue clone (U-27).
+pub(crate) struct Ours;
+
+impl PreparePoint for Ours {
+    fn allocated(&self, road: &Road<'_>, old: &BundleIdentity) -> Layout {
+        Layout::BundleIntent {
+            old: old.clone(),
+            to_version: road.offer.to_version().to_owned(),
+        }
+    }
+
+    fn prepare(
+        &self,
+        worker: &WorkerCtx,
+        road: &Road<'_>,
+        home: &Home,
+        txn: TxnId,
+        places: [&Path; 3],
+        old: BundleIdentity,
+    ) -> Result<Layout, Stop> {
+        acquire(worker, road, home, txn, places).map(|new| Layout::Bundle { old, new })
+    }
 }
 
 impl Road<'_> {
@@ -306,6 +371,7 @@ fn stop_for(why: &NotEligible) -> Stop {
 /// **The Prepare, on its worker** — the module header's six steps.
 fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
     let (home, adapter) = eligible(road.bundle, road.channel).map_err(|why| stop_for(&why))?;
+    let layout = road.layouts.named(adapter).map_err(|_| Stop::NotOurs)?;
     road.go_on()?;
     // The running bundle's identity is read before anything is written: a
     // bundle with none cannot be cloned, and so cannot be updated.
@@ -332,26 +398,22 @@ fn prepare_on(worker: &WorkerCtx, road: &Road<'_>) -> Result<Staged, Stop> {
     if std::fs::symlink_metadata(home.journal()).is_ok() {
         return Err(Stop::Busy);
     }
-    let allocated = Journal::allocate(
-        txn,
-        rescue_text,
-        Layout::BundleIntent {
-            old: old.clone(),
-            to_version: road.offer.to_version().to_owned(),
-        },
-    )
-    .naming(adapter);
+    let allocated =
+        Journal::allocate(txn, rescue_text, layout.allocated(road, &old)).naming(adapter);
     install_txn::durable_write(&home.journal(), &allocated.encode()).map_err(|_| Stop::Journal)?;
 
     // From here a refusal abandons the transaction and leaves nothing.
-    let staged = acquire(worker, road, &home, txn, [&rescue, &stage, &mount]).and_then(|new| {
-        let prepared = allocated
-            .prepare_with(Layout::Bundle { old, new })
-            .map_err(|_| Stop::Journal)?;
-        install_txn::durable_write(&home.journal(), &prepared.encode())
-            .map_err(|_| Stop::Journal)?;
-        Ok(prepared)
-    });
+    let places = [rescue.as_path(), stage.as_path(), mount.as_path()];
+    let staged = layout
+        .prepare(worker, road, &home, txn, places, old)
+        .and_then(|recorded| {
+            let prepared = allocated
+                .prepare_with(recorded)
+                .map_err(|_| Stop::Journal)?;
+            install_txn::durable_write(&home.journal(), &prepared.encode())
+                .map_err(|_| Stop::Journal)?;
+            Ok(prepared)
+        });
     match staged {
         Ok(journal) => Ok(Staged {
             home,

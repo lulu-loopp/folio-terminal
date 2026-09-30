@@ -9,7 +9,12 @@
 //! `RollbackIntent` is durable) and **Prove / Recover** (which set is live,
 //! read from the disk, at every lock holder's step) — are called through the
 //! adapter the journal names ([`Adapter`], chosen here from the channel at the
-//! press and recorded at `Allocated`, R2).
+//! press and recorded at `Allocated`, R2). Each road declares its points as a
+//! trait beside the code that calls them: `update_prepare_windows::PreparePoint`
+//! and `update_apply_windows::ApplyPoints` on Windows,
+//! `update_prepare_macos::PreparePoint` and `update_apply_macos::ApplyPoints`
+//! on macOS; each road's `Ours` is Folio's own layout, and a road finds the
+//! adapter a journal names through [`Layouts`].
 //!
 //! **Only `Ours` is built.** Homebrew and scoop are named so a journal can
 //! record them, and their roads stay off until their tickets turn them on
@@ -18,6 +23,9 @@
 //! job's eligibility asks [`built_on`] before the card, and each Prepare's
 //! road check asks it again before `Allocated` — so it keeps the row with its
 //! manager's command and **Copy**, and has no journal.
+
+use std::fmt;
+use std::sync::Arc;
 
 use bt_platform::HostPlatform;
 
@@ -69,5 +77,55 @@ pub(crate) const fn built_on(adapter: Adapter, platform: HostPlatform) -> bool {
         Adapter::Homebrew => HOMEBREW_ROAD && matches!(platform, HostPlatform::MacOs),
         Adapter::Scoop => SCOOP_ROAD && matches!(platform, HostPlatform::Windows),
         Adapter::Winget => WINGET_ROAD && matches!(platform, HostPlatform::Windows),
+    }
+}
+
+/// **A road asked for an adapter this build has no layout for.**
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct NotBuilt(pub(crate) Adapter);
+
+impl fmt::Display for NotBuilt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the journal names the {:?} adapter, which this build has not built",
+            self.0
+        )
+    }
+}
+
+/// **The layouts one road can call, by the adapter a journal names** — the
+/// road's points `L` (one of the four traits the module header names).
+/// Each road holds one; the product's has the road's own `Ours`, and a test
+/// hands the road a layout of its own in its place (the harness U-41b and
+/// U-41c build theirs on).
+pub(crate) struct Layouts<L: ?Sized> {
+    ours: Arc<L>,
+}
+
+impl<L: ?Sized> Layouts<L> {
+    /// The layouts of a road whose own layout is `ours`.
+    #[must_use]
+    pub(crate) fn of(ours: Arc<L>) -> Self {
+        Self { ours }
+    }
+
+    /// **The layout `adapter` names.**
+    ///
+    /// # Errors
+    /// [`NotBuilt`] for every adapter but `Ours`: no other road is built.
+    pub(crate) fn named(&self, adapter: Adapter) -> Result<Arc<L>, NotBuilt> {
+        match adapter {
+            Adapter::Ours => Ok(Arc::clone(&self.ours)),
+            other => Err(NotBuilt(other)),
+        }
+    }
+}
+
+impl<L: ?Sized> Clone for Layouts<L> {
+    fn clone(&self) -> Self {
+        Self {
+            ours: Arc::clone(&self.ours),
+        }
     }
 }

@@ -427,6 +427,7 @@ impl Install {
             limits,
             starter: None,
             handed_back: None,
+            layouts: own_layouts(),
         }
     }
 

@@ -160,6 +160,7 @@
 use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use bt_platform::HostPlatform;
@@ -171,6 +172,7 @@ use bt_platform::trust::Policy;
 
 use crate::cli;
 use crate::install_channel::Channel;
+use crate::update_adapter::Layouts;
 use crate::update_apply::{
     BeforeDeciding, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave, Limits, Opener,
     Opens, Watch, Watched, Window, failed_words, now_ms, owed_at_logon, read_receipt, stop_trial,
@@ -238,6 +240,218 @@ pub(crate) trait World {
     fn show_here(&mut self, text: &str);
 }
 
+// ── the layout's points ─────────────────────────────────────────────────────
+
+/// **Where a layout acts on the Windows road**: the home, the installed
+/// program, the transaction, and the member inventories the journal records.
+pub(crate) struct Site<'a> {
+    pub(crate) home: &'a Home,
+    /// `<install>\folio.exe`.
+    pub(crate) installed: &'a Path,
+    pub(crate) txn: TxnId,
+    pub(crate) inventories: &'a Inventories,
+}
+
+impl Site<'_> {
+    /// `set\`, `backup\`, `rolledout\` or the install folder.
+    ///
+    /// # Errors
+    /// The installed program has no folder, or the home is not a member
+    /// set's.
+    pub(crate) fn folder(&self, place: Place) -> Result<PathBuf, String> {
+        match place {
+            Place::Install => self
+                .installed
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or_else(|| "the installed program has no folder".to_owned()),
+            other => self
+                .home
+                .members_folder(self.txn, other)
+                .ok_or_else(|| "the home is not a member set's".to_owned()),
+        }
+    }
+}
+
+/// **How an `Activate` ended.**
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Activated {
+    /// Every step is done.
+    Done,
+    /// A step failed, leaving what every prefix of the steps leaves (I1′);
+    /// why, as a sentence. The road decides what follows from the disk.
+    Cut(String),
+}
+
+/// **A layout's `Activate` and `Prove / Recover` on the Windows road** (0.4.7
+/// ticket U-41a1; managed-update §1.1 R1): the road calls these, through the
+/// adapter its journal names (`update_adapter::Layouts`), and nothing else
+/// about it depends on the layout — the locks, the admission, the checks
+/// before a move, the phases and their rights, the trial, the commit and the
+/// rollback's decision (`update_txn::decide`) are common.
+///
+/// * [`ApplyPoints::activate`] — after `Moving` is durable, before
+///   `TrialBegan`: the staged set made the live one;
+/// * [`ApplyPoints::activate_back`] — after `RollbackIntent` is durable,
+///   under the admission: the restore `decide` named;
+/// * [`ApplyPoints::locate`] and [`ApplyPoints::live`] — which set is live,
+///   read from the disk: what `decide` is handed at every step, and which
+///   whole set the install holds (H.3, a retrial over `Stuck`, what opens).
+///
+/// Every effect is asked of the journal's rights first
+/// (`Journaled::may`).
+pub(crate) trait ApplyPoints: Send + Sync {
+    /// **Activate forward**, as the applier.
+    ///
+    /// # Errors
+    /// An effect the phase does not allow the applier.
+    fn activate(
+        &self,
+        site: &Site<'_>,
+        journal: &Journaled<'_>,
+        world: &mut dyn World,
+    ) -> Result<Activated, String>;
+
+    /// **Activate back**, as `actor`: `moves`, `decide`'s restore.
+    ///
+    /// # Errors
+    /// An effect the phase does not allow `actor`.
+    fn activate_back(
+        &self,
+        site: &Site<'_>,
+        journal: &Journaled<'_>,
+        actor: Actor,
+        moves: &[Move],
+        world: &mut dyn World,
+    ) -> Result<Activated, String>;
+
+    /// **What is where**, for `decide`.
+    ///
+    /// # Errors
+    /// A folder the site cannot name.
+    fn locate(&self, site: &Site<'_>) -> Result<Located, String>;
+
+    /// **Which whole set is installed**, or `None` for a mix or a site
+    /// whose install cannot be named.
+    fn live(&self, site: &Site<'_>) -> Option<Live>;
+}
+
+/// **Folio's own layout** (`Layout::Members`, U-23/U-24): one
+/// `install_txn::durable_move` per file, forward and back, and the install
+/// folder and `backup\` read by digest.
+pub(crate) struct Ours;
+
+impl ApplyPoints for Ours {
+    /// Every old file present to `backup\`, then every new file from `set\`
+    /// into the install (`update_txn::Inventories::forward_moves`).
+    fn activate(
+        &self,
+        site: &Site<'_>,
+        journal: &Journaled<'_>,
+        world: &mut dyn World,
+    ) -> Result<Activated, String> {
+        for step in site.inventories.forward_moves() {
+            let effect = match step.to {
+                Place::Backup => Effect::MoveOldOut,
+                _ => Effect::MoveNewIn,
+            };
+            journal.may(Actor::Applier, effect)?;
+            let from = site.folder(step.from)?.join(&step.name);
+            let to = site.folder(step.to)?.join(&step.name);
+            if let Err(failure) = install_txn::durable_move(&from, &to) {
+                return Ok(Activated::Cut(format!(
+                    "the move of `{}` failed: {failure}",
+                    step.name
+                )));
+            }
+            world.moved(&step);
+        }
+        Ok(Activated::Done)
+    }
+
+    /// Each of `moves` — the new files out to `rolledout\`, then the old ones
+    /// back — one `install_txn::durable_move`, with a look after each.
+    fn activate_back(
+        &self,
+        site: &Site<'_>,
+        journal: &Journaled<'_>,
+        actor: Actor,
+        moves: &[Move],
+        world: &mut dyn World,
+    ) -> Result<Activated, String> {
+        for step in moves {
+            let effect = match step.to {
+                Place::RolledOut => Effect::MoveNewOut,
+                _ => Effect::MoveOldBack,
+            };
+            journal.may(actor, effect)?;
+            let from = site.folder(step.from)?.join(&step.name);
+            let to = site.folder(step.to)?.join(&step.name);
+            if let Err(failure) = install_txn::durable_move(&from, &to) {
+                return Ok(Activated::Cut(format!(
+                    "the move of `{}` to {:?}: {failure}",
+                    step.name, step.to
+                )));
+            }
+            world.moved(step);
+        }
+        Ok(Activated::Done)
+    }
+
+    /// What is at each member's name, by digest: in the install folder and
+    /// in `backup\`.
+    fn locate(&self, site: &Site<'_>) -> Result<Located, String> {
+        let install = site.folder(Place::Install)?;
+        let backup = site.folder(Place::Backup)?;
+        let mut names: Vec<&str> = Vec::new();
+        for member in site
+            .inventories
+            .old_present
+            .iter()
+            .chain(&site.inventories.new)
+        {
+            if !names.contains(&member.name.as_str()) {
+                names.push(&member.name);
+            }
+        }
+        Ok(Located::Members(
+            names
+                .into_iter()
+                .map(|name| {
+                    let mut unread = Vec::new();
+                    let mut at =
+                        |place: Place, folder: &Path| match read_digest_at(&folder.join(name)) {
+                            Ok(digest) => digest,
+                            Err(why) => {
+                                unread.push((place, why));
+                                None
+                            }
+                        };
+                    let install = at(Place::Install, &install);
+                    let backup = at(Place::Backup, &backup);
+                    Seen {
+                        name: name.to_owned(),
+                        install,
+                        backup,
+                        unread,
+                    }
+                })
+                .collect(),
+        ))
+    }
+
+    fn live(&self, site: &Site<'_>) -> Option<Live> {
+        let install = site.folder(Place::Install).ok()?;
+        live_set(site.inventories, &install)
+    }
+}
+
+/// **The layouts of this road** as the product has them: [`Ours`] alone.
+#[must_use]
+pub(crate) fn own_layouts() -> Layouts<dyn ApplyPoints> {
+    Layouts::of(Arc::new(Ours))
+}
+
 /// **One Windows road**: the home, the installed program it replaces, the
 /// rescue copy this process runs from, and what the checks and waits take.
 pub(crate) struct Road {
@@ -264,6 +478,9 @@ pub(crate) struct Road {
     pub(crate) starter: Option<Running>,
     /// **The trial that handed its transaction back** (`--from-trial`, H.4).
     pub(crate) handed_back: Option<HandedBack>,
+    /// **The layouts this road calls**, by the adapter the journal names
+    /// (managed-update R2): [`own_layouts`] in the product.
+    pub(crate) layouts: Layouts<dyn ApplyPoints>,
     /// **A rescue build older than 0.4.7, for the direct-hop test** (design
     /// revision (h), the rollout contract): no adoption, no deferral — the road
     /// every update from 0.4.6 takes, whose rescue build is 0.4.6.
@@ -287,6 +504,7 @@ impl Road {
             me: crate::update_apply::this_process(),
             starter: install_flip::parent_of_this_process(),
             handed_back: None,
+            layouts: own_layouts(),
             #[cfg(test)]
             as_046: false,
         }
@@ -651,17 +869,25 @@ pub(crate) fn opens_now(road: &Road) -> Opens {
             failed: header.outcome == HeaderOutcome::RolledBack,
         };
     }
-    let Some(Layout::Members(inventories)) = bytes
+    let Some(journal) = bytes
         .as_deref()
         .and_then(|bytes| Journal::parse(bytes).ok())
-        .map(|journal| journal.body.layout)
     else {
         return Opens::Rescue;
     };
-    let Some(install) = road.installed.parent() else {
+    let Layout::Members(inventories) = &journal.body.layout else {
         return Opens::Rescue;
     };
-    match live_set(&inventories, install) {
+    let Ok(layout) = road.layouts.named(journal.body.adapter) else {
+        return Opens::Rescue;
+    };
+    let site = Site {
+        home: &road.home,
+        installed: &road.installed,
+        txn: journal.txn,
+        inventories,
+    };
+    match layout.live(&site) {
         Some(Live::New) if header.outcome != HeaderOutcome::Committed => {
             Opens::Trial { txn: header.txn }
         }
@@ -672,7 +898,7 @@ pub(crate) fn opens_now(road: &Road) -> Opens {
 
 /// Which whole set the install folder holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Live {
+pub(crate) enum Live {
     /// Every new member at its digest.
     New,
     /// Every old file at its digest, and no member only the new set brings.
@@ -727,6 +953,8 @@ struct Txn<'a> {
     /// Held for the whole road; let go when this is dropped.
     _lock: Held,
     inventories: Inventories,
+    /// The layout the journal names, whose points this road calls.
+    layout: Arc<dyn ApplyPoints>,
     /// **The successor this holder leaves behind**: the trial it started — the
     /// applier's own, or a retrial over `Stuck` — or the applier found at
     /// `Handoff`. While it runs it is the window, and the exit guard starts
@@ -748,12 +976,17 @@ impl<'a> Txn<'a> {
                 "the journal is not a member set's".to_owned(),
             ));
         };
+        let layout = road
+            .layouts
+            .named(journal.body.adapter)
+            .map_err(|not_built| Ended::Refused(not_built.to_string()))?;
         Ok(Self {
             road,
             asker,
             j: Journaled::of(&road.home, worker, journal),
             _lock: lock,
             inventories,
+            layout,
             successor: None,
         })
     }
@@ -762,21 +995,20 @@ impl<'a> Txn<'a> {
         self.j.journal.txn
     }
 
+    /// Where the layout acts: this road's home and program, this
+    /// transaction and its inventories.
+    fn site(&self) -> Site<'_> {
+        Site {
+            home: &self.road.home,
+            installed: &self.road.installed,
+            txn: self.txn(),
+            inventories: &self.inventories,
+        }
+    }
+
     /// `set\`, `backup\`, `rolledout\` or the install folder.
     fn folder(&self, place: Place) -> Result<PathBuf, String> {
-        match place {
-            Place::Install => self
-                .road
-                .installed
-                .parent()
-                .map(Path::to_path_buf)
-                .ok_or_else(|| "the installed program has no folder".to_owned()),
-            other => self
-                .road
-                .home
-                .members_folder(self.txn(), other)
-                .ok_or_else(|| "the home is not a member set's".to_owned()),
-        }
+        self.site().folder(place)
     }
 
     /// P's road, by the phase it finds.
@@ -895,23 +1127,13 @@ impl<'a> Txn<'a> {
         }
         // `Moving` is durable before the first move.
         self.j.record(Actor::Applier, &Event::Admitted)?;
-        for step in self.inventories.forward_moves() {
-            let effect = match step.to {
-                Place::Backup => Effect::MoveOldOut,
-                _ => Effect::MoveNewIn,
-            };
-            self.j.may(Actor::Applier, effect)?;
-            let from = self.folder(step.from)?.join(&step.name);
-            let to = self.folder(step.to)?.join(&step.name);
-            if let Err(failure) = install_txn::durable_move(&from, &to) {
-                world.say(&format!(
-                    "BT_UPDATE_APPLY the move of `{}` failed: {failure}",
-                    step.name
-                ));
-                drop(admission);
-                return self.declare_rollback(worker, Actor::Applier, world);
-            }
-            world.moved(&step);
+        // Activate, forward: the layout's (managed-update R1).
+        let layout = Arc::clone(&self.layout);
+        let activated = layout.activate(&self.site(), &self.j, world)?;
+        if let Activated::Cut(why) = activated {
+            world.say(&format!("BT_UPDATE_APPLY {why}"));
+            drop(admission);
+            return self.declare_rollback(worker, Actor::Applier, world);
         }
         // The trial takes its shared hold at its start.
         drop(admission);
@@ -1124,7 +1346,7 @@ impl<'a> Txn<'a> {
                 Pre::Stop(ended) => return Ok(ended),
                 Pre::Decide => {}
             }
-            let located = Located::Members(self.locate()?);
+            let located = self.layout.locate(&self.site())?;
             let action = decide(&Disk {
                 journal: &self.j.journal,
                 asker: self.asker,
@@ -1249,10 +1471,7 @@ impl<'a> Txn<'a> {
             Phase::Stuck { .. } if recorded.is_none() => true,
             _ => return Ok(Pre::Decide),
         };
-        let Ok(install) = self.folder(Place::Install) else {
-            return Ok(Pre::Decide);
-        };
-        if live_set(&self.inventories, &install) != Some(Live::New) {
+        if self.layout.live(&self.site()) != Some(Live::New) {
             return Ok(Pre::Decide);
         }
         let stale = match &self.j.journal.body.phase {
@@ -1352,25 +1571,12 @@ impl<'a> Txn<'a> {
                     .map(Some);
             }
         }
-        for step in moves {
-            let effect = match step.to {
-                Place::RolledOut => Effect::MoveNewOut,
-                _ => Effect::MoveOldBack,
-            };
-            self.j.may(actor, effect)?;
-            let from = self.folder(step.from)?.join(&step.name);
-            let to = self.folder(step.to)?.join(&step.name);
-            if let Err(failure) = install_txn::durable_move(&from, &to) {
-                drop(admission);
-                return self
-                    .stuck(
-                        actor,
-                        format!("the move of `{}` to {:?}: {failure}", step.name, step.to),
-                        world,
-                    )
-                    .map(Some);
-            }
-            world.moved(step);
+        // Activate, back: the layout's (managed-update R1).
+        let layout = Arc::clone(&self.layout);
+        let activated = layout.activate_back(&self.site(), &self.j, actor, moves, world)?;
+        if let Activated::Cut(why) = activated {
+            drop(admission);
+            return self.stuck(actor, why, world).map(Some);
         }
         Ok(None)
     }
@@ -1397,10 +1603,7 @@ impl<'a> Txn<'a> {
             // A trial of it runs already: it is the window.
             return ended;
         }
-        let Ok(install) = self.folder(Place::Install) else {
-            return ended;
-        };
-        if live_set(&self.inventories, &install) != Some(Live::New) {
+        if self.layout.live(&self.site()) != Some(Live::New) {
             return ended;
         }
         let actor = match self.asker {
@@ -1535,46 +1738,6 @@ impl<'a> Txn<'a> {
         Ok(Ended::Reverted)
     }
 
-    /// **What is at each member's name, by digest**: in the install folder
-    /// and in `backup\`.
-    fn locate(&self) -> Result<Vec<Seen>, String> {
-        let install = self.folder(Place::Install)?;
-        let backup = self.folder(Place::Backup)?;
-        let mut names: Vec<&str> = Vec::new();
-        for member in self
-            .inventories
-            .old_present
-            .iter()
-            .chain(&self.inventories.new)
-        {
-            if !names.contains(&member.name.as_str()) {
-                names.push(&member.name);
-            }
-        }
-        Ok(names
-            .into_iter()
-            .map(|name| {
-                let mut unread = Vec::new();
-                let mut at = |place: Place, folder: &Path| match read_digest_at(&folder.join(name))
-                {
-                    Ok(digest) => digest,
-                    Err(why) => {
-                        unread.push((place, why));
-                        None
-                    }
-                };
-                let install = at(Place::Install, &install);
-                let backup = at(Place::Backup, &backup);
-                Seen {
-                    name: name.to_owned(),
-                    install,
-                    backup,
-                    unread,
-                }
-            })
-            .collect())
-    }
-
     /// **W8 after the commit, and W12** (the coordinator's order): `Committed`
     /// is durable; the entrance removed and flushed; then exactly the recorded
     /// old files `backup\` holds, by their digests (`update_txn::decide`'s
@@ -1594,13 +1757,13 @@ impl<'a> Txn<'a> {
         actor: Actor,
         world: &mut impl World,
     ) -> Result<(), String> {
-        let seen = self.locate()?;
+        let located = self.layout.locate(&self.site())?;
         let entrance = world.is_armed(self.txn()).unwrap_or(true);
         let disk = Disk {
             journal: &self.j.journal,
             asker: Asker::LockHolder,
             entrance,
-            located: Located::Members(seen),
+            located,
             receipt: None,
             trial_alive: false,
             now_ms: now_ms(),

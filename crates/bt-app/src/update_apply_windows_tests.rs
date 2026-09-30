@@ -452,6 +452,7 @@ impl Install {
             },
             starter: None,
             handed_back: None,
+            layouts: own_layouts(),
             as_046: false,
         }
     }
@@ -4548,6 +4549,7 @@ fn rescue_part(root: &Path) {
         me,
         starter: install_flip::parent_of_this_process(),
         handed_back: Some(handed_back),
+        layouts: own_layouts(),
         as_046: false,
     };
     let mut world = bare_world(road.home.clone());
