@@ -967,7 +967,7 @@ impl CapturedRow {
     ///
     /// This runs when vendor cells become a stable captured row, before either the live row or a
     /// transcript [`StyleSpan`] can be windowed. A label the program chose remains the complete
-    /// link; only an address-shaped label uses the same ending rule as a bare address.
+    /// link; only an address-shaped label uses the terminator class of a bare address.
     pub fn trim_program_url_hyperlink_spans(&mut self) {
         let mut first = 0;
         while first < self.cells.len() {
@@ -1000,22 +1000,27 @@ impl CapturedRow {
                 first = end;
                 continue;
             };
-            if !(span_starts_with(&self.cells[first..end], uri)
-                || (scheme_len < uri.len()
-                    && span_starts_with(&self.cells[first..end], &uri[scheme_len..])))
+            let prefix_len = if span_starts_with(&self.cells[first..end], uri) {
+                uri.len()
+            } else if scheme_len < uri.len()
+                && span_starts_with(&self.cells[first..end], &uri[scheme_len..])
             {
+                uri.len() - scheme_len
+            } else {
                 first = end;
                 continue;
-            }
-            let Some(boundary) = self.cells[first..end]
+            };
+            let Some(boundary_after_prefix) = self.cells[first..end]
                 .iter()
                 .filter(|cell| !cell.wide_spacer)
                 .flat_map(|cell| cell.text.bytes())
+                .skip(prefix_len)
                 .position(is_url_terminator)
             else {
                 first = end;
                 continue;
             };
+            let boundary = prefix_len + boundary_after_prefix;
 
             let mut bytes = 0;
             let mut trimming = false;
@@ -1883,7 +1888,7 @@ mod tests {
 
     use super::*;
 
-    fn osc_8_row(label: &str, target: &str) -> CapturedRow {
+    fn osc_8_row_with_continuation(label: &str, target: &str, continues: bool) -> CapturedRow {
         let hyperlink = CellHyperlink {
             id: Some(Arc::from("program-link")),
             uri: Arc::from(target),
@@ -1899,11 +1904,15 @@ mod tests {
         let mut row = CapturedRow {
             captured_columns: cells.len() as u32,
             cells,
-            continues: false,
+            continues,
             shell_mark: None,
         };
         row.trim_program_url_hyperlink_spans();
         row
+    }
+
+    fn osc_8_row(label: &str, target: &str) -> CapturedRow {
+        osc_8_row_with_continuation(label, target, false)
     }
 
     fn assert_osc_8_span(label: &str, target: &str, linked_text: &str) -> CapturedRow {
@@ -1977,11 +1986,83 @@ mod tests {
         }
     }
 
+    /// RED (T-71B): scan for a terminator from byte zero instead of after `prefix_len`.
+    #[test]
+    fn osc_8_url_keeps_an_exact_iri_address() {
+        assert_osc_8_span(
+            "https://例子.test/a",
+            "https://例子.test/a",
+            "https://例子.test/a",
+        );
+    }
+
+    /// RED (T-71B): scan for a terminator from byte zero instead of after `prefix_len`.
+    #[test]
+    fn osc_8_url_trims_an_iri_tail_after_the_address() {
+        assert_osc_8_span(
+            "https://例子.test/a。顶部",
+            "https://例子.test/a",
+            "https://例子.test/a",
+        );
+    }
+
+    /// RED (T-71B): scan for a terminator from byte zero instead of after `prefix_len`.
+    #[test]
+    fn osc_8_url_trims_a_scheme_elided_iri_after_the_address() {
+        assert_osc_8_span("例子.test/a顶部", "https://例子.test/a", "例子.test/a");
+    }
+
     /// RED (T-71B): remove the scheme-elided prefix alternative.
     #[test]
     fn osc_8_url_trims_a_scheme_elided_address() {
         assert_osc_8_span("x.test/a。b", "https://x.test/a", "x.test/a");
         assert_osc_8_span("x.test/a中文", "http://x.test/a", "x.test/a");
+    }
+
+    /// RED (T-71B): remove the address-prefix guard so the continuation is trimmed too.
+    #[test]
+    fn osc_8_url_soft_wrap_trims_only_the_address_row() {
+        let address_row =
+            osc_8_row_with_continuation("https://x.test/a。顶部四", "https://x.test/a", true);
+        let continuation_row = osc_8_row("组开关", "https://x.test/a");
+
+        assert!(address_row.continues);
+        assert_eq!(
+            address_row
+                .cells
+                .iter()
+                .filter(|cell| cell.hyperlink.is_some())
+                .map(|cell| cell.text.as_str())
+                .collect::<String>(),
+            "https://x.test/a"
+        );
+        assert_eq!(
+            continuation_row
+                .cells
+                .iter()
+                .filter(|cell| cell.hyperlink.is_some())
+                .map(|cell| cell.text.as_str())
+                .collect::<String>(),
+            "组开关"
+        );
+        assert!(!continuation_row.continues);
+    }
+
+    /// RED (T-71B): let non-HTTP(S) targets pass the scheme gate with a zero-length scheme.
+    #[test]
+    fn osc_8_url_keeps_non_http_targets_whole() {
+        assert_osc_8_span("file:///tmp/a 文档", "file:///tmp/a", "file:///tmp/a 文档");
+        assert_osc_8_span(
+            "mailto:x@example.test 中文",
+            "mailto:x@example.test",
+            "mailto:x@example.test 中文",
+        );
+    }
+
+    /// RED (T-71B): add `.` to `is_url_terminator`.
+    #[test]
+    fn osc_8_url_keeps_an_ascii_punctuation_tail() {
+        assert_osc_8_span("https://x.test/a.", "https://x.test/a", "https://x.test/a.");
     }
 
     /// RED (T-71B): bypass capture-time trimming; the visible suffix regains the OSC 8 claim.

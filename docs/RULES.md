@@ -178,13 +178,16 @@ denial-permanence rule was reversed twice: on 2026-08-25 (denials expire) and
 again on 2026-09-20 (re-ask on reprint).
 
 ### 6. `OSC 8` hyperlinks — `folded`
-An HTTP(S) link whose visible text starts with its target, with or without the
-scheme, ends at the bare-address boundary; its trailing text loses the link and
-resting dots. A program-chosen label stays whole, and the target is unchanged
-(T-71B; `bt-transcript::CapturedRow`, invoked by `bt-term::cell_capture`
-before transcript or viewport clipping;
-trailing DESIGN entry 2026-09-30).
-**Rule.** An `OSC 8` target and a recognised bare path are the same object: the
+**Rule.** An HTTP(S) link whose visible text starts with its target, with or
+without the scheme, ends before the first post-prefix byte in the terminator
+class used by bare addresses; its trailing text loses the link and resting
+dots. ASCII sentence punctuation is outside that class and stays linked. A
+program-chosen label and a non-HTTP(S) target stay whole, and the target is
+unchanged. The scope is one captured row: a soft-wrapped continuation fragment
+that does not begin with the target stays linked (T-71B;
+`bt-transcript::CapturedRow`, invoked by `bt-term::cell_capture` before
+transcript or viewport clipping; trailing DESIGN entry 2026-09-30). An `OSC 8`
+target and a recognised bare path are the same object: the
 bare path is written into the cell as an implicit `CellHyperlink` carrying a
 `file:` target, so both travel one routing table with one gesture policy, and an
 `OSC 8` target is asked of the same verdict ledger on the pointer event that
