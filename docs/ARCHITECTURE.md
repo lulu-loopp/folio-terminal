@@ -292,9 +292,10 @@ those manifests actually practise, restated here from what they say:
   `bt-unicode`, `bt-doc`, `bt-detect`, `bt-layout`, `bt-persist`, `bt-winres`,
   `bt-math`, `bt-transcript`, `bt-viewport`, `bt-render`, `bt-term`, `bt-pty`,
   `bt-corpus`, `bt-workbench`) name no Win32 outside a `#[cfg(windows)]` gate. Platform-specific code lives
-  behind `bt-platform`'s interface. Its second half reads
-  `FILES_THAT_MAY_NAME_A_PLATFORM` out of `main.rs` — one list, two readers,
-  the other being `bt_app::platform_gate_tests`.
+  behind `bt-platform`'s interface. This is the cheap local substitute for a
+  non-Windows compile; CI proves the same property by compiling on macOS and
+  Linux. `bt_app::platform_gate_tests` alone owns the separate rule that only
+  the files in `FILES_THAT_MAY_NAME_A_PLATFORM` may select a platform.
 - **`scripts/check-adapter-boundary.ps1`** — `crates/bt-term/src/adapter.rs` and
   `cell_capture.rs` may not name `bt_doc`, `bt_detect` or `bt_viewport`. The
   vendor seam answers "what did the terminal do", never "what shall we do
@@ -463,13 +464,18 @@ on the active tab. **Any method may therefore reach the active tab with no
   `TabState`, and wrong in the direction that makes `Runtime` look like the
   owner of state it only borrows. Every `self.` access must be resolved to
   `Runtime`, to `WindowRuntime`, or through `Deref` to `TabState`. Since
-  0.4.6 census-1 that resolution is `bt_source::FieldCensus`, and its output is
-  committed: `docs/plans/design/ownership-census-inventory.tsv` (one row per
-  field of the four structs), `-sites.tsv` (who writes, lends, changes
-  membership, or mutates inside, per module and function), `-unknowns.tsv`
-  (the sites it could not resolve, shrink-only) and the hand-edited
-  `-annotations.tsv`. `bt-source`'s `census` test is the gate; a ticket that
-  adds a writer of a fact changes a committed row and names it in its (c′).
+  0.4.6 census-1 that resolution is `bt_source::FieldCensus`. The query writes
+  its inventory and sites reports under `target/`; the committed surfaces are
+  only `docs/plans/design/ownership-census-unknowns.tsv` (unresolved sites,
+  whose whole rows only shrink, with multiplicity, against the merge base) and
+  the hand-edited `-annotations.tsv` (the class and proposed owner of every
+  proven multi-writer fact). `bt-source`'s `census` test refuses a new unknown
+  and a multi-writer fact with no annotation row;
+  `scripts/ci/check-census-unknowns.ps1` refuses an unknown row added against
+  the merge base and an annotation row added there that names no owner or says
+  "proposed". Which module writes a fact, once it is single-writer or already
+  annotated, is report data: a second writer in the same module, or a sole
+  writer that moves, changes no committed file.
 - `Runtime` grants every one of its methods mutable access to both `App` and
   `WindowRuntime`. Moving those methods into `runtime/*.rs` does not narrow
   that access. The file move is navigation and merge relief; it is **not** an
@@ -959,7 +965,7 @@ happen" has one answer and a guard can hold it.
 
 | effect | door | what holds it |
 |---|---|---|
-| reading file bytes | `bt_platform::file_reads` — thirteen named lanes (U-13 added `UpdateJournal`, the trial's watch; U-14 added `Update`, the archive and its manifest), `Lane`, `Ledger::add`, the process-wide `LEDGER` | `file_reads_doors.txt` plus a source guard |
+| reading file bytes | `bt_platform::file_reads` — thirteen named lanes (U-13 added `UpdateJournal`, the trial's watch; U-14 added `Update`, the archive and its manifest), `Lane`, `Ledger::add`, the process-wide `LEDGER` | `file_reads_doors.txt` admits items as a set of keys, without per-site counts, plus a source guard |
 | reading who owns an install folder, and the macOS install-marker attribute | `bt_platform::install_evidence` — `owner_of`, `current_account`, `attribute` (read-only: `GetNamedSecurityInfoW` and the process token on Windows, `stat`, `geteuid` and `getxattr` on Unix); the attribute's bytes are charged to `file_reads`' `Lane::Install` | its own module, one function per read; its one caller is `install_channel::read` |
 | reading a resource out of an executable without running it (E-14) | `bt_platform::pe_resource::read_rcdata(path, name, limit)` (U-14) — `LoadLibraryExW(LOAD_LIBRARY_AS_DATAFILE \| LOAD_LIBRARY_AS_IMAGE_RESOURCE)`, `FindResourceW(RT_RCDATA)`, a copy, `FreeLibrary`; charged to `file_reads`' `Lane::Update` as one opaque load; `Unsupported` off Windows | its own module; its one caller is `update_archive::EmbeddedManifest` |
 | deciding whether a downloaded Windows release is the same publisher's Folio, and whether this build may update itself | `bt_platform::trust` (U-15) — in process, no child: `WinVerifyTrust` (`WINTRUST_ACTION_GENERIC_VERIFY_V2`) and its provider data, `CryptVerifyTimeStampSignature`, `CertGetCertificateChain` / `CertVerifyCertificateChainPolicy`, `CertNameToStrW`, `GetFileVersionInfoW`, and `IAppxFactory`'s package reader for `folio.msix`; `verify_release_file`, `verify_release_package`, `verify_sidecar`, `running_identity`, `running_capability`. Each call's reads are charged to `file_reads`' `Lane::Update` as one opaque read; any revocation fetch is Windows' own, inside those calls. Opens memory certificate stores only and writes no store; `Policy::ExclusiveRoot` (tests) is a `CertCreateCertificateChainEngine` over a memory root store. Worker only; `Unsupported` off Windows | its own module; no product caller until the Windows Prepare (U-20); `update::tests::the_trust_door_opens_no_system_certificate_store` pins its stores |
@@ -993,8 +999,11 @@ sites** — every vocabulary effect in the product outside a registered door's
 body, by crate, `cfg` arm, item and entry — in
 `docs/plans/window-thread-bare-sites.tsv`, held equal to the code by
 `window_waits_tests::every_bare_site_is_a_row_and_every_row_a_site` and held to
-shrinking against the merge base (or the pinned seed `11b9da8a` when the seed is newer than the merge base — a re-seed is the one moment the inventory may grow) by
-`scripts/ci/check-window-waits.ps1`, which prints the total in its footer.
+shrinking against the merge base by `scripts/ci/check-window-waits.ps1`, which
+compares totals per `(crate, effect entry)` — so a move or a rename passes and a
+new family or a grown total is refused — and prints the total in its footer.
+Since T-GATES-047 there is no seed: a merge base without the inventory is an
+error, not a baseline.
 **The count is a reading of the source, not the compiler's** (note (j)12): a
 method call counts when its receiver's type is written somewhere on its road,
 so a receiver typed nowhere is not seen, and A2e's lint may find sites the file
@@ -1024,8 +1033,12 @@ note's revision (i)), and it lands in five tickets with the lint last. By the
 owner's ruling of 2026-09-25 D-2 closes when A2 has landed.
 
 Each door is held by a pin: `bt_app::file_reads_source_tests` reads
-`file_reads_doors.txt` and fails the build when a product read appears outside
-an inventoried door; `quiet_command_named` is pinned as the only `Command`
+`file_reads_doors.txt` and fails the build when a product read appears in an
+item the file does not admit. A row is a key — an item (`Type::method: .verb`)
+or, for the rows still on MIGRATION-DEBT, a file and a function
+(`trace.rs: create: .open`) — and the rows are a set with no occurrence counts,
+so a second read inside an admitted item is not a new row; the lane each
+counting adapter charges is checked separately. `quiet_command_named` is pinned as the only `Command`
 construction; `handoff` holds the only `ShellExecuteW` and `NSWorkspace` sites.
 
 **The known bypass, stated as a fact.** `docs/BT-ENVIRONMENT.md`'s file-read

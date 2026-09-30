@@ -408,9 +408,9 @@ fn line_of(text: &str, at: usize) -> usize {
 ///
 /// Deliberately **not** `canonicalize`, for `bt_source::normalized`'s reason one
 /// crate over: on Windows it returns a `\\?\` verbatim path, and a verbatim path
-/// does not accept the forward slashes both lists are keyed by, so
-/// `root.join("scripts/check-portable-core.ps1")` would stop naming a file that
-/// is plainly there. The `..` components are left in; every path the scan
+/// does not accept the forward slashes both lists are keyed by, so a joined
+/// script path would stop naming a file that is plainly there. The `..`
+/// components are left in; every path the scan
 /// reports is built by walking down from this one, so they cancel out of every
 /// comparison.
 fn workspace_root() -> PathBuf {
@@ -531,8 +531,13 @@ fn complaint(
 fn no_source_reader_names_a_file_outside_the_two_lists() {
     let root = workspace_root();
     let hits = scan(&root);
+    // The independent traversal floor: a walk that lost its way finds a handful
+    // of readers, not hundreds, and the list comparison below cannot tell — a
+    // lone listed reader is no stray. 195 on 2026-09-30, after T-GATES-047
+    // retired the portable-core array reader and its twins; the floor sits
+    // below that with room for the list to keep shrinking.
     assert!(
-        hits.len() > 200,
+        hits.len() > 150,
         "the scan found {} readers, which is not this workspace — it read {} as its root",
         hits.len(),
         root.display()
@@ -605,7 +610,7 @@ fn a_planted_reader_that_is_on_neither_list_makes_the_tripwire_fire() {
         said.contains("crates/planted/src/lib.rs")
             && said.contains(DEBT_LIST)
             && said.contains("bt_source::FileScoped")
-            && said.contains(FileScoped::PortableCoreArray.path()),
+            && said.contains(FileScoped::VendoredAddedFiles.path()),
         "the refusal has to name the hit and both lists; it said:\n{said}"
     );
 
@@ -730,7 +735,7 @@ fn planted_reader() -> String {
          fn read_one() -> String {{\n    \
              std::fs::read_to_string(std::path::Path::new(\".\").join(\"{neighbour}\")).unwrap()\n\
          }}\n\
-         fn scoped() -> bt_source::Scope {{ {scope}bt_source::FileScoped::PortableCoreArray) }}\n\
+         fn scoped() -> bt_source::Scope {{ {scope}bt_source::FileScoped::VendoredAddedFiles) }}\n\
          fn walk() {{\n    \
              let root = std::path::Path::new(env!(\"{MANIFEST_DIRECTORY}\")).join(\"src\");\n    \
              for entry in std::fs::{DIRECTORY_READ}(&root).unwrap().flatten() {{\n        \

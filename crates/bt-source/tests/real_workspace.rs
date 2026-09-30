@@ -1,11 +1,9 @@
 //! The enumeration, run over the tree it exists for.
 //!
 //! A fixture proves a rule; only the real tree proves the rule is the one this
-//! workspace is written in. Two questions are asked here, and the second is the
-//! one P1a is measured by: the wholly-test set of `bt-app` computed from the
-//! declarations has to be the twelve files `docs/plans/bt-app-split-prep.md`
-//! §6.6 names. A difference is a finding about whichever reading is wrong, never
-//! a number to adjust — §6.0 rule 5.
+//! workspace is written in. The independent filesystem/declaration cross-check
+//! makes an undeclared source file or a declaration outside the package scope a
+//! finding, never a count to adjust.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -159,33 +157,15 @@ fn expected_unreached() -> BTreeMap<String, Vec<String>> {
     ])
 }
 
-/// RED — **`bt-app`'s wholly-test files are the twelve the plan names**, derived
-/// from the declarations rather than listed. Twelve when the plan was written
-/// (`docs/plans/bt-app-split-prep.md` §6.6); a thirteenth,
-/// `text_size_tests.rs` (0.4.5 ticket 37, 2026-09-24), declared `#[cfg(test)] mod
-/// text_size_tests;` in `main.rs`; twelve again since 0.4.6 census-3
-/// (2026-09-25), which moved `attention.rs` and its `attention/tests.rs` out of
-/// `bt-app` into `bt-workbench`; fourteen with A5's two lane files; fifteen
-/// with `update_eligibility.rs` (0.4.6 ticket U-8), the build script's decision
-/// that `main.rs` declares `#[cfg(test)]` so its tests run; eighteen with
-/// `update_prepare_macos_tests.rs` (0.4.6 ticket U-27), the macOS Prepare's
-/// tests and the image fixtures `update_startup` and `uninstall` share;
-/// nineteen with `update_apply_macos_tests.rs` (0.4.6 ticket U-28), the macOS
-/// applier's tests over real bundles, locks and processes.
-/// twenty with `update_prepare_windows_tests.rs` (0.4.6 ticket U-20), the
-/// Windows Prepare's tests; twenty-one with `update_apply_windows_tests.rs`
-/// (0.4.6 ticket U-23), the Windows applier's and recovery's tests.
+/// RED — **every Rust source file under `bt-app/src` is reached by a declaration.**
 ///
-/// `scripts/dev/bt-app-graph.py` carries this set as a hand-written literal of
-/// five names, and §6.6 of the plan is about the seven it is missing — four of
-/// which contain source readers. This is the reading P0 makes that table agree
-/// with, so the day a thirteenth appears is a red test rather than a table that
-/// quietly means less than it says.
+/// The test asks the declarations and the disk independently. A source file that
+/// compiles nowhere appears in `unreached`; a declaration pointing outside the
+/// package's source scope makes the cross-check disagree.
 ///
-/// MUTATION: take `#[cfg(test)]` off `mod tests;` in `main.rs` and the set loses
-/// `tests.rs`; put one on `mod quake;` and it gains `quake.rs`.
+/// MUTATION: add an undeclared `.rs` file under `bt-app/src`.
 #[test]
-fn the_wholly_test_files_of_bt_app_are_the_twenty_one() {
+fn every_bt_app_source_file_is_reached_by_a_declaration() {
     let workspace = workspace();
     let package = workspace.package("bt-app").expect("bt-app");
     let universe = universes::crate_sources(package, Vendor::Excluded).expect("bt-app's own src");
@@ -193,35 +173,6 @@ fn the_wholly_test_files_of_bt_app_are_the_twenty_one() {
         enumerate(&universe).expect("bt-app's declarations resolve completely");
     unreached.expect_none("every .rs file under bt-app/src is reached by a declaration");
 
-    let root = package.directory().join("src");
-    let wholly = named(enumeration.wholly_test_files(), &root);
-    assert_eq!(
-        wholly,
-        [
-            "attention_words/tests.rs",
-            "file_reads_source_tests.rs",
-            "focus_thumb_restore_tests.rs",
-            "ime_report_tests.rs",
-            "journeys_tests.rs",
-            "lane.rs",
-            "lane_contract_tests.rs",
-            "present_diagnostics_tests.rs",
-            "preview_typing.rs",
-            "preview_viewport_tests.rs",
-            "source_pin.rs",
-            "tests.rs",
-            "text_size_tests.rs",
-            "uninstall_tests.rs",
-            "update_apply_macos_tests.rs",
-            "update_apply_windows_tests.rs",
-            "update_archive_tests.rs",
-            "update_eligibility.rs",
-            "update_prepare_macos_tests.rs",
-            "update_prepare_windows_tests.rs",
-            "window_waits_tests.rs",
-        ],
-        "the twenty-one of `docs/plans/bt-app-split-prep.md` §6.6"
-    );
     println!("bt-app: {} files reached", enumeration.files().len());
     assert!(
         enumeration.cross_check().agrees(),

@@ -639,11 +639,30 @@ The rules are (b)2 §3's, stated in `crates/bt-source/src/census.rs` and its `ty
 
 What the first run says, at `3e657f9e`: 154 fields have proven writers in more than one module (against §0's 170 write-shaped ones); the 29 of the 170 that are not among them are written by lending alone or in one module, and 13 fields not in §2 are (`App.{keybindings_store, pins_store, recent_folders, web_spare, web_warmup}`, `WindowRuntime.{chrome_marks, focus_mode, focus_reveal, ime_cursor, preview_menu, profile_menu, restore_prompt, root_menu}`: most through a method `&mut self` on the field's own type that the name rule of §1 dropped, as it dropped `dirty_gate.open`). `WindowRuntime.dirty_gate` is now lent to `raise_dirty_gate_over` (ticket 58, `fa033ddb`), so its opener is an access row, not a write. The counts per status and the unknowns by reason are in census-1's report.
 
-**Shrink-only across commits** (coordinator, 2026-09-26). The `census` test holds the code to the committed unknown list within a tree; `scripts/ci/check-census-unknowns.ps1`, run by CI's `logic` job beside `check-migration-debt.ps1`, holds the list across commits: **the total number of unknown sites must not grow** against the list at `git merge-base HEAD origin/main`, or, while the merge base has none, against the list as census-1 seeded it (pinned by commit `7a53d429`). It compares totals, not rows, so census-7 may move a function (a row's key changes) as long as the total does not rise. No merge base, or an unreadable seed, is exit 2, not a pass. `gates-can-fail` plants a hand-added row (red) and a moved key with the same total (green). The script reads only the committed TSVs.
+**Shrink-only across commits** (coordinator, 2026-09-26; whole-row ruling 2026-09-30). The `census` test holds the code to the committed unknown list within a tree; `scripts/ci/check-census-unknowns.ps1`, run by CI's `logic` job beside `check-migration-debt.ps1`, holds the list across commits: **the whole-row multiset of unknown sites may only shrink** against the list at `git merge-base HEAD origin/main`, or, while the merge base has none, against the list as census-1 seeded it (pinned by commit `7a53d429`). A changed or duplicate row is an addition even when another row disappears and both the row count and summed `sites` value stay level. No merge base, or an unreadable seed, is exit 2, not a pass. `gates-can-fail` plants a hand-added row, then replaces one base row with a planted row of the same `sites` value; both must be red. The script reads only the committed TSVs.
 
 **For census-7.** A fact is multi-writer when it has proven writes in more than one module; lends, other mutable access and hub membership are their own columns and do not count. census-7 drafts destinations from the write column **and reads the access column too**: `WindowRuntime.tabs`, `TabState.sessions`, `App.gpu` and `WindowRuntime.attention_next_place` are reached mutably from many modules while proving few or no writes. The thirteen annotations census-1 wrote for facts §2 did not list are marked "proposed by census-1".
 
 **Added at the census-1 merge (2026-09-26).** The receiver rule gains a fixed list for one dependency type, keyed by type as the std list is: `winit::keyboard::ModifiersState`'s readers (`shift_key`, `control_key`, `alt_key`, `super_key`, `state`, `bits`, …) resolve as reads; a name not on the list stays unknown. This took 20 of the 101 unknown sites out of the list at the merge, and U-19's two new multi-writer facts (`App.update_job`, `WindowRuntime.update_card`) received proposed annotation rows.
+
+## Revision 2026-09-30 (e): inventory and sites return to query output (T-GATES-047)
+
+The byte-equal inventory and sites snapshots described by revision (c) are no
+longer committed. Every census run still writes both under
+`target/ownership-census/`; they are the query used for ownership work, not a
+gate on routine source movement. The committed gate surfaces are the unknown
+list, whose whole rows only shrink with multiplicity, and the annotations,
+which keep census-1's `proposed_owner` column and notes: the `census` test
+requires a row for every proven multi-writer fact and none for anything else,
+and `scripts/ci/check-census-unknowns.ps1` refuses an annotation row added
+against the merge base that names no owner or says "proposed". The proposals
+already in the file stay proposals until the owner rules on them; a ticket does
+not confirm them. The generator copies only the unknown rendering.
+
+What the snapshots caught that nothing now does: a second writer of a fact in
+the same module, and a sole writer that moves to another module, change no
+committed file. Both are visible in the report under `target/`, to a reader who
+compares it.
 
 ## Revision 2026-09-27 (d): two kinds of subject (census-2)
 

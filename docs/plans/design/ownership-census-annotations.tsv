@@ -1,14 +1,18 @@
 # The ownership census's annotations (census-1): the class and the proposed
 # sole writer of every proven multi-writer fact — a field of App, WindowRuntime,
 # TabState or LeafSession with proven writes in more than one module
-# (docs/plans/design/ownership-census-inventory.tsv, proven_writers = n).
+# (the inventory report the census test leaves in target/ownership-census/,
+# proven_writers = n).
 #
 # Hand-edited, and the only hand-edited file of the census. The code cannot
 # regenerate these columns (the census note's revision (b)2 §7); the gate
-# (bt-source's census test, the_committed_census_is_what_the_code_says) checks
-# only that every proven multi-writer fact has at least one row here and that
-# no row names a fact that is not one. Keyed by fact; a coarse field is split
-# into its parts, one row each (revision (b)4).
+# (bt-source's census test,
+# the_committed_census_has_annotations_and_no_new_unknowns) checks only that
+# every proven multi-writer fact has at least one row here and that no row
+# names a fact that is not one; scripts/ci/check-census-unknowns.ps1 refuses a
+# row added against the merge base that names no owner or says "proposed".
+# Keyed by fact; a coarse field is split into its parts, one row each
+# (revision (b)4).
 #
 # class: OBS, ASYNC, DUR, LIFE, PROJ (ARCHITECTURE §4.2) and VIEW, HUB, RES (the
 # census note §2). proposed_owner: the module the note proposes as sole writer

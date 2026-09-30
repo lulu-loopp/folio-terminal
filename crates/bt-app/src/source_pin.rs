@@ -4,9 +4,8 @@
 //! A pin of that kind is not a second-best test. Some of what this product
 //! promises is a compile-time fact — which table a platform ships, which flag a
 //! family of shells is told — and a runtime assertion can only ever check the
-//! platform it is running on. `scripts/check-portable-core.ps1` makes the same
-//! argument in its own header and reads source for the same reason: "a compile
-//! failure names a symbol and a line, while a rule names the rule".
+//! platform it is running on. A compile failure names a symbol and a line,
+//! while a source pin names the rule.
 //!
 //! Test-only, and the two functions here are the whole of it: find one item, and
 //! take its comments out so that a paragraph *about* a thing is not read as a
@@ -14,9 +13,8 @@
 
 /// The text of one item, from `header` to the line its body closes on.
 ///
-/// Brace counting and not a parse, for `check-portable-core.ps1`'s own reason: a
-/// gate that needed to build the crate in order to read it is a gate that cannot
-/// run on a tree that does not build.
+/// Brace counting and not a parse: callers pass a compiled-in source string, so
+/// this helper needs no second parser merely to isolate one item.
 ///
 /// Panics when the header is not there, which is the point — an item renamed out
 /// from under a pin must fail loudly rather than pass over nothing.

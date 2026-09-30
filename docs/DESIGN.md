@@ -11432,7 +11432,7 @@ One thing outside the two crates had to move with it, and it is the good kind of
 ### 2026-09-21 — Two lists and a tripwire: what still names a file, and what may
 Hundreds of guards in this workspace pin facts about the program by reading its own source text, and every one of them is bound to a *file*: when an item leaves `main.rs`, a reader bound to `main.rs` does not go red, it reads a smaller universe and stays green. `crates/bt-source` is the mechanism that replaces the binding. This is the ticket that draws the line the mechanism will be built behind (`docs/plans/bt-app-split-prep.md` §6.1, P2): every remaining reader gets a row on one of two lists, and a third thing refuses a reader that is on neither. No reader is migrated here and no product code is touched.
 **The temporary list is `docs/plans/MIGRATION-DEBT.tsv`** — 747 rows, one per reader that still names a file, each carrying the file, the owning item, the mechanism, what it pins, the ticket that will migrate it and whether Step 2a disturbs it. Tab-separated and not a table in prose, because the thing that reads it is a comparison: a row is a line, "was a row added" is a set difference over lines, and a tab-separated field needs no escaping for anything these rows carry. Its header says three things plainly and they are all three true: **it only shrinks**, **it is temporary** (it reaches zero at P20 and is deleted), and **it is not a completeness proof** — it was seeded from the 2026-09-21 census plus a lexical sweep, and a reader assembled at run time is in neither. Two numbers in it checked themselves against the plan's own count, taken independently six days earlier: 29 of the `file_reads_doors.txt` rows are keyed to `main.rs` and 21 of those to a method the move takes, which is exactly what Appendix B records.
-**The permanent list is a type**, `bt_source::FileScoped`, and `Scope` has no constructor that takes a path — a scope naming a file has to name which of the three entries it is, and each entry's reason is the doc comment on its own variant. `scripts/check-portable-core.ps1` is entry 1, as the plan names it: the array it reads is declared beside `fn main`, which can never leave `main.rs`; it is the one gate that answers on a tree that does not compile; and what it pins *is* a list of file names. `scripts/check-vendor-notices.ps1` is entry 2, because "these files in this vendored copy are not upstream's" is a fact about files in the only sense there is one, in a tree this workspace's declarations do not describe. The tripwire itself is entry 3, because files are its whole subject.
+**The permanent list is a type**, `bt_source::FileScoped`, and `Scope` has no constructor that takes a path — a scope naming a file has to name one of its entries, and each entry's reason is the doc comment on its own variant. Since T-GATES-047 it has two entries: `scripts/check-vendor-notices.ps1`, because "these files in this vendored copy are not upstream's" is a fact about files in the only sense there is one, in a tree this workspace's declarations do not describe; and the tripwire itself, because files are its whole subject. The retired portable-core array reader is no longer an entry.
 **Two candidates were considered and refused, and the reasons are the useful part.** `bt_environment_doc_tests` reads `docs/BT-ENVIRONMENT.md` by name and its subject really is that document — but the entry would be keyed to `crates/bt-app/src/diagnostics.rs`, which also holds a directory walk that is genuine debt, and allowlisting the file would blind the guard to the debt beside the document. The document is safe because nothing moves it, not because a list says so. `scripts/check-adapter-boundary.ps1` reads as if its concern were `adapter.rs` and `cell_capture.rs`; it is not, it is the adapter *module*, and the day either file gains a submodule the gate stops covering it without a word. Both are on the debt list.
 **The tripwire is `crates/bt-source/tests/tripwire.rs`**, and it is plain text matching: no universe, no parse, no query layer. That is the point — it is the guard *against* the mechanism, so a bug in the mechanism must not be able to switch it off. It lives in `bt-source`'s integration tests rather than beside a door, because it has no door: `bt_platform`'s two workspace-walking guards are inline modules in the file that declares what they guard, and this one guards the workspace's source-reading itself, whose two lists are both this crate's business. It looks for four shapes in `.rs` and `.ps1` — an `include_str!` naming a `.rs` file, a path-shaped `.rs` literal handed to a path or read call inside a function that reads one, a `Scope::File` construction, and a directory read rooted at the manifest directory that picks files out by extension — and it matches **by file**, which is the granularity both lists have. Its limits are written into it rather than discovered later: comments are not stripped (an over-approximation is the safe direction), a reader split across two functions is seen only if both name the path, it reads no Python, and a second reader in a file that already has a row does not fire. It is proved by planting a reader of each of the four shapes in a temporary tree of its own — never a fixture in this repository, which would be a reader the list then had to carry — and requiring all four to be found and refused. Its own needles are assembled from halves, for `quiet_door_tests`' reason: spelled whole they would be readers in the file that looks for them.
 **`scripts/ci/check-migration-debt.ps1` is what keeps the direction.** It compares the list with `git merge-base HEAD origin/main` and fails on any added row; rows are compared whole and with multiplicity, so a duplicate is an addition, and the commented header is not compared so the prose above the list can be rewritten freely. It passes when there is nothing to compare against — no `origin/main`, no merge base, no list at the base, which is how the commit that introduces the list passes — and the two CI jobs that run it check out with `fetch-depth: 0` so that "nothing to compare against" cannot quietly become the normal case. It runs in `logic` beside the other gates and plants a row in `gates-can-fail`, because this repository has shipped a gate that could not fail and a green run means nothing until the red one has been seen.
@@ -13336,3 +13336,93 @@ The `osc_8_url_*` captured-span tests in `bt-transcript` pin the reported `https
 The claim takes `sweep.guard` shared with `LOCK_NB`. An exclusive sweep answers `ClaimRefusal::Sweeping` immediately; `persist::is_writer_of` does not memoise that transient answer, so the existing hand-over road runs and the next writer question asks again. The sweep's exclusive guard remains non-blocking too. No released build contains U-43's sweep without this guard; coexistence with a pre-guard sweep build is ruled out rather than supported by a second protocol.
 
 On Unix, `standard_error_is` follows the diagnostics path as `diagnostics::append_note` does, so a symlinked `diagnostics.log` is compared by the target's device and inode and each recovery line still has one writer. Pinned by `instance::tests::a_claim_never_meets_a_file_a_sweep_is_holding`, `persist::tests::a_sweep_is_never_remembered_as_a_claim_refusal`, `update_recover::tests::a_recovery_line_reaches_the_log_once_whatever_standard_error_is`, and its Unix symlink case `a_symlinked_log_path_is_the_same_standard_error_target`.
+
+### 2026-09-30 — Gates hold derived sets and stable properties, and tests whose own body waits on or measures the real clock are a shrink-only list the tree is held to (T-GATES-047)
+
+The 0.4.6 gate audit is the ruling. `Text` is declared once: the table macro
+emits both the enum and test-only `Text::ALL`, so an added variant cannot be
+absent from the language checks. That macro is the one item-constructing arm
+`bt-source`'s contract admits, and it admits it by shape: the arm may emit
+`pub enum Text` and an `impl Text` holding only `ALL`, and any other item in
+it — an `impl Runtime` beside the enum, a `fn` inside the `impl` — is refused
+(`contract::an_extra_item_inside_the_admitted_arm_is_refused`).
+`window_waits_tests::PINS` is a slice, not a length that changes with the
+registry. `EventKind::ALL` needs the same treatment, but its declaration is in
+the updater-owned `update_txn.rs`; this slice does not cross that week's file
+boundary, and slice 2 must derive it there.
+
+Every canary runs on every CI run. A path filter over the gate scripts was
+tried and withdrawn: a canary's red depends on the crate it plants into (an
+`#![allow(clippy::todo)]` there disarms the lint canary) and the Rust gates
+live in the crates, so the filter would have skipped exactly the run that shows
+a gate lost its teeth, and on a manual dispatch it compared only the last
+commit. The ignored-test canary follows the ordinary workspace test and plants
+its row in leaf crate `bt-lint-probe`, so it reuses the build, and the job
+without it costs minutes. The timing-list script's scratch suite is that gate's
+positive control. A manual dispatch of a `main` SHA is skipped, and runs of the
+same SHA share one non-cancelling concurrency group.
+
+The ownership census remains a query: inventory and site reports are written
+under `target/`. Its committed surfaces are the unknowns, whose whole rows can
+only disappear against the merge base, with multiplicity, so one removed row
+beside one planted row is refused though the count and the summed sites stay
+level; and the annotations, which keep census-1's `proposed_owner` column and
+its proposals — a ticket does not confirm an ownership proposal, the owner
+does. The `census` test requires a row for every proven multi-writer fact and
+none for anything else; `scripts/ci/check-census-unknowns.ps1` refuses an
+annotation row added against the merge base that names no owner or says
+"proposed". The rule to commit byte-equal inventory and site snapshots is
+retired, and with it the rule to repair their red by regeneration. What those
+snapshots caught and nothing now does: a second writer of a fact in the same
+module, and a sole writer that moves to another module.
+
+The wholly-test literal, its count, and the number word in its test name are
+retired. The same test keeps the property-bearing half: every Rust source file
+is reached by a declaration, and the two independent declaration walks agree.
+The tripwire keeps its independent floor — more than 150 readers found (195 today),
+or it did not read this workspace. The file-read manifest's per-site occurrence
+counts are retired: its rows stay keys — an item, or a file and a function for
+the rows still on MIGRATION-DEBT — compared as a set, so a second read inside an
+admitted item is not a new row; the lane each counting adapter charges is still
+checked.
+
+The portable-core script's `bt-app` half, its second reader, its reader-agreement
+test, and its script canary are retired; the Rust platform-file test owns that
+property. The script's portable-crate half remains a cheap local gate, while CI
+uses its macOS and Linux compiles, so the duplicate Windows CI invocation is
+retired. The duplicate macOS run of the text-only window-waits gate is retired.
+
+The bare-site gate no longer keys history by file, item or function and no
+longer accepts a movable seed: it compares totals per `(crate, effect entry)`
+with the merge base. Its rule to pin `clippy.toml` byte hashes is retired; the
+configuration fence keeps only the allowed locations and the refusal of
+`CLIPPY_CONF_DIR`. A registry row now cites a DESIGN date whose dated heading
+must actually exist, rather than text merely shaped like a citation.
+
+`docs/plans/TIMING-BOUND-TESTS.tsv` names every `#[test]` function whose own
+body — not a function it calls — waits on the real clock through a stable
+standard-library wait (`sleep`, `sleep_ms`, `recv_timeout`, `wait_timeout`,
+`wait_timeout_ms`, `wait_timeout_while`, `park_timeout`, `park_timeout_ms`) or
+measures it (`elapsed`), with its target, crate, wall-clock assumption and the
+seam that removes it. The first version attributed clock calls to the nearest
+test above them and listed source-reading tests for a product function's
+`Instant`; it was rebuilt from test bodies. The scan matches the called name,
+not the callee, so the same test asserts that no workspace function or method
+is declared by a trigger's name: `focus_thumb`'s controlled `CardLoop::sleep_until`
+had put two deterministic tests on the list, `sleep_until` (not a stable
+`std::thread` item) is no trigger, and a future helper named like one is a
+finding to rename, not a silent row.
+`bt-source`'s `timing` test holds the tree to the list both ways — an unlisted
+timing-bound test and a row naming no such test are red — and
+`scripts/ci/check-timing-bound.ps1` lets whole rows only disappear against the
+merge base, so a new test that waits on the clock is refused either way. Two
+things the scan does not see are review's to find: a clock reached only through
+a helper or product function the test calls, and a measurement written as
+`Instant::now() - start`. `Instant` and `Duration` as values are not the clock;
+most tests build controlled clocks from them. The session-receipt test now waits
+for the writer's event, the no-answer hand-off test drives an already-overdue
+look and waits for the detached worker's entered event, and the U-37 starter
+exclusion uses its zero-grace controlled-clock limit. The named every-road
+failure-window test was already a source-property test with no clock and
+remains so. The other timing-bound tests are listed, not converted, in this
+slice.

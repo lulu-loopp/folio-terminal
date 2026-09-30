@@ -7,8 +7,9 @@
 //! 1. **The ten duplicated conditional identities** of §2.4, *regenerated*
 //!    from the index and compared with the plan's list — so an eleventh is a red
 //!    test and not a surprise in P3.
-//! 2. **The macro facts of §2.7**: two `macro_rules!` definitions in `bt-app`,
-//!    neither of them constructing an item; no source inclusion, no
+//! 2. **The macro facts of §2.7**: three `macro_rules!` definitions in
+//!    `bt-app`, one of them constructing items — exactly the `Text` enum and
+//!    its test list, nothing else in that arm; no source inclusion, no
 //!    `module_path!`, no `compile_error!`; one line-number invocation, in the
 //!    item the plan names.
 //! 3. **Needle provenance** (§2.6), in both of its cases, with the needles
@@ -186,19 +187,22 @@ fn the_identities_bt_app_declares_twice_are_the_ten() {
 
 // ── §2.7 — the macro facts about today's tree ─────────────────────────────
 
-/// RED — **the two `macro_rules!` definitions in `bt-app`, and the shapes the
+/// RED — **the three `macro_rules!` definitions in `bt-app`, and the shapes the
 /// traversal cannot classify.**
 ///
 /// §2.7's claim is that the mechanism outlives 2a, so the facts it rests on are
-/// asserted rather than remembered: `psreadline::asset` and
-/// `shell_integration::profile_marks::managed_line` are the two definitions,
-/// neither constructs an item (so neither can be making a `Runtime` method that
-/// this index does not hold), and the only invocation shapes reported are the
-/// ones listed below.
+/// asserted rather than remembered: `i18n::text_entries` constructs exactly
+/// the `Text` enum and an `impl Text` holding only its test list `ALL` (checked
+/// token by token in [`the_text_declaration_and_nothing_else`]), while
+/// `psreadline::asset` and `shell_integration::profile_marks::managed_line`
+/// construct no item — so no macro can be making a `Runtime` method that this
+/// index does not hold; the only invocation shapes reported are the ones listed
+/// below.
 ///
 /// MUTATION: write a `macro_rules!` arm in `bt-app` that expands to a `fn` and
-/// the `ItemConstructingArm` assertion goes red; add an `include!` and the
-/// source-inclusion one does.
+/// the `ItemConstructingArm` assertion goes red; add an `impl Runtime { … }` (or
+/// a `fn` inside `impl Text`) to `text_entries!`'s own arm and the exception's
+/// check does; add an `include!` and the source-inclusion one does.
 #[test]
 fn the_macro_facts_of_this_tree_are_asserted() {
     let index = bt_app();
@@ -211,8 +215,8 @@ fn the_macro_facts_of_this_tree_are_asserted() {
         .collect();
     assert_eq!(
         definitions,
-        ["asset", "managed_line"],
-        "bt-app has exactly two `macro_rules!` definitions"
+        ["text_entries", "asset", "managed_line"],
+        "bt-app has exactly the three named `macro_rules!` definitions"
     );
 
     let mut by_shape: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -234,11 +238,29 @@ fn the_macro_facts_of_this_tree_are_asserted() {
         MacroShape::SourceInclusion,
         MacroShape::ModulePath,
         MacroShape::CompileError,
-        MacroShape::ItemConstructingArm,
     ] {
         assert!(
             !by_shape.contains_key(&format!("{absent:?}")),
             "bt-app has no {absent:?} today: {by_shape:#?}"
+        );
+    }
+
+    let item_arms: Vec<&bt_source::UnsupportedMacroShape> = index
+        .unsupported_macro_shapes()
+        .iter()
+        .filter(|reported| reported.shape == MacroShape::ItemConstructingArm)
+        .collect();
+    assert_eq!(
+        item_arms.len(),
+        1,
+        "`text_entries!` is the one item-constructing arm: {:#?}",
+        by_shape.get(&format!("{:?}", MacroShape::ItemConstructingArm))
+    );
+    if let Err(why) = the_text_declaration_and_nothing_else(&item_arms[0].spelling) {
+        panic!(
+            "the one admitted item-constructing arm emits more than the `Text` enum and its \
+             test list ({why}):\n{}",
+            item_arms[0].spelling
         );
     }
 
@@ -254,6 +276,143 @@ fn the_macro_facts_of_this_tree_are_asserted() {
         "done_with_the_powershell_row_off_removes_nothing_and_says_nothing",
         "the single line-number invocation is where §2.7 says it is"
     );
+}
+
+/// `Ok` when `arm` — an item-constructing arm's expansion as the index spells
+/// it, braces included — emits exactly two items: `pub enum Text { … }` and an
+/// `impl Text { … }` whose body is one item, the `ALL` constant.
+///
+/// **This is the whole of the exception.** `ItemConstructingArm` is reported
+/// because the item a macro makes is not in the index, so a query for it
+/// answers "not declared" and the census cannot see its writes. The `Text` enum
+/// and its test list are admitted by shape: another item written beside them in
+/// the same arm is an item the index does not hold, and it is refused here as it
+/// would be in an arm of its own.
+fn the_text_declaration_and_nothing_else(arm: &str) -> Result<(), String> {
+    use proc_macro2::{Delimiter, TokenStream, TokenTree};
+    use std::str::FromStr;
+
+    /// One item at the top level of a token stream: the tokens before its body,
+    /// and its brace body if it has one. Attributes — doc comments included,
+    /// which the lexer turns into `#[doc = …]` — are skipped.
+    struct Item {
+        head: Vec<String>,
+        body: Option<TokenStream>,
+    }
+
+    fn items(stream: TokenStream) -> Result<Vec<Item>, String> {
+        let trees: Vec<TokenTree> = stream.into_iter().collect();
+        let mut found = Vec::new();
+        let mut at = 0;
+        while at < trees.len() {
+            if matches!(&trees[at], TokenTree::Punct(hash) if hash.as_char() == '#') {
+                match trees.get(at + 1) {
+                    Some(TokenTree::Group(group)) if group.delimiter() == Delimiter::Bracket => {
+                        at += 2;
+                        continue;
+                    }
+                    _ => return Err("a `#` that opens no attribute".to_owned()),
+                }
+            }
+            let mut head = Vec::new();
+            let mut body = None;
+            while at < trees.len() {
+                let tree = &trees[at];
+                at += 1;
+                match tree {
+                    TokenTree::Group(group) if group.delimiter() == Delimiter::Brace => {
+                        body = Some(group.stream());
+                        break;
+                    }
+                    TokenTree::Punct(semicolon) if semicolon.as_char() == ';' => break,
+                    other => head.push(other.to_string()),
+                }
+            }
+            found.push(Item { head, body });
+        }
+        Ok(found)
+    }
+
+    let stream = TokenStream::from_str(arm).map_err(|error| format!("it does not lex: {error}"))?;
+    let trees: Vec<TokenTree> = stream.into_iter().collect();
+    let inside = match trees.as_slice() {
+        [TokenTree::Group(group)] if group.delimiter() == Delimiter::Brace => group.stream(),
+        _ => return Err("it is not one braced expansion".to_owned()),
+    };
+    let emitted = items(inside)?;
+    let heads: Vec<String> = emitted.iter().map(|item| item.head.join(" ")).collect();
+    let [enumeration, list] = emitted.as_slice() else {
+        return Err(format!("it emits {} items: {heads:?}", emitted.len()));
+    };
+    if enumeration.head != ["pub", "enum", "Text"] || enumeration.body.is_none() {
+        return Err(format!(
+            "its first item is not `pub enum Text {{ … }}`: {heads:?}"
+        ));
+    }
+    if list.head != ["impl", "Text"] {
+        return Err(format!(
+            "its second item is not `impl Text {{ … }}`: {heads:?}"
+        ));
+    }
+    let members = items(list.body.clone().unwrap_or_default())?;
+    let member_heads: Vec<String> = members.iter().map(|item| item.head.join(" ")).collect();
+    match members.as_slice() {
+        [constant]
+            if constant.body.is_none()
+                && constant.head.len() >= 3
+                && constant.head[..3] == ["pub", "const", "ALL"] =>
+        {
+            Ok(())
+        }
+        _ => Err(format!(
+            "`impl Text` holds more than the `ALL` list: {member_heads:?}"
+        )),
+    }
+}
+
+/// RED (T-GATES-047) — **an item planted inside the admitted arm is refused**,
+/// beside the `Text` enum or inside its `impl`.
+///
+/// The exception for `text_entries!` is a statement about what the arm emits,
+/// so the check runs on the real arm and on the real arm with one more item in
+/// it. An `impl Runtime` written there would make a method, with writes the
+/// census cannot see, that no query of this index could find.
+///
+/// MUTATION: in `the_text_declaration_and_nothing_else`, match
+/// `[enumeration, list, ..]` instead of `[enumeration, list]` and the first
+/// planted arm is accepted.
+#[test]
+fn an_extra_item_inside_the_admitted_arm_is_refused() {
+    let index = bt_app();
+    let arm = &index
+        .unsupported_macro_shapes()
+        .iter()
+        .find(|reported| reported.shape == MacroShape::ItemConstructingArm)
+        .expect("`text_entries!` is an item-constructing arm")
+        .spelling;
+    assert_eq!(the_text_declaration_and_nothing_else(arm), Ok(()));
+
+    let close = arm.rfind('}').expect("the expansion is braced");
+    let beside = format!(
+        "{}\n        impl Runtime {{ fn planted(&mut self) {{ self.window.title = String::new(); }} }}\n{}",
+        &arm[..close],
+        &arm[close..]
+    );
+    let refused = the_text_declaration_and_nothing_else(&beside)
+        .expect_err("an `impl Runtime` beside the enum is an item the index does not hold");
+    assert!(refused.contains("3 items"), "{refused}");
+
+    let list = arm
+        .find("pub const ALL")
+        .expect("the test list is in the arm");
+    let inside = format!(
+        "{}fn planted() {{}}\n            {}",
+        &arm[..list],
+        &arm[list..]
+    );
+    let refused = the_text_declaration_and_nothing_else(&inside)
+        .expect_err("a `fn` inside `impl Text` is an item the index does not hold");
+    assert!(refused.contains("more than the `ALL` list"), "{refused}");
 }
 
 /// RED — **a name written inside a macro is in the index**, which is the

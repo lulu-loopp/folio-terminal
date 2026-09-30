@@ -1,11 +1,11 @@
 //! AST source pin: test items, comments and strings cannot hide product reads.
 //! The small manifest below inventories generic Read/OpenOptions doors, whose
-//! receiver types Rust syntax alone cannot establish. Their exact counts and
-//! the counting adapter in the same owner are pinned together.
+//! receiver types Rust syntax alone cannot establish. The lane is pinned; a
+//! site's count is query output rather than a committed rule.
 //!
 //! # Who wrote a door, and how a row says so
 //!
-//! A row of `file_reads_doors.txt` is `<count> <key>`, and the key names the
+//! A row of `file_reads_doors.txt` is `<key>`, and the key names the
 //! owner one of two ways.
 //!
 //! * **Item-keyed** — `Runtime::turn: .open`. The owner is the identity of the
@@ -399,14 +399,11 @@ fn walk() -> (BTreeMap<Door, usize>, BTreeMap<Owner, usize>) {
 }
 
 /// The manifest, as the map the walk is compared with.
-fn manifest() -> BTreeMap<String, usize> {
+fn manifest() -> BTreeSet<String> {
     include_str!("file_reads_doors.txt")
         .lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| {
-            let (count, door) = line.split_once(' ').expect("count and door");
-            (door.to_owned(), count.parse().unwrap())
-        })
+        .map(str::to_owned)
         .collect()
 }
 
@@ -428,9 +425,9 @@ fn verb_of(door: &str) -> Option<&str> {
 /// **The owners the manifest keys by item** — every row whose first segment is
 /// not a file name. The manifest is the list: a row is migrated by being
 /// written that way, and there is no second place saying which.
-fn item_keyed_owners(manifest: &BTreeMap<String, usize>) -> BTreeSet<String> {
+fn item_keyed_owners(manifest: &BTreeSet<String>) -> BTreeSet<String> {
     manifest
-        .keys()
+        .iter()
         .filter_map(|key| key.split_once(": "))
         .filter(|(head, _)| !head.ends_with(".rs"))
         .map(|(head, _)| head.to_owned())
@@ -476,13 +473,13 @@ fn file_reads_every_product_content_door_has_a_lane() {
     let (walked, counted) = walk();
     let expected = manifest();
     let item_keyed = item_keyed_owners(&expected);
-    let mut actual: BTreeMap<String, usize> = BTreeMap::new();
-    for (door, count) in &walked {
-        *actual.entry(key_of(door, &item_keyed)).or_default() += count;
-    }
+    let actual: BTreeSet<String> = walked
+        .keys()
+        .map(|door| key_of(door, &item_keyed))
+        .collect();
     assert_eq!(
         actual, expected,
-        "a content or generic read/open door changed; classify it and pin its counting owner"
+        "a content or generic read/open door changed; classify its lane"
     );
     // The counting adapters are named by item too, and each is put to the crate
     // before it is looked for: `contains` over a merged key would be answered

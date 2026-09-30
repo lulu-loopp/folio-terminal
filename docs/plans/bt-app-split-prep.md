@@ -583,7 +583,7 @@ that lands removes rows.
 | **P7** | **`the_shell_page_is_gone`**: make it recursive, migrate it, ship its file-set diff. Run it recursively on a scratch branch **first**. | **5–10** | the diff names the three added directories with a reason each; if the recursive reading finds a real violation, that is a product ticket and this one does not narrow to hide it |
 | **P8** | The two latent non-recursive walkers — `bt_render::…::crate_sources` and `bt-layout`'s `tests/red_lines.rs::sources` — one ticket. | **2–4** | empty file-set diff expected and shown; a planted file in a new subdirectory of each crate is picked up |
 | **P9** | The child-process completion proof: a zero-match child selector must be loud, not silently green. | **2–3** | a deliberately mis-aimed selector goes red |
-| **P10** | `scripts/check-portable-core.ps1` and its Rust counterpart: add the agreement test `the_gate_and_its_script_walk_the_same_files`. The script's array reader is **unchanged** — `fn main` can never leave `main.rs`, strict 2a does not move the array, and the script is the one gate that runs in five seconds on a tree that does not compile. It is allowlist entry 1. | *inside P2's 4–6* | both readers green in both directions with the array untouched; the agreement test fails if either walk changes |
+| **P10 — narrowed by T-GATES-047** | Migrate the one remaining Rust directory walk in `platform_gate_tests`; the script's former `bt-app` array reader and its agreement twin were retired, while the portable-crate half remains a separate cheap local check. | *inside P2's 4–6* | the Rust platform test owns the `bt-app` property until migrated; macOS/Linux compilation owns the CI portability property |
 
 ### 6.4 First half — the move
 
@@ -674,6 +674,11 @@ The twelve wholly-test files, by the declaration that makes each one:
 
 **A twenty-first since 2026-09-27** (0.4.6 ticket U-23): `update_apply_windows.rs` declares `#[cfg(test)] #[path = "update_apply_windows_tests.rs"] mod tests;` — the Windows applier's and recovery's tests over real install folders, programs signed by U-15's test root, real locks, a real claim, real moves and real synthetic processes — which makes `update_apply_windows_tests.rs` wholly test. The test is now `the_wholly_test_files_of_bt_app_are_the_twenty_one`.
 
+**The literal and number-word rule is retired in 0.4.7 (T-GATES-047).**
+`bt-source` still derives wholly-test files while traversing declarations, but
+the gate now keeps only file coverage: every `.rs` file is reached by a
+declaration and both independent declaration walks agree.
+
 ---
 
 ## 7. The end measurement
@@ -699,9 +704,9 @@ Run at the prep tip, not carried from P0:
 
 ### 7.2 List state
 
-MIGRATION-DEBT is **empty** (P20). The allowlist has at most four entries, each
-with a written reason, and entry 1 is `scripts/check-portable-core.ps1`'s array
-reader. The tripwire is green.
+MIGRATION-DEBT is **empty** (P20). The allowlist has at most three entries, each
+with a written reason; the retired `scripts/check-portable-core.ps1` array reader
+is not one of them. The tripwire is green.
 
 ### 7.3 The dry run (P11)
 
@@ -719,9 +724,10 @@ reader. The tripwire is green.
 4. **Re-run the mutation tables** of every guard whose subject moved. This is
    the only step that catches a guard that was green before and is green after
    for a different reason.
-5. `platform_gate_tests::only_the_named_files_decide_what_platform_this_is` and
-   `scripts/check-portable-core.ps1` both green with the array untouched — the
-   proof that strict 2a moves no platform `cfg`. Plant a needle in
+5. `platform_gate_tests::only_the_named_files_decide_what_platform_this_is` is
+   green with the array untouched — the proof that strict 2a moves no platform
+   `cfg`. `scripts/check-portable-core.ps1` separately checks the portable
+   crates for local work. Plant a needle in
    `runtime/quake.rs` and require `the_shell_page_is_gone` to go red — the proof
    that its repaired recursion reaches a new directory.
 6. Confirm no guard still on the debt list changed verdict. If one did, its row
@@ -980,7 +986,7 @@ Re-counted on `main` at `1f1d2daa`.
 | Methods in those blocks | 1,390, all distinct names |
 | Combined block lines | 68,206 |
 | Files / lines under `crates/bt-app/src` | 124 / 498,804 |
-| Wholly-test files in `bt-app` | 12 |
+| Wholly-test files in `bt-app` | derived by `bt-source`; no committed literal or count |
 | `#[test]` attributes under `crates/bt-app` | 4,170 |
 | `scripts/ci/ignored-tests.txt` non-comment entries | 35 |
 | `FILES_THAT_MAY_NAME_A_PLATFORM` | `[&str; 15]` |
@@ -1001,7 +1007,7 @@ Re-counted on `main` at `1f1d2daa`.
 | Source-text directory walks | 9, of which 3 non-recursive |
 | Parser-based source consumers | 3 |
 | PowerShell gates that read `.rs` text | 5, of which 1 names `main.rs` |
-| `file_reads_doors.txt` rows | 91, of which 29 keyed `main.rs`, 21 keyed to a moving method |
+| `file_reads_doors.txt` rows | admitted item/lane keys only; per-site counts retired |
 | Duplicated conditional callable identities | 11 identities, 22 declarations |
 
 The 96 unresolved selectors are why P0 is priced above a pure inventory: they

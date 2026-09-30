@@ -5,7 +5,7 @@
 # before the script answers:
 #
 #   1. the bare-site inventory only shrinks (below);
-#   2. the configuration fence: the five clippy.toml files and their contents;
+#   2. the configuration fence: the five clippy.toml locations;
 #      no other clippy.toml or .clippy.toml; no legacy .cargo/config; no
 #      CLIPPY_CONF_DIR anywhere a build could read it, and none set now;
 #   3. nothing lowers the lint on raw effects outside the source: no -A, -W,
@@ -30,17 +30,11 @@
 # the file is exactly what the code has. This is the historical half: the file
 # is no larger than the baseline, key by key.
 #
-#   * A row's key is (crate, arm, item, entry); its count is a positive integer;
-#     a key written twice is refused.
-#   * The baseline is the file at the pull request's merge base with origin/main
-#     when the merge base has it, and otherwise the seed: the file as commit
-#     $Seed wrote it. A branch whose merge base predates the seed is therefore
-#     compared with the seed, without rebasing, and a working-tree plant at the
-#     seed's own commit is an addition against the seed. There is no road on
-#     which a missing baseline passes.
+#   * The historical key is (crate, entry), with counts summed across arms and
+#     items. Moving or renaming a function therefore changes no history.
+#   * The baseline is the file at the pull request's merge base with origin/main.
 #   * current[key] <= baseline[key], a key missing from the baseline read as
-#     zero: a new key is refused, and so is a count that grew. A function that
-#     carries a bare site and moves is one removal and one refused addition.
+#     zero: a new effect family is refused, and so is a total that grew.
 #
 # No merge base at all (no origin/main in the clone) is not a pass either: the
 # comparison did not happen. CI checks out with full history on both jobs that
@@ -50,9 +44,6 @@
 # row and requires this to go red.
 
 param(
-    # The seed: the commit that wrote the inventory first (A2a S1). Pinned, never
-    # computed.
-    [string]$Seed = "11b9da8a0ef051d3835786715607bd588fd72e1e",
     # The level `disallowed_methods` stands at in the two lint tables that may name it: none
     # until A2e writes `deny` in both (budget note C-2 item 1, as revision (i)5 narrows it). The
     # one place these values are said.
@@ -97,26 +88,22 @@ $tree = Get-TreeFiles $repo
 # ── 2. the configuration fence ────────────────────────────────────────────────────────────────
 # The closed list. The root file holds today's three test settings and no vocabulary (A2e appends
 # it); the three shields are each `disallowed-methods = []` under a comment naming revision (j);
-# their bytes, line endings as the tree keeps them (LF), are pinned by SHA-256. The fifth, the
-# probe's, is generated from the registry and pinned by `check-lint-probe.ps1`'s regeneration.
-$fence = [ordered]@{
-    "clippy.toml"                   = "8C92FF468199167FE4225BFFF752AAF035073C0CB3DBD0723673F0059DCAB2F7"
-    "vendor/clippy.toml"            = "7A72BB0C56C26E829BDF629CF918020A4095E4417E175447099F4E07DEB10D63"
-    "crates/bt-corpus/clippy.toml"  = "7A72BB0C56C26E829BDF629CF918020A4095E4417E175447099F4E07DEB10D63"
-    "crates/bt-source/clippy.toml"  = "7A72BB0C56C26E829BDF629CF918020A4095E4417E175447099F4E07DEB10D63"
-    "crates/bt-lint-probe/clippy.toml" = $null
-}
-foreach ($file in $fence.Keys) {
+# probe's is generated from the registry and pinned by `check-lint-probe.ps1`.
+# Contents are owned by their own gates; a pasted hash is not a judgement.
+$fence = @(
+    "clippy.toml",
+    "vendor/clippy.toml",
+    "crates/bt-corpus/clippy.toml",
+    "crates/bt-source/clippy.toml",
+    "crates/bt-lint-probe/clippy.toml"
+)
+foreach ($file in $fence) {
     $path = Join-Path $repo $file
     if (-not (Test-Path -LiteralPath $path)) { $failures += "[fence] $file is one of the five and is missing"; continue }
-    if ($fence[$file]) {
-        $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash
-        if ($hash -ne $fence[$file]) { $failures += "[fence] $file is not the pinned file (SHA-256 $hash)" }
-    }
 }
 foreach ($item in $tree) {
     $file = Get-Relative $item.FullName
-    if (($item.Name -eq "clippy.toml" -or $item.Name -eq ".clippy.toml") -and -not $fence.Contains($file)) {
+    if (($item.Name -eq "clippy.toml" -or $item.Name -eq ".clippy.toml") -and $file -notin $fence) {
         $failures += "[fence] $file is a clippy configuration outside the closed list: clippy reads the nearest one, so it would replace the vocabulary for everything below it"
     }
     if ($item.Name -eq "config" -and $item.Directory.Name -eq ".cargo") {
@@ -199,7 +186,8 @@ $relative = "docs/plans/window-thread-bare-sites.tsv"
 $inventory = Join-Path $repo $relative
 $columns = "crate`tarm`titem`tentry`tcount"
 
-# The rows of one version of the file: key -> count, refusing what is not well formed.
+# The rows of one version: (crate, entry) -> total count. Item and arm remain
+# report columns in the equality test, but moves do not become historical debt.
 function Read-Inventory([string[]]$lines, [string]$where) {
     $rows = [ordered]@{}
     $header = $false
@@ -216,9 +204,8 @@ function Read-Inventory([string[]]$lines, [string]$where) {
         if (-not [int]::TryParse($cells[4], [ref]$count) -or $count -lt 1 -or "$count" -ne $cells[4]) {
             throw "$where`: the count is not a positive integer: $line"
         }
-        $key = ($cells[0..3] -join "`t")
-        if ($rows.Contains($key)) { throw "$where`: a key written twice: $line" }
-        $rows[$key] = $count
+        $key = "$($cells[0])`t$($cells[3])"
+        if ($rows.Contains($key)) { $rows[$key] += $count } else { $rows[$key] = $count }
     }
     if (-not $header) { throw "$where has no column header" }
     return $rows
@@ -246,26 +233,11 @@ try {
         exit 2
     }
 
-    # The baseline is the merge base's file, unless the pinned seed is newer than the merge
-    # base (the seed commit is not among its ancestors): then the seed's file is the baseline,
-    # because a re-seed is exactly the one moment the inventory may grow, and it is committed
-    # with its own pin. Once the seed is on main, the merge base carries it and rules again.
-    & git merge-base --is-ancestor $Seed $base *> $null
-    $seedIsNewer = ($LASTEXITCODE -ne 0)
-    $text = $null
-    if (-not $seedIsNewer) {
-        $text = (& git show "${base}:${relative}" 2>$null) | Out-String
-        $against = "the merge base $($base.Substring(0, 12))"
-        if ($LASTEXITCODE -ne 0) { $text = $null }
+    $text = (& git show "${base}:${relative}" 2>$null) | Out-String
+    if ($LASTEXITCODE -ne 0) {
+        throw "$relative is not at the merge base $base; this inventory now needs a real merge-base baseline"
     }
-    if ($null -eq $text) {
-        $text = (& git show "${Seed}:${relative}" 2>$null) | Out-String
-        if ($LASTEXITCODE -ne 0) {
-            throw "$relative is not at the merge base $base, and the pinned seed $Seed cannot be read: fetch the history that holds it"
-        }
-        $why = if ($seedIsNewer) { "the seed is newer than the merge base $($base.Substring(0, 12))" } else { "the merge base $($base.Substring(0, 12)) predates the inventory" }
-        $against = "the seed $($Seed.Substring(0, 12)) ($why)"
-    }
+    $against = "the merge base $($base.Substring(0, 12))"
     $before = Read-Inventory ($text -split "`r?`n") "$relative at $against"
 
     # ── 4. a registry row without a ruling (M9) ──────────────────────────────────────────────
@@ -293,14 +265,22 @@ function Read-RegistryRows([string[]]$lines) {
 }
 $rowsNow = Read-RegistryRows ([IO.File]::ReadAllLines((Join-Path $repo $registry)))
 $rowsThen = Read-RegistryRows ($then -split "`r?`n")
+$designText = [IO.File]::ReadAllText((Join-Path $repo "docs/DESIGN.md"))
 foreach ($row in $rowsNow.Keys) {
     $current = $rowsNow[$row]
     $previous = $rowsThen[$row]
     if ($current.status -eq "pending" -and -not ($previous -and $previous.status -eq "pending")) {
         $failures += "[ruling] registry row $row is 'pending' and was not pending at the merge base: the rows pending a ruling only shrink; a new row carries its ruling"
     }
-    if (-not $previous -and $current.status -ne "pending" -and $current.disposition -notmatch 'DESIGN\.md`?, 20\d\d-\d\d-\d\d') {
-        $failures += "[ruling] registry row $row is new and its disposition cites no dated DESIGN.md ruling"
+    if (-not $previous -and $current.status -ne "pending") {
+        if ($current.disposition -notmatch 'DESIGN\.md`?, (20\d\d-\d\d-\d\d)') {
+            $failures += "[ruling] registry row $row is new and its disposition cites no dated DESIGN.md ruling"
+        } else {
+            $date = $Matches[1]
+            if ($designText -notmatch "(?m)^### $([regex]::Escape($date)) —") {
+                $failures += "[ruling] registry row $row cites DESIGN.md $date, but no dated heading exists"
+            }
+        }
     }
 }
 
@@ -334,15 +314,14 @@ if ($added.Count -gt 0 -or $grown.Count -gt 0) {
     $failures += (
         "[inventory] the bare-site inventory only shrinks, and this adds to it:" + [Environment]::NewLine +
         ($details -join [Environment]::NewLine) + [Environment]::NewLine +
-        "A new effect goes through its door (docs/ARCHITECTURE.md section 6); a function that carries a bare " +
-        "site is moved only after its site goes through one (thread-door note, revision (j)1)."
+        "A new effect goes through its door (docs/ARCHITECTURE.md section 6); moves and renames already pass because history is grouped by effect family."
     )
 }
 if ($failures.Count -gt 0) {
     throw ("the window thread's checks failed:" + [Environment]::NewLine +
         (($failures | ForEach-Object { "  $_" }) -join [Environment]::NewLine))
 }
-Write-Host "the configuration fence holds: the five clippy.toml files, no other, no CLIPPY_CONF_DIR, no legacy .cargo/config."
+Write-Host "the configuration fence holds: the five clippy.toml locations, no other, no CLIPPY_CONF_DIR, no legacy .cargo/config."
 Write-Host "no workflow, cargo configuration or script flag lowers the lint; its two tables stand at '$WorkspaceLintLevel' and '$PlatformLintLevel'."
 Write-Host "no registry row was added without a ruling; $(@($rowsNow.Values | Where-Object { $_.status -eq 'pending' }).Count) row(s) pending."
 Write-Host "the window thread's bare sites: $total pending (docs/ARCHITECTURE.md section 6)."

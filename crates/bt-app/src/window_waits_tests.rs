@@ -1713,7 +1713,7 @@ const LANDMARKS: [(&str, &[&str]); 4] = [
 /// transaction since U-23; the sixth, the Windows applier's, U-23). B-ENDSESSION adds the
 /// system's end's write step, `exiting` then `quit_abandoned` around the one admitted wait in
 /// `session_end::settle` (the quit's `Write` on the held document; nothing is torn down).
-const PINS: [Pin; 15] = [
+const PINS: &[Pin] = &[
     Pin {
         writer: "enter_window_thread",
         owner: "bt-app crate::main",
