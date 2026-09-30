@@ -37,6 +37,17 @@
     answers 409, the script exits 3, names what both repositories hold, and
     the record still holds both saved files.
     MUTATION: in step 4, `exit 1` in place of `exit $incidentExit`.
+
+    **apply_again_over_both_applied_leaves_the_record_alone** — `-Apply` run a
+    second time over a pair it already wrote exits 0, writes nothing, and does
+    not rewrite the record.
+    MUTATION: drop the early `exit 0` when both already hold this release's file.
+
+    **apply_again_over_one_applied_keeps_the_earlier_before** — after an
+    incident left the tap with this release's file and the bucket with its old
+    one, `-Apply` again writes only the bucket, keeps the tap's file from before
+    out of the earlier record, and `-Revert` then puts both back to it.
+    MUTATION: in `New-Entry`, drop the assignment of `$kept.Before`.
 #>
 [CmdletBinding()]
 param()
@@ -303,6 +314,48 @@ try {
     Check ($run.Text -notmatch 'nothing published; both manifests are back') 'write-back 409: does not say both are back'
     Check ((Get-Held $case $tap) -ceq $third) 'write-back 409: the other edit to the tap is not written over'
     Check-Record $case 'write-back 409'
+
+    # ── apply_again_over_both_applied_leaves_the_record_alone ─────────────────
+    $case = New-Case 'both-applied' @()
+    $run = Invoke-Apply $case
+    Check ($run.Exit -eq 0) "both applied: the first -Apply exits 0 ($($run.Exit))"
+    $saved = [IO.File]::ReadAllBytes($case.Record)
+    $stamp = (Get-Item -LiteralPath $case.Record).LastWriteTimeUtc
+    $puts = @(Get-Calls $case | Where-Object { $_ -like 'PUT *' }).Count
+    Start-Sleep -Milliseconds 50
+    $run = Invoke-Apply $case
+    Check-StandIn $case 'both applied'
+    Check ($run.Exit -eq 0) "both applied: -Apply again exits 0 ($($run.Exit))"
+    Check ($run.Text -match 'already applied; the record is left as it is') 'both applied: says already applied and the record is left as it is'
+    Check (@(Get-Calls $case | Where-Object { $_ -like 'PUT *' }).Count -eq $puts) 'both applied: -Apply again writes nothing'
+    Check ((Get-Item -LiteralPath $case.Record).LastWriteTimeUtc -eq $stamp -and
+        [Convert]::ToBase64String([IO.File]::ReadAllBytes($case.Record)) -ceq [Convert]::ToBase64String($saved)) `
+        'both applied: the record is not rewritten'
+    Check-Record $case 'both applied'
+
+    # ── apply_again_over_one_applied_keeps_the_earlier_before ─────────────────
+    # An incident run: the tap lands, the bucket fails, the tap's put-back fails.
+    $case = New-Case 'one-applied' @(
+        [pscustomobject]@{ Method = 'PUT'; Target = $bucket; N = 1; Action = 'fail' },
+        [pscustomobject]@{ Method = 'PUT'; Target = $tap; N = 2; Action = 'fail' })
+    $run = Invoke-Apply $case
+    Check ($run.Exit -eq 3) "one applied: the first run is an incident ($($run.Exit))"
+    Check ((Get-Held $case $tap) -cne $before[$tap] -and (Get-Held $case $bucket) -ceq $before[$bucket]) `
+        'one applied: the tap holds this release''s file and the bucket its old one'
+    $tapPuts = @(Get-Calls $case | Where-Object { $_ -like "PUT $tap *" }).Count
+    $bucketPuts = @(Get-Calls $case | Where-Object { $_ -like "PUT $bucket *" }).Count
+    $run = Invoke-Apply $case
+    Check-StandIn $case 'one applied'
+    Check ($run.Exit -eq 0) "one applied: -Apply again exits 0 ($($run.Exit))"
+    Check ($run.Text -match 'Casks/folio\.rb — already holds Folio 9\.8\.7''s file .*kept from the earlier record') `
+        'one applied: says the tap already holds this release''s file'
+    Check (@(Get-Calls $case | Where-Object { $_ -like "PUT $tap *" }).Count -eq $tapPuts) 'one applied: the tap is not written again'
+    Check (@(Get-Calls $case | Where-Object { $_ -like "PUT $bucket *" }).Count -eq $bucketPuts + 1) 'one applied: the bucket is written'
+    Check ((Get-Held $case $tap) -cne $before[$tap] -and (Get-Held $case $bucket) -cne $before[$bucket]) 'one applied: both hold this release''s files'
+    Check-Record $case 'one applied'
+    $run = Invoke-Script $case @('-Revert', $case.Record)
+    Check ($run.Exit -eq 0) "one applied: -Revert exits 0 ($($run.Exit))"
+    Check-BothBack $case 'one applied, reverted'
 }
 finally {
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue

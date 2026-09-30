@@ -607,9 +607,10 @@ it was — and steps 5 and 7 close it if the release does not go out.
    It writes the saved files back over the blob ids step 4 left and reads both
    back: exit 0 and *both manifests are back to what they were*, or exit 3, the
    same release incident. It leaves a repository that already holds its saved
-   file alone, so running it again is harmless. **Do not run `-Apply` again over
-   an applied pair instead**: it would save what the repositories hold then,
-   which is this release's files, as the record.
+   file alone, so running it again is harmless. `-Apply` run again is harmless
+   too: over a pair it already wrote it says *already applied; the record is left
+   as it is* and exits 0; over one file it already wrote it writes only the
+   other, and keeps that file's saved bytes from the earlier record.
 8. **winget.** Once the page is published: the version's folder under
    `packaging/winget/manifests/`, validated, and a pull request to
    `microsoft/winget-pkgs` — **winget ▸ What to change for a release**,

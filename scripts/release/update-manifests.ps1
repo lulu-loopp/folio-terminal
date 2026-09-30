@@ -104,6 +104,11 @@
        now, and the record to restore from by hand. The page is not published
        either way.
 
+    Run again, it writes only what is not there yet: if both repositories
+    already hold this release's files it says so and exits 0 without touching
+    the record; if one does, that one counts as a write an earlier run landed,
+    and what it held before is kept from the earlier run's record.
+
 .PARAMETER Revert
     **Put both repositories back to what a record says they held**, the same
     write-back and read-back as step 3 of `-Apply`, with the same exit 3 when it
@@ -583,30 +588,66 @@ foreach ($read in @($cask, $scoop)) {
                'put back. Run without -CaskFile / -ScoopFile to apply.')
     }
 }
+[System.IO.Directory]::CreateDirectory($PackageDirectory) | Out-Null
+$recordPath = Join-Path $PackageDirectory 'manifests-before.json'
+
+# **Running `-Apply` again is safe.** A repository that already holds this
+# release's file holds a write an earlier run landed. Both: nothing to do, and
+# the record — the only place the files from before this release are kept — is
+# not touched. One: that one is recorded as landed, with the file from before
+# taken from the earlier run's record, so `-Revert` still puts back what the
+# repository held before the release rather than this release's own file.
+$caskRendered = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($caskText))
+$scoopRendered = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($scoopText))
+if ($cask.Content -ceq $caskRendered -and $scoop.Content -ceq $scoopRendered) {
+    Write-Host ''
+    Write-Host "both repositories already hold Folio $Version's manifests: already applied; the record is left as it is"
+    exit 0
+}
 Assert-Writer -Repositories @($CaskRepository, $ScoopRepository)
 
-function New-Entry {
-    param([string] $Repo, [string] $Path, $Read, [string] $Text)
+$earlier = $null
+if (Test-Path -LiteralPath $recordPath -PathType Leaf) {
+    $earlier = [System.IO.File]::ReadAllText($recordPath) | ConvertFrom-Json
+    if ($earlier.Version -ne $Version) { $earlier = $null }
+}
 
-    return [pscustomobject]@{
+function New-Entry {
+    param([string] $Repo, [string] $Path, $Read, [string] $Rendered)
+
+    $entry = [pscustomobject]@{
         Repository = $Repo
         Path       = $Path
         Before     = [pscustomobject]@{ Blob = $Read.Blob; Content = $Read.Content }
-        Rendered   = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($Text))
+        Rendered   = $Rendered
         Applied    = $null
     }
+    if ($Read.Content -cne $Rendered) { return $entry }
+
+    $entry.Applied = $Read.Blob
+    $kept = $null
+    if ($earlier) {
+        $kept = @($earlier.Repositories | Where-Object { $_.Repository -eq $Repo -and $_.Path -eq $Path }) |
+            Select-Object -First 1
+    }
+    if ($kept) {
+        $entry.Before = [pscustomobject]@{ Blob = $kept.Before.Blob; Content = $kept.Before.Content }
+        Write-Host "$Repo/$Path — already holds Folio $Version's file (blob $($Read.Blob)); what it held before is kept from the earlier record"
+    }
+    else {
+        Write-Host "$Repo/$Path — already holds Folio $Version's file (blob $($Read.Blob)), and no earlier record says what it held before"
+    }
+    return $entry
 }
 
 # 1. Save: the bytes and blob ids the difference above was printed against —
 # one read each — before either write.
-[System.IO.Directory]::CreateDirectory($PackageDirectory) | Out-Null
-$recordPath = Join-Path $PackageDirectory 'manifests-before.json'
 $record = [pscustomobject]@{
     Version      = $Version
     Tag          = $Tag
     Repositories = @(
-        (New-Entry -Repo $CaskRepository -Path $caskName -Read $cask -Text $caskText),
-        (New-Entry -Repo $ScoopRepository -Path $scoopName -Read $scoop -Text $scoopText))
+        (New-Entry -Repo $CaskRepository -Path $caskName -Read $cask -Rendered $caskRendered),
+        (New-Entry -Repo $ScoopRepository -Path $scoopName -Read $scoop -Rendered $scoopRendered))
 }
 Save-Record -Record $record -Path $recordPath
 Write-Host "saved what both repositories hold to $recordPath"
@@ -616,6 +657,7 @@ Write-Host "saved what both repositories hold to $recordPath"
 $failed = $false
 foreach ($entry in $record.Repositories) {
     $where = "$($entry.Repository)/$($entry.Path)"
+    if ($entry.Applied) { continue }
     try {
         $written = Write-Remote -Repo $entry.Repository -Path $entry.Path -Content $entry.Rendered `
             -Over $entry.Before.Blob -Message "Folio $Version"
