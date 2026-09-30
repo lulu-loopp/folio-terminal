@@ -1520,6 +1520,11 @@ impl<'a> Txn<'a> {
                             "BT_UPDATE_RECOVER the trial {} gave no receipt",
                             process.pid
                         ));
+                    } else if self.phase() == PhaseKind::Moving {
+                        // No trial was begun: the moves were cut short (W6; U-42a).
+                        hands.say(
+                            "BT_UPDATE_RECOVER the update was interrupted before the new version started",
+                        );
                     }
                     self.record(actor, &Event::RollbackDeclared)?;
                 }

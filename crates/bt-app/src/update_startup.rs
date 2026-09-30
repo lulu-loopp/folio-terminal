@@ -78,7 +78,7 @@ use crate::cli;
 use crate::update_job::Failure;
 use crate::update_txn::{
     AfterRollback, Class, Digest, Effect, Header, Home, JournalRead, Nonce, StartAction, StartView,
-    TxnId, after_rollback, at_start,
+    TxnId, after_rollback, at_start, rolled_back_untried,
 };
 
 /// **The pass has run.** Only [`pass`] makes one, and `launch_wire::hand_over`
@@ -248,8 +248,13 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
 pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     let admission = admit(start.home, world);
     let journal_path = start.home.journal();
+    let mut untried = false;
     let journal = match file_reads::read(Lane::Install, &journal_path) {
         Ok(bytes) => match Header::parse(&bytes) {
+            Ok(header) if start.failed.is_some() => {
+                untried = rolled_back_untried(&bytes);
+                JournalRead::Read(header)
+            }
             Ok(header) => JournalRead::Read(header),
             Err(refusal) => {
                 world.say(&format!(
@@ -291,6 +296,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
         .failed
         .and_then(|_| after_rollback(&header))
         .map(|after| match after {
+            AfterRollback::Restored if untried => Failure::Interrupted,
             AfterRollback::Restored => Failure::RolledBack,
             AfterRollback::Incomplete => Failure::Incomplete {
                 folder: start.home.root().to_path_buf(),
@@ -1321,6 +1327,85 @@ mod tests {
                 panic!("no journal never stops a start");
             };
             assert_eq!(failed, None, "no journal, no card");
+        }
+
+        /// RED (U-42a) — **a start sent after a rollback no trial ever began
+        /// says the update was interrupted before the new version started,
+        /// and one sent after a trial's rollback still says the new version
+        /// did not start; both say the previous version is back.**
+        ///
+        /// 0.4.6's D-7: after a power cut during `Moving` (W6) the card said
+        /// *The new version did not start.* — the new version never ran. The
+        /// journals here are the real transitions' (`Moving` or `Trial` →
+        /// `RollbackIntent` → `RolledBack` → `Retired`), read by the real
+        /// pass, painted by the real card.
+        ///
+        /// MUTATION: in `update_txn::next`, write `RolledBack { untried:
+        /// false }` whatever the trial — the W6 card says the new version did
+        /// not start.
+        #[test]
+        fn a_rollback_before_any_trial_says_the_update_was_interrupted() {
+            use crate::i18n::Text;
+            use crate::update_txn::{
+                Body, Event, Inventories, Journal, Layout, Phase, TrialProcess,
+            };
+            let Some(scene) = Scene::new("interrupted") else {
+                return;
+            };
+            let at = |phase: Phase| Journal {
+                txn: txn(),
+                rescue: scene.rescue.to_string_lossy().into_owned(),
+                body: Body {
+                    phase,
+                    layout: Layout::Members(Inventories {
+                        old_shipped: vec!["folio.exe".to_owned()],
+                        old_present: Vec::new(),
+                        new: Vec::new(),
+                    }),
+                },
+            };
+            let trial = Phase::Trial {
+                nonce: nonce(),
+                process: TrialProcess {
+                    pid: 4242,
+                    started: 7,
+                },
+                began_ms: 1,
+            };
+            for (from, failure, heading) in [
+                (
+                    Phase::Moving,
+                    Failure::Interrupted,
+                    Text::UpdateFailedInterrupted,
+                ),
+                (trial, Failure::RolledBack, Text::UpdateFailedTrial),
+            ] {
+                let retired = [Event::RollbackDeclared, Event::RolledBack, Event::Retired]
+                    .iter()
+                    .try_fold(at(from.clone()), |journal, event| journal.advance(event))
+                    .expect("the rollback's transitions");
+                std::fs::write(scene.home.journal(), retired.encode()).unwrap();
+                let mut world = Recorded::default();
+                let Verdict::Continue { failed, .. } =
+                    scene.run_sent(&scene.home.journal(), &mut world)
+                else {
+                    panic!("a retired transaction never stops a start");
+                };
+                assert_eq!(failed, Some(failure.clone()), "from {from:?}");
+                let card =
+                    crate::update_card::paint(&crate::update_job::State::Failed(None, failure))
+                        .expect("a failed card");
+                assert_eq!(
+                    card.heading.as_deref(),
+                    Some(heading.text()),
+                    "from {from:?}"
+                );
+                assert_eq!(
+                    card.detail.as_deref(),
+                    Some(Text::UpdateCardRestored.text()),
+                    "from {from:?}"
+                );
+            }
         }
 
         /// RED (U-32) — **the card a start sent with `--update-failed` raises

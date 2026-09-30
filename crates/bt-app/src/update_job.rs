@@ -490,6 +490,11 @@ pub(crate) enum Failure {
     /// back** (U-29): a start sent with `--update-failed` found its
     /// transaction retired with the outcome `rolled_back`.
     RolledBack,
+    /// **The update stopped before the new version ever ran, and the previous
+    /// one was put back** (0.4.7 U-42a; 0.4.6's D-7): a start sent with
+    /// `--update-failed` found its transaction retired `rolled_back` with no
+    /// trial ever begun — a power cut during the moves (W6).
+    Interrupted,
     /// **The new version did not prove itself and putting the previous one
     /// back did not finish** (U-29): the transaction is still `rolled_back`
     /// and destructive — `Stuck`, or not begun — and `folder` is where its

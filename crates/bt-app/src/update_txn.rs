@@ -713,10 +713,23 @@ pub(crate) enum Phase {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         retrial: Option<Retrial>,
     },
-    RolledBack,
+    RolledBack {
+        /// **No trial of the new build was ever begun** (0.4.7 U-42a; 0.4.6's
+        /// D-7): the rollback came from `Moving` — a power cut or a failed
+        /// move — or from a `Stuck` no trial ran over, so the new version
+        /// never ran. The card a start sent after it says the update was
+        /// interrupted, not that the new version did not start. Absent from
+        /// the journal when false, so a journal without it reads as before.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        untried: bool,
+    },
     Abandoned,
     Retired {
         outcome: Outcome,
+        /// `RolledBack`'s [`Phase::RolledBack::untried`], kept at the
+        /// retirement: the start sent with `--update-failed` reads it here.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        untried: bool,
     },
 }
 
@@ -810,7 +823,7 @@ impl Phase {
             Phase::Committed => PhaseKind::Committed,
             Phase::RollbackIntent { .. } => PhaseKind::RollbackIntent,
             Phase::Stuck { .. } => PhaseKind::Stuck,
-            Phase::RolledBack => PhaseKind::RolledBack,
+            Phase::RolledBack { .. } => PhaseKind::RolledBack,
             Phase::Abandoned => PhaseKind::Abandoned,
             Phase::Retired { .. } => PhaseKind::Retired,
         }
@@ -826,9 +839,11 @@ impl Phase {
         match self {
             Phase::Retired {
                 outcome: Outcome::Committed,
+                ..
             } => HeaderOutcome::Committed,
             Phase::Retired {
                 outcome: Outcome::RolledBack,
+                ..
             } => HeaderOutcome::RolledBack,
             phase => phase.kind().outcome(),
         }
@@ -1372,8 +1387,10 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
         (Phase::Trial { process, .. }, Event::RollbackDeclared) => Ok(Phase::RollbackIntent {
             trial: Some(*process),
         }),
-        (Phase::RollbackIntent { .. } | Phase::Stuck { .. }, Event::RolledBack) => {
-            Ok(Phase::RolledBack)
+        (Phase::RollbackIntent { trial } | Phase::Stuck { trial, .. }, Event::RolledBack) => {
+            Ok(Phase::RolledBack {
+                untried: trial.is_none(),
+            })
         }
         (Phase::RollbackIntent { trial }, Event::RollbackFailed { error }) => Ok(Phase::Stuck {
             trial: *trial,
@@ -1394,9 +1411,11 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
         }),
         (Phase::Committed, Event::Retired) => Ok(Phase::Retired {
             outcome: Outcome::Committed,
+            untried: false,
         }),
-        (Phase::RolledBack, Event::Retired) => Ok(Phase::Retired {
+        (Phase::RolledBack { untried }, Event::Retired) => Ok(Phase::Retired {
             outcome: Outcome::RolledBack,
+            untried: *untried,
         }),
         _ => Err(Refusal::Illegal {
             from: phase.kind(),
@@ -2011,7 +2030,7 @@ pub(crate) fn decide(disk: &Disk<'_>) -> Action {
             },
         },
         Phase::Committed => finish_commit(disk),
-        Phase::RolledBack => Action::FinishRollback {
+        Phase::RolledBack { .. } => Action::FinishRollback {
             remove_entrance: disk.entrance,
         },
         Phase::Abandoned | Phase::Retired { .. } => Action::Retire {
@@ -2587,6 +2606,21 @@ pub(crate) enum AfterRollback {
     Incomplete,
 }
 
+/// **Whether a retired rollback's new version never ran** (U-42a): the
+/// body's `Retired { untried }`, read from the whole journal `bytes`. `false`
+/// for any other journal, and for one that does not parse whole.
+pub(crate) fn rolled_back_untried(bytes: &[u8]) -> bool {
+    Journal::parse(bytes).is_ok_and(|journal| {
+        matches!(
+            journal.body.phase,
+            Phase::Retired {
+                outcome: Outcome::RolledBack,
+                untried: true,
+            }
+        )
+    })
+}
+
 /// **The card a start sent with `--update-failed` raises**, or `None` for a
 /// header that is neither a retired rollback nor still `destructive`.
 pub(crate) fn after_rollback(header: &Header) -> Option<AfterRollback> {
@@ -3019,15 +3053,97 @@ mod tests {
                     began_ms: BEGAN,
                 }),
             },
-            Phase::RolledBack,
+            Phase::RolledBack { untried: false },
+            Phase::RolledBack { untried: true },
             Phase::Abandoned,
             Phase::Retired {
                 outcome: Outcome::Committed,
+                untried: false,
             },
             Phase::Retired {
                 outcome: Outcome::RolledBack,
+                untried: false,
+            },
+            Phase::Retired {
+                outcome: Outcome::RolledBack,
+                untried: true,
             },
         ]
+    }
+
+    /// RED (U-42a) — **a rollback no trial ever began is `RolledBack` and
+    /// then `Retired` with `untried`; one after a trial, or a retrial over
+    /// `Stuck`, is not; and a journal without the word reads as before.**
+    ///
+    /// The flag is what a start sent with `--update-failed` reads to say the
+    /// update was interrupted rather than that the new version did not start
+    /// (0.4.6's D-7). It is written only when true, so every journal an
+    /// earlier build wrote — and every one after a trial — has the bytes it
+    /// had.
+    ///
+    /// MUTATION: in `next`, answer `RolledBack { untried: false }` for
+    /// `RollbackIntent` — the rollback from `Moving` is not untried.
+    #[test]
+    fn a_rollback_no_trial_began_is_retired_untried() {
+        let retire = |from: Phase| {
+            [Event::RollbackDeclared, Event::RolledBack, Event::Retired]
+                .iter()
+                .try_fold(journal(from, members_layout()), |journal, event| {
+                    journal.advance(event)
+                })
+                .expect("the rollback's transitions")
+        };
+        assert_eq!(
+            retire(Phase::Moving).body.phase,
+            Phase::Retired {
+                outcome: Outcome::RolledBack,
+                untried: true,
+            }
+        );
+        let after_trial = retire(trial_phase());
+        assert_eq!(
+            after_trial.body.phase,
+            Phase::Retired {
+                outcome: Outcome::RolledBack,
+                untried: false,
+            }
+        );
+        assert!(
+            !String::from_utf8_lossy(&after_trial.encode()).contains("untried"),
+            "a flag that is false is not written"
+        );
+        let stuck_retried = journal(
+            Phase::Stuck {
+                trial: None,
+                last_error: "held".to_owned(),
+                attempts: 1,
+                retrial: None,
+            },
+            members_layout(),
+        )
+        .advance(&Event::RetrialBegan {
+            nonce: nonce(TRIAL_NONCE),
+            process: TRIAL,
+            began_ms: BEGAN,
+        })
+        .and_then(|journal| journal.advance(&Event::RolledBack))
+        .expect("a retrial, then its rollback");
+        assert_eq!(
+            stuck_retried.body.phase,
+            Phase::RolledBack { untried: false },
+            "a retrial ran the new version"
+        );
+        let untried = retire(Phase::Moving).encode();
+        let reread = Journal::parse(&untried).expect("the flag reads back");
+        assert!(rolled_back_untried(&untried));
+        assert_eq!(reread.body.phase, retire(Phase::Moving).body.phase);
+        let older = String::from_utf8(untried)
+            .unwrap()
+            .replace(",\"untried\":true", "");
+        assert!(
+            !rolled_back_untried(older.as_bytes()),
+            "an earlier build's journal reads as a rollback after a trial: {older}"
+        );
     }
 
     fn event_samples() -> Vec<Event> {
@@ -3253,12 +3369,14 @@ mod tests {
             Phase::Committed
             | Phase::Retired {
                 outcome: Outcome::Committed,
+                ..
             } => HeaderOutcome::Committed,
             Phase::RollbackIntent { .. }
             | Phase::Stuck { .. }
-            | Phase::RolledBack
+            | Phase::RolledBack { .. }
             | Phase::Retired {
                 outcome: Outcome::RolledBack,
+                ..
             } => HeaderOutcome::RolledBack,
             _ => HeaderOutcome::None,
         };
@@ -3930,7 +4048,8 @@ mod tests {
             assert_eq!(
                 end.body.phase,
                 Phase::Retired {
-                    outcome: Outcome::RolledBack
+                    outcome: Outcome::RolledBack,
+                    untried: true,
                 },
                 "after {done} moves"
             );
@@ -4016,7 +4135,8 @@ mod tests {
         assert_eq!(
             committed.advance(&Event::Retired).map(|j| j.body.phase),
             Ok(Phase::Retired {
-                outcome: Outcome::Committed
+                outcome: Outcome::Committed,
+                untried: false,
             })
         );
     }
@@ -4106,7 +4226,8 @@ mod tests {
         assert_eq!(
             end.body.phase,
             Phase::Retired {
-                outcome: Outcome::RolledBack
+                outcome: Outcome::RolledBack,
+                untried: true,
             }
         );
         assert!(disk.is_old_install(&inventories));
@@ -4116,7 +4237,7 @@ mod tests {
     /// build and retires; a later start then deletes what is left.**
     #[test]
     fn w11_rolled_back_removes_the_entrance_relaunches_and_retires() {
-        let journal = journal(Phase::RolledBack, members_layout());
+        let journal = journal(Phase::RolledBack { untried: false }, members_layout());
         let disk = Disk {
             entrance: true,
             ..holder(&journal, prepared_located())
@@ -4128,7 +4249,7 @@ mod tests {
             }
         );
         assert_eq!(
-            at_start(&start_on(Phase::RolledBack)),
+            at_start(&start_on(Phase::RolledBack { untried: false })),
             StartAction::HandToRescue
         );
         let retired = journal.advance(&Event::Retired).expect("retired");
@@ -4210,7 +4331,8 @@ mod tests {
             assert_eq!(
                 end.body.phase,
                 Phase::Retired {
-                    outcome: Outcome::RolledBack
+                    outcome: Outcome::RolledBack,
+                    untried: true,
                 },
                 "cut after {done}"
             );
@@ -4636,7 +4758,7 @@ mod tests {
         for phase in [
             stuck.clone(),
             Phase::RollbackIntent { trial: None },
-            Phase::RolledBack,
+            Phase::RolledBack { untried: false },
             Phase::Handoff {
                 applier: nonce(0x44),
             },
@@ -4649,6 +4771,7 @@ mod tests {
         }
         let retired = Phase::Retired {
             outcome: Outcome::RolledBack,
+            untried: false,
         };
         assert_eq!(at_start(&sent(retired.clone())), StartAction::Retire);
 
@@ -4662,7 +4785,7 @@ mod tests {
             Some(AfterRollback::Incomplete)
         );
         assert_eq!(
-            after_rollback(&header(Phase::RolledBack)),
+            after_rollback(&header(Phase::RolledBack { untried: false })),
             Some(AfterRollback::Incomplete)
         );
         for phase in [Phase::Armed, trial_phase(), Phase::Committed] {
@@ -4675,6 +4798,7 @@ mod tests {
             Phase::Abandoned,
             Phase::Retired {
                 outcome: Outcome::Committed,
+                untried: false,
             },
             Phase::Prepared {
                 deferred_launches: 0,
@@ -4689,7 +4813,7 @@ mod tests {
     #[test]
     fn m11_rolled_back_abandoned_and_committed_with_debt_finish_as_on_windows() {
         let located = bundle(Some(new_bundle()), None);
-        let rolled_back = journal(Phase::RolledBack, bundle_layout());
+        let rolled_back = journal(Phase::RolledBack { untried: false }, bundle_layout());
         let abandoned = journal(Phase::Abandoned, bundle_layout());
         let committed = journal(Phase::Committed, bundle_layout());
         let rolled_back_disk = Disk {
@@ -4756,6 +4880,7 @@ mod tests {
         let header = journal(
             Phase::Retired {
                 outcome: Outcome::Committed,
+                untried: false,
             },
             members_layout(),
         )

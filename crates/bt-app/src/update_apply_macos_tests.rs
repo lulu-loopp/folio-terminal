@@ -896,7 +896,8 @@ fn committed_is_written_only_on_a_matching_receipt_while_trial() {
     assert_eq!(
         journal.body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert_eq!(journal.header().outcome, HeaderOutcome::Committed);
@@ -944,7 +945,8 @@ fn the_old_bundle_is_removed_only_after_committed() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert!(
@@ -1307,7 +1309,8 @@ fn a_failed_health_swaps_back() {
     assert_eq!(
         journal.body.phase,
         Phase::Retired {
-            outcome: Outcome::RolledBack
+            outcome: Outcome::RolledBack,
+            untried: false,
         }
     );
     assert_eq!(journal.header().outcome, HeaderOutcome::RolledBack);
@@ -1409,7 +1412,8 @@ fn rollback_from_the_new_live_swaps_and_from_the_old_live_does_not() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Retired {
-            outcome: Outcome::RolledBack
+            outcome: Outcome::RolledBack,
+            untried: true,
         }
     );
 
@@ -1629,7 +1633,7 @@ fn rolled_back_is_retired_at_the_next_start() {
         return;
     }
     let install = Install::new("m11");
-    install.write(Phase::RolledBack);
+    install.write(Phase::RolledBack { untried: false });
     install.arm();
     let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
     assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
@@ -1640,7 +1644,8 @@ fn rolled_back_is_retired_at_the_next_start() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Retired {
-            outcome: Outcome::RolledBack
+            outcome: Outcome::RolledBack,
+            untried: false,
         }
     );
 
@@ -2190,7 +2195,7 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
         (
             "rolled-back",
             |install, _| {
-                install.write(Phase::RolledBack);
+                install.write(Phase::RolledBack { untried: false });
                 install.arm();
             },
             plain,
@@ -2432,7 +2437,8 @@ fn a_receipt_found_by_recovery_commits_forward() {
     assert_eq!(
         install.on_disk().unwrap().body.phase,
         Phase::Retired {
-            outcome: Outcome::RolledBack
+            outcome: Outcome::RolledBack,
+            untried: false,
         }
     );
 

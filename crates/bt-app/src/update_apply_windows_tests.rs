@@ -1079,7 +1079,8 @@ fn committed_is_written_only_on_a_matching_receipt_while_trial() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     let header = install.header();
@@ -1246,7 +1247,8 @@ fn w12_finishes_the_deletions_and_never_rolls_back() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert!(
@@ -1419,7 +1421,8 @@ fn a_failed_health_reverses_the_moves_and_relaunches_the_old_build() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::RolledBack
+            outcome: Outcome::RolledBack,
+            untried: false,
         }
     );
     let header = install.header();
@@ -1592,7 +1595,8 @@ fn rollback_from_a_half_moved_install_uses_the_digests_not_the_phase() {
         assert_eq!(
             install.on_disk().body.phase,
             Phase::Retired {
-                outcome: Outcome::RolledBack
+                outcome: Outcome::RolledBack,
+                untried: phase != "trial",
             },
             "{case}: {:?}",
             world.said
@@ -1802,7 +1806,8 @@ fn stuck_with_the_new_set_live_starts_it_as_a_trial_and_its_receipt_commits() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert!(install.holds(Place::Install, &install.new));
@@ -1862,7 +1867,7 @@ fn rolled_back_is_retired_at_the_next_start() {
         return;
     };
     install.arm();
-    install.write(Phase::RolledBack);
+    install.write(Phase::RolledBack { untried: false });
     let (code, world) = recovered_at_logon(
         &install,
         limits(20_000, 20_000),
@@ -1872,7 +1877,8 @@ fn rolled_back_is_retired_at_the_next_start() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::RolledBack
+            outcome: Outcome::RolledBack,
+            untried: false,
         }
     );
     assert!(
@@ -2133,7 +2139,7 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
             "intent" => flipped_at(&install, Phase::RollbackIntent { trial: None }),
             "rolled-back" => {
                 install.arm();
-                install.write(Phase::RolledBack);
+                install.write(Phase::RolledBack { untried: false });
             }
             "stuck-new" => {
                 flipped_at(&install, stuck(1));
@@ -2168,7 +2174,14 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
         let phase = install.on_disk().body.phase;
         assert_eq!(phase.kind(), ends, "{tag}: {:?}", world.said);
         if let Some(outcome) = outcome {
-            assert_eq!(phase, Phase::Retired { outcome }, "{tag}");
+            assert_eq!(
+                phase,
+                Phase::Retired {
+                    outcome,
+                    untried: matches!(tag, "moving" | "intent")
+                },
+                "{tag}"
+            );
         }
         let expected = match opens {
             Installed => vec![(install.installed.clone(), handed())],
@@ -2566,7 +2579,8 @@ fn a_running_trial_the_journal_could_not_record_is_recorded_and_committed_by_the
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert!(install.holds(Place::Install, &install.new), "the new build");
@@ -2767,7 +2781,8 @@ fn the_logon_run_starts_nothing_only_when_nobody_is_waiting() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert!(world.opened.is_empty(), "{:?}", world.said);
@@ -3818,7 +3833,8 @@ fn two_recoveries_over_one_unrecorded_trial_commit_it_once() {
     assert_eq!(
         install.on_disk().body.phase,
         Phase::Retired {
-            outcome: Outcome::Committed
+            outcome: Outcome::Committed,
+            untried: false,
         }
     );
     assert!(runs(second));
@@ -4661,7 +4677,8 @@ fn a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers() {
                 assert_eq!(
                     install.on_disk().body.phase,
                     Phase::Retired {
-                        outcome: Outcome::Committed
+                        outcome: Outcome::Committed,
+                        untried: false,
                     }
                 );
                 assert!(matches!(trial.0.try_wait(), Ok(None)), "the trial stays");
@@ -4682,7 +4699,8 @@ fn a_trial_hands_back_to_a_real_recovery_which_adopts_ends_or_defers() {
                     matches!(
                         install.on_disk().body.phase,
                         Phase::Retired {
-                            outcome: Outcome::RolledBack
+                            outcome: Outcome::RolledBack,
+                            ..
                         }
                     ),
                     "{done:?}"
