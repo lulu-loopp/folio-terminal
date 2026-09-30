@@ -15,11 +15,12 @@ use std::{
 
 use bt_detect::{
     DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionOptions,
-    DetectionTask, InlineJoinedFragment, InlineMathRun, InlineMathSite, LiveDetectionInput,
-    LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES, MathCellSegment, MathSourceLine,
-    MathSpan, PlaceholderArtifact, StaleArtifact, advance_detection_context,
-    detect_math_blocks_with_sites, frozen_resync_scan_with_options, resolve_detection_task,
-    resolve_live_detection_task, resolve_live_detection_tasks,
+    DetectionTask, InlineJoinedFragment, InlineMathRun, InlineMathSite, LiveCapture,
+    LiveDetectionInput, LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES,
+    MathCellSegment, MathSourceLine, MathSpan, PaneRect, PlaceholderArtifact, ScreenFrame,
+    StaleArtifact, advance_detection_context, detect_math_blocks_with_sites,
+    frozen_resync_scan_with_options, resolve_detection_task, resolve_live_detection_task,
+    resolve_live_detection_tasks,
 };
 use bt_doc::{
     AnchorError, AnchorId, Bias, BlockKind, ContentAnchor, DecorationIntent, DecorationLifecycle,
@@ -904,8 +905,16 @@ struct LiveDecorationRecord {
     detection_revision: DetectionRevision,
     layout: LayoutKey,
     rendered_layout: LayoutKey,
-    initial_context: DetectionContext,
-    inputs: Arc<[LiveDetectionInput]>,
+    /// The live capture this block was proven from (or last re-anchored onto): its rows, the
+    /// checkpoint and options they were scanned under, and the frame measured from them once
+    /// (T-PANE-COLUMNS, note §3). Records proven from one capture share one `Arc`.
+    capture: LiveCapture,
+    /// **The pane of `capture`'s frame this block was proven in.** Written when the record is
+    /// installed and whenever it is re-anchored onto another capture, never otherwise. Every
+    /// presentation width is derived from it — the band a block is fitted to, the width its source
+    /// face is measured at, the fold its inline line is laid out at, the columns its picture, ground,
+    /// scissor and hit area stop at (R10). The whole screen on a screen no frame cuts.
+    pane: PaneRect,
     span: MathSpan,
     artifact: Option<PlaceholderArtifact>,
     stale_artifact: Option<StaleArtifact>,
@@ -1671,6 +1680,13 @@ pub struct DualPlaneSession {
     /// off-band re-anchor's ownership question read it, so one grid is scanned once however many
     /// closes and restores that grid sees.
     live_grid_blocks_memo: Option<(LiveGridAnswer, Vec<LiveDetectionTask>)>,
+    /// **The frame of the capture the last scheduling read** (T-PANE-COLUMNS, note §8.2 "the
+    /// current frame"): the session's own `Arc`, not the capture's, so the capture's rows are
+    /// released when their holders go. Compared by value — the rectangles, the status row and the
+    /// screen-owned fence state, never the pointer — with each new capture's frame; a difference is
+    /// a frame change and clears every pane's math (`invalidate_every_pane`). Two frames of screens
+    /// no frame cuts are the same frame whatever their sizes, so an ordinary screen never sees one.
+    current_frame: Option<Arc<ScreenFrame>>,
     feed_turn: Option<FeedTurn>,
     alternate_repaint_snapshot: Option<AlternateRepaintSnapshot>,
     alternate_repaint_in_progress: bool,
@@ -2142,6 +2158,7 @@ impl DualPlaneSession {
             offscreen_restore_memo: OffBandRestoreMemo::default(),
             offscreen_restore_pass_count: 0,
             live_grid_blocks_memo: None,
+            current_frame: None,
             feed_turn: None,
             alternate_repaint_snapshot: None,
             alternate_repaint_in_progress: false,
@@ -2490,9 +2507,14 @@ impl DualPlaneSession {
     /// Width of the grid in whole pixels — the band a math block is fitted into and scrolled
     /// within. Both the projection and the scroll clamp measure against this same number.
     fn math_pane_width_px(&self) -> u32 {
+        self.math_columns_width_px(self.layout_key.width_cells.get())
+    }
+
+    /// `columns` cells in whole pixels.
+    fn math_columns_width_px(&self, columns: u32) -> u32 {
         self.cell_width_subpixels
             .get()
-            .saturating_mul(i64::from(self.layout_key.width_cells.get()))
+            .saturating_mul(i64::from(columns))
             .div_euclid(SUBPIXELS_PER_PX)
             .max(1) as u32
     }
@@ -2502,6 +2524,64 @@ impl DualPlaneSession {
             pane_width_px: self.math_pane_width_px(),
             display_left_inset_subpixels: self.display_math_left_inset_subpixels(),
         }
+    }
+
+    /// **The columns a live block owns** (R10): its pane's, bounded by the grid, when a frame cut
+    /// the screen it was proven on; `None` on a screen no frame cut, whose block owns every column
+    /// the grid has now — exactly what it owned before panes existed.
+    fn live_block_columns(&self, record: &LiveDecorationRecord) -> Option<(u32, u32)> {
+        if !record.capture.frame().is_framed() {
+            return None;
+        }
+        let grid = self.layout_key.width_cells.get();
+        let right = record.pane.right.min(grid);
+        Some((record.pane.left.min(right), right))
+    }
+
+    /// **The band a live block is fitted into** (R10): its pane's columns. The fitting rule is
+    /// today's — shrink toward the band, stop at the readable floor, leave the rest to the horizontal
+    /// offset — run inside the pane. On a screen no frame cut, the grid's band.
+    fn math_band_for(&self, record: &LiveDecorationRecord) -> MathBand {
+        self.live_block_columns(record).map_or_else(
+            || self.math_band(),
+            |(left, right)| MathBand {
+                pane_width_px: self.math_columns_width_px(right.saturating_sub(left)),
+                display_left_inset_subpixels: self.display_math_left_inset_subpixels(),
+            },
+        )
+    }
+
+    /// The limits a live block's placement carries (`MathBlockPlacement::left_limit_columns` and
+    /// `right_limit_columns`): its pane's edges where they stand inside the grid, and `None` where
+    /// the pane's edge is the grid's own.
+    fn live_block_limits(&self, record: &LiveDecorationRecord) -> (Option<u32>, Option<u32>) {
+        self.live_block_columns(record)
+            .map_or((None, None), |(left, right)| {
+                (
+                    (left > 0).then_some(left),
+                    (right < self.layout_key.width_cells.get()).then_some(right),
+                )
+            })
+    }
+
+    /// **R11, the minimum presentable pane**: is this block's pane narrower than its two marks —
+    /// the source and copy pair `bt_render`'s tool boxes lay out, at the pane's scale? Such a block
+    /// is never presented: its record stays source, with no raster, no cleared cells and nothing
+    /// scissored, so a presented block always has room for the marks that return it to source or
+    /// copy it. Inline composites carry no marks and are not asked.
+    fn live_pane_narrower_than_marks(&self, record: &LiveDecorationRecord) -> bool {
+        let columns = self
+            .live_block_columns(record)
+            .map_or(self.layout_key.width_cells.get(), |(left, right)| {
+                right.saturating_sub(left)
+            });
+        let pane_px = self
+            .cell_width_subpixels
+            .get()
+            .saturating_mul(i64::from(columns)) as f64
+            / SUBPIXELS_PER_PX as f64;
+        let scale = f64::from(self.layout_key.dpi_milli.get()) / 1000.0;
+        pane_px < f64::from(bt_viewport::math_tool_cluster_width_px(scale as f32))
     }
 
     pub fn set_ascii_baseline_subpixels(&mut self, ascii_baseline_subpixels: NonZeroI64) {
@@ -4746,15 +4826,10 @@ impl DualPlaneSession {
         let image_tasks_before = self.local_image_path_tasks.len();
         self.reconcile_live_image_paths(true, stable);
 
-        let inputs = self.live_detection_context();
-        let initial_context = self.live_initial_detection_context(&inputs);
-        let candidates = live_candidate_rows(
-            &inputs,
-            initial_context.clone(),
-            stable,
-            self.inline_math_bands,
-        );
-        let context_signature = live_detection_context_signature(&inputs, self.inline_math_bands);
+        let capture = self.live_capture();
+        self.observe_frame(capture.frame());
+        let candidates = live_candidate_rows(&capture, stable, self.inline_math_bands);
+        let context_signature = live_detection_context_signature(&capture, self.inline_math_bands);
         let cursor_suppression = (!self.shell_integration_is_authoritative(self.live_screen))
             .then(|| self.cursor_line_suppression())
             .flatten();
@@ -4778,9 +4853,8 @@ impl DualPlaneSession {
                 cell_width_subpixels: self.cell_width_subpixels.get(),
                 cell_height_subpixels: self.cell_height_subpixels.get(),
                 ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
-                options: self.detection_options(),
-                initial_context: initial_context.clone(),
-                inputs: Arc::clone(&inputs),
+                capture: capture.clone(),
+                pane: capture.screen_rect(),
                 start: GridPoint {
                     row: candidate_row,
                     column: 0,
@@ -6896,6 +6970,47 @@ impl DualPlaneSession {
         }
     }
 
+    /// **Compare a new capture's frame with the current one, and on any difference clear every
+    /// pane's math** (T-PANE-COLUMNS; coordinator's ruling 2026-09-29, note §8.2).
+    ///
+    /// A frame change — any difference in the rectangles or the status row — and a change of the
+    /// screen-owned fence state (R9: a fence opened or closed on a row no pane owns, or carried in
+    /// by the checkpoint) are the same event: every pane-keyed fact is dropped. Every record retires
+    /// to source, resident and off-band; every row's candidate signature is cleared, so every pane
+    /// re-arms against the new frame; queued scans are dropped, and one already with the worker is
+    /// refused at completion (`live_task_is_current`). There is no retention clause: a pane whose
+    /// rectangle did not move is cleared too, because a record's pane identity was minted against a
+    /// frame that no longer stands. The cost is accepted — a frame change is a multiplexer's resize
+    /// or relayout, which is rare, and a re-typeset is one stability interval and one worker round
+    /// trip.
+    ///
+    /// What 69a does **not** have is the pane math tier: row stability is still the whole screen
+    /// row's (`LiveRowStability`), so a busy pane's writes still hold its neighbour's candidates
+    /// back. Ticket 69b keys stability, candidates, records and completion by `(row, pane)`.
+    fn observe_frame(&mut self, frame: &Arc<ScreenFrame>) {
+        let changed = self
+            .current_frame
+            .as_ref()
+            .is_some_and(|current| !frames_agree(current, frame));
+        if changed {
+            self.invalidate_every_pane();
+        }
+        self.current_frame = Some(Arc::clone(frame));
+    }
+
+    fn invalidate_every_pane(&mut self) {
+        self.retire_live_decorations(|_, _| true);
+        let dormant = std::mem::take(&mut self.offscreen_decorations);
+        self.live_invalidation_count = self
+            .live_invalidation_count
+            .saturating_add(dormant.len() as u64);
+        for state in &mut self.live_rows {
+            state.candidate_signature = None;
+        }
+        self.live_tasks.clear();
+        self.live_grid_blocks_memo = None;
+    }
+
     fn new_live_decoration_is_cursor_suppressed(&self, task: &LiveDetectionTask) -> bool {
         if self.semantic_input_overlaps_live(task.screen, task.start, task.end) {
             return true;
@@ -6915,7 +7030,14 @@ impl DualPlaneSession {
                 .is_some_and(|suppression| suppression.intersects(task.start.row, task.end.row))
     }
 
-    fn live_detection_context(&self) -> Arc<[LiveDetectionInput]> {
+    /// **The one live capture** (T-PANE-COLUMNS, note §3): every grid row with its text and its
+    /// captured cell boundaries — after, on primary, a bounded tail of frozen history — together
+    /// with the parser checkpoint before the first of them and the detection options. This is the
+    /// only reader of the grid for detection; arming, resolution, completion, the oracle's ledger
+    /// and presentation all read the capture it returns, and the frame is measured from it once.
+    /// (Repaint reconciliation still builds bare inputs from captured rows as row-identity probes,
+    /// never as scan inputs.)
+    fn live_capture(&self) -> LiveCapture {
         let mut inputs = Vec::new();
         if self.live_screen == ScreenId::Primary {
             let history_tail = self
@@ -6978,9 +7100,11 @@ impl DualPlaneSession {
             })
         });
         inputs.extend(grid_inputs);
-        Arc::from(inputs)
+        let initial_context = self.live_initial_detection_context(&inputs);
+        LiveCapture::new(inputs, initial_context, self.detection_options())
     }
 
+    /// The checkpoint immediately before the capture's first input.
     fn live_initial_detection_context(&self, inputs: &[LiveDetectionInput]) -> DetectionContext {
         match self.live_screen {
             ScreenId::Primary => inputs
@@ -7005,9 +7129,7 @@ impl DualPlaneSession {
         if self.live_screen != ScreenId::Primary {
             return 0;
         }
-        let inputs = self.live_detection_context();
-        let initial_context = self.live_initial_detection_context(&inputs);
-        bt_detect::live_detection_isolation_gap(&inputs, initial_context, self.detection_options())
+        bt_detect::live_detection_isolation_gap(&self.live_capture())
     }
 
     /// Batch ⑥ token-ownership ledger for the current live region: every structural `$$`/`\[`/`\]`/
@@ -7015,14 +7137,13 @@ impl DualPlaneSession {
     /// rejections, or an orphan. Feeds the split source-integrity / detector-containment red gate.
     /// Read-only instrumentation over the exact detection the session already runs; it never mutates
     /// detection or presentation.
-    pub fn live_detection_ownership_ledger(&self) -> bt_detect::OwnershipLedger {
-        let inputs = self.live_detection_context();
-        let initial_context = self.live_initial_detection_context(&inputs);
-        bt_detect::live_detection_ownership_ledger(
-            &inputs,
-            initial_context,
-            self.detection_options(),
-        )
+    ///
+    /// **One ledger per pane** of the current capture's frame, keyed by the pane's rectangle
+    /// (T-PANE-COLUMNS, note §4 step 7); a screen no frame cuts has exactly one, today's.
+    pub fn live_detection_ownership_ledger(
+        &self,
+    ) -> BTreeMap<PaneRect, bt_detect::OwnershipLedger> {
+        bt_detect::live_detection_ownership_ledger(&self.live_capture())
     }
 
     /// Batch ③ (review §4): every formula still *painted* — a resident live decoration holding a live
@@ -7041,13 +7162,29 @@ impl DualPlaneSession {
     /// Read-only over the detection the session already runs; it mutates no decoration, so display and
     /// preservation are byte-identical with or without this call. A record on a screen other than the
     /// live one is not part of the current detection window and is not judged.
+    ///
+    /// **Asked of the record's own pane** (T-PANE-COLUMNS, note §4 step 7): a record is backed only
+    /// by the ledger of the pane it was proven in, by `(pane, original_source)`, so a stale record in
+    /// one pane is never backed by an equal source another pane still owns. A record whose pane the
+    /// current frame no longer has is backed by nothing. On a screen no frame cut, then or now, the
+    /// one whole-screen ledger answers for every record, exactly as before panes existed.
     pub fn held_unbacked_records(&self) -> Vec<HeldUnbackedRecord> {
-        let owned = self.live_detection_ownership_ledger();
+        let capture = self.live_capture();
+        let owned = bt_detect::live_detection_ownership_ledger(&capture);
+        let unframed_now = !capture.frame().is_framed();
+        let backed = |record: &LiveDecorationRecord| {
+            let ledger = if unframed_now && !record.capture.frame().is_framed() {
+                owned.values().next()
+            } else {
+                owned.get(&record.pane)
+            };
+            ledger.is_some_and(|ledger| ledger.owns_source(&record.span.original_source))
+        };
         self.live_decorations
             .values()
             .filter(|record| record.screen == self.live_screen)
             .filter(|record| record.artifact.is_some() || record.stale_artifact.is_some())
-            .filter(|record| !owned.owns_source(&record.span.original_source))
+            .filter(|record| !backed(record))
             .map(|record| HeldUnbackedRecord {
                 source_line: record
                     .frozen_prefix
@@ -7076,16 +7213,13 @@ impl DualPlaneSession {
         (self.live_screen == ScreenId::Alternate
             && self.terminal.modes().alternate_screen
             && (!self.live_decorations.is_empty() || !self.offscreen_decorations.is_empty()))
-        .then(|| {
-            let inputs = self.live_detection_context();
-            AlternateRepaintSnapshot {
-                inputs,
-                decorations: self.live_decorations.values().cloned().collect(),
-                dormant_decorations: self.offscreen_decorations.iter().cloned().collect(),
-                invalidation_count: self.live_invalidation_count,
-                snapshot_boundary,
-                live_content_revision: self.live_content_revision,
-            }
+        .then(|| AlternateRepaintSnapshot {
+            inputs: Arc::clone(self.live_capture().inputs()),
+            decorations: self.live_decorations.values().cloned().collect(),
+            dormant_decorations: self.offscreen_decorations.iter().cloned().collect(),
+            invalidation_count: self.live_invalidation_count,
+            snapshot_boundary,
+            live_content_revision: self.live_content_revision,
         })
     }
 
@@ -7094,8 +7228,8 @@ impl DualPlaneSession {
             return;
         }
 
-        let current_inputs = self.live_detection_context();
-        let current_initial_context = self.live_initial_detection_context(&current_inputs);
+        let current_capture = self.live_capture();
+        let current_inputs = Arc::clone(current_capture.inputs());
         let mut row_mappings = segmented_row_mapping(&snapshot.inputs, &current_inputs);
         if let Some(content_end_row) = self.alternate_content_end_row
             && fixed_boundary_remains_proven(&snapshot.inputs, &current_inputs, content_end_row)
@@ -7164,8 +7298,7 @@ impl DualPlaneSession {
                 self.grid_generation,
                 self.detection_revision,
                 self.layout_key,
-                current_initial_context.clone(),
-                Arc::clone(&current_inputs),
+                &current_capture,
             ) else {
                 unresolved.push(record);
                 continue;
@@ -7186,57 +7319,49 @@ impl DualPlaneSession {
 
         if snapshot.snapshot_boundary && !unresolved.is_empty() {
             let pending = std::mem::take(&mut unresolved);
-            unresolved = self.live_grid_owned_blocks(
-                &current_inputs,
-                &current_initial_context,
-                |session, detected| {
-                    let mut still_unresolved = Vec::new();
-                    for record in pending {
-                        let matches = detected
-                            .iter()
-                            .filter(|task| task.span.render_equivalent(&record.span))
-                            .collect::<Vec<_>>();
-                        let [task] = matches.as_slice() else {
-                            still_unresolved.push(record);
-                            continue;
-                        };
-                        let delta = i64::from(task.start.row)
-                            .saturating_sub(record.placement.logical_band_start)
-                            .saturating_sub(i64::from(record.identity.source_start_offset));
-                        let Some(mut record) = shift_live_record(
-                            &record,
-                            delta,
-                            session.grid_generation,
-                            session.detection_revision,
-                            session.layout_key,
-                            current_initial_context.clone(),
-                            Arc::clone(&current_inputs),
-                        ) else {
-                            still_unresolved.push(record);
-                            continue;
-                        };
-                        if record.end.row != task.end.row
-                            || !alternate_borrowed_band_is_clear(
-                                &record,
-                                &current_inputs,
-                                &occupied,
-                            )
-                        {
-                            still_unresolved.push(record);
-                            continue;
-                        }
-                        record.start = task.start;
-                        record.end = task.end;
-                        record.span = task.span.clone();
-                        if let Some(record) =
-                            insert_nonoverlapping_live_record(&mut preserved, &mut occupied, record)
-                        {
-                            still_unresolved.push(record);
-                        }
+            unresolved = self.live_grid_owned_blocks(&current_capture, |session, detected| {
+                let mut still_unresolved = Vec::new();
+                for record in pending {
+                    let matches = detected
+                        .iter()
+                        .filter(|task| task.span.render_equivalent(&record.span))
+                        .collect::<Vec<_>>();
+                    let [task] = matches.as_slice() else {
+                        still_unresolved.push(record);
+                        continue;
+                    };
+                    let delta = i64::from(task.start.row)
+                        .saturating_sub(record.placement.logical_band_start)
+                        .saturating_sub(i64::from(record.identity.source_start_offset));
+                    let Some(mut record) = shift_live_record(
+                        &record,
+                        delta,
+                        session.grid_generation,
+                        session.detection_revision,
+                        session.layout_key,
+                        &current_capture,
+                    ) else {
+                        still_unresolved.push(record);
+                        continue;
+                    };
+                    if record.end.row != task.end.row
+                        || !alternate_borrowed_band_is_clear(&record, &current_inputs, &occupied)
+                    {
+                        still_unresolved.push(record);
+                        continue;
                     }
-                    still_unresolved
-                },
-            );
+                    record.start = task.start;
+                    record.end = task.end;
+                    record.pane = task.pane;
+                    record.span = task.span.clone();
+                    if let Some(record) =
+                        insert_nonoverlapping_live_record(&mut preserved, &mut occupied, record)
+                    {
+                        still_unresolved.push(record);
+                    }
+                }
+                still_unresolved
+            });
         }
 
         self.live_invalidation_count = snapshot.invalidation_count;
@@ -7249,14 +7374,9 @@ impl DualPlaneSession {
         }
         self.live_decorations = preserved;
         let context_signature =
-            live_detection_context_signature(&current_inputs, self.inline_math_bands);
+            live_detection_context_signature(&current_capture, self.inline_math_bands);
         let stable = vec![true; self.live_rows.len()];
-        let candidate_rows = live_candidate_rows(
-            &current_inputs,
-            current_initial_context,
-            &stable,
-            self.inline_math_bands,
-        );
+        let candidate_rows = live_candidate_rows(&current_capture, &stable, self.inline_math_bands);
         for record in self.live_decorations.values() {
             for row in record.band_start_row..=record.band_end_row {
                 if let Some(state) = self.live_rows.get_mut(row as usize) {
@@ -7315,43 +7435,36 @@ impl DualPlaneSession {
     /// the cursor or reflows — so the key taken before it is still the key afterwards.
     fn live_grid_owned_blocks<T>(
         &mut self,
-        inputs: &Arc<[LiveDetectionInput]>,
-        initial_context: &DetectionContext,
+        capture: &LiveCapture,
         read_them: impl FnOnce(&mut Self, &[LiveDetectionTask]) -> T,
     ) -> T {
         let answer = self.live_grid_answer();
         let blocks = match self.live_grid_blocks_memo.take() {
             Some((remembered, blocks)) if remembered == answer => blocks,
-            _ => self.scan_live_grid(inputs, initial_context),
+            _ => self.scan_live_grid(capture),
         };
         let read = read_them(self, &blocks);
         self.live_grid_blocks_memo = Some((answer, blocks));
         read
     }
 
-    fn scan_live_grid(
-        &self,
-        inputs: &Arc<[LiveDetectionInput]>,
-        initial_context: &DetectionContext,
-    ) -> Vec<LiveDetectionTask> {
-        let inputs = Arc::clone(inputs);
-        let initial_context = initial_context.clone();
-        let armed = inputs
-            .iter()
-            .any(|input| may_arm_math(input.text.trim(), self.inline_math_bands, || input.site))
-            || inputs
-                .windows(2)
-                .any(|pair| may_arm_table(pair[1].text.trim(), || !pair[0].text.trim().is_empty()));
+    fn scan_live_grid(&self, capture: &LiveCapture) -> Vec<LiveDetectionTask> {
+        // Asked of every pane's own lines: a framed row is two panes' text, and only a pane's slice
+        // is a line anybody printed.
+        let armed = capture.frame().panes().iter().any(|pane| {
+            let inputs = pane.inputs();
+            inputs
+                .iter()
+                .any(|input| may_arm_math(input.text.trim(), self.inline_math_bands, || input.site))
+                || inputs.windows(2).any(|pair| {
+                    may_arm_table(pair[1].text.trim(), || !pair[0].text.trim().is_empty())
+                })
+        });
         if !armed {
             return Vec::new();
         }
         let stable = vec![true; self.live_rows.len()];
-        let candidates = live_candidate_rows(
-            &inputs,
-            initial_context.clone(),
-            &stable,
-            self.inline_math_bands,
-        );
+        let candidates = live_candidate_rows(capture, &stable, self.inline_math_bands);
         let mut tasks = candidates
             .into_iter()
             .map(|candidate_row| LiveDetectionTask {
@@ -7363,9 +7476,8 @@ impl DualPlaneSession {
                 cell_width_subpixels: self.cell_width_subpixels.get(),
                 cell_height_subpixels: self.cell_height_subpixels.get(),
                 ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
-                options: self.detection_options(),
-                initial_context: initial_context.clone(),
-                inputs: Arc::clone(&inputs),
+                capture: capture.clone(),
+                pane: capture.screen_rect(),
                 start: GridPoint {
                     row: candidate_row,
                     column: 0,
@@ -7397,7 +7509,7 @@ impl DualPlaneSession {
             && !self.terminal.modes().alternate_screen
             && (!self.live_decorations.is_empty() || !self.offscreen_decorations.is_empty()))
         .then(|| AlternateRepaintSnapshot {
-            inputs: self.live_detection_context(),
+            inputs: Arc::clone(self.live_capture().inputs()),
             decorations: self.live_decorations.values().cloned().collect(),
             dormant_decorations: self.offscreen_decorations.iter().cloned().collect(),
             invalidation_count: self.live_invalidation_count,
@@ -7475,18 +7587,12 @@ impl DualPlaneSession {
             // every record is already correctly placed, so skip the segmented reprojection entirely.
             return;
         }
-        let current_inputs = self.live_detection_context();
-        let current_initial_context = self.live_initial_detection_context(&current_inputs);
-        let row_mappings = primary_repaint_row_mappings(&snapshot.inputs, &current_inputs);
+        let current_capture = self.live_capture();
+        let row_mappings = primary_repaint_row_mappings(&snapshot.inputs, current_capture.inputs());
         let context_signature =
-            live_detection_context_signature(&current_inputs, self.inline_math_bands);
+            live_detection_context_signature(&current_capture, self.inline_math_bands);
         let stable = vec![true; self.live_rows.len()];
-        let candidate_rows = live_candidate_rows(
-            &current_inputs,
-            current_initial_context.clone(),
-            &stable,
-            self.inline_math_bands,
-        );
+        let candidate_rows = live_candidate_rows(&current_capture, &stable, self.inline_math_bands);
 
         let mut preserved = BTreeMap::new();
         let mut occupied = BTreeSet::new();
@@ -7550,8 +7656,7 @@ impl DualPlaneSession {
                         self.grid_generation,
                         self.detection_revision,
                         self.layout_key,
-                        current_initial_context.clone(),
-                        Arc::clone(&current_inputs),
+                        &current_capture,
                     )
                 })
                 .flatten();
@@ -7589,9 +7694,8 @@ impl DualPlaneSession {
                     ascii_baseline_subpixels: self
                         .ascii_baseline_subpixels
                         .map_or(0, NonZeroI64::get),
-                    options: self.detection_options(),
-                    initial_context: record.initial_context.clone(),
-                    inputs: Arc::clone(&record.inputs),
+                    capture: capture_under(&record.capture, self.detection_options()),
+                    pane: record.pane,
                     start: record.start,
                     end: record.end,
                     band_start_row: record.band_start_row,
@@ -7872,112 +7976,111 @@ impl DualPlaneSession {
             return;
         }
         self.offscreen_restore_pass_count = self.offscreen_restore_pass_count.saturating_add(1);
-        let inputs = self.live_detection_context();
-        let initial_context = self.live_initial_detection_context(&inputs);
-        let relayout_tasks =
-            self.live_grid_owned_blocks(&inputs, &initial_context, |session, owned| {
-                let mut occupied = session
-                    .live_decorations
-                    .values()
-                    .flat_map(|record| record.band_start_row..=record.band_end_row)
-                    .collect::<BTreeSet<_>>();
-                let mut remaining = VecDeque::new();
-                let mut relayout_tasks = Vec::new();
-                while let Some(mut record) = session.offscreen_decorations.pop_front() {
-                    let Some((start, end, segments)) =
-                        exact_live_source_match(&record.span.original_source, &inputs, &occupied)
-                    else {
-                        remaining.push_back(record);
-                        continue;
-                    };
-                    // The scan owns this block, at these rows, from this source — or the match the
-                    // substring search found is not this block and no picture goes on it.
-                    if !owned
-                        .iter()
-                        .any(|task| live_scan_owns_record_at(task, &record, start, end))
-                    {
-                        remaining.push_back(record);
-                        continue;
-                    }
-                    // **The band is the extent that was just matched, and the identity is re-based
-                    // onto it.** `band_rows` and the two source offsets are physical row counts of
-                    // the grid this occurrence was *proven* on, so a re-wrap makes every one of
-                    // them stale together: the old length reached past the new closing row and
-                    // blanked the ordinary text under the block, and an expression built from the
-                    // offsets instead is the same staleness in a different digit. A fresh detection
-                    // of this occurrence would own exactly its source extent
-                    // (`size_resolved_live_task_band`), so that is what a restore installs.
-                    //
-                    // Re-basing the identity is the other half and not a tidy-up:
-                    // `project_live_record` reads `source_rows[i].band_offset` and the span's
-                    // live-grid rows as offsets from the band's top, so leaving them measured
-                    // against a band that no longer exists would move every later projection of
-                    // this record by the difference.
-                    if !rebase_identity_onto_match(&mut record, start, end, &segments, &inputs) {
-                        remaining.push_back(record);
-                        continue;
-                    }
-                    let logical_band_start = i64::from(start.row);
-                    record.start = start;
-                    record.end = end;
-                    record.band_start_row = start.row;
-                    record.band_end_row = end.row;
-                    record.clipped_top_rows = 0;
-                    record.clipped_bottom_rows = 0;
-                    // The re-anchor proved this occurrence's *complete* source inside the live
-                    // grid, so no part of it is frozen any more: a prefix carried over from the
-                    // anchor it lost would name history lines this placement does not span.
-                    record.frozen_prefix.clear();
-                    record.staging_prefix.clear();
-                    record.placement.logical_band_start = logical_band_start;
-                    record.placement.occluded_source_rows = 0;
-                    record.placement.occluded_visible_rows.clear();
-                    record.generation = session.grid_generation;
-                    record.detection_revision = session.detection_revision;
-                    if record.rendered_layout != session.layout_key
-                        && let Some(artifact) = record.artifact.take()
-                    {
-                        record.stale_artifact = Some(StaleArtifact {
-                            artifact,
-                            rendered_layout: record.rendered_layout,
-                        });
-                    }
-                    record.layout = session.layout_key;
-                    record.initial_context = initial_context.clone();
-                    record.inputs = Arc::clone(&inputs);
-                    record.span = record.identity.span.clone();
-                    record.span.cell_segments = segments;
-                    if record.artifact.is_none() && record.stale_artifact.is_some() {
-                        relayout_tasks.push(LiveDetectionTask {
-                            candidate_row: record.end.row,
-                            screen: record.screen,
-                            grid_generation: record.generation,
-                            detection_revision: record.detection_revision,
-                            layout: record.layout,
-                            cell_width_subpixels: session.cell_width_subpixels.get(),
-                            cell_height_subpixels: session.cell_height_subpixels.get(),
-                            ascii_baseline_subpixels: session
-                                .ascii_baseline_subpixels
-                                .map_or(0, NonZeroI64::get),
-                            options: session.detection_options(),
-                            initial_context: record.initial_context.clone(),
-                            inputs: Arc::clone(&record.inputs),
-                            start: record.start,
-                            end: record.end,
-                            band_start_row: record.band_start_row,
-                            band_end_row: record.band_end_row,
-                            span: record.span.clone(),
-                            detection_complete: true,
-                            resolved: true,
-                            refused_table_rows: Vec::new(),
-                        });
-                    }
-                    occupied.extend(record.band_start_row..=record.band_end_row);
-                    session.live_decorations.insert(record.start.row, record);
+        let capture = self.live_capture();
+        let inputs = Arc::clone(capture.inputs());
+        let relayout_tasks = self.live_grid_owned_blocks(&capture, |session, owned| {
+            let mut occupied = session
+                .live_decorations
+                .values()
+                .flat_map(|record| record.band_start_row..=record.band_end_row)
+                .collect::<BTreeSet<_>>();
+            let mut remaining = VecDeque::new();
+            let mut relayout_tasks = Vec::new();
+            while let Some(mut record) = session.offscreen_decorations.pop_front() {
+                let Some((start, end, segments)) =
+                    exact_live_source_match(&record.span.original_source, &inputs, &occupied)
+                else {
+                    remaining.push_back(record);
+                    continue;
+                };
+                // The scan owns this block, at these rows, from this source — or the match the
+                // substring search found is not this block and no picture goes on it.
+                let Some(pane) = owned
+                    .iter()
+                    .find(|task| live_scan_owns_record_at(task, &record, start, end))
+                    .map(|task| task.pane)
+                else {
+                    remaining.push_back(record);
+                    continue;
+                };
+                // **The band is the extent that was just matched, and the identity is re-based
+                // onto it.** `band_rows` and the two source offsets are physical row counts of
+                // the grid this occurrence was *proven* on, so a re-wrap makes every one of
+                // them stale together: the old length reached past the new closing row and
+                // blanked the ordinary text under the block, and an expression built from the
+                // offsets instead is the same staleness in a different digit. A fresh detection
+                // of this occurrence would own exactly its source extent
+                // (`size_resolved_live_task_band`), so that is what a restore installs.
+                //
+                // Re-basing the identity is the other half and not a tidy-up:
+                // `project_live_record` reads `source_rows[i].band_offset` and the span's
+                // live-grid rows as offsets from the band's top, so leaving them measured
+                // against a band that no longer exists would move every later projection of
+                // this record by the difference.
+                if !rebase_identity_onto_match(&mut record, start, end, &segments, &inputs) {
+                    remaining.push_back(record);
+                    continue;
                 }
-                session.offscreen_decorations = remaining;
-                relayout_tasks
-            });
+                let logical_band_start = i64::from(start.row);
+                record.start = start;
+                record.end = end;
+                record.band_start_row = start.row;
+                record.band_end_row = end.row;
+                record.clipped_top_rows = 0;
+                record.clipped_bottom_rows = 0;
+                // The re-anchor proved this occurrence's *complete* source inside the live
+                // grid, so no part of it is frozen any more: a prefix carried over from the
+                // anchor it lost would name history lines this placement does not span.
+                record.frozen_prefix.clear();
+                record.staging_prefix.clear();
+                record.placement.logical_band_start = logical_band_start;
+                record.placement.occluded_source_rows = 0;
+                record.placement.occluded_visible_rows.clear();
+                record.generation = session.grid_generation;
+                record.detection_revision = session.detection_revision;
+                if record.rendered_layout != session.layout_key
+                    && let Some(artifact) = record.artifact.take()
+                {
+                    record.stale_artifact = Some(StaleArtifact {
+                        artifact,
+                        rendered_layout: record.rendered_layout,
+                    });
+                }
+                record.layout = session.layout_key;
+                record.capture = capture.clone();
+                record.pane = pane;
+                record.span = record.identity.span.clone();
+                record.span.cell_segments = segments;
+                if record.artifact.is_none() && record.stale_artifact.is_some() {
+                    relayout_tasks.push(LiveDetectionTask {
+                        candidate_row: record.end.row,
+                        screen: record.screen,
+                        grid_generation: record.generation,
+                        detection_revision: record.detection_revision,
+                        layout: record.layout,
+                        cell_width_subpixels: session.cell_width_subpixels.get(),
+                        cell_height_subpixels: session.cell_height_subpixels.get(),
+                        ascii_baseline_subpixels: session
+                            .ascii_baseline_subpixels
+                            .map_or(0, NonZeroI64::get),
+                        capture: capture_under(&record.capture, session.detection_options()),
+                        pane: record.pane,
+                        start: record.start,
+                        end: record.end,
+                        band_start_row: record.band_start_row,
+                        band_end_row: record.band_end_row,
+                        span: record.span.clone(),
+                        detection_complete: true,
+                        resolved: true,
+                        refused_table_rows: Vec::new(),
+                    });
+                }
+                occupied.extend(record.band_start_row..=record.band_end_row);
+                session.live_decorations.insert(record.start.row, record);
+            }
+            session.offscreen_decorations = remaining;
+            relayout_tasks
+        });
         // Remember what was asked. The two lists are refilled in the buffers the last pass left
         // behind rather than collected afresh, so a pane sitting on an unresolvable record asks for
         // no memory at all after its first pass.
@@ -8675,8 +8778,7 @@ impl DualPlaneSession {
         // Only the source rows and borrowed row band are byte/revision dependencies. The rest of
         // the 1,024-line detector snapshot is semantic context: rerunning detection below catches
         // fence/delimiter state changes without rejecting ordinary spinner or status-line churn.
-        let current_inputs = self.live_detection_context();
-        if let Some(refusal) = live_task_is_current(&task, current_inputs) {
+        if let Some(refusal) = live_task_is_current(&task, &self.live_capture()) {
             return Some(refusal);
         }
         if !task.resolved {
@@ -8736,8 +8838,15 @@ impl DualPlaneSession {
                     record.vertical_scroll_px,
                 )
             });
+        // Displaced are the records standing on this block's rows **and in its pane's columns**: two
+        // panes of one split put two blocks over the same rows, and neither is in the other's way
+        // (T-PANE-COLUMNS; the branch's B-2). On a screen no frame cuts every record's pane is the
+        // whole screen, and this is the row test it always was.
         self.retire_live_decorations(|_, record| {
-            record.end.row >= task.start.row && record.start.row <= task.end.row
+            record.end.row >= task.start.row
+                && record.start.row <= task.end.row
+                && record.pane.left < task.pane.right
+                && task.pane.left < record.pane.right
         });
         let (show_source, hovered, horizontal_scroll_px, vertical_scroll_px) =
             remembered.unwrap_or((false, false, 0, 0));
@@ -8777,8 +8886,8 @@ impl DualPlaneSession {
                 detection_revision: task.detection_revision,
                 layout: task.layout,
                 rendered_layout: task.layout,
-                initial_context: task.initial_context.clone(),
-                inputs: Arc::clone(&task.inputs),
+                capture: task.capture.clone(),
+                pane: task.pane,
                 span: task.span,
                 artifact,
                 stale_artifact: None,
@@ -9713,6 +9822,10 @@ impl DualPlaneSession {
                 generation,
                 ..
             } => {
+                let live_band = match self.live_decorations.get(&start.row) {
+                    Some(record) => self.math_band_for(record),
+                    None => return false,
+                };
                 let Some(record) = self.live_decorations.get_mut(&start.row).filter(|record| {
                     record.screen == *screen
                         && record.start == *start
@@ -9728,8 +9841,10 @@ impl DualPlaneSession {
                     return false;
                 };
                 let artifact_size = (artifact.width_px, artifact.height_px);
+                // The same band the projection drew this block into — its pane's (R10) — or the
+                // offset would pan it past its own right edge into the next pane.
                 let available_width_px = math_block_available_width_px(
-                    pane_width_px,
+                    live_band.pane_width_px,
                     artifact.mode,
                     display_left_inset_subpixels,
                 );
@@ -9870,7 +9985,7 @@ impl DualPlaneSession {
                     projected_live_artifact(
                         record,
                         self.layout_key,
-                        self.math_band(),
+                        self.math_band_for(record),
                         self.math_vertical_padding_subpixels(),
                         self.cell_height_subpixels.get(),
                         self.live_block_box_limit_subpixels(record.screen),
@@ -9884,6 +9999,9 @@ impl DualPlaneSession {
                     end: record.end,
                     band_start_row: record.band_start_row,
                     band_end_row: record.band_end_row,
+                    left_limit_columns: self.live_block_limits(record).0,
+                    right_limit_columns: self.live_block_limits(record).1,
+                    pane_narrower_than_marks: self.live_pane_narrower_than_marks(record),
                     clipped_top_rows: record.clipped_top_rows,
                     clipped_bottom_rows: record.clipped_bottom_rows,
                     occluded_source_rows: record.placement.occluded_source_rows,
@@ -9932,6 +10050,9 @@ impl DualPlaneSession {
                 end: *point,
                 band_start_row: start.row,
                 band_end_row: point.row,
+                left_limit_columns: None,
+                right_limit_columns: None,
+                pane_narrower_than_marks: false,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
@@ -10233,7 +10354,11 @@ impl DualPlaneSession {
                 && placement.artifact.mode == MathMode::Display
                 && placement.artifact.kind == bt_viewport::RgbaArtifactKind::Math
             {
-                placement.left_subpixels = self.display_math_left_inset_subpixels();
+                // The inset from the block's own left edge: its pane's first column (R10), which
+                // on a screen no frame cuts is column zero and adds nothing.
+                placement.left_subpixels = i64::from(placement.left_limit_columns.unwrap_or(0))
+                    .saturating_mul(self.cell_width_subpixels.get())
+                    .saturating_add(self.display_math_left_inset_subpixels());
             }
             // **How solid this picture is drawn** (§7.1.5p ⑪) — full for every block in every
             // frame but the handful a change of face runs across, and this is the one writer of
@@ -10343,6 +10468,8 @@ impl DualPlaneSession {
                 artifact,
                 top_subpixels: first_mapped.top_subpixels,
                 left_subpixels: 0,
+                left_limit_columns: None,
+                right_limit_columns: None,
                 content_offset_subpixels: 0,
                 clip_height_subpixels: last_mapped
                     .top_subpixels
@@ -10374,19 +10501,21 @@ impl DualPlaneSession {
             if record.screen != self.live_screen || record.generation != self.grid_generation {
                 continue;
             }
-            if !record.show_source {
+            // R11: a block whose pane cannot hold its marks has no face but its own rows.
+            if !record.show_source || self.live_pane_narrower_than_marks(record) {
                 continue;
             }
             let Some(artifact) = projected_live_artifact(
                 record,
                 self.layout_key,
-                self.math_band(),
+                self.math_band_for(record),
                 self.math_vertical_padding_subpixels(),
                 self.cell_height_subpixels.get(),
                 self.live_block_box_limit_subpixels(record.screen),
             ) else {
                 continue;
             };
+            let (left_limit_columns, right_limit_columns) = self.live_block_limits(record);
             let Some((visible_row, _source_row)) = frame_row_for_live_range(
                 frame,
                 record.screen,
@@ -10405,10 +10534,13 @@ impl DualPlaneSession {
             // The band's last row by index rather than by value, because the width below is a walk
             // of the rows between the two ends and a row nobody can name is a row nobody can
             // measure.
-            let source_width_cells = frame_rows_width_cells(
+            // Measured inside the pane's columns (R10): the row a source face replaces is the pane's
+            // row, and stops at its rule.
+            let source_width_cells = frame_rows_width_cells_in(
                 frame,
                 visible_row,
                 u32::try_from(last_row).unwrap_or(u32::MAX),
+                self.live_block_columns(record),
             );
             let Some(first_mapped) = frame.row_map.get(visible_row as usize) else {
                 continue;
@@ -10434,7 +10566,10 @@ impl DualPlaneSession {
                 source: record.span.original_source.clone(),
                 artifact,
                 top_subpixels: first_mapped.top_subpixels,
-                left_subpixels: 0,
+                left_subpixels: i64::from(left_limit_columns.unwrap_or(0))
+                    .saturating_mul(self.cell_width_subpixels.get()),
+                left_limit_columns,
+                right_limit_columns,
                 content_offset_subpixels: 0,
                 clip_height_subpixels: band_height,
                 display: MathBlockDisplay::Source,
@@ -10538,6 +10673,8 @@ impl DualPlaneSession {
                     top_subpixels,
                     left_subpixels: i64::from(placement.left_column)
                         .saturating_mul(self.cell_width_subpixels.get()),
+                    left_limit_columns: None,
+                    right_limit_columns: None,
                     content_offset_subpixels: 0,
                     clip_height_subpixels: row_height_subpixels,
                     display: MathBlockDisplay::Rendered,
@@ -10571,18 +10708,19 @@ impl DualPlaneSession {
             let Some(artifact) = projected_live_artifact(
                 record,
                 self.layout_key,
-                self.math_band(),
+                self.math_band_for(record),
                 self.math_vertical_padding_subpixels(),
                 self.cell_height_subpixels.get(),
                 self.live_block_box_limit_subpixels(record.screen),
             ) else {
                 continue;
             };
+            let (left_limit_columns, right_limit_columns) = self.live_block_limits(record);
             let rendered_runs = artifact.inline_runs.clone();
             let placements = inline_placement_geometry(
                 &record.span,
                 &rendered_runs,
-                |run| live_inline_run_cells(frame, &record.inputs, record.start.row, run),
+                |run| live_inline_run_cells(frame, record.pane_inputs()?, record.start.row, run),
                 artifact.width_px,
             );
             // The joined opening fragment on the row above, cleared under the same rule the frozen
@@ -10597,7 +10735,7 @@ impl DualPlaneSession {
                         .any(|placement| placement.runs.iter().any(|run| run.run == 0))
                 })
                 .and_then(|head| {
-                    live_joined_head_cells(frame, &record.inputs, record.start.row, head)
+                    live_joined_head_cells(frame, record.pane_inputs()?, record.start.row, head)
                 });
             for index in joined_head_cells.into_iter().flatten() {
                 if let Some(cell) = frame.cells.get_mut(index) {
@@ -10639,6 +10777,8 @@ impl DualPlaneSession {
                     top_subpixels,
                     left_subpixels: i64::from(placement.left_column)
                         .saturating_mul(self.cell_width_subpixels.get()),
+                    left_limit_columns,
+                    right_limit_columns,
                     content_offset_subpixels: 0,
                     clip_height_subpixels: row_height_subpixels,
                     display: MathBlockDisplay::Rendered,
@@ -10689,6 +10829,7 @@ impl DualPlaneSession {
                     .top_subpixels
                     .saturating_add(last.height_subpixels)
                     .saturating_sub(first.top_subpixels),
+                right_limit_columns: None,
             });
             if record.hovered {
                 frame.status_text = Some(format!("Formula not rendered: {reason}"));
@@ -10729,6 +10870,7 @@ impl DualPlaneSession {
                     .top_subpixels
                     .saturating_add(last.height_subpixels)
                     .saturating_sub(first.top_subpixels),
+                right_limit_columns: self.live_block_limits(record).1,
             });
             if record.hovered {
                 frame.status_text = Some(format!("Formula not rendered: {reason}"));
@@ -11917,8 +12059,27 @@ impl DualPlaneSession {
         self.live_rows
             .extend(std::iter::repeat_n(LiveRowStability::default(), shift));
         let shift = u32::try_from(shift).unwrap_or(u32::MAX);
-        let inputs = self.live_detection_context();
+        let current = self.live_capture();
+        let inputs = Arc::clone(current.inputs());
         let last_row = after_grid_row_count(&inputs).saturating_sub(1);
+        // Each record keeps the checkpoint and options it was proven under, over the rows it now
+        // stands on; records that share those share one capture, and so one frame.
+        let mut captures: Vec<LiveCapture> = Vec::new();
+        let mut recapture = |record: &LiveDecorationRecord| {
+            if let Some(capture) = captures.iter().find(|capture| {
+                capture.initial_context() == record.capture.initial_context()
+                    && capture.options() == record.capture.options()
+            }) {
+                return capture.clone();
+            }
+            let capture = LiveCapture::new(
+                Arc::clone(&inputs),
+                record.capture.initial_context().clone(),
+                record.capture.options(),
+            );
+            captures.push(capture.clone());
+            capture
+        };
         let mapping = SegmentedRowMapping {
             content_delta: -i64::from(shift),
             content_start_row: 0,
@@ -11934,8 +12095,7 @@ impl DualPlaneSession {
                 self.grid_generation,
                 self.detection_revision,
                 self.layout_key,
-                record.initial_context.clone(),
-                Arc::clone(&inputs),
+                &recapture(&record),
             ) else {
                 invalidated += 1;
                 continue;
@@ -11955,9 +12115,8 @@ impl DualPlaneSession {
             .saturating_add(invalidated as u64);
         self.live_decorations = preserved;
 
-        let context_signature = live_detection_context_signature(&inputs, self.inline_math_bands);
+        let context_signature = live_detection_context_signature(&current, self.inline_math_bands);
         for record in self.live_decorations.values_mut() {
-            record.inputs = Arc::clone(&inputs);
             if let Some(state) = self.live_rows.get_mut(record.end.row as usize) {
                 state.candidate_signature =
                     Some(live_detection_signature(context_signature, record.end.row));
@@ -12571,9 +12730,8 @@ impl DualPlaneSession {
                 cell_width_subpixels: self.cell_width_subpixels.get(),
                 cell_height_subpixels: self.cell_height_subpixels.get(),
                 ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
-                options: detection_options,
-                initial_context: record.initial_context.clone(),
-                inputs: Arc::clone(&record.inputs),
+                capture: capture_under(&record.capture, detection_options),
+                pane: record.pane,
                 start: record.start,
                 end: record.end,
                 band_start_row: record.band_start_row,
@@ -13253,14 +13411,21 @@ pub fn render_live_detection_task(
     }
     // The **logical** line, not the row the run starts on: a run's byte offsets are offsets into
     // the string the detector proved it on, and the fold is free to have put the rest of it — or
-    // all of it — on a later row (§4.6c).
-    let line = live_snapshot_logical_line_text(&task.inputs, task.start.row);
+    // all of it — on a later row (§4.6c). The line as the block's own pane reads it (R7), because
+    // those are the bytes the offsets count.
+    let pane_inputs = task
+        .capture
+        .pane_inputs(task.pane)
+        .ok_or(MathRenderError::NotDetected)?;
+    let line = live_snapshot_logical_line_text(pane_inputs, task.start.row);
     render_task_math(
         engine,
         &task.span,
         &line,
         InlineGridGeometry {
-            pane_columns: task.layout.width_cells.get(),
+            // The width the producer of this line had to work in: its pane's (R10), which is the
+            // grid's on every screen no frame cuts.
+            pane_columns: task.pane.width().max(1),
             cell_width_subpixels: task.cell_width_subpixels,
             cell_height_subpixels: task.cell_height_subpixels,
             ascii_baseline_subpixels: task.ascii_baseline_subpixels,
@@ -13983,6 +14148,53 @@ fn math_block_padding_subpixels(
         .div_euclid(2)
 }
 
+impl LiveDecorationRecord {
+    /// The rows of this record's pane as the pane reads them (R7): only the pane's own clusters,
+    /// with cell boundaries in screen columns. On a screen no frame cuts, the capture's own inputs.
+    /// `None` only if `pane` is not a pane of `capture`'s frame, which no writer of the two allows.
+    fn pane_inputs(&self) -> Option<&Arc<[LiveDetectionInput]>> {
+        self.capture.pane_inputs(self.pane)
+    }
+}
+
+/// **Whether two frames are the same frame** (note §8.2): compared by value — the rectangles, the
+/// status row and the screen-owned fence state — and two frames of screens no frame cuts are always
+/// the same frame, whatever size the screen was, so an ordinary screen never sees a frame change.
+fn frames_agree(left: &ScreenFrame, right: &ScreenFrame) -> bool {
+    (!left.is_framed() && !right.is_framed())
+        || (left.same_layout(right) && left.screen_fence_state() == right.screen_fence_state())
+}
+
+/// The same capture under other detection options: the capture itself when they already agree, so
+/// a relayout of a record proven under today's options shares the record's frame.
+fn capture_under(capture: &LiveCapture, options: DetectionOptions) -> LiveCapture {
+    if capture.options() == options {
+        capture.clone()
+    } else {
+        LiveCapture::new(
+            Arc::clone(capture.inputs()),
+            capture.initial_context().clone(),
+            options,
+        )
+    }
+}
+
+/// **The pane of `capture`'s frame a block anchored at `start` now stands in** — how a record that
+/// is re-anchored onto another capture learns its pane (T-PANE-COLUMNS). On a screen no frame cuts
+/// that is the whole screen, wherever the point is; on a framed one it is the pane holding the
+/// point's cell, and `None` when no pane does (the point is on a rule or on the status row).
+fn pane_holding(capture: &LiveCapture, start: GridPoint) -> Option<PaneRect> {
+    let frame = capture.frame();
+    if !frame.is_framed() {
+        return Some(capture.screen_rect());
+    }
+    frame
+        .panes()
+        .iter()
+        .map(|pane| pane.rect)
+        .find(|rect| rect.contains_row(start.row) && rect.contains_column(start.column))
+}
+
 fn live_grid_input(inputs: &[LiveDetectionInput], row: u32) -> Option<&LiveDetectionInput> {
     inputs.iter().find(|input| {
         matches!(input.source, LiveDetectionSource::Grid { row: input_row, .. } if input_row == row)
@@ -14031,9 +14243,11 @@ fn proven_live_occurrence(
             *row = row.checked_sub(task.band_start_row)?;
         }
     }
+    // Row identity is still the whole captured row in 69a (the repaint probes compare it); ticket
+    // 69b keys it by the pane's slice.
     let source_rows = (task.start.row..=task.end.row)
         .map(|row| {
-            let input = live_grid_input(&task.inputs, row)?;
+            let input = live_grid_input(task.capture.inputs(), row)?;
             Some(ProvenLiveRow {
                 band_offset: row.checked_sub(task.band_start_row)?,
                 text: input.text.clone(),
@@ -14220,12 +14434,16 @@ fn extend_live_task_band(task: &mut LiveDetectionTask) {
     if task.span.mode == MathMode::Inline {
         return;
     }
+    // Only the pane's own rows can be borrowed, and only while the pane's slice of them is blank.
+    let Some(inputs) = task.capture.pane_inputs(task.pane).map(Arc::clone) else {
+        return;
+    };
     let mut borrowed = 0;
     for offset in 1..=LIVE_MATH_MAX_BORROWED_BLANK_ROWS {
         let Some(row) = task.end.row.checked_add(offset) else {
             break;
         };
-        let Some(input) = live_grid_input(&task.inputs, row) else {
+        let Some(input) = live_grid_input(&inputs, row) else {
             break;
         };
         if !input.text.chars().all(char::is_whitespace) {
@@ -14238,7 +14456,7 @@ fn extend_live_task_band(task: &mut LiveDetectionTask) {
         let Some(row) = task.start.row.checked_sub(offset) else {
             break;
         };
-        let Some(input) = live_grid_input(&task.inputs, row) else {
+        let Some(input) = live_grid_input(&inputs, row) else {
             break;
         };
         if !input.text.chars().all(char::is_whitespace) {
@@ -14280,9 +14498,18 @@ fn size_resolved_live_task_band(task: &mut LiveDetectionTask) {
 /// re-arm every candidate. An inline-capable row has to be in that set once the switch is on: its
 /// text is its own detection input, and a row that changed from `$x^2$` to `$y^2$` while no `$$`
 /// moved would otherwise hash identically and never be re-detected.
-fn live_detection_context_signature(inputs: &[LiveDetectionInput], inline_formulas: bool) -> u64 {
+///
+/// Hashed over every pane's own lines (T-PANE-COLUMNS): a framed row is two panes' text, and a fence
+/// or a delimiter is only visible in the pane's slice. On a screen no frame cuts that is the
+/// capture's own input list, as it always was.
+fn live_detection_context_signature(capture: &LiveCapture, inline_formulas: bool) -> u64 {
     let mut hasher = DefaultHasher::new();
-    for input in inputs {
+    for input in capture
+        .frame()
+        .panes()
+        .iter()
+        .flat_map(|pane| pane.inputs().iter())
+    {
         let trimmed = input.text.trim();
         let structural = may_contain_math(trimmed, inline_formulas)
             || trimmed.starts_with("```")
@@ -14847,9 +15074,9 @@ fn project_live_record_uniquely(
     generation: GridGeneration,
     detection_revision: DetectionRevision,
     layout: LayoutKey,
-    initial_context: DetectionContext,
-    inputs: Arc<[LiveDetectionInput]>,
+    capture: &LiveCapture,
 ) -> Option<RecordProjection> {
+    let inputs = capture.inputs();
     let mut visible = Vec::new();
     let mut dormant = Vec::new();
     for mapping in mappings {
@@ -14859,8 +15086,7 @@ fn project_live_record_uniquely(
             generation,
             detection_revision,
             layout,
-            initial_context.clone(),
-            Arc::clone(&inputs),
+            capture,
         ) {
             Some(RecordProjection::Visible(record)) => {
                 let support = projected_exact_source_row_support(&record);
@@ -14907,7 +15133,7 @@ fn project_live_record_uniquely(
             .map(|(_, record)| RecordProjection::Visible(record));
     }
 
-    if let Some(identity_mapping) = identity_row_mapping(record, mappings, &inputs)
+    if let Some(identity_mapping) = identity_row_mapping(record, mappings, inputs)
         && !mappings.contains(&identity_mapping)
         && let Some(RecordProjection::Visible(record)) = project_live_record(
             record,
@@ -14915,8 +15141,7 @@ fn project_live_record_uniquely(
             generation,
             detection_revision,
             layout,
-            initial_context,
-            inputs,
+            capture,
         )
     {
         return Some(RecordProjection::Visible(record));
@@ -14942,7 +15167,7 @@ fn projected_exact_source_row_support(record: &LiveDecorationRecord) -> usize {
             let Ok(target) = u32::try_from(target) else {
                 return false;
             };
-            live_grid_input(&record.inputs, target)
+            live_grid_input(record.capture.inputs(), target)
                 .is_some_and(|input| proven.exactly_matches(input))
         })
         .count()
@@ -15011,10 +15236,10 @@ fn project_live_record(
     generation: GridGeneration,
     detection_revision: DetectionRevision,
     layout: LayoutKey,
-    initial_context: DetectionContext,
-    inputs: Arc<[LiveDetectionInput]>,
+    capture: &LiveCapture,
 ) -> Option<RecordProjection> {
-    let row_count = after_grid_row_count(&inputs);
+    let inputs = capture.inputs();
+    let row_count = after_grid_row_count(inputs);
     let last_row = row_count.checked_sub(1)?;
     let mut record = record.clone();
     let logical_band_start = record
@@ -15027,8 +15252,10 @@ fn project_live_record(
     record.generation = generation;
     record.detection_revision = detection_revision;
     record.layout = layout;
-    record.initial_context = initial_context;
-    record.inputs = Arc::clone(&inputs);
+    record.capture = capture.clone();
+    // A record parked off the grid stands in no pane until a projection or a restore seats it; the
+    // whole screen names that, and nothing presents a dormant record.
+    record.pane = capture.screen_rect();
 
     debug_assert!(record.identity.source_start_offset <= record.identity.source_end_offset);
     debug_assert!(record.identity.created_start.row >= record.identity.source_start_offset);
@@ -15056,7 +15283,7 @@ fn project_live_record(
             continue;
         }
         let target_row = u32::try_from(target).ok()?;
-        let input = live_grid_input(&inputs, target_row)?;
+        let input = live_grid_input(inputs, target_row)?;
         if target < content_start || target > content_end {
             occluded_source_rows = occluded_source_rows.saturating_add(1);
             if let Some(ranges) = proven.source_clear_ranges(input) {
@@ -15176,6 +15403,9 @@ fn project_live_record(
     record.placement.occluded_source_rows = occluded_source_rows;
     record.placement.occluded_visible_rows = occluded_visible_rows;
     record.span = span;
+    // Seated, so it stands in a pane of the capture it now reads: the one holding its first cell.
+    // A frame with no pane there cannot present it, and the projection fails like any other.
+    record.pane = pane_holding(capture, record.start)?;
     Some(RecordProjection::Visible(record))
 }
 
@@ -15186,10 +15416,9 @@ fn shift_live_record(
     generation: GridGeneration,
     detection_revision: DetectionRevision,
     layout: LayoutKey,
-    initial_context: DetectionContext,
-    inputs: Arc<[LiveDetectionInput]>,
+    capture: &LiveCapture,
 ) -> Option<LiveDecorationRecord> {
-    let row_count = after_grid_row_count(&inputs);
+    let row_count = after_grid_row_count(capture.inputs());
     let last_row = row_count.checked_sub(1)?;
     let mapping = SegmentedRowMapping {
         content_delta: delta,
@@ -15203,8 +15432,7 @@ fn shift_live_record(
         generation,
         detection_revision,
         layout,
-        initial_context,
-        inputs,
+        capture,
     )? {
         RecordProjection::Visible(record) => Some(record),
         RecordProjection::Dormant(_) => None,
@@ -15269,6 +15497,10 @@ enum LiveCompletionRefusal {
     NoLongerDetected,
     /// The occurrence could not be reduced to a proven placement on the grid.
     Unproven,
+    /// The scan read a frame that no longer stands: a multiplexer's rectangles changed, or the
+    /// screen-owned fence state did (T-PANE-COLUMNS, note §8.2). Every pane re-arms from the frame
+    /// change itself.
+    FrameChanged,
 }
 
 impl std::fmt::Display for LiveCompletionRefusal {
@@ -15281,6 +15513,7 @@ impl std::fmt::Display for LiveCompletionRefusal {
             Self::SourceChanged => "source-changed",
             Self::NoLongerDetected => "no-longer-detected",
             Self::Unproven => "unproven",
+            Self::FrameChanged => "frame-changed",
         };
         formatter.write_str(word)
     }
@@ -15349,10 +15582,19 @@ fn live_task_dependency_rows(task: &LiveDetectionTask) -> (u32, u32) {
 }
 
 /// `None` when the completion still describes the grid it was scanned from.
+///
+/// The re-resolution reads the current capture under the task's own checkpoint and options, and a
+/// resolved task additionally has to be proven in the **same pane rectangle** it was proven in
+/// (T-PANE-COLUMNS, note §4 step 4): a frame that moved under it is a different answer. In 69a the
+/// dependency rows are compared whole; ticket 69b compares the pane's slice.
 fn live_task_is_current(
     task: &LiveDetectionTask,
-    current_inputs: Arc<[LiveDetectionInput]>,
+    current: &LiveCapture,
 ) -> Option<LiveCompletionRefusal> {
+    let current_inputs = current.inputs();
+    if !frames_agree(task.capture.frame(), current.frame()) {
+        return Some(LiveCompletionRefusal::FrameChanged);
+    }
     let dependency_start = if task.resolved {
         task.band_start_row
     } else {
@@ -15364,10 +15606,10 @@ fn live_task_is_current(
         task.candidate_row
     };
     for row in dependency_start..=dependency_end {
-        let Some(snapshot) = live_grid_input(&task.inputs, row) else {
+        let Some(snapshot) = live_grid_input(task.capture.inputs(), row) else {
             return Some(LiveCompletionRefusal::SourceChanged);
         };
-        let Some(current) = live_grid_input(&current_inputs, row) else {
+        let Some(current) = live_grid_input(current_inputs, row) else {
             return Some(LiveCompletionRefusal::SourceChanged);
         };
         let same_source = matches!(
@@ -15383,7 +15625,18 @@ fn live_task_is_current(
     }
 
     let mut current_task = task.clone();
-    current_task.inputs = current_inputs;
+    current_task.capture = if current.initial_context() == task.capture.initial_context()
+        && current.options() == task.capture.options()
+    {
+        current.clone()
+    } else {
+        LiveCapture::new(
+            Arc::clone(current_inputs),
+            task.capture.initial_context().clone(),
+            task.capture.options(),
+        )
+    };
+    current_task.pane = current_task.capture.screen_rect();
     current_task.start = GridPoint {
         row: task.candidate_row,
         column: 0,
@@ -15410,6 +15663,7 @@ fn live_task_is_current(
         return resolves_now.then_some(LiveCompletionRefusal::NoLongerDetected);
     }
     let same = resolves_now
+        && current_task.pane == task.pane
         && current_task.start == task.start
         && current_task.end == task.end
         && current_task.span == task.span;
@@ -15429,7 +15683,35 @@ fn byte_offset_at_column(boundaries: &[(u32, u32)], column: u32, text_len: usize
         .min(text_len)
 }
 
-fn live_candidate_rows(
+/// Every stable grid row that may close a block, in every pane of the capture's frame (note §4
+/// step 2): one walk per pane over the pane's own lines, from the pane's own checkpoint — neutral
+/// for a framed pane, the capture's for the one whole-screen pane — and a row is armed if any pane
+/// arms it. A row a screen-owned fence covers (R9) arms nothing. On a screen no frame cuts this is
+/// the one walk that always ran.
+fn live_candidate_rows(capture: &LiveCapture, stable: &[bool], inline_formulas: bool) -> Vec<u32> {
+    let frame = capture.frame();
+    let screen_fence = frame.screen_fence_state();
+    let mut candidates = frame
+        .panes()
+        .iter()
+        .flat_map(|pane| {
+            live_candidate_rows_in_pane(
+                pane.inputs(),
+                pane.initial_context().clone(),
+                stable,
+                inline_formulas,
+            )
+        })
+        .filter(|row| !screen_fence.covers(*row))
+        .collect::<Vec<_>>();
+    if frame.panes().len() > 1 {
+        candidates.sort_unstable();
+        candidates.dedup();
+    }
+    candidates
+}
+
+fn live_candidate_rows_in_pane(
     inputs: &[LiveDetectionInput],
     mut context: DetectionContext,
     stable: &[bool],
@@ -15847,11 +16129,30 @@ fn drawable_frame_row_count(frame: &ViewportFrame) -> u32 {
 /// The width of a row is `bt_viewport::row_width_cells` and is that in both places, so the band the
 /// renderer draws and the band the projection measures for the *other* face cannot drift apart.
 fn frame_rows_width_cells(frame: &ViewportFrame, first: u32, last: u32) -> u32 {
+    frame_rows_width_cells_in(frame, first, last, None)
+}
+
+/// **The widest of these frame rows, counted inside one pane's columns** (R10): a source face is
+/// drawn from its pane's first column and stops at its rule, so the width it hugs is measured
+/// there. `None` measures the whole row, which is what every history block and every block on a
+/// screen no frame cut asks for.
+fn frame_rows_width_cells_in(
+    frame: &ViewportFrame,
+    first: u32,
+    last: u32,
+    columns_of_pane: Option<(u32, u32)>,
+) -> u32 {
     let columns = frame.columns.get() as usize;
+    let (from, to) = columns_of_pane.map_or((0, columns), |(left, right)| {
+        let to = (right as usize).min(columns);
+        ((left as usize).min(to), to)
+    });
     (first..=last)
         .filter_map(|row| {
             let start = (row as usize).checked_mul(columns)?;
-            frame.cells.get(start..start.checked_add(columns)?)
+            frame
+                .cells
+                .get(start.checked_add(from)?..start.checked_add(to)?)
         })
         .map(bt_viewport::row_width_cells)
         .max()
@@ -15982,12 +16283,24 @@ fn live_snapshot_logical_line_text(inputs: &[LiveDetectionInput], row: u32) -> S
         .collect()
 }
 
+/// The screen column a byte offset of one captured row stands at, read off the row's **captured
+/// cell boundaries** — the grid's own answer, wide spacers included, and the lookup detection
+/// anchored the occurrence with (T-PANE-COLUMNS, R7). A pane's row starts at the pane's first
+/// column, so a width measured over its text would be short by the pane's origin — and by one
+/// more cell wherever a straddling cluster was dropped; the boundaries are already screen columns.
+fn captured_cell_at(input: &LiveDetectionInput, byte: usize) -> Option<u32> {
+    let byte = u32::try_from(byte).ok()?;
+    input
+        .cell_boundaries
+        .iter()
+        .find_map(|(boundary, cell)| (*boundary == byte).then_some(*cell))
+}
+
 /// Frame cells one live-grid `$…$` run occupies, as `(row, left column, cell indices)`.
 ///
-/// Columns come from `UnicodeWidthStr::width` over the row's own text — the display width, not a
-/// character count — because that is what the grid drew and what `render_task_math` measured the
-/// run's available box with. The two must agree or a CJK line places its formula in the wrong
-/// cells.
+/// Columns come from the row's captured cell boundaries ([`captured_cell_at`]) — what the grid
+/// drew, and what detection anchored the occurrence at — so a CJK line, or a pane's line, places
+/// its formula in the cells it was printed in.
 ///
 /// The run is looked up across every physical row of its logical line, and the row and column
 /// returned are the ones its **first** cell sits on: a run the fold split still owns all of its
@@ -16025,8 +16338,8 @@ fn live_fragment_cells(
     let mut origin = None;
     let mut cells = Vec::new();
     for (grid_row, byte_start) in rows {
-        let text = live_grid_input(inputs, grid_row)?.text.as_str();
-        let byte_end = byte_start.saturating_add(text.len());
+        let input = live_grid_input(inputs, grid_row)?;
+        let byte_end = byte_start.saturating_add(input.text.len());
         let from = run_start.max(byte_start);
         let to = run_end.min(byte_end);
         if from >= to {
@@ -16036,10 +16349,8 @@ fn live_fragment_cells(
             .row_map
             .iter()
             .position(|mapped| mapped.live_grid_row == Some(grid_row))?;
-        let start_column = UnicodeWidthStr::width(text.get(..from - byte_start)?);
-        let end_column = start_column.saturating_add(UnicodeWidthStr::width(
-            text.get(from - byte_start..to - byte_start)?,
-        ));
+        let start_column = captured_cell_at(input, from - byte_start)? as usize;
+        let end_column = captured_cell_at(input, to - byte_start)? as usize;
         if start_column >= end_column || end_column > columns {
             return None;
         }
@@ -17404,7 +17715,7 @@ mod tests {
             .feed_at(&stream.as_bytes()[first_line_end..], at)
             .unwrap();
         assert_eq!(session.live_screen, ScreenId::Primary);
-        let inputs = session.live_detection_context();
+        let inputs = Arc::clone(session.live_capture().inputs());
         for row in 0..count {
             assert_eq!(
                 live_grid_input(&inputs, row).unwrap().site,
@@ -20432,7 +20743,7 @@ mod tests {
             .map(|artifact| artifact.key.clone())
             .unwrap();
         let detections = session.live_detection_count();
-        let before_inputs = session.live_detection_context();
+        let before_inputs = Arc::clone(session.live_capture().inputs());
         // The checkpoint the scan of the first grid row starts from, which is what the two sides of
         // this fixture have to disagree about for it to be measuring anything.
         let before_prefix = session.live_initial_detection_context(&before_inputs);
@@ -20447,7 +20758,7 @@ mod tests {
                 start + Duration::from_millis(210),
             )
             .unwrap();
-        let after_inputs = session.live_detection_context();
+        let after_inputs = Arc::clone(session.live_capture().inputs());
         let after_prefix = session.live_initial_detection_context(&after_inputs);
         assert_ne!(before_prefix, after_prefix);
         let record = session.live_decorations.get(&0).unwrap();
@@ -21771,7 +22082,8 @@ mod tests {
         assert!(
             !session
                 .live_detection_ownership_ledger()
-                .owns_source(&held_source),
+                .values()
+                .any(|ledger| ledger.owns_source(&held_source)),
             "the fixture did not poison the parity it set out to poison"
         );
 
@@ -31984,7 +32296,7 @@ mod tests {
 
     /// The site of the grid row whose text contains `needle`, as the live scan would see it.
     fn grid_site_of(session: &DualPlaneSession, needle: &str) -> InlineMathSite {
-        let inputs = session.live_detection_context();
+        let inputs = Arc::clone(session.live_capture().inputs());
         let matching = inputs
             .iter()
             .filter(|input| {
@@ -32485,7 +32797,7 @@ mod tests {
 
     /// The live row the sentinel is on, read off the grid rather than counted.
     fn sentinel_row(session: &DualPlaneSession) -> u32 {
-        let inputs = session.live_detection_context();
+        let inputs = Arc::clone(session.live_capture().inputs());
         (0..session.live_rows.len() as u32)
             .find(|row| {
                 live_grid_input(&inputs, *row).is_some_and(|input| input.text.contains("SENTINEL"))
@@ -32577,9 +32889,8 @@ mod tests {
                     cell_width_subpixels: 0,
                     cell_height_subpixels: 0,
                     ascii_baseline_subpixels: 0,
-                    options: session.detection_options(),
-                    initial_context: record.initial_context.clone(),
-                    inputs: Arc::clone(&record.inputs),
+                    capture: record.capture.clone(),
+                    pane: record.pane,
                     start: record.start,
                     end: record.end,
                     band_start_row: record.band_start_row,
@@ -32621,7 +32932,7 @@ mod tests {
                 started,
             )
             .unwrap();
-        let inputs = session.live_detection_context();
+        let inputs = Arc::clone(session.live_capture().inputs());
         let energy_row = (0..session.live_rows.len() as u32)
             .find(|row| live_grid_input(&inputs, *row).is_some_and(|input| input.text == ENERGY))
             .expect("the command's line is on the grid");
@@ -32728,13 +33039,13 @@ mod tests {
 
     /// The site of one grid row, as the live scan sees it.
     fn grid_site_at(session: &DualPlaneSession, row: u32) -> InlineMathSite {
-        live_grid_input(&session.live_detection_context(), row)
+        live_grid_input(&Arc::clone(session.live_capture().inputs()), row)
             .map_or(InlineMathSite::Ineligible, |input| input.site)
     }
 
     /// Every row that carries text and that the scan would let a lone `$` be read on.
     fn eligible_text_rows(session: &DualPlaneSession) -> Vec<u32> {
-        let inputs = session.live_detection_context();
+        let inputs = Arc::clone(session.live_capture().inputs());
         (0..session.live_rows.len() as u32)
             .filter(|row| {
                 live_grid_input(&inputs, *row).is_some_and(|input| {
@@ -32762,7 +33073,7 @@ mod tests {
         let mut session = DualPlaneSession::new(nz(60), nz(8));
         seat_inline_metrics(&mut session);
         session.feed_at(stream.as_bytes(), started).unwrap();
-        let inputs = session.live_detection_context();
+        let inputs = Arc::clone(session.live_capture().inputs());
         let eligible = (0..session.live_rows.len() as u32)
             .filter(|row| {
                 live_grid_input(&inputs, *row).is_some_and(|input| {
@@ -33271,7 +33582,7 @@ mod tests {
             session.semantic_output_regions.is_empty(),
             "the fixture must really evict the region"
         );
-        let inputs = session.live_detection_context();
+        let inputs = Arc::clone(session.live_capture().inputs());
         let moved = (0..session.live_rows.len() as u32)
             .find(|row| {
                 live_grid_input(&inputs, *row).is_some_and(|input| input.text.contains("energy"))
@@ -33448,7 +33759,7 @@ mod tests {
             .unwrap();
         // The vendor takes the row off the bottom, so what survives is the prompt's own row — with
         // the command's text on it, which is the whole point of the fixture.
-        let inputs = session.live_detection_context();
+        let inputs = Arc::clone(session.live_capture().inputs());
         assert!(
             live_grid_input(&inputs, 0).is_some_and(|input| input.text.contains("energy")),
             "the surviving row must still carry the formula, or this proves nothing"
@@ -35398,7 +35709,7 @@ mod tests {
 
     /// Does the one row carrying this text hold any cell no command's output claims?
     fn row_carries_unclaimed_text(session: &DualPlaneSession, needle: &str) -> bool {
-        let inputs = session.live_detection_context();
+        let inputs = Arc::clone(session.live_capture().inputs());
         let rows = (0..session.live_rows.len() as u32)
             .filter(|row| {
                 live_grid_input(&inputs, *row).is_some_and(|input| input.text.contains(needle))
@@ -38533,3 +38844,7 @@ tail four
         );
     }
 }
+
+/// Formulas inside a multiplexer pane, through the real terminal (T-PANE-COLUMNS).
+#[cfg(test)]
+mod pane_columns_tests;

@@ -678,12 +678,17 @@ impl HeadlessOracle {
         // per frame only under BT_PROBE_OWNERSHIP; the final-state verdict is always computed below.
         // Hold-independent — a masked-by-holds strand still surfaces as an orphan here.
         if env::var_os("BT_PROBE_OWNERSHIP").is_some() {
-            let verdict = self
+            // One ledger per pane (T-PANE-COLUMNS); a screen no frame cuts has one.
+            let (orphans, clipped_open) = self
                 .session
                 .live_detection_ownership_ledger()
-                .containment(&self.annotations);
-            self.max_orphans = self.max_orphans.max(verdict.orphans);
-            self.ever_clipped_open |= verdict.clipped_open;
+                .values()
+                .map(|ledger| ledger.containment(&self.annotations))
+                .fold((0, false), |(orphans, clipped), verdict| {
+                    (orphans + verdict.orphans, clipped | verdict.clipped_open)
+                });
+            self.max_orphans = self.max_orphans.max(orphans);
+            self.ever_clipped_open |= clipped_open;
         }
         // Batch ③ stale-hold honesty. Every displayed formula whose exact source the current scan no
         // longer Owns is `HeldUnbacked` — a hold potentially masking dead detection. Annotated
@@ -1241,8 +1246,26 @@ fn main() -> Result<(), Box<dyn Error>> {
     // detected block, a legitimate rejection, or an orphan (hold-independent). The two layers:
     //   * source-integrity — known upstream byte damage, annotated per recording, reported not red;
     //   * detector-containment — any UNANNOTATED orphan is a containment failure and reds the exit.
-    let final_ledger = oracle.session.live_detection_ownership_ledger();
-    let verdict = final_ledger.containment(&oracle.annotations);
+    //
+    // **One ledger per pane** (T-PANE-COLUMNS, note §4 step 7), each keyed by its rectangle. The
+    // summary line adds the panes' verdicts, so on a screen no frame cuts — one pane — it is the line
+    // it always was; a framed screen also prints each pane's own verdict with its rectangle.
+    let final_ledgers = oracle.session.live_detection_ownership_ledger();
+    let verdicts = final_ledgers
+        .iter()
+        .map(|(pane, ledger)| (*pane, ledger.containment(&oracle.annotations)))
+        .collect::<Vec<_>>();
+    let verdict = verdicts.iter().fold(
+        bt_detect::ContainmentVerdict::default(),
+        |sum, (_, verdict)| bt_detect::ContainmentVerdict {
+            detected: sum.detected + verdict.detected,
+            legitimate_rejections: sum.legitimate_rejections + verdict.legitimate_rejections,
+            annotated_damage: sum.annotated_damage + verdict.annotated_damage,
+            orphans: sum.orphans + verdict.orphans,
+            clipped_open: sum.clipped_open || verdict.clipped_open,
+            red: sum.red || verdict.red,
+        },
+    );
     eprintln!(
         "OWNERSHIP_LEDGER detected={} rejections={} orphans={} annotated={} clipped_open={} max_orphans={} ever_clipped_open={}",
         verdict.detected,
@@ -1253,7 +1276,26 @@ fn main() -> Result<(), Box<dyn Error>> {
         oracle.max_orphans,
         oracle.ever_clipped_open,
     );
-    for entry in final_ledger.orphan_entries() {
+    if verdicts.len() > 1 {
+        for (pane, verdict) in &verdicts {
+            eprintln!(
+                "  PANE_LEDGER rows={}..{} columns={}..{} detected={} rejections={} orphans={} annotated={} clipped_open={}",
+                pane.top,
+                pane.bottom,
+                pane.left,
+                pane.right,
+                verdict.detected,
+                verdict.legitimate_rejections,
+                verdict.orphans,
+                verdict.annotated_damage,
+                verdict.clipped_open,
+            );
+        }
+    }
+    for entry in final_ledgers
+        .values()
+        .flat_map(bt_detect::OwnershipLedger::orphan_entries)
+    {
         let annotated = entry.source_line.is_some_and(|line| {
             oracle
                 .annotations
@@ -1276,7 +1318,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         );
     }
     if env::var_os("BT_PROBE_OWNERSHIP_DUMP").is_some() {
-        for entry in &final_ledger.entries {
+        for entry in final_ledgers.values().flat_map(|ledger| &ledger.entries) {
             eprintln!(
                 "  LEDGER li={} kind={:?} fate={:?} source_line={:?}",
                 entry.logical_index, entry.kind, entry.fate, entry.source_line
