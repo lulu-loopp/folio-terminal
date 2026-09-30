@@ -36,7 +36,7 @@ that would otherwise drift:
 | `scripts/check-notices.ps1` | `THIRD-PARTY-NOTICES.md` and the lock file |
 | `scripts/check-vendor-notices.ps1` | every copied-in dependency and its licence text |
 | `scripts/check-adapter-boundary.ps1` | the terminal adapter and the policy it must not import |
-| `scripts/ci/check-timing-bound.ps1` | the whole-row list of tests that still assume a numeric wall-clock bound only shrinks |
+| `scripts/ci/check-timing-bound.ps1` | the whole-row list of tests whose own body waits on or measures the real clock only shrinks (`bt-source`'s `timing` test holds the tree to the list) |
 | `scripts/check-machine-paths.ps1` | no tracked file naming a person, an address or a checkout path |
 
 **Run them after the three, in the same checkout and against the same `target/`.**

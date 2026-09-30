@@ -1,9 +1,18 @@
 # the_timing_bound_test_list_only_shrinks
 #
-# `docs/plans/TIMING-BOUND-TESTS.tsv` names tests whose verdict assumes real
-# elapsed time. Existing rows are migration work; a new row is a new flaky-test
-# liability. Compare with the pull request merge base, whole rows and
-# multiplicity included, so the list can only shrink.
+# `docs/plans/TIMING-BOUND-TESTS.tsv` names every `#[test]` function whose own
+# body waits on the real clock (`sleep`, `recv_timeout`, `wait_timeout`, ...) or
+# measures it (`elapsed`). Existing rows are migration work; a new row is a new
+# flaky-test liability. This script is the history half: it compares with the
+# merge base, whole rows and multiplicity included, so the list can only
+# shrink. The discovery half is bt-source's `timing` test
+# (`the_timing_bound_tests_are_exactly_the_listed_ones`), which holds the tree
+# to the list both ways, so a new timing-bound test is red there if it is not
+# listed and red here if it is.
+#
+# Neither half sees a clock a test reaches only through a function it calls (a
+# helper that polls, a product function handed a deadline), nor a measurement
+# written as `Instant::now() - start`: review owns discovering those.
 
 param(
     [string]$Repo = (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)),
