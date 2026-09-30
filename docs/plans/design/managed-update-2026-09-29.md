@@ -894,3 +894,19 @@ Homebrew:
 Windows: `FSCTL_SET_REPARSE_POINT`, the driver reference: https://learn.microsoft.com/windows-hardware/drivers/ifs/fsctl-set-reparse-point.
 
 Folio (this repository): `docs/plans/design/self-update-2026-09-16.md` revisions (a)–(h); `docs/DESIGN.md` entries of 2026-09-26 to 2026-09-29 on `install_channel` (U-1, U-4), the hooks (U-2), the update job (U-18, U-31) and the harness; `docs/RELEASING.md` "Distribution manifests", "The hooks" and "winget"; `packaging/scoop/folio.json`, `packaging/homebrew/folio.rb`, `packaging/winget/`; `crates/bt-app/src/{install_channel, update_job, update_card, update_txn, update_startup, update_prepare, update_prepare_windows, update_prepare_macos, update_apply_windows}.rs`; the reviews `U-41-review-codex-2026-09-29.md` and `U-41-review-codex-2026-09-29-b.md`.
+
+---
+
+## Revision (d), 2026-09-30: what U-41a1 built, and the two fields it left to their tickets
+
+U-41a1 (the ticket's brief, `feat/update-adapter`) builds the seam of §1.1 over the two existing layouts, with no behaviour change for ours. Two items of §7's U-41a1 row are not built here. Both are deferred by construction: neither has a writer or a reader in U-41a1, and an experiment decides each one's contents.
+
+| §7 said U-41a1 builds | what U-41a1 built | why, and where it goes |
+|---|---|---|
+| R2's record of the adapter in the journal body | `Body::adapter` (`update_txn::Adapter`: `Ours`, `Homebrew`, `Scoop`, `Winget`). The press writes it at `Allocated` from the channel (`update_adapter::of_channel`), and every later phase carries it. It follows the receipt's H.1 rule: it is absent when it is `Ours`, so an ordinary journal is 0.4.6's bytes; a body without it reads as `Ours`; and a reader ignores a field it does not know. | The brief names the adapter as a value of its own. The layout variant still says what shape the transaction has, as it did before. §1.2's "Homebrew is `Layout::Bundle` with `marker` set" becomes `Layout::Bundle` with `adapter: Homebrew`, and U-41b adds the marker to it. |
+| `Layout::Link` | not built | Its fields (§1.3: the link, the version folders, every file's digest) depend on E-M2 and E-M5, and nothing writes or reads it before U-41c. U-41c adds it with the `decide` rows it needs. |
+| the `marker` field | not built | The carry (M1–M5) is U-41b's, after E-M1. A field that no build ever writes would be journal state with no writer. |
+| the interface | `Prepare`: `update_prepare_windows::PreparePoint`, `update_prepare_macos::PreparePoint`. `Activate` forward and back, and `Prove`: `update_apply_windows::ApplyPoints` (`activate`, `activate_back`, `locate`, `live`), `update_apply_macos::ApplyPoints` (`activate`, `activate_back`, `locate`). Each road finds the layout its journal names through `update_adapter::Layouts`, and each road's `Ours` is today's code moved. | as §1.1 says |
+| eligibility by adapter, one constant each | `HOMEBREW_ROAD`, `SCOOP_ROAD`, `WINGET_ROAD`, all `false`. `update_adapter::built_on` is read by `update_job::Evidence::eligibility` and by both Prepares' road checks. | U-41d's hard-off constant and its no-card regression are one constant and one test, so they are built here (`update_card::tests::a_winget_copy_never_raises_the_card_while_the_road_is_off`). |
+
+The Windows `ApplyPoints` takes the member inventories (`Site::inventories`), and `activate_back` takes `decide`'s moves, because the Windows road holds only `Layout::Members` today (`Txn::of`). U-41c widens both when it adds `Layout::Link`. On both roads, the checks before `Activate` (admission, the process check, and the identities or digests against the journal) stay common, as §1.4 says; L4's final-path reads are U-41a2's.

@@ -13336,3 +13336,25 @@ The `osc_8_url_*` captured-span tests in `bt-transcript` pin the reported `https
 The claim takes `sweep.guard` shared with `LOCK_NB`. An exclusive sweep answers `ClaimRefusal::Sweeping` immediately; `persist::is_writer_of` does not memoise that transient answer, so the existing hand-over road runs and the next writer question asks again. The sweep's exclusive guard remains non-blocking too. No released build contains U-43's sweep without this guard; coexistence with a pre-guard sweep build is ruled out rather than supported by a second protocol.
 
 On Unix, `standard_error_is` follows the diagnostics path as `diagnostics::append_note` does, so a symlinked `diagnostics.log` is compared by the target's device and inode and each recovery line still has one writer. Pinned by `instance::tests::a_claim_never_meets_a_file_a_sweep_is_holding`, `persist::tests::a_sweep_is_never_remembered_as_a_claim_refusal`, `update_recover::tests::a_recovery_line_reaches_the_log_once_whatever_standard_error_is`, and its Unix symlink case `a_symlinked_log_path_is_the_same_standard_error_target`.
+
+### 2026-09-30 — The update transaction takes an adapter: the journal names it, and each road calls Prepare, Activate and Prove through the layout it names, with no change for Folio's own copies (U-41a1)
+
+**What is built.** The journal body gains `adapter` (`update_txn::Adapter`: `Ours`, `Homebrew`, `Scoop`, `Winget`). O's Prepare writes it once, at `Allocated`, from the channel the press read (`update_adapter::of_channel`), and every later phase carries it. The field follows the receipt's H.1 rule for a v1 document. It is not written when it is `Ours`, so an ordinary copy's journal has 0.4.6's bytes. A 0.4.6 body, which has no such field, reads as `Ours`, and a reader ignores any field it does not know. Each road finds the layout its journal names through `update_adapter::Layouts` and calls that layout's points at the phase boundaries `docs/plans/design/managed-update-2026-09-29.md` §1.1 gives them:
+
+- **Prepare**, between `Allocated` and `Prepared`: `update_prepare_windows::PreparePoint`, `update_prepare_macos::PreparePoint`.
+- **Activate forward**, after `Moving` is durable; **Activate back**, after `RollbackIntent` is durable: `ApplyPoints::activate`, `activate_back`.
+- **Prove**, which set is live: `ApplyPoints::locate` at every step `decide` takes, and on Windows `live`.
+
+Each road's `Ours` is the code that was there, moved. The applier, the recovery and the resume's revalidation read the adapter from the journal and never from the channel (R2). A journal that names an adapter this build has not built is refused before any of the adapter's points is called.
+
+**The rule.** Only `Ours` has a road in 0.4.7 so far. `HOMEBREW_ROAD`, `SCOOP_ROAD` and `WINGET_ROAD` are `false`. `update_adapter::built_on` answers eligibility (`update_job::Evidence::eligibility`) and both Prepares' road checks, so a managed copy keeps its row with the manager's command and **Copy**, gets no card and has no journal. Winget's constant is U-41d's hard-off switch; it is one constant and one test, so it is built here. `Layout::Link` and the `marker` field are left to U-41c and U-41b: an experiment fixes each one's shape, and nothing writes either before those tickets (the note's revision (d)). This entry changes no phase, transition, writer right, door, card word or row. For that reason `CHANGELOG.md` has no line for it.
+
+**What pins it.** No existing updater test's assertions changed. The only edits to existing tests are the new field in seven journal literals and the new `layouts` field in three road literals, each set to what the product uses. New tests:
+
+- `update_txn::tests::a_journal_that_names_no_adapter_reads_as_ours_and_ours_is_written_as_0_4_6_wrote_it`
+- `update_txn::tests::a_body_reader_ignores_an_adapter_or_any_field_it_does_not_know`
+- `update_card::tests::a_winget_copy_never_raises_the_card_while_the_road_is_off`
+- `update_card::tests::a_managed_copy_whose_adapter_is_not_built_keeps_the_copy_row`
+- on the harness U-41b and U-41c will use (a fake layout that records every point with the phase the journal on disk stood at, and delegates to `Ours`):
+  - Windows: `update_apply_windows::tests::the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase`, `a_layout_that_refuses_to_activate_is_rolled_back_untried`; `update_prepare_windows::tests::the_press_calls_the_prepare_of_the_layout_its_adapter_names_once_at_allocated`, `a_layout_that_refuses_its_prepare_abandons_and_leaves_nothing`
+  - macOS: `update_apply_macos::tests::the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase`, `a_layout_that_refuses_to_activate_is_reverted_with_the_old_bundle_live`; `update_prepare_macos::tests::the_press_calls_the_prepare_of_the_layout_its_adapter_names_and_a_refusal_abandons`
