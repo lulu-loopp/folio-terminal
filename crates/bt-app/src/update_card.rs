@@ -272,6 +272,7 @@ fn reason(failure: &Failure) -> String {
         Failure::Stopped(Stop::Identity) => Text::UpdateFailedIdentity,
         Failure::Stopped(Stop::Copy) => Text::UpdateFailedCopy,
         Failure::Stopped(Stop::Clone) => Text::UpdateFailedClone,
+        Failure::Stopped(Stop::TooOld) => Text::UpdateFailedTooOld,
         Failure::RolledBack | Failure::Incomplete { .. } => Text::UpdateFailedTrial,
         Failure::Interrupted => Text::UpdateFailedInterrupted,
         Failure::Stopped(Stop::Space { short_by }) => {

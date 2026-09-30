@@ -96,6 +96,27 @@ pub(crate) fn build_that(
     says: &str,
     behaviour: Behaviour,
 ) -> Vec<(String, Vec<u8>)> {
+    build_needing(
+        ca,
+        folder,
+        (version, spelled),
+        identity,
+        says,
+        behaviour,
+        crate::version::VERSION,
+    )
+}
+
+/// [`build_that`], whose manifest's `min_updater` is `needs` (U-42c).
+fn build_needing(
+    ca: &TestCa,
+    folder: &Path,
+    (version, spelled): (FileVersion, &str),
+    identity: &str,
+    says: &str,
+    behaviour: Behaviour,
+    needs: &str,
+) -> Vec<(String, Vec<u8>)> {
     let mut members = Vec::new();
     for sidecar in SIDECARS {
         let path = folder.join(sidecar);
@@ -113,7 +134,7 @@ pub(crate) fn build_that(
         arch: release_manifest::archive_arch(std::env::consts::ARCH).to_owned(),
         archive_root: archive_root(spelled),
         protocol: PROTOCOL,
-        min_updater: crate::version::VERSION.to_owned(),
+        min_updater: needs.to_owned(),
         members: members
             .iter()
             .map(|(name, bytes)| release_manifest::Member {
@@ -630,6 +651,50 @@ fn mutated_asset_hash_pair_refuses_before_swap() {
         before,
         "a Prepare changes nothing installed"
     );
+}
+
+/// RED (U-42c) — **a release that needs a newer updater than this build
+/// fails as "too old to update itself", not as "not verified"; nothing
+/// changes.**
+///
+/// 0.4.6's D-13: the first clean-machine pair ran 0.4.5 against a release
+/// whose manifest said `min_updater 0.4.6`; the card said *The update is not
+/// verified.* and no line said which check refused. The release here is
+/// signed by the test root like the genuine one and differs only in its
+/// manifest's `min_updater`.
+///
+/// MUTATION: in `stop_for_archive`, drop the `UpdaterTooOld` arm — the job
+/// fails with `Stop::Identity`.
+#[test]
+fn a_release_that_needs_a_newer_updater_says_this_version_is_too_old() {
+    let Some(scene) = Scene::new("too-old") else {
+        return refused_off_windows();
+    };
+    let before = scene.installed();
+    let folder = scene.scratch.0.join("needs-newer");
+    std::fs::create_dir_all(&folder).unwrap();
+    let release = build_needing(
+        &scene.ca,
+        &folder,
+        (OFFERED, TO),
+        IDENTITY,
+        "a release for newer updaters",
+        Behaviour::Returns,
+        "99.0.0",
+    );
+    let job = press(
+        &scene.driver(TestTools::real()),
+        Arc::new(Release::of(archive_of(&release))),
+        1,
+    );
+    failed_with(&job, 1, Stop::TooOld);
+    let paint = crate::update_card::paint(job.state()).expect("a failed card");
+    assert_eq!(
+        paint.heading.as_deref(),
+        Some(Text::UpdateFailedTooOld.text())
+    );
+    scene.left_nothing(1);
+    assert_eq!(scene.installed(), before, "nothing installed was changed");
 }
 
 /// RED (U-20) — **a copy that lands short, a disk that is full and a flush

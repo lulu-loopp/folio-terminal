@@ -2921,6 +2921,8 @@ pub enum Text {
     UpdateFailedTrial,
     /// The update stopped before the new build ever ran and the old one is back (`update_job::Failure::Interrupted`; U-42a).
     UpdateFailedInterrupted,
+    /// The release needs a newer updater than the running build (`update_job::Stop::TooOld`; U-42c).
+    UpdateFailedTooOld,
     /// The General row's picker foot while a job waits at `Verified`: the card again.
     UpdateRowRestart,
     /// The General row's picker foot on a copy a package manager updates: the manager's command, to the clipboard.
@@ -5560,6 +5562,11 @@ impl Text {
                 "The update was interrupted before the new version started.",
                 "新版本启动前更新中断。",
             ),
+            Self::UpdateFailedTooOld => pick(
+                lang,
+                "This version is too old to update itself. Download the new version.",
+                "此版本过旧，无法自行更新。下载新版本。",
+            ),
             Self::UpdateRowRestart => pick(lang, "Restart to update", "重启以更新"),
             Self::UpdateRowCopy => pick(lang, "Copy", "复制"),
             Self::UpdateRowReady => pick(
@@ -5590,7 +5597,7 @@ impl Text {
     /// the list, and a constant the product carried only so that a test could
     /// read it would be shipped weight.
     #[cfg(test)]
-    pub const ALL: [Self; 805] = [
+    pub const ALL: [Self; 806] = [
         Self::CleanupArchiveExit,
         Self::CleanupArchiveReady,
         Self::CleanupArchiveIncomplete,
@@ -6376,6 +6383,7 @@ impl Text {
         Self::UpdateFailedSpace,
         Self::UpdateFailedTrial,
         Self::UpdateFailedInterrupted,
+        Self::UpdateFailedTooOld,
         Self::UpdateRowRestart,
         Self::UpdateRowCopy,
         Self::UpdateRowReady,

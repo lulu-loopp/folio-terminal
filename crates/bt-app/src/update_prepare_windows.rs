@@ -440,7 +440,7 @@ fn acquire(
 
     // Step 4: the space the rest needs.
     let version = road.offer.to_version();
-    let expanded = update_archive::declared_bytes(&archive, version).map_err(|_| Stop::Identity)?;
+    let expanded = update_archive::declared_bytes(&archive, version).map_err(archive_refused)?;
     let needed = expanded.saturating_mul(2).saturating_add(running.size);
     let available = road
         .tools
@@ -522,10 +522,29 @@ fn expand_release(archive: &Path, version: &str, into: &Path) -> Result<Vec<Stri
     let deadline = Deadline::at(Instant::now() + EXPANSION_BUDGET);
     update_archive::expand(archive, &expected, &staging, &EmbeddedManifest, &deadline)
         .map(|expanded| expanded.members)
-        .map_err(|refusal| match refusal.reason {
-            Reason::Write(_) => Stop::Copy,
-            _ => Stop::Identity,
-        })
+        .map_err(archive_refused)
+}
+
+/// **The stop the archive reader's refusal is reported as, and its one line**
+/// (0.4.7 U-42c; 0.4.6's D-13: every refusal read as *The update is not
+/// verified.* and no line said which check refused): a release that needs a
+/// newer updater is [`Stop::TooOld`], a write into the staging folder
+/// [`Stop::Copy`], every other refusal [`Stop::Identity`] — and
+/// `diagnostics.log` names the refusal.
+fn archive_refused(refusal: update_archive::Refusal) -> Stop {
+    crate::diagnostics::note(&format!(
+        "Folio: update job — the release archive is refused: {refusal}"
+    ));
+    stop_for_archive(&refusal.reason)
+}
+
+/// The stop an archive [`Reason`] is reported as — see [`archive_refused`].
+fn stop_for_archive(reason: &Reason) -> Stop {
+    match reason {
+        Reason::Write(_) => Stop::Copy,
+        Reason::UpdaterTooOld { .. } => Stop::TooOld,
+        _ => Stop::Identity,
+    }
 }
 
 /// **The signed files of a release in `folder` are this publisher's, at the
