@@ -3058,19 +3058,17 @@ pub fn standard_error_is(path: &std::path::Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        // SAFETY: `fstat` fills the zeroed buffer this function owns.
-        let mut stream: libc::stat = unsafe { std::mem::zeroed() };
-        if unsafe { libc::fstat(libc::STDERR_FILENO, &raw mut stream) } != 0 {
+        use std::os::unix::io::FromRawFd;
+        // SAFETY: descriptor 2 is this process's standard error; it is only
+        // `fstat`ed through std, and `ManuallyDrop` keeps it from being closed.
+        let stream = std::mem::ManuallyDrop::new(unsafe {
+            std::fs::File::from_raw_fd(libc::STDERR_FILENO)
+        });
+        let Ok(stream) = stream.metadata() else {
             return false;
-        }
-        #[expect(
-            clippy::cast_sign_loss,
-            clippy::unnecessary_cast,
-            reason = "permanent: `dev_t` is signed on macOS and unsigned on Linux; std's `MetadataExt::dev` casts it the same way"
-        )]
-        let device = stream.st_dev as u64;
+        };
         std::fs::symlink_metadata(path)
-            .is_ok_and(|named| named.dev() == device && named.ino() == stream.st_ino)
+            .is_ok_and(|named| named.dev() == stream.dev() && named.ino() == stream.ino())
     }
     #[cfg(not(any(windows, unix)))]
     {
