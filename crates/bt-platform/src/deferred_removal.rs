@@ -765,9 +765,10 @@ fn remove_verified_file(path: &Path, expected: &FileIdentity) -> io::Result<bool
         use std::os::windows::fs::MetadataExt;
         const READ_ONLY: u32 = 1;
         if metadata.file_attributes() & READ_ONLY != 0 {
-            let mut permissions = metadata.permissions();
-            permissions.set_readonly(false);
-            fs::set_permissions(path, permissions)?;
+            crate::file_replace::set_file_attributes(
+                path,
+                metadata.file_attributes() & !READ_ONLY,
+            )?;
         }
     }
     fs::remove_file(path)?;
@@ -958,7 +959,7 @@ fn self_delete(path: &Path) -> io::Result<()> {
     // SAFETY: `buffer` is aligned for `FILE_RENAME_INFO`, has `length` bytes,
     // and `FileNameLength` describes the copied UTF-16 stream name.
     unsafe {
-        (*rename).Anonymous.ReplaceIfExists = false.into();
+        (*rename).Anonymous.ReplaceIfExists = false;
         (*rename).RootDirectory = HANDLE::default();
         (*rename).FileNameLength = u32::try_from(stream.len() * 2)
             .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a stream name too long"))?;
@@ -979,9 +980,7 @@ fn self_delete(path: &Path) -> io::Result<()> {
     drop(owned);
 
     let owned = open()?;
-    let disposition = FILE_DISPOSITION_INFO {
-        DeleteFile: true.into(),
-    };
+    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
     // SAFETY: the handle and fixed-size structure are live for the call.
     unsafe {
         SetFileInformationByHandle(
