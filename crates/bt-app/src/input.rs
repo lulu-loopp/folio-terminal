@@ -4840,32 +4840,29 @@ mod tests {
         );
     }
 
-    /// RED (T-KEYBOARD-CTRLALT, round 2) — **after the French dead `^`, Ctrl+Shift+Alt+E under
-    /// modifyOtherKeys is `CSI 27;8;69~`, xterm's `E`, not the composition `Ê`.**
+    /// RED (T-KEYBOARD-CTRLALT, rounds 2 and 3) — **after the French dead `^`, Ctrl+Shift+Alt+E
+    /// under modifyOtherKeys is `CSI 27;8;69~`, xterm's `E`, not the composition `Ê`.**
     ///
     /// winit hands the chord over as it does with nothing pending — `Key::Unidentified(VK_E)`,
-    /// key without modifiers `e`, no text — and the dead key stays pending in the thread's
-    /// keyboard state. A Shift lookup that translated now would answer `Ê` (202) and the chord
-    /// would read `CSI 27;8;202~`. The lookup is modelled here by the two answers
-    /// `bt_platform::shifted_character_of_virtual_key` can give in that state, which
-    /// `bt-platform`'s `a_pending_dead_key_leaves_the_shift_character_alone` proves on the real
-    /// French layout: `E` from the table it built before the dead key, or `None` if it has none,
-    /// which sends nothing rather than a wrong `k`. Flag 1 is `CSI 101;8u` either way (it reads
-    /// the key without modifiers).
+    /// key without modifiers `e`, no text — while the dead key stays pending in the keyboard
+    /// state, where a Shift translation of `VK_E` answers `Ê` (202). The lookup here is the
+    /// product's own, on the French layout's tables (`bt_platform::shifted_character_on_layout`,
+    /// the reader `shifted_character_of_virtual_key` uses for the active layout), which no
+    /// keyboard state enters; `bt-platform`'s `a_pending_dead_key_leaves_the_shift_character_alone`
+    /// sets the dead key pending for real and holds the same answer. On a Mac there is no
+    /// Windows layout, the lookup has no answer, and the chord (which never arrives there in
+    /// this shape) sends nothing.
     ///
-    /// MUTATION: have the model answer the composition `Ê` (the first assertion reads
-    /// `CSI 27;8;202~`), or fall back to the key without modifiers when the lookup has no answer
-    /// (the second reads `CSI 27;8;101~`).
+    /// MUTATION: take the Ctrl+Shift+Alt `k` from a translation of the key instead of the
+    /// layout's table (`bt-platform`'s test reads `Ê`), or from the key without modifiers
+    /// (`CSI 27;8;101~`).
     #[test]
     fn after_a_dead_key_ctrl_shift_alt_e_is_still_xterms_e() {
-        fn french_table(virtual_key: u16) -> Option<char> {
-            (virtual_key == 0x45).then_some('E')
-        }
-        fn no_table_yet(_: u16) -> Option<char> {
-            None
+        fn french(virtual_key: u16) -> Option<char> {
+            bt_platform::shifted_character_on_layout("0000040C", virtual_key)
         }
         let ctrl_shift_alt = ModifiersState::CONTROL | ModifiersState::ALT | ModifiersState::SHIFT;
-        let sent = |shifted: fn(u16) -> Option<char>, protocol| {
+        let sent = |protocol| {
             keyboard_bytes(
                 &Key::Unidentified(NativeKey::Windows(0x45)),
                 &Key::Character("e".into()),
@@ -4879,20 +4876,20 @@ mod tests {
                     text_with_all_modifiers: None,
                     virtual_key_of_scan_code: no_virtual_key,
                     virtual_key_is_dead: no_dead_keys,
-                    shifted_character_of_virtual_key: shifted,
+                    shifted_character_of_virtual_key: french,
                     conpty: ConPtyKind::Shipped,
                 },
             )
         };
+        let on_windows = bt_platform::host_platform() == HostPlatform::Windows;
         for protocol in [MOK1, MOK2] {
             assert_eq!(
-                sent(french_table, protocol),
-                Some(b"\x1b[27;8;69~".to_vec()),
+                sent(protocol),
+                on_windows.then(|| b"\x1b[27;8;69~".to_vec()),
                 "{protocol:?}"
             );
-            assert_eq!(sent(no_table_yet, protocol), None, "{protocol:?}");
         }
-        assert_eq!(sent(no_table_yet, KITTY), Some(b"\x1b[101;8u".to_vec()));
+        assert_eq!(sent(KITTY), Some(b"\x1b[101;8u".to_vec()));
     }
 
     /// RED (T-KEYBOARD-RECORDS) — **a record is the press as Windows reported it, on any layout:

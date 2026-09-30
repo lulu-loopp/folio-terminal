@@ -1209,10 +1209,14 @@ pub fn shifted_character_of_virtual_key(virtual_key: u16) -> Option<char> {
     None
 }
 
-/// Builds the Windows layout's table of Shift characters ahead of a chord.
-/// **There is no such table here**, for `shifted_character_of_virtual_key`'s
-/// reason.
-pub fn learn_shifted_characters() {}
+/// The character a named Windows layout types on a virtual key with Shift
+/// alone. **There is no such layout here**, for
+/// `shifted_character_of_virtual_key`'s reason.
+#[must_use]
+pub fn shifted_character_on_layout(klid: &str, virtual_key: u16) -> Option<char> {
+    let _ = (klid, virtual_key);
+    None
+}
 
 /// How far one wheel notch scrolls. M1-3 reads the scroll preference.
 ///

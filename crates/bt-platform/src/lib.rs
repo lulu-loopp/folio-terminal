@@ -3788,9 +3788,8 @@ mod windows_impl {
                     CPS_CANCEL, ImmGetContext, ImmNotifyIME, ImmReleaseContext, NI_COMPOSITIONSTR,
                 },
                 KeyboardAndMouse::{
-                    GetCapture, GetKeyboardLayout, HKL, MAPVK_VK_TO_CHAR, MAPVK_VK_TO_VSC,
-                    MAPVK_VSC_TO_VK_EX, MapVirtualKeyExW, MapVirtualKeyW, SetFocus, ToUnicodeEx,
-                    VK_SHIFT, VkKeyScanW,
+                    GetCapture, GetKeyboardLayout, MAPVK_VK_TO_CHAR, MAPVK_VSC_TO_VK_EX,
+                    MapVirtualKeyW, SetFocus, VkKeyScanW,
                 },
                 // One call that undoes one winit makes, and the four that answer
                 // the system's pan gesture — see
@@ -6690,137 +6689,285 @@ mod windows_impl {
         crate::vk_to_char_marks_a_dead_key(answer)
     }
 
-    /// `ToUnicodeEx`'s flag bit 2: "If bit 2 is set, keyboard state is not
-    /// changed (Windows 10, version 1607 and newer)" (the function's
-    /// documentation). It keeps a pending dead key pending; it does not keep the
-    /// dead key out of the translation, which the same documentation warns can be
-    /// "affected by … a dead key previously entered".
-    const LEAVE_THE_KEYBOARD_STATE_ALONE: u32 = 0x4;
-
-    /// What `ToUnicodeEx` writes for one key on `layout`, alone or with Shift,
-    /// leaving the thread's keyboard state as it was: `None` for a dead key (a
-    /// negative answer) or nothing typed, otherwise the units written.
-    fn translate_leaving_the_state(virtual_key: u16, shift: bool, layout: HKL) -> Option<String> {
-        let mut key_state = [0u8; 256];
-        if shift {
-            key_state[usize::from(VK_SHIFT.0)] = 0x80;
-        }
-        let mut buffer = [0u16; 8];
-        // SAFETY: `MapVirtualKeyExW` takes integers and a layout handle by value;
-        // `ToUnicodeEx` reads the 256-byte key state and writes at most the
-        // buffer's length, both borrowed live from this frame.
-        let written = unsafe {
-            let scan_code = MapVirtualKeyExW(u32::from(virtual_key), MAPVK_VK_TO_VSC, Some(layout));
-            ToUnicodeEx(
-                u32::from(virtual_key),
-                scan_code,
-                &key_state,
-                &mut buffer,
-                LEAVE_THE_KEYBOARD_STATE_ALONE,
-                Some(layout),
-            )
-        };
-        let written = usize::try_from(written).ok().filter(|count| *count > 0)?;
-        String::from_utf16(buffer.get(..written)?).ok()
+    /// `kbd.h`'s `VK_TO_BIT`: which modifier bit a modifier key sets.
+    #[repr(C)]
+    struct VkToBit {
+        virtual_key: u8,
+        modifier_bits: u8,
     }
 
-    /// Whether a dead key is pending in this thread's keyboard state, asked
-    /// without changing it.
+    /// `kbd.h`'s `MODIFIERS`, up to its variable-length `ModNumber[]`, which
+    /// follows `max_modifier_bits` and has `max_modifier_bits + 1` entries: the
+    /// column of the character tables each combination of modifier bits reads.
+    #[repr(C)]
+    struct Modifiers {
+        vk_to_bit: *const VkToBit,
+        max_modifier_bits: u16,
+        modifier_number: [u8; 0],
+    }
+
+    /// `kbd.h`'s `VK_TO_WCHAR_TABLE`: one table of `VK_TO_WCHARSn` rows, each
+    /// `row_size` bytes — a virtual key, its attributes, and `columns` UTF-16
+    /// characters, one per column. The array of tables ends with a null `rows`.
+    #[repr(C)]
+    struct VkToWcharTable {
+        rows: *const u8,
+        columns: u8,
+        row_size: u8,
+    }
+
+    /// `kbd.h`'s `KBDTABLES`, as far as the two fields read here (the rest
+    /// follows them and is not touched).
+    #[repr(C)]
+    struct KbdTables {
+        char_modifiers: *const Modifiers,
+        vk_to_wchar_table: *const VkToWcharTable,
+    }
+
+    /// `kbd.h`: a column's entry that types nothing, starts a dead key, or types
+    /// a ligature (several characters).
+    const WCH_NONE: u16 = 0xF000;
+    const WCH_DEAD: u16 = 0xF001;
+    const WCH_LGTR: u16 = 0xF002;
+    /// `kbd.h`: a `ModNumber` entry for a combination the layout does not use.
+    const SHFT_INVALID: u8 = 0x0F;
+    /// `kbd.h`: the row after a dead key's row, holding the dead character.
+    const DEAD_KEY_ROW: u8 = 0xFF;
+
+    /// Per virtual key, the character a layout types with Shift alone.
+    type ShiftTable = [Option<char>; 256];
+
+    /// **What each virtual key types with Shift alone on the layout named `klid`**
+    /// (`"00000409"`), read from the layout's own tables — or `None` when the
+    /// layout's file cannot be found or read.
     ///
-    /// Space alone types, with nothing pending, the character
-    /// `MapVirtualKeyExW(VK_SPACE, MAPVK_VK_TO_CHAR)` names — a read of the
-    /// layout's table, which no keyboard state enters ("the unshifted character
-    /// value"). With a dead key pending, `ToUnicodeEx` combines it with Space
-    /// (a layout's spacing form of the accent) or, when it cannot, writes the
-    /// dead character before Space's ("two or more characters were written …
-    /// a dead-key character … could not be combined"); either way not Space's
-    /// one character. The question is asked with flag bit 2, so it changes
-    /// nothing.
-    fn a_dead_key_is_pending(layout: HKL) -> bool {
-        const VK_SPACE: u16 = 0x20;
-        // SAFETY: integers and a layout handle by value.
-        let space =
-            unsafe { MapVirtualKeyExW(u32::from(VK_SPACE), MAPVK_VK_TO_CHAR, Some(layout)) };
-        let space = char::from_u32(space & 0xFFFF).map(String::from);
-        translate_leaving_the_state(VK_SPACE, false, layout) != space
+    /// A keyboard layout is a DLL in `System32`, named by the `Layout File` value
+    /// of `HKLM\SYSTEM\CurrentControlSet\Control\Keyboard Layouts\<KLID>`, whose one
+    /// export `KbdLayerDescriptor` returns its `KBDTABLES` (`kbd.h`). The Shift
+    /// column is the `ModNumber` entry for the modifier bits `VK_SHIFT` sets
+    /// (`pCharModifiers`); each row of `pVkToWcharTable` with that many columns
+    /// gives the virtual key's character there. A column entry that is
+    /// `WCH_NONE`, `WCH_DEAD` or `WCH_LGTR`, or a surrogate, is no one character.
+    /// These are the tables `ToUnicodeEx` itself translates with, before a dead
+    /// key pending in the keyboard state is applied to the result: a table read
+    /// has no keyboard state, so nothing typed before can change it (T-KEYBOARD-
+    /// CTRLALT round 3: the state is not per thread — a translation on a fresh
+    /// thread composes with a dead key another thread left pending, measured
+    /// 2026-09-30). The DLL is loaded from `System32` only, read, and freed.
+    fn shift_table_of_layout(klid: &str) -> Option<Box<ShiftTable>> {
+        use windows::Win32::Foundation::{ERROR_SUCCESS, FreeLibrary};
+        use windows::Win32::System::LibraryLoader::{
+            GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+        };
+        use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+        use windows::core::{PCWSTR, s};
+
+        let key = wide_null(&format!(
+            r"SYSTEM\CurrentControlSet\Control\Keyboard Layouts\{klid}"
+        ));
+        let value = wide_null("Layout File");
+        let mut file = [0u16; 260];
+        let mut size = u32::try_from(std::mem::size_of_val(&file)).ok()?;
+        // SAFETY: the key and value names are live and NUL-terminated; the
+        // buffer is live and `size` says its length in bytes.
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                PCWSTR(key.as_ptr()),
+                PCWSTR(value.as_ptr()),
+                RRF_RT_REG_SZ,
+                None,
+                Some(file.as_mut_ptr().cast()),
+                Some(&mut size),
+            )
+        };
+        if status != ERROR_SUCCESS {
+            return None;
+        }
+        // SAFETY: `file` is NUL-terminated (`RRF_RT_REG_SZ` guarantees it).
+        let module =
+            unsafe { LoadLibraryExW(PCWSTR(file.as_ptr()), None, LOAD_LIBRARY_SEARCH_SYSTEM32) }
+                .ok()?;
+        // SAFETY: `module` is live until `FreeLibrary` below; the export is
+        // `PKBDTABLES KbdLayerDescriptor(VOID)`, and every pointer it leads to
+        // lies in the module's static data, read only before the module is freed.
+        let table = unsafe {
+            let descriptor = GetProcAddress(module, s!("KbdLayerDescriptor")).map(|export| {
+                std::mem::transmute::<
+                    unsafe extern "system" fn() -> isize,
+                    unsafe extern "system" fn() -> *const KbdTables,
+                >(export)
+            });
+            let table = descriptor.and_then(|descriptor| shift_table_of_tables(descriptor()));
+            let _ = FreeLibrary(module);
+            table
+        };
+        table
+    }
+
+    /// The Shift column of a layout's `KBDTABLES`, as [`shift_table_of_layout`]
+    /// describes it.
+    ///
+    /// # Safety
+    /// `tables` is null or points to a `KBDTABLES` whose pointers are all live.
+    unsafe fn shift_table_of_tables(tables: *const KbdTables) -> Option<Box<ShiftTable>> {
+        const VK_SHIFT_CODE: u8 = 0x10;
+        // SAFETY: the caller's contract; each read below stays inside the
+        // structures `kbd.h` lays out, bounded by their own counts.
+        unsafe {
+            let tables = tables.as_ref()?;
+            let modifiers = tables.char_modifiers.as_ref()?;
+            let mut shift_bits = None;
+            let mut bit = modifiers.vk_to_bit;
+            while !bit.is_null() && (*bit).virtual_key != 0 {
+                if (*bit).virtual_key == VK_SHIFT_CODE {
+                    shift_bits = Some((*bit).modifier_bits);
+                }
+                bit = bit.add(1);
+            }
+            let shift_bits = shift_bits?;
+            if u16::from(shift_bits) > modifiers.max_modifier_bits {
+                return None;
+            }
+            let column = *(std::ptr::from_ref(modifiers)
+                .cast::<u8>()
+                .add(std::mem::offset_of!(Modifiers, modifier_number))
+                .add(usize::from(shift_bits)));
+            let mut shifted: Box<ShiftTable> = Box::new([None; 256]);
+            if column == SHFT_INVALID {
+                return Some(shifted);
+            }
+            let mut table = tables.vk_to_wchar_table;
+            while !table.is_null() && !(*table).rows.is_null() {
+                let VkToWcharTable {
+                    rows,
+                    columns,
+                    row_size,
+                } = std::ptr::read(table);
+                if column < columns {
+                    let mut row = rows;
+                    while *row != 0 {
+                        let virtual_key = *row;
+                        let slot = &mut shifted[usize::from(virtual_key)];
+                        if virtual_key != DEAD_KEY_ROW && slot.is_none() {
+                            let unit = std::ptr::read_unaligned(
+                                row.add(2 + 2 * usize::from(column)).cast::<u16>(),
+                            );
+                            *slot = match unit {
+                                WCH_NONE | WCH_DEAD | WCH_LGTR => None,
+                                unit => char::from_u32(u32::from(unit)),
+                            };
+                        }
+                        row = row.add(usize::from(row_size));
+                    }
+                }
+                table = table.add(1);
+            }
+            Some(shifted)
+        }
     }
 
     thread_local! {
-        /// Per layout, what each virtual key types with Shift alone, translated
-        /// once while no dead key was pending ([`shifted_characters_on`]). A
-        /// layout's tables do not change while it is loaded, so a table built in a
-        /// clean state is the layout's answer in every state after it.
-        static SHIFTED_CHARACTERS: std::cell::RefCell<
-            std::collections::HashMap<usize, Box<[Option<char>; 256]>>,
+        /// Per layout (`HKL`) the calling thread has asked about, its Shift table
+        /// ([`shift_table_of_layout`]; `None` for a layout whose file could not be
+        /// read). A layout's tables do not change while it is loaded.
+        static SHIFT_TABLES: std::cell::RefCell<
+            std::collections::HashMap<usize, Option<Box<ShiftTable>>>,
         > = std::cell::RefCell::new(std::collections::HashMap::new());
     }
 
-    /// The Shift character of `virtual_key` on `layout`, from the layout's table
-    /// of Shift characters — built the first time the layout is asked about while
-    /// no dead key is pending ([`a_dead_key_is_pending`]), and never while one is:
-    /// a translation then would carry the dead key (`Ê` for Shift+E after the
-    /// French `^`). Asked while a dead key is pending before any table exists for
-    /// the layout, the answer is `None` — nothing is guessed. Nothing here
-    /// changes the keyboard state.
-    fn shifted_characters_on(virtual_key: u16, layout: HKL) -> Option<char> {
-        SHIFTED_CHARACTERS.with(|tables| {
-            let mut tables = tables.borrow_mut();
-            let table = match tables.entry(layout.0 as usize) {
-                std::collections::hash_map::Entry::Occupied(known) => known.into_mut(),
-                std::collections::hash_map::Entry::Vacant(unknown) => {
-                    if a_dead_key_is_pending(layout) {
-                        return None;
-                    }
-                    let mut table = Box::new([None; 256]);
-                    for (key, slot) in (0u16..).zip(table.iter_mut()) {
-                        *slot = translate_leaving_the_state(key, true, layout).and_then(|text| {
-                            let mut characters = text.chars();
-                            let character = characters.next()?;
-                            characters.next().is_none().then_some(character)
-                        });
-                    }
-                    unknown.insert(table)
-                }
-            };
-            table.get(usize::from(virtual_key)).copied().flatten()
-        })
+    /// The character the layout named `klid` types on `virtual_key` with Shift
+    /// alone, read from the layout's tables ([`shift_table_of_layout`]) — the
+    /// same answer [`shifted_character_of_virtual_key`] gives on the thread whose
+    /// active layout that is, for a named layout.
+    #[must_use]
+    pub fn shifted_character_on_layout(klid: &str, virtual_key: u16) -> Option<char> {
+        shift_table_of_layout(klid)?
+            .get(usize::from(virtual_key))
+            .copied()
+            .flatten()
     }
 
     /// The character **the installed layout** types on this virtual key with
     /// Shift alone held — `{` on the US layout's `VK_OEM_4`, `!` on its `VK_1`,
-    /// `E` on `VK_E` — or `None` when Shift types nothing there, types a dead key,
-    /// or types more than one character.
+    /// `E` on `VK_E` — or `None` when Shift types nothing there, starts a dead
+    /// key, or types more than one character.
     ///
     /// winit hands a Ctrl+Alt chord the layout types nothing for over with no
     /// character at all (`Key::Unidentified`), so the one character xterm's
     /// modifyOtherKeys names a Ctrl+Shift+Alt chord by — the key's character with
-    /// Shift applied — is asked of the layout (T-KEYBOARD-CTRLALT). The answer is
-    /// the layout's own, whatever dead key is pending: it comes from a table of
-    /// the calling thread's layout translated while none was
-    /// ([`shifted_characters_on`]; [`learn_shifted_characters`] builds it ahead
-    /// of the chord). No call here changes the keyboard state, and none waits.
+    /// Shift applied — is asked of the layout (T-KEYBOARD-CTRLALT). It is read
+    /// from the layout's own tables ([`shift_table_of_layout`]), never translated
+    /// through the keyboard state, so a dead key pending there cannot change it
+    /// and nothing here changes the state. The calling thread's active layout
+    /// (`GetKeyboardLayout(0)`, named by `GetKeyboardLayoutNameW`) is read once
+    /// and kept; after that the answer is one map lookup.
     #[must_use]
     pub fn shifted_character_of_virtual_key(virtual_key: u16) -> Option<char> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayoutNameW;
         // SAFETY: `GetKeyboardLayout` takes an integer by value.
-        shifted_characters_on(virtual_key, unsafe { GetKeyboardLayout(0) })
-    }
-
-    /// Builds the calling thread's layout's table of Shift characters now, if
-    /// none exists and no dead key is pending — so that a Ctrl+Shift+Alt chord
-    /// typed right after a dead key finds the table already there. Called with
-    /// every key press, where nothing else is pending but that press's own dead
-    /// key; after the first, one lookup of the layout. Changes no keyboard state.
-    pub fn learn_shifted_characters() {
-        // SAFETY: `GetKeyboardLayout` takes an integer by value.
-        let _ = shifted_characters_on(0, unsafe { GetKeyboardLayout(0) });
+        let layout = unsafe { GetKeyboardLayout(0) }.0 as usize;
+        SHIFT_TABLES.with(|tables| {
+            tables
+                .borrow_mut()
+                .entry(layout)
+                .or_insert_with(|| {
+                    let mut name = [0u16; 9];
+                    // SAFETY: the buffer is `KL_NAMELENGTH` units, as the call requires.
+                    unsafe { GetKeyboardLayoutNameW(&mut name) }.ok()?;
+                    let length = name
+                        .iter()
+                        .position(|unit| *unit == 0)
+                        .unwrap_or(name.len());
+                    shift_table_of_layout(&String::from_utf16(&name[..length]).ok()?)
+                })
+                .as_ref()?
+                .get(usize::from(virtual_key))
+                .copied()
+                .flatten()
+        })
     }
 
     #[cfg(test)]
     mod shifted_character_tests {
         use super::*;
         use windows::Win32::UI::Input::KeyboardAndMouse::{
-            GetKeyboardLayoutList, KLF_NOTELLSHELL, LoadKeyboardLayoutW, UnloadKeyboardLayout,
+            GetKeyboardLayoutList, HKL, KLF_NOTELLSHELL, LoadKeyboardLayoutW, MAPVK_VK_TO_VSC,
+            MapVirtualKeyExW, ToUnicodeEx, UnloadKeyboardLayout, VK_SHIFT,
         };
+        use windows::core::w;
+
+        const VK_E: u16 = 0x45;
+        const VK_1: u16 = 0x31;
+        const VK_OEM_4: u16 = 0xDB;
+        const VK_OEM_6: u16 = 0xDD;
+
+        /// RED (T-KEYBOARD-CTRLALT, round 3) — **a layout's Shift characters are read from
+        /// its own tables: `E`, `!`, `{` on the US layout; `E` and `1` on the French one,
+        /// where Shift on the dead `^` key is the dead `¨` and so no character.**
+        ///
+        /// Needs no desktop and no keyboard state: `kbdus.dll` and `kbdfr.dll` ship with
+        /// every Windows.
+        ///
+        /// MUTATION: read column 0 instead of the Shift column (`e`, `1`, `[`), or keep a
+        /// `WCH_DEAD` entry (the French `VK_OEM_6` reads U+F001).
+        #[test]
+        fn a_layouts_shift_characters_are_read_from_its_tables() {
+            for (klid, virtual_key, wanted) in [
+                ("00000409", VK_E, Some('E')),
+                ("00000409", VK_1, Some('!')),
+                ("00000409", VK_OEM_4, Some('{')),
+                ("0000040C", VK_E, Some('E')),
+                ("0000040C", VK_1, Some('1')),
+                ("0000040C", VK_OEM_6, None),
+            ] {
+                assert_eq!(
+                    shifted_character_on_layout(klid, virtual_key),
+                    wanted,
+                    "{klid} vk {virtual_key:#x}"
+                );
+            }
+        }
 
         /// The session's loaded layouts (`GetKeyboardLayoutList`).
         fn loaded_layouts() -> Vec<HKL> {
@@ -6845,8 +6992,13 @@ mod windows_impl {
             fn load(klid: windows::core::PCWSTR) -> Self {
                 let before = loaded_layouts();
                 // SAFETY: a static wide string by pointer; the call returns a handle.
-                let layout = unsafe { LoadKeyboardLayoutW(klid, KLF_NOTELLSHELL) }
-                    .expect("the layout loads");
+                let layout = unsafe { LoadKeyboardLayoutW(klid, KLF_NOTELLSHELL) }.expect(
+                    "no dead-key layout available on this host: LoadKeyboardLayoutW failed",
+                );
+                assert!(
+                    loaded_layouts().contains(&layout),
+                    "no dead-key layout available on this host: LoadKeyboardLayoutW had no effect"
+                );
                 Self {
                     layout,
                     was_loaded: before.contains(&layout),
@@ -6862,101 +7014,70 @@ mod windows_impl {
                 }
             }
         }
-        use windows::core::w;
 
-        /// RED (T-KEYBOARD-CTRLALT, round 2) — **a pending dead key does not change the
-        /// Shift character the lookup answers, and the lookup leaves it pending.**
+        /// `ToUnicodeEx` for one key on `layout`, alone or with Shift; `flags` 0 lets the
+        /// keyboard state take the press, as a typed key's does, and 4 leaves it alone.
+        /// The answer's units, or the sign of a dead key.
+        fn translate(virtual_key: u16, shift: bool, flags: u32, layout: HKL) -> (i32, String) {
+            let mut key_state = [0u8; 256];
+            if shift {
+                key_state[usize::from(VK_SHIFT.0)] = 0x80;
+            }
+            let mut buffer = [0u16; 8];
+            // SAFETY: integers and a layout handle by value; the key state and the
+            // buffer are live for the call, which writes at most the buffer's length.
+            let written = unsafe {
+                ToUnicodeEx(
+                    u32::from(virtual_key),
+                    MapVirtualKeyExW(u32::from(virtual_key), MAPVK_VK_TO_VSC, Some(layout)),
+                    &key_state,
+                    &mut buffer,
+                    flags,
+                    Some(layout),
+                )
+            };
+            let length = usize::try_from(written).unwrap_or(0);
+            (written, String::from_utf16_lossy(&buffer[..length]))
+        }
+
+        /// RED (T-KEYBOARD-CTRLALT, rounds 2 and 3) — **with the French dead `^` pending,
+        /// the Shift character of `VK_E` is still `E`, though a translation now answers `Ê`,
+        /// and the lookup leaves the dead key pending.**
         ///
-        /// On the French layout the dead `^` is `VK_OEM_6`; after it, `ToUnicodeEx`
-        /// with Shift on `VK_E` — even with flag bit 2, which keeps the state —
-        /// answers `Ê`, the composition, and modifyOtherKeys would send
-        /// `CSI 27;8;202~` for Ctrl+Shift+Alt+E. The lookup answers `E` from the table
-        /// it built while nothing was pending, the dead key is still pending after it,
-        /// and a layout it has no table for yet is answered `None` while a dead key is
-        /// pending rather than with the composition. The dead key is set up with
-        /// `ToUnicodeEx` itself on this thread (no window, no key injected), and
-        /// consumed at the end. The French layout is loaded with `KLF_NOTELLSHELL` and,
-        /// unless the session already had it, unloaded when the test ends, failing or
-        /// not ([`BorrowedLayout`]), so the machine's layout list is left as it was.
+        /// The dead key is set pending on the test thread with `ToUnicodeEx` itself (no
+        /// window, no key injected) on the French layout, loaded for the test and unloaded
+        /// after unless the session had it ([`BorrowedLayout`]); a host where the load has
+        /// no effect fails by name ("no dead-key layout available on this host") rather
+        /// than passing. The lookup reads the layout's tables; the translation on this
+        /// thread — and, measured 2026-09-30, on any other thread of the process — composes
+        /// with the pending dead key.
         ///
-        /// MUTATION: make `shifted_characters_on` translate on every call instead of
-        /// reading its table (the pending assertion reads `Ê`), or drop its
-        /// `a_dead_key_is_pending` refusal (the cold-table assertion reads `Ê`).
+        /// MUTATION: answer `shifted_character_on_layout` with a flag-4 `ToUnicodeEx` of the
+        /// key with Shift on the calling thread (it reads `Ê`).
         #[test]
         fn a_pending_dead_key_leaves_the_shift_character_alone() {
-            const VK_E: u16 = 0x45;
-            const VK_1: u16 = 0x31;
-            const VK_OEM_6: u16 = 0xDD;
-            let borrowed = BorrowedLayout::load(w!("0000040C"));
-            let french = borrowed.layout;
-            let press = |virtual_key: u16, shift: bool| -> i32 {
-                let mut key_state = [0u8; 256];
-                if shift {
-                    key_state[usize::from(VK_SHIFT.0)] = 0x80;
-                }
-                let mut buffer = [0u16; 8];
-                // SAFETY: as in `translate_leaving_the_state`, with flags 0: the
-                // thread's keyboard state takes the press, as a typed key's does.
-                unsafe {
-                    ToUnicodeEx(
-                        u32::from(virtual_key),
-                        MapVirtualKeyExW(u32::from(virtual_key), MAPVK_VK_TO_VSC, Some(french)),
-                        &key_state,
-                        &mut buffer,
-                        0,
-                        Some(french),
-                    )
-                }
-            };
-
-            assert!(
-                !a_dead_key_is_pending(french),
-                "nothing typed on this thread yet"
-            );
-            assert_eq!(shifted_characters_on(VK_E, french), Some('E'), "clean");
-
-            assert_eq!(press(VK_OEM_6, false), -1, "the dead circumflex is pending");
-            assert!(a_dead_key_is_pending(french));
+            let french = BorrowedLayout::load(w!("0000040C"));
+            let layout = french.layout;
+            assert_eq!(translate(VK_E, true, 4, layout).1, "E", "clean");
             assert_eq!(
-                translate_leaving_the_state(VK_E, true, french).as_deref(),
-                Some("Ê"),
-                "a translation now carries the dead key"
+                translate(VK_OEM_6, false, 0, layout).0,
+                -1,
+                "the dead `^` is pending"
             );
             assert_eq!(
-                shifted_characters_on(VK_E, french),
-                Some('E'),
-                "Shift+E after `^`"
+                translate(VK_E, true, 4, layout).1,
+                "Ê",
+                "a translation composes"
             );
+            assert_eq!(shifted_character_on_layout("0000040C", VK_E), Some('E'));
+            assert_eq!(shifted_character_on_layout("0000040C", VK_1), Some('1'));
             assert_eq!(
-                shifted_characters_on(VK_1, french),
-                Some('1'),
-                "Shift+& after `^`"
+                translate(VK_E, true, 4, layout).1,
+                "Ê",
+                "the dead key is still pending after the lookup"
             );
-            assert!(
-                a_dead_key_is_pending(french),
-                "the lookup left the dead key pending"
-            );
-            assert_eq!(
-                translate_leaving_the_state(VK_E, true, french).as_deref(),
-                Some("Ê")
-            );
-
-            SHIFTED_CHARACTERS.with(|tables| tables.borrow_mut().clear());
-            assert_eq!(
-                shifted_characters_on(VK_E, french),
-                None,
-                "no table yet and a dead key pending: nothing guessed"
-            );
-            assert!(a_dead_key_is_pending(french));
-
-            // Consume the dead key: `^` then Space types the spacing `^`.
-            assert_eq!(press(0x20, false), 1);
-            assert!(!a_dead_key_is_pending(french));
-            assert_eq!(
-                shifted_characters_on(VK_E, french),
-                Some('E'),
-                "built again, clean"
-            );
+            // Consume it: `^` then Space types the spacing `^`.
+            assert_eq!(translate(0x20, false, 0, layout).1, "^");
         }
     }
 
@@ -12471,18 +12592,18 @@ pub use windows_impl::{
     exposure_probe_points, file_product_version, flash_window, get_dpi_for_window, get_window_rect,
     get_work_area, hide_every_window_of_this_process, install_console_ctrl_handler,
     install_context_menu, install_window_class_background, is_window_cloaked, is_window_minimized,
-    learn_shifted_characters, leave_process, let_the_system_translate_touch, message_box,
-    monitor_id_at, monospace_family_named, monospace_font_families, os_ui_language,
-    pointer_position, pointer_position_in_window, read_context_menu, recycle,
-    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
-    request_window_close, set_clipboard_text, set_current_thread_priority, set_system_backdrop,
-    set_window_dark_mode, set_window_outer_rect, set_window_topmost,
-    shifted_character_of_virtual_key, silence_std_streams, stand_window_at, standalone_alert,
-    std_error_is_console, stop_flashing_window, system_backdrop_available, system_uses_light_apps,
-    take_keyboard_focus, taskbar_auto_hidden_from_state, taskbar_is_auto_hidden,
-    thread_mouse_capture, top_level_window_at, virtual_key_for_character, virtual_key_is_dead,
-    virtual_key_of_scan_code, virtual_screen_rect, wheel_scroll_amount, window_is_exposed,
-    work_area_at, write_std_error, write_to_console,
+    leave_process, let_the_system_translate_touch, message_box, monitor_id_at,
+    monospace_family_named, monospace_font_families, os_ui_language, pointer_position,
+    pointer_position_in_window, read_context_menu, recycle, redirect_std_streams_to_file,
+    register_clipboard_owner, remove_context_menu, request_window_close, set_clipboard_text,
+    set_current_thread_priority, set_system_backdrop, set_window_dark_mode, set_window_outer_rect,
+    set_window_topmost, shifted_character_of_virtual_key, shifted_character_on_layout,
+    silence_std_streams, stand_window_at, standalone_alert, std_error_is_console,
+    stop_flashing_window, system_backdrop_available, system_uses_light_apps, take_keyboard_focus,
+    taskbar_auto_hidden_from_state, taskbar_is_auto_hidden, thread_mouse_capture,
+    top_level_window_at, virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code,
+    virtual_screen_rect, wheel_scroll_amount, window_is_exposed, work_area_at, write_std_error,
+    write_to_console,
 };
 
 /// **The same doors, on a machine with no Win32** (M1-1).
@@ -12501,11 +12622,12 @@ pub use portable_impl::{
     CustomWindowFrame, FilePickKind, ImeSystemCaret, ShellPickKind, adopt_parent_console,
     announce_explorer_menu_change, detach_console, directory_folds_case,
     hide_every_window_of_this_process, install_console_ctrl_handler, install_context_menu,
-    is_window_cloaked, learn_shifted_characters, leave_process, let_the_system_translate_touch,
-    read_context_menu, redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
-    set_system_backdrop, shifted_character_of_virtual_key, silence_std_streams,
-    system_backdrop_available, thread_mouse_capture, virtual_key_for_character,
-    virtual_key_is_dead, virtual_key_of_scan_code, write_std_error, write_to_console,
+    is_window_cloaked, leave_process, let_the_system_translate_touch, read_context_menu,
+    redirect_std_streams_to_file, register_clipboard_owner, remove_context_menu,
+    set_system_backdrop, shifted_character_of_virtual_key, shifted_character_on_layout,
+    silence_std_streams, system_backdrop_available, thread_mouse_capture,
+    virtual_key_for_character, virtual_key_is_dead, virtual_key_of_scan_code, write_std_error,
+    write_to_console,
 };
 
 /// **The window's composition, on a platform that has none** (M4-1).
