@@ -343,8 +343,9 @@ macro_rules! text_entries {
 
         #[cfg(test)]
         impl Text {
-            /// Every entry, generated from the declaration that defines the enum.
-            pub const ALL: &'static [Self] = &[$(Self::$variant),*];
+            /// Every entry, generated from the declaration that defines the enum:
+            /// an array of values, so a walk takes each `Text` by value.
+            pub const ALL: [Self; [$(stringify!($variant)),*].len()] = [$(Self::$variant),*];
         }
     };
 }
@@ -8321,7 +8322,7 @@ mod tests {
     #[test]
     fn every_entry_of_the_table_is_listed_once_and_reads_in_both_languages() {
         let mut seen: Vec<Text> = Vec::new();
-        for &entry in Text::ALL {
+        for entry in Text::ALL {
             assert!(!seen.contains(&entry), "{entry:?} is listed twice");
             seen.push(entry);
             for lang in [Lang::English, Lang::Chinese] {
@@ -8665,7 +8666,7 @@ mod tests {
         let mut scanned = 0_usize;
         for platform in platforms {
             let produced = table_chords(platform);
-            for &entry in Text::ALL {
+            for entry in Text::ALL {
                 for lang in Lang::ALL {
                     for chord in chords_spelled_in(entry.on(lang, platform)) {
                         scanned += 1;
@@ -8745,7 +8746,7 @@ mod tests {
             "Card height"
         );
         assert_eq!(Text::RowFocusCardHeight.in_lang(Lang::Chinese), "卡片高度");
-        for &entry in Text::ALL {
+        for entry in Text::ALL {
             for lang in [Lang::English, Lang::Chinese] {
                 let text = entry.in_lang(lang);
                 for withdrawn in ["Focus mode", "聚焦模式", "Focus card", "聚焦卡片"] {
@@ -8851,7 +8852,7 @@ mod tests {
     /// this ruling added would have shipped in.
     #[test]
     fn no_entry_ships_the_english_word_as_its_own_translation() {
-        for &entry in Text::ALL {
+        for entry in Text::ALL {
             if Text::UNTRANSLATED.contains(&entry) {
                 continue;
             }
@@ -8932,7 +8933,7 @@ mod tests {
     /// copied into its macOS column.
     #[test]
     fn no_macos_column_promises_a_control_pointer_gesture() {
-        for &entry in Text::ALL {
+        for entry in Text::ALL {
             for lang in [Lang::English, Lang::Chinese] {
                 let mac = entry.on(lang, HostPlatform::MacOs);
                 for gesture in ["Ctrl+click", "Ctrl+点击", "Ctrl+wheel", "Ctrl+滚轮"] {
@@ -8953,7 +8954,7 @@ mod tests {
     /// from its English, so the test above would pass it.
     #[test]
     fn every_chinese_entry_carries_at_least_one_han_character() {
-        for &entry in Text::ALL {
+        for entry in Text::ALL {
             if Text::UNTRANSLATED.contains(&entry) {
                 continue;
             }
@@ -8982,7 +8983,7 @@ mod tests {
     /// rest of the file stops covering it, silently, unless this is here.
     #[test]
     fn the_platform_table_has_exactly_two_columns() {
-        for &entry in Text::ALL {
+        for entry in Text::ALL {
             for lang in Lang::ALL {
                 assert_eq!(
                     entry.on(lang, HostPlatform::OtherUnix),
@@ -9040,7 +9041,7 @@ mod tests {
             "WebView2",
         ];
         let mut wrong: Vec<String> = Vec::new();
-        for &entry in Text::ALL {
+        for entry in Text::ALL {
             if Text::WINDOWS_ONLY_SURFACES.contains(&entry) {
                 continue;
             }
@@ -9139,7 +9140,7 @@ mod tests {
     #[test]
     fn no_string_in_the_window_speaks_in_the_first_person() {
         const FORBIDDEN_ENGLISH: [&str; 5] = ["we", "our", "ours", "us", "ourselves"];
-        for &entry in Text::ALL {
+        for entry in Text::ALL {
             let english = entry.in_lang(Lang::English);
             for word in english.split(|c: char| !c.is_ascii_alphabetic()) {
                 assert!(
@@ -9223,7 +9224,7 @@ mod tests {
             "chrome",
             "§",
         ];
-        for &entry in Text::ALL {
+        for entry in Text::ALL {
             let english = entry.in_lang(Lang::English);
             let lower = english.to_ascii_lowercase();
             for word in lower.split(|c: char| !c.is_ascii_alphabetic()) {
@@ -9326,7 +9327,7 @@ mod tests {
         // repository actually writes are listed above by name.
         const PRIVATE_CHINESE_ALONE: [char; 3] = ['档', '座', '片'];
         let is_han = |c: char| ('\u{4e00}'..='\u{9fff}').contains(&c);
-        for &entry in Text::ALL {
+        for entry in Text::ALL {
             for (column, sentence) in [
                 ("English", entry.in_lang(Lang::English)),
                 ("Chinese", entry.in_lang(Lang::Chinese)),
@@ -9383,7 +9384,7 @@ mod tests {
     /// the entry.
     #[test]
     fn chinese_sentences_are_punctuated_the_chinese_way() {
-        for &entry in Text::ALL {
+        for entry in Text::ALL {
             let chinese = entry.in_lang(Lang::Chinese);
             let mut previous: Option<char> = None;
             for character in chinese.chars() {
