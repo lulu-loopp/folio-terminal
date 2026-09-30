@@ -79,6 +79,13 @@ pub struct UpdateCheckV1 {
     /// than the running build. `None` until the reader skips something.
     #[serde(default)]
     pub skipped_tag: Option<String>,
+    /// **The answer above came from a local release feed** (`--update-feed`,
+    /// 0.4.7 ticket U-42e): a rehearsal's, never the releases page's. A start
+    /// without the flag forgets it — the tag and the stamp both — so nothing
+    /// offers the feed's tag and the next check asks the page at once. Absent
+    /// from the file when false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub local_answer: bool,
     /// Top-level keys this build has no name for, kept so that a file written by
     /// a newer build survives a round trip through this one.
     #[serde(flatten)]
@@ -93,6 +100,7 @@ impl Default for UpdateCheckV1 {
             latest_tag: None,
             seen_tag: None,
             skipped_tag: None,
+            local_answer: false,
             extra: Map::new(),
         }
     }
