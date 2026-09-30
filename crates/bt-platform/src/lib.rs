@@ -40,6 +40,12 @@ impl KeyboardLayout {
     pub const fn handle(&self) -> usize {
         self.handle
     }
+
+    /// The layout's eight-character `KLID`, as Windows names it.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 /// The one-character Shift result for every Win32 virtual key in a keyboard

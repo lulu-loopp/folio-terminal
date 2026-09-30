@@ -978,8 +978,9 @@ fn modify_other_keys_bytes(
                     // not known, `k` is the un-shifted character. The chord
                     // still reaches the program as Ctrl+Shift+Alt on that key,
                     // where the encoder before this road sent nothing for it
-                    // (design note revision (g)).
-                    ShiftedCharacter::Pending => base,
+                    // (design note revision (g)). An `Unavailable` table
+                    // answers the same, for every chord until the process ends.
+                    ShiftedCharacter::Pending | ShiftedCharacter::Unavailable => base,
                 }
             } else {
                 base
@@ -991,7 +992,7 @@ fn modify_other_keys_bytes(
     encoded.then(|| format!("\x1b[27;{};{code}~", xterm_modifier(modifiers)).into_bytes())
 }
 
-/// Whether the layout worker has delivered the Shift character for this key.
+/// What the layout-table lane answers for this key's Shift character.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ShiftedCharacter {
     /// The table is present; its cell is either one character or deliberately
@@ -1001,6 +1002,10 @@ pub(crate) enum ShiftedCharacter {
     /// character, Folio's own rule for a table it does not have (the wire form
     /// is still xterm's `formatOtherKeys=0`).
     Pending,
+    /// The table will never be known in this process (the layout has no
+    /// readable tables, its request was refused, or the worker is gone). The
+    /// chord is encoded as while `Pending`.
+    Unavailable,
 }
 
 /// **What the platform said about a key press beyond the key itself** — what a win32-input-mode

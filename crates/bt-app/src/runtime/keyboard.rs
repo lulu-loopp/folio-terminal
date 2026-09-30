@@ -1993,16 +1993,14 @@ impl Runtime<'_> {
             && self.window.modifiers.shift_key()
             && let Key::Unidentified(NativeKey::Windows(virtual_key)) = &event.logical_key
         {
-            bt_platform::active_keyboard_layout()
-                .and_then(|layout| {
+            bt_platform::active_keyboard_layout().map_or(
+                input::ShiftedCharacter::Unavailable,
+                |layout| {
                     self.app
                         .layout_tables
                         .shifted_character(layout, *virtual_key)
-                })
-                .map_or(
-                    input::ShiftedCharacter::Pending,
-                    input::ShiftedCharacter::Known,
-                )
+                },
+            )
         } else {
             input::ShiftedCharacter::Known(None)
         };

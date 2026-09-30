@@ -540,9 +540,16 @@ builds every HKL returned by `GetKeyboardLayoutList`; an active HKL absent from
 the application-owned map is offered on a bounded channel without waiting. The
 worker reads the layout registry value and loads, copies and frees the System32
 layout DLL through `bt_platform::keyboard_layout_shift_table`, publishes before
-`AppEvent::LayoutTablesReady`, and the next lookup drains too. Until that one
-answer lands, the chord uses its unshifted character; no registry or loader call
-runs on the window thread.
+`AppEvent::LayoutTablesReady`, and the next lookup drains too; no registry or
+loader call runs on the window thread. **Each HKL ends in one of two answers,
+`Known(table)` or `Unavailable`** (round 7): `Unavailable` when the door answers
+`None`, when eight requests are already admitted and unanswered, or when the
+worker is gone (a `Disconnected` send or drain turns every pending HKL
+`Unavailable` at once). An `Unavailable` HKL is never asked again, and a
+Ctrl+Shift+Alt chord on it, like one made while its table is pending, uses the
+un-shifted character; a refusal other than the door's `None` writes one
+`diagnostics.log` line per HKL. The answer channel holds at most the startup
+layouts plus the eight requests, so the worker's send never waits for room.
 
 **The band rule — three tiers, not two.** The event and render loop is
 `AboveNormal`; the PTY reader is `Normal`; **every** worker is `BelowNormal`.
