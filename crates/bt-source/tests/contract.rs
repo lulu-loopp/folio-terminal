@@ -186,13 +186,13 @@ fn the_identities_bt_app_declares_twice_are_the_ten() {
 
 // ── §2.7 — the macro facts about today's tree ─────────────────────────────
 
-/// RED — **the two `macro_rules!` definitions in `bt-app`, and the shapes the
+/// RED — **the three `macro_rules!` definitions in `bt-app`, and the shapes the
 /// traversal cannot classify.**
 ///
 /// §2.7's claim is that the mechanism outlives 2a, so the facts it rests on are
-/// asserted rather than remembered: `psreadline::asset` and
-/// `shell_integration::profile_marks::managed_line` are the two definitions,
-/// neither constructs an item (so neither can be making a `Runtime` method that
+/// asserted rather than remembered: `marks::folder_body`, `psreadline::asset` and
+/// `shell_integration::profile_marks::managed_line` are the three definitions,
+/// none constructs an item (so none can be making a `Runtime` method that
 /// this index does not hold), and the only invocation shapes reported are the
 /// ones listed below.
 ///
@@ -211,8 +211,8 @@ fn the_macro_facts_of_this_tree_are_asserted() {
         .collect();
     assert_eq!(
         definitions,
-        ["asset", "managed_line"],
-        "bt-app has exactly two `macro_rules!` definitions"
+        ["folder_body", "asset", "managed_line"],
+        "bt-app has exactly three `macro_rules!` definitions"
     );
 
     let mut by_shape: BTreeMap<String, Vec<String>> = BTreeMap::new();
