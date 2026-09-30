@@ -456,6 +456,18 @@ pub struct ProjectedLiveMathArtifact {
     pub end: GridPoint,
     pub band_start_row: u32,
     pub band_end_row: u32,
+    /// **The first cell column this band owns**, when it is not the grid's own — the left edge of
+    /// the multiplexer pane the block was proven in (T-PANE-COLUMNS, R10). `None` on a screen no
+    /// frame cuts, where every column of every row the band stands on is its own, as it always was.
+    pub left_limit_columns: Option<u32>,
+    /// **One past the last cell column this band owns**, when it is not the grid's right edge: the
+    /// pane's rule. The picture is drawn and scissored inside these two, and only the source cells
+    /// between them are cleared, so the pane on the other side of the rule keeps its text.
+    pub right_limit_columns: Option<u32>,
+    /// **R11: the block's pane is narrower than its two marks.** Such a block is never presented:
+    /// the projection refuses it through the source fallback (`pane-narrower-than-marks`), so it
+    /// keeps its source rows, clears no cell and scissors nothing.
+    pub pane_narrower_than_marks: bool,
     /// Rows of this proven block that remain above live row zero. They still participate in the
     /// complete presentation geometry; only their pixels and terminal cells are clipped.
     pub clipped_top_rows: u32,
@@ -597,6 +609,22 @@ pub enum BlockOverflowOwner {
     Pane,
 }
 
+/// **The side of one of a band's two marks** (the source toggle and the copy), in logical pixels.
+/// `bt_render` draws them and re-exports this; it lives here because the session, which never
+/// learns what a renderer is, has to ask whether a block's pane can hold them (T-PANE-COLUMNS,
+/// R11). See `bt_render::MATH_TOOL_BUTTON_LOGICAL_PX` for the number's history.
+pub const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 22.0;
+/// `.math-tools { gap: 2px }` (mock-up 2117): the room between the two marks.
+pub const MATH_TOOL_GAP_LOGICAL_PX: f32 = 2.0;
+
+/// The width the two marks and the gap between them take together, in the pane's own pixels at
+/// `scale` device pixels per logical pixel. One definition for the renderer that lays them out and
+/// the session that refuses a pane too narrow to hold them (R11).
+#[must_use]
+pub fn math_tool_cluster_width_px(scale: f32) -> f32 {
+    MATH_TOOL_BUTTON_LOGICAL_PX * scale * 2.0 + MATH_TOOL_GAP_LOGICAL_PX * scale
+}
+
 /// A visible math block replaces its complete source span. `top_subpixels` may be negative when
 /// an anchored viewport starts inside a tall block; the renderer clips it to the pane.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -607,6 +635,16 @@ pub struct MathBlockPlacement {
     pub artifact: ProjectedMathArtifact,
     pub top_subpixels: i64,
     pub left_subpixels: i64,
+    /// **This block's own first cell column**, or `None` when its left edge is the pane's own
+    /// (T-PANE-COLUMNS, R10). A block proven inside a multiplexer's pane owns that pane's columns:
+    /// its ground stops growing leftward here and a source row of it begins here.
+    pub left_limit_columns: Option<u32>,
+    /// **One past this block's own last cell column**, or `None` when its right edge is the
+    /// pane's own. A block is fitted to its band, and the readable floor can leave it wider than
+    /// the band; on a screen no frame cuts the pane's edge stops it, and inside a split the columns
+    /// past the rule are the next pane's text — so this is where its raster, ground, scissor, source
+    /// rows and hit area stop.
+    pub right_limit_columns: Option<u32>,
     /// Offset of rendered pixels within the owned row band. Live artifacts use this to distribute
     /// spare vertical space evenly without moving the band's clip or cleared terminal rows.
     pub content_offset_subpixels: i64,
@@ -712,6 +750,11 @@ pub struct MathFailurePlacement {
     pub anchor: MathBlockAnchor,
     pub top_subpixels: i64,
     pub height_subpixels: i64,
+    /// **One past the last column the failed block owns**, when a multiplexer's rule stands
+    /// nearer than the grid's edge (T-PANE-COLUMNS, R10): the marker is drawn, and answers a
+    /// press, at its own pane's right edge and never over the pane beyond the rule. `None` is
+    /// the grid's edge, as it always was.
+    pub right_limit_columns: Option<u32>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -3089,6 +3132,8 @@ impl ViewportProjection {
                                     .sum::<i64>(),
                             ),
                             left_subpixels: 0,
+                            left_limit_columns: None,
+                            right_limit_columns: None,
                             content_offset_subpixels: artifact.vertical_padding_subpixels,
                             clip_height_subpixels: artifact.height_subpixels,
                             display: MathBlockDisplay::Rendered,
@@ -3239,6 +3284,8 @@ impl ViewportProjection {
                                 artifact: artifact.clone(),
                                 top_subpixels: image_top,
                                 left_subpixels: 0,
+                                left_limit_columns: None,
+                                right_limit_columns: None,
                                 content_offset_subpixels: 0,
                                 clip_height_subpixels: artifact.height_subpixels,
                                 display: MathBlockDisplay::Rendered,
@@ -3476,6 +3523,9 @@ impl ViewportProjection {
                     artifact,
                     top_subpixels,
                     left_subpixels: 0,
+                    // The edges of the pane this band was proven in, and the grid's otherwise.
+                    left_limit_columns: live_math.left_limit_columns,
+                    right_limit_columns: live_math.right_limit_columns,
                     content_offset_subpixels,
                     // The shared live prefix map expands this owned band before all following
                     // logical rows. It never paints into a neighbour's fixed terminal row.
@@ -3508,7 +3558,17 @@ impl ViewportProjection {
                 let visible_last = block_last.min(last.saturating_sub(1));
                 for live_row in visible_first..=visible_last {
                     let row = &mut presented[visible_live_start + live_row - first];
-                    for cell in &mut row.visual.cells {
+                    // Only the columns this band owns (R10): every column on a screen no frame
+                    // cuts, as always; inside a split, this pane's, and the rule and the pane
+                    // beside it keep their cells.
+                    let cells = row.visual.cells.len();
+                    let clear_to = live_math
+                        .right_limit_columns
+                        .map_or(cells, |end| (end as usize).min(cells));
+                    let clear_from = live_math
+                        .left_limit_columns
+                        .map_or(0, |start| (start as usize).min(clear_to));
+                    for cell in &mut row.visual.cells[clear_from..clear_to] {
                         suppress_math_source_cell(cell);
                     }
                 }
@@ -4299,6 +4359,21 @@ impl ViewportProjection {
             .filter(|artifact| {
                 artifact.screen == screen && artifact.generation == self.grid_generation
             })
+            .filter(|artifact| {
+                // R11 (T-PANE-COLUMNS), on both screens: a pane narrower than the block's two marks
+                // cannot present it, so it keeps its source rows — no raster, no cleared cell,
+                // nothing scissored. The same source fallback every refused block takes.
+                if !artifact.pane_narrower_than_marks {
+                    return true;
+                }
+                if std::env::var_os("BT_PERF_TRACE").is_some_and(|value| !value.is_empty()) {
+                    crate::trace::line(format!(
+                        "BT_PERF_TRACE live_math_event=source-fallback row={} left={:?} right={:?} reason=pane-narrower-than-marks",
+                        artifact.start.row, artifact.left_limit_columns, artifact.right_limit_columns,
+                    ));
+                }
+                false
+            })
             .collect::<Vec<_>>();
         let accepted = if screen == ScreenId::Alternate {
             // Alternate presentation is expand-only: every proven Ready block remains rendered.
@@ -4380,6 +4455,16 @@ impl ViewportProjection {
         };
         let mut per_row_height =
             vec![self.cell_height_subpixels.get(); self.live_rows.get() as usize];
+        // **Which rows a math band has already sized this pass** (R10; owner's ruling 2026-09-16,
+        // the branch's B-3). Two panes of one split put two bands on the same terminal rows, and the
+        // live rows are one stack — one row of cells across the whole width, one top per row — so a
+        // row cannot be two heights. The shared stack honours the larger requirement, which is what
+        // keeps a band whole: the taller band keeps its height, and the shorter pane's rows move
+        // down with it as any unrelated text on a band's rows already does. First writer assigns and
+        // later writers take the max, because a primary band may be shorter than the row it stands
+        // on: a row only one band claims is sized exactly as before, which is every row of every
+        // screen no frame cuts.
+        let mut claimed = vec![false; per_row_height.len()];
         for artifact in &accepted {
             if matches!(
                 artifact.artifact.kind,
@@ -4464,31 +4549,45 @@ impl ViewportProjection {
             // A boundary-split bridge takes free height for the share of the raster its own live
             // rows owe — the frozen and staged rows above it cannot grow, so the remainder is the
             // band's, and `project` reads that band back out of this very map.
-            for offset in 0..visible_rows {
-                if let Some(height) =
-                    per_row_height.get_mut(artifact.band_start_row.saturating_add(offset) as usize)
-                    && let Some(distributed) =
-                        heights.get(top_pad_rows.saturating_add(offset) as usize)
-                {
-                    *height = *distributed;
-                }
-            }
-            if screen == ScreenId::Alternate && artifact.clipped_top_rows > 0 {
-                // Terminal-edge clipping removes logical rows, not their upward presentation
-                // extent. Fold the clipped-top slice into the first visible band row so the live
-                // prefix still measures the complete height that was pushed above the fixed grid.
-                // Bottom anchoring consumes this added height at the pane top; local review can
-                // then spend the same amount to bring the complete box back, with a non-negative
-                // content offset. Clipped-bottom rows remain outside this upward reveal extent.
-                let clipped_top_height = heights
+            // Terminal-edge clipping removes logical rows, not their upward presentation extent. On
+            // the alternate screen the clipped-top slice is folded into the band's first visible row,
+            // so the live prefix still measures the complete height that was pushed above the fixed
+            // grid. Bottom anchoring consumes this added height at the pane top; local review can then
+            // spend the same amount to bring the complete box back, with a non-negative content
+            // offset. Clipped-bottom rows remain outside this upward reveal extent.
+            //
+            // **Folded into this band's own requirement before the combine** (owner's ruling
+            // 2026-09-17): a requirement belongs to the band that states it and only the combining is
+            // shared. Added onto the shared row afterwards, it was added onto whatever another pane's
+            // band had left there, and the same bands gave different heights in different orders.
+            let hidden_top_height = if screen == ScreenId::Alternate {
+                heights
                     .iter()
                     .take(artifact.clipped_top_rows as usize)
                     .copied()
-                    .sum::<i64>();
-                if let Some(first_visible_height) =
-                    per_row_height.get_mut(artifact.band_start_row as usize)
+                    .sum::<i64>()
+            } else {
+                0
+            };
+            for offset in 0..visible_rows {
+                let row = artifact.band_start_row.saturating_add(offset) as usize;
+                if let Some(height) = per_row_height.get_mut(row)
+                    && let Some(distributed) =
+                        heights.get(top_pad_rows.saturating_add(offset) as usize)
                 {
-                    *first_visible_height = first_visible_height.saturating_add(clipped_top_height);
+                    let wanted = if offset == 0 {
+                        distributed.saturating_add(hidden_top_height)
+                    } else {
+                        *distributed
+                    };
+                    *height = if claimed.get(row).copied().unwrap_or(false) {
+                        (*height).max(wanted)
+                    } else {
+                        wanted
+                    };
+                    if let Some(claimed) = claimed.get_mut(row) {
+                        *claimed = true;
+                    }
                 }
             }
         }
@@ -6401,6 +6500,9 @@ mod tests {
                 end: GridPoint { row: 1, column: 3 },
                 band_start_row: 1,
                 band_end_row: 1,
+                left_limit_columns: None,
+                right_limit_columns: None,
+                pane_narrower_than_marks: false,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
@@ -9059,6 +9161,9 @@ mod tests {
                     end: GridPoint { row: 3, column: 4 },
                     band_start_row,
                     band_end_row,
+                    left_limit_columns: None,
+                    right_limit_columns: None,
+                    pane_narrower_than_marks: false,
                     clipped_top_rows: 0,
                     clipped_bottom_rows: 0,
                     occluded_source_rows: 0,
@@ -9207,6 +9312,9 @@ mod tests {
                 },
                 band_start_row,
                 band_end_row,
+                left_limit_columns: None,
+                right_limit_columns: None,
+                pane_narrower_than_marks: false,
                 clipped_top_rows,
                 clipped_bottom_rows,
                 occluded_source_rows,
@@ -9345,6 +9453,9 @@ mod tests {
                 end: GridPoint { row: 3, column: 4 },
                 band_start_row: 1,
                 band_end_row: 3,
+                left_limit_columns: None,
+                right_limit_columns: None,
+                pane_narrower_than_marks: false,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 1,
@@ -9582,6 +9693,9 @@ mod tests {
                 end: GridPoint { row: 0, column: 2 },
                 band_start_row: 0,
                 band_end_row: 0,
+                left_limit_columns: None,
+                right_limit_columns: None,
+                pane_narrower_than_marks: false,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
@@ -9783,6 +9897,9 @@ mod tests {
                 end: GridPoint { row: 0, column: 2 },
                 band_start_row: 0,
                 band_end_row: 0,
+                left_limit_columns: None,
+                right_limit_columns: None,
+                pane_narrower_than_marks: false,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
@@ -9916,6 +10033,9 @@ mod tests {
                 end: GridPoint { row: 0, column: 2 },
                 band_start_row: 0,
                 band_end_row: 0,
+                left_limit_columns: None,
+                right_limit_columns: None,
+                pane_narrower_than_marks: false,
                 clipped_top_rows: 0,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
@@ -10041,6 +10161,9 @@ mod tests {
             end: GridPoint { row: 3, column: 4 },
             band_start_row: 2,
             band_end_row: 3,
+            left_limit_columns: None,
+            right_limit_columns: None,
+            pane_narrower_than_marks: false,
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
             occluded_source_rows: 0,
@@ -10115,6 +10238,9 @@ mod tests {
                 },
                 band_start_row,
                 band_end_row,
+                left_limit_columns: None,
+                right_limit_columns: None,
+                pane_narrower_than_marks: false,
                 clipped_top_rows,
                 clipped_bottom_rows: 0,
                 occluded_source_rows: 0,
@@ -10759,6 +10885,9 @@ mod tests {
                     end: GridPoint { row: 6, column: 2 },
                     band_start_row: 4,
                     band_end_row: 6,
+                    left_limit_columns: None,
+                    right_limit_columns: None,
+                    pane_narrower_than_marks: false,
                     clipped_top_rows: 0,
                     clipped_bottom_rows: 0,
                     occluded_source_rows: 0,
@@ -11955,6 +12084,9 @@ mod tests {
             end: GridPoint { row: 4, column: 7 },
             band_start_row: 3,
             band_end_row: 4,
+            left_limit_columns: None,
+            right_limit_columns: None,
+            pane_narrower_than_marks: false,
             clipped_top_rows: 0,
             clipped_bottom_rows: 0,
             occluded_source_rows: 0,
@@ -13633,5 +13765,267 @@ mod tests {
                 window: 9
             })
         );
+    }
+
+    // ---- T-PANE-COLUMNS (69a): bands proven in a multiplexer's panes (note §7.3) ------------------
+
+    /// One band of `art_cells` cell-heights standing on `band_start_row..=band_end_row`, owning the
+    /// columns between `left` and `right` (`None` = the grid's own edge).
+    fn pane_band(
+        occurrence_id: u64,
+        screen: ScreenId,
+        (band_start_row, band_end_row): (u32, u32),
+        (left, right): (Option<u32>, Option<u32>),
+        art_cells: u32,
+    ) -> ProjectedLiveMathArtifact {
+        let art_h = i64::from(art_cells) * cell_height().get();
+        let height_px = (art_cells * 18) as usize;
+        let column = left.unwrap_or(0);
+        ProjectedLiveMathArtifact {
+            occurrence_id: LiveMathOccurrenceId(occurrence_id),
+            screen,
+            start: GridPoint {
+                row: band_start_row,
+                column,
+            },
+            end: GridPoint {
+                row: band_end_row,
+                column: column + 4,
+            },
+            band_start_row,
+            band_end_row,
+            left_limit_columns: left,
+            right_limit_columns: right,
+            pane_narrower_than_marks: false,
+            clipped_top_rows: 0,
+            clipped_bottom_rows: 0,
+            occluded_source_rows: 0,
+            occluded_visible_rows: Vec::new(),
+            transition_stale: false,
+            frozen_prefix: Vec::new(),
+            staging_prefix: Vec::new(),
+            generation: GridGeneration(1),
+            artifact: ProjectedMathArtifact {
+                inline_runs: Vec::new(),
+                key: format!("pane-{occurrence_id}"),
+                end: TranscriptId(0),
+                rgba: Arc::from(vec![255; height_px * 4]),
+                width_px: 1,
+                height_px: height_px as u32,
+                height_subpixels: art_h,
+                baseline_subpixels: 0,
+                mode: MathMode::Display,
+                kind: RgbaArtifactKind::Math,
+                vertical_padding_subpixels: 0,
+                render_scale_milli: 1000,
+                source: format!("pane-{occurrence_id}"),
+            },
+        }
+    }
+
+    fn pane_frame(
+        screen: ScreenId,
+        bands: impl IntoIterator<Item = ProjectedLiveMathArtifact>,
+        rows: Vec<CapturedRow>,
+    ) -> ViewportFrame {
+        let height = u32::try_from(rows.len()).unwrap();
+        let mut projection = ViewportProjection::new(
+            key(8),
+            DetectionRevision(1),
+            nz32(height),
+            cell_height(),
+            SourceGeneration(1),
+            GridGeneration(1),
+        );
+        projection.sync_live_math_artifacts(screen, bands);
+        let frame = projection
+            .continuous_frame(
+                &HistoryDocument::default(),
+                &[],
+                rows,
+                GridCursor {
+                    row: height - 1,
+                    column: 0,
+                    visible: true,
+                },
+                screen,
+            )
+            .unwrap();
+        frame.validate_shape().unwrap();
+        frame
+    }
+
+    fn band_of<'a>(frame: &'a ViewportFrame, key: &str) -> &'a MathBlockPlacement {
+        frame
+            .math_blocks
+            .iter()
+            .find(|block| block.artifact.key == key)
+            .unwrap_or_else(|| panic!("{key} is on the frame"))
+    }
+
+    /// RED (69a) — **two panes sharing rows keep the taller band whole** (R10; owner's ruling
+    /// 2026-09-16, the branch's B-3). The live rows are one stack, so a row cannot be two heights;
+    /// the stack honours the larger requirement. Assigned in turn, the second band gave rows 1 and 2
+    /// back to one cell and cut the first to a third of itself.
+    ///
+    /// MUTATION: assign each band's distribution in turn (drop the `max` in the combine).
+    #[test]
+    fn two_panes_sharing_rows_keep_the_taller_band_whole() {
+        let cell = cell_height().get();
+        for screen in [ScreenId::Alternate, ScreenId::Primary] {
+            let frame = pane_frame(
+                screen,
+                [
+                    pane_band(1, screen, (0, 2), (None, Some(49)), 9),
+                    pane_band(2, screen, (1, 3), (Some(50), None), 3),
+                ],
+                vec![fixture_row("        ", false); 30],
+            );
+            let left = band_of(&frame, "pane-1");
+            assert_eq!(left.clip_height_subpixels, 9 * cell, "{screen:?}");
+            assert_eq!(left.right_limit_columns, Some(49));
+            assert_eq!(left.left_limit_columns, None);
+            let right = band_of(&frame, "pane-2");
+            assert!(right.clip_height_subpixels >= 3 * cell, "{screen:?}");
+            assert_eq!(right.left_limit_columns, Some(50));
+            assert_eq!(right.right_limit_columns, None);
+        }
+    }
+
+    /// RED (69a) — **three panes with hidden tops agree in every order** (R10; owner's ruling
+    /// 2026-09-17). Three bands on the same three rows, each with one row hidden above the grid:
+    /// the hidden extent is folded into each band's own first-row requirement before the three are
+    /// combined, so the tallest band keeps exactly its own height in all six orders, on both screens.
+    /// Added onto the shared row afterwards it was added onto whatever the previous band left there.
+    ///
+    /// MUTATION: add the hidden top onto the shared row after the combine.
+    #[test]
+    fn three_panes_with_hidden_tops_agree_in_every_order() {
+        let cell = cell_height().get();
+        let orders = [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ];
+        for screen in [ScreenId::Alternate, ScreenId::Primary] {
+            let mut answers = Vec::new();
+            for order in orders {
+                let bands = order.map(|which| {
+                    let (id, limits, cells) = match which {
+                        0 => (1, (None, Some(19)), 8),
+                        1 => (2, (Some(20), Some(39)), 4),
+                        _ => (3, (Some(40), None), 12),
+                    };
+                    ProjectedLiveMathArtifact {
+                        clipped_top_rows: 1,
+                        ..pane_band(id, screen, (0, 2), limits, cells)
+                    }
+                });
+                let frame = pane_frame(screen, bands, vec![fixture_row("        ", false); 30]);
+                let heights = ["pane-1", "pane-2", "pane-3"]
+                    .map(|key| band_of(&frame, key).clip_height_subpixels);
+                answers.push(heights);
+            }
+            assert!(
+                answers.windows(2).all(|pair| pair[0] == pair[1]),
+                "{screen:?}: six orders gave {answers:?}"
+            );
+            if screen == ScreenId::Alternate {
+                assert_eq!(
+                    answers[0][2],
+                    12 * cell,
+                    "the tallest band keeps its own height"
+                );
+            }
+        }
+    }
+
+    /// RED (69a) — **a band clears only its own pane's source cells** (R10). A band standing in the
+    /// columns `[2, 5)` of an eight-column grid clears those cells and no other: the rule at column 5
+    /// and the pane beside it keep their text on the rows the band stands on.
+    ///
+    /// MUTATION: clear the whole row in `continuous_frame` (drop the limits).
+    #[test]
+    fn a_band_clears_only_its_own_panes_source_cells() {
+        let frame = pane_frame(
+            ScreenId::Alternate,
+            [pane_band(
+                1,
+                ScreenId::Alternate,
+                (0, 2),
+                (Some(2), Some(5)),
+                3,
+            )],
+            vec![fixture_row("ab$$x|ef", false); 30],
+        );
+        let columns = frame.columns.get() as usize;
+        let row_text = |row: usize| {
+            frame.cells[row * columns..(row + 1) * columns]
+                .iter()
+                .map(|cell| {
+                    if cell.text.is_empty() {
+                        " "
+                    } else {
+                        cell.text.as_str()
+                    }
+                })
+                .collect::<String>()
+        };
+        let placed = frame
+            .row_map
+            .iter()
+            .position(|mapped| mapped.live_grid_row == Some(1))
+            .expect("row 1 is on the frame");
+        assert_eq!(row_text(placed), "ab   |ef");
+        let band = band_of(&frame, "pane-1");
+        assert_eq!(
+            (band.left_limit_columns, band.right_limit_columns),
+            (Some(2), Some(5))
+        );
+    }
+
+    /// RED (69a) — **a pane narrower than a block's marks sends it back to source** (R11), through the
+    /// projection's existing source fallback: the band is refused, so it has no placement and clears
+    /// no cell.
+    ///
+    /// MUTATION: skip the `pane_narrower_than_marks` refusal in `sync_live_math_artifacts`.
+    #[test]
+    fn a_pane_narrower_than_its_marks_keeps_the_block_source() {
+        let frame = pane_frame(
+            ScreenId::Alternate,
+            [ProjectedLiveMathArtifact {
+                pane_narrower_than_marks: true,
+                ..pane_band(1, ScreenId::Alternate, (0, 2), (Some(2), Some(4)), 3)
+            }],
+            vec![fixture_row("ab$$|efg", false); 30],
+        );
+        assert!(frame.math_blocks.is_empty());
+        let columns = frame.columns.get() as usize;
+        let first = frame
+            .row_map
+            .iter()
+            .position(|mapped| mapped.live_grid_row == Some(0))
+            .expect("row 0 is on the frame");
+        assert_eq!(
+            frame.cells[first * columns + 2].text,
+            "$",
+            "the source stays"
+        );
+    }
+
+    /// RED (69a) — **the two marks fit exactly the panes R11 lets present** — six cells of nine
+    /// pixels at scale 1 hold the forty-six pixels of the source and copy pair, five do not. One
+    /// definition, `math_tool_cluster_width_px`, answers for the session and the renderer both.
+    ///
+    /// MUTATION: drop the gap from `math_tool_cluster_width_px`.
+    #[test]
+    fn the_marks_need_forty_six_pixels_at_scale_one() {
+        assert_eq!(math_tool_cluster_width_px(1.0), 46.0);
+        assert!(6.0 * 9.0 >= math_tool_cluster_width_px(1.0));
+        assert!(5.0 * 9.0 < math_tool_cluster_width_px(1.0));
+        assert_eq!(math_tool_cluster_width_px(2.0), 92.0);
     }
 }
