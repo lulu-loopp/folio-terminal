@@ -164,8 +164,8 @@ fn herdr_screen() -> Vec<String> {
 /// 34 onwards — not columns 8 onwards, which is where the run's bytes would land if they were
 /// counted from the start of the screen row.
 ///
-/// MUTATION: return the unframed frame from `ScreenFrame::measure`, or count the inline run's
-/// columns with `UnicodeWidthStr` over the pane's text in `live_fragment_cells`.
+/// MUTATION: read the inline run's cells off the whole screen row instead of the pane's
+/// (`record.capture.inputs()` for `record.pane_inputs()?` in the live inline placement).
 #[test]
 fn herdr_pane_rows_typeset_behind_their_sidebar() {
     let start = Instant::now();
@@ -560,6 +560,46 @@ fn a_block_in_one_pane_does_not_displace_the_other_panes_block_on_its_rows() {
         .collect::<Vec<_>>();
     panes.sort();
     assert_eq!(panes, vec![rect(0, 20, 0, 60), rect(0, 20, 61, 120)]);
+}
+
+/// RED (69a) — **a pane's rows are armed as the pane reads them** (note §4 step 2). A pipe table
+/// printed in the right pane: read as whole screen rows, `…sentence │| a | b |` does not start
+/// with a pipe and arms nothing, so the table would never be scanned; walked pane by pane, its rows
+/// arm and the table is proven in the right pane's columns.
+///
+/// MUTATION: walk the whole capture in `live_candidate_rows` instead of each pane.
+#[test]
+fn a_pipe_table_in_a_pane_is_armed_in_that_pane() {
+    let rows = (0..12_usize)
+        .map(|row| {
+            let right = match row {
+                3 => "| name | count |".to_owned(),
+                4 => "| --- | --- |".to_owned(),
+                5 => "| alpha | 3 |".to_owned(),
+                6 => "| beta | 41 |".to_owned(),
+                _ => prose(row),
+            };
+            format!("{:<50}\u{2502}{right}", prose(row))
+        })
+        .collect::<Vec<_>>();
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz(100), nz(12));
+    session.feed_at(&repaint(&rows), start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    assert!(complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)) >= 1);
+    assert!(
+        session
+            .live_decorations
+            .values()
+            .any(|record| record.span.kind == BlockKind::Table
+                && record.pane == rect(0, 12, 51, 100)),
+        "the table is proven in the right pane: {:?}",
+        session
+            .live_decorations
+            .values()
+            .map(|record| (record.span.kind, record.pane))
+            .collect::<Vec<_>>()
+    );
 }
 
 // ---- §7.4: ticket 69b (T-PANE-IDENTITY) -------------------------------------------------------

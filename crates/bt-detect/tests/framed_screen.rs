@@ -630,8 +630,9 @@ fn the_herdr_sidebar_no_longer_hides_the_pane() {
 /// RED (69a) — **the herdr compact sidebar no longer hides the pane**: the same picture three
 /// columns wide, the pane from column 4.
 ///
-/// MUTATION: count the rule's own column into the pane on its right (`left = cut` in
-/// `Measure::split`).
+/// MUTATION: start the pane right of a rule one column late (`left = cut + 2` in `Measure::split`).
+/// (Counting the rule's own column into it, `left = cut`, cuts the same strip forever: the stack
+/// overflows, which is red too.)
 #[test]
 fn the_herdr_compact_sidebar_no_longer_hides_the_pane() {
     let capture = framed_capture(100, &herdr("   "));
@@ -729,11 +730,17 @@ fn a_fence_the_screen_proves_suppresses_every_region() {
     assert!(fenced.frame().screen_fence_state().covers(0));
     assert!(fenced.frame().screen_fence_state().covers(39));
     assert!(proven(&fenced).is_empty());
-    assert!(
-        live_detection_ownership_ledger(&fenced)
+
+    // The ledger says the same: a display block the screen's fence covers is not the product's.
+    let displays = vec!["log  \u{2502}$$x^2$$".to_owned(); 40];
+    let owned = |capture: &LiveCapture| {
+        live_detection_ownership_ledger(capture)
             .values()
-            .all(|ledger| ledger.owned_block_sources.is_empty())
-    );
+            .map(|ledger| ledger.owned_block_sources.len())
+            .sum::<usize>()
+    };
+    assert_eq!(owned(&framed_capture(40, &displays)), 40);
+    assert_eq!(owned(&framed_capture_from(40, &displays, open())), 0);
 
     let mut status_opened = vec!["```".to_owned()];
     status_opened.extend(log_rows(40));
@@ -987,19 +994,19 @@ fn a_padded_full_height_table_is_never_cut_in_either_direction() {
     assert_read_whole(&framed_capture(11, &table));
 }
 
-/// RED (69a) — **full-height box art is not a pane frame**: a padded boxed banner drawn from column
-/// 0, `│` on every row, one line of text inside it standing off both rules. Its top and bottom rows
-/// are strokes touching the rules, and a stroke is frame, not text: counted as text they would be
-/// two of the three rows "with text" on each side, touching the rule, and the box would read as
-/// clipped.
+/// RED (69a) — **full-height box art is not a pane frame**: a boxed two-column diagram drawn from
+/// column 0, `│` on every row, one line of text in each box standing off the rules. Its top and
+/// bottom rows are strokes touching every rule, and a stroke is frame, not text: counted as text
+/// they would be two of the three rows "with text" beside the divider, touching it, and the divider
+/// would read as clipped and cut the diagram in two.
 ///
 /// MUTATION: count a stroke cell as text in `Measure::side_text`.
 #[test]
 fn full_height_box_art_is_not_a_pane_frame() {
-    let mut art = vec!["\u{2502}                              \u{2502}".to_owned(); 20];
-    art[0] = table_rule('\u{256d}', '\u{2500}', '\u{256e}', &[30]);
-    art[10] = "\u{2502}  Welcome to the banner       \u{2502}".to_owned();
-    art[19] = table_rule('\u{2570}', '\u{2500}', '\u{256f}', &[30]);
+    let mut art = vec!["\u{2502}              \u{2502}               \u{2502}".to_owned(); 20];
+    art[0] = table_rule('\u{250c}', '\u{252c}', '\u{2510}', &[14, 15]);
+    art[10] = "\u{2502}  a request   \u{2502}  its answer   \u{2502}".to_owned();
+    art[19] = table_rule('\u{2514}', '\u{2534}', '\u{2518}', &[14, 15]);
     assert_read_whole(&framed_capture(32, &art));
 }
 
@@ -1315,4 +1322,63 @@ fn a_formula_in_each_pane_on_one_row_does_not_refuse_the_cut() {
     let blocks = proven(&capture);
     assert_eq!(count(&blocks, left, MathMode::Inline), 20);
     assert_eq!(blocks.len(), 20);
+}
+
+/// RED (69a) — **a framed pane is scanned from a neutral checkpoint** (R8). The capture's checkpoint
+/// carries a `$$` opened in the frozen history above the grid. Unframed, the screen's first `$$` would
+/// close it; framed, no scrollback line runs into a pane, so each pane reads its own `$$ … $$` as
+/// the blocks its program printed.
+///
+/// MUTATION: scan a framed pane from the capture's checkpoint (`initial_context.clone()` for the
+/// panes in `ScreenFrame::measure`).
+#[test]
+fn a_framed_pane_is_scanned_from_a_neutral_checkpoint() {
+    let mut carried = DetectionContext::default();
+    advance_detection_context(&mut carried, TranscriptId(1), "$$");
+    let capture = framed_capture_from(100, &herdr("   "), carried);
+    let right = rect(0, 13, 4, 100);
+    assert_eq!(panes(&capture), vec![rect(0, 13, 0, 3), right]);
+    let blocks = proven(&capture);
+    assert_eq!(count(&blocks, right, MathMode::Display), 2);
+}
+
+/// RED (69a) — **a rule a few rows of text touch is still padded** (V2a asks for a majority). A
+/// full-height table whose cells are padded except on three rows, where a long entry runs up to the
+/// rule: the side is clipped on three rows of the forty it holds text on, which is a table's shape and
+/// not a pane's, so nothing is cut.
+///
+/// MUTATION: read a side as clipped when any row touches the rule (`touching > 0` for the majority
+/// in `Measure::v2`).
+#[test]
+fn a_rule_a_few_rows_of_text_touch_is_still_padded() {
+    let mut table = vec!["\u{2502} name   \u{2502} value  \u{2502}".to_owned(); 40];
+    for row in [7, 19, 31] {
+        table[row] = "\u{2502} longest\u{2502} value  \u{2502}".to_owned();
+    }
+    assert_read_whole(&framed_capture(19, &table));
+}
+
+/// RED (69a) — **a plain rule beside a separator row anchors nothing** (H2's junction joins its
+/// row). herdr draws a `─────` separator across its sidebar, ending at the cell left of its `│`
+/// rule. That rule is a proven frame, but a plain `│` does not join the separator — only a `├`
+/// would — so the sidebar is not cut there and stays one pane.
+///
+/// MUTATION: accept any vertical stroke just outside the rectangle as the row's junction.
+#[test]
+fn a_plain_rule_beside_a_separator_row_anchors_nothing() {
+    let screen = (0..20)
+        .map(|row| {
+            let side = if row == 10 {
+                "\u{2500}".repeat(25)
+            } else {
+                " ".repeat(25)
+            };
+            format!("{side}\u{2502}pane output {row}")
+        })
+        .collect::<Vec<_>>();
+    let capture = framed_capture(60, &screen);
+    assert_eq!(
+        panes(&capture),
+        vec![rect(0, 20, 0, 25), rect(0, 20, 26, 60)]
+    );
 }
