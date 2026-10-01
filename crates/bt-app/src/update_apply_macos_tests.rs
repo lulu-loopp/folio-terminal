@@ -23,6 +23,7 @@
 
 use super::*;
 
+use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ExitStatus, Stdio};
@@ -32,7 +33,8 @@ use std::thread::JoinHandle;
 
 use crate::update_prepare_macos::tests::fixture::{Scratch, on_macos, run, sign, version_of};
 use crate::update_txn::{
-    Body, Class, Header, HeaderOutcome, Outcome, STUCK_ATTEMPT_LIMIT, StartAction, TrialSight,
+    Body, Cdhash, Class, Header, HeaderOutcome, Outcome, STUCK_ATTEMPT_LIMIT, StartAction,
+    TrialSight,
 };
 
 /// The synthetic bundles' identifier.
@@ -483,6 +485,55 @@ impl Install {
         install_txn::durable_create(&self.home.receipt_path(self.txn, &nonce), &receipt.encode())
             .unwrap();
     }
+}
+
+/// A bundle-shaped transaction made only of ordinary test files. Its adapter
+/// is scripted, so these shape tests run on every host without asking macOS to
+/// compile, sign, inspect or exchange a bundle.
+fn shape_install(tag: &str) -> Install {
+    let scratch = Scratch::new(&format!("u41a1-shape-{tag}"));
+    let root = scratch.root.clone();
+    let installed = root.join("Applications").join("Folio.app");
+    let program = installed.join(EXE);
+    std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+    std::fs::write(&program, b"old shape").unwrap();
+    let home = Home::for_bundle(&installed).unwrap();
+    let txn = TxnId::new([0x6a; 16]);
+    let stage = home.stage_bundle(txn).unwrap();
+    let rescue = home.rescue_bundle(txn).unwrap();
+    for (bundle, bytes) in [
+        (&stage, b"new shape".as_slice()),
+        (&rescue, b"rescue".as_slice()),
+    ] {
+        let program = bundle.join(EXE);
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(program, bytes).unwrap();
+    }
+    let data = root.join("data").join("Folio");
+    let agents = root.join("LaunchAgents");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&agents).unwrap();
+    let install = Install {
+        _scratch: scratch,
+        installed,
+        home,
+        txn,
+        applier: Nonce::new([0x45; 32]),
+        old: BundleIdentity {
+            cdhash: Cdhash::new([0x11; 20]),
+            version: "1.0".to_owned(),
+        },
+        new: BundleIdentity {
+            cdhash: Cdhash::new([0x22; 20]),
+            version: "2.0".to_owned(),
+        },
+        data,
+        agents,
+    };
+    install.write(Phase::Handoff {
+        applier: install.applier,
+    });
+    install
 }
 
 /// Short limits for a test.
@@ -3757,7 +3808,11 @@ pub(crate) struct Recorder {
     /// `H/journal.json`.
     pub(crate) journal: PathBuf,
     pub(crate) refuse_activate: bool,
+    /// Proof answers in call order. `None` delegates every call to [`Ours`].
+    pub(crate) locate_answers: Option<Arc<Mutex<VecDeque<ProofAnswer>>>>,
 }
+
+type ProofAnswer = (Option<BundleIdentity>, Option<BundleIdentity>);
 
 impl Recorder {
     fn of(install: &Install) -> Self {
@@ -3765,7 +3820,13 @@ impl Recorder {
             calls: Arc::default(),
             journal: install.home.journal(),
             refuse_activate: false,
+            locate_answers: None,
         }
+    }
+
+    fn answering(mut self, answers: impl IntoIterator<Item = ProofAnswer>) -> Self {
+        self.locate_answers = Some(Arc::new(Mutex::new(answers.into_iter().collect())));
+        self
     }
 
     fn note(&self, point: Point) {
@@ -3802,7 +3863,14 @@ impl ApplyPoints for Recorder {
         places: &Places<'_>,
     ) -> (Option<BundleIdentity>, Option<BundleIdentity>) {
         self.note(Point::Locate);
-        Ours.locate(worker, places)
+        match &self.locate_answers {
+            Some(answers) => answers
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("the road made an unexpected Locate call"),
+            None => Ours.locate(worker, places),
+        }
     }
 }
 
@@ -3812,6 +3880,269 @@ fn recorded_road(install: &Install, recorder: &Recorder, limits: Limits) -> Road
         layouts: crate::update_adapter::Layouts::of(Arc::new(recorder.clone())),
         ..install.road(limits)
     }
+}
+
+/// RED (U-41a1 round 2) — **a refused `Activate` with the fake layout proving
+/// the old set live reverts from durable `Moving`.** This shape case runs on
+/// every host; no bundle identity reader participates.
+///
+/// MUTATION: in `Txn::after_activate_refusal`, replace `self.layout.locate`
+/// with the direct installed-bundle identity read.
+#[test]
+fn shape_activate_refusal_with_old_live_follows_the_layout() {
+    let install = shape_install("refusal-old");
+    install.write(Phase::Moving);
+    let recorder =
+        Recorder::of(&install).answering([(Some(install.old.clone()), Some(install.new.clone()))]);
+    let road = recorded_road(&install, &recorder, limits(5_000, 0));
+    let ended = on_a_worker(move |worker| {
+        let (mut txn, bundles) = Txn::hold(
+            &road,
+            worker,
+            Asker::LockHolder,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut world = Fake::default();
+        txn.after_activate_refusal(worker, &bundles.places(), &mut world)
+            .unwrap()
+    });
+    assert_eq!(ended, Ended::Reverted);
+    assert_eq!(
+        install.on_disk().map(|journal| journal.body.phase),
+        Some(Phase::Prepared {
+            deferred_launches: 0,
+        })
+    );
+    assert_eq!(recorder.calls(), vec![(Point::Locate, PhaseKind::Moving)]);
+}
+
+/// RED (U-41a1 round 2) — **a refused `Activate` with the fake layout proving
+/// the new set live records `RollbackIntent` rather than reverting.** Later
+/// proof calls say the old set is live, so the rollback is declared complete.
+///
+/// MUTATION: in `Txn::after_activate_refusal`, replace `self.layout.locate`
+/// with the direct installed-bundle identity read.
+#[test]
+fn shape_activate_refusal_with_new_live_follows_the_layout() {
+    let install = shape_install("refusal-new");
+    install.write(Phase::Moving);
+    let old = Some(install.old.clone());
+    let new = Some(install.new.clone());
+    let recorder = Recorder::of(&install).answering([
+        (new.clone(), old.clone()),
+        (old.clone(), new.clone()),
+        (old.clone(), new.clone()),
+    ]);
+    let road = recorded_road(&install, &recorder, limits(5_000, 0));
+    let ended = on_a_worker(move |worker| {
+        let (mut txn, bundles) = Txn::hold(
+            &road,
+            worker,
+            Asker::LockHolder,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut world = Fake::default();
+        txn.after_activate_refusal(worker, &bundles.places(), &mut world)
+            .unwrap()
+    });
+    assert_eq!(ended, Ended::RolledBack);
+    assert_eq!(
+        install.on_disk().map(|journal| journal.body.phase),
+        Some(Phase::Retired {
+            outcome: Outcome::RolledBack,
+            untried: true,
+        })
+    );
+    assert_eq!(
+        recorder.calls(),
+        vec![
+            (Point::Locate, PhaseKind::Moving),
+            (Point::Locate, PhaseKind::RollbackIntent),
+            (Point::Locate, PhaseKind::RolledBack),
+        ]
+    );
+}
+
+/// RED (U-41a1 round 2) — **re-entry at `Moving` follows the fake layout's
+/// old-live proof and reverts.**
+///
+/// MUTATION: in `Txn::at_moving_again`, put back its two direct identity reads.
+#[test]
+fn shape_reentry_at_moving_follows_the_layout() {
+    let install = shape_install("moving");
+    install.write(Phase::Moving);
+    let recorder =
+        Recorder::of(&install).answering([(Some(install.old.clone()), Some(install.new.clone()))]);
+    let road = recorded_road(&install, &recorder, limits(5_000, 0));
+    let ended = on_a_worker(move |worker| {
+        let (mut txn, bundles) = Txn::hold(
+            &road,
+            worker,
+            Asker::LockHolder,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut world = Fake::default();
+        txn.at_moving_again(worker, &bundles.places(), &mut world)
+            .unwrap()
+    });
+    assert_eq!(ended, Ended::Reverted);
+    assert_eq!(
+        install.on_disk().map(|journal| journal.body.phase),
+        Some(Phase::Prepared {
+            deferred_launches: 0,
+        })
+    );
+    assert_eq!(recorder.calls(), vec![(Point::Locate, PhaseKind::Moving)]);
+}
+
+/// RED (U-41a1 round 2) — **a `Stuck` retry and its watcher both use the fake
+/// layout's new-live proof.**
+///
+/// MUTATION: in `Txn::retry_as_trial`, put back the direct installed-bundle
+/// identity read.
+#[test]
+fn shape_retry_over_stuck_follows_the_layout() {
+    let install = shape_install("stuck");
+    install.write(stuck(STUCK_ATTEMPT_LIMIT));
+    let old = Some(install.old.clone());
+    let new = Some(install.new.clone());
+    let recorder =
+        Recorder::of(&install).answering([(new.clone(), old.clone()), (new.clone(), old.clone())]);
+    let road = recorded_road(&install, &recorder, limits(5_000, 0));
+    let (ended, launched) = on_a_worker(move |worker| {
+        let (mut txn, bundles) = Txn::hold(
+            &road,
+            worker,
+            Asker::Rescue,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut world = Fake::default();
+        let ended = txn.retry_as_trial(
+            worker,
+            &bundles.places(),
+            &mut world,
+            Ended::GaveUp("at the bound (test)".to_owned()),
+            &[],
+        );
+        let launched = world.launched.lock().unwrap().len();
+        (ended, launched)
+    });
+    assert!(matches!(ended, Ended::GaveUp(_)), "{ended:?}");
+    assert_eq!(launched, 1);
+    assert!(matches!(
+        install.on_disk().map(|journal| journal.body.phase),
+        Some(Phase::Stuck {
+            attempts: STUCK_ATTEMPT_LIMIT,
+            ..
+        })
+    ));
+    assert_eq!(
+        recorder.calls(),
+        vec![
+            (Point::Locate, PhaseKind::Stuck),
+            (Point::Locate, PhaseKind::Stuck),
+        ]
+    );
+}
+
+/// RED (U-41a1 round 2) — **the trial watcher asks the fake layout which path
+/// holds the new executable.**
+///
+/// MUTATION: in `Txn::watch_trial`, put back the two direct identity reads.
+#[test]
+fn shape_trial_watcher_follows_the_layout() {
+    let install = shape_install("watcher");
+    install.write(Phase::Moving);
+    let recorder =
+        Recorder::of(&install).answering([(Some(install.new.clone()), Some(install.old.clone()))]);
+    let road = recorded_road(&install, &recorder, limits(5_000, 0));
+    on_a_worker(move |worker| {
+        let (mut txn, bundles) = Txn::hold(
+            &road,
+            worker,
+            Asker::Rescue,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        let mut world = Fake::default();
+        let mut launch = Launch::untracked();
+        assert_eq!(
+            txn.watch_trial(
+                worker,
+                &bundles.places(),
+                Actor::Recovery,
+                &mut world,
+                Some((Nonce::new([0x73; 32]), now_ms())),
+                &mut launch,
+            )
+            .unwrap(),
+            None
+        );
+    });
+    assert_eq!(install.on_disk().unwrap().body.phase, Phase::Moving);
+    assert_eq!(recorder.calls(), vec![(Point::Locate, PhaseKind::Moving)]);
+}
+
+/// RED (U-41a1 round 2) — **committed retirement asks the fake layout whether
+/// the staged set is old rollback material.**
+///
+/// MUTATION: in `Txn::commit`, put back the direct staged-bundle identity read.
+#[test]
+fn shape_committed_retirement_follows_the_layout() {
+    let install = shape_install("committed");
+    install.write(Phase::Committed);
+    let recorder =
+        Recorder::of(&install).answering([(Some(install.new.clone()), Some(install.new.clone()))]);
+    let road = recorded_road(&install, &recorder, limits(5_000, 0));
+    let ended = on_a_worker(move |worker| {
+        let (mut txn, bundles) = Txn::hold(
+            &road,
+            worker,
+            Asker::LockHolder,
+            Instant::now() + Duration::from_secs(5),
+        )
+        .unwrap();
+        txn.commit(worker, &bundles.places(), Actor::Applier)
+    });
+    assert_eq!(ended, Ended::Committed);
+    assert_eq!(
+        install.on_disk().map(|journal| journal.body.phase),
+        Some(Phase::Retired {
+            outcome: Outcome::Committed,
+            untried: false,
+        })
+    );
+    assert_eq!(
+        recorder.calls(),
+        vec![(Point::Locate, PhaseKind::Committed)]
+    );
+}
+
+/// RED (U-41a1 round 2) — **the exit guard follows the fake layout's new-live
+/// proof and holds the start back as a trial.**
+///
+/// MUTATION: in `opens_now_with`, put back the direct installed-bundle
+/// identity read.
+#[test]
+fn shape_exit_guard_follows_the_layout() {
+    let install = shape_install("exit");
+    install.write(stuck(1));
+    let recorder =
+        Recorder::of(&install).answering([(Some(install.new.clone()), Some(install.old.clone()))]);
+    let layout: Arc<dyn ApplyPoints> = Arc::new(recorder.clone());
+    let layouts = crate::update_adapter::Layouts::of(layout);
+    let home = install.home.clone();
+    let opens = on_a_worker(move |worker| opens_now_with(Some(worker), &home, &layouts));
+    assert_eq!(opens, Opens::Trial { txn: install.txn });
+    assert!(matches!(
+        install.on_disk().map(|journal| journal.body.phase),
+        Some(Phase::Stuck { attempts: 1, .. })
+    ));
+    assert_eq!(recorder.calls(), vec![(Point::Locate, PhaseKind::Stuck)]);
 }
 
 /// RED (U-41a1, managed-update §1.1 R1–R2) — **the macOS road calls the
@@ -3853,8 +4184,12 @@ fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
     assert_eq!(ended, Ended::Committed, "{:?}", world.said);
     assert_eq!(
         recorder.calls(),
-        vec![(Point::Activate, PhaseKind::Moving)],
-        "a committed road: Activate at Moving"
+        vec![
+            (Point::Activate, PhaseKind::Moving),
+            (Point::Locate, PhaseKind::Moving),
+            (Point::Locate, PhaseKind::Committed),
+        ],
+        "a committed road: Activate at Moving; Prove for the watcher and retirement"
     );
     assert_eq!(version_of(&install.installed), "2.0");
 
@@ -3894,6 +4229,7 @@ fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
         recorder.calls(),
         vec![
             (Point::Activate, PhaseKind::Moving),
+            (Point::Locate, PhaseKind::Moving),
             (Point::Locate, PhaseKind::RollbackIntent),
             (Point::ActivateBack, PhaseKind::RollbackIntent),
             (Point::Locate, PhaseKind::RollbackIntent),
@@ -3935,8 +4271,8 @@ fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
 /// live, never by the phase: the refusal left the old bundle live, which is
 /// M5's "swap not performed".
 ///
-/// MUTATION: in `Txn::at_armed`, go on to the trial after a refused
-/// `Activate` — a trial is launched and the journal records `Trial`.
+/// MUTATION: in `Txn::at_armed`, put the direct installed-bundle identity read
+/// back after the refused `Activate` — `Locate@Moving` is absent.
 #[test]
 fn a_layout_that_refuses_to_activate_is_reverted_with_the_old_bundle_live() {
     if !on_macos() {
@@ -3946,7 +4282,8 @@ fn a_layout_that_refuses_to_activate_is_reverted_with_the_old_bundle_live() {
     let recorder = Recorder {
         refuse_activate: true,
         ..Recorder::of(&install)
-    };
+    }
+    .answering([(Some(install.old.clone()), Some(install.new.clone()))]);
     let road = recorded_road(&install, &recorder, limits(5_000, 5_000));
     let (ended, world) = applied(road, Fake::default());
     assert_eq!(ended, Ended::Reverted, "{:?}", world.said);
@@ -3965,5 +4302,11 @@ fn a_layout_that_refuses_to_activate_is_reverted_with_the_old_bundle_live() {
     assert!(!install.plist().exists(), "the entrance is removed");
     assert!(world.launched.lock().unwrap().is_empty(), "no trial");
     assert_eq!(version_of(&install.installed), "1.0");
-    assert_eq!(recorder.calls(), vec![(Point::Activate, PhaseKind::Moving)]);
+    assert_eq!(
+        recorder.calls(),
+        vec![
+            (Point::Activate, PhaseKind::Moving),
+            (Point::Locate, PhaseKind::Moving),
+        ]
+    );
 }

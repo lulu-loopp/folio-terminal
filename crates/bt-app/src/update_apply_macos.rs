@@ -312,7 +312,8 @@ pub(crate) struct Road {
 /// * [`ApplyPoints::activate_back`] — after `RollbackIntent` is durable,
 ///   under the admission: the old bundle made the live one again;
 /// * [`ApplyPoints::locate`] — which bundle is live and which is staged, read
-///   from the disk: what `decide` is handed at every step.
+///   from the disk: every such answer after `Activate` begins, including what
+///   `decide`, the trial watcher and the exit guard are handed.
 pub(crate) trait ApplyPoints: Send + Sync {
     /// **Activate forward**, through `hands`' exchange.
     ///
@@ -825,6 +826,16 @@ pub(crate) fn recover(
 /// rollback. Without a worker the live bundle is not asked, and a
 /// `destructive` header is answered with a trial, safe for either build.
 pub(crate) fn opens_now(worker: Option<&WorkerCtx>, home: &Home) -> Opens {
+    opens_now_with(worker, home, &own_layouts())
+}
+
+/// [`opens_now`] through `layouts`; separated so the layout recorder can pin
+/// the exit guard's `Prove` call without replacing any product effect.
+fn opens_now_with(
+    worker: Option<&WorkerCtx>,
+    home: &Home,
+    layouts: &Layouts<dyn ApplyPoints>,
+) -> Opens {
     let bytes = file_reads::read(Lane::UpdateJournal, home.journal()).ok();
     let Some(header) = bytes
         .as_deref()
@@ -834,14 +845,22 @@ pub(crate) fn opens_now(worker: Option<&WorkerCtx>, home: &Home) -> Opens {
     };
     let destructive = header.class == Class::Destructive;
     let failed = destructive || header.outcome == HeaderOutcome::RolledBack;
-    let layout = bytes
+    let journal = bytes
         .as_deref()
-        .and_then(|bytes| Journal::parse(bytes).ok())
-        .map(|journal| journal.body.layout);
-    let new_live = match (layout, home.installed_bundle(), worker) {
-        (Some(Layout::Bundle { new, .. }), Some(installed), Some(worker)) => {
-            crate::update_prepare_macos::identity(worker, &installed).as_ref() == Ok(&new)
-        }
+        .and_then(|bytes| Journal::parse(bytes).ok());
+    let new_live = match (journal.as_ref(), worker) {
+        (Some(journal), Some(worker)) => exit_places(home, journal)
+            .and_then(|bundles| {
+                layouts
+                    .named(journal.body.adapter)
+                    .ok()
+                    .map(|layout| (layout, bundles))
+            })
+            .map(|(layout, bundles)| {
+                let places = bundles.places();
+                layout.locate(worker, &places).0.as_ref() == Some(places.new)
+            })
+            .unwrap_or(destructive),
         // Which build is live cannot be told: a trial is safe for either.
         _ => destructive,
     };
@@ -850,6 +869,31 @@ pub(crate) fn opens_now(worker: Option<&WorkerCtx>, home: &Home) -> Opens {
     } else {
         Opens::Installed { failed }
     }
+}
+
+/// The paths and recorded identities the exit guard needs to ask a layout
+/// which bundle is live. This is the same derivation [`Txn::hold`] uses.
+fn exit_places(home: &Home, journal: &Journal) -> Option<Bundles> {
+    let (installed, program, stage, rescue_program) = (
+        home.installed_bundle()?,
+        home.installed_program()?,
+        home.stage_bundle(journal.txn)?,
+        home.rescue_executable(journal.txn)?,
+    );
+    let Layout::Bundle { old, new } = journal.body.layout.clone() else {
+        return None;
+    };
+    let inside = program.strip_prefix(&installed).unwrap_or(&program);
+    let stage_program = stage.join(inside);
+    Some(Bundles {
+        installed,
+        program,
+        stage,
+        stage_program,
+        rescue_program,
+        old,
+        new,
+    })
 }
 
 /// The paths and identities one road acts on, owned.
@@ -1160,17 +1204,28 @@ impl<'a> Txn<'a> {
             world.say(&format!("BT_UPDATE_APPLY the exchange: {error}"));
             // Decided by what is live, as recovery decides it (M5, M6).
             drop(admission);
-            return if crate::update_prepare_macos::identity(worker, places.installed).as_ref()
-                == Ok(places.old)
-            {
-                self.revert(Actor::Applier)
-            } else {
-                self.declare_rollback(worker, places, Actor::Applier, world)
-            };
+            return self.after_activate_refusal(worker, places, world);
         }
         // The trial takes its shared hold at its start.
         drop(admission);
         self.begin_trial(worker, places, Actor::Applier, world, &[])
+    }
+
+    /// What follows an `Activate` error, from the named layout's proof of the
+    /// live set: no effect reverts to `Prepared`; any partial or complete
+    /// effect declares the rollback.
+    fn after_activate_refusal(
+        &mut self,
+        worker: &WorkerCtx,
+        places: &Places<'_>,
+        world: &mut impl World,
+    ) -> Result<Ended, String> {
+        let (live, _) = self.layout.locate(worker, places);
+        if live.as_ref() == Some(places.old) {
+            self.revert(Actor::Applier)
+        } else {
+            self.declare_rollback(worker, places, Actor::Applier, world)
+        }
     }
 
     /// M5 / M6, found by a process started again over its own transaction:
@@ -1183,11 +1238,10 @@ impl<'a> Txn<'a> {
         places: &Places<'_>,
         world: &mut impl World,
     ) -> Result<Ended, String> {
-        let live = crate::update_prepare_macos::identity(worker, places.installed);
-        let stage = crate::update_prepare_macos::identity(worker, places.stage);
-        if live.as_ref() == Ok(places.old) {
+        let (live, stage) = self.layout.locate(worker, places);
+        if live.as_ref() == Some(places.old) {
             self.revert(Actor::Recovery)
-        } else if live.as_ref() == Ok(places.new) && stage.as_ref() == Ok(places.old) {
+        } else if live.as_ref() == Some(places.new) && stage.as_ref() == Some(places.old) {
             // A trial of it that runs and has answered is recorded, never a
             // second one started beside it (U-37).
             match self.before_deciding(
@@ -1288,16 +1342,12 @@ impl<'a> Txn<'a> {
     ) -> Result<Option<Ended>, String> {
         // The new build is live for the whole wait: nothing is exchanged
         // under this lock meanwhile.
-        let images: Vec<&Path> = [
-            (places.installed, places.program),
-            (places.stage, places.stage_program),
-        ]
-        .into_iter()
-        .filter(|(bundle, _)| {
-            crate::update_prepare_macos::identity(worker, bundle).as_ref() == Ok(places.new)
-        })
-        .map(|(_, program)| program)
-        .collect();
+        let (live, stage) = self.layout.locate(worker, places);
+        let images: Vec<&Path> = [(&live, places.program), (&stage, places.stage_program)]
+            .into_iter()
+            .filter(|(identity, _)| identity.as_ref() == Some(places.new))
+            .map(|(_, program)| program)
+            .collect();
         let road = self.road;
         let watch = Watch {
             home: &road.home,
@@ -1402,9 +1452,8 @@ impl<'a> Txn<'a> {
             // A trial of it runs already: it is the window.
             return ended;
         }
-        if crate::update_prepare_macos::identity(worker, places.installed).as_ref()
-            != Ok(places.new)
-        {
+        let (live, _) = self.layout.locate(worker, places);
+        if live.as_ref() != Some(places.new) {
             return ended;
         }
         let actor = match self.asker {
@@ -1448,7 +1497,8 @@ impl<'a> Txn<'a> {
     /// then `Retired{Committed}` and `H/<txn>`. Every failure here is debt.
     fn commit(&mut self, worker: &WorkerCtx, places: &Places<'_>, actor: Actor) -> Ended {
         let mut debt = Vec::new();
-        if crate::update_prepare_macos::identity(worker, places.stage).as_ref() == Ok(places.old) {
+        let (_, stage) = self.layout.locate(worker, places);
+        if stage.as_ref() == Some(places.old) {
             match self.may(actor, Effect::DeleteRollbackMaterial) {
                 Ok(()) => {
                     if let Err(failure) = install_txn::durable_remove(places.stage) {

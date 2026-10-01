@@ -13345,6 +13345,8 @@ On Unix, `standard_error_is` follows the diagnostics path as `diagnostics::appen
 - **Activate forward**, after `Moving` is durable; **Activate back**, after `RollbackIntent` is durable: `ApplyPoints::activate`, `activate_back`.
 - **Prove**, which set is live: `ApplyPoints::locate` at every step `decide` takes, and on Windows `live`.
 
+On macOS, after `Activate` begins, `ApplyPoints::locate` is the only reader of which recorded set is live or staged. That includes an `Activate` error, re-entry at `Moving`, the trial watch, retry over `Stuck`, committed retirement and the exit guard. The old/new identity validation immediately before `Activate` remains common to every layout.
+
 Each road's `Ours` is the code that was there, moved. The applier, the recovery and the resume's revalidation read the adapter from the journal and never from the channel (R2). A journal that names an adapter this build has not built is refused before any of the adapter's points is called.
 
 **The rule.** Only `Ours` has a road in 0.4.7 so far. `HOMEBREW_ROAD`, `SCOOP_ROAD` and `WINGET_ROAD` are `false`. `update_adapter::built_on` answers eligibility (`update_job::Evidence::eligibility`) and both Prepares' road checks, so a managed copy keeps its row with the manager's command and **Copy**, gets no card and has no journal. Winget's constant is U-41d's hard-off switch; it is one constant and one test, so it is built here. `Layout::Link` and the `marker` field are left to U-41c and U-41b: an experiment fixes each one's shape, and nothing writes either before those tickets (the note's revision (d)). This entry changes no phase, transition, writer right, door, card word or row. For that reason `CHANGELOG.md` has no line for it.
