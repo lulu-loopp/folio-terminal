@@ -169,7 +169,7 @@ bt-app	-	crate::uninstall::tree_items	std::fs::read_dir 1	worker-door-body	Worke
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
 bt-platform	-	crate::deferred_removal::copy_new	std::fs::File::sync_all 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::failure_without_plan	std::io::Write::write_fmt 1	worker-door-body	WorkerCtx	
-bt-platform	-	crate::deferred_removal::finish	std::fs::write 2	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::finish_with	std::fs::write 2	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::removal_from_environment	std::fs::canonicalize 2	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::run_from_environment	std::io::Write::write_fmt 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::deferred_removal::schedule	std::fs::create_dir_all 1, std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	

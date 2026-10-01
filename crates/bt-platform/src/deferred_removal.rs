@@ -903,18 +903,19 @@ fn digest(mut file: File) -> io::Result<String> {
 }
 
 fn finish(
-    _worker: &WorkerCtx,
+    worker: &WorkerCtx,
     words: &FailureWords,
     private: &Path,
     remover_identity: &FileIdentity,
     outcome: Outcome,
 ) -> i32 {
-    finish_with(words, private, outcome, || {
+    finish_with(worker, words, private, outcome, || {
         retire_self(private, remover_identity)
     })
 }
 
 fn finish_with(
+    _worker: &WorkerCtx,
     words: &FailureWords,
     private: &Path,
     outcome: Outcome,
@@ -1414,10 +1415,13 @@ mod tests {
         let private = root.join("private");
         fs::create_dir(&private).unwrap();
         let cleanup_target = private.clone();
+        let finished_in = private.clone();
         assert_eq!(
-            finish_with(&words(), &private, outcome, move || {
-                let _ = fs::remove_dir(cleanup_target);
-                Ok(())
+            on_worker(move |worker| {
+                finish_with(worker, &words(), &finished_in, outcome, move || {
+                    let _ = fs::remove_dir(cleanup_target);
+                    Ok(())
+                })
             }),
             1
         );
