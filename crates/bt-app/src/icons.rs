@@ -359,9 +359,9 @@ pub enum ActionIcon {
     /// `Browse…` — the root menu's escape hatch, which opens the system's own
     /// folder picker.
     ///
-    /// An act, so it wears the outline folder. Both outline identities stroke
-    /// the filled folder's exact silhouette (T-FOLDER-GLYPH); the places above
-    /// this row retain their filled glyphs.
+    /// An act, so it wears the open outline folder: its back profile and leaning
+    /// flap match the filled open folder's identity, while the places above this
+    /// row retain their filled glyphs.
     BrowseForFolder,
 
     // ── the Git menus, panel and graph ───────────────────────────────────
@@ -1575,9 +1575,17 @@ mod tests {
         };
         let chevron = ink(ChromeMark::chevron(0.0));
         let folder = ink(ChromeMark::FolderOutline);
+        let open_folder = ink(ChromeMark::FolderOpenOutline);
         assert!(
             (chevron - folder).abs() < 0.01,
             "the pane head's run draws {chevron:.2} and {folder:.2} of ink",
+        );
+        // The open outline leans farther right by design. It is measured by the
+        // same raster path here, but it belongs to menu rows and never appears
+        // in this pane-head run.
+        assert!(
+            open_folder > folder,
+            "the open folder draws {open_folder:.2} across, the closed folder {folder:.2}"
         );
     }
 
@@ -2407,8 +2415,8 @@ mod tests {
                 "{shape} is written down as filled ({why}) and is struck",
             );
         }
-        // And the two renditions are one object's shared silhouette: the
-        // object's is solid and the act's is struck.
+        // Each object's place rendition is solid and its act rendition is
+        // struck; the open pair keeps the flap that identifies it as open.
         assert!(!marks::ChromeMark::Folder.is_struck());
         assert!(marks::ChromeMark::FolderOutline.is_struck());
         assert!(!marks::ChromeMark::FolderOpen.is_struck());

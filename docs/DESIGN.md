@@ -13270,3 +13270,9 @@ Both outline folder identities now stroke the filled folder's exact path, with n
 The two outline identities still carry the filled folder's exact path data and the house's 1.2-unit pen. The complete struck rendition is scaled about that silhouette's centre by the filled-to-struck ink ratios, so its real raster ink returns to the filled glyph's 12.8 by 10.3 box without a second inset drawing. The 20% picture-size rule therefore applies to every mark again.
 
 `every_outline_folder_strokes_the_filled_folders_exact_path` guards the one path, `every_outline_folder_has_the_filled_glyphs_ink_box` guards the fitted ink box, and `the_pane_heads_run_lays_one_width_of_ink` measures the real raster ink for both neighbours.
+
+### 2026-10-01 — The open folder's outline keeps its open flap
+
+`#i-folder-line` remains the filled closed folder's silhouette, struck and fitted exactly as before. `#i-folder-open-line` again has its own two-path drawing: the shut folder's back profile and the quadrilateral flap leaning open. Its 1.2-unit pen is fitted about the drawing's ink-box centre by the filled-open-to-struck raster ratios, so the result has the filled open folder's wider ink box. This supersedes the two entries above only where they made the open identity share the closed silhouette.
+
+`the_closed_outline_folder_strokes_the_filled_folders_exact_path` guards the closed pair, `the_open_outline_is_the_flap_drawing_not_the_closed_silhouette` guards the open identity, `every_outline_folder_has_the_filled_glyphs_ink_box` compares each outline with its own filled glyph, and `the_pane_heads_run_lays_one_width_of_ink` remains scoped to the marks that actually appear in a pane head.
