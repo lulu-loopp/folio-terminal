@@ -902,6 +902,8 @@ pub(crate) struct ShellFamily {
     pub(crate) grammar: crate::shell_literal::ShellGrammar,
     /// The integration door that serves it by default.
     pub(crate) integration: Integration,
+    /// Whether this family launches a shell in WSL's path namespace.
+    pub(crate) wsl_launcher: bool,
 }
 
 /// Every shell family this product knows by name.
@@ -921,54 +923,63 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         login_flag: None,
         grammar: crate::shell_literal::ShellGrammar::PowerShell,
         integration: Integration::PowerShellOptIn,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["cmd"],
         login_flag: None,
         grammar: crate::shell_literal::ShellGrammar::Cmd,
         integration: Integration::CmdPrompt,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["bash"],
         login_flag: Some("--login"),
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::BashInitFile,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["wsl"],
         login_flag: None,
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::BashInitFile,
+        wsl_launcher: true,
     },
     ShellFamily {
         stems: &["zsh"],
         login_flag: Some("-l"),
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::ZshDotDir,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["sh", "dash", "ksh", "mksh"],
         login_flag: Some("-l"),
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::None,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["fish"],
         login_flag: Some("-l"),
         grammar: crate::shell_literal::ShellGrammar::Fish,
         integration: Integration::None,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["csh", "tcsh"],
         login_flag: Some("-l"),
         grammar: crate::shell_literal::ShellGrammar::Csh,
         integration: Integration::None,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["nu"],
         login_flag: Some("-l"),
         grammar: crate::shell_literal::ShellGrammar::Nushell,
         integration: Integration::None,
+        wsl_launcher: false,
     },
 ];
 
@@ -2689,21 +2700,7 @@ fn compose_on(
 /// directory — crosses the namespace, which is why this asks both questions and
 /// not either one.
 fn derived_paths(profile: &Profile) -> PathNamespace {
-    let names_the_launcher = |tail: &str| tail.to_ascii_lowercase().ends_with("wsl.exe");
-    let launcher = match &profile.program {
-        ProgramSource::Path(path) => path
-            .file_name()
-            .is_some_and(|name| name.eq_ignore_ascii_case("wsl.exe")),
-        ProgramSource::FirstOf(candidates) => candidates.iter().any(|candidate| match candidate {
-            ProgramCandidate::Under { tail, .. } | ProgramCandidate::BesideOnPath { tail, .. } => {
-                names_the_launcher(tail)
-            }
-            // A candidate that names the program instead of a place still names
-            // a program, and the question here is only which one.
-            ProgramCandidate::OnPath { name } => names_the_launcher(name),
-        }),
-        ProgramSource::PowerShellSeven => false,
-    };
+    let launcher = shell_family(&profile.program).is_some_and(|family| family.wsl_launcher);
     if launcher
         && matches!(
             served_by(profile),
@@ -25410,6 +25407,41 @@ mod tests {
             PathNamespace::Windows,
             "only wsl.exe behind a bash init file crosses the namespace"
         );
+    }
+
+    /// RED (T-HARDCODE-047 round 2, SET-4) — **the WSL launcher role belongs
+    /// to its shell-family row, for every program representation.**
+    ///
+    /// MUTATION: restore `ends_with("wsl.exe")` in `derived_paths`; the
+    /// `xwsl.exe` candidate below is misclassified as WSL and this test fails.
+    #[test]
+    fn the_wsl_family_alone_launches_a_wsl_path_namespace() {
+        let mut profile = shipped()
+            .into_iter()
+            .find(|profile| profile.id == "wsl")
+            .expect("wsl is a shipped row");
+        profile.integration = IntegrationChoice::Named(Integration::BashInitFile);
+
+        profile.program = ProgramSource::FirstOf(vec![ProgramCandidate::OnPath {
+            name: "xwsl.exe".to_owned(),
+        }]);
+        assert_eq!(
+            derived_paths(&profile),
+            PathNamespace::Windows,
+            "a suffix match is not a shell-family identity"
+        );
+
+        for program in [
+            ProgramSource::Path(PathBuf::from("wsl")),
+            ProgramSource::Path(PathBuf::from("wsl.exe")),
+            ProgramSource::Path(PathBuf::from("/usr/bin/wsl.exe")),
+            ProgramSource::FirstOf(vec![ProgramCandidate::OnPath {
+                name: "wsl.exe".to_owned(),
+            }]),
+        ] {
+            profile.program = program;
+            assert_eq!(derived_paths(&profile), PathNamespace::Wsl);
+        }
     }
 
     /// PIN — **what the table writes, the table reads back.**

@@ -8776,9 +8776,10 @@ mod tests {
         // `localhost`, percent decoding in both flavours, and the four shapes that have no printed
         // form — is asked on both.
         #[cfg(windows)]
-        const FORMS: [(&str, Option<&str>); 12] = [
+        const FORMS: [(&str, Option<&str>); 13] = [
             ("file:///D:/shots/a.png", Some("D:\\shots\\a.png")),
             ("file:///D:/a%20b/c%20d.png", Some("D:\\a b\\c d.png")),
+            ("file:///D:/a%2520b.txt", Some("D:\\a%20b.txt")),
             ("file:///D:/%E4%B8%AD%E6%96%87.png", Some("D:\\中文.png")),
             (
                 "file://server/share/x.png",
@@ -8794,9 +8795,10 @@ mod tests {
             ("file:///D:/%FF.png", None),
         ];
         #[cfg(not(windows))]
-        const FORMS: [(&str, Option<&str>); 12] = [
+        const FORMS: [(&str, Option<&str>); 13] = [
             ("file:///shots/a.png", Some("/shots/a.png")),
             ("file:///a%20b/c%20d.png", Some("/a b/c d.png")),
+            ("file:///D:/a%2520b.txt", Some("/D:/a%20b.txt")),
             ("file:///%E4%B8%AD%E6%96%87.png", Some("/中文.png")),
             // A remote share has no local spelling here, so there is no second spelling to
             // compare a label against.

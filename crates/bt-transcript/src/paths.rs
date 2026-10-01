@@ -7607,6 +7607,11 @@ mod tests {
         assert!(chinese.had_authority);
         assert_eq!(chinese.authority, b"");
         assert_eq!(chinese.path, "/D:/中文 name.txt".as_bytes());
+        assert_eq!(
+            decoded("file:///D:/a%2520b.txt").path,
+            b"/D:/a%20b.txt",
+            "percent escapes are decoded once, not recursively"
+        );
 
         let unc = decoded("file://server/share/a.txt");
         assert_eq!(unc.authority, b"server");
