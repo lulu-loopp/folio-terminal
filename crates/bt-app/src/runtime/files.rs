@@ -9,8 +9,8 @@ use crate::{
     files, files_key_under, files_keyboard_seat_of, files_locate, files_open_chain,
     files_row_activation, files_row_counts_clicks, files_row_entry, files_row_menu_subject, float,
     float_dock_label, folder_pick_outcome, foot_revealed_label, git_panel, hang_watch,
-    home_shortened_path, i18n, marks, name_is_writable, palette_index, press_files_node, preview,
-    profiles, rename_would_replace_another_entry, reroot_files_state, seats, settings, toast,
+    home_shortened_path, i18n, marks, palette_index, press_files_node, preview, profiles,
+    rename_would_replace_another_entry, reroot_files_state, seats, settings, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -125,7 +125,7 @@ impl Runtime<'_> {
         let was = old
             .file_name()
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-        if name.is_empty() || name == was || !name_is_writable(name) {
+        if name == was || files::judge_new_name(draft).is_some() {
             return Ok(());
         }
         let new = directory.join(name);

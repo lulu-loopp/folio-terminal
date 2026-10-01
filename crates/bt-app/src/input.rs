@@ -2484,6 +2484,7 @@ mod tests {
             ShellGrammar::Cmd,
             ShellGrammar::Posix,
             ShellGrammar::Fish,
+            ShellGrammar::Csh,
             ShellGrammar::Nushell,
             ShellGrammar::Agent,
         ] {

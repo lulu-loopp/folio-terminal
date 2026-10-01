@@ -886,24 +886,28 @@ fn migrate_settings_v38_to_v39(mut value: Value) -> Value {
     value
 }
 
-/// Migration table for `keybindings.json`. Empty, and it will stay empty for as
-/// long as the file's *shape* holds: a schema step is owed when the document
-/// changes, and adding, renaming or retiring a shortcut row does not change this
-/// document at all — an id this build cannot resolve is one row degrading to its
-/// default (§5.4 逐叶降级), which the reader already does, per line, without a
-/// version bump.
-pub const KEYBINDINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[];
+/// v2 records the keyboard dialect that wrote the chords. A v1 file cannot
+/// supply that fact, so it migrates explicitly to `unknown` and keeps the old
+/// literal-modifier behaviour.
+pub const KEYBINDINGS_MIGRATIONS: &[(u32, MigrationStep)] = &[(1, migrate_keybindings_v1_to_v2)];
 
-/// Migration table for `profiles.json`. Empty for the same reason
-/// [`KEYBINDINGS_MIGRATIONS`] is, and for one more of its own: this document is
-/// **a list of departures**, so a build that ships a sixth profile, retires a
+fn migrate_keybindings_v1_to_v2(mut value: Value) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("schema_version".to_owned(), Value::from(2));
+        object.insert("writing_platform".to_owned(), Value::from("unknown"));
+    }
+    value
+}
+
+/// Migration table for `profiles.json`. It is empty because this document is
+/// **a list of departures**: a build that ships a sixth profile, retires a
 /// fifth or retunes a fourth's arguments changes nothing here — an entry naming
 /// an id this build has never heard of is a row that degrades, and a built-in
 /// this file never mentions is a row the reader appends. Neither is a version.
 pub const PROFILES_MIGRATIONS: &[(u32, MigrationStep)] = &[];
 
-/// Migration table for `pins.json`. Empty, and it starts empty for the reason
-/// the two above are empty and one of its own: this document's shape is *a list
+/// Migration table for `pins.json`. Empty for the same row-oriented reason as
+/// profiles, and one of its own: this document's shape is *a list
 /// of rows with a category and a target*, and a build that adds a fourth
 /// category changes nothing about that shape — an entry naming a category this
 /// build has never heard of is a row that is carried and not offered, which

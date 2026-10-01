@@ -350,10 +350,10 @@ fn multiline_formula_crossing_internal_pane_bottom_keeps_identity_and_raster() {
     let observation = oracle.frames().last().unwrap();
     assert_eq!(observation.occluded_sources.len(), 1);
 
-    // A later in-place repaint keeps the previously proven pane boundary. The Jump chip mutates
+    // A later in-place repaint keeps the previously proven pane boundary. An overlay mutates
     // only the pane's last row, so that row becomes occluded without granting a frame-wide waiver.
     let mut boundary_overlay = CROSSES_PANE_BOTTOM.to_vec();
-    boundary_overlay[7] = r"a &= b + c \\        Jump to bottom (ctrl+End)";
+    boundary_overlay[7] = r"a &= b + c \\        Localized overlay status!";
     session
         .feed_at(
             &synchronized_repaint(&boundary_overlay),
@@ -368,9 +368,9 @@ fn multiline_formula_crossing_internal_pane_bottom_keeps_identity_and_raster() {
     let boundary_frame = session.viewport_frame(&mut projection).unwrap();
     assert_eq!(
         frame_row_text(&boundary_frame, 7).trim(),
-        "Jump to bottom (ctrl+End)",
+        "Localized overlay status!",
         "an occluded row clears exactly this occurrence's proven source prefix while the \
-         application's Jump chip keeps its own cells (text and highlight style)"
+         application's overlay keeps its own cells (text and highlight style)"
     );
     assert_eq!(
         frame_row_text(&boundary_frame, 9).trim(),
@@ -1258,14 +1258,14 @@ fn scrolled_away_screen() -> Vec<&'static str> {
     ]
 }
 
-fn bottom_edge_screen(chip: bool) -> Vec<&'static str> {
+fn bottom_edge_screen(overlay: bool) -> Vec<&'static str> {
     vec![
         "filler a",
         "filler b",
         "filler c",
         "11. section",
-        if chip {
-            r"$$e^{i\pi} + 1 = 0$$                 Jump to bottom (click)"
+        if overlay {
+            r"$$e^{i\pi} + 1 = 0$$                 Localized status overlay"
         } else {
             r"$$e^{i\pi} + 1 = 0$$"
         },
@@ -2463,12 +2463,12 @@ fn a_repaint_whose_producer_goes_quiet_releases_presentation_on_its_deadline() {
 /// completes it.**
 ///
 /// The show that closes the producer's bracket is what lets presentation go back to publishing the
-/// grid. Split inside it, and neither read carries a whole `\x1b[?25h`, so without reading across
-/// the seam the transaction would stay open and presentation would keep the old frame until the
+/// grid. Split inside it, and neither read carries a whole `\x1b[?25h`, so without the adapter
+/// parser retaining its state the transaction would stay open and presentation would keep the old frame until the
 /// transaction's deadline ran out, 150 ms later. Green on BASE, which had no hold to leave standing;
 /// it guards the seam for the hold this ticket adds.
 ///
-/// MUTATION: `FeedSeam::crosses` answering `false` leaves presentation held after the last read.
+/// MUTATION: recreate the repaint parser for each read; presentation remains held after the last read.
 #[test]
 fn a_repaint_whose_closing_show_is_split_between_two_reads_ends_with_that_read() {
     let repaint = unsynchronized_repaint(SCROLL_AFTER);

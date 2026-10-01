@@ -47,14 +47,14 @@
 use std::collections::BTreeMap;
 
 use bt_persist::{
-    BackgroundFitV1, KeybindingsV1, LanguageV1, LaunchOpensV1, MinimumContrastV1,
-    PsReadLineInviteV1, QuakeRestoreV1, SearchEngineV1, SettingsV1, SplitDirectionV1, ThemeModeV1,
-    WebColorSchemeV1,
+    BackgroundFitV1, KeybindingsPlatformV1, KeybindingsV1, LanguageV1, LaunchOpensV1,
+    MinimumContrastV1, PsReadLineInviteV1, QuakeRestoreV1, SearchEngineV1, SettingsV1,
+    SplitDirectionV1, ThemeModeV1, WebColorSchemeV1,
 };
 use serde_json::Value;
 
 use crate::settings::SettingsRow;
-use crate::shortcuts::{Override, Shortcuts};
+use crate::shortcuts::{Override, Shortcuts, translate_command_modifier};
 
 /// Something an import could not put in force, named the way the reader would
 /// look for it — a shortcut's id, a scheme's file, a settings row.
@@ -512,25 +512,55 @@ pub(crate) fn plan_settings(
 /// **A shortcut part, read the way `keybindings.json` is read at launch**:
 /// this build's table, then the file's lines laid over it by
 /// `Shortcuts::apply_overrides`, every refused line named by its id.
-pub(crate) fn import_shortcuts(file: &KeybindingsV1) -> (Shortcuts, Vec<ImportFault>) {
-    let mut table = Shortcuts::defaults();
+pub(crate) fn import_shortcuts(
+    file: &KeybindingsV1,
+    platform: bt_platform::HostPlatform,
+) -> (Shortcuts, Vec<ImportFault>) {
+    let source = match file.writing_platform {
+        KeybindingsPlatformV1::Unknown => None,
+        KeybindingsPlatformV1::Windows => Some(bt_platform::HostPlatform::Windows),
+        KeybindingsPlatformV1::MacOs => Some(bt_platform::HostPlatform::MacOs),
+        KeybindingsPlatformV1::OtherUnix => Some(bt_platform::HostPlatform::OtherUnix),
+    };
+    let mut translation_faults = Vec::new();
     let overrides: Vec<Override> = file
         .bindings
         .iter()
-        .map(|entry| Override {
-            id: entry.action.clone(),
-            chord: entry.chord.clone(),
+        .filter_map(|entry| {
+            let chord = match entry.chord.as_deref() {
+                Some(chord) => match translate_command_modifier(chord, source, platform) {
+                    Ok(chord) => Some(chord),
+                    Err(reason) => {
+                        translation_faults.push(ImportFault {
+                            what: format!(
+                                "{}: {}",
+                                crate::persist::KEYBINDINGS_FILE_NAME,
+                                entry.action
+                            ),
+                            reason: reason.to_owned(),
+                        });
+                        return None;
+                    }
+                },
+                None => None,
+            };
+            Some(Override {
+                id: entry.action.clone(),
+                chord,
+            })
         })
         .collect();
-    let faults = table
+    let mut table = Shortcuts::defaults_for(platform);
+    let mut faults = table
         .apply_overrides(&overrides)
         .into_iter()
         .map(|fault| ImportFault {
             what: format!("{}: {}", crate::persist::KEYBINDINGS_FILE_NAME, fault.id),
             reason: fault.reason,
         })
-        .collect();
-    (table, faults)
+        .collect::<Vec<_>>();
+    translation_faults.append(&mut faults);
+    (table, translation_faults)
 }
 
 /// What an imported `schemes` part writes into the folder, and what it names.
@@ -794,6 +824,7 @@ mod tests {
         let profiles = ProfilesV1::default();
         let keybindings = KeybindingsV1 {
             schema_version: KEYBINDINGS_SCHEMA_VERSION,
+            writing_platform: KeybindingsPlatformV1::Unknown,
             bindings: vec![BindingOverrideV1 {
                 action: "new-tab".to_owned(),
                 chord: None,
@@ -820,7 +851,10 @@ mod tests {
             SettingsPlan::default()
         );
         assert_eq!(parts.profiles.unwrap().unwrap(), profiles);
-        let (table, faults) = import_shortcuts(&parts.keybindings.unwrap().unwrap());
+        let (table, faults) = import_shortcuts(
+            &parts.keybindings.unwrap().unwrap(),
+            bt_platform::host_platform(),
+        );
         assert!(faults.is_empty(), "{faults:?}");
         let back: Vec<BindingOverrideV1> = table
             .overrides()
@@ -892,6 +926,7 @@ mod tests {
     fn one_bad_keybinding_line_is_reported_by_name_and_the_rest_apply() {
         let file = KeybindingsV1 {
             schema_version: KEYBINDINGS_SCHEMA_VERSION,
+            writing_platform: KeybindingsPlatformV1::Unknown,
             bindings: vec![
                 BindingOverrideV1 {
                     action: "new-tab".to_owned(),
@@ -903,9 +938,58 @@ mod tests {
                 },
             ],
         };
-        let (table, faults) = import_shortcuts(&file);
+        let (table, faults) = import_shortcuts(&file, bt_platform::host_platform());
         assert_eq!(faults.len(), 1, "{faults:?}");
         assert_eq!(faults[0].what, "keybindings.json: no-such-verb");
         assert!(table.is_overridden("new-tab"), "the good line landed");
+    }
+
+    /// RED (B-AUDIT-046 SET-3) — imported command shortcuts keep their
+    /// keyboard meaning across macOS and Windows, while a collapsing modifier
+    /// pair is named and refused.
+    ///
+    /// MUTATION: apply the stored chord literally; both directional assertions
+    /// keep the source spelling and go red.
+    #[test]
+    fn imported_command_shortcuts_translate_between_keyboard_dialects() {
+        let imported = |writing_platform, chord: &str| KeybindingsV1 {
+            schema_version: KEYBINDINGS_SCHEMA_VERSION,
+            writing_platform,
+            bindings: vec![BindingOverrideV1 {
+                action: "new-tab".to_owned(),
+                chord: Some(chord.to_owned()),
+            }],
+        };
+        let effective = |file: KeybindingsV1, platform| {
+            let (table, faults) = import_shortcuts(&file, platform);
+            assert!(faults.is_empty(), "{faults:?}");
+            crate::shortcuts::format_chord_on(
+                table.row("new-tab").unwrap().chord.as_ref().unwrap(),
+                platform,
+            )
+        };
+
+        assert_eq!(
+            effective(
+                imported(KeybindingsPlatformV1::MacOs, "Cmd+Shift+Y"),
+                bt_platform::HostPlatform::Windows,
+            ),
+            "Ctrl+Shift+y"
+        );
+        assert_eq!(
+            effective(
+                imported(KeybindingsPlatformV1::Windows, "Ctrl+Shift+Y"),
+                bt_platform::HostPlatform::MacOs,
+            ),
+            "Cmd+Shift+y"
+        );
+
+        let (_, faults) = import_shortcuts(
+            &imported(KeybindingsPlatformV1::MacOs, "Cmd+Ctrl+Shift+Y"),
+            bt_platform::HostPlatform::Windows,
+        );
+        assert_eq!(faults.len(), 1, "{faults:?}");
+        assert_eq!(faults[0].what, "keybindings.json: new-tab");
+        assert!(faults[0].reason.contains("collides"), "{faults:?}");
     }
 }

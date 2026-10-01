@@ -10,7 +10,7 @@
 //!   "exported_by": "Folio 0.4.4 (abc1234)",
 //!   "settings": { "schema_version": 38, … },
 //!   "profiles": { "schema_version": 1, … },
-//!   "keybindings": { "schema_version": 1, … },
+//!   "keybindings": { "schema_version": 2, "writing_platform": "windows", … },
 //!   "schemes": { "Nord (custom).json": { "name": "Nord (custom)", … } }
 //! }
 //! ```
@@ -262,6 +262,7 @@ mod tests {
         let profiles = ProfilesV1::default();
         let keybindings = KeybindingsV1 {
             schema_version: KEYBINDINGS_SCHEMA_VERSION,
+            writing_platform: crate::KeybindingsPlatformV1::Unknown,
             bindings: vec![BindingOverrideV1 {
                 action: "new-tab".to_owned(),
                 chord: Some("Ctrl+Shift+Y".to_owned()),

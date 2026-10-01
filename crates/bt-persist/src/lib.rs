@@ -63,7 +63,9 @@ pub use export::{
     EXPORT_FILE_NAME, ExportParts, ExportRefusal, FOLIO_EXPORT_VERSION, ImportedParts,
     parse_export, read_export, serialize_export,
 };
-pub use keybindings::{BindingOverrideV1, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1};
+pub use keybindings::{
+    BindingOverrideV1, KEYBINDINGS_SCHEMA_VERSION, KeybindingsPlatformV1, KeybindingsV1,
+};
 pub use layout::{
     FilesLeafV1, FilesViewV1, LayoutNodeV1, LeafNodeV1, MAX_LAST_COMMAND_CHARS, PreviewLeafV1,
     RATIO_PPM_MAX, SplitDirV1, SplitNodeV1, TermLeafV1,

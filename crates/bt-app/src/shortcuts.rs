@@ -2194,7 +2194,10 @@ impl Shortcuts {
             .filter(|(index, row)| row.chord.as_ref() != self.shipped_chord(*index))
             .map(|(_, row)| Override {
                 id: row.id.to_owned(),
-                chord: row.chord.as_ref().map(format_chord),
+                chord: row
+                    .chord
+                    .as_ref()
+                    .map(|chord| format_chord_on(chord, self.dialect)),
             })
             .collect()
     }
@@ -3113,6 +3116,11 @@ const NAMED_KEYS: &[NamedKey] = &[
 /// A chord as `keybindings.json` writes it: `Ctrl+Alt+Shift+Key`.
 #[must_use]
 pub(crate) fn format_chord(chord: &Chord) -> String {
+    format_chord_on(chord, bt_platform::host_platform())
+}
+
+#[must_use]
+pub(crate) fn format_chord_on(chord: &Chord, platform: bt_platform::HostPlatform) -> String {
     let mut out = String::new();
     // The same order [`modifier_caps`] draws, and it has to be the same order:
     // what this writes is what `parse_chord` reads back, and what the caps show
@@ -3125,13 +3133,11 @@ pub(crate) fn format_chord(chord: &Chord) -> String {
     // not move — a file is read left to right by a parser and the caps are what
     // a person compares it against, which is the sentence above.
     if chord.modifiers.super_key() {
-        out.push_str(
-            if bt_platform::host_platform() == bt_platform::HostPlatform::MacOs {
-                "Cmd+"
-            } else {
-                "Win+"
-            },
-        );
+        out.push_str(if platform == bt_platform::HostPlatform::MacOs {
+            "Cmd+"
+        } else {
+            "Win+"
+        });
     }
     if chord.modifiers.control_key() {
         out.push_str("Ctrl+");
@@ -3207,6 +3213,37 @@ pub(crate) fn parse_chord(text: &str) -> Option<Chord> {
             ChordKey::Character(Cow::Owned(rest.to_lowercase())),
         )
     })
+}
+
+/// Carry one chord between keyboard dialects. Command is `SUPER` on macOS and
+/// `CONTROL` elsewhere; an independent destination modifier that would collapse
+/// onto it is a refusal rather than a silently changed chord.
+pub(crate) fn translate_command_modifier(
+    text: &str,
+    from: Option<bt_platform::HostPlatform>,
+    to: bt_platform::HostPlatform,
+) -> Result<String, &'static str> {
+    let Some(from) = from else {
+        return Ok(text.to_owned());
+    };
+    let mut chord: Chord = parse_chord(text).ok_or("the chord is not understood")?;
+    let command = |platform| {
+        if platform == bt_platform::HostPlatform::MacOs {
+            ModifiersState::SUPER
+        } else {
+            ModifiersState::CONTROL
+        }
+    };
+    let source = command(from);
+    let destination = command(to);
+    if source != destination && chord.modifiers.contains(source) {
+        if chord.modifiers.contains(destination) {
+            return Err("the source command modifier collides with a destination modifier");
+        }
+        chord.modifiers.remove(source);
+        chord.modifiers.insert(destination);
+    }
+    Ok(format_chord_on(&chord, to))
 }
 
 /// What one press means to a recorder that is listening.
@@ -6488,6 +6525,7 @@ mod tests {
         // makes, with the disk taken out of the middle.
         let file = bt_persist::KeybindingsV1 {
             schema_version: bt_persist::KEYBINDINGS_SCHEMA_VERSION,
+            writing_platform: bt_persist::KeybindingsPlatformV1::Unknown,
             bindings: table
                 .overrides()
                 .into_iter()

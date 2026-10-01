@@ -1848,12 +1848,19 @@ fn a_files_box_opens_with_its_stem_selected() {
 #[test]
 fn a_name_windows_will_not_take_is_refused_before_the_filesystem_is_asked() {
     for name in ["notes.md", ".gitignore", "a b c.txt", "笔记.md"] {
-        assert!(name_is_writable(name), "{name} is a name a file can have");
+        assert_eq!(
+            bt_platform::judge_file_name(name, bt_platform::HostPlatform::Windows),
+            None,
+            "{name} is a name a file can have"
+        );
     }
     for name in [
         r"a\b", "a/b", "a:b", "a*b", "a?b", "a\"b", "a<b", "a>b", "a|b", "a\tb",
     ] {
-        assert!(!name_is_writable(name), "{name:?} is not");
+        assert!(
+            bt_platform::judge_file_name(name, bt_platform::HostPlatform::Windows).is_some(),
+            "{name:?} is not"
+        );
     }
 }
 

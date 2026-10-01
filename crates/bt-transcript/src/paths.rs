@@ -2477,6 +2477,126 @@ pub fn file_uri_to_local_reference(uri: &str) -> Option<PathBuf> {
     )
 }
 
+/// A `file:` address decoded once, before any caller applies filesystem or
+/// trust policy. Raw components are retained for the one segment-oriented
+/// reader; every byte decoder in the workspace goes through this owner.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DecodedFileUriAddress {
+    pub had_authority: bool,
+    pub authority: Vec<u8>,
+    pub path: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FileUriDecodeError {
+    NotFile,
+    MissingPath,
+    MalformedPercentEscape,
+    Nul,
+    Control,
+}
+
+#[derive(Clone, Copy)]
+enum FileUriSuffix {
+    Cut,
+    Keep,
+}
+
+struct RawFileUriAddress<'a> {
+    had_authority: bool,
+    authority: &'a str,
+    path: &'a str,
+}
+
+fn split_file_uri_address(
+    uri: &str,
+    suffix: FileUriSuffix,
+) -> Result<RawFileUriAddress<'_>, FileUriDecodeError> {
+    let (scheme, rest) = uri.split_once(':').ok_or(FileUriDecodeError::NotFile)?;
+    if !scheme.eq_ignore_ascii_case("file") {
+        return Err(FileUriDecodeError::NotFile);
+    }
+    let rest = match suffix {
+        FileUriSuffix::Cut => &rest[..rest.find(['?', '#']).unwrap_or(rest.len())],
+        FileUriSuffix::Keep => rest,
+    };
+    if rest.contains('\0') {
+        return Err(FileUriDecodeError::Nul);
+    }
+    if rest.chars().any(char::is_control) {
+        return Err(FileUriDecodeError::Control);
+    }
+    let (had_authority, authority, path) = match rest.strip_prefix("//") {
+        Some(rest) => match rest.find(['/', '\\']) {
+            Some(at) => (true, &rest[..at], &rest[at..]),
+            None => (true, rest, ""),
+        },
+        None => (false, "", rest),
+    };
+    if path.is_empty() {
+        return Err(FileUriDecodeError::MissingPath);
+    }
+    Ok(RawFileUriAddress {
+        had_authority,
+        authority,
+        path,
+    })
+}
+
+/// Decode the syntax shared by every `file:` consumer. This function decides
+/// scheme, authority, query/fragment cutting and percent escapes; callers only
+/// decide whether the decoded address is local and how its path is spelled.
+pub fn decode_file_uri_address(uri: &str) -> Result<DecodedFileUriAddress, FileUriDecodeError> {
+    let address = split_file_uri_address(uri, FileUriSuffix::Cut)?;
+    let authority = decode_uri_component_bytes(address.authority)?;
+    let path = decode_uri_component_bytes(address.path)?;
+    if authority.iter().chain(path.iter()).any(|byte| *byte == 0) {
+        return Err(FileUriDecodeError::Nul);
+    }
+    if authority
+        .iter()
+        .chain(path.iter())
+        .any(|byte| byte.is_ascii_control())
+    {
+        return Err(FileUriDecodeError::Control);
+    }
+    Ok(DecodedFileUriAddress {
+        had_authority: address.had_authority,
+        authority,
+        path,
+    })
+}
+
+pub fn decode_uri_component_bytes(text: &str) -> Result<Vec<u8>, FileUriDecodeError> {
+    let source = text.as_bytes();
+    let mut decoded = Vec::with_capacity(source.len());
+    let mut at = 0;
+    while at < source.len() {
+        if source[at] != b'%' {
+            decoded.push(source[at]);
+            at += 1;
+            continue;
+        }
+        let high = source
+            .get(at + 1)
+            .copied()
+            .and_then(|byte| (byte as char).to_digit(16))
+            .ok_or(FileUriDecodeError::MalformedPercentEscape)?;
+        let low = source
+            .get(at + 2)
+            .copied()
+            .and_then(|byte| (byte as char).to_digit(16))
+            .ok_or(FileUriDecodeError::MalformedPercentEscape)?;
+        decoded.push((high * 16 + low) as u8);
+        at += 3;
+    }
+    Ok(decoded)
+}
+
+pub fn decode_uri_component_utf8(text: &str) -> Option<String> {
+    String::from_utf8(decode_uri_component_bytes(text).ok()?).ok()
+}
+
 /// Decode a `file://` URI to the local path it names, applying only the shape gate every local
 /// reference shares ([`is_local_absolute_path`]) and no extension allowlist.
 ///
@@ -2489,10 +2609,9 @@ pub fn file_uri_to_local_reference(uri: &str) -> Option<PathBuf> {
 /// segment — so the answer was `/\host\share`, a string that opens with two separators, which is
 /// how Windows spells the start of a UNC. The next spawn asked `is_dir` about it from the window
 /// thread and dialled another machine. A separator inside a segment names nothing this operating
-/// system can hold, so the URI names nothing. A
-/// single **trailing** empty segment is a directory's trailing slash rather than an empty name
-/// (`file:///D:/src/` and `file:///D:/` both name directories); an interior one (`file:///D://a`)
-/// stays rejected.
+/// system can hold, so the URI names nothing. A single **trailing** empty segment is a directory's
+/// trailing slash rather than an empty name (`file:///D:/src/` and `file:///D:/` both name
+/// directories); an interior one (`file:///D://a`) stays rejected.
 ///
 /// A non-empty authority is accepted only when it is `localhost` or one of `local_hosts`, this
 /// machine's own names — the spellings of "this host" that a file URI has (a shell names its host
@@ -2506,11 +2625,14 @@ pub fn decode_file_uri(
     rooting: Rooting,
     spelling: Spelling,
 ) -> Option<PathBuf> {
-    let rest = uri
-        .get(..7)
-        .filter(|scheme| scheme.eq_ignore_ascii_case("file://"))
-        .map(|scheme| &uri[scheme.len()..])?;
-    let (authority, path) = rest.split_at(rest.find('/')?);
+    // Keep a possible suffix until `Spelling` has decided whether the shell
+    // emitted URI syntax or an unencoded path containing `#`/`%`.
+    let address = split_file_uri_address(uri, FileUriSuffix::Keep).ok()?;
+    if !address.had_authority {
+        return None;
+    }
+    let authority = decode_uri_component_utf8(address.authority)?;
+    let path = address.path;
     let authority_is_this_host = authority.is_empty()
         || authority.eq_ignore_ascii_case("localhost")
         || local_hosts
@@ -2630,22 +2752,7 @@ fn native_path_from_uri_segments(segments: &[String]) -> String {
 /// A **raw** backslash in the URI is a different thing and is left alone: it is not a decode, it
 /// was in the text the shell printed, and `file:///D:\\src` is a spelling real shells emit.
 fn percent_decode(segment: &str) -> Option<String> {
-    let bytes = segment.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0usize;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            let hex = segment
-                .get(index + 1..index + 3)
-                .filter(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
-            decoded.push(u8::from_str_radix(hex, 16).ok()?);
-            index += 3;
-        } else {
-            decoded.push(bytes[index]);
-            index += 1;
-        }
-    }
-    let decoded = String::from_utf8(decoded).ok()?;
+    let decoded = decode_uri_component_utf8(segment)?;
     if decoded.chars().any(char::is_control) {
         return None;
     }
@@ -7486,29 +7593,49 @@ mod tests {
         }
     }
 
-    /// PIN (R3-1) — **a decoded segment that carries a separator is not a
-    /// segment**, and an OSC 7 answer never becomes a share.
+    /// RED (B-AUDIT-046 shared file URI decoder) — scheme, authority, suffix
+    /// and percent decoding have one owner for every caller.
     ///
-    /// `%5C` decodes to a backslash. Joining that into a path and then putting a
-    /// root slash in front of it hands `std::path` a string that opens with two
-    /// separators, and Windows reads two separators as the start of a UNC — so
-    /// `file:///%5Chost%5Cshare` came back as `\\host\share`, which the next
-    /// spawn asks `is_dir` about from the window thread and which dials another
-    /// machine to answer.
+    /// MUTATION: give a caller its former private decoder; changing the shared
+    /// handling of a Chinese escape, drive path, UNC authority or localhost no
+    /// longer changes that caller's behavior test.
+    #[test]
+    fn the_shared_file_uri_decoder_owns_every_address_shape_once() {
+        let decoded = |uri| decode_file_uri_address(uri).unwrap();
+
+        let chinese = decoded("file:///D:/%E4%B8%AD%E6%96%87%20name.txt");
+        assert!(chinese.had_authority);
+        assert_eq!(chinese.authority, b"");
+        assert_eq!(chinese.path, "/D:/中文 name.txt".as_bytes());
+        assert_eq!(
+            decoded("file:///D:/a%2520b.txt").path,
+            b"/D:/a%20b.txt",
+            "percent escapes are decoded once, not recursively"
+        );
+
+        let unc = decoded("file://server/share/a.txt");
+        assert_eq!(unc.authority, b"server");
+        assert_eq!(unc.path, b"/share/a.txt");
+        let localhost = decoded("file://localhost/tmp/a#ignored");
+        assert_eq!(localhost.authority, b"localhost");
+        assert_eq!(localhost.path, b"/tmp/a");
+        assert_eq!(decoded("file:///").path, b"/");
+        assert!(!decoded("file:/tmp/a").had_authority);
+
+        assert_eq!(
+            decode_file_uri_address("file:///tmp/100%zz"),
+            Err(FileUriDecodeError::MalformedPercentEscape)
+        );
+        assert_eq!(
+            decode_file_uri_address("https:///tmp/a"),
+            Err(FileUriDecodeError::NotFile)
+        );
+    }
+
+    /// PIN (R3-11) — **`file:///` is the root of a POSIX namespace.**
     ///
-    /// RFC 3986 already says what a percent-escaped separator is: a character in
-    /// a name, never a boundary. This machine cannot name such a file, so the
-    /// URI names nothing.
-    ///
-    /// PIN — **`file:///` is the root of a POSIX namespace** (review row R3-11).
-    ///
-    /// It is one empty segment, and reading it as an empty *name* refused the
-    /// report outright: a WSL pane sitting at `/` — which is where a
-    /// `wsl.exe --cd /` lands, and where a `cd /` leaves any shell — lost its
-    /// directory, and every tab opened from it inherited nothing.
-    ///
-    /// MUTATION: refuse the sole empty segment and a shell at the root has no
-    /// directory to report.
+    /// The shared decoder above owns URI syntax; this test owns the transcript
+    /// caller's filesystem and trust policy.
     #[test]
     fn the_posix_root_is_a_directory_a_shell_can_stand_in() {
         assert_eq!(

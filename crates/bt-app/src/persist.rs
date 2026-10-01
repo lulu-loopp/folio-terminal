@@ -17,12 +17,12 @@ use std::time::{Duration, Instant};
 use bt_platform::admission::{WaitToken, admitted, doors};
 
 use bt_persist::{
-    BindingOverrideV1, Debouncer, ExitState, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1, ProfilesV1,
-    ReadReport, SessionV1, SettingsV1, WriteAlertAction, WriteFailureTracker, create_sentinel,
-    probe_sentinel, read_keybindings, read_keybindings_keeping, read_profiles,
-    read_profiles_keeping, read_session, read_session_keeping, read_settings,
-    read_settings_keeping, remove_sentinel, write_keybindings_atomic, write_profiles_atomic,
-    write_settings_atomic,
+    BindingOverrideV1, Debouncer, ExitState, KEYBINDINGS_SCHEMA_VERSION, KeybindingsPlatformV1,
+    KeybindingsV1, ProfilesV1, ReadReport, SessionV1, SettingsV1, WriteAlertAction,
+    WriteFailureTracker, create_sentinel, probe_sentinel, read_keybindings,
+    read_keybindings_keeping, read_profiles, read_profiles_keeping, read_session,
+    read_session_keeping, read_settings, read_settings_keeping, remove_sentinel,
+    write_keybindings_atomic, write_profiles_atomic, write_settings_atomic,
 };
 
 /// The name the session document wears on disk, which is also what a notice
@@ -1647,6 +1647,19 @@ impl KeybindingsStore {
         }
     }
 
+    /// The same store over a named file for tests that exercise the real
+    /// keybindings writer without touching this machine's configuration.
+    #[cfg(test)]
+    fn at(path: PathBuf) -> Self {
+        Self {
+            writer_of_record: is_writer_of_document(&path),
+            path,
+            overrides: Vec::new(),
+            fault: None,
+            writes: DocumentWrites::new(),
+        }
+    }
+
     /// The overrides as they were read.
     pub fn loaded(&self) -> &[BindingOverrideV1] {
         &self.overrides
@@ -1687,15 +1700,16 @@ impl KeybindingsStore {
     /// the writer (review row R4-5) or an update's trial holds its writes back
     /// (`update_trial`, F-7).
     fn write_now(&mut self) {
+        self.write_now_on(keybindings_platform());
+    }
+
+    fn write_now_on(&mut self, writing_platform: KeybindingsPlatformV1) {
         if !self.writer_of_record
             || crate::update_trial::defer(crate::update_trial::Writer::Keybindings)
         {
             return;
         }
-        let file = KeybindingsV1 {
-            schema_version: KEYBINDINGS_SCHEMA_VERSION,
-            bindings: self.overrides.clone(),
-        };
+        let file = keybindings_document(self.overrides.clone(), writing_platform);
         self.writes.record(
             KEYBINDINGS_FILE_NAME,
             crate::hang_watch::during(crate::hang_watch::Station::KeybindingsWrite, || {
@@ -1703,6 +1717,31 @@ impl KeybindingsStore {
             })
             .map_err(|error| error.to_string()),
         );
+    }
+}
+
+pub(crate) fn keybindings_platform() -> KeybindingsPlatformV1 {
+    keybindings_platform_on(bt_platform::host_platform())
+}
+
+pub(crate) fn keybindings_platform_on(
+    platform: bt_platform::HostPlatform,
+) -> KeybindingsPlatformV1 {
+    match platform {
+        bt_platform::HostPlatform::Windows => KeybindingsPlatformV1::Windows,
+        bt_platform::HostPlatform::MacOs => KeybindingsPlatformV1::MacOs,
+        bt_platform::HostPlatform::OtherUnix => KeybindingsPlatformV1::OtherUnix,
+    }
+}
+
+pub(crate) fn keybindings_document(
+    bindings: Vec<BindingOverrideV1>,
+    writing_platform: KeybindingsPlatformV1,
+) -> KeybindingsV1 {
+    KeybindingsV1 {
+        schema_version: KEYBINDINGS_SCHEMA_VERSION,
+        writing_platform,
+        bindings,
     }
 }
 
@@ -2134,6 +2173,82 @@ fn relocate(previous: &Path, current: &Path) -> Relocation {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// RED (T-HARDCODE-047 round 2, SET-3) — **the ordinary keybindings
+    /// writer records the dialect whose chord spelling it writes.**
+    ///
+    /// MUTATION: write `KeybindingsPlatformV1::Unknown` from
+    /// `KeybindingsStore::write_now_on`; the serialized platform and the
+    /// opposite-platform command-modifier translation both fail.
+    #[test]
+    fn keybindings_store_writes_each_platform_dialect_and_it_imports_by_meaning() {
+        let root = std::env::temp_dir().join(format!(
+            "bt-app-keybindings-platform-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private keybindings directory");
+
+        for (source, dialect, chord, target, expected) in [
+            (
+                bt_platform::HostPlatform::MacOs,
+                KeybindingsPlatformV1::MacOs,
+                "Cmd+Shift+Y",
+                bt_platform::HostPlatform::Windows,
+                "Ctrl+Shift+y",
+            ),
+            (
+                bt_platform::HostPlatform::Windows,
+                KeybindingsPlatformV1::Windows,
+                "Ctrl+Shift+Y",
+                bt_platform::HostPlatform::MacOs,
+                "Cmd+Shift+y",
+            ),
+            (
+                bt_platform::HostPlatform::OtherUnix,
+                KeybindingsPlatformV1::OtherUnix,
+                "Ctrl+Shift+Y",
+                bt_platform::HostPlatform::MacOs,
+                "Cmd+Shift+y",
+            ),
+        ] {
+            let path = root.join(format!("{dialect:?}.json"));
+            let mut store = KeybindingsStore::at(path.clone());
+            store.overrides = vec![BindingOverrideV1 {
+                action: "new-tab".to_owned(),
+                chord: Some(chord.to_owned()),
+            }];
+            store.write_now_on(keybindings_platform_on(source));
+
+            let (written, report) = read_keybindings(&path);
+            assert_eq!(report, ReadReport::Loaded, "{}", path.display());
+            assert_eq!(written.writing_platform, dialect);
+            let compact = serde_json::to_string(&written).expect("the written file serializes");
+            assert!(
+                compact.contains(&format!(
+                    "\"writing_platform\":{}",
+                    serde_json::to_string(&dialect).unwrap()
+                )),
+                "{compact}"
+            );
+
+            let (imported, faults) = crate::settings_bundle::import_shortcuts(&written, target);
+            assert!(faults.is_empty(), "{faults:?}");
+            assert_eq!(
+                crate::shortcuts::format_chord_on(
+                    imported
+                        .row("new-tab")
+                        .and_then(|row| row.chord.as_ref())
+                        .expect("new-tab keeps a chord"),
+                    target,
+                ),
+                expected
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// RED (U-34, round 2; Codex's review, finding 5) — **letting go of every
     /// claim never waits for a claim table another thread holds**: it runs in

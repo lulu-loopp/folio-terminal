@@ -20,6 +20,8 @@ use synthetic_bold::{
     place_synthetic_bold, synthetic_bold_glyphs, with_synthetic_bold,
 };
 
+#[cfg(target_os = "windows")]
+use std::sync::LazyLock;
 use std::{
     collections::{HashMap, HashSet},
     hash::{Hash, Hasher},
@@ -15564,7 +15566,7 @@ fn scalable_units_per_em(db: &glyphon::fontdb::Database, id: glyphon::fontdb::ID
 /// # Why this is reached on a Mac and not on Windows, and why the chain could
 /// not stop it
 ///
-/// The Windows loader names seven files and never asks the directory, so its
+/// The Windows loader names a fixed set of files and never asks the directory, so its
 /// database is a list somebody wrote. The macOS loader must call
 /// `load_system_fonts` — PingFang lives behind a content-hashed `AssetsV2` path
 /// that cannot be named — so its database is **the whole machine's library**,
@@ -15636,9 +15638,11 @@ fn drop_faces_with_no_scalable_em(db: &mut glyphon::fontdb::Database) -> usize {
 ///    Chinese reader, and legible, which beats a box.
 /// 6. `Malgun Gothic` — Korean, same argument one step further out.
 /// 7. `SimSun` / `NSimSun` — the compatibility face every Chinese Windows has
-///    had since XP. Last because it is a serif screen face designed for 12px
+///    had since XP. Late because it is a serif screen face designed for 12px
 ///    bitmaps and looks nothing like the rest of this window; present because it
 ///    is the one that is always there.
+/// 8. `MS Gothic` — the older Japanese compatibility face, loaded and kept at
+///    the tail rather than named in a chain the bounded loader cannot supply.
 ///
 /// Deliberately **no symbol or emoji face on this list.** An ideograph that
 /// reached one would be a mistake, and the shaper's `.notdef` box is a better
@@ -15650,19 +15654,92 @@ fn drop_faces_with_no_scalable_em(db: &mut glyphon::fontdb::Database) -> usize {
 /// desktop asks `OTHER_CJK_FALLBACK_FAMILIES`, so compiled there this list was a
 /// constant nobody read.
 #[cfg(target_os = "windows")]
-const CJK_FALLBACK_FAMILIES: [&str; 11] = [
-    "Microsoft YaHei UI",
-    "Microsoft YaHei",
-    "DengXian",
-    "Microsoft JhengHei UI",
-    "Microsoft JhengHei",
-    "Yu Gothic UI",
-    "Meiryo UI",
-    "Malgun Gothic",
-    "SimSun",
-    "NSimSun",
-    "MS Gothic",
+struct WindowsCjkFallback {
+    family: &'static str,
+    files: &'static [&'static str],
+    chrome_rank: u8,
+    grid_rank: u8,
+}
+
+/// The single Windows CJK fact table. Families, files and their two surface
+/// orders are rows of one relation, so a family cannot remain in a chain after
+/// its load route disappears.
+#[cfg(target_os = "windows")]
+const WINDOWS_CJK_FALLBACKS: &[WindowsCjkFallback] = &[
+    WindowsCjkFallback {
+        family: "Microsoft YaHei UI",
+        files: &["msyh.ttc", "msyhbd.ttc", "msyhl.ttc"],
+        chrome_rank: 0,
+        grid_rank: 1,
+    },
+    WindowsCjkFallback {
+        family: "Microsoft YaHei",
+        files: &["msyh.ttc", "msyhbd.ttc", "msyhl.ttc"],
+        chrome_rank: 1,
+        grid_rank: 2,
+    },
+    WindowsCjkFallback {
+        family: "DengXian",
+        files: &["Deng.ttf", "Dengb.ttf", "Dengl.ttf"],
+        chrome_rank: 2,
+        grid_rank: 3,
+    },
+    WindowsCjkFallback {
+        family: "Microsoft JhengHei UI",
+        files: &["msjh.ttc"],
+        chrome_rank: 3,
+        grid_rank: 4,
+    },
+    WindowsCjkFallback {
+        family: "Microsoft JhengHei",
+        files: &["msjh.ttc"],
+        chrome_rank: 4,
+        grid_rank: 5,
+    },
+    WindowsCjkFallback {
+        family: "Yu Gothic UI",
+        files: &["YuGothR.ttc"],
+        chrome_rank: 5,
+        grid_rank: 6,
+    },
+    WindowsCjkFallback {
+        family: "Meiryo UI",
+        files: &["meiryo.ttc"],
+        chrome_rank: 6,
+        grid_rank: 7,
+    },
+    WindowsCjkFallback {
+        family: "Malgun Gothic",
+        files: &["malgun.ttf"],
+        chrome_rank: 7,
+        grid_rank: 8,
+    },
+    WindowsCjkFallback {
+        family: "SimSun",
+        files: &["simsun.ttc"],
+        chrome_rank: 8,
+        grid_rank: 9,
+    },
+    WindowsCjkFallback {
+        family: "NSimSun",
+        files: &["simsun.ttc"],
+        chrome_rank: 9,
+        grid_rank: 0,
+    },
+    WindowsCjkFallback {
+        family: "MS Gothic",
+        files: &["msgothic.ttc"],
+        chrome_rank: 10,
+        grid_rank: 10,
+    },
 ];
+
+#[cfg(target_os = "windows")]
+static CJK_FALLBACK_FAMILIES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut rows: Vec<_> = WINDOWS_CJK_FALLBACKS.iter().collect();
+    rows.sort_by_key(|row| row.chrome_rank);
+    rows.into_iter().map(|row| row.family).collect()
+});
 
 /// Grid-only chain. Owner and coordinator ruling, 2026-09-20: NSimSun is
 /// the face the Windows terminal drew through 0.4.2, and the owner prefers
@@ -15670,19 +15747,25 @@ const CJK_FALLBACK_FAMILIES: [&str; 11] = [
 /// to proportional chrome, not this surface. Monospace labels follow the grid;
 /// proportional chrome and previews retain CJK_FALLBACK_FAMILIES unchanged.
 #[cfg(target_os = "windows")]
-const GRID_CJK_FALLBACK_FAMILIES: [&str; 11] = [
-    "NSimSun",
-    "Microsoft YaHei UI",
-    "Microsoft YaHei",
-    "DengXian",
-    "Microsoft JhengHei UI",
-    "Microsoft JhengHei",
-    "Yu Gothic UI",
-    "Meiryo UI",
-    "Malgun Gothic",
-    "SimSun",
-    "MS Gothic",
-];
+static GRID_CJK_FALLBACK_FAMILIES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut rows: Vec<_> = WINDOWS_CJK_FALLBACKS.iter().collect();
+    rows.sort_by_key(|row| row.grid_rank);
+    rows.into_iter().map(|row| row.family).collect()
+});
+
+#[cfg(target_os = "windows")]
+static WINDOWS_CJK_FONT_FILES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut files = Vec::new();
+    for file in WINDOWS_CJK_FALLBACKS
+        .iter()
+        .flat_map(|row| row.files.iter().copied())
+    {
+        if !files.contains(&file) {
+            files.push(file);
+        }
+    }
+    files
+});
 
 fn grid_cjk_fallback_families() -> &'static [&'static str] {
     #[cfg(target_os = "windows")]
@@ -15703,36 +15786,6 @@ const OTHER_CJK_FALLBACK_FAMILIES: [&str; 4] = [
     "Noto Sans CJK JP",
     "Noto Sans CJK KR",
     "WenQuanYi Zen Hei",
-];
-
-/// The files those families live in, in the order the families are read.
-///
-/// Files rather than families for [`CHROME_SANS_FONT_FILES`]' reason: a file name
-/// is a fact about this operating system and a family name is a claim about what
-/// is inside the file, and only one of the two can be checked by trying it.
-/// Missing entries are harmless — a machine without Korean support simply has no
-/// `malgun.ttf`, and the chain moves on.
-///
-/// They are memory-mapped rather than read, so a face nothing ever shapes costs
-/// address space and no pages. That is what lets this list grow past the three
-/// files it used to hold without giving up the "never enumerate Fonts/" rule the
-/// loader exists to keep.
-///
-/// **Windows only** (ticket 55, D-62): the one reader is the Windows
-/// `terminal_font_system`, which loads from `%WINDIR%\Fonts`. A Mac names no
-/// files — its database is the whole system library, for the `AssetsV2` reason
-/// `drop_faces_with_no_scalable_em` gives.
-#[cfg(target_os = "windows")]
-const CJK_FALLBACK_FONT_FILES: [&str; 9] = [
-    "msyh.ttc",
-    "msyhbd.ttc",
-    "msyhl.ttc",
-    "Deng.ttf",
-    "Dengb.ttf",
-    "Dengl.ttf",
-    "msjh.ttc",
-    "YuGothR.ttc",
-    "malgun.ttf",
 ];
 
 /// This product's own fallback table: cosmic-text's Windows one, with the CJK
@@ -15787,8 +15840,8 @@ fn terminal_font_system() -> FontSystem {
     // Keep startup bounded: load a fixed terminal/CJK/symbol fallback chain, never enumerate
     // Fonts/. Noto Color Emoji is compiled into the executable so tests and a standalone binary
     // do not depend on their working directory or on an installer copying a sidecar font.
-    // The CJK half of that chain is [`CJK_FALLBACK_FONT_FILES`], loaded in the order
-    // [`CJK_FALLBACK_FAMILIES`] names its families. Missing optional files are harmless.
+    // The CJK half of that chain is derived from [`WINDOWS_CJK_FALLBACKS`].
+    // Missing optional files are harmless.
     let windows = std::env::var_os("WINDIR").unwrap_or_else(|| "C:\\Windows".into());
     let fonts = std::path::PathBuf::from(windows).join("Fonts");
     let mut db = glyphon::fontdb::Database::new();
@@ -15800,7 +15853,6 @@ fn terminal_font_system() -> FontSystem {
         "consolab.ttf",
         "consolai.ttf",
         "consolaz.ttf",
-        "simsun.ttc",
         "seguiemj.ttf",
         "seguisym.ttf",
     ] {
@@ -15808,7 +15860,7 @@ fn terminal_font_system() -> FontSystem {
             db.load_font_file(fonts.join(file))
         });
     }
-    for file in CJK_FALLBACK_FONT_FILES {
+    for file in WINDOWS_CJK_FONT_FILES.iter().copied() {
         let _ = bt_platform::file_reads::opaque(bt_platform::file_reads::Lane::Fonts, || {
             db.load_font_file(fonts.join(file))
         });
@@ -16036,7 +16088,7 @@ fn first_installed_family<'a>(
 ///
 /// # Why this arm enumerates and the Windows one refuses to
 ///
-/// The Windows arm names seven files under `%WINDIR%\Fonts` and never asks the
+/// The Windows arm names a fixed set of files under `%WINDIR%\Fonts` and never asks the
 /// directory, because a bounded startup is the whole point of that loader. The
 /// trick does not survive the crossing. macOS keeps `PingFang` — the face that
 /// answers Simplified Chinese, which is half of what the fallback table exists
@@ -16051,7 +16103,7 @@ fn first_installed_family<'a>(
 /// `/System/Library/Fonts`, `/Library/Fonts`, the `AssetsV2` font assets and
 /// `~/Library/Fonts`, memory-mapping each face rather than reading it — a face
 /// nothing ever shapes costs address space and no pages, which is the bargain
-/// [`CJK_FALLBACK_FONT_FILES`] already takes on Windows.
+/// [`WINDOWS_CJK_FONT_FILES`] already takes on Windows.
 ///
 /// What is **not** asked of the operating system is the policy. Which family
 /// the grid opens in, which one the chrome is set in, and which chain a Han
@@ -28486,7 +28538,7 @@ mod tests {
     /// on Windows only in any case (CI's `gpu` job); a Mac and Linux only check it.
     #[cfg(target_os = "windows")]
     #[test]
-    fn the_cjk_chain_puts_simplified_first_and_the_bitmap_serif_last() {
+    fn the_cjk_chain_puts_simplified_first_and_the_bitmap_serif_late() {
         let index = |family: &str| {
             CJK_FALLBACK_FAMILIES
                 .iter()
@@ -28507,12 +28559,56 @@ mod tests {
             "SimSun is the face that is always there, which is why it is the one \
              reached only when nothing else was"
         );
-        for family in CJK_FALLBACK_FAMILIES {
+        for family in CJK_FALLBACK_FAMILIES.iter() {
             assert!(
                 !family.contains("Emoji") && !family.contains("Symbol"),
                 "{family} is on the ideograph chain and is not an ideograph face"
             );
         }
+    }
+
+    /// RED (B-AUDIT-046 RND-2) — the Windows CJK family chains and bounded
+    /// loader are projections of one complete relation.
+    ///
+    /// MUTATION: restore any former standalone list, remove Meiryo/MS Gothic
+    /// from the loader, or leave an alias without its providing file; one of
+    /// these projections no longer equals the table.
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn every_windows_cjk_family_role_has_a_bounded_load_route() {
+        let mut chrome = WINDOWS_CJK_FALLBACKS.iter().collect::<Vec<_>>();
+        chrome.sort_by_key(|row| row.chrome_rank);
+        let mut grid = WINDOWS_CJK_FALLBACKS.iter().collect::<Vec<_>>();
+        grid.sort_by_key(|row| row.grid_rank);
+        let ranks = (0..u8::try_from(WINDOWS_CJK_FALLBACKS.len()).unwrap()).collect::<Vec<_>>();
+        assert_eq!(
+            chrome.iter().map(|row| row.chrome_rank).collect::<Vec<_>>(),
+            ranks
+        );
+        assert_eq!(
+            grid.iter().map(|row| row.grid_rank).collect::<Vec<_>>(),
+            ranks
+        );
+        assert_eq!(
+            chrome.iter().map(|row| row.family).collect::<Vec<_>>(),
+            CJK_FALLBACK_FAMILIES.as_slice()
+        );
+        assert_eq!(
+            grid.iter().map(|row| row.family).collect::<Vec<_>>(),
+            GRID_CJK_FALLBACK_FAMILIES.as_slice()
+        );
+        for row in WINDOWS_CJK_FALLBACKS {
+            assert!(!row.files.is_empty(), "{} has no load route", row.family);
+            for file in row.files {
+                assert!(
+                    WINDOWS_CJK_FONT_FILES.contains(file),
+                    "{} is not in the bounded loader",
+                    file
+                );
+            }
+        }
+        assert!(WINDOWS_CJK_FONT_FILES.contains(&"meiryo.ttc"));
+        assert!(WINDOWS_CJK_FONT_FILES.contains(&"msgothic.ttc"));
     }
 
     /// PIN — the active tab's title sits on the same axis its mark does.

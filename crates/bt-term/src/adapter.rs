@@ -275,6 +275,19 @@ pub enum AdapterEvent {
     },
 }
 
+/// Repaint facts decoded by the adapter's CSI parser before a feed is applied.
+/// The session consumes these facts; it never searches the byte stream for a
+/// preferred escape-sequence spelling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepaintControl {
+    DisplayCleared,
+    CursorHomed,
+    LineErased,
+    SynchronizedUpdateOpened,
+    CursorShown,
+    CursorHidden,
+}
+
 /// Stable, vendor-free damage fact consumed by the live decoration lifecycle. Column bounds are
 /// intentionally omitted: a formula owns complete grid rows and any mutation in one of them must
 /// invalidate the transient block.
@@ -479,6 +492,7 @@ pub struct TerminalAdapter {
     processor: Processor,
     listener: CaptureListener,
     parser_boundary: Parser,
+    repaint_parser: Parser,
     /// The raw bytes the vendor terminal has taken but not yet committed: the sequence that is
     /// still open at the end of a slice, and everything a synchronized update is holding back.
     /// A resize replays exactly this into the canonical fork's parser.
@@ -678,6 +692,7 @@ struct BoundaryPerformer {
     cursor_row_positioned_explicitly: Option<bool>,
     /// **Somebody asked which terminal this is** — XTVERSION, `CSI > q` or `CSI > 0 q`.
     xtversion_queried: bool,
+    repaint_controls: Vec<RepaintControl>,
 }
 
 /// What one byte through the boundary parser leaves for the terminal processor's pace to decide:
@@ -744,6 +759,38 @@ impl Perform for BoundaryPerformer {
         // and lives at [`VENDOR_ESU_CSI`], because while a block is open the vendored
         // parser does not parse at all.
         self.sync_start = action == 'h' && private_mode_params_name(params, intermediates, 2026);
+        if self.sync_start {
+            self.repaint_controls
+                .push(RepaintControl::SynchronizedUpdateOpened);
+        }
+        if matches!(action, 'h' | 'l') && private_mode_params_name(params, intermediates, 25) {
+            self.repaint_controls.push(if action == 'h' {
+                RepaintControl::CursorShown
+            } else {
+                RepaintControl::CursorHidden
+            });
+        }
+        if intermediates.is_empty() {
+            let parameter = |index: usize| {
+                params
+                    .iter()
+                    .nth(index)
+                    .and_then(|value| value.first().copied())
+                    .unwrap_or(0)
+            };
+            match action {
+                'J' if parameter(0) == 2 => {
+                    self.repaint_controls.push(RepaintControl::DisplayCleared)
+                }
+                'H' | 'f' if parameter(0) <= 1 && parameter(1) <= 1 => {
+                    self.repaint_controls.push(RepaintControl::CursorHomed);
+                }
+                'K' if parameter(0) == 0 => {
+                    self.repaint_controls.push(RepaintControl::LineErased);
+                }
+                _ => {}
+            }
+        }
         // **XTVERSION, and only XTVERSION.** `CSI > q` and its explicit spelling `CSI > 0 q` are the
         // question "which terminal am I talking to"; every other parameter after `CSI >` is a
         // different question this window has no answer for, and `CSI Ps SP q` (DECSCUSR, the cursor
@@ -828,6 +875,7 @@ impl TerminalAdapter {
             processor: Processor::new(),
             listener,
             parser_boundary: Parser::new(),
+            repaint_parser: Parser::new(),
             xtversion_replies_owed: 0,
             parser_tail: Vec::new(),
             parser_tail_open_start: 0,
@@ -978,6 +1026,12 @@ impl TerminalAdapter {
     ///
     /// Bytes that arrive while the stream is paused simply queue behind it; the
     /// scanner's own state is unaffected, because the split is downstream of it.
+    pub fn repaint_controls(&mut self, bytes: &[u8]) -> Vec<RepaintControl> {
+        let mut performer = BoundaryPerformer::default();
+        self.repaint_parser.advance(&mut performer, bytes);
+        performer.repaint_controls
+    }
+
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<AdapterEvent> {
         let actions = self.osc1337_scanner.scan(bytes);
         self.pending_stream.extend(actions);
@@ -2185,6 +2239,47 @@ mod tests {
 
     fn nz(value: u32) -> NonZeroU32 {
         NonZeroU32::new(value).unwrap()
+    }
+
+    /// RED (B-AUDIT-046 TRM-2) — repaint boundaries are parser facts, not
+    /// byte-string signatures. Equivalent CSI spellings and sequences split
+    /// across reads therefore produce the same controls.
+    ///
+    /// MUTATION: restore the raw `windows` scanners in `session`; the explicit
+    /// defaults, HVP form, combined DEC modes, or byte-at-a-time stream goes red.
+    #[test]
+    fn repaint_controls_are_semantic_across_spellings_and_read_boundaries() {
+        let mut adapter = TerminalAdapter::new(nz(80), nz(24));
+        let mut one_byte_at_a_time = Vec::new();
+        for byte in b"\x1b[2J\x1b[;H\x1b[0K\x1b[?25;2026h\x1b[?25l" {
+            one_byte_at_a_time.extend(adapter.repaint_controls(std::slice::from_ref(byte)));
+        }
+        assert_eq!(
+            one_byte_at_a_time,
+            [
+                RepaintControl::DisplayCleared,
+                RepaintControl::CursorHomed,
+                RepaintControl::LineErased,
+                RepaintControl::SynchronizedUpdateOpened,
+                RepaintControl::CursorShown,
+                RepaintControl::CursorHidden,
+            ]
+        );
+
+        for (bytes, expected) in [
+            (&b"\x1b[H"[..], RepaintControl::CursorHomed),
+            (&b"\x1b[1;1f"[..], RepaintControl::CursorHomed),
+            (&b"\x1b[K"[..], RepaintControl::LineErased),
+            (
+                &b"\x1b[?1;2026h"[..],
+                RepaintControl::SynchronizedUpdateOpened,
+            ),
+        ] {
+            assert!(
+                adapter.repaint_controls(bytes).contains(&expected),
+                "{bytes:?}"
+            );
+        }
     }
 
     fn apply_r2_extreme_resize_trace(terminal: &mut TerminalAdapter) {

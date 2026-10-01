@@ -435,7 +435,7 @@ pub struct Profile {
     /// derived from the program, or named outright. See [`IntegrationChoice`],
     /// and [`served_by`] for the resolved answer every other module wants.
     pub integration: IntegrationChoice,
-    /// `profiles.json` grammar override: powershell/cmd/posix/fish/nu/agent. Unknown values
+    /// `profiles.json` grammar override: powershell/cmd/posix/fish/csh/nu/agent. Unknown values
     /// are refused once at load. This is a spawn-time default at a fresh argument boundary.
     pub paste_as: Option<String>,
     /// Insertion-only Windows spelling: windows/windows-slash/wsl/msys. Every value on Unix,
@@ -902,16 +902,15 @@ pub(crate) struct ShellFamily {
     pub(crate) grammar: crate::shell_literal::ShellGrammar,
     /// The integration door that serves it by default.
     pub(crate) integration: Integration,
+    /// Whether this family launches a shell in WSL's path namespace.
+    pub(crate) wsl_launcher: bool,
 }
 
 /// Every shell family this product knows by name.
 ///
-/// **`tcsh` and `csh` are not here, on purpose** (ticket 74's list had them):
-/// their quoting is not POSIX — `!` is history expansion even inside single
-/// quotes, and a newline cannot be quoted at all — and `shell_literal` has no
-/// csh grammar. A family with no quoting rule gets no row, so it gets no login
-/// flag either and is quoted by the platform default, exactly as before ticket
-/// 74; a csh grammar is its own ticket.
+/// `tcsh` and `csh` have their own grammar because history expansion remains
+/// active inside their single quotes. Keeping that grammar in this table is
+/// what makes a login flag and a quoting rule one fact.
 ///
 /// **`sh` is not bash** (review row R3-6): it ignores bash's init file in
 /// silence, so it is served by no integration rather than the wrong one.
@@ -924,48 +923,63 @@ pub(crate) const SHELL_FAMILIES: &[ShellFamily] = &[
         login_flag: None,
         grammar: crate::shell_literal::ShellGrammar::PowerShell,
         integration: Integration::PowerShellOptIn,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["cmd"],
         login_flag: None,
         grammar: crate::shell_literal::ShellGrammar::Cmd,
         integration: Integration::CmdPrompt,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["bash"],
         login_flag: Some("--login"),
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::BashInitFile,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["wsl"],
         login_flag: None,
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::BashInitFile,
+        wsl_launcher: true,
     },
     ShellFamily {
         stems: &["zsh"],
         login_flag: Some("-l"),
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::ZshDotDir,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["sh", "dash", "ksh", "mksh"],
         login_flag: Some("-l"),
         grammar: crate::shell_literal::ShellGrammar::Posix,
         integration: Integration::None,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["fish"],
         login_flag: Some("-l"),
         grammar: crate::shell_literal::ShellGrammar::Fish,
         integration: Integration::None,
+        wsl_launcher: false,
+    },
+    ShellFamily {
+        stems: &["csh", "tcsh"],
+        login_flag: Some("-l"),
+        grammar: crate::shell_literal::ShellGrammar::Csh,
+        integration: Integration::None,
+        wsl_launcher: false,
     },
     ShellFamily {
         stems: &["nu"],
         login_flag: Some("-l"),
         grammar: crate::shell_literal::ShellGrammar::Nushell,
         integration: Integration::None,
+        wsl_launcher: false,
     },
 ];
 
@@ -2322,10 +2336,17 @@ impl Registry {
     /// than over the process's, which is what lets a test hide a row without
     /// moving the window's answer to "which profile is the floor".
     fn set_hidden(&self, index: usize, hidden: bool, default: usize) -> bool {
-        let floor = self
-            .table()
-            .position_of_id(WINDOWS_POWERSHELL_ID)
-            .unwrap_or(0);
+        self.set_hidden_on(index, hidden, default, SeedPlatform::of_this_build())
+    }
+
+    fn set_hidden_on(
+        &self,
+        index: usize,
+        hidden: bool,
+        default: usize,
+        platform: SeedPlatform,
+    ) -> bool {
+        let floor = fallback_profile_in_on(&self.table(), platform);
         if hidden && (index == default || index == floor) {
             return false;
         }
@@ -2679,21 +2700,7 @@ fn compose_on(
 /// directory — crosses the namespace, which is why this asks both questions and
 /// not either one.
 fn derived_paths(profile: &Profile) -> PathNamespace {
-    let names_the_launcher = |tail: &str| tail.to_ascii_lowercase().ends_with("wsl.exe");
-    let launcher = match &profile.program {
-        ProgramSource::Path(path) => path
-            .file_name()
-            .is_some_and(|name| name.eq_ignore_ascii_case("wsl.exe")),
-        ProgramSource::FirstOf(candidates) => candidates.iter().any(|candidate| match candidate {
-            ProgramCandidate::Under { tail, .. } | ProgramCandidate::BesideOnPath { tail, .. } => {
-                names_the_launcher(tail)
-            }
-            // A candidate that names the program instead of a place still names
-            // a program, and the question here is only which one.
-            ProgramCandidate::OnPath { name } => names_the_launcher(name),
-        }),
-        ProgramSource::PowerShellSeven => false,
-    };
+    let launcher = shell_family(&profile.program).is_some_and(|family| family.wsl_launcher);
     if launcher
         && matches!(
             served_by(profile),
@@ -3134,9 +3141,8 @@ pub fn set_colour(index: usize, colour: MarkColour) -> bool {
 /// The families with a flag are the ones whose manuals document a login mode
 /// **and** whose quoting this product knows — one row of [`SHELL_FAMILIES`]
 /// says both (B-AUDIT-046 SET-4). A PowerShell on Windows, `cmd.exe`,
-/// `wsl.exe`, an agent, `tcsh`/`csh` (no quoting rule yet) or a program the
-/// table has not heard of gets `None`, carries no login flag whatever its row
-/// says, and is offered no switch.
+/// `wsl.exe`, an agent or a program the table has not heard of gets `None`,
+/// carries no login flag whatever its row says, and is offered no switch.
 #[must_use]
 pub fn login_flag(program: &ProgramSource) -> Option<&'static str> {
     shell_family(program)?.login_flag
@@ -4196,7 +4202,13 @@ pub fn fallback_profile() -> usize {
 /// question with red gates on it, and a question that cannot be asked of a
 /// private table cannot have one.
 fn fallback_profile_in(table: &ProfileTable) -> usize {
-    table.position_of_id(fallback_profile_id()).unwrap_or(0)
+    fallback_profile_in_on(table, SeedPlatform::of_this_build())
+}
+
+fn fallback_profile_in_on(table: &ProfileTable, platform: SeedPlatform) -> usize {
+    table
+        .position_of_id(fallback_profile_id_for(platform))
+        .unwrap_or(0)
 }
 
 /// **Which row is the floor on this platform** — the one a broken choice lands
@@ -25119,17 +25131,25 @@ mod tests {
     /// off `pwsh` in the first place.
     #[test]
     fn hiding_the_default_and_hiding_the_floor_are_both_refused() {
-        let registry = Registry::shipped();
+        let registry = Registry {
+            table: RwLock::new(Arc::new(ProfileTable {
+                profiles: shipped_for(SeedPlatform::Windows, &FakeMachine::bare_windows()),
+            })),
+            revision: AtomicU64::new(0),
+        };
         let floor = registry
             .table()
             .position_of_id(WINDOWS_POWERSHELL_ID)
             .unwrap();
-        assert!(!registry.set_hidden(0, true, 0), "0 is the default here");
-        assert!(!registry.set_hidden(floor, true, 0));
+        assert!(
+            !registry.set_hidden_on(0, true, 0, SeedPlatform::Windows),
+            "0 is the default here"
+        );
+        assert!(!registry.set_hidden_on(floor, true, 0, SeedPlatform::Windows));
         assert!(registry.table().profiles().iter().all(|row| !row.hidden));
 
         let cmd = registry.table().position_of_id("cmd").unwrap();
-        assert!(registry.set_hidden(cmd, true, 0));
+        assert!(registry.set_hidden_on(cmd, true, 0, SeedPlatform::Windows));
         assert!(
             !registry.table().offered().contains(&cmd),
             "hiding is being out of the pickers"
@@ -25140,7 +25160,32 @@ mod tests {
             "and it is still a profile: a seat already on disk restarts through \
              its own id"
         );
-        assert!(registry.set_hidden(cmd, false, 0));
+        assert!(registry.set_hidden_on(cmd, false, 0, SeedPlatform::Windows));
+    }
+
+    /// RED (B-AUDIT-046 SET-1) — a Mac registry protects `/bin/sh`, not the
+    /// Windows row or whatever happens to be row zero.
+    ///
+    /// MUTATION: restore the `winps` lookup (or literal zero) in `set_hidden`;
+    /// the ordinary first Mac profile cannot be hidden and the actual floor can.
+    #[test]
+    fn hiding_uses_the_fallback_floor_of_the_registrys_platform() {
+        let registry = Registry {
+            table: RwLock::new(Arc::new(ProfileTable {
+                profiles: shipped_for(SeedPlatform::MacOs, &FakeMachine::default()),
+            })),
+            revision: AtomicU64::new(0),
+        };
+        let table = registry.table();
+        let first = 0;
+        let floor = table.position_of_id(BOURNE_SHELL_ID).unwrap();
+        assert_ne!(first, floor, "the test distinguishes a row from the floor");
+        drop(table);
+
+        assert!(registry.set_hidden_on(first, true, floor, SeedPlatform::MacOs));
+        assert!(!registry.set_hidden_on(floor, true, first, SeedPlatform::MacOs));
+        assert!(registry.table().get(first).unwrap().hidden);
+        assert!(!registry.table().get(floor).unwrap().hidden);
     }
 
     /// PIN — **`Restore all defaults` puts every field back and leaves the two
@@ -25402,6 +25447,41 @@ mod tests {
             PathNamespace::Windows,
             "only wsl.exe behind a bash init file crosses the namespace"
         );
+    }
+
+    /// RED (T-HARDCODE-047 round 2, SET-4) — **the WSL launcher role belongs
+    /// to its shell-family row, for every program representation.**
+    ///
+    /// MUTATION: restore `ends_with("wsl.exe")` in `derived_paths`; the
+    /// `xwsl.exe` candidate below is misclassified as WSL and this test fails.
+    #[test]
+    fn the_wsl_family_alone_launches_a_wsl_path_namespace() {
+        let mut profile = shipped()
+            .into_iter()
+            .find(|profile| profile.id == "wsl")
+            .expect("wsl is a shipped row");
+        profile.integration = IntegrationChoice::Named(Integration::BashInitFile);
+
+        profile.program = ProgramSource::FirstOf(vec![ProgramCandidate::OnPath {
+            name: "xwsl.exe".to_owned(),
+        }]);
+        assert_eq!(
+            derived_paths(&profile),
+            PathNamespace::Windows,
+            "a suffix match is not a shell-family identity"
+        );
+
+        for program in [
+            ProgramSource::Path(PathBuf::from("wsl")),
+            ProgramSource::Path(PathBuf::from("wsl.exe")),
+            ProgramSource::Path(PathBuf::from("/usr/bin/wsl.exe")),
+            ProgramSource::FirstOf(vec![ProgramCandidate::OnPath {
+                name: "wsl.exe".to_owned(),
+            }]),
+        ] {
+            profile.program = program;
+            assert_eq!(derived_paths(&profile), PathNamespace::Wsl);
+        }
     }
 
     /// PIN — **what the table writes, the table reads back.**
@@ -26094,6 +26174,48 @@ mod paste_tests {
                     }
                 }
             }
+        }
+    }
+
+    /// RED (B-AUDIT-046 SET-4) — every supported shell family takes an
+    /// insertion path through the grammar in its one `SHELL_FAMILIES` row.
+    ///
+    /// The fixture carries each class that made the old parallel lists unsafe:
+    /// whitespace, a quote, `$`, CJK and csh history expansion. MUTATION: remove
+    /// the csh row or give it POSIX quoting; the csh/tcsh answers go red.
+    #[test]
+    fn every_supported_shell_quotes_the_same_difficult_insertion_path() {
+        use crate::shell_literal::{Encoder, Refusal};
+
+        let path = "/tmp/中 文/$cash/O'Brien!";
+        for (stem, expected) in [
+            ("bash", Ok("'/tmp/中 文/$cash/O'\\''Brien!'")),
+            ("zsh", Ok("'/tmp/中 文/$cash/O'\\''Brien!'")),
+            ("fish", Ok("'/tmp/中 文/$cash/O\\'Brien!'")),
+            ("csh", Ok("'/tmp/中 文/$cash/O'\\''Brien\\!'")),
+            ("tcsh", Ok("'/tmp/中 文/$cash/O'\\''Brien\\!'")),
+            ("pwsh", Err(Refusal::PowerShellQuote)),
+            ("cmd", Ok("\"/tmp/中 文/$cash/O'Brien!\"")),
+        ] {
+            let grammar = derive_grammar_on(
+                &ProgramSource::Path(PathBuf::from(stem)),
+                SeedPlatform::Windows,
+            );
+            let encoder = Encoder {
+                grammar,
+                named_cmd: true,
+                delayed_expansion: false,
+                powershell_doubled_quotes: &[],
+            };
+            assert_eq!(
+                encoder
+                    .literal(path)
+                    .as_ref()
+                    .map(String::as_str)
+                    .map_err(|error| *error),
+                expected,
+                "{stem}"
+            );
         }
     }
 

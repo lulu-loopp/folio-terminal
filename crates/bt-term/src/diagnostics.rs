@@ -412,10 +412,10 @@ mod tests {
         assert!(
             source_rows_expose(
                 &[r"\begin{aligned}".to_owned(), r"\end{aligned}".to_owned()],
-                &format!("{plane}\nJump to bottom (ctrl+End)"),
+                &format!("{plane}\nunrelated application overlay"),
                 rendered,
             ),
-            "an unrelated Jump chip must not exempt the whole frame"
+            "an unrelated overlay must not exempt the whole frame"
         );
     }
 

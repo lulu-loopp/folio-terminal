@@ -12,10 +12,29 @@
 use std::path::Path;
 
 use anyhow::Result;
-use bt_persist::{ExportParts, FallbackReason, KEYBINDINGS_SCHEMA_VERSION, KeybindingsV1};
+use bt_persist::{ExportParts, FallbackReason, KeybindingsV1};
 
 use crate::settings_bundle::{self, ImportFault, SettingChange};
-use crate::{FilePick, Runtime, hang_watch, i18n, persist, profiles, schemes, settings, toast};
+use crate::{
+    FilePick, Runtime, hang_watch, i18n, persist, profiles, schemes, settings, shortcuts, toast,
+};
+
+fn keybindings_for_export(
+    table: &shortcuts::Shortcuts,
+    platform: bt_platform::HostPlatform,
+) -> KeybindingsV1 {
+    persist::keybindings_document(
+        table
+            .overrides()
+            .into_iter()
+            .map(|entry| bt_persist::BindingOverrideV1 {
+                action: entry.id,
+                chord: entry.chord,
+            })
+            .collect(),
+        persist::keybindings_platform_on(platform),
+    )
+}
 
 impl Runtime<'_> {
     /// **A press on one of the three doors.**
@@ -79,19 +98,7 @@ impl Runtime<'_> {
     /// the reader's folder.
     pub(crate) fn export_settings_to(&mut self, path: &Path) -> Result<()> {
         let (scheme_documents, unreadable) = schemes::user_documents();
-        let keybindings = KeybindingsV1 {
-            schema_version: KEYBINDINGS_SCHEMA_VERSION,
-            bindings: self
-                .app
-                .shortcuts
-                .overrides()
-                .into_iter()
-                .map(|entry| bt_persist::BindingOverrideV1 {
-                    action: entry.id,
-                    chord: entry.chord,
-                })
-                .collect(),
-        };
+        let keybindings = keybindings_for_export(&self.app.shortcuts, bt_platform::host_platform());
         let banner = crate::version::banner();
         let profiles = profiles::to_file();
         let written = bt_persist::serialize_export(ExportParts {
@@ -189,7 +196,8 @@ impl Runtime<'_> {
         if let Some(part) = parts.keybindings {
             match part {
                 Ok(file) => {
-                    let (table, refused) = settings_bundle::import_shortcuts(&file);
+                    let (table, refused) =
+                        settings_bundle::import_shortcuts(&file, bt_platform::host_platform());
                     faults.extend(refused);
                     if table != self.app.shortcuts {
                         self.app.shortcuts = table;
@@ -526,5 +534,89 @@ fn part_refused(what: &str, reason: &FallbackReason) -> ImportFault {
     ImportFault {
         what: what.to_owned(),
         reason: format!("{reason:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::*;
+
+    /// RED (T-HARDCODE-047 round 2, SET-3) — **the bundle writer records the
+    /// dialect whose customized chord it exports.**
+    ///
+    /// MUTATION: pass `KeybindingsPlatformV1::Unknown` from
+    /// `keybindings_for_export`; the serialized platform and the
+    /// opposite-platform command-modifier translation both fail.
+    #[test]
+    fn bundle_export_writes_each_platform_dialect_and_it_imports_by_meaning() {
+        for (source, dialect, chord, target, expected) in [
+            (
+                bt_platform::HostPlatform::MacOs,
+                bt_persist::KeybindingsPlatformV1::MacOs,
+                "Cmd+Shift+Y",
+                bt_platform::HostPlatform::Windows,
+                "Ctrl+Shift+y",
+            ),
+            (
+                bt_platform::HostPlatform::Windows,
+                bt_persist::KeybindingsPlatformV1::Windows,
+                "Ctrl+Shift+Y",
+                bt_platform::HostPlatform::MacOs,
+                "Cmd+Shift+y",
+            ),
+            (
+                bt_platform::HostPlatform::OtherUnix,
+                bt_persist::KeybindingsPlatformV1::OtherUnix,
+                "Ctrl+Shift+Y",
+                bt_platform::HostPlatform::MacOs,
+                "Cmd+Shift+y",
+            ),
+        ] {
+            let mut table = shortcuts::Shortcuts::defaults_for(source);
+            let faults = table.apply_overrides(&[shortcuts::Override {
+                id: "new-tab".to_owned(),
+                chord: Some(chord.to_owned()),
+            }]);
+            assert!(faults.is_empty(), "{faults:?}");
+
+            let keybindings = keybindings_for_export(&table, source);
+            let settings = bt_persist::SettingsV1::default();
+            let profiles = bt_persist::ProfilesV1::default();
+            let schemes = BTreeMap::new();
+            let bytes = bt_persist::serialize_export(ExportParts {
+                exported_by: "Folio test",
+                settings: &settings,
+                profiles: &profiles,
+                keybindings: &keybindings,
+                schemes: &schemes,
+            })
+            .expect("the bundle serializes");
+            let compact: serde_json::Value =
+                serde_json::from_slice(&bytes).expect("the bundle is JSON");
+            assert_eq!(
+                compact["keybindings"]["writing_platform"],
+                serde_json::to_value(dialect).unwrap()
+            );
+
+            let exported = bt_persist::parse_export(&bytes)
+                .expect("the bundle parses")
+                .keybindings
+                .expect("the bundle carries keybindings")
+                .expect("the keybindings part is current");
+            let (imported, faults) = settings_bundle::import_shortcuts(&exported, target);
+            assert!(faults.is_empty(), "{faults:?}");
+            assert_eq!(
+                shortcuts::format_chord_on(
+                    imported
+                        .row("new-tab")
+                        .and_then(|row| row.chord.as_ref())
+                        .expect("new-tab keeps a chord"),
+                    target,
+                ),
+                expected
+            );
+        }
     }
 }

@@ -13,6 +13,7 @@ pub enum ShellGrammar {
     Cmd,
     Posix,
     Fish,
+    Csh,
     Nushell,
     Agent,
 }
@@ -24,6 +25,7 @@ impl ShellGrammar {
             "cmd" => Self::Cmd,
             "posix" => Self::Posix,
             "fish" => Self::Fish,
+            "csh" => Self::Csh,
             "nu" => Self::Nushell,
             "agent" => Self::Agent,
             _ => return None,
@@ -114,6 +116,12 @@ fn posix(text: &str) -> String {
     format!("'{}'", text.replace('\'', "'\\''"))
 }
 
+/// A csh/tcsh word. Those shells perform history expansion even inside single
+/// quotes, so `!` must be escaped in addition to the ordinary quote splice.
+fn csh(text: &str) -> String {
+    format!("'{}'", text.replace('!', "\\!").replace('\'', "'\\''"))
+}
+
 impl Encoder {
     pub fn literal(self, text: &str) -> Result<String, Refusal> {
         match self.grammar {
@@ -151,6 +159,7 @@ impl Encoder {
                 "'{}'",
                 text.replace('\\', "\\\\").replace('\'', "\\'")
             )),
+            ShellGrammar::Csh => Ok(csh(text)),
             ShellGrammar::Nushell => Err(Refusal::NushellUnmeasured),
             ShellGrammar::Agent if windows_path(text) => {
                 if text.contains('"') {
@@ -607,6 +616,7 @@ mod tests {
                 ShellGrammar::Cmd,
                 ShellGrammar::Posix,
                 ShellGrammar::Fish,
+                ShellGrammar::Csh,
                 ShellGrammar::Nushell,
                 ShellGrammar::Agent,
             ] {
@@ -623,6 +633,7 @@ mod tests {
                         Ok(format!("\"{path}\""))
                     }
                     ShellGrammar::Fish => Ok(format!("'{}'", path.replace('\\', "\\\\"))),
+                    ShellGrammar::Csh => Ok(format!("'{path}'")),
                     _ => Ok(format!("'{path}'")),
                 };
                 assert_eq!(

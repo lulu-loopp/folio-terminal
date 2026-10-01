@@ -1353,55 +1353,15 @@ pub fn root_is_addressable(root: &str) -> bool {
 ///   the file the first one made. A trailing *space* is the same hazard and
 ///   never reaches here — the trim above takes it, which is what every other
 ///   door onto a name in this window does with one.
-/// * **A character the filesystem will not take**, which is [`name_is_writable`]
-///   read from this side — the nine Windows reserves, and the controls.
+/// * **A character the filesystem will not take**, asked of
+///   [`bt_platform::judge_file_name`] — the nine Windows reserves, and the controls.
 #[must_use]
 pub fn judge_new_name(name: &str) -> Option<NewNameRefusal> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Some(NewNameRefusal::Empty);
-    }
-    if name == "." || name == ".." {
-        return Some(NewNameRefusal::Dots);
-    }
-    if name.contains('/') || name.contains('\\') {
-        return Some(NewNameRefusal::Separator);
-    }
-    if name.chars().any(|character| {
-        matches!(character, ':' | '*' | '?' | '"' | '<' | '>' | '|') || character.is_control()
-    }) {
-        return Some(NewNameRefusal::Unwritable);
-    }
-    if name.ends_with('.') {
-        return Some(NewNameRefusal::Trailing);
-    }
-    // The stem, because the device is reserved with every suffix: `NUL`,
-    // `NUL.txt` and `NUL.tar.gz` all reach the device rather than the folder.
-    let stem = name.split('.').next().unwrap_or(name);
-    if is_reserved_device(stem) {
-        return Some(NewNameRefusal::Reserved);
-    }
-    None
+    judge_new_name_on(name, bt_platform::host_platform())
 }
 
-/// Whether a name's stem is one of the DOS devices every Windows path still
-/// resolves to, whatever folder it is typed in.
-///
-/// `COM0` and `LPT0` are **not** reserved, which is why the digit is checked
-/// rather than assumed: the reserved set is `1`–`9`, and refusing `COM0` would
-/// be this window inventing a rule the platform does not have.
-fn is_reserved_device(stem: &str) -> bool {
-    let upper = stem.to_ascii_uppercase();
-    if matches!(upper.as_str(), "CON" | "PRN" | "AUX" | "NUL") {
-        return true;
-    }
-    let Some(number) = upper
-        .strip_prefix("COM")
-        .or_else(|| upper.strip_prefix("LPT"))
-    else {
-        return false;
-    };
-    matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9")
+fn judge_new_name_on(name: &str, platform: bt_platform::HostPlatform) -> Option<NewNameRefusal> {
+    bt_platform::judge_file_name(name, platform)
 }
 
 /// Why a folder will not take a typed name.
@@ -1412,26 +1372,7 @@ fn is_reserved_device(stem: &str) -> bool {
 /// saying is one thing — the draft goes red where it is being typed — so no arm
 /// carries words; the enum exists so that a test can name which refusal it
 /// meant.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NewNameRefusal {
-    /// Nothing was typed, or only spaces.
-    Empty,
-    /// A path separator: this is a name, not a path.
-    Separator,
-    /// `.` or `..` — the folder itself, or its parent.
-    Dots,
-    /// A DOS device name, with or without a suffix.
-    Reserved,
-    /// A trailing dot, which Win32 strips before it looks.
-    Trailing,
-    /// One of the nine characters Windows reserves, or a control character.
-    Unwritable,
-    /// The folder already holds an entry with this name.
-    ///
-    /// The one refusal this module does not decide: it is a fact about a
-    /// listing, and the listing lives in the window.
-    Taken,
-}
+pub use bt_platform::FileNameRefusal as NewNameRefusal;
 
 /// **Put the row a new entry is being named into where it will appear**, and
 /// answer which row that is (0.3).
@@ -2622,7 +2563,7 @@ mod tests {
     /// `notes`; add `0` to the device digits and `COM0` is refused for no
     /// reason.
     #[test]
-    fn a_new_name_is_refused_for_every_reason_a_folder_has() {
+    fn a_windows_new_name_is_refused_for_every_reason_its_folder_has() {
         use NewNameRefusal as R;
         for (name, refusal) in [
             ("", R::Empty),
@@ -2648,7 +2589,7 @@ mod tests {
             ("LPT9.tar.gz", R::Reserved),
         ] {
             assert_eq!(
-                judge_new_name(name),
+                judge_new_name_on(name, bt_platform::HostPlatform::Windows),
                 Some(refusal),
                 "{name:?} is not a name this folder can take"
             );
@@ -2665,7 +2606,7 @@ mod tests {
             "auxiliary",
         ] {
             assert_eq!(
-                judge_new_name(name),
+                judge_new_name_on(name, bt_platform::HostPlatform::Windows),
                 None,
                 "{name:?} is a name a file really can have"
             );
@@ -2674,8 +2615,37 @@ mod tests {
         // trim every other door onto a name in this window takes — so a draft of
         // spaces is the empty name, `  notes.md  ` is `notes.md`, and a trailing
         // space is not a hazard here because it never survives to be one.
-        assert_eq!(judge_new_name("  notes.md  "), None);
-        assert_eq!(judge_new_name("notes "), None);
+        assert_eq!(
+            judge_new_name_on("  notes.md  ", bt_platform::HostPlatform::Windows),
+            None
+        );
+        assert_eq!(
+            judge_new_name_on("notes ", bt_platform::HostPlatform::Windows),
+            None
+        );
+    }
+
+    /// RED (B-AUDIT-046 PRV-1) — create and rename ask this one platform
+    /// judgement, and a Mac accepts names that only Win32 reserves.
+    ///
+    /// MUTATION: ignore the handed platform in `judge_new_name_on` and always
+    /// pass `Windows`; the two Mac rows go red even on a Windows test host.
+    #[test]
+    fn the_name_judge_uses_the_target_filesystem_grammar() {
+        use NewNameRefusal as R;
+        use bt_platform::HostPlatform::{MacOs, OtherUnix, Windows};
+
+        for platform in [MacOs, OtherUnix] {
+            assert_eq!(judge_new_name_on("report:final", platform), None);
+            assert_eq!(judge_new_name_on("NUL.txt", platform), None);
+            assert_eq!(judge_new_name_on("a/b", platform), Some(R::Separator));
+            assert_eq!(judge_new_name_on("a\0b", platform), Some(R::Unwritable));
+        }
+        assert_eq!(
+            judge_new_name_on("report:final", Windows),
+            Some(R::Unwritable)
+        );
+        assert_eq!(judge_new_name_on("NUL.txt", Windows), Some(R::Reserved));
     }
 
     /// PIN (0.3) — **every name the judge admits, the filesystem really takes**,
@@ -2718,13 +2688,22 @@ mod tests {
         // And the silent one: the platform takes the call and makes a different
         // entry, which is exactly why the judge refuses it rather than leaving
         // it to `create_new`.
-        assert_eq!(judge_new_name("stripped."), Some(NewNameRefusal::Trailing));
+        let trailing = judge_new_name("stripped.");
+        if bt_platform::host_platform() == bt_platform::HostPlatform::Windows {
+            assert_eq!(trailing, Some(NewNameRefusal::Trailing));
+        } else {
+            assert_eq!(trailing, None);
+        }
         if std::fs::File::create_new(folder.join("stripped.")).is_ok() {
-            assert!(
-                folder.join("stripped").exists(),
-                "a trailing dot is stripped before the filesystem looks, so the \
-                 row the reader asked for is not the row they got"
-            );
+            if bt_platform::host_platform() == bt_platform::HostPlatform::Windows {
+                assert!(
+                    folder.join("stripped").exists(),
+                    "a trailing dot is stripped before the filesystem looks, so the \
+                     row the reader asked for is not the row they got"
+                );
+            } else {
+                assert!(folder.join("stripped.").exists());
+            }
         }
         let _ = std::fs::remove_dir_all(&folder);
     }

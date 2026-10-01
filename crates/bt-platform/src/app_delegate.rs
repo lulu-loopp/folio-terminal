@@ -583,104 +583,44 @@ impl AppDelegate {
 ///
 /// One sentence per refusal above.
 pub fn path_from_file_url(url: &str) -> Result<PathBuf, String> {
-    let Some(rest) = strip_scheme(url, "file:") else {
-        return Err(format!("{url} is not a file: URL"));
-    };
-    // `file:/path` and `file:///path` are both legal spellings of the same
-    // thing; only the second carries an authority, and only then is there a
-    // host to check.
-    let path = match rest.strip_prefix("//") {
-        Some(after) => {
-            let (authority, path) = match after.find('/') {
-                Some(at) => after.split_at(at),
-                None => (after, ""),
-            };
-            if !(authority.is_empty() || authority.eq_ignore_ascii_case("localhost")) {
-                return Err(format!(
-                    "{url} names the host {authority}, which is another machine rather than a \
-                     path on this one"
-                ));
-            }
-            path
+    let address = bt_transcript::paths::decode_file_uri_address(url).map_err(|error| match error {
+        bt_transcript::paths::FileUriDecodeError::NotFile => {
+            format!("{url} is not a file: URL")
         }
-        None => rest,
-    };
-    // A query or a fragment ends the path. Neither can occur inside one: AppKit
-    // writes `?` as `%3F` and `#` as `%23` in a file URL, which is exactly what
-    // makes this split safe rather than lossy.
-    let path = &path[..path.find(['?', '#']).unwrap_or(path.len())];
-    if !path.starts_with('/') {
+        bt_transcript::paths::FileUriDecodeError::MissingPath => {
+            format!("{url} names no path")
+        }
+        bt_transcript::paths::FileUriDecodeError::Control => {
+            format!("{url} contains a control character")
+        }
+        bt_transcript::paths::FileUriDecodeError::Nul => format!(
+            "{url} decodes to a path with a NUL in it, which ends the name the kernel is handed \
+             early and opens a different file"
+        ),
+        bt_transcript::paths::FileUriDecodeError::MalformedPercentEscape => {
+            let tail = url.rsplit_once('%').map_or("", |(_, tail)| tail);
+            if tail.len() < 2 {
+                format!("{url} ends in the middle of a percent escape")
+            } else {
+                format!("{url} carries a sequence which is not a percent escape")
+            }
+        }
+    })?;
+    let authority = String::from_utf8(address.authority)
+        .map_err(|_| format!("{url} has an authority that is not text"))?;
+    if !(authority.is_empty() || authority.eq_ignore_ascii_case("localhost")) {
+        return Err(format!(
+            "{url} names the host {authority}, which is another machine rather than a path on \
+             this one"
+        ));
+    }
+    if !address.path.starts_with(b"/") {
         return Err(format!(
             "{url} names a relative path, and the directory that would be relative to is the one \
              this process was started in rather than the one the reader meant"
         ));
     }
-    let bytes = percent_decode(path)?;
-    if bytes.contains(&0) {
-        return Err(format!(
-            "{url} decodes to a path with a NUL in it, which ends the name the kernel is handed \
-             early and opens a different file"
-        ));
-    }
-    path_from_bytes(bytes, url)
-}
-
-/// `url` after `scheme`, if that is what it starts with — the scheme of a URL
-/// is case-insensitive.
-///
-/// `get` rather than an index, because the argument is whatever AppKit handed
-/// over: slicing a `str` at a byte offset that is not a character boundary is a
-/// panic, and a URL that begins with a non-ASCII character would reach one.
-fn strip_scheme<'a>(url: &'a str, scheme: &str) -> Option<&'a str> {
-    url.get(..scheme.len())
-        .is_some_and(|start| start.eq_ignore_ascii_case(scheme))
-        .then(|| &url[scheme.len()..])
-}
-
-/// The bytes a percent-encoded path component spells.
-///
-/// Bytes and not characters: `%E6%96%87` is one CJK character in three escapes
-/// and nothing here has to know that. Everything that is not an escape passes
-/// through as its own UTF-8 bytes, so a URL that carries a raw non-ASCII
-/// character — which AppKit does not write, but a hand-made one might — decodes
-/// to the same path as the encoded spelling of it.
-fn percent_decode(path: &str) -> Result<Vec<u8>, String> {
-    let source = path.as_bytes();
-    let mut out = Vec::with_capacity(source.len());
-    let mut at = 0;
-    while at < source.len() {
-        if source[at] != b'%' {
-            out.push(source[at]);
-            at += 1;
-            continue;
-        }
-        let digits = source
-            .get(at + 1..at + 3)
-            .ok_or_else(|| format!("{path} ends in the middle of a percent escape"))?;
-        let high = hex_value(digits[0]);
-        let low = hex_value(digits[1]);
-        match (high, low) {
-            (Some(high), Some(low)) => out.push(high * 16 + low),
-            _ => {
-                return Err(format!(
-                    "{path} carries %{}{}, which is not a percent escape",
-                    digits[0] as char, digits[1] as char
-                ));
-            }
-        }
-        at += 3;
-    }
-    Ok(out)
-}
-
-/// One hexadecimal digit, in either case.
-fn hex_value(digit: u8) -> Option<u8> {
-    match digit {
-        b'0'..=b'9' => Some(digit - b'0'),
-        b'a'..=b'f' => Some(digit - b'a' + 10),
-        b'A'..=b'F' => Some(digit - b'A' + 10),
-        _ => None,
-    }
+    path_from_bytes(address.path, url)
 }
 
 /// The decoded bytes as a path.
