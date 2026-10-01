@@ -668,6 +668,13 @@ mod tests {
             .spawn()
             .expect("spawn direct helper child");
         let mut output = BufReader::new(child.stdout.take().expect("helper child stdout pipe"));
+        #[cfg_attr(
+            not(windows),
+            expect(
+                unused_variables,
+                reason = "the readiness line is the signal on every platform; its pid feeds only the Windows console-member set"
+            )
+        )]
         let grandchild_pid = loop {
             let mut line = String::new();
             assert_ne!(
