@@ -519,6 +519,17 @@ impl Runtime<'_> {
             // The shortcut table's own dispatch, and not a copy of it: a
             // palette row and a chord are two doors onto one room.
             palette::Verb::Run(action) => self.run_shortcut(action),
+            palette::Verb::ResetTerminalModes { tab, seat } => {
+                let Some(index) = self.tab_index_of(tab) else {
+                    return Ok(());
+                };
+                self.activate_tab(index, false)?;
+                if !self.window.tabs[index].sessions.contains_key(&seat) {
+                    return Ok(());
+                }
+                self.focus_seat(seat)?;
+                self.reset_terminal_modes(seat)
+            }
             palette::Verb::Go { tab, seat } => {
                 let Some(index) = self.tab_index_of(tab) else {
                     return Ok(());

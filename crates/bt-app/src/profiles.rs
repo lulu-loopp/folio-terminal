@@ -10817,6 +10817,11 @@ pub enum PaneMenuRow {
     /// that already exists, and which one is the whole of what the row is
     /// asking.
     MoveToWindow,
+    /// Put back the terminal modes a program that died without its own
+    /// teardown left on in this pane (`bt_term::DualPlaneSession::reset_program_modes`).
+    /// It changes neither the pane tree nor the child, and it stands with the
+    /// verbs about this pane, above the rule that sets `Close pane` apart.
+    ResetTerminalModes,
     /// The same verb the `×` in the head has.
     ClosePane,
 }
@@ -10840,7 +10845,7 @@ impl PaneMenuRow {
     /// was not. The mode is a posture of the window and rearranges the tab
     /// strip; a zoom is one pane's own share of one tab's stage, and every other
     /// line here is about that pane's share of that stage too.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Picker,
         Self::ZoomPane,
         Self::SplitWith,
@@ -10849,6 +10854,7 @@ impl PaneMenuRow {
         Self::MoveToNewTab,
         Self::MoveToNewWindow,
         Self::MoveToWindow,
+        Self::ResetTerminalModes,
         Self::ClosePane,
     ];
 
@@ -10920,6 +10926,10 @@ impl PaneMenuRow {
             // this row a glyph of its own would be the drawing claiming a
             // difference the words are already carrying.
             Self::MoveToWindow => ActionIcon::MoveToWindow.mark(),
+            // The circular restore mark `Restart shell…` wears, for now (T-RESET-MODES:
+            // the owner rules on a glyph of its own later); the words carry that the
+            // child is not replaced.
+            Self::ResetTerminalModes => ChromeMark::Restart,
             // **The pane's own `×` and not the tab's**, since the registry: the
             // two are one `<symbol>` under two names, and which of them a menu
             // row reached for was arbitrary — this row closes a *pane*.
@@ -10947,6 +10957,7 @@ impl PaneMenuRow {
             Self::MoveToNewTab => move_to_new_tab_text(),
             Self::MoveToNewWindow => move_to_new_window_text(),
             Self::MoveToWindow => move_to_window_text(),
+            Self::ResetTerminalModes => reset_terminal_modes_text(),
             Self::ClosePane => close_pane_text(),
         }
     }
@@ -11016,7 +11027,8 @@ impl PaneMenuRow {
             | Self::NewInFolder
             | Self::MoveToNewTab
             | Self::MoveToNewWindow
-            | Self::MoveToWindow => None,
+            | Self::MoveToWindow
+            | Self::ResetTerminalModes => None,
         }
     }
 }
@@ -11060,6 +11072,11 @@ pub fn move_to_window_text() -> &'static str {
 #[must_use]
 pub fn move_to_new_window_text() -> &'static str {
     crate::i18n::Text::PaneMenuMoveToNewWindow.text()
+}
+/// The recovery verb, spelled once for the pane menu and the command palette.
+#[must_use]
+pub fn reset_terminal_modes_text() -> &'static str {
+    crate::i18n::Text::ResetTerminalModes.text()
 }
 /// The `×`'s verb, spelled — a menu row has room for the word the button does
 /// not, and `Close pane` is the mock-up's own `title` for that button (4672).
@@ -11326,8 +11343,8 @@ pub struct PaneMenuLayout {
     zone_hits: [[f32; 4]; 4],
     /// Where the caption sits.
     caption: [f32; 4],
-    /// The rule above `Close pane`, which separates the five verbs that *make* a
-    /// pane or move one from the one that ends it.
+    /// The rule above `Close pane`, which separates the verbs that make, move or
+    /// recover a pane from the one that ends it.
     ///
     /// The menu's only rule again: the second one drew the sentence break under
     /// the focus-mode row, and left with it (user ruling 2026-08-19).
@@ -11675,8 +11692,8 @@ pub fn pane_menu_layout(
             PaneMenuRow::Picker => picker_height,
             _ => item_height,
         };
-        // The rule falls where the sentence changes: five verbs that make a pane
-        // or move one, then the one that ends it. `#file-menu` puts its own rule
+        // The rule falls where the sentence changes: the verbs that make, move or
+        // recover a pane, then the one that ends it. `#file-menu` puts its own rule
         // after the first row for the same kind of reason (mock-up 8089).
         if *row == PaneMenuRow::ClosePane {
             separator = [
@@ -21078,8 +21095,17 @@ mod tests {
     /// how much of the stage this pane gets. It is *not* the window verb this
     /// test's last paragraph turns away — a zoom is one pane's share of one
     /// tab's stage, which is what every other line here is about too.
+    ///
+    /// **The ninth verb is T-RESET-MODES'** (2026-09-30): `Reset terminal modes`,
+    /// last of the verbs about this pane and directly above the rule, so the menu
+    /// keeps the one rule of the 2026-08-19 ruling and the recovery verb is not
+    /// flush against `Close pane`.
+    ///
+    /// MUTATION: move `ResetTerminalModes` after `ClosePane` in
+    /// [`PaneMenuRow::ALL`], or strike the rule above it as well as above `Close
+    /// pane` — the order or the one-rule geometry below goes red.
     #[test]
-    fn the_pane_menu_is_a_picker_and_eight_verbs_with_a_rule_above_the_close() {
+    fn the_pane_menu_is_a_picker_and_nine_verbs_with_a_rule_above_the_close() {
         assert_eq!(
             PaneMenuRow::ALL,
             [
@@ -21094,6 +21120,7 @@ mod tests {
                 // list for the reason the two above it do: it is a verb about
                 // *this pane*, and it is the same journey at its third length.
                 PaneMenuRow::MoveToWindow,
+                PaneMenuRow::ResetTerminalModes,
                 PaneMenuRow::ClosePane,
             ]
         );
@@ -21118,9 +21145,9 @@ mod tests {
                 zoom_pane_text(),
                 // **And the chord that runs the same verb** (gesture audit
                 // 2026-08-26, 系统性发现 ②), drawn straight after the row it
-                // belongs to. Three of the eight carry one; the other five are
+                // belongs to. Three of the nine carry one; the other six are
                 // not rows of the shortcut table — see
-                // [`PaneMenuRow::accelerator`], which names all eight.
+                // [`PaneMenuRow::accelerator`], which names all nine.
                 "Ctrl+Shift+X",
                 split_with_text(),
                 new_in_folder_text(),
@@ -21131,10 +21158,11 @@ mod tests {
                 // `Move to window ▸` wears a chevron, and a row with a chevron
                 // never wears a chord — one trailing slot, one thing in it.
                 move_to_window_text(),
+                reset_terminal_modes_text(),
                 close_pane_text(),
                 "Ctrl+Shift+W",
             ],
-            "the caption under the diagram, then eight rows with their chords,              and no heading over them"
+            "the caption under the diagram, then nine rows with their chords, and no heading over them"
         );
         assert_ne!(
             move_to_new_tab_text(),
@@ -21143,10 +21171,24 @@ mod tests {
              — including by not being the same string"
         );
         let close = layout.item(PaneMenuRow::ClosePane);
+        let reset = layout.item(PaneMenuRow::ResetTerminalModes);
         let above = layout.item(PaneMenuRow::MoveToWindow);
+        assert_eq!(
+            reset[1], above[3],
+            "the recovery verb follows the last mover with no rule between them"
+        );
         assert!(
-            layout.separator[1] >= above[3] && layout.separator[3] <= close[1],
-            "the rule lies between the last constructive verb and `Close pane`"
+            layout.separator[1] >= reset[3] && layout.separator[3] <= close[1],
+            "the one rule lies between the recovery verb and `Close pane`"
+        );
+        assert_eq!(
+            layer
+                .quads
+                .iter()
+                .filter(|quad| quad.rect == layout.separator)
+                .count(),
+            1,
+            "and it is drawn once"
         );
         assert!(
             layout.item(PaneMenuRow::Picker)[3] <= layout.item(PaneMenuRow::ZoomPane)[1],
@@ -21189,6 +21231,7 @@ mod tests {
                 PaneMenuRow::MoveToNewTab,
                 PaneMenuRow::MoveToNewWindow,
                 PaneMenuRow::MoveToWindow,
+                PaneMenuRow::ResetTerminalModes,
                 PaneMenuRow::ClosePane,
             ],
             "the third exit stands directly under the second"
@@ -21318,6 +21361,7 @@ mod tests {
                 PaneMenuRow::Duplicate,
                 PaneMenuRow::MoveToNewTab,
                 PaneMenuRow::MoveToNewWindow,
+                PaneMenuRow::ResetTerminalModes,
                 PaneMenuRow::ClosePane,
             ],
             "a lone window draws no row for moving a pane into another one"
@@ -21354,18 +21398,14 @@ mod tests {
         // to the row it stands over rather than to the one it happens to follow.
         for menu in [&alone, &peers] {
             let close = menu.item(PaneMenuRow::ClosePane);
-            let above = menu.item(if menu.rows().contains(&PaneMenuRow::MoveToWindow) {
-                PaneMenuRow::MoveToWindow
-            } else {
-                PaneMenuRow::MoveToNewWindow
-            });
+            let above = menu.item(PaneMenuRow::ResetTerminalModes);
             assert!(
                 menu.separator[1] >= above[3] && menu.separator[3] <= close[1],
-                "the rule lies between the last mover and the one that ends a pane"
+                "the rule lies between the last verb about this pane and the one that ends it"
             );
         }
-        // And the keyboard walks what is drawn: the row below the third exit is
-        // `Close pane` on a lone window, not a highlight on nothing.
+        // And the keyboard walks what is drawn: the row below the second exit is
+        // the recovery verb on a lone window, not a highlight on the absent third.
         assert_eq!(
             PaneMenuHover::step(
                 Some(PaneMenuHover::Row(PaneMenuRow::MoveToNewWindow)),
@@ -21373,7 +21413,7 @@ mod tests {
                 0,
                 alone.rows(),
             ),
-            Some(PaneMenuHover::Row(PaneMenuRow::ClosePane))
+            Some(PaneMenuHover::Row(PaneMenuRow::ResetTerminalModes))
         );
         assert_eq!(
             PaneMenuHover::step(

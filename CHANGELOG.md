@@ -13,6 +13,7 @@ All notable changes to Folio are recorded here. The format follows
 
 - In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder.
 
+- A pane can reset the terminal modes a program left behind (pane menu ▸ Reset terminal modes).
 - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,
   Shift+Tab, Ctrl+I, Ctrl+M and Esc apart from Enter, Tab and a lone escape:
   Folio supports the first tier of the kitty keyboard protocol and xterm's

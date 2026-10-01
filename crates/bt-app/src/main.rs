@@ -49841,6 +49841,17 @@ impl Runtime<'_> {
                 verb: palette::Verb::Run(binding.action),
             });
         }
+        // The pane menu's recovery verb, which is not a row of the shortcut
+        // table: see `palette::reset_terminal_modes_candidate` for when it is
+        // offered and how it is addressed.
+        let tab = &self.window.tabs[self.window.active_tab];
+        let session = tab
+            .sessions
+            .contains_key(&tab.focused_leaf)
+            .then_some(tab.focused_leaf);
+        into.extend(palette::reset_terminal_modes_candidate(
+            focus, tab.id, session,
+        ));
     }
 
     /// **Every pane of this window**, tab by tab.
@@ -73438,6 +73449,8 @@ mod palette_wiring_tests {
         for door in [
             // Actions: the shortcut table's own dispatch.
             "self.run_shortcut(action)",
+            // The recovery row: the pane menu's session-owned door.
+            "self.reset_terminal_modes(seat)",
             // Places and commands both begin by putting the tab in front —
             // `jump_to_attention`'s own two steps.
             "self.activate_tab(index, false)?",
@@ -73462,6 +73475,22 @@ mod palette_wiring_tests {
             locate.contains("self.open_files_path_to(seat, &key)?"),
             "and a file is revealed through the column's own reveal"
         );
+    }
+
+    /// PIN (T-RESET-MODES) — **the palette's action list is given the recovery
+    /// row, and running it reaches the pane menu's own door.** When the row is
+    /// offered and how it is addressed is behaviour, pinned in
+    /// `palette::reset_row_tests`; this pins only the wiring on both sides.
+    ///
+    /// MUTATION: drop the `into.extend(palette::reset_terminal_modes_candidate(…))`
+    /// from `push_action_candidates`; the first assertion goes red.
+    #[test]
+    fn pane_menu_reset_terminal_modes_is_also_a_command_palette_action() {
+        let supply = method_body("Runtime", "push_action_candidates");
+        assert!(supply.contains("into.extend(palette::reset_terminal_modes_candidate("));
+        let run = method_body("Runtime", "run_palette_row");
+        assert!(run.contains("palette::Verb::ResetTerminalModes { tab, seat }"));
+        assert!(run.contains("self.reset_terminal_modes(seat)"));
     }
 
     /// PIN — **the settings wrapper is three bricks in one order**, and the
@@ -73789,15 +73818,15 @@ mod palette_wiring_tests {
     /// met by a list that can shrink under a held answer, and the answer is a
     /// `TabId` resolved at the moment the verb runs.
     ///
-    /// MUTATION: carry the ordinal and index `window.tabs` with it — the two
+    /// MUTATION: carry the ordinal and index `window.tabs` with it — the three
     /// `tab_index_of` calls go and this goes red.
     #[test]
     fn a_palette_row_names_its_tab_by_an_address_that_cannot_be_reused() {
         let run = method_body("Runtime", "run_palette_row");
         assert_eq!(
             run.matches("self.tab_index_of(tab)").count(),
-            2,
-            "both the place and the command resolve the id when they run it"
+            3,
+            "the place, the command and the terminal reset each resolve the id when they run it"
         );
         assert!(
             !run.contains("self.window.tabs[tab]"),

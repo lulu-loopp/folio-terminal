@@ -93,7 +93,9 @@ draw, which takes the name back and keeps the customizer in the chain — the sa
 their order; only the outermost one reads the status and writes the markers.
 `scripts/shell-integration/tests/exit-status.ps1` runs the whole table above in a real PowerShell
 of each generation, three times over: this script alone, conda installed before it, conda installed
-after it.
+after it. `conda-order.ps1` pins the re-hoist itself: after the first draw Folio owns the global
+`prompt` name again, with conda's wrapper and the reader's original prompt kept in its chain, and each
+of them runs once per draw.
 
 **The residue, stated.** A cmdlet that fails while an older native failure is still in
 `$LASTEXITCODE` is reported with that older code — `3` where `1` was meant. Nothing distinguishes

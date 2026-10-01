@@ -483,6 +483,8 @@ const LONG_SECTION_CAP: usize = 8;
 pub enum Verb {
     /// Carry out one row of the shortcut table.
     Run(Action),
+    /// Restore a terminal's program-controlled modes without writing to its child.
+    ResetTerminalModes { tab: TabId, seat: SeatId },
     /// Put the keyboard in one pane, activating its tab first.
     ///
     /// **The tab is named by its id and not by where it was sitting.** A
@@ -1625,6 +1627,77 @@ impl PaletteState {
         let changed = self.selected != index;
         self.selected = index;
         changed
+    }
+}
+
+/// **The command palette's `Reset terminal modes` row** — the pane menu's
+/// recovery verb, offered exactly when a terminal holds the keyboard and the
+/// focused seat has a live session (`session`), and never a row of the shortcut
+/// table (it has no chord).
+///
+/// It is addressed like a place row, by the tab's id and the seat, so a pane
+/// that exits while the palette is open cannot redirect it to a neighbour.
+pub(crate) fn reset_terminal_modes_candidate(
+    focus: crate::shortcuts::Focus,
+    tab: TabId,
+    session: Option<SeatId>,
+) -> Option<Candidate> {
+    let seat = session.filter(|_| focus.terminal)?;
+    Some(Candidate {
+        section: Section::Actions,
+        label: crate::profiles::reset_terminal_modes_text().to_owned(),
+        hint: None,
+        mark: None,
+        awaiting: false,
+        verb: Verb::ResetTerminalModes { tab, seat },
+    })
+}
+
+#[cfg(test)]
+mod reset_row_tests {
+    use super::{Section, Verb, reset_terminal_modes_candidate};
+    use crate::shortcuts::Focus;
+    use bt_layout::SeatId;
+
+    /// RED (T-RESET-MODES) — **the palette offers `Reset terminal modes` exactly
+    /// when a terminal holds the keyboard and has a live session, addressed to
+    /// that tab and seat.**
+    ///
+    /// A preview, a field or a menu holding the keyboard is not a terminal that
+    /// could be reset, and a seat whose session has gone has nothing to reset.
+    ///
+    /// MUTATION: drop `.filter(|_| focus.terminal)` in
+    /// `reset_terminal_modes_candidate`; the preview row goes red.
+    #[test]
+    fn the_reset_row_is_offered_only_to_a_terminal_that_holds_the_keyboard() {
+        let tab = crate::TabId(7);
+        let seat = SeatId(3);
+        let terminal = Focus {
+            terminal: true,
+            terminal_primary: true,
+            ..Focus::default()
+        };
+        let row = reset_terminal_modes_candidate(terminal, tab, Some(seat))
+            .expect("a terminal with the keyboard is offered the reset");
+        assert_eq!(row.section, Section::Actions);
+        assert_eq!(row.label, crate::profiles::reset_terminal_modes_text());
+        assert_eq!(row.hint, None, "no chord runs it");
+        assert_eq!(row.verb, Verb::ResetTerminalModes { tab, seat });
+
+        let preview = Focus {
+            preview: true,
+            ..Focus::default()
+        };
+        assert_eq!(
+            reset_terminal_modes_candidate(preview, tab, Some(seat)),
+            None,
+            "a preview holding the keyboard is not a terminal"
+        );
+        assert_eq!(
+            reset_terminal_modes_candidate(terminal, tab, None),
+            None,
+            "a seat with no session has nothing to reset"
+        );
     }
 }
 

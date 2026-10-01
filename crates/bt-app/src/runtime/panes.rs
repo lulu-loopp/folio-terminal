@@ -2731,6 +2731,7 @@ impl Runtime<'_> {
                 // through the very function the row above spends and then hands
                 // the tab to the application's transfer.
                 profiles::PaneMenuRow::MoveToNewWindow => self.move_pane_to_new_window(seat),
+                profiles::PaneMenuRow::ResetTerminalModes => self.reset_terminal_modes(seat),
                 // The `×`'s own verb, reached through the `×`'s own door — so the
                 // gate a destruction has to pass is passed once and not twice.
                 profiles::PaneMenuRow::ClosePane => self.close_pane(seat),

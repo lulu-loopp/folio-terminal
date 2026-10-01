@@ -43,8 +43,8 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     adapter::{
-        AdapterEvent, RemovalCause, RemovalScope, RemovalScreen, TerminalAdapter, TerminalDamage,
-        TerminalModes,
+        AdapterEvent, PtyTransport, RemovalCause, RemovalScope, RemovalScreen, TerminalAdapter,
+        TerminalDamage, TerminalModes,
     },
     cell_capture::{CapturedRowFingerprint, captured_row_is_blank},
     command_marks::{CommandMark, CommandMarkId, CommandMarkLedger},
@@ -2304,6 +2304,30 @@ impl DualPlaneSession {
         self.terminal.modes()
     }
 
+    /// Restore the program-owned terminal modes in this session without sending
+    /// input to its child — the person's road out of what a program that died
+    /// without its teardown left on ([`TerminalAdapter::reset_program_modes`]
+    /// lists the modes; `transport` says which of them the carrier keeps).
+    ///
+    /// The return to the primary screen goes through this session's own screen
+    /// switch: the adapter's `PrimaryRestored` is applied by the same
+    /// [`Self::apply_events`] an in-stream `?1049l` reaches, so the live screen,
+    /// the parked primary, the decorations and the document all change the way
+    /// they do when a program leaves the alternate screen itself. The screen's
+    /// damage counter moves whether or not a screen was switched: a cursor made
+    /// visible or a mode that changes what the pane draws is a changed picture
+    /// that arrived without a byte ([`Self::screen_revision`]).
+    pub fn reset_program_modes(&mut self, transport: PtyTransport) -> Result<(), SessionError> {
+        let observed_at = Instant::now();
+        let events = self.terminal.reset_program_modes(transport);
+        let damage = self.terminal.take_damage();
+        self.screen_revision = self.screen_revision.wrapping_add(1);
+        self.apply_events(events, observed_at)?;
+        self.observe_live_damage(damage, observed_at);
+        self.sync_staging_tail();
+        Ok(())
+    }
+
     /// Protocol replies are returned to the owning app, which is the only PTY writer.
     pub fn take_pty_writes(&self) -> Vec<Vec<u8>> {
         self.terminal.take_pty_writes()
@@ -2455,7 +2479,8 @@ impl DualPlaneSession {
     /// without this moving would be a card frozen on an old picture, and there is
     /// no path to that, because the grid cannot be written except through
     /// [`Self::feed_at`], the DEC 2026 block one of those feeds opened and
-    /// [`Self::finish_synchronized_update`] closes, or a resize.
+    /// [`Self::finish_synchronized_update`] closes, a resize, or the person's
+    /// [`Self::reset_program_modes`].
     pub fn screen_revision(&self) -> u64 {
         self.screen_revision
     }
@@ -37581,6 +37606,69 @@ mod tests {
             "the program drawing this prompt is the one that asked for the mouse"
         );
         assert!(modes.sgr_mouse);
+    }
+
+    /// RED (T-RESET-MODES) — **the reset takes the session off the alternate
+    /// screen by its own screen switch: the primary is live again, and the
+    /// shell's next prompt start is heard, recorded and retires what it retires
+    /// on the primary screen.**
+    ///
+    /// This is the 2026-09-30 incident as the code sees it: a full-screen program
+    /// on the alternate screen died, the shell's prompts were drawn there, and on
+    /// the alternate screen `133;A` records no prompt and retires no mode (the
+    /// tests above). Only after the session's own `RestorePrimary` has run is the
+    /// shell's mark evidence about the shell again.
+    ///
+    /// MUTATION: drop the `apply_events` call in
+    /// `DualPlaneSession::reset_program_modes` — the adapter is on the primary
+    /// screen but the session still parks it, and `shell_integration_seen` stays
+    /// false.
+    #[test]
+    fn a_reset_session_is_back_on_the_primary_screen_and_hears_the_next_prompt() {
+        let mut session = DualPlaneSession::new(nz(40), nz(6));
+        session.feed("主屏 primary\r\n".as_bytes()).unwrap();
+        session
+            .feed(b"\x1b[?1049h\x1b[?1003h\x1b[?1006hagent")
+            .unwrap();
+        // The shell's prompt, drawn on the screen the dead program left up.
+        session.feed(b"\x1b]133;A\x1b\\PS> ").unwrap();
+        assert!(!session.shell_integration_seen());
+        assert_eq!(session.live_screen, ScreenId::Alternate);
+
+        session.reset_program_modes(PtyTransport::Unix).unwrap();
+        assert_eq!(session.live_screen, ScreenId::Primary);
+        assert!(!session.primary_parked);
+        assert!(!session.terminal_modes().alternate_screen);
+
+        session.feed(b"\x1b[?1003h\x1b]133;A\x1b\\PS> ").unwrap();
+        assert!(
+            session.shell_integration_seen(),
+            "a prompt on the primary screen is the shell speaking again"
+        );
+        assert_eq!(
+            session.terminal_modes().mouse_tracking,
+            crate::adapter::MouseTracking::Off,
+            "and the prompt-time cleanup acts there again"
+        );
+    }
+
+    /// RED (T-RESET-MODES) — **a reset moves the screen revision, so a card keyed
+    /// to it redraws** — including a reset that switches no screen and only
+    /// shows the cursor again.
+    ///
+    /// MUTATION: drop the `screen_revision` bump in
+    /// `DualPlaneSession::reset_program_modes`; the primary-screen reset leaves
+    /// the number where it was.
+    #[test]
+    fn a_reset_moves_the_screen_revision_even_without_a_screen_switch() {
+        let mut session = DualPlaneSession::new(nz(20), nz(4));
+        session
+            .feed("主屏 primary\x1b[?25l\x1b[?1003h".as_bytes())
+            .unwrap();
+        let held = session.screen_revision();
+        session.reset_program_modes(PtyTransport::ConPty).unwrap();
+        assert!(session.screen_revision() > held);
+        assert!(session.terminal.cursor().visible);
     }
 
     /// RED (T-KEYBOARD-PROTOCOL) — **the first time a session is asked for a keyboard flag it does
