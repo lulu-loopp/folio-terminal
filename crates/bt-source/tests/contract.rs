@@ -7,7 +7,7 @@
 //! 1. **The ten duplicated conditional identities** of §2.4, *regenerated*
 //!    from the index and compared with the plan's list — so an eleventh is a red
 //!    test and not a surprise in P3.
-//! 2. **The macro facts of §2.7**: three `macro_rules!` definitions in
+//! 2. **The macro facts of §2.7**: four `macro_rules!` definitions in
 //!    `bt-app`, one of them constructing items — exactly the `Text` enum and
 //!    its test list, nothing else in that arm; no source inclusion, no
 //!    `module_path!`, no `compile_error!`; one line-number invocation, in the
