@@ -957,8 +957,8 @@ fn uninstall_entrance_row_removes_this_copys_values_and_leaves_the_rest() {
 /// PIN (T-UNINSTALL-UX; U-9, T-UNINSTALL-DOCS) — **the archive is its ten members, and
 /// `uninstall.cmd` is one press: one question in both languages where Enter keeps settings and
 /// data, then the door's `--uninstall` — with `--remove-data` only on `n` — and a pause; a line in
-/// both languages when the door answers that Folio is running; no pid, and no deletion of its
-/// own.**
+/// both languages when the door answers that Folio is running; success says removal continues
+/// after the window closes rather than claiming completion; no pid, and no deletion of its own.**
 ///
 /// The script names no pid because a batch file cannot learn its own and need not: it is the
 /// door's parent, and the door's remover waits for its parent. It deletes nothing itself — the
@@ -1002,7 +1002,7 @@ fn uninstall_archive_has_ten_files_and_a_one_press_wrapper() {
     assert!(wrapper.contains("if /i \"%answer%\"==\"n\" set \"remove=--remove-data\""));
     assert!(wrapper.contains("if \"%door%\"==\"2\""));
     assert!(wrapper.contains("if \"%door%\"==\"0\""));
-    assert!(wrapper.contains("Folio's files are removed when this window closes."));
+    assert!(wrapper.contains("Removal continues after this window closes."));
     assert!(wrapper.contains("pause"));
     for text in [Text::UninstallScriptQuestion, Text::UninstallScriptRunning] {
         // Both columns: the script prints each line in English, then in Chinese
@@ -2006,6 +2006,39 @@ fn a_bundle_reached_through_a_symlink_is_refused() {
     });
     assert!(error.in_lang(Lang::English).contains("symlink or junction"));
     remove_directory_link(&link);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// RED (T-UNINSTALL-UX round 6, mutation `refuse_bundle_ancestor_links`) — an
+/// ancestor above the `.app` name may be a symlink: macOS's ordinary `/tmp` and
+/// `/var` spellings require ancestors to be canonicalized. The bundle name and
+/// everything below it remain subject to the adjacent refusal test.
+#[test]
+fn a_bundle_under_a_symlinked_ancestor_is_planned_by_its_canonical_path() {
+    let (root, _) = sandbox("uninstall-bundle-linked-ancestor");
+    let real_parent = root.join("real");
+    let real_bundle = real_parent.join("Folio.app");
+    let real_exe = real_bundle.join("Contents/MacOS/folio");
+    fs::create_dir_all(real_exe.parent().unwrap()).unwrap();
+    fs::write(&real_exe, b"fixture executable").unwrap();
+    fs::write(real_bundle.join("Contents/Info.plist"), b"plist").unwrap();
+    let alias = root.join("alias");
+    plant_directory_link(&alias, &real_parent);
+    let linked_exe = alias.join("Folio.app/Contents/MacOS/folio");
+    let plan = on_a_worker(move |worker| {
+        program_plan(worker, &linked_exe, HostPlatform::MacOs, |_| {
+            panic!("a bundle has no manifest to ask")
+        })
+        .expect("a linked ancestor is canonicalized into a program plan")
+    });
+    let canonical_bundle = resolved(&real_bundle);
+    assert_eq!(plan.root, canonical_bundle);
+    assert!(
+        plan.items
+            .iter()
+            .all(|item| item.path().starts_with(&canonical_bundle))
+    );
+    remove_directory_link(&alias);
     fs::remove_dir_all(root).unwrap();
 }
 

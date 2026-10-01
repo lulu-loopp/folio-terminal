@@ -23,7 +23,7 @@ if "%door%"=="2" (
     echo Folio 正在运行。退出 Folio 后重新运行 uninstall.cmd。
 )
 if "%door%"=="0" (
-    echo Folio's files are removed when this window closes.
+    echo Removal continues after this window closes.
     rem zh: pending
 )
 pause

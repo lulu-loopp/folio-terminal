@@ -1666,8 +1666,9 @@ struct ProgramPlan {
 /// - **Anything else**: the executable.
 ///
 /// Every item is looked at without following links, and a directory is walked
-/// whole: a link or a junction anywhere among them refuses the whole plan
-/// (`prepare_tree`'s rule: the head resolved, the part Folio names looked at).
+/// whole: a link or junction at the bundle/item name or below it refuses the
+/// whole plan. Ancestors above that name are canonicalized; macOS itself has
+/// linked ancestors in ordinary launch paths.
 fn program_plan(
     worker: &WorkerCtx,
     exe: &Path,
@@ -1808,8 +1809,9 @@ fn unowned_names(names: Vec<OsString>, scheduled: &[OsString]) -> Vec<OsString> 
         .collect()
 }
 
-/// Refuse the unresolved `.app` name and every lexical component from it to
-/// the launch executable before canonicalization can erase an outer symlink.
+/// Refuse the unresolved `.app` name and every lexical component below it
+/// through the launch executable before canonicalization can erase such a
+/// symlink. Ancestors above the bundle name are canonicalized, not refused.
 fn refuse_bundle_chain(worker: &WorkerCtx, bundle: &Path, exe: &Path) -> Result<(), Why> {
     let relative = exe
         .strip_prefix(bundle)

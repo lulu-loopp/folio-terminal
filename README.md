@@ -54,6 +54,21 @@ Take Folio out the way it came in:
 
 Folio's files are removed and its folder only if it is then empty.
 
+Folio starts a copied remover through an internal, undocumented
+`--uninstall-remove` door; the door is not authenticated. At planning time and
+again immediately before each deletion, Folio checks that the file at the path
+is regular, has one hard link, and has the expected size and SHA-256. Both the
+check and deletion are by path. Another process running as the same account
+that deliberately swaps a file in that instant is outside what Folio defends
+against.
+
+If the remover is ended or power is lost during removal, some Folio files may
+remain and there may be no final report. If the installed Folio executable
+remains, run the uninstall again: it skips files already gone and plans the
+matching Folio files that remain. If that executable is already gone, remove
+the remaining Folio installation files and its folder manually, without
+removing unrelated files that share the folder.
+
 <!-- winget: add when live. winget runs no cleanup for Folio (a portable zip, no
 uninstall hook): `folio --uninstall-cleanup`, then `winget uninstall WeiyiShi.Folio`.
 There is no MSIX install: the zip's folio.msix only carries the Explorer menu,

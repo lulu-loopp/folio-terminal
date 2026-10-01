@@ -1,16 +1,22 @@
 //! **The uninstall remover** — a native copy of the running executable which
-//! outlives every process using the installed image, verifies each file again
-//! at the destructive boundary, and reports a truthful final result.
+//! outlives every process using the installed image, checks each named file
+//! again immediately before trying to delete it, and reports a truthful final
+//! result.
 //!
 //! `schedule` creates an unpredictable directory below the caller's per-user
-//! Folio directory, copies the running executable there, holds the copy open
-//! against replacement until the child acknowledges readiness, and starts it
-//! as `--uninstall-remove`. No script or command interpreter is involved.
+//! Folio directory, copies the running executable there, keeps a handle open
+//! through the child's readiness acknowledgement, and starts it through the
+//! internal, undocumented `--uninstall-remove` door. That handle denies name
+//! replacement on Windows; it is an ordinary read handle on Unix. The exact
+//! word routes the copy; it does not authenticate the caller or its plan. No
+//! script or command interpreter is involved.
 //! The child waits by `(pid, start time)`, for at most five minutes, and then
 //! retries held removals with bounded backoff. A file is removed only when its
-//! current length and SHA-256 still equal the expected identity. Any failure is
-//! written beside the remover as `result.txt` and shown through
-//! `standalone_alert`; the alert names both the remaining paths and that file.
+//! current length and SHA-256 still equal the expected identity. The checks and
+//! deletion are path based; a same-account process deliberately swapping a
+//! path in that instant is outside Folio's guarantees. Any failure is written
+//! beside the remover as `result.txt` and shown through `standalone_alert`; the
+//! alert names the remaining path, any last I/O error, and that file.
 
 use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
@@ -23,7 +29,8 @@ use std::time::{Duration, Instant};
 use crate::admission::WorkerCtx;
 use crate::install_flip::Running;
 
-/// The private argv door served by the copied executable.
+/// The internal, undocumented argv door served by the copied executable.
+/// Exact spelling is routing, not caller or plan authentication.
 pub const REMOVE_FLAG: &str = "--uninstall-remove";
 
 /// Every process wait, including a persistent parent shell, ends here.
@@ -131,7 +138,7 @@ pub struct FailureWords {
     pub result_at: String,
 }
 
-/// The complete immutable removal handed to the copied executable.
+/// The complete removal plan handed to the copied executable.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Removal {
     /// The running executable copied to become the remover.
@@ -146,8 +153,9 @@ pub struct Removal {
 }
 
 /// Create the native remover under `private_root`, start it with breakaway
-/// semantics, and return only after it has parsed its immutable inherited
-/// environment and acknowledged readiness.
+/// semantics, and return only after it has parsed its inherited environment
+/// and acknowledged readiness. This is a hand-off protocol, not authentication
+/// against another process running as the same account.
 ///
 /// # Errors
 /// The private directory/copy could not be made, the copy differed from the
@@ -295,10 +303,10 @@ pub fn schedule(worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> i
                     return stop_child(worker, child, &copy, &private, error);
                 }
             }
-            // The child has parsed and authenticated the inherited plan but
-            // cannot touch it until this byte arrives. This makes readiness a
-            // real hand-off: the scheduler observes a live remover while the
-            // executable copy is still held against replacement.
+            // The child has parsed the inherited plan but cannot touch it until
+            // this byte arrives. This makes readiness a real hand-off: the
+            // scheduler observes a live remover while the executable copy is
+            // still held on platforms whose file semantics provide that hold.
             if let Err(error) = release.write_all(b"go\n").and_then(|()| release.flush()) {
                 drop(copy_guard);
                 return stop_child(worker, child, &copy, &private, error);
@@ -509,8 +517,9 @@ fn put_environment(command: &mut std::process::Command, removal: &Removal, priva
     }
 }
 
-/// Run the private remover described by the inherited environment. This is the
-/// entire body of `folio.exe --uninstall-remove`.
+/// Run the internal remover described by the inherited environment. This is
+/// the entire body of `folio.exe --uninstall-remove`; the undocumented word is
+/// not an authentication boundary.
 pub fn run_from_environment(worker: &WorkerCtx) -> i32 {
     let parsed = removal_from_environment(worker);
     let (removal, private) = match parsed {
@@ -665,11 +674,26 @@ fn required_indexed_number<T: std::str::FromStr>(name: &str, index: usize) -> io
         .map_err(|_| io::Error::other(format!("remover field {name}_{index} is not a number")))
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct LeftItem {
+    path: PathBuf,
+    error: Option<String>,
+}
+
+impl LeftItem {
+    fn at(path: &Path, error: Option<io::Error>) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            error: error.map(|error| error.to_string()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Outcome {
     Removed,
     TimedOut(Vec<OsString>),
-    Left(Vec<PathBuf>),
+    Left(Vec<LeftItem>),
 }
 
 fn perform(worker: &WorkerCtx, removal: &Removal, within: Duration) -> Outcome {
@@ -700,7 +724,9 @@ fn perform_with(
         let images = match crate::install_flip::running_from(&removal.program) {
             Ok(images) => images,
             Err(error) if error.kind() == io::ErrorKind::Unsupported => Vec::new(),
-            Err(_) => return Outcome::Left(vec![removal.program.clone()]),
+            Err(error) => {
+                return Outcome::Left(vec![LeftItem::at(&removal.program, Some(error))]);
+            }
         };
         for process in images {
             let name = crate::install_flip::image_name(process).unwrap_or_else(|| {
@@ -724,32 +750,83 @@ fn perform_with(
         crate::wait::sleep_within(worker, WAIT_POLL.min(left));
     }
 
-    let mut remaining: Vec<&Item> = removal.items.iter().collect();
-    let mut folder_left = removal.folder.as_deref();
+    remove_with(
+        worker,
+        removal,
+        attempts,
+        first_backoff,
+        remove_item,
+        remove_empty_folder,
+        |path| fs::exists(path),
+    )
+}
+
+fn remove_with(
+    worker: &WorkerCtx,
+    removal: &Removal,
+    attempts: usize,
+    first_backoff: Duration,
+    mut remove: impl FnMut(&Item) -> io::Result<bool>,
+    mut remove_folder: impl FnMut(&Path) -> io::Result<bool>,
+    mut exists: impl FnMut(&Path) -> io::Result<bool>,
+) -> Outcome {
+    struct Pending<'a> {
+        item: &'a Item,
+        removed: bool,
+        last_error: Option<io::Error>,
+    }
+
+    let mut pending: Vec<Pending<'_>> = removal
+        .items
+        .iter()
+        .map(|item| Pending {
+            item,
+            removed: false,
+            last_error: None,
+        })
+        .collect();
+    let mut folder_removed = removal.folder.is_none();
+    let mut folder_error = None;
     let mut backoff = first_backoff;
     for attempt in 0..attempts {
-        remaining.retain(|item| !remove_item(item).unwrap_or(false));
-        if remaining.is_empty()
-            && let Some(folder) = folder_left
-            && remove_empty_folder(folder).unwrap_or(false)
-        {
-            folder_left = None;
+        for state in pending.iter_mut().filter(|state| !state.removed) {
+            match remove(state.item) {
+                Ok(removed) => state.removed = removed,
+                Err(error) => state.last_error = Some(error),
+            }
         }
-        if remaining.is_empty() && folder_left.is_none() {
-            return Outcome::Removed;
+        if pending.iter().all(|state| state.removed)
+            && let Some(folder) = removal.folder.as_deref()
+            && !folder_removed
+        {
+            match remove_folder(folder) {
+                Ok(removed) => folder_removed = removed,
+                Err(error) => folder_error = Some(error),
+            }
+        }
+        if pending.iter().all(|state| state.removed) && folder_removed {
+            break;
         }
         if attempt + 1 < attempts {
             crate::wait::sleep_within(worker, backoff);
             backoff = (backoff * 2).min(MAX_DELETE_BACKOFF);
         }
     }
-    let mut left: Vec<PathBuf> = remaining
-        .into_iter()
-        .filter(|item| item.path().exists())
-        .map(|item| item.path().to_path_buf())
-        .collect();
-    if let Some(folder) = folder_left.filter(|folder| folder.exists()) {
-        left.push(folder.to_path_buf());
+
+    let mut left = Vec::new();
+    for state in pending {
+        match exists(state.item.path()) {
+            Ok(false) => {}
+            Ok(true) => left.push(LeftItem::at(state.item.path(), state.last_error)),
+            Err(error) => left.push(LeftItem::at(state.item.path(), Some(error))),
+        }
+    }
+    if let Some(folder) = removal.folder.as_deref() {
+        match exists(folder) {
+            Ok(false) => {}
+            Ok(true) => left.push(LeftItem::at(folder, folder_error)),
+            Err(error) => left.push(LeftItem::at(folder, Some(error))),
+        }
     }
     if left.is_empty() {
         Outcome::Removed
@@ -793,7 +870,7 @@ fn remove_verified_file(path: &Path, expected: &FileIdentity) -> io::Result<bool
         }
     }
     fs::remove_file(path)?;
-    Ok(!path.exists())
+    fs::exists(path).map(|exists| !exists)
 }
 
 fn remove_empty_folder(path: &Path) -> io::Result<bool> {
@@ -832,12 +909,23 @@ fn finish(
     remover_identity: &FileIdentity,
     outcome: Outcome,
 ) -> i32 {
+    finish_with(words, private, outcome, || {
+        retire_self(private, remover_identity)
+    })
+}
+
+fn finish_with(
+    words: &FailureWords,
+    private: &Path,
+    outcome: Outcome,
+    retire: impl FnOnce() -> io::Result<()>,
+) -> i32 {
     let result = private.join(RESULT_NAME);
     let failure = failure_summary(words, outcome);
     if let Some(failure) = failure {
         let text = format!("{failure}\n{}\n{}", words.result_at, result.display());
         let written = fs::write(&result, format!("{text}\n"));
-        let self_result = retire_self(private, remover_identity);
+        let self_result = retire();
         let mut shown = match written {
             Ok(()) => text,
             Err(error) => format!("{failure}\n{error}"),
@@ -848,7 +936,7 @@ fn finish(
         show_failure(&words.title, &shown);
         1
     } else {
-        match retire_self(private, remover_identity) {
+        match retire() {
             Ok(()) => 0,
             Err(error) => {
                 let executable = std::env::current_exe()
@@ -896,7 +984,10 @@ fn failure_summary(words: &FailureWords, outcome: Outcome) -> Option<String> {
             words.files_left,
             paths
                 .iter()
-                .map(|path| path.display().to_string())
+                .map(|left| match &left.error {
+                    Some(error) => format!("{}: {error}", left.path.display()),
+                    None => left.path.display().to_string(),
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         )),
@@ -1034,7 +1125,6 @@ fn self_delete(_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Arc, Barrier};
 
     fn sandbox(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -1124,6 +1214,8 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn the_private_remover_cannot_be_replaced_before_readiness() {
+        use std::sync::{Arc, Barrier};
+
         let root = sandbox("guard");
         let copy = root.join(COPY_NAME_WINDOWS);
         fs::write(&copy, b"remover").unwrap();
@@ -1182,7 +1274,12 @@ mod tests {
         );
         let outcome =
             on_worker(move |worker| perform_with(worker, &plan, Duration::ZERO, 1, Duration::ZERO));
-        assert_eq!(outcome, Outcome::Left(vec![file.clone()]));
+        let Outcome::Left(left) = outcome else {
+            panic!("a held file is a final failure")
+        };
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].path, file);
+        assert!(left[0].error.is_some(), "the removal error is preserved");
         assert!(file.exists());
         drop(held);
         assert!(remove_verified_file(&file, &expected).unwrap());
@@ -1255,10 +1352,81 @@ mod tests {
         );
 
         let path = PathBuf::from("install/folio.exe");
-        let left = failure_text(&words(), result, Outcome::Left(vec![path.clone()])).unwrap();
+        let left = failure_text(
+            &words(),
+            result,
+            Outcome::Left(vec![LeftItem::at(&path, None)]),
+        )
+        .unwrap();
         assert!(left.contains("Folio could not remove:"), "{left}");
         assert!(left.contains(&path.display().to_string()), "{left}");
         assert!(left.contains(&result.display().to_string()), "{left}");
+    }
+
+    /// RED (T-UNINSTALL-UX round 6, mutation `restore_lossy_exists`) — when
+    /// removal and the final metadata read are both refused, the final read's
+    /// error is attached to the path, the outcome is failure, and `result.txt`
+    /// keeps that answer.
+    #[test]
+    fn a_refused_removal_and_final_read_are_reported_not_removed() {
+        let root = sandbox("refused-final-read");
+        let program = root.join("source.exe");
+        fs::write(&program, b"program").unwrap();
+        let path = root.join("install/folio.exe");
+        let plan = removal(
+            &program,
+            Item::File {
+                path: path.clone(),
+                expected: FileIdentity {
+                    size: 7,
+                    sha256: "expected".to_owned(),
+                },
+            },
+            None,
+        );
+        let outcome = on_worker(move |worker| {
+            remove_with(
+                worker,
+                &plan,
+                1,
+                Duration::ZERO,
+                |_| {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "removal refused",
+                    ))
+                },
+                |_| Ok(false),
+                |_| {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "metadata read refused",
+                    ))
+                },
+            )
+        });
+        let expected = Outcome::Left(vec![LeftItem {
+            path: path.clone(),
+            error: Some("metadata read refused".to_owned()),
+        }]);
+        assert_eq!(outcome, expected);
+
+        let private = root.join("private");
+        fs::create_dir(&private).unwrap();
+        let cleanup_target = private.clone();
+        assert_eq!(
+            finish_with(&words(), &private, outcome, move || {
+                let _ = fs::remove_dir(cleanup_target);
+                Ok(())
+            }),
+            1
+        );
+        let result = private.join(RESULT_NAME);
+        let text = fs::read_to_string(&result).unwrap();
+        assert!(text.contains(&path.display().to_string()), "{text}");
+        assert!(text.contains("metadata read refused"), "{text}");
+        assert!(result.exists(), "a failed remover keeps its result");
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// RED (T-UNINSTALL-UX round 2, mutation `do_not_release_ready_remover`) —

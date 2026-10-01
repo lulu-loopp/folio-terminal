@@ -861,8 +861,9 @@ pub const REMOVE_DATA_FLAG: &str = "--remove-data";
 /// the door waits for before it touches anything".
 pub const AFTER_PID_FLAG: &str = "--after-pid";
 
-/// The copied native remover's private door. It accepts no other word and is
-/// intentionally absent from the public usage line.
+/// The copied native remover's internal, undocumented door. It accepts no
+/// other word and is absent from the public usage line; exact grammar routes
+/// the remover but does not authenticate its caller or inherited plan.
 pub fn uninstall_remove(args: impl IntoIterator<Item = OsString>) -> bool {
     let mut args = args.into_iter();
     args.next().as_deref() == Some(OsStr::new(bt_platform::deferred_removal::REMOVE_FLAG))
@@ -2560,8 +2561,9 @@ mod tests {
     }
 
     /// RED (T-UNINSTALL-UX round 2, mutation `accept_private_door_tail`) — the
-    /// native remover door is exact and private: one word only, with neither a
-    /// value nor another public verb.
+    /// native remover door is internal and undocumented, with exact routing:
+    /// one word only, with neither a value nor another public verb. Exactness
+    /// is not caller or plan authentication.
     #[test]
     fn the_native_remover_door_accepts_only_its_exact_word() {
         assert!(uninstall_remove(args(&["--uninstall-remove"])));
