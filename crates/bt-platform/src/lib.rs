@@ -2910,14 +2910,18 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comm
 /// object and this is the ordinary quiet child door.
 #[must_use]
 pub fn quiet_breakaway_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
-    let mut command = quiet_command(program);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
+        let mut command = quiet_command(program);
         command.creation_flags(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB);
+        command
     }
-    command
+    #[cfg(not(windows))]
+    {
+        quiet_command(program)
+    }
 }
 
 /// **Which executable a process id is running**, or `None` when this process may not ask.
