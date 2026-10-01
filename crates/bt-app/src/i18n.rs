@@ -4868,10 +4868,16 @@ impl Text {
             Self::CleanupMarkHotkeys => pick(lang, "Quake / global hotkeys", "Quake / 全局快捷键"),
             Self::CleanupMarkRoaming => pick(lang, "Roaming data", "漫游数据"),
             Self::CleanupMarkLegacy => pick(lang, "Legacy data", "历史数据"),
-            Self::CleanupMarkLocal => pick(
+            // WebView2 is part of the Windows local-data root. A Mac's web data has its own
+            // WebKit and HTTPStorages inventory rows below, so its local-data row names no
+            // Windows program.
+            Self::CleanupMarkLocal => pick_platform(
                 lang,
+                platform,
                 "Local data (including WebView2)",
                 "本地数据（含 WebView2）",
+                "Local data",
+                "本地数据",
             ),
             Self::CleanupMarkApplicationSupport => {
                 pick(lang, "Application Support", "Application Support")

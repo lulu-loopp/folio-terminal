@@ -153,7 +153,7 @@ pub struct Removal {
 /// The private directory/copy could not be made, the copy differed from the
 /// running executable, the job object refused breakaway, or the child did not
 /// reach its readiness handshake. Nothing has been removed in those cases.
-pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> io::Result<()> {
+pub fn schedule(worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> io::Result<()> {
     validate(removal, private_root)?;
     fs::create_dir_all(private_root)?;
     validate_private_root(private_root)?;
@@ -163,7 +163,7 @@ pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> 
     } else {
         COPY_NAME_UNIX
     });
-    if let Err(error) = copy_new(&removal.program, &copy) {
+    if let Err(error) = copy_new(worker, &removal.program, &copy) {
         discard_private(&copy, &private);
         return Err(error);
     }
@@ -199,7 +199,10 @@ pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> 
     #[cfg(test)]
     let mut command = crate::quiet_command(&copy);
     command
-        .current_dir(&private)
+        // The copied process removes `private` and, when empty, its Folio
+        // parent before it exits. Its current directory must therefore live
+        // outside both of them.
+        .current_dir(private_root.parent().unwrap_or(private_root))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
@@ -231,6 +234,7 @@ pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> 
     let Some(ready) = child.stdout.take() else {
         drop(copy_guard);
         return stop_child(
+            worker,
             child,
             &copy,
             &private,
@@ -240,6 +244,7 @@ pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> 
     let Some(mut release) = child.stdin.take() else {
         drop(copy_guard);
         return stop_child(
+            worker,
             child,
             &copy,
             &private,
@@ -266,7 +271,7 @@ pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> 
         },
     ) {
         drop(copy_guard);
-        return stop_child(child, &copy, &private, error);
+        return stop_child(worker, child, &copy, &private, error);
     }
     let answer = received.recv_timeout(READY_WITHIN);
     match answer {
@@ -275,6 +280,7 @@ pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> 
                 Ok(Some(status)) => {
                     drop(copy_guard);
                     return stop_child(
+                        worker,
                         child,
                         &copy,
                         &private,
@@ -286,7 +292,7 @@ pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> 
                 Ok(None) => {}
                 Err(error) => {
                     drop(copy_guard);
-                    return stop_child(child, &copy, &private, error);
+                    return stop_child(worker, child, &copy, &private, error);
                 }
             }
             // The child has parsed and authenticated the inherited plan but
@@ -295,7 +301,7 @@ pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> 
             // executable copy is still held against replacement.
             if let Err(error) = release.write_all(b"go\n").and_then(|()| release.flush()) {
                 drop(copy_guard);
-                return stop_child(child, &copy, &private, error);
+                return stop_child(worker, child, &copy, &private, error);
             }
             drop(release);
             drop(copy_guard);
@@ -304,6 +310,7 @@ pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> 
         Ok(Ok(line)) => {
             drop(copy_guard);
             stop_child(
+                worker,
                 child,
                 &copy,
                 &private,
@@ -312,11 +319,12 @@ pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> 
         }
         Ok(Err(error)) => {
             drop(copy_guard);
-            stop_child(child, &copy, &private, error)
+            stop_child(worker, child, &copy, &private, error)
         }
         Err(mpsc::RecvTimeoutError::Timeout) => {
             drop(copy_guard);
             stop_child(
+                worker,
                 child,
                 &copy,
                 &private,
@@ -326,6 +334,7 @@ pub fn schedule(_worker: &WorkerCtx, removal: &Removal, private_root: &Path) -> 
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             drop(copy_guard);
             stop_child(
+                worker,
                 child,
                 &copy,
                 &private,
@@ -354,7 +363,13 @@ fn validate_private_root(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn stop_child(mut child: Child, copy: &Path, private: &Path, error: io::Error) -> io::Result<()> {
+fn stop_child(
+    _worker: &WorkerCtx,
+    mut child: Child,
+    copy: &Path,
+    private: &Path,
+    error: io::Error,
+) -> io::Result<()> {
     let _ = child.kill();
     let _ = child.wait();
     discard_private(copy, private);
@@ -423,7 +438,7 @@ fn private_directory(root: &Path) -> io::Result<PathBuf> {
     ))
 }
 
-fn copy_new(from: &Path, to: &Path) -> io::Result<()> {
+fn copy_new(_worker: &WorkerCtx, from: &Path, to: &Path) -> io::Result<()> {
     let mut source = File::open(from)?;
     let mut target = OpenOptions::new().write(true).create_new(true).open(to)?;
     io::copy(&mut source, &mut target)?;
@@ -497,11 +512,11 @@ fn put_environment(command: &mut std::process::Command, removal: &Removal, priva
 /// Run the private remover described by the inherited environment. This is the
 /// entire body of `folio.exe --uninstall-remove`.
 pub fn run_from_environment(worker: &WorkerCtx) -> i32 {
-    let parsed = removal_from_environment();
+    let parsed = removal_from_environment(worker);
     let (removal, private) = match parsed {
         Ok(value) => value,
         Err(error) => {
-            return failure_without_plan(error);
+            return failure_without_plan(worker, error);
         }
     };
     if writeln!(io::stdout(), "{READY_LINE}")
@@ -515,16 +530,22 @@ pub fn run_from_environment(worker: &WorkerCtx) -> i32 {
         return 1;
     }
     let result = perform(worker, &removal, REMOVAL_TIMEOUT);
-    finish(&removal.words, &private, &removal.program_identity, result)
+    finish(
+        worker,
+        &removal.words,
+        &private,
+        &removal.program_identity,
+        result,
+    )
 }
 
-fn failure_without_plan(error: io::Error) -> i32 {
+fn failure_without_plan(_worker: &WorkerCtx, error: io::Error) -> i32 {
     let _ = writeln!(io::stdout(), "refused: {error}");
     let _ = io::stdout().flush();
     1
 }
 
-fn removal_from_environment() -> io::Result<(Removal, PathBuf)> {
+fn removal_from_environment(_worker: &WorkerCtx) -> io::Result<(Removal, PathBuf)> {
     let private = required_path("PRIVATE")?;
     if !private
         .file_name()
@@ -805,6 +826,7 @@ fn digest(mut file: File) -> io::Result<String> {
 }
 
 fn finish(
+    _worker: &WorkerCtx,
     words: &FailureWords,
     private: &Path,
     remover_identity: &FileIdentity,
@@ -917,9 +939,11 @@ fn self_delete(path: &Path) -> io::Result<()> {
     use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::Storage::FileSystem::{
-        CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_INFO, FILE_RENAME_INFO,
-        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FileDispositionInfo, FileRenameInfo,
-        OPEN_EXISTING, SetFileInformationByHandle,
+        CreateFileW, DELETE, FILE_ATTRIBUTE_NORMAL, FILE_DISPOSITION_FLAG_DELETE,
+        FILE_DISPOSITION_FLAG_POSIX_SEMANTICS, FILE_DISPOSITION_INFO_EX,
+        FILE_DISPOSITION_INFO_EX_FLAGS, FILE_RENAME_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, FileDispositionInfoEx, FileRenameInfo, OPEN_EXISTING,
+        SetFileInformationByHandle,
     };
     use windows::core::PCWSTR;
 
@@ -942,7 +966,6 @@ fn self_delete(path: &Path) -> io::Result<()> {
         // SAFETY: `opened` is owned by this call alone.
         Ok::<_, io::Error>(unsafe { OwnedHandle::from_raw_handle(opened.0) })
     };
-
     // A mapped Windows image cannot be given POSIX delete disposition at its
     // ordinary stream. Renaming that stream first detaches the mapped image
     // from the file's deletable name without introducing another filesystem
@@ -980,15 +1003,19 @@ fn self_delete(path: &Path) -> io::Result<()> {
     drop(owned);
 
     let owned = open()?;
-    let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+    let disposition = FILE_DISPOSITION_INFO_EX {
+        Flags: FILE_DISPOSITION_INFO_EX_FLAGS(
+            FILE_DISPOSITION_FLAG_DELETE.0 | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS.0,
+        ),
+    };
     // SAFETY: the handle and fixed-size structure are live for the call.
     unsafe {
         SetFileInformationByHandle(
             HANDLE(owned.as_raw_handle()),
-            FileDispositionInfo,
+            FileDispositionInfoEx,
             &raw const disposition as *const _,
-            u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO>())
-                .expect("FILE_DISPOSITION_INFO fits u32"),
+            u32::try_from(std::mem::size_of::<FILE_DISPOSITION_INFO_EX>())
+                .expect("FILE_DISPOSITION_INFO_EX fits u32"),
         )
     }
     .map_err(|_| io::Error::last_os_error())?;

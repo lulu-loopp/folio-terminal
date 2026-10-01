@@ -1588,7 +1588,8 @@ fn remove_the_program(
     };
     let row = format!("{label}: {}", plan.root.display());
     let mut waited = after.to_vec();
-    match bt_platform::install_flip::running_from(&plan.program) {
+    let program: &Path = &plan.program;
+    match bt_platform::install_flip::running_from(program) {
         Ok(running) => {
             for process in running {
                 if !waited.contains(&process) {
@@ -1600,8 +1601,7 @@ fn remove_the_program(
             return vec![Entry::new(label, Fate::Refused(Why::of(&error)))];
         }
     }
-    let fallback_name = plan
-        .program
+    let fallback_name = program
         .file_name()
         .unwrap_or_else(|| std::ffi::OsStr::new("folio"))
         .to_os_string();

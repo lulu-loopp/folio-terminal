@@ -43,6 +43,8 @@
 ## and `#[macro_export]`, each by owner — the product item it is written in, or the module when it
 ## is written in none (inside `define_class!`) — with its count. A construct or owner not listed
 ## here is refused, and so is a listed one that is gone; counts taken from the code (A1e).
+## Windows's undocumented `MessageBoxTimeoutW` has no `windows` 0.62.2 binding, so
+## `windows_impl::message_box` owns its one narrow declaration and link attribute.
 
 # rows
 row	status	call	where	disposition
@@ -165,7 +167,13 @@ bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	ow
 bt-app	-	crate::uninstall::names_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::uninstall::tree_items	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
-bt-platform	-	crate::deferred_removal::schedule	std::sync::mpsc::Receiver::recv_timeout 1, std::process::Child::wait 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::copy_new	std::fs::File::sync_all 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::failure_without_plan	std::io::Write::write_fmt 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::finish	std::fs::write 2	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::removal_from_environment	std::fs::canonicalize 2	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::run_from_environment	std::io::Write::write_fmt 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::schedule	std::fs::create_dir_all 1, std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::stop_child	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
 
@@ -176,12 +184,14 @@ construct	owner	count
 #[link]	bt-platform crate::macos_dialogs	1
 #[link]	bt-platform crate::macos_impl	1
 #[link]	bt-platform crate::macos_watch	1
+#[link]	bt-platform crate::windows_impl::message_box	1
 extern block	bt-platform crate::hotkey::macos_hotkey	1
 extern block	bt-platform crate::launch_pipe::peer_executable	1
 extern block	bt-platform crate::macos_app	1
 extern block	bt-platform crate::macos_dialogs	1
 extern block	bt-platform crate::macos_impl	1
 extern block	bt-platform crate::macos_watch	1
+extern block	bt-platform crate::windows_impl::message_box	1
 msg_send!	bt-platform crate::http::DownloadTransport::new	1
 msg_send!	bt-platform crate::http::Transport::new	1
 msg_send!	bt-platform crate::macos_app::delegate_answers_the_dock_menu	1

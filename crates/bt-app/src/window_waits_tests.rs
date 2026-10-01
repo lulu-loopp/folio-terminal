@@ -1708,12 +1708,13 @@ const LANDMARKS: [(&str, &[&str]); 4] = [
 /// in `fn main` after the parse (and so before the hand-over); `loop_running` on
 /// `StartCause::Init`; `exiting` at the head of `App::finish`, in `settle_quit`'s `Write` arm, in
 /// `main`'s build-error arm and after `run_app`; `quit_abandoned` in the `Abandon` arm; and the
-/// six standalone entries (the fourth, the macOS applier's, U-28; the fifth, the recovery
-/// door's, which rolls a macOS bundle back on a worker since U-29 and recovers a Windows
-/// transaction since U-23; the sixth, the Windows applier's, U-23). B-ENDSESSION adds the
+/// seven standalone entries (the fourth, the copied remover's, T-UNINSTALL-UX; the fifth, the
+/// macOS applier's, U-28; the sixth, the recovery door's, which rolls a macOS bundle back on a
+/// worker since U-29 and recovers a Windows transaction since U-23; the seventh, the Windows
+/// applier's, U-23). B-ENDSESSION adds the
 /// system's end's write step, `exiting` then `quit_abandoned` around the one admitted wait in
 /// `session_end::settle` (the quit's `Write` on the held document; nothing is torn down).
-const PINS: [Pin; 15] = [
+const PINS: [Pin; 16] = [
     Pin {
         writer: "enter_window_thread",
         owner: "bt-app crate::main",
@@ -1776,6 +1777,11 @@ const PINS: [Pin; 15] = [
     },
     Pin {
         writer: "enter_standalone_main",
+        owner: "bt-app crate::uninstall::remover_standalone",
+        after: None,
+    },
+    Pin {
+        writer: "enter_standalone_main",
         owner: "bt-app crate::update_apply_macos::run_here",
         after: None,
     },
@@ -1790,6 +1796,48 @@ const PINS: [Pin; 15] = [
         after: None,
     },
 ];
+
+/// The two remover helpers whose raw effects became worker doors are reached only from the worker
+/// roads that own them: `schedule` for the durable private copy, and the copied remover's
+/// `run_from_environment` for its refusal line. This is the call-site half of their `# effects`
+/// rows; the registry guard separately proves that each helper itself takes `WorkerCtx`.
+fn the_remover_effect_doors_are_called_only_from_their_worker_roads(world: &World) -> Vec<String> {
+    let src = world.src("bt-platform");
+    let mut failures = Vec::new();
+    for (name, wanted) in [
+        (
+            "copy_new",
+            BTreeMap::from([(
+                "bt-platform crate::deferred_removal::schedule".to_owned(),
+                1,
+            )]),
+        ),
+        (
+            "failure_without_plan",
+            BTreeMap::from([(
+                "bt-platform crate::deferred_removal::run_from_environment".to_owned(),
+                1,
+            )]),
+        ),
+    ] {
+        let mut callers = BTreeMap::new();
+        for at in src.named(name) {
+            let file_start = src.index.file_at(at).map_or(0, |file| file.span().start());
+            let before = src.lex(at.saturating_sub(8).max(file_start), at);
+            if src.is(before.last(), "fn") || !src.in_product(at) {
+                continue;
+            }
+            *callers.entry(src.owner_of(at)).or_insert(0) += 1;
+        }
+        if callers != wanted {
+            failures.push(format!(
+                "`deferred_removal::{name}` is called only by its pinned worker road; found \
+                 {callers:?}, wanted {wanted:?}"
+            ));
+        }
+    }
+    failures
+}
 
 /// `enter_callback`'s pinned entries (§3.3 as corrected by (c)7): package, module, the
 /// callback's name, calls.
@@ -3327,12 +3375,13 @@ fn every_entrance_left_the_vocabulary_takes_its_capability(world: &World) -> Vec
 /// allow(clippy::disallowed_methods))]`, a `#[macro_export]` macro naming `thread::sleep`, a
 /// `msg_send!` outside its owners, an `async` door, a second `thread::sleep` in
 /// `video::engine::Engine::shutdown`, `PtySession::drop` calling `shutdown` before the dump's
-/// `finish` — and the named assertion goes red with that site.
+/// `finish`, or call `deferred_removal::copy_new` from a second function — and the named assertion
+/// goes red with that site.
 #[test]
 fn every_door_is_where_the_registry_says() {
     let world = World::new();
     let words = vocabulary();
-    let assertions: [(&str, Vec<String>); 11] = [
+    let assertions: [(&str, Vec<String>); 12] = [
         (
             "the_universe_is_the_product_and_its_tools_are_declared",
             the_universe_is_the_product_and_its_tools_are_declared(&world),
@@ -3348,6 +3397,10 @@ fn every_door_is_where_the_registry_says() {
         (
             "the_role_and_phase_writers_are_called_only_where_they_are_pinned",
             the_role_and_phase_writers_are_called_only_where_they_are_pinned(&world),
+        ),
+        (
+            "the_remover_effect_doors_are_called_only_from_their_worker_roads",
+            the_remover_effect_doors_are_called_only_from_their_worker_roads(&world),
         ),
         (
             "no_lint_on_raw_effects_is_lowered_outside_a_door",
