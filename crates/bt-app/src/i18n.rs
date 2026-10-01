@@ -4924,21 +4924,9 @@ impl Text {
                 "The uninstaller did not start, and nothing was removed.",
                 "卸载程序未启动，未移除任何内容。",
             ),
-            Self::UninstallStillRunning => pick(
-                lang,
-                "Still running:",
-                "Still running:", // zh: pending opus46
-            ),
-            Self::UninstallFilesLeft => pick(
-                lang,
-                "Folio could not remove:",
-                "Folio could not remove:", // zh: pending opus46
-            ),
-            Self::UninstallResultAt => pick(
-                lang,
-                "Details were saved to:",
-                "Details were saved to:", // zh: pending opus46
-            ),
+            Self::UninstallStillRunning => pick(lang, "Still running:", "仍在运行："),
+            Self::UninstallFilesLeft => pick(lang, "Folio could not remove:", "Folio 未能移除："),
+            Self::UninstallResultAt => pick(lang, "Details were saved to:", "详情已保存至："),
             Self::RowUninstall => pick(lang, "Uninstall Folio", "卸载 Folio"),
             Self::UninstallVerb => pick(lang, "Uninstall…", "卸载…"),
             Self::DescUninstall => pick(
@@ -6781,14 +6769,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: [(Self, HostPlatform); 6] = [
-        (Self::UninstallStillRunning, HostPlatform::Windows),
-        (Self::UninstallStillRunning, HostPlatform::MacOs),
-        (Self::UninstallFilesLeft, HostPlatform::Windows),
-        (Self::UninstallFilesLeft, HostPlatform::MacOs),
-        (Self::UninstallResultAt, HostPlatform::Windows),
-        (Self::UninstallResultAt, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: [(Self, HostPlatform); 0] = [];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

@@ -24,7 +24,7 @@ if "%door%"=="2" (
 )
 if "%door%"=="0" (
     echo Removal continues after this window closes.
-    rem zh: pending
+    echo 关闭此窗口后继续移除。
 )
 pause
 chcp %codepage% >nul

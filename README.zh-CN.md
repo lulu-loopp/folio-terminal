@@ -40,22 +40,11 @@ brew install --cask lulu-loopp/folio/folio
 - **macOS DMG**——打开**设置 ▸ 关于 ▸ 卸载 Folio**，或退出 Folio 后运行 `/Applications/Folio.app/Contents/MacOS/folio --uninstall`。两种方式均完整移除 Folio，包括应用。
 - **Homebrew**——`brew uninstall --zap folio`。
 
-<!-- zh: pending --> Folio's files are removed and its folder only if it is then empty.
+移除 Folio 的文件，文件夹仅在随后为空时一并移除。
 
-<!-- zh: pending --> Folio starts a copied remover through an internal,
-undocumented `--uninstall-remove` door; the door is not authenticated. At
-planning time and again immediately before each deletion, Folio checks that the
-file at the path is regular, has one hard link, and has the expected size and
-SHA-256. Both the check and deletion are by path. Another process running as
-the same account that deliberately swaps a file in that instant is outside what
-Folio defends against.
+Folio 通过内部未公开的 `--uninstall-remove` 入口启动一份副本执行移除，该入口不做身份验证。规划阶段和每次删除前，Folio 检查目标路径上的文件是否为普通文件、硬链接数为一，且大小与 SHA-256 与预期一致。检查和删除均按路径进行。同一账户下的另一进程若在此刻刻意替换文件，不在 Folio 的防护范围内。
 
-<!-- zh: pending --> If the remover is ended or power is lost during removal,
-some Folio files may remain and there may be no final report. If the installed
-Folio executable remains, run the uninstall again: it skips files already gone
-and plans the matching Folio files that remain. If that executable is already
-gone, remove the remaining Folio installation files and its folder manually,
-without removing unrelated files that share the folder.
+若移除过程中断或断电，部分文件可能残留，且可能没有最终报告。若 Folio 可执行文件仍在，再次运行卸载即可——已删除的文件跳过，剩余的匹配文件重新规划。若可执行文件已不在，手动删除残留的 Folio 安装文件及文件夹，注意不要误删文件夹中的无关文件。
 
 <!-- winget: add when live. winget runs no cleanup for Folio (a portable zip, no
 uninstall hook): `folio --uninstall-cleanup`, then `winget uninstall WeiyiShi.Folio`.
