@@ -309,6 +309,11 @@ impl Runtime<'_> {
                 ),
                 ModalBand::Fixed,
             )
+        } else if let Some(layout) = self.uninstall_card_layout() {
+            // **The uninstaller's confirmation card** (T-UNINSTALL-UX), over the settings dialog
+            // it was raised from, in its place for as long as it is up — the update card's
+            // arrangement, and its chassis. No scrim.
+            (self.uninstall_card_build(&layout), ModalBand::Fixed)
         } else if let Some(layout) = self.settings_layout() {
             // The hover and the readings first, then the renderer: a combo whose
             // value outgrows its 118px button is ellipsised, and only the font

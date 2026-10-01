@@ -68,6 +68,11 @@ impl Runtime<'_> {
             settings::ConfigurationDoor::Folder => {
                 self.reveal_in_explorer(&persist::storage_dir());
             }
+            // **`Uninstall…`** (T-UNINSTALL-UX): the confirmation card, over this
+            // dialog. Nothing is asked of the application until its *Uninstall*.
+            settings::ConfigurationDoor::Uninstall => {
+                self.window.settings.raise_uninstall_card();
+            }
         }
     }
 

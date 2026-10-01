@@ -55,6 +55,90 @@ pub(crate) enum CardVerb {
     Close,
 }
 
+/// **What a card's verbs owe the chassis they are drawn in** — the update card's
+/// [`CardVerb`], and the uninstaller's confirmation card's [`UninstallVerb`]
+/// (T-UNINSTALL-UX): their words, which of them the card recommends, and which
+/// one the `×` and `Escape` are.
+pub(crate) trait Verbs: Copy + Eq + std::fmt::Debug {
+    /// The word on the button.
+    fn text(self) -> &'static str;
+    /// **The verb drawn in the accent**, of the verbs a card carries, if any.
+    fn recommended(verbs: &[Self]) -> Option<Self>;
+    /// **What the `×` and `Escape` are** on this card.
+    fn put_away() -> Self;
+}
+
+impl Verbs for CardVerb {
+    fn text(self) -> &'static str {
+        CardVerb::text(self)
+    }
+
+    /// C9's first, except `Cancel`: a card that recommended stopping its own
+    /// download would be recommending the one press nobody raised it for.
+    fn recommended(verbs: &[Self]) -> Option<Self> {
+        verbs.first().copied().filter(|verb| *verb != Self::Cancel)
+    }
+
+    /// Later (§B).
+    fn put_away() -> Self {
+        Self::Later
+    }
+}
+
+/// **A button on the uninstaller's confirmation card** (T-UNINSTALL-UX): two
+/// verbs, the one the reader came for and the one that changes nothing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UninstallVerb {
+    /// Quit, and uninstall as the process's last act.
+    Uninstall,
+    /// Put the card away; nothing changes.
+    Cancel,
+}
+
+impl Verbs for UninstallVerb {
+    fn text(self) -> &'static str {
+        match self {
+            Self::Uninstall => Text::UninstallCardUninstall,
+            Self::Cancel => Text::UninstallCardCancel,
+        }
+        .text()
+    }
+
+    /// *Uninstall*, the verb the reader pressed `Uninstall…` for; the ring is
+    /// not lit when the card rises, so `Enter` presses nothing until a key has
+    /// lit it ([`Card`]).
+    fn recommended(verbs: &[Self]) -> Option<Self> {
+        verbs.iter().copied().find(|verb| *verb == Self::Uninstall)
+    }
+
+    /// Cancel: the `×` and `Escape` change nothing.
+    fn put_away() -> Self {
+        Self::Cancel
+    }
+}
+
+/// **What the uninstaller's confirmation card says** (T-UNINSTALL-UX): the
+/// question, then what happens to settings and data — the switch's answer —
+/// and the two verbs, *Uninstall* first.
+#[must_use]
+pub(crate) fn uninstall_paint(remove_data: bool) -> Paint<UninstallVerb> {
+    Paint {
+        heading: Some(Text::UninstallCardHeading.text().to_owned()),
+        bar: None,
+        detail: Some(
+            if remove_data {
+                Text::UninstallCardRemoves
+            } else {
+                Text::UninstallCardKeeps
+            }
+            .text()
+            .to_owned(),
+        ),
+        folder: None,
+        verbs: vec![UninstallVerb::Uninstall, UninstallVerb::Cancel],
+    }
+}
+
 impl CardVerb {
     /// The word on the button.
     #[must_use]
@@ -107,21 +191,22 @@ pub(crate) enum Asks {
 
 /// What a point on the card is over.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Target {
+pub(crate) enum Target<V = CardVerb> {
     /// The face, or the window beside it: answers nothing.
     Panel,
-    /// The `×` — Later (§B).
+    /// The `×` — Later (§B); Cancel on the uninstaller's card.
     Close,
-    Verb(CardVerb),
+    Verb(V),
 }
 
-impl Target {
-    /// The verb a press on this target is, with the close box read as Later.
+impl<V: Verbs> Target<V> {
+    /// The verb a press on this target is, with the close box read as the
+    /// card's own way of putting it away ([`Verbs::put_away`]).
     #[must_use]
-    pub(crate) const fn verb(self) -> Option<CardVerb> {
+    pub(crate) fn verb(self) -> Option<V> {
         match self {
             Self::Panel => None,
-            Self::Close => Some(CardVerb::Later),
+            Self::Close => Some(V::put_away()),
             Self::Verb(verb) => Some(verb),
         }
     }
@@ -156,7 +241,7 @@ pub(crate) enum Outcome {
 /// **Everything the card draws, in the order it draws it** — decided here, from
 /// the job alone, and measured and placed by `restore::update_card_layout`.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Paint {
+pub(crate) struct Paint<V = CardVerb> {
     /// The state's one line, drawn in the title's weight. `None` on the
     /// download's card, whose first row is the bar.
     pub(crate) heading: Option<String>,
@@ -167,19 +252,15 @@ pub(crate) struct Paint {
     pub(crate) folder: Option<PathBuf>,
     /// C9's verbs, in C9's order; the first is the one the card recommends
     /// ([`Self::primary`]).
-    pub(crate) verbs: Vec<CardVerb>,
+    pub(crate) verbs: Vec<V>,
 }
 
-impl Paint {
-    /// **The verb drawn in the accent** — C9's first, except `Cancel`: a card
-    /// that recommended stopping its own download would be recommending the one
-    /// press nobody raised it for.
+impl<V: Verbs> Paint<V> {
+    /// **The verb drawn in the accent** ([`Verbs::recommended`]) — on the update
+    /// card C9's first, except `Cancel`.
     #[must_use]
-    pub(crate) fn primary(&self) -> Option<CardVerb> {
-        self.verbs
-            .first()
-            .copied()
-            .filter(|verb| *verb != CardVerb::Cancel)
+    pub(crate) fn primary(&self) -> Option<V> {
+        V::recommended(&self.verbs)
     }
 }
 
@@ -333,20 +414,29 @@ pub(crate) fn megabytes(bytes: Bytes) -> Option<(String, f32)> {
 /// verb the ring stands on: the card rises by itself, while the reader may be
 /// typing, and a return key already on its way must not start a download
 /// (the PSReadLine invitation's rule for a card that writes).
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct Card {
-    hover: Option<Target>,
-    ring: Option<CardVerb>,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Card<V = CardVerb> {
+    hover: Option<Target<V>>,
+    ring: Option<V>,
 }
 
-impl Card {
+impl<V> Default for Card<V> {
+    fn default() -> Self {
+        Self {
+            hover: None,
+            ring: None,
+        }
+    }
+}
+
+impl<V: Verbs> Card<V> {
     #[must_use]
-    pub(crate) const fn hover(&self) -> Option<Target> {
+    pub(crate) const fn hover(&self) -> Option<Target<V>> {
         self.hover
     }
 
     /// Returns whether the drawing has to change.
-    pub(crate) fn set_hover(&mut self, hover: Option<Target>) -> bool {
+    pub(crate) fn set_hover(&mut self, hover: Option<Target<V>>) -> bool {
         let changed = self.hover != hover;
         self.hover = hover;
         changed
@@ -354,15 +444,15 @@ impl Card {
 
     /// The verb the ring stands on, if it stands on one of `verbs`.
     #[must_use]
-    pub(crate) fn ring(&self, verbs: &[CardVerb]) -> Option<CardVerb> {
+    pub(crate) fn ring(&self, verbs: &[V]) -> Option<V> {
         self.ring.filter(|verb| verbs.contains(verb))
     }
 
     /// `Tab` / `Shift+Tab`: the ring lights, or moves, over the verbs in the
     /// order they are drawn (C9's order reversed: the recommended verb stands
     /// on the right).
-    pub(crate) fn step_ring(&mut self, verbs: &[CardVerb], forward: bool) {
-        let drawn: Vec<CardVerb> = verbs.iter().rev().copied().collect();
+    pub(crate) fn step_ring(&mut self, verbs: &[V], forward: bool) {
+        let drawn: Vec<V> = verbs.iter().rev().copied().collect();
         if drawn.is_empty() {
             return;
         }
@@ -398,9 +488,9 @@ pub(crate) enum Key {
 }
 
 /// **The verb a key answers**, after the ring has moved (`Step`), or `None`.
-pub(crate) fn key(card: &mut Card, verbs: &[CardVerb], key: Key) -> Option<CardVerb> {
+pub(crate) fn key<V: Verbs>(card: &mut Card<V>, verbs: &[V], key: Key) -> Option<V> {
     match key {
-        Key::Later => Some(CardVerb::Later),
+        Key::Later => Some(V::put_away()),
         Key::Step { forward } => {
             card.step_ring(verbs, forward);
             None
@@ -582,8 +672,9 @@ mod tests {
     use bt_platform::HostPlatform;
 
     use super::{
-        Asks, Bar, Card, CardVerb, Key, Outcome, Paint, RowFoot, Target, copy_command, failed, key,
-        paint, row_description_in, row_foot, shown, spend,
+        Asks, Bar, Card, CardVerb, Key, Outcome, Paint, RowFoot, Target, UninstallVerb,
+        copy_command, failed, key, paint, row_description_in, row_foot, shown, spend,
+        uninstall_paint,
     };
     use crate::i18n::{Lang, Text};
     use crate::install_channel::{Channel, Manager};
@@ -1299,7 +1390,7 @@ mod tests {
             Some(CardVerb::Later),
             "the × is Later"
         );
-        assert_eq!(Target::Panel.verb(), None);
+        assert_eq!(Target::<CardVerb>::Panel.verb(), None);
         // A ring on a verb the card no longer carries is out.
         assert_eq!(card.ring(&[CardVerb::Cancel]), None);
     }
@@ -1350,6 +1441,50 @@ mod tests {
             crate::restore::update_card_hit(&layout, 1.0, 1.0),
             Target::Panel,
             "beside the card is the card's, and answers nothing"
+        );
+    }
+
+    /// RED (T-UNINSTALL-UX) — **the uninstaller's confirmation card says whether settings and
+    /// data stay, carries Uninstall then Cancel, and presses nothing on `Enter` until a key has
+    /// lit the ring; `Escape` and the `×` are Cancel.**
+    ///
+    /// MUTATION: in `UninstallVerb::put_away`, answer `Uninstall`, and `Escape` uninstalls.
+    #[test]
+    fn the_uninstall_card_names_what_stays_and_escape_cancels() {
+        let keeps = uninstall_paint(false);
+        let removes = uninstall_paint(true);
+        assert_eq!(
+            keeps.detail.as_deref(),
+            Some(Text::UninstallCardKeeps.text())
+        );
+        assert_eq!(
+            removes.detail.as_deref(),
+            Some(Text::UninstallCardRemoves.text())
+        );
+        assert_eq!(
+            keeps.verbs,
+            [UninstallVerb::Uninstall, UninstallVerb::Cancel]
+        );
+        assert_eq!(keeps.primary(), Some(UninstallVerb::Uninstall));
+        let mut card = Card::<UninstallVerb>::default();
+        assert_eq!(
+            key(&mut card, &keeps.verbs, Key::Press),
+            None,
+            "the ring is unlit"
+        );
+        assert_eq!(
+            key(&mut card, &keeps.verbs, Key::Later),
+            Some(UninstallVerb::Cancel)
+        );
+        assert_eq!(
+            Target::<UninstallVerb>::Close.verb(),
+            Some(UninstallVerb::Cancel)
+        );
+        key(&mut card, &keeps.verbs, Key::Step { forward: true });
+        assert_eq!(
+            key(&mut card, &keeps.verbs, Key::Press),
+            Some(UninstallVerb::Cancel),
+            "the first Tab lands on the leftmost button, Cancel"
         );
     }
 }

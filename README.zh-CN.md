@@ -33,19 +33,25 @@ brew install --cask lulu-loopp/folio/folio
 
 ## 卸载
 
-先退出 Folio，再按安装方式移除：
+按安装方式卸载：
 
-- **Windows 压缩包**——双击 Folio 文件夹中的 `uninstall.cmd`（或在该目录运行 `folio.exe --uninstall-cleanup`），然后删除文件夹。
+- **Windows 压缩包**——打开**设置 ▸ 关于 ▸ 卸载 Folio**，或退出 Folio 后双击其文件夹中的 `uninstall.cmd`。
 - **scoop**——`scoop uninstall folio`，自动完成清理。
-- **macOS DMG**——运行 `/Applications/Folio.app/Contents/MacOS/folio --uninstall-cleanup`，然后将 **Folio** 拖入废纸篓。
+- **macOS DMG**——打开**设置 ▸ 关于 ▸ 卸载 Folio**，或退出 Folio 后运行 `/Applications/Folio.app/Contents/MacOS/folio --uninstall`。两种方式均完整移除 Folio，包括应用。
 - **Homebrew**——`brew uninstall --zap folio`。
+
+移除 Folio 的文件，文件夹仅在随后为空时一并移除。
+
+Folio 通过内部未公开的 `--uninstall-remove` 入口启动一份副本执行移除，该入口不做身份验证。规划阶段和每次删除前，Folio 检查目标路径上的文件是否为普通文件、硬链接数为一，且大小与 SHA-256 与预期一致。检查和删除均按路径进行。同一账户下的另一进程若在此刻刻意替换文件，不在 Folio 的防护范围内。
+
+若移除过程中断或断电，部分文件可能残留，且可能没有最终报告。若 Folio 可执行文件仍在，再次运行卸载即可——已删除的文件跳过，剩余的匹配文件重新规划。若可执行文件已不在，手动删除残留的 Folio 安装文件及文件夹，注意不要误删文件夹中的无关文件。
 
 <!-- winget: add when live. winget runs no cleanup for Folio (a portable zip, no
 uninstall hook): `folio --uninstall-cleanup`, then `winget uninstall WeiyiShi.Folio`.
 There is no MSIX install: the zip's folio.msix only carries the Explorer menu,
 and the cleanup unregisters it. -->
 
-清理移除 Folio 在自身文件夹外添加的内容——资源管理器或 Finder 的右键菜单、PowerShell 配置文件中的行、agent 钩子——设置和数据保留。如需一并删除，先为清理命令加上 `--purge` 再删除应用；Homebrew 的 `--zap` 已删除设置文件夹。[`docs/install.zh-CN.md`](docs/install.zh-CN.md#卸载) 说明清理命令退出码的含义。
+卸载移除 Folio 在自身文件夹外添加的内容——资源管理器或 Finder 的菜单、PowerShell 配置文件中的行、agent 钩子——设置和数据保留。如需一并移除，在设置中打开**同时移除设置和数据**，在 `uninstall.cmd` 中回答 `n`，或加上 `--remove-data`；Homebrew 的 `--zap` 已包含设置文件夹。输出使用 Folio 当前设定的语言。[`docs/install.zh-CN.md`](docs/install.zh-CN.md#卸载) 说明退出码的含义。
 
 ## 功能
 

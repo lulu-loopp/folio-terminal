@@ -42,27 +42,45 @@ the first run asks, and what to do if the system puts a panel in front of you.
 
 ## Uninstall
 
-Quit Folio first, then take it out the way it came in:
+Take Folio out the way it came in:
 
-- **Windows zip** — double-click `uninstall.cmd` in Folio's folder (or run
-  `folio.exe --uninstall-cleanup` there), then delete the folder.
+- **Windows zip** — open **Settings ▸ About ▸ Uninstall Folio**, or quit Folio
+  and double-click `uninstall.cmd` in its folder.
 - **scoop** — `scoop uninstall folio` runs the same cleanup for you.
-- **macOS DMG** — run
-  `/Applications/Folio.app/Contents/MacOS/folio --uninstall-cleanup`, then drag
-  **Folio** to the Bin.
+- **macOS DMG** — open **Settings ▸ About ▸ Uninstall Folio**, or quit Folio and
+  run `/Applications/Folio.app/Contents/MacOS/folio --uninstall`. Either one
+  removes Folio completely, the app included.
 - **Homebrew** — `brew uninstall --zap folio`.
+
+Folio's files are removed and its folder only if it is then empty.
+
+Folio starts a copied remover through an internal, undocumented
+`--uninstall-remove` door; the door is not authenticated. At planning time and
+again immediately before each deletion, Folio checks that the file at the path
+is regular, has one hard link, and has the expected size and SHA-256. Both the
+check and deletion are by path. Another process running as the same account
+that deliberately swaps a file in that instant is outside what Folio defends
+against.
+
+If the remover is ended or power is lost during removal, some Folio files may
+remain and there may be no final report. If the installed Folio executable
+remains, run the uninstall again: it skips files already gone and plans the
+matching Folio files that remain. If that executable is already gone, remove
+the remaining Folio installation files and its folder manually, without
+removing unrelated files that share the folder.
 
 <!-- winget: add when live. winget runs no cleanup for Folio (a portable zip, no
 uninstall hook): `folio --uninstall-cleanup`, then `winget uninstall WeiyiShi.Folio`.
 There is no MSIX install: the zip's folio.msix only carries the Explorer menu,
 and the cleanup unregisters it. -->
 
-The cleanup removes what Folio set up outside its folder — the Explorer or
+The uninstall removes what Folio set up outside its folder — the Explorer or
 Finder menu, the line in your PowerShell profile, agent hooks — and keeps your
-settings and data. To remove those too, add `--purge` to the cleanup command
-before you delete the app; Homebrew's `--zap` already removes the settings
-folder. [`docs/install.md`](docs/install.md#uninstalling) says what the
-cleanup's exit codes mean.
+settings and data. To remove those too, turn on **Also remove settings and
+data** in Settings, answer `n` in `uninstall.cmd`, or add `--remove-data`;
+Homebrew's `--zap` already removes the settings folder. Its lines are in the
+language Folio is set to. [`docs/install.md`](docs/install.md#uninstalling) says
+what its exit codes mean.
 
 ## What it does
 

@@ -1218,6 +1218,16 @@ impl Runtime<'_> {
             }
             return Ok(());
         }
+        // **The uninstaller's confirmation card owns the keyboard** (T-UNINSTALL-UX), over the
+        // settings dialog it was raised from and under the update card, with the update card's
+        // keys: `Escape` is Cancel, `Tab` lights and moves the ring, `Enter` and `Space` press only
+        // the verb the ring stands on. Every other key is swallowed.
+        if self.uninstall_card_is_up() {
+            if !event.repeat {
+                self.press_uninstall_card_key(&event.logical_key)?;
+            }
+            return Ok(());
+        }
         // **A modal owns the keyboard, and now has somewhere to put it.** Esc
         // unwinds one layer per press (§7.1.5: the open picker first, then the
         // dialog), Tab and the arrows walk the dialog's own focus order, and

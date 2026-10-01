@@ -1181,3 +1181,4 @@ bt-unicode = { path = "../bt-unicode" }
 # the decoder, beside the viewport and terminal callers that already depend on
 # `bt-transcript`. Keeping those grammars together is why this edge is general.
 bt-transcript = { path = "../bt-transcript" }
+bt-winres = { path = "../bt-winres" }

@@ -1,6 +1,8 @@
 ## The window thread's waits: the one registry (design note 2026-09-26; budget note R7).
 ##
 ## Six sections, each a header line then tab-separated lines. A line starting `##` is a comment.
+## Some seven-cell `worker-door-body` effect rows therefore end in a tab; `.gitattributes`
+## exempts this registry from blank-at-EOL diagnostics because the parser counts that empty cell.
 ##
 ## `# rows` — ARCHITECTURE §5.3, one line per numbered exception. `status` is `done` (repaid:
 ## what remains on the window thread is its residue, still listed), `open` (to be moved),
@@ -45,6 +47,8 @@
 ## and `#[macro_export]`, each by owner — the product item it is written in, or the module when it
 ## is written in none (inside `define_class!`) — with its count. A construct or owner not listed
 ## here is refused, and so is a listed one that is gone; counts taken from the code (A1e).
+## Windows's undocumented `MessageBoxTimeoutW` has no `windows` 0.62.2 binding, so
+## `windows_impl::message_box` owns its one narrow declaration and link attribute.
 
 # rows
 row	status	call	where	disposition
@@ -77,7 +81,7 @@ row	status	call	where	disposition
 26	open	the Windows clipboard's open: `retry_open_clipboard` sleeps 5, 10, 20 and 40 ms between five `OpenClipboard` attempts	`windows_impl::{clipboard_text, set_clipboard_text}` and `WindowsClipboard::begin`, from the copy and paste gestures	**open** — found by the thread-door note's revision (k)9 and ruled interim (`DESIGN.md`, 2026-09-27, *five window-thread waits the thread-door survey found are registry rows 24–28*): retained on the window thread, bounded by 75 ms of sleeps and five opens that do not wait; disposition made definite by the coordinator's ruling in the thread-door note's revision (m) (`DESIGN.md`, 2026-09-27, *the thread-door note's revision (m)*): an interim stay, repaid by the clipboard ticket B13 (version: 0.4.7); its door will be `ClipboardOpen`
 27	open	the media session's quiet at exit: `Readers::quiet_within(MEDIA_QUIET_BUDGET)`, a `Condvar::wait_timeout` against one deadline, for first-frame readers still inside Media Foundation, before `MFShutdown`	`fn main` → `video::shutdown_media_session`, after the loop returns	**open** — found by the thread-door note's revision (k)9 and ruled interim (`DESIGN.md`, 2026-09-27, *five window-thread waits the thread-door survey found are registry rows 24–28*): retained on the window thread, with a configured wait deadline of 1.5 s (`MEDIA_QUIET_BUDGET`; the mutex taken first, the condition variable's reacquisition and scheduling can pass it, so it is not an elapsed-time guarantee, and the `MFShutdown` after it has no deadline); repaid by D-80's ticket as scope added to D-80's recorded one (reader quiescence and `MFShutdown`, amended by the thread-door note's revision (m), `DESIGN.md`, 2026-09-27, *the thread-door note's revision (m)*), unless the owner rules it stays as rows 15–17 do (version: owner); its door will be `MediaQuiet`, admitting the reader quiescence only
 28	open	an update's trial takes the data directory's claim: `update_trial::take_the_claim_within` tries every 100 ms until the old build lets go	`fn main`, before `LaunchHandOver` (trials only)	**open** — found by the thread-door note's revision (k)9 and ruled interim (`DESIGN.md`, 2026-09-27, *five window-thread waits the thread-door survey found are registry rows 24–28*): retained on the window thread before the loop, bounded by `CLAIM_WAIT` (30 s) plus one last try; repaid by B11's startup claim ownership, unless the owner rules it stays as row 18 does (version: owner); its door will be `TrialClaim`
-29	ruled to stay	an update's exit guard at the process's end: `update_handoff::leave_armed` runs the guard on a worker of its own and waits `recv_timeout(LEAVE_WITHIN)` (75 s) for its answer — the wait for the applier's decision, the election, the start, its acknowledgement, the fallback	`fn main`, after the loop (only after *Restart to update*)	**ruled to stay** (`DESIGN.md`, 2026-09-28, *every road process of an update leaves through one exit guard*): the loop has returned and every window is gone; the process must not end before the start that replaces it is delivered, and the wait is bounded; during it no window of this process exists, so the person sees Folio gone until the applier's trial or the replacement appears, and the message box appears when nothing was delivered: at the latest at the bound, earlier when every start has already failed. The box itself is shown on this thread after the wait (`bt_platform::standalone_alert`, U-32) and is synchronous: the process returns when it is answered, or on macOS at the latest after `STANDALONE_ALERT_WITHIN` (15 min), when the system takes it away; Windows's ownerless `MessageBoxW` has no timeout and returns only when the person answers it (user-bounded, not bounded by Folio)
+29	ruled to stay	an update's exit guard at the process's end: `update_handoff::leave_armed` runs the guard on a worker of its own and waits `recv_timeout(LEAVE_WITHIN)` (75 s) for its answer — the wait for the applier's decision, the election, the start, its acknowledgement, the fallback	`fn main`, after the loop (only after *Restart to update*)	**ruled to stay** (`DESIGN.md`, 2026-09-28, *every road process of an update leaves through one exit guard*): the loop has returned and every window is gone; the process must not end before the start that replaces it is delivered, and the wait is bounded; during it no window of this process exists, so the person sees Folio gone until the applier's trial or the replacement appears, and the message box appears when nothing was delivered: at the latest at the bound, earlier when every start has already failed. The box itself is shown on this thread after the wait (`bt_platform::standalone_alert`, U-32) and is synchronous: the process returns when it is answered or at the latest after `STANDALONE_ALERT_WITHIN` (15 min), when macOS takes its system alert away or Windows's ownerless `MessageBoxTimeoutW` returns
 
 # doors
 door	row	station	phases	call	minted at	measures
@@ -158,19 +162,29 @@ bt_platform::WebHost::rehost	WebRehost
 
 # effects
 crate	arm	item	effects	kind	authority	door
+bt-app	-	crate::explorer_menu::cleanup_waited_on	std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::foreground_program::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::gpu_door::open_first_window	bt_render::GpuContext::open 1, pollster::block_on 1	owner-door-body	WaitToken	GpuOpen
+bt-app	-	crate::layout_tables::build_on_system	bt_platform::keyboard_layout_shift_table 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::layout_tables::WorkerRoad::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::persist::SessionWriter::close	std::thread::JoinHandle::join 1, std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
 bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
 bt-app	-	crate::pty_door::resize	bt_pty::PtySession::resize 1	owner-door-body	WaitToken	PtyResize
 bt-app	-	crate::pty_door::spawn_shell	bt_pty::PtySession::spawn_shell_in 1	owner-door-body	WaitToken	PtyBirth
 bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	owner-door-body	WaitToken	PaneRetirementWait
+bt-app	-	crate::uninstall::names_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
+bt-app	-	crate::uninstall::tree_items	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::update_handoff::leave_armed	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	UpdateLeave
-bt-app	-	crate::layout_tables::WorkerRoad::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::copy_new	std::fs::File::sync_all 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::failure_without_plan	std::io::Write::write_fmt 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::finish_with	std::fs::write 2	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::removal_from_environment	std::fs::canonicalize 2	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::run_from_environment	std::io::Write::write_fmt 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::schedule	std::fs::create_dir_all 1, std::sync::mpsc::Receiver::recv_timeout 1	worker-door-body	WorkerCtx	
+bt-platform	-	crate::deferred_removal::stop_child	std::process::Child::wait 1	worker-door-body	WorkerCtx	
 bt-platform	-	crate::wait::sleep_within	std::thread::sleep 1	worker-door-body	WorkerCtx	
 bt-platform	[unix]	crate::instance::sweep_stale_claims_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-platform	[target_os = "macos"]	crate::webview::macos::WebHost::request_environment	std::fs::create_dir_all 1	owner-door-body	WaitToken	WebEnvironment
-bt-app	-	crate::layout_tables::build_on_system	bt_platform::keyboard_layout_shift_table 1	worker-door-body	WorkerCtx	
 
 # owners
 construct	owner	count
@@ -179,6 +193,7 @@ construct	owner	count
 #[link]	bt-platform crate::macos_dialogs	1
 #[link]	bt-platform crate::macos_impl	1
 #[link]	bt-platform crate::macos_watch	1
+#[link]	bt-platform crate::windows_impl::message_box	1
 extern block	bt-platform crate::hotkey::macos_hotkey	1
 extern block	bt-platform crate::launch_pipe::peer_executable	1
 extern block	bt-platform crate::foreground_program::imp	1
@@ -186,6 +201,7 @@ extern block	bt-platform crate::macos_app	1
 extern block	bt-platform crate::macos_dialogs	1
 extern block	bt-platform crate::macos_impl	1
 extern block	bt-platform crate::macos_watch	1
+extern block	bt-platform crate::windows_impl::message_box	1
 msg_send!	bt-platform crate::http::DownloadTransport::new	1
 msg_send!	bt-platform crate::http::Transport::new	1
 msg_send!	bt-platform crate::macos_app::delegate_answers_the_dock_menu	1

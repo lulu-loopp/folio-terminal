@@ -1211,11 +1211,21 @@ format the previous version also reads** — the PSReadLine module install, the
 Explorer registration, the toast identity, the PowerShell profile line and the
 agent hooks — so an update's rollback leaves nothing the old build cannot repair
 on its next start; presses that write them during an update's trial are neither
-held back nor greyed (owner's ruling 2026-09-27).
+held back nor greyed (owner's ruling 2026-09-27). **A person's uninstall is one
+press** (owner's rulings 2026-09-29): `folio --uninstall [--remove-data]
+[--after-pid <pid>]`, reached from Settings ▸ About ▸ Uninstall Folio and from the
+zip's `uninstall.cmd`, runs the same cleanup in the language Folio is set to,
+keeps settings and data unless `--remove-data` (the Settings switch, `n` in the
+script) says otherwise, and after a cleanup that completed hands the program's
+own files to a remover that takes them once the process that asked has gone —
+on Windows only the files the release installed and then the folder if empty, on
+macOS the bundle; a link among them refuses the removal, and a managed copy is
+left to its manager. `--uninstall-cleanup` is unchanged, for the managers' hooks.
 **From.** `docs/plans/design/clean-uninstall-2026-09-20.md` — §1 what is left
 outside, §3 the six committed rules, and §6 *what the reviews changed*, which
 states that it rules, together with its closure addendum; the owner's ruling of
-2026-09-27 at the end of `docs/plans/design/self-update-2026-09-16.md`.
+2026-09-27 at the end of `docs/plans/design/self-update-2026-09-16.md`; trailing
+entry 2026-09-29 *One press uninstalls Folio* (T-UNINSTALL-UX).
 **Overrides.** §6 supersedes §§2–5 wherever they disagree: §3's ownership rule is
 replaced by §6's two-kinds-of-mark rule, and §6 corrects revision 1's harm
 ranking and its claim about which removal code was new.

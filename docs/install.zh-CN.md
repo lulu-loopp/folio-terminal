@@ -73,14 +73,20 @@ Agent 页的三个开关**默认关闭**，各自读取对应工具的配置文�
 
 ## 卸载
 
-关闭 Folio，在另一个终端中运行一条命令：
+**设置 ▸ 关于 ▸ 卸载 Folio** 一步完成：Folio 退出后，卸载程序移除整合项，再移除程序文件。如需同时移除设置和数据，先打开**同时移除设置和数据**。
 
-- **Windows：** 在解压目录中运行 `folio.exe --uninstall-cleanup`，或双击 `uninstall.cmd`。
-- **macOS：** `/Applications/Folio.app/Contents/MacOS/folio --uninstall-cleanup`。
+也可以关闭 Folio，在另一个终端中运行命令：
 
-命令不开窗。它移除 Folio 的整合项，保留属于另一份 Folio 的 hook 和右键菜单登记，逐项报告结果。退出码 `0` 表示清理完成；`1` 指出需要修正后重试的项；`2` 表示 Folio 正在运行，或使用 purge 时有进程仍持有数据。
+- **Windows：** 双击解压目录中的 `uninstall.cmd`（询问是否保留设置和数据，Enter 保留），或在该目录运行 `folio.exe --uninstall`。
+- **macOS：** `/Applications/Folio.app/Contents/MacOS/folio --uninstall`。
 
-在同一命令后加 `--purge` 可同时删除设置、会话和浏览器数据，包括 Windows 上的两个数据根目录和历史数据目录，或 macOS 上的全部六个数据位置。不加则数据保留。**macOS 上 Folio 无法判断是否有其他程序持有此数据**，清除前请先退出 Folio。带日期的配置备份不删除。应用文件夹本身不会被删除。清理完成后，删除解压文件夹或将 Folio.app 移至废纸篓；经包管理器安装的，用对应的包管理器卸载应用。
+命令不开窗，输出使用 Folio 当前设定的语言。它移除 Folio 的整合项，保留属于另一份 Folio 的钩子和资源管理器登记，逐项报告结果。退出码 `0` 表示卸载完成；`1` 指出需要修正后重试的项；`2` 表示 Folio 正在运行，或使用 `--remove-data` 时有进程仍持有数据。
+
+清理完成后才移除 Folio 自身的文件——Windows 上移除发行包中的文件，文件夹空则一并删除；macOS 上移除 `Folio.app`。关闭运行命令的窗口后生效。`folio.exe` 旁你自己的文件保留，所在文件夹也保留；命令会指出。经包管理器安装的由包管理器管理，命令会给出对应的卸载命令。
+
+加上 `--remove-data` 可同时删除设置、会话和浏览器数据，包括 Windows 上的两个数据根目录和历史数据目录，或 macOS 上的全部六个数据位置。不加则数据保留。**macOS 上 Folio 无法判断是否有其他程序持有此数据**——没有 Windows 那样的检查——清除前请先退出 Folio；命令启动时会提示。带日期的配置备份不删除。
+
+`folio --uninstall-cleanup [--purge]` 是同样的清理但不移除 Folio 自身的文件，输出为英文，供包管理器的卸载钩子调用。
 
 macOS 通知权限和缓存的服务条目由系统管理，删除应用包后可能需要一段时间才会反映。Windows 通知记录和包管理器信息同样由各自的管理方维护。
 

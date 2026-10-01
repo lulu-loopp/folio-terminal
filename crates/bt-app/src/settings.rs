@@ -3589,6 +3589,33 @@ pub enum SettingsRow {
     /// machine is a folder-sync tool's job; Folio speaks no network protocol for
     /// it (owner ruling 2026-09-22).
     SettingsFolder,
+    /// **`Uninstall…`** (T-UNINSTALL-UX, owner ruling 2026-09-29: "Settings has
+    /// an Uninstall row"): a press raises the confirmation card, and *Uninstall*
+    /// on it quits Folio, whose last act starts the uninstaller
+    /// (`uninstall::leave_armed`).
+    ///
+    /// On the About page, under the three configuration doors, because it is the
+    /// last door about what Folio keeps on this machine: it takes all of it away.
+    /// Shown only where this copy may remove itself — see
+    /// [`uninstall_rows_for`] and [`Self::UninstallBy`].
+    Uninstall,
+    /// **`Also remove settings and data`** — the switch the uninstall takes
+    /// (owner ruling 2026-09-29: "settings and data are kept by default; one
+    /// option removes them too").
+    ///
+    /// Directly under the door it conditions, the `Sidebar` pair's arrangement.
+    /// `Off` each time the dialog opens, and held by the panel
+    /// ([`SettingsPanel::uninstall_remove_data`]) — never written to
+    /// `settings.json`, whose folder is one of the things it removes. A switch
+    /// and not a checkbox beside the button: every row in this dialog answers
+    /// one question with one control, and a yes-or-no here is a switch.
+    UninstallData,
+    /// **`Uninstall Folio` on a copy a package manager installed** — the fact
+    /// that it did (the manager's name), and its command as the row's sentence;
+    /// no button, because this copy is not Folio's to remove (the update row's
+    /// arrangement for the same copy). Stands where [`Self::Uninstall`] and
+    /// [`Self::UninstallData`] stand on every other copy ([`uninstall_rows_for`]).
+    UninstallBy,
     /// **Which language the window writes in** (user ruling 2026-08-10, shipped
     /// 2026-08-17) — `General`'s first row, above the two that were already here.
     ///
@@ -3992,7 +4019,9 @@ impl SettingsRow {
             | Self::AboutLicences
             // The three configuration doors (0.4.4 ticket 05), under the three
             // that leave for an address — see [`Self::ExportSettings`].
-            | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => SettingsCategory::About,
+            | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder
+            // And the door that takes all of it away (T-UNINSTALL-UX).
+            | Self::Uninstall | Self::UninstallData | Self::UninstallBy => SettingsCategory::About,
             // **The eight rows of one window** (§7.54e ⑤, user ruling 2026-09-05). Four of them
             // stood on `General` until that ruling, under `Default profile`, on the argument that
             // the row above said what a new terminal starts as; what the page they are on now says
@@ -4171,6 +4200,8 @@ impl SettingsRow {
             Self::ExportSettings => Text::RowExportSettings.text(),
             Self::ImportSettings => Text::RowImportSettings.text(),
             Self::SettingsFolder => Text::RowSettingsFolder.text(),
+            Self::Uninstall | Self::UninstallBy => Text::RowUninstall.text(),
+            Self::UninstallData => Text::RowUninstallData.text(),
         }
     }
 
@@ -4497,6 +4528,17 @@ impl SettingsRow {
             Self::ExportSettings => Text::DescExportSettings.text(),
             Self::ImportSettings => Text::DescImportSettings.text(),
             Self::SettingsFolder => Text::DescSettingsFolder.text(),
+            Self::Uninstall => Text::DescUninstall.text(),
+            Self::UninstallData => Text::DescUninstallData.text(),
+            // **Not a constant**: the manager's own command, which is the row's
+            // whole sentence (T-UNINSTALL-UX). Interned for `update::row_description`'s
+            // reason (see `i18n::intern`).
+            Self::UninstallBy => crate::i18n::intern(crate::i18n::uninstall_by_in(
+                crate::i18n::current(),
+                &crate::uninstall::managed_uninstall()
+                    .map(|(_, command)| command)
+                    .unwrap_or_default(),
+            )),
         }
     }
 
@@ -4571,6 +4613,10 @@ impl SettingsRow {
             Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => {
                 SettingsControl::Link
             }
+            // The uninstaller's door is a door like them; on a copy a package
+            // manager installed, the row states the fact instead (T-UNINSTALL-UX).
+            Self::Uninstall => SettingsControl::Link,
+            Self::UninstallBy => SettingsControl::Text,
             _ => SettingsControl::Combo,
         }
     }
@@ -4711,7 +4757,8 @@ impl SettingsRow {
             | Self::AboutReleaseNotes
             | Self::AboutIssues
             | Self::AboutLicences
-            | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => false,
+            | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder
+            | Self::Uninstall | Self::UninstallData | Self::UninstallBy => false,
             // And the four the disclosure exists for — by the same measure that
             // put `Customise scheme…` behind one.
             Self::ProfileArgs
@@ -4832,6 +4879,7 @@ impl SettingsRow {
             // item nobody could press.
             | Self::ContextMenu
             | Self::ProfileLogin
+            | Self::UninstallData
             | Self::LineWrapping => FORMULA_OPTIONS.len(),
             Self::BlockMaxHeight => BLOCK_MAX_HEIGHT_OPTIONS.len(),
             Self::Scrollback => SCROLLBACK_OPTIONS.len(),
@@ -4894,7 +4942,8 @@ impl SettingsRow {
             | Self::AboutReleaseNotes
             | Self::AboutIssues
             | Self::AboutLicences
-            | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => 0,
+            | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder
+            | Self::Uninstall | Self::UninstallBy => 0,
         }
     }
 
@@ -4929,6 +4978,7 @@ impl SettingsRow {
             | Self::UpdateCheck
             | Self::ContextMenu
             | Self::ProfileLogin
+            | Self::UninstallData
             | Self::LineWrapping => FORMULA_OPTIONS.get(index).copied().map(on_off_label),
             // The one item that is a word goes through the i18n table and the
             // three that are quantities do not — the table's own header lists
@@ -5047,7 +5097,9 @@ impl SettingsRow {
             | Self::AboutLicences
             | Self::ExportSettings
             | Self::ImportSettings
-            | Self::SettingsFolder => None,
+            | Self::SettingsFolder
+            | Self::Uninstall
+            | Self::UninstallBy => None,
         }
     }
 
@@ -5391,6 +5443,9 @@ impl SettingsRow {
             Self::GitPanel => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.git_panel),
+            Self::UninstallData => FORMULA_OPTIONS
+                .iter()
+                .position(|it| *it == values.uninstall_remove_data),
             Self::UpdateCheck => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.update_check),
@@ -5564,7 +5619,9 @@ impl SettingsRow {
             | Self::AboutLicences
             | Self::ExportSettings
             | Self::ImportSettings
-            | Self::SettingsFolder => None,
+            | Self::SettingsFolder
+            | Self::Uninstall
+            | Self::UninstallBy => None,
         }
     }
 
@@ -5588,6 +5645,10 @@ impl SettingsRow {
             Self::ExportSettings => Some(Text::ExportVerb.text()),
             Self::ImportSettings => Some(Text::ImportVerb.text()),
             Self::SettingsFolder => Some(Text::AboutOpen.text()),
+            Self::Uninstall => Some(Text::UninstallVerb.text()),
+            // The manager's own name: a proper noun, in no column of the table.
+            Self::UninstallBy => crate::uninstall::managed_uninstall()
+                .map(|(manager, _)| crate::uninstall::manager_name(manager)),
             _ => None,
         }
     }
@@ -5612,6 +5673,7 @@ impl SettingsRow {
             Self::ExportSettings => Some(LinkDestination::Configuration(ConfigurationDoor::Export)),
             Self::ImportSettings => Some(LinkDestination::Configuration(ConfigurationDoor::Import)),
             Self::SettingsFolder => Some(LinkDestination::Configuration(ConfigurationDoor::Folder)),
+            Self::Uninstall => Some(LinkDestination::Configuration(ConfigurationDoor::Uninstall)),
             _ => None,
         }
     }
@@ -5622,7 +5684,10 @@ impl SettingsRow {
     /// `↗` beside it.
     #[must_use]
     pub const fn opens_a_dialog(self) -> bool {
-        matches!(self, Self::ExportSettings | Self::ImportSettings)
+        matches!(
+            self,
+            Self::ExportSettings | Self::ImportSettings | Self::Uninstall
+        )
     }
 
     /// **Whether this row's button wears the `↗`**: a door whose press is
@@ -5697,6 +5762,8 @@ pub enum LinkDestination {
 pub enum ConfigurationDoor {
     Export,
     Import,
+    /// The uninstaller's confirmation card (T-UNINSTALL-UX).
+    Uninstall,
     Folder,
 }
 
@@ -5868,7 +5935,10 @@ fn about_platform_line() -> &'static str {
 /// mechanism has nothing for the sentence to be about.
 #[must_use]
 pub fn visible_rows(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
-    visible_rows_for(bt_platform::host_platform(), tab_layout)
+    uninstall_rows_for(
+        visible_rows_for(bt_platform::host_platform(), tab_layout),
+        crate::uninstall::managed_uninstall().map(|(manager, _)| manager),
+    )
 }
 
 /// The same list, asked of a named platform.
@@ -6111,6 +6181,29 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::ExportSettings);
     rows.push(SettingsRow::ImportSettings);
     rows.push(SettingsRow::SettingsFolder);
+    // **And last, the door that takes all of it away** (T-UNINSTALL-UX), with the
+    // switch it reads directly under it. A copy a package manager installed has
+    // one row here instead ([`uninstall_rows_for`]).
+    rows.push(SettingsRow::Uninstall);
+    rows.push(SettingsRow::UninstallData);
+    rows
+}
+
+/// **The uninstall rows for a copy installed by `manager`, or by nobody**
+/// (T-UNINSTALL-UX): the door and its switch where this copy may remove itself,
+/// and in their place one row, [`SettingsRow::UninstallBy`], where a package
+/// manager installed it — that copy is its manager's to remove.
+#[must_use]
+pub fn uninstall_rows_for(
+    mut rows: Vec<SettingsRow>,
+    manager: Option<crate::install_channel::Manager>,
+) -> Vec<SettingsRow> {
+    if manager.is_some() {
+        if let Some(at) = rows.iter().position(|row| *row == SettingsRow::Uninstall) {
+            rows[at] = SettingsRow::UninstallBy;
+        }
+        rows.retain(|row| *row != SettingsRow::UninstallData);
+    }
     rows
 }
 
@@ -6593,6 +6686,10 @@ pub struct SettingsValues {
     /// `update::gear_mark_is_lit`: the gear's dot, and the rest of the visit it
     /// led to.
     pub update_mark: bool,
+    /// **Whether the uninstall removes settings and data too** — the panel's
+    /// `Also remove settings and data` switch, `Off` each time the dialog opens
+    /// (T-UNINSTALL-UX; [`SettingsPanel::uninstall_remove_data`]).
+    pub uninstall_remove_data: bool,
     /// Which way a split with no direction of its own cuts.
     pub split_direction: SplitDirectionV1,
     /// Where a web preview's address field sends a non-address.
@@ -6805,6 +6902,7 @@ impl SettingsValues {
             update_row: crate::update_card::RowFoot::ReleasesPage,
             update_offer: None,
             update_mark: false,
+            uninstall_remove_data: false,
             split_direction: SplitDirectionV1::Auto,
             search_engine: SearchEngineV1::DuckDuckGo,
             launch_opens: LaunchOpensV1::NewWindow,
@@ -7050,6 +7148,15 @@ pub struct SettingsPanel {
     quake_command: TextField,
     /// Which row's `⋯` is open, by its index in the profile table.
     row_menu: Option<usize>,
+    /// **`Also remove settings and data`** (T-UNINSTALL-UX): the uninstall's one
+    /// option, `Off` each time the dialog opens or shuts, and never written to
+    /// `settings.json` — whose folder is one of the things it removes.
+    uninstall_remove_data: bool,
+    /// **The uninstaller's confirmation card**, while it is up over this dialog,
+    /// and where the pointer and the ring are on it (T-UNINSTALL-UX). Raised by
+    /// `Uninstall…`; put away by its own verbs, and by every road that shuts the
+    /// dialog.
+    uninstall_card: Option<crate::update_card::Card<crate::update_card::UninstallVerb>>,
 }
 
 /// The editor sub-page's own state: which profile, and the text of its three
@@ -7386,6 +7493,8 @@ impl SettingsPanel {
     /// a rail is that the way back is one word away.
     pub fn toggle(&mut self, content: SettingsContent<'_>) {
         self.open = !self.open;
+        self.uninstall_remove_data = false;
+        self.uninstall_card = None;
         self.psreadline_visit_read = false;
         self.agents_visit_read = false;
         self.update_mark_carried = false;
@@ -7460,6 +7569,8 @@ impl SettingsPanel {
     /// Shut everything, whatever was open.
     pub fn close(&mut self) {
         self.open = false;
+        self.uninstall_remove_data = false;
+        self.uninstall_card = None;
         self.psreadline_visit_read = false;
         self.agents_visit_read = false;
         self.update_mark_carried = false;
@@ -7471,6 +7582,49 @@ impl SettingsPanel {
         self.focus_visible = false;
         self.editor = None;
         self.row_menu = None;
+    }
+
+    /// **`Also remove settings and data`**, as the switch stands this visit
+    /// (T-UNINSTALL-UX).
+    #[must_use]
+    pub fn uninstall_remove_data(&self) -> bool {
+        self.uninstall_remove_data
+    }
+
+    /// Turn `Also remove settings and data` on or off, for this visit only.
+    pub fn set_uninstall_remove_data(&mut self, on: bool) {
+        self.uninstall_remove_data = on;
+    }
+
+    /// **Raise the uninstaller's confirmation card** over this dialog, its ring
+    /// unlit (T-UNINSTALL-UX). A picker that was open is put away: the card
+    /// holds the pointer and the keyboard while it is up.
+    pub(crate) fn raise_uninstall_card(&mut self) {
+        self.menu = None;
+        self.menu_scroll = 0.0;
+        self.row_menu = None;
+        self.hover = None;
+        self.uninstall_card = Some(crate::update_card::Card::default());
+    }
+
+    /// The confirmation card, while it is up.
+    #[must_use]
+    pub(crate) fn uninstall_card(
+        &self,
+    ) -> Option<&crate::update_card::Card<crate::update_card::UninstallVerb>> {
+        self.uninstall_card.as_ref()
+    }
+
+    /// The confirmation card's hover and ring, while it is up.
+    pub(crate) fn uninstall_card_mut(
+        &mut self,
+    ) -> Option<&mut crate::update_card::Card<crate::update_card::UninstallVerb>> {
+        self.uninstall_card.as_mut()
+    }
+
+    /// Put the confirmation card away; the dialog is as it was.
+    pub(crate) fn put_uninstall_card_away(&mut self) {
+        self.uninstall_card = None;
     }
 
     /// The editor sub-page's state, or `None` while the list is the view.
@@ -10428,6 +10582,18 @@ pub fn update_row_foot_requested(target: SettingsTarget) -> bool {
             // T-GEAR-MARK-LANDS) — see [`SettingsRow::update_door`].
             | SettingsTarget::Link(SettingsRow::AboutVersion)
     )
+}
+
+/// **`Also remove settings and data`, pressed** (T-UNINSTALL-UX): the panel's
+/// answer, never the settings file's.
+#[must_use]
+pub fn uninstall_remove_data_requested(target: SettingsTarget) -> Option<bool> {
+    match target {
+        SettingsTarget::Choice(SettingsRow::UninstallData, index) => {
+            FORMULA_OPTIONS.get(index).copied()
+        }
+        _ => None,
+    }
 }
 
 /// The Git panel's master switch, as a press on its picker.
@@ -17181,8 +17347,10 @@ mod tests {
                 SettingsRow::ExportSettings,
                 SettingsRow::ImportSettings,
                 SettingsRow::SettingsFolder,
+                SettingsRow::Uninstall,
+                SettingsRow::UninstallData,
             ],
-            "what this is, then where to go about it, then the configuration doors"
+            "what this is, then where to go about it, then the configuration doors, then              the uninstaller and its switch"
         );
 
         let banner = crate::version::banner();
@@ -17237,16 +17405,26 @@ mod tests {
                 SettingsTarget::Link(SettingsRow::ExportSettings),
                 SettingsTarget::Link(SettingsRow::ImportSettings),
                 SettingsTarget::Link(SettingsRow::SettingsFolder),
+                SettingsTarget::Link(SettingsRow::Uninstall),
+                SettingsTarget::Combo(SettingsRow::UninstallData),
             ],
-            "the keyboard reaches the six doors and stops on neither fact"
+            "the keyboard reaches the seven doors and the uninstaller's switch, and stops on neither fact"
         );
-        for row in page {
+        // Every row but the uninstaller's switch, which is a choice (T-UNINSTALL-UX).
+        for row in page
+            .iter()
+            .filter(|row| **row != SettingsRow::UninstallData)
+        {
             assert_eq!(
                 row.option_count(),
                 0,
                 "{row:?} offers a picker onto something that is not a choice"
             );
         }
+        assert_eq!(
+            SettingsRow::UninstallData.option_count(),
+            FORMULA_OPTIONS.len()
+        );
     }
 
     /// PIN (owner question 2026-09-23, "shouldn't the boxes be the same size?")
@@ -17302,7 +17480,11 @@ mod tests {
                 .filter(|entry| matches!(entry.row.control(), SettingsControl::Link))
                 .copied()
                 .collect();
-            assert_eq!(doors.len(), 6, "the About page's six doors");
+            assert_eq!(
+                doors.len(),
+                7,
+                "the About page's seven doors (T-UNINSTALL-UX added one)"
+            );
             let column_right = combo_of(&placed, SettingsRow::AboutVersion)[2];
             let door_width = width(doors[0].combo);
             let widest_need = doors
@@ -19502,6 +19684,26 @@ mod tests {
             let lines = count(row, sentence);
             if lines > SETTINGS_DESCRIPTION_MAX_LINES {
                 over.push((row, lines, sentence.to_owned()));
+            }
+        }
+        // **And the uninstaller's row on a copy a package manager installed**
+        // (T-UNINSTALL-UX): every manager's line, with and without its hook. The
+        // test process has no install channel, so the walk above never draws it.
+        for manager in [
+            crate::install_channel::Manager::Scoop,
+            crate::install_channel::Manager::Homebrew,
+            crate::install_channel::Manager::Winget,
+        ] {
+            for hook in [true, false] {
+                let row = SettingsRow::UninstallBy;
+                let sentence = crate::i18n::uninstall_by_in(
+                    Lang::English,
+                    &crate::uninstall::manager_uninstall(manager, hook),
+                );
+                let lines = count(row, &sentence);
+                if lines > SETTINGS_DESCRIPTION_MAX_LINES {
+                    over.push((row, lines, sentence));
+                }
             }
         }
         // **And the About page's `Version` row while an update is offered**
@@ -27679,7 +27881,9 @@ mod tests {
                 SettingsRow::AboutLicences,
                 SettingsRow::ExportSettings,
                 SettingsRow::ImportSettings,
-                SettingsRow::SettingsFolder
+                SettingsRow::SettingsFolder,
+                SettingsRow::Uninstall,
+                SettingsRow::UninstallData
             ]
         );
         assert_eq!(
@@ -27750,7 +27954,9 @@ mod tests {
                 SettingsRow::AboutLicences,
                 SettingsRow::ExportSettings,
                 SettingsRow::ImportSettings,
-                SettingsRow::SettingsFolder
+                SettingsRow::SettingsFolder,
+                SettingsRow::Uninstall,
+                SettingsRow::UninstallData
             ],
             "Sidebar stands directly under `Tab layout`; the two font rows stay \
              next to each other because they are one decision in two halves, the \
@@ -32456,6 +32662,72 @@ mod tests {
         )
         .expect("the settings dialog fits");
         assert_eq!(still.update_door, None, "nothing offered, no door");
+    }
+
+    /// RED (T-UNINSTALL-UX) — **the uninstall rows stand last on About where this copy may
+    /// remove itself, and a copy a package manager installed has one row in their place: the
+    /// manager's name as its fact, no door and no switch.**
+    ///
+    /// MUTATION: in `uninstall_rows_for`, keep the door when a manager is named.
+    #[test]
+    fn a_managed_copy_has_one_uninstall_row_with_no_door() {
+        let rows = visible_rows_for(
+            bt_platform::HostPlatform::Windows,
+            TabLayoutMode::Horizontal,
+        );
+        assert_eq!(
+            rows[rows.len() - 2..],
+            [SettingsRow::Uninstall, SettingsRow::UninstallData]
+        );
+        assert_eq!(SettingsRow::Uninstall.control(), SettingsControl::Link);
+        assert!(SettingsRow::Uninstall.opens_a_dialog());
+        assert_eq!(
+            SettingsRow::Uninstall.link_destination(),
+            Some(LinkDestination::Configuration(ConfigurationDoor::Uninstall))
+        );
+        let managed = uninstall_rows_for(rows, Some(crate::install_channel::Manager::Scoop));
+        assert_eq!(managed.last(), Some(&SettingsRow::UninstallBy));
+        assert!(!managed.contains(&SettingsRow::Uninstall));
+        assert!(!managed.contains(&SettingsRow::UninstallData));
+        assert_eq!(SettingsRow::UninstallBy.control(), SettingsControl::Text);
+        assert_eq!(SettingsRow::UninstallBy.link_destination(), None);
+    }
+
+    /// RED (T-UNINSTALL-UX) — **`Also remove settings and data` is `Off` each time the dialog
+    /// opens, is the panel's for the visit, and a press on it is the panel's answer and nothing
+    /// the settings file holds.**
+    ///
+    /// MUTATION: in `SettingsPanel::toggle`, leave `uninstall_remove_data` as it was.
+    #[test]
+    fn the_remove_data_switch_is_off_each_time_the_dialog_opens() {
+        let on = FORMULA_OPTIONS.iter().position(|it| *it).unwrap();
+        assert_eq!(
+            uninstall_remove_data_requested(SettingsTarget::Choice(SettingsRow::UninstallData, on)),
+            Some(true)
+        );
+        assert_eq!(
+            uninstall_remove_data_requested(SettingsTarget::Choice(SettingsRow::GitPanel, on)),
+            None
+        );
+        let rows = visible_rows(TabLayoutMode::Horizontal);
+        let mut panel = SettingsPanel::default();
+        panel.toggle(content(&rows, &[]));
+        assert!(!panel.uninstall_remove_data());
+        panel.set_uninstall_remove_data(true);
+        panel.raise_uninstall_card();
+        assert!(panel.uninstall_card().is_some());
+        panel.toggle(content(&rows, &[]));
+        panel.toggle(content(&rows, &[]));
+        assert!(
+            !panel.uninstall_remove_data(),
+            "Off again on the next visit"
+        );
+        assert!(panel.uninstall_card().is_none());
+        let values = SettingsValues {
+            uninstall_remove_data: true,
+            ..SettingsValues::sample()
+        };
+        assert_eq!(SettingsRow::UninstallData.selected_index(&values), Some(on));
     }
 }
 

@@ -6,9 +6,39 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+### Added
+
+- In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder.
+- A pane can reset the terminal modes a program left behind (pane menu ▸ Reset terminal modes).
+- Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,
+  Shift+Tab, Ctrl+I, Ctrl+M and Esc apart from Enter, Tab and a lone escape:
+  Folio supports the first tier of the kitty keyboard protocol and xterm's
+  modifyOtherKeys. neovim, fish, helix and Claude Code ask for it, and so
+  does Codex on macOS and in WSL. Programs that do not ask are unaffected.
+- On Windows, Ctrl+Enter, Shift+Enter and Alt+Enter reach console programs
+  such as Codex as those keys, so a Codex set up to submit with Ctrl+Enter
+  now does.
+- Settings has an Uninstall row; the zip's uninstall script removes Folio in
+  one step and speaks your language; settings and data stay unless you turn
+  on the option.
+- In Claude Code, `[Image #N]` in the input line is a link to the pasted
+  picture, with the same hover card as in the transcript.
+
+### Changed
+
+- The README says how to uninstall each kind of copy, and the zip's
+  `uninstall.cmd` prints its lines in Chinese as well as English.
+- The outline folder icon is the filled folder's own shape, so the two read as one.
+- In PowerShell, Shift+Enter now adds a line and Ctrl+Enter inserts one
+  above, as in Windows Terminal, instead of running the command; Alt+Enter no
+  longer runs it either. Press Enter to run.
+- The README says how to uninstall each kind of copy, and the zip's
+  `uninstall.cmd` prints its lines in Chinese as well as English.
+
+### Fixed
+
 - On Windows, Ctrl+Alt with a letter or digit reaches programs that asked for
   the kitty protocol or modifyOtherKeys.
-
 - Chinese font choices stay in Chinese coverage order instead of being sorted
   back into English order before they are shown.
 - Creating and renaming files use the filesystem rules of the machine Folio is
@@ -20,35 +50,6 @@ All notable changes to Folio are recorded here. The format follows
   alongside the existing bash, zsh, fish, PowerShell and cmd rules.
 - File links and opened file URLs now agree on Chinese escapes, drive roots,
   localhost and UNC forms instead of decoding them differently.
-
-### Added
-
-- In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder.
-
-- A pane can reset the terminal modes a program left behind (pane menu ▸ Reset terminal modes).
-- Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,
-  Shift+Tab, Ctrl+I, Ctrl+M and Esc apart from Enter, Tab and a lone escape:
-  Folio supports the first tier of the kitty keyboard protocol and xterm's
-  modifyOtherKeys. neovim, fish, helix and Claude Code ask for it, and so
-  does Codex on macOS and in WSL. Programs that do not ask are unaffected.
-- On Windows, Ctrl+Enter, Shift+Enter and Alt+Enter reach console programs
-  such as Codex as those keys, so a Codex set up to submit with Ctrl+Enter
-  now does.
-- In Claude Code, `[Image #N]` in the input line is a link to the pasted
-  picture, with the same hover card as in the transcript.
-
-### Changed
-
-- The outline folder icon is the filled folder's own shape, so the two read as one.
-
-- In PowerShell, Shift+Enter now adds a line and Ctrl+Enter inserts one
-  above, as in Windows Terminal, instead of running the command; Alt+Enter no
-  longer runs it either. Press Enter to run.
-- The README says how to uninstall each kind of copy, and the zip's
-  `uninstall.cmd` prints its lines in Chinese as well as English.
-
-### Fixed
-
 - A link a program sends whose text runs on into Chinese punctuation or an ideograph ends where a typed address would.
 - After a power cut while an update was being installed, the card says the
   update was interrupted, not that the new version did not start.

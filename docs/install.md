@@ -149,25 +149,39 @@ read Off.
 
 ## Uninstalling
 
-Close Folio, then run one command from another terminal:
+**Settings ▸ About ▸ Uninstall Folio** does all of it: Folio quits, and once it
+has gone the uninstaller removes its integrations and then its own files. Turn on
+**Also remove settings and data** first to remove those too.
 
-- **Windows:** `folio.exe --uninstall-cleanup` from the extracted folder, or
-  double-click its `uninstall.cmd`.
-- **macOS:** `/Applications/Folio.app/Contents/MacOS/folio --uninstall-cleanup`.
+Or close Folio and run one command from another terminal:
 
-The command opens no window. It removes Folio's integrations, keeps hooks and
-Explorer entries belonging to another existing copy, and reports each result.
-Exit `0` means cleanup succeeded; `1` names a refusal to fix and retry; `2`
-means Folio is running or, with purge, a process still holds its data.
+- **Windows:** double-click `uninstall.cmd` in the extracted folder (it asks
+  whether to keep settings and data; Enter keeps them), or run
+  `folio.exe --uninstall` there.
+- **macOS:** `/Applications/Folio.app/Contents/MacOS/folio --uninstall`.
 
-Add `--purge` to the same command to also delete settings, sessions and browser
-data, including both Windows data roots and legacy data, or all six macOS data
+The command opens no window, and its lines are in the language Folio is set to.
+It removes Folio's integrations, keeps hooks and Explorer entries belonging to
+another existing copy, and reports each result. Exit `0` means the uninstall
+succeeded; `1` names a refusal to fix and retry; `2` means Folio is running or,
+with `--remove-data`, a process still holds its data.
+
+Only after a cleanup that succeeded are Folio's own files removed — on Windows
+the files the release installed, then the folder if nothing else is in it; on
+macOS `Folio.app`. They go once the window that ran the command closes. A file of
+yours beside `folio.exe` stays, and so does the folder holding it; the command
+names it. A copy a package manager installed is left to its manager, and the
+command names the manager's own command.
+
+Add `--remove-data` to also delete settings, sessions and browser data,
+including both Windows data roots and legacy data, or all six macOS data
 locations. Without it, your data stays. **On macOS, Folio cannot tell whether
 another program is holding that data** — there is no equivalent of the Windows
-check — so quit Folio before you purge; the command says so as it starts. Dated recovery copies beside user
-configuration files are kept. The application folder is never deleted.
-After cleanup succeeds, delete the extracted folder or move Folio.app to the Bin;
-for a managed installation, use its package manager to remove the application.
+check — so quit Folio before you remove it; the command says so as it starts.
+Dated recovery copies beside user configuration files are kept.
+
+`folio --uninstall-cleanup [--purge]` is the same cleanup without removing
+Folio's own files, in English, for a package manager's uninstall hook.
 
 macOS notification permission and cached Services entries are managed by the OS;
 removing the bundle may take time to be reflected. Windows notification history

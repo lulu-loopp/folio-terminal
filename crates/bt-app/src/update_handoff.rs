@@ -853,6 +853,15 @@ mod tests {
                 .in_the_product(index)
                 .owners(index)
                 .into_keys()
+                .filter(|identity| {
+                    [
+                        "crate::update_apply_macos",
+                        "crate::update_apply_windows",
+                        "crate::update_handoff",
+                        "crate::update_recover",
+                    ]
+                    .contains(&identity.module_path.as_str())
+                })
                 .map(|identity| identity.name)
                 .collect();
             names.sort();

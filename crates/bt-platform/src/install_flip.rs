@@ -53,6 +53,7 @@
 //! Worker only: the exchange flushes to the device. Refused by name (or an
 //! empty answer, for the reads) where there is no arm.
 
+use std::ffi::OsString;
 use std::io;
 use std::path::Path;
 
@@ -103,6 +104,16 @@ pub fn still_running(process: Running) -> bool {
 #[must_use]
 pub fn started_of(pid: u32) -> Option<u64> {
     imp::started_of(pid)
+}
+
+/// **The image's file name for this exact live process**, or `None` after it
+/// has ended, its pid has been reused, or its image cannot be inspected.
+/// This is display evidence only; waits continue to use pid plus start time.
+#[must_use]
+pub fn image_name(process: Running) -> Option<OsString> {
+    still_running(process)
+        .then(|| imp::image_name(process.pid))
+        .flatten()
 }
 
 /// **This process's parent, by its pid and start instant, when it started
@@ -295,6 +306,14 @@ mod imp {
         (written == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
     }
 
+    pub(super) fn image_name(pid: u32) -> Option<std::ffi::OsString> {
+        let pid = libc::c_int::try_from(pid).ok()?;
+        let path = image_of(pid)?;
+        Path::new(OsStr::from_bytes(&path))
+            .file_name()
+            .map(OsStr::to_os_string)
+    }
+
     pub(super) fn parent_pid(me: u32) -> Option<u32> {
         debug_assert_eq!(me, std::process::id());
         // SAFETY: `getppid` takes nothing and cannot fail.
@@ -428,6 +447,12 @@ mod imp {
         // closed when `owned` is dropped.
         let owned = unsafe { OwnedHandle::from_raw_handle(process.0) };
         creation_of(HANDLE(owned.as_raw_handle()))
+    }
+
+    pub(super) fn image_name(pid: u32) -> Option<std::ffi::OsString> {
+        crate::process_image_path(pid)?
+            .file_name()
+            .map(OsStr::to_os_string)
     }
 
     /// The parent pid the process snapshot records for `me`.
@@ -619,6 +644,10 @@ mod imp {
     }
 
     pub(super) fn started_of(_pid: u32) -> Option<u64> {
+        None
+    }
+
+    pub(super) fn image_name(_pid: u32) -> Option<std::ffi::OsString> {
         None
     }
 

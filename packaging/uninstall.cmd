@@ -1,22 +1,31 @@
 @echo off
 setlocal
-rem Each line is printed in English, then in Chinese. The Chinese is UTF-8, so the
-rem console reads this file as UTF-8 (code page 65001) from here on, and the code
-rem page it had is put back before the script ends.
+rem One press: one question, then the uninstaller, which removes what Folio set
+rem up outside this folder, and then this folder's Folio files once this window
+rem has closed. The uninstaller's lines are in the language Folio is set to; this
+rem script's own lines are printed in English, then in Chinese. The Chinese is
+rem UTF-8, so the console reads this file as UTF-8 (code page 65001) from here
+rem on, and the code page it had is put back before the script ends.
 for /f "tokens=*" %%a in ('chcp') do for %%b in (%%a) do set "codepage=%%b"
 set "codepage=%codepage:.=%"
 chcp 65001 >nul
-"%~dp0folio.exe" --uninstall-cleanup
-set "cleanup_exit=%errorlevel%"
-echo Cleanup exit code: %cleanup_exit%
-echo 清理退出码：%cleanup_exit%
-if "%cleanup_exit%"=="0" (
-    echo You can now delete the Folio application folder. Your settings and data were kept.
-    echo 现在可以删除 Folio 应用文件夹。设置和数据已保留。
-) else (
-    echo Cleanup did not complete. Read the result above before deleting the folder.
-    echo 清理未完成。删除文件夹前请查看上方结果。
+echo Keep settings and data? [Y/n]
+set "answer="
+set /p "answer=保留设置和数据？[Y/n] "
+if defined answer set "answer=%answer:"=%"
+set "remove="
+if /i "%answer%"=="n" set "remove=--remove-data"
+if /i "%answer%"=="no" set "remove=--remove-data"
+"%~dp0folio.exe" --uninstall %remove%
+set "door=%errorlevel%"
+if "%door%"=="2" (
+    echo Folio is running. Quit Folio, then run uninstall.cmd again.
+    echo Folio 正在运行。退出 Folio 后重新运行 uninstall.cmd。
+)
+if "%door%"=="0" (
+    echo Removal continues after this window closes.
+    echo 关闭此窗口后继续移除。
 )
 pause
 chcp %codepage% >nul
-exit /b %cleanup_exit%
+exit /b %door%
