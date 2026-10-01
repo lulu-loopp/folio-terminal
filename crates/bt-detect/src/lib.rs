@@ -328,10 +328,12 @@ pub struct LiveDetectionTask {
     /// parser checkpoint immediately before them and the options they are scanned under, and the
     /// frame measured from them once.
     pub capture: LiveCapture,
-    /// **The pane this block was proven in** — the whole screen until the task is resolved, then the
-    /// rectangle of the capture's frame whose scan closed a block on `candidate_row`. Written by
-    /// `apply_live_detected_block` beside `start` and `end`; on an unframed screen always the whole
-    /// screen.
+    /// The screen-owned fence value this task was scheduled under. Completion compares it with the
+    /// session's current screen tier before accepting the answer.
+    pub screen_fence_state: ScreenFenceState,
+    /// **The pane this candidate belongs to.** Scheduling writes the rectangle whose scan armed
+    /// `candidate_row`; resolution reads only that pane's scan and keeps the rectangle beside
+    /// `start` and `end`. On an unframed screen this is the whole screen.
     pub pane: PaneRect,
     pub start: GridPoint,
     pub end: GridPoint,
@@ -3690,27 +3692,27 @@ fn resolved_pane_scans(capture: &LiveCapture) -> Vec<(&PaneScan, LiveScan)> {
         .collect()
 }
 
-/// The refused tables of every pane, first row each, in pane order and without repeats: a refusal is
-/// a refusal wherever it was proven (69a; 69b keys it by pane).
-fn refused_rows_across_panes(scans: &[(&PaneScan, LiveScan)]) -> Vec<u32> {
-    let mut rows = Vec::new();
-    for (_, scan) in scans {
-        for row in refused_table_rows(&scan.scan, &scan.row_to_logical) {
-            if !rows.contains(&row) {
-                rows.push(row);
-            }
-        }
-    }
-    rows
+/// The refused tables of one pane, first row each. A refusal is local to the text that pane's scan
+/// read; an equal row in its neighbour is a different candidate.
+fn refused_rows_in_pane(scans: &[(&PaneScan, LiveScan)], pane: PaneRect) -> Vec<u32> {
+    scans
+        .iter()
+        .find(|(candidate, _)| candidate.rect == pane)
+        .map_or_else(Vec::new, |(_, scan)| {
+            refused_table_rows(&scan.scan, &scan.row_to_logical)
+        })
 }
 
-/// The first pane whose scan closes a block on `candidate_row`, with that block and the pane's
-/// logical lines (69a: the candidate is looked up pane by pane; 69b keys candidates by pane).
+/// The block one pane's scan closes on `candidate_row`, with that pane's logical lines.
 fn block_closing_on<'a>(
     scans: &'a [(&'a PaneScan, LiveScan)],
     candidate_row: u32,
+    candidate_pane: PaneRect,
 ) -> Option<(&'a PaneScan, &'a DetectedMathBlock, &'a [LiveLogicalLine])> {
     scans.iter().find_map(|(pane, scan)| {
+        if pane.rect != candidate_pane {
+            return None;
+        }
         let id = scan.row_to_logical.get(&candidate_row)?;
         scan.scan
             .blocks
@@ -3735,16 +3737,19 @@ pub fn resolve_live_detection_task(task: &mut LiveDetectionTask) -> bool {
     // The capture is shared (one `Arc`), so holding it here while the task is written is free.
     let capture = task.capture.clone();
     let scans = resolved_pane_scans(&capture);
-    if !scans
-        .iter()
-        .any(|(_, scan)| scan.row_to_logical.contains_key(&task.candidate_row))
-    {
+    if let [only] = scans.as_slice() {
+        task.pane = only.0.rect;
+    }
+    if !scans.iter().any(|(pane, scan)| {
+        pane.rect == task.pane && scan.row_to_logical.contains_key(&task.candidate_row)
+    }) {
         task.detection_complete = true;
         return false;
     }
-    task.refused_table_rows = refused_rows_across_panes(&scans);
+    task.refused_table_rows = refused_rows_in_pane(&scans, task.pane);
     task.detection_complete = true;
-    let Some((pane, block, logical)) = block_closing_on(&scans, task.candidate_row) else {
+    let Some((pane, block, logical)) = block_closing_on(&scans, task.candidate_row, task.pane)
+    else {
         return false;
     };
     apply_live_detected_block(task, block, logical, pane)
@@ -3759,7 +3764,6 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
     };
     let capture = first.capture.clone();
     let scans = resolved_pane_scans(&capture);
-    let refused = refused_rows_across_panes(&scans);
     for task in tasks {
         if task.resolved || task.detection_complete {
             continue;
@@ -3768,9 +3772,13 @@ pub fn resolve_live_detection_tasks(tasks: &mut [LiveDetectionTask]) {
             let _ = resolve_live_detection_task(task);
             continue;
         }
+        if let [only] = scans.as_slice() {
+            task.pane = only.0.rect;
+        }
         task.detection_complete = true;
-        task.refused_table_rows = refused.clone();
-        let Some((pane, block, logical)) = block_closing_on(&scans, task.candidate_row) else {
+        task.refused_table_rows = refused_rows_in_pane(&scans, task.pane);
+        let Some((pane, block, logical)) = block_closing_on(&scans, task.candidate_row, task.pane)
+        else {
             continue;
         };
         let _ = apply_live_detected_block(task, block, logical, pane);
@@ -6285,6 +6293,7 @@ abla f",
             cell_width_subpixels: 9 * SUBPIXELS_PER_PX,
             cell_height_subpixels: 18 * SUBPIXELS_PER_PX,
             ascii_baseline_subpixels: 14 * SUBPIXELS_PER_PX,
+            screen_fence_state: capture.frame().screen_fence_state().clone(),
             pane: capture.screen_rect(),
             capture,
             start: GridPoint {

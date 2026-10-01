@@ -17,8 +17,8 @@ use bt_detect::{
     DecorationRecord, DelimiterKind, DetectionContext, DetectionInput, DetectionOptions,
     DetectionTask, ForegroundProgram, InlineJoinedFragment, InlineMathRun, InlineMathSite,
     LiveCapture, LiveDetectionInput, LiveDetectionSource, LiveDetectionTask, MAX_MATH_SOURCE_BYTES,
-    MathCellSegment, MathSourceLine, MathSpan, PaneRect, PlaceholderArtifact, ScreenFrame,
-    StaleArtifact, advance_detection_context, detect_math_blocks_with_sites,
+    MathCellSegment, MathSourceLine, MathSpan, PaneRect, PlaceholderArtifact, ScreenFenceState,
+    ScreenFrame, StaleArtifact, advance_detection_context, detect_math_blocks_with_sites,
     frozen_resync_scan_with_options, resolve_detection_task, resolve_live_detection_task,
     resolve_live_detection_tasks,
 };
@@ -673,7 +673,6 @@ struct LiveRowStability {
     revision: u64,
     last_damage_at: Option<Instant>,
     settled_revision: Option<u64>,
-    candidate_signature: Option<u64>,
     content_fingerprint: Option<CapturedRowFingerprint>,
     /// The `revision` at which this row's printed names were last read for the path ledger
     /// (§7.1.5k 丙, owner ruling 2026-09-20). A watermark and not a second copy of the fact: the
@@ -681,6 +680,27 @@ struct LiveRowStability {
     /// [`DualPlaneSession::absorb_printed_path_probes`] closes the gap the moment it has read it,
     /// so one printing is one question however many frames are drawn over it.
     path_pass_revision: u64,
+}
+
+/// Content identity of one captured row inside one pane's columns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PaneSliceFingerprint(u64);
+
+/// Math-only stability for one `(row, pane)` identity. It exists only while the current frame has
+/// more than one pane; an unframed screen uses the unchanged global row clock.
+#[derive(Clone, Debug, Default)]
+struct PaneMathStability {
+    slice_fingerprint: Option<PaneSliceFingerprint>,
+    math_revision: u64,
+    last_math_damage_at: Option<Instant>,
+    settled_math_revision: Option<u64>,
+    candidate_signature: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+struct SessionScreenFenceState {
+    frame: Arc<ScreenFrame>,
+    state: ScreenFenceState,
 }
 
 #[derive(Clone, Debug)]
@@ -1541,6 +1561,13 @@ pub struct DualPlaneSession {
     command_marks: CommandMarkLedger,
     alternate_detection_context: DetectionContext,
     live_rows: Vec<LiveRowStability>,
+    /// Math stability and candidate identity for a framed screen, keyed by `(row, pane)`. Empty for
+    /// the one whole-screen pane, which uses `live_rows`' clocks byte for byte.
+    pane_math_rows: BTreeMap<(u32, PaneRect), PaneMathStability>,
+    /// Candidate identity for the unframed path. `candidate_signature` moved out of
+    /// `LiveRowStability` because it is math-only; this vector preserves the one-pane behaviour
+    /// without populating `pane_math_rows` on an unframed screen.
+    unframed_candidate_signatures: Vec<Option<u64>>,
     live_tasks: VecDeque<LiveDetectionTask>,
     /// Admission resumes at the first refused row, independently of detection signatures.
     live_admission_row: u32,
@@ -1671,7 +1698,10 @@ pub struct DualPlaneSession {
     inline_image_scale_tasks: VecDeque<InlineImageScaleTask>,
     inline_images: BTreeMap<u64, InlineImageRecord>,
     next_inline_image_occurrence_id: u64,
-    live_decorations: BTreeMap<u32, LiveDecorationRecord>,
+    /// Resident live math, owned by the row where its source starts and the pane whose slice was
+    /// scanned. The pane is part of identity: two side-by-side panes may start a block on the same
+    /// screen row without either record replacing the other.
+    live_decorations: BTreeMap<(u32, PaneRect), LiveDecorationRecord>,
     next_live_occurrence_id: u64,
     offscreen_decorations: VecDeque<LiveDecorationRecord>,
     /// What the last off-band re-anchor pass was asked, when it could give nothing back.
@@ -1702,11 +1732,14 @@ pub struct DualPlaneSession {
     live_grid_blocks_memo: Option<(LiveGridAnswer, Vec<LiveDetectionTask>)>,
     /// **The frame of the capture the last scheduling read** (T-PANE-COLUMNS, note §8.2 "the
     /// current frame"): the session's own `Arc`, not the capture's, so the capture's rows are
-    /// released when their holders go. Compared by value — the rectangles, the status row and the
-    /// screen-owned fence state, never the pointer — with each new capture's frame; a difference is
-    /// a frame change and clears every pane's math (`invalidate_every_pane`). Two frames of screens
-    /// no frame cuts and the same foreground identity agree whatever their sizes.
+    /// released when their holders go. Compared by value — the rectangles and status row, never the
+    /// pointer — with each new capture's frame; a difference is a frame change and clears every
+    /// pane's math (`invalidate_every_pane`). The screen-owned fence is the separate tier below. Two
+    /// frames of screens no frame cuts and the same foreground identity agree whatever their sizes.
     current_frame: Option<Arc<ScreenFrame>>,
+    /// The screen-owned fence value computed for `frame`. Its one writer is `observe_frame`; a
+    /// difference has exactly the same invalidation effect as a topology change.
+    screen_fence_state: Option<SessionScreenFenceState>,
     /// E8's session-owned provenance fact. Addressed worker answers are its only writer; every new
     /// capture consumes a snapshot.
     foreground_program: ForegroundProgram,
@@ -1849,7 +1882,7 @@ struct OffBandRestoreMemo {
     /// `None` until a pass has actually been run and left something waiting.
     answer: Option<LiveGridAnswer>,
     queued: Vec<LiveMathOccurrenceId>,
-    occupied: Vec<(u32, u32)>,
+    occupied: Vec<(PaneRect, u32, u32)>,
 }
 
 impl OffBandRestoreMemo {
@@ -1860,7 +1893,7 @@ impl OffBandRestoreMemo {
         &self,
         answer: &LiveGridAnswer,
         queued: &VecDeque<LiveDecorationRecord>,
-        resident: &BTreeMap<u32, LiveDecorationRecord>,
+        resident: &BTreeMap<(u32, PaneRect), LiveDecorationRecord>,
     ) -> bool {
         self.answer.as_ref() == Some(answer)
             && self
@@ -1870,7 +1903,7 @@ impl OffBandRestoreMemo {
                 .eq(queued.iter().map(|record| record.identity.occurrence_id))
             && self.occupied.iter().copied().eq(resident
                 .values()
-                .map(|record| (record.band_start_row, record.band_end_row)))
+                .map(|record| (record.pane, record.band_start_row, record.band_end_row)))
     }
 }
 
@@ -2147,6 +2180,8 @@ impl DualPlaneSession {
             command_marks: CommandMarkLedger::default(),
             alternate_detection_context: DetectionContext::default(),
             live_rows: vec![LiveRowStability::default(); rows.get() as usize],
+            pane_math_rows: BTreeMap::new(),
+            unframed_candidate_signatures: vec![None; rows.get() as usize],
             live_tasks: VecDeque::new(),
             live_admission_row: 0,
             inline_image_bands: INLINE_IMAGE_BANDS,
@@ -2180,6 +2215,7 @@ impl DualPlaneSession {
             offscreen_restore_pass_count: 0,
             live_grid_blocks_memo: None,
             current_frame: None,
+            screen_fence_state: None,
             foreground_program: ForegroundProgram::Unknown,
             foreground_program_probe_requested: false,
             foreground_program_frame_candidate: false,
@@ -4300,6 +4336,8 @@ impl DualPlaneSession {
             };
             rows.get() as usize
         ];
+        self.pane_math_rows.clear();
+        self.unframed_candidate_signatures = vec![None; rows.get() as usize];
         let apply_result = self.apply_events(events, observed_at);
         self.alternate_repaint_in_progress = false;
         // **A reflow is not the program printing** (owner ruling 2026-09-20). Every row of the
@@ -4779,7 +4817,7 @@ impl DualPlaneSession {
             );
             out.push('\n');
         }
-        for (row, record) in &self.live_decorations {
+        for ((row, _), record) in &self.live_decorations {
             let state = if record.failure_reason.is_some() {
                 "failed"
             } else if record.artifact.is_some() {
@@ -4819,6 +4857,16 @@ impl DualPlaneSession {
             .iter()
             .filter(|row| row.settled_revision != Some(row.revision))
             .filter_map(|row| row.last_damage_at.map(|at| at + LIVE_MATH_STABLE_INTERVAL))
+            .chain(
+                self.pane_math_rows
+                    .values()
+                    .filter(|state| state.settled_math_revision != Some(state.math_revision))
+                    .filter_map(|state| {
+                        state
+                            .last_math_damage_at
+                            .map(|at| at + LIVE_MATH_STABLE_INTERVAL)
+                    }),
+            )
             .chain(self.repaint_transaction_deadline)
             .min()
     }
@@ -4846,6 +4894,14 @@ impl DualPlaneSession {
                 row.settled_revision = Some(row.revision);
             }
         }
+        for state in self.pane_math_rows.values_mut() {
+            if state
+                .last_math_damage_at
+                .is_some_and(|at| now.saturating_duration_since(at) >= LIVE_MATH_STABLE_INTERVAL)
+            {
+                state.settled_math_revision = Some(state.math_revision);
+            }
+        }
         self.schedule_live_artifacts(&stable)
     }
 
@@ -4869,22 +4925,48 @@ impl DualPlaneSession {
         let capture = self.live_capture();
         self.foreground_program_frame_candidate = capture.has_frame_candidate();
         self.observe_frame(capture.frame());
-        let candidates = live_candidate_rows(&capture, stable, self.inline_math_bands);
-        let context_signature = live_detection_context_signature(&capture, self.inline_math_bands);
+        let framed = capture.frame().panes().len() > 1;
+        let candidates = live_candidate_rows(
+            &capture,
+            |pane, row| {
+                if framed {
+                    self.pane_math_rows.get(&(row, pane)).is_some_and(|state| {
+                        state.settled_math_revision == Some(state.math_revision)
+                    })
+                } else {
+                    stable.get(row as usize).copied().unwrap_or(false)
+                }
+            },
+            self.inline_math_bands,
+        );
+        let context_signatures = capture
+            .frame()
+            .panes()
+            .iter()
+            .copied()
+            .map(|pane| {
+                (
+                    pane,
+                    live_detection_context_signature(&capture, pane, self.inline_math_bands),
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
         let cursor_suppression = (!self.shell_integration_is_authoritative(self.live_screen))
             .then(|| self.cursor_line_suppression())
             .flatten();
         let mut new_tasks = Vec::new();
-        for candidate_row in candidates {
-            if cursor_suppression.is_some_and(|suppression| suppression.contains(candidate_row)) {
+        for (candidate_row, candidate_pane) in candidates {
+            if self.cursor_is_in_pane(candidate_pane)
+                && cursor_suppression.is_some_and(|suppression| suppression.contains(candidate_row))
+            {
                 continue;
             }
-            let signature = live_detection_signature(context_signature, candidate_row);
-            let state = &mut self.live_rows[candidate_row as usize];
-            if state.candidate_signature == Some(signature) {
+            let signature =
+                live_detection_signature(context_signatures[&candidate_pane], candidate_row);
+            if self.math_candidate_signature(candidate_row, candidate_pane) == Some(signature) {
                 continue;
             }
-            state.candidate_signature = Some(signature);
+            self.set_math_candidate_signature(candidate_row, candidate_pane, Some(signature));
             let task = LiveDetectionTask {
                 candidate_row,
                 screen: self.live_screen,
@@ -4895,7 +4977,8 @@ impl DualPlaneSession {
                 cell_height_subpixels: self.cell_height_subpixels.get(),
                 ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
                 capture: capture.clone(),
-                pane: capture.screen_rect(),
+                screen_fence_state: capture.frame().screen_fence_state().clone(),
+                pane: candidate_pane,
                 start: GridPoint {
                     row: candidate_row,
                     column: 0,
@@ -4928,13 +5011,14 @@ impl DualPlaneSession {
         new_tasks.retain(|task| {
             let suppressed = task.resolved
                 && (self.semantic_input_overlaps_live(task.screen, task.start, task.end)
-                    || cursor_suppression.is_some_and(|suppression| {
-                        suppression.intersects(task.start.row, task.end.row)
-                    }));
-            if suppressed && let Some(state) = self.live_rows.get_mut(task.candidate_row as usize) {
+                    || (self.cursor_is_in_pane(task.pane)
+                        && cursor_suppression.is_some_and(|suppression| {
+                            suppression.intersects(task.start.row, task.end.row)
+                        })));
+            if suppressed {
                 // Cursor movement does not damage the source row. Leave the signature open so the
                 // next published frame can schedule this already-settled candidate immediately.
-                state.candidate_signature = None;
+                self.set_math_candidate_signature(task.candidate_row, task.pane, None);
             }
             !suppressed
         });
@@ -4946,6 +5030,7 @@ impl DualPlaneSession {
         let mut scheduled = 0usize;
         for task in new_tasks {
             let candidate_row = task.candidate_row;
+            let candidate_pane = task.pane;
             if self.enqueue_live_task(task) == EnqueueOutcome::Queued {
                 scheduled += 1;
                 continue;
@@ -4953,9 +5038,7 @@ impl DualPlaneSession {
             first_refused.get_or_insert(candidate_row);
             // Refused for want of room. The signature says "a task for this row is out", and none
             // is, so it comes off and the next pass arms this row again.
-            if let Some(state) = self.live_rows.get_mut(candidate_row as usize) {
-                state.candidate_signature = None;
-            }
+            self.set_math_candidate_signature(candidate_row, candidate_pane, None);
         }
         if let Some(row) = first_refused {
             self.live_admission_row = row;
@@ -6991,12 +7074,12 @@ impl DualPlaneSession {
         let retired_live = self
             .live_decorations
             .iter()
-            .filter_map(|(row, record)| {
+            .filter_map(|(key, record)| {
                 self.semantic_input_overlaps_live(record.screen, record.start, record.end)
-                    .then_some(*row)
+                    .then_some(*key)
             })
             .collect::<BTreeSet<_>>();
-        self.retire_live_decorations(|row, _| retired_live.contains(&row));
+        self.retire_live_decorations(|row, pane, _| retired_live.contains(&(row, pane)));
         let suppressed_frozen = self
             .decorations
             .keys()
@@ -7026,31 +7109,156 @@ impl DualPlaneSession {
     /// or relayout, which is rare, and a re-typeset is one stability interval and one worker round
     /// trip.
     ///
-    /// What 69a does **not** have is the pane math tier: row stability is still the whole screen
-    /// row's (`LiveRowStability`), so a busy pane's writes still hold its neighbour's candidates
-    /// back. Ticket 69b keys stability, candidates, records and completion by `(row, pane)`.
+    /// Math stability, candidates, records and completion all carry the same `(row, pane)` identity;
+    /// the global row tier remains independent for printed paths and image placeholders.
     fn observe_frame(&mut self, frame: &Arc<ScreenFrame>) {
-        let changed = self
+        let topology_changed = self
             .current_frame
             .as_ref()
             .is_some_and(|current| !frames_agree(current, frame));
-        if changed {
+        let fence_changed = self.screen_fence_state.as_ref().is_some_and(|current| {
+            !frames_agree(&current.frame, frame) || &current.state != frame.screen_fence_state()
+        });
+        if topology_changed || fence_changed {
             self.invalidate_every_pane();
         }
         self.current_frame = Some(Arc::clone(frame));
+        self.screen_fence_state = Some(SessionScreenFenceState {
+            frame: Arc::clone(frame),
+            state: frame.screen_fence_state().clone(),
+        });
+        if frame.panes().len() > 1 {
+            if self.pane_math_rows.is_empty() {
+                for pane in frame.panes().iter().copied() {
+                    for row in pane.rows() {
+                        let global = self.live_rows.get(row as usize);
+                        let slice_fingerprint = self
+                            .terminal
+                            .visible_row(row)
+                            .map(|captured| pane_slice_fingerprint(&captured, pane));
+                        self.pane_math_rows.insert(
+                            (row, pane),
+                            PaneMathStability {
+                                slice_fingerprint,
+                                math_revision: global.map_or(0, |state| state.revision),
+                                last_math_damage_at: global.and_then(|state| state.last_damage_at),
+                                settled_math_revision: global
+                                    .and_then(|state| state.settled_revision),
+                                ..PaneMathStability::default()
+                            },
+                        );
+                    }
+                }
+            }
+            self.unframed_candidate_signatures.fill(None);
+        } else {
+            self.pane_math_rows.clear();
+        }
     }
 
     fn invalidate_every_pane(&mut self) {
-        self.retire_live_decorations(|_, _| true);
+        self.retire_live_decorations(|_, _, _| true);
         let dormant = std::mem::take(&mut self.offscreen_decorations);
         self.live_invalidation_count = self
             .live_invalidation_count
             .saturating_add(dormant.len() as u64);
-        for state in &mut self.live_rows {
-            state.candidate_signature = None;
+        for snapshot in self
+            .primary_repaint_snapshot
+            .iter_mut()
+            .chain(self.alternate_repaint_snapshot.iter_mut())
+        {
+            snapshot.decorations.clear();
+            snapshot.dormant_decorations.clear();
         }
+        self.pending_live_handoffs.clear();
+        self.pane_math_rows.clear();
+        self.unframed_candidate_signatures.fill(None);
         self.live_tasks.clear();
         self.live_grid_blocks_memo = None;
+    }
+
+    fn math_candidate_signature(&self, row: u32, pane: PaneRect) -> Option<u64> {
+        if self
+            .current_frame
+            .as_ref()
+            .is_some_and(|frame| frame.panes().len() > 1)
+        {
+            self.pane_math_rows
+                .get(&(row, pane))
+                .and_then(|state| state.candidate_signature)
+        } else {
+            self.unframed_candidate_signatures
+                .get(row as usize)
+                .copied()
+                .flatten()
+        }
+    }
+
+    fn set_math_candidate_signature(&mut self, row: u32, pane: PaneRect, signature: Option<u64>) {
+        if self
+            .current_frame
+            .as_ref()
+            .is_some_and(|frame| frame.panes().len() > 1)
+        {
+            if let Some(state) = self.pane_math_rows.get_mut(&(row, pane)) {
+                state.candidate_signature = signature;
+            }
+        } else if let Some(state) = self.unframed_candidate_signatures.get_mut(row as usize) {
+            *state = signature;
+        }
+    }
+
+    fn clear_math_candidate_signatures_on_row(&mut self, row: u32) {
+        if self
+            .current_frame
+            .as_ref()
+            .is_some_and(|frame| frame.panes().len() > 1)
+        {
+            for ((candidate_row, _), state) in &mut self.pane_math_rows {
+                if *candidate_row == row {
+                    state.candidate_signature = None;
+                }
+            }
+        } else if let Some(signature) = self.unframed_candidate_signatures.get_mut(row as usize) {
+            *signature = None;
+        }
+    }
+
+    fn clear_all_math_candidate_signatures(&mut self) {
+        self.unframed_candidate_signatures.fill(None);
+        for state in self.pane_math_rows.values_mut() {
+            state.candidate_signature = None;
+        }
+    }
+
+    fn rearm_math_band_after_refusal(&mut self, pane: PaneRect, first: u32, last: u32) {
+        if self
+            .current_frame
+            .as_ref()
+            .is_some_and(|frame| frame.panes().len() > 1)
+        {
+            let newest = (first..=last)
+                .filter_map(|row| {
+                    self.pane_math_rows
+                        .get(&(row, pane))
+                        .and_then(|state| state.last_math_damage_at)
+                })
+                .max();
+            for row in first..=last {
+                if let Some(state) = self.pane_math_rows.get_mut(&(row, pane)) {
+                    state.candidate_signature = None;
+                    state.settled_math_revision = None;
+                    if newest.is_some() {
+                        state.last_math_damage_at = newest;
+                    }
+                }
+            }
+        } else {
+            rearm_live_row_band_after_refusal(&mut self.live_rows, first, last);
+            for row in first..=last {
+                self.set_math_candidate_signature(row, pane, None);
+            }
+        }
     }
 
     fn new_live_decoration_is_cursor_suppressed(&self, task: &LiveDetectionTask) -> bool {
@@ -7067,9 +7275,15 @@ impl DualPlaneSession {
                 && record.span.original_source == task.span.original_source
         });
         !replaces_existing
+            && self.cursor_is_in_pane(task.pane)
             && self
                 .cursor_line_suppression()
                 .is_some_and(|suppression| suppression.intersects(task.start.row, task.end.row))
+    }
+
+    fn cursor_is_in_pane(&self, pane: PaneRect) -> bool {
+        let cursor = self.terminal.cursor();
+        pane.contains_row(cursor.row) && pane.contains_column(cursor.column)
     }
 
     /// **The one live capture** (T-PANE-COLUMNS, note §3): every grid row with its text and its
@@ -7318,7 +7532,7 @@ impl DualPlaneSession {
         // comparisons and never an allocation.
         let carried = std::mem::take(&mut self.live_decorations);
         let held = |record: &LiveDecorationRecord,
-                    carried: &BTreeMap<u32, LiveDecorationRecord>| {
+                    carried: &BTreeMap<(u32, PaneRect), LiveDecorationRecord>| {
             carried
                 .values()
                 .any(|held| held.identity.occurrence_id == record.identity.occurrence_id)
@@ -7371,7 +7585,9 @@ impl DualPlaneSession {
                 for record in pending {
                     let matches = detected
                         .iter()
-                        .filter(|task| task.span.render_equivalent(&record.span))
+                        .filter(|task| {
+                            task.pane == record.pane && task.span.render_equivalent(&record.span)
+                        })
                         .collect::<Vec<_>>();
                     let [task] = matches.as_slice() else {
                         still_unresolved.push(record);
@@ -7391,8 +7607,12 @@ impl DualPlaneSession {
                         still_unresolved.push(record);
                         continue;
                     };
+                    let Some(pane_inputs) = current_capture.pane_inputs(record.pane) else {
+                        still_unresolved.push(record);
+                        continue;
+                    };
                     if record.end.row != task.end.row
-                        || !alternate_borrowed_band_is_clear(&record, &current_inputs, &occupied)
+                        || !alternate_borrowed_band_is_clear(&record, pane_inputs, &occupied)
                     {
                         still_unresolved.push(record);
                         continue;
@@ -7420,25 +7640,42 @@ impl DualPlaneSession {
             }
         }
         self.live_decorations = preserved;
-        let context_signature =
-            live_detection_context_signature(&current_capture, self.inline_math_bands);
-        let stable = vec![true; self.live_rows.len()];
-        let candidate_rows = live_candidate_rows(&current_capture, &stable, self.inline_math_bands);
-        for record in self.live_decorations.values() {
-            for row in record.band_start_row..=record.band_end_row {
+        let candidate_rows =
+            live_candidate_rows(&current_capture, |_, _| true, self.inline_math_bands);
+        let records = self
+            .live_decorations
+            .values()
+            .map(|record| {
+                (
+                    record.pane,
+                    record.start.row,
+                    record.end.row,
+                    record.band_start_row,
+                    record.band_end_row,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (pane, start_row, end_row, band_start_row, band_end_row) in records {
+            for row in band_start_row..=band_end_row {
                 if let Some(state) = self.live_rows.get_mut(row as usize) {
                     state.content_fingerprint = self.terminal.visible_row_fingerprint(row);
                 }
             }
-            for candidate_row in candidate_rows
-                .iter()
-                .copied()
-                .filter(|row| (record.start.row..=record.end.row).contains(row))
+            let context_signature =
+                live_detection_context_signature(&current_capture, pane, self.inline_math_bands);
+            for (candidate_row, _) in
+                candidate_rows
+                    .iter()
+                    .copied()
+                    .filter(|(row, candidate_pane)| {
+                        *candidate_pane == pane && (start_row..=end_row).contains(row)
+                    })
             {
-                if let Some(state) = self.live_rows.get_mut(candidate_row as usize) {
-                    state.candidate_signature =
-                        Some(live_detection_signature(context_signature, candidate_row));
-                }
+                self.set_math_candidate_signature(
+                    candidate_row,
+                    pane,
+                    Some(live_detection_signature(context_signature, candidate_row)),
+                );
             }
         }
     }
@@ -7510,11 +7747,10 @@ impl DualPlaneSession {
         if !armed {
             return Vec::new();
         }
-        let stable = vec![true; self.live_rows.len()];
-        let candidates = live_candidate_rows(capture, &stable, self.inline_math_bands);
+        let candidates = live_candidate_rows(capture, |_, _| true, self.inline_math_bands);
         let mut tasks = candidates
             .into_iter()
-            .map(|candidate_row| LiveDetectionTask {
+            .map(|(candidate_row, candidate_pane)| LiveDetectionTask {
                 candidate_row,
                 screen: self.live_screen,
                 grid_generation: self.grid_generation,
@@ -7524,7 +7760,8 @@ impl DualPlaneSession {
                 cell_height_subpixels: self.cell_height_subpixels.get(),
                 ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
                 capture: capture.clone(),
-                pane: capture.screen_rect(),
+                screen_fence_state: capture.frame().screen_fence_state().clone(),
+                pane: candidate_pane,
                 start: GridPoint {
                     row: candidate_row,
                     column: 0,
@@ -7636,10 +7873,8 @@ impl DualPlaneSession {
         }
         let current_capture = self.live_capture();
         let row_mappings = primary_repaint_row_mappings(&snapshot.inputs, current_capture.inputs());
-        let context_signature =
-            live_detection_context_signature(&current_capture, self.inline_math_bands);
-        let stable = vec![true; self.live_rows.len()];
-        let candidate_rows = live_candidate_rows(&current_capture, &stable, self.inline_math_bands);
+        let candidate_rows =
+            live_candidate_rows(&current_capture, |_, _| true, self.inline_math_bands);
 
         let mut preserved = BTreeMap::new();
         let mut occupied = BTreeSet::new();
@@ -7742,6 +7977,7 @@ impl DualPlaneSession {
                         .ascii_baseline_subpixels
                         .map_or(0, NonZeroI64::get),
                     capture: capture_under(&record.capture, self.detection_options()),
+                    screen_fence_state: record.capture.frame().screen_fence_state().clone(),
                     pane: record.pane,
                     start: record.start,
                     end: record.end,
@@ -7773,21 +8009,40 @@ impl DualPlaneSession {
         self.live_decorations = preserved;
         // Reseat the row fingerprints/candidate signatures under each preserved band so the next
         // damage compares against the reflowed grid, exactly as `finish_alternate_repaint` does.
-        for record in self.live_decorations.values() {
-            for row in record.band_start_row..=record.band_end_row {
+        let records = self
+            .live_decorations
+            .values()
+            .map(|record| {
+                (
+                    record.pane,
+                    record.start.row,
+                    record.end.row,
+                    record.band_start_row,
+                    record.band_end_row,
+                )
+            })
+            .collect::<Vec<_>>();
+        for (pane, start_row, end_row, band_start_row, band_end_row) in records {
+            for row in band_start_row..=band_end_row {
                 if let Some(state) = self.live_rows.get_mut(row as usize) {
                     state.content_fingerprint = self.terminal.visible_row_fingerprint(row);
                 }
             }
-            for candidate_row in candidate_rows
-                .iter()
-                .copied()
-                .filter(|row| (record.start.row..=record.end.row).contains(row))
+            let context_signature =
+                live_detection_context_signature(&current_capture, pane, self.inline_math_bands);
+            for (candidate_row, _) in
+                candidate_rows
+                    .iter()
+                    .copied()
+                    .filter(|(row, candidate_pane)| {
+                        *candidate_pane == pane && (start_row..=end_row).contains(row)
+                    })
             {
-                if let Some(state) = self.live_rows.get_mut(candidate_row as usize) {
-                    state.candidate_signature =
-                        Some(live_detection_signature(context_signature, candidate_row));
-                }
+                self.set_math_candidate_signature(
+                    candidate_row,
+                    pane,
+                    Some(live_detection_signature(context_signature, candidate_row)),
+                );
             }
         }
         for task in relayout_tasks {
@@ -8029,14 +8284,24 @@ impl DualPlaneSession {
             let mut occupied = session
                 .live_decorations
                 .values()
-                .flat_map(|record| record.band_start_row..=record.band_end_row)
+                .flat_map(|record| {
+                    (record.band_start_row..=record.band_end_row).map(move |row| (row, record.pane))
+                })
                 .collect::<BTreeSet<_>>();
             let mut remaining = VecDeque::new();
             let mut relayout_tasks = Vec::new();
             while let Some(mut record) = session.offscreen_decorations.pop_front() {
-                let Some((start, end, segments)) =
-                    exact_live_source_match(&record.span.original_source, &inputs, &occupied)
-                else {
+                record.pane = retained_pane_in(&capture, record.pane);
+                let occupied_in_pane = occupied
+                    .iter()
+                    .filter_map(|(row, pane)| (*pane == record.pane).then_some(*row))
+                    .collect::<BTreeSet<_>>();
+                let pane_inputs = capture.pane_inputs(record.pane).unwrap_or(&inputs);
+                let Some((start, end, segments)) = exact_live_source_match(
+                    &record.span.original_source,
+                    pane_inputs,
+                    &occupied_in_pane,
+                ) else {
                     remaining.push_back(record);
                     continue;
                 };
@@ -8044,7 +8309,10 @@ impl DualPlaneSession {
                 // substring search found is not this block and no picture goes on it.
                 let Some(pane) = owned
                     .iter()
-                    .find(|task| live_scan_owns_record_at(task, &record, start, end))
+                    .find(|task| {
+                        task.pane == record.pane
+                            && live_scan_owns_record_at(task, &record, start, end)
+                    })
                     .map(|task| task.pane)
                 else {
                     remaining.push_back(record);
@@ -8064,7 +8332,7 @@ impl DualPlaneSession {
                 // live-grid rows as offsets from the band's top, so leaving them measured
                 // against a band that no longer exists would move every later projection of
                 // this record by the difference.
-                if !rebase_identity_onto_match(&mut record, start, end, &segments, &inputs) {
+                if !rebase_identity_onto_match(&mut record, start, end, &segments, pane_inputs) {
                     remaining.push_back(record);
                     continue;
                 }
@@ -8111,6 +8379,7 @@ impl DualPlaneSession {
                             .ascii_baseline_subpixels
                             .map_or(0, NonZeroI64::get),
                         capture: capture_under(&record.capture, session.detection_options()),
+                        screen_fence_state: record.capture.frame().screen_fence_state().clone(),
                         pane: record.pane,
                         start: record.start,
                         end: record.end,
@@ -8122,8 +8391,12 @@ impl DualPlaneSession {
                         refused_table_rows: Vec::new(),
                     });
                 }
-                occupied.extend(record.band_start_row..=record.band_end_row);
-                session.live_decorations.insert(record.start.row, record);
+                occupied.extend(
+                    (record.band_start_row..=record.band_end_row).map(|row| (row, record.pane)),
+                );
+                session
+                    .live_decorations
+                    .insert((record.start.row, record.pane), record);
             }
             session.offscreen_decorations = remaining;
             relayout_tasks
@@ -8143,7 +8416,7 @@ impl DualPlaneSession {
         memo.occupied.extend(
             self.live_decorations
                 .values()
-                .map(|record| (record.band_start_row, record.band_end_row)),
+                .map(|record| (record.pane, record.band_start_row, record.band_end_row)),
         );
         for task in relayout_tasks {
             self.enqueue_live_task(task);
@@ -8187,14 +8460,19 @@ impl DualPlaneSession {
             self.pending_live_handoffs.clear();
             self.live_screen = screen;
             self.live_tasks.clear();
+            self.current_frame = None;
+            self.screen_fence_state = None;
             for row in &mut self.live_rows {
                 *row = LiveRowStability::default();
             }
+            self.pane_math_rows.clear();
+            self.unframed_candidate_signatures.fill(None);
         }
         let damaged = match damage {
             TerminalDamage::Full => (0..self.live_rows.len() as u32).collect::<Vec<_>>(),
             TerminalDamage::Rows(rows) => rows,
         };
+        let mut screen_tier_dirty = false;
         for row in damaged {
             // Damage is "a cell was written", not "a cell changed": a TUI that repaints its whole
             // screen writes every row every frame, and the vendor reports every one of them. The
@@ -8222,12 +8500,69 @@ impl DualPlaneSession {
             state.revision = state.revision.wrapping_add(1);
             state.last_damage_at = Some(observed_at);
             state.settled_revision = None;
-            state.candidate_signature = None;
             // Counted here, above every suppression below it, because it is a fact about the glass
             // and not about what this session decided to do with it: a repaint window that skips
             // the invalidation is exactly the case that has to know the cells moved.
             self.live_content_revision = self.live_content_revision.wrapping_add(1);
-            self.rearm_live_bands_containing(row);
+            screen_tier_dirty |= self.current_frame.as_ref().is_some_and(|frame| {
+                frame.panes().len() > 1 && !frame.panes().iter().any(|pane| pane.contains_row(row))
+            });
+            let panes = self
+                .current_frame
+                .as_ref()
+                .filter(|frame| frame.panes().len() > 1)
+                .map(|frame| {
+                    frame
+                        .panes()
+                        .iter()
+                        .copied()
+                        .filter(|pane| pane.contains_row(row))
+                        .collect::<Vec<_>>()
+                });
+            let changed_panes = if let Some(panes) = panes {
+                // The whole-row fingerprint above is allocation-free. Only a genuinely changed row
+                // in a framed screen needs its cells captured for per-pane fingerprints; the
+                // unframed path therefore keeps its historical repaint cost byte for byte.
+                let Some(captured) = self.terminal.visible_row(row) else {
+                    continue;
+                };
+                panes
+                    .into_iter()
+                    .filter(|pane| {
+                        let fingerprint = pane_slice_fingerprint(&captured, *pane);
+                        let Some(state) = self.pane_math_rows.get_mut(&(row, *pane)) else {
+                            return false;
+                        };
+                        if state.slice_fingerprint == Some(fingerprint) {
+                            return false;
+                        }
+                        state.slice_fingerprint = Some(fingerprint);
+                        state.math_revision = state.math_revision.wrapping_add(1);
+                        state.last_math_damage_at = Some(observed_at);
+                        state.settled_math_revision = None;
+                        state.candidate_signature = None;
+                        true
+                    })
+                    .collect::<Vec<_>>()
+            } else {
+                self.clear_math_candidate_signatures_on_row(row);
+                Vec::new()
+            };
+            if changed_panes.is_empty()
+                && self
+                    .current_frame
+                    .as_ref()
+                    .is_some_and(|frame| frame.panes().len() > 1)
+            {
+                continue;
+            }
+            if changed_panes.is_empty() {
+                self.rearm_live_bands_containing(row, None);
+            } else {
+                for pane in &changed_panes {
+                    self.rearm_live_bands_containing(row, Some(*pane));
+                }
+            }
             // Suppression: inside a repaint window the proven raster keeps rendering over the rows
             // being rewritten instead of the record being torn down (and its source flashing
             // through). Alternate suppresses across a boundary repaint; primary suppresses across an
@@ -8245,7 +8580,17 @@ impl DualPlaneSession {
                 self.primary_repaint_dirty = true;
                 continue;
             }
-            self.invalidate_live_row(row);
+            if changed_panes.is_empty() {
+                self.invalidate_live_row(row, None);
+            } else {
+                for pane in changed_panes {
+                    self.invalidate_live_row(row, Some(pane));
+                }
+            }
+        }
+        if self.current_frame.is_none() || screen_tier_dirty {
+            let capture = self.live_capture();
+            self.observe_frame(capture.frame());
         }
     }
 
@@ -8270,27 +8615,55 @@ impl DualPlaneSession {
     ///
     /// No allocation: the resident records are walked in place, and there are as many of them as
     /// there are blocks on one screen.
-    fn rearm_live_bands_containing(&mut self, row: u32) {
-        let live_rows = &mut self.live_rows;
-        for record in self
-            .live_decorations
-            .values()
-            .filter(|record| record.band_start_row <= row && row <= record.band_end_row)
-        {
-            rearm_live_row_band(live_rows, record.band_start_row, record.band_end_row);
+    fn rearm_live_bands_containing(&mut self, row: u32, pane: Option<PaneRect>) {
+        if let Some(pane) = pane {
+            let pane_math_rows = &mut self.pane_math_rows;
+            for record in self
+                .live_decorations
+                .values()
+                .filter(|record| record.pane == pane)
+                .filter(|record| record.band_start_row <= row && row <= record.band_end_row)
+            {
+                let first = record.band_start_row;
+                let last = record.band_end_row;
+                for band_row in first..=last {
+                    if let Some(state) = pane_math_rows.get_mut(&(band_row, pane)) {
+                        state.candidate_signature = None;
+                        state.settled_math_revision = None;
+                    }
+                }
+            }
+        } else {
+            let live_rows = &mut self.live_rows;
+            let candidate_signatures = &mut self.unframed_candidate_signatures;
+            for record in self
+                .live_decorations
+                .values()
+                .filter(|record| record.band_start_row <= row && row <= record.band_end_row)
+            {
+                let first = record.band_start_row;
+                let last = record.band_end_row;
+                rearm_live_row_band(live_rows, first, last);
+                for band_row in first..=last {
+                    if let Some(signature) = candidate_signatures.get_mut(band_row as usize) {
+                        *signature = None;
+                    }
+                }
+            }
         }
     }
 
-    fn invalidate_live_row(&mut self, row: u32) {
+    fn invalidate_live_row(&mut self, row: u32, pane: Option<PaneRect>) {
         let removed = self
             .live_decorations
             .iter()
             .filter(|(_, record)| record.band_start_row <= row && row <= record.band_end_row)
-            .map(|(start, _)| *start)
+            .filter(|(_, record)| pane.is_none_or(|pane| record.pane == pane))
+            .map(|(key, _)| *key)
             .collect::<Vec<_>>();
         let mut invalidated = 0_u64;
-        for start in removed {
-            let Some(record) = self.live_decorations.remove(&start) else {
+        for key in removed {
+            let Some(record) = self.live_decorations.remove(&key) else {
                 continue;
             };
             // The record is already out of `live_decorations` here, so a preservation check that
@@ -8343,11 +8716,11 @@ impl DualPlaneSession {
     /// doors say "nothing to retire" on almost every call.
     fn retire_live_decorations(
         &mut self,
-        mut doomed: impl FnMut(u32, &LiveDecorationRecord) -> bool,
+        mut doomed: impl FnMut(u32, PaneRect, &LiveDecorationRecord) -> bool,
     ) {
         let mut retired = Vec::new();
-        self.live_decorations.retain(|row, record| {
-            if doomed(*row, record) {
+        self.live_decorations.retain(|(row, pane), record| {
+            if doomed(*row, *pane, record) {
                 retired.push(record.identity.occurrence_id);
                 false
             } else {
@@ -8405,11 +8778,9 @@ impl DualPlaneSession {
     /// next pass. This bounded round-robin cursor survives context-signature changes, so repeatedly
     /// rearmed rows cannot overtake waiting rows, and admission also returns to a changing head.
     fn enqueue_live_task(&mut self, task: LiveDetectionTask) -> EnqueueOutcome {
-        if let Some(index) = self
-            .live_tasks
-            .iter()
-            .position(|queued| queued.candidate_row == task.candidate_row)
-        {
+        if let Some(index) = self.live_tasks.iter().position(|queued| {
+            queued.candidate_row == task.candidate_row && queued.pane == task.pane
+        }) {
             self.live_tasks.remove(index);
         }
         if self.live_tasks.len() == WORKER_QUEUE_CAP {
@@ -8745,12 +9116,13 @@ impl DualPlaneSession {
                 // renderer, so two scans of one band can be in flight at once and the loser arrives
                 // last. Re-arming for it would schedule a scan whose answer is already on the
                 // screen.
-                let answered = self
-                    .live_decorations
-                    .values()
-                    .any(|record| record.band_start_row <= first && last <= record.band_end_row);
+                let answered = self.live_decorations.values().any(|record| {
+                    record.pane == task.pane
+                        && record.band_start_row <= first
+                        && last <= record.band_end_row
+                });
                 if !answered {
-                    rearm_live_row_band_after_refusal(&mut self.live_rows, first, last);
+                    self.rearm_math_band_after_refusal(task.pane, first, last);
                 }
             }
             // A refused completion used to leave nothing behind but a counter nobody prints, so a
@@ -8822,10 +9194,18 @@ impl DualPlaneSession {
         if task.layout != self.layout_key {
             return Some(LiveCompletionRefusal::Layout);
         }
+        let current_capture = self.live_capture();
+        if self.screen_fence_state.as_ref().is_none_or(|current| {
+            !frames_agree(&current.frame, current_capture.frame())
+                || &current.state != current_capture.frame().screen_fence_state()
+                || current.state != task.screen_fence_state
+        }) {
+            return Some(LiveCompletionRefusal::FrameChanged);
+        }
         // Only the source rows and borrowed row band are byte/revision dependencies. The rest of
         // the 1,024-line detector snapshot is semantic context: rerunning detection below catches
         // fence/delimiter state changes without rejecting ordinary spinner or status-line churn.
-        if let Some(refusal) = live_task_is_current(&task, &self.live_capture()) {
+        if let Some(refusal) = live_task_is_current(&task, &current_capture) {
             return Some(refusal);
         }
         if !task.resolved {
@@ -8843,26 +9223,26 @@ impl DualPlaneSession {
             // The second clause is the live half of `retire_refused_table`, and for its reason: a
             // table drawn from rows that were on the grid before this one arrived stands above the
             // candidate rather than over it, so the first clause never reaches it.
-            self.retire_live_decorations(|row, record| {
-                record.end.row == task.candidate_row || task.refused_table_rows.contains(&row)
+            self.retire_live_decorations(|row, pane, record| {
+                pane == task.pane
+                    && (record.end.row == task.candidate_row
+                        || task.refused_table_rows.contains(&row))
             });
             return None;
         }
         if self.semantic_input_overlaps_live(task.screen, task.start, task.end) {
-            self.retire_live_decorations(|row, _| row == task.start.row);
+            self.retire_live_decorations(|row, pane, _| row == task.start.row && pane == task.pane);
             return None;
         }
         if artifact.is_none() && failure_reason.is_none() {
-            self.retire_live_decorations(|row, _| row == task.start.row);
+            self.retire_live_decorations(|row, pane, _| row == task.start.row && pane == task.pane);
             return None;
         }
         if self.new_live_decoration_is_cursor_suppressed(&task) {
-            if let Some(state) = self.live_rows.get_mut(task.candidate_row as usize) {
-                // The task was valid, but presentation policy rejected creating its record at this
-                // cursor state. Keep the stable row eligible for the first frame after the cursor
-                // leaves its WRAPLINE-linked logical line.
-                state.candidate_signature = None;
-            }
+            // The task was valid, but presentation policy rejected creating its record at this
+            // cursor state. Keep the stable row eligible for the first frame after the cursor
+            // leaves its WRAPLINE-linked logical line.
+            self.set_math_candidate_signature(task.candidate_row, task.pane, None);
             return None;
         }
         // Instance state, carried across a re-detection of the block that is already standing on
@@ -8872,7 +9252,7 @@ impl DualPlaneSession {
         // formula's source is an action on one block, not a setting that follows the text.
         let remembered = self
             .live_decorations
-            .get(&task.start.row)
+            .get(&(task.start.row, task.pane))
             .filter(|record| {
                 record.span.original_source == task.span.original_source
                     && record.span.mode == task.span.mode
@@ -8889,11 +9269,10 @@ impl DualPlaneSession {
         // panes of one split put two blocks over the same rows, and neither is in the other's way
         // (T-PANE-COLUMNS; the branch's B-2). On a screen no frame cuts every record's pane is the
         // whole screen, and this is the row test it always was.
-        self.retire_live_decorations(|_, record| {
-            record.end.row >= task.start.row
+        self.retire_live_decorations(|_, pane, record| {
+            pane == task.pane
+                && record.end.row >= task.start.row
                 && record.start.row <= task.end.row
-                && record.pane.left < task.pane.right
-                && task.pane.left < record.pane.right
         });
         let (show_source, hovered, horizontal_scroll_px, vertical_scroll_px) =
             remembered.unwrap_or((false, false, 0, 0));
@@ -8912,7 +9291,7 @@ impl DualPlaneSession {
             }
         }
         self.live_decorations.insert(
-            task.start.row,
+            (task.start.row, task.pane),
             LiveDecorationRecord {
                 identity,
                 placement: LiveOccurrencePlacement {
@@ -9225,9 +9604,12 @@ impl DualPlaneSession {
         self.invalidate_all_live_decorations();
         self.pending_live_handoffs.clear();
         self.live_tasks.clear();
+        self.clear_all_math_candidate_signatures();
         for row in &mut self.live_rows {
-            row.candidate_signature = None;
             row.settled_revision = None;
+        }
+        for state in self.pane_math_rows.values_mut() {
+            state.settled_math_revision = None;
         }
         self.schedule_existing_artifacts();
     }
@@ -9603,8 +9985,8 @@ impl DualPlaneSession {
                 ..
             } => self
                 .live_decorations
-                .get(&start.row)
-                .filter(|record| {
+                .values()
+                .find(|record| {
                     record.screen == *screen
                         && record.start == *start
                         && record.end == *end
@@ -9750,7 +10132,7 @@ impl DualPlaneSession {
                 generation,
                 ..
             } => {
-                let Some(record) = self.live_decorations.get_mut(&start.row).filter(|record| {
+                let Some(record) = self.live_decorations.values_mut().find(|record| {
                     record.screen == *screen
                         && record.start == *start
                         && record.end == *end
@@ -9869,19 +10251,25 @@ impl DualPlaneSession {
                 generation,
                 ..
             } => {
-                let live_band = match self.live_decorations.get(&start.row) {
-                    Some(record) => self.math_band_for(record),
-                    None => return false,
-                };
-                let Some(record) = self.live_decorations.get_mut(&start.row).filter(|record| {
-                    record.screen == *screen
-                        && record.start == *start
-                        && record.end == *end
-                        && record.generation == *generation
-                        && !record.show_source
-                }) else {
+                let Some(key) = self
+                    .live_decorations
+                    .iter()
+                    .find(|(_, record)| {
+                        record.screen == *screen
+                            && record.start == *start
+                            && record.end == *end
+                            && record.generation == *generation
+                            && !record.show_source
+                    })
+                    .map(|(key, _)| *key)
+                else {
                     return false;
                 };
+                let live_band = self.math_band_for(&self.live_decorations[&key]);
+                let record = self
+                    .live_decorations
+                    .get_mut(&key)
+                    .expect("key found above");
                 let Some((artifact, scale_milli)) =
                     live_artifact_and_scale(record, self.layout_key)
                 else {
@@ -10449,7 +10837,7 @@ impl DualPlaneSession {
                     generation,
                     ..
                 } => {
-                    let Some(record) = self.live_decorations.get(&start.row).filter(|record| {
+                    let Some(record) = self.live_decorations.values().find(|record| {
                         record.screen == *screen
                             && record.start == *start
                             && record.end == *end
@@ -12154,7 +12542,7 @@ impl DualPlaneSession {
             };
             match projected {
                 RecordProjection::Visible(record) => {
-                    preserved.insert(record.start.row, record);
+                    preserved.insert((record.start.row, record.pane), record);
                 }
                 RecordProjection::Dormant(record) if self.live_screen == ScreenId::Alternate => {
                     self.retain_offscreen_record(record);
@@ -12167,12 +12555,21 @@ impl DualPlaneSession {
             .saturating_add(invalidated as u64);
         self.live_decorations = preserved;
 
-        let context_signature = live_detection_context_signature(&current, self.inline_math_bands);
-        for record in self.live_decorations.values_mut() {
-            if let Some(state) = self.live_rows.get_mut(record.end.row as usize) {
-                state.candidate_signature =
-                    Some(live_detection_signature(context_signature, record.end.row));
-            }
+        let signatures = self
+            .live_decorations
+            .values()
+            .map(|record| {
+                let context_signature =
+                    live_detection_context_signature(&current, record.pane, self.inline_math_bands);
+                (
+                    record.end.row,
+                    record.pane,
+                    live_detection_signature(context_signature, record.end.row),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (row, pane, signature) in signatures {
+            self.set_math_candidate_signature(row, pane, Some(signature));
         }
     }
 
@@ -12707,7 +13104,7 @@ impl DualPlaneSession {
             })
             .map(|(start, _)| *start)
             .collect::<BTreeSet<_>>();
-        self.retire_live_decorations(|row, _| superseded.contains(&row));
+        self.retire_live_decorations(|row, pane, _| superseded.contains(&(row, pane)));
         let document = &self.document;
         let snapshots = self
             .primary_repaint_snapshot
@@ -12783,6 +13180,7 @@ impl DualPlaneSession {
                 cell_height_subpixels: self.cell_height_subpixels.get(),
                 ascii_baseline_subpixels: self.ascii_baseline_subpixels.map_or(0, NonZeroI64::get),
                 capture: capture_under(&record.capture, detection_options),
+                screen_fence_state: record.capture.frame().screen_fence_state().clone(),
                 pane: record.pane,
                 start: record.start,
                 end: record.end,
@@ -12818,9 +13216,7 @@ impl DualPlaneSession {
         // Relayout tasks carry the current grid generation and a stale raster bridges the worker
         // interval. Clearing content signatures still provides a retry path if a queued task is
         // dropped: resize changed layout, so unchanged text must not suppress the fresh raster.
-        for row in &mut self.live_rows {
-            row.candidate_signature = None;
-        }
+        self.clear_all_math_candidate_signatures();
         self.schedule_existing_artifacts();
     }
 
@@ -14214,8 +14610,7 @@ impl LiveDecorationRecord {
 /// same foreground identity agree whatever their size.
 fn frames_agree(left: &ScreenFrame, right: &ScreenFrame) -> bool {
     left.foreground_program() == right.foreground_program()
-        && ((!left.is_framed() && !right.is_framed())
-            || (left.same_layout(right) && left.screen_fence_state() == right.screen_fence_state()))
+        && ((!left.is_framed() && !right.is_framed()) || left.same_layout(right))
 }
 
 /// The same capture under other detection options: the capture itself when they already agree, so
@@ -14247,6 +14642,17 @@ fn pane_holding(capture: &LiveCapture, start: GridPoint) -> Option<PaneRect> {
         .iter()
         .copied()
         .find(|rect| rect.contains_row(start.row) && rect.contains_column(start.column))
+}
+
+/// The pane identity a retained record has in `capture`. Framed identities are rectangles and a
+/// frame change retires them before projection. An unframed screen is the historical one-pane path:
+/// its whole-screen rectangle follows a resize without turning that resize into a pane-frame change.
+fn retained_pane_in(capture: &LiveCapture, pane: PaneRect) -> PaneRect {
+    if capture.frame().is_framed() {
+        pane
+    } else {
+        capture.screen_rect()
+    }
 }
 
 fn live_grid_input(inputs: &[LiveDetectionInput], row: u32) -> Option<&LiveDetectionInput> {
@@ -14297,11 +14703,12 @@ fn proven_live_occurrence(
             *row = row.checked_sub(task.band_start_row)?;
         }
     }
-    // Row identity is still the whole captured row in 69a (the repaint probes compare it); ticket
-    // 69b keys it by the pane's slice.
+    let pane_inputs = task.capture.pane_inputs(task.pane)?;
+    // Repaint identity is the pane's captured slice. The same screen rows may carry an independent
+    // occurrence in a neighbouring pane, and neither its text nor its occupancy belongs here.
     let source_rows = (task.start.row..=task.end.row)
         .map(|row| {
-            let input = live_grid_input(task.capture.inputs(), row)?;
+            let input = live_grid_input(pane_inputs, row)?;
             Some(ProvenLiveRow {
                 band_offset: row.checked_sub(task.band_start_row)?,
                 text: input.text.clone(),
@@ -14556,12 +14963,17 @@ fn size_resolved_live_task_band(task: &mut LiveDetectionTask) {
 /// Hashed over every pane's own lines (T-PANE-COLUMNS): a framed row is two panes' text, and a fence
 /// or a delimiter is only visible in the pane's slice. On a screen no frame cuts that is the
 /// capture's own input list, as it always was.
-fn live_detection_context_signature(capture: &LiveCapture, inline_formulas: bool) -> u64 {
+fn live_detection_context_signature(
+    capture: &LiveCapture,
+    pane: PaneRect,
+    inline_formulas: bool,
+) -> u64 {
     let mut hasher = DefaultHasher::new();
     for input in capture
         .pane_scans()
         .iter()
-        .flat_map(|pane| pane.inputs().iter())
+        .filter(|scan| scan.rect == pane)
+        .flat_map(|scan| scan.inputs().iter())
     {
         let trimmed = input.text.trim();
         let structural = may_contain_math(trimmed, inline_formulas)
@@ -14888,7 +15300,8 @@ fn live_scan_owns_record_at(
     start: GridPoint,
     end: GridPoint,
 ) -> bool {
-    task.start.row == start.row
+    task.pane == record.pane
+        && task.start.row == start.row
         && task.end.row == end.row
         && task.span.original_source == record.span.original_source
         && task.span.render_source == record.span.render_source
@@ -15129,7 +15542,7 @@ fn project_live_record_uniquely(
     layout: LayoutKey,
     capture: &LiveCapture,
 ) -> Option<RecordProjection> {
-    let inputs = capture.inputs();
+    let inputs = capture.pane_inputs(retained_pane_in(capture, record.pane))?;
     let mut visible = Vec::new();
     let mut dormant = Vec::new();
     for mapping in mappings {
@@ -15220,7 +15633,10 @@ fn projected_exact_source_row_support(record: &LiveDecorationRecord) -> usize {
             let Ok(target) = u32::try_from(target) else {
                 return false;
             };
-            live_grid_input(record.capture.inputs(), target)
+            record
+                .capture
+                .pane_inputs(record.pane)
+                .and_then(|inputs| live_grid_input(inputs, target))
                 .is_some_and(|input| proven.exactly_matches(input))
         })
         .count()
@@ -15291,7 +15707,8 @@ fn project_live_record(
     layout: LayoutKey,
     capture: &LiveCapture,
 ) -> Option<RecordProjection> {
-    let inputs = capture.inputs();
+    let pane = retained_pane_in(capture, record.pane);
+    let inputs = capture.pane_inputs(pane)?;
     let row_count = after_grid_row_count(inputs);
     let last_row = row_count.checked_sub(1)?;
     let mut record = record.clone();
@@ -15306,9 +15723,7 @@ fn project_live_record(
     record.detection_revision = detection_revision;
     record.layout = layout;
     record.capture = capture.clone();
-    // A record parked off the grid stands in no pane until a projection or a restore seats it; the
-    // whole screen names that, and nothing presents a dormant record.
-    record.pane = capture.screen_rect();
+    record.pane = pane;
 
     debug_assert!(record.identity.source_start_offset <= record.identity.source_end_offset);
     debug_assert!(record.identity.created_start.row >= record.identity.source_start_offset);
@@ -15506,10 +15921,10 @@ fn after_grid_row_count(inputs: &[LiveDetectionInput]) -> u32 {
 fn alternate_borrowed_band_is_clear(
     record: &LiveDecorationRecord,
     inputs: &[LiveDetectionInput],
-    occupied: &BTreeSet<u32>,
+    occupied: &BTreeSet<(u32, PaneRect)>,
 ) -> bool {
     (record.band_start_row..=record.band_end_row).all(|row| {
-        !occupied.contains(&row)
+        !occupied.contains(&(row, record.pane))
             && ((record.start.row..=record.end.row).contains(&row)
                 || live_grid_input(inputs, row)
                     .is_some_and(|input| input.text.chars().all(char::is_whitespace)))
@@ -15517,17 +15932,19 @@ fn alternate_borrowed_band_is_clear(
 }
 
 fn insert_nonoverlapping_live_record(
-    records: &mut BTreeMap<u32, LiveDecorationRecord>,
-    occupied: &mut BTreeSet<u32>,
+    records: &mut BTreeMap<(u32, PaneRect), LiveDecorationRecord>,
+    occupied: &mut BTreeSet<(u32, PaneRect)>,
     record: LiveDecorationRecord,
 ) -> Option<LiveDecorationRecord> {
-    if records.contains_key(&record.start.row)
-        || (record.band_start_row..=record.band_end_row).any(|row| occupied.contains(&row))
+    let key = (record.start.row, record.pane);
+    if records.contains_key(&key)
+        || (record.band_start_row..=record.band_end_row)
+            .any(|row| occupied.contains(&(row, record.pane)))
     {
         return Some(record);
     }
-    occupied.extend(record.band_start_row..=record.band_end_row);
-    records.insert(record.start.row, record);
+    occupied.extend((record.band_start_row..=record.band_end_row).map(|row| (row, record.pane)));
+    records.insert(key, record);
     None
 }
 
@@ -15578,7 +15995,6 @@ fn rearm_live_row_band(rows: &mut [LiveRowStability], first: u32, last: u32) {
         let Some(state) = rows.get_mut(row as usize) else {
             continue;
         };
-        state.candidate_signature = None;
         state.settled_revision = None;
     }
 }
@@ -15638,8 +16054,8 @@ fn live_task_dependency_rows(task: &LiveDetectionTask) -> (u32, u32) {
 ///
 /// The re-resolution reads the current capture under the task's own checkpoint and options, and a
 /// resolved task additionally has to be proven in the **same pane rectangle** it was proven in
-/// (T-PANE-COLUMNS, note §4 step 4): a frame that moved under it is a different answer. In 69a the
-/// dependency rows are compared whole; ticket 69b compares the pane's slice.
+/// (T-PANE-COLUMNS, note §4 step 4): a frame that moved under it is a different answer. Dependency
+/// rows compare that pane's sliced text, so churn in a neighbouring pane is not a dependency.
 fn live_task_is_current(
     task: &LiveDetectionTask,
     current: &LiveCapture,
@@ -15648,6 +16064,12 @@ fn live_task_is_current(
     if !frames_agree(task.capture.frame(), current.frame()) {
         return Some(LiveCompletionRefusal::FrameChanged);
     }
+    let Some(snapshot_pane_inputs) = task.capture.pane_inputs(task.pane) else {
+        return Some(LiveCompletionRefusal::FrameChanged);
+    };
+    let Some(current_pane_inputs) = current.pane_inputs(task.pane) else {
+        return Some(LiveCompletionRefusal::FrameChanged);
+    };
     let dependency_start = if task.resolved {
         task.band_start_row
     } else {
@@ -15659,10 +16081,10 @@ fn live_task_is_current(
         task.candidate_row
     };
     for row in dependency_start..=dependency_end {
-        let Some(snapshot) = live_grid_input(task.capture.inputs(), row) else {
+        let Some(snapshot) = live_grid_input(snapshot_pane_inputs, row) else {
             return Some(LiveCompletionRefusal::SourceChanged);
         };
-        let Some(current) = live_grid_input(current_inputs, row) else {
+        let Some(current) = live_grid_input(current_pane_inputs, row) else {
             return Some(LiveCompletionRefusal::SourceChanged);
         };
         let same_source = matches!(
@@ -15690,7 +16112,7 @@ fn live_task_is_current(
             task.capture.foreground_program().clone(),
         )
     };
-    current_task.pane = current_task.capture.screen_rect();
+    current_task.pane = task.pane;
     current_task.start = GridPoint {
         row: task.candidate_row,
         column: 0,
@@ -15742,7 +16164,11 @@ fn byte_offset_at_column(boundaries: &[(u32, u32)], column: u32, text_len: usize
 /// for a framed pane, the capture's for the one whole-screen pane — and a row is armed if any pane
 /// arms it. A row a screen-owned fence covers (R9) arms nothing. On a screen no frame cuts this is
 /// the one walk that always ran.
-fn live_candidate_rows(capture: &LiveCapture, stable: &[bool], inline_formulas: bool) -> Vec<u32> {
+fn live_candidate_rows(
+    capture: &LiveCapture,
+    mut stable: impl FnMut(PaneRect, u32) -> bool,
+    inline_formulas: bool,
+) -> Vec<(u32, PaneRect)> {
     let frame = capture.frame();
     let screen_fence = frame.screen_fence_state();
     let mut candidates = Vec::new();
@@ -15750,7 +16176,7 @@ fn live_candidate_rows(capture: &LiveCapture, stable: &[bool], inline_formulas: 
         let pane_candidates = live_candidate_rows_in_pane(
             pane.inputs(),
             pane.initial_context().clone(),
-            stable,
+            |row| stable(pane.rect, row),
             inline_formulas,
         );
         #[cfg(test)]
@@ -15762,12 +16188,9 @@ fn live_candidate_rows(capture: &LiveCapture, stable: &[bool], inline_formulas: 
         candidates.extend(
             pane_candidates
                 .into_iter()
-                .filter(|row| !screen_fence.covers(*row)),
+                .filter(|row| !screen_fence.covers(*row))
+                .map(|row| (row, pane.rect)),
         );
-    }
-    if capture.pane_scans().len() > 1 {
-        candidates.sort_unstable();
-        candidates.dedup();
     }
     candidates
 }
@@ -15787,7 +16210,7 @@ fn take_arming_walks() -> Vec<(PaneRect, Vec<u32>)> {
 fn live_candidate_rows_in_pane(
     inputs: &[LiveDetectionInput],
     mut context: DetectionContext,
-    stable: &[bool],
+    mut stable: impl FnMut(u32) -> bool,
     inline_formulas: bool,
 ) -> Vec<u32> {
     let mut candidates = Vec::new();
@@ -15819,10 +16242,7 @@ fn live_candidate_rows_in_pane(
             && (may_arm_math(&logical_text, inline_formulas, || {
                 logical_site.unwrap_or(InlineMathSite::Ineligible)
             }) || may_arm_table(&logical_text, || previous_logical_continues_paragraph))
-            && let Some(row) = logical_grid_rows
-                .last()
-                .copied()
-                .filter(|row| stable.get(*row as usize).copied().unwrap_or(false))
+            && let Some(row) = logical_grid_rows.last().copied().filter(|row| stable(*row))
         {
             candidates.push(row);
         }
@@ -15857,6 +16277,29 @@ fn captured_cells_text(cells: &[bt_transcript::CapturedCell]) -> String {
 
 fn captured_row_text_and_boundaries(row: &CapturedRow) -> (String, Vec<(u32, u32)>) {
     captured_row_text_and_boundaries_with_trailing_glyphs(row, false)
+}
+
+fn pane_slice_fingerprint(row: &CapturedRow, pane: PaneRect) -> PaneSliceFingerprint {
+    let mut hasher = DefaultHasher::new();
+    0x4254_5041_4e45_3031_u64.hash(&mut hasher);
+    for cell in row
+        .cells
+        .iter()
+        .skip(pane.left as usize)
+        .take(pane.width() as usize)
+    {
+        cell.text.hash(&mut hasher);
+        cell.style.flags.hash(&mut hasher);
+        cell.style.foreground.hash(&mut hasher);
+        cell.style.background.hash(&mut hasher);
+        cell.hyperlink
+            .as_ref()
+            .map(|link| link.uri.as_ref())
+            .hash(&mut hasher);
+        cell.wide_spacer.hash(&mut hasher);
+        cell.command_output_write.hash(&mut hasher);
+    }
+    PaneSliceFingerprint(hasher.finish())
 }
 
 /// One grid row as the **logical line** reads it — the single rule for every joiner that merges
@@ -17597,7 +18040,8 @@ mod tests {
         );
         session
             .live_decorations
-            .get_mut(&0)
+            .values_mut()
+            .find(|record| record.start.row == 0)
             .expect("row-zero formula produced a ready live artifact")
             .band_end_row = ROWS - 1;
         let fingerprints = (0..ROWS)
@@ -20676,7 +21120,8 @@ mod tests {
         );
         let artifact_key = session
             .live_decorations
-            .get(&0)
+            .values()
+            .find(|record| record.start.row == 0)
             .and_then(|record| record.artifact.as_ref())
             .map(|artifact| artifact.key.clone())
             .unwrap();
@@ -20691,7 +21136,8 @@ mod tests {
             assert_eq!(
                 session
                     .live_decorations
-                    .get(&0)
+                    .values()
+                    .find(|record| record.start.row == 0)
                     .and_then(|record| record.artifact.as_ref())
                     .map(|artifact| artifact.key.as_str()),
                 Some(artifact_key.as_str())
@@ -20738,7 +21184,8 @@ mod tests {
         );
         let artifact_key = session
             .live_decorations
-            .get(&0)
+            .values()
+            .find(|record| record.start.row == 0)
             .and_then(|record| record.artifact.as_ref())
             .map(|artifact| artifact.key.clone())
             .unwrap();
@@ -20761,7 +21208,11 @@ mod tests {
         let after_inputs = Arc::clone(session.live_capture().inputs());
         let after_prefix = session.live_initial_detection_context(&after_inputs);
         assert_ne!(before_prefix, after_prefix);
-        let record = session.live_decorations.get(&0).unwrap();
+        let record = session
+            .live_decorations
+            .values()
+            .find(|record| record.start.row == 0)
+            .unwrap();
         assert_eq!((record.band_start_row, record.band_end_row), (0, 0));
         assert_eq!(
             record
@@ -20811,7 +21262,11 @@ mod tests {
             complete_detected_live_tasks(&mut primary, synthetic_raster(40, 40)),
             1
         );
-        let record = primary.live_decorations.get(&0).unwrap();
+        let record = primary
+            .live_decorations
+            .values()
+            .find(|record| record.start.row == 0)
+            .unwrap();
         assert_eq!((record.band_start_row, record.band_end_row), (0, 0));
         let mut projection = primary.new_projection(primary.layout_key());
         let exact = primary.viewport_frame(&mut projection).unwrap();
@@ -20875,7 +21330,8 @@ mod tests {
         assert_eq!(
             inflight
                 .live_decorations
-                .get(&0)
+                .values()
+                .find(|record| record.start.row == 0)
                 .map(|record| { (record.band_start_row, record.band_end_row) }),
             Some((0, 0))
         );
@@ -20887,7 +21343,15 @@ mod tests {
             complete_detected_live_tasks(&mut blocked, synthetic_raster(40, 40)),
             1
         );
-        assert_eq!(blocked.live_decorations.get(&0).unwrap().band_end_row, 0);
+        assert_eq!(
+            blocked
+                .live_decorations
+                .values()
+                .find(|record| record.start.row == 0)
+                .unwrap()
+                .band_end_row,
+            0
+        );
         let mut projection = blocked.new_projection(blocked.layout_key());
         let expanded = blocked.viewport_frame(&mut projection).unwrap();
         assert_eq!(expanded.math_blocks.len(), 1);
@@ -20927,7 +21391,12 @@ mod tests {
             1
         );
         assert_eq!(
-            capped.live_decorations.get(&0).unwrap().band_end_row,
+            capped
+                .live_decorations
+                .values()
+                .find(|record| record.start.row == 0)
+                .unwrap()
+                .band_end_row,
             0,
             "every blank separator remains outside the detector-proven source band"
         );
@@ -20942,7 +21411,12 @@ mod tests {
             1
         );
         assert_eq!(
-            alternate.live_decorations.get(&0).unwrap().band_end_row,
+            alternate
+                .live_decorations
+                .values()
+                .find(|record| record.start.row == 0)
+                .unwrap()
+                .band_end_row,
             0,
             "alternate presentation must not borrow an adjacent terminal row"
         );
@@ -20963,7 +21437,11 @@ mod tests {
             complete_detected_live_tasks(&mut upward, synthetic_raster(40, 30)),
             1
         );
-        let record = upward.live_decorations.get(&1).unwrap();
+        let record = upward
+            .live_decorations
+            .values()
+            .find(|record| record.start.row == 1)
+            .unwrap();
         assert_eq!((record.band_start_row, record.band_end_row), (1, 1));
         upward
             .feed_at(
@@ -22850,7 +23328,11 @@ mod tests {
             }
         ));
         let block = &frame.math_blocks[0];
-        let record = session.live_decorations.get(&0).unwrap();
+        let record = session
+            .live_decorations
+            .values()
+            .find(|record| record.start.row == 0)
+            .unwrap();
         assert_eq!(
             (record.band_start_row, record.band_end_row),
             (0, 3),
@@ -23274,7 +23756,8 @@ mod tests {
         );
         let live_artifact = session
             .live_decorations
-            .get(&0)
+            .values()
+            .find(|record| record.start.row == 0)
             .and_then(|record| record.artifact.clone())
             .unwrap();
         session
@@ -23937,7 +24420,8 @@ mod tests {
         );
         let before = session
             .live_decorations
-            .get(&1)
+            .values()
+            .find(|record| record.start.row == 1)
             .and_then(|record| record.artifact.as_ref())
             .map(|artifact| Arc::clone(&artifact.rgba))
             .unwrap();
@@ -23950,7 +24434,8 @@ mod tests {
 
         let after = session
             .live_decorations
-            .get(&0)
+            .values()
+            .find(|record| record.start.row == 0)
             .and_then(|record| record.artifact.as_ref())
             .map(|artifact| Arc::clone(&artifact.rgba))
             .expect("the unchanged formula shifts with the full-screen scroll");
@@ -28672,7 +29157,7 @@ mod tests {
             session.live_decorations.is_empty(),
             "completion inside the hidden half-burst must retain the source-line gate"
         );
-        assert_eq!(session.live_rows[0].candidate_signature, None);
+        assert_eq!(session.unframed_candidate_signatures[0], None);
     }
 
     #[test]
@@ -29128,7 +29613,7 @@ mod tests {
             .unwrap();
         assert!(session.complete_live_worker_result(task, Ok(synthetic_raster(32, 18))));
         assert!(session.live_decorations.is_empty());
-        assert_eq!(session.live_rows[0].candidate_signature, None);
+        assert_eq!(session.unframed_candidate_signatures[0], None);
 
         session
             .feed_at(
@@ -32901,6 +33386,7 @@ mod tests {
                     cell_height_subpixels: 0,
                     ascii_baseline_subpixels: 0,
                     capture: record.capture.clone(),
+                    screen_fence_state: record.capture.frame().screen_fence_state().clone(),
                     pane: record.pane,
                     start: record.start,
                     end: record.end,

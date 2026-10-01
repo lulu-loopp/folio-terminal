@@ -237,7 +237,9 @@ row separator need not be an ampersand to be read*; the `bt-detect` crate doc;
 trailing entry 2026-09-29 *A formula inside a multiplexer's pane is detected in
 that pane's own rectangle and drawn inside it* (T-PANE-COLUMNS, with the design
 note `docs/plans/design/pane-columns-2026-09-29.md` and the `bt_detect::frame`
-module doc).
+module doc). Math identity and stability are per `(screen row, pane rectangle)`;
+the whole-row freshness tier remains the owner for printed paths and image
+placeholders (T-PANE-IDENTITY, 2026-10-01).
 
 ### 8. Selection — three models, by ruling — `folded`
 **Rule.** This window keeps three selection models on purpose, each in its own
@@ -444,7 +446,10 @@ admits the renderer under the dependency bar.
 Entries: §4.6 and its lettered continuations; §5 is a stub; the `bt-math` crate
 doc, which carries the worker stack contract; trailing entry 2026-09-29 *A
 formula inside a multiplexer's pane is detected in that pane's own rectangle and
-drawn inside it* (a live block's band, fold, limits and marks are its pane's).
+drawn inside it* (a live block's band, fold, limits and marks are its pane's), and
+trailing entry 2026-10-01 *math identity, stability, repaint ownership and
+completion dependencies belong to `(row, pane)`, while global row freshness does
+not move* (T-PANE-IDENTITY).
 
 ### 22. Animation and pacing — `folded`
 **Rule.** One frame clock per window, its interval taken from the display and

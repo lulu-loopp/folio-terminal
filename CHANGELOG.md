@@ -23,6 +23,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- Formulas inside tmux, screen, zellij or herdr panes are typeset per pane, and a pane that keeps printing no longer unsettles its neighbour's formulas.
+
 - In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder.
 
 - A pane can reset the terminal modes a program left behind (pane menu ▸ Reset terminal modes).

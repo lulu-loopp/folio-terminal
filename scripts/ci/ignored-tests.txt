@@ -132,14 +132,3 @@ attention_ownership::tests::attention_a_linked_config_is_edited_at_its_target_in
 # `cargo test -p bt-platform --lib the_released_windows_assets -- --ignored --nocapture`.
 # Expiry: when the updater's Windows acceptance (U-20) reads a real release in CI.
 trust::tests::the_released_windows_assets_carry_an_identity_oid
-
-# T-PANE-COLUMNS (69a, 2026-09-29): five of the design note's §7.4 tests belong to ticket
-# 69b (T-PANE-IDENTITY), which keys math stability, candidates, records and completion by
-# (row, pane). They are written in full against today's session and are red until 69b
-# lands; 69a ships only together with 69b (owner, 2026-09-29), so none of them is a
-# regression a release could carry. Expiry: 69b's merge, before the 0.4.7 tag.
-session::pane_columns_tests::a_formula_in_one_pane_settles_while_the_other_pane_writes
-session::pane_columns_tests::a_spinner_in_one_pane_advances_the_row_but_not_the_other_panes_math
-session::pane_columns_tests::two_panes_closing_on_the_same_row_both_typeset
-session::pane_columns_tests::two_panes_starting_on_the_same_row_both_keep_their_records
-session::pane_columns_tests::completion_ignores_the_other_panes_half_of_the_row

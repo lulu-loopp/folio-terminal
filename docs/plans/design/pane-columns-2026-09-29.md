@@ -260,7 +260,7 @@ Four Codex reviews: the branch's three (2026-09-16 at `947e31b1`; 2026-09-17 at 
 | **B-1** inline runs used pane bytes against whole-screen text; the origin arithmetic was a cell short at a straddling cluster (R2-1) | closed (`live_region_cell_column`) | R7 |
 | **B-2** raster, source, ground and hit bounds escaped the region | closed (region band, left/right limits, marks hidden) | R10, R11 |
 | **B-3** a later band overwrote an earlier band's rows; hidden top added after merging | closed (`max`, fold first) | R10; six-order test |
-| **B-4** candidates, tasks and records keyed by row only; completion compared whole rows | open, "accepted limit" | **69b**, release-gating |
+| **B-4** candidates, tasks and records keyed by row only; completion compared whole rows | **closed**: candidates, records, stability, repaint occupancy, retirement and completion dependencies are keyed/scoped by `(row, PaneRect)` | **69b**, release-gating |
 | **B-5** 90 % occupancy is not proof | unbroken frame + fence ownership + upstream checkpoint | replaced by V1 (every row of the rectangle), R5 and R9 |
 | **B-6** repeated border work | thread-local memo | the capture owns the frame (§3) |
 | **B-7** empty trailing region | open | panes are bounded rectangles |

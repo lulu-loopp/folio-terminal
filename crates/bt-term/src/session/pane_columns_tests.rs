@@ -5,9 +5,8 @@
 //! each row addressed, the frame cells written, then the pane's own text. The cell boundaries the
 //! detector reads are therefore the captured ones, never inferred.
 //!
-//! The §7.4 tests belong to ticket 69b (T-PANE-IDENTITY: stability, candidates, records and
-//! completion keyed by `(row, pane)`). They are written here in full and carry
-//! `#[ignore = "69b"]` until 69b lands; `scripts/ci/ignored-tests.txt` lists them.
+//! The §7.4 tests are ticket 69b's T-PANE-IDENTITY pins: stability, candidates, records and
+//! completion are keyed by `(row, pane)`.
 
 use super::tests::{complete_detected_live_tasks, nz, synthetic_raster};
 use super::*;
@@ -515,7 +514,7 @@ fn the_oracle_does_not_back_a_stale_region_from_another_regions_equal_source() {
     }
     session
         .live_decorations
-        .insert(right.start.row, right.clone());
+        .insert((right.start.row, right.pane), right.clone());
     let reported = session.held_unbacked_records();
     assert_eq!(reported.len(), 1, "{reported:?}");
     assert_eq!(reported[0].band_start_row, right.band_start_row);
@@ -599,8 +598,8 @@ fn a_pipe_table_in_a_pane_is_armed_in_that_pane() {
     );
 }
 
-/// RED (69a round 2, E5) — the production arming loop walks each pane exactly once before 69a
-/// unions row numbers. T08's one whole-capture walk changes both the observed rectangles and lists.
+/// RED (69a round 2, E5) — the production arming loop walks each pane exactly once and reports
+/// candidate identities with their panes. T08's whole-capture walk changes both rectangles and lists.
 #[test]
 fn arming_walks_each_pane_once_and_reports_each_panes_candidate_rows() {
     let rows = (0..12)
@@ -622,16 +621,23 @@ fn arming_walks_each_pane_once_and_reports_each_panes_candidate_rows() {
     let mut session = DualPlaneSession::new(nz(100), nz(12));
     session.feed_at(&repaint(&rows), start).unwrap();
     let capture = session.live_capture();
-    let stable = vec![true; 12];
     let _ = take_arming_walks();
-    let union = live_candidate_rows(&capture, &stable, session.inline_math_bands);
+    let candidates = live_candidate_rows(&capture, |_, _| true, session.inline_math_bands);
     let walks = take_arming_walks();
     assert_eq!(walks.len(), 2);
     assert_eq!(walks[0].0, rect(0, 12, 0, 50));
     assert_eq!(walks[1].0, rect(0, 12, 51, 100));
     assert_eq!(walks[0].1, vec![3, 5]);
     assert_eq!(walks[1].1, vec![6, 7]);
-    assert_eq!(union, vec![3, 5, 6, 7]);
+    assert_eq!(
+        candidates,
+        vec![
+            (3, rect(0, 12, 0, 50)),
+            (5, rect(0, 12, 0, 50)),
+            (6, rect(0, 12, 51, 100)),
+            (7, rect(0, 12, 51, 100)),
+        ]
+    );
 }
 
 /// RED (69a round 2, E4) — the session retains only topology. The Arc holding capture rows dies
@@ -755,7 +761,6 @@ const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
 ///
 /// MUTATION: compare whole-row fingerprints in the pane math tier.
 #[test]
-#[ignore = "69b"]
 fn a_formula_in_one_pane_settles_while_the_other_pane_writes() {
     let start = Instant::now();
     let mut session = DualPlaneSession::new(nz(100), nz(40));
@@ -789,7 +794,6 @@ fn a_formula_in_one_pane_settles_while_the_other_pane_writes() {
 ///
 /// MUTATION: advance the pane math clock on any damaged row.
 #[test]
-#[ignore = "69b"]
 fn a_spinner_in_one_pane_advances_the_row_but_not_the_other_panes_math() {
     let start = Instant::now();
     let mut session = DualPlaneSession::new(nz(100), nz(40));
@@ -857,7 +861,7 @@ fn two_pane_screen(horizontal: bool) -> Vec<String> {
         .collect()
 }
 
-/// RED (69a, written for 69b) — **a frame change invalidates every pane-keyed state** (Codex's
+/// RED (69b) — **a frame change invalidates every pane-keyed state** (Codex's
 /// check of (b), blocker 2; coordinator's ruling 2026-09-29). Capture A is a split at column 50;
 /// capture B adds a junction-anchored horizontal split at row 20 inside the right pane only. On B
 /// every record is dropped — the left pane's too, although its rectangle did not move — and both
@@ -913,7 +917,7 @@ fn a_frame_change_invalidates_every_pane_keyed_state() {
     assert!(after.contains(&rect(21, 40, 51, 100)));
 }
 
-/// RED (69a, written for 69b) — **a fence opened on the status row suppresses every pane, and its
+/// RED (69b) — **a fence opened on the status row suppresses every pane, and its
 /// closing releases them** (Codex's check of (b), blocker 3). Row 0 is an excluded status row; rows
 /// 1–39 are split at column 50 with a settled formula in each pane. Repainting only row 0 to three
 /// backticks leaves the frame's rectangles alone but changes the screen-owned fence state: every
@@ -1004,7 +1008,6 @@ fn same_row_screen(left_start: usize, right_start: usize) -> Vec<String> {
 ///
 /// MUTATION: key candidates by row alone.
 #[test]
-#[ignore = "69b"]
 fn two_panes_closing_on_the_same_row_both_typeset() {
     let start = Instant::now();
     let mut session = DualPlaneSession::new(nz(100), nz(40));
@@ -1031,7 +1034,6 @@ fn two_panes_closing_on_the_same_row_both_typeset() {
 ///
 /// MUTATION: key `live_decorations` by the start row alone.
 #[test]
-#[ignore = "69b"]
 fn two_panes_starting_on_the_same_row_both_keep_their_records() {
     let rows = (0..40)
         .map(|row| {
@@ -1072,7 +1074,6 @@ fn two_panes_starting_on_the_same_row_both_keep_their_records() {
 ///
 /// MUTATION: compare the whole row in `live_task_is_current`.
 #[test]
-#[ignore = "69b"]
 fn completion_ignores_the_other_panes_half_of_the_row() {
     let start = Instant::now();
     let mut session = DualPlaneSession::new(nz(100), nz(40));
