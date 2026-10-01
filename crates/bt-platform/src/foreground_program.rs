@@ -4,7 +4,15 @@
 //! the door. Windows takes one ToolHelp snapshot. macOS walks `proc_listchildpids`. An `ssh` client
 //! or WSL bridge is a boundary rather than evidence about the remote/guest process.
 
+use std::{collections::BTreeSet, time::Duration};
+
 use crate::admission::WorkerCtx;
+
+/// The private word the Windows observation door gives Folio's short-lived console helper.
+pub const CONSOLE_MEMBERS_FLAG: &str = "--console-members";
+
+/// Both the candidate cadence and the console helper's absolute deadline.
+pub const OBSERVATION_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ForegroundProgram {
@@ -20,6 +28,11 @@ struct ProcessEntry {
     started: u64,
 }
 
+struct Observation {
+    processes: Vec<ProcessEntry>,
+    console_members: Option<BTreeSet<u32>>,
+}
+
 /// Observe the deepest local descendant of `shell_pid` on a worker.
 ///
 /// ```compile_fail
@@ -30,14 +43,26 @@ struct ProcessEntry {
 /// one, and therefore cannot call this process-table door from the window thread.
 #[must_use]
 pub fn foreground_program(_worker: &WorkerCtx, shell_pid: u32) -> ForegroundProgram {
-    imp::snapshot(shell_pid).map_or(ForegroundProgram::Unknown, |processes| {
+    imp::observation(_worker, shell_pid).map_or(ForegroundProgram::Unknown, |observation| {
         let order = if cfg!(target_os = "macos") {
             LeafOrder::Youngest
         } else {
             LeafOrder::DeepestThenYoungest
         };
-        choose_foreground(&processes, shell_pid, order)
+        choose_foreground(
+            &observation.processes,
+            shell_pid,
+            order,
+            observation.console_members.as_ref(),
+        )
     })
+}
+
+/// The standalone helper body. It prints the attached console's process ids, one per line.
+/// Failure is `false` and leaves standard output empty.
+#[must_use]
+pub fn write_console_members(_worker: &WorkerCtx, shell_pid: u32) -> bool {
+    imp::write_console_members(shell_pid)
 }
 
 fn canonical_image(image: &str) -> String {
@@ -70,6 +95,7 @@ fn choose_foreground(
     processes: &[ProcessEntry],
     shell_pid: u32,
     order: LeafOrder,
+    console_members: Option<&BTreeSet<u32>>,
 ) -> ForegroundProgram {
     let mut frontier = vec![(shell_pid, 0usize)];
     let mut best: Option<(usize, u64, u32, Option<String>)> = None;
@@ -83,22 +109,25 @@ fn choose_foreground(
             let image = canonical_image(&child.image);
             let boundary = crosses_remote_boundary(&image);
             let has_children = children(child.pid).next().is_some();
-            if !boundary && has_children {
-                frontier.push((child.pid, depth + 1));
-                continue;
+            let is_candidate =
+                console_members.map_or(!has_children, |members| members.contains(&child.pid));
+            if is_candidate {
+                let candidate = (
+                    depth + 1,
+                    child.started,
+                    child.pid,
+                    (!boundary).then_some(image.clone()),
+                );
+                if best.as_ref().is_none_or(|current| {
+                    matches!(order, LeafOrder::DeepestThenYoungest) && candidate.0 > current.0
+                        || (matches!(order, LeafOrder::Youngest) || candidate.0 == current.0)
+                            && (candidate.1, candidate.2) > (current.1, current.2)
+                }) {
+                    best = Some(candidate);
+                }
             }
-            let candidate = (
-                depth + 1,
-                child.started,
-                child.pid,
-                (!boundary).then_some(image),
-            );
-            if best.as_ref().is_none_or(|current| {
-                matches!(order, LeafOrder::DeepestThenYoungest) && candidate.0 > current.0
-                    || (matches!(order, LeafOrder::Youngest) || candidate.0 == current.0)
-                        && (candidate.1, candidate.2) > (current.1, current.2)
-            }) {
-                best = Some(candidate);
+            if !boundary && (has_children || console_members.is_some()) {
+                frontier.push((child.pid, depth + 1));
             }
         }
     }
@@ -107,24 +136,116 @@ fn choose_foreground(
 }
 
 #[cfg(any(test, not(any(windows, target_os = "macos"))))]
-fn unsupported_snapshot() -> Option<Vec<ProcessEntry>> {
+fn unsupported_observation() -> Option<Observation> {
     None
 }
 
 #[cfg(windows)]
 mod imp {
-    use super::ProcessEntry;
+    use super::{CONSOLE_MEMBERS_FLAG, OBSERVATION_INTERVAL, Observation, ProcessEntry};
     use std::{
+        collections::BTreeSet,
+        io::{Read, Write},
         mem::size_of,
         os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        process::Stdio,
+        time::{Duration, Instant},
     };
     use windows::Win32::{
         Foundation::HANDLE,
+        System::Console::{AttachConsole, FreeConsole, GetConsoleProcessList},
         System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
             TH32CS_SNAPPROCESS,
         },
     };
+
+    const HELPER_POLL: Duration = Duration::from_millis(10);
+
+    pub(super) fn observation(
+        worker: &crate::admission::WorkerCtx,
+        shell_pid: u32,
+    ) -> Option<Observation> {
+        Some(Observation {
+            processes: snapshot(shell_pid)?,
+            console_members: Some(console_members(worker, shell_pid)?),
+        })
+    }
+
+    fn console_members(
+        worker: &crate::admission::WorkerCtx,
+        shell_pid: u32,
+    ) -> Option<BTreeSet<u32>> {
+        let executable = std::env::current_exe().ok()?;
+        let mut child = crate::quiet_command(executable)
+            .args([CONSOLE_MEMBERS_FLAG, &shell_pid.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()?;
+        let deadline = Instant::now() + OBSERVATION_INTERVAL;
+        let status = loop {
+            match child.try_wait().ok()? {
+                Some(status) => break status,
+                None if Instant::now() < deadline => {
+                    crate::wait::sleep_within(worker, HELPER_POLL);
+                }
+                None => {
+                    // This handle names exactly the helper this call started.
+                    let _ = child.kill();
+                    return None;
+                }
+            }
+        };
+        if !status.success() {
+            return None;
+        }
+        let mut output = String::new();
+        child.stdout.take()?.read_to_string(&mut output).ok()?;
+        let members = output
+            .lines()
+            .map(str::parse)
+            .collect::<Result<BTreeSet<u32>, _>>()
+            .ok()?;
+        (!members.is_empty()).then_some(members)
+    }
+
+    pub(super) fn write_console_members(shell_pid: u32) -> bool {
+        // SAFETY: this helper starts consoleless and attaches only to the pane shell pid its
+        // parent supplied. It detaches before returning, so no resident Folio process changes
+        // console state.
+        if unsafe { AttachConsole(shell_pid) }.is_err() {
+            return false;
+        }
+        let members = (|| {
+            let mut pids = vec![0u32; 64];
+            loop {
+                // SAFETY: `pids` is writable for the slice length supplied by the binding.
+                let count = unsafe { GetConsoleProcessList(&mut pids) };
+                let count = usize::try_from(count).ok()?;
+                if count == 0 {
+                    return None;
+                }
+                if count <= pids.len() {
+                    pids.truncate(count);
+                    return Some(pids);
+                }
+                pids.resize(count, 0);
+            }
+        })();
+        // SAFETY: the successful attach above made this helper a member of exactly one console.
+        let detached = unsafe { FreeConsole() }.is_ok();
+        let Some(members) = members.filter(|_| detached) else {
+            return false;
+        };
+        let text = members
+            .into_iter()
+            .map(|pid| format!("{pid}\n"))
+            .collect::<String>();
+        let mut output = std::io::stdout().lock();
+        output.write_all(text.as_bytes()).is_ok() && output.flush().is_ok()
+    }
 
     /// One ToolHelp snapshot of the process table, narrowed to the shell's descendants before any
     /// process is opened: a start time is read only for a process on the shell's tree, and a
@@ -186,7 +307,7 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
-    use super::ProcessEntry;
+    use super::{Observation, ProcessEntry};
     use std::ffi::{c_char, c_int, c_void};
 
     const PROC_PIDTBSDINFO: c_int = 3;
@@ -231,7 +352,17 @@ mod imp {
         fn proc_name(pid: c_int, buffer: *mut c_void, buffersize: u32) -> c_int;
     }
 
-    pub(super) fn snapshot(shell_pid: u32) -> Option<Vec<ProcessEntry>> {
+    pub(super) fn observation(
+        _worker: &crate::admission::WorkerCtx,
+        shell_pid: u32,
+    ) -> Option<Observation> {
+        Some(Observation {
+            processes: snapshot(shell_pid)?,
+            console_members: None,
+        })
+    }
+
+    fn snapshot(shell_pid: u32) -> Option<Vec<ProcessEntry>> {
         let mut processes = Vec::new();
         let mut parents = vec![i32::try_from(shell_pid).ok()?];
         while let Some(parent) = parents.pop() {
@@ -294,15 +425,26 @@ mod imp {
         }
         Some(processes)
     }
+
+    pub(super) fn write_console_members(_shell_pid: u32) -> bool {
+        false
+    }
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
 mod imp {
-    use super::ProcessEntry;
+    use super::Observation;
 
     /// The named unsupported-platform refusal. It fabricates no provenance.
-    pub(super) fn snapshot(_shell_pid: u32) -> Option<Vec<ProcessEntry>> {
-        super::unsupported_snapshot()
+    pub(super) fn observation(
+        _worker: &crate::admission::WorkerCtx,
+        _shell_pid: u32,
+    ) -> Option<Observation> {
+        super::unsupported_observation()
+    }
+
+    pub(super) fn write_console_members(_shell_pid: u32) -> bool {
+        false
     }
 }
 
@@ -332,7 +474,7 @@ mod tests {
             process(12, 11, "TMUX.EXE", 30),
         ];
         assert_eq!(
-            choose_foreground(&table, 10, LeafOrder::DeepestThenYoungest),
+            choose_foreground(&table, 10, LeafOrder::DeepestThenYoungest, None),
             ForegroundProgram::Known("tmux".to_owned())
         );
     }
@@ -351,11 +493,11 @@ mod tests {
             process(14, 11, "OpenConsole.exe", 50),
         ];
         assert_eq!(
-            choose_foreground(&table, 10, LeafOrder::DeepestThenYoungest),
+            choose_foreground(&table, 10, LeafOrder::DeepestThenYoungest, None),
             ForegroundProgram::Known("tmux".to_owned())
         );
         assert_eq!(
-            choose_foreground(&table, 10, LeafOrder::Youngest),
+            choose_foreground(&table, 10, LeafOrder::Youngest, None),
             ForegroundProgram::Known("tmux".to_owned())
         );
     }
@@ -367,7 +509,7 @@ mod tests {
             process(12, 10, "new.exe", 30),
         ];
         assert_eq!(
-            choose_foreground(&table, 10, LeafOrder::DeepestThenYoungest),
+            choose_foreground(&table, 10, LeafOrder::DeepestThenYoungest, None),
             ForegroundProgram::Known("new".to_owned())
         );
     }
@@ -380,7 +522,7 @@ mod tests {
             process(13, 10, "young", 30),
         ];
         assert_eq!(
-            choose_foreground(&table, 10, LeafOrder::Youngest),
+            choose_foreground(&table, 10, LeafOrder::Youngest, None),
             ForegroundProgram::Known("young".to_owned())
         );
     }
@@ -393,6 +535,7 @@ mod tests {
                     &[process(11, 10, bridge, 20)],
                     10,
                     LeafOrder::DeepestThenYoungest,
+                    None,
                 ),
                 ForegroundProgram::Unknown
             );
@@ -402,8 +545,29 @@ mod tests {
                 &[process(11, 10, "helper", 10), process(12, 11, "ssh", 20),],
                 10,
                 LeafOrder::DeepestThenYoungest,
+                None,
             ),
             ForegroundProgram::Unknown
+        );
+    }
+
+    /// RED (69a round 3, E8 console ownership) — **an off-console descendant can never supply
+    /// trusted provenance.** `tmux.exe` is younger and deeper, but it is detached from the pane's
+    /// console; the older console member `screen.exe` is the answer.
+    ///
+    /// MUTATION: ignore `console_members` in `choose_foreground` and use the ordinary deepest-leaf
+    /// choice.
+    #[test]
+    fn an_off_console_descendant_never_beats_a_console_member() {
+        let table = [
+            process(11, 10, "screen.exe", 20),
+            process(12, 10, "detached.exe", 30),
+            process(13, 12, "tmux.exe", 40),
+        ];
+        let members = BTreeSet::from([10, 11]);
+        assert_eq!(
+            choose_foreground(&table, 10, LeafOrder::DeepestThenYoungest, Some(&members),),
+            ForegroundProgram::Known("screen".to_owned())
         );
     }
 
@@ -492,6 +656,7 @@ mod tests {
         }
 
         let shell_pid = child.id();
+        #[cfg(target_os = "macos")]
         let observed = crate::spawn_at_priority(
             "foreground-program-door-test",
             crate::ThreadPriority::BelowNormal,
@@ -500,6 +665,24 @@ mod tests {
         .expect("spawn worker-authority test")
         .join()
         .expect("foreground-program worker completes");
+        #[cfg(windows)]
+        let observed = {
+            // The platform test binary has no `--console-members` main; the shipped helper lives
+            // in `bt-app`. Keep this real process-tree pin here and give selection the member set
+            // the helper supplies. The app/VM row owns the real helper-process proof.
+            let grandchild_pid = fs::read_to_string(&ready)
+                .expect("read grandchild pid")
+                .parse::<u32>()
+                .expect("grandchild pid is decimal");
+            let table = imp::snapshot(shell_pid).expect("snapshot helper descendants");
+            let members = BTreeSet::from([shell_pid, grandchild_pid]);
+            choose_foreground(
+                &table,
+                shell_pid,
+                LeafOrder::DeepestThenYoungest,
+                Some(&members),
+            )
+        };
 
         fs::write(&stop, []).expect("release helper processes");
         assert!(child.wait().expect("join helper child").success());
@@ -512,6 +695,6 @@ mod tests {
 
     #[test]
     fn unsupported_platform_refuses_the_foreground_program_door_by_name() {
-        assert!(unsupported_snapshot().is_none());
+        assert!(unsupported_observation().is_none());
     }
 }

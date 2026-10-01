@@ -423,7 +423,7 @@ TabState.landing	LandTween	-	1	1	1	0	0	0	0	complete
 TabState.last_drawn_offset	Option<i32>	-	1	1	1	0	0	0	0	complete
 TabState.last_drawn_landing	Option<u8>	-	1	1	1	0	0	0	0	complete
 LeafSession.pty	Option<PtySession>	-	n	3	3	4	0	0	1	incomplete
-LeafSession.foreground_program_cadence	Cadence	-	1	1	2	0	0	0	0	complete
+LeafSession.foreground_program_cadence	Cadence	-	1	1	3	0	0	0	0	complete
 LeafSession.incarnation	u64	-	0	0	0	0	0	0	0	complete
 LeafSession.wake	Option<Arc<LeafWake>>	-	0	0	0	0	0	0	0	complete
 LeafSession.profile	String	-	0	0	0	0	0	0	2	incomplete

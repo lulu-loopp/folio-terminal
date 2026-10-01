@@ -9,7 +9,8 @@ use anyhow::{Context, Result};
 
 use crate::{LeafSession, ShellAddress};
 
-pub(crate) const OBSERVATION_INTERVAL: Duration = Duration::from_secs(5);
+pub(crate) const OBSERVATION_INTERVAL: Duration =
+    bt_platform::foreground_program::OBSERVATION_INTERVAL;
 
 pub(crate) struct Request {
     pub(crate) address: ShellAddress,
@@ -88,6 +89,16 @@ pub(crate) fn request(
     {
         return;
     }
+    dispatch(leaf, address, requests);
+}
+
+/// Send a request the cadence has already admitted, including the one successor returned by
+/// [`Cadence::answered`].
+pub(crate) fn dispatch(
+    leaf: &mut LeafSession,
+    address: ShellAddress,
+    requests: &mpsc::Sender<Request>,
+) {
     let sent = leaf
         .pty
         .as_ref()
@@ -102,7 +113,8 @@ pub(crate) fn request(
                 .is_ok()
         });
     if !sent {
-        leaf.foreground_program_cadence.answered();
+        // Nothing can arrive for this request, so the cadence is not left permanently in flight.
+        let _ = leaf.foreground_program_cadence.answered();
     }
 }
 
@@ -113,16 +125,17 @@ pub(crate) fn deadline(leaf: &LeafSession) -> Option<Instant> {
 }
 
 /// Land one answer only in the shell incarnation that asked. `None` is a stale answer; `Some`
-/// says whether the compact session-owned fact changed.
+/// says whether the compact session-owned fact changed and whether one command-start request was
+/// coalesced behind this answer.
 pub(crate) fn apply_answer(
     session: &mut LeafSession,
     incarnation: u64,
     program: bt_platform::foreground_program::ForegroundProgram,
-) -> Option<bool> {
+) -> Option<(bool, bool)> {
     if session.incarnation != incarnation {
         return None;
     }
-    session.foreground_program_cadence.answered();
+    let follow_up = session.foreground_program_cadence.answered();
     let program = match program {
         bt_platform::foreground_program::ForegroundProgram::Known(image) => {
             bt_detect::ForegroundProgram::known(image)
@@ -133,7 +146,7 @@ pub(crate) fn apply_answer(
     };
     let changed = session.session.foreground_program() != &program;
     session.session.apply_foreground_program(program);
-    Some(changed)
+    Some((changed, follow_up))
 }
 
 /// Per-session cadence and coalescing. The clock is supplied by the app, so tests move it without
@@ -141,6 +154,7 @@ pub(crate) fn apply_answer(
 #[derive(Default)]
 pub(crate) struct Cadence {
     in_flight: bool,
+    pending_after: bool,
     next_periodic: Option<Instant>,
 }
 
@@ -157,7 +171,11 @@ impl Cadence {
             self.next_periodic = Some(now + OBSERVATION_INTERVAL);
         }
         let periodic = candidate && self.next_periodic.is_some_and(|due| now >= due);
-        if self.in_flight || !(command_started || periodic) {
+        if self.in_flight {
+            self.pending_after |= command_started || periodic;
+            return false;
+        }
+        if !(command_started || periodic) {
             return false;
         }
         self.in_flight = true;
@@ -165,8 +183,11 @@ impl Cadence {
         true
     }
 
-    pub(crate) fn answered(&mut self) {
-        self.in_flight = false;
+    /// Complete one probe and answer whether its one coalesced successor must be sent now.
+    pub(crate) fn answered(&mut self) -> bool {
+        let ask_now = std::mem::take(&mut self.pending_after);
+        self.in_flight = ask_now;
+        ask_now
     }
 
     pub(crate) fn deadline(&self, candidate: bool) -> Option<Instant> {
@@ -211,12 +232,29 @@ mod tests {
     }
 
     #[test]
-    fn redundant_requests_are_coalesced_until_the_answer_lands() {
+    fn command_starts_while_a_probe_is_in_flight_each_leave_one_successor() {
         let start = Instant::now();
         let mut cadence = Cadence::default();
+        let mut requests = 0;
         assert!(cadence.should_request(start, true, true));
+        requests += 1;
+
+        // Hold answer A. CommandStart B is consumed by the caller, but the cadence retains its
+        // one-bit obligation rather than losing it behind A.
+        assert!(!cadence.should_request(start, true, true));
+        assert!(cadence.answered());
+        requests += 1;
+        assert_eq!(requests, 2, "answer A dispatches exactly one request for B");
+
+        // Hold answer B. Any number of triggers remains one bit and therefore one successor.
+        assert!(!cadence.should_request(start, true, true));
         assert!(!cadence.should_request(start + OBSERVATION_INTERVAL, true, true));
-        cadence.answered();
-        assert!(cadence.should_request(start + OBSERVATION_INTERVAL, true, true));
+        assert!(cadence.answered());
+        requests += 1;
+        assert_eq!(
+            requests, 3,
+            "answer B dispatches exactly one further request"
+        );
+        assert!(!cadence.answered(), "nothing else was left pending");
     }
 }

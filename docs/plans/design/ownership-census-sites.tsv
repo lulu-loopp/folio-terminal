@@ -351,7 +351,8 @@ LeafSession.card_skip	access	crate	aim_card_window	lend	1
 LeafSession.column_awake	write	crate::runtime::terminal	Runtime::wake_terminal_column	assign	1
 LeafSession.conpty_grid	write	crate	release_due_leaf_resize	assign	1
 LeafSession.foreground_program_cadence	write	crate::foreground_program	apply_answer	call:answered	1
-LeafSession.foreground_program_cadence	write	crate::foreground_program	request	call:answered,call:should_request	2
+LeafSession.foreground_program_cadence	write	crate::foreground_program	dispatch	call:answered	1
+LeafSession.foreground_program_cadence	write	crate::foreground_program	request	call:should_request	1
 LeafSession.frame_image_references	write	crate::runtime::frame	Runtime::publish_frame_inner	assign	1
 LeafSession.frame_image_references	write	crate::runtime::panes	Runtime::rescan_pane_references	assign	2
 LeafSession.grid	write	crate	release_due_leaf_resize	assign	1

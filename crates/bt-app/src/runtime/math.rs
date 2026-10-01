@@ -917,6 +917,7 @@ impl Runtime<'_> {
         batch: &mut Vec<foreground_program::Answer>,
     ) -> Result<()> {
         let mut changed = false;
+        let requests = self.app.foreground_program_worker.requests.clone();
         for answer in answers_for(batch, |answer| {
             self.owns(AnswerOwner::Tab(answer.address.leaf.tab))
         }) {
@@ -927,11 +928,14 @@ impl Runtime<'_> {
             let Some(session) = self.window.tabs[index].sessions.get_mut(&leaf.seat) else {
                 continue;
             };
-            let Some(answer_changed) =
+            let Some((answer_changed, follow_up)) =
                 foreground_program::apply_answer(session, answer.incarnation, answer.program)
             else {
                 continue;
             };
+            if follow_up {
+                foreground_program::dispatch(session, answer.address, &requests);
+            }
             changed |= answer_changed;
         }
         if changed {

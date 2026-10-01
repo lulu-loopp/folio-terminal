@@ -44097,7 +44097,7 @@ fn an_addressed_foreground_answer_stores_unknown_and_preserves_an_unlisted_local
             incarnation,
             bt_platform::foreground_program::ForegroundProgram::Unknown,
         ),
-        Some(false)
+        Some((false, false))
     );
     assert_eq!(
         leaf.session.foreground_program(),
@@ -44110,7 +44110,7 @@ fn an_addressed_foreground_answer_stores_unknown_and_preserves_an_unlisted_local
             incarnation,
             bt_platform::foreground_program::ForegroundProgram::Known("powershell".to_owned()),
         ),
-        Some(true)
+        Some((true, false))
     );
     assert_eq!(
         leaf.session.foreground_program(),

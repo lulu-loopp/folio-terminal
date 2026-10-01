@@ -71272,7 +71272,28 @@ fn report_frame_shape_stop(error: &anyhow::Error, path: &Path, announce: impl Fn
 }
 
 fn main() -> Result<()> {
-    // First, so that even the panic hook's own words have somewhere to land
+    // **The console-membership helper is checked before this process touches any console.** It is
+    // a short-lived worker main whose one permitted attachment is the pane shell pid on its exact
+    // private line; the resident GUI process never changes console state.
+    if let Some(request) = cli::console_members(std::env::args_os().skip(1)) {
+        let code = match request {
+            Ok(shell_pid) => {
+                let listed = bt_platform::admission::enter_standalone_main(
+                    "folio-console-members",
+                    |worker| {
+                        bt_platform::foreground_program::write_console_members(worker, shell_pid)
+                    },
+                )
+                .ok()
+                .is_some_and(|listed| listed);
+                if listed { 0 } else { 1 }
+            }
+            Err(_) => 2,
+        };
+        std::process::exit(code);
+    }
+    // First for every ordinary front door, so that even the panic hook's own words have somewhere
+    // to land. The private console-members helper above must begin unattached.
     // when a shell launched this window-subsystem process to read its traces.
     // **For the front door only** — see `diagnostics::enter_resident_run`, which
     // is where the borrow ends.
@@ -71291,7 +71312,7 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
     install_panic_log_hook();
-    // **The doorbell, before anything else this program can do.**
+    // **The ordinary doorbell, before anything else a resident launch can do.**
     //
     // `folio attention` is this executable being run by an agent's hook, and what it owes that
     // caller is to be *finished*: the hook that matters most fires while Claude Code is holding an
@@ -71303,7 +71324,7 @@ fn main() -> Result<()> {
     if let Some(call) = cli::attention(std::env::args_os().skip(1)) {
         std::process::exit(attention_wire::run_verb(call));
     }
-    // **And the second doorbell, beside it** (§7.4a). `folio --explorer-command`
+    // **And the second ordinary doorbell, beside it** (§7.4a). `folio --explorer-command`
     // is Explorer starting this executable as a COM server because somebody
     // right-clicked a folder, and what it owes that caller is an apartment with a
     // message pump before the menu is drawn. Above the panic log's siblings for
