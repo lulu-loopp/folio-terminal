@@ -187,17 +187,17 @@ fn the_identities_bt_app_declares_twice_are_the_ten() {
 
 // ── §2.7 — the macro facts about today's tree ─────────────────────────────
 
-/// RED — **the three `macro_rules!` definitions in `bt-app`, and the shapes the
+/// RED — **the four `macro_rules!` definitions in `bt-app`, and the shapes the
 /// traversal cannot classify.**
 ///
 /// §2.7's claim is that the mechanism outlives 2a, so the facts it rests on are
 /// asserted rather than remembered: `i18n::text_entries` constructs exactly
 /// the `Text` enum and an `impl Text` holding only its test list `ALL` (checked
 /// token by token in [`the_text_declaration_and_nothing_else`]), while
-/// `psreadline::asset` and `shell_integration::profile_marks::managed_line`
-/// construct no item — so no macro can be making a `Runtime` method that this
-/// index does not hold; the only invocation shapes reported are the ones listed
-/// below.
+/// `marks::folder_body`, `psreadline::asset` and
+/// `shell_integration::profile_marks::managed_line` construct no item — so no
+/// macro can be making a `Runtime` method that this index does not hold; the
+/// only invocation shapes reported are the ones listed below.
 ///
 /// MUTATION: write a `macro_rules!` arm in `bt-app` that expands to a `fn` and
 /// the `ItemConstructingArm` assertion goes red; add an `impl Runtime { … }` (or
@@ -215,8 +215,8 @@ fn the_macro_facts_of_this_tree_are_asserted() {
         .collect();
     assert_eq!(
         definitions,
-        ["text_entries", "asset", "managed_line"],
-        "bt-app has exactly the three named `macro_rules!` definitions"
+        ["text_entries", "folder_body", "asset", "managed_line"],
+        "bt-app has exactly the four named `macro_rules!` definitions"
     );
 
     let mut by_shape: BTreeMap<String, Vec<String>> = BTreeMap::new();

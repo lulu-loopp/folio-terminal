@@ -359,10 +359,9 @@ pub enum ActionIcon {
     /// `Browse…` — the root menu's escape hatch, which opens the system's own
     /// folder picker.
     ///
-    /// **An act, and the rows above it are places** — which P2 drew a line
-    /// along and 裁1 (2026-08-26) rubbed out. Both wear the mock-up's open
-    /// folder, solid, because both are about a folder; what tells this row from
-    /// the places above it is its own word.
+    /// An act, so it wears the open outline folder: its back profile and leaning
+    /// flap match the filled open folder's identity, while the places above this
+    /// row retain their filled glyphs.
     BrowseForFolder,
 
     // ── the Git menus, panel and graph ───────────────────────────────────
@@ -1562,21 +1561,31 @@ mod tests {
     /// levelling its *picture* is what levelling a cross means.
     #[test]
     fn the_pane_heads_run_lays_one_width_of_ink() {
-        // How many logical pixels of ink the mark lays across the head: the box
-        // it is given, times the fraction of its own box its artwork covers.
+        // How many logical pixels of ink the mark actually lays across the
+        // head, measured from its raster and scaled into the box it is given.
         let ink = |mark: ChromeMark| {
-            let [width, _] = MarkSlot::CompactHead.mark_box_logical_px(mark);
-            if mark.draws_edge_to_edge() {
-                width
-            } else {
-                width * marks::HOUSE_INK_RATIO
-            }
+            let [width, height] = MarkSlot::CompactHead.mark_box_logical_px(mark);
+            let [view_width, view_height] = mark
+                .view_box_units()
+                .expect("a pane-head mark has a quoted view box");
+            let [ink_across, _] = mark
+                .ink_extent_units()
+                .expect("a pane-head mark has measurable ink");
+            ink_across * (width / view_width).min(height / view_height)
         };
         let chevron = ink(ChromeMark::chevron(0.0));
         let folder = ink(ChromeMark::FolderOutline);
+        let open_folder = ink(ChromeMark::FolderOpenOutline);
         assert!(
             (chevron - folder).abs() < 0.01,
             "the pane head's run draws {chevron:.2} and {folder:.2} of ink",
+        );
+        // The open outline leans farther right by design. It is measured by the
+        // same raster path here, but it belongs to menu rows and never appears
+        // in this pane-head run.
+        assert!(
+            open_folder > folder,
+            "the open folder draws {open_folder:.2} across, the closed folder {folder:.2}"
         );
     }
 
@@ -1664,13 +1673,6 @@ mod tests {
                     ))
                 })
                 .collect();
-            let biggest = pictures
-                .iter()
-                .copied()
-                .fold(
-                    ("", f32::MIN),
-                    |so_far, one| if one.1 > so_far.1 { one } else { so_far },
-                );
             let smallest = pictures
                 .iter()
                 .copied()
@@ -1678,18 +1680,18 @@ mod tests {
                     ("", f32::MAX),
                     |so_far, one| if one.1 < so_far.1 { one } else { so_far },
                 );
-            let spread = biggest.1 / smallest.1 - 1.0;
-            if spread <= OPTICAL_PICTURE_SPREAD {
-                continue;
+            for (id, picture) in pictures {
+                let spread = picture / smallest.1 - 1.0;
+                if spread <= OPTICAL_PICTURE_SPREAD {
+                    continue;
+                }
+                wrong.push(format!(
+                    "{surface}: {id} makes a {picture:.3} picture beside {}'s {:.3} — {:.1}% apart",
+                    smallest.0,
+                    smallest.1,
+                    spread * 100.0,
+                ));
             }
-            wrong.push(format!(
-                "{surface}: {} makes a {:.3} picture beside {}'s {:.3} — {:.1}% apart",
-                biggest.0,
-                biggest.1,
-                smallest.0,
-                smallest.1,
-                spread * 100.0,
-            ));
         }
         assert!(
             wrong.is_empty(),
@@ -2413,8 +2415,8 @@ mod tests {
                 "{shape} is written down as filled ({why}) and is struck",
             );
         }
-        // And the two renditions are two drawings of one object: the object's
-        // is solid, the act's is struck, and they are not the same shape.
+        // Each object's place rendition is solid and its act rendition is
+        // struck; the open pair keeps the flap that identifies it as open.
         assert!(!marks::ChromeMark::Folder.is_struck());
         assert!(marks::ChromeMark::FolderOutline.is_struck());
         assert!(!marks::ChromeMark::FolderOpen.is_struck());
