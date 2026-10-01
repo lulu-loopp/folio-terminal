@@ -455,7 +455,9 @@ mod tests {
     #[cfg(any(windows, target_os = "macos"))]
     use std::{
         fs,
-        time::{Duration, Instant, SystemTime},
+        io::{BufRead, BufReader, Write},
+        process::Stdio,
+        time::SystemTime,
     };
 
     fn process(pid: u32, parent: u32, image: &str, started: u64) -> ProcessEntry {
@@ -575,10 +577,6 @@ mod tests {
     const HELPER_MODE: &str = "FOLIO_FOREGROUND_PROGRAM_HELPER_MODE";
     #[cfg(any(windows, target_os = "macos"))]
     const HELPER_NAMED_EXE: &str = "FOLIO_FOREGROUND_PROGRAM_NAMED_EXE";
-    #[cfg(any(windows, target_os = "macos"))]
-    const HELPER_READY: &str = "FOLIO_FOREGROUND_PROGRAM_READY";
-    #[cfg(any(windows, target_os = "macos"))]
-    const HELPER_STOP: &str = "FOLIO_FOREGROUND_PROGRAM_STOP";
 
     #[cfg(any(windows, target_os = "macos"))]
     #[test]
@@ -586,10 +584,13 @@ mod tests {
         if std::env::var(HELPER_MODE).as_deref() != Ok("grandchild") {
             return;
         }
-        let stop = std::path::PathBuf::from(std::env::var_os(HELPER_STOP).expect("stop path"));
-        while !stop.exists() {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        writeln!(std::io::stdout(), "ready {}", std::process::id())
+            .expect("publish grandchild readiness");
+        std::io::stdout().flush().expect("flush readiness");
+        let mut release = String::new();
+        BufReader::new(std::io::stdin())
+            .read_line(&mut release)
+            .expect("wait for the parent to release the grandchild");
     }
 
     #[cfg(any(windows, target_os = "macos"))]
@@ -601,18 +602,43 @@ mod tests {
         let named = std::path::PathBuf::from(
             std::env::var_os(HELPER_NAMED_EXE).expect("named executable path"),
         );
-        let ready = std::path::PathBuf::from(std::env::var_os(HELPER_READY).expect("ready path"));
-        let stop = std::env::var_os(HELPER_STOP).expect("stop path");
         let mut grandchild = crate::quiet_command(named)
             .args([
                 "--exact",
                 "foreground_program::tests::helper_named_grandchild_waits_for_the_parent",
+                "--nocapture",
             ])
             .env(HELPER_MODE, "grandchild")
-            .env(HELPER_STOP, stop)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
             .expect("spawn named grandchild");
-        fs::write(&ready, grandchild.id().to_string()).expect("publish grandchild readiness");
+        let mut output = BufReader::new(grandchild.stdout.take().expect("grandchild stdout pipe"));
+        let ready = format!("ready {}", grandchild.id());
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                output
+                    .read_line(&mut line)
+                    .expect("read grandchild readiness"),
+                0,
+                "the grandchild ended before readiness"
+            );
+            if line.contains(&ready) {
+                writeln!(std::io::stdout(), "{ready}").expect("forward grandchild readiness");
+                std::io::stdout().flush().expect("flush readiness");
+                break;
+            }
+        }
+        let mut release = String::new();
+        BufReader::new(std::io::stdin())
+            .read_line(&mut release)
+            .expect("wait for the test to release the helper tree");
+        writeln!(
+            grandchild.stdin.as_mut().expect("grandchild stdin pipe"),
+            "release"
+        )
+        .expect("release grandchild");
         grandchild.wait().expect("join named grandchild");
     }
 
@@ -628,32 +654,31 @@ mod tests {
         fs::create_dir(&sandbox).expect("create helper sandbox under target");
         let current = std::env::current_exe().expect("current test executable");
         let named = sandbox.join(if cfg!(windows) { "tmux.exe" } else { "tmux" });
-        let ready = sandbox.join("ready");
-        let stop = sandbox.join("stop");
         fs::copy(&current, &named).expect("copy the test executable under an allowlisted name");
         let mut child = crate::quiet_command(&current)
             .args([
                 "--exact",
                 "foreground_program::tests::helper_child_spawns_the_named_grandchild",
+                "--nocapture",
             ])
             .env(HELPER_MODE, "child")
             .env(HELPER_NAMED_EXE, &named)
-            .env(HELPER_READY, &ready)
-            .env(HELPER_STOP, &stop)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
             .spawn()
             .expect("spawn direct helper child");
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !ready.exists() {
-            assert!(
-                child.try_wait().expect("query helper child").is_none(),
-                "the helper child exited before its grandchild was ready"
+        let mut output = BufReader::new(child.stdout.take().expect("helper child stdout pipe"));
+        let grandchild_pid = loop {
+            let mut line = String::new();
+            assert_ne!(
+                output.read_line(&mut line).expect("read helper readiness"),
+                0,
+                "the helper child ended before its grandchild was ready"
             );
-            assert!(
-                Instant::now() < deadline,
-                "the helper grandchild did not start"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+            if let Some((_, pid)) = line.trim_end().rsplit_once("ready ") {
+                break pid.parse::<u32>().expect("grandchild pid is decimal");
+            }
+        };
 
         let shell_pid = child.id();
         #[cfg(target_os = "macos")]
@@ -670,10 +695,6 @@ mod tests {
             // The platform test binary has no `--console-members` main; the shipped helper lives
             // in `bt-app`. Keep this real process-tree pin here and give selection the member set
             // the helper supplies. The app/VM row owns the real helper-process proof.
-            let grandchild_pid = fs::read_to_string(&ready)
-                .expect("read grandchild pid")
-                .parse::<u32>()
-                .expect("grandchild pid is decimal");
             let table = imp::snapshot(shell_pid).expect("snapshot helper descendants");
             let members = BTreeSet::from([shell_pid, grandchild_pid]);
             choose_foreground(
@@ -684,10 +705,12 @@ mod tests {
             )
         };
 
-        fs::write(&stop, []).expect("release helper processes");
+        writeln!(
+            child.stdin.as_mut().expect("helper child stdin pipe"),
+            "release"
+        )
+        .expect("release helper processes");
         assert!(child.wait().expect("join helper child").success());
-        fs::remove_file(&ready).expect("remove ready marker");
-        fs::remove_file(&stop).expect("remove stop marker");
         fs::remove_file(&named).expect("remove named helper copy");
         fs::remove_dir(&sandbox).expect("remove empty helper sandbox");
         assert_eq!(observed, ForegroundProgram::Known("tmux".to_owned()));

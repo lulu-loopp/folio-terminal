@@ -4202,30 +4202,19 @@ fn the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase() {
         started.start(bundle, "trial");
         Ok(())
     }));
-    let killer = {
-        let children = children.clone();
-        let journal = install.home.journal();
-        std::thread::spawn(move || {
-            let give_up = Instant::now() + Duration::from_secs(20);
-            while Instant::now() < give_up {
-                let trial = std::fs::read(&journal)
-                    .ok()
-                    .and_then(|bytes| Journal::parse(&bytes).ok())
-                    .is_some_and(|journal| journal.body.phase.kind() == PhaseKind::Trial);
-                if trial {
-                    for pid in children.started.lock().unwrap().clone() {
-                        children.end(pid);
-                    }
-                    return;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-        })
-    };
     let recorder = Recorder::of(&install);
     let road = recorded_road(&install, &recorder, limits(5_000, 20_000));
-    let (ended, world) = applied(road, world);
-    killer.join().unwrap();
+    let applier = start(road, world);
+    journal_reaches(&install, |journal| {
+        journal.body.phase.kind() == PhaseKind::Trial
+    });
+    for pid in children.started.lock().unwrap().clone() {
+        children.end(pid);
+    }
+    let (ended, world) = match applier.join() {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
     assert_eq!(ended, Ended::RolledBack, "{:?}", world.said);
     assert_eq!(
         recorder.calls(),
