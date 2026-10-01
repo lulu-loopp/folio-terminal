@@ -1261,3 +1261,135 @@ fn revalidation_before_resume_refuses_a_changed_image() {
     assert!(!home.journal().exists());
     assert!(mounted(home.root()).is_empty());
 }
+
+// ── the layout's Prepare (U-41a1) ───────────────────────────────────────────
+
+/// What the road asked of a layout's Prepare, and the journal on disk when
+/// it asked: `None` where there was none yet.
+type PrepareCall = (
+    &'static str,
+    Option<(PhaseKind, crate::update_txn::Adapter)>,
+);
+
+/// **A fake layout's Prepare on the macOS road** — the harness U-41b builds
+/// Homebrew's on (managed-update §6): every call recorded with the journal on
+/// disk, delegated to Folio's own layout unless it is told to refuse with
+/// `refuse`.
+#[derive(Clone, Default)]
+struct PrepareRecorder {
+    calls: Arc<Mutex<Vec<PrepareCall>>>,
+    refuse: Option<Stop>,
+}
+
+impl PrepareRecorder {
+    fn calls(&self) -> Vec<PrepareCall> {
+        self.calls.lock().unwrap().clone()
+    }
+}
+
+impl PreparePoint for PrepareRecorder {
+    fn allocated(&self, road: &Road<'_>, old: &BundleIdentity) -> Layout {
+        self.calls.lock().unwrap().push(("allocated", None));
+        Ours.allocated(road, old)
+    }
+
+    fn prepare(
+        &self,
+        worker: &WorkerCtx,
+        road: &Road<'_>,
+        home: &Home,
+        txn: TxnId,
+        places: [&Path; 3],
+        old: BundleIdentity,
+    ) -> Result<Layout, Stop> {
+        let on_disk = std::fs::read(home.journal()).ok().map(|bytes| {
+            let journal = Journal::parse(&bytes).unwrap();
+            (journal.body.phase.kind(), journal.body.adapter)
+        });
+        self.calls.lock().unwrap().push(("prepare", on_disk));
+        match &self.refuse {
+            Some(stop) => Err(*stop),
+            None => Ours.prepare(worker, road, home, txn, places, old),
+        }
+    }
+}
+
+/// RED (U-41a1, managed-update §1.1 R1–R2, §1.3) — **the press calls the
+/// Prepare of the layout its channel names once, with the journal at
+/// `Allocated` on disk and naming that adapter, and records its answer at
+/// `Prepared`; a layout that refuses abandons the transaction and leaves no
+/// mount, no `H/<txn>` and no journal.**
+///
+/// The fake delegates to Folio's own layout, so the road is the real U-27
+/// Prepare over a real image; the refusal's abandonment is the road's,
+/// common to every layout (`update_prepare::abandon`).
+///
+/// MUTATION: in `prepare_on`, acquire through `Ours` in place of the layout
+/// the adapter names (`layout.prepare` → `Ours.prepare`) — the recorder hears
+/// no `prepare`, and the refusing layout's press is `Verified`.
+#[test]
+fn the_press_calls_the_prepare_of_the_layout_its_adapter_names_and_a_refusal_abandons() {
+    if !on_macos() {
+        return;
+    }
+    let scene = Scene::new("layout-prepare", "Folio.app", |_| {});
+    let tools = Arc::new(TestTools::new(&scene.scratch));
+    let recorder = PrepareRecorder::default();
+    let job = press(
+        &driver(&scene, &tools).laid_out(Arc::new(recorder.clone())),
+        scene.release(),
+        0x41,
+    );
+    assert!(
+        matches!(job.state(), State::Verified(_)),
+        "{:?}",
+        job.state()
+    );
+    assert_eq!(
+        recorder.calls(),
+        vec![
+            ("allocated", None),
+            (
+                "prepare",
+                Some((PhaseKind::Allocated, crate::update_txn::Adapter::Ours))
+            ),
+        ]
+    );
+    let journal = journal_on_disk(&scene.home());
+    assert_eq!(
+        journal.body.phase,
+        Phase::Prepared {
+            deferred_launches: 0
+        }
+    );
+    assert_eq!(journal.body.adapter, crate::update_txn::Adapter::Ours);
+    assert!(matches!(journal.body.layout, Layout::Bundle { .. }));
+    drop(job);
+
+    let scene = Scene::new("layout-refuses", "Folio.app", |_| {});
+    let tools = Arc::new(TestTools::new(&scene.scratch));
+    let recorder = PrepareRecorder {
+        refuse: Some(Stop::Copy),
+        ..PrepareRecorder::default()
+    };
+    let job = press(
+        &driver(&scene, &tools).laid_out(Arc::new(recorder.clone())),
+        scene.release(),
+        0x42,
+    );
+    assert_eq!(
+        job.state(),
+        &State::Failed(Some(offer(0x42)), Failure::Stopped(Stop::Copy))
+    );
+    let home = scene.home();
+    assert!(mounted(home.root()).is_empty(), "no mount is left");
+    assert!(!home.transaction(TxnId::new([0x42; 16])).exists());
+    assert!(!home.journal().exists(), "the journal is removed");
+    assert_eq!(
+        recorder.calls().last(),
+        Some(&(
+            "prepare",
+            Some((PhaseKind::Allocated, crate::update_txn::Adapter::Ours))
+        ))
+    );
+}

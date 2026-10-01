@@ -1356,6 +1356,7 @@ mod tests {
                 txn: txn(),
                 rescue: scene.rescue.to_string_lossy().into_owned(),
                 body: Body {
+                    adapter: crate::update_txn::Adapter::Ours,
                     phase,
                     layout: Layout::Members(Inventories {
                         old_shipped: vec!["folio.exe".to_owned()],
@@ -1479,6 +1480,7 @@ mod tests {
                 txn: txn(),
                 rescue: scene.rescue.to_string_lossy().into_owned(),
                 body: Body {
+                    adapter: crate::update_txn::Adapter::Ours,
                     phase: Phase::Stuck {
                         trial: None,
                         last_error: "the exchange back was refused".to_owned(),

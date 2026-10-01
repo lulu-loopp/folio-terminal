@@ -13498,3 +13498,27 @@ The two outline identities still carry the filled folder's exact path data and t
 `#i-folder-line` remains the filled closed folder's silhouette, struck and fitted exactly as before. `#i-folder-open-line` again has its own two-path drawing: the shut folder's back profile and the quadrilateral flap leaning open. Its 1.2-unit pen is fitted about the drawing's ink-box centre by the filled-open-to-struck raster ratios, so the result has the filled open folder's wider ink box. This supersedes the two entries above only where they made the open identity share the closed silhouette.
 
 `the_closed_outline_folder_strokes_the_filled_folders_exact_path` guards the closed pair, `the_open_outline_is_the_flap_drawing_not_the_closed_silhouette` guards the open identity, `every_outline_folder_has_the_filled_glyphs_ink_box` compares each outline with its own filled glyph, and `the_pane_heads_run_lays_one_width_of_ink` remains scoped to the marks that actually appear in a pane head.
+
+### 2026-09-30 — The update transaction takes an adapter: the journal names it, and each road calls Prepare, Activate and Prove through the layout it names, with no change for Folio's own copies (U-41a1)
+
+**What is built.** The journal body gains `adapter` (`update_txn::Adapter`: `Ours`, `Homebrew`, `Scoop`, `Winget`). O's Prepare writes it once, at `Allocated`, from the channel the press read (`update_adapter::of_channel`), and every later phase carries it. The field follows the receipt's H.1 rule for a v1 document. It is not written when it is `Ours`, so an ordinary copy's journal has 0.4.6's bytes. A 0.4.6 body, which has no such field, reads as `Ours`, and a reader ignores any field it does not know. Each road finds the layout its journal names through `update_adapter::Layouts` and calls that layout's points at the phase boundaries `docs/plans/design/managed-update-2026-09-29.md` §1.1 gives them:
+
+- **Prepare**, between `Allocated` and `Prepared`: `update_prepare_windows::PreparePoint`, `update_prepare_macos::PreparePoint`.
+- **Activate forward**, after `Moving` is durable; **Activate back**, after `RollbackIntent` is durable: `ApplyPoints::activate`, `activate_back`.
+- **Prove**, which set is live: `ApplyPoints::locate` at every step `decide` takes, and on Windows `live`.
+
+On macOS, after `Activate` begins, `ApplyPoints::locate` is the only reader of which recorded set is live or staged. That includes an `Activate` error, re-entry at `Moving`, the trial watch, retry over `Stuck`, committed retirement and the exit guard. The old/new identity validation immediately before `Activate` remains common to every layout.
+
+Each road's `Ours` is the code that was there, moved. The applier, the recovery and the resume's revalidation read the adapter from the journal and never from the channel (R2). A journal that names an adapter this build has not built is refused before any of the adapter's points is called.
+
+**The rule.** Only `Ours` has a road in 0.4.7 so far. `HOMEBREW_ROAD`, `SCOOP_ROAD` and `WINGET_ROAD` are `false`. `update_adapter::built_on` answers eligibility (`update_job::Evidence::eligibility`) and both Prepares' road checks, so a managed copy keeps its row with the manager's command and **Copy**, gets no card and has no journal. Winget's constant is U-41d's hard-off switch; it is one constant and one test, so it is built here. `Layout::Link` and the `marker` field are left to U-41c and U-41b: an experiment fixes each one's shape, and nothing writes either before those tickets (the note's revision (d)). This entry changes no phase, transition, writer right, door, card word or row. For that reason `CHANGELOG.md` has no line for it.
+
+**What pins it.** No existing updater test's assertions changed. The only edits to existing tests are the new field in seven journal literals and the new `layouts` field in three road literals, each set to what the product uses. New tests:
+
+- `update_txn::tests::a_journal_that_names_no_adapter_reads_as_ours_and_ours_is_written_as_0_4_6_wrote_it`
+- `update_txn::tests::a_body_reader_ignores_an_adapter_or_any_field_it_does_not_know`
+- `update_card::tests::a_winget_copy_never_raises_the_card_while_the_road_is_off`
+- `update_card::tests::a_managed_copy_whose_adapter_is_not_built_keeps_the_copy_row`
+- on the harness U-41b and U-41c will use (a fake layout that records every point with the phase the journal on disk stood at, and delegates to `Ours`):
+  - Windows: `update_apply_windows::tests::the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase`, `a_layout_that_refuses_to_activate_is_rolled_back_untried`; `update_prepare_windows::tests::the_press_calls_the_prepare_of_the_layout_its_adapter_names_once_at_allocated`, `a_layout_that_refuses_its_prepare_abandons_and_leaves_nothing`
+  - macOS: `update_apply_macos::tests::the_road_calls_each_point_of_the_layout_the_journal_names_once_per_phase`, `a_layout_that_refuses_to_activate_is_reverted_with_the_old_bundle_live`; `update_prepare_macos::tests::the_press_calls_the_prepare_of_the_layout_its_adapter_names_and_a_refusal_abandons`

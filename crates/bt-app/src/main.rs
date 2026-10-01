@@ -169,6 +169,8 @@ mod trace;
 mod trace_sink;
 mod uninstall;
 mod update;
+// Which adapter a copy's update takes, and whether its road is built (0.4.7 ticket U-41a1).
+mod update_adapter;
 // The appliers' shared machine — the journal's recording, the wait for the old
 // build's claim, and the wait from `Trial` to a decided outcome — lifted from
 // U-28's; the Windows applier is built on it (0.4.6 ticket U-23).

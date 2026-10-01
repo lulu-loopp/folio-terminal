@@ -1083,6 +1083,99 @@ mod tests {
         assert_eq!(written.into_inner(), 0);
     }
 
+    /// A job that considered `latest` for a copy installed as `channel`,
+    /// running on `platform`.
+    fn considered_on(latest: &str, channel: Channel, platform: HostPlatform) -> Job<u32> {
+        let mut job = Job::with_offers(true);
+        job.consider(
+            Gathered {
+                platform,
+                ..gathered(latest, channel)
+            },
+            &windows(),
+            || TxnId::new([7; 16]),
+        );
+        job
+    }
+
+    /// PIN (U-41d, managed-update §2.4 design (a)) — **a winget copy never
+    /// raises the card while winget's road is off: on every platform, its
+    /// row keeps `winget upgrade` with one Copy, and no transaction is
+    /// offered.**
+    ///
+    /// The road is off by a constant (`update_adapter::WINGET_ROAD`), not by
+    /// a precondition: no pin is read and no winget process runs, so the
+    /// regression is the whole of it — the job's answer, the card and the
+    /// row, through the real job.
+    ///
+    /// MUTATION: `WINGET_ROAD = true` — the winget copy on Windows is offered
+    /// the card.
+    #[test]
+    fn a_winget_copy_never_raises_the_card_while_the_road_is_off() {
+        let command = "winget upgrade --id WeiyiShi.Folio --exact";
+        for platform in [HostPlatform::Windows, HostPlatform::MacOs] {
+            let job = considered_on(
+                "v0.4.7",
+                Channel::Managed {
+                    manager: Manager::Winget,
+                    uninstall_hook: false,
+                },
+                platform,
+            );
+            assert_eq!(job.card_window(), None, "{platform:?}: no card");
+            assert_eq!(shown(&job).card, None, "{platform:?}");
+            assert_eq!(
+                job.answer(),
+                Some(&Err(crate::update_job::NotEligible::Managed {
+                    manager: Manager::Winget,
+                    command
+                })),
+                "{platform:?}"
+            );
+            assert_eq!(row_foot(&job), RowFoot::Copy { command }, "{platform:?}");
+        }
+    }
+
+    /// PIN (U-41a1, managed-update §1.5) — **a Homebrew copy on macOS and a
+    /// scoop copy on Windows, whose adapters are not built yet, keep their
+    /// manager's command with Copy and no card, on the platform whose road
+    /// their adapter would take.**
+    ///
+    /// The journal can name `Homebrew` and `Scoop` (`update_txn::Adapter`),
+    /// and eligibility now asks the adapter whether its road is built
+    /// (`update_adapter::built_on`) instead of refusing every managed copy;
+    /// until U-41b and U-41c build them, the answer must stay the row it was.
+    ///
+    /// MUTATION: `HOMEBREW_ROAD = true` or `SCOOP_ROAD = true` — that copy
+    /// is offered the card on its platform.
+    #[test]
+    fn a_managed_copy_whose_adapter_is_not_built_keeps_the_copy_row() {
+        for (manager, platform, command) in [
+            (
+                Manager::Homebrew,
+                HostPlatform::MacOs,
+                "brew upgrade --cask folio",
+            ),
+            (Manager::Scoop, HostPlatform::Windows, "scoop update folio"),
+        ] {
+            let job = considered_on(
+                "v0.4.7",
+                Channel::Managed {
+                    manager,
+                    uninstall_hook: true,
+                },
+                platform,
+            );
+            assert_eq!(job.card_window(), None, "{manager:?}: no card");
+            assert_eq!(row_foot(&job), RowFoot::Copy { command }, "{manager:?}");
+        }
+        // And ours, on the same two platforms, is offered it.
+        for platform in [HostPlatform::Windows, HostPlatform::MacOs] {
+            let job = considered_on("v0.4.7", Channel::Ours, platform);
+            assert!(job.card_window().is_some(), "{platform:?}: ours is offered");
+        }
+    }
+
     /// RED (U-4) — **a copy winget's own record names is offered no card, and
     /// its row names `winget upgrade --id WeiyiShi.Folio --exact` with one
     /// `Copy`.**
