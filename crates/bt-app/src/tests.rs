@@ -24505,6 +24505,7 @@ fn pane_menu_reset_terminal_modes_stops_mouse_motion_and_restores_legacy_keys() 
             virtual_key_of_scan_code: |_| None,
             virtual_key_is_dead: |_| false,
             conpty: bt_pty::ConPtyKind::NotConPty,
+            shifted_character: input::ShiftedCharacter::Known(None),
         },
     );
     assert_eq!(encoded, Some(vec![b'\r']), "Shift+Enter is legacy again");
