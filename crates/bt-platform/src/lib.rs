@@ -9,6 +9,7 @@ use std::num::NonZeroIsize;
 /// crate that forbids `unsafe`.
 pub mod admission;
 pub mod file_reads;
+pub mod foreground_program;
 
 /// **The thread door** — one definition, in [`admission`], for every platform: a named thread in
 /// its band whose body is lent a [`admission::WorkerCtx`]. Re-exported here, where every caller

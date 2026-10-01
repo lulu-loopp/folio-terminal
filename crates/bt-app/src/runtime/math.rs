@@ -2,16 +2,17 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    AnimationEntry, AnimationFillOutcome, DecorationWorkerCompletion, DocumentMath, Layered,
-    MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand, Motion, OverlayStack,
+    AnimationEntry, AnimationFillOutcome, AnswerOwner, DecorationWorkerCompletion, DocumentMath,
+    Layered, MathHoverExit, MathWorkerRequest, MathWorkerResult, ModalBand, Motion, OverlayStack,
     PasteTarget, Popup, PreviewDocument, PreviewMathArtifact, PreviewMathKey, PreviewMathPicture,
     PreviewSurface, PreviewTextCommand, Runtime, TabState, adopt_animation_fill,
     answer_one_formula, answers_for, dispatch_tab_decoration_tasks, document_formulas,
-    dump_overlay_frame, first_run, float_trigger_tip, formula_tools, ground_overlay_layers,
-    hang_watch, i18n, leaf_session_mut, marks, math_copy_window, math_em_milli, new_tab_tip,
-    nonzero_u32, preview, preview_select, preview_text_command, preview_trace, profiles, quit,
-    rail_overlay_layer, recoverable_clipboard_write, restore, retire_spent_math_copy, search,
-    seats, settings, tooltip, trace_sink, window_layout_key, write_terminal_clipboard_text,
+    dump_overlay_frame, first_run, float_trigger_tip, foreground_program, formula_tools,
+    ground_overlay_layers, hang_watch, i18n, leaf_session_mut, marks, math_copy_window,
+    math_em_milli, new_tab_tip, nonzero_u32, preview, preview_select, preview_text_command,
+    preview_trace, profiles, quit, rail_overlay_layer, recoverable_clipboard_write, restore,
+    retire_spent_math_copy, search, seats, settings, tooltip, trace_sink, window_layout_key,
+    write_terminal_clipboard_text,
 };
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -911,6 +912,38 @@ impl Runtime<'_> {
         )
     }
 
+    pub(crate) fn apply_foreground_program_results(
+        &mut self,
+        batch: &mut Vec<foreground_program::Answer>,
+    ) -> Result<()> {
+        let mut changed = false;
+        let requests = self.app.foreground_program_worker.requests.clone();
+        for answer in answers_for(batch, |answer| {
+            self.owns(AnswerOwner::Tab(answer.address.leaf.tab))
+        }) {
+            let leaf = answer.address.leaf;
+            let Some(index) = self.window.tabs.iter().position(|tab| tab.id == leaf.tab) else {
+                continue;
+            };
+            let Some(session) = self.window.tabs[index].sessions.get_mut(&leaf.seat) else {
+                continue;
+            };
+            let Some((answer_changed, follow_up)) =
+                foreground_program::apply_answer(session, answer.incarnation, answer.program)
+            else {
+                continue;
+            };
+            if follow_up {
+                foreground_program::dispatch(session, answer.address, &requests);
+            }
+            changed |= answer_changed;
+        }
+        if changed {
+            self.redraw()?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn apply_math_results(
         &mut self,
         batch: &mut Vec<MathWorkerResult>,
@@ -1203,16 +1236,13 @@ impl Runtime<'_> {
             };
         }
         let active = self.window.active_tab;
-        let tasks = self.app.math_worker.tasks.clone();
-        let scale_tasks = self.app.math_worker.scale_tasks.clone();
-        let path_tasks = self.app.math_worker.path_tasks.clone();
+        let senders = self.app.decoration_senders();
         let window = self.window_id();
         dispatch_tab_decoration_tasks(
             window,
             &mut self.window.tabs[active],
-            &tasks,
-            &scale_tasks,
-            &path_tasks,
+            &senders,
+            Instant::now(),
             &mut self.app.math_worker_running,
             &mut self.app.math_worker_notice_pending,
         );
@@ -1288,16 +1318,13 @@ impl Runtime<'_> {
         if !settled {
             return Ok(());
         }
-        let tasks = self.app.math_worker.tasks.clone();
-        let scale_tasks = self.app.math_worker.scale_tasks.clone();
-        let path_tasks = self.app.math_worker.path_tasks.clone();
+        let senders = self.app.decoration_senders();
         let window = self.window_id();
         let disabled = dispatch_tab_decoration_tasks(
             window,
             &mut self.window.tabs[active],
-            &tasks,
-            &scale_tasks,
-            &path_tasks,
+            &senders,
+            Instant::now(),
             &mut self.app.math_worker_running,
             &mut self.app.math_worker_notice_pending,
         );

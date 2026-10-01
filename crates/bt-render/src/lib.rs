@@ -220,9 +220,12 @@ const COMPOSED_ROW_CACHE_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 /// now belong to is the window's run of head controls, and its box is theirs
 /// (`UI-SPEC.md` H3, 2026-09-23: the run's tool box moved from 19 to 22, and
 /// this reuse moves with it).
-pub const MATH_TOOL_BUTTON_LOGICAL_PX: f32 = 22.0;
-/// `.math-tools { gap: 2px }` (mock-up 2117).
-const MATH_TOOL_GAP_LOGICAL_PX: f32 = 2.0;
+///
+/// Defined in `bt_viewport` since T-PANE-COLUMNS, because the session — which never learns what a
+/// renderer is — has to ask whether a pane can hold the two marks (R11); this is the same number.
+pub use bt_viewport::MATH_TOOL_BUTTON_LOGICAL_PX;
+// `.math-tools { gap: 2px }` (mock-up 2117), defined beside the button's side in `bt_viewport`.
+use bt_viewport::MATH_TOOL_GAP_LOGICAL_PX;
 /// `.math-tools button { border-radius: 5px }` (mock-up 2129) — the pill a
 /// hovered or pressed mark wears.
 ///
@@ -264,11 +267,9 @@ fn math_toolbar_vertical_bounds(visible_top: f32, visible_bottom: f32, scale: f3
     (top, top + button)
 }
 
-/// The width the two marks and the gap between them take together, in the pane's
-/// own pixels.
-fn math_tool_cluster_width_px(scale: f32) -> f32 {
-    MATH_TOOL_BUTTON_LOGICAL_PX * scale * 2.0 + MATH_TOOL_GAP_LOGICAL_PX * scale
-}
+// The width the two marks and the gap between them take together, in the pane's
+// own pixels — `bt_viewport`'s one definition, which R11 asks of a pane too.
+use bt_viewport::math_tool_cluster_width_px;
 
 /// **The ground a display block keeps around its ink** — its left and right
 /// edges, in the pane body's own pixels.
@@ -321,12 +322,21 @@ fn math_block_ground_bounds(metrics: CellMetrics, ink: [f32; 2], pane: [f32; 2])
 /// A block the pane has cut short has no reserve left to centre in; there the
 /// pair is pushed up against the block's own right edge, and against its left
 /// edge if even that is not wide enough. Both are degradations of one rule and
-/// neither is a second placement.
+/// neither is a second placement. **Neither ever crosses the pane's own edge**
+/// (`pane`, `[left, right]`): inside a multiplexer's split the columns past it
+/// are the next pane's, and a hit test reads a mark's box before the block's.
+/// R11 keeps every presented block's pane at least as wide as the pair, so the
+/// clamp always has room (T-PANE-COLUMNS).
 ///
 /// Pulled out of `math_block_geometry` so the arithmetic can be pinned without a
 /// GPU, which is the arrangement `math_horizontal_bounds` and
 /// `math_toolbar_vertical_bounds` beside it already keep.
-fn math_tool_boxes_px(block: [f32; 4], ink_right: f32, scale: f32) -> ([f32; 4], [f32; 4]) {
+fn math_tool_boxes_px(
+    block: [f32; 4],
+    ink_right: f32,
+    scale: f32,
+    pane: [f32; 2],
+) -> ([f32; 4], [f32; 4]) {
     let [block_left, block_top, block_right, block_bottom] = block;
     let (top, bottom) = math_toolbar_vertical_bounds(block_top, block_bottom, scale);
     let button = bottom - top;
@@ -337,7 +347,10 @@ fn math_tool_boxes_px(block: [f32; 4], ink_right: f32, scale: f32) -> ([f32; 4],
     let left = if reserve >= total {
         reserve_left + (reserve - total) / 2.0
     } else {
-        (block_right - total).max(block_left)
+        (block_right - total)
+            .max(block_left)
+            .min(pane[1] - total)
+            .max(pane[0])
     };
     (
         [left, top, left + button, bottom],
@@ -455,9 +468,16 @@ fn math_band_face_for(
         // row list measured from a clipped top would start its first row wherever
         // the pane's edge happens to be.
         rows_top: metrics.padding_px + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32,
-        rows_left: metrics.padding_px,
-        rows_right: (metrics.padding_px + frame.columns.get() as f32 * metrics.cell_width_px)
-            .min(seat.width as f32),
+        // Column zero *of this block's pane*, and its last column (R10): a source row is an
+        // ordinary row of the terminal, but inside a multiplexer's split the row it replaces is the
+        // pane's row and stops at the rule.
+        rows_left: math_block_left_edge_px(metrics, placement.left_limit_columns),
+        rows_right: math_block_right_px(
+            metrics,
+            seat.width,
+            frame.columns,
+            placement.right_limit_columns,
+        ),
         row_height: metrics.cell_height_px,
         display: placement.display,
     })
@@ -583,9 +603,16 @@ fn math_block_geometry_px(
     if !frame.drawable_interval_overlaps(placement.top_subpixels, placement.clip_height_subpixels) {
         return None;
     }
-    let pane_left = metrics.padding_px;
-    let pane_right =
-        (pane_left + frame.columns.get() as f32 * metrics.cell_width_px).min(seat.width as f32);
+    // The block's own left and right edges: the pane's, or its multiplexer pane's when one stands
+    // nearer (R10). Every horizontal number below — ink, clip, ground, marks, hit area — is cut to
+    // these.
+    let pane_left = math_block_left_edge_px(metrics, placement.left_limit_columns);
+    let pane_right = math_block_right_px(
+        metrics,
+        seat.width,
+        frame.columns,
+        placement.right_limit_columns,
+    );
     let pane_top = metrics.padding_px;
     let pane_bottom = seat.height as f32;
     let band_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
@@ -644,18 +671,21 @@ fn math_block_geometry_px(
         placement.left_subpixels,
         math_block_is_a_band(placement),
     );
-    let source_left = math_block_left_px(
-        metrics,
-        if placement.face_milli.is_some() {
-            0
-        } else {
-            placement.left_subpixels
-        },
-        false,
-    );
+    // Source rows begin at the block's own first column: the grid's column zero, or its pane's.
+    let source_left = if placement.face_milli.is_some() {
+        pane_left
+    } else {
+        math_block_left_px(metrics, placement.left_subpixels, false)
+    };
     let left = across(rendered_left, source_left);
-    let (visible_left, visible_right) =
-        math_horizontal_bounds(metrics, seat.width, frame.columns, left, scaled_width)?;
+    let (visible_left, visible_right) = math_horizontal_bounds(
+        metrics,
+        seat.width,
+        frame.columns,
+        [placement.left_limit_columns, placement.right_limit_columns],
+        left,
+        scaled_width,
+    )?;
     if visible_right <= visible_left || visible_bottom <= visible_top {
         return None;
     }
@@ -712,7 +742,12 @@ fn math_block_geometry_px(
         // **What the marks must not stand on** — the block's substance, which is the raster's right
         // edge for a picture and the longest row's for a source face. ⑨ ii's "centred in the
         // reserve" is then the room between that edge and the block's own, on either face.
-        let (source, copy) = math_tool_boxes_px(block, visible_right, metrics.scale_factor as f32);
+        let (source, copy) = math_tool_boxes_px(
+            block,
+            visible_right,
+            metrics.scale_factor as f32,
+            [pane_left, pane_right],
+        );
         (Some(source), Some(copy))
     } else {
         (None, None)
@@ -11770,8 +11805,13 @@ impl WindowRenderer {
             return None;
         }
         let pane_left = metrics.padding_px;
-        let pane_right =
-            (pane_left + frame.columns.get() as f32 * metrics.cell_width_px).min(seat.width as f32);
+        // The failed block's own pane's right edge (T-PANE-COLUMNS, R10), the grid's otherwise.
+        let pane_right = math_block_right_px(
+            metrics,
+            seat.width,
+            frame.columns,
+            placement.right_limit_columns,
+        );
         let pane_top = metrics.padding_px;
         let pane_bottom = seat.height as f32;
         let raw_top = pane_top + placement.top_subpixels as f32 / SUBPIXELS_PER_PX as f32;
@@ -17860,16 +17900,48 @@ fn math_block_left_px(metrics: CellMetrics, left_subpixels: i64, takes_the_inden
     metrics.padding_px + indent + left_subpixels as f32 / SUBPIXELS_PER_PX as f32
 }
 
+/// **The left edge one block may reach**, in the pane body's own pixels: the pane's, unless the
+/// block was proven in a multiplexer's pane whose first column stands further right
+/// (`MathBlockPlacement::left_limit_columns`, T-PANE-COLUMNS R10). The mirror of
+/// [`math_block_right_px`].
+fn math_block_left_edge_px(metrics: CellMetrics, left_limit_columns: Option<u32>) -> f32 {
+    let pane_left = metrics.padding_px;
+    left_limit_columns.map_or(pane_left, |limit| {
+        pane_left + limit as f32 * metrics.cell_width_px
+    })
+}
+
+/// **The right edge one block may reach**, in the pane body's own pixels. The seat stops every
+/// band, and that does not change; what may stand nearer is a multiplexer's rule
+/// (`MathBlockPlacement::right_limit_columns`), past which the columns are the next pane's text.
+/// It can only bring the edge in. One definition because the ink bound, the scissor, the ground,
+/// the marks and a source face's rows all ask it, and a raster reaching past its own scissor would
+/// be drawn nowhere it could be seen.
+fn math_block_right_px(
+    metrics: CellMetrics,
+    surface_width: u32,
+    columns: NonZeroU32,
+    right_limit_columns: Option<u32>,
+) -> f32 {
+    let pane_left = metrics.padding_px;
+    let pane_right =
+        (pane_left + columns.get() as f32 * metrics.cell_width_px).min(surface_width as f32);
+    right_limit_columns.map_or(pane_right, |limit| {
+        (pane_left + limit as f32 * metrics.cell_width_px).min(pane_right)
+    })
+}
+
+/// `limits` is `[left_limit_columns, right_limit_columns]` of the placement.
 fn math_horizontal_bounds(
     metrics: CellMetrics,
     surface_width: u32,
     columns: NonZeroU32,
+    limits: [Option<u32>; 2],
     block_left: f32,
     scaled_width: f32,
 ) -> Option<(f32, f32)> {
-    let pane_left = metrics.padding_px;
-    let pane_right =
-        (pane_left + columns.get() as f32 * metrics.cell_width_px).min(surface_width as f32);
+    let pane_left = math_block_left_edge_px(metrics, limits[0]);
+    let pane_right = math_block_right_px(metrics, surface_width, columns, limits[1]);
     let visible_left = block_left.max(pane_left);
     let visible_right = (block_left + scaled_width).min(pane_right);
     (visible_right > visible_left).then_some((visible_left, visible_right))
@@ -18419,6 +18491,9 @@ pub fn measure_preview_text_rows(
 
 #[cfg(test)]
 mod tests {
+    /// A pane edge no test here reaches: the marks' own block is all that bounds them.
+    const UNBOUNDED_PANE: [f32; 2] = [0.0, 10_000.0];
+
     use super::*;
     use bt_source::{Found, Index, ItemQuery, Needle, Pattern, Scope, Search, View, needle};
     use bt_transcript::CapturedCell;
@@ -19154,6 +19229,8 @@ mod tests {
             },
             top_subpixels,
             left_subpixels: 0,
+            left_limit_columns: None,
+            right_limit_columns: None,
             content_offset_subpixels: 0,
             clip_height_subpixels,
             display: MathBlockDisplay::Rendered,
@@ -19306,6 +19383,7 @@ mod tests {
             metrics,
             200,
             NonZeroU32::new(10).unwrap(),
+            [None, None],
             math_block_left_px(metrics, inset_subpixels, false),
             40.0,
         )
@@ -19318,6 +19396,7 @@ mod tests {
             metrics,
             200,
             NonZeroU32::new(10).unwrap(),
+            [None, None],
             math_block_left_px(metrics, 0, true),
             40.0,
         )
@@ -19358,6 +19437,7 @@ mod tests {
             metrics,
             SEAT_WIDTH,
             columns,
+            [None, None],
             math_block_left_px(metrics, 0, true),
             4000.0, // an image far wider than either extent
         )
@@ -19385,6 +19465,7 @@ mod tests {
             metrics,
             WINDOW_WIDTH,
             columns,
+            [None, None],
             math_block_left_px(metrics, 0, true),
             4000.0,
         )
@@ -19899,7 +19980,7 @@ mod tests {
         // A block from 40 to 300 whose ink stops at 200 — a right reserve of 100
         // against a pair that needs 40, so the pair is centred in the reserve.
         let block = [40.0, 10.0, 300.0, 70.0];
-        let (source, copy) = math_tool_boxes_px(block, 200.0, 1.0);
+        let (source, copy) = math_tool_boxes_px(block, 200.0, 1.0, UNBOUNDED_PANE);
 
         // ① Inside the block, in the room right of the ink, centred in it.
         assert!(
@@ -19925,9 +20006,10 @@ mod tests {
 
         // ④ A block the pane cut short has no reserve left; the pair is pushed
         //    against its right edge and still never escapes it.
-        let (_, tight) = math_tool_boxes_px([40.0, 10.0, 220.0, 70.0], 210.0, 1.0);
+        let (_, tight) = math_tool_boxes_px([40.0, 10.0, 220.0, 70.0], 210.0, 1.0, UNBOUNDED_PANE);
         assert_eq!(tight[2], 220.0, "flush with the block's right edge");
-        let (narrow_source, narrow_copy) = math_tool_boxes_px([40.0, 10.0, 60.0, 70.0], 60.0, 1.0);
+        let (narrow_source, narrow_copy) =
+            math_tool_boxes_px([40.0, 10.0, 60.0, 70.0], 60.0, 1.0, UNBOUNDED_PANE);
         assert_eq!(
             narrow_source[0], 40.0,
             "a block narrower than the pair keeps them inside its left edge"
@@ -19935,7 +20017,8 @@ mod tests {
         assert!(narrow_copy[2] >= narrow_source[2]);
 
         // ⑤ And it is logical pixels, so the boxes double with the display.
-        let (retina, _) = math_tool_boxes_px([80.0, 20.0, 600.0, 140.0], 400.0, 2.0);
+        let (retina, _) =
+            math_tool_boxes_px([80.0, 20.0, 600.0, 140.0], 400.0, 2.0, UNBOUNDED_PANE);
         assert_eq!(retina[3] - retina[1], MATH_TOOL_BUTTON_LOGICAL_PX * 2.0);
     }
 
@@ -34659,6 +34742,70 @@ mod tests {
             pixels.hash(&mut hasher);
             hasher.finish()
         }
+    }
+
+    /// RED (69a) — **a block drawn in a multiplexer's pane stays inside it** (T-PANE-COLUMNS, R10,
+    /// note §7.3). A band proven in the pane `[0, 20)` of a forty-column grid, its raster far wider
+    /// than the pane, wearing its marks: the ink, the scissor, the ground and both marks stop at the
+    /// rule's column, and a point in the neighbouring pane hits nothing of it. A band in the pane
+    /// right of the rule starts at that pane's first column. R11 guarantees such a pane holds the
+    /// marks; the marks are asserted to fit.
+    ///
+    /// MUTATION: read `pane_right` from the grid in `math_block_geometry_px` (drop the limits).
+    #[test]
+    fn a_block_in_a_pane_draws_and_answers_only_inside_it() {
+        let metrics = fade_metrics();
+        let mut frame = wash_frame(40, 8);
+        let mut left = seat_test_band(0, 2, true);
+        left.artifact.width_px = 400;
+        left.right_limit_columns = Some(20);
+        let mut right = seat_test_band(3, 2, false);
+        right.left_limit_columns = Some(21);
+        right.left_subpixels = 21 * 10 * SUBPIXELS_PER_PX;
+        frame.math_blocks = vec![left, right];
+        let rule = metrics.padding_px + 20.0 * metrics.cell_width_px;
+        let geometry = seat_test_geometry(&frame, 0);
+        assert!(geometry.ink[2] <= rule, "ink {:?}", geometry.ink);
+        assert!(geometry.clip[2] <= rule, "clip {:?}", geometry.clip);
+        assert!(geometry.block[2] <= rule, "ground {:?}", geometry.block);
+        for mark in [geometry.eye, geometry.copy] {
+            let mark = mark.expect("a lit band carries its marks");
+            assert!(mark[0] >= metrics.padding_px && mark[2] <= rule, "{mark:?}");
+        }
+        let neighbour = [rule + 25.0, geometry.block[1] + 5.0];
+        assert!(!point_in_rect(neighbour, geometry.block));
+        assert!(
+            geometry
+                .eye
+                .is_none_or(|mark| !point_in_rect(neighbour, mark))
+        );
+        assert!(
+            geometry
+                .copy
+                .is_none_or(|mark| !point_in_rect(neighbour, mark))
+        );
+
+        let geometry = seat_test_geometry(&frame, 1);
+        let pane_left = metrics.padding_px + 21.0 * metrics.cell_width_px;
+        assert!(
+            geometry.block[0] >= pane_left,
+            "ground {:?}",
+            geometry.block
+        );
+        assert!(geometry.ink[0] >= pane_left, "ink {:?}", geometry.ink);
+    }
+
+    /// RED (69a) — **a mark never crosses its pane's edge** (R11). A band whose ground the pane cut
+    /// short, its ink ending at the rule: the pair is pushed against the pane's edge rather than
+    /// past it, into the next pane.
+    ///
+    /// MUTATION: drop the `pane` clamp in `math_tool_boxes_px`.
+    #[test]
+    fn the_marks_are_clamped_to_the_pane_not_only_to_the_block() {
+        let (source, copy) =
+            math_tool_boxes_px([180.0, 10.0, 200.0, 70.0], 200.0, 1.0, [8.0, 200.0]);
+        assert!(copy[2] <= 200.0, "{copy:?}");
+        assert!(source[0] >= 8.0, "{source:?}");
     }
 }
 

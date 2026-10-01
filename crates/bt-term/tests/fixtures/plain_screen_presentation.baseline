@@ -1,0 +1,55 @@
+# Captured from main 7b2e0841 (before any T-PANE-COLUMNS change) by plain_screen_presentation.rs's
+# a_plain_screen_is_presented_exactly_as_it_always_was run against an empty fixture.
+== pane-alternate
+row  0 |Inline:                stays inline.|
+row  6 |$$|
+row  7 |\begin{pmatrix}|
+row  8 |a & b \\|
+row  9 |c & d \\|
+row 10 |e & f|
+row 11 |\end{pmatrix}|
+row 12 |$$|
+block anchor=Live { screen: Alternate, start: GridPoint { row: 2, column: 0 }, end: GridPoint { row: 4, column: 2 }, band_start_row: 2, band_end_row: 4, generation: GridGeneration(1), run: None } top=36864 left=4608 content_offset=18432 clip=73728 display=Rendered source_width_cells=0 overflow=Block toolbar=false source="\\frac{1}{2}" artifact=120x36@73728 scale=1000
+block anchor=Live { screen: Alternate, start: GridPoint { row: 0, column: 8 }, end: GridPoint { row: 0, column: 22 }, band_start_row: 0, band_end_row: 0, generation: GridGeneration(1), run: None } top=0 left=73728 content_offset=0 clip=18432 display=Rendered source_width_cells=0 overflow=Pane toolbar=false source="e^{i\\pi}+1=0" artifact=40x18@18432 scale=1000
+held_unbacked=[HeldUnbackedRecord { source_line: LiveGrid(0), original_source: "e^{i\\pi}+1=0", screen: Alternate, band_start_row: 0, band_end_row: 0, stale: false }]
+isolation_gap=0
+== pane-primary
+row  0 |Inline: $e^{i\pi}+1=0$ stays inline.|
+block anchor=Live { screen: Primary, start: GridPoint { row: 2, column: 0 }, end: GridPoint { row: 4, column: 2 }, band_start_row: 2, band_end_row: 4, generation: GridGeneration(1), run: None } top=36864 left=4608 content_offset=18432 clip=73728 display=Rendered source_width_cells=0 overflow=Block toolbar=false source="\\frac{1}{2}" artifact=120x36@73728 scale=1000
+block anchor=Live { screen: Primary, start: GridPoint { row: 6, column: 0 }, end: GridPoint { row: 12, column: 2 }, band_start_row: 6, band_end_row: 12, generation: GridGeneration(1), run: None } top=129024 left=4608 content_offset=18432 clip=73728 display=Rendered source_width_cells=0 overflow=Block toolbar=false source="\\begin{pmatrix}\na & b \\\\\nc & d \\\\\ne & f\n\\end{pmatrix}" artifact=120x36@73728 scale=1000
+held_unbacked=[]
+isolation_gap=0
+== pane-primary-scrolled-into-history
+row  0 |an ordinary line of output number 20|
+row  1 |an ordinary line of output number 21|
+row  2 |an ordinary line of output number 22|
+row  3 |an ordinary line of output number 23|
+row  4 |an ordinary line of output number 24|
+row  5 |an ordinary line of output number 25|
+row  6 |an ordinary line of output number 26|
+row  7 |an ordinary line of output number 27|
+row  8 |an ordinary line of output number 28|
+row  9 |an ordinary line of output number 29|
+row 10 |Inline: $e^{i\pi}+1=0$ stays inline.|
+block anchor=Live { screen: Primary, start: GridPoint { row: 12, column: 0 }, end: GridPoint { row: 14, column: 2 }, band_start_row: 12, band_end_row: 14, generation: GridGeneration(21), run: None } top=221184 left=4608 content_offset=18432 clip=73728 display=Rendered source_width_cells=0 overflow=Block toolbar=false source="\\frac{1}{2}" artifact=120x36@73728 scale=1000
+block anchor=Live { screen: Primary, start: GridPoint { row: 16, column: 0 }, end: GridPoint { row: 22, column: 2 }, band_start_row: 16, band_end_row: 22, generation: GridGeneration(21), run: None } top=313344 left=4608 content_offset=18432 clip=73728 display=Rendered source_width_cells=0 overflow=Block toolbar=false source="\\begin{pmatrix}\na & b \\\\\nc & d \\\\\ne & f\n\\end{pmatrix}" artifact=120x36@73728 scale=1000
+held_unbacked=[]
+isolation_gap=0
+== wide-characters-alternate
+row  0 |前 置                 之 后|
+row  2 |$$|
+row  3 |\alpha|
+row  4 |$$|
+block anchor=Live { screen: Alternate, start: GridPoint { row: 0, column: 5 }, end: GridPoint { row: 0, column: 19 }, band_start_row: 0, band_end_row: 0, generation: GridGeneration(1), run: None } top=0 left=46080 content_offset=0 clip=18432 display=Rendered source_width_cells=0 overflow=Pane toolbar=false source="e^{i\\pi}+1=0" artifact=40x18@18432 scale=1000
+held_unbacked=[HeldUnbackedRecord { source_line: LiveGrid(0), original_source: "e^{i\\pi}+1=0", screen: Alternate, band_start_row: 0, band_end_row: 0, stale: false }]
+isolation_gap=0
+== soft-wrapped-alternate
+row  0 |prefix text       an|
+row  1 |d more text that wra|
+row  2 |ps here|
+row  3 |$$|
+row  4 |\beta|
+row  5 |$$|
+block anchor=Live { screen: Alternate, start: GridPoint { row: 0, column: 12 }, end: GridPoint { row: 0, column: 17 }, band_start_row: 0, band_end_row: 0, generation: GridGeneration(1), run: None } top=0 left=110592 content_offset=0 clip=18432 display=Rendered source_width_cells=0 overflow=Pane toolbar=false source="a+b" artifact=40x18@18432 scale=1000
+held_unbacked=[HeldUnbackedRecord { source_line: LiveGrid(0), original_source: "a+b", screen: Alternate, band_start_row: 0, band_end_row: 0, stale: false }]
+isolation_gap=0

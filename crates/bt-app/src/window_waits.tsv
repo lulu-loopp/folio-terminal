@@ -158,6 +158,7 @@ bt_platform::WebHost::rehost	WebRehost
 
 # effects
 crate	arm	item	effects	kind	authority	door
+bt-app	-	crate::foreground_program::run	std::sync::mpsc::Receiver::recv 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::gpu_door::open_first_window	bt_render::GpuContext::open 1, pollster::block_on 1	owner-door-body	WaitToken	GpuOpen
 bt-app	-	crate::persist::SessionWriter::close	std::thread::JoinHandle::join 1, std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
 bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
@@ -180,6 +181,7 @@ construct	owner	count
 #[link]	bt-platform crate::macos_watch	1
 extern block	bt-platform crate::hotkey::macos_hotkey	1
 extern block	bt-platform crate::launch_pipe::peer_executable	1
+extern block	bt-platform crate::foreground_program::imp	1
 extern block	bt-platform crate::macos_app	1
 extern block	bt-platform crate::macos_dialogs	1
 extern block	bt-platform crate::macos_impl	1

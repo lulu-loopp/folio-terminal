@@ -67,6 +67,7 @@ mod files_watch;
 mod first_run;
 mod float;
 mod focus_thumb;
+mod foreground_program;
 mod formula_tools;
 mod git;
 mod git_graph;
@@ -11378,6 +11379,15 @@ fn leaf_session_mut(
         .map(|leaf| &mut leaf.session)
 }
 
+/// The worker lanes a tab's decoration dispatch hands work to, cloned out of [`App`] so the
+/// dispatch can borrow the tab and the worker flags mutably at the same time.
+struct DecorationSenders {
+    math: mpsc::Sender<MathWorkerRequest>,
+    scale: mpsc::Sender<ScaleWorkerRequest>,
+    path: mpsc::Sender<PathWorkerRequest>,
+    foreground: mpsc::Sender<foreground_program::Request>,
+}
+
 /// Collect every pane of the tab on screen, not merely the one holding the keyboard.
 ///
 /// A leaf queues its own decoration work as its own bytes are drained — that half was always per
@@ -11390,30 +11400,31 @@ fn leaf_session_mut(
 fn dispatch_tab_decoration_tasks(
     window: WindowId,
     tab: &mut TabState,
-    tasks: &mpsc::Sender<MathWorkerRequest>,
-    scale_tasks: &mpsc::Sender<ScaleWorkerRequest>,
-    path_tasks: &mpsc::Sender<PathWorkerRequest>,
+    senders: &DecorationSenders,
+    now: Instant,
     running: &mut bool,
     notice_pending: &mut bool,
 ) -> bool {
     let tab_id = tab.id;
     let mut disabled = false;
     for (seat, leaf) in tab.leaves_mut() {
-        disabled |= dispatch_pending_math_tasks(
-            ShellAddress {
-                window,
-                leaf: LeafId {
-                    tab: tab_id,
-                    seat: *seat,
-                },
+        let address = ShellAddress {
+            window,
+            leaf: LeafId {
+                tab: tab_id,
+                seat: *seat,
             },
+        };
+        disabled |= dispatch_pending_math_tasks(
+            address,
             &mut leaf.session,
-            tasks,
-            scale_tasks,
-            path_tasks,
+            &senders.math,
+            &senders.scale,
+            &senders.path,
             running,
             notice_pending,
         );
+        foreground_program::request(leaf, address, &senders.foreground, now);
     }
     disabled
 }
@@ -11444,6 +11455,7 @@ struct DpiSnapshot {
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
 struct LeafSession {
     pty: Option<PtySession>,
+    foreground_program_cadence: foreground_program::Cadence,
     /// **Which shell this is, told apart from the one that stood here before**
     /// (review X-1).
     ///
@@ -12339,6 +12351,7 @@ struct App {
     /// events read this map and never wait.
     layout_tables: layout_tables::LayoutTables,
     math_worker: MathWorker,
+    foreground_program_worker: foreground_program::Worker,
     math_worker_running: bool,
     math_worker_notice_pending: bool,
     /// **The repositories the kernel has been asked to report changes in**
@@ -27707,6 +27720,13 @@ fn attention_ledger_deadline(tabs: &[TabState]) -> Option<Instant> {
         .min()
 }
 
+fn foreground_program_deadline(tabs: &[TabState]) -> Option<Instant> {
+    tabs.iter()
+        .flat_map(TabState::leaves)
+        .filter_map(|(_, leaf)| foreground_program::deadline(leaf))
+        .min()
+}
+
 fn emit_attention_lines(trace: Option<&attention_trace::Trace>, lines: Vec<String>) {
     for line in lines {
         attention_trace::emit(trace, || line);
@@ -38218,6 +38238,7 @@ fn create_leaf_session(
         // when there is no ConPTY — see the field.
         wake: pty.is_some().then_some(wake),
         pty,
+        foreground_program_cadence: foreground_program::Cadence::default(),
         paste_recipient: profiles::paste_recipient(
             profiles::index_of_id(&profile),
             &bt_pty::SystemShellEnvironment,
@@ -42043,6 +42064,12 @@ impl Runtime<'_> {
                 let _ = proxy.send_event(AppEvent::MathReady);
             }
         })?;
+        let foreground_program_worker = foreground_program::Worker::spawn({
+            let proxy = proxy.clone();
+            move || {
+                let _ = proxy.send_event(AppEvent::MathReady);
+            }
+        })?;
         let handoff_lane = handoff_lane::HandoffLane::spawn({
             let proxy = proxy.clone();
             move || {
@@ -42076,6 +42103,7 @@ impl Runtime<'_> {
             handoff_lane,
             layout_tables,
             math_worker,
+            foreground_program_worker,
             math_worker_running: true,
             math_worker_notice_pending: false,
             files_worker,
@@ -50808,6 +50836,15 @@ impl Runtime<'_> {
 }
 
 impl App {
+    fn decoration_senders(&self) -> DecorationSenders {
+        DecorationSenders {
+            math: self.math_worker.tasks.clone(),
+            scale: self.math_worker.scale_tasks.clone(),
+            path: self.math_worker.path_tasks.clone(),
+            foreground: self.foreground_program_worker.requests.clone(),
+        }
+    }
+
     /// **Write what an update's trial held back, now that it is committed**
     /// (`update_trial`, F-7) — each released writer run again, in
     /// [`update_trial::Writer`]'s order: the folder before anything written
@@ -60441,6 +60478,17 @@ impl FolioApp {
         (batch, gone)
     }
 
+    fn drain_foreground_program_answers(&mut self) -> Vec<foreground_program::Answer> {
+        let mut batch = Vec::new();
+        let Some(app) = self.app.as_mut() else {
+            return batch;
+        };
+        while let Ok(answer) = app.foreground_program_worker.answers.try_recv() {
+            batch.push(answer);
+        }
+        batch
+    }
+
     /// **Give every hand-off answer to the window that asked for it** (`handoff_lane`).
     ///
     /// Each answer is offered to every open window and claimed by the one whose duties hold its
@@ -63923,7 +63971,11 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }
             AppEvent::MathReady => {
                 let (mut batch, gone) = self.drain_math_answers();
-                self.for_each_window(|runtime| runtime.apply_math_results(&mut batch, gone))
+                let mut foreground = self.drain_foreground_program_answers();
+                self.for_each_window(|runtime| {
+                    runtime.apply_math_results(&mut batch, gone)?;
+                    runtime.apply_foreground_program_results(&mut foreground)
+                })
             }
             AppEvent::FilesReady => {
                 let (mut batch, gone) = self.drain_files_answers();
@@ -71266,7 +71318,28 @@ fn report_frame_shape_stop(error: &anyhow::Error, path: &Path, announce: impl Fn
 }
 
 fn main() -> Result<()> {
-    // First, so that even the panic hook's own words have somewhere to land
+    // **The console-membership helper is checked before this process touches any console.** It is
+    // a short-lived worker main whose one permitted attachment is the pane shell pid on its exact
+    // private line; the resident GUI process never changes console state.
+    if let Some(request) = cli::console_members(std::env::args_os().skip(1)) {
+        let code = match request {
+            Ok(shell_pid) => {
+                let listed = bt_platform::admission::enter_standalone_main(
+                    "folio-console-members",
+                    |worker| {
+                        bt_platform::foreground_program::write_console_members(worker, shell_pid)
+                    },
+                )
+                .ok()
+                .is_some_and(|listed| listed);
+                if listed { 0 } else { 1 }
+            }
+            Err(_) => 2,
+        };
+        std::process::exit(code);
+    }
+    // First for every ordinary front door, so that even the panic hook's own words have somewhere
+    // to land. The private console-members helper above must begin unattached.
     // when a shell launched this window-subsystem process to read its traces.
     // **For the front door only** — see `diagnostics::enter_resident_run`, which
     // is where the borrow ends.
@@ -71285,7 +71358,7 @@ fn main() -> Result<()> {
         std::process::exit(code);
     }
     install_panic_log_hook();
-    // **The doorbell, before anything else this program can do.**
+    // **The ordinary doorbell, before anything else a resident launch can do.**
     //
     // `folio attention` is this executable being run by an agent's hook, and what it owes that
     // caller is to be *finished*: the hook that matters most fires while Claude Code is holding an
@@ -71297,7 +71370,7 @@ fn main() -> Result<()> {
     if let Some(call) = cli::attention(std::env::args_os().skip(1)) {
         std::process::exit(attention_wire::run_verb(call));
     }
-    // **And the second doorbell, beside it** (§7.4a). `folio --explorer-command`
+    // **And the second ordinary doorbell, beside it** (§7.4a). `folio --explorer-command`
     // is Explorer starting this executable as a COM server because somebody
     // right-clicked a folder, and what it owes that caller is an apartment with a
     // message pump before the menu is drawn. Above the panic log's siblings for

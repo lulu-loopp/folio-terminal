@@ -844,6 +844,31 @@ where
 /// Account-wide profile removal, answered before the ordinary window grammar.
 pub const REMOVE_SHELL_INTEGRATION_FLAG: &str = "--remove-shell-integration";
 
+/// The private Windows console-membership helper. This word is owned by the platform door so the
+/// parent and helper cannot acquire two spellings.
+pub const CONSOLE_MEMBERS_FLAG: &str = bt_platform::foreground_program::CONSOLE_MEMBERS_FLAG;
+pub const CONSOLE_MEMBERS_USAGE: &str = "usage: folio --console-members <shell-pid>";
+
+/// Strict early grammar for the console-membership helper: the exact private word followed by one
+/// non-zero decimal process id and nothing else.
+pub fn console_members(
+    args: impl IntoIterator<Item = OsString>,
+) -> Option<Result<u32, &'static str>> {
+    let mut args = args.into_iter();
+    let first = args.next()?;
+    if first.to_str()? != CONSOLE_MEMBERS_FLAG {
+        return None;
+    }
+    let pid = args
+        .next()
+        .and_then(|word| word.to_str().and_then(|word| word.parse::<u32>().ok()))
+        .filter(|pid| *pid != 0);
+    Some(match (pid, args.next()) {
+        (Some(pid), None) => Ok(pid),
+        _ => Err(CONSOLE_MEMBERS_USAGE),
+    })
+}
+
 pub fn remove_shell_integration<I>(args: I) -> bool
 where
     I: IntoIterator<Item = OsString>,
@@ -1283,6 +1308,31 @@ mod tests {
             "--remove-shell-integration"
         ])));
         assert!(refusal_text(&CliFault::HelpAsked).contains("--remove-shell-integration"));
+    }
+
+    /// RED (69a round 3, E8 helper grammar) — the private helper door opens only on its exact first
+    /// word and accepts exactly one shell pid.
+    ///
+    /// MUTATION: treat any leading `--console-*` word as the helper verb.
+    #[test]
+    fn cli_console_members_is_only_its_exact_private_verb() {
+        assert_eq!(
+            console_members(args(&["--console-members", "42"])),
+            Some(Ok(42))
+        );
+        assert_eq!(console_members(args(&["--console-member", "42"])), None);
+        assert_eq!(
+            console_members(args(&["prefix", "--console-members", "42"])),
+            None
+        );
+        assert_eq!(
+            console_members(args(&["--console-members", "42", "extra"])),
+            Some(Err(CONSOLE_MEMBERS_USAGE))
+        );
+        assert_eq!(
+            console_members(args(&["--console-members", "not-a-pid"])),
+            Some(Err(CONSOLE_MEMBERS_USAGE))
+        );
     }
 
     /// PIN (§7.4a) — **the COM server's door opens on the first word and on
