@@ -2925,9 +2925,6 @@ text_entries! {
     MenuFolioHelp,
 
     // ── the update card and About → Version (U-19, T-UPDATE-ON-ABOUT) ──
-    //
-    // English in both columns until opus46 writes the Chinese: every entry
-    // below is on `CHINESE_PENDING`.
     /// The update card's first verb on an offer (C9): the press downloads; the restart is asked for again at `Verified`.
     UpdateCardUpdate,
     /// The update card's Later, on an offer and on a verified job. Escape and the close box say the same.
@@ -3245,15 +3242,11 @@ impl Text {
             // sentence is the one a reader of a terminal's settings actually
             // wants: a row about a version check reads as the front half of an
             // updater until something says it is not.
-            Self::RowAutoCheck => pick(
-                lang,
-                "Automatic check", // zh: pending T-UPDATE-ON-ABOUT
-                "Automatic check", // zh: pending T-UPDATE-ON-ABOUT
-            ),
+            Self::RowAutoCheck => pick(lang, "Automatic check", "自动检查"),
             Self::DescAutoCheck => pick(
                 lang,
-                "Checks for a new version once a day. Check still works when this is Off.", // zh: pending T-UPDATE-ON-ABOUT
-                "Checks for a new version once a day. Check still works when this is Off.", // zh: pending T-UPDATE-ON-ABOUT
+                "Checks for a new version once a day. Check still works when this is Off.",
+                "每天查一次有没有新版。关闭后仍可手动检查。",
             ),
             Self::DescGitPanel => pick(
                 lang,
@@ -5684,90 +5677,35 @@ impl Text {
             Self::UpdateCardRestored => pick(lang, "Previous version restored.", "已恢复旧版。"),
             Self::UpdateCardIncomplete => pick(lang, "Update incomplete.", "更新未完成。"),
             Self::UpdateCardUpdated => pick(lang, "Updated.", "已更新。"),
-            Self::VersionUpToDate => pick(
-                lang,
-                "Up to date", // zh: pending T-UPDATE-ON-ABOUT
-                "Up to date", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionCheck => pick(
-                lang, "Check", // zh: pending T-UPDATE-ON-ABOUT
-                "Check", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionUpdateAndRestart => pick(
-                lang,
-                "Update and restart", // zh: pending T-UPDATE-ON-ABOUT
-                "Update and restart", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionCopyCommand => pick(
-                lang,
-                "Copy command", // zh: pending T-UPDATE-ON-ABOUT
-                "Copy command", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionRetry => pick(
-                lang, "Retry", // zh: pending T-UPDATE-ON-ABOUT
-                "Retry", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionWhatsNew => pick(
-                lang,
-                "What's new", // zh: pending T-UPDATE-ON-ABOUT
-                "What's new", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionDetails => pick(
-                lang, "Details", // zh: pending T-UPDATE-ON-ABOUT
-                "Details", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionAvailable => pick(
-                lang,
-                "{version} available", // zh: pending T-UPDATE-ON-ABOUT
-                "{version} available", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionDownloading => pick(
-                lang,
-                "Downloading {version}", // zh: pending T-UPDATE-ON-ABOUT
-                "Downloading {version}", // zh: pending T-UPDATE-ON-ABOUT
-            ),
+            Self::VersionUpToDate => pick(lang, "Up to date", "已是最新"),
+            Self::VersionCheck => pick(lang, "Check", "检查"),
+            Self::VersionUpdateAndRestart => pick(lang, "Update and restart", "更新并重启"),
+            Self::VersionCopyCommand => pick(lang, "Copy command", "复制命令"),
+            Self::VersionRetry => pick(lang, "Retry", "再试"),
+            Self::VersionWhatsNew => pick(lang, "What's new", "改了什么 ↗"),
+            Self::VersionDetails => pick(lang, "Details", "详情"),
+            Self::VersionAvailable => pick(lang, "{version} available", "有新版 {version}"),
+            Self::VersionDownloading => pick(lang, "Downloading {version}", "正在下载 {version}"),
             Self::VersionManaged => pick(
                 lang,
-                "{version} available · {command}", // zh: pending T-UPDATE-ON-ABOUT
-                "{version} available · {command}", // zh: pending T-UPDATE-ON-ABOUT
+                "{version} available · {command}",
+                "有新版 {version} · {command}",
             ),
             Self::VersionFailed => pick(
                 lang,
-                "{version} wasn't installed. This version was restored.", // zh: pending T-UPDATE-ON-ABOUT
-                "{version} wasn't installed. This version was restored.", // zh: pending T-UPDATE-ON-ABOUT
+                "{version} wasn't installed. This version was restored.",
+                "{version} 未装上，已恢复当前版本。",
             ),
-            Self::VersionLastChecked => pick(
-                lang,
-                "Last checked: {when}", // zh: pending T-UPDATE-ON-ABOUT
-                "Last checked: {when}", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionNeverChecked => pick(
-                lang, "Never", // zh: pending T-UPDATE-ON-ABOUT
-                "Never", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionJustNow => pick(
-                lang, "just now", // zh: pending T-UPDATE-ON-ABOUT
-                "just now", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionMinutesAgo => pick(
-                lang,
-                "{count} minutes ago", // zh: pending T-UPDATE-ON-ABOUT
-                "{count} minutes ago", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionHoursAgo => pick(
-                lang,
-                "{count} hours ago", // zh: pending T-UPDATE-ON-ABOUT
-                "{count} hours ago", // zh: pending T-UPDATE-ON-ABOUT
-            ),
-            Self::VersionDaysAgo => pick(
-                lang,
-                "{count} days ago", // zh: pending T-UPDATE-ON-ABOUT
-                "{count} days ago", // zh: pending T-UPDATE-ON-ABOUT
-            ),
+            Self::VersionLastChecked => pick(lang, "Last checked: {when}", "上次检查：{when}"),
+            Self::VersionNeverChecked => pick(lang, "Never", "从未"),
+            Self::VersionJustNow => pick(lang, "just now", "刚刚"),
+            Self::VersionMinutesAgo => pick(lang, "{count} minutes ago", "{count} 分钟前"),
+            Self::VersionHoursAgo => pick(lang, "{count} hours ago", "{count} 小时前"),
+            Self::VersionDaysAgo => pick(lang, "{count} days ago", "{count} 天前"),
             Self::VersionSettingsAvailable => pick(
                 lang,
-                "Settings · {version} available", // zh: pending T-UPDATE-ON-ABOUT
-                "Settings · {version} available", // zh: pending T-UPDATE-ON-ABOUT
+                "Settings · {version} available",
+                "设置 · 有新版 {version}",
             ),
             Self::UpdateFailedUnsupported => pick(
                 lang,
@@ -5996,78 +5934,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &{
-        use HostPlatform::{MacOs, OtherUnix, Windows};
-        use Text::{
-            DescAutoCheck, RowAutoCheck, VersionAvailable, VersionCheck, VersionCopyCommand,
-            VersionDaysAgo, VersionDetails, VersionDownloading, VersionFailed, VersionHoursAgo,
-            VersionJustNow, VersionLastChecked, VersionManaged, VersionMinutesAgo,
-            VersionNeverChecked, VersionRetry, VersionSettingsAvailable, VersionUpToDate,
-            VersionUpdateAndRestart, VersionWhatsNew,
-        };
-        [
-            (RowAutoCheck, Windows),
-            (RowAutoCheck, MacOs),
-            (RowAutoCheck, OtherUnix),
-            (DescAutoCheck, Windows),
-            (DescAutoCheck, MacOs),
-            (DescAutoCheck, OtherUnix),
-            (VersionUpToDate, Windows),
-            (VersionUpToDate, MacOs),
-            (VersionUpToDate, OtherUnix),
-            (VersionCheck, Windows),
-            (VersionCheck, MacOs),
-            (VersionCheck, OtherUnix),
-            (VersionUpdateAndRestart, Windows),
-            (VersionUpdateAndRestart, MacOs),
-            (VersionUpdateAndRestart, OtherUnix),
-            (VersionCopyCommand, Windows),
-            (VersionCopyCommand, MacOs),
-            (VersionCopyCommand, OtherUnix),
-            (VersionRetry, Windows),
-            (VersionRetry, MacOs),
-            (VersionRetry, OtherUnix),
-            (VersionWhatsNew, Windows),
-            (VersionWhatsNew, MacOs),
-            (VersionWhatsNew, OtherUnix),
-            (VersionDetails, Windows),
-            (VersionDetails, MacOs),
-            (VersionDetails, OtherUnix),
-            (VersionAvailable, Windows),
-            (VersionAvailable, MacOs),
-            (VersionAvailable, OtherUnix),
-            (VersionDownloading, Windows),
-            (VersionDownloading, MacOs),
-            (VersionDownloading, OtherUnix),
-            (VersionManaged, Windows),
-            (VersionManaged, MacOs),
-            (VersionManaged, OtherUnix),
-            (VersionFailed, Windows),
-            (VersionFailed, MacOs),
-            (VersionFailed, OtherUnix),
-            (VersionLastChecked, Windows),
-            (VersionLastChecked, MacOs),
-            (VersionLastChecked, OtherUnix),
-            (VersionNeverChecked, Windows),
-            (VersionNeverChecked, MacOs),
-            (VersionNeverChecked, OtherUnix),
-            (VersionJustNow, Windows),
-            (VersionJustNow, MacOs),
-            (VersionJustNow, OtherUnix),
-            (VersionMinutesAgo, Windows),
-            (VersionMinutesAgo, MacOs),
-            (VersionMinutesAgo, OtherUnix),
-            (VersionHoursAgo, Windows),
-            (VersionHoursAgo, MacOs),
-            (VersionHoursAgo, OtherUnix),
-            (VersionDaysAgo, Windows),
-            (VersionDaysAgo, MacOs),
-            (VersionDaysAgo, OtherUnix),
-            (VersionSettingsAvailable, Windows),
-            (VersionSettingsAvailable, MacOs),
-            (VersionSettingsAvailable, OtherUnix),
-        ]
-    };
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
