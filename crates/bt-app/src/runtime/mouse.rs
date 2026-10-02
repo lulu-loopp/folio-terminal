@@ -3928,8 +3928,8 @@ impl Runtime<'_> {
             seats::ChromeTarget::Settings => {
                 if self.is_quake_window() {
                     self.open_settings_on_row(settings::SettingsRow::QuakeHotkey)?;
-                } else if update::gear_mark_is_lit() {
-                    self.open_settings_on_row(settings::SettingsRow::UpdateCheck)?;
+                } else if update::gear_mark_is_lit(&self.app.update_job) {
+                    self.open_settings_on_row(settings::SettingsRow::AboutVersion)?;
                 } else {
                     self.toggle_settings_panel()?;
                 }

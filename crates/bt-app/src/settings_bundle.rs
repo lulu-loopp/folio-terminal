@@ -158,7 +158,7 @@ impl SettingChange {
             Self::KeyHints(_) => SettingsRow::KeyHints,
             Self::TurnEndNotification(_) => SettingsRow::TurnEndNotifications,
             Self::CopyOnSelect(_) => SettingsRow::CopyOnSelect,
-            Self::UpdateCheck(_) => SettingsRow::UpdateCheck,
+            Self::UpdateCheck(_) => SettingsRow::AutoCheck,
             Self::QuakeHeight(_) => SettingsRow::QuakeHeight,
             Self::QuakeWidth(_) => SettingsRow::QuakeWidth,
             Self::QuakeDismiss(_) => SettingsRow::QuakeDismiss,

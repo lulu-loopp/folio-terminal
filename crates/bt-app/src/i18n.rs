@@ -520,13 +520,10 @@ text_entries! {
     /// The banner every diagnostic file opens with, said on a row: which
     /// version, and which build of it.
     RowAboutVersion,
-    DescAboutVersion,
     /// Which machine this copy was made for — the half of a bug report that is
     /// never in the log attached to it.
     RowAboutPlatform,
     DescAboutPlatform,
-    RowAboutReleaseNotes,
-    DescAboutReleaseNotes,
     /// **The row the About page exists for.** The report that asked for a
     /// version asked for it so that a defect could be filed naming one.
     RowAboutIssues,
@@ -570,9 +567,8 @@ text_entries! {
     /// 2026-09-07): the row's three answers are three places **in that menu**, so
     /// the surface is still what the title names and the answers name the places.
     RowContextMenu,
-    /// **The one row in this dialog that governs a network request** (§7.51),
-    /// last on the General page.
-    RowUpdateCheck,
+    /// The daily-check switch directly under About > Version.
+    RowAutoCheck,
     RowTabLayout,
     RowSidebar,
     RowSplitDirection,
@@ -643,10 +639,7 @@ text_entries! {
     /// The deployment database would not answer, so nothing below the two facts
     /// about the machine can be claimed (R2-20).
     DescExplorerFirstPageUnreadable,
-    /// The sentence the row wears while there is nothing newer — what the check
-    /// does, and the bound on what it can do. The other sentence names a version
-    /// and is composed by [`update_row_available_in`].
-    DescUpdateCheck,
+    DescAutoCheck,
     DescTabLayout,
     DescSidebar,
     DescSplitDirection,
@@ -1088,7 +1081,6 @@ text_entries! {
     /// ellipsis stays: pressing it does not finish the job, it hands you a file.
     /// The verb at the foot of the update row's picker. **No ellipsis**: it hands
     /// an address to the browser rather than opening a second asking.
-    OpenReleasesPage,
     AddScheme,
     /// **The verb the font picker ends with**, on the same terms and behind the
     /// same hairline: it opens the system's own Fonts page, where a font is
@@ -2932,10 +2924,7 @@ text_entries! {
     /// Help's one row, which opens the page a reader is sent to.
     MenuFolioHelp,
 
-    // ── the update card and the General row (0.4.6 U-19, C9 and C2) ──
-    //
-    // English in both columns until opus46 writes the Chinese: every entry
-    // below is on `CHINESE_PENDING`.
+    // ── the update card and About → Version (U-19, T-UPDATE-ON-ABOUT) ──
     /// The update card's first verb on an offer (C9): the press downloads; the restart is asked for again at `Verified`.
     UpdateCardUpdate,
     /// The update card's Later, on an offer and on a verified job. Escape and the close box say the same.
@@ -2964,6 +2953,29 @@ text_entries! {
     UpdateCardIncomplete,
     /// The trial over a `Stuck` transaction committed forward after its card said *Update incomplete.* (U-32).
     UpdateCardUpdated,
+    /// About > Version: no newer release is known.
+    VersionUpToDate,
+    /// About > Version controls and inline links.
+    VersionChecking,
+    VersionCheck,
+    VersionUpdateAndRestart,
+    VersionCopyCommand,
+    VersionRetry,
+    VersionOpenReleases,
+    VersionWhatsNew,
+    VersionDetails,
+    /// Value-carrying templates for About > Version.
+    VersionAvailable,
+    VersionDownloading,
+    VersionManaged,
+    VersionFailed,
+    VersionLastChecked,
+    VersionNeverChecked,
+    VersionJustNow,
+    VersionMinutesAgo,
+    VersionHoursAgo,
+    VersionDaysAgo,
+    VersionSettingsAvailable,
     /// The reason a press fails while no driver exists (`update_job::Failure::Unsupported`).
     UpdateFailedUnsupported,
     /// The reason a driver that stopped gives (`update_job::Failure::Stopped`); U-20 names finer ones.
@@ -2991,17 +3003,6 @@ text_entries! {
     UpdateFailedInterrupted,
     /// The release needs a newer updater than the running build (`update_job::Stop::TooOld`; U-42c).
     UpdateFailedTooOld,
-    /// The General row's picker foot while a job waits at `Verified`: the card again.
-    UpdateRowRestart,
-    /// The General row's picker foot on a copy a package manager updates: the manager's command, to the clipboard.
-    UpdateRowCopy,
-    /// The General row's sentence while a job waits at `Verified`.
-    UpdateRowReady,
-    /// The General row's sentence on a copy a package manager updates (C2).
-    UpdateRowManaged,
-    /// The About page's `Version` row, its sentence while an update is offered
-    /// (0.4.6 T-GEAR-MARK-LANDS); `{version}` is the offered tag.
-    AboutVersionOffer,
 }
 
 impl Text {
@@ -3146,22 +3147,11 @@ impl Text {
             Self::NavAbout => pick(lang, "About", "关于"),
             Self::AboutOpen => pick(lang, "Open", "打开"),
             Self::RowAboutVersion => pick(lang, "Version", "版本"),
-            Self::DescAboutVersion => pick(
-                lang,
-                "The version this window is running, and the build it came from.",
-                "当前运行的版本号与构建标识。",
-            ),
             Self::RowAboutPlatform => pick(lang, "Platform", "平台"),
             Self::DescAboutPlatform => pick(
                 lang,
                 "The system and the processor this copy was made for.",
                 "此版本适用的操作系统与处理器。",
-            ),
-            Self::RowAboutReleaseNotes => pick(lang, "Release notes", "版本说明"),
-            Self::DescAboutReleaseNotes => pick(
-                lang,
-                "What changed in this version, and in the ones before it.",
-                "此版本及以往各版本的更新内容。",
             ),
             Self::RowAboutIssues => pick(lang, "Report a defect", "报告缺陷"),
             Self::DescAboutIssues => pick(
@@ -3254,11 +3244,11 @@ impl Text {
             // sentence is the one a reader of a terminal's settings actually
             // wants: a row about a version check reads as the front half of an
             // updater until something says it is not.
-            Self::RowUpdateCheck => pick(lang, "Update check", "检查新版"),
-            Self::DescUpdateCheck => pick(
+            Self::RowAutoCheck => pick(lang, "Automatic check", "自动检查"),
+            Self::DescAutoCheck => pick(
                 lang,
-                "Checks once a day for a newer Folio. The new version is named on this row.",
-                "每天检查一次新版本。有新版本时在此行显示。",
+                "Checks for a new version once a day. Check still works when this is Off.",
+                "每天查一次有没有新版。关闭后仍可手动检查。",
             ),
             Self::DescGitPanel => pick(
                 lang,
@@ -3798,7 +3788,6 @@ impl Text {
             // ── the Advanced disclosure and its Reset ──────────────────────
             Self::AdvancedGroup => pick(lang, "ADVANCED", "高级"),
             Self::ResetAdvanced => pick(lang, "Reset to defaults", "恢复默认值"),
-            Self::OpenReleasesPage => pick(lang, "Open releases page", "打开发布页"),
             Self::AddScheme => pick(lang, "Add scheme…", "添加配色…"),
             Self::InstallFonts => pick(lang, "Install fonts…", "安装字体…"),
             Self::SchemeInUseBroken => pick(lang, "Colour scheme not reloaded", "配色未重新载入"),
@@ -5690,6 +5679,38 @@ impl Text {
             Self::UpdateCardRestored => pick(lang, "Previous version restored.", "已恢复旧版。"),
             Self::UpdateCardIncomplete => pick(lang, "Update incomplete.", "更新未完成。"),
             Self::UpdateCardUpdated => pick(lang, "Updated.", "已更新。"),
+            Self::VersionUpToDate => pick(lang, "Up to date", "已是最新"),
+            Self::VersionChecking => pick(lang, "Checking…", "检查中…"),
+            Self::VersionCheck => pick(lang, "Check", "检查"),
+            Self::VersionUpdateAndRestart => pick(lang, "Update and restart", "更新并重启"),
+            Self::VersionCopyCommand => pick(lang, "Copy command", "复制命令"),
+            Self::VersionRetry => pick(lang, "Retry", "再试"),
+            Self::VersionOpenReleases => pick(lang, "Open the release page", "打开发布页"),
+            Self::VersionWhatsNew => pick(lang, "What's new", "改了什么 ↗"),
+            Self::VersionDetails => pick(lang, "Details", "详情"),
+            Self::VersionAvailable => pick(lang, "{version} available", "有新版 {version}"),
+            Self::VersionDownloading => pick(lang, "Downloading {version}", "正在下载 {version}"),
+            Self::VersionManaged => pick(
+                lang,
+                "{version} available · {command}",
+                "有新版 {version} · {command}",
+            ),
+            Self::VersionFailed => pick(
+                lang,
+                "{version} wasn't installed. This version was restored.",
+                "{version} 未装上，已恢复当前版本。",
+            ),
+            Self::VersionLastChecked => pick(lang, "Last checked: {when}", "上次检查：{when}"),
+            Self::VersionNeverChecked => pick(lang, "Never", "从未"),
+            Self::VersionJustNow => pick(lang, "just now", "刚刚"),
+            Self::VersionMinutesAgo => pick(lang, "{count} minutes ago", "{count} 分钟前"),
+            Self::VersionHoursAgo => pick(lang, "{count} hours ago", "{count} 小时前"),
+            Self::VersionDaysAgo => pick(lang, "{count} days ago", "{count} 天前"),
+            Self::VersionSettingsAvailable => pick(
+                lang,
+                "Settings · {version} available",
+                "设置 · 有新版 {version}",
+            ),
             Self::UpdateFailedUnsupported => pick(
                 lang,
                 "Folio cannot update itself here.",
@@ -5737,21 +5758,6 @@ impl Text {
                 "This version is too old to update itself. Download the new version.",
                 "此版本过旧，无法自行更新。下载新版本。",
             ),
-            Self::UpdateRowRestart => pick(lang, "Restart to update", "重启以更新"),
-            Self::UpdateRowCopy => pick(lang, "Copy", "复制"),
-            Self::UpdateRowReady => pick(
-                lang,
-                "{version} is ready. Restart to update closes running programs.",
-                "{version} 已就绪。重启以更新会关闭正在运行的程序。",
-            ),
-            Self::UpdateRowManaged => pick(
-                lang,
-                "{version} is available: {command}",
-                "有新版本 {version}：{command}",
-            ),
-            Self::AboutVersionOffer => {
-                pick(lang, "{version} is available.", "{version} 可供更新。")
-            }
         }
     }
 
@@ -6140,60 +6146,96 @@ pub fn psreadline_row_update_in(lang: Lang, installed: &str, available: &str) ->
     }
 }
 
-/// **The update row's sentence when the releases page has named a newer build**
-/// (§7.51).
-///
-/// Composed rather than picked, because the one fact worth having on this row is
-/// the number — a sentence that said "a newer version is out" would send the
-/// reader to the page to find out which. The second half names this row's own
-/// printed verb, which is what the copy guide's §3b permits a sentence to point
-/// at.
 #[must_use]
-pub fn update_row_available_in(lang: Lang, version: &str) -> String {
-    match lang {
-        Lang::English => {
-            format!(
-                "{version} is available. Open releases page shows the new version in your browser."
-            )
-        }
-        Lang::Chinese => format!("{version} 已发布。点击「打开发布页」可在浏览器中查看。"),
-    }
-}
-
-/// **The update row's sentence while a job waits at `Verified`** (0.4.6 U-19),
-/// filled from [`Text::UpdateRowReady`] so the missing Chinese stays on the
-/// pending list.
-#[must_use]
-pub fn update_row_ready_in(lang: Lang, version: &str) -> String {
-    Text::UpdateRowReady
+pub fn version_available_in(lang: Lang, version: &str) -> String {
+    Text::VersionAvailable
         .in_lang(lang)
         .replace("{version}", version)
 }
 
-/// **The About page's `Version` sentence while an update is offered** (0.4.6
-/// T-GEAR-MARK-LANDS), filled from [`Text::AboutVersionOffer`] so the missing
-/// Chinese stays on the pending list.
-///
-/// It stands **in place of** the row's own sentence rather than after it: the
-/// two together take three lines of the About page's column in English, over
-/// the dialog's two-line budget (`settings::tests::no_settings_sentence_needs_a_third_line`),
-/// and while an update is offered the offer is the thing the row has to say.
 #[must_use]
-pub fn about_version_offer_in(lang: Lang, version: &str) -> String {
-    Text::AboutVersionOffer
+pub fn version_downloading_in(lang: Lang, version: &str) -> String {
+    Text::VersionDownloading
         .in_lang(lang)
         .replace("{version}", version)
 }
 
-/// **The update row's sentence on a copy a package manager updates** (0.4.6
-/// U-19, C2): the version and the manager's own command, which the row's
-/// `Copy` puts on the clipboard.
 #[must_use]
-pub fn update_row_managed_in(lang: Lang, version: &str, command: &str) -> String {
-    Text::UpdateRowManaged
+pub fn version_managed_in(lang: Lang, version: &str, command: &str) -> String {
+    Text::VersionManaged
         .in_lang(lang)
         .replace("{version}", version)
         .replace("{command}", command)
+}
+
+#[must_use]
+pub fn version_failed_in(lang: Lang, version: &str) -> String {
+    Text::VersionFailed
+        .in_lang(lang)
+        .replace("{version}", version)
+}
+
+/// **The elapsed-time form About → Version's "Last checked" line names** —
+/// the displayed bucket, language-free, so the window loop can compare it
+/// (a clock tick inside one bucket draws the same words and repaints nothing).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LastChecked {
+    Never,
+    JustNow,
+    MinutesAgo(u64),
+    HoursAgo(u64),
+    DaysAgo(u64),
+}
+
+impl LastChecked {
+    /// The form for a check stamped `checked_at_ms` (0: never), read at `now_ms`.
+    #[must_use]
+    pub const fn at(checked_at_ms: u64, now_ms: u64) -> Self {
+        let elapsed = now_ms.saturating_sub(checked_at_ms);
+        if checked_at_ms == 0 {
+            Self::Never
+        } else if elapsed < 60_000 {
+            Self::JustNow
+        } else if elapsed < 3_600_000 {
+            Self::MinutesAgo(elapsed / 60_000)
+        } else if elapsed < 86_400_000 {
+            Self::HoursAgo(elapsed / 3_600_000)
+        } else {
+            Self::DaysAgo(elapsed / 86_400_000)
+        }
+    }
+}
+
+#[must_use]
+pub fn version_last_checked_in(lang: Lang, checked_at_ms: u64, now_ms: u64) -> String {
+    let (template, count) = match LastChecked::at(checked_at_ms, now_ms) {
+        LastChecked::Never => (Text::VersionNeverChecked, None),
+        LastChecked::JustNow => (Text::VersionJustNow, None),
+        LastChecked::MinutesAgo(count) => (Text::VersionMinutesAgo, Some(count)),
+        LastChecked::HoursAgo(count) => (Text::VersionHoursAgo, Some(count)),
+        LastChecked::DaysAgo(count) => (Text::VersionDaysAgo, Some(count)),
+    };
+    let when = match count {
+        Some(count) => template
+            .in_lang(lang)
+            .replace("{count}", &count.to_string()),
+        None => template.in_lang(lang).to_owned(),
+    };
+    Text::VersionLastChecked
+        .in_lang(lang)
+        .replace("{when}", &when)
+}
+
+#[must_use]
+pub fn version_settings_tip_in(lang: Lang, version: Option<&str>) -> String {
+    version.map_or_else(
+        || Text::Settings.in_lang(lang).to_owned(),
+        |version| {
+            Text::VersionSettingsAvailable
+                .in_lang(lang)
+                .replace("{version}", version)
+        },
+    )
 }
 
 /// **The Settings row's sentence for a copy a package manager installed** —
@@ -8381,6 +8423,32 @@ fn move_refusal_notice_in(lang: Lang, said: &str, pane_is_now_a_tab: bool) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (T-UPDATE-ON-ABOUT) — the gear explains its dot in both language
+    /// columns, and the unlit gear keeps the established one-word tip.
+    ///
+    /// MUTATION: ignore `version` in `version_settings_tip_in`; both lit cases
+    /// lose the offered tag and go red.
+    #[test]
+    fn the_settings_tip_names_the_lit_version_in_both_languages() {
+        for lang in Lang::ALL {
+            assert_eq!(
+                version_settings_tip_in(lang, None),
+                Text::Settings.in_lang(lang)
+            );
+            let lit = version_settings_tip_in(lang, Some("v10.10.10-preview"));
+            assert_eq!(
+                lit,
+                match lang {
+                    Lang::English => "Settings · v10.10.10-preview available",
+                    Lang::Chinese => "设置 · 有新版 v10.10.10-preview",
+                }
+            );
+            assert!(lit.contains("v10.10.10-preview"), "{lang:?}: {lit}");
+            let lines = crate::tooltip::wrap(&lit, 39.0, |run| run.chars().count() as f32);
+            assert!(lines.len() <= 2, "{lang:?}: {lines:?}");
+        }
+    }
 
     /// PIN — **an agent installer's refusal carries the installer's own reason,
     /// after a colon.**

@@ -504,13 +504,10 @@ fn press(driver: &MacPrepare, transport: SharedTransport, txn: u8) -> Job<u32> {
     let mut job = Job::with_offers(true);
     job.consider(
         Gathered {
-            check: Some((
-                UpdateCheckV1 {
-                    latest_tag: Some("v0.4.7".to_owned()),
-                    ..UpdateCheckV1::default()
-                },
-                true,
-            )),
+            check: Some(UpdateCheckV1 {
+                latest_tag: Some("v0.4.7".to_owned()),
+                ..UpdateCheckV1::default()
+            }),
             channel: Some(Channel::Ours),
             running: "0.4.6",
             capable: true,

@@ -623,7 +623,7 @@ pub fn settings_target(application: Application) -> Option<SettingsTarget> {
     // `FORMULA_OPTIONS` is `[true, false]`, so an answer is the index of itself.
     let choice = |row, on: bool| Some(SettingsTarget::Choice(row, usize::from(!on)));
     match application {
-        Application::UpdateCheck(on) => choice(SettingsRow::UpdateCheck, on),
+        Application::UpdateCheck(on) => choice(SettingsRow::AutoCheck, on),
         // **`choice` again since the switch** (user ruling 2026-09-07): the row
         // is `[true, false]` like every other switch in the dialog, and what a
         // press of `On` reaches is the machine's business rather than the
