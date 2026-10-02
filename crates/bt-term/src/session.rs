@@ -4947,7 +4947,12 @@ impl DualPlaneSession {
             .map(|pane| {
                 (
                     pane,
-                    live_detection_context_signature(&capture, pane, self.inline_math_bands),
+                    live_detection_context_signature(
+                        &capture,
+                        pane,
+                        self.inline_math_bands,
+                        &self.pane_math_rows,
+                    ),
                 )
             })
             .collect::<BTreeMap<_, _>>();
@@ -7661,8 +7666,12 @@ impl DualPlaneSession {
                     state.content_fingerprint = self.terminal.visible_row_fingerprint(row);
                 }
             }
-            let context_signature =
-                live_detection_context_signature(&current_capture, pane, self.inline_math_bands);
+            let context_signature = live_detection_context_signature(
+                &current_capture,
+                pane,
+                self.inline_math_bands,
+                &self.pane_math_rows,
+            );
             for (candidate_row, _) in
                 candidate_rows
                     .iter()
@@ -8028,8 +8037,12 @@ impl DualPlaneSession {
                     state.content_fingerprint = self.terminal.visible_row_fingerprint(row);
                 }
             }
-            let context_signature =
-                live_detection_context_signature(&current_capture, pane, self.inline_math_bands);
+            let context_signature = live_detection_context_signature(
+                &current_capture,
+                pane,
+                self.inline_math_bands,
+                &self.pane_math_rows,
+            );
             for (candidate_row, _) in
                 candidate_rows
                     .iter()
@@ -12559,8 +12572,12 @@ impl DualPlaneSession {
             .live_decorations
             .values()
             .map(|record| {
-                let context_signature =
-                    live_detection_context_signature(&current, record.pane, self.inline_math_bands);
+                let context_signature = live_detection_context_signature(
+                    &current,
+                    record.pane,
+                    self.inline_math_bands,
+                    &self.pane_math_rows,
+                );
                 (
                     record.end.row,
                     record.pane,
@@ -14605,9 +14622,10 @@ impl LiveDecorationRecord {
     }
 }
 
-/// **Whether two frames are the same frame** (note §8.2): compared by value — the rectangles, the
-/// status row, screen-owned fence state, and foreground identity. Two unframed screens with the
-/// same foreground identity agree whatever their size.
+/// **Whether two frames have the same topology** (note §8.2): compared by value — the rectangles,
+/// status row and foreground identity. The screen-owned fence is a separate session tier compared
+/// explicitly by `observe_frame` and completion. Two unframed screens with the same foreground
+/// identity agree whatever their size.
 fn frames_agree(left: &ScreenFrame, right: &ScreenFrame) -> bool {
     left.foreground_program() == right.foreground_program()
         && ((!left.is_framed() && !right.is_framed()) || left.same_layout(right))
@@ -14967,7 +14985,9 @@ fn live_detection_context_signature(
     capture: &LiveCapture,
     pane: PaneRect,
     inline_formulas: bool,
+    pane_math_rows: &BTreeMap<(u32, PaneRect), PaneMathStability>,
 ) -> u64 {
+    let framed = capture.frame().panes().len() > 1;
     let mut hasher = DefaultHasher::new();
     for input in capture
         .pane_scans()
@@ -14980,7 +15000,24 @@ fn live_detection_context_signature(
             || trimmed.starts_with("```")
             || trimmed.starts_with("~~~");
         if structural {
-            input.hash(&mut hasher);
+            if !framed {
+                // The unframed signature is the historical `LiveDetectionInput` hash byte for
+                // byte, including its whole-row revision.
+                input.hash(&mut hasher);
+                continue;
+            }
+            match input.source {
+                LiveDetectionSource::Grid { row, .. } => {
+                    input.hash_with_source(
+                        LiveDetectionSource::Grid {
+                            row,
+                            revision: pane_math_rows[&(row, pane)].math_revision,
+                        },
+                        &mut hasher,
+                    );
+                }
+                LiveDetectionSource::History { .. } => input.hash(&mut hasher),
+            }
         }
     }
     hasher.finish()
@@ -16282,6 +16319,9 @@ fn captured_row_text_and_boundaries(row: &CapturedRow) -> (String, Vec<(u32, u32
 fn pane_slice_fingerprint(row: &CapturedRow, pane: PaneRect) -> PaneSliceFingerprint {
     let mut hasher = DefaultHasher::new();
     0x4254_5041_4e45_3031_u64.hash(&mut hasher);
+    if pane.consumes_continuation(row.captured_columns) {
+        row.continues.hash(&mut hasher);
+    }
     for cell in row
         .cells
         .iter()

@@ -750,6 +750,27 @@ fn spinner_screen(spinner: char) -> Vec<String> {
         .collect()
 }
 
+/// The blocker-1 screen: the left pane's structural row is the same physical row as the right
+/// pane's spinner. Unlike [`spinner_screen`], no quiet body row can hide a whole-row revision leak
+/// from the framed context signature.
+fn one_line_formula_spinner_screen(spinner: char) -> Vec<String> {
+    (0..40)
+        .map(|row| {
+            let left = if row == 11 {
+                "$$x^2$$".to_owned()
+            } else {
+                prose(row)
+            };
+            let right = if row == 11 {
+                format!("{:<29}{spinner}", "working")
+            } else {
+                prose(row)
+            };
+            format!("{left:<50}\u{2502}{right}")
+        })
+        .collect()
+}
+
 const SPINNER: [char; 4] = ['|', '/', '-', '\\'];
 
 /// RED (69b) — **a formula in one pane settles while the other pane writes** (Codex finding 6). A
@@ -835,6 +856,158 @@ fn a_spinner_in_one_pane_advances_the_row_but_not_the_other_panes_math() {
     );
 }
 
+/// RED (69b round 2, blocker 1) — **a framed context signature uses the pane's sliced source
+/// identity.** A complete left formula and the right spinner share structural row 11. The spinner
+/// advances the whole-row revision, but does not queue another left scan or replace its occurrence.
+///
+/// MUTATION: hash the global `LiveDetectionSource::Grid::revision` in the framed signature.
+#[test]
+fn a_spinner_sharing_a_structural_row_does_not_rearm_the_other_pane() {
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz(100), nz(40));
+    session
+        .feed_at(&repaint(&one_line_formula_spinner_screen('|')), start)
+        .unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    assert_eq!(
+        complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+        1
+    );
+    let left = rect(0, 40, 0, 50);
+    let occurrence = session.live_decorations[&(11, left)].identity.occurrence_id;
+    let detections = session.live_detection_count;
+
+    for tick in 1..=10u32 {
+        let at = start + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(50) * tick;
+        let spinner = SPINNER[tick as usize % SPINNER.len()];
+        session
+            .feed_at(
+                &rewrite_row(11, &one_line_formula_spinner_screen(spinner)[11]),
+                at,
+            )
+            .unwrap();
+        session.advance_live_stability(at);
+        assert!(
+            session.live_tasks.is_empty(),
+            "the right spinner queued a left scan at tick {tick}"
+        );
+        assert_eq!(
+            session.live_decorations[&(11, left)].identity.occurrence_id,
+            occurrence,
+            "the settled left occurrence changed at tick {tick}"
+        );
+    }
+    assert_eq!(session.live_detection_count, detections);
+}
+
+/// A 40×101 non-aligned frame: two top panes, a full-width bottom pane, and one display block in
+/// that bottom pane. Row 22 fills the grid and ends in `+`; whether it soft-wraps into row 23
+/// therefore changes the detector's logical source without changing any captured cell on row 22.
+fn full_width_bottom_pane_screen() -> Vec<String> {
+    (0..40)
+        .map(|row| match row {
+            0..19 => {
+                let left = format!("left {row}");
+                format!("{left:<50}\u{2502}right {row}")
+            }
+            19 => format!("{}\u{2534}{}", "\u{2500}".repeat(50), "\u{2500}".repeat(50)),
+            21 | 24 => "$$".to_owned(),
+            22 => format!("x^2{}+", " ".repeat(97)),
+            23 => "y^2".to_owned(),
+            _ => format!("full width row {row}"),
+        })
+        .collect()
+}
+
+/// Make row 22 wrap into row 23, then repaint row 23 byte-identically. The only final captured-row
+/// fact that differs from [`repaint`] is row 22's WRAPLINE/`continues` bit.
+fn wrap_bottom_formula_body(rows: &[String]) -> Vec<u8> {
+    let mut bytes = format!("\x1b[23;1H{}", rows[22]).into_bytes();
+    bytes.extend_from_slice(rows[23].as_bytes());
+    bytes.extend_from_slice(format!("\x1b[24;1H{}\x1b[K", rows[23]).as_bytes());
+    bytes.extend_from_slice(b"\x1b[1;1H");
+    bytes
+}
+
+/// RED (69b round 2, blocker 2) — **a full-width pane consumes the row's soft-wrap bit as part of
+/// its slice identity.** Changing only that bit advances the bottom pane's clock, retires the old
+/// occurrence and lands the block again from the joined logical-line shape. Neither top pane moves.
+///
+/// MUTATION: omit `continues` from `pane_slice_fingerprint`.
+#[test]
+fn a_full_width_pane_counts_soft_wrap_as_its_slice_identity() {
+    let rows = full_width_bottom_pane_screen();
+    let start = Instant::now();
+    let mut session = DualPlaneSession::new(nz(101), nz(40));
+    session.feed_at(&repaint(&rows), start).unwrap();
+    session.advance_live_stability(start + LIVE_MATH_STABLE_INTERVAL);
+    assert_eq!(
+        complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+        1
+    );
+
+    let top_left = rect(0, 19, 0, 50);
+    let top_right = rect(0, 19, 51, 101);
+    let bottom = rect(20, 40, 0, 101);
+    let top_before = session
+        .pane_math_rows
+        .iter()
+        .filter(|((_, pane), _)| *pane == top_left || *pane == top_right)
+        .map(|(key, state)| (*key, state.math_revision))
+        .collect::<BTreeMap<_, _>>();
+    let bottom_revision = session.pane_math_rows[&(22, bottom)].math_revision;
+    let occurrence = session.live_decorations[&(21, bottom)]
+        .identity
+        .occurrence_id;
+    let capture = session.live_capture();
+    assert!(
+        !live_grid_input(capture.pane_inputs(bottom).unwrap(), 22)
+            .unwrap()
+            .continues
+    );
+
+    let changed = start + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(10);
+    session
+        .feed_at(&wrap_bottom_formula_body(&rows), changed)
+        .unwrap();
+    let capture = session.live_capture();
+    assert!(
+        live_grid_input(capture.pane_inputs(bottom).unwrap(), 22)
+            .unwrap()
+            .continues
+    );
+    assert!(
+        session.pane_math_rows[&(22, bottom)].math_revision > bottom_revision,
+        "the pane clock advances when its logical-line shape changes"
+    );
+    assert_eq!(
+        session
+            .pane_math_rows
+            .iter()
+            .filter(|((_, pane), _)| *pane == top_left || *pane == top_right)
+            .map(|(key, state)| (*key, state.math_revision))
+            .collect::<BTreeMap<_, _>>(),
+        top_before,
+        "the top panes are untouched"
+    );
+    assert!(
+        session
+            .live_decorations
+            .values()
+            .all(|record| record.identity.occurrence_id != occurrence),
+        "the old logical-line occurrence retires"
+    );
+    session.advance_live_stability(changed + LIVE_MATH_STABLE_INTERVAL);
+    assert_eq!(
+        complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
+        1,
+        "the block lands again from the joined logical line"
+    );
+    let record = &session.live_decorations[&(21, bottom)];
+    assert_ne!(record.identity.occurrence_id, occurrence);
+    assert!(record.span.original_source.contains("+y^2"));
+}
+
 /// A 40×100 split at column 50 with a display block in each pane; `horizontal` adds a
 /// junction-anchored horizontal split at row 20 inside the right pane only.
 fn two_pane_screen(horizontal: bool) -> Vec<String> {
@@ -864,13 +1037,17 @@ fn two_pane_screen(horizontal: bool) -> Vec<String> {
 /// RED (69b) — **a frame change invalidates every pane-keyed state** (Codex's
 /// check of (b), blocker 2; coordinator's ruling 2026-09-29). Capture A is a split at column 50;
 /// capture B adds a junction-anchored horizontal split at row 20 inside the right pane only. On B
-/// every record is dropped — the left pane's too, although its rectangle did not move — and both
-/// panes' formulas re-arm and land again, under new occurrences.
+/// right-pane churn first makes the left pane's clock differ from the global row clock. Before B,
+/// one A-frame task remains queued, another is resolved with the worker, the right record is
+/// off-band, and an open repaint snapshot holds both it and the resident left record. On B every
+/// old fact is dropped — the left pane's too, although its rectangle did not move — the worker
+/// result is refused, and both formulas re-arm and land again under new occurrences.
 ///
 /// 69a builds the frame identity and wires this invalidation (`observe_frame`), so the test runs
 /// here; 69b adds the pane math tier it also clears.
 ///
-/// MUTATION: compare frames by the left pane's rectangle only, or skip `invalidate_every_pane`.
+/// MUTATIONS: retain the unchanged left pane's clock; keep `live_tasks`; accept the worker's old
+/// frame; or retain the repaint snapshot's copies.
 #[test]
 fn a_frame_change_invalidates_every_pane_keyed_state() {
     let start = Instant::now();
@@ -889,20 +1066,127 @@ fn a_frame_change_invalidates_every_pane_keyed_state() {
         .map(|record| (record.pane, record.identity.occurrence_id))
         .collect::<Vec<_>>();
     let left = rect(0, 40, 0, 50);
+    let right = rect(0, 40, 51, 100);
     assert!(before.iter().any(|(pane, _)| *pane == left));
 
-    let changed = start + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(10);
+    // Churn only the right half of a left-formula body row. The global row clock moves and the
+    // left pane's clock does not, giving the frame-change rebuild an observable old value it must
+    // replace rather than retain.
+    let churned = start + LIVE_MATH_STABLE_INTERVAL + Duration::from_millis(10);
+    session
+        .feed_at(
+            &rewrite_row(6, &format!("{:<50}\u{2502}right churn", "y^2")),
+            churned,
+        )
+        .unwrap();
+    let left_math_before = session.pane_math_rows[&(6, left)].math_revision;
+    assert!(session.live_rows[6].revision > left_math_before);
+
+    // Rewrite the right formula's body outside a repaint hold. Alternate-screen preservation moves
+    // its old record off-band, where the changed source keeps it from re-anchoring.
+    let right_changed = churned + Duration::from_millis(10);
+    session
+        .feed_at(
+            &rewrite_row(26, &format!("{:<50}\u{2502}z^2", prose(26))),
+            right_changed,
+        )
+        .unwrap();
+    assert_eq!(session.live_decorations.len(), 1);
+    assert_eq!(session.offscreen_decorations.len(), 1);
+
+    // The changed right formula queues one fresh A-frame task. Clearing the already-answered left
+    // signature makes the same scheduling door queue a second; hand the first proven task to the
+    // worker and leave the other in the session queue.
+    let ready = right_changed + LIVE_MATH_STABLE_INTERVAL;
+    session.advance_live_stability(ready);
+    session.clear_all_math_candidate_signatures();
+    session.schedule_live_artifacts(&vec![true; session.live_rows.len()]);
+    let in_flight = take_a_proven_task(&mut session);
+    assert_eq!(in_flight.capture.frame().panes(), &[left, right]);
+    assert_eq!(session.live_tasks.len(), 1, "one A-frame task is queued");
+
+    // Teach the cursor toggle its closing half, then open a real repaint transaction. Its snapshot
+    // holds the resident left record and the dormant right record while capture B arrives.
+    session
+        .feed_at(b"\x1b[?25l\x1b[?25h", ready + Duration::from_millis(1))
+        .unwrap();
+    session
+        .feed_at(b"\x1b[?25l", ready + Duration::from_millis(2))
+        .unwrap();
+    let snapshot = session
+        .alternate_repaint_snapshot
+        .as_ref()
+        .expect("the open repaint snapshot");
+    let left_occurrence = before
+        .iter()
+        .find_map(|(pane, id)| (*pane == left).then_some(*id))
+        .unwrap();
+    assert!(
+        snapshot
+            .decorations
+            .iter()
+            .any(|record| record.identity.occurrence_id == left_occurrence)
+    );
+    assert!(!snapshot.dormant_decorations.is_empty());
+
+    let changed = ready + Duration::from_millis(3);
     session
         .feed_at(&rewrite_row(20, &two_pane_screen(true)[20]), changed)
         .unwrap();
-    session.advance_live_stability(changed + LIVE_MATH_STABLE_INTERVAL);
-    // Every record of the old frame is gone, the unchanged left pane's included.
-    assert!(
-        session.live_decorations.values().all(|record| before
-            .iter()
-            .all(|(_, id)| *id != record.identity.occurrence_id)),
-        "a record minted against the old frame survived"
+    let capture_b = session.live_capture();
+    assert_ne!(capture_b.frame().panes(), in_flight.capture.frame().panes());
+    session.observe_frame(capture_b.frame());
+
+    // Every category was populated above and is now empty or rebuilt from B. In particular, the
+    // unchanged left rectangle receives the global clock's current value rather than retaining its
+    // older A-frame math clock.
+    assert_eq!(
+        session.pane_math_rows[&(6, left)].math_revision,
+        session.live_rows[6].revision
     );
+    assert!(session.pane_math_rows[&(6, left)].math_revision > left_math_before);
+    assert!(
+        session
+            .pane_math_rows
+            .keys()
+            .all(|(_, pane)| *pane != right),
+        "the old right-pane map entries are gone"
+    );
+    assert!(
+        session
+            .pane_math_rows
+            .values()
+            .all(|state| state.candidate_signature.is_none()),
+        "old candidate signatures are gone"
+    );
+    assert!(
+        session.live_tasks.is_empty(),
+        "the queued A-frame task is gone"
+    );
+    assert!(
+        session.live_decorations.is_empty(),
+        "resident records are gone"
+    );
+    assert!(
+        session.offscreen_decorations.is_empty(),
+        "off-band records are gone"
+    );
+    let snapshot = session
+        .alternate_repaint_snapshot
+        .as_ref()
+        .expect("the repaint window itself remains open");
+    assert!(snapshot.decorations.is_empty());
+    assert!(snapshot.dormant_decorations.is_empty());
+    assert!(
+        !session.complete_live_worker_result(in_flight, Ok(synthetic_raster(40, 40))),
+        "the worker's A-frame task is refused"
+    );
+
+    // Close the repaint transaction and let B's fresh pane clocks settle.
+    session
+        .feed_at(b"\x1b[?25h", changed + Duration::from_millis(1))
+        .unwrap();
+    session.advance_live_stability(changed + LIVE_MATH_STABLE_INTERVAL);
     assert_eq!(
         complete_detected_live_tasks(&mut session, synthetic_raster(40, 40)),
         2,
@@ -911,10 +1195,15 @@ fn a_frame_change_invalidates_every_pane_keyed_state() {
     let after = session
         .live_decorations
         .values()
-        .map(|record| record.pane)
+        .map(|record| (record.pane, record.identity.occurrence_id))
         .collect::<Vec<_>>();
-    assert!(after.contains(&left));
-    assert!(after.contains(&rect(21, 40, 51, 100)));
+    assert!(after.iter().any(|(pane, _)| *pane == left));
+    assert!(after.iter().any(|(pane, _)| *pane == rect(21, 40, 51, 100)));
+    assert!(
+        after
+            .iter()
+            .all(|(_, id)| before.iter().all(|(_, old)| old != id))
+    );
 }
 
 /// RED (69b) — **a fence opened on the status row suppresses every pane, and its
@@ -924,7 +1213,7 @@ fn a_frame_change_invalidates_every_pane_keyed_state() {
 /// record retires and no pane re-arms. Repainting it back re-arms both, and their formulas land
 /// again. A task resolved before the opening is refused at completion.
 ///
-/// MUTATION: leave the screen fence state out of `frames_agree`.
+/// MUTATION: skip the screen-tier state comparison in `observe_frame`.
 #[test]
 fn a_fence_opened_on_the_status_row_suppresses_every_pane_and_its_closing_releases_them() {
     let screen = |status: &str| {

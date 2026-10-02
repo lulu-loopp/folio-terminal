@@ -17,6 +17,7 @@ use ledger::{OwnershipRecorder, source_line_of, structural_kind};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    hash::{Hash, Hasher},
     sync::Arc,
     time::Duration,
 };
@@ -295,7 +296,7 @@ pub enum LiveDetectionSource {
     Grid { row: u32, revision: u64 },
 }
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LiveDetectionInput {
     pub source: LiveDetectionSource,
     pub text: String,
@@ -312,6 +313,26 @@ pub struct LiveDetectionInput {
     /// whose inline verdict may change, so a cached snapshot comparing equal must mean equal here
     /// too.
     pub site: InlineMathSite,
+}
+
+impl LiveDetectionInput {
+    /// Hash every captured detection fact while naming the source identity the caller owns. Pane
+    /// slicing uses this to substitute a pane-local revision without cloning the captured strings;
+    /// the ordinary [`Hash`] implementation supplies `self.source` and is therefore unchanged.
+    pub fn hash_with_source<H: Hasher>(&self, source: LiveDetectionSource, state: &mut H) {
+        source.hash(state);
+        self.text.hash(state);
+        self.continues.hash(state);
+        self.captured_columns.hash(state);
+        self.cell_boundaries.hash(state);
+        self.site.hash(state);
+    }
+}
+
+impl Hash for LiveDetectionInput {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.hash_with_source(self.source, state);
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

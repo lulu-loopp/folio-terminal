@@ -87,6 +87,13 @@ impl PaneRect {
     pub fn contains_column(self, column: u32) -> bool {
         self.columns().contains(&column)
     }
+
+    /// Whether this pane consumes a captured row's soft-wrap continuation. A continuation lands
+    /// in column zero of the following row, so only a leaf spanning the complete screen owns it.
+    #[must_use]
+    pub fn consumes_continuation(self, screen_width: u32) -> bool {
+        self.left == 0 && self.right >= screen_width
+    }
 }
 
 /// The foreground program captured for one frame measurement (revision (e), E8).
@@ -1319,7 +1326,7 @@ fn screen_fence_pass(
 /// pane that spans the full width can continue, since a soft wrap lands in column zero of the next
 /// row.
 fn pane_input(input: &LiveDetectionInput, rect: PaneRect, screen_width: u32) -> LiveDetectionInput {
-    let continues = input.continues && rect.left == 0 && rect.right >= screen_width;
+    let continues = input.continues && rect.consumes_continuation(screen_width);
     let mut text = String::new();
     let mut boundaries = Vec::new();
     for (start_byte, end_byte, start_cell, end_cell) in clusters(input) {
