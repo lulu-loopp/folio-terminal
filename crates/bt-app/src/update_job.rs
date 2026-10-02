@@ -1326,7 +1326,7 @@ pub(crate) struct Job<W> {
     /// **The reader put the card away and the job went on** — Later (Escape,
     /// the close box) on the download's card or on a verified one. The card
     /// is not drawn until the download ends (`Verified` or `Failed`, once) or
-    /// the General row's foot asks for it again ([`Self::reopen`]).
+    /// About → Version's control asks for it again ([`Self::reopen`]).
     put_away: bool,
     /// The last decision, for U-19's row.
     answer: Option<Result<Eligible, NotEligible>>,
@@ -1697,11 +1697,23 @@ impl<W: Copy + Eq> Job<W> {
         self.presenter.filter(|_| drawn && !self.put_away)
     }
 
-    /// **The General row's foot asks for the card again** (U-19: `Restart to
-    /// update` while a job waits at `Verified`), in `window` — the window the
-    /// row was pressed in. Answers whether a card is now up there.
+    /// **About → Version asks for the card again** (`Update and restart` while
+    /// a job waits at `Verified`), in `window` — the window the row was pressed
+    /// in. Answers whether a card is now up there.
     pub(crate) fn reopen(&mut self, window: W) -> bool {
         if !matches!(self.state, State::Verified(_)) {
+            return false;
+        }
+        self.presenter = Some(window);
+        self.put_away = false;
+        true
+    }
+
+    /// Raise the unchanged failed card as the Version row's `Details`. This
+    /// only chooses its presenting window; it does not move the job or add a
+    /// card state.
+    pub(crate) fn show_failure(&mut self, window: W) -> bool {
+        if !matches!(self.state, State::Failed(..)) {
             return false;
         }
         self.presenter = Some(window);
@@ -1801,21 +1813,6 @@ impl<W: Copy + Eq> Job<W> {
         }
         self.answer = Some(answer);
         line
-    }
-
-    /// **The reader turned the check off** (§B): an offer on the card is put
-    /// away and a download is cancelled. A staged, verified or quitting job is
-    /// not the switch's to undo.
-    pub(crate) fn switch_off(&mut self) {
-        if matches!(
-            self.state,
-            State::Available(_) | State::Downloading(..) | State::Staged(_)
-        ) {
-            self.stop_the_driver();
-            self.state = State::Idle;
-            self.presenter = None;
-            self.put_away = false;
-        }
     }
 
     /// **The reports waiting for the window thread, taken without applying
@@ -2879,7 +2876,7 @@ mod tests {
 
     /// RED (U-32) — **a macOS build offers: a copy that is ours gets the card
     /// for a newer release, said once, and a copy Homebrew owns gets
-    /// `brew upgrade` on the General row and no card.**
+    /// `brew upgrade` on About → Version and no card.**
     ///
     /// U-18 built the job with its gate shut; U-31 opened it for Windows and
     /// U-32 opens it for macOS, once the macOS roads — the Prepare (U-27), the
@@ -2960,7 +2957,7 @@ mod tests {
     }
 
     /// RED (U-31) — **through the Windows gate, a copy that is ours gets the
-    /// card and a copy scoop owns gets scoop's command on the General row.**
+    /// card and a copy scoop owns gets scoop's command on About → Version.**
     ///
     /// Opening the gate must not reach a managed copy: the 2026-09-20 ruling
     /// (managed installs do not self-update) holds after it. Each copy is a

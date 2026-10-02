@@ -183,8 +183,8 @@ mod update_apply_macos;
 mod update_apply_windows;
 // The updater's archive reader (0.4.6 ticket U-14); U-20's Prepare is its caller.
 mod update_archive;
-// The update card and the General row: what the reader sees of the update job
-// (0.4.6 ticket U-19).
+// The update card and About → Version: what the reader sees of the update job
+// (0.4.6 ticket U-19; T-UPDATE-ON-ABOUT).
 mod update_card;
 // The update job, one per process on `App` (0.4.6 ticket U-18).
 mod update_job;
@@ -12871,7 +12871,7 @@ struct App {
     /// the copy, not to a window of it. See [`update_job::Job`].
     update_job: update_job::Job<WindowId>,
     /// **What the update job showed at the end of the last turn** — the card's
-    /// window and paint, and the General row's foot (U-19). Compared once a
+    /// window and paint, and the Version row's control (U-19). Compared once a
     /// turn by `FolioApp::settle_update_card`, which repaints only the windows
     /// whose drawing changed; a copy of nothing the job owns.
     update_shown: update_card::Shown<WindowId>,
@@ -42760,10 +42760,10 @@ impl Runtime<'_> {
         // T-GEAR-MARK-LANDS): the panel is told the gear was lit before the
         // answer puts it out, so the update row wears the dot the gear led the
         // reader to until they leave the page — `seen_tag` stays the one answer.
-        if self.window.settings.category() == settings::SettingsCategory::General {
+        if self.window.settings.category() == settings::SettingsCategory::About {
             self.window
                 .settings
-                .carry_update_mark(update::gear_mark_is_lit());
+                .carry_update_mark(update::gear_mark_is_lit(&self.app.update_job));
             update::answer_mark();
         }
         let inputs = settings::geometry::Inputs::new(
@@ -43053,17 +43053,17 @@ impl Runtime<'_> {
             powershell_install_pending: self.app.settings_store.loaded().powershell_install_pending,
             git_panel: self.app.settings_store.loaded().git_panel,
             update_check: self.app.settings_store.loaded().update_check,
-            // What the row ends with is the update job's to say (0.4.6 U-19).
-            update_row: update_card::row_foot(&self.app.update_job),
-            // The offer the gear and the General row read, for the About page's
-            // `Version` row; and whether the update row wears the gear's mark —
-            // the gear's own answer, or the visit it led to (0.4.6
-            // T-GEAR-MARK-LANDS).
-            update_offer: update::offer(),
+            version_update: update_card::version_row(
+                &self.app.update_job,
+                update::check_view(),
+                update::offer().as_deref(),
+                update::unix_epoch_ms(),
+                i18n::current(),
+            ),
             update_mark: self
                 .window
                 .settings
-                .update_row_marked(update::gear_mark_is_lit()),
+                .update_row_marked(update::gear_mark_is_lit(&self.app.update_job)),
             // The panel's, for this visit (T-UNINSTALL-UX).
             uninstall_remove_data: self.window.settings.uninstall_remove_data(),
             key_hints: self.app.settings_store.loaded().key_hints,
@@ -43693,6 +43693,18 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::update_check_requested(target) {
             self.apply_update_check(enabled);
         }
+        if target == settings::SettingsTarget::MenuAction(settings::SettingsRow::AboutVersion) {
+            match self.settings_values().version_update.link {
+                Some(update_card::VersionLink::WhatsNew { tag }) => {
+                    self.hand_url_to_the_browser(&format!("{}/tag/{tag}", update::RELEASES_PAGE))?;
+                }
+                Some(update_card::VersionLink::Details) => {
+                    let window = self.window.window.id();
+                    self.app.update_job.show_failure(window);
+                }
+                None => {}
+            }
+        }
         // **The one press in this dialog that leaves the window.** It is a foot
         // verb and not a choice, so it is answered here beside the choices for
         // `apply_settings_choice`'s founding reason rather than in a second
@@ -44142,7 +44154,7 @@ impl Runtime<'_> {
             // into a `_` is a row that silently starts resetting the day
             // somebody moves it, and this is the one row in the dialog whose
             // reset would switch a network request back on.
-            | Row::UpdateCheck
+            | Row::AutoCheck
             | Row::PsReadLine
             | Row::Scrollback
             | Row::LineWrapping
@@ -44178,7 +44190,6 @@ impl Runtime<'_> {
             // back. Named rather than swept into a `_`, on this arm's own rule.
             | Row::AboutVersion
             | Row::AboutPlatform
-            | Row::AboutReleaseNotes
             | Row::AboutIssues
             | Row::AboutLicences
             // And the three configuration doors (0.4.4 ticket 05), which hold
@@ -46013,27 +46024,23 @@ impl Runtime<'_> {
     /// **Nothing is started or stopped here**, and that is deliberate rather
     /// than an omission. The check is a one-shot taken at launch: by the time
     /// this row can be pressed the thread has either run or was never started,
-    /// so `On` takes effect at the next launch; `Off` suppresses the cached offer
-    /// at once, and an answer still on the wire is dropped when it lands (U-6).
+    /// so `On` takes effect at the next launch. `Off` changes only that launch
+    /// schedule; cached evidence and a manual answer still on the wire remain
+    /// visible on Version.
     /// A build that started the thread from this press would be a build where
     /// pressing `On` makes a network request the same second — which is the one
     /// thing a reader auditing this row is checking for.
     ///
-    /// The state file is left where it is on `Off`. It holds a stamp and three
-    /// tags, all four of which are only read by a check that is not going to
-    /// happen; deleting it would be this row reaching for a file the row is not
-    /// about, and a reader who wants it gone has `docs/PRIVACY.md`'s one line.
+    /// The state file is left where it is on `Off`. Its cached evidence still
+    /// answers Version and its mark, and a reader who wants it gone has
+    /// `docs/PRIVACY.md`'s one line.
     fn apply_update_check(&mut self, enabled: bool) {
         let mut settings = self.app.settings_store.loaded().clone();
         settings.update_check = enabled;
         self.app.settings_store.store(settings);
-        // The offer's owner is told, so `Off` suppresses a cached offer from the
-        // next frame (U-6) — no thread is started or stopped here.
+        // This is the schedule only. Manual Check, cached offers and a job
+        // already in progress remain owned by their existing roads.
         update::set_enabled(enabled);
-        // And the update job (§B): `Off` puts an offer away and cancels a download.
-        if !enabled {
-            self.app.update_job.switch_off();
-        }
     }
 
     /// Point the `Focus card height` row at `height` logical pixels of card body
@@ -61081,7 +61088,7 @@ impl FolioApp {
     /// shows is compared with what it showed at the end of the last turn: a card
     /// that appeared, moved, changed its words or went is repainted in the
     /// window it left and the window it is in, with that window's hover and
-    /// ring put out when its verbs changed; a change of the General row's foot
+    /// ring put out when its verbs changed; a change of the Version row's control
     /// repaints every window, because any of them may have Settings open. The
     /// job's own events (a report, a verb, a switch) need no repaint of their
     /// own — this is the one.
@@ -64067,7 +64074,7 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }
             // The answer is already in `update::known()`; what is owed is a
             // frame that reads it — the mark on the gear, and the sentence on
-            // the row if a dialog happens to be standing on the General page.
+            // the row if a dialog happens to be standing on the About page.
             // Every window, because a release is a release in all of them.
             AppEvent::UpdateChecked => self.for_each_window(|runtime| {
                 if runtime.refresh_chrome() {
@@ -68434,9 +68441,9 @@ mod floated_page_tests {
     /// The gear wore the update mark, the press opened the dialog at the top of
     /// its first page, and nothing there said what the mark had meant. While
     /// `update::gear_mark_is_lit` answers yes, the press goes through
-    /// `open_settings_on_row` with `UpdateCheck` — the door that turns to the
+    /// `open_settings_on_row` with `AboutVersion` — the door that turns to the
     /// row's page and scrolls it into view (its geometry is pinned by
-    /// `settings::tests::a_lit_gear_lands_on_general_with_the_update_row_in_view`),
+    /// `settings::tests::a_lit_gear_lands_on_about_with_the_version_row_in_view`),
     /// and the layout it asks for is the one that answers the mark. The summoned
     /// terminal's gear keeps its own page, and the question is asked after it.
     ///
@@ -68446,8 +68453,8 @@ mod floated_page_tests {
     /// first page at its top exactly as before
     /// (`an_unlit_gear_opens_the_first_page_as_it_always_has`).
     ///
-    /// MUTATION: delete the `else if update::gear_mark_is_lit()` branch — the
-    /// lit gear toggles the dialog open on the first page's top and this goes red.
+    /// MUTATION: retarget `open_settings_on_row` to a General row — the literal
+    /// About-Version road disappears from the arm and this goes red.
     #[test]
     fn a_lit_gear_opens_settings_on_the_marked_row() {
         let arm = gear_arm();
@@ -68455,10 +68462,10 @@ mod floated_page_tests {
             .find("if self.is_quake_window()")
             .expect("the summoned terminal's gear is asked first");
         let lit = arm
-            .find("} else if update::gear_mark_is_lit() {")
+            .find("} else if update::gear_mark_is_lit(&self.app.update_job) {")
             .expect("a lit gear is asked about before the dialog is toggled");
         let lands = arm
-            .find("self.open_settings_on_row(settings::SettingsRow::UpdateCheck)?")
+            .find("self.open_settings_on_row(settings::SettingsRow::AboutVersion)?")
             .expect("and it opens the dialog on the update row");
         let toggle = arm
             .find("self.toggle_settings_panel()?")
@@ -68468,8 +68475,8 @@ mod floated_page_tests {
             "the lit branch is the second question and the toggle the last:\n{arm}"
         );
         assert_eq!(
-            crate::settings::SettingsRow::UpdateCheck.category(),
-            crate::settings::SettingsCategory::General,
+            crate::settings::SettingsRow::AboutVersion.category(),
+            crate::settings::SettingsCategory::About,
             "the row the lit gear names is on the page the mark is answered on"
         );
     }

@@ -298,7 +298,7 @@ impl Runtime<'_> {
             )
         } else if let Some(layout) = self.update_card_layout() {
             // **The update card** (0.4.6 U-19), under the paste card and over the settings
-            // dialog: the General row's `Restart to update` raises it from that dialog, and it has
+            // dialog: About → Version's `Update and restart` raises it from that dialog, and it has
             // to be seen over it. It draws no scrim (§B: it never dims the window behind it).
             (
                 restore::update_card_build(

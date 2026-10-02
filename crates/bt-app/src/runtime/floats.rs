@@ -968,7 +968,7 @@ impl Runtime<'_> {
                 // memory — a lock and a clone of four small fields, never the
                 // disk; it is on the frame path for the reason `i18n::current()`
                 // is, and like that one it answers the same thing all frame.
-                update_mark: update::gear_mark_is_lit(),
+                update_mark: update::gear_mark_is_lit(&self.app.update_job),
                 // **Which caption run this window wears** (§7.54e ②) — the one
                 // window whose `×` hides rather than closes, and which therefore
                 // has no second button that means the same thing.

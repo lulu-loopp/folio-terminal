@@ -960,20 +960,22 @@ the one header `User-Agent: Folio`, through the platform's own HTTP stack
 (WinHTTP; `NSURLSession`, ephemeral). The newest tag is the greatest by
 precedence, never the first listed. Every failure is silent and counts as that
 day's attempt. The check itself downloads, replaces and restarts nothing: its
-answer is the gear's mark and the General row's sentence. `update-check.json`
+answer is the gear's mark and About → Version's state line. `update-check.json`
 (schema v2: the stamp, `latest_tag`, `seen_tag`, `skipped_tag`) has one owner,
 `update::OfferState`, which holds one lock across every read-modify-write; a
 claim file keeps a second process from asking the same day. The offer decision is
-`update::should_offer`: the switch on, a tag newer than the running build, and
-above `skipped_tag` by precedence (Skip only raises it). The switch off starts
-no thread, writes nothing, and hides a cached offer from the next frame.
+`update::should_offer`: a tag newer than the running build and above
+`skipped_tag` by precedence (Skip only raises it). The **Automatic check** switch
+directly below Version controls only the daily start: Off starts no scheduled
+thread and writes nothing, while Version's **Check** still uses the same worker
+door and cached or in-flight evidence remains visible.
 `--update-feed <file-URL>` makes one start read a local folder in the releases
 list's shape instead of github.com, for the check and the download alike; it is
 never persisted and moves nothing else — not the gate, not the checksum, not the
 signer. **The job.** One `update_job::Job` per process, on `App`, waits typed
 (`Pending`) for both the check to settle and the channel to be read, then
-decides eligibility by a pure function in this order: a trial never offers; the
-switch; a newer, unskipped tag; the channel (`Ours` only — `Managed` is sent to
+decides eligibility by a pure function in this order: a trial never offers; a
+newer, unskipped tag; the channel (`Ours` only — `Managed` is sent to
 its manager's command, `NotOurs` and `Unknown` to the releases page); the
 updater flag; a release file named for this tag here. It says its answer once
 per launch in `diagnostics.log`, with no path and no account. **The gate** is a
@@ -997,9 +999,11 @@ commits it forward says `Updated.` instead, from its watch's `Committed`),
 holds the window's keys until answered
 or put away, and follows its window when that window closes. **Restart asks the
 application's quit** (`App::restart_for_update`: `Job::restart`, then the one
-quit door with `Reason::UpdateRestart`), never the job alone. The General row's
-foot is read off the job: the releases page; **Restart to update** at
-`Verified`; the manager's command with **Copy** on a managed copy. **The road
+quit door with `Reason::UpdateRestart`), never the job alone. About → Version is
+the one update surface: its state line and single control are read from the
+check and job; a release links to that tag's notes, `Verified` offers **Update
+and restart**, and a managed copy names its manager's command with **Copy
+command**. **The road
 on Windows**: the Prepare stages inside the install folder
 (`<install>\.folio-update\`) and holds every signed file to the running build's
 signer; the ordinary quit hands the installation to the applier only on a

@@ -774,6 +774,9 @@ pwsh -File scripts/release/cleanvm/updater/run-row.ps1 `
   关窗再普通启动一次,各收集一次。活行(happy、W14、W14long、W15、E7、rollback、console1/2)
   不断电,在驱动启动后的固定秒数收集,有的再跑第二段按键计划(happy 的两次普通启动、E7 的
   放开后再按「重启」)。
+- **更新入口。** 表中的「更新」和「重启」默认仍指自动弹出的更新卡。若卡片已收起而该行要
+  从 `Verified` 继续,入口是「设置 → 关于 → 版本」的「更新并重启」,不再是「常规」页的一行;
+  自动检查开关就在版本下一行,但这些 W 行不改它。
 - **监视器绝不长时间打开日志。** `journal.json` 上任何一个打开的句柄都会让写入方的
   rename-over 失败(`Access is denied`);第一版监视器每 25 ms 读一次,把应用者弄死在
   Armed → Moving(H-6)。现在只在目录项(时间、大小、创建时间,`FindFirstFile` 不开文件)变了

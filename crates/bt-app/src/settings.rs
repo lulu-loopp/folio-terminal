@@ -3405,8 +3405,8 @@ pub enum SettingsRow {
     /// at all, it is another program's menu. `General` is where the rows about
     /// what this product *is on this machine* already are.
     ContextMenu,
-    /// **Whether this build asks the releases page whether a newer one exists**
-    /// (§7.51) — the General page's last row.
+    /// **Whether this build checks automatically for a newer release** —
+    /// directly under Version on About.
     ///
     /// **The only row in this dialog whose Off stops a network request**, which
     /// is why it is a switch at all: nothing else this product does reaches off
@@ -3414,17 +3414,9 @@ pub enum SettingsRow {
     /// exactly one row to read and exactly one to press. Off, no thread is
     /// started and no file is written — it is not a quieter check.
     ///
-    /// Its picker carries [`Text::OpenReleasesPage`] at its foot, on the footing
-    /// `Add scheme…` and `Install fonts…` are there: a verb that belongs to this
-    /// row and is not one of its two answers. It is offered whether or not there
-    /// is anything new, because "show me the releases" is a sentence that is
-    /// true on any day; what changes with an answer is the row's own
-    /// description, which names the version.
-    ///
-    /// On `General` and last on it. The three rows above say what this product
-    /// does on this machine and `Explorer context menu` says what it does to
-    /// another program's menu; this is the only one that leaves the machine.
-    UpdateCheck,
+    /// Its persisted key remains `update_check`; Off stops only the scheduled
+    /// daily start, while Version's Check stays available.
+    AutoCheck,
     /// **How much of the screen the summoned terminal covers** (§7.54).
     ///
     /// A slider and not a picker, on [`SettingsControl`]'s own division: a combo
@@ -3559,10 +3551,6 @@ pub enum SettingsRow {
     /// never in the log the reporter attaches, because the log was written by
     /// the same build that would have to say it.
     AboutPlatform,
-    /// The releases page — what changed, in this version and in the ones before
-    /// it. The same address the update row's own verb opens, read off the same
-    /// constant so the two doors cannot come apart.
-    AboutReleaseNotes,
     /// Where a defect is filed. It is the row this whole page exists for: the
     /// report that asked for a version asked for it *so that a bug report could
     /// name one*.
@@ -4005,16 +3993,12 @@ impl SettingsRow {
             | Self::OptionSendsAlt
             | Self::SearchEngine
             | Self::LaunchOpens
-            | Self::ContextMenu
-            // And the row that is about what this product does off this machine
-            // rather than on it — see the variant.
-            | Self::UpdateCheck => SettingsCategory::General,
-            // **The page that holds no setting** (T-SETTINGS-ABOUT). Two rows
-            // that state a fact and three that hand an address to the browser —
-            // see [`SettingsCategory::About`].
+            | Self::ContextMenu => SettingsCategory::General,
+            // Version owns the updater, with its automatic-check switch
+            // immediately below it (T-UPDATE-ON-ABOUT).
             Self::AboutVersion
+            | Self::AutoCheck
             | Self::AboutPlatform
-            | Self::AboutReleaseNotes
             | Self::AboutIssues
             | Self::AboutLicences
             // The three configuration doors (0.4.4 ticket 05), under the three
@@ -4147,7 +4131,7 @@ impl SettingsRow {
             Self::KeyHints => Text::RowKeyHints.text(),
             Self::OptionSendsAlt => Text::RowOptionSendsAlt.text(),
             Self::ContextMenu => Text::RowContextMenu.text(),
-            Self::UpdateCheck => Text::RowUpdateCheck.text(),
+            Self::AutoCheck => Text::RowAutoCheck.text(),
             // Mock-up 2360.
             Self::TabLayout => Text::RowTabLayout.text(),
             // Mock-up 4154.
@@ -4194,7 +4178,6 @@ impl SettingsRow {
             Self::QuakeRestore => Text::RowQuakeRestore.text(),
             Self::AboutVersion => Text::RowAboutVersion.text(),
             Self::AboutPlatform => Text::RowAboutPlatform.text(),
-            Self::AboutReleaseNotes => Text::RowAboutReleaseNotes.text(),
             Self::AboutIssues => Text::RowAboutIssues.text(),
             Self::AboutLicences => Text::RowAboutLicences.text(),
             Self::ExportSettings => Text::RowExportSettings.text(),
@@ -4351,16 +4334,7 @@ impl SettingsRow {
             // both places and what the first page registers. The module that
             // owns the world is asked.
             Self::ContextMenu => crate::explorer_menu::row_description(),
-            // **Not a constant**, on the row above's footing: the sentence names
-            // the version the releases page named, and a row that only said "a
-            // newer version is out" would send the reader to the page to find
-            // out which one. See `update_card::row_description_in`, and `i18n::intern`
-            // for where the `&'static str` a `String` becomes is argued for.
-            Self::UpdateCheck => crate::update_card::row_description_in(
-                crate::i18n::current(),
-                &values.update_row,
-                crate::update::offer().as_deref(),
-            ),
+            Self::AutoCheck => Text::DescAutoCheck.text(),
             // Mock-up 2361.
             Self::TabLayout => Text::DescTabLayout.text(),
             // Mock-up 4155. **Not a constant** since 0.4.4 ticket 06: the
@@ -4508,21 +4482,10 @@ impl SettingsRow {
             Self::QuakeCommand => Text::DescQuakeCommand.text(),
             Self::QuakeTopGap => Text::DescQuakeTopGap.text(),
             Self::QuakeRestore => Text::DescQuakeRestore.text(),
-            // **And the offer while an update is offered** (0.4.6
-            // T-GEAR-MARK-LANDS): a reader who comes to the version to see whether
-            // it is the newest is told which one is, on the row they came to. In
-            // place of the row's own sentence, which with it would take a third
-            // line — see `i18n::about_version_offer_in`. Interned for
-            // `update::row_description`'s reason.
-            Self::AboutVersion => match values.update_offer.as_deref() {
-                None => Text::DescAboutVersion.text(),
-                Some(tag) => crate::i18n::intern(crate::i18n::about_version_offer_in(
-                    crate::i18n::current(),
-                    tag,
-                )),
-            },
+            // The Version view model owns the complete value line for every
+            // updater state; intern it for this frame's borrowed row API.
+            Self::AboutVersion => crate::i18n::intern(values.version_update.value.clone()),
             Self::AboutPlatform => Text::DescAboutPlatform.text(),
-            Self::AboutReleaseNotes => Text::DescAboutReleaseNotes.text(),
             Self::AboutIssues => Text::DescAboutIssues.text(),
             Self::AboutLicences => Text::DescAboutLicences.text(),
             Self::ExportSettings => Text::DescExportSettings.text(),
@@ -4605,9 +4568,7 @@ impl SettingsRow {
             // with an address — see [`SettingsControl::Text`] and
             // [`SettingsControl::Link`].
             Self::AboutVersion | Self::AboutPlatform => SettingsControl::Text,
-            Self::AboutReleaseNotes | Self::AboutIssues | Self::AboutLicences => {
-                SettingsControl::Link
-            }
+            Self::AboutIssues | Self::AboutLicences => SettingsControl::Link,
             // A door with a verb on it, drawn the way the three above are: the
             // row names what it does and the verb is the one thing to press.
             Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => {
@@ -4714,7 +4675,7 @@ impl SettingsRow {
             | Self::ContextMenu
             // A reader who wants to know what this product talks to must not
             // have to open a disclosure to find the row that answers it.
-            | Self::UpdateCheck
+            | Self::AutoCheck
             // Neither is advanced, on the shortcut hints' measure: a reader who
             // has just bound a key and watched a terminal come down over their
             // editor is looking for exactly these two, and a row behind a
@@ -4754,7 +4715,6 @@ impl SettingsRow {
             // will not find on the day they need it.
             | Self::AboutVersion
             | Self::AboutPlatform
-            | Self::AboutReleaseNotes
             | Self::AboutIssues
             | Self::AboutLicences
             | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder
@@ -4872,7 +4832,7 @@ impl SettingsRow {
             | Self::ClaudeHooks
             | Self::CodexNotify
             | Self::CopilotHooks
-            | Self::UpdateCheck
+            | Self::AutoCheck
             // A switch since the second ruling of 2026-09-07, so it counts what
             // every other switch here counts. Which place `On` reaches is a fact
             // about the machine and is said in the row's line, not in a third
@@ -4939,7 +4899,6 @@ impl SettingsRow {
             // [`Self::stated_value`] instead.
             | Self::AboutVersion
             | Self::AboutPlatform
-            | Self::AboutReleaseNotes
             | Self::AboutIssues
             | Self::AboutLicences
             | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder
@@ -4975,7 +4934,7 @@ impl SettingsRow {
             | Self::ClaudeHooks
             | Self::CodexNotify
             | Self::CopilotHooks
-            | Self::UpdateCheck
+            | Self::AutoCheck
             | Self::ContextMenu
             | Self::ProfileLogin
             | Self::UninstallData
@@ -5092,7 +5051,6 @@ impl SettingsRow {
             | Self::ProfileEnv
             | Self::AboutVersion
             | Self::AboutPlatform
-            | Self::AboutReleaseNotes
             | Self::AboutIssues
             | Self::AboutLicences
             | Self::ExportSettings
@@ -5121,20 +5079,12 @@ impl SettingsRow {
     /// Two pickers doing the same thing differently would be two idioms; one is
     /// an idiom.
     ///
-    /// **The update row's verb is the update job's** (0.4.6 U-19): which of the
-    /// three it is — the releases page, `Restart to update`, `Copy` — is read
-    /// off `values`, so the picker, its focus walk and its draw ask one place.
     #[must_use]
-    pub fn menu_action(self, values: &SettingsValues) -> Option<&'static str> {
+    pub fn menu_action(self, _values: &SettingsValues) -> Option<&'static str> {
         match self {
             Self::LightScheme | Self::DarkScheme => Some(Text::AddScheme.text()),
             Self::TerminalFont => Some(Text::InstallFonts.text()),
             Self::TerminalCjkFont => Some(Text::InstallFonts.text()),
-            // No ellipsis, unlike the two above: those two open a further asking
-            // and this one hands an address to the browser and is over — which
-            // is also why it wears a different mark, see
-            // [`menu_action_mark`](Self::menu_action_mark).
-            Self::UpdateCheck => Some(values.update_row.text()),
             _ => None,
         }
     }
@@ -5147,20 +5097,9 @@ impl SettingsRow {
     /// of them has a default that is right for almost every row: a foot verb
     /// added tomorrow is far more likely to add a thing than to leave.
     ///
-    /// The update row's two other feet wear **no mark**: `Restart to update`
-    /// raises a card in this window and `Copy` fills the clipboard — neither
-    /// adds a thing nor leaves the window (0.4.6 U-19).
     #[must_use]
-    pub fn menu_action_mark(self, values: &SettingsValues) -> &'static str {
-        match self {
-            // The one verb in this dialog that hands an address to the browser.
-            Self::UpdateCheck => match values.update_row {
-                crate::update_card::RowFoot::ReleasesPage => MENU_ACTION_MARK_AWAY,
-                crate::update_card::RowFoot::Restart { .. }
-                | crate::update_card::RowFoot::Copy { .. } => "",
-            },
-            _ => MENU_ACTION_MARK,
-        }
+    pub fn menu_action_mark(self, _values: &SettingsValues) -> &'static str {
+        MENU_ACTION_MARK
     }
 
     /// **Which canvas a scheme row is about** — `Some(true)` for the Light row,
@@ -5446,7 +5385,7 @@ impl SettingsRow {
             Self::UninstallData => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.uninstall_remove_data),
-            Self::UpdateCheck => FORMULA_OPTIONS
+            Self::AutoCheck => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.update_check),
             Self::KeyHints => FORMULA_OPTIONS
@@ -5614,7 +5553,6 @@ impl SettingsRow {
             | Self::ProfileEnv
             | Self::AboutVersion
             | Self::AboutPlatform
-            | Self::AboutReleaseNotes
             | Self::AboutIssues
             | Self::AboutLicences
             | Self::ExportSettings
@@ -5637,11 +5575,8 @@ impl SettingsRow {
     #[must_use]
     pub fn stated_value(self) -> Option<&'static str> {
         match self {
-            Self::AboutVersion => Some(about_version_line()),
             Self::AboutPlatform => Some(about_platform_line()),
-            Self::AboutReleaseNotes | Self::AboutIssues | Self::AboutLicences => {
-                Some(Text::AboutOpen.text())
-            }
+            Self::AboutIssues | Self::AboutLicences => Some(Text::AboutOpen.text()),
             Self::ExportSettings => Some(Text::ExportVerb.text()),
             Self::ImportSettings => Some(Text::ImportVerb.text()),
             Self::SettingsFolder => Some(Text::AboutOpen.text()),
@@ -5657,9 +5592,7 @@ impl SettingsRow {
     ///
     /// The row owns its destination, which is what keeps the press and the page
     /// a single answer: a router that carried a `match` of its own would be a
-    /// second place for a row to be filed under the wrong address. The releases
-    /// row reads `update::RELEASES_PAGE` rather than a copy of it, so this page
-    /// and the update row's own verb cannot come apart.
+    /// second place for a row to be filed under the wrong address.
     ///
     /// Two of the three are addresses and always will be. The third is
     /// [`notices_destination`], which answers with a **file** where this build
@@ -5667,7 +5600,6 @@ impl SettingsRow {
     #[must_use]
     pub fn link_destination(self) -> Option<LinkDestination> {
         match self {
-            Self::AboutReleaseNotes => Some(LinkDestination::Address(crate::update::RELEASES_PAGE)),
             Self::AboutIssues => Some(LinkDestination::Address(ISSUES_PAGE)),
             Self::AboutLicences => Some(notices_destination()),
             Self::ExportSettings => Some(LinkDestination::Configuration(ConfigurationDoor::Export)),
@@ -5701,23 +5633,17 @@ impl SettingsRow {
 
     /// **The update row's verb, on the About page's `Version` row** (0.4.6
     /// T-GEAR-MARK-LANDS): while an update is offered, the version row carries
-    /// the General row's foot — `Open releases page`, `Restart to update` or
-    /// `Copy`, whichever the update job says ([`SettingsValues::update_row`]) —
-    /// as a door under its fact, and whether that door leaves the window (the
-    /// `↗` the General row's picker puts on the releases page).
+    /// the update job's one state control — Check, Update and restart, progress,
+    /// Copy command or Retry ([`SettingsValues::version_update`]) — as a door in
+    /// the ordinary control slot.
     ///
     /// One verb for two rows: a press on this door is
     /// [`SettingsTarget::Link`] of this row, and [`update_row_foot_requested`]
-    /// answers it exactly as it answers the General row's foot. `None` on every
-    /// other row, and on this one while nothing is offered.
+    /// answers it through the existing check/card/clipboard roads. `None` on
+    /// every other row.
     #[must_use]
     pub fn update_door(self, values: &SettingsValues) -> Option<(&'static str, bool)> {
-        (self == Self::AboutVersion && values.update_offer.is_some()).then(|| {
-            (
-                values.update_row.text(),
-                matches!(values.update_row, crate::update_card::RowFoot::ReleasesPage),
-            )
-        })
+        (self == Self::AboutVersion).then(|| (values.version_update.control.text(), false))
     }
 
     /// **The verb on this row's door button and whether it leaves the window**
@@ -5875,11 +5801,6 @@ fn shipped_notices_near(executable: &std::path::Path) -> Option<std::path::PathB
 /// `&'static str`, so it is leaked exactly once — a constant of the process by
 /// construction, which is what [`SettingsRow::stated_value`] promises. The same
 /// arithmetic [`intern_scheme_name`] runs, with a set of one.
-fn about_version_line() -> &'static str {
-    static LINE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    LINE.get_or_init(|| Box::leak(crate::version::banner().into_boxed_str()))
-}
-
 /// **The machine this copy was made for** — `Windows (x86_64)`.
 ///
 /// Not in the language table, and the table's own header says why: an operating
@@ -6099,7 +6020,8 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // the whole dialog that reaches off it. A reader who opens this page to find
     // out what Folio talks to should find that row where a page ends rather than
     // among the rows about what the window says and does.
-    rows.push(SettingsRow::UpdateCheck);
+    // The automatic schedule is now part of the updater's home, directly under
+    // the Version row. The stored key remains `update_check`.
     // ── the summoned terminal's own page (§7.54e ⑤) ──
     //
     // **The key first**, because a window nobody can call up is not a window and
@@ -6171,8 +6093,8 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // under them the three doors, in the order a reader reaches for them: what
     // changed, where to say it went wrong, and what this was built out of.
     rows.push(SettingsRow::AboutVersion);
+    rows.push(SettingsRow::AutoCheck);
     rows.push(SettingsRow::AboutPlatform);
-    rows.push(SettingsRow::AboutReleaseNotes);
     rows.push(SettingsRow::AboutIssues);
     rows.push(SettingsRow::AboutLicences);
     // **The configuration doors, last** (0.4.4 ticket 05): take everything this
@@ -6668,19 +6590,10 @@ pub struct SettingsValues {
     /// instead of offering a press that cannot happen (closure review R1). Handed in for
     /// `copilot_readiness`'s reason — the answer is a file on disk and this row is drawn per frame.
     pub agent_config_refusals: [Option<&'static str>; 3],
-    /// Whether the releases page is asked once a day (§7.51).
+    /// Whether the automatic update check is scheduled once a day (§7.51).
     pub update_check: bool,
-    /// **What the update row ends with, read off the update job** (0.4.6 U-19):
-    /// the releases page, `Restart to update` while a job waits at `Verified`,
-    /// or a package manager's command with `Copy` (C2). Handed in for
-    /// `agent_config_refusals`' reason: the job is the application's, and the
-    /// row reads what it already knows.
-    pub update_row: crate::update_card::RowFoot,
-    /// **The tag this reader is offered**, if any — `update::offer`, the one
-    /// decision the gear and the General row already read (0.4.6
-    /// T-GEAR-MARK-LANDS). The About page's `Version` row names it and carries
-    /// the General row's verb while it is `Some`.
-    pub update_offer: Option<String>,
+    /// The About Version row derived this frame from the check and job owners.
+    pub version_update: crate::update_card::VersionRow,
     /// **Whether the update row wears the gear's mark** (0.4.6
     /// T-GEAR-MARK-LANDS) — `SettingsPanel::update_row_marked` over
     /// `update::gear_mark_is_lit`: the gear's dot, and the rest of the visit it
@@ -6899,8 +6812,7 @@ impl SettingsValues {
             copilot_readiness: crate::attention_copilot::Readiness::Unknown,
             agent_config_refusals: [None; 3],
             update_check: true,
-            update_row: crate::update_card::RowFoot::ReleasesPage,
-            update_offer: None,
+            version_update: crate::update_card::VersionRow::default(),
             update_mark: false,
             uninstall_remove_data: false,
             split_direction: SplitDirectionV1::Auto,
@@ -7071,7 +6983,7 @@ pub struct SettingsPanel {
     agents_visit_read: bool,
     /// **The gear's update mark, carried onto the page it led to** (0.4.6
     /// T-GEAR-MARK-LANDS). Set by [`Self::carry_update_mark`] on the frame this
-    /// visit to `General` shows the update row while the gear is lit — the frame
+    /// visit to `About` shows the Version row while the gear is lit — the frame
     /// the mark is answered on (`update::answer_mark`, DESIGN §7.52) — and reset
     /// by every road off the page, the two latches above' three roads.
     ///
@@ -7408,10 +7320,10 @@ impl SettingsPanel {
 
     /// **The update row is being shown while the gear is `lit`** (0.4.6
     /// T-GEAR-MARK-LANDS): keep the mark on the row for the rest of this visit
-    /// to `General`. Called on the door that answers the mark, just before it
+    /// to `About`. Called on the door that answers the mark, just before it
     /// answers it; a closed dialog or another page carries nothing.
     pub fn carry_update_mark(&mut self, lit: bool) {
-        if self.open && self.category == SettingsCategory::General && lit {
+        if self.open && self.category == SettingsCategory::About && lit {
             self.update_mark_carried = true;
         }
     }
@@ -8925,13 +8837,22 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
             // is an action.
             //
             // **Except the update door under the version** (0.4.6
-            // T-GEAR-MARK-LANDS): while an update is offered that row carries the
-            // General row's verb, and a verb is a stop.
-            PageItem::Row(row) if matches!(row.control(), SettingsControl::Text) => row
-                .update_door(content.values)
-                .map(|_| SettingsTarget::Link(row))
-                .into_iter()
-                .collect(),
+            // T-GEAR-MARK-LANDS): the row carries its state link and control,
+            // and each enabled action is a stop.
+            PageItem::Row(row) if matches!(row.control(), SettingsControl::Text) => {
+                let mut stops = Vec::new();
+                if row == SettingsRow::AboutVersion && content.values.version_update.link.is_some()
+                {
+                    stops.push(SettingsTarget::MenuAction(row));
+                }
+                if row
+                    .update_door(content.values)
+                    .is_some_and(|_| content.values.version_update.control.enabled())
+                {
+                    stops.push(SettingsTarget::Link(row));
+                }
+                stops
+            }
             PageItem::Row(row) => vec![row.control_target()],
             // **The disclosure is a focus stop** (user ruling 2026-08-17): Enter
             // and Space turn it, which is the whole of "keyboard focusable".
@@ -9694,6 +9615,8 @@ pub struct SettingsLayout {
     /// T-GEAR-MARK-LANDS) — [`SettingsRow::update_door`]'s box while an update
     /// is offered, answering [`SettingsTarget::Link`] of `AboutVersion`.
     update_door: Option<[f32; 4]>,
+    /// `What's new ↗` or `Details` on the Version value line.
+    version_link: Option<[f32; 4]>,
     /// The environment table's lines, ghosts first, in the order they are drawn.
     env_rows: Vec<EnvRowLayout>,
     /// The `Add` under the table.
@@ -10559,29 +10482,20 @@ pub fn option_sends_alt_requested(target: SettingsTarget) -> Option<bool> {
 #[must_use]
 pub fn update_check_requested(target: SettingsTarget) -> Option<bool> {
     match target {
-        SettingsTarget::Choice(SettingsRow::UpdateCheck, index) => {
+        SettingsTarget::Choice(SettingsRow::AutoCheck, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
     }
 }
 
-/// Whether the press was the update row's picker foot — `Open releases page`,
-/// `Restart to update` or `Copy`, whichever [`SettingsRow::menu_action`] drew
-/// (0.4.6 U-19; the runtime answers it by the job's [`crate::update_card::RowFoot`]).
+/// Whether the press was About → Version's state control (T-UPDATE-ON-ABOUT).
 ///
 /// Its own reader rather than a `match` at the call site, so the one place that
-/// knows which row carries which foot verb is this file, where
-/// [`SettingsRow::menu_action`] already says so.
+/// knows which row carries the control is this file.
 #[must_use]
 pub fn update_row_foot_requested(target: SettingsTarget) -> bool {
-    matches!(
-        target,
-        SettingsTarget::MenuAction(SettingsRow::UpdateCheck)
-            // The same verb on the About page's `Version` row (0.4.6
-            // T-GEAR-MARK-LANDS) — see [`SettingsRow::update_door`].
-            | SettingsTarget::Link(SettingsRow::AboutVersion)
-    )
+    matches!(target, SettingsTarget::Link(SettingsRow::AboutVersion))
 }
 
 /// **`Also remove settings and data`, pressed** (T-UNINSTALL-UX): the panel's
@@ -11481,6 +11395,7 @@ pub fn layout_for_menus(
     let mut placed_crumb: Option<CrumbLayout> = None;
     let mut placed_browse: Option<[f32; 4]> = None;
     let mut placed_update_door: Option<[f32; 4]> = None;
+    let mut placed_version_link: Option<[f32; 4]> = None;
     let mut placed_env: Vec<EnvRowLayout> = Vec::new();
     let mut placed_env_add: Option<[f32; 4]> = None;
     let mut editor_foot: Option<[f32; 4]> = None;
@@ -11628,16 +11543,15 @@ pub fn layout_for_menus(
                     row_right,
                     combo_top + combo_height,
                 ];
-                // **The update door stands under the version**, at the page's
-                // door width and flush with the column's right edge, where every
-                // other door on the page stands (0.4.6 T-GEAR-MARK-LANDS).
+                // The Version row's one state control occupies the ordinary
+                // control slot; the value and inline link stay in the text
+                // column (T-UPDATE-ON-ABOUT plan A).
                 if row.update_door(content_of.values).is_some() {
-                    let door_top = combo[3] + px(STACKED_GAP_LOGICAL_PX);
                     placed_update_door = Some([
                         row_right - door,
-                        door_top,
+                        combo_top,
                         row_right,
-                        door_top + px(BUTTON_HEIGHT_LOGICAL_PX),
+                        combo_top + px(BUTTON_HEIGHT_LOGICAL_PX),
                     ]);
                 }
                 // `.row .text` is `flex: 1` beside a `flex: none` control, one gap
@@ -11656,12 +11570,29 @@ pub fn layout_for_menus(
                     text_column_right,
                     top + px(ROW_TITLE_LINE_LOGICAL_PX),
                 ];
-                let desc = [
+                let mut desc = [
                     row_left,
                     title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX),
                     text_column_right,
                     title[3] + px(ROW_DESC_MARGIN_TOP_LOGICAL_PX + ROW_DESC_LINE_LOGICAL_PX),
                 ];
+                // Plan A keeps the release/failure link on the Version value's
+                // first line. Give the link its own right-aligned box and make
+                // the value's wrapping width end before it; the height solve in
+                // `desc_lines` subtracts the same measured width.
+                if row == SettingsRow::AboutVersion
+                    && let Some(link) = &content_of.values.version_update.link
+                {
+                    let width = measure(link.text(), px(ROW_DESC_FONT_LOGICAL_PX))
+                        + px(COMBO_CHEVRON_BOX_LOGICAL_PX);
+                    placed_version_link = Some([
+                        desc[2] - width,
+                        desc[1],
+                        desc[2],
+                        desc[1] + px(ROW_DESC_LINE_LOGICAL_PX),
+                    ]);
+                    desc[2] -= width;
+                }
                 placed_rows.push(RowLayout {
                     row,
                     band,
@@ -12246,6 +12177,7 @@ pub fn layout_for_menus(
         crumb: placed_crumb,
         browse: placed_browse,
         update_door: placed_update_door,
+        version_link: placed_version_link,
         env_rows: placed_env,
         env_add: placed_env_add,
         editor_foot,
@@ -12514,11 +12446,8 @@ impl StackMetrics {
     /// fact with the update door under it (0.4.6 T-GEAR-MARK-LANDS).
     fn control_stack_height(self, row: SettingsRow, values: &SettingsValues) -> f32 {
         let px = |value: f32| value * self.scale;
-        if row.update_door(values).is_some() {
-            px(COMBO_HEIGHT_LOGICAL_PX + STACKED_GAP_LOGICAL_PX + BUTTON_HEIGHT_LOGICAL_PX)
-        } else {
-            px(COMBO_HEIGHT_LOGICAL_PX)
-        }
+        let _ = (row, values);
+        px(COMBO_HEIGHT_LOGICAL_PX)
     }
 
     /// **The band one row of `lines` stands in**, with its own control column —
@@ -12572,9 +12501,16 @@ impl StackMetrics {
         button: f32,
         measure: &mut dyn FnMut(&str, f32) -> f32,
     ) -> usize {
+        let mut width = self.desc_width(row, span, button);
+        if row == SettingsRow::AboutVersion
+            && let Some(link) = &values.version_update.link
+        {
+            width -= measure(link.text(), ROW_DESC_FONT_LOGICAL_PX * self.scale)
+                + COMBO_CHEVRON_BOX_LOGICAL_PX * self.scale;
+        }
         description_lines(
             row.description(values),
-            self.desc_width(row, span, button),
+            width,
             ROW_DESC_FONT_LOGICAL_PX * self.scale,
             measure,
         )
@@ -13415,11 +13351,21 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
     {
         return SettingsTarget::EditorBrowse;
     }
+    if let Some(link) = layout.version_link
+        && layout.shows(link)
+        && contains(link, x, y)
+    {
+        return SettingsTarget::MenuAction(SettingsRow::AboutVersion);
+    }
     if let Some(door) = layout.update_door
         && layout.shows(door)
         && contains(door, x, y)
     {
-        return SettingsTarget::Link(SettingsRow::AboutVersion);
+        return if values.version_update.control.enabled() {
+            SettingsTarget::Link(SettingsRow::AboutVersion)
+        } else {
+            SettingsTarget::Panel
+        };
     }
     // **The environment table stands inside the editor's Advanced group**, so
     // every cell of it answers on that group's terms as well as the page's: asked
@@ -13740,6 +13686,21 @@ pub fn build(
             tabular_numerals: false,
             clip: None,
         });
+        if values.update_mark && item.category == SettingsCategory::About {
+            let dot = (crate::marks::DIRTY_DOT_LOGICAL_PX * scale)
+                .round()
+                .max(1.0);
+            sprites.push(crate::marks::dirty_dot_sprite(
+                [
+                    item.label[2] - dot,
+                    item.label[1],
+                    item.label[2],
+                    item.label[3],
+                ],
+                palette.accent,
+                scale,
+            ));
+        }
     }
 
     // Everything below the header is clipped to the content box, which is what
@@ -13810,7 +13771,7 @@ pub fn build(
         // (`marks::dirty_dot_sprite`, `seats::window_chrome`), just after the
         // title's last glyph and centred on its line, for as long as
         // `SettingsValues::update_mark` says the gear led here.
-        if placed.row == SettingsRow::UpdateCheck && values.update_mark {
+        if placed.row == SettingsRow::AboutVersion && values.update_mark {
             let dot = (crate::marks::DIRTY_DOT_LOGICAL_PX * scale)
                 .round()
                 .max(1.0);
@@ -13864,6 +13825,29 @@ pub fn build(
                 tabular_numerals: false,
                 clip: None,
             });
+        }
+        if placed.row == SettingsRow::AboutVersion
+            && let (Some(link), Some(rect)) = (&values.version_update.link, layout.version_link)
+        {
+            let target = SettingsTarget::MenuAction(SettingsRow::AboutVersion);
+            content_stack.labels.push(ChromeLabel {
+                mono: false,
+                text: format!("{} ↗", link.text()),
+                rect,
+                font_size_px: desc_font,
+                color: palette.accent,
+                align_right: true,
+                align_center: false,
+                letter_spacing_em: 0.0,
+                weight: ChromeLabelWeight::Regular,
+                tabular_numerals: false,
+                clip: None,
+            });
+            if focus == Some(target) || hover == Some(target) {
+                content_stack
+                    .quads
+                    .extend(focus_ring(rect, scale, palette.accent));
+            }
         }
         if placed.row.advanced()
             && let Some(band) = layout.advanced_clip
@@ -13985,33 +13969,57 @@ pub fn build(
             // **A fact** (T-SETTINGS-ABOUT). No border and no ground: a box
             // would say "press me" on a row where nothing happens.
             SettingsControl::Text => {
-                push_stated_value(
-                    &mut content_stack,
-                    placed.combo,
-                    placed.row.stated_value().unwrap_or_default(),
-                    scale,
-                    palette,
-                    measure,
-                );
-                // **And the update door under the version** (0.4.6
-                // T-GEAR-MARK-LANDS): the General row's verb in the chassis every
-                // door on this page stands in, ringed as they are.
+                if let Some(stated) = placed.row.stated_value() {
+                    push_stated_value(
+                        &mut content_stack,
+                        placed.combo,
+                        stated,
+                        scale,
+                        palette,
+                        measure,
+                    );
+                }
                 if let Some((verb, leaves_the_window)) = placed.row.update_door(values)
                     && let Some(door) = layout.update_door
                 {
                     let target = SettingsTarget::Link(placed.row);
-                    push_door_button(
-                        &mut content_stack,
-                        door,
-                        verb,
-                        leaves_the_window,
-                        hover == Some(target),
-                        scale,
-                        border,
-                        palette,
-                        measure,
-                    );
-                    if focus == Some(target) {
+                    if let crate::update_card::VersionControl::Progress(bytes) =
+                        values.version_update.control
+                    {
+                        content_stack.quads.push(OverlayQuad {
+                            rect: door,
+                            color: palette.dialog_hover,
+                            alpha: 1.0,
+                        });
+                        let share = bytes
+                            .total
+                            .filter(|total| *total > 0)
+                            .map_or(0.35, |total| bytes.received as f32 / total as f32)
+                            .clamp(0.0, 1.0);
+                        content_stack.quads.push(OverlayQuad {
+                            rect: [
+                                door[0],
+                                door[1],
+                                door[0] + (door[2] - door[0]) * share,
+                                door[3],
+                            ],
+                            color: palette.accent,
+                            alpha: 1.0,
+                        });
+                    } else {
+                        push_door_button(
+                            &mut content_stack,
+                            door,
+                            verb,
+                            leaves_the_window,
+                            values.version_update.control.enabled() && hover == Some(target),
+                            scale,
+                            border,
+                            palette,
+                            measure,
+                        );
+                    }
+                    if values.version_update.control.enabled() && focus == Some(target) {
                         content_stack
                             .quads
                             .extend(focus_ring(door, scale, palette.accent));
@@ -17315,19 +17323,19 @@ mod tests {
     /// stated as the four claims that make the page useful rather than merely
     /// present:
     ///
-    /// 1. The page holds the five rows, in the order a report needs them.
+    /// 1. General has no automatic-update row; About starts with Version then
+    ///    Automatic check, before Platform and the page's unchanged doors.
     /// 2. The version row says **the same line** `--version`, `diagnostics.log`
     ///    and every hang report open with — so a reporter quoting the row and a
     ///    maintainer reading the log are comparing one string.
-    /// 3. The three doors have addresses, and the releases one is the update
-    ///    row's own constant rather than a second copy of it.
-    /// 4. The keyboard reaches every door and none of the two facts: a ring on
+    /// 3. The two address doors still have destinations.
+    /// 4. The keyboard reaches Version's control, Automatic check and every
+    ///    door, but not the Platform fact: a ring on
     ///    a row where nothing happens is a ring that lies.
     ///
-    /// Red gate: spell the releases address here instead of reading
-    /// `update::RELEASES_PAGE` and the third block goes red the day that
-    /// constant moves; make the version row a `Combo` and the last block does,
-    /// because the page would then offer a picker onto a fact.
+    /// MUTATION: move `AutoCheck` after `AboutPlatform` in `flat_rows`; both the
+    /// exact page list and focus order go red. Move it back to General and the
+    /// General-page exclusion goes red as well.
     #[test]
     fn the_about_page_names_the_build_the_machine_and_three_ways_out() {
         let rows = visible_rows(TabLayoutMode::Horizontal);
@@ -17336,12 +17344,18 @@ mod tests {
             .copied()
             .filter(|row| row.category() == SettingsCategory::About)
             .collect();
+        assert!(
+            rows.iter()
+                .filter(|row| row.category() == SettingsCategory::General)
+                .all(|row| *row != SettingsRow::AutoCheck),
+            "General has no Automatic check row"
+        );
         assert_eq!(
             page,
             vec![
                 SettingsRow::AboutVersion,
+                SettingsRow::AutoCheck,
                 SettingsRow::AboutPlatform,
-                SettingsRow::AboutReleaseNotes,
                 SettingsRow::AboutIssues,
                 SettingsRow::AboutLicences,
                 SettingsRow::ExportSettings,
@@ -17353,11 +17367,10 @@ mod tests {
             "what this is, then where to go about it, then the configuration doors, then              the uninstaller and its switch"
         );
 
-        let banner = crate::version::banner();
         assert_eq!(
-            SettingsRow::AboutVersion.stated_value(),
-            Some(banner.as_str()),
-            "the row and the diagnostics say one line"
+            SettingsRow::AboutVersion.description(&values()),
+            values().version_update.value,
+            "the Version row owns its current update value"
         );
         assert!(
             SettingsRow::AboutPlatform
@@ -17366,16 +17379,7 @@ mod tests {
             "the machine row names the processor this copy was made for"
         );
 
-        assert_eq!(
-            SettingsRow::AboutReleaseNotes.link_destination(),
-            Some(LinkDestination::Address(crate::update::RELEASES_PAGE)),
-            "one address, read by this page and by the update row's own verb"
-        );
-        for row in [
-            SettingsRow::AboutReleaseNotes,
-            SettingsRow::AboutIssues,
-            SettingsRow::AboutLicences,
-        ] {
+        for row in [SettingsRow::AboutIssues, SettingsRow::AboutLicences] {
             assert!(
                 row.link_destination().is_some(),
                 "{row:?} is a door with nowhere to go"
@@ -17383,7 +17387,8 @@ mod tests {
             assert_eq!(row.control(), SettingsControl::Link);
             assert_eq!(row.control_target(), SettingsTarget::Link(row));
         }
-        for row in [SettingsRow::AboutReleaseNotes, SettingsRow::AboutIssues] {
+        {
+            let row = SettingsRow::AboutIssues;
             let Some(LinkDestination::Address(url)) = row.link_destination() else {
                 panic!("{row:?} answers with an address on every machine")
             };
@@ -17399,7 +17404,8 @@ mod tests {
         assert_eq!(
             page_order(content, SettingsCategory::About),
             vec![
-                SettingsTarget::Link(SettingsRow::AboutReleaseNotes),
+                SettingsTarget::Link(SettingsRow::AboutVersion),
+                SettingsTarget::Combo(SettingsRow::AutoCheck),
                 SettingsTarget::Link(SettingsRow::AboutIssues),
                 SettingsTarget::Link(SettingsRow::AboutLicences),
                 SettingsTarget::Link(SettingsRow::ExportSettings),
@@ -17408,12 +17414,12 @@ mod tests {
                 SettingsTarget::Link(SettingsRow::Uninstall),
                 SettingsTarget::Combo(SettingsRow::UninstallData),
             ],
-            "the keyboard reaches the seven doors and the uninstaller's switch, and stops on neither fact"
+            "the keyboard starts at Version, then its automatic switch and the page's doors"
         );
         // Every row but the uninstaller's switch, which is a choice (T-UNINSTALL-UX).
         for row in page
             .iter()
-            .filter(|row| **row != SettingsRow::UninstallData)
+            .filter(|row| !matches!(**row, SettingsRow::AutoCheck | SettingsRow::UninstallData))
         {
             assert_eq!(
                 row.option_count(),
@@ -17425,6 +17431,43 @@ mod tests {
             SettingsRow::UninstallData.option_count(),
             FORMULA_OPTIONS.len()
         );
+    }
+
+    /// RED (T-UPDATE-ON-ABOUT) — a settings file written by 0.4.6 keeps the
+    /// same `update_check` key and its false answer becomes Automatic check Off.
+    ///
+    /// MUTATION: compare AutoCheck's selected value with
+    /// `!values.update_check`; the selected index changes from Off to On and
+    /// this goes red.
+    #[test]
+    fn a_046_update_check_false_file_reads_as_automatic_check_off() {
+        let root = std::env::temp_dir().join(format!(
+            "bt-settings-update-on-about-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("a private settings fixture directory");
+        let path = root.join("settings.json");
+        let old = bt_persist::SettingsV1 {
+            update_check: false,
+            ..bt_persist::SettingsV1::default()
+        };
+        bt_persist::write_settings_atomic(&path, &old).expect("write the 0.4.6 file");
+        let wire = std::fs::read_to_string(&path).expect("read the compatibility fixture");
+        assert!(wire.contains(r#""update_check": false"#), "{wire}");
+
+        let (loaded, report) = bt_persist::read_settings(&path);
+        assert_eq!(report, bt_persist::ReadReport::Loaded);
+        let visible = SettingsValues {
+            update_check: loaded.update_check,
+            ..values()
+        };
+        assert_eq!(
+            SettingsRow::AutoCheck.selected_index(&visible),
+            Some(1),
+            "the unchanged false key selects Off on the renamed row"
+        );
+        std::fs::remove_dir_all(&root).expect("remove the private fixture");
     }
 
     /// PIN (owner question 2026-09-23, "shouldn't the boxes be the same size?")
@@ -17461,40 +17504,49 @@ mod tests {
             let mut face = |text: &str, font_size_px: f32| {
                 text.chars().count() as f32 * font_size_px * advance
             };
+            let visible = values();
+            let held = SettingsContent {
+                values: &visible,
+                ..content(&rows, &shortcuts)
+            };
             let placed = layout_for_menu(
                 SURFACE.0 * scale,
                 SURFACE.1 * scale,
                 scale,
                 None,
                 None,
-                content(&rows, &shortcuts),
+                held,
                 SettingsCategory::About,
                 UNSCROLLED,
                 MENU_UNSCROLLED,
                 &mut face,
             )
             .expect("the settings dialog fits");
-            let doors: Vec<RowLayout> = placed
+            let mut doors: Vec<(SettingsRow, [f32; 4])> = placed
                 .rows
                 .iter()
                 .filter(|entry| matches!(entry.row.control(), SettingsControl::Link))
-                .copied()
+                .map(|entry| (entry.row, entry.combo))
                 .collect();
+            doors.push((
+                SettingsRow::AboutVersion,
+                placed.update_door.expect("Version has its state control"),
+            ));
             assert_eq!(
                 doors.len(),
                 7,
                 "the About page's seven doors (T-UNINSTALL-UX added one)"
             );
             let column_right = combo_of(&placed, SettingsRow::AboutVersion)[2];
-            let door_width = width(doors[0].combo);
+            let door_width = width(doors[0].1);
             let widest_need = doors
                 .iter()
-                .map(|door| {
-                    let verb = face(
-                        door.row.stated_value().unwrap_or_default(),
-                        BUTTON_FONT_LOGICAL_PX * scale,
-                    );
-                    let mark = if door.row.leaves_the_window() {
+                .map(|(row, _)| {
+                    let (verb, leaves_the_window) = row
+                        .door_verb(&visible)
+                        .expect("each collected row has a door");
+                    let verb = face(verb, BUTTON_FONT_LOGICAL_PX * scale);
+                    let mark = if leaves_the_window {
                         (COMBO_GAP_LOGICAL_PX + COMBO_CHEVRON_BOX_LOGICAL_PX) * scale
                     } else {
                         0.0
@@ -17517,23 +17569,23 @@ mod tests {
                     "the wide face is meant to put the verbs, not the floor, in charge"
                 );
             }
-            for door in &doors {
+            for (row, rect) in &doors {
                 assert_eq!(
-                    width(door.combo),
+                    width(*rect),
                     door_width,
                     "scale {scale}, advance {advance}: {:?} is not the width of {:?}",
-                    door.row,
-                    doors[0].row
+                    row,
+                    doors[0].0
                 );
                 assert!(
-                    (door.combo[3] - door.combo[1] - BUTTON_HEIGHT_LOGICAL_PX * scale).abs() < 1e-3,
+                    (rect[3] - rect[1] - BUTTON_HEIGHT_LOGICAL_PX * scale).abs() < 1e-3,
                     "{:?} is a button and stands at the button's height",
-                    door.row
+                    row
                 );
                 assert_eq!(
-                    door.combo[2], column_right,
+                    rect[2], column_right,
                     "{:?} ends on the column every control on the page ends on",
-                    door.row
+                    row
                 );
             }
         }
@@ -17549,7 +17601,6 @@ mod tests {
         let quads = quads_of(&placed, None, &values());
         let labels = labels_of(&placed, None, &values());
         for row in [
-            SettingsRow::AboutReleaseNotes,
             SettingsRow::AboutIssues,
             SettingsRow::AboutLicences,
             SettingsRow::ExportSettings,
@@ -19071,7 +19122,7 @@ mod tests {
             (SettingsRow::PsReadLine, Text::PsReadLineRowGone, Windows),
             (SettingsRow::PsReadLine, Text::PsReadLineRowNotOurs, Windows),
             // The sentence with no version in it, for the row above's reason.
-            (SettingsRow::UpdateCheck, Text::DescUpdateCheck, Windows),
+            (SettingsRow::AutoCheck, Text::DescAutoCheck, Windows),
             // The Mac columns. `LaunchOpens`, `TurnEndNotifications`,
             // `QuakeHotkey` and `OptionSendsAlt` are the rows whose sentence has
             // one; `Acrylic`'s stands with the other refusals above.
@@ -19594,10 +19645,7 @@ mod tests {
     ///
     /// MUTATION: put the pre-2026-09-13 `DescLaunchOpens`, `DescSidebar` or
     /// `DescQuakeRestore` back, or the pre-2026-09-23 `DescOptionSendsAlt`, and
-    /// this names the row and the line count. And (0.4.6 U-19) spell out
-    /// `Text::UpdateRowManaged` as `{version} is available. Press Copy to put
-    /// {command} on the clipboard, then run it in a terminal to update.` and the
-    /// winget sentence names `UpdateCheck` at three lines.
+    /// this names the row and the line count.
     #[test]
     fn no_settings_sentence_needs_a_third_line() {
         use crate::i18n::Lang;
@@ -19675,15 +19723,56 @@ mod tests {
                 over.push((row, lines, sentence.to_owned()));
             }
         }
-        // **The update row's sentences beyond today's** (0.4.6 U-19): a job
-        // waiting at `Verified`, and a copy each package manager owns, each with
-        // a tag longer than any this product has shipped. The fixture's job says
-        // neither, so the walk above never draws them.
-        for sentence in crate::update_card::every_new_row_sentence_in(Lang::English) {
-            let row = SettingsRow::UpdateCheck;
-            let lines = count(row, sentence);
+        // Version's default value above is the shortest state. Exercise every
+        // dynamic template with the longest shipped command and a longer tag,
+        // plus each elapsed-time form, in the same column.
+        let row = SettingsRow::AboutVersion;
+        let running = crate::version::VERSION;
+        let tag = "v10.10.10-preview";
+        let line = |state: String| format!("Folio {running} · {state}");
+        let day = 86_400_000;
+        let now = 10_000 * day;
+        let mut version_values = vec![
+            line(crate::i18n::version_available_in(Lang::English, tag)),
+            line(crate::i18n::version_downloading_in(Lang::English, tag)),
+            line(crate::i18n::version_failed_in(Lang::English, tag)),
+            line(crate::i18n::version_last_checked_in(Lang::English, 0, now)),
+            line(crate::i18n::version_last_checked_in(
+                Lang::English,
+                now,
+                now,
+            )),
+            line(crate::i18n::version_last_checked_in(
+                Lang::English,
+                now - 59 * 60_000,
+                now,
+            )),
+            line(crate::i18n::version_last_checked_in(
+                Lang::English,
+                now - 23 * 3_600_000,
+                now,
+            )),
+            line(crate::i18n::version_last_checked_in(
+                Lang::English,
+                now - 999 * day,
+                now,
+            )),
+        ];
+        for manager in [
+            crate::install_channel::Manager::Scoop,
+            crate::install_channel::Manager::Homebrew,
+            crate::install_channel::Manager::Winget,
+        ] {
+            version_values.push(line(crate::i18n::version_managed_in(
+                Lang::English,
+                tag,
+                crate::update_job::manager_command(manager),
+            )));
+        }
+        for sentence in version_values {
+            let lines = count(row, &sentence);
             if lines > SETTINGS_DESCRIPTION_MAX_LINES {
-                over.push((row, lines, sentence.to_owned()));
+                over.push((row, lines, sentence));
             }
         }
         // **And the uninstaller's row on a copy a package manager installed**
@@ -19704,16 +19793,6 @@ mod tests {
                 if lines > SETTINGS_DESCRIPTION_MAX_LINES {
                     over.push((row, lines, sentence));
                 }
-            }
-        }
-        // **And the About page's `Version` row while an update is offered**
-        // (0.4.6 T-GEAR-MARK-LANDS), with the same over-long tag.
-        {
-            let row = SettingsRow::AboutVersion;
-            let sentence = crate::i18n::about_version_offer_in(Lang::English, "v10.10.10-preview");
-            let lines = count(row, &sentence);
-            if lines > SETTINGS_DESCRIPTION_MAX_LINES {
-                over.push((row, lines, sentence));
             }
         }
         assert!(
@@ -23843,9 +23922,14 @@ mod tests {
                         f64::from((combo[0] + combo[2]) / 2.0),
                         f64::from((combo[1] + combo[3]) / 2.0),
                     );
+                    let expected = if row == SettingsRow::AboutVersion {
+                        SettingsTarget::Link(row)
+                    } else {
+                        row.control_target()
+                    };
                     assert_eq!(
                         hit(&placed, &values(), centre.0, centre.1),
-                        row.control_target(),
+                        expected,
                         "{tab_layout:?} at {scale}: {row:?}'s control must answer \
                          where it is drawn"
                     );
@@ -27494,7 +27578,11 @@ mod tests {
                 .iter()
                 .position(|row| *row == SettingsRow::ContextMenu)
                 .expect("the Explorer row is on every machine's list");
-            assert_eq!(rows[at + 1], SettingsRow::UpdateCheck);
+            assert!(
+                rows.iter()
+                    .filter(|row| row.category() == SettingsCategory::General)
+                    .all(|row| *row != SettingsRow::AutoCheck)
+            );
             // `Opening Folio again` stands between them since 2026-09-11
             // (§7.59): the last row about Folio itself, above the two that
             // reach out of this window.
@@ -27598,7 +27686,7 @@ mod tests {
         assert_eq!(press(1, false), Some(ExplorerPlace::Off));
         assert_eq!(press(2, true), None);
         assert_eq!(
-            explorer_place_requested(SettingsTarget::Choice(SettingsRow::UpdateCheck, 0), true),
+            explorer_place_requested(SettingsTarget::Choice(SettingsRow::AutoCheck, 0), true),
             None,
             "no other row's press is an Explorer place"
         );
@@ -27846,9 +27934,6 @@ mod tests {
                 // One row about Explorer's menu since 2026-09-07, with three
                 // answers where two switches stood (§7.4b).
                 SettingsRow::ContextMenu,
-                // Last on General: the only row in the dialog that reaches off
-                // the machine (§7.51).
-                SettingsRow::UpdateCheck,
                 // ── the summoned terminal's own page (§7.54e ⑤) ──
                 SettingsRow::QuakeHotkey,
                 SettingsRow::QuakeProfile,
@@ -27875,8 +27960,8 @@ mod tests {
                 // report needs, then the three doors — see
                 // `SettingsCategory::About`.
                 SettingsRow::AboutVersion,
+                SettingsRow::AutoCheck,
                 SettingsRow::AboutPlatform,
-                SettingsRow::AboutReleaseNotes,
                 SettingsRow::AboutIssues,
                 SettingsRow::AboutLicences,
                 SettingsRow::ExportSettings,
@@ -27924,9 +28009,6 @@ mod tests {
                 // One row about Explorer's menu since 2026-09-07, with three
                 // answers where two switches stood (§7.4b).
                 SettingsRow::ContextMenu,
-                // Last on General: the only row in the dialog that reaches off
-                // the machine (§7.51).
-                SettingsRow::UpdateCheck,
                 // ── the summoned terminal's own page (§7.54e ⑤) ──
                 SettingsRow::QuakeHotkey,
                 SettingsRow::QuakeProfile,
@@ -27948,8 +28030,8 @@ mod tests {
                 SettingsRow::CopilotHooks,
                 SettingsRow::TurnEndNotifications,
                 SettingsRow::AboutVersion,
+                SettingsRow::AutoCheck,
                 SettingsRow::AboutPlatform,
-                SettingsRow::AboutReleaseNotes,
                 SettingsRow::AboutIssues,
                 SettingsRow::AboutLicences,
                 SettingsRow::ExportSettings,
@@ -28985,8 +29067,8 @@ mod tests {
         lacking.default_profile = profiles::fallback_profile();
 
         let mut panel = keyboarded_on(SettingsRow::DefaultProfile.category());
-        // `End` and then two steps back: `Update check` closes this page
-        // (§7.51), `Explorer context menu` stands above it (§7.4), and `Default
+        // `End` and then two steps back: `Explorer context menu` closes this
+        // page (§7.4), `Opening Folio again` stands above it, and `Default
         // profile` above that. The summoned terminal's rows used to stand between
         // them and moved to a page of their own on 2026-09-05 (§7.54e ⑤), which
         // is why this walk is four presses shorter than it was; a second Explorer
@@ -28997,7 +29079,7 @@ mod tests {
         // page reordered under this test lands the ring somewhere else and says
         // so.
         panel.key(SettingsKey::End, content(&flat, &lines), &lacking);
-        for _ in 0..3 {
+        for _ in 0..2 {
             panel.key(SettingsKey::Up, content(&flat, &lines), &lacking);
         }
         assert_eq!(
@@ -32316,8 +32398,8 @@ mod tests {
     /// mark: its disc, its size, its ink.
     fn update_row_marks(placed: &SettingsLayout, values: &SettingsValues) -> Vec<ChromeSprite> {
         let title = placed
-            .row(SettingsRow::UpdateCheck)
-            .expect("General holds the update row")
+            .row(SettingsRow::AboutVersion)
+            .expect("About holds the Version row")
             .title;
         let gear_mark =
             crate::marks::dirty_dot_sprite([0.0, 0.0, 6.0, 6.0], chrome_palette().accent, 1.0);
@@ -32341,7 +32423,7 @@ mod tests {
     ///
     /// The owner, 2026-09-27: the gear wore a mark, and the page it opened did
     /// not say where the mark was. The mark is answered by the layout that first
-    /// shows `General` (`update::answer_mark`, DESIGN §7.52), so a row that read
+    /// shows `About` (`update::answer_mark`, DESIGN §7.52), so a row that read
     /// the owner alone would lose its dot one frame after it was first drawn.
     /// The panel is told on that same door that the gear was lit, and keeps it
     /// for the visit; the owner's `seen_tag` stays the one answer. This runs the
@@ -32365,13 +32447,14 @@ mod tests {
         let held = content(&rows, &[]);
         let mut panel = SettingsPanel::default();
         panel.toggle(held);
-        assert_eq!(panel.category(), SettingsCategory::General);
+        panel.select_category(SettingsCategory::About);
+        assert_eq!(panel.category(), SettingsCategory::About);
         assert!(
             panel.update_row_marked(owner.mark_is_lit(running)),
             "while the gear is lit the row wears its mark"
         );
 
-        // The door (`Runtime::settings_layout` on `General`): carry, then answer.
+        // The door (`Runtime::settings_layout` on `About`): carry, then answer.
         panel.carry_update_mark(owner.mark_is_lit(running));
         let tag = owner.offer(running).expect("the offer the gear was lit by");
         owner.mark_seen(&tag).expect("the answer is written");
@@ -32399,7 +32482,7 @@ mod tests {
                     values: &marked,
                     ..held
                 },
-                SettingsCategory::General,
+                SettingsCategory::About,
                 scroll,
                 MENU_UNSCROLLED,
                 &mut measure,
@@ -32408,7 +32491,7 @@ mod tests {
         };
         let placed = layout_at(
             layout_at(UNSCROLLED)
-                .scroll_to_show(SettingsTarget::Field(SettingsRow::UpdateCheck), UNSCROLLED),
+                .scroll_to_show(SettingsTarget::Field(SettingsRow::AboutVersion), UNSCROLLED),
         );
         let marks = update_row_marks(&placed, &marked);
         assert_eq!(
@@ -32416,11 +32499,14 @@ mod tests {
             1,
             "the row wears one disc, the gear's own, on its title line"
         );
-        let title = placed.row(SettingsRow::UpdateCheck).expect("the row").title;
+        let title = placed
+            .row(SettingsRow::AboutVersion)
+            .expect("the row")
+            .title;
         let dot = marks[0].rect;
         assert!(
             dot[0]
-                >= title[0] + measure(SettingsRow::UpdateCheck.title(), ROW_TITLE_FONT_LOGICAL_PX),
+                >= title[0] + measure(SettingsRow::AboutVersion.title(), ROW_TITLE_FONT_LOGICAL_PX),
             "after the title's last glyph, not over it: title {title:?}, dot {dot:?}"
         );
         let unmarked = SettingsValues {
@@ -32446,9 +32532,10 @@ mod tests {
         );
 
         // A visit that turns to another page leaves the mark behind it.
+        assert!(panel.select_category(SettingsCategory::About));
         panel.carry_update_mark(true);
         assert!(panel.update_row_marked(false));
-        assert!(panel.select_category(SettingsCategory::About));
+        assert!(panel.select_category(SettingsCategory::General));
         assert!(
             !panel.update_row_marked(false),
             "another page is a road off the page, like a close"
@@ -32456,9 +32543,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// PIN (0.4.6 T-GEAR-MARK-LANDS) — **a lit gear lands on `General` with the
-    /// update row in view.** The runtime's half is `Runtime::open_settings_on_row`
-    /// with `UpdateCheck` (the RED pin is `main.rs`'s
+    /// PIN (T-UPDATE-ON-ABOUT) — **a lit gear lands on `About` with the Version
+    /// row in view.** The runtime's half is `Runtime::open_settings_on_row`
+    /// with `AboutVersion` (the RED pin is `main.rs`'s
     /// `a_lit_gear_opens_settings_on_the_marked_row`); this is the panel's and
     /// the geometry's: the dialog the gear opens is on the row's page, and the
     /// scroll that door computes brings the row's whole band inside the viewport
@@ -32467,14 +32554,14 @@ mod tests {
     /// MUTATION: file the update row under another page and the page assertion
     /// goes red; scroll to a different row and the band is not shown.
     #[test]
-    fn a_lit_gear_lands_on_general_with_the_update_row_in_view() {
+    fn a_lit_gear_lands_on_about_with_the_version_row_in_view() {
         let rows = flat_rows();
         let held = content(&rows, &[]);
         let mut panel = SettingsPanel::default();
         panel.toggle(held);
-        let row = SettingsRow::UpdateCheck;
+        let row = SettingsRow::AboutVersion;
         panel.select_category(row.category());
-        assert_eq!(panel.category(), SettingsCategory::General);
+        assert_eq!(panel.category(), SettingsCategory::About);
         let category = panel.category();
         let layout_at = |scroll: f32| {
             layout_for_menu(
@@ -32502,99 +32589,25 @@ mod tests {
         );
     }
 
-    /// RED (0.4.6 T-GEAR-MARK-LANDS) — **while an update is offered, the About
-    /// page's `Version` row says which version, and carries the General row's
-    /// verb as a door under its fact: one verb, one press, two rows.**
+    /// RED (T-UPDATE-ON-ABOUT) — the release-specific link is on Version's
+    /// value line, owns a reachable hit box, and the value ends before it.
     ///
-    /// The owner landed on the About page looking for what the gear meant. The
-    /// sentence names the offer (`Text::AboutVersionOffer`, its Chinese pending)
-    /// in place of the row's own, which with it would take a third line; the
-    /// door's word and its `↗` are the General row's
-    /// picker foot for every foot the update job can say, and a press on it is
-    /// the same request (`update_row_foot_requested`), so there is nothing on
-    /// this row to drift from that one. With nothing offered the row is what it
-    /// always was.
-    ///
-    /// MUTATIONS: drop the sentence — the description assertion goes red; give
-    /// the door a word of its own — the shared-verb loop goes red; leave
-    /// `Link(AboutVersion)` out of `update_row_foot_requested` — the press
-    /// assertion goes red; place the door at the column width — the one-width
-    /// assertion goes red; leave it out of `hit` — the centre press lands
-    /// elsewhere.
+    /// MUTATION: create `placed_version_link` only in the stacked-row branch;
+    /// Version is not stacked, so the link disappears and this goes red.
     #[test]
-    fn the_about_page_names_the_offer_and_shares_the_row_verb() {
-        use crate::i18n::Lang;
-        use crate::update_card::RowFoot;
-
+    fn the_version_link_is_inline_reachable_and_clear_of_the_value() {
         let rows = flat_rows();
-        let lines = shortcut_lines();
-        let quiet = values();
-        assert_eq!(SettingsRow::AboutVersion.update_door(&quiet), None);
-        assert_eq!(
-            SettingsRow::AboutVersion.description(&quiet),
-            Text::DescAboutVersion.text(),
-            "nothing offered, nothing said"
-        );
-
-        let offered = SettingsValues {
-            update_offer: Some("v0.4.7".to_owned()),
-            update_row: RowFoot::Restart {
+        let mut visible = values();
+        visible.version_update = crate::update_card::VersionRow {
+            value: format!("Folio {} · v0.4.7 available", crate::version::VERSION),
+            control: crate::update_card::VersionControl::UpdateAndRestart,
+            link: Some(crate::update_card::VersionLink::WhatsNew {
                 tag: "v0.4.7".to_owned(),
-            },
-            ..values()
+            }),
         };
-        assert_eq!(
-            crate::i18n::about_version_offer_in(Lang::English, "v0.4.7"),
-            "v0.4.7 is available.",
-            "the offer, naming the version"
-        );
-        assert_eq!(
-            SettingsRow::AboutVersion.description(&offered),
-            crate::i18n::about_version_offer_in(crate::i18n::current(), "v0.4.7")
-        );
-
-        for foot in [
-            RowFoot::ReleasesPage,
-            RowFoot::Restart {
-                tag: "v0.4.7".to_owned(),
-            },
-            RowFoot::Copy {
-                command: crate::update_job::manager_command(crate::install_channel::Manager::Scoop),
-            },
-        ] {
-            let values = SettingsValues {
-                update_row: foot.clone(),
-                ..offered.clone()
-            };
-            let (verb, leaves) = SettingsRow::AboutVersion
-                .update_door(&values)
-                .expect("an offered update puts a door on the version row");
-            assert_eq!(
-                Some(verb),
-                SettingsRow::UpdateCheck.menu_action(&values),
-                "{foot:?}: the General row's word"
-            );
-            assert_eq!(
-                leaves,
-                SettingsRow::UpdateCheck.menu_action_mark(&values) == MENU_ACTION_MARK_AWAY,
-                "{foot:?}: and its mark"
-            );
-        }
-        assert!(update_row_foot_requested(SettingsTarget::MenuAction(
-            SettingsRow::UpdateCheck
-        )));
-        assert!(
-            update_row_foot_requested(SettingsTarget::Link(SettingsRow::AboutVersion)),
-            "a press on the version row's door is the General row's press"
-        );
-        assert!(
-            SettingsRow::AboutVersion.link_destination().is_none(),
-            "and it has no destination of its own to go to instead"
-        );
-
         let held = SettingsContent {
-            values: &offered,
-            ..content(&rows, &lines)
+            values: &visible,
+            ..content(&rows, &[])
         };
         let placed = layout_for_menu(
             SURFACE.0,
@@ -32608,60 +32621,24 @@ mod tests {
             MENU_UNSCROLLED,
             &mut measure,
         )
-        .expect("the settings dialog fits");
-        let door = placed
-            .update_door
-            .expect("the version row carries the door");
-        let version = *placed
+        .expect("the About page fits");
+        let row = placed
             .row(SettingsRow::AboutVersion)
-            .expect("the version row");
-        assert!(within(door, version.band), "inside the version row");
+            .expect("About holds Version");
+        let link = placed.version_link.expect("What's new has an inline box");
         assert!(
-            door[1] >= version.combo[3],
-            "under the version, not over it"
+            row.desc[2] <= link[0],
+            "the value ends before its link: value {:?}, link {link:?}",
+            row.desc
         );
-        assert_eq!(door[2], version.combo[2], "flush with the control column");
-        let release = combo_of(&placed, SettingsRow::AboutReleaseNotes);
-        assert_eq!(
-            door[2] - door[0],
-            release[2] - release[0],
-            "one width for every door on the page"
+        let centre = (
+            f64::from((link[0] + link[2]) / 2.0),
+            f64::from((link[1] + link[3]) / 2.0),
         );
         assert_eq!(
-            hit(
-                &placed,
-                &offered,
-                f64::from((door[0] + door[2]) / 2.0),
-                f64::from((door[1] + door[3]) / 2.0)
-            ),
-            SettingsTarget::Link(SettingsRow::AboutVersion)
+            hit(&placed, &visible, centre.0, centre.1),
+            SettingsTarget::MenuAction(SettingsRow::AboutVersion)
         );
-        assert_eq!(
-            page_order(held, SettingsCategory::About).first(),
-            Some(&SettingsTarget::Link(SettingsRow::AboutVersion)),
-            "the door is the page's first stop"
-        );
-        assert!(
-            labels_of(&placed, None, &offered)
-                .iter()
-                .any(|label| label.text == "Restart to update"),
-            "the door says the General row's word"
-        );
-
-        let still = layout_for_menu(
-            SURFACE.0,
-            SURFACE.1,
-            1.0,
-            None,
-            None,
-            content(&rows, &lines),
-            SettingsCategory::About,
-            UNSCROLLED,
-            MENU_UNSCROLLED,
-            &mut measure,
-        )
-        .expect("the settings dialog fits");
-        assert_eq!(still.update_door, None, "nothing offered, no door");
     }
 
     /// RED (T-UNINSTALL-UX) — **the uninstall rows stand last on About where this copy may

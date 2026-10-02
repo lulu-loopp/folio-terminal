@@ -1,4 +1,4 @@
-//! **The update card and the General row** — what the reader sees of the update
+//! **The update card and About → Version** — what the reader sees of the update
 //! job (0.4.6 ticket U-19; `docs/plans/design/self-update-2026-09-16.md` §B,
 //! C2, C9 and the revision's "U-14 — The card and the row").
 //!
@@ -18,7 +18,7 @@
 //!   (`update::OfferState::skip`).
 //! - **Where the keyboard's ring is** — [`Card`], the per-window hover and ring,
 //!   which is the only state here and is about a window, not the job.
-//! - **What the General row ends with** — [`row_foot`]: the releases page as
+//! - **What the Version row ends with** — [`row_foot`]: the releases page as
 //!   before, **Restart to update** while a job waits at `Verified`, and on a copy
 //!   a package manager owns that manager's command with one **Copy** (C2: a
 //!   managed copy gets no card).
@@ -34,7 +34,7 @@
 use std::path::PathBuf;
 
 use crate::i18n::{self, Lang, Text};
-use crate::update_job::{Bytes, Effect, Failure, Job, NotEligible, State, Stop, Verb};
+use crate::update_job::{Bytes, Effect, Failure, Job, NotEligible, Offer, State, Stop, Verb};
 
 // ── the verbs ──────────────────────────────────────────────────────────────
 
@@ -518,9 +518,187 @@ pub(crate) fn spend(
     }
 }
 
-// ── the General row ────────────────────────────────────────────────────────
+// ── About > Version ────────────────────────────────────────────────────────
 
-/// **What the General row's picker ends with** (C9, C2).
+/// The control in About's Version row. This is deliberately a view model: the
+/// job remains the owner and every press is routed back to its existing card
+/// entry or to the check owner's shared worker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum VersionControl {
+    Check { enabled: bool },
+    UpdateAndRestart,
+    Progress(Bytes),
+    CopyCommand { command: &'static str },
+    Retry,
+}
+
+/// The stable names used by the six-state table test.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VersionControlKind {
+    Check,
+    UpdateAndRestart,
+    Progress,
+    CopyCommand,
+    Retry,
+}
+
+impl VersionControl {
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn kind(&self) -> VersionControlKind {
+        match self {
+            Self::Check { .. } => VersionControlKind::Check,
+            Self::UpdateAndRestart => VersionControlKind::UpdateAndRestart,
+            Self::Progress(_) => VersionControlKind::Progress,
+            Self::CopyCommand { .. } => VersionControlKind::CopyCommand,
+            Self::Retry => VersionControlKind::Retry,
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn text(&self) -> &'static str {
+        match self {
+            Self::Check { .. } => Text::VersionCheck,
+            Self::UpdateAndRestart => Text::VersionUpdateAndRestart,
+            Self::Progress(_) => return "",
+            Self::CopyCommand { .. } => Text::VersionCopyCommand,
+            Self::Retry => Text::VersionRetry,
+        }
+        .text()
+    }
+
+    #[must_use]
+    pub(crate) const fn enabled(&self) -> bool {
+        !matches!(self, Self::Check { enabled: false } | Self::Progress(_))
+    }
+}
+
+/// The inline link beside the Version value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum VersionLink {
+    WhatsNew { tag: String },
+    Details,
+}
+
+impl VersionLink {
+    #[must_use]
+    pub(crate) fn text(&self) -> &'static str {
+        match self {
+            Self::WhatsNew { .. } => Text::VersionWhatsNew,
+            Self::Details => Text::VersionDetails,
+        }
+        .text()
+    }
+}
+
+/// Everything About's Version row reads from the owners this frame.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct VersionRow {
+    pub(crate) value: String,
+    pub(crate) control: VersionControl,
+    pub(crate) link: Option<VersionLink>,
+}
+
+impl Default for VersionRow {
+    fn default() -> Self {
+        Self {
+            value: format!(
+                "Folio {} · {}",
+                crate::version::VERSION,
+                Text::VersionUpToDate.text()
+            ),
+            control: VersionControl::Check { enabled: true },
+            link: None,
+        }
+    }
+}
+
+/// Derive the Version row from the existing check and job owners. No state is
+/// cached here: a frame that sees new evidence or progress sees new words.
+#[must_use]
+pub(crate) fn version_row<W: Copy + Eq>(
+    job: &Job<W>,
+    check: crate::update::CheckView,
+    offered: Option<&str>,
+    now_ms: u64,
+    lang: Lang,
+) -> VersionRow {
+    let running = crate::version::VERSION;
+    let line = |state: String| format!("Folio {running} · {state}");
+
+    if let State::Failed(offer, _) = job.state() {
+        let tag = offer
+            .as_ref()
+            .map(Offer::tag)
+            .or(offered)
+            .unwrap_or(running);
+        return VersionRow {
+            value: line(crate::i18n::version_failed_in(lang, tag)),
+            control: VersionControl::Retry,
+            link: Some(VersionLink::Details),
+        };
+    }
+    if let State::Downloading(offer, bytes) = job.state() {
+        return VersionRow {
+            value: line(crate::i18n::version_downloading_in(lang, offer.tag())),
+            control: VersionControl::Progress(*bytes),
+            link: None,
+        };
+    }
+    if let State::Staged(offer) | State::Quitting(offer) | State::Committing(offer) = job.state() {
+        return VersionRow {
+            value: line(crate::i18n::version_downloading_in(lang, offer.tag())),
+            control: VersionControl::Progress(Bytes::default()),
+            link: None,
+        };
+    }
+    if let Some(Err(NotEligible::Managed { command, .. })) = job.answer()
+        && let Some(tag) = offered
+    {
+        return VersionRow {
+            value: line(crate::i18n::version_managed_in(lang, tag, command)),
+            control: VersionControl::CopyCommand { command },
+            link: Some(VersionLink::WhatsNew {
+                tag: tag.to_owned(),
+            }),
+        };
+    }
+    let job_offer = job.state().offer().map(Offer::tag).or(offered);
+    if let Some(tag) = job_offer {
+        return VersionRow {
+            value: line(crate::i18n::version_available_in(lang, tag)),
+            control: VersionControl::UpdateAndRestart,
+            link: Some(VersionLink::WhatsNew {
+                tag: tag.to_owned(),
+            }),
+        };
+    }
+    if check.answered == Some(false) {
+        return VersionRow {
+            value: line(crate::i18n::version_last_checked_in(
+                lang,
+                check.checked_at_ms,
+                now_ms,
+            )),
+            control: VersionControl::Check {
+                enabled: !check.checking,
+            },
+            link: None,
+        };
+    }
+    VersionRow {
+        value: line(Text::VersionUpToDate.text().to_owned()),
+        control: VersionControl::Check {
+            enabled: !check.checking,
+        },
+        link: None,
+    }
+}
+
+// ── the job posture watched by the window loop ────────────────────────────
+
+/// **What the Version row's control asks for** (C9, C2).
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) enum RowFoot {
     /// `Open releases page`, as the row has always offered — also for a copy
@@ -534,21 +712,9 @@ pub(crate) enum RowFoot {
     Copy { command: &'static str },
 }
 
-impl RowFoot {
-    /// The foot's word.
-    #[must_use]
-    pub(crate) fn text(&self) -> &'static str {
-        match self {
-            Self::ReleasesPage => Text::OpenReleasesPage,
-            Self::Restart { .. } => Text::UpdateRowRestart,
-            Self::Copy { .. } => Text::UpdateRowCopy,
-        }
-        .text()
-    }
-}
-
-/// **The General row's foot, read off the job** — the row says only what the
-/// job already knows (coordinator ruling 6: no capability input is added).
+/// The job posture which can change About's Version row, read off the owner.
+/// This stays language-free so the application loop can cheaply decide which
+/// windows need a settings repaint.
 #[must_use]
 pub(crate) fn row_foot<W: Copy + Eq>(job: &Job<W>) -> RowFoot {
     if let State::Verified(offer) = job.state() {
@@ -560,46 +726,6 @@ pub(crate) fn row_foot<W: Copy + Eq>(job: &Job<W>) -> RowFoot {
         Some(Err(NotEligible::Managed { command, .. })) => RowFoot::Copy { command },
         _ => RowFoot::ReleasesPage,
     }
-}
-
-/// **The General row's sentence for this foot**, in `lang`; `offered` is the
-/// tag the day's check offers (`update::offer`).
-///
-/// The releases page keeps today's sentence ([`crate::update::row_description_in`]);
-/// the other two name the tag and what their foot does. A managed copy whose
-/// check offers nothing says the row's plain sentence, as it always has.
-#[must_use]
-pub(crate) fn row_description_in(
-    lang: Lang,
-    foot: &RowFoot,
-    offered: Option<&str>,
-) -> &'static str {
-    match foot {
-        RowFoot::ReleasesPage => crate::update::row_description_in(lang),
-        RowFoot::Restart { tag } => i18n::intern(i18n::update_row_ready_in(lang, tag)),
-        RowFoot::Copy { command } => match offered {
-            Some(tag) => i18n::intern(i18n::update_row_managed_in(lang, tag, command)),
-            None => Text::DescUpdateCheck.in_lang(lang),
-        },
-    }
-}
-
-/// **`Copy` on the row**: the manager's command through the window's one
-/// clipboard write (`write`), **only on the reader's press** — nothing else
-/// here writes the clipboard. Answers whether this foot copies at all.
-///
-/// # Errors
-///
-/// The write's.
-pub(crate) fn copy_command(
-    foot: &RowFoot,
-    write: impl FnOnce(&str) -> anyhow::Result<()>,
-) -> anyhow::Result<bool> {
-    let RowFoot::Copy { command } = foot else {
-        return Ok(false);
-    };
-    write(command)?;
-    Ok(true)
 }
 
 // ── what the windows show, for the loop's once-a-turn comparison ───────────
@@ -633,36 +759,6 @@ pub(crate) fn shown<W: Copy + Eq>(job: &Job<W>) -> Shown<W> {
     }
 }
 
-/// **Every sentence the General row can say beyond today's**, for the settings
-/// dialog's two-line budget (`settings::tests::no_settings_sentence_needs_a_third_line`):
-/// the ready row and the managed row under each manager, with a tag longer than
-/// any this product has shipped.
-#[cfg(test)]
-pub(crate) fn every_new_row_sentence_in(lang: Lang) -> Vec<&'static str> {
-    const TAG: &str = "v10.10.10-preview";
-    let mut sentences = vec![row_description_in(
-        lang,
-        &RowFoot::Restart {
-            tag: TAG.to_owned(),
-        },
-        Some(TAG),
-    )];
-    for manager in [
-        crate::install_channel::Manager::Scoop,
-        crate::install_channel::Manager::Homebrew,
-        crate::install_channel::Manager::Winget,
-    ] {
-        sentences.push(row_description_in(
-            lang,
-            &RowFoot::Copy {
-                command: crate::update_job::manager_command(manager),
-            },
-            Some(TAG),
-        ));
-    }
-    sentences
-}
-
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;
@@ -673,8 +769,8 @@ mod tests {
 
     use super::{
         Asks, Bar, Card, CardVerb, Key, Outcome, Paint, RowFoot, Target, UninstallVerb,
-        copy_command, failed, key, paint, row_description_in, row_foot, shown, spend,
-        uninstall_paint,
+        VersionControl, VersionControlKind, failed, key, paint, row_foot, shown, spend,
+        uninstall_paint, version_row,
     };
     use crate::i18n::{Lang, Text};
     use crate::install_channel::{Channel, Manager};
@@ -759,6 +855,97 @@ mod tests {
         assert_eq!(job.drain_progress(), 0);
         assert!(matches!(job.state(), State::Verified(_)));
         job
+    }
+
+    /// RED (T-UPDATE-ON-ABOUT) — the Version row has exactly six visible
+    /// states, each with its exact value line and one control kind.
+    ///
+    /// MUTATION: return `Check` for `VersionControl::UpdateAndRestart`; the
+    /// `available` row goes red while the other five remain green.
+    #[test]
+    fn about_version_has_the_six_ruled_states() {
+        use super::{VersionControlKind as Kind, version_row};
+        use crate::update::CheckView;
+
+        let running = crate::version::VERSION;
+        let up_to_date = Job::with_offers(true);
+        let available = considered("v0.4.7", Channel::Ours);
+        let (downloading_job, _) = downloading();
+        let managed = considered(
+            "v0.4.7",
+            Channel::Managed {
+                manager: Manager::Scoop,
+                uninstall_hook: true,
+            },
+        );
+        let (mut failed_job, failed_post) = downloading();
+        failed_post.post(Step::Stopped(crate::update_job::Stop::Download));
+        assert_eq!(failed_job.drain_progress(), 0);
+        let no_answer = Job::with_offers(true);
+        let now = 10 * 86_400_000;
+
+        let rows = [
+            (
+                "up to date",
+                &up_to_date,
+                CheckView {
+                    answered: Some(true),
+                    ..CheckView::default()
+                },
+                None,
+                format!("Folio {running} · Up to date"),
+                Kind::Check,
+            ),
+            (
+                "available",
+                &available,
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("Folio {running} · v0.4.7 available"),
+                Kind::UpdateAndRestart,
+            ),
+            (
+                "downloading",
+                &downloading_job,
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("Folio {running} · Downloading v0.4.7"),
+                Kind::Progress,
+            ),
+            (
+                "managed",
+                &managed,
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("Folio {running} · v0.4.7 available · scoop update folio"),
+                Kind::CopyCommand,
+            ),
+            (
+                "failed",
+                &failed_job,
+                CheckView::default(),
+                Some("v0.4.7"),
+                format!("Folio {running} · v0.4.7 wasn't installed. This version was restored."),
+                Kind::Retry,
+            ),
+            (
+                "no answer",
+                &no_answer,
+                CheckView {
+                    checked_at_ms: now,
+                    answered: Some(false),
+                    ..CheckView::default()
+                },
+                None,
+                format!("Folio {running} · Last checked: just now"),
+                Kind::Check,
+            ),
+        ];
+        for (name, job, check, offered, value, control) in rows {
+            let row = version_row(job, check, offered, now, Lang::English);
+            assert_eq!(row.value, value, "{name}");
+            assert_eq!(row.control.kind(), control, "{name}");
+        }
     }
 
     /// RED (U-19) — **the offer's card names the version, and its verbs are
@@ -1061,13 +1248,13 @@ mod tests {
     }
 
     /// RED (U-19) — **Later on a verified job puts the card away, keeps the
-    /// job, and leaves `Restart to update` on the General row, which raises
+    /// job, and leaves `Update and restart` on About → Version, which raises
     /// the card again.**
     ///
     /// §B: "From `Verified`, **Later** keeps the staged transaction and leaves
-    /// a **Restart to finish updating** entry on the General row's picker
+    /// an **Update and restart** control on the Version row
     /// foot, so the work is not stranded and not silently discarded"; C9 names
-    /// it **Restart to update**. The row's foot is read off the job, the
+    /// it the same restart action. The row's control is read off the job, the
     /// row's sentence names the tag, and pressing the foot re-opens the card
     /// in the window it was pressed in.
     ///
@@ -1089,20 +1276,6 @@ mod tests {
             RowFoot::Restart {
                 tag: "v0.4.7".to_owned()
             }
-        );
-        assert_eq!(foot.text(), "Restart to update");
-        assert_eq!(
-            row_description_in(Lang::English, &foot, Some("v0.4.7")),
-            "v0.4.7 is ready. Restart to update closes running programs."
-        );
-        let values = crate::settings::SettingsValues {
-            update_row: foot,
-            ..crate::settings::SettingsValues::sample()
-        };
-        assert_eq!(
-            crate::settings::SettingsRow::UpdateCheck.menu_action(&values),
-            Some("Restart to update"),
-            "the picker's foot is the job's"
         );
         assert!(job.reopen(2), "the row's foot raises the card again");
         assert_eq!(
@@ -1126,8 +1299,9 @@ mod tests {
     /// writer is the window's one clipboard write, and no test writes the real
     /// clipboard.
     ///
-    /// MUTATION: send `NotEligible::Managed` to the releases page in
-    /// `row_foot` and the row offers the page instead of the command.
+    /// MUTATION: return `VersionControl::UpdateAndRestart` for the managed
+    /// branch of `version_row`; its one control stops being Copy and this goes
+    /// red.
     #[test]
     fn a_managed_copy_shows_its_command_and_no_card() {
         for (manager, command) in [
@@ -1149,29 +1323,16 @@ mod tests {
             assert_eq!(shown(&job).card, None);
             let foot = row_foot(&job);
             assert_eq!(foot, RowFoot::Copy { command }, "{manager:?}");
-            assert_eq!(foot.text(), "Copy");
-            let sentence = row_description_in(Lang::English, &foot, Some("v0.4.7"));
-            assert!(sentence.contains(command), "{sentence}");
-            let written = RefCell::new(Vec::<String>::new());
-            assert!(
-                copy_command(&foot, |text| {
-                    written.borrow_mut().push(text.to_owned());
-                    Ok(())
-                })
-                .expect("the recording writer accepts")
+            let row = version_row(
+                &job,
+                crate::update::CheckView::default(),
+                Some("v0.4.7"),
+                0,
+                Lang::English,
             );
-            assert_eq!(written.into_inner(), vec![command.to_owned()]);
+            assert!(row.value.contains(command), "{}", row.value);
+            assert_eq!(row.control, VersionControl::CopyCommand { command });
         }
-        // And the releases page is not a copy: nothing is written.
-        let written = RefCell::new(0);
-        assert!(
-            !copy_command(&RowFoot::ReleasesPage, |_| {
-                *written.borrow_mut() += 1;
-                Ok(())
-            })
-            .expect("nothing to write")
-        );
-        assert_eq!(written.into_inner(), 0);
     }
 
     /// A job that considered `latest` for a copy installed as `channel`,
@@ -1249,6 +1410,11 @@ mod tests {
             ),
             (Manager::Scoop, HostPlatform::Windows, "scoop update folio"),
         ] {
+            let adapter = crate::update_adapter::of_manager(manager);
+            assert!(
+                !crate::update_adapter::built_on(adapter, platform),
+                "{manager:?}: this proof is for an unbuilt manager road"
+            );
             let job = considered_on(
                 "v0.4.7",
                 Channel::Managed {
@@ -1259,6 +1425,23 @@ mod tests {
             );
             assert_eq!(job.card_window(), None, "{manager:?}: no card");
             assert_eq!(row_foot(&job), RowFoot::Copy { command }, "{manager:?}");
+            let row = version_row(
+                &job,
+                crate::update::CheckView::default(),
+                Some("v0.4.7"),
+                0,
+                Lang::English,
+            );
+            assert_eq!(
+                row.control,
+                VersionControl::CopyCommand { command },
+                "{manager:?}: the Version state copies the manager command"
+            );
+            assert_ne!(
+                row.control.kind(),
+                VersionControlKind::UpdateAndRestart,
+                "{manager:?}: an unbuilt road never offers Folio's updater"
+            );
         }
         // And ours, on the same two platforms, is offered it.
         for platform in [HostPlatform::Windows, HostPlatform::MacOs] {
@@ -1323,8 +1506,15 @@ mod tests {
         let command = "winget upgrade --id WeiyiShi.Folio --exact";
         let foot = row_foot(&job);
         assert_eq!(foot, RowFoot::Copy { command });
-        let sentence = row_description_in(Lang::English, &foot, Some("v0.4.7"));
-        assert!(sentence.contains(command), "{sentence}");
+        let row = version_row(
+            &job,
+            crate::update::CheckView::default(),
+            Some("v0.4.7"),
+            0,
+            Lang::English,
+        );
+        assert!(row.value.contains(command), "{}", row.value);
+        assert_eq!(row.control, VersionControl::CopyCommand { command });
         std::fs::remove_dir_all(&location).unwrap();
     }
 

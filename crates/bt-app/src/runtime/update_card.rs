@@ -1,6 +1,6 @@
-//! `update_card` — the window's half of the update card and of the General
-//! row's foot (0.4.6 ticket U-19): whether the card is up in this window, its
-//! placement against the real font, and what a key, a press or the row's foot
+//! `update_card` — the window's half of the update card and of About → Version's
+//! control (0.4.6 ticket U-19): whether the card is up in this window, its
+//! placement against the real font, and what a key, a press or the row's control
 //! does. What the card says is [`crate::update_card`]'s; every fact it reads is
 //! the update job's (`App::update_job`).
 //!
@@ -259,26 +259,32 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// **The General row's foot** (0.4.6 U-19), answered by what the job
-    /// says it is: the releases page as before; `Restart to update` raises the
-    /// verified job's card again, in this window; `Copy` puts the package
-    /// manager's command on the clipboard through the window's one clipboard
-    /// write — on this press and on nothing else.
+    /// About > Version's state control. Update enters through the card's exact
+    /// `Update` verb, Copy uses the existing clipboard road, and Check/Retry use
+    /// the daily check's worker door with its timestamp gate bypassed.
     pub(crate) fn press_update_row_foot(&mut self) -> Result<()> {
-        match update_card::row_foot(&self.app.update_job) {
-            update_card::RowFoot::ReleasesPage => {
-                self.hand_url_to_the_browser(update::RELEASES_PAGE)?;
+        match self.settings_values().version_update.control {
+            update_card::VersionControl::Check { enabled: true }
+            | update_card::VersionControl::Retry => {
+                let _ = update::begin_now();
             }
-            update_card::RowFoot::Restart { .. } => {
-                let window = self.window.window.id();
-                self.app.update_job.reopen(window);
+            update_card::VersionControl::UpdateAndRestart => {
+                let verb = if matches!(self.app.update_job.state(), update_job::State::Verified(_))
+                {
+                    update_card::CardVerb::Restart
+                } else {
+                    update_card::CardVerb::Update
+                };
+                self.answer_update_card(verb)?;
             }
-            foot @ update_card::RowFoot::Copy { .. } => {
+            update_card::VersionControl::CopyCommand { command } => {
                 recoverable_clipboard_write(
-                    update_card::copy_command(&foot, write_terminal_clipboard_text).map(drop),
+                    write_terminal_clipboard_text(command),
                     "copy the package manager's update command",
                 );
             }
+            update_card::VersionControl::Check { enabled: false }
+            | update_card::VersionControl::Progress(_) => {}
         }
         Ok(())
     }

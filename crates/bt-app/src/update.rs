@@ -82,7 +82,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, AtomicU8, Ordering as AtomicOrdering},
     },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -657,9 +657,16 @@ pub enum Outcome {
     Answered(String),
     /// The question was asked and did not come back. The stamp advanced anyway.
     Refused,
-    /// A tag came back after the switch had been turned off while the request
-    /// was on the wire. It is neither written nor offered (U-6).
-    SwitchedOff,
+}
+
+/// The check facts the About page renders. The persisted schema stays
+/// `UpdateCheckV1`; the last-answer bit and in-flight bit last only for this
+/// process because neither belongs in the compatibility file.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CheckView {
+    pub checking: bool,
+    pub checked_at_ms: u64,
+    pub answered: Option<bool>,
 }
 
 /// **The update check's state, under one owner** (0.4.6 ticket U-6; fact 11 of
@@ -680,7 +687,7 @@ pub enum Outcome {
 /// and its write was still replaced by the older document. Atomic replacement
 /// makes each write whole; it does not make read-modify-write atomic. The writers
 /// are two threads of this process — the check's `bt-update-check` worker and the
-/// window thread (the mark answered on the General page, and Skip) — so the lock
+/// window thread (the mark answered on About, and Skip) — so the lock
 /// is a mutex in this process, and every writer takes it.
 ///
 /// # Why a lock, and not the storage worker
@@ -727,6 +734,14 @@ pub struct OfferState {
     /// found the stamp too fresh or the claim held, or will not run at all. The
     /// update job decides nothing before this ([`Self::job_evidence`]).
     settled: AtomicBool,
+    /// Whether the shared check worker is currently asking. The About page
+    /// reads this to disable its `Check` button; it is not a second request
+    /// owner, only the visible state of this one.
+    checking: AtomicBool,
+    /// What the last question did: 0 before any known question, 1 when it got
+    /// an answer, 2 when it got none. Kept in process because the persisted
+    /// document deliberately records the time and last tag, not an error.
+    last_answer: AtomicU8,
     /// A test's pause between a transaction's read and its write — the one place
     /// a racing writer can land. Fires once.
     #[cfg(test)]
@@ -762,6 +777,13 @@ impl OfferState {
         if !local {
             forget_a_local_answer(&mut state);
         }
+        let last_answer = if state.checked_at_ms == 0 {
+            0
+        } else if state.latest_tag.is_some() {
+            1
+        } else {
+            2
+        };
         Self {
             claim: dir.join(CLAIM_FILE_NAME),
             path,
@@ -771,6 +793,8 @@ impl OfferState {
             owed: AtomicBool::new(false),
             local,
             settled: AtomicBool::new(false),
+            checking: AtomicBool::new(false),
+            last_answer: AtomicU8::new(last_answer),
             #[cfg(test)]
             between: Mutex::new(None),
         }
@@ -791,8 +815,9 @@ impl OfferState {
         self.enabled.load(AtomicOrdering::Acquire)
     }
 
-    /// The reader turned the switch on or off. Off suppresses the cached offer
-    /// at once, and an answer still on the wire when it lands.
+    /// The reader turned the automatic daily check on or off. It changes the
+    /// next scheduled start only; a manual check and an answer already on the
+    /// wire remain the same check through the same worker door.
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, AtomicOrdering::Release);
     }
@@ -811,21 +836,36 @@ impl OfferState {
     pub fn job_evidence(&self) -> Option<(UpdateCheckV1, bool)> {
         self.settled
             .load(AtomicOrdering::Acquire)
-            .then(|| (self.known(), self.enabled()))
+            .then(|| (self.known(), true))
     }
 
     /// The tag this reader is offered now — [`should_offer`] over this owner's
-    /// state and switch.
+    /// evidence. The schedule switch is deliberately not eligibility.
     #[must_use]
     pub fn offer(&self, running: &str) -> Option<String> {
-        should_offer(&self.known(), running, self.enabled()).map(str::to_owned)
+        should_offer(&self.known(), running, true).map(str::to_owned)
     }
 
-    /// Whether the gear wears its mark — [`mark_is_lit`] over this owner's state
-    /// and switch.
+    /// Whether the gear wears its mark — [`mark_is_lit`] over this owner's
+    /// evidence. The schedule switch is deliberately not visibility.
     #[must_use]
     pub fn mark_is_lit(&self, running: &str) -> bool {
-        mark_is_lit(&self.known(), running, self.enabled())
+        mark_is_lit(&self.known(), running, true)
+    }
+
+    /// The part of the check state the About page can show without reading the
+    /// state file or inventing another owner.
+    #[must_use]
+    pub fn view(&self) -> CheckView {
+        CheckView {
+            checking: self.checking.load(AtomicOrdering::Acquire),
+            checked_at_ms: self.known().checked_at_ms,
+            answered: match self.last_answer.load(AtomicOrdering::Acquire) {
+                1 => Some(true),
+                2 => Some(false),
+                _ => None,
+            },
+        }
     }
 
     /// **The one read-modify-write.** `change` answers whether it changed
@@ -926,13 +966,33 @@ impl OfferState {
     /// whatever it learned is in [`Self::known`] by then, and this launch asks
     /// nothing more.
     pub fn run(&self, now_ms: u64, source: &dyn Releases) -> Outcome {
-        let outcome = self.ask(now_ms, source);
-        self.settle();
+        self.checking.store(true, AtomicOrdering::Release);
+        let outcome = self.ask(now_ms, source, false);
+        self.finish(&outcome);
         outcome
     }
 
+    /// The About page's `Check`: the same question, claim, source and owner as
+    /// [`Self::run`], with the daily timestamp gate deliberately bypassed.
+    pub fn run_now(&self, now_ms: u64, source: &dyn Releases) -> Outcome {
+        self.checking.store(true, AtomicOrdering::Release);
+        let outcome = self.ask(now_ms, source, true);
+        self.finish(&outcome);
+        outcome
+    }
+
+    fn finish(&self, outcome: &Outcome) {
+        match outcome {
+            Outcome::Answered(_) => self.last_answer.store(1, AtomicOrdering::Release),
+            Outcome::Refused => self.last_answer.store(2, AtomicOrdering::Release),
+            Outcome::TooSoon | Outcome::Busy => {}
+        }
+        self.checking.store(false, AtomicOrdering::Release);
+        self.settle();
+    }
+
     /// [`Self::run`]'s question, before it settles.
-    fn ask(&self, now_ms: u64, source: &dyn Releases) -> Outcome {
+    fn ask(&self, now_ms: u64, source: &dyn Releases, now: bool) -> Outcome {
         let Some(_claim) = Claim::take(&self.claim, now_ms) else {
             return Outcome::Busy;
         };
@@ -940,7 +1000,7 @@ impl OfferState {
         let mut too_soon = false;
         let local = self.local;
         let _ = self.transact(|state| {
-            too_soon = !due(state.checked_at_ms, now_ms);
+            too_soon = !now && !due(state.checked_at_ms, now_ms);
             if !too_soon {
                 state.checked_at_ms = now_ms;
                 // Whose stamp this is: a start without the feed asks again at
@@ -954,7 +1014,6 @@ impl OfferState {
         }
 
         match source.latest_tag() {
-            Ok(_) if !self.enabled() => Outcome::SwitchedOff,
             Ok(tag) => {
                 // Only the field this thread fetched is written; everything else
                 // is whatever the file says under the lock — an acknowledgement
@@ -1187,10 +1246,28 @@ fn forget_a_local_answer(state: &mut UpdateCheckV1) -> bool {
 /// Whether the gear wears its mark — the chrome's one question, asked of the
 /// owner.
 #[must_use]
-pub fn gear_mark_is_lit() -> bool {
-    OWNER
-        .get()
-        .is_some_and(|owner| owner.mark_is_lit(crate::version::VERSION))
+pub fn gear_mark_is_lit<W: Copy + Eq>(job: &crate::update_job::Job<W>) -> bool {
+    matches!(job.state(), crate::update_job::State::Failed(..))
+        || OWNER
+            .get()
+            .is_some_and(|owner| owner.mark_is_lit(crate::version::VERSION))
+}
+
+/// The tag named by the lit gear. A rollback reported by a later launch has no
+/// captured job offer, so it uses the check owner's current offered tag when
+/// there is one, then the running version as the last honest fallback.
+#[must_use]
+pub fn gear_mark_tag<W: Copy + Eq>(job: &crate::update_job::Job<W>) -> Option<String> {
+    if let crate::update_job::State::Failed(failed_offer, _) = job.state() {
+        return Some(
+            failed_offer
+                .as_ref()
+                .map(|offer| offer.tag().to_owned())
+                .or_else(offer)
+                .unwrap_or_else(|| crate::version::VERSION.to_owned()),
+        );
+    }
+    gear_mark_is_lit(job).then(offer).flatten()
 }
 
 /// **What the update job decides on** — [`OfferState::job_evidence`] of this
@@ -1201,12 +1278,20 @@ pub fn job_evidence() -> Option<(UpdateCheckV1, bool)> {
 }
 
 /// **The tag this process's check offers**, if any — [`OfferState::offer`] of
-/// the owner, for the General row's sentences (U-19).
+/// the owner, for About → Version's state line (U-19, T-UPDATE-ON-ABOUT).
 #[must_use]
 pub fn offer() -> Option<String> {
     OWNER
         .get()
         .and_then(|owner| owner.offer(crate::version::VERSION))
+}
+
+/// The check facts displayed on About, from the one owner.
+#[must_use]
+pub fn check_view() -> CheckView {
+    OWNER
+        .get()
+        .map_or_else(CheckView::default, OfferState::view)
 }
 
 /// **Skip, pressed on the update card** (U-19): [`OfferState::skip`] of this
@@ -1221,36 +1306,12 @@ pub fn skip(tag: &str) -> Result<(), bt_persist::WriteError> {
     OWNER.get().map_or(Ok(()), |owner| owner.skip(tag))
 }
 
-/// The reader turned the switch on or off (Settings > General > Update check).
-///
-/// Off suppresses the cached offer from the next frame. On does not start a
-/// check: that is still the next launch's (see `Runtime::apply_update_check`).
+/// The reader turned the automatic check on or off (Settings > About).
+/// On and Off take effect at the next scheduled launch; neither hides an offer
+/// nor cancels a job, and the About page's manual Check remains available.
 pub fn set_enabled(enabled: bool) {
     if let Some(owner) = OWNER.get() {
         owner.set_enabled(enabled);
-    }
-}
-
-/// **The settings row's own sentence.**
-///
-/// A function on this module rather than a literal in the table, on
-/// `context_menu::row_description`'s footing: what the row says depends on a
-/// fact about the world, and the module that owns the fact is the one that
-/// should be asked. The base sentence is a table entry like every other row's;
-/// only the one that names a version is composed. Since 0.4.6 U-19 it is the
-/// sentence of the row whose foot is the releases page; the update card's
-/// module chooses among the row's sentences (`update_card::row_description_in`).
-///
-/// In a named language — the entry point for a test that reads both
-/// columns.
-#[must_use]
-pub fn row_description_in(lang: crate::i18n::Lang) -> &'static str {
-    match OWNER
-        .get()
-        .and_then(|owner| owner.offer(crate::version::VERSION))
-    {
-        None => crate::i18n::Text::DescUpdateCheck.in_lang(lang),
-        Some(tag) => crate::i18n::intern(crate::i18n::update_row_available_in(lang, &tag)),
     }
 }
 
@@ -1275,23 +1336,42 @@ pub fn release_trial() {
 /// the loop to consider an offer: the thread's answer, a check that will not
 /// run (the switch, a trial), and a kernel that would not give out a thread.
 pub fn begin() {
+    spawn_check(false);
+}
+
+/// Ask now from About. Answers whether this press started the shared worker;
+/// a second press while it is in flight is refused by the same in-flight bit
+/// that disables the button.
+#[must_use]
+pub fn begin_now() -> bool {
+    spawn_check(true)
+}
+
+fn spawn_check(now: bool) -> bool {
     let Some(owner) = OWNER.get() else {
-        return;
+        return false;
     };
     let settled_without_asking = || {
         owner.settle();
         crate::update_job::evidence_landed();
     };
-    if !owner.enabled() {
+    if !now && !owner.enabled() {
         settled_without_asking();
-        return;
+        return false;
     }
     // **Not in an update's trial** (`update_trial`, F-7): the check writes its
     // stamp and its claim file into O's folder. It is asked again when the
     // trial is committed ([`release_trial`]).
     if crate::update_trial::defer(crate::update_trial::Writer::UpdateCheck) {
         settled_without_asking();
-        return;
+        return false;
+    }
+    if owner
+        .checking
+        .compare_exchange(false, true, AtomicOrdering::AcqRel, AtomicOrdering::Acquire)
+        .is_err()
+    {
+        return false;
     }
     // **In the background band.** A thread starts at normal priority whatever
     // the thread that spawned it was running at, and this one would otherwise
@@ -1305,17 +1385,24 @@ pub fn begin() {
         move |_ctx| {
             let now_ms = unix_epoch_ms();
             let source = check_source(feed(), &GitHubReleases);
-            if matches!(owner.run(now_ms, source), Outcome::Answered(_))
-                && let Some(wake) = WAKE.get()
-            {
+            let outcome = if now {
+                owner.run_now(now_ms, source)
+            } else {
+                owner.run(now_ms, source)
+            };
+            if let Some(wake) = WAKE.get() {
                 wake();
             }
             crate::update_job::evidence_landed();
+            let _ = outcome;
         },
     );
     if spawned.is_err() {
+        owner.checking.store(false, AtomicOrdering::Release);
         settled_without_asking();
+        return false;
     }
+    true
 }
 
 /// The wall clock, in milliseconds since the Unix epoch.
@@ -1325,7 +1412,7 @@ pub fn begin() {
 /// different runs of the program, and a monotonic instant means nothing to the
 /// second one. A clock that moves under this is what [`due`]'s backwards case is
 /// for.
-fn unix_epoch_ms() -> u64 {
+pub(crate) fn unix_epoch_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
@@ -1799,47 +1886,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// PIN — **the row says the number, in both columns.**
-    ///
-    /// A row that only said "a newer version is out" would send the reader to
-    /// the page to find out which one, which is the whole of what this feature
-    /// exists to save them. The base sentence is a table entry and is checked by
-    /// `i18n`'s own gates; what is checked here is that the *composed* one
-    /// carries the version and that the two columns are not one column said
-    /// twice.
-    ///
-    /// MUTATION: drop `{version}` from either arm of `update_row_available_in`
-    /// and that column goes red.
-    #[test]
-    fn the_rows_sentence_names_the_version_in_both_languages() {
-        for lang in crate::i18n::Lang::ALL {
-            let sentence = crate::i18n::update_row_available_in(lang, "0.1.1");
-            assert!(sentence.contains("0.1.1"), "{lang:?}: {sentence}");
-            // The copy guide's Chinese rule: a full stop after a Han character
-            // is the full-width one.
-            if lang == crate::i18n::Lang::Chinese {
-                assert!(sentence.contains('。'), "{sentence}");
-                assert!(!sentence.contains(". "), "{sentence}");
-            }
-        }
-        assert_ne!(
-            crate::i18n::update_row_available_in(crate::i18n::Lang::English, "0.1.1"),
-            crate::i18n::update_row_available_in(crate::i18n::Lang::Chinese, "0.1.1"),
-        );
-
-        // And with nothing newer to say, the row wears the table's own sentence
-        // — which is what every machine reads on the day its build is the
-        // newest. The process's owner is never opened by a test in this module
-        // (each opens its own on a private directory), so this is the unopened
-        // state and not a leftover.
-        for lang in crate::i18n::Lang::ALL {
-            assert_eq!(
-                super::row_description_in(lang),
-                crate::i18n::Text::DescUpdateCheck.in_lang(lang)
-            );
-        }
-    }
-
     /// PIN — **the request carries nothing about the machine, and the address it
     /// goes to is the one the documents name.**
     ///
@@ -2037,10 +2083,6 @@ mod tests {
             Some(newer)
         );
         assert!(mark_is_lit(&available, running, true));
-        for lang in crate::i18n::Lang::ALL {
-            let sentence = crate::i18n::update_row_available_in(lang, newer);
-            assert!(sentence.contains(newer), "{lang:?}: {sentence}");
-        }
 
         // ④ Could not ask. The stamp advances, and the tag this machine already
         //    knew about stays known — a failed check is a silence, not an
@@ -2052,37 +2094,6 @@ mod tests {
         let refused = state_of(&root);
         assert_eq!(refused.latest_tag.as_deref(), Some(newer));
         assert_eq!(refused.checked_at_ms, 3 * CHECK_INTERVAL_MS);
-
-        // And the verb, against each platform in turn.
-        for platform in [
-            bt_platform::HostPlatform::Windows,
-            bt_platform::HostPlatform::MacOs,
-            bt_platform::HostPlatform::OtherUnix,
-        ] {
-            // A job with nothing to say leaves the row's foot the releases
-            // page (0.4.6 U-19: the foot is read off the job).
-            let values = crate::settings::SettingsValues::sample();
-            assert_eq!(
-                crate::settings::SettingsRow::UpdateCheck.menu_action(&values),
-                Some(crate::i18n::Text::OpenReleasesPage.text()),
-                "{platform:?}"
-            );
-            // The mark that says the press leaves this window, rather than the
-            // `+` every other foot verb wears.
-            assert_eq!(
-                crate::settings::SettingsRow::UpdateCheck.menu_action_mark(&values),
-                "↗",
-                "{platform:?}"
-            );
-            assert!(
-                crate::settings::update_row_foot_requested(
-                    crate::settings::SettingsTarget::MenuAction(
-                        crate::settings::SettingsRow::UpdateCheck
-                    )
-                ),
-                "{platform:?}"
-            );
-        }
 
         // And the address that press opens is a page for a person, over TLS.
         assert!(super::RELEASES_PAGE.starts_with("https://github.com/"));
@@ -2311,19 +2322,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (U-6) — **switching off suppresses the cached offer and an answer still
-    /// on the wire.**
+    /// RED (T-UPDATE-ON-ABOUT) — **Off controls the automatic schedule, not
+    /// Version's evidence or its manual Check.**
     ///
-    /// Cached: a file that learned a newer tag while the switch was on is not
-    /// offered or marked once the switch is off. In flight: the switch goes off
-    /// while the request is out, and the answer is neither offered nor written
-    /// (off writes nothing).
-    ///
-    /// MUTATION: drop the `enabled` guard from `should_offer` and the cached half
-    /// goes red; drop the `SwitchedOff` arm in `OfferState::run` and the in-flight
-    /// answer is written.
+    /// MUTATION: pass `self.enabled()` to `should_offer` from `offer`; the
+    /// cached and in-flight assertions go red when the schedule is Off.
     #[test]
-    fn switch_off_suppresses_cached_and_inflight_offers() {
+    fn automatic_check_off_keeps_cached_and_inflight_manual_answers() {
         struct TurnsOff<'owner> {
             owner: &'owner OfferState,
         }
@@ -2347,31 +2352,31 @@ mod tests {
 
         let owner = OfferState::load(&root, false);
         assert_eq!(
-            owner.offer("0.4.6"),
-            None,
-            "a cached tag is not offered while off"
+            owner.offer("0.4.6").as_deref(),
+            Some("v9.0.0"),
+            "Off does not hide evidence already learned"
         );
-        assert!(!owner.mark_is_lit("0.4.6"));
+        assert!(owner.mark_is_lit("0.4.6"));
         owner.set_enabled(true);
         assert_eq!(owner.offer("0.4.6").as_deref(), Some("v9.0.0"));
         owner.set_enabled(false);
         assert_eq!(
-            owner.offer("0.4.6"),
-            None,
-            "and off again suppresses it at once"
+            owner.offer("0.4.6").as_deref(),
+            Some("v9.0.0"),
+            "and switching the schedule Off leaves it visible"
         );
 
         let fresh = dir("switch-off-inflight");
         let inflight = OfferState::load(&fresh, true);
         assert_eq!(
-            inflight.run(CHECK_INTERVAL_MS, &TurnsOff { owner: &inflight }),
-            Outcome::SwitchedOff
+            inflight.run_now(CHECK_INTERVAL_MS, &TurnsOff { owner: &inflight }),
+            Outcome::Answered("v9.1.0".to_owned())
         );
-        assert_eq!(inflight.offer("0.4.6"), None);
+        assert_eq!(inflight.offer("0.4.6").as_deref(), Some("v9.1.0"));
         assert_eq!(
-            state_of(&fresh).latest_tag,
-            None,
-            "the answer that landed after Off is not written"
+            state_of(&fresh).latest_tag.as_deref(),
+            Some("v9.1.0"),
+            "the manual answer that landed after Off is still written"
         );
 
         let _ = std::fs::remove_dir_all(&root);

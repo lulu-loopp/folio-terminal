@@ -3,7 +3,7 @@
 
 use crate::{
     PreviewSurface, Runtime, WebHeadVerb, git_graph, git_panel, i18n, marks, pane_control_tip,
-    seats, tab_surface_tip_boxes, tooltip, tooltip_anchor_for,
+    seats, tab_surface_tip_boxes, tooltip, tooltip_anchor_for, update,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -130,7 +130,12 @@ impl Runtime<'_> {
                     // The gear, silenced while the dialog it opens is up — the
                     // chevron's rule, for the same reason.
                     seats::ChromeTarget::Settings if self.window.settings.is_open() => "",
-                    seats::ChromeTarget::Settings => i18n::Text::Settings.text(),
+                    seats::ChromeTarget::Settings => {
+                        crate::i18n::intern(i18n::version_settings_tip_in(
+                            i18n::current(),
+                            update::gear_mark_tag(&self.app.update_job).as_deref(),
+                        ))
+                    }
                     // `title="Toggle sidebar"` (mock-up 2270), quoted rather than
                     // reworded: the tip is the mock-up's own text and it names the
                     // verb in both directions, which is what a toggle needs.
