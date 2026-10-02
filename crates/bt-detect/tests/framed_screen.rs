@@ -156,6 +156,7 @@ fn candidate(screen: &Screen, capture: &LiveCapture, row: u32) -> LiveDetectionT
         cell_height_subpixels: 18 * SUBPIXELS_PER_PX,
         ascii_baseline_subpixels: 14 * SUBPIXELS_PER_PX,
         capture: capture.clone(),
+        screen_fence_state: capture.frame().screen_fence_state().clone(),
         pane: capture.screen_rect(),
         start: GridPoint { row, column: 0 },
         end: GridPoint { row, column: 0 },
@@ -552,9 +553,22 @@ fn proven(capture: &LiveCapture) -> Vec<Proven> {
         })
         .collect::<Vec<_>>();
     let screen = Screen::alt("proven", capture.screen_rect().right, Vec::new());
-    let mut tasks = rows
-        .into_iter()
-        .map(|row| candidate(&screen, capture, row))
+    let mut tasks = capture
+        .frame()
+        .panes()
+        .iter()
+        .copied()
+        .flat_map(|pane| {
+            rows.iter()
+                .copied()
+                .filter(move |row| pane.contains_row(*row))
+                .map(move |row| (row, pane))
+        })
+        .map(|(row, pane)| {
+            let mut task = candidate(&screen, capture, row);
+            task.pane = pane;
+            task
+        })
         .collect::<Vec<_>>();
     resolve_live_detection_tasks(&mut tasks);
     tasks
@@ -1339,9 +1353,7 @@ fn a_capture_shares_its_frame_between_the_tasks_that_hold_it() {
 /// block's cells). The unsplit scan groups every `$…$` run of a line into one inline occurrence,
 /// so a row holding `$a_n$` left of the rule and `$b_n$` right of it proves one occurrence whose
 /// runs stand on both sides. No cell of either formula is on the rule, so the cut takes nothing
-/// apart: the screen is split, and the left pane proves its formula on every row. (The right pane's
-/// formula on the same row is ticket 69b's: in 69a a candidate row is filled from the first pane
-/// whose block closes on it — `two_panes_closing_on_the_same_row_both_typeset`.)
+/// apart: the screen is split, and each pane proves its formula on every row.
 ///
 /// E3(b) exempts this particular block because its first and last delimiters stand on opposite
 /// sides. `soft_wrap_frames::a_soft_wrapped_left_right_left_inline_occurrence_is_tested_per_segment`
@@ -1362,7 +1374,8 @@ fn a_formula_in_each_pane_on_one_row_does_not_refuse_the_cut() {
     assert_eq!(panes(&capture), vec![left, right]);
     let blocks = proven(&capture);
     assert_eq!(count(&blocks, left, MathMode::Inline), 20);
-    assert_eq!(blocks.len(), 20);
+    assert_eq!(count(&blocks, right, MathMode::Inline), 20);
+    assert_eq!(blocks.len(), 40);
 }
 
 fn clipped_rule_screen(mut rows: impl FnMut(usize) -> (String, String)) -> Vec<String> {
