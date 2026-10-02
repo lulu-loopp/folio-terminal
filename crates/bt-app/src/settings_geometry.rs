@@ -15,7 +15,7 @@ pub struct Inputs {
     // Published font slices are immutable and retained by their owners.
     families: (usize, usize),
     cjk_families: (usize, usize),
-    descriptions: Vec<&'static str>,
+    descriptions: Vec<Option<&'static str>>,
     rows: Vec<SettingsRow>,
     shortcuts: Vec<crate::shortcuts::ShortcutRow>,
     profiles: Vec<crate::profiles::ProfileLine>,
@@ -52,7 +52,7 @@ impl Inputs {
             descriptions: content
                 .rows
                 .iter()
-                .map(|row| row.description(content.values))
+                .map(|row| row.literal_description(content.values))
                 .collect(),
             rows: content.rows.to_vec(),
             shortcuts: content.shortcuts.to_vec(),
@@ -230,7 +230,7 @@ mod tests {
             |i| {
                 i.rows.pop().unwrap();
             },
-            |i| i.descriptions.push("worker changed a row's sentence"),
+            |i| i.descriptions.push(Some("worker changed a row's sentence")),
             |i| {
                 i.scheme_files.push(SchemeFileLine {
                     name: "custom".into(),

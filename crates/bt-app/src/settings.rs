@@ -4210,14 +4210,33 @@ impl SettingsRow {
     /// one sentence covers both ends because `No limit` is a word in the picker
     /// that already says the rest.
     ///
-    /// Still `&'static str`, which is the i18n ruling's own constraint
+    /// Every other row's is still a `&'static str` ([`Self::literal_description`]),
+    /// which is the i18n ruling's own constraint
     /// (2026-08-13): the language table is a `match lang` returning one of two
     /// literals, and a description that varied by value *and* by language is
     /// still a choice among literals. A `String` here would allocate on every
     /// frame of a dialog that redraws on hover.
+    ///
+    /// About → Version's line is the one that is not a literal: it is the
+    /// Version view model's (`values.version_update`, T-UPDATE-ON-ABOUT), and
+    /// is borrowed from it for this frame rather than interned — its
+    /// relative-time forms change for as long as the process runs, and the
+    /// intern pool must not grow with time.
     #[must_use]
-    pub fn description(self, values: &SettingsValues) -> &'static str {
-        match self {
+    pub fn description(self, values: &SettingsValues) -> &str {
+        match self.literal_description(values) {
+            Some(sentence) => sentence,
+            None => &values.version_update.value,
+        }
+    }
+
+    /// [`Self::description`] when it is a literal, and `None` for About →
+    /// Version, whose line is `values.version_update`'s. The geometry's
+    /// inputs compare these, and compare `values` (which carries Version's
+    /// line) beside them.
+    #[must_use]
+    pub fn literal_description(self, values: &SettingsValues) -> Option<&'static str> {
+        Some(match self {
             // Mock-up 2496, word for word. It used to read "Light or dark" with
             // a note claiming the mock-up's line named a third option this build
             // did not have; System shipped, and the note outlived the fact —
@@ -4482,9 +4501,7 @@ impl SettingsRow {
             Self::QuakeCommand => Text::DescQuakeCommand.text(),
             Self::QuakeTopGap => Text::DescQuakeTopGap.text(),
             Self::QuakeRestore => Text::DescQuakeRestore.text(),
-            // The Version view model owns the complete value line for every
-            // updater state; intern it for this frame's borrowed row API.
-            Self::AboutVersion => crate::i18n::intern(values.version_update.value.clone()),
+            Self::AboutVersion => return None,
             Self::AboutPlatform => Text::DescAboutPlatform.text(),
             Self::AboutIssues => Text::DescAboutIssues.text(),
             Self::AboutLicences => Text::DescAboutLicences.text(),
@@ -4502,7 +4519,7 @@ impl SettingsRow {
                     .map(|(_, command)| command)
                     .unwrap_or_default(),
             )),
-        }
+        })
     }
 
     /// Which of the dialog's two control forms this row answers with.
@@ -5643,7 +5660,12 @@ impl SettingsRow {
     /// every other row.
     #[must_use]
     pub fn update_door(self, values: &SettingsValues) -> Option<(&'static str, bool)> {
-        (self == Self::AboutVersion).then(|| (values.version_update.control.text(), false))
+        (self == Self::AboutVersion).then(|| {
+            (
+                values.version_update.control.text(),
+                values.version_update.control.leaves_window(),
+            )
+        })
     }
 
     /// **The verb on this row's door button and whether it leaves the window**
@@ -13830,9 +13852,11 @@ pub fn build(
             && let (Some(link), Some(rect)) = (&values.version_update.link, layout.version_link)
         {
             let target = SettingsTarget::MenuAction(SettingsRow::AboutVersion);
+            let arrow = matches!(link, crate::update_card::VersionLink::WhatsNew { .. })
+                && !link.text().ends_with('↗');
             content_stack.labels.push(ChromeLabel {
                 mono: false,
-                text: format!("{} ↗", link.text()),
+                text: format!("{}{}", link.text(), if arrow { " ↗" } else { "" }),
                 rect,
                 font_size_px: desc_font,
                 color: palette.accent,
@@ -18690,7 +18714,8 @@ mod tests {
                 .map(|line| line.text.as_str())
                 .collect::<Vec<_>>()
                 .join(" ");
-            let sentence = row.row.description(&values());
+            let shown = values();
+            let sentence = row.row.description(&shown);
             if said.ends_with(ELLIPSIS) {
                 assert_eq!(
                     row.desc_lines, ROW_DESC_MAX_LINES,
@@ -18806,7 +18831,8 @@ mod tests {
             };
             for row in page {
                 measured.push(row);
-                let sentence = row.description(&values());
+                let shown = values();
+                let sentence = row.description(&shown);
                 let lines = wrapped_description(
                     sentence,
                     metrics.desc_width(row, span, button),
@@ -18971,7 +18997,8 @@ mod tests {
                 held.category_rows(category)
             };
             for row in page {
-                let english = row.description(&values());
+                let shown = values();
+                let english = row.description(&shown);
                 if english.is_empty() {
                     continue;
                 }
@@ -19695,7 +19722,8 @@ mod tests {
         for (_, page) in &dialog_pages {
             for row in page {
                 measured.push(*row);
-                let sentence = row.description(&values());
+                let shown = values();
+                let sentence = row.description(&shown);
                 if owner_ruled_exception(sentence, Lang::English) {
                     continue;
                 }
@@ -19727,9 +19755,9 @@ mod tests {
         // dynamic template with the longest shipped command and a longer tag,
         // plus each elapsed-time form, in the same column.
         let row = SettingsRow::AboutVersion;
-        let running = crate::version::VERSION;
+        let banner = crate::version::banner();
         let tag = "v10.10.10-preview";
-        let line = |state: String| format!("Folio {running} · {state}");
+        let line = |state: String| format!("{banner} · {state}");
         let day = 86_400_000;
         let now = 10_000 * day;
         let mut version_values = vec![
@@ -19938,10 +19966,12 @@ mod tests {
         let mut table = Shortcuts::defaults();
         let shipped = table.accelerator(Action::ToggleFocusMode);
         let drawn = |table: &Shortcuts| {
-            SettingsRow::FocusMode.description(&SettingsValues {
-                focus_mode_chord: table.accelerator(Action::ToggleFocusMode),
-                ..values()
-            })
+            SettingsRow::FocusMode
+                .literal_description(&SettingsValues {
+                    focus_mode_chord: table.accelerator(Action::ToggleFocusMode),
+                    ..values()
+                })
+                .expect("the focus-mode sentence is a literal")
         };
         let shipped = shipped.expect("focus-mode ships bound");
         assert!(
@@ -20076,7 +20106,8 @@ mod tests {
         };
         for (_, page) in &dialog_pages {
             for row in page {
-                let english = row.description(&values());
+                let shown = values();
+                let english = row.description(&shown);
                 if english.is_empty() {
                     continue;
                 }
@@ -20206,7 +20237,8 @@ mod tests {
                 held.category_rows(category)
             };
             for row in page {
-                let english = row.description(&values());
+                let shown = values();
+                let english = row.description(&shown);
                 if english.is_empty() {
                     continue;
                 }
@@ -25535,7 +25567,8 @@ mod tests {
             );
         }
         let drawn = drawn_text(&labels);
-        let sentence = SettingsRow::Formulas.description(&values());
+        let shown = values();
+        let sentence = SettingsRow::Formulas.description(&shown);
         assert!(
             drawn.contains(sentence),
             "the row says what Off does, and it is not drawn: {sentence:?} in {drawn:?}"
@@ -25561,7 +25594,8 @@ mod tests {
             0.0,
         );
         let labels = labels_of(&placed, None, &values());
-        let sentence = SettingsRow::Tables.description(&values());
+        let shown = values();
+        let sentence = SettingsRow::Tables.description(&shown);
         assert!(
             drawn_text(&labels).contains(sentence),
             "the row says what Off does, and it is not drawn: {sentence:?}"
@@ -25723,7 +25757,8 @@ mod tests {
             0.0,
         );
         let labels = labels_of(&placed, None, &values());
-        let sentence = SettingsRow::BlockMaxHeight.description(&values());
+        let shown = values();
+        let sentence = SettingsRow::BlockMaxHeight.description(&shown);
         assert!(
             drawn_text(&labels).contains(sentence),
             "the row says what a cap does, and it is not drawn: {sentence:?}"
@@ -25844,7 +25879,8 @@ mod tests {
             0.0,
         );
         let labels = labels_of(&placed, None, &values());
-        let sentence = SettingsRow::Scrollback.description(&values());
+        let shown = values();
+        let sentence = SettingsRow::Scrollback.description(&shown);
         assert!(
             drawn_text(&labels).contains(sentence),
             "the row says what the number buys, and it is not drawn: {sentence:?}"
@@ -26230,10 +26266,12 @@ mod tests {
         // rather than a switch are distinct from the plain one and from each
         // other.
         let sentence = |readiness| {
-            SettingsRow::CopilotHooks.description(&SettingsValues {
-                copilot_readiness: readiness,
-                ..values()
-            })
+            SettingsRow::CopilotHooks
+                .literal_description(&SettingsValues {
+                    copilot_readiness: readiness,
+                    ..values()
+                })
+                .expect("the copilot sentence is a literal")
         };
         assert_eq!(
             sentence(Readiness::Unknown),
@@ -28264,7 +28302,8 @@ mod tests {
         }
         let drawn = drawn_text(&labels);
         for row in [SettingsRow::TabLayout, SettingsRow::Sidebar] {
-            let sentence = row.description(&values());
+            let shown = values();
+            let sentence = row.description(&shown);
             assert!(
                 drawn.contains(sentence),
                 "{row:?}: the row's sentence is not drawn: {sentence:?}"
@@ -29530,8 +29569,10 @@ mod tests {
     /// Today every row's answer is constant in the values — the two the mock-up
     /// varies (`wrap-desc`, `blockmax-desc`) have no setting behind them yet and
     /// no row here. What this pins is the shape: the parameter is in the
-    /// signature, it reaches every arm, and the answer is still `&'static str`,
-    /// which is the i18n ruling's own constraint on this method.
+    /// signature, it reaches every arm, and every row's answer but About →
+    /// Version's is still a `&'static str` ([`SettingsRow::literal_description`]),
+    /// which is the i18n ruling's own constraint on this method; Version's is
+    /// borrowed from its view model (T-UPDATE-ON-ABOUT round 2).
     ///
     /// Red gate: drop the parameter and this does not compile, which is the
     /// point — the slice that adds Line wrapping adds a match arm, not a
@@ -29547,7 +29588,12 @@ mod tests {
             ..values()
         };
         for row in visible_rows(TabLayoutMode::Vertical) {
-            let line: &'static str = row.description(&light);
+            assert_eq!(
+                row.literal_description(&light).is_none(),
+                row == SettingsRow::AboutVersion,
+                "{row:?}: only Version's line is not a literal"
+            );
+            let line = row.description(&light);
             assert!(!line.is_empty(), "{row:?} says something");
             assert_eq!(
                 line,
@@ -32599,7 +32645,7 @@ mod tests {
         let rows = flat_rows();
         let mut visible = values();
         visible.version_update = crate::update_card::VersionRow {
-            value: format!("Folio {} · v0.4.7 available", crate::version::VERSION),
+            value: format!("{} · v0.4.7 available", crate::version::banner()),
             control: crate::update_card::VersionControl::UpdateAndRestart,
             link: Some(crate::update_card::VersionLink::WhatsNew {
                 tag: "v0.4.7".to_owned(),
@@ -32638,6 +32684,36 @@ mod tests {
         assert_eq!(
             hit(&placed, &visible, centre.0, centre.1),
             SettingsTarget::MenuAction(SettingsRow::AboutVersion)
+        );
+        let labels = labels_of(&placed, None, &visible);
+        assert!(
+            labels.iter().any(|label| label.text == "What's new ↗"),
+            "the release-notes link leaves the window"
+        );
+
+        visible.version_update.link = Some(crate::update_card::VersionLink::Details);
+        let held = SettingsContent {
+            values: &visible,
+            ..content(&rows, &[])
+        };
+        let placed = layout_for_menu(
+            SURFACE.0,
+            SURFACE.1,
+            1.0,
+            None,
+            None,
+            held,
+            SettingsCategory::About,
+            UNSCROLLED,
+            MENU_UNSCROLLED,
+            &mut measure,
+        )
+        .expect("the failed Version row fits");
+        let labels = labels_of(&placed, None, &visible);
+        assert!(labels.iter().any(|label| label.text == "Details"));
+        assert!(
+            !labels.iter().any(|label| label.text == "Details ↗"),
+            "Details reopens the in-process failed card"
         );
     }
 

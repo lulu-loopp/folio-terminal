@@ -479,13 +479,10 @@ fn offered(txn: u8) -> Job<u32> {
     let mut job = Job::with_offers(true);
     job.consider(
         Gathered {
-            check: Some((
-                UpdateCheckV1 {
-                    latest_tag: Some(TAG.to_owned()),
-                    ..UpdateCheckV1::default()
-                },
-                true,
-            )),
+            check: Some(UpdateCheckV1 {
+                latest_tag: Some(TAG.to_owned()),
+                ..UpdateCheckV1::default()
+            }),
             channel: Some(Channel::Ours),
             running: "0.4.6",
             capable: true,
@@ -1520,14 +1517,9 @@ fn launch(exe: &Path, resume: crate::update_prepare::Resumer, gathered: &Gathere
 /// and a check that has not settled yet (`check`) or that knows `v0.4.7`.
 fn at_launch_gathered(knows_the_release: bool) -> Gathered {
     Gathered {
-        check: knows_the_release.then(|| {
-            (
-                UpdateCheckV1 {
-                    latest_tag: Some(TAG.to_owned()),
-                    ..UpdateCheckV1::default()
-                },
-                true,
-            )
+        check: knows_the_release.then(|| UpdateCheckV1 {
+            latest_tag: Some(TAG.to_owned()),
+            ..UpdateCheckV1::default()
         }),
         channel: Some(Channel::Ours),
         running: "0.4.6",

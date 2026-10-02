@@ -390,11 +390,10 @@ pub fn newer_than<'tag>(latest: Option<&'tag str>, running: &str) -> Option<&'ta
 /// **The offer decision**: the tag this reader is offered, or `None` (0.4.6 ticket
 /// U-6; `docs/plans/design/self-update-2026-09-16.md` §B).
 ///
-/// Three conditions, all necessary:
+/// Two conditions, both necessary. Automatic check is not one of them: it is
+/// the daily schedule, and Off only stops the scheduled start (T-UPDATE-ON-ABOUT
+/// round 2, R4).
 ///
-/// * **The switch is on.** Off suppresses a cached offer as well as a new one: a
-///   tag the file learned while the switch was on is not offered after it goes
-///   off.
 /// * **The tag is newer than the running build** — [`newer_than`].
 /// * **The tag is above the skipped one by precedence**, not merely different
 ///   from it. A tag at or below `skipped_tag` is never offered again, and a tag
@@ -405,14 +404,7 @@ pub fn newer_than<'tag>(latest: Option<&'tag str>, running: &str) -> Option<&'ta
 /// A `skipped_tag` that does not parse as a version skips nothing, for
 /// [`newest_tag`]'s reason: a tag that is not a version takes no part in ordering.
 #[must_use]
-pub fn should_offer<'state>(
-    state: &'state UpdateCheckV1,
-    running: &str,
-    enabled: bool,
-) -> Option<&'state str> {
-    if !enabled {
-        return None;
-    }
+pub fn should_offer<'state>(state: &'state UpdateCheckV1, running: &str) -> Option<&'state str> {
     let tag = newer_than(state.latest_tag.as_deref(), running)?;
     let skipped = state.skipped_tag.as_deref().and_then(Version::parse);
     match (Version::parse(tag), skipped) {
@@ -429,8 +421,8 @@ pub fn should_offer<'state>(
 /// keyed by the tag rather than by a flag, so the next release lights it again
 /// without anything having to clear anything.
 #[must_use]
-pub fn mark_is_lit(state: &UpdateCheckV1, running: &str, enabled: bool) -> bool {
-    should_offer(state, running, enabled).is_some_and(|tag| Some(tag) != state.seen_tag.as_deref())
+pub fn mark_is_lit(state: &UpdateCheckV1, running: &str) -> bool {
+    should_offer(state, running).is_some_and(|tag| Some(tag) != state.seen_tag.as_deref())
 }
 
 /// Whether the releases page is owed a question.
@@ -829,28 +821,28 @@ impl OfferState {
     }
 
     /// **What the update job decides on** (U-18): the state as this process
-    /// holds it and the switch — once this launch's check has settled, and
-    /// `None` before, so no offer is derived from a cache the check is about to
-    /// replace.
+    /// holds it — once this launch's check has settled, and `None` before, so
+    /// no offer is derived from a cache the check is about to replace. The
+    /// Automatic check switch is not part of it: it is the daily schedule only.
     #[must_use]
-    pub fn job_evidence(&self) -> Option<(UpdateCheckV1, bool)> {
+    pub fn job_evidence(&self) -> Option<UpdateCheckV1> {
         self.settled
             .load(AtomicOrdering::Acquire)
-            .then(|| (self.known(), true))
+            .then(|| self.known())
     }
 
     /// The tag this reader is offered now — [`should_offer`] over this owner's
     /// evidence. The schedule switch is deliberately not eligibility.
     #[must_use]
     pub fn offer(&self, running: &str) -> Option<String> {
-        should_offer(&self.known(), running, true).map(str::to_owned)
+        should_offer(&self.known(), running).map(str::to_owned)
     }
 
     /// Whether the gear wears its mark — [`mark_is_lit`] over this owner's
     /// evidence. The schedule switch is deliberately not visibility.
     #[must_use]
     pub fn mark_is_lit(&self, running: &str) -> bool {
-        mark_is_lit(&self.known(), running, true)
+        mark_is_lit(&self.known(), running)
     }
 
     /// The part of the check state the About page can show without reading the
@@ -1247,7 +1239,7 @@ fn forget_a_local_answer(state: &mut UpdateCheckV1) -> bool {
 /// owner.
 #[must_use]
 pub fn gear_mark_is_lit<W: Copy + Eq>(job: &crate::update_job::Job<W>) -> bool {
-    matches!(job.state(), crate::update_job::State::Failed(..))
+    job.last_failure().is_some()
         || OWNER
             .get()
             .is_some_and(|owner| owner.mark_is_lit(crate::version::VERSION))
@@ -1258,7 +1250,7 @@ pub fn gear_mark_is_lit<W: Copy + Eq>(job: &crate::update_job::Job<W>) -> bool {
 /// there is one, then the running version as the last honest fallback.
 #[must_use]
 pub fn gear_mark_tag<W: Copy + Eq>(job: &crate::update_job::Job<W>) -> Option<String> {
-    if let crate::update_job::State::Failed(failed_offer, _) = job.state() {
+    if let Some((failed_offer, _)) = job.last_failure() {
         return Some(
             failed_offer
                 .as_ref()
@@ -1273,7 +1265,7 @@ pub fn gear_mark_tag<W: Copy + Eq>(job: &crate::update_job::Job<W>) -> Option<St
 /// **What the update job decides on** — [`OfferState::job_evidence`] of this
 /// process's owner; `None` before the owner is opened or its check settles.
 #[must_use]
-pub fn job_evidence() -> Option<(UpdateCheckV1, bool)> {
+pub fn job_evidence() -> Option<UpdateCheckV1> {
     OWNER.get().and_then(OfferState::job_evidence)
 }
 
@@ -1347,6 +1339,13 @@ pub fn begin_now() -> bool {
     spawn_check(true)
 }
 
+/// Whether this entry may start the shared check worker. Automatic check gates
+/// only the scheduled entry; a reader's Check is independent of it.
+#[must_use]
+const fn check_entry_allowed(now: bool, automatic: bool) -> bool {
+    now || automatic
+}
+
 fn spawn_check(now: bool) -> bool {
     let Some(owner) = OWNER.get() else {
         return false;
@@ -1355,7 +1354,7 @@ fn spawn_check(now: bool) -> bool {
         owner.settle();
         crate::update_job::evidence_landed();
     };
-    if !now && !owner.enabled() {
+    if !check_entry_allowed(now, owner.enabled()) {
         settled_without_asking();
         return false;
     }
@@ -1423,7 +1422,7 @@ pub(crate) fn unix_epoch_ms() -> u64 {
 mod tests {
     use super::{
         CHECK_INTERVAL_MS, CLAIM_STALE_MS, OfferState, Outcome, Releases, STATE_FILE_NAME, Version,
-        due, eligible, mark_is_lit, newer_than, newest_tag,
+        check_entry_allowed, due, eligible, mark_is_lit, newer_than, newest_tag,
     };
     use bt_persist::UpdateCheckV1;
 
@@ -1461,7 +1460,10 @@ mod tests {
     use std::{
         cell::RefCell,
         path::{Path, PathBuf},
-        sync::atomic::{AtomicU32, Ordering},
+        sync::{
+            Arc,
+            atomic::{AtomicU32, Ordering},
+        },
     };
 
     /// A private directory for one test, cleaned on the way in as well as out —
@@ -1621,17 +1623,14 @@ mod tests {
             latest_tag: Some("v0.1.1".to_owned()),
             ..UpdateCheckV1::default()
         };
-        assert!(
-            mark_is_lit(&state, "0.1.0", true),
-            "a newer tag lights the mark"
-        );
+        assert!(mark_is_lit(&state, "0.1.0"), "a newer tag lights the mark");
 
         OfferState::load(&root, true)
             .mark_seen("v0.1.1")
             .expect("the acknowledgement is written");
         state.seen_tag = state_of(&root).seen_tag;
         assert!(
-            !mark_is_lit(&state, "0.1.0", true),
+            !mark_is_lit(&state, "0.1.0"),
             "the mark goes out once this reader has been shown this version"
         );
 
@@ -1639,7 +1638,7 @@ mod tests {
         // anything.
         state.latest_tag = Some("v0.1.2".to_owned());
         assert!(
-            mark_is_lit(&state, "0.1.0", true),
+            mark_is_lit(&state, "0.1.0"),
             "a version that has not been seen lights the mark whatever was seen before"
         );
 
@@ -1649,7 +1648,7 @@ mod tests {
             latest_tag: Some("v0.0.9".to_owned()),
             ..UpdateCheckV1::default()
         };
-        assert!(!mark_is_lit(&old, "0.1.0", true));
+        assert!(!mark_is_lit(&old, "0.1.0"));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1728,7 +1727,7 @@ mod tests {
             "the stamp advanced on the refusal"
         );
         assert_eq!(state.latest_tag, None, "and nothing was invented to draw");
-        assert!(!mark_is_lit(&state, "0.1.0", true));
+        assert!(!mark_is_lit(&state, "0.1.0"));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2060,7 +2059,7 @@ mod tests {
         let fresh = state_of(&root);
         assert_eq!(fresh.latest_tag, None);
         assert_eq!(newer_than(fresh.latest_tag.as_deref(), running), None);
-        assert!(!mark_is_lit(&fresh, running, true));
+        assert!(!mark_is_lit(&fresh, running));
 
         // ② Asked, and this build is the newest there is.
         assert_eq!(
@@ -2069,7 +2068,7 @@ mod tests {
         );
         let current = state_of(&root);
         assert_eq!(newer_than(current.latest_tag.as_deref(), running), None);
-        assert!(!mark_is_lit(&current, running, true));
+        assert!(!mark_is_lit(&current, running));
 
         // ③ A newer release. This is the only state whose sentence names a
         //    version, and it names the verb beside it.
@@ -2082,7 +2081,7 @@ mod tests {
             newer_than(available.latest_tag.as_deref(), running),
             Some(newer)
         );
-        assert!(mark_is_lit(&available, running, true));
+        assert!(mark_is_lit(&available, running));
 
         // ④ Could not ask. The stamp advances, and the tag this machine already
         //    knew about stays known — a failed check is a silence, not an
@@ -2313,7 +2312,7 @@ mod tests {
             ("v0.5.0", Some("nightly"), true),
         ] {
             assert_eq!(
-                super::should_offer(&state(latest, skipped), "0.4.6", true).is_some(),
+                super::should_offer(&state(latest, skipped), "0.4.6").is_some(),
                 offered,
                 "{latest} with {skipped:?} skipped"
             );
@@ -2322,24 +2321,29 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// RED (T-UPDATE-ON-ABOUT) — **Off controls the automatic schedule, not
-    /// Version's evidence or its manual Check.**
+    /// RED (T-UPDATE-ON-ABOUT round 2, R4) — **Off stops the daily timer and
+    /// nothing else**: the scheduled entry (`begin`) is refused while Off, and
+    /// a reader's Check (`begin_now`) is still admitted.
     ///
-    /// MUTATION: pass `self.enabled()` to `should_offer` from `offer`; the
-    /// cached and in-flight assertions go red when the schedule is Off.
+    /// MUTATION: change `now || automatic` to `automatic`; manual Check is
+    /// refused while Off and this goes red.
     #[test]
-    fn automatic_check_off_keeps_cached_and_inflight_manual_answers() {
-        struct TurnsOff<'owner> {
-            owner: &'owner OfferState,
-        }
-        impl Releases for TurnsOff<'_> {
-            fn latest_tag(&self) -> Result<String, String> {
-                self.owner.set_enabled(false);
-                Ok("v9.1.0".to_owned())
-            }
-        }
+    fn automatic_check_off_stops_only_the_scheduled_entry() {
+        assert!(!check_entry_allowed(false, false));
+        assert!(check_entry_allowed(false, true));
+        assert!(check_entry_allowed(true, false));
+        assert!(check_entry_allowed(true, true));
+    }
 
-        let root = dir("switch-off");
+    /// RED (T-UPDATE-ON-ABOUT round 2, R4) — **a known offer and its mark
+    /// stay when Automatic check is Off**, loaded Off and switched Off alike.
+    ///
+    /// MUTATION: make `OfferState::offer` answer `None` while
+    /// `!self.enabled()` (the pre-ticket suppression); the offer assertions go
+    /// red (the same guard in `OfferState::mark_is_lit` reddens the mark's).
+    #[test]
+    fn automatic_check_off_keeps_a_known_offer_and_its_mark() {
+        let root = dir("switch-off-known");
         bt_persist::write_update_check_atomic(
             &root.join(STATE_FILE_NAME),
             &UpdateCheckV1 {
@@ -2349,22 +2353,34 @@ mod tests {
             },
         )
         .expect("a cached answer");
-
         let owner = OfferState::load(&root, false);
-        assert_eq!(
-            owner.offer("0.4.6").as_deref(),
-            Some("v9.0.0"),
-            "Off does not hide evidence already learned"
-        );
+        assert_eq!(owner.offer("0.4.6").as_deref(), Some("v9.0.0"));
         assert!(owner.mark_is_lit("0.4.6"));
         owner.set_enabled(true);
-        assert_eq!(owner.offer("0.4.6").as_deref(), Some("v9.0.0"));
         owner.set_enabled(false);
-        assert_eq!(
-            owner.offer("0.4.6").as_deref(),
-            Some("v9.0.0"),
-            "and switching the schedule Off leaves it visible"
-        );
+        assert_eq!(owner.offer("0.4.6").as_deref(), Some("v9.0.0"));
+        assert!(owner.mark_is_lit("0.4.6"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-UPDATE-ON-ABOUT round 2, R4) — **an answer already on the wire
+    /// is recorded** and offered even if Automatic check is turned Off before
+    /// it lands.
+    ///
+    /// MUTATION: in `OfferState::ask`'s answered branch, return
+    /// `Outcome::Refused` without the write while `!self.enabled()` (the
+    /// pre-ticket `SwitchedOff`); the outcome and both later assertions go red.
+    #[test]
+    fn an_answer_already_on_the_wire_is_kept_after_automatic_check_goes_off() {
+        struct TurnsOff<'owner> {
+            owner: &'owner OfferState,
+        }
+        impl Releases for TurnsOff<'_> {
+            fn latest_tag(&self) -> Result<String, String> {
+                self.owner.set_enabled(false);
+                Ok("v9.1.0".to_owned())
+            }
+        }
 
         let fresh = dir("switch-off-inflight");
         let inflight = OfferState::load(&fresh, true);
@@ -2379,8 +2395,87 @@ mod tests {
             "the manual answer that landed after Off is still written"
         );
 
-        let _ = std::fs::remove_dir_all(&root);
         let _ = std::fs::remove_dir_all(&fresh);
+    }
+
+    /// RED (T-UPDATE-ON-ABOUT round 2, R4) — **turning Automatic check Off
+    /// does not cancel a download the reader started.** The setting's road
+    /// tells the check owner only (`update::set_enabled`); the owner's
+    /// evidence carries no switch, and the evidence landing again after Off
+    /// leaves the job downloading: its driver is not told to stop, and its
+    /// next report still moves it.
+    ///
+    /// MUTATION: in `Job::consider`'s `offered_this_launch` branch, stop the
+    /// driver and return the job to Idle when the decision is refreshed (a
+    /// re-decision of a job in flight); the job leaves Downloading and the
+    /// cancel flag is set.
+    #[test]
+    fn automatic_check_off_does_not_cancel_a_started_download() {
+        use crate::install_channel::Channel;
+        use crate::update_job::{
+            Bytes, Driver, Gathered, Job, NoDownloadDoor, Offer, Poster, Presenters, Refused,
+            SharedTransport, State, Step, Verb,
+        };
+        use crate::update_txn::TxnId;
+
+        #[derive(Default)]
+        struct Starts(RefCell<Option<Poster>>);
+        impl Driver for Starts {
+            fn prepare(
+                &self,
+                _: &Offer,
+                _: &SharedTransport,
+                post: &Poster,
+            ) -> Result<(), Refused> {
+                *self.0.borrow_mut() = Some(post.clone());
+                Ok(())
+            }
+        }
+
+        let root = dir("switch-off-download-更新");
+        bt_persist::write_update_check_atomic(
+            &root.join(STATE_FILE_NAME),
+            &UpdateCheckV1 {
+                latest_tag: Some("v0.4.7".to_owned()),
+                ..UpdateCheckV1::default()
+            },
+        )
+        .expect("a cached answer");
+        let owner = OfferState::load(&root, true);
+        owner.settle();
+        let gathered = |owner: &OfferState| Gathered {
+            check: owner.job_evidence(),
+            channel: Some(Channel::Ours),
+            running: "0.4.6",
+            capable: true,
+            trial: false,
+            platform: bt_platform::HostPlatform::Windows,
+        };
+        let presenters = Presenters {
+            visited: &[1],
+            open: &[1],
+            quake: None,
+        };
+        let mut job = Job::with_offers(true);
+        job.consider(gathered(&owner), &presenters, || TxnId::new([3; 16]));
+        let driver = Starts::default();
+        let transport: SharedTransport = Arc::new(NoDownloadDoor);
+        job.answer_verb(Verb::Press, &driver, &transport)
+            .expect("the download starts");
+        let poster = driver.0.borrow_mut().take().expect("the running driver");
+
+        owner.set_enabled(false);
+        job.consider(gathered(&owner), &presenters, || TxnId::new([4; 16]));
+        assert!(matches!(job.state(), State::Downloading(..)));
+        assert!(!poster.cancelled(), "the driver is not told to stop");
+        let bytes = Bytes {
+            received: 5_000_000,
+            total: Some(40_000_000),
+        };
+        poster.post(Step::Received(bytes));
+        assert_eq!(job.drain_progress(), 0, "its report still moves the job");
+        assert!(matches!(job.state(), State::Downloading(_, now) if *now == bytes));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// RED (U-18) — **the update job decides only once this launch's check has
@@ -2389,8 +2484,8 @@ mod tests {
     /// The job's typed pending state waits for two facts, and this is the
     /// check's: before the check settles, the owner hands the job nothing, so a
     /// cached tag the check is about to replace is never offered on; after an
-    /// answer, a refusal, a fresh stamp or a held claim, it hands over the state
-    /// and the switch. Each outcome is a real `run` over a real directory.
+    /// answer, a refusal, a fresh stamp or a held claim, it hands over the state.
+    /// Each outcome is a real `run` over a real directory.
     ///
     /// MUTATION: drop `self.settle()` from `OfferState::run` and every owner
     /// below still answers `None`.
@@ -2409,9 +2504,8 @@ mod tests {
             owner.run(start, &Counting::ok("v0.1.1")),
             Outcome::Answered("v0.1.1".to_owned())
         );
-        let (state, switch) = owner.job_evidence().expect("an answer settles the check");
+        let state = owner.job_evidence().expect("an answer settles the check");
         assert_eq!(state.latest_tag.as_deref(), Some("v0.1.1"));
-        assert!(switch);
         // A later launch inside the day: the stamp is fresh and the cache is the answer.
         let again = OfferState::load(&root, true);
         assert_eq!(again.job_evidence(), None);
@@ -2420,7 +2514,7 @@ mod tests {
             Outcome::TooSoon
         );
         assert_eq!(
-            again.job_evidence().map(|(state, _)| state.latest_tag),
+            again.job_evidence().map(|state| state.latest_tag),
             Some(Some("v0.1.1".to_owned())),
             "a fresh stamp settles the check on the cached answer"
         );

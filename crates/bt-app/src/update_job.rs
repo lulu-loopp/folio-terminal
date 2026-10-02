@@ -26,7 +26,7 @@
 //!
 //! # Eligibility is a pure function
 //!
-//! [`Evidence::eligibility`] reads the switch, the offer decision
+//! [`Evidence::eligibility`] reads the offer decision
 //! ([`crate::update::should_offer`]: newer, and above a skipped tag by
 //! precedence), the channel (§D: only [`Channel::Ours`]; a managed copy gets its
 //! manager's command, `NotOurs` and `Unknown` the releases page), the build's
@@ -248,9 +248,9 @@ pub(crate) enum Pending {
 /// and the three that are known at start.
 #[derive(Clone, Debug)]
 pub(crate) struct Gathered {
-    /// The check's state and the switch, once this launch's check has settled
+    /// The check's state, once this launch's check has settled
     /// ([`crate::update::job_evidence`]).
-    pub(crate) check: Option<(UpdateCheckV1, bool)>,
+    pub(crate) check: Option<UpdateCheckV1>,
     /// How this copy was installed, once read ([`crate::install_channel::channel`]).
     pub(crate) channel: Option<Channel>,
     /// The running build's version.
@@ -284,8 +284,7 @@ impl Gathered {
     /// The [`Pending`] naming what has not arrived.
     pub(crate) fn complete(self) -> Result<Evidence, Pending> {
         match (self.check, self.channel) {
-            (Some((check, switch)), Some(channel)) => Ok(Evidence {
-                switch,
+            (Some(check), Some(channel)) => Ok(Evidence {
                 check,
                 running: self.running,
                 channel,
@@ -303,8 +302,6 @@ impl Gathered {
 /// **Everything an offer is decided on**, complete.
 #[derive(Clone, Debug)]
 pub(crate) struct Evidence {
-    /// The reader's switch (Settings > General > update check).
-    pub(crate) switch: bool,
     /// `update-check.json` as this process holds it after the day's check.
     pub(crate) check: UpdateCheckV1,
     /// The running build's version.
@@ -330,8 +327,6 @@ pub(crate) struct Eligible {
 pub(crate) enum NotEligible {
     /// This process is an update's trial: it is proving a build, not choosing one.
     Trial,
-    /// The reader turned the check off.
-    SwitchOff,
     /// Nothing newer than the running build is known.
     NoNewerRelease,
     /// The newest tag is at or below the one the reader skipped.
@@ -374,9 +369,7 @@ impl NotEligible {
     #[must_use]
     pub(crate) const fn route(&self) -> Route {
         match self {
-            Self::Trial | Self::SwitchOff | Self::NoNewerRelease | Self::Skipped { .. } => {
-                Route::Nothing
-            }
+            Self::Trial | Self::NoNewerRelease | Self::Skipped { .. } => Route::Nothing,
             Self::Managed { command, .. } => Route::Command(command),
             Self::NotOurs
             | Self::Unknown
@@ -391,7 +384,6 @@ impl NotEligible {
     pub(crate) fn why(&self) -> String {
         match self {
             Self::Trial => "this start is an update's trial".to_owned(),
-            Self::SwitchOff => "the check is switched off".to_owned(),
             Self::NoNewerRelease => "no newer release is known".to_owned(),
             Self::Skipped { tag } => format!("{tag} is at or below the skipped tag"),
             Self::Managed { manager, command } => {
@@ -421,8 +413,9 @@ impl Evidence {
     /// of §B's "when all of" and §D's classification column.
     ///
     /// The order is the order a reason is named in: a trial first (it never
-    /// offers), then the switch, then whether there is anything newer, then who
-    /// owns the copy, then the build, then the file.
+    /// offers), then whether there is anything newer, then who owns the copy,
+    /// then the build, then the file. Automatic check is a schedule and is not
+    /// eligibility.
     ///
     /// # Errors
     /// The first condition that does not hold.
@@ -430,10 +423,7 @@ impl Evidence {
         if self.trial {
             return Err(NotEligible::Trial);
         }
-        if !self.switch {
-            return Err(NotEligible::SwitchOff);
-        }
-        let Some(tag) = should_offer(&self.check, self.running, self.switch) else {
+        let Some(tag) = should_offer(&self.check, self.running) else {
             return Err(
                 match newer_than(self.check.latest_tag.as_deref(), self.running) {
                     Some(tag) => NotEligible::Skipped {
@@ -1230,8 +1220,8 @@ pub(crate) struct Poster {
     txn: TxnId,
     inbox: Arc<Mutex<Vec<Progress>>>,
     staged: StagedSlot,
-    /// Set by the job when the reader cancels this transaction's download (or
-    /// turns the check off under it): the driver stops at its next step.
+    /// Set by the job when the reader cancels this transaction's download: the
+    /// driver stops at its next step.
     cancelled: Arc<AtomicBool>,
 }
 
@@ -1330,6 +1320,15 @@ pub(crate) struct Job<W> {
     put_away: bool,
     /// The last decision, for U-19's row.
     answer: Option<Result<Eligible, NotEligible>>,
+    /// The platform whose release grammar the last decision used. Kept beside
+    /// `answer` so an asked offer can mint exactly the offer that decision
+    /// permits without re-running eligibility.
+    offer_platform: Option<HostPlatform>,
+    /// The last failure of this launch (R3). Closing its card moves the state
+    /// to `Idle`; About → Version and the gear's mark keep naming it until a
+    /// new attempt's download starts, or the update it named completes
+    /// ([`Self::after_commit`]).
+    last_failure: Option<(Option<Offer>, Failure)>,
     /// Whether the decision has been written to `diagnostics.log`.
     said: bool,
     /// [`Job::offers_enabled`] in the product.
@@ -1401,6 +1400,8 @@ impl<W: Copy + Eq> Job<W> {
             presenter: None,
             put_away: false,
             answer: None,
+            offer_platform: None,
+            last_failure: None,
             said: false,
             offers,
             inbox: Arc::new(Mutex::new(Vec::new())),
@@ -1413,11 +1414,10 @@ impl<W: Copy + Eq> Job<W> {
         }
     }
 
-    /// **The download is given up** (Cancel, or the switch turned off under
-    /// it): the driver is told to stop at its next step, and a staged
-    /// transaction it may already have left is let go — its lock released, its
-    /// journal left at `Prepared` for a later launch to count or resume
-    /// ((b).1 F-17). A job that has moved on holds nothing of it.
+    /// **The download is given up** (Cancel): the driver is told to stop at
+    /// its next step, and a staged transaction it may already have left is let
+    /// go — its lock released, its journal left at `Prepared` for a later
+    /// launch to count or resume ((b).1 F-17). A job that has moved on holds nothing of it.
     fn stop_the_driver(&mut self) {
         if let Some(flag) = self.running.take() {
             flag.store(true, Ordering::SeqCst);
@@ -1438,6 +1438,7 @@ impl<W: Copy + Eq> Job<W> {
     pub(crate) fn after_rollback(mut self, failure: Option<Failure>) -> Self {
         if let Some(failure) = failure {
             self.said_incomplete = matches!(failure, Failure::Incomplete { .. });
+            self.last_failure = Some((None, failure.clone()));
             self.state = State::Failed(None, failure);
             self.offered_this_launch = true;
         }
@@ -1465,6 +1466,7 @@ impl<W: Copy + Eq> Job<W> {
             return false;
         }
         self.said_incomplete = false;
+        self.last_failure = None;
         self.state = State::Updated(version.to_owned());
         true
     }
@@ -1675,6 +1677,14 @@ impl<W: Copy + Eq> Job<W> {
         self.answer.as_ref()
     }
 
+    /// The failure About > Version keeps naming after its card was closed.
+    #[must_use]
+    pub(crate) fn last_failure(&self) -> Option<(&Option<Offer>, &Failure)> {
+        self.last_failure
+            .as_ref()
+            .map(|(offer, failure)| (offer, failure))
+    }
+
     /// **The window the card is drawn in now**, or `None` when no card is up
     /// (U-19).
     ///
@@ -1709,10 +1719,56 @@ impl<W: Copy + Eq> Job<W> {
         true
     }
 
-    /// Raise the unchanged failed card as the Version row's `Details`. This
-    /// only chooses its presenting window; it does not move the job or add a
-    /// card state.
+    /// **The release an asked offer would name** (T-UPDATE-ON-ABOUT round 2,
+    /// R1): the last decision's eligible tag, while it is the tag the check
+    /// owner offers now (`known_tag`, [`crate::update::offer`]), offers reach
+    /// this build ([`Self::offers_enabled`]), and no update this launch was
+    /// told is incomplete may still be committed forward ([`Self::after_commit`]).
+    /// The state is not read: [`Self::offer_again`] acts only from `Idle`.
+    #[must_use]
+    pub(crate) fn asked_offer(&self, known_tag: Option<&str>) -> Option<&str> {
+        let Some(Ok(eligible)) = &self.answer else {
+            return None;
+        };
+        (self.offers
+            && !self.said_incomplete
+            && self.offer_platform.is_some()
+            && known_tag == Some(eligible.tag.as_str()))
+        .then_some(eligible.tag.as_str())
+    }
+
+    /// **The reader asks for the offer from About → Version** (T-UPDATE-ON-ABOUT
+    /// round 2, R1): from `Idle` — after Later, or after a failed card was
+    /// closed — the job raises the same `Available` offer [`Self::consider`]
+    /// raises for [`Self::asked_offer`]'s tag, in `window`, the window the row
+    /// was pressed in. Independent of `offered_this_launch`, which stops a
+    /// second *unasked* card; an asked one is not unasked. Answers whether the
+    /// offer is up; the card's `Update` verb then runs unchanged.
+    pub(crate) fn offer_again(&mut self, window: W, known_tag: Option<&str>) -> bool {
+        if !matches!(self.state, State::Idle) {
+            return false;
+        }
+        let (Some(tag), Some(platform)) = (self.asked_offer(known_tag), self.offer_platform) else {
+            return false;
+        };
+        let Some(offer) = Offer::mint(mint_txn(), tag, platform) else {
+            return false;
+        };
+        self.state = State::Available(offer);
+        self.presenter = Some(window);
+        self.put_away = false;
+        true
+    }
+
+    /// **About → Version's `Details`**: the failed card in `window`. A failed
+    /// card that was closed (`Idle`, the failure remembered for this launch,
+    /// R3) is raised again with the same failure; Later closes it as before.
     pub(crate) fn show_failure(&mut self, window: W) -> bool {
+        if matches!(self.state, State::Idle)
+            && let Some((offer, failure)) = self.last_failure.clone()
+        {
+            self.state = State::Failed(offer, failure);
+        }
         if !matches!(self.state, State::Failed(..)) {
             return false;
         }
@@ -1774,6 +1830,14 @@ impl<W: Copy + Eq> Job<W> {
             Pass::Ordinary => {}
         }
         if self.offered_this_launch {
+            // The launch's one unasked offer is spent, and the state does not
+            // move; the decision is still kept current, so About → Version names
+            // and asks for ([`Self::offer_again`]) what the evidence permits now
+            // — a reader's Check can learn a newer tag after Later.
+            if let Ok(evidence) = gathered.complete() {
+                self.offer_platform = Some(evidence.platform);
+                self.answer = Some(evidence.eligibility());
+            }
             return None;
         }
         let evidence = match gathered.complete() {
@@ -1784,6 +1848,7 @@ impl<W: Copy + Eq> Job<W> {
             }
         };
         let answer = evidence.eligibility();
+        self.offer_platform = Some(evidence.platform);
         self.state = State::Idle;
         let line = (!self.said).then(|| {
             self.said = true;
@@ -1889,6 +1954,11 @@ impl<W: Copy + Eq> Job<W> {
             // The driver is done: nothing is left to cancel.
             self.running = None;
         }
+        if applied == Applied::Moved
+            && let State::Failed(offer, failure) = &next
+        {
+            self.last_failure = Some((offer.clone(), failure.clone()));
+        }
         self.state = next;
         applied
     }
@@ -1922,6 +1992,7 @@ impl<W: Copy + Eq> Job<W> {
                 };
                 match driver.prepare(&offer, transport, &post) {
                     Ok(()) => {
+                        self.last_failure = None;
                         self.running = Some(cancelled);
                         (
                             State::Downloading(offer, Bytes::default()),
@@ -1969,6 +2040,9 @@ impl<W: Copy + Eq> Job<W> {
         if matches!(next, State::Idle) {
             self.presenter = None;
             self.put_away = false;
+        }
+        if let State::Failed(offer, failure) = &next {
+            self.last_failure = Some((offer.clone(), failure.clone()));
         }
         self.state = next;
         outcome
@@ -2021,11 +2095,11 @@ mod tests {
         }
     }
 
-    /// Everything in: a newer tag, switch on, a flagged build, not a trial —
+    /// Everything in: a newer tag, a flagged build, not a trial —
     /// with the channel as given.
     fn gathered(latest: &str, skipped: Option<&str>, channel: Option<Channel>) -> Gathered {
         Gathered {
-            check: Some((check(Some(latest), skipped), true)),
+            check: Some(check(Some(latest), skipped)),
             channel,
             running: RUNNING,
             capable: true,
@@ -2657,7 +2731,6 @@ mod tests {
         platform: HostPlatform,
     ) -> Result<super::Eligible, NotEligible> {
         Evidence {
-            switch: true,
             check: check(Some("v0.4.7"), None),
             running: RUNNING,
             channel,

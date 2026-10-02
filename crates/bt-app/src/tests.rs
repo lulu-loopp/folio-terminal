@@ -19209,7 +19209,9 @@ fn every_surface_that_names_the_product_says_the_same_name() {
         ),
         (
             "the settings dialog's startup row",
-            settings::SettingsRow::DefaultProfile.description(&settings::SettingsValues::sample()),
+            settings::SettingsRow::DefaultProfile
+                .literal_description(&settings::SettingsValues::sample())
+                .expect("the startup row's sentence is a literal"),
         ),
         ("the restore prompt", restore::sub_text()),
         ("this terminal's own banner", &banner),

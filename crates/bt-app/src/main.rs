@@ -61102,7 +61102,7 @@ impl FolioApp {
             open: &open,
             quake: app.quake.window(),
         });
-        let now = update_card::shown(&app.update_job);
+        let now = update_card::shown(&app.update_job, update::gear_mark_is_lit(&app.update_job));
         if now == app.update_shown {
             return Ok(());
         }
@@ -61114,7 +61114,7 @@ impl FolioApp {
                 .map(|(window, paint)| (*window, paint.verbs.clone()))
         };
         let reset = verbs(&before) != verbs(&now);
-        if before.foot != now.foot {
+        if update_card::version_changed(&before, &now) {
             return self.for_each_window(|runtime| {
                 if reset {
                     runtime.window.update_card.reset();

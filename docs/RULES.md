@@ -966,9 +966,11 @@ answer is the gear's mark and About → Version's state line. `update-check.json
 claim file keeps a second process from asking the same day. The offer decision is
 `update::should_offer`: a tag newer than the running build and above
 `skipped_tag` by precedence (Skip only raises it). The **Automatic check** switch
-directly below Version controls only the daily start: Off starts no scheduled
-thread and writes nothing, while Version's **Check** still uses the same worker
-door and cached or in-flight evidence remains visible.
+directly below Version is the daily schedule and nothing else — **Off, Folio
+never checks by itself**: no scheduled thread starts and nothing is written.
+Version's **Check** still asks through the same worker door; a known offer and
+the gear's mark stay; an answer already on the wire is recorded; a download
+already started is not cancelled. The switch is not eligibility.
 `--update-feed <file-URL>` makes one start read a local folder in the releases
 list's shape instead of github.com, for the check and the download alike; it is
 never persisted and moves nothing else — not the gate, not the checksum, not the
@@ -984,7 +986,11 @@ and **on for macOS** (U-32), off wherever no release is built. With the gate
 off the job decides and stays `Idle`. With it on, an eligible answer mints the
 offer once — `{txn, tag, asset, hash_doc, to_version}`, never derived again —
 and raises the card once per launch in the ordinary window the reader was last
-in, never the summoned terminal. **The frozen address**: a press fetches exactly
+in, never the summoned terminal. An offer put away with Later, or a failed card
+that was closed, comes back only when asked — About → Version's **Update and
+restart** or **Retry** raises the same `Available` offer from `Idle`
+(`Job::offer_again`), in the window pressed, for the decision the job keeps
+current after its one unasked offer; never unasked. **The frozen address**: a press fetches exactly
 two files, by the offer's own tag, from
 `https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/` —
 `folio-<version>-windows-x64.zip` with `SHA256SUMS.txt`, or
@@ -1000,10 +1006,18 @@ holds the window's keys until answered
 or put away, and follows its window when that window closes. **Restart asks the
 application's quit** (`App::restart_for_update`: `Job::restart`, then the one
 quit door with `Reason::UpdateRestart`), never the job alone. About → Version is
-the one update surface: its state line and single control are read from the
-check and job; a release links to that tag's notes, `Verified` offers **Update
-and restart**, and a managed copy names its manager's command with **Copy
-command**. **The road
+the one update surface: its line is `Folio <version> (<commit>) · <state>`, and
+its single control is read from the job's actionable state and route, never
+from the check's offer alone — `Pending` names its state and has no verb; an
+eligible offer has **Update and restart** (the card's Update); a download shows
+its progress; `Verified` raises its card again; a managed copy names its
+manager's command with **Copy command**; every other ineligible answer (not
+ours, unknown, no updater flag, no release file here, offers off in this build)
+opens the releases page. A release links to that tag's notes. A failure stays
+named for the rest of the launch after its card is closed, with **Details** (the
+failed card again) and **Retry** (one new attempt through the card's Update;
+disabled while an update this launch was told is incomplete may still be
+committed forward). **The road
 on Windows**: the Prepare stages inside the install folder
 (`<install>\.folio-update\`) and holds every signed file to the running build's
 signer; the ordinary quit hands the installation to the applier only on a

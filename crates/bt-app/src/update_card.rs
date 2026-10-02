@@ -525,11 +525,23 @@ pub(crate) fn spend(
 /// entry or to the check owner's shared worker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum VersionControl {
-    Check { enabled: bool },
+    Check {
+        enabled: bool,
+    },
     UpdateAndRestart,
     Progress(Bytes),
-    CopyCommand { command: &'static str },
-    Retry,
+    CopyCommand {
+        command: &'static str,
+    },
+    /// Enabled while the job can raise the failed release's offer again
+    /// ([`Job::asked_offer`]); a recovery that may still complete cannot be
+    /// raced by a second attempt.
+    Retry {
+        enabled: bool,
+    },
+    /// The releases page, for a copy the job will not update itself (§D's
+    /// adoption route, [`crate::update_job::Route::ReleasesPage`]).
+    OpenReleases,
 }
 
 /// The stable names used by the six-state table test.
@@ -541,6 +553,7 @@ pub(crate) enum VersionControlKind {
     Progress,
     CopyCommand,
     Retry,
+    OpenReleases,
 }
 
 impl VersionControl {
@@ -552,7 +565,8 @@ impl VersionControl {
             Self::UpdateAndRestart => VersionControlKind::UpdateAndRestart,
             Self::Progress(_) => VersionControlKind::Progress,
             Self::CopyCommand { .. } => VersionControlKind::CopyCommand,
-            Self::Retry => VersionControlKind::Retry,
+            Self::Retry { .. } => VersionControlKind::Retry,
+            Self::OpenReleases => VersionControlKind::OpenReleases,
         }
     }
 
@@ -563,14 +577,24 @@ impl VersionControl {
             Self::UpdateAndRestart => Text::VersionUpdateAndRestart,
             Self::Progress(_) => return "",
             Self::CopyCommand { .. } => Text::VersionCopyCommand,
-            Self::Retry => Text::VersionRetry,
+            Self::Retry { .. } => Text::VersionRetry,
+            Self::OpenReleases => Text::VersionOpenReleases,
         }
         .text()
     }
 
     #[must_use]
     pub(crate) const fn enabled(&self) -> bool {
-        !matches!(self, Self::Check { enabled: false } | Self::Progress(_))
+        !matches!(
+            self,
+            Self::Check { enabled: false } | Self::Retry { enabled: false } | Self::Progress(_)
+        )
+    }
+
+    /// Whether the control is answered outside this window.
+    #[must_use]
+    pub(crate) const fn leaves_window(&self) -> bool {
+        matches!(self, Self::OpenReleases)
     }
 }
 
@@ -604,8 +628,8 @@ impl Default for VersionRow {
     fn default() -> Self {
         Self {
             value: format!(
-                "Folio {} · {}",
-                crate::version::VERSION,
+                "{} · {}",
+                crate::version::banner(),
                 Text::VersionUpToDate.text()
             ),
             control: VersionControl::Check { enabled: true },
@@ -625,9 +649,11 @@ pub(crate) fn version_row<W: Copy + Eq>(
     lang: Lang,
 ) -> VersionRow {
     let running = crate::version::VERSION;
-    let line = |state: String| format!("Folio {running} · {state}");
+    let line = |state: String| format!("{} · {state}", crate::version::banner());
 
-    if let State::Failed(offer, _) = job.state() {
+    if matches!(job.state(), State::Failed(..) | State::Idle)
+        && let Some((offer, _)) = job.last_failure()
+    {
         let tag = offer
             .as_ref()
             .map(Offer::tag)
@@ -635,7 +661,9 @@ pub(crate) fn version_row<W: Copy + Eq>(
             .unwrap_or(running);
         return VersionRow {
             value: line(crate::i18n::version_failed_in(lang, tag)),
-            control: VersionControl::Retry,
+            control: VersionControl::Retry {
+                enabled: job.asked_offer(offered).is_some(),
+            },
             link: Some(VersionLink::Details),
         };
     }
@@ -653,19 +681,14 @@ pub(crate) fn version_row<W: Copy + Eq>(
             link: None,
         };
     }
-    if let Some(Err(NotEligible::Managed { command, .. })) = job.answer()
-        && let Some(tag) = offered
-    {
+    if matches!(job.state(), State::Pending(_)) {
         return VersionRow {
-            value: line(crate::i18n::version_managed_in(lang, tag, command)),
-            control: VersionControl::CopyCommand { command },
-            link: Some(VersionLink::WhatsNew {
-                tag: tag.to_owned(),
-            }),
+            value: line(Text::VersionChecking.in_lang(lang).to_owned()),
+            control: VersionControl::Check { enabled: false },
+            link: None,
         };
     }
-    let job_offer = job.state().offer().map(Offer::tag).or(offered);
-    if let Some(tag) = job_offer {
+    if let Some(tag) = job.state().offer().map(Offer::tag) {
         return VersionRow {
             value: line(crate::i18n::version_available_in(lang, tag)),
             control: VersionControl::UpdateAndRestart,
@@ -673,6 +696,36 @@ pub(crate) fn version_row<W: Copy + Eq>(
                 tag: tag.to_owned(),
             }),
         };
+    }
+    // Idle with a decision: the control is the decision's actionable route
+    // (R2) — the asked offer (R1), a manager's command, or the releases page
+    // for every answer that kept that adoption route. The check's offer alone
+    // never makes a verb.
+    if let (Some(answer), Some(tag)) = (job.answer(), offered) {
+        let control = match answer {
+            Err(NotEligible::Managed { command, .. }) => {
+                return VersionRow {
+                    value: line(crate::i18n::version_managed_in(lang, tag, command)),
+                    control: VersionControl::CopyCommand { command },
+                    link: Some(VersionLink::WhatsNew {
+                        tag: tag.to_owned(),
+                    }),
+                };
+            }
+            Ok(_) if job.asked_offer(offered).is_some() => Some(VersionControl::UpdateAndRestart),
+            Ok(eligible) => (eligible.tag == tag).then_some(VersionControl::OpenReleases),
+            Err(reason) => (reason.route() == crate::update_job::Route::ReleasesPage)
+                .then_some(VersionControl::OpenReleases),
+        };
+        if let Some(control) = control {
+            return VersionRow {
+                value: line(crate::i18n::version_available_in(lang, tag)),
+                control,
+                link: Some(VersionLink::WhatsNew {
+                    tag: tag.to_owned(),
+                }),
+            };
+        }
     }
     if check.answered == Some(false) {
         return VersionRow {
@@ -688,7 +741,7 @@ pub(crate) fn version_row<W: Copy + Eq>(
         };
     }
     VersionRow {
-        value: line(Text::VersionUpToDate.text().to_owned()),
+        value: line(Text::VersionUpToDate.in_lang(lang).to_owned()),
         control: VersionControl::Check {
             enabled: !check.checking,
         },
@@ -737,6 +790,16 @@ pub(crate) fn row_foot<W: Copy + Eq>(job: &Job<W>) -> RowFoot {
 pub(crate) struct Shown<W> {
     pub(crate) card: Option<(W, Paint)>,
     pub(crate) foot: RowFoot,
+    pub(crate) version: VersionPosture,
+}
+
+/// The language-free parts of About > Version and the shared update mark that
+/// can change a window's drawing between turns.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct VersionPosture {
+    pub(crate) state: crate::update_job::Kind,
+    pub(crate) progress_megabytes: Option<(u64, Option<u64>)>,
+    pub(crate) mark_lit: bool,
 }
 
 impl<W> Default for Shown<W> {
@@ -744,19 +807,44 @@ impl<W> Default for Shown<W> {
         Self {
             card: None,
             foot: RowFoot::default(),
+            version: VersionPosture {
+                state: crate::update_job::Kind::Pending,
+                progress_megabytes: None,
+                mark_lit: false,
+            },
         }
     }
 }
 
 /// What the job shows now.
 #[must_use]
-pub(crate) fn shown<W: Copy + Eq>(job: &Job<W>) -> Shown<W> {
+pub(crate) fn shown<W: Copy + Eq>(job: &Job<W>, mark_lit: bool) -> Shown<W> {
+    let progress_megabytes = match job.state() {
+        State::Downloading(_, bytes) => Some((
+            bytes.received / 1_000_000,
+            bytes.total.map(|total| total / 1_000_000),
+        )),
+        State::Staged(_) | State::Quitting(_) | State::Committing(_) => Some((0, None)),
+        _ => None,
+    };
     Shown {
         card: job
             .card_window()
             .and_then(|window| paint(job.state()).map(|paint| (window, paint))),
         foot: row_foot(job),
+        version: VersionPosture {
+            state: job.state().kind(),
+            progress_megabytes,
+            mark_lit,
+        },
     }
+}
+
+/// Whether every open window must repaint its Version row and shared update
+/// marks this turn.
+#[must_use]
+pub(crate) fn version_changed<W>(before: &Shown<W>, now: &Shown<W>) -> bool {
+    before.foot != now.foot || before.version != now.version
 }
 
 #[cfg(test)]
@@ -770,7 +858,7 @@ mod tests {
     use super::{
         Asks, Bar, Card, CardVerb, Key, Outcome, Paint, RowFoot, Target, UninstallVerb,
         VersionControl, VersionControlKind, failed, key, paint, row_foot, shown, spend,
-        uninstall_paint, version_row,
+        uninstall_paint, version_changed, version_row,
     };
     use crate::i18n::{Lang, Text};
     use crate::install_channel::{Channel, Manager};
@@ -790,13 +878,10 @@ mod tests {
 
     fn gathered(latest: &str, channel: Channel) -> Gathered {
         Gathered {
-            check: Some((
-                UpdateCheckV1 {
-                    latest_tag: Some(latest.to_owned()),
-                    ..UpdateCheckV1::default()
-                },
-                true,
-            )),
+            check: Some(UpdateCheckV1 {
+                latest_tag: Some(latest.to_owned()),
+                ..UpdateCheckV1::default()
+            }),
             channel: Some(channel),
             running: RUNNING,
             capable: true,
@@ -860,15 +945,21 @@ mod tests {
     /// RED (T-UPDATE-ON-ABOUT) — the Version row has exactly six visible
     /// states, each with its exact value line and one control kind.
     ///
+    /// Every value line starts with `version::banner()` — the same
+    /// `Folio <version> (<commit>)` that `--version`, `diagnostics.log` and the
+    /// hang reports print (round 2, R5).
+    ///
     /// MUTATION: return `Check` for `VersionControl::UpdateAndRestart`; the
-    /// `available` row goes red while the other five remain green.
+    /// `available` row goes red while the other five remain green. MUTATION
+    /// (R5): build the line from `Folio {VERSION}` instead of the banner; all
+    /// six rows go red.
     #[test]
     fn about_version_has_the_six_ruled_states() {
         use super::{VersionControlKind as Kind, version_row};
         use crate::update::CheckView;
 
-        let running = crate::version::VERSION;
-        let up_to_date = Job::with_offers(true);
+        let banner = crate::version::banner();
+        let up_to_date = considered(RUNNING, Channel::Ours);
         let available = considered("v0.4.7", Channel::Ours);
         let (downloading_job, _) = downloading();
         let managed = considered(
@@ -881,7 +972,7 @@ mod tests {
         let (mut failed_job, failed_post) = downloading();
         failed_post.post(Step::Stopped(crate::update_job::Stop::Download));
         assert_eq!(failed_job.drain_progress(), 0);
-        let no_answer = Job::with_offers(true);
+        let no_answer = considered(RUNNING, Channel::Ours);
         let now = 10 * 86_400_000;
 
         let rows = [
@@ -893,7 +984,7 @@ mod tests {
                     ..CheckView::default()
                 },
                 None,
-                format!("Folio {running} · Up to date"),
+                format!("{banner} · Up to date"),
                 Kind::Check,
             ),
             (
@@ -901,7 +992,7 @@ mod tests {
                 &available,
                 CheckView::default(),
                 Some("v0.4.7"),
-                format!("Folio {running} · v0.4.7 available"),
+                format!("{banner} · v0.4.7 available"),
                 Kind::UpdateAndRestart,
             ),
             (
@@ -909,7 +1000,7 @@ mod tests {
                 &downloading_job,
                 CheckView::default(),
                 Some("v0.4.7"),
-                format!("Folio {running} · Downloading v0.4.7"),
+                format!("{banner} · Downloading v0.4.7"),
                 Kind::Progress,
             ),
             (
@@ -917,7 +1008,7 @@ mod tests {
                 &managed,
                 CheckView::default(),
                 Some("v0.4.7"),
-                format!("Folio {running} · v0.4.7 available · scoop update folio"),
+                format!("{banner} · v0.4.7 available · scoop update folio"),
                 Kind::CopyCommand,
             ),
             (
@@ -925,7 +1016,7 @@ mod tests {
                 &failed_job,
                 CheckView::default(),
                 Some("v0.4.7"),
-                format!("Folio {running} · v0.4.7 wasn't installed. This version was restored."),
+                format!("{banner} · v0.4.7 wasn't installed. This version was restored."),
                 Kind::Retry,
             ),
             (
@@ -937,14 +1028,206 @@ mod tests {
                     ..CheckView::default()
                 },
                 None,
-                format!("Folio {running} · Last checked: just now"),
+                format!("{banner} · Last checked: just now"),
                 Kind::Check,
             ),
         ];
         for (name, job, check, offered, value, control) in rows {
             let row = version_row(job, check, offered, now, Lang::English);
             assert_eq!(row.value, value, "{name}");
+            assert!(row.value.starts_with(&banner), "{name}: {}", row.value);
             assert_eq!(row.control.kind(), control, "{name}");
+        }
+    }
+
+    /// RED (T-UPDATE-ON-ABOUT round 2, R2) — **Version derives its control
+    /// from the job's actionable state and route, never from the check's offer
+    /// by itself.** Pending names its state with no verb; a check in flight
+    /// disables Check; every non-manager ineligible answer that kept the
+    /// releases-page adoption route — and an eligible answer in a build whose
+    /// offers are off — opens that page.
+    ///
+    /// MUTATION: restore round 1's `job.state().offer().map(...).or(offered)`
+    /// projection ahead of the answer; Pending and every ineligible row
+    /// become `UpdateAndRestart` and fail this table.
+    #[test]
+    fn pending_and_ineligible_jobs_keep_their_actionable_version_routes() {
+        use crate::update::CheckView;
+
+        let pending = Job::<u32>::with_offers(true);
+        let pending_row = version_row(
+            &pending,
+            CheckView::default(),
+            Some("v0.4.7"),
+            0,
+            Lang::English,
+        );
+        assert!(
+            pending_row.value.ends_with(" · Checking…"),
+            "{}",
+            pending_row.value
+        );
+        assert_eq!(
+            pending_row.control,
+            VersionControl::Check { enabled: false }
+        );
+        assert!(!pending_row.control.enabled());
+
+        let current = considered(RUNNING, Channel::Ours);
+        let in_flight = version_row(
+            &current,
+            CheckView {
+                checking: true,
+                ..CheckView::default()
+            },
+            None,
+            0,
+            Lang::English,
+        );
+        assert_eq!(in_flight.control, VersionControl::Check { enabled: false });
+
+        let cases = [
+            (
+                "not ours",
+                Gathered {
+                    channel: Some(Channel::NotOurs),
+                    ..gathered("v0.4.7", Channel::Ours)
+                },
+                true,
+            ),
+            (
+                "unknown",
+                Gathered {
+                    channel: Some(Channel::Unknown),
+                    ..gathered("v0.4.7", Channel::Ours)
+                },
+                true,
+            ),
+            (
+                "not an updater build",
+                Gathered {
+                    capable: false,
+                    ..gathered("v0.4.7", Channel::Ours)
+                },
+                true,
+            ),
+            (
+                "no asset",
+                Gathered {
+                    platform: HostPlatform::OtherUnix,
+                    ..gathered("v0.4.7", Channel::Ours)
+                },
+                true,
+            ),
+            ("offers off", gathered("v0.4.7", Channel::Ours), false),
+        ];
+        for (name, evidence, offers) in cases {
+            let mut job = Job::with_offers(offers);
+            job.consider(evidence, &windows(), || TxnId::new([9; 16]));
+            assert!(matches!(job.state(), State::Idle), "{name}");
+            let row = version_row(&job, CheckView::default(), Some("v0.4.7"), 0, Lang::English);
+            assert_eq!(row.control, VersionControl::OpenReleases, "{name}");
+            assert!(row.control.leaves_window(), "{name}");
+            assert_eq!(row.control.text(), "Open the release page", "{name}");
+            assert!(
+                row.value.ends_with("v0.4.7 available"),
+                "{name}: {}",
+                row.value
+            );
+            assert!(
+                !job.offer_again(2, Some("v0.4.7")),
+                "{name}: no asked offer"
+            );
+        }
+    }
+
+    /// RED (T-UPDATE-ON-ABOUT round 2, blocker 4) — **the once-per-turn
+    /// comparison sends Version changes to every window, not only the card's
+    /// presenter.** Window A (`1`) presents the card; window B has About open.
+    /// A 1 MB → 20 MB move and Downloading → Failed each change what B draws —
+    /// its Version row and control, and the one lit fact its gear, its About
+    /// entry and its Version title wear — while the row's foot stays the
+    /// releases page, so the comparison must see the Version posture.
+    ///
+    /// MUTATION: compare only `foot` in `version_changed` (round 1's
+    /// comparison); both "window B must repaint" assertions go red.
+    #[test]
+    fn another_windows_about_repaints_for_progress_failure_and_all_update_marks() {
+        let row = |job: &Job<u32>| {
+            version_row(
+                job,
+                crate::update::CheckView::default(),
+                Some("v0.4.7"),
+                0,
+                Lang::English,
+            )
+        };
+        let (mut job, post) = downloading();
+        assert_eq!(job.card_window(), Some(1), "window A presents the card");
+        post.post(Step::Received(Bytes {
+            received: 1_000_000,
+            total: Some(40_000_000),
+        }));
+        assert_eq!(job.drain_progress(), 0);
+        let one = shown(&job, crate::update::gear_mark_is_lit(&job));
+        let one_row = row(&job);
+
+        post.post(Step::Received(Bytes {
+            received: 20_000_000,
+            total: Some(40_000_000),
+        }));
+        assert_eq!(job.drain_progress(), 0);
+        let twenty = shown(&job, crate::update::gear_mark_is_lit(&job));
+        let twenty_row = row(&job);
+        assert_eq!(one.foot, twenty.foot, "the foot alone would not repaint B");
+        assert!(version_changed(&one, &twenty), "window B must repaint");
+        assert_ne!(one_row.control, twenty_row.control);
+
+        post.post(Step::Stopped(crate::update_job::Stop::Download));
+        assert_eq!(job.drain_progress(), 0);
+        let failed = shown(&job, crate::update::gear_mark_is_lit(&job));
+        let failed_row = row(&job);
+        assert_eq!(
+            twenty.foot, failed.foot,
+            "the foot alone would not repaint B"
+        );
+        assert!(version_changed(&twenty, &failed), "window B must repaint");
+        assert_eq!(failed_row.control, VersionControl::Retry { enabled: true });
+        assert!(
+            !twenty.version.mark_lit && failed.version.mark_lit,
+            "B's gear, About entry and Version title wear the one lit fact"
+        );
+    }
+
+    /// RED (T-UPDATE-ON-ABOUT round 2, review 7) — **the lit gear's tip names
+    /// the release the job failed to install, after its card is closed too**:
+    /// the tag the chrome's tip is built from (`update::gear_mark_tag`, read by
+    /// `runtime/tooltips.rs`) is the failed offer's, in both languages.
+    ///
+    /// MUTATION: make `gear_mark_tag` answer `None` for a remembered failure;
+    /// the tip falls back to the bare "Settings" and goes red.
+    #[test]
+    fn the_lit_gear_tip_names_the_failed_release() {
+        let (mut job, post) = downloading();
+        post.post(Step::Stopped(crate::update_job::Stop::Download));
+        assert_eq!(job.drain_progress(), 0);
+        for close in [false, true] {
+            if close {
+                job.answer_verb(Verb::Later, &Starting::default(), &no_door())
+                    .expect("close the failed card");
+            }
+            assert!(crate::update::gear_mark_is_lit(&job), "closed: {close}");
+            let tag = crate::update::gear_mark_tag(&job);
+            for (lang, tip) in [
+                (Lang::English, "Settings · v0.4.7 available"),
+                (Lang::Chinese, "设置 · 有新版 v0.4.7"),
+            ] {
+                assert_eq!(
+                    crate::i18n::version_settings_tip_in(lang, tag.as_deref()),
+                    tip,
+                    "closed: {close}"
+                );
+            }
         }
     }
 
@@ -1320,7 +1603,7 @@ mod tests {
                 },
             );
             assert_eq!(job.card_window(), None, "{manager:?} gets no card");
-            assert_eq!(shown(&job).card, None);
+            assert_eq!(shown(&job, false).card, None);
             let foot = row_foot(&job);
             assert_eq!(foot, RowFoot::Copy { command }, "{manager:?}");
             let row = version_row(
@@ -1375,7 +1658,7 @@ mod tests {
                 platform,
             );
             assert_eq!(job.card_window(), None, "{platform:?}: no card");
-            assert_eq!(shown(&job).card, None, "{platform:?}");
+            assert_eq!(shown(&job, false).card, None, "{platform:?}");
             assert_eq!(
                 job.answer(),
                 Some(&Err(crate::update_job::NotEligible::Managed {
