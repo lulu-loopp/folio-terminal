@@ -6175,24 +6175,51 @@ pub fn version_failed_in(lang: Lang, version: &str) -> String {
         .replace("{version}", version)
 }
 
+/// **The elapsed-time form About → Version's "Last checked" line names** —
+/// the displayed bucket, language-free, so the window loop can compare it
+/// (a clock tick inside one bucket draws the same words and repaints nothing).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LastChecked {
+    Never,
+    JustNow,
+    MinutesAgo(u64),
+    HoursAgo(u64),
+    DaysAgo(u64),
+}
+
+impl LastChecked {
+    /// The form for a check stamped `checked_at_ms` (0: never), read at `now_ms`.
+    #[must_use]
+    pub const fn at(checked_at_ms: u64, now_ms: u64) -> Self {
+        let elapsed = now_ms.saturating_sub(checked_at_ms);
+        if checked_at_ms == 0 {
+            Self::Never
+        } else if elapsed < 60_000 {
+            Self::JustNow
+        } else if elapsed < 3_600_000 {
+            Self::MinutesAgo(elapsed / 60_000)
+        } else if elapsed < 86_400_000 {
+            Self::HoursAgo(elapsed / 3_600_000)
+        } else {
+            Self::DaysAgo(elapsed / 86_400_000)
+        }
+    }
+}
+
 #[must_use]
 pub fn version_last_checked_in(lang: Lang, checked_at_ms: u64, now_ms: u64) -> String {
-    let elapsed = now_ms.saturating_sub(checked_at_ms);
-    let when = if checked_at_ms == 0 {
-        Text::VersionNeverChecked.in_lang(lang).to_owned()
-    } else if elapsed < 60_000 {
-        Text::VersionJustNow.in_lang(lang).to_owned()
-    } else {
-        let (template, count) = if elapsed < 3_600_000 {
-            (Text::VersionMinutesAgo, elapsed / 60_000)
-        } else if elapsed < 86_400_000 {
-            (Text::VersionHoursAgo, elapsed / 3_600_000)
-        } else {
-            (Text::VersionDaysAgo, elapsed / 86_400_000)
-        };
-        template
+    let (template, count) = match LastChecked::at(checked_at_ms, now_ms) {
+        LastChecked::Never => (Text::VersionNeverChecked, None),
+        LastChecked::JustNow => (Text::VersionJustNow, None),
+        LastChecked::MinutesAgo(count) => (Text::VersionMinutesAgo, Some(count)),
+        LastChecked::HoursAgo(count) => (Text::VersionHoursAgo, Some(count)),
+        LastChecked::DaysAgo(count) => (Text::VersionDaysAgo, Some(count)),
+    };
+    let when = match count {
+        Some(count) => template
             .in_lang(lang)
-            .replace("{count}", &count.to_string())
+            .replace("{count}", &count.to_string()),
+        None => template.in_lang(lang).to_owned(),
     };
     Text::VersionLastChecked
         .in_lang(lang)

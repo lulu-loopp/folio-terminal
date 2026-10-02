@@ -1433,7 +1433,12 @@ impl<W: Copy + Eq> Job<W> {
     /// **A launch that a rollback sent** (`--update-failed`, U-29;
     /// `update_startup::failed`): the card stands at `Failed` from the start
     /// with `failure` and no offer — the transaction was an earlier launch's —
-    /// and this launch offers nothing else. `None` is every other launch.
+    /// and this launch raises no offer by itself (its one unasked offer is
+    /// spent). The reader may still ask from About → Version once the check
+    /// lands ([`Self::offer_again`]): Update and restart or Retry, a new
+    /// transaction; while an incomplete update may still be committed forward
+    /// ([`Self::asked_offer`]) nothing can be asked. `None` is every other
+    /// launch.
     #[must_use]
     pub(crate) fn after_rollback(mut self, failure: Option<Failure>) -> Self {
         if let Some(failure) = failure {

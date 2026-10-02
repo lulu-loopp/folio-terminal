@@ -990,7 +990,10 @@ in, never the summoned terminal. An offer put away with Later, or a failed card
 that was closed, comes back only when asked — About → Version's **Update and
 restart** or **Retry** raises the same `Available` offer from `Idle`
 (`Job::offer_again`), in the window pressed, for the decision the job keeps
-current after its one unasked offer; never unasked. **The frozen address**: a press fetches exactly
+current after its one unasked offer; never unasked. A launch a finished rollback
+sent (`--update-failed`) likewise raises nothing by itself, and its asked verbs
+work once the check lands; while an update this launch was told is incomplete
+may still be committed forward, nothing can be asked. **The frozen address**: a press fetches exactly
 two files, by the offer's own tag, from
 `https://github.com/lulu-loopp/folio-terminal/releases/download/<tag>/` —
 `folio-<version>-windows-x64.zip` with `SHA256SUMS.txt`, or

@@ -61102,7 +61102,13 @@ impl FolioApp {
             open: &open,
             quake: app.quake.window(),
         });
-        let now = update_card::shown(&app.update_job, update::gear_mark_is_lit(&app.update_job));
+        let now = update_card::shown(
+            &app.update_job,
+            update::gear_mark_is_lit(&app.update_job),
+            update::check_view(),
+            update::offer().as_deref(),
+            update::unix_epoch_ms(),
+        );
         if now == app.update_shown {
             return Ok(());
         }

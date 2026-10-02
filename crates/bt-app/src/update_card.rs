@@ -793,13 +793,24 @@ pub(crate) struct Shown<W> {
     pub(crate) version: VersionPosture,
 }
 
-/// The language-free parts of About > Version and the shared update mark that
-/// can change a window's drawing between turns.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// The language-free facts About > Version and the shared update mark are
+/// drawn from ([`version_row`], `update::gear_mark_is_lit`), as the window loop
+/// compares them once a turn: a change in any of them repaints every window.
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct VersionPosture {
     pub(crate) state: crate::update_job::Kind,
     pub(crate) progress_megabytes: Option<(u64, Option<u64>)>,
     pub(crate) mark_lit: bool,
+    /// The tag the check owner offers (`update::offer`).
+    pub(crate) offered: Option<String>,
+    /// Whether the job can raise that offer when asked ([`Job::asked_offer`]):
+    /// Update and restart, or Retry enabled.
+    pub(crate) asked: bool,
+    /// A reader's Check is in flight (Check disabled).
+    pub(crate) checking: bool,
+    /// The "Last checked" form, while the last question got no answer — the
+    /// displayed bucket, not the timestamp.
+    pub(crate) last_checked: Option<crate::i18n::LastChecked>,
 }
 
 impl<W> Default for Shown<W> {
@@ -811,14 +822,26 @@ impl<W> Default for Shown<W> {
                 state: crate::update_job::Kind::Pending,
                 progress_megabytes: None,
                 mark_lit: false,
+                offered: None,
+                asked: false,
+                checking: false,
+                last_checked: None,
             },
         }
     }
 }
 
-/// What the job shows now.
+/// What the job shows now, with the check facts Version reads beside it:
+/// `mark_lit` (`update::gear_mark_is_lit`), `check` (`update::check_view`),
+/// `offered` (`update::offer`) and the wall clock `now_ms`.
 #[must_use]
-pub(crate) fn shown<W: Copy + Eq>(job: &Job<W>, mark_lit: bool) -> Shown<W> {
+pub(crate) fn shown<W: Copy + Eq>(
+    job: &Job<W>,
+    mark_lit: bool,
+    check: crate::update::CheckView,
+    offered: Option<&str>,
+    now_ms: u64,
+) -> Shown<W> {
     let progress_megabytes = match job.state() {
         State::Downloading(_, bytes) => Some((
             bytes.received / 1_000_000,
@@ -836,6 +859,11 @@ pub(crate) fn shown<W: Copy + Eq>(job: &Job<W>, mark_lit: bool) -> Shown<W> {
             state: job.state().kind(),
             progress_megabytes,
             mark_lit,
+            offered: offered.map(str::to_owned),
+            asked: job.asked_offer(offered).is_some(),
+            checking: check.checking,
+            last_checked: (check.answered == Some(false))
+                .then(|| crate::i18n::LastChecked::at(check.checked_at_ms, now_ms)),
         },
     }
 }
@@ -1169,7 +1197,13 @@ mod tests {
             total: Some(40_000_000),
         }));
         assert_eq!(job.drain_progress(), 0);
-        let one = shown(&job, crate::update::gear_mark_is_lit(&job));
+        let one = shown(
+            &job,
+            crate::update::gear_mark_is_lit(&job),
+            crate::update::CheckView::default(),
+            Some("v0.4.7"),
+            0,
+        );
         let one_row = row(&job);
 
         post.post(Step::Received(Bytes {
@@ -1177,7 +1211,13 @@ mod tests {
             total: Some(40_000_000),
         }));
         assert_eq!(job.drain_progress(), 0);
-        let twenty = shown(&job, crate::update::gear_mark_is_lit(&job));
+        let twenty = shown(
+            &job,
+            crate::update::gear_mark_is_lit(&job),
+            crate::update::CheckView::default(),
+            Some("v0.4.7"),
+            0,
+        );
         let twenty_row = row(&job);
         assert_eq!(one.foot, twenty.foot, "the foot alone would not repaint B");
         assert!(version_changed(&one, &twenty), "window B must repaint");
@@ -1185,7 +1225,13 @@ mod tests {
 
         post.post(Step::Stopped(crate::update_job::Stop::Download));
         assert_eq!(job.drain_progress(), 0);
-        let failed = shown(&job, crate::update::gear_mark_is_lit(&job));
+        let failed = shown(
+            &job,
+            crate::update::gear_mark_is_lit(&job),
+            crate::update::CheckView::default(),
+            Some("v0.4.7"),
+            0,
+        );
         let failed_row = row(&job);
         assert_eq!(
             twenty.foot, failed.foot,
@@ -1196,6 +1242,126 @@ mod tests {
         assert!(
             !twenty.version.mark_lit && failed.version.mark_lit,
             "B's gear, About entry and Version title wear the one lit fact"
+        );
+    }
+
+    /// RED (T-UPDATE-ON-ABOUT round 3, B1) — **every fact Version is drawn
+    /// from reaches the once-per-turn comparison, not only the job's state.**
+    /// Window B has About open while each of these lands elsewhere:
+    ///
+    /// 1. a launch sent by a finished rollback (`--update-failed`, U-29) shows
+    ///    the failure with Retry disabled; the startup check lands, the job's
+    ///    refreshed decision lets it raise the offer, and Retry enables — the
+    ///    state stays `Failed` and the mark stays lit;
+    /// 2. after Later, a reader's Check learns a newer tag — the job stays
+    ///    `Idle` and can still raise an offer, but B must name the new tag;
+    /// 3. a reader's Check pressed in window A disables B's Check while in
+    ///    flight;
+    /// 4. the "Last checked" line moves from one displayed form to the next,
+    ///    while a clock tick inside one form repaints nothing.
+    ///
+    /// MUTATIONS (each drops one field from the comparison by building it as a
+    /// constant in `shown`): `asked: false` reddens 1; `offered: None`
+    /// reddens 2; `checking: false` reddens 3; `last_checked: None` reddens 4.
+    #[test]
+    fn another_windows_about_repaints_for_the_decision_and_the_check() {
+        use crate::update::CheckView;
+
+        let posture = |job: &Job<u32>, offered: Option<&str>, check: CheckView, now: u64| {
+            shown(
+                job,
+                crate::update::gear_mark_is_lit(job),
+                check,
+                offered,
+                now,
+            )
+        };
+        let row = |job: &Job<u32>, offered: Option<&str>, check: CheckView, now: u64| {
+            version_row(job, check, offered, now, Lang::English)
+        };
+        let quiet = CheckView::default();
+
+        // 1. `--update-failed` → the check lands → Retry enables.
+        let mut rolled_back = Job::with_offers(true).after_rollback(Some(Failure::RolledBack));
+        let before = posture(&rolled_back, Some("v0.4.7"), quiet, 0);
+        assert_eq!(
+            row(&rolled_back, Some("v0.4.7"), quiet, 0).control,
+            VersionControl::Retry { enabled: false }
+        );
+        rolled_back.consider(gathered("v0.4.7", Channel::Ours), &windows(), || {
+            TxnId::new([5; 16])
+        });
+        let after = posture(&rolled_back, Some("v0.4.7"), quiet, 0);
+        assert_eq!(
+            row(&rolled_back, Some("v0.4.7"), quiet, 0).control,
+            VersionControl::Retry { enabled: true }
+        );
+        assert_eq!(before.version.state, after.version.state);
+        assert_eq!(before.version.mark_lit, after.version.mark_lit);
+        assert!(
+            version_changed(&before, &after),
+            "B must repaint: Retry enabled"
+        );
+
+        // 2. After Later, a Check learns a newer tag.
+        let mut later = considered("v0.4.7", Channel::Ours);
+        later
+            .answer_verb(Verb::Later, &Starting::default(), &no_door())
+            .expect("Later");
+        let before = posture(&later, Some("v0.4.7"), quiet, 0);
+        later.consider(gathered("v0.4.8", Channel::Ours), &windows(), || {
+            TxnId::new([6; 16])
+        });
+        let after = posture(&later, Some("v0.4.8"), quiet, 0);
+        assert!(before.version.asked && after.version.asked);
+        assert!(
+            row(&later, Some("v0.4.8"), quiet, 0)
+                .value
+                .ends_with("v0.4.8 available")
+        );
+        assert!(
+            version_changed(&before, &after),
+            "B must repaint: the newer tag"
+        );
+
+        // 3. A Check in flight from window A.
+        let current = considered(RUNNING, Channel::Ours);
+        let asking = CheckView {
+            checking: true,
+            ..quiet
+        };
+        let before = posture(&current, None, quiet, 0);
+        let after = posture(&current, None, asking, 0);
+        assert_eq!(
+            row(&current, None, asking, 0).control,
+            VersionControl::Check { enabled: false }
+        );
+        assert!(
+            version_changed(&before, &after),
+            "B must repaint: Check in flight"
+        );
+
+        // 4. "Last checked" moves by its displayed form, not by the clock.
+        let unanswered = CheckView {
+            checked_at_ms: 1_000_000,
+            answered: Some(false),
+            ..quiet
+        };
+        let minute = 60_000;
+        let one = posture(&current, None, unanswered, 1_000_000 + minute + 1);
+        let one_later = posture(&current, None, unanswered, 1_000_000 + 2 * minute - 1);
+        let two = posture(&current, None, unanswered, 1_000_000 + 2 * minute);
+        assert_eq!(
+            row(&current, None, unanswered, 1_000_000 + 2 * minute).value,
+            format!("{} · Last checked: 2 minutes ago", crate::version::banner())
+        );
+        assert!(
+            !version_changed(&one, &one_later),
+            "a tick inside one form repaints nothing"
+        );
+        assert!(
+            version_changed(&one, &two),
+            "B must repaint: 1 → 2 minutes ago"
         );
     }
 
@@ -1603,7 +1769,10 @@ mod tests {
                 },
             );
             assert_eq!(job.card_window(), None, "{manager:?} gets no card");
-            assert_eq!(shown(&job, false).card, None);
+            assert_eq!(
+                shown(&job, false, crate::update::CheckView::default(), None, 0).card,
+                None
+            );
             let foot = row_foot(&job);
             assert_eq!(foot, RowFoot::Copy { command }, "{manager:?}");
             let row = version_row(
@@ -1658,7 +1827,11 @@ mod tests {
                 platform,
             );
             assert_eq!(job.card_window(), None, "{platform:?}: no card");
-            assert_eq!(shown(&job, false).card, None, "{platform:?}");
+            assert_eq!(
+                shown(&job, false, crate::update::CheckView::default(), None, 0).card,
+                None,
+                "{platform:?}"
+            );
             assert_eq!(
                 job.answer(),
                 Some(&Err(crate::update_job::NotEligible::Managed {
