@@ -5680,20 +5680,12 @@ impl Text {
             Self::UpdateCardIncomplete => pick(lang, "Update incomplete.", "更新未完成。"),
             Self::UpdateCardUpdated => pick(lang, "Updated.", "已更新。"),
             Self::VersionUpToDate => pick(lang, "Up to date", "已是最新"),
-            Self::VersionChecking => pick(
-                lang,
-                "Checking…",
-                "Checking…", // zh: pending T-UPDATE-ON-ABOUT
-            ),
+            Self::VersionChecking => pick(lang, "Checking…", "检查中…"),
             Self::VersionCheck => pick(lang, "Check", "检查"),
             Self::VersionUpdateAndRestart => pick(lang, "Update and restart", "更新并重启"),
             Self::VersionCopyCommand => pick(lang, "Copy command", "复制命令"),
             Self::VersionRetry => pick(lang, "Retry", "再试"),
-            Self::VersionOpenReleases => pick(
-                lang,
-                "Open the release page",
-                "Open the release page", // zh: pending T-UPDATE-ON-ABOUT
-            ),
+            Self::VersionOpenReleases => pick(lang, "Open the release page", "打开发布页"),
             Self::VersionWhatsNew => pick(lang, "What's new", "改了什么 ↗"),
             Self::VersionDetails => pick(lang, "Details", "详情"),
             Self::VersionAvailable => pick(lang, "{version} available", "有新版 {version}"),
@@ -5946,12 +5938,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        (Self::VersionChecking, HostPlatform::Windows),
-        (Self::VersionChecking, HostPlatform::MacOs),
-        (Self::VersionOpenReleases, HostPlatform::Windows),
-        (Self::VersionOpenReleases, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
