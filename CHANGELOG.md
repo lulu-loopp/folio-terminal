@@ -24,18 +24,6 @@ All notable changes to Folio are recorded here. The format follows
 - In Claude Code, `[Image #N]` in the input line is a link to the pasted
   picture, with the same hover card as in the transcript.
 - Formulas inside tmux, screen, zellij or herdr panes are typeset per pane, and a pane that keeps printing no longer unsettles its neighbour's formulas.
-- In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder.
-- A pane can reset the terminal modes a program left behind (pane menu ▸ Reset terminal modes).
-- Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,
-  Shift+Tab, Ctrl+I, Ctrl+M and Esc apart from Enter, Tab and a lone escape:
-  Folio supports the first tier of the kitty keyboard protocol and xterm's
-  modifyOtherKeys. neovim, fish, helix and Claude Code ask for it, and so
-  does Codex on macOS and in WSL. Programs that do not ask are unaffected.
-- On Windows, Ctrl+Enter, Shift+Enter and Alt+Enter reach console programs
-  such as Codex as those keys, so a Codex set up to submit with Ctrl+Enter
-  now does.
-- In Claude Code, `[Image #N]` in the input line is a link to the pasted
-  picture, with the same hover card as in the transcript.
 
 ### Changed
 
@@ -45,14 +33,6 @@ All notable changes to Folio are recorded here. The format follows
 - In PowerShell, Shift+Enter now adds a line and Ctrl+Enter inserts one
   above, as in Windows Terminal, instead of running the command; Alt+Enter no
   longer runs it either. Press Enter to run.
-- The README says how to uninstall each kind of copy, and the zip's
-  `uninstall.cmd` prints its lines in Chinese as well as English.
-- The outline folder icon is the filled folder's own shape, so the two read as one.
-- In PowerShell, Shift+Enter now adds a line and Ctrl+Enter inserts one
-  above, as in Windows Terminal, instead of running the command; Alt+Enter no
-  longer runs it either. Press Enter to run.
-- The README says how to uninstall each kind of copy, and the zip's
-  `uninstall.cmd` prints its lines in Chinese as well as English.
 
 ### Fixed
 
