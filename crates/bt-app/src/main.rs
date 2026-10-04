@@ -38062,6 +38062,7 @@ fn create_leaf_session(
                     program.into(),
                     &command.arguments,
                     &command.environment,
+                    &command.profile_environment,
                     pty_size(grid, PhysicalSize::new(body.width, body.height)),
                     wake.output(),
                     place.working_directory,
@@ -71516,6 +71517,7 @@ fn main() -> Result<()> {
     // first turn. Below the six argv doors, whose processes never have a window, and above the
     // hand-over, which is this phase's one wait (§5.3 row 18).
     bt_platform::admission::enter_window_thread();
+    pty_door::begin_launch_environment_snapshot();
     // **An update comes first** (`update_startup`, 0.4.6 U-12). The admission is
     // taken shared here, before the data directory is resolved (which may move
     // it), before settings, sidecars and the hand-over below; then one look at

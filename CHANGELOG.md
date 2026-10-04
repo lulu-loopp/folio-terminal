@@ -27,6 +27,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- On Windows, a newly installed command is found in a new tab without restarting Folio.
 - The new-version notice and the update button are on About → Version; the daily check switch moved there too, and turning it off stops only the daily check.
 - The README says how to uninstall each kind of copy, and the zip's
   `uninstall.cmd` prints its lines in Chinese as well as English.

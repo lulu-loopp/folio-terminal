@@ -62,7 +62,7 @@ row	status	call	where	disposition
 8	open	`bt-platform::macos_watch::DirWatch::start_scoped` and, on Windows, `windows_impl::DirWatch::start_scoped` wait on `listening.recv()` with no deadline and join the watcher on their refusal arm; each `Drop` does `SetEvent` then an unbounded `join()`	the watch subscriptions: `DirNews::arm` (the scheme and storage watches, from `Runtime::create`; the scheme watch again from `Runtime::add_scheme`), and the `subscribe` roads of `files_watch`, `git_watch` and `preview_watch` (from `Runtime::advance_files_watch`, `advance_git_watch`, `advance_preview_watch` and `ask_the_unwatched_preview_files`); both platforms by the thread-door note's revision (l)	**0.4.4** — make watcher start and retirement asynchronous
 9	open	surface acquire, queue submit, swapchain present, surface configure, DirectComposition size and commit	`Runtime::present_seats_and_commit`	**0.5** — presentation lane; the present mode itself comes from `get_default_config` and has no owner
 10	open	device recovery's `pollster::block_on(rebuild_after_device_loss)` plus deliberate 150 ms and 450 ms sleeps across three attempts	`FolioApp::recovered_from_a_lost_device`	**0.5** — an explicit asynchronous state machine
-11	open	`CreatePseudoConsole` + `CreateProcessW`, and a `stat` of the working directory	`create_leaf_session` → `PtySession::spawn_shell_in`	**0.5→0.6** — session lane, preserving input and resize ordering
+11	open	joining the `bt-pty-birth` worker, which owns `CreatePseudoConsole` + `CreateProcessW`, the working-directory `stat`, and the fresh-logon environment read	`create_leaf_session` → `pty_door::spawn_shell`	**0.5→0.6** — process birth is off the window thread; the admitted synchronous join remains until the session lane preserves input and resize ordering
 12	open	the synchronous `ResizePseudoConsole` round trip	`Runtime::flush_pending_pty_resize`	**0.5→0.6** — session lane; moving it must preserve the ordering this function represents
 13	done	`sample_window_place` — 4 to 8 syscalls, at three call sites for one instant	`drain_pty`, `advance_strip_animation`, `FolioApp::user_event`	**done** — *where the window is gets asked once per turn, at the turn's head; the drain and the strip tick read that answer* (`DESIGN.md`, 2026-09-24); one writer, `Runtime::observe_window_place`, also called at a window's birth and by an attention delivery between turns; each probe has its own station
 14	done	`Window::set_title` at five call sites with no throttle	`drain_pty`, `activate_tab`, `dress_new_window`, `finish_synchronized_update_if_due`, `finish_rename`	**done** — *the window's title is one wanted value, written to the system only when it changes and at most once a frame* (`DESIGN.md`, 2026-09-24); the one remaining call is `Runtime::flush_title`, on this thread by §5.2
@@ -91,7 +91,7 @@ CompositorCommit	9	CompositorCommit	Running, Exiting	`bt_platform::Compositor::c
 CompositorBirth	9	CompositorBirth	Running	`bt_platform::Compositor::new`, `bt_platform::spare_parent`	`Runtime::create`, `Runtime::open_window`, `Runtime::make_spare_web_controller`	the tree and its commit
 CompositorWindowSize	9	CompositorWindowSize	Running, Exiting	`bt_platform::Compositor::set_window_size`	`Runtime::resize`	the ground and its commit
 SurfaceBirth	9	SurfaceConfigure	Running	`WindowRenderer::new`	`Runtime::open_window`	the surface and its configure
-PtyBirth	11	PtyBirth	Running, Exiting	`pty_door::spawn_shell` (`PtySession::spawn_shell_in`)	`create_leaf_session`	one call
+PtyBirth	11	PtyBirth	Running, Exiting	`pty_door::spawn_shell` (join of `bt-pty-birth`)	`create_leaf_session`	one call
 PtyResize	12	PtyResize	Running, Exiting	`pty_door::resize` (`PtySession::resize`)	`commit_leaf_resize`	one call per leaf
 PlaceHidden	13	PlaceHidden	Running, Exiting	`window_is_hidden`	`sample_window_place`	one call
 PlaceExposure	13	PlaceExposure	Running, Exiting	`window_is_exposed`	`sample_window_place`	one call
@@ -139,6 +139,7 @@ wgpu::Queue::submit	all	the GPU driver
 wgpu::Queue::present	all	the GPU driver and the compositor
 bt_render::GpuContext::open	all	a cross-crate entrance that waits inside
 bt_pty::PtySession::spawn_shell_in	all	a cross-crate entrance that waits inside
+bt_pty::PtySession::spawn_refreshed	all	a cross-crate entrance that waits inside after composing the fresh Windows block
 bt_pty::PtySession::resize	all	a cross-crate entrance that waits inside
 bt_pty::wait_for_retirements	all	a cross-crate entrance that waits inside
 bt_platform::keyboard_layout_shift_table	windows	the worker-only keyboard-layout-table door: one registry read and one System32 DLL load, copied and freed before return
@@ -170,7 +171,7 @@ bt-app	-	crate::layout_tables::WorkerRoad::run	std::sync::mpsc::Receiver::recv 1
 bt-app	-	crate::persist::SessionWriter::close	std::thread::JoinHandle::join 1, std::thread::sleep 1	owner-door-body	WaitToken	SessionWriterRetire
 bt-app	-	crate::persist::SessionWriter::wait_for	std::sync::mpsc::Receiver::recv_timeout 1	owner-door-body	WaitToken	SessionWriteWait
 bt-app	-	crate::pty_door::resize	bt_pty::PtySession::resize 1	owner-door-body	WaitToken	PtyResize
-bt-app	-	crate::pty_door::spawn_shell	bt_pty::PtySession::spawn_shell_in 1	owner-door-body	WaitToken	PtyBirth
+bt-app	-	crate::pty_door::spawn_shell	std::thread::JoinHandle::join 1, bt_pty::PtySession::spawn_shell_in 1, bt_pty::PtySession::spawn_refreshed 1	owner-door-body	WaitToken	PtyBirth
 bt-app	-	crate::pty_door::wait_for_retirements	bt_pty::wait_for_retirements 1	owner-door-body	WaitToken	PaneRetirementWait
 bt-app	-	crate::uninstall::names_in	std::fs::read_dir 1	worker-door-body	WorkerCtx	
 bt-app	-	crate::uninstall::tree_items	std::fs::read_dir 1	worker-door-body	WorkerCtx	

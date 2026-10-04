@@ -29,6 +29,7 @@ disallowed-methods = [
     { path = "wgpu::Queue::present", reason = "the GPU driver and the compositor" },
     { path = "bt_render::GpuContext::open", reason = "a cross-crate entrance that waits inside" },
     { path = "bt_pty::PtySession::spawn_shell_in", reason = "a cross-crate entrance that waits inside" },
+    { path = "bt_pty::PtySession::spawn_refreshed", reason = "a cross-crate entrance that waits inside after composing the fresh Windows block" },
     { path = "bt_pty::PtySession::resize", reason = "a cross-crate entrance that waits inside" },
     { path = "bt_pty::wait_for_retirements", reason = "a cross-crate entrance that waits inside" },
     { path = "bt_platform::keyboard_layout_shift_table", reason = "the worker-only keyboard-layout-table door: one registry read and one System32 DLL load, copied and freed before return" },

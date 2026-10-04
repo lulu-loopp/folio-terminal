@@ -1038,6 +1038,9 @@ windows = { version = "0.62.2", features = [
     # console of its own can answer `--help` on the console that started it.
     "Win32_System_Console",
     "Win32_System_DataExchange",
+    # `CreateEnvironmentBlock` / `DestroyEnvironmentBlock`: the fresh current-user
+    # block a shell birth reads on its worker (`src/environment.rs`).
+    "Win32_System_Environment",
     # `GetThreadContext` and `ReadProcessMemory`: the two kernel calls the hang
     # reporter makes while the window thread is suspended (`src/hang.rs`). The
     # namespace is called `Diagnostics::Debug` because a debugger is the other

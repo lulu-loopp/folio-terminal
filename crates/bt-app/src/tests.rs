@@ -55198,6 +55198,7 @@ fn every_owner_door_takes_its_own_token_by_value() {
         OsString,
         &[OsString],
         &[(OsString, OsString)],
+        &[(OsString, OsString)],
         PtySize,
         OutputWake,
         Option<PathBuf>,
