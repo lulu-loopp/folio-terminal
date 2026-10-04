@@ -46,8 +46,8 @@
 //! * [`OWNER_FILE`] — **the window's owner** (U-34): the one process that has
 //!   taken the duty that a Folio window follows *Restart to update*, handed
 //!   from O to P explicitly ([`take_the_window`]); recovery that finds
-//!   `Handoff` leaves it to a live process the mark names
-//!   ([`the_window_is_theirs`]), writes nothing and opens nothing;
+//!   `Handoff` leaves it to a live process the mark names or whose election
+//!   lock is still held ([`window_holder`]), writes nothing and opens nothing;
 //! * [`ExitGuard`] — **the one way a road process leaves** (U-34): at its
 //!   exit, whatever the reason, a successor it holds still running opens
 //!   Folio, else it starts what the disk names ([`Opens`]); the recovery run
@@ -194,6 +194,28 @@ impl Ended {
 /// one twice the last.
 pub(crate) const JOURNAL_WRITE_WITHIN: Duration = Duration::from_secs(2);
 
+fn write_within<E>(
+    until: Instant,
+    mut write: impl FnMut() -> Result<(), E>,
+    is_refused_while_open: impl Fn(&E) -> bool,
+    mut wait: impl FnMut(Duration) -> bool,
+) -> Result<(), E> {
+    let mut pause = Duration::from_millis(10);
+    loop {
+        match write() {
+            Ok(()) => return Ok(()),
+            Err(failure) if is_refused_while_open(&failure) => {
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() || !wait(pause.min(left)) {
+                    return Err(failure);
+                }
+                pause = pause.saturating_mul(2);
+            }
+            Err(failure) => return Err(failure),
+        }
+    }
+}
+
 /// **Write the journal's bytes durably** (`install_txn::durable_write`), and
 /// while the rename is refused because another program holds `journal.json`
 /// open (`install_txn::Failure::refused_while_open`: Windows only), ask again
@@ -206,22 +228,16 @@ pub(crate) const JOURNAL_WRITE_WITHIN: Duration = Duration::from_secs(2);
 /// The last failure, as a sentence; the journal keeps its last durable
 /// bytes.
 pub(crate) fn write_journal(worker: &WorkerCtx, path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let until = Instant::now() + JOURNAL_WRITE_WITHIN;
-    let mut pause = Duration::from_millis(10);
-    loop {
-        match install_txn::durable_write(path, bytes) {
-            Ok(()) => return Ok(()),
-            Err(failure) if failure.refused_while_open() => {
-                let left = until.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    return Err(failure.to_string());
-                }
-                bt_platform::wait::sleep_within(worker, pause.min(left));
-                pause = pause.saturating_mul(2);
-            }
-            Err(failure) => return Err(failure.to_string()),
-        }
-    }
+    write_within(
+        Instant::now() + JOURNAL_WRITE_WITHIN,
+        || install_txn::durable_write(path, bytes),
+        install_txn::Failure::refused_while_open,
+        |pause| {
+            bt_platform::wait::sleep_within(worker, pause);
+            true
+        },
+    )
+    .map_err(|failure| failure.to_string())
 }
 
 /// **A holder of the journal under its lock**, as [`watch_trial`] needs it:
@@ -930,18 +946,117 @@ fn read_window_owner(home: &Home, txn: TxnId) -> io::Result<Option<Running>> {
     }
 }
 
+/// A successful election. When the owner mark could not be replaced before
+/// its rename, `held` is the election lock itself: the caller keeps it until
+/// process exit, so another contender can never become a second owner.
+pub(crate) struct WindowDuty {
+    held: Option<install_txn::Held>,
+    warning: Option<String>,
+}
+
+impl WindowDuty {
+    fn recorded(held: install_txn::Held, warning: Option<String>) -> Self {
+        drop(held);
+        Self {
+            held: None,
+            warning,
+        }
+    }
+
+    fn held(held: install_txn::Held, warning: String) -> Self {
+        Self {
+            held: Some(held),
+            warning: Some(warning),
+        }
+    }
+
+    /// The non-fatal mark failure that made the lock, rather than durable
+    /// bytes, the record of this process's duty.
+    pub(crate) fn warning(&self) -> Option<&str> {
+        self.warning.as_deref()
+    }
+
+    /// Keep a pre-rename winner's operating-system lock until process exit.
+    /// Ordinary successful and post-rename elections have no lock here: the
+    /// visible mark records them.
+    pub(crate) fn hold_until_process_exit(self) {
+        if let Some(held) = self.held {
+            #[cfg(not(test))]
+            std::mem::forget(held);
+            #[cfg(test)]
+            drop(held);
+        }
+    }
+}
+
+impl std::fmt::Debug for WindowDuty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.warning {
+            Some(warning) => f.debug_tuple("Mine").field(warning).finish(),
+            None => f.write_str("Mine"),
+        }
+    }
+}
+
+/// Why a contender could not enter the election.
+pub(crate) struct WindowRefusal {
+    why: String,
+    contended: bool,
+}
+
+impl WindowRefusal {
+    /// The refusal's diagnostic sentence.
+    pub(crate) fn why(&self) -> &str {
+        &self.why
+    }
+
+    /// Whether another process currently holds the election and therefore
+    /// carries the duty.
+    pub(crate) const fn contended(&self) -> bool {
+        self.contended
+    }
+}
+
+impl std::fmt::Debug for WindowRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Refused").field(&self.why).finish()
+    }
+}
+
 /// **Who has the duty a window follows**, as [`take_the_window`] found it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum Window {
     /// This process: it opens a window when it leaves.
-    Mine,
+    Mine(WindowDuty),
     /// This live process has it: it opens the window.
     Theirs(Running),
-    /// The election could not prove who has the duty. This process must not
-    /// open a window: a contender inside the election may be its owner, or
-    /// the replacement of a stale mark may not have reached the disk.
-    Refused(String),
+    /// This process did not enter the election. A contended refusal belongs
+    /// to the holder; an open failure is left to O, which armed the duty.
+    Refused(WindowRefusal),
 }
+
+impl Window {
+    /// Whether this process won the duty.
+    #[cfg(test)]
+    pub(crate) const fn is_mine(&self) -> bool {
+        matches!(self, Self::Mine(_))
+    }
+}
+
+impl PartialEq for Window {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Mine(_), Self::Mine(_)) => true,
+            (Self::Theirs(left), Self::Theirs(right)) => left == right,
+            (Self::Refused(left), Self::Refused(right)) => {
+                left.why == right.why && left.contended == right.contended
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Window {}
 
 /// `H\<txn>\owner.lock`: the election's lock (round 5).
 pub(crate) fn owner_lock_path(home: &Home, txn: TxnId) -> PathBuf {
@@ -961,20 +1076,29 @@ pub(crate) const ELECTION_WITHIN: Duration = Duration::from_secs(5);
 /// read the mark; absent, malformed or naming a process that no longer runs
 /// (pid and start instant) → write this process durably, [`Window::Mine`];
 /// naming this process → `Mine`; naming another live process →
-/// [`Window::Theirs`]. A holder that dies inside the election releases the lock
-/// with its process, so there is no half-held state and nothing to clean up.
-/// A contender waits up to [`ELECTION_WITHIN`] for the lock (`install_txn`'s
-/// own bounded poll). It answers [`Window::Refused`] when the lock cannot be
-/// taken or opened, or when the replacement cannot be made durable: none of
-/// those states proves that this process owns the duty. Thus an arbitrary
-/// delay or refusal at any step can remove a winner, but can never add one.
+/// [`Window::Theirs`]. A mark replacement refused by a scanner is re-asked
+/// with [`write_journal`]'s [`JOURNAL_WRITE_WITHIN`] discipline. Once inside,
+/// the holder owns: after the rename the visible mark records that duty, and
+/// before the rename (or when the mark cannot be read) the holder retains the
+/// operating-system lock until process exit. A holder that dies releases that
+/// lock with its process, so the next contender can take the duty. Only a
+/// process that did not enter the election answers [`Window::Refused`]: a
+/// contended refusal belongs to the holder; an open failure is left to O,
+/// which armed the failure-window road.
 ///
 /// **By `until`** (round 8, Codex's finding 15): the wait for the lock is the
 /// smaller of [`ELECTION_WITHIN`] and what is left before `until` — the
 /// applier's road deadline — so an election begun near that deadline never
 /// carries the applier's wait for O past it.
-pub(crate) fn take_the_window(home: &Home, txn: TxnId, me: Running, until: Instant) -> Window {
+pub(crate) fn take_the_window(
+    worker: Option<&WorkerCtx>,
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    until: Instant,
+) -> Window {
     take_the_window_within(
+        worker,
         home,
         txn,
         me,
@@ -985,41 +1109,129 @@ pub(crate) fn take_the_window(home: &Home, txn: TxnId, me: Running, until: Insta
 /// [`take_the_window`], waiting up to `within` for the election's lock — zero
 /// in O's panic road, which waits for nothing.
 pub(crate) fn take_the_window_within(
+    worker: Option<&WorkerCtx>,
     home: &Home,
     txn: TxnId,
     me: Running,
     within: Duration,
 ) -> Window {
-    take_the_window_within_after_lock(home, txn, me, within, || {})
+    take_the_window_within_using(
+        home,
+        txn,
+        me,
+        within,
+        || {},
+        |path, bytes| MarkWriteFailure::from_result(install_txn::durable_write(path, bytes)),
+        |pause| match worker {
+            Some(worker) => {
+                bt_platform::wait::sleep_within(worker, pause);
+                true
+            }
+            None => false,
+        },
+    )
 }
 
-fn take_the_window_within_after_lock(
+pub(crate) struct MarkWriteFailure {
+    why: String,
+    refused_while_open: bool,
+    after_rename: bool,
+}
+
+impl MarkWriteFailure {
+    fn from_result(result: Result<(), install_txn::Failure>) -> Result<(), Self> {
+        result.map_err(|failure| Self {
+            refused_while_open: failure.refused_while_open(),
+            after_rename: matches!(
+                failure.stage,
+                install_txn::Stage::OpenDirectory | install_txn::Stage::FlushDirectory
+            ),
+            why: failure.to_string(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn before_rename_for_test(why: &str, refused_while_open: bool) -> Self {
+        Self {
+            why: why.to_owned(),
+            refused_while_open,
+            after_rename: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn after_rename_for_test(why: &str) -> Self {
+        Self {
+            why: why.to_owned(),
+            refused_while_open: false,
+            after_rename: true,
+        }
+    }
+}
+
+fn take_the_window_within_using(
     home: &Home,
     txn: TxnId,
     me: Running,
     within: Duration,
     after_lock: impl FnOnce(),
+    mut write: impl FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure>,
+    wait: impl FnMut(Duration) -> bool,
 ) -> Window {
-    let _held = match install_txn::hold_within(&owner_lock_path(home, txn), Hold::Exclusive, within)
+    let until = Instant::now() + within;
+    let held = match install_txn::hold_within(&owner_lock_path(home, txn), Hold::Exclusive, within)
     {
         Ok(Some(held)) => held,
         Ok(None) => {
-            return Window::Refused("the window election is still held".to_owned());
+            return Window::Refused(WindowRefusal {
+                why: "the window election is still held".to_owned(),
+                contended: true,
+            });
         }
         Err(failure) => {
-            return Window::Refused(format!("the window election: {failure}"));
+            return Window::Refused(WindowRefusal {
+                why: format!("the window election: {failure}"),
+                contended: false,
+            });
         }
     };
     after_lock();
     match read_window_owner(home, txn) {
-        Err(error) => Window::Refused(format!("the window's mark: {error}")),
-        Ok(Some(owner)) if owner == me => Window::Mine,
-        Ok(Some(owner)) if install_flip::still_running(owner) => Window::Theirs(owner),
+        Err(error) => Window::Mine(WindowDuty::held(
+            held,
+            format!("the window's mark could not be read; owner.lock records the duty: {error}"),
+        )),
+        Ok(Some(owner)) if owner == me => Window::Mine(WindowDuty::recorded(held, None)),
+        Ok(Some(owner)) if install_flip::still_running(owner) => {
+            drop(held);
+            Window::Theirs(owner)
+        }
         // Absent, malformed, or its process gone: this process takes it.
         Ok(_) => {
-            match install_txn::durable_write(&owner_path(home, txn), owner_value(me).as_bytes()) {
-                Ok(()) => Window::Mine,
-                Err(failure) => Window::Refused(format!("the window's mark: {failure}")),
+            let mark = owner_path(home, txn);
+            let bytes = owner_value(me);
+            let write_until = until.min(Instant::now() + JOURNAL_WRITE_WITHIN);
+            match write_within(
+                write_until,
+                || write(&mark, bytes.as_bytes()),
+                |failure| failure.refused_while_open,
+                wait,
+            ) {
+                Ok(()) => Window::Mine(WindowDuty::recorded(held, None)),
+                Err(failure) if failure.after_rename => Window::Mine(WindowDuty::recorded(
+                    held,
+                    Some(format!(
+                        "the window's mark was replaced but its directory was not flushed: {}",
+                        failure.why
+                    )),
+                )),
+                Err(failure) => Window::Mine(WindowDuty::held(
+                    held,
+                    format!(
+                        "the window's mark could not be replaced; owner.lock records the duty: {}",
+                        failure.why
+                    ),
+                )),
             }
         }
     }
@@ -1036,7 +1248,76 @@ pub(crate) fn take_the_window_within_at(
     within: Duration,
     after_lock: impl FnOnce(),
 ) -> Window {
-    take_the_window_within_after_lock(home, txn, me, within, after_lock)
+    take_the_window_within_using(
+        home,
+        txn,
+        me,
+        within,
+        after_lock,
+        |path, bytes| MarkWriteFailure::from_result(install_txn::durable_write(path, bytes)),
+        |_| false,
+    )
+}
+
+/// [`take_the_window_within_at`] with an injected mark writer and pause. The
+/// pause returns immediately, so scanner retries are deterministic.
+#[cfg(test)]
+pub(crate) fn take_the_window_within_writes_at(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    within: Duration,
+    write: impl FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure>,
+) -> Window {
+    take_the_window_within_using(home, txn, me, within, || {}, write, |_| true)
+}
+
+fn ask_for_the_window_until(
+    until: Instant,
+    poll: Duration,
+    mut ask: impl FnMut() -> Window,
+    mut wait: impl FnMut(Duration),
+) -> Window {
+    loop {
+        let answer = ask();
+        let asks_again = matches!(&answer, Window::Theirs(_))
+            || matches!(&answer, Window::Refused(refusal) if refusal.contended());
+        let left = until.saturating_duration_since(Instant::now());
+        if !asks_again || left.is_zero() {
+            return answer;
+        }
+        wait(poll.min(left));
+    }
+}
+
+/// **The one applier election loop**, shared by Windows and macOS: another
+/// live marked owner or a contended election is asked again while the one
+/// `old_within` deadline has time left. No retry receives a fresh budget.
+pub(crate) fn take_the_window_for_applier(
+    worker: &WorkerCtx,
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    until: Instant,
+    poll: Duration,
+) -> Window {
+    ask_for_the_window_until(
+        until,
+        poll,
+        || take_the_window(Some(worker), home, txn, me, until),
+        |pause| bt_platform::wait::sleep_within(worker, pause),
+    )
+}
+
+/// [`take_the_window_for_applier`] with injected asks and pauses.
+#[cfg(test)]
+pub(crate) fn take_the_window_for_applier_at(
+    until: Instant,
+    poll: Duration,
+    ask: impl FnMut() -> Window,
+    wait: impl FnMut(Duration),
+) -> Window {
+    ask_for_the_window_until(until, poll, ask, wait)
 }
 
 /// **Clear the window's mark** — O, as it hands the transaction over, before
@@ -1049,11 +1330,32 @@ pub(crate) fn clear_the_window(owner: &Path) -> Result<(), String> {
     install_txn::durable_remove(owner).map_err(|failure| failure.to_string())
 }
 
-/// **The live process the window's mark names, if it is not `me`** — the one
-/// R leaves a `Handoff` to. A process the mark does not name is never waited
-/// for, however it runs.
-pub(crate) fn the_window_is_theirs(home: &Home, txn: TxnId, me: Running) -> Option<Running> {
-    window_owner(home, txn).filter(|owner| *owner != me && install_flip::still_running(*owner))
+/// A live owner recovery finds at `Handoff`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WindowHolder {
+    /// The durable mark names the owner.
+    Marked(Running),
+    /// Another process holds `owner.lock`; a pre-rename failure left no mark,
+    /// but the lock is the live authority.
+    Unmarked,
+}
+
+/// **The live owner of the window duty, if it is not `me`**, as recovery asks
+/// at `Handoff`. Recovery first tries the election lock without waiting. A
+/// holder is an owner even without readable mark bytes; with the lock free,
+/// the exact live mark remains the durable answer.
+pub(crate) fn window_holder(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+) -> Result<Option<WindowHolder>, String> {
+    match install_txn::try_hold(&owner_lock_path(home, txn), Hold::Exclusive) {
+        Ok(None) => Ok(Some(WindowHolder::Unmarked)),
+        Ok(Some(_held)) => Ok(window_owner(home, txn)
+            .filter(|owner| *owner != me && install_flip::still_running(*owner))
+            .map(WindowHolder::Marked)),
+        Err(failure) => Err(format!("the window election: {failure}")),
+    }
 }
 
 /// **What a road process's exit guard asks of the platform it runs on**
@@ -1148,8 +1450,8 @@ pub(crate) enum Left {
     /// instant — and opens Folio: nothing was started.
     Succeeded(u32),
     /// Another process has the duty a window follows ([`OWNER_FILE`]), or
-    /// nobody is proven to have it and this process never took it: nothing
-    /// was started here.
+    /// this process left the duty with the outgoing build: nothing was
+    /// started here.
     NotMine(Option<u32>),
     /// The recovery run at logon, with nothing done and nobody waiting (W8):
     /// nothing was started.
@@ -1175,9 +1477,9 @@ impl Left {
             Left::NotMine(Some(pid)) => {
                 format!("{pid} has the duty to open Folio; nothing was started here")
             }
-            Left::NotMine(None) => {
-                String::from("this process never took the duty to open Folio; nothing was started")
-            }
+            Left::NotMine(None) => String::from(
+                "the window duty stayed with another process; nothing was started here",
+            ),
             Left::NobodyWaiting => String::from("nobody is waiting; nothing was started"),
             Left::Elsewhere => String::from(
                 "a Folio holds the data directory and opens Folio; nothing was started",
@@ -1247,8 +1549,8 @@ impl<L: Leave> ExitGuard<L> {
     }
 
     /// **This process does not have the duty a window follows**
-    /// ([`OWNER_FILE`]): `owner` has it, or nobody is proven to — then the
-    /// process that armed first (O) keeps it. The guard starts nothing.
+    /// ([`OWNER_FILE`]): the named owner, an election-lock holder, or the
+    /// outgoing build keeps it. The guard starts nothing.
     pub(crate) fn not_mine(&mut self, owner: Option<u32>) {
         self.not_mine = Some(owner);
     }

@@ -649,9 +649,9 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
         world,
         data: &road.data,
     });
-    // **The window's duty first** (U-34, `update_apply::OWNER_FILE`): taken
-    // before the wait for O's lock, while O still runs. An applier that does
-    // not get it leaves the transaction untouched.
+    // **The window's duty first** (U-34, `update_apply::OWNER_FILE` and its
+    // lock): taken before the wait for O's lock, while O still runs. An
+    // applier that does not get it leaves the transaction untouched.
     // A live owner that is not this applier is O at its end, which leaves
     // anyway: wait for it to go (round 6), within the applier's own wait for
     // O, before giving up the transaction. **One deadline for the whole wait
@@ -659,26 +659,24 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
     // admission all spend `window` — the election's own wait for its lock
     // too (round 8).
     let until = window;
-    let duty = loop {
-        match crate::update_apply::take_the_window(
-            &road.home,
-            road.txn,
-            crate::update_apply::this_process(),
-            until,
-        ) {
-            Window::Theirs(_) if Instant::now() < until => {
-                bt_platform::wait::sleep_within(
-                    worker,
-                    road.limits
-                        .poll
-                        .min(until.saturating_duration_since(Instant::now())),
-                );
-            }
-            decided => break decided,
-        }
-    };
+    let duty = crate::update_apply::take_the_window_for_applier(
+        worker,
+        &road.home,
+        road.txn,
+        crate::update_apply::this_process(),
+        until,
+        road.limits.poll,
+    );
     match duty {
-        Window::Mine => {}
+        Window::Mine(duty) => {
+            if let Some(warning) = duty.warning() {
+                guard
+                    .inner()
+                    .world
+                    .say(&format!("BT_UPDATE_APPLY {warning}"));
+            }
+            duty.hold_until_process_exit();
+        }
         other => {
             let owner = match &other {
                 Window::Theirs(owner) => Some(owner.pid),
@@ -771,18 +769,31 @@ pub(crate) fn recover(
     ) {
         Ok((mut txn, bundles)) => {
             let places = bundles.places();
-            let mut ended = if txn.phase() == PhaseKind::Handoff
-                && let Some(applier) = crate::update_apply::the_window_is_theirs(
+            let mut ended = if txn.phase() == PhaseKind::Handoff {
+                match crate::update_apply::window_holder(
                     &road.home,
                     road.txn,
                     crate::update_apply::this_process(),
                 ) {
-                hands.say(&format!(
-                    "BT_UPDATE_RECOVER {} has the update's window; the handed-off update is left to it",
-                    applier.pid
-                ));
-                txn.successor = Some(applier);
-                Ended::LockHeld
+                    Ok(Some(crate::update_apply::WindowHolder::Marked(applier))) => {
+                        hands.say(&format!(
+                            "BT_UPDATE_RECOVER {} has the update's window; the handed-off update is left to it",
+                            applier.pid
+                        ));
+                        txn.successor = Some(applier);
+                        Ended::LockHeld
+                    }
+                    Ok(Some(crate::update_apply::WindowHolder::Unmarked)) => {
+                        hands.say(
+                            "BT_UPDATE_RECOVER an election-lock holder has the update's window; the handed-off update is left to it",
+                        );
+                        Ended::Deferred(Deferral::Held)
+                    }
+                    Ok(None) => txn
+                        .settle(worker, &places, None, hands, handed)
+                        .unwrap_or_else(Ended::Failed),
+                    Err(why) => Ended::Failed(why),
+                }
             } else {
                 txn.settle(worker, &places, None, hands, handed)
                     .unwrap_or_else(Ended::Failed)

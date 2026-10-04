@@ -29,13 +29,15 @@
 //!
 //! **And then O leaves through its exit guard** (0.4.6 ticket U-34, the one
 //! guard every road process leaves through: `update_apply::ExitGuard`). Who
-//! opens the window is decided by one mark, never by who is alive
-//! (`update_apply::OWNER_FILE`, `H\<txn>\owner`): the hand-over clears it
+//! opens the window is decided by one election, never by who is alive
+//! (`H\<txn>\owner.lock`, with `update_apply::OWNER_FILE` as its durable
+//! mark): the hand-over clears the mark
 //! before `Handoff` is written ([`perform`]); the applier takes it as soon as
 //! it knows its transaction; O, at the process's very end — after the loop,
 //! once it has let go of its data directory's claim ([`leave_armed`]) — takes
-//! it too, and starts Folio only if it got it ([`Leaving`]). So an applier
-//! that took the mark opens the window itself, and O starts nothing; an
+//! it too, and starts Folio only if it got it ([`Leaving`]). A holder whose
+//! mark write fails retains the election lock and still owns. So an applier
+//! that took the election opens the window itself, and O starts nothing; an
 //! applier that never took it (not started, not yet running, refused before
 //! its road) leaves it to O, and a late one that finds O's mark touches
 //! nothing. O's start reads the header the way a lock holder's does: a
@@ -533,6 +535,7 @@ impl Leaving {
             home: home.as_ref(),
             data: &self.data,
             worker,
+            election_failure: None,
         });
         // **The applier O started decides first** (round 6): O's end waits,
         // on its worker's wait door, until the mark names that applier, or it
@@ -563,6 +566,7 @@ impl Leaving {
         }
         if let Some((home, txn)) = &self.transaction {
             let window = crate::update_apply::take_the_window_within(
+                worker,
                 home,
                 *txn,
                 me,
@@ -574,9 +578,26 @@ impl Leaving {
                 },
             );
             match window {
-                Window::Mine => {}
+                Window::Mine(duty) => {
+                    if let Some(warning) = duty.warning() {
+                        crate::diagnostics::note(&format!(
+                            "Folio: the outgoing build owns the window duty; {warning}"
+                        ));
+                    }
+                    duty.hold_until_process_exit();
+                }
                 Window::Theirs(owner) => guard.not_mine(Some(owner.pid)),
-                Window::Refused(_) => guard.not_mine(None),
+                Window::Refused(refusal) => {
+                    crate::diagnostics::note(&format!(
+                        "Folio: the outgoing build's window election was refused: {}",
+                        refusal.why()
+                    ));
+                    if refusal.contended() {
+                        guard.not_mine(None);
+                    } else {
+                        guard.inner().election_failure = Some(refusal.why().to_owned());
+                    }
+                }
             }
         }
         guard.leave()
@@ -595,6 +616,10 @@ struct OldLeave<'a> {
     home: Option<&'a Home>,
     data: &'a Path,
     worker: Option<&'a WorkerCtx>,
+    /// An election O could not enter. O keeps its armed duty and the old
+    /// build is told the update is incomplete even when the journal's class
+    /// alone would not have selected the failure words.
+    election_failure: Option<String>,
 }
 
 impl Leave for OldLeave<'_> {
@@ -606,13 +631,14 @@ impl Leave for OldLeave<'_> {
         let words = self
             .home
             .filter(|home| {
-                file_reads::read(Lane::UpdateJournal, home.journal())
-                    .ok()
-                    .and_then(|bytes| Header::parse(&bytes).ok())
-                    .is_some_and(|header| {
-                        header.class == Class::Destructive
-                            || header.outcome == HeaderOutcome::RolledBack
-                    })
+                self.election_failure.is_some()
+                    || file_reads::read(Lane::UpdateJournal, home.journal())
+                        .ok()
+                        .and_then(|bytes| Header::parse(&bytes).ok())
+                        .is_some_and(|header| {
+                            header.class == Class::Destructive
+                                || header.outcome == HeaderOutcome::RolledBack
+                        })
             })
             .map(|home| crate::update_apply::failed_words(home).to_vec())
             .unwrap_or_default();
@@ -1702,6 +1728,7 @@ mod tests {
         let late_applier = Running { pid: 1, started: 1 };
         assert_eq!(
             crate::update_apply::take_the_window(
+                None,
                 &staged.home,
                 txn,
                 late_applier,
@@ -1727,14 +1754,15 @@ mod tests {
             "the hand-over cleared the earlier mark"
         );
         let applier = crate::update_apply::this_process();
-        assert_eq!(
+        assert!(
             crate::update_apply::take_the_window(
+                None,
                 &staged.home,
                 txn,
                 applier,
                 Instant::now() + crate::update_apply::ELECTION_WITHIN
-            ),
-            Window::Mine
+            )
+            .is_mine()
         );
         let mut starts = Starts::default();
         assert_eq!(
@@ -1752,8 +1780,9 @@ mod tests {
     /// RED (U-34, round 2) — **the window's mark is taken by exactly one live
     /// process**: created for the first taker; refused to a second while the
     /// first runs (by pid and start instant); taken over from an owner that no
-    /// longer runs; and refused when the election cannot be held, the mark
-    /// cannot be read, or its replacement is refused — none proves ownership.
+    /// longer runs. A contender that cannot enter refuses; a holder whose
+    /// mark cannot be read or replaced remains the one owner by retaining
+    /// `owner.lock`.
     ///
     /// MUTATION: in `update_apply::take_the_window_within`, replace the mark
     /// whatever it names (a second live taker then gets it too).
@@ -1766,23 +1795,23 @@ mod tests {
         let other = Running { pid: 1, started: 1 };
         let take = |who| {
             crate::update_apply::take_the_window(
+                None,
                 &staged.home,
                 txn,
                 who,
                 Instant::now() + crate::update_apply::ELECTION_WITHIN,
             )
         };
-        assert_eq!(take(me), Window::Mine);
-        assert_eq!(take(me), Window::Mine);
+        assert!(take(me).is_mine());
+        assert!(take(me).is_mine());
         assert_eq!(take(other), Window::Theirs(me));
         std::fs::write(
             crate::update_apply::owner_path(&staged.home, txn),
             format!("{}:{}", me.pid, me.started.wrapping_add(1)),
         )
         .unwrap();
-        assert_eq!(
-            take(other),
-            Window::Mine,
+        assert!(
+            take(other).is_mine(),
             "an owner that no longer runs is taken over"
         );
         assert_eq!(
@@ -1797,9 +1826,14 @@ mod tests {
         .unwrap();
         let mark = crate::update_apply::owner_path(&staged.home, txn);
         if let Ok(scanner) = bt_platform::trust_harness::hold_without_delete_sharing(&mark) {
+            let answer = take(me);
+            let Window::Mine(duty) = answer else {
+                panic!("the holder owns despite a replacement refusal: {answer:?}");
+            };
             assert!(
-                matches!(take(me), Window::Refused(_)),
-                "a replacement refusal proves no owner"
+                duty.warning()
+                    .is_some_and(|warning| warning.contains("could not be replaced")),
+                "the failed mark is named"
             );
             drop(scanner);
         }
@@ -1807,6 +1841,7 @@ mod tests {
         assert!(
             matches!(
                 crate::update_apply::take_the_window(
+                    None,
                     &staged.home,
                     TxnId::new([0x77; 16]),
                     me,
@@ -1820,9 +1855,208 @@ mod tests {
         let mark = crate::update_apply::owner_path(&staged.home, txn);
         std::fs::remove_file(&mark).unwrap();
         std::fs::create_dir(&mark).unwrap();
+        let answer = take(me);
+        let Window::Mine(duty) = answer else {
+            panic!("the lock holder owns despite an unreadable mark: {answer:?}");
+        };
         assert!(
-            matches!(take(me), Window::Refused(_)),
-            "an unreadable mark proves no owner"
+            duty.warning()
+                .is_some_and(|warning| warning.contains("could not be read")),
+            "the read refusal, not a later replacement refusal, is named"
+        );
+    }
+
+    /// RED (T-UPDATE-LOCK-RACE round 2) — **the owner mark uses the journal
+    /// writer's retry discipline: a scanner may refuse it repeatedly and the
+    /// fourth attempt still records this holder.** The injected pause returns
+    /// immediately; no clock or sleep chooses the interleaving.
+    ///
+    /// MUTATION: remove the `refused_while_open` arm from
+    /// `update_apply::write_within`.
+    #[test]
+    fn the_window_mark_is_retried_after_three_scanner_refusals() {
+        let folder = Folder::new("mark-retry");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let me = crate::update_apply::this_process();
+        let mut attempts = 0;
+        let answer = crate::update_apply::take_the_window_within_writes_at(
+            &staged.home,
+            txn,
+            me,
+            crate::update_apply::JOURNAL_WRITE_WITHIN,
+            |mark, bytes| {
+                attempts += 1;
+                if attempts <= 3 {
+                    Err(
+                        crate::update_apply::MarkWriteFailure::before_rename_for_test(
+                            "scanner", true,
+                        ),
+                    )
+                } else {
+                    std::fs::write(mark, bytes).unwrap();
+                    Ok(())
+                }
+            },
+        );
+        assert!(answer.is_mine(), "{answer:?}");
+        assert_eq!(attempts, 4);
+        assert_eq!(
+            crate::update_apply::window_owner(&staged.home, txn),
+            Some(me)
+        );
+    }
+
+    /// RED (T-UPDATE-LOCK-RACE round 2) — **a holder whose pre-rename mark
+    /// write fails still owns by its held election lock, so a simultaneous
+    /// contender refuses and the pair can never be `[Refused, Refused]`.**
+    ///
+    /// MUTATION: map the injected write failure back to `Window::Refused`, or
+    /// drop `held` before returning the holder's answer.
+    #[test]
+    fn a_holder_that_cannot_write_still_owns_and_the_contender_refuses() {
+        let folder = Folder::new("mark-write-fails");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let me = crate::update_apply::this_process();
+        let holder = crate::update_apply::take_the_window_within_writes_at(
+            &staged.home,
+            txn,
+            me,
+            crate::update_apply::JOURNAL_WRITE_WITHIN,
+            |_mark, _bytes| {
+                Err(
+                    crate::update_apply::MarkWriteFailure::before_rename_for_test(
+                        "disk refused the write",
+                        false,
+                    ),
+                )
+            },
+        );
+        let contender = crate::update_apply::take_the_window_within(
+            None,
+            &staged.home,
+            txn,
+            Running { pid: 1, started: 1 },
+            Duration::ZERO,
+        );
+        assert!(holder.is_mine(), "{holder:?}");
+        assert_eq!(
+            crate::update_apply::window_holder(&staged.home, txn, Running { pid: 1, started: 1 },),
+            Ok(Some(crate::update_apply::WindowHolder::Unmarked)),
+            "recovery defers to the same live lock authority"
+        );
+        assert!(
+            matches!(&contender, Window::Refused(refusal) if refusal.contended()),
+            "{contender:?}"
+        );
+    }
+
+    /// RED (T-UPDATE-LOCK-RACE round 2) — **both platform appliers re-ask a
+    /// contended election inside the same deadline**. The injected pause
+    /// releases the first holder, so the second ask takes the duty without a
+    /// sleep or a fresh budget.
+    ///
+    /// MUTATION: in `update_apply::ask_for_the_window_until`, return the first
+    /// contended `Window::Refused`.
+    #[test]
+    fn both_appliers_reask_a_contended_election_within_the_same_budget() {
+        let folder = Folder::new("mark-contention-retry");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let me = crate::update_apply::this_process();
+        let mut holder = Some(
+            install_txn::try_hold(
+                &crate::update_apply::owner_lock_path(&staged.home, txn),
+                Hold::Exclusive,
+            )
+            .unwrap()
+            .unwrap(),
+        );
+        let mut asks = 0;
+        let answer = crate::update_apply::take_the_window_for_applier_at(
+            Instant::now() + crate::update_apply::ELECTION_WITHIN,
+            Duration::from_millis(1),
+            || {
+                asks += 1;
+                crate::update_apply::take_the_window_within(
+                    None,
+                    &staged.home,
+                    txn,
+                    me,
+                    Duration::ZERO,
+                )
+            },
+            |_| drop(holder.take()),
+        );
+        assert!(answer.is_mine(), "{answer:?}");
+        assert_eq!(asks, 2);
+    }
+
+    /// RED (T-UPDATE-LOCK-RACE round 2) — **a directory-flush failure after
+    /// rename is an election success**: the visible mark names the holder and
+    /// the next contender answers `Theirs`.
+    ///
+    /// MUTATION: map an `after_rename` failure to `Window::Refused`.
+    #[test]
+    fn a_mark_that_landed_before_the_directory_flush_still_wins() {
+        let folder = Folder::new("mark-landed");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let me = crate::update_apply::this_process();
+        let answer = crate::update_apply::take_the_window_within_writes_at(
+            &staged.home,
+            txn,
+            me,
+            crate::update_apply::JOURNAL_WRITE_WITHIN,
+            |mark, bytes| {
+                std::fs::write(mark, bytes).unwrap();
+                Err(
+                    crate::update_apply::MarkWriteFailure::after_rename_for_test(
+                        "directory flush failed",
+                    ),
+                )
+            },
+        );
+        assert!(answer.is_mine(), "{answer:?}");
+        assert_eq!(
+            crate::update_apply::take_the_window_within(
+                None,
+                &staged.home,
+                txn,
+                Running { pid: 1, started: 1 },
+                Duration::ZERO,
+            ),
+            Window::Theirs(me)
+        );
+    }
+
+    /// RED (T-UPDATE-LOCK-RACE round 2) — **when no process can even open the
+    /// election lock, O still carries the duty it armed and starts the old
+    /// build's failure road.** An unentered applier may defer to O; O may not
+    /// turn its own refusal into silence.
+    ///
+    /// MUTATION: in `Leaving::leave`, call `guard.not_mine(None)` for every
+    /// `Window::Refused`.
+    #[test]
+    fn os_unentered_election_still_ends_in_the_failure_road() {
+        let folder = Folder::new("old-election-open-fails");
+        let staged = staged(&folder);
+        let installed = folder.0.join("folio.exe");
+        let mut starts = Starts::default();
+        let left = Leaving::over(&staged.home, TxnId::new([0x77; 16]), &folder.0).leave(
+            crate::update_apply::this_process(),
+            &installed,
+            &mut starts,
+            None,
+        );
+        assert_eq!(left, Left::Started(installed.clone()));
+        assert_eq!(
+            starts.calls,
+            vec![(
+                installed,
+                crate::update_apply::failed_words(&staged.home).to_vec()
+            )]
         );
     }
 
@@ -2068,6 +2302,7 @@ mod tests {
         let late = Running { pid: 1, started: 1 };
         let contender = std::thread::spawn(move || {
             crate::update_apply::take_the_window(
+                None,
                 &home,
                 txn,
                 late,
@@ -2130,6 +2365,7 @@ mod tests {
         });
         entered.recv().unwrap();
         let second = crate::update_apply::take_the_window_within(
+            None,
             &staged.home,
             txn,
             Running { pid: 1, started: 1 },
@@ -2138,7 +2374,7 @@ mod tests {
         release.send(()).unwrap();
         let first = first.join().unwrap();
 
-        assert_eq!(first, Window::Mine);
+        assert!(first.is_mine(), "{first:?}");
         assert!(matches!(second, Window::Refused(_)), "{second:?}");
         assert_eq!(
             crate::update_apply::window_owner(&staged.home, txn),
@@ -2212,14 +2448,15 @@ mod tests {
         assert!(inside, "the child got inside the election");
         let _ = child.kill();
         let _ = child.wait();
-        assert_eq!(
+        assert!(
             crate::update_apply::take_the_window(
+                None,
                 &staged.home,
                 txn,
                 me,
                 Instant::now() + crate::update_apply::ELECTION_WITHIN
-            ),
-            Window::Mine,
+            )
+            .is_mine(),
             "the killed contender's lock went with it"
         );
         assert_eq!(

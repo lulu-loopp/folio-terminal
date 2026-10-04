@@ -77,7 +77,7 @@
 //! for O's lock; recovery that finds `Handoff` while a live process holds that
 //! mark leaves the handed-off transaction to it, writes nothing and waits for
 //! nothing — that process is its successor, and opens Folio
-//! (`update_apply::the_window_is_theirs`). A process of the rescue image that
+//! (`update_apply::window_holder`). A process of the rescue image that
 //! never took the mark is not waited for.
 //!
 //! **Any other home**, reading the header:
