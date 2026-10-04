@@ -57,6 +57,15 @@
 //! * **Anything else** (`node`, `git`, a test's own program) gets the
 //!   environment alone.
 //!
+//! Every family also starts **without the variables Folio announces to a pane**
+//! ([`PANE_ANNOUNCEMENTS`]), unless the test sets one itself: a test run from a
+//! shell inside a Folio pane inherits `TERM_PROGRAM=Folio`, `FORCE_HYPERLINK`
+//! and the rest, and a CI runner does not, so a gate that passes only because
+//! its child inherited them passes for a reason CI does not have. A child on a
+//! pseudoconsole still gets what `bt-pty` itself declares to every child
+//! (`TERM_PROGRAM`, `TERM_PROGRAM_VERSION`, `COLORTERM`, `TERM`) — the
+//! product's declaration, the same on every machine.
+//!
 //! Process starts that are not on a pseudoconsole — a one-shot script, a shell
 //! fed on a pipe — take the same rule through [`Hygiene::command`].
 //!
@@ -102,6 +111,70 @@ pub const REFUSED_EXIT_CODE: u32 = 75;
 /// tests' own ceilings are (`bt-app`'s `real_powershell_input_reaches_a_viewport_owned_frame`).
 const ESTABLISH_CEILING: Duration = Duration::from_secs(180);
 const ESTABLISH_POLL: Duration = Duration::from_millis(10);
+
+/// **The variables Folio announces to a pane by name** — the ones a process
+/// started from inside a Folio pane inherits and a CI runner does not.
+///
+/// `bt-pty`'s own declarations to every child (`PtyCommand`'s environment
+/// layers: [`crate::TERM_PROGRAM`]'s variable, its version, `COLORTERM`,
+/// `TERM`) and `bt-app`'s per-pane ones: the hyperlink capability, the
+/// attention wire's three, and the shell-integration marker and zsh bridge.
+/// `bt-app` pins its names to this list
+/// (`shell_integration::tests::every_pane_announcement_is_one_the_test_shell_strips`).
+/// A `WSLENV` entry that forwards one of these is an announcement too, and is
+/// dropped from the list it stands in. Values Folio derives from the user's own
+/// (`PROMPT`, `WSLENV`'s other entries, the locale, `ZDOTDIR`) are the user's,
+/// and are left as they are.
+pub const PANE_ANNOUNCEMENTS: [&str; 10] = [
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "COLORTERM",
+    "TERM",
+    "FORCE_HYPERLINK",
+    "FOLIO_PANE",
+    "FOLIO_ATTENTION",
+    "FOLIO_ATTENTION_PIPE",
+    "BT_SHELL_INTEGRATION",
+    "BT_USER_ZDOTDIR",
+];
+
+fn is_pane_announcement(key: &OsStr) -> bool {
+    PANE_ANNOUNCEMENTS
+        .iter()
+        .any(|name| crate::environment_key_eq(key, OsStr::new(name)))
+}
+
+/// `WSLENV` with every entry that forwards a pane announcement removed; `None`
+/// when nothing is left.
+fn wslenv_without_announcements(value: &OsStr) -> Option<OsString> {
+    let value = value.to_string_lossy();
+    let kept = value
+        .split(':')
+        .filter(|entry| {
+            let name = entry.split('/').next().unwrap_or_default();
+            !name.is_empty() && !is_pane_announcement(OsStr::new(name))
+        })
+        .collect::<Vec<_>>();
+    (!kept.is_empty()).then(|| kept.join(":").into())
+}
+
+/// `environment` as a CI runner would hand it on: without the pane
+/// announcements, and with `WSLENV` no longer forwarding them.
+pub fn without_pane_announcements(
+    environment: impl IntoIterator<Item = (OsString, OsString)>,
+) -> Vec<(OsString, OsString)> {
+    environment
+        .into_iter()
+        .filter(|(key, _)| !is_pane_announcement(key))
+        .filter_map(|(key, value)| {
+            if crate::environment_key_eq(&key, OsStr::new("WSLENV")) {
+                wslenv_without_announcements(&value).map(|value| (key, value))
+            } else {
+                Some((key, value))
+            }
+        })
+        .collect()
+}
 
 /// The family a program belongs to, by its file name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -418,6 +491,20 @@ impl Hygiene {
             Family::Cmd | Family::Posix(_) | Family::Program => (arguments, Gate::Open),
         };
         command.arguments = arguments;
+        // The child's base block is this process's, without the pane announcements: through the
+        // refresh seam `PtySession::spawn` clears the inherited block and starts from this one,
+        // then lays the command's own declarations — and so anything the test set — over it.
+        command.environment_refresh = Some(match command.environment_refresh.take() {
+            Some(refresh) => crate::EnvironmentRefresh::new(
+                without_pane_announcements(refresh.fresh),
+                without_pane_announcements(refresh.launch_snapshot),
+                without_pane_announcements(refresh.inherited),
+            ),
+            None => {
+                let inherited = without_pane_announcements(std::env::vars_os());
+                crate::EnvironmentRefresh::new(inherited.clone(), inherited.clone(), inherited)
+            }
+        });
         for (key, value, settable) in self.environment(family) {
             let chosen = command
                 .environment
@@ -535,6 +622,17 @@ impl Hygiene {
         let family = Family::of(program);
         let mut command = new(program.to_os_string());
         command.args(self.flagged(family, Vec::new()));
+        // Without the pane announcements; a test that wants one sets it after this, and wins.
+        for name in PANE_ANNOUNCEMENTS {
+            command.env_remove(name);
+        }
+        match std::env::var_os("WSLENV") {
+            Some(listed) => match wslenv_without_announcements(&listed) {
+                Some(kept) => command.env("WSLENV", kept),
+                None => command.env_remove("WSLENV"),
+            },
+            None => &mut command,
+        };
         for (key, value, _) in self.environment(family) {
             command.env(key, value);
         }
@@ -1023,6 +1121,84 @@ mod tests {
             .iter()
             .find(|(name, _)| name == key)
             .map(|(_, value)| value.clone())
+    }
+
+    /// PIN — **a test shell starts as a CI runner would, not as a Folio pane
+    /// would**: the pane announcements are gone from every block it is started
+    /// from, `WSLENV` no longer forwards them, and what a test sets itself is
+    /// kept.
+    ///
+    /// RED (mutations: `is_pane_announcement` answers `false`; `Hygiene::command`
+    /// removes nothing; `prepare` leaves `environment_refresh` as it found it).
+    #[test]
+    fn a_test_shell_does_not_inherit_what_folio_announces_to_its_pane() {
+        let block = |pairs: &[(&str, &str)]| {
+            pairs
+                .iter()
+                .map(|(key, value)| (OsString::from(key), OsString::from(value)))
+                .collect::<Vec<_>>()
+        };
+        let inherited = block(&[
+            ("TERM_PROGRAM", "Folio"),
+            ("TERM_PROGRAM_VERSION", "0.4.6"),
+            ("COLORTERM", "truecolor"),
+            ("TERM", "xterm-256color"),
+            ("FORCE_HYPERLINK", "1"),
+            ("FOLIO_PANE", "1.1"),
+            ("FOLIO_ATTENTION", "capability"),
+            ("FOLIO_ATTENTION_PIPE", "pipe"),
+            ("BT_SHELL_INTEGRATION", "marker"),
+            ("BT_USER_ZDOTDIR", "/zsh"),
+            ("WSLENV", "USERPROFILE/p:TERM_PROGRAM/u:FORCE_HYPERLINK/u"),
+            ("PATH", "kept"),
+        ]);
+        assert_eq!(
+            without_pane_announcements(inherited),
+            block(&[("WSLENV", "USERPROFILE/p"), ("PATH", "kept")])
+        );
+        assert_eq!(
+            without_pane_announcements(block(&[("WSLENV", "TERM_PROGRAM/u")])),
+            block(&[])
+        );
+
+        let hygiene = Hygiene::new();
+        let command = hygiene.command("powershell.exe", std::process::Command::new);
+        let removed = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_owned())
+            .collect::<Vec<_>>();
+        for name in PANE_ANNOUNCEMENTS {
+            assert!(
+                removed
+                    .iter()
+                    .any(|key| crate::environment_key_eq(key, OsStr::new(name))),
+                "{name} is removed from a child off a pseudoconsole"
+            );
+        }
+
+        let (prepared, _) = hygiene.prepare(
+            PtyCommand::new("powershell.exe")
+                .arg("-NoProfile")
+                .arg("-Command")
+                .arg("exit")
+                .env("TERM_PROGRAM", "a test's own"),
+        );
+        let refresh = prepared
+            .environment_refresh
+            .as_ref()
+            .expect("a test shell starts from a cleaned block");
+        for list in [&refresh.fresh, &refresh.launch_snapshot, &refresh.inherited] {
+            assert!(
+                list.iter().all(|(key, _)| !is_pane_announcement(key)),
+                "{list:?}"
+            );
+        }
+        assert_eq!(
+            value(&prepared, "TERM_PROGRAM").as_deref(),
+            Some(OsStr::new("a test's own")),
+            "what the test sets itself is kept"
+        );
     }
 
     /// RED (T-TEST-SHELL-HYGIENE) — **each family is started without the user's startup files,

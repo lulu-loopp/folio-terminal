@@ -11,6 +11,19 @@ param([switch]$SkipWindowsPowerShell)
 
 $ErrorActionPreference = 'Stop'
 $here = $PSScriptRoot
+
+# A run from a shell inside a Folio pane inherits what Folio announces to its panes, and a CI runner
+# does not: every suite starts from what CI sees, and a suite that needs a declaration sets it
+# itself. The names are `bt_pty::test_shell::PANE_ANNOUNCEMENTS`, pinned by
+# `every_pane_announcement_is_one_the_test_shell_strips`; a WSLENV entry forwarding one goes too.
+$paneAnnouncements = @('TERM_PROGRAM', 'TERM_PROGRAM_VERSION', 'COLORTERM', 'TERM', 'FORCE_HYPERLINK', 'FOLIO_PANE', 'FOLIO_ATTENTION', 'FOLIO_ATTENTION_PIPE', 'BT_SHELL_INTEGRATION', 'BT_USER_ZDOTDIR')
+foreach ($name in $paneAnnouncements) {
+    Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+}
+if ($env:WSLENV) {
+    $kept = @($env:WSLENV.Split(':') | Where-Object { $_ -and ($paneAnnouncements -notcontains $_.Split('/')[0]) })
+    if ($kept.Count -gt 0) { $env:WSLENV = $kept -join ':' } else { Remove-Item -LiteralPath Env:WSLENV }
+}
 $failures = @()
 $ran = 0
 $skipped = @()

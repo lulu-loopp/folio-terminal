@@ -2881,7 +2881,9 @@ fn probe_profile_observation(program: &Path) -> Option<ProfileObservation> {
     }
 }
 
-#[cfg(any(windows, test))]
+/// Read what [`PROFILE_COMMAND`] writes: the profile path, then the effective execution policy.
+/// Windows only, like the probe that is its one reader and the test that pins it.
+#[cfg(windows)]
 fn parse_profile_observation(stdout: &str) -> Option<ProfileObservation> {
     let mut lines = stdout
         .lines()
@@ -4011,6 +4013,34 @@ mod tests {
                 "{program} must honour its accepted NoProfile prefix"
             );
         }
+    }
+
+    /// PIN — **the profile probe's answer is the path the shell names, then its policy**.
+    /// A missing or unreadable policy line is `Unknown`, not a refusal; a relative or empty
+    /// path is no answer.
+    ///
+    /// RED (mutations: drop the `is_absolute` check; read the policy from the first line).
+    #[cfg(windows)]
+    #[test]
+    fn the_profile_probe_answer_is_a_path_and_a_policy() {
+        use crate::psreadline::ExecutionPolicy;
+        let observed = parse_profile_observation(
+            "\r\nD:\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1\r\nRestricted\r\n",
+        )
+        .expect("the shell answered");
+        assert_eq!(
+            observed.path,
+            PathBuf::from(r"D:\Documents\PowerShell\Microsoft.PowerShell_profile.ps1")
+        );
+        assert_eq!(observed.policy, ExecutionPolicy::Restricted);
+        assert!(
+            !observed.line_present,
+            "presence is read from the file, not the probe"
+        );
+        let no_policy = parse_profile_observation("C:\\p\\profile.ps1\r\n").expect("a path");
+        assert_eq!(no_policy.policy, ExecutionPolicy::Unknown);
+        assert!(parse_profile_observation("profile.ps1\r\nBypass\r\n").is_none());
+        assert!(parse_profile_observation("  \r\n").is_none());
     }
 
     /// PIN — **no button before the edition has been looked at** (review C-5 of
@@ -5202,6 +5232,52 @@ mod tests {
         assert!(
             session_scope.contains(&declaration),
             "the session-scope case must declare {declaration:?}"
+        );
+    }
+
+    /// PIN — **every variable this build announces to a pane by name is one a test shell does not
+    /// inherit** (T-INTEGRATION-INJECT-4 round 3). A test run from inside a Folio pane inherits
+    /// these and CI does not; `bt_pty::test_shell` removes exactly
+    /// [`bt_pty::test_shell::PANE_ANNOUNCEMENTS`] from every child it builds, and the script
+    /// suites' runner clears the same list. A name added to a pane here without being added
+    /// there is a local gate that can pass for a reason CI does not have.
+    ///
+    /// RED (mutations: drop `FORCE_HYPERLINK` from `PANE_ANNOUNCEMENTS`; drop a name from
+    /// `run.ps1`'s `$paneAnnouncements`).
+    #[test]
+    fn every_pane_announcement_is_one_the_test_shell_strips() {
+        let stripped = bt_pty::test_shell::PANE_ANNOUNCEMENTS;
+        for announced in [
+            "TERM_PROGRAM",
+            "TERM_PROGRAM_VERSION",
+            "COLORTERM",
+            "TERM",
+            FORCE_HYPERLINK,
+            INSTALLED_MARKER,
+            USER_ZDOTDIR,
+            crate::attention_wire::PANE_VARIABLE,
+            crate::attention_wire::ENDPOINT_VARIABLE,
+            crate::attention_wire::CAPABILITY_VARIABLE,
+        ] {
+            assert!(
+                stripped.contains(&announced),
+                "{announced} is announced to a pane and must be stripped from a test shell"
+            );
+        }
+        // `FORWARDED` is what crosses into WSL; every name in it is an announcement.
+        for forwarded in FORWARDED {
+            let name = forwarded.split('/').next().unwrap_or_default();
+            assert!(stripped.contains(&name), "{name} crosses into WSL");
+        }
+        let runner = include_str!("../../../scripts/shell-integration/tests/run.ps1");
+        let line = runner
+            .lines()
+            .find(|line| line.starts_with("$paneAnnouncements = @("))
+            .expect("the suites' runner clears the pane announcements");
+        let listed = line.split('\'').skip(1).step_by(2).collect::<Vec<_>>();
+        assert_eq!(
+            listed, stripped,
+            "run.ps1 clears exactly the test shell's list"
         );
     }
 

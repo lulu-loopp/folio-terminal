@@ -105,6 +105,9 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Internal
 
+- Tests and the shell-integration script suites start their shells without the
+  variables Folio gives its own panes, so a run from inside Folio sees what CI
+  sees.
 - CI's structural gates now hold derived enum coverage and stable properties
   instead of hand-maintained counts, snapshots and source-location inventories,
   and every gate's self-test runs on every run. Tests that wait on or measure
