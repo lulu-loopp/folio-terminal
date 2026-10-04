@@ -581,6 +581,24 @@ pub fn compose_powershell_arguments(
     arguments
 }
 
+/// The complete argument list `bt-pty`'s last-resort retry is started with when a pane's own
+/// program would not start: [`bt_pty::LAST_RESORT_ARGUMENTS`] through
+/// [`compose_powershell_arguments`], so the retry — Windows PowerShell — carries the same load
+/// as any other PowerShell this process starts, and `/bin/sh` off Windows carries nothing.
+#[must_use]
+pub fn last_resort_arguments(scripts: Scripts<'_>, powershell_integration: bool) -> Vec<OsString> {
+    let own = bt_pty::LAST_RESORT_ARGUMENTS
+        .iter()
+        .map(OsString::from)
+        .collect::<Vec<_>>();
+    compose_powershell_arguments(
+        Path::new(bt_pty::LAST_RESORT_SHELL),
+        &own,
+        scripts.powershell,
+        powershell_integration,
+    )
+}
+
 /// Whether every existing word is a documented non-terminal PowerShell host
 /// option whose arity Folio knows. This is intentionally an allowlist: a new
 /// host switch is unsafe until its relationship with the appended `-Command`
@@ -2315,6 +2333,51 @@ mod tests {
         assert_eq!(composed("pwsh.exe", &[], false), Vec::<String>::new());
     }
 
+    /// RED (mutation: `last_resort_arguments` returns `bt_pty::LAST_RESORT_ARGUMENTS` unchanged)
+    /// — the shell `bt-pty` retries with when a pane's program will not start is a PowerShell on
+    /// Windows and is handed the same load as every other PowerShell birth, and only while the
+    /// switch is on and the script is prepared.
+    #[test]
+    fn the_last_resort_retry_is_composed_like_every_other_powershell_birth() {
+        let script = Path::new("C:/Folio/folio.ps1");
+        let scripts = Scripts {
+            powershell: Some(script),
+            ..Scripts::default()
+        };
+        let own = bt_pty::LAST_RESORT_ARGUMENTS
+            .iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            last_resort_arguments(scripts, true),
+            compose_powershell_arguments(
+                Path::new(bt_pty::LAST_RESORT_SHELL),
+                &own,
+                Some(script),
+                true
+            )
+        );
+        assert_eq!(last_resort_arguments(scripts, false), own);
+        assert_eq!(last_resort_arguments(Scripts::default(), true), own);
+        if cfg!(windows) {
+            let composed = last_resort_arguments(scripts, true);
+            assert_eq!(composed[..1], [OsString::from("-NoLogo")]);
+            assert_eq!(
+                composed[1..3],
+                [OsString::from("-NoExit"), OsString::from("-Command")]
+            );
+            assert_eq!(
+                composed[3],
+                OsString::from(powershell_load_command(
+                    Path::new(bt_pty::LAST_RESORT_SHELL),
+                    script
+                ))
+            );
+        } else {
+            assert_eq!(last_resort_arguments(scripts, true), own);
+        }
+    }
+
     #[test]
     fn powershell_loader_is_guarded_and_pwsh_revives_only_the_loaded_assembly() {
         let path = Path::new("C:/Folio/folio.ps1");
@@ -2343,6 +2406,19 @@ mod tests {
             constructor.matches("shell_command_for_program(").count(),
             1,
             "the leaf constructor must ask the PowerShell composition exactly once"
+        );
+        // RED (mutation: pass `bt_pty::LAST_RESORT_ARGUMENTS` to the birth instead) — the
+        // last-resort retry's argv is composed once, by the same composer, and handed to the birth.
+        assert_eq!(
+            constructor
+                .matches("shell_integration::last_resort_arguments(")
+                .count(),
+            1,
+            "the leaf constructor must compose the last-resort retry's arguments exactly once"
+        );
+        assert!(
+            constructor.contains("&fallback_arguments,"),
+            "the composed retry arguments must reach the birth"
         );
 
         let found = index
@@ -3126,6 +3202,7 @@ mod tests {
             let mut session = bt_pty::PtySession::spawn_shell_in(
                 program.clone(),
                 &command.arguments,
+                &last_resort_arguments(scripts, false),
                 &command.environment,
                 bt_pty::PtySize::cells(
                     std::num::NonZeroU16::new(200).unwrap(),

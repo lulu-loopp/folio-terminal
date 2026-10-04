@@ -84,8 +84,12 @@ pub fn begin_startup_migration() {
 
 fn profile_line_is_present(path: &Path) -> bool {
     bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path)
-        .and_then(|bytes| Decoded::read(&bytes))
-        .is_ok_and(|decoded| profile_suppresses_integration_offer(&decoded.text))
+        .is_ok_and(|bytes| profile_bytes_carry_the_line(&bytes))
+}
+
+/// Whether a profile's bytes, decoded as PowerShell decodes them, still carry a Folio line.
+fn profile_bytes_carry_the_line(bytes: &[u8]) -> bool {
+    Decoded::read(bytes).is_ok_and(|decoded| profile_suppresses_integration_offer(&decoded.text))
 }
 
 /// Read-only startup discovery for the conditional Settings remover. Legacy marks remain useful

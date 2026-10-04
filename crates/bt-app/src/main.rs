@@ -38050,14 +38050,21 @@ fn create_leaf_session(
         // environment is one of the things the spawn now lays down, and a
         // function that asked this module five separate questions about one
         // index is a function no test can put a profile in front of.
+        let scripts = shell_integration::Scripts::installed();
+        let powershell_integration = shell_integration::powershell_integration_enabled();
         let mut command = shell_integration::shell_command_for_program(
             row,
             &place.arguments,
-            shell_integration::Scripts::installed(),
+            scripts,
             &bt_pty::SystemShellEnvironment,
             Some(Path::new(program)),
-            shell_integration::powershell_integration_enabled(),
+            powershell_integration,
         );
+        // **The retry is a PowerShell this process starts too**: when `program` will not start,
+        // `bt-pty` falls back once to its last-resort shell, and that shell is composed by the same
+        // function from the same two answers as the one it replaces.
+        let fallback_arguments =
+            shell_integration::last_resort_arguments(scripts, powershell_integration);
         // **The two variables that make an agent in this pane able to say something.**
         //
         // They are added here, after the profile's own environment, because they are not a property
@@ -38091,6 +38098,7 @@ fn create_leaf_session(
                     token,
                     program.into(),
                     &command.arguments,
+                    &fallback_arguments,
                     &command.environment,
                     &command.profile_environment,
                     pty_size(grid, PhysicalSize::new(body.width, body.height)),

@@ -148,8 +148,6 @@ crates/bt-app/src/file_reads_doors.txt	schemes.rs: catalogue: .read	ledger key n
 crates/bt-app/src/file_reads_doors.txt	settings.rs: adopted: .read	ledger key naming a file	adopted (2 site(s), .read)	P16	no
 crates/bt-app/src/file_reads_doors.txt	settings.rs: get: .read	ledger key naming a file	get (1 site(s), .read)	P16	no
 crates/bt-app/src/file_reads_doors.txt	settings.rs: scanned: .read	ledger key naming a file	scanned (2 site(s), .read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: add_profile_with_forms: profile_marks::Decoded::read	ledger key naming a file	add_profile_with_forms (1 site(s), profile_marks::Decoded::read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: offer_for: profile_marks::Decoded::read	ledger key naming a file	offer_for (1 site(s), profile_marks::Decoded::read)	P16	no
 crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: profile_path_reason: std::fs::File::open	ledger key naming a file	profile_path_reason (1 site(s), std::fs::File::open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: read_profile_for_edit: .open	ledger key naming a file	read_profile_for_edit (1 site(s), .open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: read_profile_for_edit: .read	ledger key naming a file	read_profile_for_edit (1 site(s), .read)	P16	no
@@ -158,8 +156,6 @@ crates/bt-app/src/file_reads_doors.txt	shell_integration.rs: replace_profile: .o
 crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .open	ledger key naming a file	lock (1 site(s), .open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: lock: .read	ledger key naming a file	lock (1 site(s), .read)	P16	no
 crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_marks.rs: rewrite_recorded: Decoded::read	ledger key naming a file	rewrite_recorded (1 site(s), Decoded::read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_runtime.rs: enable_record: Marks::read	ledger key naming a file	enable_record (1 site(s), Marks::read)	P16	no
-crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_runtime.rs: install_recorded: Marks::read	ledger key naming a file	install_recorded (1 site(s), Marks::read)	P16	no
 crates/bt-app/src/file_reads_doors.txt	shell_integration/profile_runtime.rs: operate_with: Marks::read	ledger key naming a file	operate_with (1 site(s), Marks::read)	P16	no
 crates/bt-app/src/file_reads_doors.txt	trace.rs: append: .open	ledger key naming a file	append (1 site(s), .open)	P16	no
 crates/bt-app/src/file_reads_doors.txt	trace.rs: create: .open	ledger key naming a file	create (1 site(s), .open)	P16	no

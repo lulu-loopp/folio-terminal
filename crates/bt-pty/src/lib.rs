@@ -184,6 +184,18 @@ pub const WINDOWS_POWERSHELL: &str = "powershell.exe";
 pub const LAST_RESORT_SHELL: &str = WINDOWS_POWERSHELL;
 #[cfg(unix)]
 pub const LAST_RESORT_SHELL: &str = shell::BOURNE_SHELL;
+
+/// [`LAST_RESORT_SHELL`]'s own arguments: `-NoLogo` for Windows PowerShell, none for `/bin/sh`
+/// (a flag `sh` would read as a file to open).
+///
+/// A caller of [`PtySession::spawn_shell_in`] or [`PtySession::spawn_refreshed`] states the
+/// retry's complete argument list itself, because what a caller adds to a PowerShell it starts
+/// (the app's process-scoped integration load) is owed to the retry as much as to the program
+/// that would not start; a caller with nothing to add passes these.
+#[cfg(windows)]
+pub const LAST_RESORT_ARGUMENTS: &[&str] = &["-NoLogo"];
+#[cfg(unix)]
+pub const LAST_RESORT_ARGUMENTS: &[&str] = &[];
 const READER_CHUNK_BYTES: usize = 16 * 1024;
 const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
 /// Explicit opt-in only, including release builds. This records your keystrokes, including
@@ -957,27 +969,22 @@ impl PtyCommand {
     /// Windows PowerShell as this terminal starts it: interactive, color-capable, `-NoLogo`.
     ///
     /// The one command in this crate that still names an argument, because it is the one command
-    /// that names a *specific shell*: it is the guaranteed fallback every other spawn retries
-    /// against, so it cannot ask a caller which flags PowerShell takes.
+    /// that names a *specific shell*.
     pub fn powershell() -> Self {
         Self::interactive_shell(WINDOWS_POWERSHELL).arg("-NoLogo")
     }
 
-    /// The shell every recoverable spawn failure retries against, as this terminal starts it.
+    /// The shell every recoverable spawn failure retries against, started with `arguments`.
     ///
-    /// [`Self::powershell`] on Windows and an argument-free `/bin/sh` off it — the same standing,
-    /// named once. This is the only door the fallback path goes through, which is what keeps
+    /// The program is [`LAST_RESORT_SHELL`] on every path, named once; the arguments are the
+    /// caller's whole list — [`LAST_RESORT_ARGUMENTS`] when it has nothing to add, which keeps
     /// `-NoLogo` (a flag `sh` reads as a file to open) on the side of the `cfg` that has a
-    /// PowerShell to give it to.
-    pub fn last_resort_shell() -> Self {
-        #[cfg(windows)]
-        {
-            Self::powershell()
-        }
-        #[cfg(unix)]
-        {
-            Self::interactive_shell(LAST_RESORT_SHELL)
-        }
+    /// PowerShell to give it to. This is the only door the fallback path goes through.
+    pub fn last_resort_shell(arguments: &[OsString]) -> Self {
+        arguments.iter().fold(
+            Self::interactive_shell(LAST_RESORT_SHELL),
+            |command, argument| command.arg(argument),
+        )
     }
 
     /// An interactive, color-capable shell command for `program` — the `COLORTERM`/`TERM`
@@ -1906,16 +1913,22 @@ impl PtySession {
     /// shell in it is worse than a window with the wrong one *provided the swap is stated*. The
     /// retry is skipped when the program is already that shell, where it would repeat an
     /// identical, already-failed spawn.
+    ///
+    /// `fallback_args` is that retry's complete argument list ([`LAST_RESORT_ARGUMENTS`] for a
+    /// caller with nothing to add): the variables above belong to the shell that would not start,
+    /// but an argument the caller adds to *every* PowerShell it starts belongs to the retry too.
     pub fn spawn_shell_in(
         program: impl Into<OsString>,
         args: &[OsString],
+        fallback_args: &[OsString],
         environment: &[(OsString, OsString)],
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
     ) -> Result<Self, PtyError> {
         let program = program.into();
-        let fall_back = !program_is_the_last_resort_shell(&program);
+        let fall_back =
+            (!program_is_the_last_resort_shell(&program)).then(|| fallback_args.to_vec());
         Self::spawn_interactive(
             program,
             args,
@@ -1930,10 +1943,14 @@ impl PtySession {
     }
 
     /// Start a named shell with the complete Windows refresh inputs supplied by its worker.
+    ///
+    /// `fallback_args` is the [`LAST_RESORT_SHELL`] retry's complete argument list, as for
+    /// [`Self::spawn_shell_in`].
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_refreshed(
         program: impl Into<OsString>,
         args: &[OsString],
+        fallback_args: &[OsString],
         folio_environment: &[(OsString, OsString)],
         profile_environment: &[(OsString, OsString)],
         refresh: EnvironmentRefresh,
@@ -1942,7 +1959,8 @@ impl PtySession {
         working_directory: Option<PathBuf>,
     ) -> Result<Self, PtyError> {
         let program = program.into();
-        let fall_back = !program_is_the_last_resort_shell(&program);
+        let fall_back =
+            (!program_is_the_last_resort_shell(&program)).then(|| fallback_args.to_vec());
         Self::spawn_interactive(
             program,
             args,
@@ -1979,7 +1997,8 @@ impl PtySession {
             size,
             wake,
             working_directory,
-            shell_spawn_failure_should_fall_back(resolved.choice),
+            shell_spawn_failure_should_fall_back(resolved.choice)
+                .then(|| LAST_RESORT_ARGUMENTS.iter().map(OsString::from).collect()),
         )
     }
 
@@ -1999,7 +2018,37 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
-        fall_back: bool,
+        fall_back: Option<Vec<OsString>>,
+    ) -> Result<Self, PtyError> {
+        Self::spawn_interactive_with(
+            program,
+            args,
+            folio_environment,
+            profile_environment,
+            environment_refresh,
+            size,
+            wake,
+            working_directory,
+            fall_back,
+            Self::spawn,
+        )
+    }
+
+    /// [`Self::spawn_interactive`] with the one `spawn` it makes per attempt handed in, so the
+    /// command each attempt is made of can be read without starting a process.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_interactive_with(
+        program: OsString,
+        args: &[OsString],
+        folio_environment: &[(OsString, OsString)],
+        profile_environment: &[(OsString, OsString)],
+        environment_refresh: Option<EnvironmentRefresh>,
+        size: PtySize,
+        wake: OutputWake,
+        working_directory: Option<PathBuf>,
+        // The retry's complete argument list when a failure is recoverable, `None` when it is not.
+        fall_back: Option<Vec<OsString>>,
+        mut spawn: impl FnMut(PtyCommand, PtySize, OutputWake) -> Result<Self, PtyError>,
     ) -> Result<Self, PtyError> {
         // A directory that no longer exists would fail the spawn outright, and a
         // tab that refuses to open because the last one was deleted out from
@@ -2038,9 +2087,9 @@ impl PtySession {
             Some(refresh) => command.refresh_environment(refresh),
             None => command,
         };
-        match Self::spawn(command, size, wake.clone()) {
-            Ok(session) => Ok(session),
-            Err(spawn_error) if fall_back => {
+        match (spawn(command, size, wake.clone()), fall_back) {
+            (Ok(session), _) => Ok(session),
+            (Err(spawn_error), Some(fallback_args)) => {
                 // The whole of the operating system's account, kept where a debugging string is
                 // the right register and read by whoever is debugging. It is deliberately not
                 // carried up: see [`ShellFallback`].
@@ -2049,19 +2098,20 @@ impl PtySession {
                      using {LAST_RESORT_SHELL} instead",
                     Path::new(&program).display()
                 );
-                let fallback = PtyCommand::last_resort_shell().working_directory(working_directory);
+                let fallback = PtyCommand::last_resort_shell(&fallback_args)
+                    .working_directory(working_directory);
                 let fallback = match environment_refresh {
                     Some(refresh) => fallback.refresh_environment(refresh),
                     None => fallback,
                 };
-                let mut session = Self::spawn(fallback, size, wake)?;
+                let mut session = spawn(fallback, size, wake)?;
                 session.shell_fallback = Some(ShellFallback {
                     requested: program,
                     started: LAST_RESORT_SHELL,
                 });
                 Ok(session)
             }
-            Err(spawn_error) => Err(spawn_error),
+            (Err(spawn_error), None) => Err(spawn_error),
         }
     }
 
@@ -4705,6 +4755,64 @@ mod tests {
         assert_eq!(fallback.started, WINDOWS_POWERSHELL);
         assert!(session.child_id().is_some());
         session.shutdown().unwrap();
+    }
+
+    /// RED (T-INTEGRATION-INJECT-1 merge, mutation: build the retry from
+    /// `LAST_RESORT_ARGUMENTS` instead of the caller's list) — the last-resort retry is started
+    /// with exactly the arguments the caller stated for it, so a word the caller adds to every
+    /// PowerShell it starts reaches the retry too; the failed program's own arguments and
+    /// variables do not. No process is started: the seam records each attempt's command.
+    #[test]
+    fn the_last_resort_retry_is_started_with_the_callers_fallback_arguments() {
+        let fallback_args = [
+            OsString::from("-NoLogo"),
+            OsString::from("-NoExit"),
+            OsString::from("-Command"),
+            OsString::from("folio 'load'"),
+        ];
+        let mut attempts = Vec::new();
+        let result = PtySession::spawn_interactive_with(
+            OsString::from("missing-shell.exe"),
+            &[OsString::from("--own")],
+            &[(OsString::from("FAILED_PROGRAM_ONLY"), OsString::from("1"))],
+            &[],
+            None,
+            PtySize::cells(NonZeroU16::new(80).unwrap(), NonZeroU16::new(24).unwrap()),
+            Arc::new(|| {}),
+            None,
+            Some(fallback_args.to_vec()),
+            |command, _, _| {
+                attempts.push(command);
+                Err(PtyError::Backend("refused by the test".into()))
+            },
+        );
+        assert!(result.is_err());
+        assert_eq!(attempts.len(), 2, "one attempt and one retry");
+        assert_eq!(attempts[0].program, OsString::from("missing-shell.exe"));
+        assert_eq!(attempts[0].arguments, [OsString::from("--own")]);
+        assert_eq!(attempts[1].program, OsString::from(LAST_RESORT_SHELL));
+        assert_eq!(attempts[1].arguments, fallback_args);
+        assert!(attempts[1].environment.is_empty());
+
+        // A failure the caller says is not recoverable is not retried at all.
+        let mut tries = 0;
+        let refused = PtySession::spawn_interactive_with(
+            OsString::from(LAST_RESORT_SHELL),
+            &[],
+            &[],
+            &[],
+            None,
+            PtySize::cells(NonZeroU16::new(80).unwrap(), NonZeroU16::new(24).unwrap()),
+            Arc::new(|| {}),
+            None,
+            None,
+            |_, _, _| {
+                tries += 1;
+                Err(PtyError::Backend("refused by the test".into()))
+            },
+        );
+        assert!(refused.is_err());
+        assert_eq!(tries, 1);
     }
 
     #[cfg(windows)]

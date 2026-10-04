@@ -141,6 +141,7 @@ pub(crate) fn spawn_shell(
     token: WaitToken<'_, doors::PtyBirth>,
     program: OsString,
     args: &[OsString],
+    fallback_args: &[OsString],
     folio_environment: &[(OsString, OsString)],
     profile_environment: &[(OsString, OsString)],
     size: PtySize,
@@ -149,6 +150,7 @@ pub(crate) fn spawn_shell(
 ) -> Result<PtySession, PtyError> {
     let _ = token;
     let args = args.to_vec();
+    let fallback_args = fallback_args.to_vec();
     let folio_environment = folio_environment.to_vec();
     let profile_environment = profile_environment.to_vec();
     let worker = bt_platform::spawn_at_priority(
@@ -169,6 +171,7 @@ pub(crate) fn spawn_shell(
                 Some(refresh) => PtySession::spawn_refreshed(
                     program,
                     &args,
+                    &fallback_args,
                     &folio_environment,
                     &profile_environment,
                     refresh,
@@ -179,6 +182,7 @@ pub(crate) fn spawn_shell(
                 None => PtySession::spawn_shell_in(
                     program,
                     &args,
+                    &fallback_args,
                     &folio_environment
                         .into_iter()
                         .chain(profile_environment)

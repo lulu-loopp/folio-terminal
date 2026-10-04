@@ -83,7 +83,6 @@ schemes.rs: catalogue: .read
 settings.rs: adopted: .read
 settings.rs: get: .read
 settings.rs: scanned: .read
-shell_integration.rs: add_profile_with_forms: profile_marks::Decoded::read
 shell_integration.rs: profile_path_reason: std::fs::File::open
 shell_integration.rs: read_profile_for_edit: .open
 shell_integration.rs: read_profile_for_edit: .read
@@ -93,9 +92,9 @@ shell_integration/profile_marks.rs: lock: .open
 shell_integration/profile_marks.rs: lock: .read
 shell_integration/profile_marks.rs: rewrite_recorded: Decoded::read
 attention_ownership.rs: record: Marks::read
-shell_integration/profile_runtime.rs: enable_record: Marks::read
-shell_integration/profile_runtime.rs: install_recorded: Marks::read
 shell_integration/profile_runtime.rs: operate_with: Marks::read
+observe_profile_lines: Marks::read
+profile_bytes_carry_the_line: Decoded::read
 trace.rs: append: .open
 trace.rs: create: .open
 trace.rs: open: .open
