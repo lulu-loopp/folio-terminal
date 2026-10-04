@@ -326,9 +326,8 @@ fn product_packages() -> Vec<(String, Vec<String>)> {
     out
 }
 
-/// **The features a build of `folio.exe` turns on**, per product package: every
-/// `features = [...]` a product manifest's `[dependencies]` line names on a first-party
-/// package, that package's own `default`, and whatever those imply in its `[features]` table.
+/// **The features a build of `folio.exe` turns on**, per product package — read off the product
+/// manifests ([`resolve_product_features`]).
 ///
 /// A feature named only on a *dev*-dependency is a test build's — `bt-pty`'s `test-shell`
 /// (T-TEST-SHELL-HYGIENE), `bt-platform`'s `trust-harness` — and an item standing on it is
@@ -336,68 +335,172 @@ fn product_packages() -> Vec<(String, Vec<String>)> {
 fn product_features(packages: &[(String, Vec<String>)]) -> BTreeMap<String, BTreeSet<String>> {
     let root = repository_root();
     let workspace = bt_source::Workspace::read(&root).expect("the workspace's manifests");
-    let manifest_of = |name: &str| {
-        let package = workspace.package(name).expect("a workspace package");
-        std::fs::read_to_string(package.directory().join("Cargo.toml"))
-            .expect("a package has a manifest")
-    };
-    let quoted = |list: &str| -> Vec<String> {
-        list.split('"')
-            .skip(1)
-            .step_by(2)
-            .map(ToOwned::to_owned)
-            .collect()
-    };
-    let mut named: BTreeMap<String, BTreeSet<String>> = packages
+    let manifests: BTreeMap<String, String> = packages
         .iter()
-        .map(|(name, _)| (name.clone(), BTreeSet::new()))
+        .map(|(name, _)| {
+            let package = workspace.package(name).expect("a workspace package");
+            let text = std::fs::read_to_string(package.directory().join("Cargo.toml"))
+                .expect("a package has a manifest");
+            (name.clone(), text)
+        })
         .collect();
-    for (name, _) in packages {
-        let mut section = "";
-        for line in manifest_of(name).lines().map(str::trim) {
-            if line.starts_with('[') {
-                section = line;
-                continue;
-            }
-            let dependencies = section == "[dependencies]"
-                || (section.starts_with("[target.") && section.ends_with(".dependencies]"));
-            if dependencies
-                && line.starts_with("bt-")
-                && let Some((dependency, rest)) = line.split_once('=')
-                && let Some((_, list)) = rest.split_once("features")
-                && let Some(set) = named.get_mut(dependency.trim())
-            {
-                set.extend(quoted(list.split(']').next().unwrap_or_default()));
-            }
-        }
+    resolve_product_features("bt-app", &manifests)
+}
+
+/// Cargo's own feature resolution, over the product's manifests, for a build of `root` with its
+/// default features: a dependency (in `[dependencies]` or a `[target.….dependencies]` table, in
+/// any TOML form — inline, multi-line, or a `[dependencies.name]` table — and under its
+/// `package = …` name when it is renamed) contributes the features it names and, unless
+/// `default-features = false`, its `default`; a feature in a `[features]` table implies each of
+/// its entries — another feature of the same package, or `dep/feature` / `dep?/feature` in a
+/// dependency (an optional `dep:` entry turns no feature on) — until nothing changes.
+/// `[dev-dependencies]` and `[build-dependencies]` contribute nothing: a product build compiles
+/// neither into the product. Only the packages in `manifests` are resolved.
+fn resolve_product_features(
+    root: &str,
+    manifests: &BTreeMap<String, String>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let documents: BTreeMap<&str, toml_edit::DocumentMut> = manifests
+        .iter()
+        .map(|(name, text)| {
+            let document: toml_edit::DocumentMut = text
+                .parse()
+                .unwrap_or_else(|error| panic!("{name}'s manifest is TOML: {error}"));
+            (name.as_str(), document)
+        })
+        .collect();
+
+    // Every product dependency edge: (dependent, the key it is written under, package, features
+    // named, default features on).
+    struct Edge {
+        from: String,
+        key: String,
+        package: String,
+        features: Vec<String>,
+        defaults: bool,
     }
-    for (name, enabled) in &mut named {
-        let mut table: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        let mut section = "";
-        for line in manifest_of(name).lines().map(str::trim) {
-            if line.starts_with('[') {
-                section = line;
+    let strings = |item: Option<&toml_edit::Item>| -> Vec<String> {
+        item.and_then(toml_edit::Item::as_array)
+            .map(|array| {
+                array
+                    .iter()
+                    .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut edges: Vec<Edge> = Vec::new();
+    for (name, document) in &documents {
+        let mut tables: Vec<&toml_edit::Item> = Vec::new();
+        if let Some(table) = document.get("dependencies") {
+            tables.push(table);
+        }
+        if let Some(targets) = document
+            .get("target")
+            .and_then(toml_edit::Item::as_table_like)
+        {
+            for (_, target) in targets.iter() {
+                if let Some(table) = target.get("dependencies") {
+                    tables.push(table);
+                }
+            }
+        }
+        for table in tables {
+            let Some(table) = table.as_table_like() else {
                 continue;
-            }
-            if section == "[features]"
-                && let Some((feature, implied)) = line.split_once('=')
-            {
-                table.insert(feature.trim().to_owned(), quoted(implied));
-            }
-        }
-        if table.contains_key("default") {
-            enabled.insert("default".to_owned());
-        }
-        let mut queue: Vec<String> = enabled.iter().cloned().collect();
-        while let Some(feature) = queue.pop() {
-            for implied in table.get(&feature).into_iter().flatten() {
-                if enabled.insert(implied.clone()) {
-                    queue.push(implied.clone());
+            };
+            for (key, entry) in table.iter() {
+                let (package, features, defaults) = match entry.as_table_like() {
+                    Some(detail) => (
+                        detail
+                            .get("package")
+                            .and_then(toml_edit::Item::as_str)
+                            .unwrap_or(key)
+                            .to_owned(),
+                        strings(detail.get("features")),
+                        detail
+                            .get("default-features")
+                            .and_then(toml_edit::Item::as_bool)
+                            .unwrap_or(true),
+                    ),
+                    None => (key.to_owned(), Vec::new(), true),
+                };
+                if documents.contains_key(package.as_str()) {
+                    edges.push(Edge {
+                        from: (*name).to_owned(),
+                        key: key.to_owned(),
+                        package,
+                        features,
+                        defaults,
+                    });
                 }
             }
         }
     }
-    named
+
+    let table_of = |package: &str, feature: &str| -> Vec<String> {
+        strings(
+            documents
+                .get(package)
+                .and_then(|document| document.get("features"))
+                .and_then(|features| features.get(feature)),
+        )
+    };
+    let declares = |package: &str, feature: &str| {
+        documents
+            .get(package)
+            .and_then(|document| document.get("features"))
+            .and_then(|features| features.get(feature))
+            .is_some()
+    };
+
+    let mut enabled: BTreeMap<String, BTreeSet<String>> = documents
+        .keys()
+        .map(|name| ((*name).to_owned(), BTreeSet::new()))
+        .collect();
+    let mut queue: Vec<(String, String)> = Vec::new();
+    let mut turn_on = |package: &str, feature: &str, queue: &mut Vec<(String, String)>| {
+        if declares(package, feature)
+            && enabled
+                .get_mut(package)
+                .is_some_and(|set| set.insert(feature.to_owned()))
+        {
+            queue.push((package.to_owned(), feature.to_owned()));
+        }
+    };
+    turn_on(root, "default", &mut queue);
+    // A package is in the product only if a product package depends on it, so its edges are
+    // walked from every product package; `manifests` holds exactly those.
+    for edge in &edges {
+        if edge.defaults {
+            turn_on(&edge.package, "default", &mut queue);
+        }
+        for feature in &edge.features {
+            turn_on(&edge.package, feature, &mut queue);
+        }
+    }
+    while let Some((package, feature)) = queue.pop() {
+        for implied in table_of(&package, &feature) {
+            if implied.starts_with("dep:") {
+                continue;
+            }
+            match implied.split_once('/') {
+                Some((key, dependency_feature)) => {
+                    let key = key.trim_end_matches('?');
+                    let targets: Vec<String> = edges
+                        .iter()
+                        .filter(|edge| edge.from == package && edge.key == key)
+                        .map(|edge| edge.package.clone())
+                        .collect();
+                    for target in targets {
+                        turn_on(&target, dependency_feature, &mut queue);
+                    }
+                }
+                None => turn_on(&package, &implied, &mut queue),
+            }
+        }
+    }
+    enabled
 }
 
 /// What a `cfg` predicate says about a product build that has `features` on: `test` is off, a
@@ -458,6 +561,162 @@ fn product_build_permits(predicates: &[String], features: &BTreeSet<String>) -> 
             product_build_cfg(&meta, features) != Some(false)
         })
     })
+}
+
+fn manifests(rows: &[(&str, &str)]) -> BTreeMap<String, String> {
+    rows.iter()
+        .map(|(name, text)| ((*name).to_owned(), (*text).to_owned()))
+        .collect()
+}
+
+fn enabled_in(resolved: &BTreeMap<String, BTreeSet<String>>, package: &str) -> Vec<String> {
+    resolved
+        .get(package)
+        .map(|set| set.iter().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// RED (T-TEST-SHELL-HYGIENE review) — **a product build's features are resolved the way cargo
+/// resolves them, whatever TOML shape the manifests are written in.**
+///
+/// The root's `default` turns on `wide`, which turns on `renamed/deep` (`bt-b`, under a renamed
+/// key) across the crate boundary and, through `bt-c?/quiet`, `bt-c`'s `quiet`; `bt-b`'s
+/// dependency on `bt-c` is a `[dependencies.bt-c]` table naming `loud` and `louder` in a
+/// multi-line array; the root names `bt-b`'s `first` and `second` in a multi-line array inside
+/// an inline table. A
+/// dev-dependency's `tests-only` and a build-dependency's `build-only` stay off, and so does
+/// `bt-c`'s `default` (its edge says `default-features = false`).
+///
+/// MUTATIONS: read only a `features` array's first element (`strings` takes one) and `second`
+/// and `louder` are lost; skip the `dep/feature` arm and `deep` and `quiet` stay off;
+/// read `[dev-dependencies]` as a product table and `tests-only` turns on; ignore
+/// `default-features` and `bt-c`'s `default` turns on.
+#[test]
+fn product_features_follow_cargo_across_every_manifest_shape() {
+    let resolved = resolve_product_features(
+        "bt-a",
+        &manifests(&[
+            (
+                "bt-a",
+                r#"[package]
+name = "bt-a"
+
+[features]
+default = ["wide"]
+wide = ["renamed/deep", "bt-c?/quiet"]
+
+[dependencies]
+renamed = { package = "bt-b", path = "../bt-b", features = [
+    "first",
+    "second",
+] }
+bt-c = { path = "../bt-c", default-features = false }
+
+[dev-dependencies]
+bt-b = { path = "../bt-b", features = ["tests-only"] }
+
+[build-dependencies]
+bt-c = { path = "../bt-c", features = ["build-only"] }
+"#,
+            ),
+            (
+                "bt-b",
+                r#"[package]
+name = "bt-b"
+
+[features]
+first = []
+second = []
+deep = []
+tests-only = []
+
+[dependencies.bt-c]
+path = "../bt-c"
+default-features = false
+features = [
+    "loud",
+    "louder",
+]
+"#,
+            ),
+            (
+                "bt-c",
+                r#"[package]
+name = "bt-c"
+
+[features]
+default = ["chatty"]
+chatty = []
+loud = []
+louder = []
+quiet = []
+build-only = []
+"#,
+            ),
+        ]),
+    );
+    assert_eq!(enabled_in(&resolved, "bt-a"), ["default", "wide"]);
+    assert_eq!(
+        enabled_in(&resolved, "bt-b"),
+        ["deep", "first", "second"],
+        "named in a multi-line array under a renamed key, and implied across the crate boundary"
+    );
+    assert_eq!(
+        enabled_in(&resolved, "bt-c"),
+        ["loud", "louder", "quiet"],
+        "named in a `[dependencies.bt-c]` table, implied through `bt-c?/quiet`, and no default"
+    );
+}
+
+/// RED (T-TEST-SHELL-HYGIENE review) — **this workspace's test-only features are off in the
+/// product**, read from the real manifests: `bt-pty`'s `test-shell` and `bt-platform`'s
+/// `trust-harness` are named only on dev-dependency lines.
+///
+/// MUTATION: read `[dev-dependencies]` as a product table and both turn on.
+#[test]
+fn the_workspace_s_test_only_features_are_off_in_the_product() {
+    let resolved = product_features(&product_packages());
+    for (package, feature) in [("bt-pty", "test-shell"), ("bt-platform", "trust-harness")] {
+        assert!(
+            !enabled_in(&resolved, package)
+                .iter()
+                .any(|on| on == feature),
+            "{package}'s {feature} is on in a build of folio.exe: {resolved:?}"
+        );
+    }
+}
+
+/// RED (T-TEST-SHELL-HYGIENE review) — **a `cfg` predicate is read as a product build reads
+/// it**: `test` off, a feature on exactly when the product turns it on, a platform unknown.
+///
+/// MUTATION: answer `None` for `feature = "…"` in `product_build_cfg` and the first, third and
+/// fourth rows are unknown instead of decided.
+#[test]
+fn a_cfg_is_read_with_the_product_s_features() {
+    let on: BTreeSet<String> = ["shipped".to_owned()].into_iter().collect();
+    let read = |predicate: &str| {
+        product_build_cfg(
+            &syn::parse_str::<syn::Meta>(predicate).expect("a cfg predicate"),
+            &on,
+        )
+    };
+    for (predicate, expected) in [
+        (r#"any(test, feature = "test-shell")"#, Some(false)),
+        ("test", Some(false)),
+        (r#"feature = "shipped""#, Some(true)),
+        (r#"not(feature = "test-shell")"#, Some(true)),
+        (r#"all(windows, feature = "test-shell")"#, Some(false)),
+        (r#"any(unix, feature = "test-shell")"#, None),
+        ("windows", None),
+        (r#"all(windows, feature = "shipped")"#, None),
+    ] {
+        assert_eq!(read(predicate), expected, "{predicate}");
+    }
+    assert!(!product_build_permits(
+        &[r#"any(test, feature = "test-shell")"#.to_owned()],
+        &on
+    ));
+    assert!(product_build_permits(&["windows".to_owned()], &on));
 }
 
 // ── the lexer: code tokens, comments skipped, a literal one token ───────────────────────────

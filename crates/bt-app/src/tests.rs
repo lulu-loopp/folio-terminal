@@ -25942,7 +25942,8 @@ fn real_powershell_input_reaches_a_viewport_owned_frame() {
         if silent_for >= SILENCE_BUDGET || started.elapsed() >= CEILING {
             panic!(
                 "{MARKER} never reached Term: gave up after {:?}, the last {:?} of it with the \
-                     child silent, having read {bytes_read} bytes; the handshake {}. Screen {:?}",
+                     child silent, having read {bytes_read} bytes; the handshake {}; {}. Screen \
+                     {:?}",
                 started.elapsed(),
                 silent_for,
                 if command_sent {
@@ -25950,6 +25951,7 @@ fn real_powershell_input_reaches_a_viewport_owned_frame() {
                 } else {
                     "never completed, so the command was never sent"
                 },
+                pty.account(),
                 session.terminal().visible_text()
             );
         }

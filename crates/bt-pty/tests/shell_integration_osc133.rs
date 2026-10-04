@@ -254,17 +254,18 @@ impl ShellProbe {
         }
     }
 
-    fn give_up_if_stalled(&self, waiting_for: &str) {
+    fn give_up_if_stalled(&mut self, waiting_for: &str) {
         let silent_for = self.last_output.elapsed();
         if silent_for < SILENCE_BUDGET && self.started.elapsed() < CEILING {
             return;
         }
         panic!(
             "gave up waiting for {waiting_for} after {:?}, the last {:?} of it with the child \
-             silent and {} bytes read in all; screen {:?}",
+             silent and {} bytes read in all; {}; screen {:?}",
             self.started.elapsed(),
             silent_for,
             self.raw.len(),
+            self.pty.account(),
             self.session.terminal().visible_text()
         );
     }

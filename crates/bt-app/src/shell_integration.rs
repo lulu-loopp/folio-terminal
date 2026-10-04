@@ -3403,8 +3403,8 @@ mod tests {
             .unwrap();
             session
                 .write(
-                    b"printf 'argv=%s\n' \"$(ps -ww -o command= -p $$)\"; \
-                      printf 'path=%s\n' \"$PATH\"; echo folio-done-$((6*7))\n",
+                    b"printf 'argv=%s\\n' \"$(ps -ww -o command= -p $$)\"; \
+                      printf 'path=%s\\n' \"$PATH\"; echo folio-done-$((6*7))\n",
                 )
                 .unwrap();
             let mut seen = String::new();

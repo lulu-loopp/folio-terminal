@@ -182,15 +182,17 @@ impl Probe {
                 return;
             }
             let silent_for = self.last_output.elapsed();
-            assert!(
-                silent_for < SILENCE_BUDGET && self.started.elapsed() < CEILING,
-                "gave up waiting for {needle} after {:?}, the last {:?} of it silent, \
-                 {} bytes read; screen {:?}",
-                self.started.elapsed(),
-                silent_for,
-                self.raw.len(),
-                self.session.terminal().visible_text()
-            );
+            if silent_for >= SILENCE_BUDGET || self.started.elapsed() >= CEILING {
+                panic!(
+                    "gave up waiting for {needle} after {:?}, the last {:?} of it silent, \
+                     {} bytes read; {}; screen {:?}",
+                    self.started.elapsed(),
+                    silent_for,
+                    self.raw.len(),
+                    self.pty.account(),
+                    self.session.terminal().visible_text()
+                );
+            }
             std::thread::sleep(Duration::from_millis(2));
         }
     }

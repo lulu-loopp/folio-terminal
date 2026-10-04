@@ -3002,10 +3002,12 @@ mod tests {
                 if silent_for >= PROBE_SILENCE_BUDGET || started.elapsed() >= PROBE_CEILING {
                     panic!(
                         "gave up waiting for current line {expected:?} after {:?}, the last {:?} \
-                         of it with the child silent and {} bytes read in all; got {:?}, screen {:?}",
+                         of it with the child silent and {} bytes read in all; {}; got {:?}, \
+                         screen {:?}",
                         started.elapsed(),
                         silent_for,
                         self.raw_output.len(),
+                        self.session.account(),
                         self.current_line(),
                         self.terminal.visible_text()
                     );
@@ -3033,12 +3035,13 @@ mod tests {
                 if silent_for >= PROBE_SILENCE_BUDGET || started.elapsed() >= PROBE_CEILING {
                     panic!(
                         "gave up waiting for output marker {:?} after {:?}, the last {:?} of it \
-                         with the child silent and {} bytes read since the wait began; current \
-                         line {:?}, screen {:?}",
+                         with the child silent and {} bytes read since the wait began; {}; \
+                         current line {:?}, screen {:?}",
                         String::from_utf8_lossy(expected),
                         started.elapsed(),
                         silent_for,
                         self.raw_output.len() - start,
+                        self.session.account(),
                         self.current_line(),
                         self.terminal.visible_text()
                     );
@@ -4949,6 +4952,43 @@ mod tests {
             ));
         let mut shell = TestShell::spawn(command, size(80, 10)).unwrap();
         shell.write(b"Write-Output never\r").unwrap();
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE, CI run 37221762304) — **a refused shell says why where a
+    /// waiting test can see it**: the reason is on the screen, and `TestShell::account` names it.
+    ///
+    /// On the runner a shell that never drew its prompt left an empty screen and a silence budget
+    /// running out, with the refusal (if that was what happened) only in a file nobody read.
+    ///
+    /// MUTATIONS: drop the console line from `powershell_hygiene`'s `catch` and the wait gives
+    /// up on a silent screen; read no refusal file in `TestShell::account` and the last
+    /// assertion fails.
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_shell_says_why_on_its_screen_and_in_its_account() {
+        let command = PtyCommand::new(WINDOWS_POWERSHELL)
+            .arg("-NoLogo")
+            .arg("-NoExit")
+            .arg("-Command")
+            .arg(format!(
+                "function global:Set-PSReadLineOption {{ throw 'BT_NO_HISTORY_OPTION' }}; {}",
+                test_shell::HYGIENE
+            ));
+        let session = TestShell::spawn(command, size(120, 10)).unwrap();
+        let mut oracle = InteractiveOracle {
+            session,
+            terminal: TerminalAdapter::new(nz32(120), nz32(10)),
+            raw_output: Vec::new(),
+            pty_replies: Vec::new(),
+            cpr_log: Vec::new(),
+            cpr_columns: 120,
+        };
+        oracle.wait_for_output_since(0, b"the history refusal failed");
+        let account = oracle.session.account();
+        assert!(
+            account.contains("history refusal refused: BT_NO_HISTORY_OPTION"),
+            "{account}"
+        );
     }
 
     #[cfg(windows)]

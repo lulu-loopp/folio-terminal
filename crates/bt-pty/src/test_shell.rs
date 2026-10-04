@@ -124,13 +124,11 @@ pub enum Posix {
 }
 
 impl Family {
-    /// The family of `program`, read off its file name; `wsl` is refused here,
-    /// with the reason.
+    /// The family of `program`, read off its name ([`program_name`]); `wsl` is
+    /// refused here, with the reason.
     #[must_use]
     pub fn of(program: &OsStr) -> Self {
-        let stem = Path::new(program)
-            .file_stem()
-            .map(|stem| stem.to_string_lossy().to_ascii_lowercase());
+        let stem = program_name(program);
         match stem.as_deref() {
             Some("powershell" | "pwsh") => Self::PowerShell,
             Some("cmd") => Self::Cmd,
@@ -160,6 +158,26 @@ impl Family {
             Self::Posix(Posix::Bourne) | Self::Program => &[],
         }
     }
+}
+
+/// **The name a program is known by**, the same on every platform: the last
+/// component of its spelling with either separator — `/` or `\` — taken as
+/// one, without its extension, lower-cased.
+///
+/// Not `Path::file_stem`: off Windows a backslash is an ordinary file-name
+/// character, so `C:\Windows\System32\wsl.exe` would be one name there and
+/// `wsl` here, and the helper's contract — what it refuses, what flags it
+/// gives — is about the program a test names, not about the host reading the
+/// name (CI run 37221762304: refused on Windows, admitted on macOS and Linux).
+#[must_use]
+pub fn program_name(program: &OsStr) -> Option<String> {
+    let spelled = program.to_string_lossy();
+    let last = spelled.rsplit(['/', '\\']).next()?;
+    let stem = match last.rsplit_once('.') {
+        Some((stem, _)) if !stem.is_empty() => stem,
+        _ => last,
+    };
+    (!stem.is_empty()).then(|| stem.to_ascii_lowercase())
 }
 
 /// **This test's stand-in for the account**: a temporary directory that holds
@@ -323,10 +341,13 @@ impl Hygiene {
             family
                 .startup_flags()
                 .iter()
-                .filter(|flag| {
-                    !arguments
+                .filter(|flag| match family {
+                    Family::PowerShell => {
+                        !powershell_switches(&arguments).contains(&PowerShellSwitch::NoProfile)
+                    }
+                    _ => !arguments
                         .iter()
-                        .any(|argument| argument.to_string_lossy().eq_ignore_ascii_case(flag))
+                        .any(|argument| argument.to_string_lossy().eq_ignore_ascii_case(flag)),
                 })
                 .map(OsString::from)
                 .collect()
@@ -371,23 +392,14 @@ impl Hygiene {
     /// A PowerShell's argument list with the history refusal in its startup
     /// script, when it is a PowerShell that will draw a prompt.
     fn powershell_arguments(&self, mut arguments: Vec<OsString>) -> (Vec<OsString>, Gate) {
-        let is = |argument: &OsString, names: &[&str]| {
-            let argument = argument.to_string_lossy();
-            names.iter().any(|name| argument.eq_ignore_ascii_case(name))
-        };
-        let stays_open = arguments.iter().any(|argument| is(argument, &["-NoExit"]));
-        let script = arguments.iter().position(|argument| {
-            is(
-                argument,
-                &[
-                    "-Command",
-                    "-c",
-                    "-EncodedCommand",
-                    "-e",
-                    "-ec",
-                    "-File",
-                    "-f",
-                ],
+        let switches = powershell_switches(&arguments);
+        let stays_open = switches.contains(&PowerShellSwitch::NoExit);
+        let script = switches.iter().position(|switch| {
+            matches!(
+                switch,
+                PowerShellSwitch::Command
+                    | PowerShellSwitch::EncodedCommand
+                    | PowerShellSwitch::File
             )
         });
         let refusal = powershell_hygiene(self);
@@ -401,7 +413,7 @@ impl Hygiene {
                 arguments.push("-Command".into());
                 arguments.push(refusal.into());
             }
-            Some(at) if is(&arguments[at], &["-Command", "-c"]) => {
+            Some(at) if switches[at] == PowerShellSwitch::Command => {
                 assert_eq!(
                     arguments.len(),
                     at + 2,
@@ -471,6 +483,78 @@ impl Drop for Hygiene {
     }
 }
 
+/// The switches a PowerShell command line's shape depends on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PowerShellSwitch {
+    NoExit,
+    NoProfile,
+    Command,
+    EncodedCommand,
+    File,
+    /// Any other switch, or a switch's value.
+    Other,
+}
+
+/// Each argument of a PowerShell command line as a switch, up to and including the one that
+/// starts its script (`-Command`, `-EncodedCommand`, `-File`) — what follows that is the
+/// script's, not PowerShell's.
+///
+/// Read the way PowerShell reads them: a `-`, `--` or `/` in front, any case, the full name or
+/// one of the documented aliases (`-c`, `-e`, `-ec`, `-f`). PowerShell also takes any
+/// unambiguous abbreviation (`-noe`, `-noprof`, `-comm`); an abbreviation of one of the five
+/// switches that decide whether this shell will draw a prompt, or has a profile, is refused
+/// here rather than guessed at, because a misread one would open the history gate on a shell
+/// that draws a prompt.
+fn powershell_switches(arguments: &[OsString]) -> Vec<PowerShellSwitch> {
+    const NAMED: [(&str, PowerShellSwitch); 9] = [
+        ("noexit", PowerShellSwitch::NoExit),
+        ("noprofile", PowerShellSwitch::NoProfile),
+        ("command", PowerShellSwitch::Command),
+        ("c", PowerShellSwitch::Command),
+        ("encodedcommand", PowerShellSwitch::EncodedCommand),
+        ("e", PowerShellSwitch::EncodedCommand),
+        ("ec", PowerShellSwitch::EncodedCommand),
+        ("file", PowerShellSwitch::File),
+        ("f", PowerShellSwitch::File),
+    ];
+    let mut switches = Vec::new();
+    for argument in arguments {
+        let spelled = argument.to_string_lossy();
+        let name = spelled
+            .strip_prefix("--")
+            .or_else(|| spelled.strip_prefix('-'))
+            .or_else(|| spelled.strip_prefix('/'))
+            .map(str::to_ascii_lowercase);
+        let switch = match name {
+            Some(name) if !name.is_empty() => match NAMED.iter().find(|(full, _)| *full == name) {
+                Some((_, switch)) => *switch,
+                None => {
+                    if let Some((full, _)) = NAMED
+                        .iter()
+                        .find(|(full, _)| full.len() > 2 && full.starts_with(name.as_str()))
+                    {
+                        panic!(
+                            "a test's PowerShell is started with {spelled:?}, which PowerShell \
+                             reads as an abbreviation of -{full}: spell it in full, so the \
+                             helper reads the command line the way PowerShell does"
+                        );
+                    }
+                    PowerShellSwitch::Other
+                }
+            },
+            _ => PowerShellSwitch::Other,
+        };
+        switches.push(switch);
+        if matches!(
+            switch,
+            PowerShellSwitch::Command | PowerShellSwitch::EncodedCommand | PowerShellSwitch::File
+        ) {
+            break;
+        }
+    }
+    switches
+}
+
 /// `text` as a PowerShell single-quoted literal. PowerShell reads the four
 /// typographic single quotes as quotes too, so each of them is doubled as well.
 fn powershell_literal(text: &str) -> String {
@@ -491,12 +575,19 @@ fn powershell_literal(text: &str) -> String {
 /// The history refusal a test's interactive PowerShell runs before its first
 /// prompt: history saving off and its file inside the hygiene directory, both
 /// read back and written to the proof file — or, when any step fails, the
-/// reason written to the refusal file and the shell gone.
+/// reason written to the refusal file and then to the console, and the shell gone.
 ///
-/// Cmdlets only, so it means the same thing in a constrained language mode,
-/// and single quotes only, because Windows PowerShell's own command-line
-/// parsing mangles a double quote inside `-Command`. The proof is written
-/// beside its name and moved into place, so a reader never sees half of it.
+/// The console line is what a test sees when it is waiting for a prompt that
+/// will never come: written only to a file, a refusal is an empty screen and a
+/// silence budget running out (CI run 37221762304), and the reason is lost.
+///
+/// Only the PSReadLine cmdlets the old startup scripts already called, and the
+/// .NET file calls, in a full language mode — no other module command, so the
+/// refusal adds no module load to the shell it runs in; the `Set-Content` /
+/// `Move-Item` arm is for a constrained language mode, where a .NET call is
+/// refused. Single quotes only, because Windows PowerShell's own command-line
+/// parsing mangles a double quote inside `-Command`. The proof is written beside
+/// its name and moved into place, so a reader never sees half of it.
 #[must_use]
 pub fn powershell_hygiene(hygiene: &Hygiene) -> String {
     let history = powershell_literal(&hygiene.history_file().to_string_lossy());
@@ -507,12 +598,18 @@ pub fn powershell_hygiene(hygiene: &Hygiene) -> String {
     format!(
         "try {{ Set-PSReadLineOption -HistorySaveStyle SaveNothing -HistorySavePath {history} \
          -ErrorAction Stop; $__FolioTestShell = Get-PSReadLineOption -ErrorAction Stop; \
-         Set-Content -LiteralPath {partial} -Value (([string]$__FolioTestShell.HistorySaveStyle) \
-         + [char]10 + [string]$__FolioTestShell.HistorySavePath) -NoNewline -Encoding UTF8 \
-         -ErrorAction Stop; Move-Item -LiteralPath {partial} -Destination {proof} -Force \
-         -ErrorAction Stop; Remove-Variable -Name __FolioTestShell }} catch {{ Set-Content \
-         -LiteralPath {refusal} -Value ([string]$_) -Encoding UTF8 -ErrorAction SilentlyContinue; \
-         exit {REFUSED_EXIT_CODE} }};"
+         $__FolioTestShell = ([string]$__FolioTestShell.HistorySaveStyle) + [char]10 + \
+         [string]$__FolioTestShell.HistorySavePath; \
+         if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ \
+         [IO.File]::WriteAllText({partial}, $__FolioTestShell); [IO.File]::Move({partial}, {proof}) \
+         }} else {{ Set-Content -LiteralPath {partial} -Value $__FolioTestShell -NoNewline \
+         -Encoding UTF8 -ErrorAction Stop; Move-Item -LiteralPath {partial} -Destination {proof} \
+         -Force -ErrorAction Stop }}; $__FolioTestShell = $null }} catch {{ \
+         if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ \
+         [IO.File]::WriteAllText({refusal}, [string]$_) }} else {{ Set-Content -LiteralPath \
+         {refusal} -Value ([string]$_) -Encoding UTF8 -ErrorAction SilentlyContinue }}; \
+         'folio test shell: the history refusal failed, so this shell will not be typed into: ' + \
+         [string]$_; exit {REFUSED_EXIT_CODE} }};"
     )
 }
 
@@ -741,6 +838,38 @@ impl TestShell {
             );
             std::thread::sleep(ESTABLISH_POLL);
         }
+    }
+
+    /// **What the shell's hygiene and the shell itself have come to**, for a test's message
+    /// when it gives up waiting: whether the history refusal was established, what the proof
+    /// says, or the reason the shell gave for refusing; and whether the shell has ended, with
+    /// its exit code. A wait that ran out on an empty screen says nothing else.
+    pub fn account(&mut self) -> String {
+        let program = Path::new(&self.program).display().to_string();
+        let refusal = match &self.gate {
+            Gate::Open => "not owed (no line editor here keeps a history)".to_owned(),
+            Gate::PowerShell {
+                established: true, ..
+            } => "established".to_owned(),
+            Gate::PowerShell { proof, refusal, .. } => {
+                if let Ok(reason) = std::fs::read_to_string(refusal) {
+                    format!("refused: {}", reason.trim_start_matches('\u{feff}').trim())
+                } else if let Ok(said) = std::fs::read_to_string(proof) {
+                    format!("written, reading {:?}", said.trim_start_matches('\u{feff}'))
+                } else {
+                    "not yet written (the startup script has not reached it)".to_owned()
+                }
+            }
+        };
+        let child = match self.session.try_wait() {
+            Ok(Some(status)) if status.exit_code() == REFUSED_EXIT_CODE => {
+                format!("ended with exit code {REFUSED_EXIT_CODE}, the history refusal's own")
+            }
+            Ok(Some(status)) => format!("ended with exit code {}", status.exit_code()),
+            Ok(None) => "is still running".to_owned(),
+            Err(error) => format!("cannot be asked whether it is running ({error})"),
+        };
+        format!("{program}: history refusal {refusal}; the shell {child}")
     }
 
     pub fn read_output(&self) -> Vec<u8> {
@@ -981,13 +1110,104 @@ mod tests {
         );
     }
 
-    /// RED (T-TEST-SHELL-HYGIENE) — **WSL is refused**: its shell's home is the distribution's.
+    /// RED (T-TEST-SHELL-HYGIENE) — **WSL is refused**, by its name, on every platform: its
+    /// shell's home is the distribution's. Spelled as a Windows path on purpose: off Windows a
+    /// backslash is a file-name character, and CI run 37221762304 admitted this spelling on
+    /// macOS and Linux while refusing it on Windows.
     ///
-    /// MUTATION: map `wsl` to `Family::Program` and no panic comes.
+    /// MUTATIONS: map `wsl` to `Family::Program` and no panic comes; name the program with
+    /// `Path::file_stem` in `program_name` and no panic comes off Windows.
     #[test]
     #[should_panic(expected = "WSL runs a shell inside a distribution")]
     fn wsl_has_no_hygienic_form() {
         let _ = Family::of(OsStr::new(r"C:\Windows\System32\wsl.exe"));
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE) — **a program is named by its spelling, the same on every
+    /// platform**: the last component under either separator, without its extension, in any
+    /// case.
+    ///
+    /// MUTATIONS: name the program with `Path::file_stem` and the backslash rows fail off
+    /// Windows; drop the lower-casing and the upper-case rows fail everywhere.
+    #[test]
+    fn a_program_is_named_the_same_on_every_platform() {
+        for (spelled, name) in [
+            (r"C:\Windows\System32\wsl.exe", "wsl"),
+            ("/mnt/c/Windows/System32/WSL.EXE", "wsl"),
+            (r"C:\Program Files\PowerShell\7\pwsh.exe", "pwsh"),
+            ("/opt/microsoft/powershell/7/pwsh", "pwsh"),
+            ("PowerShell.exe", "powershell"),
+            (r"C:\WINDOWS\system32\CMD.EXE", "cmd"),
+            ("/bin/zsh", "zsh"),
+            ("bash", "bash"),
+        ] {
+            assert_eq!(
+                program_name(OsStr::new(spelled)).as_deref(),
+                Some(name),
+                "{spelled}"
+            );
+        }
+        assert_eq!(
+            Family::of(OsStr::new(r"C:\Program Files\Git\bin\bash.exe")),
+            Family::Posix(Posix::Bash)
+        );
+        assert_eq!(
+            Family::of(OsStr::new(r"C:\WINDOWS\system32\CMD.EXE")),
+            Family::Cmd
+        );
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE review) — **a PowerShell switch is read in every spelling
+    /// PowerShell reads it**: `/NoExit`, `--noexit`, `-NOEXIT` make a shell that draws a prompt,
+    /// and `/NoProfile` is not given twice.
+    ///
+    /// MUTATION: strip only a leading `-` in `powershell_switches` and `/NoExit` reads as a
+    /// one-shot whose gate is open.
+    #[test]
+    fn every_spelling_of_no_exit_is_an_interactive_powershell() {
+        let hygiene = Hygiene::new();
+        for spelled in ["/NoExit", "--noexit", "-NOEXIT"] {
+            let (command, gate) = hygiene.prepare(
+                PtyCommand::new("powershell.exe")
+                    .arg(spelled)
+                    .arg("/Command")
+                    .arg("function global:prompt { 'P> ' }"),
+            );
+            assert!(
+                matches!(gate, Gate::PowerShell { .. }),
+                "{spelled} is a shell that draws a prompt"
+            );
+            assert!(
+                arguments(&command)
+                    .last()
+                    .is_some_and(|script| script.starts_with("try {")),
+                "{spelled}: the refusal is first in the script"
+            );
+        }
+        let (command, _) = hygiene.prepare(
+            PtyCommand::new("pwsh")
+                .arg("/NoProfile")
+                .arg("-Command")
+                .arg("1"),
+        );
+        assert_eq!(arguments(&command), ["/NoProfile", "-Command", "1"]);
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE review) — **an abbreviated switch is refused, not guessed**:
+    /// PowerShell reads `-noe` as `-NoExit`, and a helper that did not would open the gate on a
+    /// shell that draws a prompt.
+    ///
+    /// MUTATION: drop the abbreviation check in `powershell_switches` and `-noe` reads as
+    /// another switch, so no panic comes.
+    #[test]
+    #[should_panic(expected = "reads as an abbreviation of -noexit")]
+    fn an_abbreviated_no_exit_is_refused() {
+        let _ = Hygiene::new().prepare(
+            PtyCommand::new("powershell.exe")
+                .arg("-noe")
+                .arg("-Command")
+                .arg("1"),
+        );
     }
 
     /// RED (T-TEST-SHELL-HYGIENE) — **off a pseudoconsole, the family's flags come first and the

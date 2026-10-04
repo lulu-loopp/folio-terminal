@@ -5,7 +5,10 @@
 ## in the product (bt-app and every first-party package it depends on; libraries and the `folio` binary; test code,
 ## build scripts, examples, development binaries and `vendor/` out), outside the body of a registered door function
 ## (a function taking a `WaitToken` of a `# doors` line), with the number of such sites in that item. The reading is
-## cfg-blind: a Windows arm and its macOS twin are two rows. `arm` is the `cfg` the item stands on, or `-`.
+## platform-blind: a Windows arm and its macOS twin are two rows. A feature is read as a build of `folio.exe` sets
+## it (T-TEST-SHELL-HYGIENE): one that only a dev-dependency names (`bt-pty`'s `test-shell`, `bt-platform`'s
+## `trust-harness`) is off, so an item standing on it is not in the product. `arm` is the `cfg` the item stands on,
+## or `-`.
 ##
 ## Held equal to the code by `hang_watch::window_waits_tests::every_bare_site_is_a_row_and_every_row_a_site`, which
 ## says how a site is recognised. This file only shrinks: a row goes when its site goes through a door (A2b-A2d); no
