@@ -1476,7 +1476,10 @@ impl Runtime<'_> {
         let inherited = self
             .sessions
             .get(&source)
-            .map(|leaf| seed.applied(&leaf.profile, leaf.session.working_directory()))
+            // Where the source stands is §7.1.4's ladder, the one `Restart shell` reads: a source
+            // whose shell never reported stands where it was put down, not at its profile's
+            // default.
+            .map(|leaf| seed.applied(&leaf.profile, leaf.place_for_a_new_shell().as_deref()))
             // A seat with no shell to inherit from has no profile to inherit
             // either, and the fallback is the one answer that is startable by
             // construction. Said here rather than left to `LeafSeed::default()`,

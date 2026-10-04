@@ -79,6 +79,11 @@ All notable changes to Folio are recorded here. The format follows
   was restored when nothing had been replaced; it says the previous version was
   restored only when it was, and says the update is incomplete when putting it
   back did not finish.
+- Restart shell, Duplicate pane, the splits and Duplicate tab start the new
+  shell in the folder the pane was opened in when its shell never reported
+  one, instead of the profile's default folder. A folder that has since been
+  deleted opens the profile's own starting folder rather than the folder Folio
+  itself was started from.
 
 ### Known issues
 

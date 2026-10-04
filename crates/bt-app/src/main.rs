@@ -9541,22 +9541,25 @@ fn git_full_path(root: &Path, path: &str) -> PathBuf {
 ///   what "同一 seat 反复重启永远用同一个可执行文件" asks for; reading
 ///   `settings.default_profile` here would turn a Git Bash pane into a
 ///   PowerShell the first time somebody changed that setting.
-/// * **The directory is the last trusted OSC 7 report**, which is what
-///   `working_directory()` holds. The contract is explicit that this is 「最后
-///   已知」 and not 「当前」: a `cd` the old shell performed without announcing
-///   it is a `cd` the restart cannot see, and going to ask the process would be
-///   promising a freshness this window has no way to deliver.
-/// * **No folder at all is an absence, not a fallback.** `None` reaches
+/// * **The directory is §1.1's ladder**: the last trusted OSC 7 report, else
+///   the seat's initial cwd — [`LeafSession::place_for_a_new_shell`], read by
+///   the caller. The contract is explicit that this is 「最后已知」 and not
+///   「当前」: a `cd` the old shell performed without announcing it is a `cd`
+///   the restart cannot see. Until 2026-10-04 only the first rung was read, so
+///   a pane opened in a chosen folder whose shell never reported restarted at
+///   its profile's default instead of where it was born.
+/// * **No folder at all is an absence, not a fallback.** `None` (a pane whose
+///   spawn could name no place, or one put down at its shell's own `~`) reaches
 ///   `profiles::spawn_place`, which answers it with the profile's own starting
 ///   directory — the same answer a brand-new pane on that profile gets.
 ///
 /// The manual name is not here because it is not a fact about a shell: it is the
 /// tab's (`TabSeed::manual_name`), and a restart that never touches a tab keeps
 /// it by construction rather than by copying it.
-fn restart_seed(profile: &str, last_reported_cwd: Option<&Path>) -> LeafSeed {
+fn restart_seed(profile: &str, standing_in: Option<&Path>) -> LeafSeed {
     LeafSeed {
         profile: profile.to_owned(),
-        cwd: last_reported_cwd.map(Path::to_path_buf),
+        cwd: standing_in.map(Path::to_path_buf),
         // A running pane's profile is one this build has, by construction — it
         // started a process from it.
         unknown_profile_id: None,
@@ -17848,15 +17851,11 @@ impl TabState {
             // profile had slid into its slot, and that wrong id then came back off
             // disk as the pane's shell on the next launch.
             profile_id: self.leaf_profile(seat),
+            // The one ladder every shell started in this pane's place reads (T-RESTART-CWD).
             cwd: self
                 .sessions
                 .get(&seat)
-                .and_then(|leaf| {
-                    leaf.session
-                        .working_directory()
-                        .map(Path::to_path_buf)
-                        .or_else(|| leaf.spawn_place.clone())
-                })
+                .and_then(LeafSession::place_for_a_new_shell)
                 .map(|path| path.to_string_lossy().into_owned())
                 .unwrap_or_default(),
             manual_name: self.manual_name.clone(),
@@ -19055,6 +19054,31 @@ impl TabState {
 const TITLE_ACTIVITY_SEPARATOR: &str = " - ";
 
 impl LeafSession {
+    /// **Where this pane stands, for a shell that is to be started in its place** — `Restart
+    /// shell`, `Duplicate pane` and every split, `Duplicate tab` (`docs/M2-restart-shell-contract.md`
+    /// §1.1; `docs/DESIGN.md` §7.1.4's ladder: the last OSC 7 report, else the folder the shell was
+    /// put down in, else `HOME`).
+    ///
+    /// The first rung is the shell's report. The second is [`Self::spawn_place`], which only the
+    /// spawn knew and which already has `HOME` folded into it, so a pane opened by `New terminal in
+    /// folder…` or split off into a folder, whose shell never reported, is started again in that
+    /// folder rather than at its profile's default.
+    ///
+    /// The session save (`TabState::term_leaf`) writes this same ladder, so a restored pane and a
+    /// Recent row stand where a restart would.
+    ///
+    /// A WSL pane put down at its shell's own home holds the mark `~` as its place and hands `~`
+    /// on; `profiles::place_for` reads a place equal to the profile's home mark as the shell's
+    /// home, so the next shell is put down at its home with the mark set (round 2). A folder that
+    /// has since stopped being a directory is answered by `profiles::spawn_place`, which every one
+    /// of these spawns goes through.
+    fn place_for_a_new_shell(&self) -> Option<PathBuf> {
+        self.session
+            .working_directory()
+            .map(Path::to_path_buf)
+            .or_else(|| self.spawn_place.clone())
+    }
+
     /// **Turn [`Self::has_rail`] on at the ledger's first mark**, and answer
     /// whether this call was the one that did — true at most once per leaf.
     ///
@@ -37874,6 +37898,35 @@ fn startable_profile(requested: &str, programs: &profiles::ProfilePrograms) -> S
     Started::Nothing
 }
 
+/// **Where a leaf's shell was born, said for the profile that actually started** (T-RESTART-CWD
+/// round 2) — the leaf's `spawn_place` and its shell's-home mark, given the place resolved for
+/// `asked` and the profile `started` that `bt-pty`'s one-shot fallback may have swapped in.
+///
+/// Unchanged when no swap happened. After a swap the place is crossed into the started profile's
+/// namespace through `profiles::cwd_for_spawn`, the one door every crossing goes through, so a
+/// WSL pane that came up as PowerShell records `D:\Projects` rather than `/mnt/d/Projects`, and a
+/// place that has no spelling there (the WSL home mark `~`) is recorded as none — the started
+/// profile's own starting directory, by the ladder's last rung. The mark goes with the swap: it
+/// names a launcher's home, and the profile that started takes no launcher flag.
+fn birth_place_of_the_started_shell(
+    asked: &str,
+    started: &str,
+    place: Option<PathBuf>,
+    at_shell_home: bool,
+) -> (Option<PathBuf>, bool) {
+    if asked == started {
+        return (place, at_shell_home);
+    }
+    (
+        profiles::cwd_for_spawn(
+            profiles::index_of_id(asked),
+            profiles::index_of_id(started),
+            place.as_deref(),
+        ),
+        false,
+    )
+}
+
 /// Spawn one shell for one Terminal leaf, sized to the rectangle it will draw
 /// into.
 ///
@@ -38124,6 +38177,11 @@ fn create_leaf_session(
         // meet the same missing program and say the same thing again, for ever.
         spawn_profile.to_owned()
     };
+    // **And the place it was born in is said in the namespace of the shell that started**
+    // (T-RESTART-CWD round 2): `spawn_place` was resolved for `spawn_profile`, and after the swap
+    // above this leaf is `profile`.
+    let (spawn_place, at_shell_home) =
+        birth_place_of_the_started_shell(spawn_profile, &profile, spawn_place, place.at_shell_home);
     let columns = nonzero_u32(grid.columns.get());
     let rows = nonzero_u32(grid.rows.get());
     let mut session = DualPlaneSession::with_quotas_and_cell_height(
@@ -38207,7 +38265,7 @@ fn create_leaf_session(
     // And whether that rung is a *mark* rather than a place: a WSL leaf opening at its own `$HOME`
     // was handed `--cd ~`, which only the shell can expand, so the session reads the expansion off
     // the pane's first `OSC 7` report (§7.30, 2026-09-07).
-    session.set_spawn_at_shell_home(place.at_shell_home);
+    session.set_spawn_at_shell_home(at_shell_home);
     // T-3, and it arrives beside the rung above for the same reason: which spelling of an absolute
     // path this pane's shell prints is a fact about the profile, and `seed.profile` is the last
     // place that holds it. A Git Bash prints `/d/Demo/report.md` and a WSL bash prints
