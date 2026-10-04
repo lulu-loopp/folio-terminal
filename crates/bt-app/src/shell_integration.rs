@@ -58,7 +58,7 @@ mod profile_runtime;
 pub use profile_runtime::{
     ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
     begin_profile_observation_for, begin_removal, begin_startup_migration,
-    remove_shell_integration, remove_shell_integration_at, take_profile_install, take_removal,
+    remove_shell_integration, remove_shell_integration_at, take_profile_installs, take_removal,
 };
 
 /// The script, compiled in.
@@ -716,6 +716,10 @@ enum PowerShellOptionKind {
 #[derive(Clone, Copy)]
 struct PowerShellOption {
     name: &'static str,
+    /// **The parameter this call binds** — the option's identity, whatever it was spelled as.
+    /// An alias call (`ep`, `ec`, `wd`, …) binds the same parameter as its full name, so it
+    /// names that full name here; every reader that asks *which* option a word is asks this.
+    parameter: &'static str,
     minimum: &'static str,
     kind: PowerShellOptionKind,
 }
@@ -723,126 +727,151 @@ struct PowerShellOption {
 const WINPS_OPTIONS: &[PowerShellOption] = &[
     PowerShellOption {
         name: "version",
+        parameter: "version",
         minimum: "v",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "help",
+        parameter: "help",
         minimum: "h",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "?",
+        parameter: "?",
         minimum: "?",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "noexit",
+        parameter: "noexit",
         minimum: "noe",
         kind: PowerShellOptionKind::NoExit,
     },
     PowerShellOption {
         name: "noprofile",
+        parameter: "noprofile",
         minimum: "nop",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "nologo",
+        parameter: "nologo",
         minimum: "nol",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "noninteractive",
+        parameter: "noninteractive",
         minimum: "noni",
         kind: PowerShellOptionKind::NonInteractive,
     },
     PowerShellOption {
         name: "configurationname",
+        parameter: "configurationname",
         minimum: "config",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "command",
+        parameter: "command",
         minimum: "c",
         kind: PowerShellOptionKind::Command,
     },
     PowerShellOption {
         name: "windowstyle",
+        parameter: "windowstyle",
         minimum: "w",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "file",
+        parameter: "file",
         minimum: "f",
         kind: PowerShellOptionKind::File,
     },
     PowerShellOption {
         name: "outputformat",
+        parameter: "outputformat",
         minimum: "o",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "of",
+        parameter: "outputformat",
         minimum: "o",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "inputformat",
+        parameter: "inputformat",
         minimum: "in",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "if",
+        parameter: "inputformat",
         minimum: "if",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "executionpolicy",
+        parameter: "executionpolicy",
         minimum: "ex",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "ep",
+        parameter: "executionpolicy",
         minimum: "ep",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "encodedcommand",
+        parameter: "encodedcommand",
         minimum: "e",
         kind: PowerShellOptionKind::EncodedCommand,
     },
     PowerShellOption {
         name: "ec",
+        parameter: "encodedcommand",
         minimum: "e",
         kind: PowerShellOptionKind::EncodedCommand,
     },
     PowerShellOption {
         name: "encodedarguments",
+        parameter: "encodedarguments",
         minimum: "encodeda",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "ea",
+        parameter: "encodedarguments",
         minimum: "ea",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "servermode",
+        parameter: "servermode",
         minimum: "s",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "sta",
+        parameter: "sta",
         minimum: "sta",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "mta",
+        parameter: "mta",
         minimum: "mta",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "psconsolefile",
+        parameter: "psconsolefile",
         minimum: "psconsolefile",
         kind: PowerShellOptionKind::Value,
     },
@@ -851,166 +880,199 @@ const WINPS_OPTIONS: &[PowerShellOption] = &[
 const PWSH_OPTIONS: &[PowerShellOption] = &[
     PowerShellOption {
         name: "version",
+        parameter: "version",
         minimum: "v",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "help",
+        parameter: "help",
         minimum: "h",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "?",
+        parameter: "?",
         minimum: "?",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "login",
+        parameter: "login",
         minimum: "l",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "noexit",
+        parameter: "noexit",
         minimum: "noe",
         kind: PowerShellOptionKind::NoExit,
     },
     PowerShellOption {
         name: "noprofile",
+        parameter: "noprofile",
         minimum: "nop",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "nologo",
+        parameter: "nologo",
         minimum: "nol",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "noninteractive",
+        parameter: "noninteractive",
         minimum: "noni",
         kind: PowerShellOptionKind::NonInteractive,
     },
     PowerShellOption {
         name: "noprofileloadtime",
+        parameter: "noprofileloadtime",
         minimum: "noprofileloadtime",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "interactive",
+        parameter: "interactive",
         minimum: "i",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "configurationfile",
+        parameter: "configurationfile",
         minimum: "configurationfile",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "configurationname",
+        parameter: "configurationname",
         minimum: "config",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "custompipename",
+        parameter: "custompipename",
         minimum: "cus",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "commandwithargs",
+        parameter: "commandwithargs",
         minimum: "commandwithargs",
         kind: PowerShellOptionKind::CommandWithArgs,
     },
     PowerShellOption {
         name: "cwa",
+        parameter: "commandwithargs",
         minimum: "cwa",
         kind: PowerShellOptionKind::CommandWithArgs,
     },
     PowerShellOption {
         name: "command",
+        parameter: "command",
         minimum: "c",
         kind: PowerShellOptionKind::Command,
     },
     PowerShellOption {
         name: "windowstyle",
+        parameter: "windowstyle",
         minimum: "w",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "file",
+        parameter: "file",
         minimum: "f",
         kind: PowerShellOptionKind::File,
     },
     PowerShellOption {
         name: "outputformat",
+        parameter: "outputformat",
         minimum: "o",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "of",
+        parameter: "outputformat",
         minimum: "o",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "inputformat",
+        parameter: "inputformat",
         minimum: "inp",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "if",
+        parameter: "inputformat",
         minimum: "if",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "executionpolicy",
+        parameter: "executionpolicy",
         minimum: "ex",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "ep",
+        parameter: "executionpolicy",
         minimum: "ep",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "encodedcommand",
+        parameter: "encodedcommand",
         minimum: "e",
         kind: PowerShellOptionKind::EncodedCommand,
     },
     PowerShellOption {
         name: "ec",
+        parameter: "encodedcommand",
         minimum: "e",
         kind: PowerShellOptionKind::EncodedCommand,
     },
     PowerShellOption {
         name: "encodedarguments",
+        parameter: "encodedarguments",
         minimum: "encodeda",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "ea",
+        parameter: "encodedarguments",
         minimum: "ea",
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "settingsfile",
+        parameter: "settingsfile",
         minimum: "settings",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "sta",
+        parameter: "sta",
         minimum: "sta",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "mta",
+        parameter: "mta",
         minimum: "mta",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
         name: "workingdirectory",
+        parameter: "workingdirectory",
         minimum: "wo",
         kind: PowerShellOptionKind::Value,
     },
     PowerShellOption {
         name: "wd",
+        parameter: "workingdirectory",
         minimum: "wd",
         kind: PowerShellOptionKind::Value,
     },
@@ -1028,7 +1090,8 @@ enum PowerShellTerminal {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PowerShellNonTerminal {
-    name: &'static str,
+    /// [`PowerShellOption::parameter`]: one identity for every accepted spelling.
+    parameter: &'static str,
     option: usize,
     value: Option<usize>,
 }
@@ -1103,15 +1166,15 @@ fn classify_powershell_arguments(
                 && option.name.len() >= key.len()
                 && option.name[..key.len()].eq_ignore_ascii_case(key)
         })?;
-        if (is_pwsh(program) && option.name == "login" && at != 0)
-            || (!is_pwsh(program) && option.name == "psconsolefile" && at != 0)
+        if (is_pwsh(program) && option.parameter == "login" && at != 0)
+            || (!is_pwsh(program) && option.parameter == "psconsolefile" && at != 0)
         {
             return None;
         }
         match option.kind {
             PowerShellOptionKind::Flag => {
                 non_terminal.push(PowerShellNonTerminal {
-                    name: option.name,
+                    parameter: option.parameter,
                     option: at,
                     value: None,
                 });
@@ -1120,7 +1183,7 @@ fn classify_powershell_arguments(
             PowerShellOptionKind::NoExit => {
                 no_exit = true;
                 non_terminal.push(PowerShellNonTerminal {
-                    name: option.name,
+                    parameter: option.parameter,
                     option: at,
                     value: None,
                 });
@@ -1128,7 +1191,7 @@ fn classify_powershell_arguments(
             }
             PowerShellOptionKind::Value => {
                 non_terminal.push(PowerShellNonTerminal {
-                    name: option.name,
+                    parameter: option.parameter,
                     option: at,
                     value: Some(at + 1),
                 });
@@ -1140,7 +1203,7 @@ fn classify_powershell_arguments(
             PowerShellOptionKind::NonInteractive => {
                 non_interactive = true;
                 non_terminal.push(PowerShellNonTerminal {
-                    name: option.name,
+                    parameter: option.parameter,
                     option: at,
                     value: None,
                 });
@@ -1211,7 +1274,7 @@ fn classify_powershell_arguments(
                     }
                     no_exit = true;
                     non_terminal.push(PowerShellNonTerminal {
-                        name: "noexit",
+                        parameter: "noexit",
                         option: payload + 1,
                         value: None,
                     });
@@ -2163,7 +2226,8 @@ static PROFILE_OBSERVATIONS: OnceLock<Mutex<BTreeMap<PowerShellEdition, ProfileO
 pub enum PowerShellProfileFallback {
     /// The argv can receive process-scoped integration; no persistent fallback is needed.
     NotNeeded,
-    /// A command-bearing row is still waiting for its asynchronous parse fact.
+    /// A command-bearing row is still waiting for its asynchronous parse fact, or the edition's
+    /// first `$PROFILE` and policy observation has not landed yet.
     Pending,
     /// The managed line can be added with one press.
     Offer,
@@ -2173,6 +2237,9 @@ pub enum PowerShellProfileFallback {
     NoProfile,
     /// The effective policy refuses script files, including `$PROFILE`.
     PolicyBlocked,
+    /// This platform has no `$PROFILE` probe ([`PROFILE_PROBE_EXISTS`]), so nothing is observed
+    /// and nothing is offered.
+    Unsupported,
 }
 
 fn asks_for_no_profile(program: &Path, arguments: &[OsString]) -> bool {
@@ -2180,7 +2247,7 @@ fn asks_for_no_profile(program: &Path, arguments: &[OsString]) -> bool {
         parsed
             .non_terminal
             .iter()
-            .any(|option| option.name == "noprofile")
+            .any(|option| option.parameter == "noprofile")
     })
 }
 
@@ -2207,6 +2274,7 @@ pub fn powershell_profile_fallback(
         .get(&powershell_edition(program))
         .cloned();
     profile_fallback_from_parts(
+        PROFILE_PROBE_EXISTS,
         integration_enabled,
         composable,
         pending,
@@ -2215,7 +2283,11 @@ pub fn powershell_profile_fallback(
     )
 }
 
+/// The row model's one decision. `Offer` needs an observation of the row's edition: before the
+/// first one lands the row is `Pending`, and on a platform with no probe it never lands, which
+/// is `Unsupported` rather than a wait.
 fn profile_fallback_from_parts(
+    probe_exists: bool,
     integration_enabled: bool,
     composable: bool,
     pending: bool,
@@ -2223,17 +2295,22 @@ fn profile_fallback_from_parts(
     observed: Option<(crate::psreadline::ExecutionPolicy, bool)>,
 ) -> PowerShellProfileFallback {
     if composable {
-        PowerShellProfileFallback::NotNeeded
-    } else if !integration_enabled || no_profile {
-        PowerShellProfileFallback::NoProfile
-    } else if pending {
-        PowerShellProfileFallback::Pending
-    } else if observed.is_some_and(|(policy, _)| policy.blocks_script()) {
-        PowerShellProfileFallback::PolicyBlocked
-    } else if observed.is_some_and(|(_, present)| present) {
-        PowerShellProfileFallback::Enabled
-    } else {
-        PowerShellProfileFallback::Offer
+        return PowerShellProfileFallback::NotNeeded;
+    }
+    if !integration_enabled || no_profile {
+        return PowerShellProfileFallback::NoProfile;
+    }
+    if !probe_exists {
+        return PowerShellProfileFallback::Unsupported;
+    }
+    if pending {
+        return PowerShellProfileFallback::Pending;
+    }
+    match observed {
+        None => PowerShellProfileFallback::Pending,
+        Some((policy, _)) if policy.blocks_script() => PowerShellProfileFallback::PolicyBlocked,
+        Some((_, true)) => PowerShellProfileFallback::Enabled,
+        Some((_, false)) => PowerShellProfileFallback::Offer,
     }
 }
 
@@ -2284,7 +2361,7 @@ fn parse_key(program: &Path, arguments: &[OsString]) -> ParseKey {
         let mut launcher = parsed
             .non_terminal
             .iter()
-            .filter(|option| option.name == "workingdirectory")
+            .filter(|option| option.parameter == "workingdirectory")
             .filter_map(|option| option.value.map(|value| (option.option, value)))
             .collect::<Vec<_>>();
         launcher.sort_unstable_by(|left, right| right.0.cmp(&left.0));
@@ -2784,6 +2861,12 @@ fn run_profile_probe(program: &Path) -> Option<PathBuf> {
 fn run_profile_probe(_program: &Path) -> Option<PathBuf> {
     None
 }
+
+/// **Whether this platform can ask a PowerShell for its `$PROFILE` and execution policy** — the
+/// one place that platform fact lives, beside the probe it describes. Off Windows
+/// [`probe_profile_observation`] answers nothing, so the Profiles row model
+/// ([`profile_fallback_from_parts`]) offers no fallback there.
+const PROFILE_PROBE_EXISTS: bool = cfg!(windows);
 
 fn probe_profile_observation(program: &Path) -> Option<ProfileObservation> {
     #[cfg(windows)]
@@ -3890,10 +3973,13 @@ mod tests {
             Enabled, NoProfile, NotNeeded, Offer, Pending, PolicyBlocked,
         };
         let decide = |composable, pending, no_profile, observed| {
-            profile_fallback_from_parts(true, composable, pending, no_profile, observed)
+            profile_fallback_from_parts(true, true, composable, pending, no_profile, observed)
         };
         assert_eq!(decide(true, false, false, None), NotNeeded);
-        assert_eq!(decide(false, false, false, None), Offer);
+        assert_eq!(
+            decide(false, false, false, Some((RemoteSigned, false))),
+            Offer
+        );
         assert_eq!(decide(false, true, false, None), Pending);
         assert_eq!(decide(false, false, true, None), NoProfile);
         assert_eq!(
@@ -3927,6 +4013,60 @@ mod tests {
         }
     }
 
+    /// PIN — **no button before the edition has been looked at** (review C-5 of
+    /// T-INTEGRATION-INJECT-4). An uncomposable row whose edition has no observation yet is
+    /// `Pending`: the line may already be there, or the policy may refuse it.
+    ///
+    /// RED (mutation: `None => Offer` in `profile_fallback_from_parts`).
+    #[test]
+    fn an_unobserved_edition_is_pending_not_offered() {
+        assert_eq!(
+            profile_fallback_from_parts(true, true, false, false, false, None),
+            PowerShellProfileFallback::Pending
+        );
+    }
+
+    /// PIN — **where the profile probe does not exist, the row model never offers** (review G-6
+    /// of T-INTEGRATION-INJECT-4). Whatever else is known, a platform without the probe is
+    /// `Unsupported`, and the public model passes the probe's own platform fact.
+    ///
+    /// RED (mutations: delete the `!probe_exists` arm — the observed, line-less, permissive case
+    /// is `Offer`; pass `true` instead of `PROFILE_PROBE_EXISTS` in
+    /// `powershell_profile_fallback` — red on a build without the probe).
+    #[test]
+    fn a_platform_without_the_profile_probe_never_offers() {
+        use crate::psreadline::ExecutionPolicy::{RemoteSigned, Restricted};
+        for observed in [
+            None,
+            Some((RemoteSigned, false)),
+            Some((RemoteSigned, true)),
+            Some((Restricted, false)),
+        ] {
+            for pending in [false, true] {
+                assert_eq!(
+                    profile_fallback_from_parts(false, true, false, pending, false, observed),
+                    PowerShellProfileFallback::Unsupported,
+                    "{observed:?} pending={pending}"
+                );
+            }
+        }
+        // No test publishes an observation, so on this build an uncomposable row is waiting for
+        // one where the probe exists and is unsupported where it does not.
+        let answer = powershell_profile_fallback(
+            Path::new("pwsh.exe"),
+            &os_words(&["-NoExit", "-File", "enter.ps1"]),
+            true,
+        );
+        assert_eq!(
+            answer,
+            if PROFILE_PROBE_EXISTS {
+                PowerShellProfileFallback::Pending
+            } else {
+                PowerShellProfileFallback::Unsupported
+            }
+        );
+    }
+
     /// RED (mutation: treat `-c` as a literal name, discard `-NoExit`, or let
     /// the next option parse after Command) — the motivating generated rows are
     /// the host's Command terminal, not an unsafe suffix point.
@@ -3957,7 +4097,7 @@ mod tests {
                 parsed
                     .non_terminal
                     .iter()
-                    .any(|option| option.name == "noexit" && option.value.is_none()),
+                    .any(|option| option.parameter == "noexit" && option.value.is_none()),
                 "the parsed non-terminal list names NoExit: {program} {words:?}"
             );
             assert!(
@@ -3975,7 +4115,7 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert_eq!(conda.non_terminal[0].name, "executionpolicy");
+        assert_eq!(conda.non_terminal[0].parameter, "executionpolicy");
         assert_eq!(conda.non_terminal[0].option, 0);
         assert_eq!(conda.non_terminal[0].value, Some(1));
     }
@@ -4116,6 +4256,70 @@ mod tests {
             command_text(program, &startup),
             command_text(program, &birth)
         );
+    }
+
+    /// PIN — **every spelling of the working-directory launcher flag leaves the parse-cache
+    /// identity** (review E of T-INTEGRATION-INJECT-4). The spellings are the table's own: each
+    /// call whose parameter is `workingdirectory`, every accepted length of it, with each
+    /// prefix and in two cases; those the classifier reads as that parameter all key the same
+    /// fact as the row without the pair. The alias `wd` is among them.
+    ///
+    /// RED (mutation: the `wd` entry's `parameter: "wd"`, i.e. identity by spelled name) — `-wd`
+    /// is no longer read as the working directory, and the set loses it.
+    #[test]
+    fn every_spelling_of_the_working_directory_leaves_the_parse_key() {
+        let program = Path::new("pwsh.exe");
+        let startup = os_words(&["-Command", "Get-Date"]);
+        let mut spellings = Vec::new();
+        for option in option_table(program)
+            .iter()
+            .filter(|option| option.parameter == "workingdirectory")
+        {
+            for length in option.minimum.len()..=option.name.len() {
+                let key = &option.name[..length];
+                for prefix in ["-", "--", "/"] {
+                    for spelled in [key.to_owned(), key.to_ascii_uppercase()] {
+                        spellings.push(format!("{prefix}{spelled}"));
+                    }
+                }
+            }
+        }
+        let read_as_working_directory = spellings
+            .into_iter()
+            .filter(|spelling| {
+                classify_powershell_arguments(
+                    program,
+                    &os_words(&[
+                        spelling.as_str(),
+                        "C:/reader/project",
+                        "-Command",
+                        "Get-Date",
+                    ]),
+                )
+                .is_some_and(|parsed| parsed.non_terminal[0].parameter == "workingdirectory")
+            })
+            .collect::<Vec<_>>();
+        for expected in ["-wd", "/WD", "-WorkingDirectory", "--wo"] {
+            assert!(
+                read_as_working_directory
+                    .iter()
+                    .any(|spelling| spelling.eq_ignore_ascii_case(expected)),
+                "{expected} is a working-directory spelling: {read_as_working_directory:?}"
+            );
+        }
+        for spelling in &read_as_working_directory {
+            let birth = os_words(&[
+                spelling.as_str(),
+                "C:/reader/project",
+                "-Command",
+                "Get-Date",
+            ]);
+            assert_eq!(
+                parse_key(program, &startup),
+                parse_key(program, &birth),
+                "{spelling}"
+            );
+        }
     }
 
     /// RED (mutations: collapse a nonzero exit into `None`, accept arbitrary
@@ -4616,7 +4820,7 @@ mod tests {
             has_no_profile: parsed
                 .non_terminal
                 .iter()
-                .any(|option| option.name == "noprofile"),
+                .any(|option| option.parameter == "noprofile"),
         }
     }
 
@@ -4956,37 +5160,71 @@ mod tests {
     ///
     /// Red gate: rename [`bt_pty::TERM_PROGRAM`] without the script's literal, or
     /// the script's literal without the constant, and this fails.
+    ///
+    /// The script names this terminal twice — the guard that returns outside a
+    /// Folio session, and the hyperlink declaration — and both are pinned: every
+    /// `$env:TERM_PROGRAM` comparison in it is one of those two, spelled with the
+    /// declared name. The script suite's session-scope case declares the same
+    /// name, and is pinned here likewise.
+    ///
+    /// Red gate: rename [`bt_pty::TERM_PROGRAM`] without the script's literals,
+    /// either literal without the constant, or the session-scope case's
+    /// declaration without the constant, and this fails.
     #[test]
     fn the_integration_script_knows_the_name_this_terminal_announces() {
         let declared = bt_pty::TERM_PROGRAM;
-        let comparison = format!("$env:TERM_PROGRAM -eq '{declared}'");
-        assert!(
-            script_source_ps1().contains(&comparison),
-            "the terminal declares TERM_PROGRAM={declared:?}, so the script must \
-             test for it verbatim; folio.ps1 does not contain {comparison:?}"
-        );
-        // And it is the *only* spelling the script compares against, so a rename
-        // cannot pass by leaving the old literal in a second branch beside it.
+        let guard = format!("if ($env:TERM_PROGRAM -ne '{declared}') {{");
+        let hyperlink = format!("if ($env:TERM_PROGRAM -eq '{declared}' -and");
+        for comparison in [&guard, &hyperlink] {
+            assert_eq!(
+                script_source_ps1().matches(comparison.as_str()).count(),
+                1,
+                "the terminal declares TERM_PROGRAM={declared:?}, so the script must \
+                 test for it verbatim, once; folio.ps1 does not contain {comparison:?}"
+            );
+        }
+        // And those are the *only* places the script compares the name, so a
+        // rename cannot pass by leaving the old literal in a third branch.
         assert_eq!(
-            script_source_ps1().matches("$env:TERM_PROGRAM -eq").count(),
-            1,
-            "the script recognises this terminal in one place, not two"
+            script_source_ps1().matches("$env:TERM_PROGRAM -").count(),
+            2,
+            "the script recognises this terminal in exactly the guard and the \
+             hyperlink declaration"
         );
-        let posix_guard = format!(r#"[ "${{TERM_PROGRAM-}}" = {declared} ] || return 0"#);
+        let session_scope =
+            include_str!("../../../scripts/shell-integration/tests/session-scope.ps1");
+        let declaration = format!("$env:TERM_PROGRAM = '{declared}'");
+        assert_eq!(
+            session_scope.matches("$env:TERM_PROGRAM =").count(),
+            1,
+            "the session-scope case declares this terminal in one place"
+        );
+        assert!(
+            session_scope.contains(&declaration),
+            "the session-scope case must declare {declaration:?}"
+        );
+    }
+
+    /// PIN — **the bash and zsh scripts act wherever they are sourced** (owner's
+    /// ruling 2026-10-04). A hand-installed copy sourced from an rc file on a host
+    /// reached by ssh from a Folio pane, or in a `sudo -i` / `su -` shell inside
+    /// one, sees no `TERM_PROGRAM`, and its standard `OSC 133` / `OSC 7` are what
+    /// the pane reads; only `folio.ps1`, whose line Folio itself adds to
+    /// `$PROFILE`, is scoped to Folio.
+    ///
+    /// RED (mutation: restore `[ "${TERM_PROGRAM-}" = Folio ] || return 0` in
+    /// either script).
+    #[test]
+    fn the_bash_and_zsh_scripts_do_not_ask_which_terminal_runs_them() {
         for (name, source) in [
             ("folio.bash", script_source()),
             ("folio.zsh", script_source_zsh()),
         ] {
             assert!(
-                source.contains(&posix_guard),
-                "{name} must be inert outside TERM_PROGRAM={declared:?}"
+                !source.contains("TERM_PROGRAM"),
+                "{name} must act in any terminal that sources it"
             );
         }
-    }
-
-    #[test]
-    fn inject4_all_integration_scripts_are_scoped_to_folio() {
-        the_integration_script_knows_the_name_this_terminal_announces();
     }
 
     /// RED (mutation: remove the startup pre-ask or join its worker) — every

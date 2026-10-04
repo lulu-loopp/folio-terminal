@@ -12531,8 +12531,6 @@ struct App {
     /// closed simply raises no card: the row it would have reported to is not
     /// there any more.
     explorer_package_asked_by: Option<WindowId>,
-    /// The window owed the result of its one-click PowerShell profile write.
-    powershell_profile_asked_by: Option<WindowId>,
     /// **Which place that press asked for**, carried beside the address for the
     /// address's own reason (user ruling 2026-09-07).
     ///
@@ -42370,7 +42368,6 @@ impl Runtime<'_> {
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
             explorer_package_asked_by: None,
-            powershell_profile_asked_by: None,
             explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
             explorer_package_announce: Announce::Everything,
             // Read once, and *only* read: see the field for why this one is not repaired.
@@ -43914,8 +43911,7 @@ impl Runtime<'_> {
             if let Some(program) = self.app.profile_programs.program(&id).map(PathBuf::from)
                 && shell_integration::is_powershell(&program)
             {
-                self.app.powershell_profile_asked_by = Some(self.window_id());
-                shell_integration::begin_profile_install(program);
+                shell_integration::begin_profile_install(program, self.window_id());
             }
         }
         self.apply_editor_choice(target)?;
@@ -64327,12 +64323,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // here. A removal that found nothing to remove changed nothing,
                 // so it says nothing.
                 let mut removal = shell_integration::take_removal();
-                let install = shell_integration::take_profile_install();
-                let asked_by = install.as_ref().and_then(|_| {
-                    self.app
-                        .as_mut()
-                        .and_then(|app| app.powershell_profile_asked_by.take())
-                });
+                // Each answer is addressed to the window whose click asked for it; an answer
+                // for a window that has since closed is delivered nowhere.
+                let installs = shell_integration::take_profile_installs();
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()?;
@@ -64351,10 +64344,9 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                             text,
                         )?;
                     }
-                    if Some(runtime.window_id()) == asked_by
-                        && let Some(outcome) = install.clone()
-                    {
-                        match outcome {
+                    let here = runtime.window_id();
+                    for answer in installs.iter().filter(|answer| answer.window == here) {
+                        match answer.outcome.clone() {
                             shell_integration::ProfileInstallOutcome::Installed {
                                 program,
                                 profile,

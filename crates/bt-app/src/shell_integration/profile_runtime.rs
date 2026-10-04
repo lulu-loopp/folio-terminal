@@ -5,7 +5,10 @@ use std::{io, sync::Mutex};
 
 static STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static REMOVAL: Mutex<Option<Report>> = Mutex::new(None);
-static PROFILE_INSTALL: Mutex<Option<ProfileInstallOutcome>> = Mutex::new(None);
+/// Every answered one-click install or Undo not yet delivered, each with the window that asked.
+/// A queue, not a slot: two windows' clicks in flight are two answers, and neither replaces the
+/// other.
+static PROFILE_INSTALLS: Mutex<Vec<ProfileInstallAnswer>> = Mutex::new(Vec::new());
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProfileInstallOutcome {
@@ -13,6 +16,23 @@ pub enum ProfileInstallOutcome {
     Refused(String),
     Undone,
     UndoRefused(String),
+}
+
+/// One answered request: **the window is part of the address** (`files::DirRequest`'s rule), so
+/// the outcome and the Undo handle it carries reach the window whose click asked for them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProfileInstallAnswer {
+    pub window: winit::window::WindowId,
+    pub outcome: ProfileInstallOutcome,
+}
+
+fn answer_profile_install(window: winit::window::WindowId, outcome: ProfileInstallOutcome) {
+    if let Ok(mut answers) = PROFILE_INSTALLS.lock() {
+        answers.push(ProfileInstallAnswer { window, outcome });
+    }
+    if let Some(wake) = WAKE.get() {
+        wake();
+    }
 }
 
 /// A sandbox replaces the entire candidate set, including recorded real paths.
@@ -386,7 +406,7 @@ fn undo_profile_install(profile: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub fn begin_profile_install(program: PathBuf) {
+pub fn begin_profile_install(program: PathBuf, window: winit::window::WindowId) {
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-install",
         bt_platform::ThreadPriority::BelowNormal,
@@ -395,17 +415,16 @@ pub fn begin_profile_install(program: PathBuf) {
                 Ok(profile) => ProfileInstallOutcome::Installed { program, profile },
                 Err(error) => ProfileInstallOutcome::Refused(error.to_string()),
             };
-            if let Ok(mut slot) = PROFILE_INSTALL.lock() {
-                *slot = Some(outcome);
-            }
-            if let Some(wake) = WAKE.get() {
-                wake();
-            }
+            answer_profile_install(window, outcome);
         },
     );
 }
 
-pub fn begin_profile_install_undo(program: PathBuf, profile: PathBuf) {
+pub fn begin_profile_install_undo(
+    program: PathBuf,
+    profile: PathBuf,
+    window: winit::window::WindowId,
+) {
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-install-undo",
         bt_platform::ThreadPriority::BelowNormal,
@@ -422,18 +441,17 @@ pub fn begin_profile_install_undo(program: PathBuf, profile: PathBuf) {
                 }
                 Err(error) => ProfileInstallOutcome::UndoRefused(error.to_string()),
             };
-            if let Ok(mut slot) = PROFILE_INSTALL.lock() {
-                *slot = Some(outcome);
-            }
-            if let Some(wake) = WAKE.get() {
-                wake();
-            }
+            answer_profile_install(window, outcome);
         },
     );
 }
 
-pub fn take_profile_install() -> Option<ProfileInstallOutcome> {
-    PROFILE_INSTALL.lock().ok()?.take()
+/// Every answer that has arrived since the last call, oldest first.
+pub fn take_profile_installs() -> Vec<ProfileInstallAnswer> {
+    PROFILE_INSTALLS
+        .lock()
+        .map(|mut answers| std::mem::take(&mut *answers))
+        .unwrap_or_default()
 }
 
 pub fn begin_removal() {
@@ -540,6 +558,39 @@ mod tests {
 
         undo_profile_install(&profile).expect("Undo removes the managed line");
         assert_eq!(fs::read(&profile).unwrap(), b"");
+    }
+
+    /// PIN — **two clicks in flight from two windows are two answers** (review C-4 of
+    /// T-INTEGRATION-INJECT-4). Each answer carries the window that asked, so each window
+    /// receives its own outcome and the Undo handle inside it; the second answer does not
+    /// replace the first.
+    ///
+    /// RED (mutation: keep one slot, `answers.clear()` before the push in
+    /// `answer_profile_install`): the first window's answer is gone.
+    #[test]
+    fn two_windows_clicks_in_flight_each_get_their_own_answer() {
+        let first = winit::window::WindowId::from(7_u64);
+        let second = winit::window::WindowId::from(8_u64);
+        let installed = |profile: &str| ProfileInstallOutcome::Installed {
+            program: PathBuf::from("pwsh.exe"),
+            profile: PathBuf::from(profile),
+        };
+        answer_profile_install(first, installed("profile A.ps1"));
+        answer_profile_install(second, installed("profile B.ps1"));
+        let answers = take_profile_installs();
+        let mine = |window| {
+            answers
+                .iter()
+                .filter(|answer: &&ProfileInstallAnswer| answer.window == window)
+                .map(|answer| answer.outcome.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(mine(first), vec![installed("profile A.ps1")]);
+        assert_eq!(mine(second), vec![installed("profile B.ps1")]);
+        assert!(
+            take_profile_installs().is_empty(),
+            "an answer is delivered once"
+        );
     }
 
     #[test]

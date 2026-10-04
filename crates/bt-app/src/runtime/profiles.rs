@@ -386,8 +386,7 @@ impl Runtime<'_> {
             self.window.powershell_profile_undo = Some((id, program, profile));
             return;
         }
-        self.app.powershell_profile_asked_by = Some(self.window_id());
-        shell_integration::begin_profile_install_undo(program, profile);
+        shell_integration::begin_profile_install_undo(program, profile, self.window_id());
     }
 
     /// Write the table to `profiles.json` and re-probe what it can start.

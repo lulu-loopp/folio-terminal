@@ -78,11 +78,11 @@ run_case() {
     shift 3
     if [ -n "$marker" ]; then
         printf '%s\n' "$@" | env -i HOME="$home" TERM=dumb PATH="$PATH" \
-            TERM_PROGRAM=Folio BT_SHELL_INTEGRATION="$marker" \
+            BT_SHELL_INTEGRATION="$marker" \
             bash --rcfile "$rcfile" -i > "$transcript" 2>&1
     else
         printf '%s\n' "$@" | env -i HOME="$home" TERM=dumb PATH="$PATH" \
-            TERM_PROGRAM=Folio bash --rcfile "$rcfile" -i > "$transcript" 2>&1
+            bash --rcfile "$rcfile" -i > "$transcript" 2>&1
     fi
 }
 

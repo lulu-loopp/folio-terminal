@@ -223,15 +223,27 @@ the success toast offers Undo. The installed fact is per edition, so every such 
 edition changes to the ordinary capability sentence together. The one existing **PowerShell
 `$PROFILE` line** row remains the only lasting removal surface. No button is offered when the row
 has any accepted `NoProfile` spelling or that edition reports an execution policy which refuses
-profile scripts; the latter gets an explicit policy capability sentence. A missing profile file
+profile scripts; the latter gets an explicit policy capability sentence. Nor is it offered before
+that edition's first profile/policy observation has landed, or off Windows, where there is no
+profile probe. A missing profile file
 is created with only the managed line. Opening the Profiles page starts the existing background
 profile/policy observation once for that visit; leaving and returning starts another observation,
 with no polling loop.
 
-Every installed integration script first verifies `TERM_PROGRAM=Folio`. A durable profile or rc
-line is therefore inert in other terminals. A nested shell deliberately inherits the declaration
-and remains integrated. The process-scoped launch paths set the same declaration, so this guard
-does not distinguish automatic composition from an opted-in profile line.
+The PowerShell script, and only it, first verifies `TERM_PROGRAM=Folio`: Folio itself adds its line
+to `$PROFILE`, and that line must be inert when the same profile is read in another terminal. A
+nested PowerShell started inside a Folio pane inherits the declaration and is deliberately
+integrated. The process-scoped launch paths set the same declaration, so this guard does not
+distinguish automatic composition from the opted-in profile line. Known limit: a PowerShell session
+on another host reached by ssh from a Folio pane, whose profile sources `folio.ps1`, is inert
+unless the ssh connection forwards `TERM_PROGRAM` (`SendEnv` on the client and `AcceptEnv` on the
+server); `TERM_PROGRAM` does not cross ssh by default.
+
+The bash and zsh scripts are unchanged: they act wherever they are sourced. Folio never adds a line
+to a bash or zsh rc file, and a hand-installed copy sourced from an rc file on a remote host reached
+by ssh from a Folio pane, or in a `sudo -i` / `su -` shell inside a pane, must keep working there —
+`TERM_PROGRAM` crosses neither ssh nor `sudo`'s `env_reset`. The sequences they emit are the
+standard `OSC 133` and `OSC 7` that other terminals read or ignore.
 
 The bash script is also installed automatically, for one session at a time:
 

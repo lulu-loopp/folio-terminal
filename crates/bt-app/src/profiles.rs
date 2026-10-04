@@ -4052,7 +4052,8 @@ pub fn capability_text_for_launch(
             }
             crate::shell_integration::PowerShellProfileFallback::Pending
             | crate::shell_integration::PowerShellProfileFallback::Offer
-            | crate::shell_integration::PowerShellProfileFallback::NoProfile => {
+            | crate::shell_integration::PowerShellProfileFallback::NoProfile
+            | crate::shell_integration::PowerShellProfileFallback::Unsupported => {
                 return crate::i18n::Text::CapPowerShellNotProvided;
             }
         }

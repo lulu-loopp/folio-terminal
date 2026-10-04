@@ -9511,7 +9511,8 @@ pub struct ProfileLineLayout {
     pub caps: Option<[[f32; 4]; 2]>,
     pub up: [f32; 4],
     pub down: [f32; 4],
-    /// The persistent-fallback button, occupying the resting action run.
+    /// The `$PROFILE` fallback button of an `Offer` row: the right end of the
+    /// text column, one gap left of the verb run, and disjoint from every verb.
     pub enable: Option<[f32; 4]>,
     /// The one verb in the open — `Edit` (§7.1.6c-6b). It took this slot from
     /// `Duplicate` the moment there was an editor to open, which is the mock-up's
@@ -11999,21 +12000,40 @@ pub fn layout_for_menus(
                 run(columns.edit),
                 run(columns.more),
             );
+            // **The fallback button takes the right end of the text column, not
+            // the verb run** (mock 2026-10-04, version b): it stands at rest
+            // where the run's left edge leaves off, the run keeps its own column
+            // on this row as on every other, and the row's sentences end one gap
+            // before the button — the Shortcuts row's rule, where the chord ends
+            // one gap before the button that changes it. A button laid over the
+            // run would answer every press aimed at a verb.
             let enable = (line.profile_fallback
                 == crate::shell_integration::PowerShellProfileFallback::Offer)
-                .then_some([
-                    up[0],
-                    middle - px(BUTTON_HEIGHT_LOGICAL_PX) / 2.0,
-                    more[2],
-                    middle + px(BUTTON_HEIGHT_LOGICAL_PX) / 2.0,
-                ]);
+                .then(|| {
+                    let label = measure(
+                        Text::ProfilesEnableViaProfile.text(),
+                        px(BUTTON_FONT_LOGICAL_PX),
+                    );
+                    let width =
+                        (2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + label).ceil();
+                    let right = columns.text.1;
+                    [
+                        right - width,
+                        middle - px(BUTTON_HEIGHT_LOGICAL_PX) / 2.0,
+                        right,
+                        middle + px(BUTTON_HEIGHT_LOGICAL_PX) / 2.0,
+                    ]
+                });
 
             let column = px(PROFILE_MARK_COLUMN_LOGICAL_PX);
             let side = px(PROFILE_MARK_LOGICAL_PX).round();
             let mark_left = ((row_left + row_left + column - side) / 2.0).round();
             let mark_top = ((band[1] + band[3] - side) / 2.0).round();
             let mark = [mark_left, mark_top, mark_left + side, mark_top + side];
-            let (text_column_left, text_column_right) = columns.text;
+            let text_column_left = columns.text.0;
+            let text_column_right = enable.map_or(columns.text.1, |button| {
+                button[0] - px(PROFILE_ROW_GAP_LOGICAL_PX)
+            });
 
             let title_width = measure(line.title, px(ROW_TITLE_FONT_LOGICAL_PX));
             let title = [
@@ -14884,10 +14904,10 @@ fn push_profile_page(
                 });
             }
         }
+        // The fallback button is not one of the revealed verbs: it is the row's
+        // own offer, in its own box beside the run, at rest and engaged alike.
         let enable_target = SettingsTarget::ProfileEnable(placed.index);
-        let enable_focused = [hover, focus].contains(&Some(enable_target));
-        let show_enable = placed.enable.is_some() && (!engaged || enable_focused);
-        if let Some(button) = placed.enable.filter(|_| show_enable) {
+        if let Some(button) = placed.enable {
             push_button(
                 &mut stack.quads,
                 &mut stack.labels,
@@ -14905,7 +14925,7 @@ fn push_profile_page(
                     .extend(focus_ring(button, scale, palette.accent));
             }
         }
-        if !engaged || show_enable {
+        if !engaged {
             continue;
         }
         // The first row's `↑` and the last row's `↓` are **dark, not absent**: a
@@ -32212,6 +32232,80 @@ mod tests {
             1
         );
         assert!(order.contains(&SettingsTarget::ProfileEnable(0)));
+    }
+
+    /// PIN — **an `Offer` row's verbs are the verbs of any other row** (review
+    /// C-3 of T-INTEGRATION-INJECT-4). The fallback button has its own box, left
+    /// of the verb run; every verb's centre answers with its own verb, the
+    /// button's centre with the button, and no point of the row is claimed by
+    /// both — the placed boxes are disjoint, and the run stands where it stands
+    /// on a row with no offer. The row's sentences end before the button.
+    ///
+    /// RED (mutation: lay the button over the run again,
+    /// `[up[0], …, more[2], …]`): each verb's centre answers `ProfileEnable`,
+    /// and the boxes overlap.
+    #[test]
+    fn an_offer_rows_verbs_answer_beside_its_own_button() {
+        let mut lines = profile_lines();
+        // A middle row, so neither its `↑` nor its `↓` is the dark one.
+        lines[1].profile_fallback = crate::shell_integration::PowerShellProfileFallback::Offer;
+        let placed = profiles_page(&lines);
+        let offer = &placed.profiles[1];
+        let plain = &placed.profiles[2];
+        let button = offer.enable.expect("the offered fallback");
+        let centre = |rect: [f32; 4]| {
+            (
+                f64::from((rect[0] + rect[2]) / 2.0),
+                f64::from((rect[1] + rect[3]) / 2.0),
+            )
+        };
+        for (rect, expected) in [
+            (offer.up, SettingsTarget::ProfileUp(1)),
+            (offer.down, SettingsTarget::ProfileDown(1)),
+            (offer.edit, SettingsTarget::ProfileEdit(1)),
+            (offer.more, SettingsTarget::ProfileMore(1)),
+            (button, SettingsTarget::ProfileEnable(1)),
+        ] {
+            let (x, y) = centre(rect);
+            assert_eq!(hit(&placed, &values(), x, y), expected);
+        }
+        let disjoint =
+            |a: [f32; 4], b: [f32; 4]| a[2] <= b[0] || b[2] <= a[0] || a[3] <= b[1] || b[3] <= a[1];
+        for (name, verb) in [
+            ("up", offer.up),
+            ("down", offer.down),
+            ("edit", offer.edit),
+            ("more", offer.more),
+        ] {
+            assert!(
+                disjoint(button, verb),
+                "the button {button:?} overlaps {name} {verb:?}"
+            );
+        }
+        // The run is where it is on every row.
+        for (offered, ordinary) in [
+            (offer.up, plain.up),
+            (offer.down, plain.down),
+            (offer.edit, plain.edit),
+            (offer.more, plain.more),
+        ] {
+            assert_eq!(
+                (offered[0], offered[2]),
+                (ordinary[0], ordinary[2]),
+                "an offer moved the verb run"
+            );
+        }
+        assert!(
+            button[2] <= offer.up[0],
+            "the button stands left of the run"
+        );
+        let caps = offer.caps.expect("a PowerShell row states its capability");
+        for text in [offer.title, offer.desc, caps[0], caps[1]] {
+            assert!(
+                text[2] <= button[0],
+                "the row's text {text:?} runs under the button {button:?}"
+            );
+        }
     }
 
     /// PIN — **the first row's `↑` and the last row's `↓` are dark, not absent,

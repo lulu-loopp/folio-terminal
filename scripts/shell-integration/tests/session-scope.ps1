@@ -17,6 +17,7 @@ if (Test-Path Env:\FORCE_HYPERLINK) {
     throw 'folio.ps1 changed the environment outside a Folio session'
 }
 
+# `bt_pty::TERM_PROGRAM`, pinned by `the_integration_script_knows_the_name_this_terminal_announces`.
 $env:TERM_PROGRAM = 'Folio'
 . $Script
 if (-not $Global:__FolioShellIntegration.Installed) {

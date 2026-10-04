@@ -29,7 +29,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Changed
 
 - New panes derive Folio's prompt, WSL forwarding, hyperlink and zsh startup declarations from the account environment at the moment the pane starts, so changes made after Folio opened are kept.
-- Folio's PowerShell, bash and zsh integration scripts are inert when their startup line is read by another terminal; nested shells inside Folio remain integrated.
+- Folio's PowerShell integration script does nothing when your `$PROFILE` is read by another terminal; PowerShell started inside Folio stays integrated. A PowerShell on another machine reached by ssh is integrated only if ssh forwards `TERM_PROGRAM`. The bash and zsh scripts are unchanged: a copy you source yourself, for example on a server you ssh into from Folio, keeps working.
 - On Windows, a newly installed command is found in a new tab without restarting Folio.
 - PowerShell panes have command marks, folder tracking and inline formulas without setup when their command line can be safely extended; Settings offers the per-edition `$PROFILE` fallback for rows that cannot be extended.
 - PowerShell profile rows that run a command at startup — including Visual Studio Developer PowerShell and conda environments — now keep that command and receive the same command marks, folder tracking and inline formulas when PowerShell confirms the command parses.

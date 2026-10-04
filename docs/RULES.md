@@ -100,8 +100,9 @@ offer one Settings action which writes the guarded managed line to that edition'
 `$PROFILE.CurrentUserCurrentHost`; rows with `NoProfile` or a script-refusing
 execution policy do not. The installed fact and policy are observed per edition,
 once on each Profiles-page visit, and Undo removes only the managed line. The
-loader and every bash/zsh integration script return outside
-`TERM_PROGRAM=Folio`; a nested shell inherits the declaration intentionally.
+PowerShell script returns outside `TERM_PROGRAM=Folio`, so that line is inert
+in other terminals; a nested PowerShell inherits the declaration intentionally.
+The bash and zsh scripts act wherever they are sourced.
 The one existing Settings remover, `--remove-shell-integration`, or
 `--uninstall-cleanup` removes a managed line. No path changes execution policy.
 Every writer of that
