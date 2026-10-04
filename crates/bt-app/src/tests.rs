@@ -24992,15 +24992,72 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
         "a report is the first rung and beats where the shell was born"
     );
 
-    let mut at_home = LeafSession {
+    // A WSL pane put down at its shell's home hands its mark on; `profiles::place_for` reads a
+    // place equal to the home mark as the shell's home (round 2), pinned in `profiles::tests`.
+    let at_home = LeafSession {
         spawn_place: Some(PathBuf::from("~")),
         ..leaf_saying("no report from this shell either")
     };
-    at_home.session.set_spawn_at_shell_home(true);
+    assert_eq!(at_home.place_for_a_new_shell(), Some(PathBuf::from("~")));
+}
+
+/// RED (T-RESTART-CWD round 2, finding 2) — **a leaf records where its shell was born in the
+/// namespace of the profile that actually started.**
+///
+/// `bt-pty` falls back once to the last-resort shell when the profile's program will not start,
+/// and `create_leaf_session` then makes the leaf the fallback profile — while its `spawn_place`
+/// was resolved for the profile that was asked for. A WSL pane that came up as PowerShell held
+/// `/mnt/d/Projects`, which the ladder now hands to the next PowerShell.
+///
+/// MUTATION, observed red: return the place and the mark unchanged after a swap — the WSL
+/// spelling and the launcher's mark stay on a PowerShell leaf.
+#[test]
+fn a_shell_that_fell_back_records_its_birth_place_in_its_own_namespace() {
+    let (wsl, fallback) = ("wsl", profiles::fallback_profile_id());
     assert_eq!(
-        at_home.place_for_a_new_shell(),
-        None,
-        "`~` is a mark for the profile's home, asked for again by handing on nothing"
+        birth_place_of_the_started_shell(
+            wsl,
+            fallback,
+            Some(PathBuf::from("/mnt/d/Projects")),
+            false
+        ),
+        (Some(PathBuf::from(r"D:\Projects")), false),
+        "crossed into the started profile's spelling"
+    );
+    assert_eq!(
+        birth_place_of_the_started_shell(wsl, fallback, Some(PathBuf::from("~")), true),
+        (None, false),
+        "the launcher's home mark has no spelling there, and no mark goes with it"
+    );
+    assert_eq!(
+        birth_place_of_the_started_shell(wsl, wsl, Some(PathBuf::from("~")), true),
+        (Some(PathBuf::from("~")), true),
+        "no swap, nothing changes"
+    );
+    let spawn = free_fn_body("create_leaf_session");
+    let swapped = spawn
+        .find("let profile = if let Some(fallback) = &shell_fallback {")
+        .expect("the swap");
+    let said = spawn
+        .find("birth_place_of_the_started_shell(spawn_profile, &profile, spawn_place, place.at_shell_home)")
+        .expect("the birth place is said for the started profile");
+    let told = spawn
+        .find("session.set_spawn_at_shell_home(at_shell_home);")
+        .expect("and the session is told the mark that goes with it");
+    assert!(swapped < said && said < told, "{spawn}");
+}
+
+/// RED (T-RESTART-CWD round 2, finding 3) — **the session save writes the one ladder**, the
+/// one every shell started in a pane's place reads.
+///
+/// MUTATION, observed red: write `working_directory().or(spawn_place)` inline again.
+#[test]
+fn the_session_save_writes_the_one_ladder() {
+    let save = method_body("TabState", "term_leaf");
+    assert!(
+        save.contains(".and_then(LeafSession::place_for_a_new_shell)")
+            && !save.contains("spawn_place"),
+        "{save}"
     );
 }
 
