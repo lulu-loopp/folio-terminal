@@ -3317,11 +3317,12 @@ mod tests {
     /// The real producer end to end: this build's macOS seed, through
     /// [`shell_command`] with the real scripts written into a sandbox, spawned
     /// over a real pty, and asked by the shell itself. The reader's home is a
-    /// sandbox under `std::env::temp_dir()` — `TMPDIR` decides where, so a run on
-    /// a shared machine points it inside its own work tree — holding a
-    /// `.zprofile`, a `.bash_profile` and a `.profile` that each put a marker at
-    /// the front of `PATH`. No file of the account running the test is read or
-    /// written: `HOME` is the sandbox and `ZDOTDIR` is Folio's copy in it.
+    /// `bt_pty::test_shell::Hygiene` directory under `std::env::temp_dir()` —
+    /// `TMPDIR` decides where, so a run on a shared machine points it inside its
+    /// own work tree — holding a `.zprofile`, a `.bash_profile` and a `.profile`
+    /// that each put a marker at the front of `PATH`. No file of the account
+    /// running the test is read or written: `HOME`, `HISTFILE` and `XDG_*` are the
+    /// sandbox's and `ZDOTDIR` is Folio's copy in it.
     ///
     /// `ps -ww -o command= -p $$` is the reporter's own question, widened so a
     /// long init-file path is not cut at the terminal's width. zsh and sh answer
@@ -3334,10 +3335,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_login_row_starts_a_login_shell() {
-        use std::{
-            sync::Arc,
-            time::{Duration, Instant},
-        };
+        use std::time::{Duration, Instant};
 
         struct Mac;
         impl ShellEnvironment for Mac {
@@ -3350,24 +3348,24 @@ mod tests {
         }
 
         const MARKER: &str = "/folio-login-marker-74";
-        let sandbox =
-            std::env::temp_dir().join(format!("folio-login-shell-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&sandbox);
-        let home = sandbox.join("home");
-        let zdotdir = sandbox.join("zdotdir");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&zdotdir).unwrap();
-        for name in [".zprofile", ".bash_profile", ".profile"] {
-            std::fs::write(home.join(name), format!("export PATH=\"{MARKER}:$PATH\"\n")).unwrap();
-        }
-        for name in ZDOTDIR_FILES {
-            std::fs::write(zdotdir.join(name), SCRIPT_ZSH).unwrap();
-        }
-        let script = sandbox.join(SCRIPT_FILE);
-        std::fs::write(&script, SCRIPT).unwrap();
-        let scripts = Scripts {
-            bash: Some(&script),
-            zdotdir: Some(&zdotdir),
+        // One `bt_pty::test_shell::Hygiene` per shell: its own temporary `HOME`, `ZDOTDIR`,
+        // `HISTFILE` and `XDG_*`, holding the startup files this test writes — the files this
+        // test is about, so the shell is not told to skip them (`reading_startup_files`).
+        let sandbox = || {
+            let hygiene = bt_pty::test_shell::Hygiene::new().reading_startup_files();
+            let home = hygiene.home();
+            let zdotdir = hygiene.root().join("zdotdir");
+            std::fs::create_dir_all(&zdotdir).unwrap();
+            for name in [".zprofile", ".bash_profile", ".profile"] {
+                std::fs::write(home.join(name), format!("export PATH=\"{MARKER}:$PATH\"\n"))
+                    .unwrap();
+            }
+            for name in ZDOTDIR_FILES {
+                std::fs::write(zdotdir.join(name), SCRIPT_ZSH).unwrap();
+            }
+            let script = hygiene.root().join(SCRIPT_FILE);
+            std::fs::write(&script, SCRIPT).unwrap();
+            (hygiene, home, zdotdir, script)
         };
 
         let rows = profiles::shipped_for(profiles::SeedPlatform::MacOs, &Mac);
@@ -3381,11 +3379,17 @@ mod tests {
             let profiles::ProgramSource::Path(program) = &row.program else {
                 panic!("{id} names one path");
             };
+            let (hygiene, home, zdotdir, script) = sandbox();
+            let scripts = Scripts {
+                bash: Some(&script),
+                zdotdir: Some(&zdotdir),
+            };
             let mut command = shell_command(row, &[], scripts, &bare());
             command
                 .environment
                 .push((OsString::from("HOME"), home.clone().into_os_string()));
-            let mut session = bt_pty::PtySession::spawn_shell_in(
+            let mut session = bt_pty::test_shell::TestShell::spawn_shell_in(
+                hygiene,
                 program.clone(),
                 &command.arguments,
                 &|| last_resort_arguments(false),
@@ -3394,14 +3398,13 @@ mod tests {
                     std::num::NonZeroU16::new(200).unwrap(),
                     std::num::NonZeroU16::new(24).unwrap(),
                 ),
-                Arc::new(|| {}),
                 Some(home.clone()),
             )
             .unwrap();
             session
                 .write(
-                    b"printf 'argv=%s\\n' \"$(ps -ww -o command= -p $$)\"; \
-                      printf 'path=%s\\n' \"$PATH\"; echo folio-done-$((6*7))\n",
+                    b"printf 'argv=%s\n' \"$(ps -ww -o command= -p $$)\"; \
+                      printf 'path=%s\n' \"$PATH\"; echo folio-done-$((6*7))\n",
                 )
                 .unwrap();
             let mut seen = String::new();
@@ -3431,7 +3434,6 @@ mod tests {
             );
             session.shutdown().unwrap();
         }
-        let _ = std::fs::remove_dir_all(&sandbox);
     }
 
     /// PIN — **a Bourne shell is told it has no integration rather than handed

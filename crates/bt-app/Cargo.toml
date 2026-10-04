@@ -153,6 +153,10 @@ serde_json.workspace = true
 # releases signed by U-15's test root under an exclusive-root engine. A
 # dev-dependency's feature is on only in test builds; `folio.exe` never has it.
 bt-platform = { path = "../bt-platform", features = ["trust-harness"] }
+# **A real shell for a test** (T-TEST-SHELL-HYGIENE): the same `bt-pty`, with its
+# `test-shell` feature, so every shell a test starts is started without the user's
+# startup files or history. On only in test builds; `folio.exe` never has it.
+bt-pty = { path = "../bt-pty", features = ["test-shell"] }
 
 # **Tests only, macOS only, and not one new package** (M2-5). The glyph
 # measurement opens winit's own window — the product's window — and needs one

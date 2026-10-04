@@ -413,6 +413,7 @@ dependencies = [
 name = "bt-pty"
 version = "0.4.6"
 dependencies = [
+ "bt-pty",
  "bt-term",
  "bt-transcript",
  "bt-winres",
@@ -464,6 +465,7 @@ dependencies = [
  "bt-doc",
  "bt-math",
  "bt-platform",
+ "bt-pty",
  "bt-transcript",
  "bt-unicode",
  "bt-viewport",

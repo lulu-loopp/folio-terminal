@@ -113,9 +113,18 @@ fn temporary_directory() -> PathBuf {
 /// ordering, which is half of what these tests assert, so the redirection is done
 /// *inside* the shell — `2>&1` before `exec` — which reproduces the single
 /// device rather than reassembling it afterwards.
+///
+/// **Under `bt_pty::test_shell::Hygiene`** (T-TEST-SHELL-HYGIENE): the login
+/// chain the script replays is `/etc/profile` and then the startup files in
+/// `HOME`, and an interactive bash writes `~/.bash_history` as it exits — so
+/// `HOME`, `HISTFILE` and `XDG_*` are the test's own temporary directory. Started
+/// with the account's `HOME`, every run appended the lines below to the
+/// account's Git Bash history.
 fn session_bytes(directory: &Path, commands: &str) -> Vec<u8> {
     let bash = git_bash();
-    let output = Command::new(&bash)
+    let hygiene = bt_pty::test_shell::Hygiene::new();
+    let output = hygiene
+        .command(&bash, Command::new)
         .arg("-c")
         .arg(format!(
             "exec '{}' --init-file '{}' -i 2>&1",

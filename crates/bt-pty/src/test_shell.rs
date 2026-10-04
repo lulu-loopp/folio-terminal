@@ -1,0 +1,1010 @@
+//! **A real shell for a test, started so that it cannot reach the account it runs
+//! under** (T-TEST-SHELL-HYGIENE, 2026-10-04).
+//!
+//! The account's PSReadLine history held five copies of
+//! `Write-Output ('BT_APP_' + 'INPUT_OK')`: `bt-app`'s
+//! `real_powershell_input_reaches_a_viewport_owned_frame` started the default
+//! shell the way a pane starts it, so the user's own `$PROFILE` ran and the
+//! line it typed was appended to the user's own history file, once per full
+//! test run. Other tests had each written their own `-NoProfile` and their own
+//! `Set-PSReadLineOption -HistorySaveStyle SaveNothing`, which is a rule kept
+//! by everybody remembering it. This module is the rule kept by construction:
+//! every real shell a test starts goes through here, and
+//! `crates/bt-source/tests/test_shells.rs` is red for one that does not.
+//!
+//! # The rule, per shell family
+//!
+//! Every family runs with this test's own [`Hygiene`] directory standing in
+//! for every place a shell keeps per-user state that is found through the
+//! environment: `HOME`, the four `XDG_*_HOME`s and, on Windows, `APPDATA` and
+//! `LOCALAPPDATA`. A test that sets one of these itself must point it inside
+//! that directory; anything else is refused before a process starts.
+//!
+//! * **PowerShell** (`powershell.exe`, `pwsh`). `-NoProfile`, always — the
+//!   user's `$PROFILE` is found through the Documents known folder, which no
+//!   environment variable moves, so the flag is the only way it is not run.
+//!   An *interactive* PowerShell (one that will draw a prompt: `-NoExit`, or no
+//!   script at all) is a line editor that appends every accepted line to a
+//!   history file the user owns, and that file is also found through a known
+//!   folder. So before anything the test wrote can be read as a line, the
+//!   startup script ([`powershell_hygiene`]) sets `HistorySaveStyle
+//!   SaveNothing` *and* points `HistorySavePath` into the hygiene directory —
+//!   the second so that the line editor does not even load the user's history
+//!   — reads both back, and writes what it read to a proof file; if either
+//!   step fails it writes why and exits. [`TestShell::write`] does not type
+//!   until the proof is there and says exactly that, and fails the test with
+//!   the shell's own reason otherwise. The script runs before the first prompt
+//!   because `-Command` runs before the first prompt; the gate is what turns a
+//!   shell that could not establish it into a test that says so, rather than a
+//!   test that waits for a prompt it was never going to get. The module
+//!   analysis cache is redirected too (`PSModuleAnalysisCachePath`), and
+//!   `pwsh`'s telemetry and update check are off. A one-shot PowerShell
+//!   (`-Command`, `-EncodedCommand` or `-File` without `-NoExit`) never runs a
+//!   line editor, so it has no history to refuse.
+//! * **cmd** — `/D`, so the `AutoRun` commands in the user's registry are not
+//!   run. `cmd` keeps its history in memory only.
+//! * **POSIX shells** (`sh`, `bash`, `dash`, `ksh`, `mksh`, `zsh`, `fish`) —
+//!   every startup file a user owns is found through `HOME`, `ZDOTDIR`,
+//!   `XDG_CONFIG_HOME` or `ENV`/`BASH_ENV`, and every history file through
+//!   `HISTFILE`, `HOME` or `XDG_DATA_HOME`; all of them are the hygiene
+//!   directory's (`ENV` and `BASH_ENV` empty), so the user's files are neither
+//!   read nor written. On top of that `bash` is given `--norc --noprofile`,
+//!   `zsh` `-f` and `fish` `--no-config` — unless the test's subject *is* the
+//!   startup files ([`Hygiene::reading_startup_files`]), in which case the ones
+//!   it reads are the ones it wrote into its own temporary `HOME`.
+//! * **`wsl`** is refused: it starts a shell inside a distribution, under the
+//!   distribution's own home directory, which nothing on this side can move.
+//! * **Anything else** (`node`, `git`, a test's own program) gets the
+//!   environment alone.
+//!
+//! Process starts that are not on a pseudoconsole — a one-shot script, a shell
+//! fed on a pipe — take the same rule through [`Hygiene::command`].
+//!
+//! Tests only: this crate's own, and those of a crate that turns on the
+//! `test-shell` feature on its dev-dependency on this one. A build of the
+//! shipped program never has it.
+
+use std::{
+    ffi::{OsStr, OsString},
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
+
+use portable_pty::ExitStatus;
+
+use crate::{
+    OutputWake, PtyCommand, PtyError, PtySession, PtySize, RingStats, ShellEnvironment,
+    ShellFallback, SystemShellEnvironment, upsert_environment,
+};
+
+/// Where a test's PowerShell startup script wants the history refusal, when not
+/// first.
+///
+/// A PowerShell block comment, so a script that carries it is valid whether or
+/// not it is replaced. The refusal goes where this stands, exactly once, or
+/// first when the script does not carry it — which is right for every startup
+/// script except one that must load a particular PSReadLine before anything
+/// asks for one (`Import-Module` first, the refusal after it).
+pub const HYGIENE: &str = "<#folio-test-shell-hygiene#>";
+
+/// The exit code a PowerShell leaves with when its history refusal could not be
+/// established.
+pub const REFUSED_EXIT_CODE: u32 = 75;
+
+/// How long [`TestShell::write`] waits for a PowerShell to say its history is
+/// off. Not a measure of anything: the startup script either finishes, fails
+/// (and the shell exits), or the shell exits — every one of those ends the
+/// wait. This is the backstop for a shell that does none of them, set where the
+/// tests' own ceilings are (`bt-app`'s `real_powershell_input_reaches_a_viewport_owned_frame`).
+const ESTABLISH_CEILING: Duration = Duration::from_secs(180);
+const ESTABLISH_POLL: Duration = Duration::from_millis(10);
+
+/// The family a program belongs to, by its file name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Family {
+    PowerShell,
+    Cmd,
+    Posix(Posix),
+    /// A program that is not a shell: it gets the environment alone.
+    Program,
+}
+
+/// Which POSIX shell, for the one flag each has that skips its startup files.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Posix {
+    Bash,
+    Zsh,
+    Fish,
+    /// `sh`, `dash`, `ksh`, `mksh`: no such flag, and nothing to find but `ENV`.
+    Bourne,
+}
+
+impl Family {
+    /// The family of `program`, read off its file name; `wsl` is refused here,
+    /// with the reason.
+    #[must_use]
+    pub fn of(program: &OsStr) -> Self {
+        let stem = Path::new(program)
+            .file_stem()
+            .map(|stem| stem.to_string_lossy().to_ascii_lowercase());
+        match stem.as_deref() {
+            Some("powershell" | "pwsh") => Self::PowerShell,
+            Some("cmd") => Self::Cmd,
+            Some("bash") => Self::Posix(Posix::Bash),
+            Some("zsh") => Self::Posix(Posix::Zsh),
+            Some("fish") => Self::Posix(Posix::Fish),
+            Some("sh" | "dash" | "ksh" | "mksh") => Self::Posix(Posix::Bourne),
+            Some("wsl") => panic!(
+                "a test cannot start {}: WSL runs a shell inside a distribution, under that \
+                 distribution's own home directory, and nothing on this side can give it a \
+                 temporary one — so its startup files and its history would be the user's",
+                Path::new(program).display()
+            ),
+            _ => Self::Program,
+        }
+    }
+
+    /// The flags that skip the user's startup files, for a family that has
+    /// them. Empty for one whose isolation is the environment alone.
+    fn startup_flags(self) -> &'static [&'static str] {
+        match self {
+            Self::PowerShell => &["-NoProfile"],
+            Self::Cmd => &["/D"],
+            Self::Posix(Posix::Bash) => &["--norc", "--noprofile"],
+            Self::Posix(Posix::Zsh) => &["-f"],
+            Self::Posix(Posix::Fish) => &["--no-config"],
+            Self::Posix(Posix::Bourne) | Self::Program => &[],
+        }
+    }
+}
+
+/// **This test's stand-in for the account**: a temporary directory that holds
+/// every per-user location a shell would write to, removed when it is dropped.
+#[derive(Debug)]
+pub struct Hygiene {
+    root: PathBuf,
+    reads_startup_files: bool,
+}
+
+impl Default for Hygiene {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Hygiene {
+    /// A fresh directory, with every location below it already made.
+    #[must_use]
+    pub fn new() -> Self {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "folio-test-shell-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        // The filesystem is the boundary: a run killed before its `Drop` leaves
+        // this name behind, and what it left must not be read as this run's.
+        let _ = std::fs::remove_dir_all(&root);
+        let hygiene = Self {
+            root,
+            reads_startup_files: false,
+        };
+        for directory in hygiene.directories() {
+            std::fs::create_dir_all(&directory).unwrap_or_else(|error| {
+                panic!(
+                    "the test shell's directory {} cannot be made: {error}",
+                    directory.display()
+                )
+            });
+        }
+        hygiene
+    }
+
+    /// For a test whose subject is a POSIX shell's startup files: the shell is
+    /// not told to skip them, and the ones it finds are the ones the test wrote
+    /// under [`Self::home`] — `HOME`, `ZDOTDIR` and `XDG_CONFIG_HOME` are still
+    /// this directory's. PowerShell's `-NoProfile` and cmd's `/D` stay: the
+    /// startup files they skip are found where no test can put its own.
+    #[must_use]
+    pub fn reading_startup_files(mut self) -> Self {
+        self.reads_startup_files = true;
+        self
+    }
+
+    /// The directory itself. A test that places files a shell will read puts
+    /// them below it.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    /// `HOME`, and `ZDOTDIR`.
+    #[must_use]
+    pub fn home(&self) -> PathBuf {
+        self.root.join("home")
+    }
+
+    /// The history file a POSIX shell is handed and the path PSReadLine is
+    /// pointed at. Nothing writes it unless a test asks a shell to.
+    #[must_use]
+    pub fn history_file(&self) -> PathBuf {
+        self.root.join("history")
+    }
+
+    fn proof_file(&self) -> PathBuf {
+        self.root.join("history-refusal.proof")
+    }
+
+    fn refusal_file(&self) -> PathBuf {
+        self.root.join("history-refusal.failed")
+    }
+
+    fn directories(&self) -> Vec<PathBuf> {
+        let mut directories = vec![self.home()];
+        directories.extend(self.xdg().into_iter().map(|(_, path)| path));
+        directories.extend(self.application_data().into_iter().map(|(_, path)| path));
+        directories
+    }
+
+    fn xdg(&self) -> [(&'static str, PathBuf); 4] {
+        let xdg = self.root.join("xdg");
+        [
+            ("XDG_CONFIG_HOME", xdg.join("config")),
+            ("XDG_DATA_HOME", xdg.join("data")),
+            ("XDG_STATE_HOME", xdg.join("state")),
+            ("XDG_CACHE_HOME", xdg.join("cache")),
+        ]
+    }
+
+    /// Windows' two per-user data directories, as far as a program finds them
+    /// through the environment. Off Windows nothing reads these names.
+    fn application_data(&self) -> Vec<(&'static str, PathBuf)> {
+        if cfg!(windows) {
+            let data = self.root.join("appdata");
+            vec![
+                ("APPDATA", data.join("roaming")),
+                ("LOCALAPPDATA", data.join("local")),
+            ]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Every variable this family is started with, and whether a test may set
+    /// it itself (to a path inside [`Self::root`]) — `false` for the values
+    /// that are not locations.
+    fn environment(&self, family: Family) -> Vec<(&'static str, OsString, bool)> {
+        let mut environment: Vec<(&'static str, OsString, bool)> =
+            vec![("HOME", self.home().into_os_string(), true)];
+        environment.extend(
+            self.xdg()
+                .into_iter()
+                .chain(self.application_data())
+                .map(|(key, path)| (key, path.into_os_string(), true)),
+        );
+        match family {
+            Family::PowerShell => {
+                let cache = self
+                    .application_data()
+                    .last()
+                    .map_or_else(|| self.root.clone(), |(_, local)| local.clone())
+                    .join("ModuleAnalysisCache");
+                environment.push(("PSModuleAnalysisCachePath", cache.into_os_string(), true));
+                environment.push(("POWERSHELL_TELEMETRY_OPTOUT", "1".into(), false));
+                environment.push(("POWERSHELL_UPDATECHECK", "Off".into(), false));
+            }
+            Family::Posix(_) => {
+                environment.push(("ZDOTDIR", self.home().into_os_string(), true));
+                environment.push(("HISTFILE", self.history_file().into_os_string(), true));
+                environment.push(("ENV", OsString::new(), true));
+                environment.push(("BASH_ENV", OsString::new(), true));
+            }
+            Family::Cmd | Family::Program => {}
+        }
+        environment
+    }
+
+    /// Whether a value a test chose for one of the hygiene's own variables keeps
+    /// it inside this test: a location below [`Self::root`], or nothing at all.
+    fn keeps_inside(&self, value: &OsStr) -> bool {
+        value.is_empty() || Path::new(value).starts_with(&self.root)
+    }
+
+    /// `arguments` with this family's startup flags in front, each only if the
+    /// caller did not already write it.
+    fn flagged(&self, family: Family, arguments: Vec<OsString>) -> Vec<OsString> {
+        let skips_startup =
+            matches!(family, Family::PowerShell | Family::Cmd) || !self.reads_startup_files;
+        let mut flagged: Vec<OsString> = if skips_startup {
+            family
+                .startup_flags()
+                .iter()
+                .filter(|flag| {
+                    !arguments
+                        .iter()
+                        .any(|argument| argument.to_string_lossy().eq_ignore_ascii_case(flag))
+                })
+                .map(OsString::from)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        flagged.extend(arguments);
+        flagged
+    }
+
+    /// `command`, rewritten to the rule for its program's family, and what has to
+    /// be established before anything is typed into it.
+    fn prepare(&self, mut command: PtyCommand) -> (PtyCommand, Gate) {
+        let family = Family::of(&command.program);
+        let arguments = self.flagged(family, std::mem::take(&mut command.arguments));
+        let (arguments, gate) = match family {
+            Family::PowerShell => self.powershell_arguments(arguments),
+            Family::Cmd | Family::Posix(_) | Family::Program => (arguments, Gate::Open),
+        };
+        command.arguments = arguments;
+        for (key, value, settable) in self.environment(family) {
+            let chosen = command
+                .environment
+                .iter()
+                .chain(&command.profile_environment)
+                .find(|(existing, _)| crate::environment_key_eq(existing, OsStr::new(key)))
+                .map(|(_, value)| value.clone());
+            match chosen {
+                Some(chosen) if settable && self.keeps_inside(&chosen) => {}
+                Some(chosen) if settable => panic!(
+                    "a test's shell may not be started with {key}={}: that is a place the shell \
+                     keeps per-user state, and it has to be inside the test's own directory {}",
+                    Path::new(&chosen).display(),
+                    self.root.display()
+                ),
+                Some(_) | None => upsert_environment(&mut command.environment, key.into(), value),
+            }
+        }
+        (command, gate)
+    }
+
+    /// A PowerShell's argument list with the history refusal in its startup
+    /// script, when it is a PowerShell that will draw a prompt.
+    fn powershell_arguments(&self, mut arguments: Vec<OsString>) -> (Vec<OsString>, Gate) {
+        let is = |argument: &OsString, names: &[&str]| {
+            let argument = argument.to_string_lossy();
+            names.iter().any(|name| argument.eq_ignore_ascii_case(name))
+        };
+        let stays_open = arguments.iter().any(|argument| is(argument, &["-NoExit"]));
+        let script = arguments.iter().position(|argument| {
+            is(
+                argument,
+                &[
+                    "-Command",
+                    "-c",
+                    "-EncodedCommand",
+                    "-e",
+                    "-ec",
+                    "-File",
+                    "-f",
+                ],
+            )
+        });
+        let refusal = powershell_hygiene(self);
+        match script {
+            // A one-shot: no prompt, so no line editor and no history.
+            Some(_) if !stays_open => return (arguments, Gate::Open),
+            None => {
+                if !stays_open {
+                    arguments.push("-NoExit".into());
+                }
+                arguments.push("-Command".into());
+                arguments.push(refusal.into());
+            }
+            Some(at) if is(&arguments[at], &["-Command", "-c"]) => {
+                assert_eq!(
+                    arguments.len(),
+                    at + 2,
+                    "a test's interactive PowerShell takes its startup script as the one \
+                     argument after -Command, so the history refusal has one place to go"
+                );
+                let script = arguments[at + 1].to_string_lossy().into_owned();
+                let script = match script.matches(HYGIENE).count() {
+                    0 => format!("{refusal} {script}"),
+                    1 => script.replacen(HYGIENE, &refusal, 1),
+                    many => panic!(
+                        "the startup script names HYGIENE {many} times; the history refusal \
+                         goes in one place"
+                    ),
+                };
+                arguments[at + 1] = script.into();
+            }
+            Some(at) => panic!(
+                "an interactive PowerShell started with {} has no startup script the history \
+                 refusal can be put in front of: write the startup as -Command",
+                arguments[at].to_string_lossy()
+            ),
+        }
+        let gate = Gate::PowerShell {
+            proof: self.proof_file(),
+            refusal: self.refusal_file(),
+            history: self.history_file(),
+            established: false,
+        };
+        (arguments, gate)
+    }
+
+    /// A process started off a pseudoconsole — a one-shot script, a shell fed on
+    /// a pipe — under the same rule: `program`, made by `new`, with its family's
+    /// startup flags already given and the hygiene environment. The caller adds
+    /// its own arguments after them. The directory must outlive the child.
+    ///
+    /// `new` is the caller's own door: `std::process::Command::new` from an
+    /// integration test, `bt_platform::quiet_command` from a test inside `src/`,
+    /// where that is the only door (`no_command_is_built_outside_the_quiet_door`).
+    /// This module builds no child of its own.
+    ///
+    /// No PowerShell history refusal is put in front of anything here: a
+    /// PowerShell that draws a prompt is started on a pseudoconsole
+    /// ([`TestShell`]), and one that does not has no line editor to save a line.
+    /// A POSIX shell made interactive on a pipe (`bash -i`) does keep a history,
+    /// and writes it to the `HISTFILE` this sets.
+    pub fn command(
+        &self,
+        program: impl AsRef<OsStr>,
+        new: impl FnOnce(OsString) -> std::process::Command,
+    ) -> std::process::Command {
+        let program = program.as_ref();
+        let family = Family::of(program);
+        let mut command = new(program.to_os_string());
+        command.args(self.flagged(family, Vec::new()));
+        for (key, value, _) in self.environment(family) {
+            command.env(key, value);
+        }
+        command
+    }
+}
+
+impl Drop for Hygiene {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// `text` as a PowerShell single-quoted literal. PowerShell reads the four
+/// typographic single quotes as quotes too, so each of them is doubled as well.
+fn powershell_literal(text: &str) -> String {
+    let mut literal = String::from("'");
+    for character in text.chars() {
+        if matches!(
+            character,
+            '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}'
+        ) {
+            literal.push(character);
+        }
+        literal.push(character);
+    }
+    literal.push('\'');
+    literal
+}
+
+/// The history refusal a test's interactive PowerShell runs before its first
+/// prompt: history saving off and its file inside the hygiene directory, both
+/// read back and written to the proof file — or, when any step fails, the
+/// reason written to the refusal file and the shell gone.
+///
+/// Cmdlets only, so it means the same thing in a constrained language mode,
+/// and single quotes only, because Windows PowerShell's own command-line
+/// parsing mangles a double quote inside `-Command`. The proof is written
+/// beside its name and moved into place, so a reader never sees half of it.
+#[must_use]
+pub fn powershell_hygiene(hygiene: &Hygiene) -> String {
+    let history = powershell_literal(&hygiene.history_file().to_string_lossy());
+    let proof = hygiene.proof_file();
+    let partial = powershell_literal(&format!("{}.part", proof.to_string_lossy()));
+    let proof = powershell_literal(&proof.to_string_lossy());
+    let refusal = powershell_literal(&hygiene.refusal_file().to_string_lossy());
+    format!(
+        "try {{ Set-PSReadLineOption -HistorySaveStyle SaveNothing -HistorySavePath {history} \
+         -ErrorAction Stop; $__FolioTestShell = Get-PSReadLineOption -ErrorAction Stop; \
+         Set-Content -LiteralPath {partial} -Value (([string]$__FolioTestShell.HistorySaveStyle) \
+         + [char]10 + [string]$__FolioTestShell.HistorySavePath) -NoNewline -Encoding UTF8 \
+         -ErrorAction Stop; Move-Item -LiteralPath {partial} -Destination {proof} -Force \
+         -ErrorAction Stop; Remove-Variable -Name __FolioTestShell }} catch {{ Set-Content \
+         -LiteralPath {refusal} -Value ([string]$_) -Encoding UTF8 -ErrorAction SilentlyContinue; \
+         exit {REFUSED_EXIT_CODE} }};"
+    )
+}
+
+/// What has to be true before a test may type.
+#[derive(Debug)]
+enum Gate {
+    /// Nothing: no line editor here keeps a history the user owns.
+    Open,
+    /// A PowerShell that will draw a prompt: its history refusal, read back.
+    PowerShell {
+        proof: PathBuf,
+        refusal: PathBuf,
+        history: PathBuf,
+        established: bool,
+    },
+}
+
+/// Two spellings of one file: the same directory, as the file system resolves
+/// it, and the same name.
+fn same_file_location(left: &Path, right: &Path) -> bool {
+    let resolve = |path: &Path| {
+        let directory = path.parent()?.canonicalize().ok()?;
+        Some((directory, path.file_name()?.to_os_string()))
+    };
+    matches!((resolve(left), resolve(right)), (Some(left), Some(right)) if left == right)
+}
+
+/// **The one door a test starts a real shell on a pseudoconsole through.**
+///
+/// The session is not handed out: [`Self::write`] is typing and waits for the
+/// history refusal, [`Self::reply`] is a terminal's answer to a query and does
+/// not, and everything else a test asks of the session is forwarded.
+pub struct TestShell {
+    // Declared first, so the child is ended before the directory it may still be
+    // writing into is removed.
+    session: PtySession,
+    gate: Gate,
+    program: OsString,
+    hygiene: Hygiene,
+}
+
+/// A process-starting door with the one `spawn` it makes per attempt handed in.
+type Door<'a> = dyn FnOnce(
+        &mut dyn FnMut(PtyCommand, PtySize, OutputWake) -> Result<PtySession, PtyError>,
+    ) -> Result<PtySession, PtyError>
+    + 'a;
+
+impl TestShell {
+    /// `command`, rewritten to the rule for its family, started in a fresh
+    /// [`Hygiene`].
+    pub fn spawn(command: PtyCommand, size: PtySize) -> Result<Self, PtyError> {
+        Self::spawn_in(Hygiene::new(), command, size)
+    }
+
+    /// [`Self::spawn`] in a [`Hygiene`] the test prepared — files of its own
+    /// placed below it, or [`Hygiene::reading_startup_files`].
+    pub fn spawn_in(
+        hygiene: Hygiene,
+        command: PtyCommand,
+        size: PtySize,
+    ) -> Result<Self, PtyError> {
+        Self::through(
+            hygiene,
+            Box::new(move |spawn| spawn(command, size, quiet())),
+        )
+    }
+
+    /// The default shell, resolved and started the way
+    /// [`PtySession::spawn_default`] does it — the fallback included — with every
+    /// attempt under the rule.
+    pub fn spawn_default(size: PtySize) -> Result<Self, PtyError> {
+        Self::spawn_default_with(size, &SystemShellEnvironment)
+    }
+
+    /// [`Self::spawn_default`] with the resolution's environment handed in.
+    pub(crate) fn spawn_default_with(
+        size: PtySize,
+        environment: &dyn ShellEnvironment,
+    ) -> Result<Self, PtyError> {
+        Self::through(
+            Hygiene::new(),
+            Box::new(move |spawn| {
+                PtySession::spawn_default_with(size, quiet(), None, environment, spawn)
+            }),
+        )
+    }
+
+    /// `program` with `arguments` and `environment`, started the way
+    /// [`PtySession::spawn_shell_in`] does it — the fallback to the last-resort
+    /// shell included — with every attempt under the rule.
+    pub fn spawn_shell_in(
+        hygiene: Hygiene,
+        program: impl Into<OsString>,
+        arguments: &[OsString],
+        fallback_arguments: &dyn Fn() -> Vec<OsString>,
+        environment: &[(OsString, OsString)],
+        size: PtySize,
+        working_directory: Option<PathBuf>,
+    ) -> Result<Self, PtyError> {
+        let program = program.into();
+        Self::through(
+            hygiene,
+            Box::new(move |spawn| {
+                PtySession::spawn_shell_in_with(
+                    program,
+                    arguments,
+                    fallback_arguments,
+                    environment,
+                    size,
+                    quiet(),
+                    working_directory,
+                    spawn,
+                )
+            }),
+        )
+    }
+
+    fn through(hygiene: Hygiene, door: Box<Door<'_>>) -> Result<Self, PtyError> {
+        let mut started = None;
+        let session = door(&mut |command, size, wake| {
+            let (command, gate) = hygiene.prepare(command);
+            let program = command.program.clone();
+            let session = PtySession::spawn(command, size, wake)?;
+            started = Some((gate, program));
+            Ok(session)
+        })?;
+        let (gate, program) = started.expect("a door that answered a session spawned one");
+        Ok(Self {
+            session,
+            gate,
+            program,
+            hygiene,
+        })
+    }
+
+    /// The program that was started, after any fallback.
+    #[must_use]
+    pub fn program(&self) -> &OsStr {
+        &self.program
+    }
+
+    /// The directory standing in for the account.
+    #[must_use]
+    pub fn hygiene(&self) -> &Hygiene {
+        &self.hygiene
+    }
+
+    /// **Type** `bytes` into the shell — once its history refusal is
+    /// established, and never otherwise.
+    ///
+    /// # Panics
+    ///
+    /// When the shell said it could not refuse history, read back something
+    /// other than what it was told, or ended without saying anything: nothing is
+    /// typed, and the message says which.
+    pub fn write(&mut self, bytes: &[u8]) -> Result<(), PtyError> {
+        self.establish();
+        self.session.write(bytes)
+    }
+
+    /// A terminal's **answer** to something the child asked — a cursor report,
+    /// a colour report — which the child may be waiting on before it can reach
+    /// the point where its history refusal is established. Never typing.
+    pub fn reply(&self, bytes: &[u8]) -> Result<(), PtyError> {
+        self.session.write(bytes)
+    }
+
+    /// The session itself, for a product function that takes one — under the
+    /// same condition as [`Self::write`], because whoever holds it can type.
+    pub fn session_mut(&mut self) -> &mut PtySession {
+        self.establish();
+        &mut self.session
+    }
+
+    fn establish(&mut self) {
+        let Gate::PowerShell {
+            proof,
+            refusal,
+            history,
+            established,
+        } = &mut self.gate
+        else {
+            return;
+        };
+        if *established {
+            return;
+        }
+        let program = Path::new(&self.program).display().to_string();
+        let started = Instant::now();
+        loop {
+            if let Ok(said) = std::fs::read_to_string(&*proof) {
+                let said = said.trim_start_matches('\u{feff}');
+                let (style, path) = said.split_once('\n').unwrap_or((said, ""));
+                assert!(
+                    style == "SaveNothing" && same_file_location(Path::new(path), history),
+                    "{program} was told to save no history and to keep its history file at {}, \
+                     and read back style {style:?} and file {path:?}; nothing was typed into it",
+                    history.display()
+                );
+                *established = true;
+                return;
+            }
+            if let Ok(reason) = std::fs::read_to_string(&*refusal) {
+                panic!(
+                    "{program} could not turn its history saving off, so nothing was typed into \
+                     it; it said: {}",
+                    reason.trim_start_matches('\u{feff}').trim()
+                );
+            }
+            match self.session.try_wait() {
+                Ok(Some(status)) => panic!(
+                    "{program} ended ({status:?}) before it said its history saving was off, so \
+                     nothing was typed into it"
+                ),
+                Ok(None) => {}
+                Err(error) => panic!(
+                    "{program} could not be asked whether it is still running ({error}) before \
+                     it said its history saving was off, so nothing was typed into it"
+                ),
+            }
+            assert!(
+                started.elapsed() < ESTABLISH_CEILING,
+                "{program} neither said its history saving was off nor ended within {:?}, so \
+                 nothing was typed into it",
+                ESTABLISH_CEILING
+            );
+            std::thread::sleep(ESTABLISH_POLL);
+        }
+    }
+
+    pub fn read_output(&self) -> Vec<u8> {
+        self.session.read_output()
+    }
+
+    pub fn output_is_drained(&self) -> bool {
+        self.session.output_is_drained()
+    }
+
+    pub fn resize(&self, size: PtySize) -> Result<(), PtyError> {
+        self.session.resize(size)
+    }
+
+    pub fn size(&self) -> Result<PtySize, PtyError> {
+        self.session.size()
+    }
+
+    pub fn clear_host_buffer(&self, keep_cursor_row: bool) -> Result<bool, PtyError> {
+        self.session.clear_host_buffer(keep_cursor_row)
+    }
+
+    pub fn ring_stats(&self) -> RingStats {
+        self.session.ring_stats()
+    }
+
+    #[must_use]
+    pub fn child_id(&self) -> Option<u32> {
+        self.session.child_id()
+    }
+
+    pub fn try_wait(&mut self) -> Result<Option<ExitStatus>, PtyError> {
+        self.session.try_wait()
+    }
+
+    pub fn shutdown(&mut self) -> Result<Option<ExitStatus>, PtyError> {
+        self.session.shutdown()
+    }
+
+    pub fn take_shell_fallback(&mut self) -> Option<ShellFallback> {
+        self.session.take_shell_fallback()
+    }
+
+    #[must_use]
+    pub fn conpty_kind(&self) -> crate::ConPtyKind {
+        self.session.conpty_kind()
+    }
+
+    #[must_use]
+    pub fn inbox_conpty_reason(&self) -> Option<String> {
+        self.session.inbox_conpty_reason()
+    }
+}
+
+/// A test reads its child's output by asking; nothing is woken.
+fn quiet() -> OutputWake {
+    Arc::new(|| {})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn arguments(command: &PtyCommand) -> Vec<String> {
+        command
+            .arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn value(command: &PtyCommand, key: &str) -> Option<OsString> {
+        command
+            .environment
+            .iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.clone())
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE) — **each family is started without the user's startup files,
+    /// with the hygiene directory standing in for every per-user location.**
+    ///
+    /// MUTATIONS: return `arguments` unflagged from `Hygiene::flagged` and the flags are missing;
+    /// skip the environment loop in `Hygiene::prepare` and `HOME` is the account's.
+    #[test]
+    fn every_family_is_started_without_the_users_startup_files() {
+        let hygiene = Hygiene::new();
+        let inside = |key: &str, command: &PtyCommand| {
+            let value = value(command, key).unwrap_or_else(|| panic!("{key} is set"));
+            assert!(
+                Path::new(&value).starts_with(hygiene.root()),
+                "{key}={value:?} is outside {}",
+                hygiene.root().display()
+            );
+        };
+
+        let (cmd, gate) = hygiene.prepare(PtyCommand::new("cmd.exe").arg("/C").arg("echo hi"));
+        assert_eq!(arguments(&cmd), ["/D", "/C", "echo hi"]);
+        assert!(matches!(gate, Gate::Open));
+        inside("HOME", &cmd);
+
+        let (bash, _) = hygiene.prepare(PtyCommand::new("/usr/bin/bash").arg("-c").arg("true"));
+        assert_eq!(arguments(&bash), ["--norc", "--noprofile", "-c", "true"]);
+        for key in [
+            "HOME",
+            "ZDOTDIR",
+            "HISTFILE",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+        ] {
+            inside(key, &bash);
+        }
+        assert_eq!(value(&bash, "ENV"), Some(OsString::new()));
+        assert_eq!(value(&bash, "BASH_ENV"), Some(OsString::new()));
+
+        let (zsh, _) = hygiene.prepare(PtyCommand::new("/bin/zsh"));
+        assert_eq!(arguments(&zsh), ["-f"]);
+
+        let (sh, _) = hygiene.prepare(PtyCommand::new("/bin/sh").arg("-c").arg("true"));
+        assert_eq!(
+            arguments(&sh),
+            ["-c", "true"],
+            "a Bourne shell has no such flag"
+        );
+        inside("HISTFILE", &sh);
+
+        let (node, gate) = hygiene.prepare(PtyCommand::new("node").arg("-e").arg("0"));
+        assert_eq!(arguments(&node), ["-e", "0"]);
+        assert!(matches!(gate, Gate::Open));
+        inside("HOME", &node);
+        if cfg!(windows) {
+            inside("APPDATA", &node);
+            inside("LOCALAPPDATA", &node);
+        }
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE) — **an interactive PowerShell has its history refusal first in
+    /// its startup script, or where the script asks; a one-shot has none and needs none.**
+    ///
+    /// MUTATION: answer `Gate::Open` for every PowerShell in `Hygiene::powershell_arguments` and
+    /// the interactive ones are not gated.
+    #[test]
+    fn an_interactive_powershell_refuses_history_before_its_startup_script() {
+        let hygiene = Hygiene::new();
+        let refusal = powershell_hygiene(&hygiene);
+
+        let (bare, gate) = hygiene.prepare(PtyCommand::new("powershell.exe").arg("-NoLogo"));
+        assert_eq!(
+            arguments(&bare),
+            [
+                "-NoProfile",
+                "-NoLogo",
+                "-NoExit",
+                "-Command",
+                refusal.as_str()
+            ]
+        );
+        assert!(matches!(gate, Gate::PowerShell { .. }));
+
+        let (first, _) = hygiene.prepare(
+            PtyCommand::new("pwsh")
+                .arg("-NoExit")
+                .arg("-Command")
+                .arg("function global:prompt { 'P> ' }"),
+        );
+        assert_eq!(
+            arguments(&first)[3],
+            format!("{refusal} function global:prompt {{ 'P> ' }}")
+        );
+
+        let (placed, _) = hygiene.prepare(
+            PtyCommand::new("powershell.exe")
+                .arg("-NoProfile")
+                .arg("-NoExit")
+                .arg("-Command")
+                .arg(format!("Import-Module PSReadLine; {HYGIENE} Write-Host x")),
+        );
+        assert_eq!(
+            arguments(&placed),
+            [
+                "-NoProfile".to_owned(),
+                "-NoExit".to_owned(),
+                "-Command".to_owned(),
+                format!("Import-Module PSReadLine; {refusal} Write-Host x"),
+            ],
+            "-NoProfile is not given twice, and the refusal stands where the script put it"
+        );
+
+        let (one_shot, gate) = hygiene.prepare(
+            PtyCommand::new("powershell.exe")
+                .arg("-Command")
+                .arg("Start-Sleep 1"),
+        );
+        assert_eq!(
+            arguments(&one_shot),
+            ["-NoProfile", "-Command", "Start-Sleep 1"]
+        );
+        assert!(matches!(gate, Gate::Open));
+        assert!(value(&one_shot, "PSModuleAnalysisCachePath").is_some());
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE) — **a location a test chooses itself must be inside its own
+    /// directory.**
+    ///
+    /// MUTATION: accept every caller-chosen value in `Hygiene::prepare` and no panic comes.
+    #[test]
+    #[should_panic(expected = "a test's shell may not be started with HOME=")]
+    fn a_home_outside_the_test_is_refused() {
+        let hygiene = Hygiene::new();
+        let outside = hygiene.root().parent().unwrap().to_path_buf();
+        let _ = hygiene.prepare(PtyCommand::new("/bin/sh").env("HOME", outside));
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE) — **and one inside it is kept**: a test whose subject is the
+    /// startup files puts them in its own `HOME`, and is not told to skip them.
+    ///
+    /// MUTATION: ignore `reads_startup_files` in `Hygiene::flagged` and `--norc` comes back.
+    #[test]
+    fn startup_files_a_test_wrote_into_its_own_home_are_read() {
+        let hygiene = Hygiene::new().reading_startup_files();
+        let home = hygiene.home();
+        let zdotdir = hygiene.root().join("zdotdir");
+        let (login, _) = hygiene.prepare(
+            PtyCommand::new("/bin/bash")
+                .arg("-l")
+                .env("HOME", &home)
+                .env("ZDOTDIR", &zdotdir),
+        );
+        assert_eq!(arguments(&login), ["-l"]);
+        assert_eq!(value(&login, "HOME"), Some(home.into_os_string()));
+        assert_eq!(value(&login, "ZDOTDIR"), Some(zdotdir.into_os_string()));
+        let (powershell, _) =
+            hygiene.prepare(PtyCommand::new("powershell.exe").arg("-Command").arg("1"));
+        assert_eq!(
+            arguments(&powershell)[0],
+            "-NoProfile",
+            "a profile is never a test's"
+        );
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE) — **WSL is refused**: its shell's home is the distribution's.
+    ///
+    /// MUTATION: map `wsl` to `Family::Program` and no panic comes.
+    #[test]
+    #[should_panic(expected = "WSL runs a shell inside a distribution")]
+    fn wsl_has_no_hygienic_form() {
+        let _ = Family::of(OsStr::new(r"C:\Windows\System32\wsl.exe"));
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE) — **off a pseudoconsole, the family's flags come first and the
+    /// environment is the hygiene's.** Nothing is started.
+    ///
+    /// MUTATION: drop the `args` call in `Hygiene::command` and `-NoProfile` is gone.
+    #[test]
+    fn a_command_off_a_pseudoconsole_takes_the_same_rule() {
+        let hygiene = Hygiene::new();
+        let command = hygiene.command("powershell.exe", std::process::Command::new);
+        let words: Vec<_> = command.get_args().collect();
+        assert_eq!(words, ["-NoProfile"]);
+        let home = command
+            .get_envs()
+            .find(|(key, _)| *key == "HOME")
+            .and_then(|(_, value)| value)
+            .expect("HOME is set");
+        assert!(Path::new(home).starts_with(hygiene.root()));
+    }
+}

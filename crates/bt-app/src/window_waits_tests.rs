@@ -326,6 +326,140 @@ fn product_packages() -> Vec<(String, Vec<String>)> {
     out
 }
 
+/// **The features a build of `folio.exe` turns on**, per product package: every
+/// `features = [...]` a product manifest's `[dependencies]` line names on a first-party
+/// package, that package's own `default`, and whatever those imply in its `[features]` table.
+///
+/// A feature named only on a *dev*-dependency is a test build's — `bt-pty`'s `test-shell`
+/// (T-TEST-SHELL-HYGIENE), `bt-platform`'s `trust-harness` — and an item standing on it is
+/// not in the product, however `bt_source`'s test-bit-only reading leaves it.
+fn product_features(packages: &[(String, Vec<String>)]) -> BTreeMap<String, BTreeSet<String>> {
+    let root = repository_root();
+    let workspace = bt_source::Workspace::read(&root).expect("the workspace's manifests");
+    let manifest_of = |name: &str| {
+        let package = workspace.package(name).expect("a workspace package");
+        std::fs::read_to_string(package.directory().join("Cargo.toml"))
+            .expect("a package has a manifest")
+    };
+    let quoted = |list: &str| -> Vec<String> {
+        list.split('"')
+            .skip(1)
+            .step_by(2)
+            .map(ToOwned::to_owned)
+            .collect()
+    };
+    let mut named: BTreeMap<String, BTreeSet<String>> = packages
+        .iter()
+        .map(|(name, _)| (name.clone(), BTreeSet::new()))
+        .collect();
+    for (name, _) in packages {
+        let mut section = "";
+        for line in manifest_of(name).lines().map(str::trim) {
+            if line.starts_with('[') {
+                section = line;
+                continue;
+            }
+            let dependencies = section == "[dependencies]"
+                || (section.starts_with("[target.") && section.ends_with(".dependencies]"));
+            if dependencies
+                && line.starts_with("bt-")
+                && let Some((dependency, rest)) = line.split_once('=')
+                && let Some((_, list)) = rest.split_once("features")
+                && let Some(set) = named.get_mut(dependency.trim())
+            {
+                set.extend(quoted(list.split(']').next().unwrap_or_default()));
+            }
+        }
+    }
+    for (name, enabled) in &mut named {
+        let mut table: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut section = "";
+        for line in manifest_of(name).lines().map(str::trim) {
+            if line.starts_with('[') {
+                section = line;
+                continue;
+            }
+            if section == "[features]"
+                && let Some((feature, implied)) = line.split_once('=')
+            {
+                table.insert(feature.trim().to_owned(), quoted(implied));
+            }
+        }
+        if table.contains_key("default") {
+            enabled.insert("default".to_owned());
+        }
+        let mut queue: Vec<String> = enabled.iter().cloned().collect();
+        while let Some(feature) = queue.pop() {
+            for implied in table.get(&feature).into_iter().flatten() {
+                if enabled.insert(implied.clone()) {
+                    queue.push(implied.clone());
+                }
+            }
+        }
+    }
+    named
+}
+
+/// What a `cfg` predicate says about a product build that has `features` on: `test` is off, a
+/// feature is on exactly when it is in `features`, anything else (a platform) is unknown —
+/// three-valued over `not`, `all` and `any`, as `bt_source`'s own reading is.
+fn product_build_cfg(meta: &syn::Meta, features: &BTreeSet<String>) -> Option<bool> {
+    if meta.path().is_ident("test") {
+        return Some(false);
+    }
+    match meta {
+        syn::Meta::NameValue(pair) if pair.path.is_ident("feature") => match &pair.value {
+            syn::Expr::Lit(syn::ExprLit {
+                lit: syn::Lit::Str(name),
+                ..
+            }) => Some(features.contains(&name.value())),
+            _ => None,
+        },
+        syn::Meta::List(list) => {
+            let children = list
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                )
+                .ok()?;
+            let values: Vec<_> = children
+                .iter()
+                .map(|child| product_build_cfg(child, features))
+                .collect();
+            if list.path.is_ident("not") && values.len() == 1 {
+                values[0].map(|value| !value)
+            } else if list.path.is_ident("all") {
+                if values.contains(&Some(false)) {
+                    Some(false)
+                } else if values.iter().all(|value| *value == Some(true)) {
+                    Some(true)
+                } else {
+                    None
+                }
+            } else if list.path.is_ident("any") {
+                if values.contains(&Some(true)) {
+                    Some(true)
+                } else if values.iter().all(|value| *value == Some(false)) {
+                    Some(false)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Whether every predicate on a path lets a product build with `features` compile it.
+fn product_build_permits(predicates: &[String], features: &BTreeSet<String>) -> bool {
+    predicates.iter().all(|predicate| {
+        syn::parse_str::<syn::Meta>(predicate).map_or(true, |meta| {
+            product_build_cfg(&meta, features) != Some(false)
+        })
+    })
+}
+
 // ── the lexer: code tokens, comments skipped, a literal one token ───────────────────────────
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -348,6 +482,8 @@ struct Tok {
 struct Src {
     package: &'static str,
     index: &'static Index,
+    /// The features a product build turns on in this package ([`product_features`]).
+    features: &'static BTreeSet<String>,
 }
 
 /// The punctuation read as one token.
@@ -463,6 +599,10 @@ impl Src {
     fn product_file(&self, file: &FileRecord) -> bool {
         file.owners().iter().any(|owner| {
             owner.compilation.permits_product()
+                && owner
+                    .steps
+                    .iter()
+                    .all(|step| product_build_permits(&step.predicates, self.features))
                 && match owner.target.kind {
                     TargetKind::Library => true,
                     TargetKind::Binary => self.package == "bt-app" && owner.target.name == "folio",
@@ -477,9 +617,10 @@ impl Src {
     /// Whether an item record is product code.
     fn product_item(&self, record: &ItemRecord) -> bool {
         self.product_file(self.index.file_of(record))
-            && record
-                .identities()
-                .any(|identity| identity.variant.permits_product())
+            && record.identities().any(|identity| {
+                identity.variant.permits_product()
+                    && product_build_permits(identity.variant.predicates(), self.features)
+            })
     }
 
     /// Whether a build of the shipped program contains the token at `at`.
@@ -765,6 +906,7 @@ const KEYWORDS: [&str; 22] = [
 impl World {
     fn new() -> Self {
         let packages = product_packages();
+        let mut features = product_features(&packages);
         let srcs: Vec<Src> = packages
             .iter()
             .map(|(name, _)| {
@@ -772,6 +914,7 @@ impl World {
                 Src {
                     package,
                     index: Index::of_package(package),
+                    features: Box::leak(Box::new(features.remove(name).unwrap_or_default())),
                 }
             })
             .collect();
@@ -2275,6 +2418,7 @@ fn every_excluded_root_carries_the_unconditional_form(world: &World) -> Vec<Stri
         let excluded_src = Src {
             package: src.package,
             index,
+            features: src.features,
         };
         for target in &excluded {
             let Some(file) = index.file(&target.file) else {

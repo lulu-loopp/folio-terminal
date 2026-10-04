@@ -51,14 +51,11 @@ fn prompt_bytes(directory: &Path) -> Vec<u8> {
         ),
     )
     .unwrap();
-    let output = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-        ])
+    // Through `bt_pty::test_shell::Hygiene`: `-NoProfile` and a temporary HOME/APPDATA.
+    let hygiene = bt_pty::test_shell::Hygiene::new();
+    let output = hygiene
+        .command("powershell.exe", Command::new)
+        .args(["-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(&driver)
         .arg(directory)
         .output()

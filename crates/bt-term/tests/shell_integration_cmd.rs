@@ -62,30 +62,32 @@ fn temporary_directory() -> PathBuf {
 /// Everything a `cmd.exe` started the way Folio starts it writes, while running
 /// `commands`.
 ///
-/// `/d` skips the `AutoRun` registry value, which is somebody's own machine
-/// setup and not part of what is under test — the same discipline every other
-/// probe in this repository applies to a real user's configuration.
+/// Started through `bt_pty::test_shell::Hygiene`, which gives it `/D` — the
+/// `AutoRun` registry value is somebody's own machine setup and not part of what
+/// is under test — and a temporary HOME/APPDATA.
 fn session_bytes(directory: &Path, commands: &str) -> Vec<u8> {
-    let output = Command::new(
-        std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into()),
-    )
-    .arg("/d")
-    .current_dir(directory)
-    .env("PROMPT", PROMPT)
-    .stdin(std::process::Stdio::piped())
-    .stdout(std::process::Stdio::piped())
-    .stderr(std::process::Stdio::null())
-    .spawn()
-    .and_then(|mut child| {
-        use std::io::Write;
-        child
-            .stdin
-            .take()
-            .expect("stdin was piped")
-            .write_all(commands.as_bytes())?;
-        child.wait_with_output()
-    })
-    .expect("cmd.exe ships with Windows");
+    let hygiene = bt_pty::test_shell::Hygiene::new();
+    let output = hygiene
+        .command(
+            std::env::var_os("ComSpec").unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".into()),
+            Command::new,
+        )
+        .current_dir(directory)
+        .env("PROMPT", PROMPT)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .expect("stdin was piped")
+                .write_all(commands.as_bytes())?;
+            child.wait_with_output()
+        })
+        .expect("cmd.exe ships with Windows");
     output.stdout
 }
 

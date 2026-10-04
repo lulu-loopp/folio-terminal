@@ -44,11 +44,11 @@
 use std::{
     ffi::OsString,
     num::{NonZeroU16, NonZeroU32},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
-use bt_pty::{PtyCommand, PtySession, PtySize, WINDOWS_POWERSHELL};
+use bt_pty::test_shell::TestShell;
+use bt_pty::{PtyCommand, PtySize, WINDOWS_POWERSHELL};
 use bt_term::DualPlaneSession;
 
 const SILENCE_BUDGET: Duration = Duration::from_secs(30);
@@ -92,7 +92,6 @@ fn encoded_command(script: &str) -> OsString {
 fn powershell(script: &str) -> PtyCommand {
     PtyCommand::interactive_shell(WINDOWS_POWERSHELL)
         .arg("-NoLogo")
-        .arg("-NoProfile")
         .arg("-NonInteractive")
         .arg("-EncodedCommand")
         .arg(encoded_command(script))
@@ -104,7 +103,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 struct Probe {
-    pty: PtySession,
+    pty: TestShell,
     session: DualPlaneSession,
     raw: Vec<u8>,
     answered: Vec<u8>,
@@ -120,10 +119,9 @@ impl Probe {
     /// A probe tall enough for a child that prints one line per chord.
     fn spawn_with_rows(command: PtyCommand, rows: u16) -> Self {
         let columns = NonZeroU16::new(COLUMNS).unwrap();
-        let pty = PtySession::spawn(
+        let pty = TestShell::spawn(
             command,
             PtySize::cells(columns, NonZeroU16::new(rows).unwrap()),
-            Arc::new(|| {}),
         )
         .expect("the child starts on a supported host");
         let session = DualPlaneSession::new(
@@ -149,7 +147,7 @@ impl Probe {
         }
         for reply in self.session.take_pty_writes() {
             self.answered.extend_from_slice(&reply);
-            self.pty.write(&reply).unwrap();
+            self.pty.reply(&reply).unwrap();
         }
     }
 

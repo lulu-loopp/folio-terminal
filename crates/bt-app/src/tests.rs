@@ -25875,8 +25875,12 @@ fn direct_glyph_fixture_preserves_emoji_and_ambiguous_cell_occupancy() {
 fn real_powershell_input_reaches_a_viewport_owned_frame() {
     let columns = std::num::NonZeroU16::new(48).unwrap();
     let rows = std::num::NonZeroU16::new(10).unwrap();
+    // The default shell, resolved as a pane resolves it, but started through `TestShell`:
+    // without the user's `$PROFILE`, and with history refused (and read back) before the line
+    // below is typed. Started the ordinary way, this test appended that line to the user's own
+    // PSReadLine history on every run (T-TEST-SHELL-HYGIENE).
     let mut pty =
-        PtySession::spawn_default(PtySize::cells(columns, rows), Arc::new(|| {})).unwrap();
+        bt_pty::test_shell::TestShell::spawn_default(PtySize::cells(columns, rows)).unwrap();
     let mut session = DualPlaneSession::with_quotas_and_cell_height(
         nonzero_u32(columns.get()),
         nonzero_u32(rows.get()),
@@ -25884,7 +25888,7 @@ fn real_powershell_input_reaches_a_viewport_owned_frame() {
         DEFAULT_FROZEN_LINE_QUOTA,
         std::num::NonZeroI64::new(22 * bt_viewport::SUBPIXELS_PER_PX).unwrap(),
     );
-    // The child here is a real PowerShell starting a real profile, so *how long* it needs to
+    // The child here is a real PowerShell starting for real, so *how long* it needs to
     // reach a prompt and echo a command back is a fact about the machine, not about this
     // terminal. A total wall-clock budget therefore made this test a load meter: at rest it
     // finished in six seconds, but with twenty-four spinners on this twenty-four-thread host
@@ -25920,7 +25924,7 @@ fn real_powershell_input_reaches_a_viewport_owned_frame() {
             session.feed(&bytes).unwrap();
             let replies = session.take_pty_writes();
             for reply in &replies {
-                pty.write(reply).unwrap();
+                pty.reply(reply).unwrap();
             }
             if !command_sent && !replies.is_empty() {
                 pty.write(&ime_commit_bytes("Write-Output ('BT_APP_' + 'INPUT_OK')\r"))
@@ -56241,20 +56245,20 @@ fn each_leafs_resize_is_one_admission_and_a_refused_one_is_a_failed_resize() {
             Instant::now(),
         )
     }
-    fn a_leaf() -> (DualPlaneSession, PtySession) {
+    fn a_leaf() -> (DualPlaneSession, bt_pty::test_shell::TestShell) {
         let size = PtySize::cells(
             std::num::NonZeroU16::new(80).unwrap(),
             std::num::NonZeroU16::new(24).unwrap(),
         );
-        let pty = PtySession::spawn_default(size, Arc::new(|| {})).expect("a real shell");
+        let pty = bt_pty::test_shell::TestShell::spawn_default(size).expect("a real shell");
         (DualPlaneSession::new(nonzero_u32(80), nonzero_u32(24)), pty)
     }
     on_the_window_thread();
     let (mut first, mut first_pty) = a_leaf();
     let (mut second, mut second_pty) = a_leaf();
     let _ = crate::hang_watch::admissions_on_this_thread();
-    commit(&mut first, &mut first_pty).expect("the first leaf's child hears its size");
-    commit(&mut second, &mut second_pty).expect("and the second's");
+    commit(&mut first, first_pty.session_mut()).expect("the first leaf's child hears its size");
+    commit(&mut second, second_pty.session_mut()).expect("and the second's");
     assert_eq!(
         crate::hang_watch::admissions_on_this_thread(),
         ["PtyResize", "PtyResize"],
@@ -56263,7 +56267,8 @@ fn each_leafs_resize_is_one_admission_and_a_refused_one_is_a_failed_resize() {
     std::thread::spawn(|| {
         assert!(bt_platform::admission::enter_window_thread());
         let (mut session, mut pty) = a_leaf();
-        let refused = commit(&mut session, &mut pty).expect_err("not admitted before the loop");
+        let refused =
+            commit(&mut session, pty.session_mut()).expect_err("not admitted before the loop");
         let said = format!("{refused:#}");
         assert!(
             said.contains("commit a coalesced final ConPTY resize")
