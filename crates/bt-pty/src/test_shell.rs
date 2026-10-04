@@ -186,6 +186,33 @@ pub fn program_name(program: &OsStr) -> Option<String> {
 pub struct Hygiene {
     root: PathBuf,
     reads_startup_files: bool,
+    powershell_shape: Option<PowerShellShape>,
+}
+
+/// **A PowerShell command line's shape, as an authoritative classifier read it** — for a test
+/// whose subject is the argv itself (a product-composed row), so the helper does not read the
+/// argv a second, different way.
+///
+/// `bt-app`'s `shell_integration::classify_powershell_arguments` reads each edition's own
+/// option table, abbreviations included (`-noe -c`, the genuine Visual Studio row); this
+/// crate's reading ([`Hygiene::prepare`] without a shape) knows the full names and the
+/// documented aliases and refuses an abbreviation. A test that has the better reading hands
+/// it over here ([`Hygiene::with_powershell_shape`]) rather than keeping two.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PowerShellShape {
+    /// The shell will draw a prompt — `-NoExit`, or no script at all — so a line editor will
+    /// read what is typed and the history refusal is owed. `false` is a one-shot: no refusal,
+    /// no gate, the argv as given.
+    pub draws_a_prompt: bool,
+    /// The index (in the argv as the test gives it) of the startup text the refusal goes into:
+    /// where it carries [`HYGIENE`], or first. `None` for a startup the argv names but does not
+    /// spell — a `-File` row — which must then carry [`powershell_hygiene`] itself (the test
+    /// writes that file); the argv stays exactly as given, and [`TestShell::write`] still types
+    /// nothing until the proof is there.
+    pub startup_text: Option<usize>,
+    /// The argv already says `-NoProfile`, in any spelling; when it does not, `-NoProfile` is
+    /// put first.
+    pub has_no_profile: bool,
 }
 
 impl Default for Hygiene {
@@ -210,6 +237,7 @@ impl Hygiene {
         let hygiene = Self {
             root,
             reads_startup_files: false,
+            powershell_shape: None,
         };
         for directory in hygiene.directories() {
             std::fs::create_dir_all(&directory).unwrap_or_else(|error| {
@@ -230,6 +258,14 @@ impl Hygiene {
     #[must_use]
     pub fn reading_startup_files(mut self) -> Self {
         self.reads_startup_files = true;
+        self
+    }
+
+    /// For a PowerShell whose command line a test has classified itself: the helper takes
+    /// `shape` instead of reading the argv ([`PowerShellShape`]).
+    #[must_use]
+    pub fn with_powershell_shape(mut self, shape: PowerShellShape) -> Self {
+        self.powershell_shape = Some(shape);
         self
     }
 
@@ -298,6 +334,12 @@ impl Hygiene {
     fn environment(&self, family: Family) -> Vec<(&'static str, OsString, bool)> {
         let mut environment: Vec<(&'static str, OsString, bool)> =
             vec![("HOME", self.home().into_os_string(), true)];
+        if cfg!(windows) {
+            // What a Windows program that does not read `HOME` finds a home by (Git, Node,
+            // a profile row's own scripts). PowerShell's `$PROFILE` is not among them: that is a
+            // known folder no variable moves, which is why `-NoProfile` stays.
+            environment.push(("USERPROFILE", self.home().into_os_string(), true));
+        }
         environment.extend(
             self.xdg()
                 .into_iter()
@@ -342,9 +384,12 @@ impl Hygiene {
                 .startup_flags()
                 .iter()
                 .filter(|flag| match family {
-                    Family::PowerShell => {
-                        !powershell_switches(&arguments).contains(&PowerShellSwitch::NoProfile)
-                    }
+                    Family::PowerShell => !match self.powershell_shape {
+                        Some(shape) => shape.has_no_profile,
+                        None => {
+                            powershell_switches(&arguments).contains(&PowerShellSwitch::NoProfile)
+                        }
+                    },
                     _ => !arguments
                         .iter()
                         .any(|argument| argument.to_string_lossy().eq_ignore_ascii_case(flag)),
@@ -362,9 +407,14 @@ impl Hygiene {
     /// be established before anything is typed into it.
     fn prepare(&self, mut command: PtyCommand) -> (PtyCommand, Gate) {
         let family = Family::of(&command.program);
+        let given = command.arguments.len();
         let arguments = self.flagged(family, std::mem::take(&mut command.arguments));
+        let flags = arguments.len() - given;
         let (arguments, gate) = match family {
-            Family::PowerShell => self.powershell_arguments(arguments),
+            Family::PowerShell => match self.powershell_shape {
+                Some(shape) => self.shaped_powershell_arguments(arguments, shape, flags),
+                None => self.powershell_arguments(arguments),
+            },
             Family::Cmd | Family::Posix(_) | Family::Program => (arguments, Gate::Open),
         };
         command.arguments = arguments;
@@ -387,6 +437,35 @@ impl Hygiene {
             }
         }
         (command, gate)
+    }
+
+    /// [`Self::powershell_arguments`] for a command line the test classified itself: the argv
+    /// as given (after any `-NoProfile` put first, `flags` words), with the refusal in the
+    /// startup text the shape names.
+    fn shaped_powershell_arguments(
+        &self,
+        mut arguments: Vec<OsString>,
+        shape: PowerShellShape,
+        flags: usize,
+    ) -> (Vec<OsString>, Gate) {
+        if !shape.draws_a_prompt {
+            return (arguments, Gate::Open);
+        }
+        if let Some(at) = shape.startup_text {
+            let at = at + flags;
+            let script = arguments[at].to_string_lossy().into_owned();
+            arguments[at] = with_refusal(&script, &powershell_hygiene(self)).into();
+        }
+        (arguments, self.powershell_gate())
+    }
+
+    fn powershell_gate(&self) -> Gate {
+        Gate::PowerShell {
+            proof: self.proof_file(),
+            refusal: self.refusal_file(),
+            history: self.history_file(),
+            established: false,
+        }
     }
 
     /// A PowerShell's argument list with the history refusal in its startup
@@ -421,15 +500,7 @@ impl Hygiene {
                      argument after -Command, so the history refusal has one place to go"
                 );
                 let script = arguments[at + 1].to_string_lossy().into_owned();
-                let script = match script.matches(HYGIENE).count() {
-                    0 => format!("{refusal} {script}"),
-                    1 => script.replacen(HYGIENE, &refusal, 1),
-                    many => panic!(
-                        "the startup script names HYGIENE {many} times; the history refusal \
-                         goes in one place"
-                    ),
-                };
-                arguments[at + 1] = script.into();
+                arguments[at + 1] = with_refusal(&script, &refusal).into();
             }
             Some(at) => panic!(
                 "an interactive PowerShell started with {} has no startup script the history \
@@ -437,13 +508,7 @@ impl Hygiene {
                 arguments[at].to_string_lossy()
             ),
         }
-        let gate = Gate::PowerShell {
-            proof: self.proof_file(),
-            refusal: self.refusal_file(),
-            history: self.history_file(),
-            established: false,
-        };
-        (arguments, gate)
+        (arguments, self.powershell_gate())
     }
 
     /// A process started off a pseudoconsole — a one-shot script, a shell fed on
@@ -553,6 +618,17 @@ fn powershell_switches(arguments: &[OsString]) -> Vec<PowerShellSwitch> {
         }
     }
     switches
+}
+
+/// `script` with the history refusal where it carries [`HYGIENE`], or first.
+fn with_refusal(script: &str, refusal: &str) -> String {
+    match script.matches(HYGIENE).count() {
+        0 => format!("{refusal} {script}"),
+        1 => script.replacen(HYGIENE, refusal, 1),
+        many => panic!(
+            "the startup script names HYGIENE {many} times; the history refusal goes in one place"
+        ),
+    }
 }
 
 /// `text` as a PowerShell single-quoted literal. PowerShell reads the four
@@ -1191,6 +1267,84 @@ mod tests {
                 .arg("1"),
         );
         assert_eq!(arguments(&command), ["/NoProfile", "-Command", "1"]);
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE, merge with T-INTEGRATION-INJECT-3) — **a command line a test
+    /// classified itself is taken as classified**: the genuine `-noe -c` row is not refused,
+    /// the refusal goes where its startup text carries `HYGIENE`, a `-File` row's argv is left
+    /// exactly as given yet still gated, a one-shot is untouched and ungated, and a missing
+    /// `-NoProfile` is put first with the startup text's index moved past it.
+    ///
+    /// MUTATIONS: ignore the shape in `Hygiene::prepare` and `-noe` is refused as an
+    /// abbreviation; drop the `flags` offset in `shaped_powershell_arguments` and the refusal
+    /// lands in `-c` instead of its text.
+    #[test]
+    fn a_classified_command_line_is_taken_as_classified() {
+        let shaped = |draws_a_prompt, startup_text, has_no_profile| {
+            Hygiene::new().with_powershell_shape(PowerShellShape {
+                draws_a_prompt,
+                startup_text,
+                has_no_profile,
+            })
+        };
+        let hygiene = shaped(true, Some(3), true);
+        let refusal = powershell_hygiene(&hygiene);
+        let (command, gate) = hygiene.prepare(
+            PtyCommand::new("powershell.exe")
+                .arg("-NoProfile")
+                .arg("-noe")
+                .arg("-c")
+                .arg(format!("{HYGIENE} Write-Output ready\r\nloader")),
+        );
+        assert_eq!(
+            arguments(&command),
+            [
+                "-NoProfile".to_owned(),
+                "-noe".to_owned(),
+                "-c".to_owned(),
+                format!("{refusal} Write-Output ready\r\nloader"),
+            ]
+        );
+        assert!(matches!(gate, Gate::PowerShell { .. }));
+
+        let hygiene = shaped(true, None, true);
+        let row = ["-NoProfile", "-NoExit", "-File", "row.ps1"];
+        let (command, gate) = hygiene.prepare(
+            row.iter()
+                .fold(PtyCommand::new("pwsh.exe"), |c, a| c.arg(a)),
+        );
+        assert_eq!(arguments(&command), row, "a -File row stays as written");
+        assert!(
+            matches!(gate, Gate::PowerShell { .. }),
+            "and is still gated"
+        );
+
+        let hygiene = shaped(false, Some(2), true);
+        let row = ["-NoProfile", "-Command", "Write-Output once"];
+        let (command, gate) = hygiene.prepare(
+            row.iter()
+                .fold(PtyCommand::new("pwsh.exe"), |c, a| c.arg(a)),
+        );
+        assert_eq!(arguments(&command), row);
+        assert!(matches!(gate, Gate::Open));
+
+        let hygiene = shaped(true, Some(2), false);
+        let refusal = powershell_hygiene(&hygiene);
+        let (command, _) = hygiene.prepare(
+            PtyCommand::new("powershell.exe")
+                .arg("-noe")
+                .arg("-c")
+                .arg("Write-Output ready"),
+        );
+        assert_eq!(
+            arguments(&command),
+            [
+                "-NoProfile".to_owned(),
+                "-noe".to_owned(),
+                "-c".to_owned(),
+                format!("{refusal} Write-Output ready"),
+            ]
+        );
     }
 
     /// RED (T-TEST-SHELL-HYGIENE review) — **an abbreviated switch is refused, not guessed**:
