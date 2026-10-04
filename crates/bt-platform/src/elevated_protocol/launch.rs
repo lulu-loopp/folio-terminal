@@ -10,8 +10,11 @@ pub struct LaunchInstant(pub Duration);
 /// The complete parent-side launch-attempt state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LaunchState {
-    Waiting { began: LaunchInstant },
-    Connected,
+    Launching { began: LaunchInstant },
+    Connecting { began: LaunchInstant },
+    AwaitingHello { began: LaunchInstant },
+    Starting { began: LaunchInstant },
+    Started,
     Canceled,
     TimedOut,
     Failed(String),
@@ -31,7 +34,11 @@ impl LaunchState {
         match self {
             Self::Canceled | Self::TimedOut | Self::Failed(_) => Some(LaunchAction::TryAgain),
             Self::Stopped(_) => Some(LaunchAction::RestartShell),
-            Self::Waiting { .. } | Self::Connected => None,
+            Self::Launching { .. }
+            | Self::Connecting { .. }
+            | Self::AwaitingHello { .. }
+            | Self::Starting { .. }
+            | Self::Started => None,
         }
     }
 }
@@ -40,7 +47,10 @@ impl LaunchState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum LaunchEvent {
     Tick(LaunchInstant),
-    Connected,
+    HostLaunched,
+    TransportConnected,
+    HelloReceived,
+    ChildStarted,
     Canceled,
     Failed(String),
     Stopped(Option<String>),
@@ -59,23 +69,46 @@ pub fn transition_launch(
     event: LaunchEvent,
 ) -> Result<LaunchState, LaunchTransitionError> {
     match (state, event) {
-        (LaunchState::Waiting { began }, LaunchEvent::Tick(now)) => {
+        (
+            state @ (LaunchState::Launching { began }
+            | LaunchState::Connecting { began }
+            | LaunchState::AwaitingHello { began }
+            | LaunchState::Starting { began }),
+            LaunchEvent::Tick(now),
+        ) => {
             let elapsed = now.0.saturating_sub(began.0);
             if elapsed >= LAUNCH_TIMEOUT {
                 Ok(LaunchState::TimedOut)
             } else {
-                Ok(LaunchState::Waiting { began })
+                Ok(state)
             }
         }
-        (LaunchState::Waiting { .. }, LaunchEvent::Connected) => Ok(LaunchState::Connected),
-        (LaunchState::Waiting { .. }, LaunchEvent::Canceled) => Ok(LaunchState::Canceled),
-        (LaunchState::Waiting { .. }, LaunchEvent::Failed(reason)) => {
-            Ok(LaunchState::Failed(reason))
+        (LaunchState::Launching { began }, LaunchEvent::HostLaunched) => {
+            Ok(LaunchState::Connecting { began })
         }
-        (LaunchState::Waiting { .. } | LaunchState::Connected, LaunchEvent::Stopped(reason)) => {
-            Ok(LaunchState::Stopped(reason))
+        (LaunchState::Connecting { began }, LaunchEvent::TransportConnected) => {
+            Ok(LaunchState::AwaitingHello { began })
         }
-        (LaunchState::Connected, LaunchEvent::Tick(_)) => Ok(LaunchState::Connected),
+        (LaunchState::AwaitingHello { began }, LaunchEvent::HelloReceived) => {
+            Ok(LaunchState::Starting { began })
+        }
+        (LaunchState::Starting { .. }, LaunchEvent::ChildStarted) => Ok(LaunchState::Started),
+        (LaunchState::Launching { .. }, LaunchEvent::Canceled) => Ok(LaunchState::Canceled),
+        (
+            LaunchState::Launching { .. }
+            | LaunchState::Connecting { .. }
+            | LaunchState::AwaitingHello { .. }
+            | LaunchState::Starting { .. },
+            LaunchEvent::Failed(reason),
+        ) => Ok(LaunchState::Failed(reason)),
+        (
+            LaunchState::Launching { .. }
+            | LaunchState::Connecting { .. }
+            | LaunchState::AwaitingHello { .. }
+            | LaunchState::Starting { .. },
+            LaunchEvent::Stopped(reason),
+        ) => Ok(LaunchState::Failed(reason.unwrap_or_default())),
+        (LaunchState::Started, LaunchEvent::Stopped(reason)) => Ok(LaunchState::Stopped(reason)),
         (state, event) => Err(LaunchTransitionError {
             state: state_name(&state),
             event: event_name(&event),
@@ -85,8 +118,11 @@ pub fn transition_launch(
 
 const fn state_name(state: &LaunchState) -> &'static str {
     match state {
-        LaunchState::Waiting { .. } => "waiting",
-        LaunchState::Connected => "connected",
+        LaunchState::Launching { .. } => "launching",
+        LaunchState::Connecting { .. } => "connecting",
+        LaunchState::AwaitingHello { .. } => "awaiting hello",
+        LaunchState::Starting { .. } => "starting",
+        LaunchState::Started => "started",
         LaunchState::Canceled => "canceled",
         LaunchState::TimedOut => "timed out",
         LaunchState::Failed(_) => "failed",
@@ -97,7 +133,10 @@ const fn state_name(state: &LaunchState) -> &'static str {
 const fn event_name(event: &LaunchEvent) -> &'static str {
     match event {
         LaunchEvent::Tick(_) => "tick",
-        LaunchEvent::Connected => "connected",
+        LaunchEvent::HostLaunched => "host launched",
+        LaunchEvent::TransportConnected => "transport connected",
+        LaunchEvent::HelloReceived => "hello received",
+        LaunchEvent::ChildStarted => "child started",
         LaunchEvent::Canceled => "canceled",
         LaunchEvent::Failed(_) => "failed",
         LaunchEvent::Stopped(_) => "stopped",
@@ -116,27 +155,32 @@ mod tests {
     /// its Try-again action differ.
     #[test]
     fn every_launch_table_row_has_its_exact_state_and_single_action() {
-        let waiting = LaunchState::Waiting {
+        let launching = LaunchState::Launching {
             began: at_millis(1_000),
         };
-        assert_eq!(waiting.action(), None);
+        assert_eq!(launching.action(), None);
         assert_eq!(
-            transition_launch(waiting.clone(), LaunchEvent::Connected),
-            Ok(LaunchState::Connected)
+            transition_launch(launching.clone(), LaunchEvent::HostLaunched),
+            Ok(LaunchState::Connecting {
+                began: at_millis(1_000)
+            })
         );
         assert_eq!(
-            transition_launch(waiting.clone(), LaunchEvent::Canceled),
+            transition_launch(launching.clone(), LaunchEvent::Canceled),
             Ok(LaunchState::Canceled)
         );
         assert_eq!(
             transition_launch(
-                waiting.clone(),
+                launching.clone(),
                 LaunchEvent::Failed("access denied".to_owned())
             ),
             Ok(LaunchState::Failed("access denied".to_owned()))
         );
         assert_eq!(
-            transition_launch(waiting, LaunchEvent::Stopped(Some("pipe broke".to_owned()))),
+            transition_launch(
+                LaunchState::Started,
+                LaunchEvent::Stopped(Some("pipe broke".to_owned()))
+            ),
             Ok(LaunchState::Stopped(Some("pipe broke".to_owned())))
         );
         assert_eq!(LaunchState::Canceled.action(), Some(LaunchAction::TryAgain));
@@ -149,27 +193,86 @@ mod tests {
             LaunchState::Stopped(None).action(),
             Some(LaunchAction::RestartShell)
         );
-        assert_eq!(LaunchState::Connected.action(), None);
+        assert_eq!(LaunchState::Started.action(), None);
     }
 
-    /// RED MUTATION: change the timeout comparison from `>=` to `>`; exactly
-    /// fifteen seconds remains Waiting.
+    /// RED MUTATION: change the timeout comparison from `>=` to `>`; every
+    /// pre-start phase remains live at exactly fifteen seconds.
     #[test]
     fn launch_timeout_uses_the_exact_fifteen_second_boundary() {
-        let waiting = LaunchState::Waiting {
-            began: at_millis(2_000),
-        };
-        assert_eq!(
-            transition_launch(waiting.clone(), LaunchEvent::Tick(at_millis(16_999))),
-            Ok(waiting.clone())
-        );
-        assert_eq!(
-            transition_launch(waiting.clone(), LaunchEvent::Tick(at_millis(17_000))),
-            Ok(LaunchState::TimedOut)
-        );
-        assert_eq!(
-            transition_launch(waiting, LaunchEvent::Tick(at_millis(17_001))),
-            Ok(LaunchState::TimedOut)
-        );
+        let began = at_millis(2_000);
+        for state in [
+            LaunchState::Launching { began },
+            LaunchState::Connecting { began },
+            LaunchState::AwaitingHello { began },
+            LaunchState::Starting { began },
+        ] {
+            assert_eq!(
+                transition_launch(state.clone(), LaunchEvent::Tick(at_millis(16_999))),
+                Ok(state.clone())
+            );
+            assert_eq!(
+                transition_launch(state, LaunchEvent::Tick(at_millis(17_000))),
+                Ok(LaunchState::TimedOut)
+            );
+        }
+    }
+
+    /// RED MUTATION: keep `Connecting` after `TransportConnected`; a host that
+    /// connects without saying Hello is not represented by the bounded phase.
+    #[test]
+    fn launch_connect_hello_and_start_are_distinct_bounded_phases() {
+        let began = at_millis(2_000);
+        let phases = [
+            (LaunchState::Launching { began }, LaunchEvent::HostLaunched),
+            (
+                LaunchState::Connecting { began },
+                LaunchEvent::TransportConnected,
+            ),
+            (
+                LaunchState::AwaitingHello { began },
+                LaunchEvent::HelloReceived,
+            ),
+            (LaunchState::Starting { began }, LaunchEvent::ChildStarted),
+        ];
+        let expected = [
+            LaunchState::Connecting { began },
+            LaunchState::AwaitingHello { began },
+            LaunchState::Starting { began },
+            LaunchState::Started,
+        ];
+        for ((state, event), expected) in phases.into_iter().zip(expected) {
+            assert_eq!(transition_launch(state, event), Ok(expected));
+        }
+    }
+
+    /// RED MUTATION: map a pre-start disappearance to `Stopped`; it offers
+    /// Restart-shell instead of the ruled Try-again action.
+    #[test]
+    fn disappearance_is_a_start_failure_until_the_child_has_started() {
+        let began = at_millis(2_000);
+        for state in [
+            LaunchState::Launching { began },
+            LaunchState::Connecting { began },
+            LaunchState::AwaitingHello { began },
+            LaunchState::Starting { began },
+        ] {
+            let (failed, action) = transition_launch(
+                state,
+                LaunchEvent::Stopped(Some("host disappeared".to_owned())),
+            )
+            .map(|state| {
+                let action = state.action();
+                (state, action)
+            })
+            .expect("pre-start disappearance has a ruled outcome");
+            assert_eq!(failed, LaunchState::Failed("host disappeared".to_owned()));
+            assert_eq!(action, Some(LaunchAction::TryAgain));
+        }
+
+        let stopped = transition_launch(LaunchState::Started, LaunchEvent::Stopped(None))
+            .expect("post-start disappearance has a ruled outcome");
+        assert_eq!(stopped, LaunchState::Stopped(None));
+        assert_eq!(stopped.action(), Some(LaunchAction::RestartShell));
     }
 }

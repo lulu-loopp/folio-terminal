@@ -296,3 +296,22 @@ running. Handshake frames at a nonzero generation, a second `Spawn`, input befor
 out-of-order frame are pane-local protocol errors. Shutdown before authentication
 may only close the transport; after authentication it is acknowledged and stops
 any starting, running, or exited child state.
+
+## 13. Revision (d) — 2026-10-04: shutdown drains legitimate in-flight facts and launch stays bounded through start
+
+After the parent writes `Shutdown`, a current-generation frame that the host
+could legitimately have written before reading that request is not a protocol
+error. `Exit` is applied so its status reaches the pane. `Started`,
+`StartFailed`, `Output`, and `ForegroundResult` are dropped, and `ShutdownAck`
+ends the session and closes the transport. Every other current-generation frame
+in the parent's shutting-down state remains a pane-local protocol error; older
+host operational frames retain Revision (c)'s stale-frame rule and future ones
+retain its future-generation error.
+
+The one absolute 15-second launch deadline covers four explicit phases:
+launching the host, connecting the transport, awaiting `Hello`, and awaiting
+the child's `Started` report. Moving to a later phase does not reset or stop the
+deadline, so a connected host that never says `Hello` times out. A host that
+disappears in any of those pre-start phases resolves to `Administrator terminal
+couldn't start.` with `Try again`; only disappearance after `Started` resolves
+to `Administrator terminal stopped.` with `Restart shell…`.

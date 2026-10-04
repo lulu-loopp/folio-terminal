@@ -13795,3 +13795,23 @@ Pinned by the thirteen tests under `elevated_protocol::{codec,session,launch}::t
 `stale_generation_frames_after_restart_are_dropped_by_both_roles`, and
 `launch_timeout_uses_the_exact_fifteen_second_boundary`. Each test carries the mutation observed
 red before the restored implementation passed.
+
+### 2026-10-04 — Follow-up: administrator shutdown drains in-flight child facts and launch stays bounded through child start (T-ADMIN-1 round 2)
+
+Design-note Revision (d) now makes the shutdown race and launch phases explicit. After the parent
+writes `Shutdown`, a current-generation `Exit` still updates the pane, legitimate informational
+frames already in the pipe are dropped, `ShutdownAck` ends the session, and every frame the host
+could not have sent remains a protocol error. The one absolute 15-second budget now spans host
+launch, transport connect, `Hello`, and the child's `Started` report; a disappearance is a start
+failure until that report and is `Stopped` only afterwards.
+
+The decoder's hostile corpus begins with every valid frame kind, applies byte, truncation, length,
+count, and splice mutations, and feeds each item whole and under deterministic chunkings while
+requiring a minimum reach count for every payload decoder. Exact-frame decoding has truthful empty
+input and trailing-frame errors, and the previously unpinned generation, request-id, exhaustion,
+and environment-pair checks now have focused mutation tests. Pinned by
+`arbitrary_byte_strings_never_panic_the_decoder`, `shutting_down_pins_every_frame_kind`,
+`launch_timeout_uses_the_exact_fifteen_second_boundary`,
+`disappearance_is_a_start_failure_until_the_child_has_started`, and the focused
+`FutureGeneration`, `RestartGeneration`, `DuplicateRequest`, `UnknownRequest`,
+`GenerationExhausted`, and environment-count tests beside them.

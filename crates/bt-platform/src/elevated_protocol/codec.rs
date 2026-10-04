@@ -279,6 +279,10 @@ pub enum MalformedPayload {
 /// distinct variant so transport code never has to inspect prose.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DecodeError {
+    EmptyInput,
+    TrailingFrames {
+        count: usize,
+    },
     WrongMagic {
         found: u32,
     },
@@ -367,14 +371,12 @@ pub fn decode(bytes: &[u8], role: ReaderRole) -> Result<Frame, DecodeError> {
     let mut decoder = Decoder::new(role);
     let frames = decoder.push(bytes)?;
     decoder.finish()?;
-    if frames.len() != 1 {
-        return Err(DecodeError::MalformedPayload {
-            kind: frames
-                .first()
-                .map_or(FrameKind::ShutdownAck, |frame| frame.message.kind()),
-            problem: MalformedPayload::TrailingBytes {
-                count: frames.len(),
-            },
+    if frames.is_empty() {
+        return Err(DecodeError::EmptyInput);
+    }
+    if frames.len() > 1 {
+        return Err(DecodeError::TrailingFrames {
+            count: frames.len() - 1,
         });
     }
     Ok(frames.into_iter().next().expect("one frame was counted"))
@@ -970,12 +972,9 @@ mod tests {
         bytes
     }
 
-    /// RED MUTATION: encode `WireString` with `String::from_utf16_lossy`; the
-    /// unpaired-surrogate Spawn frame no longer equals its decoded frame.
-    #[test]
-    fn every_frame_kind_round_trips_with_empty_and_lossless_text_payloads() {
+    fn all_frame_fixtures() -> Vec<Frame> {
         let request = spawn_request();
-        let frames = vec![
+        vec![
             Frame {
                 generation: 0,
                 message: Message::Hello {
@@ -1047,8 +1046,14 @@ mod tests {
                 generation: 2,
                 message: Message::ShutdownAck,
             },
-        ];
-        for frame in frames {
+        ]
+    }
+
+    /// RED MUTATION: encode `WireString` with `String::from_utf16_lossy`; the
+    /// unpaired-surrogate Spawn frame no longer equals its decoded frame.
+    #[test]
+    fn every_frame_kind_round_trips_with_empty_and_lossless_text_payloads() {
+        for frame in all_frame_fixtures() {
             let bytes = encode(&frame).expect("the fixture is representable");
             assert_eq!(decode(&bytes, role_for(&frame.message)), Ok(frame));
         }
@@ -1328,13 +1333,213 @@ mod tests {
         }
     }
 
-    /// RED MUTATION: index the first payload byte without checking it; the
-    /// deterministic empty/small corpus panics.
+    /// RED MUTATION: report zero frames and multiple frames through the old
+    /// malformed-payload sentinel; empty input acquires a fictitious kind and
+    /// the trailing count ceases to mean trailing frames.
+    #[test]
+    fn exact_frame_decode_names_empty_input_and_trailing_frames_truthfully() {
+        assert_eq!(
+            decode(&[], ReaderRole::Parent),
+            Err(DecodeError::EmptyInput)
+        );
+
+        let ack = encode(&Frame {
+            generation: 1,
+            message: Message::ShutdownAck,
+        })
+        .expect("fixture frame");
+        let mut two_frames = ack.clone();
+        two_frames.extend_from_slice(&ack);
+        assert_eq!(
+            decode(&two_frames, ReaderRole::Parent),
+            Err(DecodeError::TrailingFrames { count: 1 })
+        );
+    }
+
+    /// RED MUTATION: validate environment counts with a four-byte minimum;
+    /// two pairs are accepted even though only one minimum pair remains.
+    #[test]
+    fn environment_pair_count_requires_two_string_prefixes_per_pair() {
+        let request = SpawnRequest {
+            spec: SpawnSpec {
+                program: WireString::default(),
+                arguments: Vec::new(),
+            },
+            cwd: None,
+            grid: grid(),
+            environment: vec![EnvironmentEntry {
+                name: WireString::default(),
+                value: WireString::default(),
+            }],
+        };
+        let mut bytes = encode(&Frame {
+            generation: 1,
+            message: Message::Spawn(request),
+        })
+        .expect("fixture frame");
+        let environment_count_offset = FRAME_HEADER_LENGTH + 4 + 4 + 1 + 4;
+        bytes[environment_count_offset..environment_count_offset + 4]
+            .copy_from_slice(&2_u32.to_le_bytes());
+        assert_eq!(
+            decode(&bytes, ReaderRole::Host),
+            Err(DecodeError::MalformedPayload {
+                kind: FrameKind::Spawn,
+                problem: MalformedPayload::CountExceedsPayload {
+                    field: "environment",
+                    count: 2,
+                },
+            })
+        );
+    }
+
+    /// RED MUTATION: read `Cursor::u8` with `self.bytes[self.at]` instead of
+    /// `take`; an Exit whose declared payload length is zero panics.
     #[test]
     fn arbitrary_byte_strings_never_panic_the_decoder() {
+        struct CorpusItem {
+            bytes: Vec<u8>,
+            role: ReaderRole,
+        }
+
+        fn observe_payload_decoders(
+            item: &CorpusItem,
+            mut seed: u64,
+            maximum_chunk: usize,
+        ) -> Vec<FrameKind> {
+            let mut decoder = Decoder::new(item.role);
+            let mut reached = Vec::new();
+            let mut at = 0;
+            while at < item.bytes.len() {
+                let remaining = item.bytes.len().saturating_sub(at);
+                let chunk_length = if maximum_chunk == 0 {
+                    remaining
+                } else {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    (1 + (seed as usize % maximum_chunk)).min(remaining)
+                };
+                match decoder.push(&item.bytes[at..at + chunk_length]) {
+                    Ok(frames) => {
+                        reached.extend(frames.into_iter().map(|frame| frame.message.kind()));
+                    }
+                    Err(DecodeError::MalformedPayload { kind, .. }) => {
+                        reached.push(kind);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+                at += chunk_length;
+            }
+            let _ = decoder.finish();
+            reached
+        }
+
+        fn string_wire_length(string: &WireString) -> usize {
+            4 + string.units().len() * 2
+        }
+
+        fn spawn_count_offsets(request: &SpawnRequest) -> (usize, usize) {
+            let arguments = FRAME_HEADER_LENGTH + string_wire_length(&request.spec.program);
+            let mut environment = arguments + 4;
+            environment += request
+                .spec
+                .arguments
+                .iter()
+                .map(string_wire_length)
+                .sum::<usize>();
+            environment += 1;
+            if let Some(cwd) = &request.cwd {
+                environment += string_wire_length(cwd);
+            }
+            environment += 4;
+            (arguments, environment)
+        }
+
         let outcome = std::panic::catch_unwind(|| {
+            let fixtures = all_frame_fixtures();
+            let mut encoded = Vec::new();
+            let mut corpus = Vec::new();
+            for frame in &fixtures {
+                let bytes = encode(frame).expect("fixture frame");
+                let role = role_for(&frame.message);
+                encoded.push((bytes.clone(), role));
+                corpus.push(CorpusItem {
+                    bytes: bytes.clone(),
+                    role,
+                });
+
+                for at in 0..bytes.len() {
+                    corpus.push(CorpusItem {
+                        bytes: bytes[..at].to_vec(),
+                        role,
+                    });
+                    for bit in 0..8 {
+                        let mut flipped = bytes.clone();
+                        flipped[at] ^= 1 << bit;
+                        corpus.push(CorpusItem {
+                            bytes: flipped,
+                            role,
+                        });
+                    }
+                }
+
+                let payload_length = bytes.len() - FRAME_HEADER_LENGTH;
+                let maximum = frame.message.kind().payload_limit();
+                let declared_lengths = [
+                    0,
+                    payload_length.saturating_sub(1),
+                    payload_length.saturating_add(1),
+                    maximum.saturating_sub(1),
+                    maximum,
+                    maximum.saturating_add(1),
+                    u32::MAX as usize,
+                ];
+                for length in declared_lengths {
+                    let mut edited = bytes.clone();
+                    edited[16..20].copy_from_slice(&(length as u32).to_le_bytes());
+                    corpus.push(CorpusItem {
+                        bytes: edited,
+                        role,
+                    });
+                }
+
+                let request = match &frame.message {
+                    Message::Spawn(request) | Message::Restart(request) => Some(request),
+                    _ => None,
+                };
+                if let Some(request) = request {
+                    let (arguments, environment) = spawn_count_offsets(request);
+                    for offset in [arguments, environment] {
+                        let remaining = bytes.len() - (offset + 4);
+                        for count in [0, 1, 2, (remaining as u32).saturating_add(1), u32::MAX] {
+                            let mut edited = bytes.clone();
+                            edited[offset..offset + 4].copy_from_slice(&count.to_le_bytes());
+                            corpus.push(CorpusItem {
+                                bytes: edited,
+                                role,
+                            });
+                        }
+                    }
+                }
+            }
+
+            for (left, left_role) in &encoded {
+                for (right, right_role) in &encoded {
+                    if left_role != right_role {
+                        continue;
+                    }
+                    let mut splice = left.clone();
+                    splice.extend_from_slice(right);
+                    corpus.push(CorpusItem {
+                        bytes: splice,
+                        role: *left_role,
+                    });
+                }
+            }
+
             let mut seed = 0xbb67_ae85_84ca_a73b_u64;
-            for length in 0..1024 {
+            for length in 0..128 {
                 let mut bytes = vec![0; length];
                 for byte in &mut bytes {
                     seed ^= seed << 13;
@@ -1343,20 +1548,63 @@ mod tests {
                     *byte = seed as u8;
                 }
                 for role in [ReaderRole::Parent, ReaderRole::Host] {
-                    let mut whole = Decoder::new(role);
-                    let _ = whole.push(&bytes);
-                    let _ = whole.finish();
-
-                    let mut decoder = Decoder::new(role);
-                    for chunk in bytes.chunks(1 + (length % 17)) {
-                        if decoder.push(chunk).is_err() {
-                            break;
-                        }
-                    }
-                    let _ = decoder.finish();
+                    corpus.push(CorpusItem {
+                        bytes: bytes.clone(),
+                        role,
+                    });
                 }
             }
+
+            let mut payload_reach = [0_usize; 14];
+            for item in &corpus {
+                let whole = observe_payload_decoders(item, 1, 0);
+                let mut seen = [false; 14];
+                for kind in whole.iter().copied() {
+                    seen[kind as usize - 1] = true;
+                }
+                for (count, was_seen) in payload_reach.iter_mut().zip(seen) {
+                    *count += usize::from(was_seen);
+                }
+
+                for (chunk_seed, maximum_chunk) in [
+                    (0x243f_6a88_85a3_08d3, 1),
+                    (0x1319_8a2e_0370_7344, 7),
+                    (0xa409_3822_299f_31d0, 31),
+                ] {
+                    assert_eq!(
+                        observe_payload_decoders(item, chunk_seed, maximum_chunk),
+                        whole,
+                        "payload reach changed with chunking"
+                    );
+                }
+            }
+            (corpus.len(), payload_reach)
         });
-        assert!(outcome.is_ok());
+        let (corpus_length, payload_reach) = outcome.expect("the decoder never panics");
+        for (kind, count) in [
+            FrameKind::Hello,
+            FrameKind::Authenticate,
+            FrameKind::Spawn,
+            FrameKind::Started,
+            FrameKind::StartFailed,
+            FrameKind::Input,
+            FrameKind::Output,
+            FrameKind::Resize,
+            FrameKind::Exit,
+            FrameKind::ForegroundQuery,
+            FrameKind::ForegroundResult,
+            FrameKind::Restart,
+            FrameKind::Shutdown,
+            FrameKind::ShutdownAck,
+        ]
+        .into_iter()
+        .zip(payload_reach)
+        {
+            eprintln!("payload corpus reached {kind:?} in {count} items");
+            assert!(
+                count >= 8,
+                "{kind:?} payload decoder reached by only {count} of {corpus_length} items"
+            );
+        }
     }
 }

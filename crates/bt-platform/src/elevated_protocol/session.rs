@@ -446,6 +446,30 @@ fn receive_parent(state: ParentState, frame: Frame) -> (ParentState, Vec<Effect>
             ParentState::ShuttingDown { generation },
             Frame {
                 generation: received,
+                message: Message::Exit(status),
+            },
+        ) if received == generation => (
+            ParentState::ShuttingDown { generation },
+            vec![Effect::ApplyExit(status)],
+        ),
+        (
+            ParentState::ShuttingDown { generation },
+            Frame {
+                generation: received,
+                message:
+                    message @ (Message::Started { .. }
+                    | Message::StartFailed(_)
+                    | Message::Output(_)
+                    | Message::ForegroundResult { .. }),
+            },
+        ) if received == generation => (
+            ParentState::ShuttingDown { generation },
+            vec![Effect::DropFrame(message.kind())],
+        ),
+        (
+            ParentState::ShuttingDown { generation },
+            Frame {
+                generation: received,
                 message: Message::ShutdownAck,
             },
         ) if received == generation => (ParentState::Ended, vec![Effect::CloseTransport]),
@@ -1324,6 +1348,252 @@ mod tests {
             assert_eq!(same, host);
             assert_eq!(effects, vec![Effect::DropFrame(kind)]);
         }
+    }
+
+    /// RED MUTATION: route every current-generation frame received while
+    /// shutting down through `unexpected_parent_frame`; an in-flight Exit no
+    /// longer reaches the pane and legitimate pre-Shutdown frames fail it.
+    #[test]
+    fn shutting_down_pins_every_frame_kind() {
+        let generation = 7;
+        let shutting_down = ParentState::ShuttingDown { generation };
+        let dropped = [
+            Message::Started {
+                child_pid: HostProcessId(40),
+                conpty: ConPtyKind::Shipped,
+            },
+            Message::StartFailed(ErrorPayload {
+                code: 5,
+                message: WireString::from_text("could not start"),
+            }),
+            Message::Output(vec![1, 2, 3]),
+            Message::ForegroundResult {
+                request_id: RequestId(9),
+                process: ForegroundProcess::Unknown,
+            },
+        ];
+        for message in dropped {
+            let kind = message.kind();
+            let (state, effects) = transition_parent(
+                shutting_down.clone(),
+                ParentEvent::Receive(Frame {
+                    generation,
+                    message,
+                }),
+            );
+            assert_eq!(state, shutting_down);
+            assert_eq!(effects, vec![Effect::DropFrame(kind)]);
+        }
+
+        let (state, effects) = transition_parent(
+            shutting_down.clone(),
+            ParentEvent::Receive(Frame {
+                generation,
+                message: Message::Exit(Some(23)),
+            }),
+        );
+        assert_eq!(state, shutting_down);
+        assert_eq!(effects, vec![Effect::ApplyExit(Some(23))]);
+
+        let (state, effects) = transition_parent(
+            shutting_down.clone(),
+            ParentEvent::Receive(Frame {
+                generation,
+                message: Message::ShutdownAck,
+            }),
+        );
+        assert_eq!(state, ParentState::Ended);
+        assert_eq!(effects, vec![Effect::CloseTransport]);
+
+        let rejected = [
+            Message::Hello {
+                capability: capability(1),
+                host_pid: HostProcessId(2),
+            },
+            Message::Authenticate {
+                capability: capability(1),
+                parent_start_id: ParentStartId(2),
+            },
+            Message::Spawn(request()),
+            Message::Input(vec![1]),
+            Message::Resize(Grid {
+                rows: 24,
+                columns: 80,
+            }),
+            Message::ForegroundQuery(RequestId(9)),
+            Message::Restart(request()),
+            Message::Shutdown(WireString::from_text("duplicate")),
+        ];
+        for message in rejected {
+            let kind = message.kind();
+            let (state, effects) = transition_parent(
+                shutting_down.clone(),
+                ParentEvent::Receive(Frame {
+                    generation,
+                    message,
+                }),
+            );
+            assert_eq!(state, ParentState::Failed, "{kind:?}");
+            assert_eq!(
+                effects,
+                vec![
+                    Effect::FailPane(PaneFailure::UnexpectedFrame {
+                        state: "shutting down",
+                        kind,
+                    }),
+                    Effect::CloseTransport,
+                ],
+                "{kind:?}"
+            );
+        }
+    }
+
+    /// RED MUTATION: accept an operational frame whose generation is greater
+    /// than the current generation; one role no longer reports FutureGeneration.
+    #[test]
+    fn future_generation_is_a_pane_local_error_for_both_roles() {
+        let (parent, host) = begin_running();
+        let (state, effects) = transition_parent(
+            parent,
+            ParentEvent::Receive(Frame {
+                generation: 2,
+                message: Message::Output(vec![1]),
+            }),
+        );
+        assert_eq!(state, ParentState::Failed);
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::FailPane(PaneFailure::FutureGeneration {
+                current: 1,
+                received: 2,
+            }))
+        ));
+
+        let (state, effects) = transition_host(
+            host,
+            HostEvent::Receive(Frame {
+                generation: 2,
+                message: Message::Input(vec![1]),
+            }),
+        );
+        assert_eq!(state, HostState::Failed);
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::FailPane(PaneFailure::FutureGeneration {
+                current: 1,
+                received: 2,
+            }))
+        ));
+    }
+
+    /// RED MUTATION: accept any Restart generation while Running; generation
+    /// three starts instead of reporting RestartGeneration from generation one.
+    #[test]
+    fn restart_requires_exactly_the_next_generation() {
+        let (_, host) = begin_running();
+        let (state, effects) = transition_host(
+            host,
+            HostEvent::Receive(Frame {
+                generation: 3,
+                message: Message::Restart(request()),
+            }),
+        );
+        assert_eq!(state, HostState::Failed);
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::FailPane(PaneFailure::RestartGeneration {
+                current: 1,
+                received: 3,
+            }))
+        ));
+    }
+
+    /// RED MUTATION: let insertion of an already-live request id succeed; the
+    /// parent or host accepts the same request twice.
+    #[test]
+    fn duplicate_live_request_ids_fail_both_roles() {
+        let (parent, host) = begin_running();
+        let request_id = RequestId(44);
+        let (parent, _) = transition_parent(parent, ParentEvent::ForegroundQuery(request_id));
+        let (state, effects) = transition_parent(parent, ParentEvent::ForegroundQuery(request_id));
+        assert_eq!(state, ParentState::Failed);
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::FailPane(PaneFailure::DuplicateRequest(RequestId(
+                44
+            ))))
+        ));
+
+        let query = Frame {
+            generation: 1,
+            message: Message::ForegroundQuery(request_id),
+        };
+        let (host, _) = transition_host(host, HostEvent::Receive(query.clone()));
+        let (state, effects) = transition_host(host, HostEvent::Receive(query));
+        assert_eq!(state, HostState::Failed);
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::FailPane(PaneFailure::DuplicateRequest(RequestId(
+                44
+            ))))
+        ));
+    }
+
+    /// RED MUTATION: ignore a missing pending request id; an unasked result is
+    /// applied or written instead of reporting UnknownRequest.
+    #[test]
+    fn unasked_foreground_results_fail_both_roles() {
+        let (parent, host) = begin_running();
+        let request_id = RequestId(81);
+        let (state, effects) = transition_parent(
+            parent,
+            ParentEvent::Receive(Frame {
+                generation: 1,
+                message: Message::ForegroundResult {
+                    request_id,
+                    process: ForegroundProcess::Unknown,
+                },
+            }),
+        );
+        assert_eq!(state, ParentState::Failed);
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::FailPane(PaneFailure::UnknownRequest(RequestId(81))))
+        ));
+
+        let (state, effects) = transition_host(
+            host,
+            HostEvent::ForegroundObserved {
+                request_id,
+                process: ForegroundProcess::Unknown,
+            },
+        );
+        assert_eq!(state, HostState::Failed);
+        assert!(matches!(
+            effects.first(),
+            Some(Effect::FailPane(PaneFailure::UnknownRequest(RequestId(81))))
+        ));
+    }
+
+    /// RED MUTATION: replace checked generation advance with wrapping addition;
+    /// a restart at u64::MAX writes generation zero.
+    #[test]
+    fn restart_rejects_generation_exhaustion() {
+        let state = ParentState::Running {
+            generation: u64::MAX,
+            child_pid: HostProcessId(8),
+            conpty: ConPtyKind::Inbox,
+            pending_foreground: BTreeSet::new(),
+        };
+        let (state, effects) = transition_parent(state, ParentEvent::Restart(request()));
+        assert_eq!(state, ParentState::Failed);
+        assert_eq!(
+            effects,
+            vec![
+                Effect::FailPane(PaneFailure::GenerationExhausted),
+                Effect::CloseTransport,
+            ]
+        );
     }
 
     /// RED MUTATION: make pre-authentication Shutdown emit an acknowledgement;
