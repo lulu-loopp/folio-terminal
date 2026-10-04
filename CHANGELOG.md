@@ -86,6 +86,9 @@ All notable changes to Folio are recorded here. The format follows
   one, instead of the profile's default folder. A folder that has since been
   deleted opens the profile's own starting folder rather than the folder Folio
   itself was started from.
+- Pointing at a pane's notice strip — its words or its `×` — no longer also
+  answers the pane's corner folder or `⌄` hidden under it: the files card no
+  longer opens and the pane menu no longer drops from under the strip.
 
 ### Known issues
 

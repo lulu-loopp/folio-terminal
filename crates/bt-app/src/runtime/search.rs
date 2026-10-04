@@ -2,8 +2,8 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    Runtime, SearchRefresh, SearchScanCache, frame_row_of_anchor, hang_watch, input, marks,
-    native_window, rescan_leaf_for_search, search, seats, text_field, tooltip, trace_sink,
+    PointerTarget, Runtime, SearchRefresh, SearchScanCache, frame_row_of_anchor, hang_watch, input,
+    marks, native_window, rescan_leaf_for_search, search, seats, text_field, tooltip, trace_sink,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -34,9 +34,7 @@ impl Runtime<'_> {
         &mut self,
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<bool> {
-        let hover = position
-            .zip(self.window.search_layout)
-            .and_then(|(at, capsule)| search::hit(&capsule, at.x as f32, at.y as f32));
+        let hover = position.and_then(|at| self.search_at(at));
         if self.window.search_hover != hover {
             self.window.search_hover = hover;
             if self.refresh_overlay() {
@@ -678,15 +676,36 @@ impl Runtime<'_> {
         self.refresh_search(SearchRefresh::Asked)
     }
 
+    /// **Which part of the capsule owns this point**, as the one router says
+    /// ([`Self::pointer_target_at`], owner's ruling 2026-10-04) — so a capsule
+    /// under a floating window answers nothing, and the hover and the press
+    /// cannot disagree about it.
+    pub(in crate::runtime) fn search_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<search::SearchElement> {
+        match self.pointer_target_at(position)? {
+            PointerTarget::Search(element) => Some(element),
+            _ => None,
+        }
+    }
+
+    /// The capsule as it was last drawn, hit-tested at this point — for
+    /// [`Self::pointer_target_at`] to place in the in-pane order.
+    pub(in crate::runtime) fn search_part_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<search::SearchElement> {
+        let capsule = self.window.search_layout?;
+        search::hit(&capsule, position.x as f32, position.y as f32)
+    }
+
     /// A press on the capsule. Returns whether it landed there at all.
     pub(in crate::runtime) fn press_search(
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let Some(capsule) = self.window.search_layout else {
-            return Ok(false);
-        };
-        let Some(element) = search::hit(&capsule, position.x as f32, position.y as f32) else {
+        let Some(element) = self.search_at(position) else {
             return Ok(false);
         };
         match element {

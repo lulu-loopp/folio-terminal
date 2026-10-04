@@ -191,6 +191,15 @@ fn reader_names(found: &Found) -> Vec<String> {
     names
 }
 
+/// A shell a forwarded press can be handed to.
+fn a_shell() -> PasteTarget {
+    PasteTarget {
+        tab: TabId(1),
+        seat: SeatId(1),
+        incarnation: 1,
+    }
+}
+
 /// A file on a volume this machine holds.
 fn a_local_file() -> bt_term::PathVerdict {
     bt_term::PathVerdict {
@@ -731,11 +740,11 @@ fn the_modal_family_covers_the_float_and_the_tip_covers_them_both() {
     assert_eq!(
         order,
         vec![
-            0, 24, 16, 13, 26, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 25, 8, 20, 23, 9,
+            0, 24, 16, 13, 26, 1, 19, 2, 17, 14, 18, 3, 4, 5, 6, 7, 12, 15, 22, 25, 8, 20, 23, 9,
             10, 11, 21
         ],
         "bottom to top: pane bars, video bars, terminal thumbs, command rails, formula marks, \
-             rail, flight, ground, search capsule, integration strips, download sheet, schematic, \
+             rail, flight, ground, integration strips, search capsule (owner's ruling 2026-10-04), download sheet, schematic, \
              float, modal, file menu, pane menu, git menu, terminal menu, tab menu, command \
              palette, notices, key hint, Cards bubble, tip, glance, ghost, window ring"
     );
@@ -10963,7 +10972,7 @@ fn local_selection_route(mode: SelectionDragMode) -> MouseRoute {
     let hit = hyperlink_hit("https://example.test");
     MouseRoute::Local(Box::new(SelectionDrag {
         mode,
-        origin_seat: SeatId(1),
+        owner: a_shell(),
         origin_row: 1,
         origin_column: 2,
         origin: ViewSelection {
@@ -11030,6 +11039,7 @@ fn selection_release_copy_policy_covers_drag_word_and_line_but_not_click_or_forw
     let forwarded = MouseRoute::Forward {
         button: input::MouseProtocolButton::Left,
         sgr: true,
+        owner: a_shell(),
     };
     assert!(!should_copy_on_select_release(
         Some(&forwarded),
@@ -24028,6 +24038,7 @@ fn forwarded_mouse_hit_stays_bound_to_the_presented_frame_during_an_unpresented_
         session.terminal_modes(),
         ModifiersState::empty(),
         PressedCellTarget::Ordinary,
+        a_shell(),
     )
     .unwrap();
 
@@ -24053,6 +24064,7 @@ fn a_tracked_pane_keeps_a_press_on_an_ordinary_cell_and_shift_still_takes_it_bac
         session.terminal_modes(),
         ModifiersState::CONTROL,
         PressedCellTarget::Ordinary,
+        a_shell(),
     );
     assert!(forwarded.is_some());
     assert!(matches!(route, Some(MouseRoute::Forward { .. })));
@@ -24067,6 +24079,7 @@ fn a_tracked_pane_keeps_a_press_on_an_ordinary_cell_and_shift_still_takes_it_bac
             session.terminal_modes(),
             ModifiersState::CONTROL | ModifiersState::SHIFT,
             PressedCellTarget::Ordinary,
+            a_shell(),
         )
         .is_none()
     );
@@ -24097,6 +24110,7 @@ fn a_verified_target_under_a_tracked_press_is_ours_on_the_primary_screen() {
                 modes,
                 modifiers,
                 PressedCellTarget::Ours,
+                a_shell(),
             )
             .is_none(),
             "a press on a mark this window painted writes nothing to the child"
@@ -24116,6 +24130,7 @@ fn a_verified_target_under_a_tracked_press_is_ours_on_the_primary_screen() {
                 modes,
                 modifiers,
                 PressedCellTarget::Ours,
+                a_shell(),
             )
             .is_none()
         );
@@ -24137,6 +24152,7 @@ fn a_tracked_press_on_a_plain_cell_is_still_the_programs() {
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(b"\x1b[<0;3;2M".to_vec())
     );
@@ -24169,6 +24185,7 @@ fn a_prompt_start_that_retires_tracking_takes_the_next_press_back_from_the_child
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(b"\x1b[<0;3;2M".to_vec()),
         "the leftover mode is still routing presses at a program that is gone"
@@ -24187,6 +24204,7 @@ fn a_prompt_start_that_retires_tracking_takes_the_next_press_back_from_the_child
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         )
         .is_none(),
         "and afterwards the press is this window's, to select with"
@@ -24228,6 +24246,7 @@ fn a_press_already_forwarded_when_the_prompt_arrives_is_released_in_its_own_enco
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         )
         .is_some()
     );
@@ -24252,6 +24271,7 @@ fn a_press_already_forwarded_when_the_prompt_arrives_is_released_in_its_own_enco
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(b"\x1b[<0;3;2m".to_vec()),
         "the release the forwarded press is owed, in the encoding that press \
@@ -24288,6 +24308,7 @@ fn a_release_keeps_the_press_encoding_when_the_program_switches_protocol_mid_cli
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(vec![0x1b, b'[', b'M', b' ', b'#', b'"'])
     );
@@ -24308,6 +24329,7 @@ fn a_release_keeps_the_press_encoding_when_the_program_switches_protocol_mid_cli
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(vec![0x1b, b'[', b'M', b'#', b'#', b'"']),
         "the release answers the press, not the modes"
@@ -24348,6 +24370,7 @@ fn a_forwarded_drag_keeps_its_press_encoding_when_the_program_drops_sgr_mid_drag
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(b"\x1b[<0;3;2M".to_vec())
     );
@@ -24404,6 +24427,7 @@ fn a_forwarded_drag_keeps_its_press_encoding_when_the_program_adds_sgr_mid_drag(
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(vec![0x1b, b'[', b'M', b' ', b'#', b'"'])
     );
@@ -24458,6 +24482,7 @@ fn a_hover_with_no_press_in_flight_reads_the_modes_as_they_are() {
             Some(&MouseRoute::Forward {
                 button: input::MouseProtocolButton::Left,
                 sgr: true,
+                owner: a_shell(),
             }),
             modes,
             ModifiersState::empty(),
@@ -24560,6 +24585,7 @@ fn the_same_verified_target_on_the_alternate_screen_is_the_windows_too() {
                 modes,
                 modifiers,
                 PressedCellTarget::Ours,
+                a_shell(),
             )
             .is_none(),
             "a press on a mark this window painted writes nothing to the child, \
@@ -24578,6 +24604,7 @@ fn the_same_verified_target_on_the_alternate_screen_is_the_windows_too() {
                 modes,
                 modifiers,
                 PressedCellTarget::Ours,
+                a_shell(),
             )
             .is_none(),
             "and the release of that pair finds no forward latched to answer"
@@ -24606,6 +24633,7 @@ fn a_tracked_press_on_a_plain_cell_is_still_the_programs_on_the_alternate_screen
             modes,
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(b"\x1b[<0;3;2M".to_vec())
     );
@@ -24661,6 +24689,7 @@ fn an_osc_8_link_on_the_alternate_screen_is_found_and_keeps_its_press() {
             modes,
             ModifiersState::empty(),
             target,
+            a_shell(),
         )
         .is_none(),
         "the press stays here, so `begin_local_selection` gets to arm the link"
@@ -24686,6 +24715,7 @@ fn shift_keeps_a_tracked_press_local_on_every_cell_and_on_both_screens() {
                     session.terminal_modes(),
                     ModifiersState::SHIFT,
                     target,
+                    a_shell(),
                 )
                 .is_none()
             );
@@ -24718,6 +24748,7 @@ fn only_a_left_press_can_be_taken_from_a_tracking_program_on_either_screen() {
                     session.terminal_modes(),
                     ModifiersState::empty(),
                     PressedCellTarget::Ours,
+                    a_shell(),
                 )
                 .is_some(),
                 "there is no local verb on the other two buttons to trade the hole for"
@@ -24780,6 +24811,7 @@ fn a_right_press_is_the_windows_unless_the_program_tracks_and_then_shift_takes_i
                 modes,
                 modifiers,
                 PressedCellTarget::Ordinary,
+                a_shell(),
             )
             .is_some();
             assert_ne!(
@@ -24803,6 +24835,7 @@ fn a_right_press_is_the_windows_unless_the_program_tracks_and_then_shift_takes_i
                 idle.terminal_modes(),
                 modifiers,
                 PressedCellTarget::Ordinary,
+                a_shell(),
             )
             .is_none()
         );
@@ -25592,6 +25625,7 @@ fn stationary_double_click_stays_strictly_paired_across_tui_repaints() {
                     session.terminal_modes(),
                     ModifiersState::empty(),
                     PressedCellTarget::Ordinary,
+                    a_shell(),
                 )
                 .expect("tracked click must produce one PTY write per edge"),
             );
@@ -41087,6 +41121,761 @@ fn the_press_and_the_hover_ask_one_router() {
         method_body("Runtime", "pointer_target_at")
             .contains("self.docked_chrome_target_at(position)"),
         "which is the router"
+    );
+}
+
+/// RED (T-STRIP-HOVER-THROUGH, owner's report on 0.4.6, 2026-10-03) — **a
+/// pane's notice strip owns the points it is drawn on, and the router says so.**
+///
+/// The strip is staged in `Layered::Notice`, over every pane's own chrome and
+/// under every floating window. The router used to go from the floats straight
+/// to the docked ladder, which knows nothing about strips, so a hand on the
+/// strip's `×` was — to the chrome hover, the files flyout's trigger, the `⌄`'s
+/// rest clock and the press router — a hand on whatever the band was covering,
+/// while the strip's own hover and press walked a second list beside it.
+///
+/// Red gate: drop the strip's arm from `pointer_target_at` (or move it below
+/// the ladder) and the ordering assertions fail; give `drive_notice_hover` or
+/// `press_notice` back their own walk of `notice_layouts` and the last ones do.
+#[test]
+fn a_panes_notice_strip_is_asked_between_the_floats_and_the_docked_chrome() {
+    let router = squeezed_body("Runtime", "pointer_target_at");
+    let float = router
+        .find("self.float_hit_at(position)")
+        .expect("the floats are asked first");
+    let strip = router
+        .find("self.docked_notice_at(position)")
+        .expect("a pane's strip is asked by the router");
+    let docked = router
+        .find("self.docked_chrome_target_at(position)")
+        .expect("and the docked ladder last");
+    assert!(
+        float < strip && strip < docked,
+        "the pointer is asked in the order the glass is painted: a window, then \
+         a strip, then the chrome the strip covers"
+    );
+    assert!(
+        router[strip..docked].contains(".map(|(seat,element)|PointerTarget::Notice(seat,element))")
+            && router[strip..docked].contains("returnclaim;"),
+        "and the strip's claim is the whole answer, so nothing under it is asked"
+    );
+    assert_eq!(
+        reader_names(&calls_of("Runtime", "docked_notice_at")),
+        ["pane_hit_context", "pointer_target_at"],
+        "a pane's strip is placed in the order by the router, and read as a fact only by the cells' hover root, which cannot ask the router"
+    );
+    let at = squeezed_body("Runtime", "notice_at");
+    assert!(
+        at.contains("self.pointer_target_at(position)?"),
+        "the strip a gesture lands on is the strip the router names"
+    );
+    for gesture in ["drive_notice_hover", "press_notice"] {
+        let body = squeezed_body("Runtime", gesture);
+        assert!(
+            body.contains("self.notice_at("),
+            "`{gesture}` asks the one router which strip is under the pointer"
+        );
+        assert!(
+            !body.contains("notice_layouts"),
+            "`{gesture}` keeps no second list of strips beside the router"
+        );
+    }
+}
+
+/// RED (owner's ruling 2026-10-04, T-STRIP-HOVER-THROUGH follow-up) — **the
+/// search capsule is above the notice strip, on the glass and to the pointer,
+/// and the two orders are one list.**
+///
+/// A surface the reader summoned (Ctrl+F) outranks a notice nobody asked for.
+/// `IN_PANE_SURFACES_TOP_FIRST` is read by the paint (`OverlayStack::flattened`,
+/// bottom first) and by the router (`pointer_target_at`, top first); the hover
+/// and the press of every button read the router. The capsule hangs from the
+/// seat's own top, so on a pane wearing a strip the two meet.
+///
+/// Red gates: put the strip first in the list, or paint the two bands by hand,
+/// and the paint assertions fail; ask `drive_notice_hover` before
+/// `drive_search_hover` and the hover assertion fails; take the in-pane press
+/// below the chrome router, or answer the strip and the capsule by doors of
+/// their own, and the click assertions fail.
+#[test]
+fn the_capsule_is_above_the_strip_for_the_paint_the_hover_and_the_press() {
+    assert_eq!(
+        IN_PANE_SURFACES_TOP_FIRST,
+        [InPaneSurface::SearchCapsule, InPaneSurface::NoticeStrip],
+        "the capsule the reader summoned is the top surface inside a pane"
+    );
+    // The paint, run: the strip is laid down first and the capsule over it.
+    let layer = |opacity| marks::OverlayLayer {
+        opacity,
+        ..marks::OverlayLayer::default()
+    };
+    let stack = OverlayStack {
+        search: vec![layer(0.25)].into(),
+        pane_notices: vec![layer(0.5)].into(),
+        ..OverlayStack::default()
+    };
+    let painted: Vec<f32> = stack
+        .flattened()
+        .layers
+        .iter()
+        .map(|layer| layer.opacity)
+        .collect();
+    assert_eq!(
+        painted,
+        [0.5, 0.25],
+        "paint: the strip, then the capsule over it"
+    );
+    let paint = squeezed(item_body(&ItemQuery::method("OverlayStack", "flattened")));
+    assert!(
+        paint.contains("IN_PANE_SURFACES_TOP_FIRST.iter().rev()"),
+        "paint: the two bands are placed by the one list, bottom first"
+    );
+    // The router reads the same list, top first, between the floats and the
+    // docked chrome.
+    let router = squeezed_body("Runtime", "pointer_target_at");
+    let float = router
+        .find("self.float_hit_at(position)")
+        .expect("floats first");
+    let in_pane = router
+        .find("forsurfaceinIN_PANE_SURFACES_TOP_FIRST")
+        .expect("pointer: the router walks the one list");
+    let docked = router
+        .find("self.docked_chrome_target_at(position)")
+        .expect("and the docked chrome last");
+    assert!(
+        float < in_pane && in_pane < docked,
+        "floats, then the in-pane surfaces, then the chrome"
+    );
+    // Hover.
+    let moved = squeezed_body("Runtime", "pointer_moved");
+    let capsule = moved
+        .find("self.drive_search_hover(")
+        .expect("the capsule's hover is driven on every move");
+    let strip = moved
+        .find("self.drive_notice_hover(")
+        .expect("and the strip's");
+    assert!(
+        capsule < strip,
+        "hover: the capsule, which is on top, is asked first"
+    );
+    assert!(
+        moved[strip..]
+            .starts_with("self.drive_notice_hover((self.window.mouse_route.is_none()&&!on_search)"),
+        "and a hand the capsule has claimed lights nothing on the strip under it"
+    );
+    for (gesture, door) in [
+        ("drive_search_hover", "self.search_at("),
+        ("press_search", "self.search_at("),
+        ("drive_notice_hover", "self.notice_at("),
+        ("press_notice", "self.notice_at("),
+    ] {
+        assert!(
+            squeezed_body("Runtime", gesture).contains(door),
+            "`{gesture}` reads the router's answer"
+        );
+    }
+    // Click: one door for both surfaces and every button, above the pane.
+    let press = squeezed_body("Runtime", "mouse_input");
+    let gate = press
+        .find("self.press_in_pane_surface(button,position)?")
+        .expect("click: the in-pane surfaces take their presses through one door");
+    for below in [
+        "self.point_is_on_the_web_page(position)",
+        "self.chrome_mouse_input(state,button,position)?",
+        "self.preview_rendered_surface_at(position)",
+    ] {
+        assert!(
+            press[gate..].contains(below),
+            "click: `{below}` is asked below the in-pane surfaces, never above them"
+        );
+    }
+    let door = squeezed_body("Runtime", "press_in_pane_surface");
+    assert!(
+        door.contains("self.in_pane_surface_at(position)")
+            && door.contains("InPaneSurface::SearchCapsule=>self.press_search(position)?")
+            && door.contains("InPaneSurface::NoticeStrip=>self.press_notice(position)?"),
+        "click: the door asks the router which surface, and hands the left button to it"
+    );
+    assert_eq!(
+        reader_names(&calls_of("Runtime", "press_search")),
+        ["press_in_pane_surface"],
+        "the capsule's press has one caller"
+    );
+    assert_eq!(
+        reader_names(&calls_of("Runtime", "press_notice")),
+        ["press_in_pane_surface"],
+        "and so does the strip's"
+    );
+}
+
+/// RED (independent review of `d0e62ef1`, 2026-10-04) — **every pointer reader
+/// below the in-pane surfaces takes their claim from the router**: the wheel,
+/// a press of any button (a rendered page's context menu included), the tip,
+/// the root the cells' hovers draw from, the files flyout's reference trigger,
+/// a playing video's bar and a hosted page's own hover.
+///
+/// Red gates: drop the wheel's in-pane station and a notch on the strip's frame
+/// scrolls what is under it; let `press_in_pane_surface` take the left button
+/// only and a right click on a pill opens the page menu under it; read the tip
+/// off the flat list again and a hidden control's tip speaks through the layer
+/// above it; drop the root's gate and a link under the capsule underlines.
+#[test]
+fn every_pointer_reader_below_the_in_pane_surfaces_reads_their_claim() {
+    let wheel = squeezed_body("Runtime", "mouse_wheel");
+    let station = wheel
+        .find("letSome(surface)=self.in_pane_surface_at(position)")
+        .expect("wheel: a notch asks the router whether a surface inside a pane owns it");
+    for below in [
+        "self.point_is_on_the_web_page(position)",
+        "self.preview_surface_at(position)",
+        "seats::files_body_at(",
+    ] {
+        assert!(
+            wheel[station..].contains(below),
+            "wheel: `{below}` is asked below the in-pane surfaces"
+        );
+    }
+    let answer = &wheel[station..wheel.len().min(station + 200)];
+    assert!(
+        answer.contains("returnOk(());"),
+        "wheel: a notch on a claimed point is nobody's"
+    );
+    let door = squeezed_body("Runtime", "press_in_pane_surface");
+    assert!(
+        door.contains("ifbutton==MouseButton::Left{") && door.ends_with("Ok(true)}"),
+        "press: every button on a claimed point is taken, only the left one acts"
+    );
+    let moved = squeezed_body("Runtime", "pointer_moved");
+    assert!(
+        moved.contains("self.owned_tooltip_anchor_at(position)"),
+        "tip: the pane-level tip is read through the router's owner"
+    );
+    let owned = squeezed_body("Runtime", "owned_tooltip_anchor_at");
+    for arm in [
+        "Some(InPaneSurface::SearchCapsule)=>capsule_control",
+        "Some(InPaneSurface::NoticeStrip)=>false",
+        "None=>!capsule_control",
+    ] {
+        assert!(owned.contains(arm), "tip: `{arm}`");
+    }
+    let root = squeezed_body("Runtime", "pane_hit_context");
+    assert!(
+        root.contains("self.search_part_at(position).is_some()")
+            && root.contains("self.docked_notice_at(position).is_some()"),
+        "cells: the root every cell hover draws from is gated by the in-pane surfaces"
+    );
+    let trigger = squeezed_body("Runtime", "float_trigger_at");
+    assert!(
+        trigger.contains(
+            "Some(PointerTarget::Float(..)|PointerTarget::Search(_)|PointerTarget::Notice(..),)=>None,"
+        ),
+        "flyout: a reference under a claimed point raises no files card"
+    );
+    assert!(
+        moved.contains("self.in_pane_surface_at(position).is_none();")
+            && moved.contains("self.note_video_hover(on_the_picture.then_some(position));"),
+        "video: a hand on a claimed point is not on the picture"
+    );
+    assert!(
+        squeezed_body("Runtime", "drive_web_pointer")
+            .contains("self.in_pane_surface_at(position).is_none()"),
+        "page: a hand on a claimed point is not on the hosted page"
+    );
+}
+
+/// RED (confirmation review of `6049179a`, P1) — **a press handed to the
+/// program is released to it, however the hand comes up over the capsule or
+/// the strip, and the route comes off.**
+///
+/// The in-pane surfaces decide where a gesture *starts*. `6049179a` let them
+/// decide where one ends too: the cell root (`pane_hit_context`) refuses a
+/// point on the capsule or the strip, `mouse_input` stopped at the failed cell
+/// lookup, and the child was given a press and never its release while
+/// `MouseRoute::Forward` stayed latched.
+///
+/// Run: a lone terminal wearing a strip, a forwarded press on a cell, and the
+/// release with the pointer on the strip's `×` — a point no cell lookup names,
+/// which the owner's clamp folds into the body's first row — comes back as the
+/// release bytes and clears the route. Read: the release is ended by
+/// `release_owned_gesture` above every surface claim, from the clamped owner
+/// cell, and a routed drag's moves are reported the same way.
+///
+/// Red gate: move the owned release below the cell lookup (where the forwarded
+/// release used to be answered) or measure it with `pane_hit_context`, and the
+/// ordering or the clamp assertion fails; remove the drag-motion station and
+/// the motion assertion fails.
+#[test]
+fn a_forwarded_press_is_released_to_its_pane_over_the_capsule_and_the_strip() {
+    let scale = seats::scale_ppm(CROSS_DPI) as f32 / 1_000_000.0;
+    let mut seats = seats::Seats::lone_terminal();
+    let seat = seats.terminals()[0];
+    seats.set_notices(std::collections::BTreeSet::from([seat]));
+    let (layout, _) = cross_solve(&seats);
+    let body = seats::pane_body_viewport(&seats, &layout, seat, scale).expect("a placed pane");
+    let strip = seats::pane_notice_strip(&seats, &layout, seat, scale).expect("a strip");
+    // No band kind is worn by a terminal since T-INTEGRATION-INJECT-1 retired `Offer` and
+    // `Added`; the seat model and the router do not tell a terminal's strip from a preview's, so
+    // the release's ordering is pinned with a band that still exists.
+    let bar = notice::lay_out(
+        strip,
+        notice::NoticeSay::band(notice::Notice::DiskChanged),
+        &[90.0, 90.0],
+        scale,
+    );
+    let close = bar.close.expect("a band has its `×`");
+    let (x, y) = (
+        f64::from((close[0] + close[2]) / 2.0),
+        f64::from((close[1] + close[3]) / 2.0),
+    );
+    assert!(
+        y < f64::from(body.y),
+        "the strip's `×` is above the first row of cells, so no cell lookup names it"
+    );
+    let (clamped_x, clamped_y) = clamp_into_body(body, x, y);
+    assert_eq!(
+        clamped_y, 0.0,
+        "the owner's clamp folds it into the first row"
+    );
+    assert!(clamped_x > 0.0 && clamped_x < f64::from(body.width));
+
+    let mut session =
+        DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+    session.feed(b"\x1b[?1000h\x1b[?1006h").unwrap();
+    let mut route = None;
+    let pressed = route_forwarded_mouse_button(
+        &mut route,
+        ElementState::Pressed,
+        input::MouseProtocolButton::Left,
+        bt_render::GridHit { row: 3, column: 4 },
+        session.terminal_modes(),
+        ModifiersState::empty(),
+        PressedCellTarget::Ordinary,
+        a_shell(),
+    );
+    assert!(pressed.is_some() && matches!(route, Some(MouseRoute::Forward { .. })));
+    let released = route_forwarded_mouse_button(
+        &mut route,
+        ElementState::Released,
+        input::MouseProtocolButton::Left,
+        bt_render::GridHit { row: 0, column: 9 },
+        session.terminal_modes(),
+        ModifiersState::empty(),
+        PressedCellTarget::Ordinary,
+        a_shell(),
+    )
+    .expect("the release is owed to the forwarded press");
+    assert_eq!(
+        released, b"\x1b[<0;10;1m",
+        "an SGR release at the clamped cell"
+    );
+    assert!(route.is_none(), "and the route comes off");
+
+    let input = squeezed_body("Runtime", "mouse_input");
+    let owned = input
+        .find("ifstate==ElementState::Released&&self.release_owned_gesture(button)?")
+        .expect("a release is first offered to the gesture that owns it");
+    for later in [
+        "self.quit_card_layout()",
+        "self.press_in_pane_surface(button,position)?",
+        "self.chrome_mouse_input(state,button,position)?",
+        "self.pane_frame_hit()",
+    ] {
+        let at = input
+            .find(later)
+            .unwrap_or_else(|| panic!("`{later}` is in the router"));
+        assert!(owned < at, "the owned release is answered before `{later}`");
+    }
+    let release = squeezed_body("Runtime", "release_owned_gesture");
+    assert!(
+        release.contains("Some(MouseRoute::Forward{button:latched,owner,..})=>")
+            && release.contains("self.forwarded_gesture_hit(seat)")
+            && release.contains("ElementState::Released,"),
+        "the forwarded release is sent from the owner's cell"
+    );
+    assert!(
+        release.contains("self.window.mouse_route=None;returnOk(true);"),
+        "and a pane with no frame still lets go of the route"
+    );
+    let hit = squeezed_body("Runtime", "forwarded_gesture_hit");
+    assert!(
+        hit.contains("self.drag_hit_in_pane(seat)?") && !hit.contains("pane_hit_context"),
+        "the owner's cell is clamped into its body, not refused by the surfaces over it"
+    );
+    let moved = squeezed_body("Runtime", "pointer_moved");
+    let routed = moved
+        .find("ifmatches!(self.window.mouse_route,Some(MouseRoute::Forward{..})){returnself.forward_owned_drag_motion();}")
+        .expect("a routed drag's moves go to the pane that took the press");
+    let guard = moved.find("ifhit.is_none(){").expect("the cell guard");
+    assert!(
+        routed < guard,
+        "ahead of the guard that needs a cell under the pointer"
+    );
+    assert!(
+        squeezed_body("Runtime", "forward_owned_drag_motion")
+            .contains("self.forwarded_gesture_hit(seat)"),
+        "measured the same way the release is"
+    );
+}
+
+/// RED (confirmation review of `6049179a`, P1) — **a text selection drawn into
+/// the strip is finished in its own pane.**
+///
+/// The selection's release was already answered before the cell lookup; it is
+/// now one arm of the same owned release, ahead of every surface, and its
+/// moves keep reading the origin pane's clamped cell.
+///
+/// Red gate: drop the `Local` arm of `release_owned_gesture` and the release
+/// falls through to the surfaces and the cell lookup, which refuses the point,
+/// leaving the route latched — the first assertion names it.
+#[test]
+fn a_text_selection_drawn_into_the_strip_is_finished_in_its_own_pane() {
+    let release = squeezed_body("Runtime", "release_owned_gesture");
+    assert!(
+        release.contains(
+            "ifself.live_paste_target(drag.owner).is_none(){self.window.mouse_route=None;returnOk(true);}self.finish_local_selection(*drag)?;Ok(true)}"
+        ),
+        "a selection's release finishes it, wherever the pointer is"
+    );
+    assert_eq!(
+        reader_names(&calls_of("Runtime", "finish_local_selection")),
+        ["release_owned_gesture"],
+        "and that is the one place a selection is finished by a release"
+    );
+    let moved = squeezed_body("Runtime", "pointer_moved");
+    assert!(
+        moved.contains(
+            "ifmatches!(self.window.mouse_route,Some(MouseRoute::Local(_))){returnself.extend_local_selection();}"
+        ),
+        "its moves go to its own pane"
+    );
+    assert!(
+        squeezed_body("Runtime", "drag_hit_in_pane").contains("clamp_into_body(body,"),
+        "clamped into that pane's body, so a point on the strip names its first row"
+    );
+}
+
+/// RED (confirmation review of `6049179a`, P2) — **the in-pane surfaces yield
+/// to every band painted above them, and that list is the paint order.**
+///
+/// The wheel's in-pane station stood above the palette, so a notch on the
+/// palette's list where it overlapped a pill was swallowed by the pill. The
+/// rule is not a station moved by hand: the router's in-pane step yields to
+/// `OVER_IN_PANE_TOP_FIRST`, and every reader that asks the router — the
+/// wheel, the press door, the tip — inherits it. This test reads
+/// `OverlayStack::flattened` and requires that list to be exactly the bands it
+/// paints above `in_pane`, top first, less the ones that take no pointer — so a
+/// band added to the paint above the in-pane surfaces fails here until it is
+/// classified, and a reorder of the paint fails here until the list follows.
+///
+/// Red gate: swap two entries of the list, or drop the yield from the router,
+/// and the assertion naming it fails.
+#[test]
+fn the_in_pane_surfaces_yield_to_every_band_painted_above_them() {
+    let paint = squeezed(item_body(&ItemQuery::method("OverlayStack", "flattened")));
+    let array = &paint[paint.find("[preview_bars,").expect("the paint array")..];
+    let array = &array[1..array.find(']').expect("its end")];
+    let bands: Vec<&str> = array.split(',').filter(|band| !band.is_empty()).collect();
+    let in_pane = bands
+        .iter()
+        .position(|band| *band == "in_pane")
+        .expect("the in-pane surfaces are painted as one band");
+    let above: Vec<&str> = bands[in_pane + 1..]
+        .iter()
+        .rev()
+        .copied()
+        .filter(|band| !BANDS_OVER_IN_PANE_THAT_TAKE_NO_POINTER.contains(band))
+        .collect();
+    let listed: Vec<&str> = OVER_IN_PANE_TOP_FIRST
+        .iter()
+        .map(|family| family.band())
+        .collect();
+    assert_eq!(
+        listed, above,
+        "OVER_IN_PANE_TOP_FIRST is the paint order above the in-pane surfaces, top first"
+    );
+    let router = squeezed_body("Runtime", "pointer_target_at");
+    let step = router
+        .find("forsurfaceinIN_PANE_SURFACES_TOP_FIRST")
+        .expect("the in-pane step");
+    assert!(
+        router[step..].contains(
+            "ifself.painted_over_in_pane_at(position,&OVER_IN_PANE_TOP_FIRST){break;}returnclaim;"
+        ),
+        "the router's in-pane claim yields to every band painted over it"
+    );
+    assert!(
+        squeezed_body("Runtime", "notice_at")
+            .contains("OVER_IN_PANE_TOP_FIRST.split(|family|*family==OverInPane::Float)"),
+        "and a window's own pill to every band painted over the window"
+    );
+    for reader in [
+        "mouse_wheel",
+        "press_in_pane_surface",
+        "owned_tooltip_anchor_at",
+    ] {
+        assert!(
+            squeezed_body("Runtime", reader).contains("self.in_pane_surface_at(position)"),
+            "`{reader}` takes the in-pane claim from the router, so it yields in the paint order"
+        );
+    }
+    let surface = squeezed_body("Runtime", "in_pane_surface_at");
+    assert!(
+        surface.contains("self.pointer_target_at(position)?"),
+        "and the claim is the router's"
+    );
+}
+
+/// RED (final review of `f5d0fc2b`) — **a forwarded gesture is delivered to
+/// the shell it was handed to, and to no other.**
+///
+/// The route used to record a button and an encoding and nothing else, and its
+/// moves and release went to whichever pane held the focus *then*. Run: the
+/// press records its owner (tab, seat, incarnation); a focus moved to another
+/// pane does not change it; and the owner's liveness — the paste address's own
+/// rule — is false for a pane that closed, a shell restarted in the same seat
+/// and a tab no longer on top. Read: the release and the drag's moves take the
+/// seat from the route, ask whether the owner is live, and drop the route
+/// without a byte when it is not.
+///
+/// Red gates: take the release's seat from `focused_leaf` again (focus moved
+/// mid-drag) and the owner assertion fails; drop the liveness question from the
+/// release or from the moves (owner closed mid-drag) and the drop assertion
+/// naming that door fails.
+#[test]
+fn a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to() {
+    let mut session =
+        DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+    session.feed(b"\x1b[?1002h\x1b[?1006h").unwrap();
+    let owner = PasteTarget {
+        tab: TabId(7),
+        seat: SeatId(2),
+        incarnation: 41,
+    };
+    let mut route = None;
+    route_forwarded_mouse_button(
+        &mut route,
+        ElementState::Pressed,
+        input::MouseProtocolButton::Left,
+        bt_render::GridHit { row: 1, column: 1 },
+        session.terminal_modes(),
+        ModifiersState::empty(),
+        PressedCellTarget::Ordinary,
+        owner,
+    )
+    .expect("a tracked press is forwarded");
+    // The focus moves to seat 3 while the button is held: nothing about the
+    // route names the focus, so the gesture is still seat 2's.
+    assert!(
+        matches!(route, Some(MouseRoute::Forward { owner: recorded, .. }) if recorded == owner),
+        "the press records the shell it was handed to"
+    );
+    assert!(
+        paste_target_is_live(TabId(7), Some(41), owner),
+        "while it stands, it is owed"
+    );
+    assert!(
+        !paste_target_is_live(TabId(7), None, owner),
+        "a closed pane is owed nothing"
+    );
+    assert!(
+        !paste_target_is_live(TabId(7), Some(42), owner),
+        "nor a shell restarted in the same seat"
+    );
+    assert!(
+        !paste_target_is_live(TabId(8), Some(41), owner),
+        "nor a pane whose tab is no longer on top"
+    );
+
+    let release = squeezed_body("Runtime", "release_owned_gesture");
+    let motion = squeezed_body("Runtime", "forward_owned_drag_motion");
+    for (door, body) in [("release", &release), ("motion", &motion)] {
+        assert!(
+            !body.contains("focused_leaf"),
+            "{door}: the gesture is delivered to its recorded owner, not to the focus"
+        );
+        assert!(
+            body.contains("letseat=owner.seat;"),
+            "{door}: the seat is the route's"
+        );
+        assert!(
+            body.contains(
+                "ifself.live_paste_target(owner).is_none(){self.window.mouse_route=None;"
+            ),
+            "{door}: a gone owner drops the route with nothing sent"
+        );
+    }
+    assert!(
+        release.contains("self.send_mouse_input_to(seat,&bytes,"),
+        "release: written into the owner's own pipe"
+    );
+    // A selection drag is addressed the same way.
+    assert!(
+        squeezed_body("Runtime", "extend_local_selection").contains(
+            "ifself.live_paste_target(owner).is_none(){self.window.mouse_route=None;returnOk(());}letseat=owner.seat;"
+        ),
+        "selection: its moves go to its own shell, and a gone shell lets it go"
+    );
+    assert!(
+        squeezed_body("Runtime", "mouse_input").contains(
+            "letSome(owner)=self.paste_target(hit_seat)else{returnOk(());};self.begin_local_selection(owner,hit)"
+        ),
+        "selection: the press records its shell"
+    );
+    let press = squeezed_body("Runtime", "mouse_input");
+    assert!(
+        press.contains("letSome(owner)=self.paste_target(self.focused_leaf)else{returnOk(());};"),
+        "the press records the shell it is handed to"
+    );
+}
+
+/// RED (final review of `f5d0fc2b`) — **only the button that started a
+/// forwarded gesture ends it**, and another button pressed and let go while it
+/// is held is not forwarded under it.
+///
+/// Run: left down forwarded; right down and up (over an overlay, or anywhere);
+/// left up. The child hears exactly a left press and a left release, and the
+/// route stands until the left release and comes off there. Read: the owned
+/// release hands a different button's release on down the ordinary road, and
+/// the cell road takes no second button while a forwarded gesture is latched.
+///
+/// Red gates: drop the latched-button test from the release arm, or let a
+/// second press overwrite the route, and the chord's byte list is wrong; drop
+/// the owned release's button test and its assertion fails.
+#[test]
+fn a_chord_under_a_forwarded_gesture_leaves_it_whole() {
+    let mut session =
+        DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+    session.feed(b"\x1b[?1002h\x1b[?1006h").unwrap();
+    let modes = session.terminal_modes();
+    let at = bt_render::GridHit { row: 1, column: 2 };
+    let mut route = None;
+    let mut heard: Vec<Vec<u8>> = Vec::new();
+    let mut step = |state, button| {
+        if let Some(bytes) = route_forwarded_mouse_button(
+            &mut route,
+            state,
+            button,
+            at,
+            modes,
+            ModifiersState::empty(),
+            PressedCellTarget::Ordinary,
+            a_shell(),
+        ) {
+            heard.push(bytes);
+        }
+        matches!(
+            route,
+            Some(MouseRoute::Forward {
+                button: input::MouseProtocolButton::Left,
+                ..
+            })
+        )
+    };
+    assert!(step(
+        ElementState::Pressed,
+        input::MouseProtocolButton::Left
+    ));
+    assert!(
+        step(ElementState::Pressed, input::MouseProtocolButton::Right),
+        "a second button's press does not take the route"
+    );
+    assert!(
+        step(ElementState::Released, input::MouseProtocolButton::Right),
+        "and its release does not end the left gesture"
+    );
+    assert!(
+        !step(ElementState::Released, input::MouseProtocolButton::Left),
+        "the left release ends it"
+    );
+    assert_eq!(
+        heard,
+        [b"\x1b[<0;3;2M".to_vec(), b"\x1b[<0;3;2m".to_vec()],
+        "the child hears exactly left down and left up"
+    );
+    assert!(route.is_none());
+
+    let release = squeezed_body("Runtime", "release_owned_gesture");
+    assert!(
+        release.contains("ifprotocol_mouse_button(button)!=Some(latched){returnOk(false);}"),
+        "the owned release hands another button's release on as an event of its own"
+    );
+    assert!(
+        release.contains("ifbutton!=MouseButton::Left{returnOk(false);}"),
+        "and a selection, begun by the left button, is ended only by it"
+    );
+    let road = squeezed_body("Runtime", "mouse_input");
+    assert!(
+        road.contains(
+            "ifmatches!(self.window.mouse_route,Some(MouseRoute::Forward{..})){returnOk(());}match state"
+                .replace(' ', "")
+                .as_str()
+        ),
+        "the cell road begins no selection under a latched forwarded gesture"
+    );
+}
+
+/// RED (final review of `f5d0fc2b`) — **a band painted above the panes owns the
+/// wheel over its own area, whether or not it scrolls.**
+///
+/// Yielding the in-pane claim to the menus left the notch to fall through them:
+/// a notch on a pane menu over a strip, or over plain terminal, scrolled the
+/// terminal beneath. Every band of `OVER_IN_PANE_TOP_FIRST` now declares
+/// ([`OverInPane::wheel`], an exhaustive match) whether its own station
+/// answers the notch or it swallows it, and `mouse_wheel` asks the topmost one
+/// before the hosted page and every pane — with a strip under the menu or not.
+///
+/// Red gates: remove the station, or declare a menu `OwnStation` (there is no
+/// menu station for it to reach), and the assertion naming it fails.
+#[test]
+fn a_band_painted_above_the_panes_owns_the_wheel_over_its_area() {
+    for band in OVER_IN_PANE_TOP_FIRST {
+        let expected = match band {
+            OverInPane::Palette | OverInPane::Float => OverWheel::OwnStation,
+            _ => OverWheel::Swallow,
+        };
+        assert_eq!(band.wheel(), expected, "{band:?}");
+    }
+    let wheel = squeezed_body("Runtime", "mouse_wheel");
+    let station = wheel
+        .find("letSome(band)=self.topmost_band_over_in_pane_at(position){ifband.wheel()==OverWheel::Swallow{")
+        .expect("the wheel asks the topmost band over the panes what it does with a notch");
+    assert!(
+        wheel[station..wheel.len().min(station + 260)].contains("returnOk(());"),
+        "a band that swallows ends the notch there"
+    );
+    for (band, own) in [
+        (
+            OverInPane::Palette,
+            "palette::wheel_part(&layout,position.x,position.y)",
+        ),
+        (OverInPane::Float, "self.float_hit_at(position)"),
+    ] {
+        let at = wheel
+            .find(own)
+            .unwrap_or_else(|| panic!("{band:?} has a station"));
+        assert!(
+            at > station,
+            "{band:?}'s own station is below the gate that lets it through"
+        );
+    }
+    for beneath in [
+        "self.point_is_on_the_web_page(position)",
+        "seats::files_body_at(",
+        "self.preview_surface_at(position)",
+        "self.in_pane_surface_at(position)",
+    ] {
+        let at = wheel
+            .find(beneath)
+            .unwrap_or_else(|| panic!("`{beneath}` is on the wheel's road"));
+        assert!(
+            at > station,
+            "`{beneath}` is asked only after the bands above it"
+        );
+    }
+    assert!(
+        squeezed_body("Runtime", "topmost_band_over_in_pane_at")
+            .contains("OVER_IN_PANE_TOP_FIRST.into_iter().find("),
+        "the topmost band is read off the paint-ordered list"
     );
 }
 

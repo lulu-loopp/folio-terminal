@@ -21011,6 +21011,14 @@ enum MouseRoute {
     Forward {
         button: input::MouseProtocolButton,
         sgr: bool,
+        /// **The shell the press was handed to** (T-STRIP-HOVER-THROUGH, final
+        /// review 2026-10-04) — tab, seat and incarnation. The moves and the
+        /// release of this gesture are owed to it and to nobody else: a focus
+        /// moved while the button is held does not redirect them, and a shell
+        /// that is gone — its pane closed, its program restarted, its tab no
+        /// longer on top — is owed nothing, so the route is dropped without a
+        /// byte sent to whatever stands there now.
+        owner: PasteTarget,
     },
     MathBlock,
 }
@@ -21209,6 +21217,21 @@ fn right_press_raises_terminal_menu(modes: TerminalModes, modifiers: ModifiersSt
     modes.mouse_tracking == MouseTracking::Off || modifiers.shift_key()
 }
 
+/// **One button event of a gesture handed to the program**, and what it does
+/// to the route that holds the gesture.
+///
+/// **One gesture, one button** (T-STRIP-HOVER-THROUGH, final review
+/// 2026-10-04). A press is forwarded only when no forwarded gesture is already
+/// latched, and only the release of the button that latched it ends it. While
+/// it is held, another button's press and release are not forwarded under it
+/// and do not touch it: they go on down the window's ordinary road as events of
+/// their own, where an overlay, a menu or the window's own surfaces can take
+/// them — and a child holding the left button is never told the left button
+/// came up because the right one did.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one button event and the six facts it is judged on; the owner is the press's address"
+)]
 fn route_forwarded_mouse_button(
     route: &mut Option<MouseRoute>,
     state: ElementState,
@@ -21217,15 +21240,17 @@ fn route_forwarded_mouse_button(
     modes: TerminalModes,
     modifiers: ModifiersState,
     target: PressedCellTarget,
+    owner: PasteTarget,
 ) -> Option<Vec<u8>> {
     let forward = !modifiers.shift_key()
         && modes.mouse_tracking != MouseTracking::Off
         && !press_belongs_to_the_window(button, target);
     match state {
-        ElementState::Pressed if forward => {
+        ElementState::Pressed if forward && route.is_none() => {
             *route = Some(MouseRoute::Forward {
                 button,
                 sgr: modes.sgr_mouse,
+                owner,
             });
             Some(input::mouse_bytes(
                 modes.sgr_mouse,
@@ -21242,9 +21267,17 @@ fn route_forwarded_mouse_button(
         // click retires `1006` (§7.1.5i); reading it here would split one click
         // across two protocols.
         ElementState::Released => {
-            let Some(MouseRoute::Forward { sgr, .. }) = route else {
+            let Some(MouseRoute::Forward {
+                sgr,
+                button: latched,
+                ..
+            }) = route
+            else {
                 return None;
             };
+            if *latched != button {
+                return None;
+            }
             let sgr = *sgr;
             *route = None;
             Some(input::mouse_bytes(
@@ -21286,7 +21319,7 @@ fn route_forwarded_mouse_motion(
         return None;
     }
     match route {
-        Some(MouseRoute::Forward { button, sgr })
+        Some(MouseRoute::Forward { button, sgr, .. })
             if modes.mouse_tracking != MouseTracking::Click =>
         {
             Some((*sgr, *button))
@@ -21305,7 +21338,13 @@ struct SelectionDrag {
     /// touch. A selection is set on one shell's session and made of one frame's
     /// anchors, so the pointer wandering into the pane next door — or onto the
     /// chrome, or off the window — must still be answered in cells of *this* one.
-    origin_seat: SeatId,
+    ///
+    /// **Named as a shell — tab, seat and incarnation — since the final review
+    /// of T-STRIP-HOVER-THROUGH (2026-10-04)**, the forwarded route's own
+    /// address: a seat number alone would answer for whatever pane wears it
+    /// after a tab switch or a restart, and a gesture whose shell is gone is
+    /// let go without touching anything that stands there now.
+    owner: PasteTarget,
     origin_row: u32,
     origin_column: u32,
     origin: ViewSelection,
@@ -31186,12 +31225,11 @@ struct OverlayStack {
     ///
     /// **A pane's notice strip** (7.1.6j), beside the capsule.
     ///
-    /// Above it in this list and never over it on the glass: the capsule floats
-    /// over the pane's own text and the strip stands in a row the text was moved
-    /// out of (`seats::pane_body_viewport` takes it), so the two cannot share a
-    /// pixel. The order is a statement rather than a fix — if the arithmetic
-    /// were ever broken, the surface that says what is *missing* should be the
-    /// one seen to survive.
+    /// **Under the capsule** (owner's ruling 2026-10-04). The two do meet — the
+    /// capsule hangs from the seat's own top, the strip takes the top row of
+    /// the body — and where they do, the surface the reader summoned is the one
+    /// on top. The two are painted by [`IN_PANE_SURFACES_TOP_FIRST`], the same
+    /// list the pointer router reads, so the order is stated once.
     ///
     /// One per pane and not a singleton: preview disk news belongs to the
     /// surface whose buffer observed it.
@@ -31448,6 +31486,22 @@ impl OverlayStack {
             drag_ghost,
             window_ring,
         } = self;
+        // The surfaces inside a pane, painted bottom first from the one list
+        // the pointer router reads top first ([`IN_PANE_SURFACES_TOP_FIRST`]).
+        let (mut search, mut pane_notices) = (Some(search), Some(pane_notices));
+        let in_pane = IN_PANE_SURFACES_TOP_FIRST.iter().rev().fold(
+            marks::Band::default(),
+            |mut band, surface| {
+                band.append(
+                    match surface {
+                        InPaneSurface::SearchCapsule => search.take(),
+                        InPaneSurface::NoticeStrip => pane_notices.take(),
+                    }
+                    .unwrap_or_default(),
+                );
+                band
+            },
+        );
         [
             preview_bars,
             video_bars,
@@ -31457,8 +31511,7 @@ impl OverlayStack {
             rail,
             flight,
             ground,
-            search,
-            pane_notices,
+            in_pane,
             web_sheet,
             layout_peek,
             float,
@@ -33996,9 +34049,156 @@ enum PointerTarget {
     /// [`float::FloatPart::Head`] included, because a window with no answer for
     /// a point still consumes it.
     Float(float::FloatId, float::FloatPart),
-    /// No window claimed it, so the answer is the docked chrome's.
+    /// **A pane's notice strip claimed it** (T-STRIP-HOVER-THROUGH, 2026-10-04),
+    /// and this is the part of the strip the pointer is on.
+    ///
+    /// Its own arm, between the two above, because it is drawn between them:
+    /// `Layered::Notice` paints over every pane's own chrome and under every
+    /// floating window. Whatever docked chrome lies beneath the strip is covered
+    /// by it, so it is not under the pointer — the same sentence the `Float` arm
+    /// says about the panes behind a window, one layer down.
+    Notice(SeatId, notice::NoticeElement),
+    /// **The search capsule claimed it** (owner's ruling 2026-10-04), and this is
+    /// the part of it the pointer is on. Above the strip for the reason
+    /// [`IN_PANE_SURFACES_TOP_FIRST`] gives.
+    Search(search::SearchElement),
+    /// No window and no in-pane surface claimed it, so the answer is the docked
+    /// chrome's.
     Chrome(seats::ChromeTarget),
 }
+
+/// One of the surfaces that stand **inside** a pane, over its own chrome and
+/// under every floating window (owner's ruling 2026-10-04).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InPaneSurface {
+    /// The search capsule (Ctrl+F, §7.1.5d).
+    SearchCapsule,
+    /// A pane's notice strip (§7.1.6j).
+    NoticeStrip,
+}
+
+/// **The surfaces inside a pane, top first — one statement of the paint order
+/// and the pointer order at once** (owner's ruling 2026-10-04).
+///
+/// A surface the reader summoned outranks a notice nobody asked for, so the
+/// search capsule is painted over the notice strip and answers the pointer
+/// before it; the strip's controls under the capsule do not answer, the rest of
+/// the strip does. [`OverlayStack::flattened`] paints this list bottom first and
+/// [`Runtime::pointer_target_at`] asks it top first, so the two cannot drift: a
+/// change to the order here is a change to both.
+const IN_PANE_SURFACES_TOP_FIRST: [InPaneSurface; 2] =
+    [InPaneSurface::SearchCapsule, InPaneSurface::NoticeStrip];
+
+/// **A band painted above the surfaces inside a pane that takes the pointer
+/// where it is drawn** (T-STRIP-HOVER-THROUGH, confirmation review 2026-10-04).
+///
+/// The in-pane surfaces claim a point only where none of these covers it:
+/// a palette list standing over a pill is the palette's to scroll, and a menu
+/// row over the strip's `×` is the menu's. Each variant is named by the
+/// [`OverlayStack`] field it is painted in ([`Self::band`]), which is what lets
+/// a test read [`OverlayStack::flattened`] and require this list to be every
+/// band painted above `in_pane`, top first, less
+/// [`BANDS_OVER_IN_PANE_THAT_TAKE_NO_POINTER`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverInPane {
+    FilePeek,
+    Toast,
+    Palette,
+    TabMenu,
+    TermMenu,
+    GitMenu,
+    PaneMenu,
+    FileMenu,
+    Modal,
+    Float,
+    WebSheet,
+}
+
+/// **What a band painted above the in-pane surfaces does with a wheel notch
+/// over its own area** (T-STRIP-HOVER-THROUGH, final review 2026-10-04): it
+/// either has a station of its own in `Runtime::mouse_wheel` that scrolls it,
+/// or it swallows the notch. Either way nothing beneath it scrolls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverWheel {
+    /// Its own station answers the notch — the palette's list, a floating
+    /// window's tree or document.
+    OwnStation,
+    /// Not a scroller and not transparent: the notch is nobody's.
+    Swallow,
+}
+
+impl OverInPane {
+    /// The wheel's answer for this band, asked exhaustively so a family added
+    /// to [`OVER_IN_PANE_TOP_FIRST`] has to say which it is.
+    ///
+    /// The glance card, the modal band's scrollers (the first-run card and
+    /// settings) and the toasts have stations *above* the one that asks this,
+    /// which return first; what reaches here over them is the part with no
+    /// scroller — a glance card with no document, a menu in the modal band —
+    /// and that is swallowed.
+    const fn wheel(self) -> OverWheel {
+        match self {
+            Self::Palette | Self::Float => OverWheel::OwnStation,
+            Self::FilePeek
+            | Self::Toast
+            | Self::TabMenu
+            | Self::TermMenu
+            | Self::GitMenu
+            | Self::PaneMenu
+            | Self::FileMenu
+            | Self::Modal
+            | Self::WebSheet => OverWheel::Swallow,
+        }
+    }
+}
+
+#[cfg(test)]
+impl OverInPane {
+    /// The [`OverlayStack`] field this family is painted in.
+    const fn band(self) -> &'static str {
+        match self {
+            Self::FilePeek => "file_peek",
+            Self::Toast => "toast",
+            Self::Palette => "palette",
+            Self::TabMenu => "tab_menu",
+            Self::TermMenu => "term_menu",
+            Self::GitMenu => "git_menu",
+            Self::PaneMenu => "pane_menu",
+            Self::FileMenu => "file_menu",
+            Self::Modal => "modal",
+            Self::Float => "float",
+            Self::WebSheet => "web_sheet",
+        }
+    }
+}
+
+/// Every band painted above the in-pane surfaces that takes the pointer, top
+/// first — the paint order of [`OverlayStack::flattened`] read downwards.
+const OVER_IN_PANE_TOP_FIRST: [OverInPane; 11] = [
+    OverInPane::FilePeek,
+    OverInPane::Toast,
+    OverInPane::Palette,
+    OverInPane::TabMenu,
+    OverInPane::TermMenu,
+    OverInPane::GitMenu,
+    OverInPane::PaneMenu,
+    OverInPane::FileMenu,
+    OverInPane::Modal,
+    OverInPane::Float,
+    OverInPane::WebSheet,
+];
+
+/// The bands painted above the in-pane surfaces that never take the pointer:
+/// pictures that follow it or explain it, which a hand points *through*.
+#[cfg(test)]
+const BANDS_OVER_IN_PANE_THAT_TAKE_NO_POINTER: [&str; 6] = [
+    "layout_peek",
+    "key_hint",
+    "card_hint",
+    "tooltip",
+    "drag_ghost",
+    "window_ring",
+];
 
 /// Which surface a files tree is drawn on — the two hosts P81 asks to be wired.
 ///
@@ -48237,6 +48437,10 @@ impl Runtime<'_> {
             // this `None`, which is what `observe_file_peek` is told when the
             // hand leaves a row.
             Some(PointerTarget::Float(..)) => None,
+            // **And a strip is no row either** (T-STRIP-HOVER-THROUGH,
+            // 2026-10-04): it is drawn over whatever it covers, so a glance
+            // cannot arm from under it.
+            Some(PointerTarget::Notice(..) | PointerTarget::Search(_)) => None,
             Some(PointerTarget::Chrome(seats::ChromeTarget::FilesRow { seat, index })) => {
                 Some((RowHost::Column(seat), index))
             }
@@ -52406,8 +52610,13 @@ mod mouse_trace_station_tests {
         // spends it in two ways — a whole rung or a carried fraction — each with its
         // own `wheel_route taken=text-size` line above it. 24 → 25 on 2026-09-24
         // (ticket 57): a notch under a modal card is swallowed, with its own
-        // `wheel_route taken=overlay at=modal` line above it.
-        assert_every_exit_is_traced("mouse_wheel", 25);
+        // `wheel_route taken=overlay at=modal` line above it. 25 → 26 on
+        // 2026-10-04 (T-STRIP-HOVER-THROUGH): a notch on the search capsule or a
+        // notice strip is swallowed, with its own `wheel_route taken=overlay
+        // at=in-pane` line above it. 26 → 27 the same day: a notch on a band
+        // painted above the panes that does not scroll is swallowed, with its
+        // own `wheel_route taken=overlay at=over-pane` line above it.
+        assert_every_exit_is_traced("mouse_wheel", 27);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }
@@ -53541,10 +53750,14 @@ mod files_locate_door_tests {
         // in the document. What keeps it honest is that the strip's own door is
         // asked above the chrome router entirely, off the very rectangle the
         // pill was drawn in; remove that rung and the words stop answering on
-        // both hosts at once.
+        // both hosts at once. Since T-STRIP-HOVER-THROUGH the rung is the one
+        // door of the surfaces inside a pane, which hands the strip's left
+        // press to `press_notice`.
         let router = method_body("Runtime", "mouse_input");
         assert!(
-            router.contains("self.press_notice(position)?"),
+            router.contains("self.press_in_pane_surface(button, position)?")
+                && method_body("Runtime", "press_in_pane_surface")
+                    .contains("self.press_notice(position)?"),
             "the press router does not reach the strip's own door before the chrome, so the words on a window's pill land in the document instead of answering it"
         );
         // ⑤ One verb, one buffer, whichever host was pressed.

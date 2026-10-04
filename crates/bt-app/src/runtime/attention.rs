@@ -2,10 +2,11 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    AttentionDelivery, NoticeHost, NoticeStrip, PreviewSurface, Runtime, TaskbarFlash,
-    UserInputKind, WindowRuntime, answer_attention_in, attention, attention_codex,
-    attention_copilot, attention_hooks, attention_trace, emit_attention_lines, float, i18n, marks,
-    native_window, next_attention_stop, notice, notify, profiles, seats, taskbar_lane, toast,
+    AttentionDelivery, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane, PointerTarget,
+    PreviewSurface, Runtime, TaskbarFlash, UserInputKind, WindowRuntime, answer_attention_in,
+    attention, attention_codex, attention_copilot, attention_hooks, attention_trace,
+    emit_attention_lines, float, i18n, marks, native_window, next_attention_stop, notice, notify,
+    profiles, seats, taskbar_lane, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -505,20 +506,7 @@ impl Runtime<'_> {
         &mut self,
         position: Option<PhysicalPosition<f64>>,
     ) -> Result<bool> {
-        // **A pill with nothing to press is not hovered** (owner's ruling
-        // 2026-09-12), on `press_notice`'s own reason one gesture along: a
-        // confirmation floating over a document must not take the pointer away
-        // from the words under it.
-        let hover = position.and_then(|at| {
-            self.window.notice_layouts.iter().find_map(|(host, strip)| {
-                (!strip.bar.verbs.is_empty() || strip.bar.close.is_some())
-                    .then(|| {
-                        notice::hit(&strip.bar, at.x as f32, at.y as f32)
-                            .map(|element| (*host, element))
-                    })
-                    .flatten()
-            })
-        });
+        let hover = position.and_then(|at| self.notice_at(at));
         if self.window.notice_hover != hover {
             self.window.notice_hover = hover;
             if self.refresh_overlay() {
@@ -538,16 +526,7 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Result<bool> {
-        let hit = self.window.notice_layouts.iter().find_map(|(host, strip)| {
-            notice::hit(&strip.bar, position.x as f32, position.y as f32).map(|it| {
-                (
-                    *host,
-                    it,
-                    strip.bar.verbs.is_empty() && strip.bar.close.is_none(),
-                )
-            })
-        });
-        let Some((host, element, verbless)) = hit else {
+        let Some((host, element)) = self.notice_at(position) else {
             return Ok(false);
         };
         // Which seat, when the host is one. `None` is a float, and every arm
@@ -568,22 +547,72 @@ impl Runtime<'_> {
             }
             // The strip's own width. It takes the press and answers nothing — a
             // bar with a hole in it lets a click through onto a cell that is
-            // nowhere near the pointer.
-            //
-            // **A pill with no verb in it does not take the press at all**
-            // (owner's ruling 2026-09-12). A band is chrome a reader did not ask
-            // for and stands in its own row, so swallowing a stray click is the
-            // honest thing; a confirmation floating over a document is *the
-            // document's* surface for the second it is up, and a `Saved` that
-            // ate a click into the paragraph under it would be this window
-            // charging the reader for having been told.
-            notice::NoticeElement::Body => {
-                if verbless {
-                    return Ok(false);
-                }
-            }
+            // nowhere near the pointer. (A pill with no verb in it never gets
+            // here: [`Self::notice_at`] does not count it as under the pointer.)
+            notice::NoticeElement::Body => {}
         }
         Ok(true)
+    }
+
+    /// **Which strip — and which part of it — owns this point**, asked of the
+    /// one door every pointer question goes through
+    /// ([`Self::pointer_target_at`], T-STRIP-HOVER-THROUGH 2026-10-04).
+    ///
+    /// The hover and the press both ask it, so the strip that lights and the
+    /// strip that takes the click are the strip the router says is on top: a
+    /// pane's band answers where no floating window stands over it, and a
+    /// window's own band answers inside that window. It used to be a walk of
+    /// every strip beside the router, which agreed with it only for as long as
+    /// nothing else was drawn where a strip is.
+    pub(in crate::runtime) fn notice_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(NoticeHost, notice::NoticeElement)> {
+        match self.pointer_target_at(position)? {
+            PointerTarget::Notice(seat, element) => Some((NoticeHost::Seat(seat), element)),
+            // A window's own pill, which only a band painted over the window
+            // can cover — the part of `OVER_IN_PANE_TOP_FIRST` above it.
+            PointerTarget::Float(id, _) => {
+                let host = NoticeHost::Float(id);
+                let element = self.notice_part_at(host, position)?;
+                let over_the_window = OVER_IN_PANE_TOP_FIRST
+                    .split(|family| *family == OverInPane::Float)
+                    .next()
+                    .unwrap_or_default();
+                (!self.painted_over_in_pane_at(position, over_the_window))
+                    .then_some((host, element))
+            }
+            PointerTarget::Search(_) | PointerTarget::Chrome(_) => None,
+        }
+    }
+
+    /// The docked strip under this point — a pane's band, never a window's —
+    /// for [`Self::pointer_target_at`] to place between the floats and the
+    /// docked chrome.
+    pub(in crate::runtime) fn docked_notice_at(
+        &self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(SeatId, notice::NoticeElement)> {
+        self.window
+            .notice_layouts
+            .keys()
+            .find_map(|host| match *host {
+                NoticeHost::Seat(seat) => self
+                    .notice_part_at(*host, position)
+                    .map(|element| (seat, element)),
+                NoticeHost::Float(_) => None,
+            })
+    }
+
+    /// What one host's strip, as it was last drawn, claims at this point —
+    /// [`notice::claim`], so a strip with nothing to press claims nothing.
+    fn notice_part_at(
+        &self,
+        host: NoticeHost,
+        position: PhysicalPosition<f64>,
+    ) -> Option<notice::NoticeElement> {
+        let strip = self.window.notice_layouts.get(&host)?;
+        notice::claim(&strip.bar, position.x as f32, position.y as f32)
     }
 
     /// **Re-read all three agent configurations**, on the one edge that can afford it.
