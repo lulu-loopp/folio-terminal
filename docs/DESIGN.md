@@ -13728,3 +13728,26 @@ The per-birth current-account read follows the same rule without a cache: a fail
 ordinary inherited spawn for that birth and the next birth asks again. Each actual failed read is
 written once to resident diagnostics. Pinned by
 `pty_door::tests::{a_current_environment_door_error_uses_the_inherited_spawn,a_snapshot_error_is_retried_and_a_later_spawn_composes_normally}`.
+
+### 2026-10-04 — The administrator host protocol is a bounded codec and two pure state machines (T-ADMIN-1)
+
+`bt_platform::elevated_protocol` now owns the platform-free bytes shared by the future resident
+transport and elevated host: the fixed binary header, every typed payload, lossless UTF-16 wire
+strings, a chunk-independent streaming decoder, and the 1 MiB control and 64 KiB output bounds.
+The same module owns pure parent/host session transitions and the injected-clock launch-attempt
+model; it opens no pipe, starts no process, reads no clock, and calls no platform API.
+
+The rule is design-note Revision (c): a length or count is validated before it can reserve memory;
+role, handshake and message order are typed failures; the parent advances before restart and both
+roles discard older-generation operational frames without applying them. Authentication failure
+and every other protocol failure remain pane-local. The 15-second launch boundary is compared only
+with caller-supplied instants, and each terminal launch state exposes only its ruled action.
+
+Pinned by the thirteen tests under `elevated_protocol::{codec,session,launch}::tests`, including
+`every_frame_kind_round_trips_with_empty_and_lossless_text_payloads`,
+`hostile_u32_max_length_is_rejected_before_any_payload_reservation`,
+`arbitrary_chunk_boundaries_equal_whole_buffer_decoding`,
+`both_roles_follow_the_full_happy_path`,
+`stale_generation_frames_after_restart_are_dropped_by_both_roles`, and
+`launch_timeout_uses_the_exact_fifteen_second_boundary`. Each test carries the mutation observed
+red before the restored implementation passed.

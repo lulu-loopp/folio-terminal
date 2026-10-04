@@ -241,3 +241,58 @@ This revision incorporates the owner's 2026-10-04 rulings and supersedes every e
 The same switch carries into the 0.5 `where × what` panel as an independent choice beside split direction, applying to the next Shell or Agent selection and not to Files, Preview or Browser. An elevated agent means its command is run by the selected row profile's elevated shell, so that shell and the agent process tree—not the resident Folio UI—hold the administrator token; hooks and attention behavior follow spike 4's measured result.
 
 Owner questions 1–5 are ruled as recorded in §9. The process model, authenticated pipe, one-host-per-pane lifetime, persistence, dormant restore, update/uninstall census and UAC-free automated-test strategy in §§1–4 and §§6–10 otherwise stand.
+
+## 12. Revision (c) — 2026-10-04: the wire has one byte-level spelling
+
+This revision makes §2's protocol table implementable without changing its
+messages. The 20-byte header is the four bytes `FADM`, followed by little-endian
+`u16` wire version 1, little-endian `u16` kind, little-endian `u64` generation,
+and little-endian `u32` payload length. Kinds 1 through 14 are, in table order:
+`Hello`, `Authenticate`, `Spawn`, `Started`, `StartFailed`, `Input`, `Output`,
+`Resize`, `Exit`, `ForegroundQuery`, `ForegroundResult`, `Restart`, `Shutdown`,
+and `ShutdownAck`. Generation zero is handshake-only; the first child is
+generation one. A restart frame carries exactly the current generation plus
+one, and the parent advances its generation before it writes that frame.
+
+A capability is 32 opaque bytes; a process id and exit status are `u32`; a
+parent start identity and request id are `u64`. Every wire string is a `u32`
+byte count followed by little-endian UTF-16 code units. The byte count must be
+even. This representation is used for programs, arguments, working directories,
+environment names and values, foreground image names, shutdown reasons, and
+error text, so no boundary performs a lossy conversion and an unpaired surrogate
+round-trips. A spawn payload is program, `u32` argument count and arguments, an
+optional working directory (`u8` 0 or 1, then the string when present), `u16`
+rows, `u16` columns, then `u32` environment-pair count and the ordered name/value
+pairs. Counts are accepted only after proving that their minimum representation
+fits in the remaining payload. Rows and columns are nonzero.
+
+`Hello` is capability then host pid; `Authenticate` is capability then parent
+start identity. `Started` is child pid followed by a one-byte ConPTY kind (1 is
+the shipped pair, 2 is the inbox implementation), making explicit the report
+already required by §3. `StartFailed` is a `u32` error code and wire string.
+`Input` and `Output` are their raw payload bytes. `Resize` is rows then columns.
+`Exit` is a one-byte option tag (0 is no status, 1 is followed by `u32`).
+`ForegroundQuery` is its request id; `ForegroundResult` is its request id and a
+one-byte process tag (0 unknown, 1 followed by the image-name string). `Shutdown`
+is its reason string and `ShutdownAck` is empty. No payload admits trailing bytes
+or any other tag.
+
+`Output` payloads are at most 64 KiB. Every other kind, including `Input`, is a
+control payload and is at most 1 MiB. A reader validates magic, version, kind,
+the kind's size bound, and direction from the fixed header before reserving its
+payload. An incomplete header or a validated but incomplete payload becomes a
+truncation only when the stream ends. A complete frame with a short field, an
+odd UTF-16 byte count, an impossible count, an unknown tag, a zero grid
+dimension, or trailing bytes is malformed.
+
+All operational frames carry their child generation. After the parent advances
+for restart, it discards every older host operational frame before applying
+ordering or request-id checks. The host likewise discards every older parent
+operational frame, including input, resize, query, restart, or shutdown, without
+touching the current child. A future generation is a pane-local protocol error,
+except for a `Restart` carrying exactly current plus one while the host is
+running. Handshake frames at a nonzero generation, a second `Spawn`, input before
+`Started`, a duplicate live request id, an unasked result, and every other
+out-of-order frame are pane-local protocol errors. Shutdown before authentication
+may only close the transport; after authentication it is acknowledged and stops
+any starting, running, or exited child state.
