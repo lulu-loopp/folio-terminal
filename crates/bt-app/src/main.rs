@@ -41699,12 +41699,15 @@ impl Runtime<'_> {
             &persist::storage_dir(),
             settings_store.loaded().update_check,
         );
-        // **The update job, and the day's check behind it** (U-18, U-33). A transaction an
+        // **The update job, and the launch check behind it** (U-18, U-33). A transaction an
         // earlier launch left `preparing` or `deferred` (`update_startup::waiting`) is the job
         // owner's to sweep, count, resume or discard, on the job's worker and before any offer;
-        // the check starts once that pass has landed, and not at all when it resumed a staged
-        // set (`Job::after_start`). With nothing waiting the check starts here, as it always has.
-        // A launch a rollback sent raises its card at `Failed` (U-29).
+        // this launch entry starts once that pass has landed, and not at all when it resumed a
+        // staged set (`Job::after_start`). T-UPDATE-DAILY's application clock is independent:
+        // when the persisted interval is due it may ask while that pass or staged transaction
+        // stands, without changing the transaction's captured offer. With nothing waiting the
+        // launch entry starts here, as it always has. A launch a rollback sent raises its card at
+        // `Failed` (U-29).
         let the_update_job = update_job::Job::default()
             .after_rollback(update_startup::failed())
             .after_start(
@@ -46251,15 +46254,11 @@ impl Runtime<'_> {
 
     /// Store the reader's answer about the update check (§7.51).
     ///
-    /// **Nothing is started or stopped here**, and that is deliberate rather
-    /// than an omission. The check is a one-shot taken at launch: by the time
-    /// this row can be pressed the thread has either run or was never started,
-    /// so `On` takes effect at the next launch. `Off` changes only that launch
-    /// schedule; cached evidence and a manual answer still on the wire remain
-    /// visible on Version.
-    /// A build that started the thread from this press would be a build where
-    /// pressing `On` makes a network request the same second — which is the one
-    /// thing a reader auditing this row is checking for.
+    /// **Nothing is started or stopped directly here.** The application clock
+    /// owns the schedule: `On` lets its next turn start an overdue check, while
+    /// `Off` removes the deadline and leaves an answer already on the wire
+    /// alone. Cached evidence remains visible and manual Check keeps using the
+    /// same worker door.
     ///
     /// The state file is left where it is on `Off`. Its cached evidence still
     /// answers Version and its mark, and a reader who wants it gone has

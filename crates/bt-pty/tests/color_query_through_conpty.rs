@@ -37,11 +37,11 @@
 
 use std::{
     num::{NonZeroU16, NonZeroU32},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
-use bt_pty::{PtyCommand, PtySession, PtySize, WINDOWS_POWERSHELL};
+use bt_pty::test_shell::TestShell;
+use bt_pty::{PtyCommand, PtySize, WINDOWS_POWERSHELL};
 use bt_term::{DualPlaneSession, TerminalCanvas, TerminalPalette};
 
 /// A background no scheme in this product wears, so an answer carrying it can
@@ -101,7 +101,7 @@ while((Get-Date) -lt $d -and -not ($s.Contains($bel) -or $s.Contains($st))) { \
 Write-Output ('BT_OSC11' + '_TWO=' + ((($s.ToCharArray() | ForEach-Object { '{0:x2}' -f [int]$_ }) -join '')))";
 
 struct Probe {
-    pty: PtySession,
+    pty: TestShell,
     session: DualPlaneSession,
     raw: Vec<u8>,
     answered: Vec<u8>,
@@ -130,13 +130,14 @@ impl Probe {
     fn spawn() -> Self {
         let columns = NonZeroU16::new(80).unwrap();
         let rows = NonZeroU16::new(20).unwrap();
+        // Started through `TestShell`: `-NoProfile`, and history refused before the startup
+        // script asks anything — the `exit` this probe types at the end is a line too.
         let command = PtyCommand::interactive_shell(WINDOWS_POWERSHELL)
             .arg("-NoLogo")
-            .arg("-NoProfile")
             .arg("-NoExit")
             .arg("-Command")
             .arg(ASKING_STARTUP);
-        let pty = PtySession::spawn(command, PtySize::cells(columns, rows), Arc::new(|| {}))
+        let pty = TestShell::spawn(command, PtySize::cells(columns, rows))
             .expect("Windows PowerShell starts on a supported host");
         let mut session = DualPlaneSession::new(
             NonZeroU32::new(u32::from(columns.get())).unwrap(),
@@ -162,7 +163,7 @@ impl Probe {
         }
         for reply in self.session.take_pty_writes() {
             self.answered.extend_from_slice(&reply);
-            self.pty.write(&reply).unwrap();
+            self.pty.reply(&reply).unwrap();
         }
     }
 
@@ -181,15 +182,17 @@ impl Probe {
                 return;
             }
             let silent_for = self.last_output.elapsed();
-            assert!(
-                silent_for < SILENCE_BUDGET && self.started.elapsed() < CEILING,
-                "gave up waiting for {needle} after {:?}, the last {:?} of it silent, \
-                 {} bytes read; screen {:?}",
-                self.started.elapsed(),
-                silent_for,
-                self.raw.len(),
-                self.session.terminal().visible_text()
-            );
+            if silent_for >= SILENCE_BUDGET || self.started.elapsed() >= CEILING {
+                panic!(
+                    "gave up waiting for {needle} after {:?}, the last {:?} of it silent, \
+                     {} bytes read; {}; screen {:?}",
+                    self.started.elapsed(),
+                    silent_for,
+                    self.raw.len(),
+                    self.pty.account(),
+                    self.session.terminal().visible_text()
+                );
+            }
             std::thread::sleep(Duration::from_millis(2));
         }
     }
