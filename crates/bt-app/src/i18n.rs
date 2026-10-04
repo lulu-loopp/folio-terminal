@@ -2943,7 +2943,12 @@ text_entries! {
     VersionAvailable,
     VersionDownloading,
     VersionManaged,
+    /// A failed update that stopped before anything installed moved (`update_card::Outcome::NothingChanged`).
     VersionFailed,
+    /// A failed update whose replaced files were put back (`update_card::Outcome::Restored`).
+    VersionFailedRestored,
+    /// A failed update whose rollback did not finish (`update_card::Outcome::Incomplete`).
+    VersionFailedIncomplete,
     VersionLastChecked,
     VersionNeverChecked,
     VersionJustNow,
@@ -5651,7 +5656,7 @@ impl Text {
             Self::VersionCheck => pick(lang, "Check", "检查"),
             Self::VersionUpdateAndRestart => pick(lang, "Update and restart", "更新并重启"),
             Self::VersionCopyCommand => pick(lang, "Copy command", "复制命令"),
-            Self::VersionRetry => pick(lang, "Retry", "再试"),
+            Self::VersionRetry => pick(lang, "Retry", "重试"),
             Self::VersionOpenReleases => pick(lang, "Open the release page", "打开发布页"),
             Self::VersionWhatsNew => pick(lang, "What's new", "改了什么 ↗"),
             Self::VersionDetails => pick(lang, "Details", "详情"),
@@ -5664,8 +5669,18 @@ impl Text {
             ),
             Self::VersionFailed => pick(
                 lang,
-                "{version} wasn't installed. This version was restored.",
-                "{version} 未装上，已恢复当前版本。",
+                "{version} was not installed.",
+                "{version} 未成功安装。",
+            ),
+            Self::VersionFailedRestored => pick(
+                lang,
+                "{version} was not installed. The previous version was restored.",
+                "{version} 安装未成功，已恢复旧版。",
+            ),
+            Self::VersionFailedIncomplete => pick(
+                lang,
+                "The update to {version} is incomplete.",
+                "{version} 的更新未完成。",
             ),
             Self::VersionLastChecked => pick(lang, "Last checked: {when}", "上次检查：{when}"),
             Self::VersionNeverChecked => pick(lang, "Never", "从未"),
@@ -6138,13 +6153,6 @@ pub fn version_managed_in(lang: Lang, version: &str, command: &str) -> String {
         .in_lang(lang)
         .replace("{version}", version)
         .replace("{command}", command)
-}
-
-#[must_use]
-pub fn version_failed_in(lang: Lang, version: &str) -> String {
-    Text::VersionFailed
-        .in_lang(lang)
-        .replace("{version}", version)
 }
 
 /// **The elapsed-time form About → Version's "Last checked" line names** —

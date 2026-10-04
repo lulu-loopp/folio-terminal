@@ -4922,6 +4922,15 @@ pub fn spawn_place(
     inherited: Option<PathBuf>,
     environment: &dyn ShellEnvironment,
 ) -> SpawnPlace {
+    // **A folder that is no longer a directory is no folder** (T-RESTART-CWD round 2). Every
+    // shell started in a pane's place comes through here — `Restart shell`, a split, a duplicate,
+    // a revived tab, a Recent row — and the folder it carries may have been deleted since it was
+    // reported or since the pane was born. Handed on as it stands, `bt-pty`'s boundary check would
+    // start the shell in *this process's* directory (`C:\WINDOWS\system32` for a shortcut
+    // launch); answered here, it falls to what no folder falls to for this profile — its own
+    // starting directory or the account's home. The check is `revived_cwd`'s, the one a restore
+    // already made, so a WSL folder, which Windows cannot see, is taken at its word.
+    let inherited = inherited.and_then(|cwd| revived_cwd(profile, &cwd));
     let (start_at, starting_dir, namespace) = with_table(|table| {
         table.get(profile).map_or_else(
             || {
@@ -4989,8 +4998,13 @@ fn place_for(
             }
         }
         StartingDir::LauncherFlag { flag, home } => {
-            let at_shell_home = place.is_none();
+            // **The launcher is told its home whether the place was missing or *was* the home
+            // mark** (T-RESTART-CWD round 2). A pane put down at `~` stands at `~` until its shell
+            // reports, so a restart, a split, a duplicate, a saved session and a Recent row all
+            // carry `~` on — and `--cd ~` is the same launch as no place at all, so the pane's
+            // first report is the answer to `~` in both.
             let directory = place.unwrap_or_else(|| PathBuf::from(home.clone()));
+            let at_shell_home = directory == Path::new(home);
             SpawnPlace {
                 working_directory: None,
                 arguments: vec![
@@ -17455,16 +17469,14 @@ mod tests {
     #[test]
     fn an_inherited_directory_is_told_to_the_launcher_that_can_read_it() {
         let machine = FakeMachine::default().with_var("USERPROFILE", r"C:\Users\dev");
+        // A directory that exists: since T-RESTART-CWD round 2 one that does not is no folder.
+        let here = std::env::temp_dir();
         assert_eq!(
-            spawn_place(
-                index_of_id("pwsh"),
-                Some(PathBuf::from(r"D:\Developer")),
-                &machine
-            ),
+            spawn_place(index_of_id("pwsh"), Some(here.clone()), &machine),
             SpawnPlace {
-                working_directory: Some(PathBuf::from(r"D:\Developer")),
+                working_directory: Some(here.clone()),
                 arguments: Vec::new(),
-                directory: Some(PathBuf::from(r"D:\Developer")),
+                directory: Some(here.clone()),
                 at_shell_home: false,
             },
             "a Windows process is simply started there"
@@ -17483,6 +17495,71 @@ mod tests {
                 at_shell_home: false,
             },
             "the launcher is told the place, in the namespace the shell reads"
+        );
+    }
+
+    /// RED (T-RESTART-CWD round 2, finding 1) — **a folder that is no longer a directory starts
+    /// the shell where no folder would**, never in this process's own directory.
+    ///
+    /// `Restart shell`, a split, a duplicate and a revived tab all hand `spawn_place` the folder
+    /// the pane stood in, and it may have been deleted since. Handed on as it stood, `bt-pty`'s
+    /// boundary check started the shell in Folio's own process directory (`C:\WINDOWS\system32`
+    /// for a shortcut launch). A WSL folder cannot be checked from Windows and is taken at its
+    /// word, as a restore already takes it.
+    ///
+    /// MUTATION, observed red: drop the `revived_cwd` filter from `spawn_place` — the deleted
+    /// folder is handed on as the working directory.
+    #[test]
+    fn a_folder_that_is_no_longer_a_directory_starts_the_shell_where_no_folder_would() {
+        let home = r"C:\Users\dev";
+        let machine = FakeMachine::default().with_var("USERPROFILE", home);
+        let live = std::env::temp_dir();
+        let gone = live.join("folio-restart-cwd-no-such-directory");
+        for id in ["pwsh", "gitbash", "cmd"] {
+            let profile = index_of_id(id);
+            assert_eq!(
+                spawn_place(profile, Some(live.clone()), &machine).working_directory,
+                Some(live.clone()),
+                "{id}: a folder that is there is where the shell starts"
+            );
+            assert_eq!(
+                spawn_place(profile, Some(gone.clone()), &machine),
+                spawn_place(profile, None, &machine),
+                "{id}: a folder that is gone is answered as no folder"
+            );
+            assert_eq!(
+                spawn_place(profile, Some(gone.clone()), &machine).working_directory,
+                Some(PathBuf::from(home))
+            );
+        }
+        let unseen = PathBuf::from("/mnt/d/folio-restart-cwd-no-such-directory");
+        assert_eq!(
+            spawn_place(index_of_id("wsl"), Some(unseen.clone()), &machine).directory,
+            Some(unseen),
+            "a WSL folder is taken at its word: Windows cannot see it to check"
+        );
+    }
+
+    /// RED (T-RESTART-CWD round 2, finding 3) — **a place equal to the launcher's home mark is
+    /// the shell's home**, so a pane put down at `~` and started again with `~` (a restart, a
+    /// split, a duplicate, a saved session, a session file an earlier build wrote) keeps reading
+    /// its first OSC 7 as the answer to `~`.
+    ///
+    /// MUTATION, observed red: answer `at_shell_home` with `place.is_none()` again — `~` handed
+    /// on is a launch with the mark lost.
+    #[test]
+    fn a_place_that_is_the_launchers_home_mark_is_the_shells_home() {
+        let machine = FakeMachine::default().with_var("USERPROFILE", r"C:\Users\dev");
+        let wsl = index_of_id("wsl");
+        assert_eq!(
+            spawn_place(wsl, Some(PathBuf::from("~")), &machine),
+            spawn_place(wsl, None, &machine),
+            "`--cd ~` is the same launch as no place at all"
+        );
+        assert!(spawn_place(wsl, Some(PathBuf::from("~")), &machine).at_shell_home);
+        assert!(
+            !spawn_place(wsl, Some(PathBuf::from("/home/alice/src")), &machine).at_shell_home,
+            "a folder the pane inherited is not its home"
         );
     }
 

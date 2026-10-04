@@ -467,7 +467,10 @@ impl<'a> Scripts<'a> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ShellCommand {
     pub arguments: Vec<OsString>,
+    /// Folio's terminal and integration declarations.
     pub environment: Vec<(OsString, OsString)>,
+    /// The selected profile's final environment layer.
+    pub profile_environment: Vec<(OsString, OsString)>,
 }
 
 /// The whole argument list and environment for one leaf of `profile`, with the
@@ -550,7 +553,7 @@ pub fn shell_command_for_program(
     if profile.paths == profiles::PathNamespace::Wsl {
         forward_into_wsl(&mut command.environment, mine);
     }
-    layer_profile_environment(&mut command.environment, mine);
+    layer_profile_environment(&mut command.profile_environment, mine);
     command
 }
 
@@ -698,7 +701,7 @@ pub fn layer_profile_environment(
             .iter_mut()
             .find(|(existing, _)| environment_name_eq(existing, &name))
         {
-            Some((_, existing)) => *existing = value,
+            Some(existing) => *existing = (name, value),
             None => environment.push((name, value)),
         }
     }
@@ -831,6 +834,7 @@ fn shell_command_for(
                 ShellCommand {
                     arguments,
                     environment: installed_environment(login),
+                    profile_environment: Vec::new(),
                 }
             }
             // WSL: `wsl.exe` is a launcher, so the shell and its flag come
@@ -867,6 +871,7 @@ fn shell_command_for(
                 profiles::PathNamespace::Windows => ShellCommand {
                     arguments: own(),
                     environment: zdotdir_environment(zdotdir.as_os_str().to_owned(), environment),
+                    profile_environment: Vec::new(),
                 },
                 // Under WSL the launcher is handed the question, and the
                 // directory has to be named in the distribution's own spelling
@@ -880,10 +885,12 @@ fn shell_command_for(
                 OsString::from(CMD_PROMPT),
                 cmd_prompt(environment.var_os(CMD_PROMPT)),
             )],
+            profile_environment: Vec::new(),
         },
         _ => ShellCommand {
             arguments: own(),
             environment: Vec::new(),
+            profile_environment: Vec::new(),
         },
     }
 }
@@ -911,6 +918,7 @@ fn wsl_command(scripts: Scripts<'_>, own: &dyn Fn() -> Vec<OsString>) -> ShellCo
         return ShellCommand {
             arguments: own(),
             environment: Vec::new(),
+            profile_environment: Vec::new(),
         };
     }
     ShellCommand {
@@ -931,6 +939,7 @@ fn wsl_command(scripts: Scripts<'_>, own: &dyn Fn() -> Vec<OsString>) -> ShellCo
             )
             .collect(),
         environment: crossing_environment(),
+        profile_environment: Vec::new(),
     }
 }
 
@@ -2462,12 +2471,12 @@ mod tests {
         // One function, in the crate that spawns, naming all four and no platform.
         let region = crate::source_pin::code_of(crate::source_pin::source_region(
             include_str!("../../bt-pty/src/lib.rs"),
-            "fn resolved_environment(&self)",
+            "fn resolved_environment_layers(&self)",
         ));
         for name in DECLARED {
             assert!(
                 region.contains(&format!("\"{name}\"")),
-                "`resolved_environment` no longer declares {name}"
+                "`resolved_environment_layers` no longer declares {name}"
             );
         }
         assert!(
@@ -3454,16 +3463,18 @@ mod tests {
 
     fn value_of(command: &ShellCommand, name: &str) -> Option<String> {
         command
-            .environment
+            .profile_environment
             .iter()
+            .chain(&command.environment)
             .find(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(name))
             .map(|(_, value)| value.to_string_lossy().into_owned())
     }
 
     fn spelled(command: &ShellCommand, name: &str) -> usize {
         command
-            .environment
+            .profile_environment
             .iter()
+            .chain(&command.environment)
             .filter(|(key, _)| key.to_string_lossy().eq_ignore_ascii_case(name))
             .count()
     }

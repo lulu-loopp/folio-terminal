@@ -47,11 +47,11 @@ drop the test items; a number that moves edits this table and the pictures.
 
 | what | count | pattern |
 |---|---|---|
-| thread-spawn sites | **50** — `bt-app` 33, `bt-platform` 13, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
-| through the thread door | **46** — `bt-app` 33, `bt-platform` 13; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c; U-13's `folio-trial-watch`, T-KEYBOARD-CTRLALT's `folio-layout-tables`, and T-UNINSTALL-UX's `folio-remover-ready` joined). A source guard holds both crates to it (the assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` of `hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e) | `spawn_at_priority` |
+| thread-spawn sites | **52** — `bt-app` 35, `bt-platform` 13, `bt-pty` 4 — plus **one** rayon pool, `bt-term::inline_image::resample_pool` (`bt-image-resample-{index}`) | `spawn_at_priority(_with_stack)?\(`, `thread::spawn\(`, `thread::Builder::new\(\)`, `ThreadPoolBuilder::new\(\)` |
+| through the thread door | **48** — `bt-app` 35, `bt-platform` 13; each is a `Worker` by its name and its body is lent a `WorkerCtx` (A1b, A1c; U-13's `folio-trial-watch`, T-KEYBOARD-CTRLALT's `folio-layout-tables`, T-UNINSTALL-UX's `folio-remover-ready`, and T-ENV-REFRESH's two spawn workers joined). A source guard holds both crates to it (the assertion `every_thread_bt_app_and_bt_platform_start_comes_through_the_thread_door` of `hang_watch::window_waits_tests::every_door_is_where_the_registry_says`, since A1e) | `spawn_at_priority` |
 | bare spawns | **4**, all in `bt-pty` and `Unset` by design: the reader, the writer, the dump publisher (unnamed) and `pty-retirement` | `thread::spawn\(`, `thread::Builder::new\(\)` |
 | of those through the door, in a door process rather than the window process | **4**: `folio-attention-stdin` (`attention_wire::payload_on_stdin`), `folio-explorer-removal` (`explorer_menu::remove_from_explorer_menu`), `folio-explorer-cleanup` (`explorer_menu::cleanup_registrations`), and `folio-remover-ready` (`deferred_removal::schedule`'s readiness pipe); each process's main thread waits as a worker, entered once through `enter_standalone_main`. The uninstaller and copied-remover doors enter once for their whole runs, so their process waits and retry backoff through `wait::sleep_within` are workers' waits too | `enter_standalone_main\(` |
-| named sites / distinct names | **47 / 42**, besides the pool | the first argument, or `.name(…)` |
+| named sites / distinct names | **49 / 44**, besides the pool | the first argument, or `.name(…)` |
 | `spawn_blocking` | **0** — there is no async runtime | `spawn_blocking` |
 | channel constructions | **34** — 28 `mpsc::channel`, 6 `mpsc::sync_channel`; `bt-app` 27 (T-KEYBOARD-CTRLALT adds the layout-table request and answer pair), `bt-platform` 7 (T-UNINSTALL-UX adds the remover readiness pipe) — and **6** `Condvar::new` (`bt-pty` 3, `bt-platform` 2, `bt-app` 1); no other channel crate | `(sync_)?channel(::<…>)?\(`, `Condvar::new\(` |
 | `AppEvent` variants | **34** (T-KEYBOARD-CTRLALT added `LayoutTablesReady`; U-3 added `InstallChannelRead`, U-13 `TrialWritesReleased`, U-18 `UpdateJobOffer` and `UpdateJobProgress`, §5, §10) | `enum AppEvent` in `main.rs` |
@@ -521,7 +521,7 @@ does not have to find it later.
 
 ### 5.1 The seven lanes
 
-Fifty production thread-spawn sites exist across three crates (`bt-app` 33,
+Fifty-two production thread-spawn sites exist across three crates (`bt-app` 35,
 `bt-platform` 13, `bt-pty` 4), plus one lazy rayon pool in `bt-term` (§0.1).
 All but `bt-pty`'s four go through the thread door (0.4.6, A1c). **The thread count is not the defect; the absence of a contract
 is.** `MathWorker::spawn` starts path verification and image scaling as well as
@@ -550,6 +550,14 @@ The seams that already implement this shape: `bt-app::main::run_path_verify_work
 coalescing, completion as the door's own `Result`),
 `bt-pty::PtySession`, `bt-app::persist::SessionWriter`,
 `bt-app::trace_sink::Queue`, `bt-app::main::Runtime::present_seats_and_commit`.
+
+**A shell birth has two short-lived workers** (T-ENV-REFRESH). At process
+startup `bt-environment-snapshot` captures one fresh current-user environment;
+the first `bt-pty-birth` worker joins that snapshot worker, and every birth
+worker asks the platform again, composes the child block, and owns PTY/process
+creation. The window thread enters the existing `PtyBirth` admission and joins
+the birth worker; it never calls the environment door. On non-Windows hosts the
+door returns no block and `bt-pty` retains ordinary process inheritance.
 
 **The storage worker has a second job** (0.4.6 U-13): besides `session.json`, the
 `SessionWriter` thread (`session-writer`) writes an update trial's receipt,
@@ -834,7 +842,7 @@ A2e puts one `expect` on each; revision (k) allocates the rest.
 | 8 | open | `bt-platform::macos_watch::DirWatch::start_scoped` and, on Windows, `windows_impl::DirWatch::start_scoped` wait on `listening.recv()` with no deadline and join the watcher on their refusal arm; each `Drop` does `SetEvent` then an unbounded `join()` | the watch subscriptions: `DirNews::arm` (the scheme and storage watches, from `Runtime::create`; the scheme watch again from `Runtime::add_scheme`), and the `subscribe` roads of `files_watch`, `git_watch` and `preview_watch` (from `Runtime::advance_files_watch`, `advance_git_watch`, `advance_preview_watch` and `ask_the_unwatched_preview_files`); both platforms by the thread-door note's revision (l) | **0.4.4** — make watcher start and retirement asynchronous |
 | 9 | open | surface acquire, queue submit, swapchain present, surface configure, DirectComposition size and commit | `Runtime::present_seats_and_commit` | **0.5** — presentation lane; the present mode itself comes from `get_default_config` and has no owner |
 | 10 | open | device recovery's `pollster::block_on(rebuild_after_device_loss)` plus deliberate 150 ms and 450 ms sleeps across three attempts | `FolioApp::recovered_from_a_lost_device` | **0.5** — an explicit asynchronous state machine |
-| 11 | open | `CreatePseudoConsole` + `CreateProcessW`, and a `stat` of the working directory | `create_leaf_session` → `PtySession::spawn_shell_in` | **0.5→0.6** — session lane, preserving input and resize ordering |
+| 11 | open | joining the `bt-pty-birth` worker, which owns `CreatePseudoConsole` + `CreateProcessW`, the working-directory `stat`, and the fresh-logon environment read | `create_leaf_session` → `pty_door::spawn_shell` | **0.5→0.6** — process birth is off the window thread; the admitted synchronous join remains until the session lane preserves input and resize ordering |
 | 12 | open | the synchronous `ResizePseudoConsole` round trip | `Runtime::flush_pending_pty_resize` | **0.5→0.6** — session lane; moving it must preserve the ordering this function represents |
 | 13 | done | `sample_window_place` — 4 to 8 syscalls, at three call sites for one instant | `drain_pty`, `advance_strip_animation`, `FolioApp::user_event` | **done** — *where the window is gets asked once per turn, at the turn's head; the drain and the strip tick read that answer* (`DESIGN.md`, 2026-09-24); one writer, `Runtime::observe_window_place`, also called at a window's birth and by an attention delivery between turns; each probe has its own station |
 | 14 | done | `Window::set_title` at five call sites with no throttle | `drain_pty`, `activate_tab`, `dress_new_window`, `finish_synchronized_update_if_due`, `finish_rename` | **done** — *the window's title is one wanted value, written to the system only when it changes and at most once a frame* (`DESIGN.md`, 2026-09-24); the one remaining call is `Runtime::flush_title`, on this thread by §5.2 |
@@ -865,7 +873,7 @@ A2e puts one `expect` on each; revision (k) allocates the rest.
 | `CompositorBirth` | 9 | `CompositorBirth` | Running | `bt_platform::Compositor::new`, `bt_platform::spare_parent` | `Runtime::create`, `Runtime::open_window`, `Runtime::make_spare_web_controller` | the tree and its commit |
 | `CompositorWindowSize` | 9 | `CompositorWindowSize` | Running, Exiting | `bt_platform::Compositor::set_window_size` | `Runtime::resize` | the ground and its commit |
 | `SurfaceBirth` | 9 | `SurfaceConfigure` | Running | `WindowRenderer::new` | `Runtime::open_window` | the surface and its configure |
-| `PtyBirth` | 11 | `PtyBirth` | Running, Exiting | `pty_door::spawn_shell` (`PtySession::spawn_shell_in`) | `create_leaf_session` | one call |
+| `PtyBirth` | 11 | `PtyBirth` | Running, Exiting | `pty_door::spawn_shell` (join of `bt-pty-birth`) | `create_leaf_session` | one call |
 | `PtyResize` | 12 | `PtyResize` | Running, Exiting | `pty_door::resize` (`PtySession::resize`) | `commit_leaf_resize` | one call per leaf |
 | `PlaceHidden` | 13 | `PlaceHidden` | Running, Exiting | `window_is_hidden` | `sample_window_place` | one call |
 | `PlaceExposure` | 13 | `PlaceExposure` | Running, Exiting | `window_is_exposed` | `sample_window_place` | one call |

@@ -19761,7 +19761,6 @@ mod tests {
         let mut version_values = vec![
             line(crate::i18n::version_available_in(Lang::English, tag)),
             line(crate::i18n::version_downloading_in(Lang::English, tag)),
-            line(crate::i18n::version_failed_in(Lang::English, tag)),
             line(crate::i18n::version_last_checked_in(Lang::English, 0, now)),
             line(crate::i18n::version_last_checked_in(
                 Lang::English,
@@ -19784,6 +19783,19 @@ mod tests {
                 now,
             )),
         ];
+        for outcome in [
+            crate::update_card::Outcome::NothingChanged,
+            crate::update_card::Outcome::Restored,
+            crate::update_card::Outcome::Incomplete {
+                folder: std::path::PathBuf::new(),
+            },
+        ] {
+            version_values.push(line(crate::update_card::version_failed_in(
+                Lang::English,
+                &outcome,
+                tag,
+            )));
+        }
         for manager in [
             crate::install_channel::Manager::Scoop,
             crate::install_channel::Manager::Homebrew,

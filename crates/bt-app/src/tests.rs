@@ -21030,7 +21030,7 @@ fn the_tab_menus_subject_is_an_id_resolved_when_the_verb_runs() {
     assert!(
         duplicate.contains("state.focused()")
             && duplicate.contains("leaf.profile")
-            && duplicate.contains("leaf.session.working_directory()"),
+            && duplicate.contains("leaf.place_for_a_new_shell()"),
         "both facts come off one leaf of the tab the menu names"
     );
     assert!(
@@ -24948,10 +24948,139 @@ fn a_restart_carries_the_seats_own_profile_and_its_last_reported_folder() {
         "a pane that is running has a profile this build has"
     );
 
-    // A shell that never said where it stood is an absence, not a fallback:
-    // `spawn_place` answers `None` with the profile's own starting
-    // directory, which is what a brand-new pane on that profile gets.
+    // A pane with no place at all is an absence, not a fallback: `spawn_place`
+    // answers `None` with the profile's own starting directory, which is what a
+    // brand-new pane on that profile gets.
     assert_eq!(restart_seed(profile, None).cwd, None);
+}
+
+/// RED (T-RESTART-CWD, 2026-10-04) — **a pane whose shell never reported a
+/// folder is started again where it was born** (`docs/M2-restart-shell-contract.md`
+/// §1.1: 无上报则该 seat 的初始 cwd).
+///
+/// `Restart shell` read only the shell's OSC 7 report, so a pane opened by
+/// `New terminal in folder…` (or split off into a folder) whose shell has no
+/// integration restarted at its profile's default folder. The ladder is
+/// [`LeafSession::place_for_a_new_shell`]: the report, else the folder the
+/// spawn put the shell down in, except the shell's-own-home mark, which is
+/// handed on as nothing so the next spawn asks for the home again.
+///
+/// MUTATIONS, each observed red: drop the spawn rung (answer `None` after the
+/// report) — the first assertion; read the spawn rung before the report — the
+/// second; drop the shell's-home exception — the third.
+#[test]
+fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
+    let born_in = PathBuf::from(r"D:\Projects\chosen-folder");
+
+    let silent = LeafSession {
+        spawn_place: Some(born_in.clone()),
+        ..leaf_saying("no report from this shell")
+    };
+    assert_eq!(
+        restart_seed(&silent.profile, silent.place_for_a_new_shell().as_deref()).cwd,
+        Some(born_in.clone()),
+        "the folder the pane was born in, not the profile's default"
+    );
+
+    let reported = LeafSession {
+        spawn_place: Some(born_in.clone()),
+        ..leaf_saying("\u{1b}]7;file://localhost/D:/Developer/folio-terminal\u{7}")
+    };
+    assert_eq!(
+        reported.place_for_a_new_shell(),
+        Some(PathBuf::from(r"D:\Developer\folio-terminal")),
+        "a report is the first rung and beats where the shell was born"
+    );
+
+    // A WSL pane put down at its shell's home hands its mark on; `profiles::place_for` reads a
+    // place equal to the home mark as the shell's home (round 2), pinned in `profiles::tests`.
+    let at_home = LeafSession {
+        spawn_place: Some(PathBuf::from("~")),
+        ..leaf_saying("no report from this shell either")
+    };
+    assert_eq!(at_home.place_for_a_new_shell(), Some(PathBuf::from("~")));
+}
+
+/// RED (T-RESTART-CWD round 2, finding 2) — **a leaf records where its shell was born in the
+/// namespace of the profile that actually started.**
+///
+/// `bt-pty` falls back once to the last-resort shell when the profile's program will not start,
+/// and `create_leaf_session` then makes the leaf the fallback profile — while its `spawn_place`
+/// was resolved for the profile that was asked for. A WSL pane that came up as PowerShell held
+/// `/mnt/d/Projects`, which the ladder now hands to the next PowerShell.
+///
+/// MUTATION, observed red: return the place and the mark unchanged after a swap — the WSL
+/// spelling and the launcher's mark stay on a PowerShell leaf.
+#[test]
+fn a_shell_that_fell_back_records_its_birth_place_in_its_own_namespace() {
+    let (wsl, fallback) = ("wsl", profiles::fallback_profile_id());
+    assert_eq!(
+        birth_place_of_the_started_shell(
+            wsl,
+            fallback,
+            Some(PathBuf::from("/mnt/d/Projects")),
+            false
+        ),
+        (Some(PathBuf::from(r"D:\Projects")), false),
+        "crossed into the started profile's spelling"
+    );
+    assert_eq!(
+        birth_place_of_the_started_shell(wsl, fallback, Some(PathBuf::from("~")), true),
+        (None, false),
+        "the launcher's home mark has no spelling there, and no mark goes with it"
+    );
+    assert_eq!(
+        birth_place_of_the_started_shell(wsl, wsl, Some(PathBuf::from("~")), true),
+        (Some(PathBuf::from("~")), true),
+        "no swap, nothing changes"
+    );
+    let spawn = free_fn_body("create_leaf_session");
+    let swapped = spawn
+        .find("let profile = if let Some(fallback) = &shell_fallback {")
+        .expect("the swap");
+    let said = spawn
+        .find("birth_place_of_the_started_shell(spawn_profile, &profile, spawn_place, place.at_shell_home)")
+        .expect("the birth place is said for the started profile");
+    let told = spawn
+        .find("session.set_spawn_at_shell_home(at_shell_home);")
+        .expect("and the session is told the mark that goes with it");
+    assert!(swapped < said && said < told, "{spawn}");
+}
+
+/// RED (T-RESTART-CWD round 2, finding 3) — **the session save writes the one ladder**, the
+/// one every shell started in a pane's place reads.
+///
+/// MUTATION, observed red: write `working_directory().or(spawn_place)` inline again.
+#[test]
+fn the_session_save_writes_the_one_ladder() {
+    let save = method_body("TabState", "term_leaf");
+    assert!(
+        save.contains(".and_then(LeafSession::place_for_a_new_shell)")
+            && !save.contains("spawn_place"),
+        "{save}"
+    );
+}
+
+/// RED (T-RESTART-CWD, 2026-10-04) — **every verb that starts a shell in a
+/// pane's place reads the one ladder**: `Restart shell`, every split (which
+/// is `Duplicate pane` and `Split with`), and `Duplicate tab`.
+///
+/// Those verbs spawn a ConPTY and cannot run here, so this is their bodies, read
+/// through `bt_source`.
+///
+/// MUTATION, observed red: put `leaf.session.working_directory()` back in any one
+/// of the three bodies.
+#[test]
+fn every_verb_that_starts_a_shell_in_a_panes_place_reads_the_one_ladder() {
+    for door in ["restart_shell", "split_seat", "duplicate_tab"] {
+        let body = method_body("Runtime", door);
+        assert!(
+            body.contains("leaf.place_for_a_new_shell()")
+                && !body.contains("session.working_directory()"),
+            "`{door}` reads where the pane stands through \
+             `LeafSession::place_for_a_new_shell`:\n{body}"
+        );
+    }
 }
 
 /// PIN (ticket #62) — **`Clear scrollback…` asks by count, and asks nothing
@@ -55196,6 +55325,7 @@ fn every_owner_door_takes_its_own_token_by_value() {
         WaitToken<'_, doors::PtyBirth>,
         OsString,
         &[OsString],
+        &[(OsString, OsString)],
         &[(OsString, OsString)],
         PtySize,
         OutputWake,

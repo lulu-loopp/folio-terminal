@@ -22,6 +22,8 @@ use portable_pty::{
 };
 use thiserror::Error;
 
+type EnvironmentPairs = Vec<(OsString, OsString)>;
+
 // The build script's ConPTY sidecar unpacking, compiled here only so its tests run: `build.rs`
 // reaches the same file by `#[path]`, and nothing of it ships in this library.
 #[cfg(test)]
@@ -890,6 +892,8 @@ pub struct PtyCommand {
     pub arguments: Vec<OsString>,
     pub working_directory: Option<PathBuf>,
     pub environment: Vec<(OsString, OsString)>,
+    profile_environment: Vec<(OsString, OsString)>,
+    environment_refresh: Option<EnvironmentRefresh>,
     declare_color_support: bool,
     /// A command line the program parses for itself, written into the launcher's
     /// command line verbatim — see [`PtyCommand::interpreter_line`]. `None` for
@@ -905,6 +909,8 @@ impl PtyCommand {
             arguments: Vec::new(),
             working_directory: None,
             environment: Vec::new(),
+            profile_environment: Vec::new(),
+            environment_refresh: None,
             declare_color_support: false,
             interpreter_line: None,
         }
@@ -934,17 +940,17 @@ impl PtyCommand {
     }
 
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
-        let key = key.into();
-        let value = value.into();
-        if let Some((_, existing_value)) = self
-            .environment
-            .iter_mut()
-            .find(|(existing_key, _)| environment_key_eq(existing_key, &key))
-        {
-            *existing_value = value;
-        } else {
-            self.environment.push((key, value));
-        }
+        upsert_environment(&mut self.environment, key.into(), value.into());
+        self
+    }
+
+    fn profile_env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        upsert_environment(&mut self.profile_environment, key.into(), value.into());
+        self
+    }
+
+    fn refresh_environment(mut self, refresh: EnvironmentRefresh) -> Self {
+        self.environment_refresh = Some(refresh);
         self
     }
 
@@ -992,6 +998,7 @@ impl PtyCommand {
     fn command_has_no_color(&self) -> bool {
         self.environment
             .iter()
+            .chain(&self.profile_environment)
             .any(|(key, _)| environment_key_eq(key, OsStr::new("NO_COLOR")))
     }
 
@@ -1000,12 +1007,13 @@ impl PtyCommand {
     /// explicit values win. A caller that explicitly sets `NO_COLOR` opts out of the color
     /// declarations. An *inherited* `NO_COLOR` does not suppress them — it is stripped instead,
     /// see `strips_inherited_no_color`.
-    fn resolved_environment(&self) -> Vec<(OsString, OsString)> {
+    fn resolved_environment_layers(&self) -> (EnvironmentPairs, EnvironmentPairs) {
         let command_has_no_color = self.command_has_no_color();
         let mut environment = Vec::with_capacity(self.environment.len() + 4);
         if !self
             .environment
             .iter()
+            .chain(&self.profile_environment)
             .any(|(key, _)| environment_key_eq(key, OsStr::new("TERM_PROGRAM")))
         {
             environment.push(("TERM_PROGRAM".into(), TERM_PROGRAM.into()));
@@ -1013,6 +1021,7 @@ impl PtyCommand {
         if !self
             .environment
             .iter()
+            .chain(&self.profile_environment)
             .any(|(key, _)| environment_key_eq(key, OsStr::new("TERM_PROGRAM_VERSION")))
         {
             environment.push(("TERM_PROGRAM_VERSION".into(), TERM_PROGRAM_VERSION.into()));
@@ -1021,6 +1030,7 @@ impl PtyCommand {
             if !self
                 .environment
                 .iter()
+                .chain(&self.profile_environment)
                 .any(|(key, _)| environment_key_eq(key, OsStr::new("COLORTERM")))
             {
                 environment.push(("COLORTERM".into(), "truecolor".into()));
@@ -1028,13 +1038,14 @@ impl PtyCommand {
             if !self
                 .environment
                 .iter()
+                .chain(&self.profile_environment)
                 .any(|(key, _)| environment_key_eq(key, OsStr::new("TERM")))
             {
                 environment.push(("TERM".into(), "xterm-256color".into()));
             }
         }
         environment.extend(self.environment.iter().cloned());
-        environment
+        (environment, self.profile_environment.clone())
     }
 
     /// A color-capable interactive shell must not inherit a `NO_COLOR` that was aimed at the
@@ -1045,6 +1056,65 @@ impl PtyCommand {
     /// shell, after this strip, and wins).
     fn strips_inherited_no_color(&self) -> bool {
         self.declare_color_support && !self.command_has_no_color()
+    }
+}
+
+/// The three process-level inputs captured by the app's spawn worker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EnvironmentRefresh {
+    fresh: Vec<(OsString, OsString)>,
+    launch_snapshot: Vec<(OsString, OsString)>,
+    inherited: Vec<(OsString, OsString)>,
+}
+
+impl EnvironmentRefresh {
+    #[must_use]
+    pub fn new(
+        fresh: Vec<(OsString, OsString)>,
+        launch_snapshot: Vec<(OsString, OsString)>,
+        inherited: Vec<(OsString, OsString)>,
+    ) -> Self {
+        Self {
+            fresh,
+            launch_snapshot,
+            inherited,
+        }
+    }
+}
+
+/// Compose the complete environment for one child while preserving source order.
+#[must_use]
+pub fn spawn_environment(
+    fresh: &[(OsString, OsString)],
+    launch_snapshot: &[(OsString, OsString)],
+    inherited: &[(OsString, OsString)],
+    folio_vars: &[(OsString, OsString)],
+    profile_env: &[(OsString, OsString)],
+) -> Vec<(OsString, OsString)> {
+    let mut environment = fresh.to_vec();
+    for (key, value) in inherited {
+        let launch_value = launch_snapshot
+            .iter()
+            .find(|(launch_key, _)| environment_key_eq(launch_key, key))
+            .map(|(_, launch_value)| launch_value);
+        if launch_value != Some(value) {
+            upsert_environment(&mut environment, key.clone(), value.clone());
+        }
+    }
+    for (key, value) in folio_vars.iter().chain(profile_env) {
+        upsert_environment(&mut environment, key.clone(), value.clone());
+    }
+    environment
+}
+
+fn upsert_environment(environment: &mut Vec<(OsString, OsString)>, key: OsString, value: OsString) {
+    if let Some(existing) = environment
+        .iter_mut()
+        .find(|(existing_key, _)| environment_key_eq(existing_key, &key))
+    {
+        *existing = (key, value);
+    } else {
+        environment.push((key, value));
     }
 }
 
@@ -1850,6 +1920,35 @@ impl PtySession {
             program,
             args,
             environment,
+            &[],
+            None,
+            size,
+            wake,
+            working_directory,
+            fall_back,
+        )
+    }
+
+    /// Start a named shell with the complete Windows refresh inputs supplied by its worker.
+    #[allow(clippy::too_many_arguments)]
+    pub fn spawn_refreshed(
+        program: impl Into<OsString>,
+        args: &[OsString],
+        folio_environment: &[(OsString, OsString)],
+        profile_environment: &[(OsString, OsString)],
+        refresh: EnvironmentRefresh,
+        size: PtySize,
+        wake: OutputWake,
+        working_directory: Option<PathBuf>,
+    ) -> Result<Self, PtyError> {
+        let program = program.into();
+        let fall_back = !program_is_the_last_resort_shell(&program);
+        Self::spawn_interactive(
+            program,
+            args,
+            folio_environment,
+            profile_environment,
+            Some(refresh),
             size,
             wake,
             working_directory,
@@ -1875,6 +1974,8 @@ impl PtySession {
             // through `spawn_shell_in` instead, because there the caller picked the program.
             &resolved.args.iter().map(OsString::from).collect::<Vec<_>>(),
             &[],
+            &[],
+            None,
             size,
             wake,
             working_directory,
@@ -1888,10 +1989,13 @@ impl PtySession {
     /// One function so the two doors cannot drift on the three things that are not about *which*
     /// shell — that a vanished working directory is survivable, that every shell gets the colour
     /// declarations, and what a fallback leaves behind for the window to say.
+    #[allow(clippy::too_many_arguments)]
     fn spawn_interactive(
         program: OsString,
         args: &[OsString],
-        environment: &[(OsString, OsString)],
+        folio_environment: &[(OsString, OsString)],
+        profile_environment: &[(OsString, OsString)],
+        environment_refresh: Option<EnvironmentRefresh>,
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
@@ -1921,10 +2025,19 @@ impl PtySession {
             Some(line) => command.interpreter_line(line),
             None => command,
         };
-        let command = environment
+        let command = folio_environment
             .iter()
             .fold(command, |command, (key, value)| command.env(key, value))
             .working_directory(working_directory.clone());
+        let command = profile_environment
+            .iter()
+            .fold(command, |command, (key, value)| {
+                command.profile_env(key, value)
+            });
+        let command = match environment_refresh.clone() {
+            Some(refresh) => command.refresh_environment(refresh),
+            None => command,
+        };
         match Self::spawn(command, size, wake.clone()) {
             Ok(session) => Ok(session),
             Err(spawn_error) if fall_back => {
@@ -1937,6 +2050,10 @@ impl PtySession {
                     Path::new(&program).display()
                 );
                 let fallback = PtyCommand::last_resort_shell().working_directory(working_directory);
+                let fallback = match environment_refresh {
+                    Some(refresh) => fallback.refresh_environment(refresh),
+                    None => fallback,
+                };
                 let mut session = Self::spawn(fallback, size, wake)?;
                 session.shell_fallback = Some(ShellFallback {
                     requested: program,
@@ -1960,7 +2077,16 @@ impl PtySession {
         let input_dump = input_dump.map(Mutex::new);
         let conpty_source = conpty_source();
         let strip_inherited_no_color = command.strips_inherited_no_color();
-        let environment = command.resolved_environment();
+        let (folio_environment, profile_environment) = command.resolved_environment_layers();
+        let environment = command.environment_refresh.as_ref().map(|refresh| {
+            spawn_environment(
+                &refresh.fresh,
+                &refresh.launch_snapshot,
+                &refresh.inherited,
+                &folio_environment,
+                &profile_environment,
+            )
+        });
         let pair = native_pty_system()
             .openpty(size.backend())
             .map_err(backend)?;
@@ -1973,10 +2099,21 @@ impl PtySession {
         }
         // Drop an inherited NO_COLOR before layering our declarations so the shell starts in a
         // color-capable environment regardless of how the terminal itself was launched.
-        if strip_inherited_no_color {
+        if environment.is_some() {
+            builder.env_clear();
+        } else if strip_inherited_no_color {
             builder.env_remove("NO_COLOR");
         }
-        for (key, value) in environment {
+        for (key, value) in environment.unwrap_or_else(|| {
+            let mut environment = folio_environment;
+            for (key, value) in profile_environment {
+                upsert_environment(&mut environment, key, value);
+            }
+            environment
+        }) {
+            if strip_inherited_no_color && environment_key_eq(&key, OsStr::new("NO_COLOR")) {
+                continue;
+            }
             builder.env(key, value);
         }
         #[cfg(windows)]
@@ -2309,6 +2446,112 @@ mod tests {
 
     use super::*;
     use bt_term::{DualPlaneSession, RESIZE_REQUEST_QUIET, TerminalAdapter, TerminalCursor};
+
+    fn environment(rows: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
+        rows.iter()
+            .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+            .collect()
+    }
+
+    fn composed_value<'a>(
+        environment: &'a [(OsString, OsString)],
+        name: &str,
+    ) -> Option<&'a OsStr> {
+        environment
+            .iter()
+            .find(|(key, _)| environment_key_eq(key, OsStr::new(name)))
+            .map(|(_, value)| value.as_os_str())
+    }
+
+    #[test]
+    fn fresh_environment_overlay_table() {
+        let fresh = environment(&[
+            ("PATH", r"C:\Windows"),
+            ("APPDATA", r"C:\Users\me\AppData\Roaming"),
+            ("FOLIO_LAYER", "fresh"),
+            ("PROFILE_LAYER", "fresh"),
+            ("CaseName", "fresh"),
+        ]);
+        let snapshot = environment(&[
+            ("PATH", r"C:\Windows"),
+            ("REMOVED", "old-machine"),
+            ("APPDATA", r"C:\Users\me\AppData\Roaming"),
+        ]);
+        let inherited = environment(&[
+            ("PATH", r"C:\Windows;C:\NewTool"),
+            ("REMOVED", "old-machine"),
+            ("APPDATA", r"D:\isolated\AppData"),
+            ("中文", "值=仍然完整"),
+        ]);
+        let folio = environment(&[("FOLIO_LAYER", "folio"), ("casename", "folio-case")]);
+        let profile = environment(&[("PROFILE_LAYER", "profile"), ("CASENAME", "profile-case")]);
+
+        let composed = spawn_environment(&fresh, &snapshot, &inherited, &folio, &profile);
+        assert_eq!(
+            composed_value(&composed, "PATH"),
+            Some(OsStr::new(r"C:\Windows;C:\NewTool")),
+            "MUTATION: taking fresh PATH loses a command installed after Folio opened"
+        );
+        assert_eq!(
+            composed_value(&composed, "REMOVED"),
+            None,
+            "MUTATION: restoring an unchanged inherited value resurrects a removed machine variable"
+        );
+        assert_eq!(
+            composed_value(&composed, "APPDATA"),
+            Some(OsStr::new(r"D:\isolated\AppData")),
+            "MUTATION: comparing no launch snapshot loses an isolated launch override"
+        );
+        assert_eq!(
+            composed_value(&composed, "FOLIO_LAYER"),
+            Some(OsStr::new("folio")),
+            "MUTATION: fresh written after Folio declarations wins incorrectly"
+        );
+        assert_eq!(
+            composed_value(&composed, "PROFILE_LAYER"),
+            Some(OsStr::new("profile")),
+            "MUTATION: profile environment written before fresh loses"
+        );
+        assert_eq!(
+            composed_value(&composed, "CASENAME"),
+            Some(OsStr::new("profile-case")),
+            "MUTATION: case-sensitive matching on Windows leaves contradictory names"
+        );
+        assert!(
+            composed
+                .iter()
+                .any(|(key, value)| key == "CASENAME" && value == "profile-case"),
+            "the winning source supplies the winning casing"
+        );
+        assert_eq!(
+            composed_value(&composed, "中文"),
+            Some(OsStr::new("值=仍然完整")),
+            "MUTATION: parsing or splitting a value at '=' damages Unicode data"
+        );
+    }
+
+    #[test]
+    fn the_spawn_seam_asks_the_compositor_instead_of_using_raw_inherited_environment() {
+        let command = PtyCommand::new("shell")
+            .env("FOLIO", "yes")
+            .refresh_environment(EnvironmentRefresh::new(
+                environment(&[("FRESH", "now")]),
+                environment(&[("OLD", "launch")]),
+                environment(&[("OLD", "launch")]),
+            ));
+        let (folio, profile) = command.resolved_environment_layers();
+        let refresh = command.environment_refresh.as_ref().expect("refresh seam");
+        let composed = spawn_environment(
+            &refresh.fresh,
+            &refresh.launch_snapshot,
+            &refresh.inherited,
+            &folio,
+            &profile,
+        );
+        assert_eq!(composed_value(&composed, "FRESH"), Some(OsStr::new("now")));
+        assert_eq!(composed_value(&composed, "OLD"), None);
+        assert_eq!(composed_value(&composed, "FOLIO"), Some(OsStr::new("yes")));
+    }
 
     // ── the resize cursor oracle, which is a PSReadLine measurement ─────────
     //
@@ -3042,7 +3285,7 @@ mod tests {
     fn powershell_declares_truecolor_environment_by_default() {
         let command = PtyCommand::powershell();
         assert!(command.strips_inherited_no_color());
-        let environment = command.resolved_environment();
+        let environment = command.resolved_environment_layers().0;
         assert_eq!(
             environment_value(&environment, "TERM_PROGRAM"),
             Some(std::ffi::OsStr::new("Folio"))
@@ -3065,7 +3308,7 @@ mod tests {
     fn plain_command_declares_terminal_identity_but_no_color_capability() {
         let command = PtyCommand::new("some-tool.exe");
         assert!(!command.strips_inherited_no_color());
-        let environment = command.resolved_environment();
+        let environment = command.resolved_environment_layers().0;
         assert_eq!(
             environment_value(&environment, "TERM_PROGRAM"),
             Some(std::ffi::OsStr::new("Folio"))
@@ -3095,7 +3338,8 @@ mod tests {
             .env("TERM", "better-terminal")
             .env(term_program_key, "UserTerminal")
             .env("TERM_PROGRAM_VERSION", "user-version")
-            .resolved_environment();
+            .resolved_environment_layers()
+            .0;
         assert_eq!(
             environment_value(&environment, "TERM_PROGRAM"),
             Some(std::ffi::OsStr::new("UserTerminal"))
@@ -3121,7 +3365,7 @@ mod tests {
         let interactive = PtyCommand::powershell();
         assert!(interactive.strips_inherited_no_color());
         assert_eq!(
-            environment_value(&interactive.resolved_environment(), "COLORTERM"),
+            environment_value(&interactive.resolved_environment_layers().0, "COLORTERM"),
             Some(std::ffi::OsStr::new("truecolor"))
         );
 
@@ -3134,7 +3378,7 @@ mod tests {
         };
         let command_opt_out = PtyCommand::powershell().env(no_color_key, "1");
         assert!(!command_opt_out.strips_inherited_no_color());
-        let environment = command_opt_out.resolved_environment();
+        let environment = command_opt_out.resolved_environment_layers().0;
         assert_eq!(environment_value(&environment, "COLORTERM"), None);
         assert_eq!(environment_value(&environment, "TERM"), None);
         assert_eq!(
