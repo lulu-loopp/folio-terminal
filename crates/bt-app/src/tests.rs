@@ -56115,6 +56115,7 @@ fn every_owner_door_takes_its_own_token_by_value() {
         OsString,
         &[OsString],
         bool,
+        shell_integration::EnvironmentDerivation,
         &[(OsString, OsString)],
         &[(OsString, OsString)],
         PtySize,

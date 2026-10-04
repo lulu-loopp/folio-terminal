@@ -31,8 +31,11 @@
 # your own `~/.zshrc` — and then it owes nothing, because zsh has already read
 # your files. Which it is, is the file's own name and nothing else.
 #
-# Nothing here is Folio-specific except the comments: `OSC 133` and `OSC 7` are
-# the sequences Windows Terminal, VS Code and iTerm2 all read.
+# `OSC 133` and `OSC 7` are common protocols, but this installed copy is scoped
+# to Folio sessions. A persistent line in a reader's rc file must be inert when
+# that same file is read by another terminal.
+
+[ "${TERM_PROGRAM-}" = Folio ] || return 0
 
 # zsh only. A hand-installed copy can reach another shell, and every parameter
 # below is zsh's own.

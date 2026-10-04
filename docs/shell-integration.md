@@ -201,9 +201,9 @@ file*, where `\\wsl.localhost\<distro>\…` is exactly the name that works.
 
 ## Injecting the script
 
-PowerShell's script is process-scoped and automatic, and this product never writes `$PROFILE`.
-Folio owns a refreshed copy below its data directory and composes the one PowerShell argv at the
-leaf-spawn seam. A row with no terminal host switch receives exactly `-NoExit -Command <loader>`.
+PowerShell's script is process-scoped and automatic when the row can be composed. Folio owns a
+refreshed copy below its data directory and composes the one PowerShell argv at the leaf-spawn
+seam. A row with no terminal host switch receives exactly `-NoExit -Command <loader>`.
 For an existing `Command` or strict base64/UTF-16LE `EncodedCommand`, a below-normal preparation
 worker first asks the row's resolved PowerShell executable to parse the exact command text. A valid
 answer appends `CRLF` and the loader inside that same terminal command; Folio preserves an existing
@@ -214,6 +214,24 @@ command line are left unchanged. A failed probe is an unavailable answer rather 
 command: a later birth may schedule the next background attempt, up to three attempts for the
 exact executable and argv in one process, and the birth never waits. The Settings capability
 sentence reads that same answer.
+
+When a PowerShell row must instead be spawned as written (`File`, `CommandWithArgs`, stdin,
+`NonInteractive`, or an unknown/invalid host line), Settings > Profiles offers one **Enable via
+profile** button for that edition. One click uses the existing managed-line writer and backup to
+add Folio's guarded line to `$PROFILE.CurrentUserCurrentHost`; no confirmation is interposed, and
+the success toast offers Undo. The installed fact is per edition, so every such row for that
+edition changes to the ordinary capability sentence together. The one existing **PowerShell
+`$PROFILE` line** row remains the only lasting removal surface. No button is offered when the row
+has any accepted `NoProfile` spelling or that edition reports an execution policy which refuses
+profile scripts; the latter gets an explicit policy capability sentence. A missing profile file
+is created with only the managed line. Opening the Profiles page starts the existing background
+profile/policy observation once for that visit; leaving and returning starts another observation,
+with no polling loop.
+
+Every installed integration script first verifies `TERM_PROGRAM=Folio`. A durable profile or rc
+line is therefore inert in other terminals. A nested shell deliberately inherits the declaration
+and remains integrated. The process-scoped launch paths set the same declaration, so this guard
+does not distinguish automatic composition from an opted-in profile line.
 
 The bash script is also installed automatically, for one session at a time:
 
@@ -346,7 +364,7 @@ fallback path described under **Authority and fallback** rather than on a guess.
 |---|---|---|---|---|---|---|---|---|
 | **PowerShell** (7, script installed) | yes | yes | yes | yes | yes | `PowerShell` | script | PSReadLine |
 | **Windows PowerShell** (5.1, script installed) | yes | yes | yes | yes | yes | `Windows PowerShell` | script | PSReadLine |
-| **either PowerShell** (script not installed or argv declined) | no | no | no | no | no | — | no | PSReadLine |
+| **either PowerShell** (script not installed or argv declined, profile fallback off) | no | no | no | no | no | — | no | PSReadLine |
 | **Git Bash** | yes | yes | yes | yes | yes | none, deliberately | yes | bash's own |
 | **WSL** (bash login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
 | **WSL** (zsh login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | zsh's own |
@@ -579,6 +597,8 @@ idempotent within one shell, and does nothing at all in a non-interactive one.
 The process loader preserves the prompt and PSReadLine implementation that exist when it runs, then
 the owned script wraps them with standard A/B/C/D markers. The script is idempotent within one shell
 process and works in both PowerShell 7 (`pwsh`) and Windows PowerShell 5.1 (`powershell.exe`). It
+returns before doing anything unless `TERM_PROGRAM` is exactly `Folio`; nested PowerShell sessions
+inside Folio inherit that value and are intentionally integrated. It
 requires PSReadLine. PowerShell 7 may revive only its already-loaded in-box PSReadLine assembly when
 execution policy prevented module registration; Windows PowerShell does not take that path. A
 missing PSReadLine installation, non-FullLanguage session, refused argv, failed preparation or

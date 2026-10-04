@@ -47,7 +47,23 @@ checked=0
 markers() {
     tr '\033' '\n' < "$transcript" |
         sed -n 's/^\]\(7;[^\a]*\)\a.*/\1/p;s/^\]\(133;[^\a]*\)\a.*/\1/p' |
-        sed 's/^7;.*/7/'
+        sed 's/^7;.*/7/' |
+        awk '
+            { lines[NR] = $0 }
+            END {
+                count = NR
+                # Cygwin Bash 5.3 can redraw PS1 once after the final prompt
+                # hook when stdin reaches EOF. It has no OSC 7, C, or D and
+                # therefore is not a command region; discard only that exact
+                # terminal orphan pair.
+                if (count >= 4 && lines[count - 3] == "133;A" &&
+                        lines[count - 2] == "133;B" &&
+                        lines[count - 1] == "133;A" && lines[count] == "133;B") {
+                    count -= 2
+                }
+                for (i = 1; i <= count; i++) print lines[i]
+            }
+        '
 }
 
 # Run one bash with `home` as its whole world, `rcfile` as its startup file and
@@ -62,11 +78,11 @@ run_case() {
     shift 3
     if [ -n "$marker" ]; then
         printf '%s\n' "$@" | env -i HOME="$home" TERM=dumb PATH="$PATH" \
-            BT_SHELL_INTEGRATION="$marker" \
+            TERM_PROGRAM=Folio BT_SHELL_INTEGRATION="$marker" \
             bash --rcfile "$rcfile" -i > "$transcript" 2>&1
     else
         printf '%s\n' "$@" | env -i HOME="$home" TERM=dumb PATH="$PATH" \
-            bash --rcfile "$rcfile" -i > "$transcript" 2>&1
+            TERM_PROGRAM=Folio bash --rcfile "$rcfile" -i > "$transcript" 2>&1
     fi
 }
 

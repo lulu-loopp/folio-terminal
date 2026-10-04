@@ -56,8 +56,9 @@ use crate::{
 pub mod profile_marks;
 mod profile_runtime;
 pub use profile_runtime::{
-    begin_removal, begin_startup_migration, remove_shell_integration, remove_shell_integration_at,
-    take_removal,
+    ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
+    begin_profile_observation_for, begin_removal, begin_startup_migration,
+    remove_shell_integration, remove_shell_integration_at, take_profile_install, take_removal,
 };
 
 /// The script, compiled in.
@@ -484,6 +485,26 @@ pub struct ShellCommand {
     pub environment: Vec<(OsString, OsString)>,
     /// The selected profile's final environment layer.
     pub profile_environment: Vec<(OsString, OsString)>,
+    /// The facts needed to re-derive environment-dependent declarations at pane birth.
+    pub(crate) environment_derivation: EnvironmentDerivation,
+}
+
+/// Which Folio declarations depend on values already present in a pane's environment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EnvironmentDerivation {
+    pub(crate) integration: Integration,
+    pub(crate) crosses_wsl: bool,
+    pub(crate) forwards_terminal_into_wsl: bool,
+}
+
+impl Default for EnvironmentDerivation {
+    fn default() -> Self {
+        Self {
+            integration: Integration::None,
+            crosses_wsl: false,
+            forwards_terminal_into_wsl: false,
+        }
+    }
 }
 
 /// The whole argument list and environment for one leaf of `profile`, with the
@@ -515,13 +536,31 @@ pub fn shell_command(
     // asks the program for, before any door below trades a word for its script.
     let words = profiles::launch_args(profile);
     let own = || {
-        words
-            .iter()
-            .map(OsString::from)
-            .chain(place_arguments.iter().cloned())
-            .collect::<Vec<_>>()
+        let words = words.iter().map(OsString::from);
+        if profiles::served_by(profile) == Integration::PowerShellOptIn {
+            // PowerShell keeps parsing non-terminal switches only until a terminal such as
+            // -Command. A starting-place launcher flag therefore has to precede the row's own
+            // words; after -Command it would become user command text instead of a host flag.
+            place_arguments
+                .iter()
+                .cloned()
+                .chain(words)
+                .collect::<Vec<_>>()
+        } else {
+            words
+                .chain(place_arguments.iter().cloned())
+                .collect::<Vec<_>>()
+        }
     };
     let mut command = shell_command_for(profile, scripts, environment, &own);
+    command.environment_derivation = EnvironmentDerivation {
+        integration: profiles::served_by(profile),
+        crosses_wsl: profile.paths == profiles::PathNamespace::Wsl,
+        forwards_terminal_into_wsl: command
+            .environment
+            .iter()
+            .any(|(name, _)| environment_name_eq(name, OsStr::new("WSLENV"))),
+    };
     let mine = &profile.env;
     command.environment.extend(hyperlink_declaration(
         profiles::served_by(profile),
@@ -543,6 +582,113 @@ pub fn shell_command(
     }
     layer_profile_environment(&mut command.profile_environment, mine);
     command
+}
+
+struct ComposedEnvironment<'a>(&'a [(OsString, OsString)]);
+
+impl ShellEnvironment for ComposedEnvironment<'_> {
+    fn var_os(&self, key: &str) -> Option<OsString> {
+        self.0
+            .iter()
+            .rev()
+            .find(|(name, _)| environment_name_eq(name, OsStr::new(key)))
+            .map(|(_, value)| value.clone())
+    }
+
+    fn is_file(&self, path: &Path) -> bool {
+        path.is_file()
+    }
+}
+
+/// Rebuild every Folio declaration derived from a value the pane already has.
+///
+/// Called once on the pane-birth worker with the composed fresh account block plus explicit
+/// launch overrides, before Folio's declarations and the profile's final layer are applied.
+pub(crate) fn derive_environment_for_birth(
+    derivation: EnvironmentDerivation,
+    environment: &[(OsString, OsString)],
+    folio: &mut Vec<(OsString, OsString)>,
+    profile: &[(OsString, OsString)],
+) {
+    let environment = ComposedEnvironment(environment);
+    let profile_has = |wanted: &str| {
+        profile
+            .iter()
+            .any(|(name, _)| environment_name_eq(name, OsStr::new(wanted)))
+    };
+    let remove = |rows: &mut Vec<(OsString, OsString)>, wanted: &str| {
+        rows.retain(|(name, _)| !environment_name_eq(name, OsStr::new(wanted)));
+    };
+
+    if derivation.integration == Integration::CmdPrompt {
+        remove(folio, CMD_PROMPT);
+        folio.push((
+            OsString::from(CMD_PROMPT),
+            cmd_prompt(environment.var_os(CMD_PROMPT)),
+        ));
+    }
+
+    remove(folio, FORCE_HYPERLINK);
+    if derivation.integration != Integration::PowerShellOptIn
+        && !profile_has(FORCE_HYPERLINK)
+        && environment.var_os(FORCE_HYPERLINK).is_none()
+    {
+        folio.push((OsString::from(FORCE_HYPERLINK), OsString::from("1")));
+    }
+
+    for name in LOCALE_VARIABLES {
+        remove(folio, name);
+    }
+    if !LOCALE_VARIABLES.iter().any(|name| profile_has(name)) {
+        folio.extend(locale_declaration(
+            bt_platform::system_locale_declaration(),
+            &environment,
+            &[],
+        ));
+    }
+
+    if derivation.integration == Integration::ZshDotDir {
+        remove(folio, USER_ZDOTDIR);
+        if let Some(theirs) = environment.var_os(ZDOTDIR) {
+            folio.push((OsString::from(USER_ZDOTDIR), theirs));
+        }
+    }
+
+    if derivation.crosses_wsl {
+        remove(folio, "WSLENV");
+        let mut list = environment
+            .var_os("WSLENV")
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let mut append = |name: &str| {
+            if list
+                .split(':')
+                .any(|entry| entry.split('/').next().is_some_and(|entry| entry == name))
+            {
+                return;
+            }
+            if !list.is_empty() && !list.ends_with(':') {
+                list.push(':');
+            }
+            list.push_str(name);
+            list.push_str("/u");
+        };
+        if derivation.forwards_terminal_into_wsl {
+            for name in FORWARDED {
+                append(name);
+            }
+        }
+        for (name, _) in profile {
+            let name = name.to_string_lossy();
+            if !name.is_empty() && !name.eq_ignore_ascii_case("WSLENV") {
+                append(&name);
+            }
+        }
+        if !list.is_empty() {
+            folio.push((OsString::from("WSLENV"), OsString::from(list)));
+        }
+    }
 }
 
 /// The PowerShell console-host parser's meaning for one spelling.
@@ -578,7 +724,7 @@ const WINPS_OPTIONS: &[PowerShellOption] = &[
     PowerShellOption {
         name: "version",
         minimum: "v",
-        kind: PowerShellOptionKind::Value,
+        kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
         name: "help",
@@ -681,8 +827,13 @@ const WINPS_OPTIONS: &[PowerShellOption] = &[
         kind: PowerShellOptionKind::Unsupported,
     },
     PowerShellOption {
-        name: "sta",
+        name: "servermode",
         minimum: "s",
+        kind: PowerShellOptionKind::Unsupported,
+    },
+    PowerShellOption {
+        name: "sta",
+        minimum: "sta",
         kind: PowerShellOptionKind::Flag,
     },
     PowerShellOption {
@@ -952,7 +1103,9 @@ fn classify_powershell_arguments(
                 && option.name.len() >= key.len()
                 && option.name[..key.len()].eq_ignore_ascii_case(key)
         })?;
-        if is_pwsh(program) && option.name == "login" && at != 0 {
+        if (is_pwsh(program) && option.name == "login" && at != 0)
+            || (!is_pwsh(program) && option.name == "psconsolefile" && at != 0)
+        {
             return None;
         }
         match option.kind {
@@ -1044,10 +1197,25 @@ fn classify_powershell_arguments(
             }
             PowerShellOptionKind::EncodedCommand => {
                 let payload = at + 1;
-                if payload + 1 != arguments.len() {
+                if payload >= arguments.len() || payload + 2 < arguments.len() {
                     return None;
                 }
                 let text = decode_encoded_command(arguments[payload].to_str()?)?;
+                if payload + 1 < arguments.len() {
+                    let trailing = arguments[payload + 1].to_str()?.trim();
+                    let trailing = trailing
+                        .strip_prefix('-')
+                        .or_else(|| trailing.strip_prefix('/'))?;
+                    if !trailing.eq_ignore_ascii_case("noexit") {
+                        return None;
+                    }
+                    no_exit = true;
+                    non_terminal.push(PowerShellNonTerminal {
+                        name: "noexit",
+                        option: payload + 1,
+                        value: None,
+                    });
+                }
                 return Some(ParsedPowerShellArguments {
                     non_terminal,
                     no_exit,
@@ -1456,6 +1624,7 @@ fn shell_command_for(
                     arguments,
                     environment: installed_environment(login),
                     profile_environment: Vec::new(),
+                    environment_derivation: EnvironmentDerivation::default(),
                 }
             }
             // WSL: `wsl.exe` is a launcher, so the shell and its flag come
@@ -1493,6 +1662,7 @@ fn shell_command_for(
                     arguments: own(),
                     environment: zdotdir_environment(zdotdir.as_os_str().to_owned(), environment),
                     profile_environment: Vec::new(),
+                    environment_derivation: EnvironmentDerivation::default(),
                 },
                 // Under WSL the launcher is handed the question, and the
                 // directory has to be named in the distribution's own spelling
@@ -1507,11 +1677,13 @@ fn shell_command_for(
                 cmd_prompt(environment.var_os(CMD_PROMPT)),
             )],
             profile_environment: Vec::new(),
+            environment_derivation: EnvironmentDerivation::default(),
         },
         _ => ShellCommand {
             arguments: own(),
             environment: Vec::new(),
             profile_environment: Vec::new(),
+            environment_derivation: EnvironmentDerivation::default(),
         },
     }
 }
@@ -1540,6 +1712,7 @@ fn wsl_command(scripts: Scripts<'_>, own: &dyn Fn() -> Vec<OsString>) -> ShellCo
             arguments: own(),
             environment: Vec::new(),
             profile_environment: Vec::new(),
+            environment_derivation: EnvironmentDerivation::default(),
         };
     }
     ShellCommand {
@@ -1561,6 +1734,7 @@ fn wsl_command(scripts: Scripts<'_>, own: &dyn Fn() -> Vec<OsString>) -> ShellCo
             .collect(),
         environment: crossing_environment(),
         profile_environment: Vec::new(),
+        environment_derivation: EnvironmentDerivation::default(),
     }
 }
 
@@ -1933,7 +2107,7 @@ pub fn is_powershell(program: &Path) -> bool {
 ///
 /// Windows only, like its one reader: off Windows the profile path is not asked.
 #[cfg(windows)]
-const PROFILE_COMMAND: &str = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $PROFILE.CurrentUserCurrentHost";
+const PROFILE_COMMAND: &str = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $PROFILE.CurrentUserCurrentHost; (Get-ExecutionPolicy).ToString()";
 
 /// **The path is asked of the shell and never composed**, and the machine this
 /// was written on is why.
@@ -1956,6 +2130,120 @@ const PROFILE_COMMAND: &str = "[Console]::OutputEncoding = New-Object System.Tex
 type ProfileAnswer = std::sync::Arc<OnceLock<Option<PathBuf>>>;
 type ProfileAnswers = std::collections::BTreeMap<PathBuf, ProfileAnswer>;
 static PROFILE_ANSWERS: OnceLock<std::sync::Mutex<ProfileAnswers>> = OnceLock::new();
+
+/// The two profile scopes a Windows account can carry. Every executable of one
+/// edition reads the same CurrentUserCurrentHost profile, so this is the key
+/// that makes two uncomposable rows flip together.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum PowerShellEdition {
+    WindowsPowerShell,
+    PowerShellSeven,
+}
+
+fn powershell_edition(program: &Path) -> PowerShellEdition {
+    if is_pwsh(program) {
+        PowerShellEdition::PowerShellSeven
+    } else {
+        PowerShellEdition::WindowsPowerShell
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ProfileObservation {
+    path: PathBuf,
+    policy: crate::psreadline::ExecutionPolicy,
+    line_present: bool,
+}
+
+static PROFILE_OBSERVATIONS: OnceLock<Mutex<BTreeMap<PowerShellEdition, ProfileObservation>>> =
+    OnceLock::new();
+
+/// What an uncomposable PowerShell row can honestly offer on the Profiles page.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PowerShellProfileFallback {
+    /// The argv can receive process-scoped integration; no persistent fallback is needed.
+    NotNeeded,
+    /// A command-bearing row is still waiting for its asynchronous parse fact.
+    Pending,
+    /// The managed line can be added with one press.
+    Offer,
+    /// This edition's profile already carries an active Folio line.
+    Enabled,
+    /// The row explicitly tells PowerShell not to load profiles.
+    NoProfile,
+    /// The effective policy refuses script files, including `$PROFILE`.
+    PolicyBlocked,
+}
+
+fn asks_for_no_profile(program: &Path, arguments: &[OsString]) -> bool {
+    classify_powershell_arguments(program, arguments).is_some_and(|parsed| {
+        parsed
+            .non_terminal
+            .iter()
+            .any(|option| option.name == "noprofile")
+    })
+}
+
+/// The Profiles page's row model, kept pure apart from reading the latest
+/// worker-published edition fact.
+#[must_use]
+pub fn powershell_profile_fallback(
+    program: &Path,
+    arguments: &[OsString],
+    integration_enabled: bool,
+) -> PowerShellProfileFallback {
+    let composable = integration_enabled && powershell_arguments_are_safe(program, arguments);
+    let no_profile = asks_for_no_profile(program, arguments);
+    let pending = classify_powershell_arguments(program, arguments).is_some_and(|parsed| {
+        matches!(
+            parsed.terminal,
+            PowerShellTerminal::Command { .. } | PowerShellTerminal::EncodedCommand { .. }
+        ) && cached_parse_answer(program, arguments).is_none()
+    });
+    let observed = PROFILE_OBSERVATIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&powershell_edition(program))
+        .cloned();
+    profile_fallback_from_parts(
+        integration_enabled,
+        composable,
+        pending,
+        no_profile,
+        observed.map(|observed| (observed.policy, observed.line_present)),
+    )
+}
+
+fn profile_fallback_from_parts(
+    integration_enabled: bool,
+    composable: bool,
+    pending: bool,
+    no_profile: bool,
+    observed: Option<(crate::psreadline::ExecutionPolicy, bool)>,
+) -> PowerShellProfileFallback {
+    if composable {
+        PowerShellProfileFallback::NotNeeded
+    } else if !integration_enabled || no_profile {
+        PowerShellProfileFallback::NoProfile
+    } else if pending {
+        PowerShellProfileFallback::Pending
+    } else if observed.is_some_and(|(policy, _)| policy.blocks_script()) {
+        PowerShellProfileFallback::PolicyBlocked
+    } else if observed.is_some_and(|(_, present)| present) {
+        PowerShellProfileFallback::Enabled
+    } else {
+        PowerShellProfileFallback::Offer
+    }
+}
+
+fn publish_profile_observation(program: &Path, observed: ProfileObservation) {
+    PROFILE_OBSERVATIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(powershell_edition(program), observed);
+}
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct ParseKey {
@@ -1982,15 +2270,31 @@ enum ParseAnswer {
 /// Process-owned answers from the target PowerShell parser.
 ///
 /// The executable in the key is the already-resolved [`profiles::ProfilePrograms`]
-/// answer and the argv is exact. Editing any row therefore makes a new key and
-/// a new question without invalidating an answer another row may still use.
+/// answer and the argv is exact except for a starting-directory launcher pair.
+/// That pair is supplied only at birth and cannot change the command grammar;
+/// removing it makes the startup question and the birth name the same fact.
+/// Editing any command row therefore still makes a new key and a new question
+/// without invalidating an answer another row may still use.
 type ParseAnswers = BTreeMap<ParseKey, ParseAnswer>;
 static PARSE_ANSWERS: OnceLock<Mutex<ParseAnswers>> = OnceLock::new();
 
 fn parse_key(program: &Path, arguments: &[OsString]) -> ParseKey {
+    let mut arguments = arguments.to_vec();
+    if let Some(parsed) = classify_powershell_arguments(program, &arguments) {
+        let mut launcher = parsed
+            .non_terminal
+            .iter()
+            .filter(|option| option.name == "workingdirectory")
+            .filter_map(|option| option.value.map(|value| (option.option, value)))
+            .collect::<Vec<_>>();
+        launcher.sort_unstable_by(|left, right| right.0.cmp(&left.0));
+        for (option, value) in launcher {
+            arguments.drain(option..=value);
+        }
+    }
     ParseKey {
         program: profile_key(program),
-        arguments: arguments.to_vec(),
+        arguments,
     }
 }
 
@@ -2473,14 +2777,47 @@ fn run_powershell_probe(
 
 #[cfg(windows)]
 fn run_profile_probe(program: &Path) -> Option<PathBuf> {
-    let output = run_powershell_probe(program, PROFILE_COMMAND, None).ok()?;
-    let path = parse_profile_answer(std::str::from_utf8(&output.stdout).ok()?)?;
-    path.is_absolute().then_some(path)
+    probe_profile_observation(program).map(|observed| observed.path)
 }
 
 #[cfg(not(windows))]
 fn run_profile_probe(_program: &Path) -> Option<PathBuf> {
     None
+}
+
+fn probe_profile_observation(program: &Path) -> Option<ProfileObservation> {
+    #[cfg(windows)]
+    {
+        let output = run_powershell_probe(program, PROFILE_COMMAND, None).ok()?;
+        parse_profile_observation(std::str::from_utf8(&output.stdout).ok()?)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = program;
+        None
+    }
+}
+
+#[cfg(any(windows, test))]
+fn parse_profile_observation(stdout: &str) -> Option<ProfileObservation> {
+    let mut lines = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let path = PathBuf::from(lines.next()?);
+    if !path.is_absolute() {
+        return None;
+    }
+    let policy = lines
+        .next()
+        .map_or(crate::psreadline::ExecutionPolicy::Unknown, |line| {
+            crate::psreadline::ExecutionPolicy::parse(line)
+        });
+    Some(ProfileObservation {
+        path,
+        policy,
+        line_present: false,
+    })
 }
 
 /// Read the one line the probe command writes.
@@ -2490,9 +2827,9 @@ fn run_profile_probe(_program: &Path) -> Option<PathBuf> {
 /// and whichever folder — there is no shape this function is entitled to expect,
 /// because the answer is exactly the thing this build must not think it knows.
 ///
-/// Read by the Windows [`run_profile_probe`] and by the tests; off Windows there is no answer
-/// to read.
-#[cfg(any(windows, test))]
+/// Kept as the narrow path-only parser for existing fixtures; production now
+/// reads path and execution policy together through [`parse_profile_observation`].
+#[cfg(test)]
 #[must_use]
 pub fn parse_profile_answer(stdout: &str) -> Option<PathBuf> {
     stdout
@@ -2669,7 +3006,6 @@ pub fn begin_powershell_script_preparation() {
 }
 
 /// What one write into a profile did.
-#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileWrite {
     /// The file that now carries the line.
@@ -2689,7 +3025,6 @@ pub fn add_to_profile(
     add_profile_with_forms(profile, line, &profile_marks::Forms::new(&[]), at)
 }
 
-#[cfg(test)]
 fn add_profile_with_forms(
     profile: &Path,
     line: &str,
@@ -3487,6 +3822,111 @@ mod tests {
         }
     }
 
+    /// RED (mutation: map `-s` to STA) — 5.1 measured it as server mode.
+    #[test]
+    fn inject4_winps_s_is_not_sta() {
+        let winps = Path::new("powershell.exe");
+        assert_eq!(
+            classify_powershell_arguments(winps, &os_words(&["-s"])),
+            None
+        );
+        assert!(classify_powershell_arguments(winps, &os_words(&["-sta"])).is_some());
+    }
+
+    /// RED (mutation: accept 5.1 `-Version`) — it selects another engine.
+    #[test]
+    fn inject4_winps_version_is_not_composable() {
+        let winps = Path::new("powershell.exe");
+        assert_eq!(
+            classify_powershell_arguments(winps, &os_words(&["-Version", "2"])),
+            None
+        );
+    }
+
+    /// RED (mutation: allow a late `-PSConsoleFile`) — 5.1 binds it only at argv zero.
+    #[test]
+    fn inject4_winps_psconsolefile_is_position_zero_only() {
+        let winps = Path::new("powershell.exe");
+        assert!(
+            classify_powershell_arguments(
+                winps,
+                &os_words(&["-PSConsoleFile", "legacy.psc1", "-NoLogo"])
+            )
+            .is_some()
+        );
+        assert_eq!(
+            classify_powershell_arguments(
+                winps,
+                &os_words(&["-NoLogo", "-PSConsoleFile", "legacy.psc1"])
+            ),
+            None
+        );
+    }
+
+    /// RED (mutation: require the encoded payload to be last) — both hosts
+    /// continue far enough to accept the trailing NoExit.
+    #[test]
+    fn inject4_encoded_command_accepts_trailing_noexit() {
+        let encoded = encode_command("Get-Date");
+        for program in [Path::new("powershell.exe"), Path::new("pwsh.exe")] {
+            let words = ["-EncodedCommand", encoded.as_str(), "-NoExit"];
+            let parsed = classify_powershell_arguments(program, &os_words(&words))
+                .expect("the hosts continue option parsing after the encoded payload");
+            assert!(parsed.no_exit);
+            assert!(matches!(
+                parsed.terminal,
+                PowerShellTerminal::EncodedCommand { text, .. } if text == "Get-Date"
+            ));
+        }
+    }
+
+    /// RED (mutations: offer beside a composable row, ignore `-NoProfile`,
+    /// ignore a blocking policy, or key the installed fact by row) — the
+    /// Profiles page's fallback is one edition fact applied to every row.
+    #[test]
+    fn inject4_powershell_profile_fallback_row_model_covers_every_state() {
+        use crate::psreadline::ExecutionPolicy::{RemoteSigned, Restricted};
+        use PowerShellProfileFallback::{
+            Enabled, NoProfile, NotNeeded, Offer, Pending, PolicyBlocked,
+        };
+        let decide = |composable, pending, no_profile, observed| {
+            profile_fallback_from_parts(true, composable, pending, no_profile, observed)
+        };
+        assert_eq!(decide(true, false, false, None), NotNeeded);
+        assert_eq!(decide(false, false, false, None), Offer);
+        assert_eq!(decide(false, true, false, None), Pending);
+        assert_eq!(decide(false, false, true, None), NoProfile);
+        assert_eq!(
+            decide(false, false, false, Some((Restricted, false))),
+            PolicyBlocked
+        );
+        assert_eq!(
+            decide(false, false, false, Some((RemoteSigned, true))),
+            Enabled
+        );
+
+        let two_rows = |present| {
+            [
+                decide(false, false, false, Some((RemoteSigned, present))),
+                decide(false, false, false, Some((RemoteSigned, present))),
+            ]
+        };
+        assert_eq!(two_rows(false), [Offer, Offer]);
+        assert_eq!(two_rows(true), [Enabled, Enabled]);
+
+        for (program, spelling) in [("powershell.exe", "-NoP"), ("pwsh.exe", "-nop")] {
+            assert_eq!(
+                powershell_profile_fallback(
+                    Path::new(program),
+                    &os_words(&[spelling, "-File", "enter.ps1"]),
+                    true,
+                ),
+                NoProfile,
+                "{program} must honour its accepted NoProfile prefix"
+            );
+        }
+    }
+
     /// RED (mutation: treat `-c` as a literal name, discard `-NoExit`, or let
     /// the next option parse after Command) — the motivating generated rows are
     /// the host's Command terminal, not an unsafe suffix point.
@@ -3575,6 +4015,14 @@ mod tests {
         );
         assert_eq!(result[..2], os_words(&["-NoExit", "-ec"]));
 
+        let trailing_noexit = ["-ec", encoded.as_str(), "-NoExit"];
+        let result = compose(&trailing_noexit, Some(true)).expect("encoded command with suffix");
+        assert_eq!(result[2], "-NoExit");
+        assert_eq!(
+            decode_encoded_command(result[1].to_str().unwrap()),
+            Some(format!("{unicode}\r\n{loader}"))
+        );
+
         for words in [
             vec!["-File", "x.ps1"],
             vec!["-cwa", "Get-Date"],
@@ -3648,6 +4096,26 @@ mod tests {
                 .insert(parse_key(program, &arguments), answer);
             assert_eq!(cached_parse_answer(program, &arguments), expected);
         }
+    }
+
+    /// RED (mutation: key the launcher's working-directory pair) — startup asks
+    /// about the row before a pane has a concrete place, while birth adds that
+    /// non-terminal pair. Both name the same command grammar fact.
+    #[test]
+    fn inject4_launcher_flag_profile_matches_the_startup_parse_cache_key() {
+        let program = Path::new("pwsh.exe");
+        let startup = os_words(&["-Command", "Get-Date"]);
+        let birth = os_words(&[
+            "-WorkingDirectory",
+            "C:/reader/project",
+            "-Command",
+            "Get-Date",
+        ]);
+        assert_eq!(parse_key(program, &startup), parse_key(program, &birth));
+        assert_eq!(
+            command_text(program, &startup),
+            command_text(program, &birth)
+        );
     }
 
     /// RED (mutations: collapse a nonzero exit into `None`, accept arbitrary
@@ -4499,6 +4967,48 @@ mod tests {
             1,
             "the script recognises this terminal in one place, not two"
         );
+        let posix_guard = format!(r#"[ "${{TERM_PROGRAM-}}" = {declared} ] || return 0"#);
+        for (name, source) in [
+            ("folio.bash", script_source()),
+            ("folio.zsh", script_source_zsh()),
+        ] {
+            assert!(
+                source.contains(&posix_guard),
+                "{name} must be inert outside TERM_PROGRAM={declared:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn inject4_all_integration_scripts_are_scoped_to_folio() {
+        the_integration_script_knows_the_name_this_terminal_announces();
+    }
+
+    /// RED (mutation: remove the startup pre-ask or join its worker) — every
+    /// command-bearing row is asked before the first window, while neither the
+    /// startup path nor pane birth waits for that answer.
+    #[test]
+    fn inject4_startup_preasks_power_shell_rows_without_a_birth_waiting() {
+        let source = include_str!("main.rs");
+        let ask = "shell_integration::begin_powershell_preparation_for(&profile_programs);";
+        assert!(source.contains(ask));
+        assert!(source.find(ask).unwrap() < source.find("opening_window_attributes(").unwrap());
+        let worker = include_str!("shell_integration.rs")
+            .split_once("pub fn begin_powershell_preparation_for(")
+            .unwrap()
+            .1
+            .split_once("pub fn begin_powershell_script_preparation()")
+            .unwrap()
+            .0;
+        assert!(!worker.contains(".join()"));
+        let birth = include_str!("pty_door.rs")
+            .split_once("pub(crate) fn spawn_shell(")
+            .unwrap()
+            .1
+            .split_once("pub(crate) fn resize(")
+            .unwrap()
+            .0;
+        assert!(!birth.contains("parse_worker.join()"));
     }
 
     /// PIN — **what a pane is told it is, is one answer for every platform**

@@ -46,6 +46,8 @@ Invoke-Suite -Name 'folio.ps1 conda order (pwsh)' -Program 'pwsh' `
     -Arguments @('-NoProfile', '-File', (Join-Path $here 'conda-order.ps1'))
 Invoke-Suite -Name 'folio.ps1 dual module names (pwsh)' -Program 'pwsh' `
     -Arguments @('-NoProfile', '-File', (Join-Path $here 'module-names.ps1'))
+Invoke-Suite -Name 'folio.ps1 session scope (pwsh)' -Program 'pwsh' `
+    -Arguments @('-NoProfile', '-File', (Join-Path $here 'session-scope.ps1'))
 if (-not $SkipWindowsPowerShell) {
     Invoke-Suite -Name 'folio.ps1 exit status (Windows PowerShell 5.1)' -Program 'powershell' `
         -Arguments @('-NoProfile', '-File', (Join-Path $here 'exit-status.ps1'),
@@ -57,6 +59,8 @@ if (-not $SkipWindowsPowerShell) {
         -Arguments @('-NoProfile', '-File', (Join-Path $here 'conda-order.ps1'))
     Invoke-Suite -Name 'folio.ps1 dual module names (Windows PowerShell 5.1)' -Program 'powershell' `
         -Arguments @('-NoProfile', '-File', (Join-Path $here 'module-names.ps1'))
+    Invoke-Suite -Name 'folio.ps1 session scope (Windows PowerShell 5.1)' -Program 'powershell' `
+        -Arguments @('-NoProfile', '-File', (Join-Path $here 'session-scope.ps1'))
 }
 
 foreach ($note in $skipped) { Write-Host "skipped: $note" }

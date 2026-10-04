@@ -7008,6 +7008,8 @@ pub struct SettingsPanel {
     /// is one this build will not edit, so a press cannot be what notices that the reader has
     /// unpicked the link or cleared the read-only bit — opening the page is (re-review, round 3).
     agents_visit_read: bool,
+    /// The Profiles page's external `$PROFILE`/policy refresh edge.
+    profiles_visit_read: bool,
     /// **The gear's update mark, carried onto the page it led to** (0.4.6
     /// T-GEAR-MARK-LANDS). Set by [`Self::carry_update_mark`] on the frame this
     /// visit to `About` shows the Version row while the gear is lit — the frame
@@ -7345,6 +7347,14 @@ impl SettingsPanel {
         !std::mem::replace(&mut self.agents_visit_read, true)
     }
 
+    /// Consume the first showing of the Profiles list on this page visit.
+    pub fn take_profiles_open_edge(&mut self, showing: bool) -> bool {
+        if !self.open || !showing {
+            return false;
+        }
+        !std::mem::replace(&mut self.profiles_visit_read, true)
+    }
+
     /// **The update row is being shown while the gear is `lit`** (0.4.6
     /// T-GEAR-MARK-LANDS): keep the mark on the row for the rest of this visit
     /// to `About`. Called on the door that answers the mark, just before it
@@ -7402,6 +7412,7 @@ impl SettingsPanel {
         self.category = category;
         self.psreadline_visit_read = false;
         self.agents_visit_read = false;
+        self.profiles_visit_read = false;
         self.update_mark_carried = false;
         self.menu = None;
         self.menu_scroll = 0.0;
@@ -7436,6 +7447,7 @@ impl SettingsPanel {
         self.uninstall_card = None;
         self.psreadline_visit_read = false;
         self.agents_visit_read = false;
+        self.profiles_visit_read = false;
         self.update_mark_carried = false;
         self.menu = None;
         self.menu_scroll = 0.0;
@@ -7512,6 +7524,7 @@ impl SettingsPanel {
         self.uninstall_card = None;
         self.psreadline_visit_read = false;
         self.agents_visit_read = false;
+        self.profiles_visit_read = false;
         self.update_mark_carried = false;
         self.menu = None;
         self.menu_scroll = 0.0;
@@ -7747,6 +7760,7 @@ impl SettingsPanel {
             | SettingsTarget::ResetAdvanced(_)
             | SettingsTarget::ProfileUp(_)
             | SettingsTarget::ProfileDown(_)
+            | SettingsTarget::ProfileEnable(_)
             | SettingsTarget::ProfileEdit(_)
             | SettingsTarget::ProfileMore(_)
             | SettingsTarget::ProfileNew
@@ -7829,6 +7843,7 @@ impl SettingsPanel {
             self.category = content.first_category();
             self.psreadline_visit_read = false;
             self.agents_visit_read = false;
+            self.profiles_visit_read = false;
             self.update_mark_carried = false;
             self.menu = None;
             self.recording = None;
@@ -8343,6 +8358,7 @@ impl SettingsPanel {
             // this type has no way to reach a file.
             Some(
                 target @ (SettingsTarget::ProfileEdit(_)
+                | SettingsTarget::ProfileEnable(_)
                 | SettingsTarget::ProfileNew
                 | SettingsTarget::EditorBack
                 | SettingsTarget::EditorBrowse
@@ -8795,15 +8811,27 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
         // in the order the eye reads them. `Enter` on the row opens the editor,
         // so a reader who never leaves the home row can still edit a profile.
         let mut order = vec![SettingsTarget::ProfileNew];
-        order.extend(content.profiles.iter().enumerate().flat_map(|(index, _)| {
-            [
-                SettingsTarget::ProfileRow(index),
-                SettingsTarget::ProfileUp(index),
-                SettingsTarget::ProfileDown(index),
-                SettingsTarget::ProfileEdit(index),
-                SettingsTarget::ProfileMore(index),
-            ]
-        }));
+        order.extend(
+            content
+                .profiles
+                .iter()
+                .enumerate()
+                .flat_map(|(index, line)| {
+                    let mut stops = vec![SettingsTarget::ProfileRow(index)];
+                    if line.profile_fallback
+                        == crate::shell_integration::PowerShellProfileFallback::Offer
+                    {
+                        stops.push(SettingsTarget::ProfileEnable(index));
+                    }
+                    stops.extend([
+                        SettingsTarget::ProfileUp(index),
+                        SettingsTarget::ProfileDown(index),
+                        SettingsTarget::ProfileEdit(index),
+                        SettingsTarget::ProfileMore(index),
+                    ]);
+                    stops
+                }),
+        );
         return order;
     }
     // The same walk the boxes are placed from, so the ring visits the page in
@@ -8922,6 +8950,7 @@ impl SettingsTarget {
             Self::ProfileRow(index)
             | Self::ProfileUp(index)
             | Self::ProfileDown(index)
+            | Self::ProfileEnable(index)
             | Self::ProfileEdit(index)
             | Self::ProfileMore(index)
             | Self::ProfileMoreItem(index, _) => Some(index),
@@ -9053,6 +9082,8 @@ pub enum SettingsTarget {
     ProfileUp(usize),
     /// The `↓` on one row of the Profiles page.
     ProfileDown(usize),
+    /// The one-click persistent fallback on an uncomposable PowerShell row.
+    ProfileEnable(usize),
     /// One row of the Profiles page, away from its verbs.
     ///
     /// **A hover target and a focus stop** (§7.1.6c-6b). The action run is
@@ -9218,6 +9249,7 @@ pub fn target_popup(target: SettingsTarget) -> Option<DialogPopup> {
         | SettingsTarget::RestoreAll
         | SettingsTarget::ProfileUp(_)
         | SettingsTarget::ProfileDown(_)
+        | SettingsTarget::ProfileEnable(_)
         | SettingsTarget::ProfileRow(_)
         | SettingsTarget::ProfileEdit(_)
         | SettingsTarget::ProfileNew
@@ -9298,6 +9330,7 @@ pub fn target_is_ground(target: SettingsTarget) -> bool {
         | SettingsTarget::RestoreAll
         | SettingsTarget::ProfileUp(_)
         | SettingsTarget::ProfileDown(_)
+        | SettingsTarget::ProfileEnable(_)
         | SettingsTarget::ProfileRow(_)
         | SettingsTarget::ProfileEdit(_)
         | SettingsTarget::ProfileMore(_)
@@ -9478,6 +9511,8 @@ pub struct ProfileLineLayout {
     pub caps: Option<[[f32; 4]; 2]>,
     pub up: [f32; 4],
     pub down: [f32; 4],
+    /// The persistent-fallback button, occupying the resting action run.
+    pub enable: Option<[f32; 4]>,
     /// The one verb in the open — `Edit` (§7.1.6c-6b). It took this slot from
     /// `Duplicate` the moment there was an editor to open, which is the mock-up's
     /// own instruction: "when 5b lands Edit / Hide / Delete / Set as default,
@@ -9912,6 +9947,7 @@ impl SettingsLayout {
             SettingsTarget::RestoreAll => self.restore_all,
             SettingsTarget::ProfileUp(index)
             | SettingsTarget::ProfileDown(index)
+            | SettingsTarget::ProfileEnable(index)
             | SettingsTarget::ProfileEdit(index)
             | SettingsTarget::ProfileMore(index)
             | SettingsTarget::ProfileMoreItem(index, _)
@@ -11963,6 +11999,14 @@ pub fn layout_for_menus(
                 run(columns.edit),
                 run(columns.more),
             );
+            let enable = (line.profile_fallback
+                == crate::shell_integration::PowerShellProfileFallback::Offer)
+                .then_some([
+                    up[0],
+                    middle - px(BUTTON_HEIGHT_LOGICAL_PX) / 2.0,
+                    more[2],
+                    middle + px(BUTTON_HEIGHT_LOGICAL_PX) / 2.0,
+                ]);
 
             let column = px(PROFILE_MARK_COLUMN_LOGICAL_PX);
             let side = px(PROFILE_MARK_LOGICAL_PX).round();
@@ -12018,6 +12062,7 @@ pub fn layout_for_menus(
                 caps,
                 up,
                 down,
+                enable,
                 edit,
                 more,
             });
@@ -13335,6 +13380,9 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
         // row's dark `↑`. `ProfileRow` says the true thing and costs nothing:
         // pressing a row's band already does nothing but move the focus, which
         // is exactly what a press on a dark button is owed.
+        if placed.enable.is_some_and(|button| contains(button, x, y)) {
+            return SettingsTarget::ProfileEnable(placed.index);
+        }
         if contains(placed.up, x, y) {
             return if placed.index == 0 {
                 SettingsTarget::ProfileRow(placed.index)
@@ -14836,7 +14884,28 @@ fn push_profile_page(
                 });
             }
         }
-        if !engaged {
+        let enable_target = SettingsTarget::ProfileEnable(placed.index);
+        let enable_focused = [hover, focus].contains(&Some(enable_target));
+        let show_enable = placed.enable.is_some() && (!engaged || enable_focused);
+        if let Some(button) = placed.enable.filter(|_| show_enable) {
+            push_button(
+                &mut stack.quads,
+                &mut stack.labels,
+                button,
+                Text::ProfilesEnableViaProfile.text(),
+                hover == Some(enable_target),
+                scale,
+                border,
+                palette,
+                measure,
+            );
+            if focus == Some(enable_target) {
+                stack
+                    .quads
+                    .extend(focus_ring(button, scale, palette.accent));
+            }
+        }
+        if !engaged || show_enable {
             continue;
         }
         // The first row's `↑` and the last row's `↓` are **dark, not absent**: a
@@ -16487,6 +16556,29 @@ mod tests {
             panel.take_psreadline_open_edge(true),
             "Escape also rearms the visit"
         );
+    }
+
+    /// RED (mutation: return `self.open` instead of consuming the visit latch)
+    /// — profile and policy facts refresh once per Profiles-page visit, never
+    /// once per frame.
+    #[test]
+    fn inject4_profiles_page_observation_is_one_edge_per_visit() {
+        let mut panel = SettingsPanel::default();
+        assert!(!panel.take_profiles_open_edge(true));
+        panel.toggle(content(&[], &[]));
+        panel.select_category(SettingsCategory::Profiles);
+        assert!(panel.take_profiles_open_edge(true));
+        for _ in 0..200 {
+            assert!(!panel.take_profiles_open_edge(true));
+        }
+        panel.select_category(SettingsCategory::General);
+        assert!(!panel.take_profiles_open_edge(false));
+        panel.select_category(SettingsCategory::Profiles);
+        assert!(panel.take_profiles_open_edge(true));
+        panel.close();
+        panel.toggle(content(&[], &[]));
+        panel.select_category(SettingsCategory::Profiles);
+        assert!(panel.take_profiles_open_edge(true));
     }
 
     /// **A refused agent row looks again when its page is opened, and only then.**
@@ -31003,6 +31095,7 @@ mod tests {
                 title: "PowerShell 7",
                 command: "pwsh.exe -NoLogo".to_owned(),
                 capability: Some(Text::CapPowerShell.text()),
+                profile_fallback: crate::shell_integration::PowerShellProfileFallback::NotNeeded,
                 is_agent: false,
                 is_default: true,
                 default_is_automatic: false,
@@ -31017,6 +31110,7 @@ mod tests {
                 title: "WSL",
                 command: "wsl.exe --cd ~".to_owned(),
                 capability: Some(Text::CapWslBash.text()),
+                profile_fallback: crate::shell_integration::PowerShellProfileFallback::NotNeeded,
                 is_agent: false,
                 is_default: false,
                 default_is_automatic: false,
@@ -31031,6 +31125,7 @@ mod tests {
                 title: "Git Bash",
                 command: "Git Bash is not installed".to_owned(),
                 capability: None,
+                profile_fallback: crate::shell_integration::PowerShellProfileFallback::NotNeeded,
                 is_agent: false,
                 is_default: false,
                 default_is_automatic: false,
@@ -31045,6 +31140,7 @@ mod tests {
                 title: "Command Prompt",
                 command: "cmd.exe".to_owned(),
                 capability: Some(Text::CapCmd.text()),
+                profile_fallback: crate::shell_integration::PowerShellProfileFallback::NotNeeded,
                 is_agent: false,
                 is_default: false,
                 default_is_automatic: false,
@@ -31080,6 +31176,7 @@ mod tests {
             title: "Claude Code",
             command: "Claude Code was not found on Windows".to_owned(),
             capability: None,
+            profile_fallback: crate::shell_integration::PowerShellProfileFallback::NotNeeded,
             is_agent: true,
             is_default: false,
             default_is_automatic: false,
@@ -31100,6 +31197,7 @@ mod tests {
             title: "Codex",
             command: "codex.cmd".to_owned(),
             capability: Some(Text::CapNone.text()),
+            profile_fallback: crate::shell_integration::PowerShellProfileFallback::NotNeeded,
             is_agent: true,
             is_default: false,
             default_is_automatic: false,
@@ -32071,6 +32169,49 @@ mod tests {
                 "the pointer parked on {verb:?} keeps its row's run revealed"
             );
         }
+    }
+
+    /// RED (mutation: omit `ProfileEnable`, draw it for every PowerShell row,
+    /// or route its box to `ProfileRow`) — only the offered fallback owns the
+    /// one-click control, at rest and in the keyboard walk.
+    #[test]
+    fn inject4_uncomposable_powershell_row_has_one_profile_fallback_button() {
+        let mut lines = profile_lines();
+        lines[0].profile_fallback = crate::shell_integration::PowerShellProfileFallback::Offer;
+        let placed = profiles_page(&lines);
+        let button = placed.profiles[0].enable.expect("the offered fallback");
+        assert!(
+            placed.profiles[1..]
+                .iter()
+                .all(|line| line.enable.is_none())
+        );
+
+        let target = hit(
+            &placed,
+            &values(),
+            f64::from((button[0] + button[2]) / 2.0),
+            f64::from((button[1] + button[3]) / 2.0),
+        );
+        assert_eq!(target, SettingsTarget::ProfileEnable(0));
+        let content = SettingsContent {
+            rows: &[],
+            shortcuts: &[],
+            profiles: &lines,
+            scheme_files: &[],
+            advanced: AdvancedOpen::default(),
+            advanced_reveal: None,
+            editor: None,
+            values: Box::leak(Box::new(values())),
+        };
+        let order = page_order(content, SettingsCategory::Profiles);
+        assert_eq!(
+            order
+                .iter()
+                .filter(|target| matches!(target, SettingsTarget::ProfileEnable(_)))
+                .count(),
+            1
+        );
+        assert!(order.contains(&SettingsTarget::ProfileEnable(0)));
     }
 
     /// PIN — **the first row's `↑` and the last row's `↓` are dark, not absent,

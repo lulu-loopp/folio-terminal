@@ -1117,6 +1117,22 @@ impl EnvironmentRefresh {
             inherited,
         }
     }
+
+    /// The environment a pane receives before Folio and profile declarations are layered.
+    ///
+    /// Environment-derived declarations must read this block rather than the terminal process's
+    /// launch environment, otherwise a declaration computed before the refresh can overwrite the
+    /// current account value it was meant to extend.
+    #[must_use]
+    pub fn before_folio(&self) -> Vec<(OsString, OsString)> {
+        spawn_environment(
+            &self.fresh,
+            &self.launch_snapshot,
+            &self.inherited,
+            &[],
+            &[],
+        )
+    }
 }
 
 /// Compose the complete environment for one child while preserving source order.

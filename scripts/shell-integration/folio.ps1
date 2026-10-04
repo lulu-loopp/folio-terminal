@@ -2,6 +2,13 @@
 # Opt in from $PROFILE after prompt customizers (for example oh-my-posh):
 #   . 'D:\path\to\folio\scripts\shell-integration\folio.ps1'
 
+# A profile line is persistent; the integration it names is not. Nested PowerShell sessions
+# inherit Folio's declaration and install normally, while the same profile opened in another
+# terminal returns before changing a function, global, or environment variable.
+if ($env:TERM_PROGRAM -ne 'Folio') {
+    return
+}
+
 if ($Global:__FolioShellIntegration -and
     $Global:__FolioShellIntegration.Installed) {
     return

@@ -8,6 +8,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
+- PowerShell profiles whose startup command cannot be safely extended can enable Folio through that edition's `$PROFILE` in one click from Settings, with Undo.
 - In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder.
 - A pane can reset the terminal modes a program left behind (pane menu ▸ Reset terminal modes).
 - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,
@@ -27,8 +28,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- New panes derive Folio's prompt, WSL forwarding, hyperlink and zsh startup declarations from the account environment at the moment the pane starts, so changes made after Folio opened are kept.
+- Folio's PowerShell, bash and zsh integration scripts are inert when their startup line is read by another terminal; nested shells inside Folio remain integrated.
 - On Windows, a newly installed command is found in a new tab without restarting Folio.
-- PowerShell panes have command marks, folder tracking and inline formulas without any setup; nothing is added to your PowerShell profile.
+- PowerShell panes have command marks, folder tracking and inline formulas without setup when their command line can be safely extended; Settings offers the per-edition `$PROFILE` fallback for rows that cannot be extended.
 - PowerShell profile rows that run a command at startup — including Visual Studio Developer PowerShell and conda environments — now keep that command and receive the same command marks, folder tracking and inline formulas when PowerShell confirms the command parses.
 - The new-version notice and the update button are on About → Version; the daily check switch moved there too, and turning it off stops only the daily check.
 - The README says how to uninstall each kind of copy, and the zip's

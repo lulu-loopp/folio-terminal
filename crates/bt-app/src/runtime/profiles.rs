@@ -377,6 +377,19 @@ impl Runtime<'_> {
         self.store_profiles()
     }
 
+    /// Remove the one managed line added by the toast this window is holding.
+    pub(in crate::runtime) fn take_powershell_profile_undo(&mut self, card: toast::ToastId) {
+        let Some((id, program, profile)) = self.window.powershell_profile_undo.take() else {
+            return;
+        };
+        if id != card {
+            self.window.powershell_profile_undo = Some((id, program, profile));
+            return;
+        }
+        self.app.powershell_profile_asked_by = Some(self.window_id());
+        shell_integration::begin_profile_install_undo(program, profile);
+    }
+
     /// Write the table to `profiles.json` and re-probe what it can start.
     ///
     /// **Three things move together and are moved in one place**: the file, the

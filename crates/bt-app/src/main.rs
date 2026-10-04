@@ -12531,6 +12531,8 @@ struct App {
     /// closed simply raises no card: the row it would have reported to is not
     /// there any more.
     explorer_package_asked_by: Option<WindowId>,
+    /// The window owed the result of its one-click PowerShell profile write.
+    powershell_profile_asked_by: Option<WindowId>,
     /// **Which place that press asked for**, carried beside the address for the
     /// address's own reason (user ruling 2026-09-07).
     ///
@@ -13402,6 +13404,8 @@ struct WindowRuntime {
     /// longer matches does nothing, which is the honest answer: the thing it
     /// offered to undo is no longer the thing that would come back.
     profile_undo: Option<(toast::ToastId, profiles::Profile, usize)>,
+    /// The one managed `$PROFILE` line a standing toast can remove again.
+    powershell_profile_undo: Option<(toast::ToastId, PathBuf, PathBuf)>,
     /// **Where a checkout came from**, while it is in flight (user ruling,
     /// 2026-08-19): the repository, and the branch `HEAD` was on before.
     ///
@@ -38294,6 +38298,7 @@ fn create_leaf_session(
                     program.into(),
                     &command.arguments,
                     powershell_integration,
+                    command.environment_derivation,
                     &command.environment,
                     &command.profile_environment,
                     pty_size(grid, PhysicalSize::new(body.width, body.height)),
@@ -41015,6 +41020,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         settings: settings::SettingsPanel::default(),
         settings_geometry: settings::geometry::Geometry::default(),
         profile_undo: None,
+        powershell_profile_undo: None,
         checkout_from: None,
         checkout_undo: None,
         settings_scroll: 0.0,
@@ -42364,6 +42370,7 @@ impl Runtime<'_> {
             // has moved since, writes the verb again — see the field.
             context_menu_installed: context_menu::reassert(),
             explorer_package_asked_by: None,
+            powershell_profile_asked_by: None,
             explorer_package_asked_place: explorer_menu::ExplorerPlace::default(),
             explorer_package_announce: Announce::Everything,
             // Read once, and *only* read: see the field for why this one is not repaired.
@@ -42958,6 +42965,13 @@ impl Runtime<'_> {
             .take_agents_open_edge(content.shows_agents(self.window.settings.category()));
         if agents_opened {
             self.refresh_agent_rows();
+        }
+        let profiles_opened = self.window.settings.take_profiles_open_edge(
+            self.window.settings.category() == settings::SettingsCategory::Profiles
+                && content.editor.is_none(),
+        );
+        if profiles_opened {
+            shell_integration::begin_profile_observation_for(&self.app.profile_programs);
         }
         // Use the refreshed fact on this very layout, including its geometry.
         let refreshed_values = (psreadline_opened || agents_opened).then(|| {
@@ -43894,6 +43908,15 @@ impl Runtime<'_> {
     ) -> Result<()> {
         if let Some(action) = settings::profile_action_requested(target) {
             self.apply_profile_action(action)?;
+        }
+        if let settings::SettingsTarget::ProfileEnable(index) = target {
+            let id = profiles::id(index);
+            if let Some(program) = self.app.profile_programs.program(&id).map(PathBuf::from)
+                && shell_integration::is_powershell(&program)
+            {
+                self.app.powershell_profile_asked_by = Some(self.window_id());
+                shell_integration::begin_profile_install(program);
+            }
         }
         self.apply_editor_choice(target)?;
         if let Some(mode) = settings::theme_requested(target) {
@@ -45300,6 +45323,7 @@ impl Runtime<'_> {
             | settings::SettingsTarget::ResetAdvanced(_)
             | settings::SettingsTarget::ProfileUp(_)
             | settings::SettingsTarget::ProfileDown(_)
+            | settings::SettingsTarget::ProfileEnable(_)
             | settings::SettingsTarget::MenuAction(_)
             | settings::SettingsTarget::MenuItemEdit(..)
             | settings::SettingsTarget::MenuItemDelete(..)
@@ -64303,6 +64327,12 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 // here. A removal that found nothing to remove changed nothing,
                 // so it says nothing.
                 let mut removal = shell_integration::take_removal();
+                let install = shell_integration::take_profile_install();
+                let asked_by = install.as_ref().and_then(|_| {
+                    self.app
+                        .as_mut()
+                        .and_then(|app| app.powershell_profile_asked_by.take())
+                });
                 self.for_each_window(|runtime| {
                     if runtime.refresh_chrome() {
                         runtime.present_chrome_change()?;
@@ -64320,6 +64350,35 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                             None,
                             text,
                         )?;
+                    }
+                    if Some(runtime.window_id()) == asked_by
+                        && let Some(outcome) = install.clone()
+                    {
+                        match outcome {
+                            shell_integration::ProfileInstallOutcome::Installed {
+                                program,
+                                profile,
+                            } => {
+                                let id = runtime.toast_with_verb(
+                                    toast::ToastKind::Info,
+                                    toast::ToastAnchor::Window,
+                                    i18n::Text::ShellProfileAddedToast.text(),
+                                    i18n::Text::ProfilesUndo.text(),
+                                )?;
+                                runtime.window.powershell_profile_undo =
+                                    Some((id, program, profile));
+                            }
+                            shell_integration::ProfileInstallOutcome::Refused(reason)
+                            | shell_integration::ProfileInstallOutcome::UndoRefused(reason) => {
+                                runtime.toast(
+                                    toast::ToastKind::Error,
+                                    toast::ToastAnchor::Window,
+                                    Some(i18n::Text::ShellProfileRefused.text().to_owned()),
+                                    reason,
+                                )?;
+                            }
+                            shell_integration::ProfileInstallOutcome::Undone => {}
+                        }
                     }
                     Ok(())
                 })

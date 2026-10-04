@@ -13,8 +13,11 @@
 #     exactly as the PowerShell script is dot-sourced into `$PROFILE`. Then
 #     `BT_SHELL_INTEGRATION` is unset and nothing is sourced on your behalf.
 #
-# Nothing here is Folio-specific except the comments: `OSC 133` and
-# `OSC 7` are the sequences Windows Terminal, VS Code and iTerm2 all read.
+# `OSC 133` and `OSC 7` are common protocols, but this installed copy is scoped
+# to Folio sessions. A persistent line in a reader's rc file must be inert when
+# that same file is read by another terminal.
+
+[ "${TERM_PROGRAM-}" = Folio ] || return 0
 
 # Bash only, interactive only. `--init-file` is read by neither a non-interactive
 # shell nor another shell family, but a hand-installed copy can reach both.

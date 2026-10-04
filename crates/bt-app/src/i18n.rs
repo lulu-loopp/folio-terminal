@@ -1142,6 +1142,7 @@ text_entries! {
     /// dialog has never had. It arrives with the row menu in the next slice,
     /// where the refusals that have reasons have to live anyway.
     ProfilesDuplicate,
+    ProfilesEnableViaProfile,
     /// The badges. They report and are not controls, which is why they wear the
     /// group label's type and the ink an unavailable thing wears.
     ProfilesBadgeDefault,
@@ -1180,6 +1181,8 @@ text_entries! {
     /// way the sentence is true in every state and needs no probe.
     CapPowerShell,
     CapPowerShellNotProvided,
+    CapPowerShellViaProfile,
+    CapPowerShellProfilePolicy,
     /// WSL. The same everything, and the same honest condition — a `zsh` or
     /// `fish` login never reads the init file the launcher was handed.
     CapWslBash,
@@ -2050,6 +2053,7 @@ text_entries! {
     RowPowerShellProfileLine,
     DescPowerShellProfileLine,
     RemovePowerShellProfileLine,
+    ShellProfileAddedToast,
 
     // ── Claude Code's hooks (attention plan §3.3, Terminal page) ────────────
     /// `Terminal ▸ Claude Code hooks` — the row that lets an agent say it is waiting.
@@ -3787,6 +3791,10 @@ impl Text {
             Self::NavProfiles => pick(lang, "Profiles", "配置文件"),
             Self::CategoryProfiles => pick(lang, "PROFILES", "配置文件"),
             Self::ProfilesDuplicate => pick(lang, "Duplicate", "复制"),
+            // zh: pending T-INTEGRATION-INJECT-4
+            Self::ProfilesEnableViaProfile => {
+                pick(lang, "Enable via $PROFILE", "Enable via $PROFILE")
+            }
             // Lower case, because it is a badge and not a heading: the type
             // raises it in the English and there is no case to raise in the
             // Chinese, which is the same ruling `CategoryGeneral` carries.
@@ -3826,6 +3834,18 @@ impl Text {
                 lang,
                 "PowerShell integration is not provided for these arguments.",
                 "自定义启动参数，不提供 PowerShell 整合。",
+            ),
+            // zh: pending T-INTEGRATION-INJECT-4
+            Self::CapPowerShellViaProfile => pick(
+                lang,
+                "Prompt marks, directory, exit codes and hyperlinks, loaded via $PROFILE",
+                "Prompt marks, directory, exit codes and hyperlinks, loaded via $PROFILE",
+            ),
+            // zh: pending T-INTEGRATION-INJECT-4
+            Self::CapPowerShellProfilePolicy => pick(
+                lang,
+                "PowerShell integration is not provided for these arguments. The execution policy does not allow loading $PROFILE.",
+                "PowerShell integration is not provided for these arguments. The execution policy does not allow loading $PROFILE.",
             ),
             Self::CapWslBash => pick(
                 lang,
@@ -4763,13 +4783,20 @@ impl Text {
             ),
             Self::DescPowerShellProfileLine => pick(
                 lang,
-                "An earlier Folio added this startup line.",
-                "旧版 Folio 添加了此启动行。",
+                // zh: pending T-INTEGRATION-INJECT-4
+                "Folio added this startup line.",
+                "Folio added this startup line.",
             ),
             Self::RemovePowerShellProfileLine => pick(
                 lang,
                 "Remove the line from $PROFILE",
                 "从 $PROFILE 移除此行",
+            ),
+            // zh: pending T-INTEGRATION-INJECT-4
+            Self::ShellProfileAddedToast => pick(
+                lang,
+                "Added one line to $PROFILE. It takes effect only in Folio.",
+                "Added one line to $PROFILE. It takes effect only in Folio.",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -5902,7 +5929,18 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        (Self::ProfilesEnableViaProfile, HostPlatform::Windows),
+        (Self::ProfilesEnableViaProfile, HostPlatform::MacOs),
+        (Self::CapPowerShellViaProfile, HostPlatform::Windows),
+        (Self::CapPowerShellViaProfile, HostPlatform::MacOs),
+        (Self::CapPowerShellProfilePolicy, HostPlatform::Windows),
+        (Self::CapPowerShellProfilePolicy, HostPlatform::MacOs),
+        (Self::DescPowerShellProfileLine, HostPlatform::Windows),
+        (Self::DescPowerShellProfileLine, HostPlatform::MacOs),
+        (Self::ShellProfileAddedToast, HostPlatform::Windows),
+        (Self::ShellProfileAddedToast, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
