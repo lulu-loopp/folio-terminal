@@ -141,19 +141,28 @@ pub fn probe_26(size: bt_pty::PtySize, wake: bt_pty::OutputWake) -> impl Sized {
     bt_pty::PtySession::spawn_shell_in("probe", &[], &[], size, wake, None) // probe: bt_pty::PtySession::spawn_shell_in
 }
 
+/// `bt_pty::PtySession::spawn_refreshed` - all
+pub fn probe_27(
+    r: bt_pty::EnvironmentRefresh,
+    size: bt_pty::PtySize,
+    wake: bt_pty::OutputWake,
+) -> impl Sized {
+    bt_pty::PtySession::spawn_refreshed("probe", &[], &[], &[], r, size, wake, None) // probe: bt_pty::PtySession::spawn_refreshed
+}
+
 /// `bt_pty::PtySession::resize` - all
-pub fn probe_27(s: &bt_pty::PtySession, size: bt_pty::PtySize) -> impl Sized {
+pub fn probe_28(s: &bt_pty::PtySession, size: bt_pty::PtySize) -> impl Sized {
     s.resize(size) // probe: bt_pty::PtySession::resize
 }
 
 /// `bt_pty::wait_for_retirements` - all
-pub fn probe_28(d: std::time::Duration) -> impl Sized {
+pub fn probe_29(d: std::time::Duration) -> impl Sized {
     bt_pty::wait_for_retirements(d) // probe: bt_pty::wait_for_retirements
 }
 
 /// `bt_platform::keyboard_layout_shift_table` - windows
 #[cfg(windows)]
-pub fn probe_29(
+pub fn probe_30(
     worker: &bt_platform::admission::WorkerCtx,
     layout: &bt_platform::KeyboardLayout,
 ) -> impl Sized {
@@ -162,7 +171,7 @@ pub fn probe_29(
 
 /// `windows::Win32::UI::Shell::ShellExecuteW` - windows
 #[cfg(windows)]
-pub fn probe_30(
+pub fn probe_31(
     o: windows::core::PCWSTR,
     n: windows::Win32::UI::WindowsAndMessaging::SHOW_WINDOW_CMD,
 ) -> impl Sized {
@@ -171,24 +180,24 @@ pub fn probe_30(
 
 /// `windows::Win32::System::Threading::SetEvent` - windows
 #[cfg(windows)]
-pub fn probe_31(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
+pub fn probe_32(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
     unsafe { windows::Win32::System::Threading::SetEvent(h) } // probe: windows::Win32::System::Threading::SetEvent
 }
 
 /// `windows::Win32::Foundation::CloseHandle` - windows
 #[cfg(windows)]
-pub fn probe_32(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
+pub fn probe_33(h: windows::Win32::Foundation::HANDLE) -> impl Sized {
     unsafe { windows::Win32::Foundation::CloseHandle(h) } // probe: windows::Win32::Foundation::CloseHandle
 }
 
 /// `libc::write` - macos
 #[cfg(target_os = "macos")]
-pub fn probe_33(fd: i32, b: &[u8]) -> impl Sized {
+pub fn probe_34(fd: i32, b: &[u8]) -> impl Sized {
     unsafe { libc::write(fd, b.as_ptr().cast(), b.len()) } // probe: libc::write
 }
 
 /// `libc::close` - macos
 #[cfg(target_os = "macos")]
-pub fn probe_34(fd: i32) -> impl Sized {
+pub fn probe_35(fd: i32) -> impl Sized {
     unsafe { libc::close(fd) } // probe: libc::close
 }

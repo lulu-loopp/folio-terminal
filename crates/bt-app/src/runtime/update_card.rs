@@ -531,9 +531,7 @@ mod tests {
         let failed = row(&job, "v0.4.7");
         assert_eq!(failed.control, VersionControl::Retry { enabled: true });
         assert!(
-            failed
-                .value
-                .ends_with("v0.4.7 wasn't installed. This version was restored."),
+            failed.value.ends_with("v0.4.7 was not installed."),
             "{}",
             failed.value
         );

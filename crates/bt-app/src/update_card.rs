@@ -651,16 +651,14 @@ pub(crate) fn version_row<W: Copy + Eq>(
     let running = crate::version::VERSION;
     let line = |state: String| format!("{} · {state}", crate::version::banner());
 
-    if matches!(job.state(), State::Failed(..) | State::Idle)
-        && let Some((offer, _)) = job.last_failure()
-    {
+    if let Some((offer, outcome)) = version_failure(job) {
         let tag = offer
             .as_ref()
             .map(Offer::tag)
             .or(offered)
             .unwrap_or(running);
         return VersionRow {
-            value: line(crate::i18n::version_failed_in(lang, tag)),
+            value: line(version_failed_in(lang, &outcome, tag)),
             control: VersionControl::Retry {
                 enabled: job.asked_offer(offered).is_some(),
             },
@@ -749,6 +747,34 @@ pub(crate) fn version_row<W: Copy + Eq>(
     }
 }
 
+/// **The failure About → Version names, and what it did to the installed
+/// copy**: the launch's last failure ([`Job::last_failure`]) while the job is
+/// `Failed` or `Idle`, read through the same [`outcome`] the failed card draws
+/// its second line from — nothing changed, the previous version restored, or
+/// the update incomplete (T-UPDATE-FAILURE-COPY).
+fn version_failure<W: Copy + Eq>(job: &Job<W>) -> Option<(&Option<Offer>, Outcome)> {
+    if !matches!(job.state(), State::Failed(..) | State::Idle) {
+        return None;
+    }
+    job.last_failure()
+        .map(|(offer, failure)| (offer, outcome(failure)))
+}
+
+/// **Version's failed value**, one sentence per [`Outcome`]: a stop before
+/// anything moved says only that `version` was not installed; a rollback says
+/// the previous version was put back as well; an unfinished rollback says the
+/// update is incomplete, as the card does.
+#[must_use]
+pub(crate) fn version_failed_in(lang: Lang, outcome: &Outcome, version: &str) -> String {
+    match outcome {
+        Outcome::NothingChanged => Text::VersionFailed,
+        Outcome::Restored => Text::VersionFailedRestored,
+        Outcome::Incomplete { .. } => Text::VersionFailedIncomplete,
+    }
+    .in_lang(lang)
+    .replace("{version}", version)
+}
+
 // ── the job posture watched by the window loop ────────────────────────────
 
 /// **What the Version row's control asks for** (C9, C2).
@@ -811,6 +837,9 @@ pub(crate) struct VersionPosture {
     /// The "Last checked" form, while the last question got no answer — the
     /// displayed bucket, not the timestamp.
     pub(crate) last_checked: Option<crate::i18n::LastChecked>,
+    /// What the failure Version names did to the installed copy
+    /// ([`version_failure`]), while it names one.
+    pub(crate) failed: Option<Outcome>,
 }
 
 impl<W> Default for Shown<W> {
@@ -826,6 +855,7 @@ impl<W> Default for Shown<W> {
                 asked: false,
                 checking: false,
                 last_checked: None,
+                failed: None,
             },
         }
     }
@@ -864,6 +894,7 @@ pub(crate) fn shown<W: Copy + Eq>(
             checking: check.checking,
             last_checked: (check.answered == Some(false))
                 .then(|| crate::i18n::LastChecked::at(check.checked_at_ms, now_ms)),
+            failed: version_failure(job).map(|(_, outcome)| outcome),
         },
     }
 }
@@ -1044,7 +1075,7 @@ mod tests {
                 &failed_job,
                 CheckView::default(),
                 Some("v0.4.7"),
-                format!("{banner} · v0.4.7 wasn't installed. This version was restored."),
+                format!("{banner} · v0.4.7 was not installed."),
                 Kind::Retry,
             ),
             (
@@ -1066,6 +1097,92 @@ mod tests {
             assert!(row.value.starts_with(&banner), "{name}: {}", row.value);
             assert_eq!(row.control.kind(), control, "{name}");
         }
+    }
+
+    /// RED (T-UPDATE-FAILURE-COPY; the owner's ruling of 2026-10-04) —
+    /// **Version's failed line says what the failure did to the installed
+    /// copy**, read from the same `outcome` the failed card draws its second
+    /// line from: a stop before anything moved says only that the version was
+    /// not installed; a rollback (after a trial, or after the moves were
+    /// interrupted) says the previous version was restored; a rollback that
+    /// did not finish says the update is incomplete, with Retry disabled.
+    ///
+    /// MUTATIONS, each observed red: (1) draw `Text::VersionFailed` for every
+    /// outcome in `version_failed_in` — the three restored and incomplete rows
+    /// fail; (2) draw `VersionFailedRestored` for `Outcome::Incomplete` — the
+    /// incomplete row fails; (3) map `Failure::Interrupted` to
+    /// `Outcome::NothingChanged` in `outcome` — the interrupted row fails.
+    #[test]
+    fn about_version_says_what_each_failure_did() {
+        use crate::update::CheckView;
+
+        let banner = crate::version::banner();
+        let (mut stopped, post) = downloading();
+        post.post(Step::Stopped(crate::update_job::Stop::Sums));
+        assert_eq!(stopped.drain_progress(), 0);
+        let after =
+            |failure: Failure| considered("v0.4.7", Channel::Ours).after_rollback(Some(failure));
+        let rows = [
+            (
+                "stopped",
+                stopped,
+                format!("{banner} · v0.4.7 was not installed."),
+                true,
+            ),
+            (
+                "rolled back",
+                after(Failure::RolledBack),
+                format!("{banner} · v0.4.7 was not installed. The previous version was restored."),
+                true,
+            ),
+            (
+                "interrupted",
+                after(Failure::Interrupted),
+                format!("{banner} · v0.4.7 was not installed. The previous version was restored."),
+                true,
+            ),
+            (
+                "incomplete",
+                after(Failure::Incomplete {
+                    folder: PathBuf::from("journal"),
+                }),
+                format!("{banner} · The update to v0.4.7 is incomplete."),
+                false,
+            ),
+        ];
+        for (name, job, value, retry) in rows {
+            assert!(matches!(job.state(), State::Failed(..)), "{name}");
+            let row = version_row(&job, CheckView::default(), Some("v0.4.7"), 0, Lang::English);
+            assert_eq!(row.value, value, "{name}");
+            assert_eq!(
+                row.control,
+                VersionControl::Retry { enabled: retry },
+                "{name}"
+            );
+        }
+    }
+
+    /// RED (T-UPDATE-FAILURE-COPY) — **what a failure did reaches the
+    /// once-a-turn comparison**: two failed jobs that differ only in it (same
+    /// state kind, offer, asked offer, mark and check) draw different Version
+    /// lines, so the posture differs.
+    ///
+    /// MUTATION: build `failed: None` in `shown`; observed red.
+    #[test]
+    fn version_posture_carries_what_the_failure_did() {
+        use crate::update::CheckView;
+
+        let (mut stopped, post) = downloading();
+        post.post(Step::Stopped(crate::update_job::Stop::Sums));
+        assert_eq!(stopped.drain_progress(), 0);
+        let rolled_back =
+            considered("v0.4.7", Channel::Ours).after_rollback(Some(Failure::RolledBack));
+        let before = shown(&stopped, true, CheckView::default(), Some("v0.4.7"), 0);
+        let now = shown(&rolled_back, true, CheckView::default(), Some("v0.4.7"), 0);
+        assert_eq!(before.version.state, now.version.state);
+        assert_eq!(before.version.asked, now.version.asked);
+        assert_eq!(before.foot, now.foot);
+        assert!(version_changed(&before, &now));
     }
 
     /// RED (T-UPDATE-ON-ABOUT round 2, R2) — **Version derives its control

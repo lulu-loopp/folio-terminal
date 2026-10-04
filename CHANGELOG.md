@@ -27,6 +27,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- On Windows, a newly installed command is found in a new tab without restarting Folio.
 - The new-version notice and the update button are on About → Version; the daily check switch moved there too, and turning it off stops only the daily check.
 - The README says how to uninstall each kind of copy, and the zip's
   `uninstall.cmd` prints its lines in Chinese as well as English.
@@ -75,6 +76,15 @@ All notable changes to Folio are recorded here. The format follows
 - On macOS, a new version that quits the moment it is started no longer leaves
   about 90 seconds with no Folio window before the previous version comes back,
   when the version you update from is 0.4.7 or later.
+- After an update fails, About → Version no longer says the previous version
+  was restored when nothing had been replaced; it says the previous version was
+  restored only when it was, and says the update is incomplete when putting it
+  back did not finish.
+- Restart shell, Duplicate pane, the splits and Duplicate tab start the new
+  shell in the folder the pane was opened in when its shell never reported
+  one, instead of the profile's default folder. A folder that has since been
+  deleted opens the profile's own starting folder rather than the folder Folio
+  itself was started from.
 
 ### Known issues
 
