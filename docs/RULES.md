@@ -966,15 +966,22 @@ arrives on". T-INTEGRATION-INJECT-1 removes the PowerShell row and its pending
 intent; process-scoped integration asks no first-run question.
 
 ### 36. The update check — `folded`
-**Rule.** **The check.** At most once every 24 hours across every window on the
-machine, on a thread of its own started after the first window, Folio sends one
+**Rule.** **The check.** At most once every 24 hours across every window and
+process on the machine — at launch, and again each day while Folio stays open,
+turned by the first open window's application clock — Folio sends one
 `GET` of `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` with
 the one header `User-Agent: Folio`, through the platform's own HTTP stack
 (WinHTTP; `NSURLSession`, ephemeral). The newest tag is the greatest by
 precedence, never the first listed. Every failure is silent and counts as that
-day's attempt. The check itself downloads, replaces and restarts nothing: its
+day's attempt (`attempted_at_ms`) without moving the last answer's stamp
+(`checked_at_ms`, which About's "Last checked" names); the check is due when
+both are a day old (`update::owed`, over `update::due`, which reads a stamp in
+the future as due). A held cross-process claim is looked at again after its
+five-minute stale bound, to adopt the other process's answer without making a
+second request. During an update's trial the schedule waits for the commit. The
+check itself downloads, replaces and restarts nothing: its
 answer is the gear's mark and About → Version's state line. `update-check.json`
-(schema v2: the stamp, `latest_tag`, `seen_tag`, `skipped_tag`) has one owner,
+(schema v2: the stamps, `latest_tag`, `seen_tag`, `skipped_tag`) has one owner,
 `update::OfferState`, which holds one lock across every read-modify-write; a
 claim file keeps a second process from asking the same day. The offer decision is
 `update::should_offer`: a tag newer than the running build and above
@@ -983,7 +990,10 @@ directly below Version is the daily schedule and nothing else — **Off, Folio
 never checks by itself**: no scheduled thread starts and nothing is written.
 Version's **Check** still asks through the same worker door; a known offer and
 the gear's mark stay; an answer already on the wire is recorded; a download
-already started is not cancelled. The switch is not eligibility.
+already started is not cancelled. The schedule is independent of the job: an
+offer, download or failure card never suppresses a due check. A running update
+transaction keeps its captured tag; a newer answer becomes the offer About asks
+for after that transaction ends. The switch is not eligibility.
 `--update-feed <file-URL>` makes one start read a local folder in the releases
 list's shape instead of github.com, for the check and the download alike; it is
 never persisted and moves nothing else — not the gate, not the checksum, not the

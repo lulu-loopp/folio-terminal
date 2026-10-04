@@ -29,8 +29,8 @@ release; nothing is downloaded until you press **Update** on it.
 | **Address** | `https://api.github.com/repos/lulu-loopp/folio-terminal/releases` |
 | **Method** | `GET`. No query string, no request body. |
 | **What is sent** | One header: `User-Agent: Folio`. No version, no build, no operating system, no identifier, no cookie. GitHub refuses a request with no user agent at all, which is why the header is not empty. |
-| **How often** | At most once every 24 hours, across every Folio window on the machine. A failure — no network, a proxy, a rate limit — counts as the attempt for that day and is not retried. |
-| **Where the answer goes** | `update-check.json` in the settings directory below: when the page was last asked, the tag it named, the tag you have already been shown, and the tag you chose to skip. |
+| **How often** | At most once every 24 hours, across every Folio window on the machine — at launch, and again each day while Folio stays open. A failure — no network, a proxy, a rate limit — counts as the attempt for that day and is not retried until the day has passed. |
+| **Where the answer goes** | `update-check.json` in the settings directory below: when the page last answered, when a request last got no answer, the tag it named, the tag you have already been shown, and the tag you chose to skip. |
 | **How to switch it off** | Settings > General > **Update check**, or `"update_check": false` in `settings.json`. On a machine that has never run Folio it is also the first row of the first-run card, where it arrives on and can be switched off before it has ever run. Off, no thread is started, no request is made and `update-check.json` is never written. |
 
 GitHub receives the request the way it receives any request: your IP address and

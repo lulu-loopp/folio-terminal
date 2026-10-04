@@ -5,8 +5,9 @@
 //! # What this is, stated as a bound
 //!
 //! One `GET` of one fixed address, at most once every twenty-four hours across
-//! every window on the machine, on a thread of its own, carrying nothing about
-//! the machine or the person at it, failing in complete silence, and downloading
+//! every window and every process on the machine — at launch and again each day
+//! while Folio stays open — on a thread of its own, carrying nothing about the
+//! machine or the person at it, failing in complete silence, and downloading
 //! nothing whatever it learns. That sentence is the whole feature, and every
 //! part of it is load-bearing:
 //!
@@ -18,7 +19,7 @@
 //!   *is it time yet*; a claim file beside it answers *is another window already
 //!   asking*. Two windows opened together make one request, and the second one
 //!   does not queue behind the first — it simply does not ask. See
-//!   [`OfferState::run`].
+//!   [`OfferState::run_on_clock`].
 //! * **Its own thread.** Nothing on the path from `main` to the first frame
 //!   waits for this. The thread is started after the window exists and its
 //!   answer arrives as an ordinary wake, exactly the way the PSReadLine probe's
@@ -28,8 +29,9 @@
 //!   cookie, no query string. See [`USER_AGENT`] for why it is not empty.
 //! * **Silent.** Every failure — no network, DNS, a proxy, a rate limit, a
 //!   response that is not JSON, a tag that is not a version — is the same
-//!   outcome: the stamp advances and nothing is said. A terminal that reported
-//!   its update check's problems would be a terminal that talked about itself.
+//!   outcome: the attempt is recorded, the last answer's stamp stays where it
+//!   was, and nothing is said. A terminal that reported its update check's
+//!   problems would be a terminal that talked about itself.
 //! * **Downloads nothing.** The check has no installer, no replacement, no
 //!   restart: the most it can do is put a dot on a gear and a sentence in a
 //!   dialog. What it learned is the update job's evidence (`update_job`): on a
@@ -55,13 +57,21 @@
 //! [`GitHubReleases::latest_tag`] stopped being two arms and this file stopped
 //! naming a platform.
 //!
-//! # Why the stamp advances on failure
+//! # Why a failure counts as the day's attempt
 //!
 //! It is the whole of the no-retry-storm rule. A laptop on a train would
 //! otherwise fail, find itself still due, and fail again — once per window, per
-//! launch, forever — and the machine that suffers most is the one least able to
-//! answer. The stamp records *when we asked*, not *when we were told*, so a
-//! week offline is seven attempts and not seven thousand.
+//! launch, per turn of a window left open, forever — and the machine that
+//! suffers most is the one least able to answer. So a refusal writes
+//! `attempted_at_ms`, and the check is due only when both that and the last
+//! answer's `checked_at_ms` are a day old ([`owed`]): a week offline is seven
+//! attempts across every window and process, not seven thousand. The answer's
+//! stamp itself does not move on a refusal (T-UPDATE-DAILY), so About's "Last
+//! checked" names the last answer rather than hiding a failure behind a fresh
+//! time. A held cross-process claim is looked at again after its own stale
+//! bound, which lets this process read the other one's answer without a second
+//! request; and should the attempt not reach the disk, this process still
+//! remembers it in memory and waits the same day.
 //!
 //! # Why the tag is compared and not the date
 //!
@@ -82,9 +92,9 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU8, Ordering as AtomicOrdering},
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering as AtomicOrdering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use bt_persist::UpdateCheckV1;
@@ -437,14 +447,45 @@ pub fn due(checked_at_ms: u64, now_ms: u64) -> bool {
     now_ms < checked_at_ms || now_ms - checked_at_ms >= CHECK_INTERVAL_MS
 }
 
+/// Whether the automatic check is owed by `state`: [`due`] of the last answer
+/// **and** of the last unanswered attempt, so a refusal counts as the day's
+/// attempt without moving the answer's stamp (T-UPDATE-DAILY).
+#[must_use]
+pub fn owed(state: &UpdateCheckV1, now_ms: u64) -> bool {
+    due(state.checked_at_ms, now_ms) && due(state.attempted_at_ms, now_ms)
+}
+
+/// How long until `stamp`'s day has passed by [`due`]; zero once it has.
+fn wait_ms(stamp: u64, now_ms: u64) -> u64 {
+    if due(stamp, now_ms) {
+        0
+    } else {
+        CHECK_INTERVAL_MS - (now_ms - stamp)
+    }
+}
+
+/// What the last question did, as the About page tells it, read from a
+/// document: 0 never asked, 1 answered, 2 asked without an answer.
+const fn last_answer_of(state: &UpdateCheckV1) -> u8 {
+    if state.attempted_at_ms != 0 {
+        2
+    } else if state.checked_at_ms == 0 {
+        0
+    } else if state.latest_tag.is_some() {
+        1
+    } else {
+        2
+    }
+}
+
 // ── the check itself ────────────────────────────────────────────────────────
 
 /// Where a tag comes from.
 ///
-/// A trait with one method so the whole of [`OfferState::run`] can be tested without a
-/// network: the tests hand it a source that counts its calls and answers from a
-/// string, and the product hands it [`GitHubReleases`]. Nothing else in this
-/// module knows that HTTP exists.
+/// A trait with one method so the whole of [`OfferState::run_on_clock`] can be
+/// tested without a network: the tests hand it a source that counts its calls
+/// and answers from a string, and the product hands it [`GitHubReleases`].
+/// Nothing else in this module knows that HTTP exists.
 pub trait Releases {
     /// The latest release's tag, or a sentence nobody reads.
     ///
@@ -634,7 +675,7 @@ pub fn check_source<'a>(feed: Option<&'a Feed>, page: &'a dyn Releases) -> &'a d
     }
 }
 
-/// What one call to [`OfferState::run`] did, for the tests and for nobody else.
+/// What one call to [`OfferState::run_on_clock`] did.
 ///
 /// The product ignores it: every arm below the first two ends in the same place,
 /// which is a state file on a disk and a window that may or may not draw a dot.
@@ -647,8 +688,27 @@ pub enum Outcome {
     Busy,
     /// A tag came back and is now in the file.
     Answered(String),
-    /// The question was asked and did not come back. The stamp advanced anyway.
+    /// The question was asked and did not come back. It is the day's attempt
+    /// (`attempted_at_ms`); the answer's stamp stays where it was.
     Refused,
+}
+
+/// What the automatic check's one application clock owes at `now_ms`.
+///
+/// The update job is deliberately absent: an offer, download or failure card
+/// may be standing while the check follows its own cadence. `After` is a wall
+/// duration translated to the event loop's `Instant` only at the scheduling
+/// door, so sleep and wall-clock corrections are judged again by [`due`] on
+/// the turn that follows them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Schedule {
+    Off,
+    /// An update's trial holds the check's writes (`update_trial`, F-7);
+    /// [`release_trial`] starts the check when the trial is committed.
+    Held,
+    InFlight,
+    Start,
+    After(u64),
 }
 
 /// The check facts the About page renders. The persisted schema stays
@@ -690,8 +750,8 @@ pub struct CheckView {
 /// press. Routing it through a worker would add a channel and a wake for a file of
 /// four fields; a lock over one read and one atomic write of a few hundred bytes
 /// serialises the same writers with nothing new. The lock is **never** held
-/// across the network request: the check takes it once to advance the stamp and
-/// once to record the answer.
+/// across the network request: what the request did — an answer with its stamp,
+/// or a refusal's attempt — lands after it.
 ///
 /// # What the lock does not cover
 ///
@@ -734,6 +794,16 @@ pub struct OfferState {
     /// an answer, 2 when it got none. Kept in process because the persisted
     /// document deliberately records the time and last tag, not an error.
     last_answer: AtomicU8,
+    /// The last automatic or manual request which got no answer, or found
+    /// another process holding the claim. The refusal is also written to the
+    /// document (`attempted_at_ms`); this copy is what bounds the retry when
+    /// that write did not land, or for a feed's check, which never writes it.
+    last_attempt_ms: AtomicU64,
+    /// The in-process retry interval after [`Self::last_attempt_ms`]. A refused
+    /// source keeps the ordinary daily cadence; a held claim is looked at again
+    /// after the claim's own stale bound so this process can ingest the other
+    /// process's answer. Zero means the persisted stamps own the next look.
+    retry_after_ms: AtomicU64,
     /// A test's pause between a transaction's read and its write — the one place
     /// a racing writer can land. Fires once.
     #[cfg(test)]
@@ -769,13 +839,7 @@ impl OfferState {
         if !local {
             forget_a_local_answer(&mut state);
         }
-        let last_answer = if state.checked_at_ms == 0 {
-            0
-        } else if state.latest_tag.is_some() {
-            1
-        } else {
-            2
-        };
+        let last_answer = last_answer_of(&state);
         Self {
             claim: dir.join(CLAIM_FILE_NAME),
             path,
@@ -787,6 +851,8 @@ impl OfferState {
             settled: AtomicBool::new(false),
             checking: AtomicBool::new(false),
             last_answer: AtomicU8::new(last_answer),
+            last_attempt_ms: AtomicU64::new(0),
+            retry_after_ms: AtomicU64::new(0),
             #[cfg(test)]
             between: Mutex::new(None),
         }
@@ -858,6 +924,61 @@ impl OfferState {
                 _ => None,
             },
         }
+    }
+
+    /// The automatic schedule at `now_ms`, from the persisted answer and
+    /// attempt stamps and this process's bounded retry state; `trial_holds` is
+    /// whether an update's trial holds the check's writes. [`due`] remains the
+    /// one owner of the daily decision ([`owed`], [`wait_ms`]).
+    fn schedule(&self, now_ms: u64, trial_holds: bool) -> Schedule {
+        if !self.enabled() {
+            return Schedule::Off;
+        }
+        if trial_holds {
+            return Schedule::Held;
+        }
+        if self.checking.load(AtomicOrdering::Acquire) {
+            return Schedule::InFlight;
+        }
+        let (checked_at_ms, attempted_at_ms) = {
+            let known = self
+                .known
+                .lock()
+                .expect("the update state is not held across a panic");
+            (known.checked_at_ms, known.attempted_at_ms)
+        };
+        let persisted = wait_ms(checked_at_ms, now_ms).max(wait_ms(attempted_at_ms, now_ms));
+        let in_memory = self.retry_wait_ms(now_ms);
+        match persisted.max(in_memory) {
+            0 => Schedule::Start,
+            wait => Schedule::After(wait),
+        }
+    }
+
+    /// How long this process's own retry bound still holds the automatic
+    /// check back; zero when it does not. A clock set back past the attempt
+    /// releases it, as [`due`] releases a stamp in the future.
+    fn retry_wait_ms(&self, now_ms: u64) -> u64 {
+        let retry_after_ms = self.retry_after_ms.load(AtomicOrdering::Acquire);
+        let attempted_at_ms = self.last_attempt_ms.load(AtomicOrdering::Acquire);
+        if retry_after_ms == 0
+            || now_ms < attempted_at_ms
+            || now_ms - attempted_at_ms >= retry_after_ms
+        {
+            0
+        } else {
+            retry_after_ms - (now_ms - attempted_at_ms)
+        }
+    }
+
+    fn retry_after(&self, now_ms: u64, interval_ms: u64) {
+        self.last_attempt_ms.store(now_ms, AtomicOrdering::Release);
+        self.retry_after_ms
+            .store(interval_ms, AtomicOrdering::Release);
+    }
+
+    fn clear_retry(&self) {
+        self.retry_after_ms.store(0, AtomicOrdering::Release);
     }
 
     /// **The one read-modify-write.** `change` answers whether it changed
@@ -939,14 +1060,15 @@ impl OfferState {
     /// 1. **Take the claim first.** Not "decide, then claim" — two windows that both
     ///    read a stale stamp before either wrote one would both decide to ask.
     ///    Everything that reads or writes the stamp happens inside the claim.
-    /// 2. **Then read the stamp**, and let go if it is not time yet.
-    /// 3. **Then write the stamp**, before the request rather than after it, so a
-    ///    window that starts while this one is waiting on a socket sees a fresh
-    ///    stamp the moment this one lets go of the claim.
+    /// 2. **Then read the stamps**, and let go if it is not time yet ([`owed`]).
+    /// 3. **Then write what the request did**: an answer with its stamp, or a
+    ///    refusal as the day's attempt (`attempted_at_ms`), which leaves the
+    ///    answer's stamp in place. The claim is held across the request, so a
+    ///    window that starts meanwhile finds it held and does not ask.
     ///
-    /// Steps 2 and 3 are one transaction and the answer is a second. The lock is
-    /// not held across the request, so the window thread is never made to wait
-    /// on somebody else's network.
+    /// Step 2 is one transaction and step 3 a second, after the request. The
+    /// lock is not held across the request, so the window thread is never made
+    /// to wait on somebody else's network.
     ///
     /// A window that finds the claim held does **not** wait: it does nothing at all
     /// this launch, and its gear draws whatever the file said when it opened. The
@@ -957,34 +1079,74 @@ impl OfferState {
     /// Every outcome settles the check for the update job ([`Self::settle`]):
     /// whatever it learned is in [`Self::known`] by then, and this launch asks
     /// nothing more.
-    pub fn run(&self, now_ms: u64, source: &dyn Releases) -> Outcome {
+    #[cfg(test)]
+    pub(crate) fn run(&self, now_ms: u64, source: &dyn Releases) -> Outcome {
+        self.run_on_clock(now_ms, source, || now_ms)
+    }
+
+    fn run_on_clock(
+        &self,
+        now_ms: u64,
+        source: &dyn Releases,
+        completed_at: impl FnOnce() -> u64,
+    ) -> Outcome {
         self.checking.store(true, AtomicOrdering::Release);
-        let outcome = self.ask(now_ms, source, false);
-        self.finish(&outcome);
+        let outcome = self.ask(now_ms, source, false, completed_at);
+        self.finish(now_ms, &outcome);
         outcome
     }
 
     /// The About page's `Check`: the same question, claim, source and owner as
     /// [`Self::run`], with the daily timestamp gate deliberately bypassed.
-    pub fn run_now(&self, now_ms: u64, source: &dyn Releases) -> Outcome {
+    #[cfg(test)]
+    pub(crate) fn run_now(&self, now_ms: u64, source: &dyn Releases) -> Outcome {
+        self.run_now_on_clock(now_ms, source, || now_ms)
+    }
+
+    fn run_now_on_clock(
+        &self,
+        now_ms: u64,
+        source: &dyn Releases,
+        completed_at: impl FnOnce() -> u64,
+    ) -> Outcome {
         self.checking.store(true, AtomicOrdering::Release);
-        let outcome = self.ask(now_ms, source, true);
-        self.finish(&outcome);
+        let outcome = self.ask(now_ms, source, true, completed_at);
+        self.finish(now_ms, &outcome);
         outcome
     }
 
-    fn finish(&self, outcome: &Outcome) {
+    fn finish(&self, now_ms: u64, outcome: &Outcome) {
         match outcome {
-            Outcome::Answered(_) => self.last_answer.store(1, AtomicOrdering::Release),
-            Outcome::Refused => self.last_answer.store(2, AtomicOrdering::Release),
-            Outcome::TooSoon | Outcome::Busy => {}
+            Outcome::Answered(_) => {
+                self.last_answer.store(1, AtomicOrdering::Release);
+                self.clear_retry();
+            }
+            Outcome::Refused => {
+                self.last_answer.store(2, AtomicOrdering::Release);
+                self.retry_after(now_ms, CHECK_INTERVAL_MS);
+            }
+            Outcome::Busy => self.retry_after(now_ms, CLAIM_STALE_MS),
+            Outcome::TooSoon => {
+                // The document is fresher than this process: another process
+                // answered, or was refused, since this one last looked. Its
+                // facts are now [`Self::known`], and About tells them.
+                self.last_answer
+                    .store(last_answer_of(&self.known()), AtomicOrdering::Release);
+                self.clear_retry();
+            }
         }
         self.checking.store(false, AtomicOrdering::Release);
         self.settle();
     }
 
-    /// [`Self::run`]'s question, before it settles.
-    fn ask(&self, now_ms: u64, source: &dyn Releases, now: bool) -> Outcome {
+    /// [`Self::run_on_clock`]'s question, before it settles.
+    fn ask(
+        &self,
+        now_ms: u64,
+        source: &dyn Releases,
+        now: bool,
+        completed_at: impl FnOnce() -> u64,
+    ) -> Outcome {
         let Some(_claim) = Claim::take(&self.claim, now_ms) else {
             return Outcome::Busy;
         };
@@ -992,32 +1154,46 @@ impl OfferState {
         let mut too_soon = false;
         let local = self.local;
         let _ = self.transact(|state| {
-            too_soon = !now && !due(state.checked_at_ms, now_ms);
-            if !too_soon {
-                state.checked_at_ms = now_ms;
-                // Whose stamp this is: a start without the feed asks again at
-                // once over a feed's (U-42e).
-                state.local_stamp = local;
-            }
-            !too_soon
+            too_soon = !now && !owed(state, now_ms);
+            false
         });
         if too_soon {
             return Outcome::TooSoon;
         }
 
-        match source.latest_tag() {
+        let answer = source.latest_tag();
+        let completed_at_ms = completed_at();
+        match answer {
             Ok(tag) => {
-                // Only the field this thread fetched is written; everything else
-                // is whatever the file says under the lock — an acknowledgement
-                // or a Skip made while the request was on the wire included.
-                let _ = self.transact(|state| {
+                // Only the fields this thread fetched are written; everything
+                // else is whatever the file says under the lock — an
+                // acknowledgement or a Skip made while the request was on the
+                // wire included.
+                let persisted = self.transact(|state| {
+                    state.checked_at_ms = completed_at_ms;
+                    state.attempted_at_ms = 0;
+                    // Whose stamp this is: a start without the feed asks again
+                    // at once over a feed's (U-42e).
+                    state.local_stamp = local;
                     state.latest_tag = Some(tag.clone());
                     state.local_tag = local;
                     true
                 });
-                Outcome::Answered(tag)
+                persisted.map_or(Outcome::Refused, |()| Outcome::Answered(tag))
             }
-            Err(_) => Outcome::Refused,
+            Err(_) => {
+                // **The day's attempt is spent**, across every window and
+                // process (the no-retry-storm rule). A feed's refusal is not
+                // written: a feed is a rehearsal, and nothing it does may hold
+                // back an ordinary start's question to the page (U-42e).
+                if !local {
+                    let _ = self.transact(|state| {
+                        state.attempted_at_ms = completed_at_ms;
+                        true
+                    });
+                }
+                Outcome::Refused
+            }
         }
     }
 
@@ -1299,8 +1475,9 @@ pub fn skip(tag: &str) -> Result<(), bt_persist::WriteError> {
 }
 
 /// The reader turned the automatic check on or off (Settings > About).
-/// On and Off take effect at the next scheduled launch; neither hides an offer
-/// nor cancels a job, and the About page's manual Check remains available.
+/// On and Off take effect on the application clock's next turn; neither hides
+/// an offer nor cancels a job, and the About page's manual Check remains
+/// available.
 pub fn set_enabled(enabled: bool) {
     if let Some(owner) = OWNER.get() {
         owner.set_enabled(enabled);
@@ -1319,7 +1496,7 @@ pub fn release_trial() {
     begin();
 }
 
-/// Start the one check this process makes.
+/// Start the scheduled check.
 ///
 /// A no-op when the switch is off, and that is the whole of the switch: no
 /// thread, no claim, no file. Off is not a quieter check.
@@ -1328,7 +1505,7 @@ pub fn release_trial() {
 /// the loop to consider an offer: the thread's answer, a check that will not
 /// run (the switch, a trial), and a kernel that would not give out a thread.
 pub fn begin() {
-    spawn_check(false);
+    spawn_check(false, unix_epoch_ms());
 }
 
 /// Ask now from About. Answers whether this press started the shared worker;
@@ -1336,7 +1513,7 @@ pub fn begin() {
 /// that disables the button.
 #[must_use]
 pub fn begin_now() -> bool {
-    spawn_check(true)
+    spawn_check(true, unix_epoch_ms())
 }
 
 /// Whether this entry may start the shared check worker. Automatic check gates
@@ -1346,7 +1523,7 @@ const fn check_entry_allowed(now: bool, automatic: bool) -> bool {
     now || automatic
 }
 
-fn spawn_check(now: bool) -> bool {
+fn spawn_check(now: bool, now_ms: u64) -> bool {
     let Some(owner) = OWNER.get() else {
         return false;
     };
@@ -1362,6 +1539,13 @@ fn spawn_check(now: bool) -> bool {
     // stamp and its claim file into O's folder. It is asked again when the
     // trial is committed ([`release_trial`]).
     if crate::update_trial::defer(crate::update_trial::Writer::UpdateCheck) {
+        settled_without_asking();
+        return false;
+    }
+    // **This process's own retry bound holds every automatic entry**, the
+    // launch's included: a launch entry the job starts after its pass lands
+    // must not ask again a request the application clock just saw refused.
+    if !now && owner.retry_wait_ms(now_ms) > 0 {
         settled_without_asking();
         return false;
     }
@@ -1382,12 +1566,11 @@ fn spawn_check(now: bool) -> bool {
         "bt-update-check",
         bt_platform::ThreadPriority::BelowNormal,
         move |_ctx| {
-            let now_ms = unix_epoch_ms();
             let source = check_source(feed(), &GitHubReleases);
             let outcome = if now {
-                owner.run_now(now_ms, source)
+                owner.run_now_on_clock(now_ms, source, unix_epoch_ms)
             } else {
-                owner.run(now_ms, source)
+                owner.run_on_clock(now_ms, source, unix_epoch_ms)
             };
             if let Some(wake) = WAKE.get() {
                 wake();
@@ -1398,10 +1581,43 @@ fn spawn_check(now: bool) -> bool {
     );
     if spawned.is_err() {
         owner.checking.store(false, AtomicOrdering::Release);
+        owner.last_answer.store(2, AtomicOrdering::Release);
+        owner.retry_after(now_ms, CHECK_INTERVAL_MS);
         settled_without_asking();
         return false;
     }
     true
+}
+
+/// Turn the automatic schedule once and return the event-loop deadline for its
+/// next look. The caller is the first open window's application-clock turn.
+/// The request itself remains on [`spawn_check`]'s existing worker.
+///
+/// **Not during an update's trial.** The check's writes are held then, so
+/// [`spawn_check`] would settle without asking, wake the loop, and be asked
+/// again on the turn that wake makes — a loop. [`release_trial`] starts the
+/// check once the trial is committed.
+pub(crate) fn advance_schedule(now: Instant, now_ms: u64) -> Option<Instant> {
+    let owner = OWNER.get()?;
+    let trial_holds = crate::update_trial::writes_are_deferred();
+    if owner.schedule(now_ms, trial_holds) == Schedule::Start {
+        let _ = spawn_check(false, now_ms);
+    }
+    match owner.schedule(now_ms, trial_holds) {
+        Schedule::After(milliseconds) => now.checked_add(Duration::from_millis(milliseconds)),
+        Schedule::Off | Schedule::Held | Schedule::InFlight | Schedule::Start => None,
+    }
+}
+
+/// The next instant About's relative failed-check text changes, while that page
+/// is open. The language owner defines the displayed buckets; this translates
+/// its wall duration to the event loop's clock.
+pub(crate) fn last_checked_deadline(now: Instant, now_ms: u64) -> Option<Instant> {
+    let view = check_view();
+    (view.answered == Some(false))
+        .then(|| crate::i18n::LastChecked::next_change_in_ms(view.checked_at_ms, now_ms))
+        .flatten()
+        .and_then(|milliseconds| now.checked_add(Duration::from_millis(milliseconds)))
 }
 
 /// The wall clock, in milliseconds since the Unix epoch.
@@ -1421,8 +1637,8 @@ pub(crate) fn unix_epoch_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        CHECK_INTERVAL_MS, CLAIM_STALE_MS, OfferState, Outcome, Releases, STATE_FILE_NAME, Version,
-        check_entry_allowed, due, eligible, mark_is_lit, newer_than, newest_tag,
+        CHECK_INTERVAL_MS, CLAIM_STALE_MS, OfferState, Outcome, Releases, STATE_FILE_NAME,
+        Schedule, Version, check_entry_allowed, due, eligible, mark_is_lit, newer_than, newest_tag,
     };
     use bt_persist::UpdateCheckV1;
 
@@ -1694,40 +1910,254 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// PIN — **a machine that cannot reach the network asks once, not once per
-    /// launch.**
+    /// RED (T-UPDATE-DAILY) — **the interval begins when the request
+    /// completes, not when its worker starts.** A slow request must not spend
+    /// part of the next interval while it is still in flight.
     ///
-    /// This is the no-retry-storm rule, and it is the reason the stamp is
-    /// written *before* the request rather than after it. The failure is
-    /// complete and silent: nothing is written into `latest_tag`, so nothing is
-    /// drawn, and the state file is otherwise exactly what a successful check
-    /// would have left.
-    ///
-    /// MUTATION: move the stamp write below `source.latest_tag()` — or into the
-    /// `Ok` arm — and the call count goes to eleven.
+    /// MUTATION: write `now_ms` instead of `completed_at_ms` in `ask`'s answer
+    /// transaction; the persisted stamp is the worker's start and this goes
+    /// red.
     #[test]
-    fn a_refused_question_is_silent_and_is_not_asked_again_until_tomorrow() {
+    fn a_completed_check_stamps_its_completion_clock() {
+        let root = dir("completion-clock");
+        let owner = OfferState::load(&root, true);
+        let started = 1_756_000_000_000u64;
+        let completed = started + 12_345;
+
+        assert_eq!(
+            owner.run_on_clock(started, &Counting::ok("v0.4.7"), || completed),
+            Outcome::Answered("v0.4.7".to_owned())
+        );
+        assert_eq!(state_of(&root).checked_at_ms, completed);
+        assert_eq!(
+            owner.schedule(completed, false),
+            Schedule::After(CHECK_INTERVAL_MS)
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-UPDATE-DAILY) — **the automatic schedule is a table over the
+    /// persisted age and switch, and never over the update job's state.** An
+    /// offer card, download or failure card therefore cannot hold the daily
+    /// check off; only the schedule switch and the check's own in-flight bit
+    /// can.
+    ///
+    /// MUTATION: return `Schedule::Off` from the due arm of `schedule`; every
+    /// due job-state row goes red.
+    #[test]
+    fn automatic_schedule_table_is_independent_of_the_update_job() {
+        let now = 1_756_000_000_000u64;
+        for (case, age, enabled, expected) in [
+            ("fresh", CHECK_INTERVAL_MS - 1, true, Schedule::After(1)),
+            ("due", CHECK_INTERVAL_MS, true, Schedule::Start),
+            ("overdue", 2 * CHECK_INTERVAL_MS, true, Schedule::Start),
+            ("off", 2 * CHECK_INTERVAL_MS, false, Schedule::Off),
+        ] {
+            let root = dir(&format!("schedule-{case}"));
+            bt_persist::write_update_check_atomic(
+                &root.join(STATE_FILE_NAME),
+                &UpdateCheckV1 {
+                    checked_at_ms: now - age,
+                    latest_tag: Some("v0.4.6".to_owned()),
+                    ..UpdateCheckV1::default()
+                },
+            )
+            .expect("a completed check");
+            let owner = OfferState::load(&root, enabled);
+            for job_state in ["idle", "offer open", "downloading", "failure open"] {
+                assert_eq!(
+                    owner.schedule(now, false),
+                    expected,
+                    "{case}, job={job_state}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    /// RED (T-UPDATE-DAILY) — **another process's completed answer defers this
+    /// one and is adopted without a second request.** The local schedule can be
+    /// stale, so the existing claim + transaction re-read remains authoritative.
+    ///
+    /// MUTATION: decide `too_soon` from `self.known()` instead of the document
+    /// read inside `transact`; the stale process makes the second source call.
+    /// Or leave `last_answer` alone on `TooSoon`; About keeps saying it never
+    /// asked.
+    #[test]
+    fn another_processs_fresh_completed_check_is_adopted_without_a_request() {
+        let root = dir("schedule-other-process");
+        let first = OfferState::load(&root, true);
+        let now = 1_756_000_000_000u64;
+        assert_eq!(first.schedule(now, false), Schedule::Start);
+
+        let second = OfferState::load(&root, true);
+        assert_eq!(
+            second.run(now, &Counting::ok("v0.4.8")),
+            Outcome::Answered("v0.4.8".to_owned())
+        );
+
+        let source = Counting::ok("v9.9.9");
+        assert_eq!(first.run(now, &source), Outcome::TooSoon);
+        assert_eq!(source.calls(), 0, "the other process already asked");
+        assert_eq!(first.known().latest_tag.as_deref(), Some("v0.4.8"));
+        assert_eq!(
+            first.view().answered,
+            Some(true),
+            "About tells the other process's answer"
+        );
+        assert_eq!(
+            first.schedule(now, false),
+            Schedule::After(CHECK_INTERVAL_MS)
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-UPDATE-DAILY) — **a 48-hour wall-clock jump starts exactly one
+    /// check, and a backwards correction starts one rather than suppressing the
+    /// schedule forever.** A completed answer moves the stamp to the sampled
+    /// wall time, so neither jump can storm.
+    ///
+    /// MUTATION: make `due` use `saturating_sub`, or leave the successful stamp
+    /// unchanged; the backwards row or the exactly-once assertions go red.
+    #[test]
+    fn sleep_and_clock_corrections_start_one_check_without_a_storm() {
+        let root = dir("schedule-clock-jumps");
+        let day = CHECK_INTERVAL_MS;
+        let start = 1_756_000_000_000u64;
+        let owner = OfferState::load(&root, true);
+        assert!(matches!(
+            owner.run(start, &Counting::ok("v0.4.7")),
+            Outcome::Answered(_)
+        ));
+
+        let woke = start + 2 * day;
+        assert_eq!(owner.schedule(woke, false), Schedule::Start);
+        let source = Counting::ok("v0.4.8");
+        assert!(matches!(owner.run(woke, &source), Outcome::Answered(_)));
+        assert_eq!(source.calls(), 1);
+        assert_eq!(owner.schedule(woke, false), Schedule::After(day));
+
+        let corrected_back = start - day;
+        assert_eq!(owner.schedule(corrected_back, false), Schedule::Start);
+        assert!(matches!(
+            owner.run(corrected_back, &source),
+            Outcome::Answered(_)
+        ));
+        assert_eq!(source.calls(), 2);
+        assert_eq!(owner.schedule(corrected_back, false), Schedule::After(day));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-UPDATE-DAILY; the no-retry-storm PIN it replaces) — **a machine
+    /// that cannot reach the network makes one attempt a day, across this
+    /// process's clock, later launches and other processes alike, and the
+    /// failure is not hidden behind a fresh "Last checked".**
+    ///
+    /// The failure is silent: `latest_tag` and the answer's stamp do not move;
+    /// the attempt is written as `attempted_at_ms`, and a process opened on
+    /// the file tells About that the last question got no answer.
+    ///
+    /// MUTATION: drop the refusal's `attempted_at_ms` transaction in `ask`; a
+    /// later launch asks again at once and the call count goes to eleven.
+    #[test]
+    fn a_refused_question_is_the_days_attempt_for_every_process() {
         let root = dir("refused");
         let owner = OfferState::load(&root, true);
         let source = Counting::refusing();
 
         let start = 1_756_000_000_000u64;
         assert_eq!(owner.run(start, &source), Outcome::Refused);
+        assert_eq!(
+            owner.schedule(start, false),
+            Schedule::After(CHECK_INTERVAL_MS)
+        );
+        assert_eq!(
+            owner.schedule(start + CHECK_INTERVAL_MS - 1, false),
+            Schedule::After(1)
+        );
+        assert_eq!(
+            owner.schedule(start + CHECK_INTERVAL_MS, false),
+            Schedule::Start
+        );
         for offset in 1..10u64 {
+            let launch = OfferState::load(&root, true);
             assert_eq!(
-                owner.run(start + offset * 60_000, &source),
+                launch.schedule(start + offset * 60_000, false),
+                Schedule::After(CHECK_INTERVAL_MS - offset * 60_000)
+            );
+            assert_eq!(
+                launch.run(start + offset * 60_000, &source),
                 Outcome::TooSoon
             );
         }
         assert_eq!(source.calls(), 1, "ten launches offline, one attempt");
 
         let state = state_of(&root);
-        assert_eq!(
-            state.checked_at_ms, start,
-            "the stamp advanced on the refusal"
-        );
+        assert_eq!(state.checked_at_ms, 0, "no answer, no answer's stamp");
+        assert_eq!(state.attempted_at_ms, start, "the day's attempt is spent");
         assert_eq!(state.latest_tag, None, "and nothing was invented to draw");
         assert!(!mark_is_lit(&state, "0.1.0"));
+        assert_eq!(
+            OfferState::load(&root, true).view().answered,
+            Some(false),
+            "a later launch still says the last question got no answer"
+        );
+
+        let next_day = start + CHECK_INTERVAL_MS;
+        let answering = Counting::ok("v0.4.7");
+        assert_eq!(
+            OfferState::load(&root, true).run(next_day, &answering),
+            Outcome::Answered("v0.4.7".to_owned())
+        );
+        let answered = state_of(&root);
+        assert_eq!(answered.checked_at_ms, next_day);
+        assert_eq!(answered.attempted_at_ms, 0, "an answer clears the attempt");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-UPDATE-DAILY) — **the schedule waits while an update's trial
+    /// holds the check's writes.** The trial's `spawn_check` settles without
+    /// asking and wakes the loop; a schedule still saying `Start` would be
+    /// asked again on the turn that wake makes, for as long as the trial.
+    ///
+    /// MUTATION: drop the `trial_holds` arm from `OfferState::schedule`; the
+    /// held row answers `Start` and this goes red.
+    #[test]
+    fn a_trial_holds_the_schedule_until_it_is_committed() {
+        let root = dir("schedule-trial");
+        let owner = OfferState::load(&root, true);
+        let now = 1_756_000_000_000u64;
+        assert_eq!(owner.schedule(now, true), Schedule::Held);
+        assert_eq!(owner.schedule(now, false), Schedule::Start);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (T-UPDATE-DAILY) — **an answer that cannot land holds the check back a
+    /// day as a source refusal**, held by this process's memory when neither the
+    /// answer nor the attempt reaches the disk. Otherwise both stamps remain
+    /// due and the application clock asks again on every turn.
+    ///
+    /// MUTATION: ignore the result of the answer transaction and return
+    /// `Outcome::Answered(tag)`; the schedule becomes `Start` and this goes
+    /// red.
+    #[test]
+    fn an_answer_that_cannot_be_persisted_does_not_make_a_retry_loop() {
+        let root = dir("answer-write-refused");
+        std::fs::create_dir(root.join(STATE_FILE_NAME)).expect("an unwritable state-file name");
+        let owner = OfferState::load(&root, true);
+        let source = Counting::ok("v0.4.7");
+        let start = 1_756_000_000_000u64;
+
+        assert_eq!(owner.run(start, &source), Outcome::Refused);
+        assert_eq!(source.calls(), 1);
+        assert_eq!(owner.known().checked_at_ms, 0);
+        assert_eq!(owner.known().latest_tag, None);
+        assert_eq!(
+            owner.schedule(start, false),
+            Schedule::After(CHECK_INTERVAL_MS)
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -2083,16 +2513,17 @@ mod tests {
         );
         assert!(mark_is_lit(&available, running));
 
-        // ④ Could not ask. The stamp advances, and the tag this machine already
-        //    knew about stays known — a failed check is a silence, not an
-        //    erasure.
+        // ④ Could not ask. The last answer's stamp and the tag this machine
+        //    already knew about stay known — a failed check is a silence, not
+        //    an erasure — and the attempt is the day's.
         assert_eq!(
             owner.run(3 * CHECK_INTERVAL_MS, &Counting::refusing()),
             Outcome::Refused
         );
         let refused = state_of(&root);
         assert_eq!(refused.latest_tag.as_deref(), Some(newer));
-        assert_eq!(refused.checked_at_ms, 3 * CHECK_INTERVAL_MS);
+        assert_eq!(refused.checked_at_ms, 2 * CHECK_INTERVAL_MS);
+        assert_eq!(refused.attempted_at_ms, 3 * CHECK_INTERVAL_MS);
 
         // And the address that press opens is a page for a person, over TLS.
         assert!(super::RELEASES_PAGE.starts_with("https://github.com/"));
@@ -2333,6 +2764,107 @@ mod tests {
         assert!(check_entry_allowed(false, true));
         assert!(check_entry_allowed(true, false));
         assert!(check_entry_allowed(true, true));
+    }
+
+    /// RED (T-UPDATE-DAILY) — **a due check runs while an older offer is open
+    /// and while its transaction is downloading, without replacing or
+    /// cancelling either.** The newer evidence becomes the job's current
+    /// decision; the running transaction completes for the immutable offer it
+    /// already owns, and the newer tag can be offered afterwards.
+    ///
+    /// MUTATION: gate `OfferState::schedule` on `job.state().kind() == Idle`
+    /// (represented by returning `Off` in the due arm); both due assertions go
+    /// red before either newer answer can land.
+    #[test]
+    fn periodic_answers_leave_an_open_offer_and_running_transaction_frozen() {
+        use std::sync::Mutex;
+
+        use crate::install_channel::Channel;
+        use crate::update_job::{
+            Driver, Gathered, Job, NoDownloadDoor, Offer, Poster, Presenters, Refused,
+            SharedTransport, State, Verb,
+        };
+        use crate::update_txn::TxnId;
+
+        #[derive(Default)]
+        struct Starts(Mutex<Option<Poster>>);
+        impl Driver for Starts {
+            fn prepare(
+                &self,
+                _: &Offer,
+                _: &SharedTransport,
+                post: &Poster,
+            ) -> Result<(), Refused> {
+                *self.0.lock().expect("the test driver") = Some(post.clone());
+                Ok(())
+            }
+        }
+
+        let root = dir("periodic-frozen-transaction");
+        let owner = OfferState::load(&root, true);
+        let day = CHECK_INTERVAL_MS;
+        assert!(matches!(
+            owner.run(day, &Counting::ok("v0.4.7")),
+            Outcome::Answered(_)
+        ));
+        let gathered = |owner: &OfferState| Gathered {
+            check: owner.job_evidence(),
+            channel: Some(Channel::Ours),
+            running: "0.4.6",
+            capable: true,
+            trial: false,
+            platform: bt_platform::HostPlatform::Windows,
+        };
+        let presenters = Presenters {
+            visited: &[1],
+            open: &[1],
+            quake: None,
+        };
+        let mut job = Job::with_offers(true);
+        job.consider(gathered(&owner), &presenters, || TxnId::new([1; 16]));
+        let first = job.state().offer().cloned().expect("the first offer");
+
+        assert_eq!(owner.schedule(2 * day, false), Schedule::Start);
+        assert!(matches!(
+            owner.run(2 * day, &Counting::ok("v0.4.8")),
+            Outcome::Answered(_)
+        ));
+        job.consider(gathered(&owner), &presenters, || TxnId::new([2; 16]));
+        assert_eq!(job.state().kind(), crate::update_job::Kind::Available);
+        assert_eq!(
+            job.state().offer(),
+            Some(&first),
+            "the open offer is frozen"
+        );
+
+        let driver = Starts::default();
+        let transport: SharedTransport = std::sync::Arc::new(NoDownloadDoor);
+        job.answer_verb(Verb::Press, &driver, &transport)
+            .expect("the first offer starts");
+        let poster = driver
+            .0
+            .lock()
+            .expect("the test driver")
+            .take()
+            .expect("a running transaction");
+        assert!(matches!(job.state(), State::Downloading(..)));
+
+        assert_eq!(owner.schedule(3 * day, false), Schedule::Start);
+        assert!(matches!(
+            owner.run(3 * day, &Counting::ok("v0.4.9")),
+            Outcome::Answered(_)
+        ));
+        job.consider(gathered(&owner), &presenters, || TxnId::new([3; 16]));
+        assert!(matches!(job.state(), State::Downloading(..)));
+        assert_eq!(job.state().offer(), Some(&first));
+        assert!(!poster.cancelled(), "the running transaction is untouched");
+        assert_eq!(owner.offer("0.4.6").as_deref(), Some("v0.4.9"));
+        assert_eq!(
+            job.asked_offer(owner.offer("0.4.6").as_deref()),
+            Some("v0.4.9"),
+            "the newer tag is the one About offers once the transaction ends"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// RED (T-UPDATE-ON-ABOUT round 2, R4) — **a known offer and its mark
@@ -2791,10 +3323,9 @@ mod tests {
     /// it, and asks the page again at once over the feed's stamp.**
     ///
     /// Codex's sequence: a legitimate answer from github.com, its day passed;
-    /// a start with an unreadable `--update-feed` writes its stamp and gets no
-    /// answer; the next plain start took the mixed file for a feed's answer
-    /// and erased the page's tag with it. The stamp and the tag now say whose
-    /// they are each on their own.
+    /// a start with an unreadable `--update-feed` gets no answer; the next plain
+    /// start keeps the page's completed stamp and tag, sees that their day has
+    /// passed, and asks the page.
     ///
     /// MUTATION: in `forget_a_local_answer`, forget the tag whenever anything
     /// is forgotten (`if forgot`): the plain start offers nothing.
@@ -2815,7 +3346,7 @@ mod tests {
             Outcome::Refused
         );
         let mixed = state_of(&home);
-        assert!(mixed.local_stamp && !mixed.local_tag, "{mixed:?}");
+        assert!(!mixed.local_stamp && !mixed.local_tag, "{mixed:?}");
 
         let plain = OfferState::load_for(&home, true, false);
         assert_eq!(
@@ -2826,15 +3357,15 @@ mod tests {
         assert_eq!(
             plain.run(2 * CHECK_INTERVAL_MS + 1, check_source(None, &page)),
             Outcome::Answered("v0.4.7".to_owned()),
-            "the feed's stamp is forgotten, so the page is asked now"
+            "the page's completed stamp is due, so the page is asked now"
         );
         assert_eq!(page.calls(), 2);
         let _ = std::fs::remove_dir_all(&home);
     }
 
     /// RED (U-30b) — **a feed that cannot be read, or whose list is not the
-    /// releases list's shape, is a failed check — the stamp advances, nothing
-    /// is offered, nothing panics — and never a reason to ask github.com.**
+    /// releases list's shape, is a failed check — the completed stamp stays,
+    /// nothing is offered, nothing panics — and never a reason to ask github.com.**
     ///
     /// Each case: a URL that names no local folder, a folder that is not
     /// there, a list that is not JSON, an object where the list goes, a
@@ -2893,7 +3424,11 @@ mod tests {
                 "{}",
                 feed.url()
             );
-            assert_eq!(state_of(&home).checked_at_ms, now, "the stamp advances");
+            assert_eq!(
+                state_of(&home).checked_at_ms,
+                0,
+                "no answer leaves no completed stamp"
+            );
             assert!(feed.asset("v0.4.7", "a.zip").is_err(), "{}", feed.url());
         }
         assert_eq!(page.calls(), 0, "github.com was contacted");
