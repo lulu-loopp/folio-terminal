@@ -79,11 +79,19 @@ prompt/input/output boundary for each screen that emits them: scanned before
 `AdapterEvent::ShellIntegration`. PowerShell integration is process-scoped and on
 by default: for an actual `powershell` or `pwsh` executable whose row contains
 only documented non-terminal host switches, the single spawn seam appends exactly
-`-NoExit -Command <guarded text loader>`. The loader reads Folio's own
+`-NoExit -Command <guarded text loader>`. It classifies each edition with that
+host parser's ordered switch spellings, aliases and minimum prefixes. A terminal
+`Command` tail is joined with one space and an `EncodedCommand` is decoded as
+strict base64 UTF-16LE; only when that exact resolved executable and argv have
+parsed successfully in the target host does Folio append `CRLF` and the loader
+inside the same command. Existing `NoExit` is preserved and a terminal command
+never gains it. `File`, `CommandWithArgs`, stdin, `NonInteractive`, invalid or
+unknown argv, an unknown/failed/invalid parse answer, and a composed Windows
+command line above 32,766 UTF-16 code units are left byte-for-byte unchanged;
+Settings projects that same current answer. The loader reads Folio's own
 `shell-integration/folio.ps1`; it never writes `$PROFILE` or changes execution
-policy. Unknown, terminal or bare arguments receive no injection, and the profile
-capability sentence says so. Restart, split, duplicate, restore and Recent all use
-that same seam. An older Folio-managed `$PROFILE` line is observed but left
+policy. Restart, split, duplicate, restore and Recent all use that same seam. An
+older Folio-managed `$PROFILE` line is observed but left
 byte-identical; only the explicit Settings remover, `--remove-shell-integration`
 or `--uninstall-cleanup` removes it. Every writer of that
 record takes the advisory lock with an explicit asker: `Asker::InApp` waits

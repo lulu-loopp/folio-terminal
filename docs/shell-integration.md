@@ -201,12 +201,19 @@ file*, where `\\wsl.localhost\<distro>\…` is exactly the name that works.
 
 ## Injecting the script
 
-PowerShell's script is **opt-in and manual**: you dot-source it into `$PROFILE` yourself, and this
-product never writes there. The bash script is installed automatically, for one session at a time,
-and the asymmetry is the shells':
+PowerShell's script is process-scoped and automatic, and this product never writes `$PROFILE`.
+Folio owns a refreshed copy below its data directory and composes the one PowerShell argv at the
+leaf-spawn seam. A row with no terminal host switch receives exactly `-NoExit -Command <loader>`.
+For an existing `Command` or strict base64/UTF-16LE `EncodedCommand`, a below-normal preparation
+worker first asks the row's resolved PowerShell executable to parse the exact command text. A valid
+answer appends `CRLF` and the loader inside that same terminal command; Folio preserves an existing
+`NoExit` and never adds one to a terminal command. The exact executable and argv own the process
+cache entry, so an edited row must answer a new question. File, CommandWithArgs, stdin,
+NonInteractive, unknown or invalid argv, an unavailable parse answer, and an overlong Windows
+command line are left unchanged. The Settings capability sentence reads that same answer.
 
-* `pwsh` has one startup file at one well-known path and no argument that would source a second one
-  after it, so the only automatic injection available would be editing a file that belongs to you.
+The bash script is also installed automatically, for one session at a time:
+
 * `bash --init-file <file>` names the startup file for one interactive shell and touches nothing on
   disk.
 
@@ -336,7 +343,7 @@ fallback path described under **Authority and fallback** rather than on a guess.
 |---|---|---|---|---|---|---|---|---|
 | **PowerShell** (7, script installed) | yes | yes | yes | yes | yes | `PowerShell` | script | PSReadLine |
 | **Windows PowerShell** (5.1, script installed) | yes | yes | yes | yes | yes | `Windows PowerShell` | script | PSReadLine |
-| **either PowerShell** (script not installed) | no | no | no | no | no | — | no | PSReadLine |
+| **either PowerShell** (script not installed or argv declined) | no | no | no | no | no | — | no | PSReadLine |
 | **Git Bash** | yes | yes | yes | yes | yes | none, deliberately | yes | bash's own |
 | **WSL** (bash login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | bash's own |
 | **WSL** (zsh login shell) | yes | yes | yes | yes | yes | none, deliberately | yes, via `WSLENV` | zsh's own |
@@ -566,18 +573,13 @@ idempotent within one shell, and does nothing at all in a non-interactive one.
 
 ## PowerShell 7 and Windows PowerShell 5.1
 
-The opt-in script preserves the prompt and PSReadLine implementation that exist when it is loaded,
-then wraps them with standard A/B/C/D markers. Load prompt customizers first, and dot-source the
-script as the final relevant line in `$PROFILE`:
-
-```powershell
-. 'D:\Developer\BetterTerminal\scripts\shell-integration\folio.ps1'
-```
-
-Restart PowerShell after editing the profile. The script requires PSReadLine and is idempotent within
-one shell process. It works in both PowerShell 7 (`pwsh`) and Windows PowerShell 5.1
-(`powershell.exe`). A `-NoProfile` shell, a profile blocked by execution policy, or a missing
-PSReadLine installation does not emit markers and therefore uses fallback behavior.
+The process loader preserves the prompt and PSReadLine implementation that exist when it runs, then
+the owned script wraps them with standard A/B/C/D markers. The script is idempotent within one shell
+process and works in both PowerShell 7 (`pwsh`) and Windows PowerShell 5.1 (`powershell.exe`). It
+requires PSReadLine. PowerShell 7 may revive only its already-loaded in-box PSReadLine assembly when
+execution policy prevented module registration; Windows PowerShell does not take that path. A
+missing PSReadLine installation, non-FullLanguage session, refused argv, failed preparation or
+unreadable owned script emits no marks and uses fallback behavior. No execution policy is changed.
 
 ### The old names still work
 

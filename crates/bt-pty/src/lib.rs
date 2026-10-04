@@ -61,6 +61,29 @@ pub fn conpty_source() -> ConPtySource {
     ConPtySource::NotWindows
 }
 
+/// Number of UTF-16 code units in the command line the Windows PTY launcher
+/// gives `CreateProcessW`, excluding its terminating NUL.
+///
+/// Kept here beside the launcher rather than copied by a caller: the quoting
+/// rule is part of [`CommandBuilder::cmdline`], and a length gate using any
+/// other renderer would disagree precisely on spaces, quotes, and trailing
+/// backslashes where the Windows limit matters.
+#[cfg(windows)]
+#[must_use]
+pub fn windows_command_line_len(program: &Path, arguments: &[OsString]) -> Option<usize> {
+    let mut command = CommandBuilder::new(program);
+    command.args(arguments);
+    let (_, line) = command.cmdline().ok()?;
+    line.len().checked_sub(1)
+}
+
+/// There is no `CreateProcessW` command-line ceiling off Windows.
+#[cfg(not(windows))]
+#[must_use]
+pub fn windows_command_line_len(_program: &Path, _arguments: &[OsString]) -> Option<usize> {
+    Some(0)
+}
+
 /// **Which pseudoconsole a session runs on, in the terms a key encoder needs** (T-KEYBOARD-RECORDS).
 ///
 /// Folio writes win32-input-mode key records only to the ConPTY it ships, whose translation of

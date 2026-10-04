@@ -75,7 +75,6 @@ bt-app	-	crate::schemes::user_sources	std::fs::read_dir	1
 bt-app	-	crate::schemes::write_custom_copy	std::fs::write	1
 bt-app	-	crate::shell_integration::cached_profile_answer	std::fs::canonicalize	1
 bt-app	-	crate::shell_integration::install_script_at	std::fs::create_dir_all	1
-bt-app	-	crate::shell_integration::install_script_at	std::fs::write	1
 bt-app	-	crate::shell_integration::install_zdotdir	std::fs::create_dir_all	1
 bt-app	-	crate::shell_integration::install_zdotdir	std::fs::write	1
 bt-app	-	crate::shell_integration::profile_marks::Marks::write	std::fs::create_dir_all	1
