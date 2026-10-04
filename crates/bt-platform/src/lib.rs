@@ -8,6 +8,8 @@ use std::num::NonZeroIsize;
 /// admission (`docs/ARCHITECTURE.md` §5.1; design note 2026-09-26). The one module of this
 /// crate that forbids `unsafe`.
 pub mod admission;
+/// The platform-free elevated-pane wire codec and its pure lifecycle models.
+pub mod elevated_protocol;
 pub mod environment;
 pub mod file_reads;
 pub mod foreground_program;

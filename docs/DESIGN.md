@@ -13773,6 +13773,49 @@ written once to resident diagnostics. Pinned by
 
 **Pinned by.** `tests::a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to` (the press records its owner; liveness fails for a closed pane, a restarted shell and a tab not on top; release, moves and a selection read the recorded owner and drop a gone one); `tests::a_chord_under_a_forwarded_gesture_leaves_it_whole` (run: left down, right down and up, left up → the child hears exactly `ESC[<0;3;2M` and `ESC[<0;3;2m`, and the route clears at left up); `tests::a_band_painted_above_the_panes_owns_the_wheel_over_its_area`. Each was observed red under a named mutation: release to the focus; the liveness check removed from the release, the moves and the selection; any button ends the gesture; a second press takes the route; the owned release ignores the button; the wheel station disabled; a pane menu declared `OwnStation`.
 
+### 2026-10-04 — The administrator host protocol is a bounded codec and two pure state machines (T-ADMIN-1)
+
+`bt_platform::elevated_protocol` now owns the platform-free bytes shared by the future resident
+transport and elevated host: the fixed binary header, every typed payload, lossless UTF-16 wire
+strings, a chunk-independent streaming decoder, and the 1 MiB control and 64 KiB output bounds.
+The same module owns pure parent/host session transitions and the injected-clock launch-attempt
+model; it opens no pipe, starts no process, reads no clock, and calls no platform API.
+
+The rule is design-note Revision (c): a length or count is validated before it can reserve memory;
+role, handshake and message order are typed failures; the parent advances before restart and both
+roles discard older-generation operational frames without applying them. Authentication failure
+and every other protocol failure remain pane-local. The 15-second launch boundary is compared only
+with caller-supplied instants, and each terminal launch state exposes only its ruled action.
+
+Pinned by the thirteen tests under `elevated_protocol::{codec,session,launch}::tests`, including
+`every_frame_kind_round_trips_with_empty_and_lossless_text_payloads`,
+`hostile_u32_max_length_is_rejected_before_any_payload_reservation`,
+`arbitrary_chunk_boundaries_equal_whole_buffer_decoding`,
+`both_roles_follow_the_full_happy_path`,
+`stale_generation_frames_after_restart_are_dropped_by_both_roles`, and
+`launch_timeout_uses_the_exact_fifteen_second_boundary`. Each test carries the mutation observed
+red before the restored implementation passed.
+
+### 2026-10-04 — Follow-up: administrator shutdown drains in-flight child facts and launch stays bounded through child start (T-ADMIN-1 round 2)
+
+Design-note Revision (d) now makes the shutdown race and launch phases explicit. After the parent
+writes `Shutdown`, a current-generation `Exit` still updates the pane, legitimate informational
+frames already in the pipe are dropped, `ShutdownAck` ends the session, and every frame the host
+could not have sent remains a protocol error. The one absolute 15-second budget now spans host
+launch, transport connect, `Hello`, and the child's `Started` report; a disappearance is a start
+failure until that report and is `Stopped` only afterwards.
+
+The decoder's hostile corpus begins with every valid frame kind, applies byte, truncation, length,
+count, and splice mutations, and feeds each item whole and under deterministic chunkings while
+requiring a minimum reach count for every payload decoder. Exact-frame decoding has truthful empty
+input and trailing-frame errors, and the previously unpinned generation, request-id, exhaustion,
+and environment-pair checks now have focused mutation tests. Pinned by
+`arbitrary_byte_strings_never_panic_the_decoder`, `shutting_down_pins_every_frame_kind`,
+`launch_timeout_uses_the_exact_fifteen_second_boundary`,
+`disappearance_is_a_start_failure_until_the_child_has_started`, and the focused
+`FutureGeneration`, `RestartGeneration`, `DuplicateRequest`, `UnknownRequest`,
+`GenerationExhausted`, and environment-count tests beside them.
+
 ### 2026-10-04 — PowerShell integration belongs to the spawned Folio process, not `$PROFILE` (T-INTEGRATION-INJECT-1)
 
 **What is built.** The one leaf-spawn seam composes every PowerShell argv. When the resolved executable is `powershell` or `pwsh`, Shell integration is on, Folio's refreshed `shell-integration/folio.ps1` exists, and every existing row argument is allowlisted, it preserves those arguments and appends exactly `-NoExit -Command <loader>`. The loader runs only in FullLanguage mode, revives pwsh 7's already-loaded in-box PSReadLine assembly when execution policy prevented module registration, defines the host read-line function only when absent, and text-evaluates Folio's owned script. It doubles PowerShell's five single-quote characters in the path. Folio prepares that owned file on a worker before the first pane; version changes replace stale bytes atomically under Folio's data root.
