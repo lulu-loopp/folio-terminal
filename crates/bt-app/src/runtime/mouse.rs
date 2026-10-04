@@ -5,20 +5,21 @@ use crate::{
     ApplicationChange, DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragRelease,
     DragSource, DropBatch, DropLanding, Fading, FloatDrag, FloatDragKind, FloatHeadPress,
     HoverFloat, IN_PANE_SURFACES_TOP_FIRST, InPaneSurface, LeafId, MathHoverExit, MouseRoute,
-    OwnPress, PanePress, PointerTarget, Popup, PressAfterBlur, PressedCellTarget, PreviewBodyRung,
-    PreviewSurface, RenameExit, RenameSubject, RowActivation, RowHost, RowPayload, RowPayloadKind,
-    RowPress, Runtime, SpringGate, TabClick, TerminalReference, UserInputKind, WebHeadVerb,
-    WheelAxis, WheelBurst, WheelRoute, a_right_press_is_on_the_pane_menus_head, answered_once,
-    button_router_position, crumb_segments, drain_whole_units, files, files_row_activation,
-    first_run, float, float_grasp, float_sizing_of, formula_tools, glass_allows_a_drop, hang_watch,
-    image_zoom_notch, input, landing_for_aim, live_viewport_mouse_hit, marks, mouse_trace,
-    native_window, over_home_ground, palette, pan_on_the_wheel_road, platform_pointer_of,
-    pointer_cursor, press_after_blur, press_files_node, press_pins_a_peek, press_reaches_no_grid,
-    press_spends_itself_closing, pressed_row_identity, profiles, protocol_mouse_button,
-    recoverable_wheel_scroll_amount, release_verdict, restore, right_press_raises_terminal_menu,
-    risen_frame, route_forwarded_mouse_button, route_forwarded_mouse_motion, search, seats,
-    settings, settling, toast, tooltip, update, upright_wheel, web_page_cursor, websheet,
-    wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches, write_pty_input,
+    OVER_IN_PANE_TOP_FIRST, OverInPane, OwnPress, PanePress, PointerTarget, Popup, PressAfterBlur,
+    PressedCellTarget, PreviewBodyRung, PreviewSurface, RenameExit, RenameSubject, RowActivation,
+    RowHost, RowPayload, RowPayloadKind, RowPress, Runtime, SpringGate, TabClick,
+    TerminalReference, UserInputKind, WebHeadVerb, WheelAxis, WheelBurst, WheelRoute,
+    a_right_press_is_on_the_pane_menus_head, answered_once, button_router_position, crumb_segments,
+    drain_whole_units, files, files_row_activation, first_run, float, float_grasp, float_sizing_of,
+    formula_tools, glass_allows_a_drop, hang_watch, image_zoom_notch, input, landing_for_aim,
+    live_viewport_mouse_hit, marks, mouse_trace, native_window, over_home_ground, palette,
+    pan_on_the_wheel_road, platform_pointer_of, pointer_cursor, press_after_blur, press_files_node,
+    press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity,
+    profiles, protocol_mouse_button, recoverable_wheel_scroll_amount, release_verdict, restore,
+    right_press_raises_terminal_menu, risen_frame, route_forwarded_mouse_button,
+    route_forwarded_mouse_motion, seats, settings, settling, toast, tooltip, update, upright_wheel,
+    web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
+    write_pty_input,
 };
 use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
 use anyhow::Context;
@@ -2243,6 +2244,16 @@ impl Runtime<'_> {
         if matches!(self.window.mouse_route, Some(MouseRoute::Local(_))) {
             return self.extend_local_selection();
         }
+        // **And a drag already handed to a program goes on being that
+        // program's** (T-STRIP-HOVER-THROUGH, confirmation review 2026-10-04),
+        // on the selection's terms one line up: its moves are reported in the
+        // pane the press went to, clamped into that pane's body, wherever the
+        // hand is — over the capsule, the strip, a pane head or the pane next
+        // door. What the pointer is over decides where a gesture *starts*; it
+        // does not take one away from its owner halfway.
+        if matches!(self.window.mouse_route, Some(MouseRoute::Forward { .. })) {
+            return self.forward_owned_drag_motion();
+        }
         if hit.is_none() {
             return Ok(());
         }
@@ -2345,6 +2356,15 @@ impl Runtime<'_> {
                     .map(|(seat, element)| PointerTarget::Notice(seat, element)),
             };
             if claim.is_some() {
+                // **Unless a band painted above the in-pane surfaces covers
+                // the point** (confirmation review, 2026-10-04): a palette list
+                // or a menu row standing over the strip is the palette's or the
+                // menu's, and it answers through its own door. The point then
+                // reads as what the docked ladder says, exactly as it did
+                // before there were in-pane surfaces in this router.
+                if self.painted_over_in_pane_at(position, &OVER_IN_PANE_TOP_FIRST) {
+                    break;
+                }
                 return claim;
             }
         }
@@ -2372,6 +2392,99 @@ impl Runtime<'_> {
                 self.notice_at(position).map(|_| InPaneSurface::NoticeStrip)
             }
             PointerTarget::Chrome(_) => None,
+        }
+    }
+
+    /// **Whether one of `families` — bands painted above the in-pane surfaces —
+    /// takes the pointer at this point** (T-STRIP-HOVER-THROUGH, confirmation
+    /// review 2026-10-04).
+    ///
+    /// `families` is [`OVER_IN_PANE_TOP_FIRST`] for a pane's own surfaces, and
+    /// the part of it above [`OverInPane::Float`] for a floating window's own
+    /// pill, which only what is painted over the window can cover. Each family
+    /// is asked by the hit test its own door uses, so "covered" here is exactly
+    /// "that door would have taken the gesture".
+    pub(in crate::runtime) fn painted_over_in_pane_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+        families: &[OverInPane],
+    ) -> bool {
+        families
+            .iter()
+            .any(|family| self.over_in_pane_claims(*family, position))
+    }
+
+    fn over_in_pane_claims(&mut self, family: OverInPane, position: PhysicalPosition<f64>) -> bool {
+        let (x, y) = (position.x, position.y);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a pointer position is a surface coordinate, as every hit test here reads it"
+        )]
+        let (fx, fy) = (x as f32, y as f32);
+        match family {
+            OverInPane::FilePeek => self.file_peek_holds([fx, fy]),
+            OverInPane::Toast => toast::at(&self.window.toast_layouts, fx, fy).is_some(),
+            OverInPane::Palette => self
+                .window
+                .palette_layout
+                .clone()
+                .is_some_and(|layout| palette::wheel_part(&layout, x, y).is_some()),
+            OverInPane::TabMenu => self
+                .tab_menu_layout()
+                .is_some_and(|layout| profiles::tab_menu_hit(&layout, x, y).is_some()),
+            OverInPane::TermMenu => self
+                .term_menu_layout()
+                .is_some_and(|layout| profiles::term_menu_hit(&layout, x, y).is_some()),
+            OverInPane::GitMenu => self
+                .git_menu_layout()
+                .is_some_and(|layout| profiles::git_menu_hit(&layout, x, y).is_some()),
+            OverInPane::PaneMenu => self
+                .pane_menu_layout()
+                .is_some_and(|layout| profiles::pane_menu_hit(&layout, x, y).is_some()),
+            OverInPane::FileMenu => self
+                .file_menu_layout()
+                .is_some_and(|layout| profiles::file_menu_hit(&layout, x, y).is_some()),
+            // The modal band: the full-window cards and the settings sheet,
+            // which cover everything, and the four menus staged in the same
+            // band, which cover their own frames.
+            OverInPane::Modal => {
+                if self.a_modal_covers_the_window()
+                    || self
+                        .profile_menu_layout()
+                        .is_some_and(|layout| layout.contains(fx, fy))
+                    || self
+                        .root_menu_layout()
+                        .is_some_and(|layout| profiles::root_menu_hit(&layout, x, y).is_some())
+                {
+                    return true;
+                }
+                if self.window.graph_filter_menu.is_some()
+                    && self.graph_filter_menu_layout().is_some_and(|layout| {
+                        profiles::git_filter_menu_hit(&layout, x, y).is_some()
+                    })
+                {
+                    return true;
+                }
+                let Some(seat) = self.preview_menu_seat() else {
+                    return false;
+                };
+                let items = self.preview_menu_items(seat);
+                self.preview_menu_layout().is_some_and(|layout| {
+                    profiles::preview_menu_hit(&layout, &items, x, y).is_some()
+                })
+            }
+            // **Answered before this list is ever read**: a window's claim is
+            // the router's first step and is terminal there, so a point that
+            // reaches an in-pane claim is one no window stands over — and a
+            // window's own pill is asked only about the part of the list above
+            // this family. Asking the windows here again would be a second
+            // reader of the float question (`the_press_and_the_hover_ask_one_router`).
+            OverInPane::Float => false,
+            OverInPane::WebSheet => self
+                .window
+                .web_sheet_layouts
+                .iter()
+                .any(|(seat, layout)| websheet::hit(layout, *seat, fx, fy).is_some()),
         }
     }
 
@@ -4102,6 +4215,122 @@ impl Runtime<'_> {
         }
     }
 
+    /// **End the gesture a press on a cell latched, wherever the button comes
+    /// up** — and answer whether there was one (T-STRIP-HOVER-THROUGH,
+    /// confirmation review 2026-10-04).
+    ///
+    /// Every [`MouseRoute`] is a press that a pane took, and its release is
+    /// owed to that pane whatever is under the pointer now:
+    ///
+    /// * a formula mark's press ink comes off with the button (owner's ruling
+    ///   2026-09-14 ②);
+    /// * a selection drag is finished in the pane it began in — over the pane
+    ///   next door, over the chrome, past the window's edge — because a release
+    ///   left unanswered left the route latched and the next move went on
+    ///   selecting;
+    /// * a press handed to the program gets its release, at the cell the
+    ///   pointer stands over clamped into that pane's body
+    ///   ([`Self::forwarded_gesture_hit`]), in the encoding the press was sent
+    ///   in, and the route comes off. A child given a press and never its
+    ///   release holds a button down for ever.
+    ///
+    /// A button the mouse protocol has no name for ends nothing here, as it
+    /// forwarded nothing.
+    fn release_owned_gesture(&mut self, button: MouseButton) -> Result<bool> {
+        match self.window.mouse_route.as_ref().cloned() {
+            None => Ok(false),
+            Some(MouseRoute::MathBlock) => {
+                self.window.mouse_route = None;
+                if self.window.math_tool_pressed.take().is_some() {
+                    self.repaint_hovered_pane()?;
+                }
+                Ok(true)
+            }
+            Some(MouseRoute::Local(drag)) => {
+                self.finish_local_selection(*drag)?;
+                Ok(true)
+            }
+            Some(MouseRoute::Forward { .. }) => {
+                let Some(protocol_button) = protocol_mouse_button(button) else {
+                    return Ok(false);
+                };
+                let seat = self.focused_leaf;
+                let Some(hit) = self.forwarded_gesture_hit(seat) else {
+                    // A pane with no frame to name a cell in has no child to
+                    // tell; the latch still has to come off.
+                    self.window.mouse_route = None;
+                    return Ok(true);
+                };
+                let modes = self.leaf_terminal_modes(seat);
+                if let Some(bytes) = route_forwarded_mouse_button(
+                    &mut self.window.mouse_route,
+                    ElementState::Released,
+                    protocol_button,
+                    hit,
+                    modes,
+                    self.window.modifiers,
+                    PressedCellTarget::Ordinary,
+                ) {
+                    self.mouse_trace(|| {
+                        format!(
+                            "pane_release forwarded=1 bytes={} cell={},{}",
+                            bytes.len(),
+                            hit.row,
+                            hit.column
+                        )
+                    });
+                    self.answer_attention(seat, UserInputKind::MouseButton);
+                    self.send_user_input(
+                        &bytes,
+                        "forward mouse button event to PTY",
+                        UserInputKind::MouseButton,
+                    )?;
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    /// **The cell a gesture already handed to a program stands at** — the
+    /// owner pane's own, with the pointer clamped into its body
+    /// ([`Self::drag_hit_in_pane`]) and folded onto the live grid the program
+    /// sees, as the press was.
+    ///
+    /// The owner is the focused pane: the press that latched the route moved
+    /// the focus there (D40) and nothing moves it while a button is held.
+    fn forwarded_gesture_hit(&self, seat: SeatId) -> Option<bt_render::GridHit> {
+        let hit = self.drag_hit_in_pane(seat)?;
+        let frame = self.pane_frame(seat)?;
+        Some(live_viewport_mouse_hit(frame, hit))
+    }
+
+    /// One move of a drag already handed to a program, reported to the pane
+    /// that took the press ([`Self::forwarded_gesture_hit`]).
+    fn forward_owned_drag_motion(&mut self) -> Result<()> {
+        let seat = self.focused_leaf;
+        let Some(hit) = self.forwarded_gesture_hit(seat) else {
+            return Ok(());
+        };
+        let modes = self.leaf_terminal_modes(seat);
+        let Some((sgr, button)) = route_forwarded_mouse_motion(
+            self.window.mouse_route.as_ref(),
+            modes,
+            self.window.modifiers,
+        ) else {
+            return Ok(());
+        };
+        let bytes = input::mouse_bytes(
+            sgr,
+            button,
+            input::MouseProtocolEvent::Motion,
+            hit.row,
+            hit.column,
+            self.window.modifiers,
+        );
+        self.answer_attention(seat, UserInputKind::MouseMotion);
+        self.send_mouse_input_to(seat, &bytes, "forward SGR mouse motion to PTY")
+    }
+
     pub(crate) fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {
         // The road's first station (`BT_MOUSE_TRACE`). Everything a cross-monitor
         // report needs to be settled about the *frame* the click landed in is
@@ -4180,18 +4409,28 @@ impl Runtime<'_> {
             // router returns early for every surface above that arm: a click on
             // the tab strip has to hand the caret back too, and it never reaches
             // the level the capsule is answered at.
+            // Asked of the router, so a press on a window or a menu standing
+            // over the capsule is a press outside it.
             if self.window.search.is_focused()
-                && !self
+                && self
                     .window
-                    .search_layout
-                    .zip(self.window.pointer_position)
-                    .is_some_and(|(capsule, at)| {
-                        search::hit(&capsule, at.x as f32, at.y as f32).is_some()
-                    })
+                    .pointer_position
+                    .is_none_or(|at| self.search_at(at).is_none())
             {
                 self.window.search.blur();
                 self.after_search_change()?;
             }
+        }
+        // **A gesture in progress owns its release** (T-STRIP-HOVER-THROUGH,
+        // confirmation review 2026-10-04). A route latched by a press on a cell —
+        // a formula's mark, a selection, a press handed to the program — is
+        // ended by the button coming up wherever the pointer is, and ahead of
+        // every surface drawn there: the claims below decide where a gesture
+        // *starts*, and a release over the search capsule, a notice strip or any
+        // other surface is not a new gesture there but the end of the one the
+        // pane already owns.
+        if state == ElementState::Released && self.release_owned_gesture(button)? {
+            return Ok(());
         }
         // The quit card first, in the order it is drawn: every press is
         // swallowed, its own scrim included, and the answer is the application's
@@ -5034,18 +5273,6 @@ impl Runtime<'_> {
         {
             return Ok(());
         }
-        if state == ElementState::Released
-            && matches!(self.window.mouse_route, Some(MouseRoute::MathBlock))
-        {
-            self.window.mouse_route = None;
-            // The press ink comes off with the button, wherever it comes up —
-            // the gesture belongs to the mark it began on (owner's ruling
-            // 2026-09-14 ②).
-            if self.window.math_tool_pressed.take().is_some() {
-                self.repaint_hovered_pane()?;
-            }
-            return Ok(());
-        }
         if state == ElementState::Pressed
             && let Some((math_seat, math_hit)) = self.math_hit()
             && matches!(button, MouseButton::Left | MouseButton::Right)
@@ -5109,16 +5336,6 @@ impl Runtime<'_> {
                 _ => {}
             }
             return Ok(());
-        }
-        // A selection drag already in flight is finished wherever the button comes
-        // up — over the pane next door, over the chrome, past the window's edge.
-        // The pane it began in owns the whole gesture, so nothing here needs the
-        // pointer to be over a cell; under the guard below, a release outside the
-        // pane left the route latched and the next move went on selecting.
-        if state == ElementState::Released
-            && let Some(MouseRoute::Local(drag)) = self.window.mouse_route.as_ref().cloned()
-        {
-            return self.finish_local_selection(*drag);
         }
         // **A rendered page's own context menu** (user report 2026-08-28),
         // asked before the cell lookup below because a preview seat has no cells

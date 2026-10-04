@@ -2,10 +2,11 @@
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
 use crate::{
-    AttentionDelivery, NoticeHost, NoticeStrip, PointerTarget, PreviewSurface, Runtime,
-    TaskbarFlash, UserInputKind, WindowRuntime, answer_attention_in, attention, attention_codex,
-    attention_copilot, attention_hooks, attention_trace, emit_attention_lines, float, i18n, marks,
-    native_window, next_attention_stop, notice, notify, profiles, seats, taskbar_lane, toast,
+    AttentionDelivery, NoticeHost, NoticeStrip, OVER_IN_PANE_TOP_FIRST, OverInPane, PointerTarget,
+    PreviewSurface, Runtime, TaskbarFlash, UserInputKind, WindowRuntime, answer_attention_in,
+    attention, attention_codex, attention_copilot, attention_hooks, attention_trace,
+    emit_attention_lines, float, i18n, marks, native_window, next_attention_stop, notice, notify,
+    profiles, seats, taskbar_lane, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -602,10 +603,17 @@ impl Runtime<'_> {
     ) -> Option<(NoticeHost, notice::NoticeElement)> {
         match self.pointer_target_at(position)? {
             PointerTarget::Notice(seat, element) => Some((NoticeHost::Seat(seat), element)),
+            // A window's own pill, which only a band painted over the window
+            // can cover — the part of `OVER_IN_PANE_TOP_FIRST` above it.
             PointerTarget::Float(id, _) => {
                 let host = NoticeHost::Float(id);
-                self.notice_part_at(host, position)
-                    .map(|element| (host, element))
+                let element = self.notice_part_at(host, position)?;
+                let over_the_window = OVER_IN_PANE_TOP_FIRST
+                    .split(|family| *family == OverInPane::Float)
+                    .next()
+                    .unwrap_or_default();
+                (!self.painted_over_in_pane_at(position, over_the_window))
+                    .then_some((host, element))
             }
             PointerTarget::Search(_) | PointerTarget::Chrome(_) => None,
         }

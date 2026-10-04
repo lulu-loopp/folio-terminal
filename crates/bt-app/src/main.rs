@@ -34051,6 +34051,79 @@ enum InPaneSurface {
 const IN_PANE_SURFACES_TOP_FIRST: [InPaneSurface; 2] =
     [InPaneSurface::SearchCapsule, InPaneSurface::NoticeStrip];
 
+/// **A band painted above the surfaces inside a pane that takes the pointer
+/// where it is drawn** (T-STRIP-HOVER-THROUGH, confirmation review 2026-10-04).
+///
+/// The in-pane surfaces claim a point only where none of these covers it:
+/// a palette list standing over a pill is the palette's to scroll, and a menu
+/// row over the strip's `×` is the menu's. Each variant is named by the
+/// [`OverlayStack`] field it is painted in ([`Self::band`]), which is what lets
+/// a test read [`OverlayStack::flattened`] and require this list to be every
+/// band painted above `in_pane`, top first, less
+/// [`BANDS_OVER_IN_PANE_THAT_TAKE_NO_POINTER`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverInPane {
+    FilePeek,
+    Toast,
+    Palette,
+    TabMenu,
+    TermMenu,
+    GitMenu,
+    PaneMenu,
+    FileMenu,
+    Modal,
+    Float,
+    WebSheet,
+}
+
+#[cfg(test)]
+impl OverInPane {
+    /// The [`OverlayStack`] field this family is painted in.
+    const fn band(self) -> &'static str {
+        match self {
+            Self::FilePeek => "file_peek",
+            Self::Toast => "toast",
+            Self::Palette => "palette",
+            Self::TabMenu => "tab_menu",
+            Self::TermMenu => "term_menu",
+            Self::GitMenu => "git_menu",
+            Self::PaneMenu => "pane_menu",
+            Self::FileMenu => "file_menu",
+            Self::Modal => "modal",
+            Self::Float => "float",
+            Self::WebSheet => "web_sheet",
+        }
+    }
+}
+
+/// Every band painted above the in-pane surfaces that takes the pointer, top
+/// first — the paint order of [`OverlayStack::flattened`] read downwards.
+const OVER_IN_PANE_TOP_FIRST: [OverInPane; 11] = [
+    OverInPane::FilePeek,
+    OverInPane::Toast,
+    OverInPane::Palette,
+    OverInPane::TabMenu,
+    OverInPane::TermMenu,
+    OverInPane::GitMenu,
+    OverInPane::PaneMenu,
+    OverInPane::FileMenu,
+    OverInPane::Modal,
+    OverInPane::Float,
+    OverInPane::WebSheet,
+];
+
+/// The bands painted above the in-pane surfaces that never take the pointer:
+/// pictures that follow it or explain it, which a hand points *through*.
+#[cfg(test)]
+const BANDS_OVER_IN_PANE_THAT_TAKE_NO_POINTER: [&str; 6] = [
+    "layout_peek",
+    "key_hint",
+    "card_hint",
+    "tooltip",
+    "drag_ghost",
+    "window_ring",
+];
+
 /// Which surface a files tree is drawn on — the two hosts P81 asks to be wired.
 ///
 /// "delegated on both hosts, so re-rendered rows keep working" (P150, mock-up
