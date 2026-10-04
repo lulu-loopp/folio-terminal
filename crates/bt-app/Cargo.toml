@@ -37,6 +37,7 @@ bt-winres = { path = "../bt-winres" }
 
 [dependencies]
 anyhow.workspace = true
+base64.workspace = true
 bt-detect = { path = "../bt-detect" }
 bt-doc = { path = "../bt-doc" }
 bt-layout = { path = "../bt-layout" }

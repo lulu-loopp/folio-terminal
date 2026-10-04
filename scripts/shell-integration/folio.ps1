@@ -40,9 +40,17 @@ $originalReadLine = if ($readLineCommand -is [System.Management.Automation.Funct
 } else {
     $readLineCommand
 }
+$readLineType = if ($Global:__FolioShellIntegration) {
+    $Global:__FolioShellIntegration.ReadLineType
+} else {
+    $null
+}
 
 $Global:__FolioShellIntegration = @{
     Installed = $true
+    # The loader's edition-specific PSReadLine bridge. It belongs to this one
+    # private state table rather than occupying a second global name.
+    ReadLineType = $readLineType
     # The prompts this one stands in front of, outermost first. Index 0 is what `prompt` was when
     # Folio wrapped it; a customizer that wraps *us* afterwards is adopted onto the front of this
     # list by `prompt` itself (see the re-hoist there), so the chain is always "every prompt in the

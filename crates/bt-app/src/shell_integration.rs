@@ -34,14 +34,17 @@
 //! close.
 
 use std::{
+    collections::BTreeMap,
     ffi::{OsStr, OsString},
+    io::Write,
     path::{Path, PathBuf},
     sync::{
-        OnceLock,
+        Mutex, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bt_platform::LocaleDeclaration;
 use bt_pty::ShellEnvironment;
 
@@ -370,14 +373,27 @@ fn install() -> Option<PathBuf> {
 /// copy that was never there.
 fn install_script_at(directory: &Path, name: &str, text: &str) -> Option<PathBuf> {
     let path = directory.join(name);
-    if bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Settings, &path)
-        .is_ok_and(|existing| existing == text)
-    {
-        return Some(path);
-    }
     std::fs::create_dir_all(directory).ok()?;
-    std::fs::write(&path, text).ok()?;
-    Some(path)
+    // The launch worker and a pane birth can arrive together. A native
+    // preserving replace may lose that race without changing the destination;
+    // re-read and retry so at least one complete build copy wins, while a real
+    // permission or volume failure still returns promptly and is never cached.
+    for _ in 0..3 {
+        if bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Settings, &path)
+            .is_ok_and(|existing| existing == text)
+        {
+            return Some(path);
+        }
+        let written = if path.exists() {
+            bt_persist::atomic_replace_preserving(&path, text.as_bytes())
+        } else {
+            bt_persist::atomic_write(&path, text.as_bytes())
+        };
+        if written.is_ok() {
+            return Some(path);
+        }
+    }
+    None
 }
 
 /// The directory zsh is pointed at, written out on first use.
@@ -529,28 +545,586 @@ pub fn shell_command(
     command
 }
 
+/// The PowerShell console-host parser's meaning for one spelling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PowerShellOptionKind {
+    Flag,
+    Value,
+    NoExit,
+    NonInteractive,
+    Command,
+    EncodedCommand,
+    File,
+    CommandWithArgs,
+    Unsupported,
+}
+
+/// One `MatchSwitch` call in PowerShell's command-line parser.
+///
+/// `minimum` is deliberately explicit. The hosts do not calculate prefixes
+/// from a set: each parser call names its own smallest accepted spelling, with
+/// aliases such as `ep`, `wd`, `ec`, and `cwa` as separate calls. That is why
+/// `-e` means EncodedCommand while the shorter shared prefixes of the `no*`
+/// family are errors. The order below is the host's order where two calls can
+/// overlap.
+#[derive(Clone, Copy)]
+struct PowerShellOption {
+    name: &'static str,
+    minimum: &'static str,
+    kind: PowerShellOptionKind,
+}
+
+const WINPS_OPTIONS: &[PowerShellOption] = &[
+    PowerShellOption {
+        name: "version",
+        minimum: "v",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "help",
+        minimum: "h",
+        kind: PowerShellOptionKind::Unsupported,
+    },
+    PowerShellOption {
+        name: "?",
+        minimum: "?",
+        kind: PowerShellOptionKind::Unsupported,
+    },
+    PowerShellOption {
+        name: "noexit",
+        minimum: "noe",
+        kind: PowerShellOptionKind::NoExit,
+    },
+    PowerShellOption {
+        name: "noprofile",
+        minimum: "nop",
+        kind: PowerShellOptionKind::Flag,
+    },
+    PowerShellOption {
+        name: "nologo",
+        minimum: "nol",
+        kind: PowerShellOptionKind::Flag,
+    },
+    PowerShellOption {
+        name: "noninteractive",
+        minimum: "noni",
+        kind: PowerShellOptionKind::NonInteractive,
+    },
+    PowerShellOption {
+        name: "configurationname",
+        minimum: "config",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "command",
+        minimum: "c",
+        kind: PowerShellOptionKind::Command,
+    },
+    PowerShellOption {
+        name: "windowstyle",
+        minimum: "w",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "file",
+        minimum: "f",
+        kind: PowerShellOptionKind::File,
+    },
+    PowerShellOption {
+        name: "outputformat",
+        minimum: "o",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "of",
+        minimum: "o",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "inputformat",
+        minimum: "in",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "if",
+        minimum: "if",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "executionpolicy",
+        minimum: "ex",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "ep",
+        minimum: "ep",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "encodedcommand",
+        minimum: "e",
+        kind: PowerShellOptionKind::EncodedCommand,
+    },
+    PowerShellOption {
+        name: "ec",
+        minimum: "e",
+        kind: PowerShellOptionKind::EncodedCommand,
+    },
+    PowerShellOption {
+        name: "encodedarguments",
+        minimum: "encodeda",
+        kind: PowerShellOptionKind::Unsupported,
+    },
+    PowerShellOption {
+        name: "ea",
+        minimum: "ea",
+        kind: PowerShellOptionKind::Unsupported,
+    },
+    PowerShellOption {
+        name: "sta",
+        minimum: "s",
+        kind: PowerShellOptionKind::Flag,
+    },
+    PowerShellOption {
+        name: "mta",
+        minimum: "mta",
+        kind: PowerShellOptionKind::Flag,
+    },
+    PowerShellOption {
+        name: "psconsolefile",
+        minimum: "psconsolefile",
+        kind: PowerShellOptionKind::Value,
+    },
+];
+
+const PWSH_OPTIONS: &[PowerShellOption] = &[
+    PowerShellOption {
+        name: "version",
+        minimum: "v",
+        kind: PowerShellOptionKind::Unsupported,
+    },
+    PowerShellOption {
+        name: "help",
+        minimum: "h",
+        kind: PowerShellOptionKind::Unsupported,
+    },
+    PowerShellOption {
+        name: "?",
+        minimum: "?",
+        kind: PowerShellOptionKind::Unsupported,
+    },
+    PowerShellOption {
+        name: "login",
+        minimum: "l",
+        kind: PowerShellOptionKind::Flag,
+    },
+    PowerShellOption {
+        name: "noexit",
+        minimum: "noe",
+        kind: PowerShellOptionKind::NoExit,
+    },
+    PowerShellOption {
+        name: "noprofile",
+        minimum: "nop",
+        kind: PowerShellOptionKind::Flag,
+    },
+    PowerShellOption {
+        name: "nologo",
+        minimum: "nol",
+        kind: PowerShellOptionKind::Flag,
+    },
+    PowerShellOption {
+        name: "noninteractive",
+        minimum: "noni",
+        kind: PowerShellOptionKind::NonInteractive,
+    },
+    PowerShellOption {
+        name: "noprofileloadtime",
+        minimum: "noprofileloadtime",
+        kind: PowerShellOptionKind::Flag,
+    },
+    PowerShellOption {
+        name: "interactive",
+        minimum: "i",
+        kind: PowerShellOptionKind::Flag,
+    },
+    PowerShellOption {
+        name: "configurationfile",
+        minimum: "configurationfile",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "configurationname",
+        minimum: "config",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "custompipename",
+        minimum: "cus",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "commandwithargs",
+        minimum: "commandwithargs",
+        kind: PowerShellOptionKind::CommandWithArgs,
+    },
+    PowerShellOption {
+        name: "cwa",
+        minimum: "cwa",
+        kind: PowerShellOptionKind::CommandWithArgs,
+    },
+    PowerShellOption {
+        name: "command",
+        minimum: "c",
+        kind: PowerShellOptionKind::Command,
+    },
+    PowerShellOption {
+        name: "windowstyle",
+        minimum: "w",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "file",
+        minimum: "f",
+        kind: PowerShellOptionKind::File,
+    },
+    PowerShellOption {
+        name: "outputformat",
+        minimum: "o",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "of",
+        minimum: "o",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "inputformat",
+        minimum: "inp",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "if",
+        minimum: "if",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "executionpolicy",
+        minimum: "ex",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "ep",
+        minimum: "ep",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "encodedcommand",
+        minimum: "e",
+        kind: PowerShellOptionKind::EncodedCommand,
+    },
+    PowerShellOption {
+        name: "ec",
+        minimum: "e",
+        kind: PowerShellOptionKind::EncodedCommand,
+    },
+    PowerShellOption {
+        name: "encodedarguments",
+        minimum: "encodeda",
+        kind: PowerShellOptionKind::Unsupported,
+    },
+    PowerShellOption {
+        name: "ea",
+        minimum: "ea",
+        kind: PowerShellOptionKind::Unsupported,
+    },
+    PowerShellOption {
+        name: "settingsfile",
+        minimum: "settings",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "sta",
+        minimum: "sta",
+        kind: PowerShellOptionKind::Flag,
+    },
+    PowerShellOption {
+        name: "mta",
+        minimum: "mta",
+        kind: PowerShellOptionKind::Flag,
+    },
+    PowerShellOption {
+        name: "workingdirectory",
+        minimum: "wo",
+        kind: PowerShellOptionKind::Value,
+    },
+    PowerShellOption {
+        name: "wd",
+        minimum: "wd",
+        kind: PowerShellOptionKind::Value,
+    },
+];
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PowerShellTerminal {
+    None,
+    Command { option: usize, text: String },
+    EncodedCommand { payload: usize, text: String },
+    File,
+    CommandWithArgs,
+    Stdin,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PowerShellNonTerminal {
+    name: &'static str,
+    option: usize,
+    value: Option<usize>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ParsedPowerShellArguments {
+    non_terminal: Vec<PowerShellNonTerminal>,
+    no_exit: bool,
+    non_interactive: bool,
+    terminal: PowerShellTerminal,
+}
+
+fn is_pwsh(program: &Path) -> bool {
+    program
+        .file_stem()
+        .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case("pwsh"))
+}
+
+fn option_table(program: &Path) -> &'static [PowerShellOption] {
+    if is_pwsh(program) {
+        PWSH_OPTIONS
+    } else {
+        WINPS_OPTIONS
+    }
+}
+
+fn decode_encoded_command(value: &str) -> Option<String> {
+    let bytes = BASE64.decode(value).ok()?;
+    let chunks = bytes.chunks_exact(2);
+    if !chunks.remainder().is_empty() {
+        return None;
+    }
+    let wide = chunks
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+        .collect::<Vec<_>>();
+    String::from_utf16(&wide).ok()
+}
+
+fn encode_command(value: &str) -> String {
+    let bytes = value
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect::<Vec<_>>();
+    BASE64.encode(bytes)
+}
+
+fn classify_powershell_arguments(
+    program: &Path,
+    arguments: &[OsString],
+) -> Option<ParsedPowerShellArguments> {
+    let mut non_terminal = Vec::new();
+    let mut no_exit = false;
+    let mut non_interactive = false;
+    let mut at = 0;
+    while at < arguments.len() {
+        let word = arguments[at].to_str()?.trim();
+        if word.is_empty() {
+            at += 1;
+            continue;
+        }
+        let mut characters = word.chars();
+        let prefix = characters.next()?;
+        if !matches!(prefix, '-' | '/') {
+            return None;
+        }
+        let mut key = characters.as_str();
+        if prefix == '-' && key.starts_with('-') {
+            key = &key[1..];
+        }
+        let option = option_table(program).iter().find(|option| {
+            key.len() >= option.minimum.len()
+                && option.name.len() >= key.len()
+                && option.name[..key.len()].eq_ignore_ascii_case(key)
+        })?;
+        if is_pwsh(program) && option.name == "login" && at != 0 {
+            return None;
+        }
+        match option.kind {
+            PowerShellOptionKind::Flag => {
+                non_terminal.push(PowerShellNonTerminal {
+                    name: option.name,
+                    option: at,
+                    value: None,
+                });
+                at += 1;
+            }
+            PowerShellOptionKind::NoExit => {
+                no_exit = true;
+                non_terminal.push(PowerShellNonTerminal {
+                    name: option.name,
+                    option: at,
+                    value: None,
+                });
+                at += 1;
+            }
+            PowerShellOptionKind::Value => {
+                non_terminal.push(PowerShellNonTerminal {
+                    name: option.name,
+                    option: at,
+                    value: Some(at + 1),
+                });
+                at += 2;
+                if at > arguments.len() {
+                    return None;
+                }
+            }
+            PowerShellOptionKind::NonInteractive => {
+                non_interactive = true;
+                non_terminal.push(PowerShellNonTerminal {
+                    name: option.name,
+                    option: at,
+                    value: None,
+                });
+                at += 1;
+            }
+            PowerShellOptionKind::Unsupported => return None,
+            PowerShellOptionKind::File => {
+                if at + 1 >= arguments.len() {
+                    return None;
+                }
+                return Some(ParsedPowerShellArguments {
+                    non_terminal,
+                    no_exit,
+                    non_interactive,
+                    terminal: PowerShellTerminal::File,
+                });
+            }
+            PowerShellOptionKind::CommandWithArgs => {
+                if at + 1 >= arguments.len() {
+                    return None;
+                }
+                return Some(ParsedPowerShellArguments {
+                    non_terminal,
+                    no_exit,
+                    non_interactive,
+                    terminal: PowerShellTerminal::CommandWithArgs,
+                });
+            }
+            PowerShellOptionKind::Command => {
+                let option = at;
+                let tail = &arguments[at + 1..];
+                if tail.len() == 1 && tail[0] == OsStr::new("-") {
+                    return Some(ParsedPowerShellArguments {
+                        non_terminal,
+                        no_exit,
+                        non_interactive,
+                        terminal: PowerShellTerminal::Stdin,
+                    });
+                }
+                if tail.is_empty() {
+                    return None;
+                }
+                let text = tail
+                    .iter()
+                    .map(|word| word.to_str())
+                    .collect::<Option<Vec<_>>>()?
+                    .join(" ");
+                return Some(ParsedPowerShellArguments {
+                    non_terminal,
+                    no_exit,
+                    non_interactive,
+                    terminal: PowerShellTerminal::Command { option, text },
+                });
+            }
+            PowerShellOptionKind::EncodedCommand => {
+                let payload = at + 1;
+                if payload + 1 != arguments.len() {
+                    return None;
+                }
+                let text = decode_encoded_command(arguments[payload].to_str()?)?;
+                return Some(ParsedPowerShellArguments {
+                    non_terminal,
+                    no_exit,
+                    non_interactive,
+                    terminal: PowerShellTerminal::EncodedCommand { payload, text },
+                });
+            }
+        }
+    }
+    Some(ParsedPowerShellArguments {
+        non_terminal,
+        no_exit,
+        non_interactive,
+        terminal: PowerShellTerminal::None,
+    })
+}
+
+fn composed_powershell_arguments(
+    program: &Path,
+    row_arguments: &[OsString],
+    script: &Path,
+    parse_answer: Option<bool>,
+) -> Option<Vec<OsString>> {
+    let parsed = classify_powershell_arguments(program, row_arguments)?;
+    if parsed.non_interactive {
+        return None;
+    }
+    let loader = powershell_load_command(program, script);
+    let mut arguments = row_arguments.to_vec();
+    match parsed.terminal {
+        PowerShellTerminal::None => {
+            arguments.push(OsString::from("-NoExit"));
+            arguments.push(OsString::from("-Command"));
+            arguments.push(OsString::from(loader));
+        }
+        PowerShellTerminal::Command { option, text } => {
+            if parse_answer != Some(true) {
+                return None;
+            }
+            arguments.truncate(option + 1);
+            arguments.push(OsString::from(format!("{text}\r\n{loader}")));
+        }
+        PowerShellTerminal::EncodedCommand { payload, text } => {
+            if parse_answer != Some(true) {
+                return None;
+            }
+            arguments[payload] = OsString::from(encode_command(&format!("{text}\r\n{loader}")));
+        }
+        PowerShellTerminal::File
+        | PowerShellTerminal::CommandWithArgs
+        | PowerShellTerminal::Stdin => return None,
+    }
+    let within_limit = bt_pty::windows_command_line_len(program, &arguments)
+        .is_some_and(|length| length <= 32_766);
+    within_limit.then_some(arguments)
+}
+
 /// Compose a PowerShell process's complete argv without changing the row's own words.
 ///
-/// This is the one process-scoped integration seam. It is deliberately pure so the exact argv
-/// can be pinned independently of ConPTY and every way a leaf is requested.
+/// This pure seam is also the conservative answer before the asynchronous
+/// target-parser probe has answered: command-bearing rows remain byte-for-byte
+/// as written. Births use [`compose_with_prepared`], which supplies the cached
+/// answer when one exists.
 #[must_use]
+#[cfg(test)]
 pub fn compose_powershell_arguments(
     program: &Path,
     row_arguments: &[OsString],
     script: Option<&Path>,
     enabled: bool,
 ) -> Vec<OsString> {
-    let mut arguments = row_arguments.to_vec();
-    if enabled
-        && let Some(script) = script
-        && is_powershell(program)
-        && powershell_arguments_are_safe(program, row_arguments)
-    {
-        arguments.push(OsString::from("-NoExit"));
-        arguments.push(OsString::from("-Command"));
-        arguments.push(OsString::from(powershell_load_command(program, script)));
+    if !enabled || !is_powershell(program) {
+        return row_arguments.to_vec();
     }
-    arguments
+    script
+        .and_then(|script| composed_powershell_arguments(program, row_arguments, script, None))
+        .unwrap_or_else(|| row_arguments.to_vec())
 }
 
 /// **A shell's argv, finished on its birth worker** (`pty_door::spawn_shell`).
@@ -566,34 +1140,70 @@ pub fn compose_powershell_birth(
     arguments: &[OsString],
     powershell_integration: bool,
 ) -> Vec<OsString> {
-    compose_with_prepared(
+    compose_with_prepared_and_retry(
         program,
         arguments,
         powershell_integration,
         powershell_script_for_birth,
+        schedule_parse_retry,
     )
 }
 
 /// [`compose_powershell_birth`] with the preparation handed in: `prepare` is asked only when the
 /// composer would load into this argv, and its answer is the script named.
+#[cfg(test)]
 fn compose_with_prepared(
     program: &Path,
     arguments: &[OsString],
     powershell_integration: bool,
     prepare: impl FnOnce() -> Option<PathBuf>,
 ) -> Vec<OsString> {
-    if !(powershell_integration
-        && is_powershell(program)
-        && powershell_arguments_are_safe(program, arguments))
-    {
+    compose_with_prepared_and_retry(program, arguments, powershell_integration, prepare, |_| {})
+}
+
+/// The birth seam with its background retry handed in. The callback is told
+/// only about a command whose parse answer is unknown; it must return without
+/// waiting for the question to be answered.
+fn compose_with_prepared_and_retry(
+    program: &Path,
+    arguments: &[OsString],
+    powershell_integration: bool,
+    prepare: impl FnOnce() -> Option<PathBuf>,
+    retry: impl FnOnce(ParseQuestion),
+) -> Vec<OsString> {
+    if !powershell_integration || !is_powershell(program) {
         return arguments.to_vec();
     }
-    compose_powershell_arguments(
-        program,
-        arguments,
-        prepare().as_deref(),
-        powershell_integration,
-    )
+    let Some(parsed) = classify_powershell_arguments(program, arguments) else {
+        return arguments.to_vec();
+    };
+    if parsed.non_interactive {
+        return arguments.to_vec();
+    }
+    let parse_answer = match &parsed.terminal {
+        PowerShellTerminal::Command { .. } | PowerShellTerminal::EncodedCommand { .. } => {
+            cached_parse_answer(program, arguments)
+        }
+        PowerShellTerminal::None => None,
+        PowerShellTerminal::File
+        | PowerShellTerminal::CommandWithArgs
+        | PowerShellTerminal::Stdin => return arguments.to_vec(),
+    };
+    if matches!(
+        parsed.terminal,
+        PowerShellTerminal::Command { .. } | PowerShellTerminal::EncodedCommand { .. }
+    ) && parse_answer != Some(true)
+    {
+        if let Some(text) = command_text(program, arguments) {
+            retry(ParseQuestion::new(program, arguments, text));
+        }
+        return arguments.to_vec();
+    }
+    let Some(script) = prepare().filter(|path| path.is_file()) else {
+        return arguments.to_vec();
+    };
+    composed_powershell_arguments(program, arguments, &script, parse_answer)
+        .unwrap_or_else(|| arguments.to_vec())
 }
 
 /// The complete argument list `bt-pty`'s last-resort retry is started with when a pane's own
@@ -610,50 +1220,35 @@ pub fn last_resort_arguments(powershell_integration: bool) -> Vec<OsString> {
     )
 }
 
-/// Whether every existing word is a documented non-terminal PowerShell host
-/// option whose arity Folio knows. This is intentionally an allowlist: a new
-/// host switch is unsafe until its relationship with the appended `-Command`
-/// is understood.
+/// Whether this argv is known, right now, to receive integration at birth.
+///
+/// Command text needs the asynchronous target-shell parse answer; terminal and
+/// noninteractive forms always decline. This is the Settings capability line's
+/// side-effect-free view of the same cache the birth seam reads.
 #[must_use]
 pub fn powershell_arguments_are_safe(program: &Path, arguments: &[OsString]) -> bool {
-    let pwsh = program
-        .file_stem()
-        .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case("pwsh"));
-    let mut at = 0;
-    while at < arguments.len() {
-        let word = arguments[at].to_string_lossy();
-        let Some(option) = word.strip_prefix('-').or_else(|| word.strip_prefix('/')) else {
-            return false;
-        };
-        let option = option.to_ascii_lowercase();
-        let takes_value = matches!(
-            option.as_str(),
-            "executionpolicy"
-                | "windowstyle"
-                | "inputformat"
-                | "outputformat"
-                | "configurationname"
-        ) || (!pwsh && matches!(option.as_str(), "version" | "psconsolefile"))
-            || (pwsh
-                && matches!(
-                    option.as_str(),
-                    "workingdirectory" | "settingsfile" | "custompipename" | "configurationfile"
-                ));
-        if takes_value {
-            at += 1;
-            if at == arguments.len() {
+    let Some(parsed) = classify_powershell_arguments(program, arguments) else {
+        return false;
+    };
+    if parsed.non_interactive {
+        return false;
+    }
+    let parse_answer = match parsed.terminal {
+        PowerShellTerminal::None => None,
+        PowerShellTerminal::Command { .. } | PowerShellTerminal::EncodedCommand { .. } => {
+            if cached_parse_answer(program, arguments) != Some(true) {
                 return false;
             }
-        } else if !(matches!(
-            option.as_str(),
-            "nologo" | "noprofile" | "noexit" | "sta" | "mta"
-        ) || (pwsh && at == 0 && matches!(option.as_str(), "login" | "l")))
-        {
-            return false;
+            Some(true)
         }
-        at += 1;
-    }
-    true
+        PowerShellTerminal::File
+        | PowerShellTerminal::CommandWithArgs
+        | PowerShellTerminal::Stdin => return false,
+    };
+    let prospective = persist::storage_dir()
+        .join(SCRIPT_DIRECTORY)
+        .join(SCRIPT_FILE_PS1);
+    composed_powershell_arguments(program, arguments, &prospective, parse_answer).is_some()
 }
 
 fn powershell_single_quoted(value: &Path) -> String {
@@ -674,16 +1269,13 @@ fn powershell_single_quoted(value: &Path) -> String {
 #[must_use]
 pub fn powershell_load_command(program: &Path, script: &Path) -> String {
     let path = powershell_single_quoted(script);
-    let revive = if program
-        .file_stem()
-        .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case("pwsh"))
-    {
+    let revive = if cfg!(windows) && is_pwsh(program) {
         "if (-not (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and ([AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'Microsoft.PowerShell.PSReadLine' })) { Import-Module (Join-Path $PSHOME 'Modules\\PSReadLine\\Microsoft.PowerShell.PSReadLine.dll') }; "
     } else {
         ""
     };
     format!(
-        "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ {revive}if ((Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and -not (Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction Ignore)) {{ $Global:__FolioReadLineType = (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine | Where-Object ImplementingAssembly | Select-Object -Last 1).ImplementingAssembly.GetType('Microsoft.PowerShell.PSConsoleReadLine'); function global:PSConsoleHostReadLine {{ $lastRunStatus = $?; Microsoft.PowerShell.Core\\Set-StrictMode -Off; $Global:__FolioReadLineType::ReadLine($host.Runspace, $ExecutionContext, $lastRunStatus) }} }}; if (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) {{ . ([scriptblock]::Create([IO.File]::ReadAllText({path}))) }} }}"
+        "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ {revive}if ((Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and -not (Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction Ignore)) {{ if (-not $Global:__FolioShellIntegration) {{ $Global:__FolioShellIntegration = @{{}} }}; $Global:__FolioShellIntegration.ReadLineType = (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine | Where-Object ImplementingAssembly | Select-Object -Last 1).ImplementingAssembly.GetType('Microsoft.PowerShell.PSConsoleReadLine'); function global:PSConsoleHostReadLine {{ $lastRunStatus = $?; Microsoft.PowerShell.Core\\Set-StrictMode -Off; $Global:__FolioShellIntegration.ReadLineType::ReadLine($host.Runspace, $ExecutionContext, $lastRunStatus) }} }}; if (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) {{ $folioScript = $null; try {{ $folioScript = [IO.File]::ReadAllText({path}) }} catch {{}}; if ($null -ne $folioScript) {{ . ([scriptblock]::Create($folioScript)) }} }} }}"
     )
 }
 
@@ -1278,10 +1870,10 @@ const SCRIPT_DIRECTORY: &str = "shell-integration";
 static POWERSHELL_INTEGRATION: AtomicBool = AtomicBool::new(true);
 /// The durable `folio.ps1`, compared and repaired once per process — outside a trial, or after
 /// its commit.
-static DURABLE_POWERSHELL_SCRIPT: OnceLock<Option<PathBuf>> = OnceLock::new();
+static DURABLE_POWERSHELL_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
 /// The script an update's trial names while its writes are held back (see
 /// [`powershell_script_for_birth`]).
-static TRIAL_POWERSHELL_SCRIPT: OnceLock<Option<PathBuf>> = OnceLock::new();
+static TRIAL_POWERSHELL_SCRIPT: OnceLock<PathBuf> = OnceLock::new();
 static POWERSHELL_PROFILE_LINE_PRESENT: AtomicBool = AtomicBool::new(false);
 
 /// Publish the persisted answer for subsequent shell births.
@@ -1339,7 +1931,7 @@ pub fn is_powershell(program: &Path) -> bool {
 /// where their startup file is would be absurd. `-NonInteractive` so nothing can
 /// stop for a prompt on a thread with no console.
 ///
-/// Windows only, like its one reader: off Windows [`run_profile_probe`] asks no PowerShell.
+/// Windows only, like its one reader: off Windows the profile path is not asked.
 #[cfg(windows)]
 const PROFILE_COMMAND: &str = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $PROFILE.CurrentUserCurrentHost";
 
@@ -1364,6 +1956,310 @@ const PROFILE_COMMAND: &str = "[Console]::OutputEncoding = New-Object System.Tex
 type ProfileAnswer = std::sync::Arc<OnceLock<Option<PathBuf>>>;
 type ProfileAnswers = std::collections::BTreeMap<PathBuf, ProfileAnswer>;
 static PROFILE_ANSWERS: OnceLock<std::sync::Mutex<ProfileAnswers>> = OnceLock::new();
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ParseKey {
+    program: PathBuf,
+    arguments: Vec<OsString>,
+}
+
+const PARSE_PROBE_ATTEMPT_LIMIT: u8 = 3;
+const PROBE_OUTPUT_PREFIX_LIMIT: usize = 32;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ParseAnswer {
+    Pending {
+        attempt: u8,
+    },
+    Valid,
+    Invalid,
+    Failed {
+        attempts: u8,
+        failure: ParseProbeFailure,
+    },
+}
+
+/// Process-owned answers from the target PowerShell parser.
+///
+/// The executable in the key is the already-resolved [`profiles::ProfilePrograms`]
+/// answer and the argv is exact. Editing any row therefore makes a new key and
+/// a new question without invalidating an answer another row may still use.
+type ParseAnswers = BTreeMap<ParseKey, ParseAnswer>;
+static PARSE_ANSWERS: OnceLock<Mutex<ParseAnswers>> = OnceLock::new();
+
+fn parse_key(program: &Path, arguments: &[OsString]) -> ParseKey {
+    ParseKey {
+        program: profile_key(program),
+        arguments: arguments.to_vec(),
+    }
+}
+
+fn cached_parse_answer(program: &Path, arguments: &[OsString]) -> Option<bool> {
+    match PARSE_ANSWERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&parse_key(program, arguments))
+    {
+        Some(ParseAnswer::Valid) => Some(true),
+        Some(ParseAnswer::Invalid) => Some(false),
+        Some(ParseAnswer::Pending { .. } | ParseAnswer::Failed { .. }) | None => None,
+    }
+}
+
+fn command_text(program: &Path, arguments: &[OsString]) -> Option<String> {
+    let parsed = classify_powershell_arguments(program, arguments)?;
+    if parsed.non_interactive {
+        return None;
+    }
+    match parsed.terminal {
+        PowerShellTerminal::Command { text, .. }
+        | PowerShellTerminal::EncodedCommand { text, .. } => Some(text),
+        PowerShellTerminal::None
+        | PowerShellTerminal::File
+        | PowerShellTerminal::CommandWithArgs
+        | PowerShellTerminal::Stdin => None,
+    }
+}
+
+#[derive(Clone)]
+struct ParseQuestion {
+    key: ParseKey,
+    program: PathBuf,
+    text: String,
+}
+
+impl ParseQuestion {
+    fn new(program: &Path, arguments: &[OsString], text: String) -> Self {
+        Self {
+            key: parse_key(program, arguments),
+            program: program.to_path_buf(),
+            text,
+        }
+    }
+}
+
+fn parse_questions(programs: &profiles::ProfilePrograms) -> Vec<ParseQuestion> {
+    profiles::table()
+        .profiles()
+        .iter()
+        .filter_map(|profile| {
+            let program = PathBuf::from(programs.program(&profile.id)?);
+            if !is_powershell(&program) {
+                return None;
+            }
+            let arguments = profiles::launch_args(profile)
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            let text = command_text(&program, &arguments)?;
+            Some(ParseQuestion::new(&program, &arguments, text))
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct ParseAttempt {
+    question: ParseQuestion,
+    number: u8,
+}
+
+/// Claim one bounded attempt before starting any worker or process. A failed
+/// answer remains unknown, and the next birth may claim the next attempt; a
+/// pending, grammatical or exhausted answer starts nothing.
+fn claim_parse_attempt(question: ParseQuestion) -> Option<ParseAttempt> {
+    let number = {
+        let mut answers = PARSE_ANSWERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let number = match answers.get(&question.key) {
+            None => 1,
+            Some(ParseAnswer::Failed { attempts, .. }) if *attempts < PARSE_PROBE_ATTEMPT_LIMIT => {
+                attempts + 1
+            }
+            Some(
+                ParseAnswer::Pending { .. }
+                | ParseAnswer::Valid
+                | ParseAnswer::Invalid
+                | ParseAnswer::Failed { .. },
+            ) => return None,
+        };
+        answers.insert(
+            question.key.clone(),
+            ParseAnswer::Pending { attempt: number },
+        );
+        number
+    };
+    Some(ParseAttempt { question, number })
+}
+
+fn publish_parse_attempt(key: ParseKey, number: u8, result: Result<bool, ParseProbeFailure>) {
+    let answer = match result {
+        Ok(true) => ParseAnswer::Valid,
+        Ok(false) => ParseAnswer::Invalid,
+        Err(failure) => ParseAnswer::Failed {
+            attempts: number,
+            failure,
+        },
+    };
+    let mut answers = PARSE_ANSWERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if matches!(
+        answers.get(&key),
+        Some(ParseAnswer::Pending { attempt }) if *attempt == number
+    ) {
+        answers.insert(key, answer);
+    }
+    drop(answers);
+    if let Some(wake) = WAKE.get() {
+        wake();
+    }
+}
+
+fn run_parse_attempt(attempt: ParseAttempt) {
+    let result = run_parse_probe(&attempt.question.program, &attempt.question.text);
+    publish_parse_attempt(attempt.question.key, attempt.number, result);
+}
+
+fn ask_parse_question(question: ParseQuestion) {
+    if let Some(attempt) = claim_parse_attempt(question) {
+        run_parse_attempt(attempt);
+    }
+}
+
+/// A birth that meets a transient failure starts at most one background retry
+/// for the exact row and then continues with the original argv. Claiming before
+/// the thread door coalesces concurrent births; the attempt limit makes a
+/// permanently failing host quiet for the rest of this process.
+fn request_parse_retry(
+    question: ParseQuestion,
+    start: impl FnOnce(ParseAttempt) -> Result<(), String>,
+) {
+    let Some(attempt) = claim_parse_attempt(question) else {
+        return;
+    };
+    let key = attempt.question.key.clone();
+    let number = attempt.number;
+    if let Err(error) = start(attempt) {
+        publish_parse_attempt(key, number, Err(ParseProbeFailure::WorkerSpawn(error)));
+    }
+}
+
+fn schedule_parse_retry(question: ParseQuestion) {
+    request_parse_retry(question, |attempt| {
+        spawn_powershell_preparation(PowershellPreparation::ParseAttempt(attempt))
+    });
+}
+
+const PARSE_COMMAND: &str = "$enc=[Text.UTF8Encoding]::new($false);[Console]::InputEncoding=$enc;[Console]::OutputEncoding=$enc;$source=[Console]::In.ReadToEnd();$tokens=$null;$errors=$null;[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)>$null;if($errors.Count -eq 0){[Console]::Out.Write('1')}else{[Console]::Out.Write('0')}";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProbeOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ParseProbeFailure {
+    WorkerSpawn(String),
+    Spawn(String),
+    Stdin {
+        error: String,
+        stdout: String,
+        stderr: String,
+    },
+    Deadline {
+        stdout: String,
+        stderr: String,
+    },
+    Wait {
+        error: String,
+        stdout: String,
+        stderr: String,
+    },
+    Exit {
+        code: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
+    OutputNotRecognised {
+        stdout: String,
+        stderr: String,
+    },
+}
+
+impl std::fmt::Display for ParseProbeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WorkerSpawn(error) => write!(formatter, "worker spawn: {error}"),
+            Self::Spawn(error) => write!(formatter, "process spawn: {error}"),
+            Self::Stdin {
+                error,
+                stdout,
+                stderr,
+            } => write!(
+                formatter,
+                "stdin write: {error}; stdout first bytes {stdout}; stderr first bytes {stderr}"
+            ),
+            Self::Deadline { stdout, stderr } => write!(
+                formatter,
+                "five-second deadline; stdout first bytes {stdout}; stderr first bytes {stderr}"
+            ),
+            Self::Wait {
+                error,
+                stdout,
+                stderr,
+            } => write!(
+                formatter,
+                "process wait: {error}; stdout first bytes {stdout}; stderr first bytes {stderr}"
+            ),
+            Self::Exit {
+                code,
+                stdout,
+                stderr,
+            } => write!(
+                formatter,
+                "exit status {code:?}; stdout first bytes {stdout}; stderr first bytes {stderr}"
+            ),
+            Self::OutputNotRecognised { stdout, stderr } => write!(
+                formatter,
+                "output not recognised; stdout first bytes {stdout}; stderr first bytes {stderr}"
+            ),
+        }
+    }
+}
+
+fn output_prefix(bytes: &[u8]) -> String {
+    let mut rendered = bytes
+        .iter()
+        .take(PROBE_OUTPUT_PREFIX_LIMIT)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if bytes.len() > PROBE_OUTPUT_PREFIX_LIMIT {
+        rendered.push_str(" …");
+    }
+    format!("[{rendered}]")
+}
+
+fn run_parse_probe(program: &Path, text: &str) -> Result<bool, ParseProbeFailure> {
+    let output = run_powershell_probe(program, PARSE_COMMAND, Some(text))?;
+    parse_probe_answer(output)
+}
+
+fn parse_probe_answer(output: ProbeOutput) -> Result<bool, ParseProbeFailure> {
+    match output.stdout.as_slice() {
+        b"1" => Ok(true),
+        b"0" => Ok(false),
+        _ => Err(ParseProbeFailure::OutputNotRecognised {
+            stdout: output_prefix(&output.stdout),
+            stderr: output_prefix(&output.stderr),
+        }),
+    }
+}
 
 fn profile_key(program: &Path) -> PathBuf {
     #[cfg(windows)]
@@ -1457,8 +2353,41 @@ pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = WAKE.set(Box::new(wake));
 }
 
-#[cfg(windows)]
-fn run_profile_probe(program: &Path) -> Option<PathBuf> {
+fn powershell_probe_command(program: &Path) -> Result<std::process::Command, ParseProbeFailure> {
+    #[cfg(windows)]
+    {
+        bt_platform::quiet_command_named(program).ok_or_else(|| {
+            ParseProbeFailure::Spawn(format!(
+                "the named child-process door could not resolve {}",
+                program.display()
+            ))
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(bt_platform::quiet_command(program))
+    }
+}
+
+fn stopped_output(mut child: std::process::Child) -> ProbeOutput {
+    let _ = child.kill();
+    child.wait_with_output().map_or_else(
+        |_| ProbeOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        },
+        |output| ProbeOutput {
+            stdout: output.stdout,
+            stderr: output.stderr,
+        },
+    )
+}
+
+fn run_powershell_probe(
+    program: &Path,
+    command: &str,
+    input: Option<&str>,
+) -> Result<ProbeOutput, ParseProbeFailure> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time a PowerShell pane is opened.
     //
@@ -1468,13 +2397,35 @@ fn run_profile_probe(program: &Path) -> Option<PathBuf> {
     // asks about the program a pane will run, so it asks about the one an
     // administrator installed.
     use std::process::Stdio;
-    let mut child = bt_platform::quiet_command_named(program)?
-        .args(["-NoProfile", "-NonInteractive", "-Command", PROFILE_COMMAND])
-        .stdin(Stdio::null())
+    let mut child = powershell_probe_command(program)?
+        .args(["-NoProfile", "-NonInteractive", "-Command", command])
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-        .ok()?;
+        .map_err(|error| ParseProbeFailure::Spawn(error.to_string()))?;
+    if let Some(input) = input {
+        let written = child.stdin.take().map_or_else(
+            || Err("the piped stdin handle was absent".to_owned()),
+            |mut stdin| {
+                stdin
+                    .write_all(input.as_bytes())
+                    .map_err(|error| error.to_string())
+            },
+        );
+        if let Err(error) = written {
+            let output = stopped_output(child);
+            return Err(ParseProbeFailure::Stdin {
+                error,
+                stdout: output_prefix(&output.stdout),
+                stderr: output_prefix(&output.stderr),
+            });
+        }
+    }
     let _started_pid = child.id(); // Only this owned child may be stopped.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
@@ -1483,17 +2434,46 @@ fn run_profile_probe(program: &Path) -> Option<PathBuf> {
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(20))
             }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+            Ok(None) => {
+                let output = stopped_output(child);
+                return Err(ParseProbeFailure::Deadline {
+                    stdout: output_prefix(&output.stdout),
+                    stderr: output_prefix(&output.stderr),
+                });
+            }
+            Err(error) => {
+                let output = stopped_output(child);
+                return Err(ParseProbeFailure::Wait {
+                    error: error.to_string(),
+                    stdout: output_prefix(&output.stdout),
+                    stderr: output_prefix(&output.stderr),
+                });
             }
         }
     }
-    let output = child.wait_with_output().ok()?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| ParseProbeFailure::Wait {
+            error: error.to_string(),
+            stdout: "[]".to_owned(),
+            stderr: "[]".to_owned(),
+        })?;
     if !output.status.success() {
-        return None;
+        return Err(ParseProbeFailure::Exit {
+            code: output.status.code(),
+            stdout: output_prefix(&output.stdout),
+            stderr: output_prefix(&output.stderr),
+        });
     }
+    Ok(ProbeOutput {
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
+#[cfg(windows)]
+fn run_profile_probe(program: &Path) -> Option<PathBuf> {
+    let output = run_powershell_probe(program, PROFILE_COMMAND, None).ok()?;
     let path = parse_profile_answer(std::str::from_utf8(&output.stdout).ok()?)?;
     path.is_absolute().then_some(path)
 }
@@ -1571,15 +2551,29 @@ pub fn integration_line() -> String {
 pub fn powershell_script_for_birth() -> Option<PathBuf> {
     let durable = persist::storage_dir().join(SCRIPT_DIRECTORY);
     if crate::update_trial::defer(crate::update_trial::Writer::PowerShellScript) {
-        return TRIAL_POWERSHELL_SCRIPT
-            .get_or_init(|| {
-                powershell_script_in_trial(&durable, &trial_script_directory()?, SCRIPT_PS1)
-            })
-            .clone();
+        if let Some(path) = TRIAL_POWERSHELL_SCRIPT.get().filter(|path| path.is_file()) {
+            return Some(path.clone());
+        }
+        let prepared =
+            powershell_script_in_trial(&durable, &trial_script_directory()?, SCRIPT_PS1)?;
+        if !prepared.is_file() {
+            return None;
+        }
+        let _ = TRIAL_POWERSHELL_SCRIPT.set(prepared.clone());
+        return Some(prepared);
     }
-    DURABLE_POWERSHELL_SCRIPT
-        .get_or_init(|| install_script_at(&durable, SCRIPT_FILE_PS1, SCRIPT_PS1))
-        .clone()
+    if let Some(path) = DURABLE_POWERSHELL_SCRIPT
+        .get()
+        .filter(|path| path.is_file())
+    {
+        return Some(path.clone());
+    }
+    let prepared = install_script_at(&durable, SCRIPT_FILE_PS1, SCRIPT_PS1)?;
+    if !prepared.is_file() {
+        return None;
+    }
+    let _ = DURABLE_POWERSHELL_SCRIPT.set(prepared.clone());
+    Some(prepared)
 }
 
 /// A trial's own folder for the script: under the system temporary directory, which holds none
@@ -1591,6 +2585,23 @@ fn trial_script_directory() -> Option<PathBuf> {
             .join(format!("folio-trial-{txn}"))
             .join(SCRIPT_DIRECTORY),
     )
+}
+
+/// Remove the script copy owned by a transaction after that transaction's
+/// own directory has been retired. The target is reconstructed from the same
+/// fixed prefix as [`trial_script_directory`] and checked before the recursive
+/// removal; no durable Folio or user directory is beneath this path.
+pub(crate) fn remove_trial_script(txn: crate::update_txn::TxnId) {
+    let temporary = std::env::temp_dir();
+    let root = temporary.join(format!("folio-trial-{txn}"));
+    if root.parent() == Some(temporary.as_path())
+        && root
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with("folio-trial-"))
+    {
+        let _ = std::fs::remove_dir_all(root.join(SCRIPT_DIRECTORY));
+        let _ = std::fs::remove_dir(root);
+    }
 }
 
 /// The trial half of [`powershell_script_for_birth`]'s rule, over directories a test can name:
@@ -1618,14 +2629,43 @@ fn powershell_script_in_trial(
 /// is compared once.
 ///
 /// [`update_trial::Writer::PowerShellScript`]: crate::update_trial::Writer::PowerShellScript
-pub fn begin_powershell_script_preparation() {
-    let _ = bt_platform::spawn_at_priority(
+enum PowershellPreparation {
+    ScriptAndQuestions(Vec<ParseQuestion>),
+    ParseAttempt(ParseAttempt),
+}
+
+fn spawn_powershell_preparation(work: PowershellPreparation) -> Result<(), String> {
+    bt_platform::spawn_at_priority(
         "powershell-script-prepare",
         bt_platform::ThreadPriority::BelowNormal,
-        |_ctx| {
-            let _ = powershell_script_for_birth();
+        move |_ctx| match work {
+            PowershellPreparation::ScriptAndQuestions(questions) => {
+                let _ = powershell_script_for_birth();
+                for question in questions {
+                    ask_parse_question(question);
+                }
+            }
+            PowershellPreparation::ParseAttempt(attempt) => run_parse_attempt(attempt),
         },
-    );
+    )
+    .map(drop)
+    .map_err(|error| error.to_string())
+}
+
+fn begin_powershell_preparation(questions: Vec<ParseQuestion>) {
+    let _ = spawn_powershell_preparation(PowershellPreparation::ScriptAndQuestions(questions));
+}
+
+/// Prepare the script and ask the target parser about every command-bearing
+/// PowerShell row in this profile snapshot. Called at startup and after a table
+/// change; exact argv keys make unchanged rows free and changed rows new work.
+pub fn begin_powershell_preparation_for(programs: &profiles::ProfilePrograms) {
+    begin_powershell_preparation(parse_questions(programs));
+}
+
+/// Re-prepare only the script when a trial releases its durable write.
+pub fn begin_powershell_script_preparation() {
+    begin_powershell_preparation(Vec::new());
 }
 
 /// What one write into a profile did.
@@ -2118,13 +3158,26 @@ mod tests {
             "the window thread waits for no startup worker"
         );
         let warmed = source
-            .find("shell_integration::begin_powershell_script_preparation();")
+            .find("shell_integration::begin_powershell_preparation_for(&profile_programs);")
             .expect("launch starts the script's preparation");
         assert!(warmed < source.find("opening_window_attributes(").unwrap());
         let probe = source_for_profile_probe();
-        assert!(probe.contains("quiet_command_named"));
+        let command = source_for_probe_command();
+        assert!(command.contains("quiet_command_named"));
+        assert!(command.contains("quiet_command(program)"));
         assert!(probe.contains("-NoProfile"));
         assert!(probe.contains("from_secs(5)"));
+        let parse_probe = include_str!("shell_integration.rs")
+            .split_once("fn run_parse_probe(program: &Path, text: &str)")
+            .expect("the Windows target parser probe")
+            .1
+            .split_once("fn profile_key")
+            .expect("the item after that probe")
+            .0;
+        assert!(parse_probe.contains("run_powershell_probe(program, PARSE_COMMAND, Some(text))"));
+        assert!(probe.contains("Stdio::piped()"));
+        assert!(probe.contains("input.as_bytes()"));
+        assert!(!probe.contains(".arg(input)"));
     }
 
     /// PIN — **the window hears a removal only through the report's own answer,
@@ -2192,10 +3245,20 @@ mod tests {
 
     fn source_for_profile_probe() -> &'static str {
         include_str!("shell_integration.rs")
-            .split_once("fn run_profile_probe(program: &Path)")
+            .split_once("fn run_powershell_probe(")
             .unwrap()
             .1
-            .split_once("#[cfg(not(windows))]")
+            .split_once("#[cfg(windows)]\nfn run_profile_probe")
+            .unwrap()
+            .0
+    }
+
+    fn source_for_probe_command() -> &'static str {
+        include_str!("shell_integration.rs")
+            .split_once("fn powershell_probe_command(")
+            .unwrap()
+            .1
+            .split_once("fn stopped_output")
             .unwrap()
             .0
     }
@@ -2314,91 +3377,408 @@ mod tests {
         assert!(!actual.iter().skip(1).any(|word| word == "-NoLogo"));
     }
 
-    #[test]
-    fn powershell_argument_allowlist_composes_only_documented_non_terminal_switches() {
-        let script = Path::new("C:/Folio/folio.ps1");
-        let composed = |program: &str, words: &[&str], enabled: bool| {
-            let own = words.iter().map(OsString::from).collect::<Vec<_>>();
-            compose_powershell_arguments(Path::new(program), &own, Some(script), enabled)
-                .iter()
-                .map(|word| word.to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-        };
+    fn os_words(words: &[&str]) -> Vec<OsString> {
+        words.iter().map(OsString::from).collect()
+    }
 
-        let common = [
-            vec![],
-            vec!["-NoLogo"],
-            vec!["/NoProfile"],
-            vec!["-NoExit"],
-            vec!["-Sta"],
-            vec!["-Mta"],
-            vec!["-ExecutionPolicy", "RemoteSigned"],
-            vec!["-WindowStyle", "Hidden"],
-            vec!["-InputFormat", "Text"],
-            vec!["-OutputFormat", "Text"],
-            vec!["-ConfigurationName", "Microsoft.PowerShell"],
-        ];
-        for program in ["powershell.exe", "pwsh.exe"] {
-            for words in &common {
-                let actual = composed(program, words, true);
-                assert_eq!(
-                    &actual[..words.len()],
-                    words.as_slice(),
-                    "{program} {words:?}"
-                );
-                assert_eq!(
-                    &actual[words.len()..words.len() + 2],
-                    ["-NoExit", "-Command"]
-                );
-                assert_eq!(
-                    actual.last().unwrap(),
-                    &powershell_load_command(Path::new(program), script),
-                    "{program} {words:?}"
-                );
+    /// RED (mutation: shorten any `minimum`, remove an alias row, or share the
+    /// pwsh table with Windows PowerShell) — each edition's one table is the
+    /// parser's ordered `MatchSwitch` contract, including its non-generic
+    /// prefix exceptions.
+    #[test]
+    fn powershell_classifier_enumerates_each_editions_names_aliases_and_prefixes() {
+        for (program, table) in [
+            (Path::new("powershell.exe"), WINPS_OPTIONS),
+            (Path::new("pwsh.exe"), PWSH_OPTIONS),
+        ] {
+            for option in table {
+                let spelling = format!("-{}", option.name);
+                let mut words = vec![OsString::from(spelling)];
+                if option.kind == PowerShellOptionKind::Value {
+                    words.push(OsString::from("value"));
+                } else if matches!(
+                    option.kind,
+                    PowerShellOptionKind::Command
+                        | PowerShellOptionKind::EncodedCommand
+                        | PowerShellOptionKind::File
+                        | PowerShellOptionKind::CommandWithArgs
+                ) {
+                    words.push(OsString::from(
+                        if option.kind == PowerShellOptionKind::EncodedCommand {
+                            encode_command("Get-Date")
+                        } else {
+                            "Get-Date".to_owned()
+                        },
+                    ));
+                }
+                let parsed = classify_powershell_arguments(program, &words);
+                if option.kind == PowerShellOptionKind::Unsupported {
+                    assert_eq!(parsed, None, "{program:?} {}", option.name);
+                } else {
+                    assert!(parsed.is_some(), "{program:?} {}", option.name);
+                }
+
+                if option.minimum != option.name {
+                    let mut minimum = words.clone();
+                    minimum[0] = OsString::from(format!("/{}", option.minimum));
+                    let parsed = classify_powershell_arguments(program, &minimum);
+                    if option.kind == PowerShellOptionKind::Unsupported {
+                        assert_eq!(parsed, None, "{program:?} {}", option.minimum);
+                    } else {
+                        assert!(parsed.is_some(), "{program:?} {}", option.minimum);
+                    }
+                }
             }
         }
-        for words in [
-            vec!["-Version", "5.1"],
-            vec!["-PSConsoleFile", "console.psc1"],
+
+        for (program, words) in [
+            ("powershell.exe", vec!["-n"]),
+            ("powershell.exe", vec!["-en"]),
+            ("pwsh.exe", vec!["-n"]),
+            ("pwsh.exe", vec!["-set"]),
+            ("pwsh.exe", vec!["-NoProfileL"]),
         ] {
             assert_eq!(
-                composed("powershell.exe", &words, true).len(),
-                words.len() + 3
+                classify_powershell_arguments(Path::new(program), &os_words(&words)),
+                None,
+                "ambiguous or below-minimum spelling {program} {words:?}"
             );
         }
-        for words in [
-            vec!["-Login"],
-            vec!["-l"],
-            vec!["-WorkingDirectory", "C:/demo"],
-            vec!["-SettingsFile", "settings.json"],
-            vec!["-CustomPipeName", "folio"],
-            vec!["-ConfigurationFile", "folio.pssc"],
-        ] {
-            assert_eq!(composed("pwsh.exe", &words, true).len(), words.len() + 3);
-        }
+        assert!(
+            classify_powershell_arguments(Path::new("powershell.exe"), &os_words(&["-NoP"]))
+                .is_some()
+        );
+        assert!(
+            classify_powershell_arguments(
+                Path::new("pwsh.exe"),
+                &os_words(&["-NoP", "-NoProfileLoadTime", "-i"])
+            )
+            .is_some()
+        );
 
-        let refused = [
-            vec!["-File", "x.ps1"],
-            vec!["-f", "x.ps1"],
-            vec!["-Command"],
-            vec!["-c"],
-            vec!["-EncodedCommand", "QQA="],
-            vec!["-ec", "QQA="],
-            vec!["-cwa", "Get-Date"],
-            vec!["/c", "Get-Date"],
-            vec!["Get-Date"],
-            vec!["-NonInteractive"],
-        ];
-        for program in ["powershell.exe", "pwsh.exe"] {
-            for words in &refused {
-                assert_eq!(
-                    composed(program, words, true),
-                    *words,
-                    "unsafe argv changed: {program} {words:?}"
-                );
-            }
+        for (program, words, terminal, non_interactive) in [
+            ("powershell.exe", vec!["-nol"], "none", false),
+            ("powershell.exe", vec!["-ep", "Bypass"], "none", false),
+            ("powershell.exe", vec!["-f", "script.ps1"], "file", false),
+            (
+                "powershell.exe",
+                vec!["-noni", "-c", "Get-Date"],
+                "command",
+                true,
+            ),
+            ("pwsh.exe", vec!["-wd", "C:/"], "none", false),
+            ("pwsh.exe", vec!["-cwa", "Get-Date"], "cwa", false),
+        ] {
+            let parsed = classify_powershell_arguments(Path::new(program), &os_words(&words))
+                .unwrap_or_else(|| panic!("measured spelling {program} {words:?}"));
+            assert_eq!(parsed.non_interactive, non_interactive);
+            assert_eq!(
+                match parsed.terminal {
+                    PowerShellTerminal::None => "none",
+                    PowerShellTerminal::Command { .. } => "command",
+                    PowerShellTerminal::File => "file",
+                    PowerShellTerminal::CommandWithArgs => "cwa",
+                    PowerShellTerminal::EncodedCommand { .. } => "encoded",
+                    PowerShellTerminal::Stdin => "stdin",
+                },
+                terminal,
+                "{program} {words:?}"
+            );
         }
-        assert_eq!(composed("pwsh.exe", &[], false), Vec::<String>::new());
+    }
+
+    /// RED (mutation: treat `-c` as a literal name, discard `-NoExit`, or let
+    /// the next option parse after Command) — the motivating generated rows are
+    /// the host's Command terminal, not an unsafe suffix point.
+    #[test]
+    fn visual_studio_and_conda_rows_classify_as_commands_with_noexit() {
+        let vs_text =
+            "&{Import-Module 'Microsoft.VisualStudio.DevShell.dll'; Enter-VsDevShell a2ec33a6}";
+        let conda_text = "& 'C:/Miniconda/shell/condabin/conda-hook.ps1' ; conda activate 'base'";
+        for (program, words, expected) in [
+            ("powershell.exe", vec!["-noe", "-c", vs_text], vs_text),
+            ("powershell.exe", vec!["-noe", "/c", vs_text], vs_text),
+            (
+                "pwsh.exe",
+                vec![
+                    "-ExecutionPolicy",
+                    "ByPass",
+                    "-NoExit",
+                    "-Command",
+                    conda_text,
+                ],
+                conda_text,
+            ),
+        ] {
+            let parsed = classify_powershell_arguments(Path::new(program), &os_words(&words))
+                .expect("a real host line");
+            assert!(parsed.no_exit, "{program} {words:?}");
+            assert!(
+                parsed
+                    .non_terminal
+                    .iter()
+                    .any(|option| option.name == "noexit" && option.value.is_none()),
+                "the parsed non-terminal list names NoExit: {program} {words:?}"
+            );
+            assert!(
+                matches!(parsed.terminal, PowerShellTerminal::Command { text, .. } if text == expected)
+            );
+        }
+        let conda = classify_powershell_arguments(
+            Path::new("pwsh.exe"),
+            &os_words(&[
+                "-ExecutionPolicy",
+                "ByPass",
+                "-NoExit",
+                "-Command",
+                "Get-Date",
+            ]),
+        )
+        .unwrap();
+        assert_eq!(conda.non_terminal[0].name, "executionpolicy");
+        assert_eq!(conda.non_terminal[0].option, 0);
+        assert_eq!(conda.non_terminal[0].value, Some(1));
+    }
+
+    /// RED (mutations: join with no space, use `;`, add `-NoExit`, accept an
+    /// unknown parse, rewrite a terminal form, or omit the rendered-line cap).
+    #[test]
+    fn powershell_composition_table_preserves_every_terminal_contract() {
+        let script = Path::new("C:/Folio/folio.ps1");
+        let program = Path::new("pwsh.exe");
+        let loader = powershell_load_command(program, script);
+        let compose = |words: &[&str], answer| {
+            composed_powershell_arguments(program, &os_words(words), script, answer)
+        };
+
+        let plain = compose(&["-NoLogo"], None).expect("non-terminal");
+        assert_eq!(plain[..3], os_words(&["-NoLogo", "-NoExit", "-Command"]));
+        assert_eq!(plain[3], OsString::from(&loader));
+
+        let command = compose(&["-NoExit", "-c", "$x=", "'several' # comment"], Some(true))
+            .expect("parse-valid command");
+        assert_eq!(command.len(), 3);
+        assert_eq!(command[..2], os_words(&["-NoExit", "-c"]));
+        assert_eq!(
+            command[2],
+            OsString::from(format!("$x= 'several' # comment\r\n{loader}"))
+        );
+        assert_eq!(command.iter().filter(|word| *word == "-NoExit").count(), 1);
+
+        let unicode = "$global:answer='雪'";
+        let encoded = encode_command(unicode);
+        let encoded_words = ["-NoExit", "-ec", encoded.as_str()];
+        let result = compose(&encoded_words, Some(true)).expect("encoded command");
+        assert_eq!(
+            decode_encoded_command(result[2].to_str().unwrap()),
+            Some(format!("{unicode}\r\n{loader}"))
+        );
+        assert_eq!(result[..2], os_words(&["-NoExit", "-ec"]));
+
+        for words in [
+            vec!["-File", "x.ps1"],
+            vec!["-cwa", "Get-Date"],
+            vec!["-Command", "-"],
+            vec!["-NonInteractive", "-Command", "Get-Date"],
+            vec!["-unknown"],
+        ] {
+            assert_eq!(compose(&words, Some(true)), None, "{words:?}");
+        }
+        assert_eq!(compose(&["-Command", "Get-Date"], None), None);
+        assert_eq!(compose(&["-Command", "Get-Date"], Some(false)), None);
+        let huge = "x".repeat(40_000);
+        assert_eq!(
+            composed_powershell_arguments(
+                program,
+                &[OsString::from("-Command"), OsString::from(huge)],
+                script,
+                Some(true)
+            ),
+            None
+        );
+    }
+
+    /// RED (mutations: treat Pending/Failed as valid or key on the executable
+    /// without argv) — an exact changed row has no inherited grammar answer.
+    #[test]
+    fn parse_gate_cache_distinguishes_unknown_valid_invalid_failure_and_row_change() {
+        let program = Path::new("C:/unique/parser-gate/pwsh.exe");
+        let first = os_words(&["-Command", "Get-Date"]);
+        let changed = os_words(&["-Command", "Get-Location"]);
+        assert_eq!(cached_parse_answer(program, &first), None);
+        let mut answers = PARSE_ANSWERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        answers.insert(
+            parse_key(program, &first),
+            ParseAnswer::Pending { attempt: 1 },
+        );
+        assert_eq!(
+            answers.get(&parse_key(program, &first)),
+            Some(&ParseAnswer::Pending { attempt: 1 })
+        );
+        drop(answers);
+        assert_eq!(cached_parse_answer(program, &first), None);
+        PARSE_ANSWERS
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(parse_key(program, &first), ParseAnswer::Valid);
+        assert_eq!(cached_parse_answer(program, &first), Some(true));
+        assert_eq!(cached_parse_answer(program, &changed), None);
+        for (arguments, answer) in [
+            (os_words(&["-Command", "broken'"]), ParseAnswer::Invalid),
+            (
+                os_words(&["-Command", "probe failed"]),
+                ParseAnswer::Failed {
+                    attempts: 1,
+                    failure: ParseProbeFailure::Deadline {
+                        stdout: "[]".to_owned(),
+                        stderr: "[]".to_owned(),
+                    },
+                },
+            ),
+        ] {
+            let expected = matches!(answer, ParseAnswer::Invalid).then_some(false);
+            PARSE_ANSWERS
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap()
+                .insert(parse_key(program, &arguments), answer);
+            assert_eq!(cached_parse_answer(program, &arguments), expected);
+        }
+    }
+
+    /// RED (mutations: collapse a nonzero exit into `None`, accept arbitrary
+    /// stdout, or omit either output prefix) — the diagnostic names the stage
+    /// that failed and carries the first bytes needed to distinguish encoding,
+    /// host output and a silent child.
+    #[test]
+    fn a_parse_probe_failure_names_its_stage_and_first_output_bytes() {
+        let malformed = parse_probe_answer(ProbeOutput {
+            stdout: vec![0xef, 0xbb, 0xbf, b'1'],
+            stderr: "错误".as_bytes().to_vec(),
+        })
+        .expect_err("a BOM is not the probe's one-byte protocol");
+        let rendered = malformed.to_string();
+        assert!(rendered.starts_with("output not recognised"));
+        assert!(rendered.contains("[ef bb bf 31]"));
+        assert!(rendered.contains("[e9 94 99 e8 af af]"));
+
+        let exited = ParseProbeFailure::Exit {
+            code: Some(23),
+            stdout: "[31]".to_owned(),
+            stderr: "[]".to_owned(),
+        }
+        .to_string();
+        assert!(exited.starts_with("exit status Some(23)"));
+        assert!(exited.contains("stdout first bytes [31]"));
+        assert!(exited.contains("stderr first bytes []"));
+    }
+
+    /// RED (mutation: make `Failed` an occupied terminal cache entry again) —
+    /// a transient probe failure remains unknown and the next request can turn
+    /// the exact row into a valid answer.
+    #[test]
+    fn a_failed_parse_probe_is_unknown_and_the_next_request_can_answer() {
+        let program = Path::new("C:/unique/parser-retry/pwsh.exe");
+        let arguments = os_words(&["-Command", "'天下為公'"]);
+        let question = ParseQuestion::new(program, &arguments, "'天下為公'".to_owned());
+
+        let first = claim_parse_attempt(question.clone()).expect("first attempt");
+        publish_parse_attempt(
+            first.question.key,
+            first.number,
+            Err(ParseProbeFailure::Deadline {
+                stdout: "[]".to_owned(),
+                stderr: "[]".to_owned(),
+            }),
+        );
+        assert_eq!(cached_parse_answer(program, &arguments), None);
+
+        let second = claim_parse_attempt(question).expect("failure is retryable");
+        assert_eq!(second.number, 2);
+        publish_parse_attempt(second.question.key, second.number, Ok(true));
+        assert_eq!(cached_parse_answer(program, &arguments), Some(true));
+    }
+
+    /// RED (mutation: raise `PARSE_PROBE_ATTEMPT_LIMIT` from three to four) — a permanently
+    /// failing parser starts three children for an exact row, never one per
+    /// pane birth for the rest of the process.
+    #[test]
+    fn a_permanently_failed_parse_probe_has_a_process_attempt_limit() {
+        let program = Path::new("C:/unique/parser-attempt-limit/pwsh.exe");
+        let arguments = os_words(&["-Command", "Write-Output 雪"]);
+        let question = ParseQuestion::new(program, &arguments, "Write-Output 雪".to_owned());
+
+        assert_eq!(PARSE_PROBE_ATTEMPT_LIMIT, 3);
+        for expected in 1..=3 {
+            let attempt = claim_parse_attempt(question.clone()).expect("bounded attempt");
+            assert_eq!(attempt.number, expected);
+            publish_parse_attempt(
+                attempt.question.key,
+                attempt.number,
+                Err(ParseProbeFailure::Exit {
+                    code: Some(17),
+                    stdout: "[31]".to_owned(),
+                    stderr: "[e9 9b aa]".to_owned(),
+                }),
+            );
+        }
+        assert!(claim_parse_attempt(question).is_none());
+        assert_eq!(cached_parse_answer(program, &arguments), None);
+    }
+
+    /// RED (mutation: execute the claimed attempt inside `request_parse_retry`
+    /// before handing it to `start`) — a birth with an unknown answer returns
+    /// its original argv after handing one job to the scheduler; it neither
+    /// prepares the script nor executes the parser job itself. A second birth
+    /// sees Pending and does not hand over another job.
+    #[test]
+    fn a_birth_schedules_a_parse_retry_without_waiting_for_it() {
+        let program = Path::new("C:/unique/parser-birth-retry/pwsh.exe");
+        let arguments = os_words(&["-Command", "Write-Output '混合 script'"]);
+        let question =
+            ParseQuestion::new(program, &arguments, "Write-Output '混合 script'".to_owned());
+        let failed = claim_parse_attempt(question).expect("first attempt");
+        publish_parse_attempt(
+            failed.question.key,
+            failed.number,
+            Err(ParseProbeFailure::Stdin {
+                error: "fixture".to_owned(),
+                stdout: "[]".to_owned(),
+                stderr: "[]".to_owned(),
+            }),
+        );
+
+        let prepared = std::cell::Cell::new(false);
+        let scheduled = std::cell::RefCell::new(None);
+        let actual = compose_with_prepared_and_retry(
+            program,
+            &arguments,
+            true,
+            || {
+                prepared.set(true);
+                None
+            },
+            |retry| {
+                request_parse_retry(retry, |attempt| {
+                    *scheduled.borrow_mut() = Some(attempt);
+                    Ok(())
+                });
+            },
+        );
+        assert_eq!(actual, arguments);
+        assert!(!prepared.get());
+        assert_eq!(
+            scheduled.borrow().as_ref().map(|attempt| attempt.number),
+            Some(2)
+        );
+        request_parse_retry(
+            ParseQuestion::new(program, &arguments, "Write-Output '混合 script'".to_owned()),
+            |_| panic!("a concurrent birth scheduled a second parser child"),
+        );
     }
 
     /// RED (mutations: `compose_with_prepared` asks `prepare` before its gate; or
@@ -2408,7 +3788,9 @@ mod tests {
     /// PowerShell and is handed the same load; off Windows `/bin/sh` is handed nothing.
     #[test]
     fn a_birth_prepares_the_script_only_for_an_argv_that_loads_it() {
-        let script = PathBuf::from("C:/Folio/folio.ps1");
+        let root = temp_dir("birth-prepares");
+        let script = root.join("folio.ps1");
+        std::fs::write(&script, "# fixture").unwrap();
         let asked = std::cell::Cell::new(0);
         let prepare = || {
             asked.set(asked.get() + 1);
@@ -2472,6 +3854,37 @@ mod tests {
                 && source.contains("compose_powershell_birth("),
             "the retry's argv is the last-resort shell's own words through the birth composer"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// RED (mutation: trust `prepare`'s path without checking it, or memoize its
+    /// first failure) — a missing copy is a plain birth and the following birth
+    /// asks preparation again and can integrate.
+    #[test]
+    fn a_failed_or_missing_preparation_is_retried_at_the_next_birth() {
+        let root = temp_dir("birth-retries");
+        let script = root.join("folio.ps1");
+        let words = os_words(&["-NoLogo"]);
+        let attempts = std::cell::Cell::new(0);
+        let first = compose_with_prepared(Path::new("pwsh.exe"), &words, true, || {
+            attempts.set(attempts.get() + 1);
+            None
+        });
+        assert_eq!(first, words);
+        let missing = compose_with_prepared(Path::new("pwsh.exe"), &words, true, || {
+            attempts.set(attempts.get() + 1);
+            Some(script.clone())
+        });
+        assert_eq!(missing, words);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(&script, "# fixture").unwrap();
+        let ready = compose_with_prepared(Path::new("pwsh.exe"), &words, true, || {
+            attempts.set(attempts.get() + 1);
+            Some(script.clone())
+        });
+        assert_eq!(attempts.get(), 3);
+        assert_eq!(ready[..3], os_words(&["-NoLogo", "-NoExit", "-Command"]));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// RED (mutations: `powershell_script_in_trial` installs into the durable directory; or names
@@ -2570,10 +3983,386 @@ mod tests {
             assert!(load.contains("Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine"));
             assert!(load.contains("function global:PSConsoleHostReadLine"));
             assert!(load.contains("Microsoft.PowerShell.Core\\Set-StrictMode -Off"));
+            assert!(load.contains("try { $folioScript = [IO.File]::ReadAllText("));
+            assert!(load.contains("catch {}"));
+            assert!(load.contains("$Global:__FolioShellIntegration.ReadLineType"));
+            assert!(!load.contains("$Global:__FolioReadLineType"));
         }
         assert!(!winps.contains("GetAssemblies"));
-        assert!(pwsh.contains("GetAssemblies"));
-        assert!(pwsh.contains("Microsoft.PowerShell.PSReadLine.dll"));
+        assert_eq!(pwsh.contains("GetAssemblies"), cfg!(windows));
+        assert_eq!(
+            pwsh.contains("Microsoft.PowerShell.PSReadLine.dll"),
+            cfg!(windows)
+        );
+        assert!(SCRIPT_PS1.contains("ReadLineType = $readLineType"));
+        assert!(!SCRIPT_PS1.contains("$Global:__FolioReadLineType"));
+    }
+
+    /// RED (mutation: omit the retirement hook or remove only the script
+    /// file) — rollback/discard retirement removes the transaction-owned
+    /// PowerShell staging root together with the update transaction.
+    #[test]
+    fn retired_trial_removes_its_powershell_script_root() {
+        let mut bytes = [0x6d; 16];
+        bytes[..4].copy_from_slice(&std::process::id().to_le_bytes());
+        let txn = crate::update_txn::TxnId::new(bytes);
+        let root = std::env::temp_dir().join(format!("folio-trial-{txn}"));
+        let script = root.join(SCRIPT_DIRECTORY).join(SCRIPT_FILE_PS1);
+        std::fs::create_dir_all(script.parent().unwrap()).unwrap();
+        std::fs::write(&script, SCRIPT_PS1).unwrap();
+
+        remove_trial_script(txn);
+
+        assert!(!root.exists(), "the transaction-owned staging root remains");
+        let delete = Index::of_package("bt-app")
+            .body_of(&bt_source::ItemQuery::function("delete").in_module("crate::update_startup"))
+            .expect("update-start retirement delete");
+        assert!(delete.contains("remove_trial_script(txn)"));
+    }
+
+    /// RED (mutation: replace atomically only on one caller, or write the
+    /// destination directly) — two preparations leave one complete script,
+    /// never a splice or a truncated file.
+    #[test]
+    fn two_script_preparations_replace_atomically() {
+        let root = temp_dir("atomic-script");
+        std::fs::create_dir_all(&root).unwrap();
+        let name = "folio.ps1";
+        std::fs::write(root.join(name), "standing").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let texts = ["a".repeat(128 * 1024), "b".repeat(128 * 1024)];
+        let joins = texts
+            .into_iter()
+            .map(|text| {
+                let root = root.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    install_script_at(&root, name, &text)
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        let outcomes = joins
+            .into_iter()
+            .map(|join| join.join().unwrap())
+            .collect::<Vec<_>>();
+        let installed = root.join(name);
+        assert!(
+            outcomes.iter().any(Option::is_some),
+            "at least one competing replacement lands"
+        );
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| outcome.is_none() || outcome.as_deref() == Some(installed.as_path())),
+            "a refusal names nothing else: {outcomes:?}"
+        );
+        let final_text = std::fs::read_to_string(root.join(name)).unwrap();
+        assert_eq!(final_text.len(), 128 * 1024);
+        assert!(
+            final_text.bytes().all(|byte| byte == b'a')
+                || final_text.bytes().all(|byte| byte == b'b')
+        );
+        let body = Index::of_package("bt-app")
+            .body_of(&bt_source::ItemQuery::function("install_script_at"))
+            .expect("the script writer");
+        assert!(body.contains("bt_persist::atomic_replace_preserving"));
+        assert!(body.contains("bt_persist::atomic_write"));
+        assert!(!body.contains("std::fs::write"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[cfg(windows)]
+    fn real_powershell_output_until(
+        session: &mut bt_pty::PtySession,
+        needle: &[u8],
+        silent_for: std::time::Duration,
+    ) -> Vec<u8> {
+        let started = std::time::Instant::now();
+        let absolute_deadline = started + std::time::Duration::from_secs(180);
+        let mut last_output = started;
+        let mut output = Vec::new();
+        while !output.windows(needle.len()).any(|window| window == needle) {
+            let now = std::time::Instant::now();
+            assert!(
+                now < absolute_deadline && now.duration_since(last_output) < silent_for,
+                "PowerShell never emitted {:?}; elapsed {:?}, silent {:?}, {} bytes; output was {:?}",
+                String::from_utf8_lossy(needle),
+                now.duration_since(started),
+                now.duration_since(last_output),
+                output.len(),
+                String::from_utf8_lossy(&output)
+            );
+            let chunk = session.read_output();
+            if chunk.is_empty() {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            } else {
+                last_output = std::time::Instant::now();
+            }
+            output.extend(chunk);
+        }
+        output
+    }
+
+    #[cfg(windows)]
+    fn real_parse_answer(program: &Path, text: &str) -> bool {
+        let mut failures = Vec::new();
+        for attempt in 1..=PARSE_PROBE_ATTEMPT_LIMIT {
+            match run_parse_probe(program, text) {
+                Ok(answer) => return answer,
+                Err(failure) => {
+                    eprintln!(
+                        "{} target parser attempt {attempt}/{PARSE_PROBE_ATTEMPT_LIMIT} failed: {failure}",
+                        program.display()
+                    );
+                    failures.push(failure);
+                }
+            }
+        }
+        panic!(
+            "{} target parser gave no answer in {PARSE_PROBE_ATTEMPT_LIMIT} attempts: {failures:?}",
+            program.display()
+        );
+    }
+
+    /// Real-shell acceptance through the same headless ConPTY as a pane.
+    ///
+    /// The Windows Known Folder that supplies `$PROFILE` cannot be redirected
+    /// by HOME/USERPROFILE (Part B measured that explicitly), so the hard rule
+    /// that tests never read the account's profile requires `-NoProfile` here.
+    /// The row's own `-NoExit -Command` lifetime and command composition are
+    /// otherwise unchanged. Before this process types a byte, user text points
+    /// PSReadLine at the scratch file, selects SaveNothing, and prints both
+    /// verified values; a failed verification exits the child instead.
+    ///
+    /// RED (mutation: drop the CRLF composition, add `-NoExit` to the one-shot
+    /// row, or compose File) — prompt marks/effect, exit, and plain-file arms
+    /// fail independently.
+    #[cfg(windows)]
+    #[test]
+    fn real_command_rows_integrate_without_touching_account_state() {
+        use std::sync::Arc;
+
+        let root = temp_dir("real-command-rows");
+        let home = root.join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let integration = root.join(SCRIPT_FILE_PS1);
+        std::fs::write(&integration, SCRIPT_PS1).unwrap();
+        let history = root.join("history.txt");
+        let history_literal = powershell_single_quoted(&history);
+        let safety = format!(
+            "Set-PSReadLineOption -HistorySavePath {history_literal} -HistorySaveStyle SaveNothing; if (((Get-PSReadLineOption).HistorySaveStyle -ne 'SaveNothing') -or ((Get-PSReadLineOption).HistorySavePath -ne {history_literal})) {{ exit 91 }}; Write-Output ('BT_SAFE|' + (Get-PSReadLineOption).HistorySavePath)"
+        );
+        let environment = vec![
+            (OsString::from("HOME"), home.clone().into_os_string()),
+            (OsString::from("USERPROFILE"), home.clone().into_os_string()),
+            (
+                OsString::from("APPDATA"),
+                home.join("AppData/Roaming").into_os_string(),
+            ),
+        ];
+
+        for name in ["powershell.exe", "pwsh.exe"] {
+            let Some(program) = bt_platform::program_on_path(Path::new(name)) else {
+                eprintln!("{name}: not installed; real command-row arm skipped");
+                continue;
+            };
+            let user = format!("{safety}; $Global:BT_FOLIO_EFFECT = 'persisted'");
+            let row = os_words(&["-NoProfile", "-NoExit", "-Command", &user]);
+            let arguments = composed_powershell_arguments(
+                &program,
+                &row,
+                &integration,
+                Some(real_parse_answer(&program, &user)),
+            )
+            .expect("the valid command composes");
+            let mut session = bt_pty::PtySession::spawn_shell_in(
+                program.clone(),
+                &arguments,
+                &|| last_resort_arguments(false),
+                &environment,
+                bt_pty::PtySize::cells(
+                    std::num::NonZeroU16::new(100).unwrap(),
+                    std::num::NonZeroU16::new(30).unwrap(),
+                ),
+                Arc::new(|| {}),
+                Some(home.clone()),
+            )
+            .unwrap();
+            let mut output = real_powershell_output_until(
+                &mut session,
+                b"\x1b]133;B",
+                std::time::Duration::from_secs(20),
+            );
+            assert!(output.windows(8).any(|window| window == b"BT_SAFE|"));
+            assert!(
+                output
+                    .windows(b"\x1b]7;".len())
+                    .any(|window| window == b"\x1b]7;")
+            );
+            session
+                .write(b"Write-Output ('BT_EFFECT|' + $Global:BT_FOLIO_EFFECT); exit\r")
+                .unwrap();
+            output.extend(real_powershell_output_until(
+                &mut session,
+                b"BT_EFFECT|persisted",
+                std::time::Duration::from_secs(20),
+            ));
+            assert!(
+                output
+                    .windows(b"\x1b]133".len())
+                    .any(|window| window == b"\x1b]133")
+            );
+            session.shutdown().unwrap();
+
+            let one_shot = "Write-Output INJECT3_ONESHOT";
+            let row = os_words(&["-NoProfile", "-Command", one_shot]);
+            let arguments = composed_powershell_arguments(
+                &program,
+                &row,
+                &integration,
+                Some(real_parse_answer(&program, one_shot)),
+            )
+            .expect("one-shot command composes without changing its lifetime");
+            assert!(!arguments.iter().any(|argument| argument == "-NoExit"));
+            let mut session = bt_pty::PtySession::spawn_shell_in(
+                program.clone(),
+                &arguments,
+                &|| last_resort_arguments(false),
+                &environment,
+                bt_pty::PtySize::cells(
+                    std::num::NonZeroU16::new(100).unwrap(),
+                    std::num::NonZeroU16::new(30).unwrap(),
+                ),
+                Arc::new(|| {}),
+                Some(home.clone()),
+            )
+            .unwrap();
+            let output = real_powershell_output_until(
+                &mut session,
+                b"INJECT3_ONESHOT",
+                std::time::Duration::from_secs(20),
+            );
+            assert!(
+                !output
+                    .windows(b"\x1b]133".len())
+                    .any(|window| window == b"\x1b]133")
+            );
+            session.shutdown().unwrap();
+
+            let file = root.join(format!("{name}-plain.ps1"));
+            std::fs::write(
+                &file,
+                format!("{safety}; Write-Output INJECT3_FILE_PLAIN\r\n"),
+            )
+            .unwrap();
+            let row = vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-NoExit"),
+                OsString::from("-File"),
+                file.into_os_string(),
+            ];
+            assert_eq!(
+                composed_powershell_arguments(&program, &row, &integration, Some(true)),
+                None
+            );
+            let mut session = bt_pty::PtySession::spawn_shell_in(
+                program.clone(),
+                &row,
+                &|| last_resort_arguments(false),
+                &environment,
+                bt_pty::PtySize::cells(
+                    std::num::NonZeroU16::new(100).unwrap(),
+                    std::num::NonZeroU16::new(30).unwrap(),
+                ),
+                Arc::new(|| {}),
+                Some(home.clone()),
+            )
+            .unwrap();
+            let output = real_powershell_output_until(
+                &mut session,
+                b"INJECT3_FILE_PLAIN",
+                std::time::Duration::from_secs(20),
+            );
+            assert!(output.windows(8).any(|window| window == b"BT_SAFE|"));
+            assert!(
+                !output
+                    .windows(b"\x1b]133".len())
+                    .any(|window| window == b"\x1b]133")
+            );
+            session.write(b"exit\r").unwrap();
+            session.shutdown().unwrap();
+        }
+
+        let vs_program =
+            PathBuf::from(r"C:\Windows\SysWOW64\WindowsPowerShell\v1.0\powershell.exe");
+        let vs_module = PathBuf::from(
+            r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Microsoft.VisualStudio.DevShell.dll",
+        );
+        if vs_program.is_file() && vs_module.is_file() {
+            let vs = format!(
+                "{safety}; &{{Import-Module {}; Enter-VsDevShell a2ec33a6}}; Write-Output INJECT3_VS_READY",
+                powershell_single_quoted(&vs_module)
+            );
+            let row = vec![
+                OsString::from("-NoProfile"),
+                OsString::from("-noe"),
+                OsString::from("-c"),
+                OsString::from(&vs),
+            ];
+            let arguments = composed_powershell_arguments(
+                &vs_program,
+                &row,
+                &integration,
+                Some(real_parse_answer(&vs_program, &vs)),
+            )
+            .expect("the installed Developer PowerShell row composes");
+            let mut session = bt_pty::PtySession::spawn_shell_in(
+                vs_program,
+                &arguments,
+                &|| last_resort_arguments(false),
+                &environment,
+                bt_pty::PtySize::cells(
+                    std::num::NonZeroU16::new(120).unwrap(),
+                    std::num::NonZeroU16::new(35).unwrap(),
+                ),
+                Arc::new(|| {}),
+                Some(home.clone()),
+            )
+            .unwrap();
+            let output = real_powershell_output_until(
+                &mut session,
+                b"\x1b]133;B",
+                std::time::Duration::from_secs(30),
+            );
+            assert!(
+                output
+                    .windows(16)
+                    .any(|window| window == b"INJECT3_VS_READY")
+            );
+            assert!(
+                output
+                    .windows(b"\x1b]133".len())
+                    .any(|window| window == b"\x1b]133")
+            );
+            session
+                .write(b"if (Get-Command cl.exe -ErrorAction Ignore) { Write-Output INJECT3_CL_OK }; exit\r")
+                .unwrap();
+            let _output = real_powershell_output_until(
+                &mut session,
+                b"INJECT3_CL_OK",
+                std::time::Duration::from_secs(20),
+            );
+            session.shutdown().unwrap();
+        } else {
+            eprintln!("Visual Studio Build Tools Developer PowerShell is absent; arm skipped");
+        }
+        assert!(
+            !history.exists(),
+            "SaveNothing wrote no scratch history either"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

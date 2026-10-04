@@ -3,7 +3,7 @@
 
 use crate::{
     FilesFocusArrival, Popup, Runtime, cli, i18n, launch_wire, persist, profile_menu_anchor,
-    profiles, seats, settings, text_field, toast,
+    profiles, seats, settings, shell_integration, text_field, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -406,6 +406,7 @@ impl Runtime<'_> {
     fn adopt_profile_table(&mut self) -> Result<()> {
         self.app.profile_programs =
             profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
+        shell_integration::begin_powershell_preparation_for(&self.app.profile_programs);
         self.app.first_run_attempted = false;
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),

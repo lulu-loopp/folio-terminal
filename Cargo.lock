@@ -262,6 +262,7 @@ name = "bt-app"
 version = "0.4.6"
 dependencies = [
  "anyhow",
+ "base64",
  "bt-detect",
  "bt-doc",
  "bt-layout",
