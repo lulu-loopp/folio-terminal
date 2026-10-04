@@ -29,6 +29,7 @@ All notable changes to Folio are recorded here. The format follows
 
 - On Windows, a newly installed command is found in a new tab without restarting Folio.
 - PowerShell panes have command marks, folder tracking and inline formulas without any setup; nothing is added to your PowerShell profile.
+- PowerShell profile rows that run a command at startup — including Visual Studio Developer PowerShell and conda environments — now keep that command and receive the same command marks, folder tracking and inline formulas when PowerShell confirms the command parses.
 - The new-version notice and the update button are on About → Version; the daily check switch moved there too, and turning it off stops only the daily check.
 - The README says how to uninstall each kind of copy, and the zip's
   `uninstall.cmd` prints its lines in Chinese as well as English.
@@ -39,6 +40,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- PowerShell integration preparation can be retried after a failed or missing write, concurrent preparations cannot leave a partial script, and an update trial's temporary script is removed when that transaction is retired.
+- PowerShell's integration loader now keeps its PSReadLine reflection state process-wide and silently leaves the shell unchanged if its owned script cannot be read.
 - Folio left running now learns about a new version within a day.
 - On Windows, Ctrl+Alt with a letter or digit reaches programs that asked for
   the kitty protocol or modifyOtherKeys.

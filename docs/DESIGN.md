@@ -13844,6 +13844,30 @@ When a pane's own program will not start, `bt-pty` retries once with its last-re
 
 **Pinned by.** `shell_integration::tests::{a_birth_prepares_the_script_only_for_an_argv_that_loads_it,a_trial_names_a_matching_durable_script_and_otherwise_its_own_copy,every_terminal_birth_uses_the_one_powershell_composition,shell_integration_startup_and_removal_doors_are_above_window_work}`; `hang_watch::window_waits_tests::a_binding_filled_by_assignment_takes_the_assigned_types`; `bt-pty` `tests::the_last_resort_retry_is_started_with_the_callers_fallback_arguments`.
 
+### 2026-10-04 — A PowerShell command row keeps its command and gains the loader only after its own host parses it (T-INTEGRATION-INJECT-3)
+
+The composer now models the two console-host parsers as separate ordered switch tables, including their aliases and measured minimum spellings. A row with no terminal form still receives `-NoExit -Command <loader>`. For `Command`, its tail is joined with one space; for `EncodedCommand`, strict base64 UTF-16LE is decoded. Only a `Parser::ParseInput` success from that row's resolved target executable admits `U + CRLF + loader`, re-encoded for the encoded form. The terminal option stays in place, existing `NoExit` is preserved, and none is added. File, CommandWithArgs, stdin, NonInteractive, unknown or malformed forms, missing/invalid/failed parse answers, and a rendered Windows command line longer than 32,766 UTF-16 code units remain exactly the row's argv. This is the same pure decision Settings reports.
+
+`shell_integration::PARSE_ANSWERS` owns the process cache by resolved executable plus exact argv. Startup and profile-program refresh add questions, and the existing below-normal `powershell-script-prepare` worker asks them with the command source on UTF-8 stdin and a fixed five-second parser command; pane birth and the window thread never wait. That worker also owns best-effort script preparation. Success alone is memoized, a cached path is rechecked at birth, failed or missing writes retry, and concurrent writers land through atomic replacement. A trial writes only below its transaction-named temporary root, which transaction retirement now removes. The loader catches an unreadable owned script without disturbing the shell, keeps the PSReadLine reflection type in the process-global integration table, and limits assembly revival to pwsh's already-loaded in-box assembly.
+
+The contract is pinned by the edition/prefix table, exact VS Developer PowerShell and conda rows, composition/encoding/length cases, every cache state and row edit, retry/missing-file and two-writer atomic tests, loader/source-state and retirement tests, plus a real headless ConPTY exercise for both installed editions and the genuine installed Visual Studio developer-shell row. Each named classifier, composition, cache-key, preparation, loader and atomic-write mutation was observed red before restoration.
+
+### 2026-10-04 — Follow-up: a failed PowerShell parser probe is a bounded unknown, not a process-lifetime verdict (T-INTEGRATION-INJECT-3 round 2)
+
+The parser probe now runs on Windows, macOS and Linux through the registered quiet child-process
+door and reports which stage failed — worker or process spawn, stdin, five-second deadline, wait,
+exit status, or output shape — with the first stdout and stderr bytes. The deadline still ends a
+hung child; because the work is background work, a slow or cold answer costs only the current
+birth's integration rather than making that birth wait.
+
+A failure remains unknown. A later birth atomically claims a background retry for the exact
+resolved executable and argv, while concurrent births keep their original argv and start nothing;
+three attempts per key bound a permanently failing host. Valid and invalid parser answers remain
+terminal. Pinned by `a_failed_parse_probe_is_unknown_and_the_next_request_can_answer`,
+`a_permanently_failed_parse_probe_has_a_process_attempt_limit`,
+`a_birth_schedules_a_parse_retry_without_waiting_for_it`, and the real command-row exercise whose
+failure now names every probe stage and output prefix.
+
 ### 2026-10-04 — The update check keeps its daily cadence while Folio runs
 
 `update::begin` was the one check a process made: the 24-hour rule was applied only at launch, so a Folio left open for days was never offered a release. The first open window's application-clock turn now asks the existing update owner whether a check is owed (`OfferState::schedule`, over `update::due`) and folds the next wall-clock look into the event loop's deadline; the request stays on `bt-update-check`. The stamp is the wall clock, so a machine that slept is judged again on the first turn after it wakes, a clock set back reads as due, and a completed check moves the stamp to the sampled time — one check, no storm. Automatic check Off removes the schedule; manual Check still works. While an update's trial holds the check's writes the schedule waits (`Schedule::Held`): `spawn_check` would settle without asking and wake the loop, which would ask again at once; `release_trial` starts the check on commit.

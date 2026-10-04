@@ -41857,7 +41857,7 @@ impl Runtime<'_> {
         shell_integration::begin_startup_migration();
         // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
         // PowerShell birth that arrives before it finishes prepares it on its own birth worker.
-        shell_integration::begin_powershell_script_preparation();
+        shell_integration::begin_powershell_preparation_for(&profile_programs);
         // Three registry reads, on this thread, finishing before the next line
         // (§7.40 ②). This used to start a worker running `wsl.exe --list` and a
         // `getent` inside the distribution — and the `profiles::title` call
