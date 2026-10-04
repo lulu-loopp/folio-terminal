@@ -33997,7 +33997,16 @@ enum PointerTarget {
     /// [`float::FloatPart::Head`] included, because a window with no answer for
     /// a point still consumes it.
     Float(float::FloatId, float::FloatPart),
-    /// No window claimed it, so the answer is the docked chrome's.
+    /// **A pane's notice strip claimed it** (T-STRIP-HOVER-THROUGH, 2026-10-04),
+    /// and this is the part of the strip the pointer is on.
+    ///
+    /// Its own arm, between the two above, because it is drawn between them:
+    /// `Layered::Notice` paints over every pane's own chrome and under every
+    /// floating window. Whatever docked chrome lies beneath the strip is covered
+    /// by it, so it is not under the pointer — the same sentence the `Float` arm
+    /// says about the panes behind a window, one layer down.
+    Notice(SeatId, notice::NoticeElement),
+    /// No window and no strip claimed it, so the answer is the docked chrome's.
     Chrome(seats::ChromeTarget),
 }
 
@@ -48205,6 +48214,10 @@ impl Runtime<'_> {
             // this `None`, which is what `observe_file_peek` is told when the
             // hand leaves a row.
             Some(PointerTarget::Float(..)) => None,
+            // **And a strip is no row either** (T-STRIP-HOVER-THROUGH,
+            // 2026-10-04): it is drawn over whatever it covers, so a glance
+            // cannot arm from under it.
+            Some(PointerTarget::Notice(..)) => None,
             Some(PointerTarget::Chrome(seats::ChromeTarget::FilesRow { seat, index })) => {
                 Some((RowHost::Column(seat), index))
             }

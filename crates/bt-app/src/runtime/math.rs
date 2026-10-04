@@ -195,9 +195,12 @@ impl Runtime<'_> {
             search: self.search_layers().into(),
             // Beside the capsule, and above it in the list for the reason it
             // is above it on the glass: the capsule floats over the pane's
-            // own text and this stands in a row the text was moved out of, so
-            // the two can never overlap and the order between them says which
-            // would win if the arithmetic were ever broken.
+            // own text and this stands in a row the text was moved out of.
+            // **They can meet** — the capsule hangs from the seat's own top
+            // (`seats::search_capsule_host`), not from the body the strip
+            // leaves — and where they do this is the one on top, which is the
+            // order the hover and the press answer in too
+            // (T-STRIP-HOVER-THROUGH, 2026-10-04).
             pane_notices: self.notice_layers().into(),
             // **Above the capsule and the strip, below every menu.** It is a
             // notice standing on one pane's own body, and §7.7 ④ puts its Escape

@@ -75,6 +75,9 @@ All notable changes to Folio are recorded here. The format follows
 - On macOS, a new version that quits the moment it is started no longer leaves
   about 90 seconds with no Folio window before the previous version comes back,
   when the version you update from is 0.4.7 or later.
+- Pointing at a pane's notice strip — its words or its `×` — no longer also
+  answers the pane's corner folder or `⌄` hidden under it: the files card no
+  longer opens and the pane menu no longer drops from under the strip.
 
 ### Known issues
 

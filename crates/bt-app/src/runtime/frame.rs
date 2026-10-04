@@ -810,6 +810,9 @@ impl Runtime<'_> {
         match self.pointer_target_at(position)? {
             PointerTarget::Chrome(target) => Some(target),
             PointerTarget::Float(..) => None,
+            // A strip covers the chrome under it the way a window does
+            // (T-STRIP-HOVER-THROUGH): the point is the strip's, not a target.
+            PointerTarget::Notice(..) => None,
         }
     }
 

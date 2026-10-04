@@ -501,6 +501,24 @@ pub fn hit(bar: &NoticeBar, x: f32, y: f32) -> Option<NoticeElement> {
     )
 }
 
+/// **What the strip claims of the pointer at this point** — [`hit`], less a
+/// strip with nothing to press (owner's ruling 2026-09-12).
+///
+/// A confirmation floating over a document is *the document's* surface for the
+/// second it is up: it is neither hovered nor pressed, and the words under it go
+/// on answering. Every other strip claims its whole frame, `Body` included — a
+/// bar with a hole in it would let a click through onto a cell that is not
+/// under the pointer. This is the answer the window's pointer router places
+/// above the docked chrome (`Runtime::pointer_target_at`), so the hover and the
+/// press ask it and nothing else.
+#[must_use]
+pub fn claim(bar: &NoticeBar, x: f32, y: f32) -> Option<NoticeElement> {
+    if bar.verbs.is_empty() && bar.close.is_none() {
+        return None;
+    }
+    hit(bar, x, y)
+}
+
 /// Draw one strip.
 ///
 /// `say` is the sentence **as it fits** — [`Notice::text`] when the whole of it
@@ -912,6 +930,40 @@ mod tests {
         );
         assert_eq!(hit(&bar, 105.0, 39.0), None, "above the strip is nobody's");
         assert_eq!(hit(&bar, 105.0, 70.0), None, "nor is the row below it");
+    }
+
+    /// **What the router is told a strip claims** (T-STRIP-HOVER-THROUGH,
+    /// 2026-10-04): every band, `Body` included, and a strip with nothing to
+    /// press not at all — a `Saved` floating over a document leaves the words
+    /// under it answering (owner's ruling 2026-09-12).
+    ///
+    /// Red gate: answer [`hit`] for a verbless pill and the second assertion
+    /// fails — the pill would swallow the hover and the press of the page under
+    /// it; refuse a band's bare width and the first one does.
+    #[test]
+    fn a_strip_claims_its_frame_unless_it_has_nothing_to_press() {
+        for kind in [
+            Notice::Offer,
+            Notice::Added,
+            Notice::DiskChanged,
+            Notice::DiskDeleted,
+        ] {
+            let say = NoticeSay::band(kind);
+            let bar = lay_out(STRIP, say, &vec![80.0; say.verbs.len()], 1.0);
+            assert_eq!(claim(&bar, 105.0, 55.0), hit(&bar, 105.0, 55.0));
+            assert_eq!(claim(&bar, 690.0, 55.0), Some(NoticeElement::Close));
+            for (verb, box_) in &bar.verbs {
+                let (x, y) = ((box_[0] + box_[2]) / 2.0, (box_[1] + box_[3]) / 2.0);
+                assert_eq!(claim(&bar, x, y), Some(NoticeElement::Verb(*verb)));
+            }
+        }
+        let saved = lay_out(STRIP, NoticeSay::pill("Saved", &[]), &[], 1.0);
+        assert_eq!(hit(&saved, 105.0, 55.0), Some(NoticeElement::Body));
+        assert_eq!(
+            claim(&saved, 105.0, 55.0),
+            None,
+            "a pill with nothing to press claims nothing"
+        );
     }
 
     /// The second state offers one verb and not three. A card is the report of

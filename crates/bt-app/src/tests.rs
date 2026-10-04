@@ -40961,6 +40961,102 @@ fn the_press_and_the_hover_ask_one_router() {
     );
 }
 
+/// RED (T-STRIP-HOVER-THROUGH, owner's report on 0.4.6, 2026-10-03) — **a
+/// pane's notice strip owns the points it is drawn on, and the router says so.**
+///
+/// The strip is staged in `Layered::Notice`, over every pane's own chrome and
+/// under every floating window. The router used to go from the floats straight
+/// to the docked ladder, which knows nothing about strips, so a hand on the
+/// strip's `×` was — to the chrome hover, the files flyout's trigger, the `⌄`'s
+/// rest clock and the press router — a hand on whatever the band was covering,
+/// while the strip's own hover and press walked a second list beside it.
+///
+/// Red gate: drop the strip's arm from `pointer_target_at` (or move it below
+/// the ladder) and the ordering assertions fail; give `drive_notice_hover` or
+/// `press_notice` back their own walk of `notice_layouts` and the last ones do.
+#[test]
+fn a_panes_notice_strip_is_asked_between_the_floats_and_the_docked_chrome() {
+    let router = squeezed_body("Runtime", "pointer_target_at");
+    let float = router
+        .find("self.float_hit_at(position)")
+        .expect("the floats are asked first");
+    let strip = router
+        .find("self.docked_notice_at(position)")
+        .expect("a pane's strip is asked by the router");
+    let docked = router
+        .find("self.docked_chrome_target_at(position)")
+        .expect("and the docked ladder last");
+    assert!(
+        float < strip && strip < docked,
+        "the pointer is asked in the order the glass is painted: a window, then \
+         a strip, then the chrome the strip covers"
+    );
+    assert!(
+        router[strip..docked].contains("returnSome(PointerTarget::Notice(seat,element));"),
+        "and the strip's claim is the whole answer, so nothing under it is asked"
+    );
+    assert_eq!(
+        reader_names(&calls_of("Runtime", "docked_notice_at")),
+        ["pointer_target_at"],
+        "a pane's strip is placed in the order by the router and nowhere else"
+    );
+    let at = squeezed_body("Runtime", "notice_at");
+    assert!(
+        at.contains("self.pointer_target_at(position)?"),
+        "the strip a gesture lands on is the strip the router names"
+    );
+    for gesture in ["drive_notice_hover", "press_notice"] {
+        let body = squeezed_body("Runtime", gesture);
+        assert!(
+            body.contains("self.notice_at("),
+            "`{gesture}` asks the one router which strip is under the pointer"
+        );
+        assert!(
+            !body.contains("notice_layouts"),
+            "`{gesture}` keeps no second list of strips beside the router"
+        );
+    }
+}
+
+/// RED (the same report) — **the strip's hover is asked before the capsule's**,
+/// the order the two are painted in (`Layered::Notice` is staged above the
+/// search layer) and the order their presses are taken in (`press_notice` runs
+/// before `press_search`). The capsule hangs from the seat's own top, so on a
+/// pane wearing a strip the two meet.
+///
+/// Red gate: ask `drive_search_hover` first again and the hover lights a
+/// toggle under the strip while the press goes to the strip's word.
+#[test]
+fn the_strips_hover_is_asked_before_the_capsules() {
+    let moved = squeezed_body("Runtime", "pointer_moved");
+    let strip = moved
+        .find("self.drive_notice_hover(")
+        .expect("the strip's hover is driven on every move");
+    let capsule = moved
+        .find("self.drive_search_hover(")
+        .expect("and the capsule's");
+    assert!(
+        strip < capsule,
+        "the strip, which is on top, is asked first"
+    );
+    assert!(
+        moved[capsule..]
+            .starts_with("self.drive_search_hover((self.window.mouse_route.is_none()&&!on_notice)"),
+        "and a hand the strip has claimed lights nothing on the capsule under it"
+    );
+    let press = squeezed_body("Runtime", "mouse_input");
+    let pressed_strip = press
+        .find("self.press_notice(position)?")
+        .expect("the strip takes its own press");
+    let pressed_capsule = press
+        .find("self.press_search(position)?")
+        .expect("and the capsule its own");
+    assert!(
+        pressed_strip < pressed_capsule,
+        "the press already asked the strip first; the hover now agrees"
+    );
+}
+
 /// RED (review row D7) — **a menu's rows are the rows its host can carry
 /// out.**
 ///

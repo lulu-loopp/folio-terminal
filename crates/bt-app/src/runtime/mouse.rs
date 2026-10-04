@@ -2141,12 +2141,17 @@ impl Runtime<'_> {
         // have to be answered in: they share the pane's top-right corner, and on
         // a short pane the rail's own block reaches up under the capsule. A hand
         // on a toggle must not also be lighting a tick behind it.
-        let on_search =
-            self.drive_search_hover(self.window.mouse_route.is_none().then_some(position))?;
-        // The strip, beside the capsule: it is a surface inside the pane too, and
-        // a hand on one of its words must not also be lighting a tick behind it.
-        let on_notice = self.drive_notice_hover(
-            (self.window.mouse_route.is_none() && !on_search).then_some(position),
+        //
+        // **And the strip above the capsule** (T-STRIP-HOVER-THROUGH,
+        // 2026-10-04): it is a surface inside the pane too, a hand on one of its
+        // words must not also be lighting a tick behind it, and where the two
+        // meet it is the strip that is drawn on top (`Layered::Notice` is staged
+        // above the capsule) and the strip that takes the press (`press_notice`
+        // runs before `press_search`). The hover is the third of those answers.
+        let on_notice =
+            self.drive_notice_hover(self.window.mouse_route.is_none().then_some(position))?;
+        let on_search = self.drive_search_hover(
+            (self.window.mouse_route.is_none() && !on_notice).then_some(position),
         )?;
         let on_command_rail = self.drive_command_rail_hover(
             (self.window.mouse_route.is_none() && !on_search && !on_notice).then_some(position),
@@ -2294,6 +2299,18 @@ impl Runtime<'_> {
     /// [`Self::popover_trigger_at`]'s note: `float_hit_at` measures two
     /// captions before it looks at anything, and a window with nothing floating
     /// should pay none of it.
+    ///
+    /// **Then a pane's notice strip, and only then the docked chrome**
+    /// (T-STRIP-HOVER-THROUGH, 2026-10-04). The rule is the one above, one layer
+    /// down: the pointer is asked in the order the glass is painted, and
+    /// `Layered::Notice` is painted over every pane's own chrome. The ladder in
+    /// [`Self::docked_chrome_target_at`] knows nothing about strips, so asked
+    /// first it answered for whatever the band was covering — and the hover, the
+    /// files flyout's trigger, the `⌄`'s rest clock and the press router all read
+    /// that answer, while the strip's own hover and press asked a second list
+    /// beside it. A strip with nothing to press claims nothing
+    /// ([`Self::docked_notice_at`]), so a confirmation pill leaves the document
+    /// under it answering as before.
     pub(crate) fn pointer_target_at(
         &mut self,
         position: PhysicalPosition<f64>,
@@ -2302,6 +2319,9 @@ impl Runtime<'_> {
             && let Some((id, part)) = self.float_hit_at(position)
         {
             return Some(PointerTarget::Float(id, part));
+        }
+        if let Some((seat, element)) = self.docked_notice_at(position) {
+            return Some(PointerTarget::Notice(seat, element));
         }
         self.docked_chrome_target_at(position)
             .map(PointerTarget::Chrome)
@@ -2337,6 +2357,10 @@ impl Runtime<'_> {
             // point inside a float is the float's, so there is no docked chrome
             // under this pointer to light.
             Some(PointerTarget::Float(..)) | None => None,
+            // **And a strip is opaque to it the same way**
+            // (T-STRIP-HOVER-THROUGH): the strip lights its own words through
+            // `drive_notice_hover`, and the chrome it covers lights nothing.
+            Some(PointerTarget::Notice(..)) => None,
         });
         // `.pane:hover` is a second question about the same pointer, and it has
         // to be asked here rather than derived from `hover`: over a terminal's
@@ -4854,10 +4878,10 @@ impl Runtime<'_> {
         // and the two words on the strip could be hovered, lit, and never
         // pressed.
         //
-        // Above it is also the order the *hover* already used
-        // (`drive_notice_hover` runs before every chrome question) and the order
-        // the strip is *drawn* in (`Layered::Notice` is above the pane). Three
-        // answers that have to agree, and this is the one that did not.
+        // Above it is also the order the *hover* uses (`pointer_target_at` asks
+        // the strips before the docked chrome, since T-STRIP-HOVER-THROUGH) and
+        // the order the strip is *drawn* in (`Layered::Notice` is above the
+        // pane). Three answers that have to agree.
         if state == ElementState::Pressed
             && button == MouseButton::Left
             && let Some(position) = self.window.pointer_position

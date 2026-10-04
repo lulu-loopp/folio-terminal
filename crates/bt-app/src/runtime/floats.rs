@@ -2116,6 +2116,8 @@ impl Runtime<'_> {
                     _ => None,
                 }
             }
+            // A strip raises no popover, and what it covers raises none either.
+            PointerTarget::Notice(..) => None,
             PointerTarget::Chrome(target) => Some(self.docked_popover_trigger(target)),
         }
     }

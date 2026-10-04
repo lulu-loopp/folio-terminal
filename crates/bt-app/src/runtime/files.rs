@@ -1750,6 +1750,8 @@ impl Runtime<'_> {
             // raises no file menu. Silence, and not the chrome underneath, and
             // not the covered column's ground either.
             Some(PointerTarget::Float(..)) => return None,
+            // A pane's notice strip is not a file and not a column's ground.
+            Some(PointerTarget::Notice(..)) => return None,
             Some(PointerTarget::Chrome(seats::ChromeTarget::FilesRow { seat, index })) => {
                 (seat, index)
             }
