@@ -76,6 +76,10 @@ All notable changes to Folio are recorded here. The format follows
 - On macOS, a new version that quits the moment it is started no longer leaves
   about 90 seconds with no Folio window before the previous version comes back,
   when the version you update from is 0.4.7 or later.
+- After an update fails, About → Version no longer says the previous version
+  was restored when nothing had been replaced; it says the previous version was
+  restored only when it was, and says the update is incomplete when putting it
+  back did not finish.
 - Restart shell, Duplicate pane, the splits and Duplicate tab start the new
   shell in the folder the pane was opened in when its shell never reported
   one, instead of the profile's default folder. A folder that has since been
