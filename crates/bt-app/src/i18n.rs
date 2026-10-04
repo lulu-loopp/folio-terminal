@@ -5689,7 +5689,7 @@ impl Text {
             Self::VersionCheck => pick(lang, "Check", "检查"),
             Self::VersionUpdateAndRestart => pick(lang, "Update and restart", "更新并重启"),
             Self::VersionCopyCommand => pick(lang, "Copy command", "复制命令"),
-            Self::VersionRetry => pick(lang, "Retry", "再试"),
+            Self::VersionRetry => pick(lang, "Retry", "重试"),
             Self::VersionOpenReleases => pick(lang, "Open the release page", "打开发布页"),
             Self::VersionWhatsNew => pick(lang, "What's new", "改了什么 ↗"),
             Self::VersionDetails => pick(lang, "Details", "详情"),
@@ -5700,20 +5700,18 @@ impl Text {
                 "{version} available · {command}",
                 "有新版 {version} · {command}",
             ),
-            Self::VersionFailed => pick(
-                lang,
-                "{version} was not installed.", // zh: pending T-UPDATE-FAILURE-COPY
-                "{version} was not installed.", // zh: pending T-UPDATE-FAILURE-COPY
-            ),
+            Self::VersionFailed => {
+                pick(lang, "{version} was not installed.", "{version} 未能安装。")
+            }
             Self::VersionFailedRestored => pick(
                 lang,
-                "{version} was not installed. The previous version was restored.", // zh: pending T-UPDATE-FAILURE-COPY
-                "{version} was not installed. The previous version was restored.", // zh: pending T-UPDATE-FAILURE-COPY
+                "{version} was not installed. The previous version was restored.",
+                "{version} 未能安装，已恢复旧版。",
             ),
             Self::VersionFailedIncomplete => pick(
                 lang,
-                "The update to {version} is incomplete.", // zh: pending T-UPDATE-FAILURE-COPY
-                "The update to {version} is incomplete.", // zh: pending T-UPDATE-FAILURE-COPY
+                "The update to {version} is incomplete.",
+                "更新至 {version} 未完成。",
             ),
             Self::VersionLastChecked => pick(lang, "Last checked: {when}", "上次检查：{when}"),
             Self::VersionNeverChecked => pick(lang, "Never", "从未"),
@@ -5953,21 +5951,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &{
-        use HostPlatform::{MacOs, OtherUnix, Windows};
-        use Text::{VersionFailed, VersionFailedIncomplete, VersionFailedRestored};
-        [
-            (VersionFailed, Windows),
-            (VersionFailed, MacOs),
-            (VersionFailed, OtherUnix),
-            (VersionFailedRestored, Windows),
-            (VersionFailedRestored, MacOs),
-            (VersionFailedRestored, OtherUnix),
-            (VersionFailedIncomplete, Windows),
-            (VersionFailedIncomplete, MacOs),
-            (VersionFailedIncomplete, OtherUnix),
-        ]
-    };
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
