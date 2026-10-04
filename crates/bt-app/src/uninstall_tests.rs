@@ -434,9 +434,11 @@ fn uninstall_purge_junction_refuses_root_without_touching_target() {
     fs::write(outside.join("sentinel"), b"keep").unwrap();
     fs::create_dir_all(&scope.data[0]).unwrap();
     let junction = scope.data[0].join("escape");
-    // Native PowerShell creates a junction without developer-mode symlink privileges.
-    let status = bt_platform::quiet_command("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", "New-Item -ItemType Junction -Path $env:FOLIO_TEST_JUNCTION -Target $env:FOLIO_TEST_TARGET -ErrorAction Stop | Out-Null"])
+    // Native PowerShell creates a junction without developer-mode symlink privileges; started
+    // through `bt_pty::test_shell` (no profile, a temporary HOME/APPDATA).
+    let hygiene = bt_pty::test_shell::Hygiene::new();
+    let status = hygiene.command("powershell.exe", bt_platform::quiet_command)
+        .args(["-NonInteractive", "-Command", "New-Item -ItemType Junction -Path $env:FOLIO_TEST_JUNCTION -Target $env:FOLIO_TEST_TARGET -ErrorAction Stop | Out-Null"])
         .env("FOLIO_TEST_JUNCTION", &junction).env("FOLIO_TEST_TARGET", &outside).status().unwrap();
     assert!(status.success());
     let report = execute(&scope, true, system_absent);
@@ -1182,9 +1184,11 @@ fn plant_directory_link(link: &Path, target: &Path) {
     std::os::unix::fs::symlink(target, link).unwrap();
     #[cfg(windows)]
     {
-        let status = bt_platform::quiet_command("powershell.exe")
+        // Through `bt_pty::test_shell`: no profile, a temporary HOME/APPDATA.
+        let hygiene = bt_pty::test_shell::Hygiene::new();
+        let status = hygiene
+            .command("powershell.exe", bt_platform::quiet_command)
             .args([
-                "-NoProfile",
                 "-NonInteractive",
                 "-Command",
                 "New-Item -ItemType Junction -Path $env:FOLIO_TEST_JUNCTION -Target $env:FOLIO_TEST_TARGET -ErrorAction Stop | Out-Null",

@@ -30,19 +30,20 @@
 //! believes in. Either way no keystroke can land on a row the two disagree about, so that is what
 //! is asserted here — on both paths, whichever this machine has.
 //!
-//! **Nothing here touches the user's own shell.** `-NoProfile` means their `$PROFILE` is not read,
-//! the line editor is told to save no history, and the shell is spawned the way a pane spawns one.
+//! **Nothing here touches the user's own shell.** It is started through `bt_pty::test_shell`:
+//! `-NoProfile`, a line editor that saves no history (read back before anything is typed), and a
+//! temporary HOME/APPDATA — otherwise the way a pane spawns one.
 
 #![cfg(windows)]
 #![allow(clippy::disallowed_methods)]
 
 use std::{
     num::{NonZeroU16, NonZeroU32},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
-use bt_pty::{ConPtySource, PtyCommand, PtySession, PtySize, WINDOWS_POWERSHELL, conpty_source};
+use bt_pty::test_shell::TestShell;
+use bt_pty::{ConPtySource, PtyCommand, PtySize, WINDOWS_POWERSHELL, conpty_source};
 use bt_term::{DualPlaneSession, HostScreen};
 
 /// The prompt the probe installs, so "a prompt is on the screen" is read rather than assumed.
@@ -65,7 +66,7 @@ const COLUMNS: u16 = 80;
 const ROWS: u16 = 12;
 
 struct Pane {
-    pty: PtySession,
+    pty: TestShell,
     session: DualPlaneSession,
     raw: Vec<u8>,
     started: Instant,
@@ -80,17 +81,14 @@ impl Pane {
     fn spawn() -> Self {
         let columns = NonZeroU16::new(COLUMNS).unwrap();
         let rows = NonZeroU16::new(ROWS).unwrap();
+        // Started through `TestShell`: `-NoProfile`, and history refused before the prompt.
         let command = PtyCommand::interactive_shell(WINDOWS_POWERSHELL)
             .arg("-NoLogo")
-            .arg("-NoProfile")
             .arg("-NoExit")
             .arg("-Command")
-            .arg(format!(
-                "Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
-                 function global:prompt {{ '{PROMPT}' }}"
-            ));
-        let pty = PtySession::spawn(command, PtySize::cells(columns, rows), Arc::new(|| {}))
-            .unwrap_or_else(|error| {
+            .arg(format!("function global:prompt {{ '{PROMPT}' }}"));
+        let pty =
+            TestShell::spawn(command, PtySize::cells(columns, rows)).unwrap_or_else(|error| {
                 panic!("Windows PowerShell starts on a supported host: {error:?}")
             });
         Self {
@@ -114,7 +112,7 @@ impl Pane {
         self.raw.extend_from_slice(&bytes);
         self.session.feed(&bytes).unwrap();
         for reply in self.session.take_pty_writes() {
-            self.pty.write(&reply).unwrap();
+            self.pty.reply(&reply).unwrap();
         }
         true
     }
@@ -166,16 +164,17 @@ impl Pane {
         }
     }
 
-    fn give_up_if_stalled(&self, waiting_for: &str) {
+    fn give_up_if_stalled(&mut self, waiting_for: &str) {
         let silent_for = self.last_output.elapsed();
         if silent_for < SILENCE_BUDGET && self.started.elapsed() < CEILING {
             return;
         }
         panic!(
             "gave up waiting for {waiting_for} after {:?}, the last {:?} of it with the child \
-             silent; screen {:?}",
+             silent; {}; screen {:?}",
             self.started.elapsed(),
             silent_for,
+            self.pty.account(),
             self.rows()
         );
     }

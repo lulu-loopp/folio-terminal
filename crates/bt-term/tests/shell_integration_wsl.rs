@@ -192,7 +192,10 @@ fn ask_with(directory: &Path, login_shell: &str, init_file: &str, zdotdir: &str)
     let mut path = OsString::from(directory);
     path.push(";");
     path.push(std::env::var_os("PATH").unwrap_or_default());
-    let output = Command::new(git_sh())
+    // Through `bt_pty::test_shell::Hygiene`: a temporary HOME, HISTFILE and XDG_*.
+    let hygiene = bt_pty::test_shell::Hygiene::new();
+    let output = hygiene
+        .command(git_sh(), Command::new)
         .arg("-c")
         .arg(question())
         .arg("folio")

@@ -37,6 +37,15 @@ pub use shell::{
 #[cfg(windows)]
 pub use portable_pty::win::{CONPTY_SIDECAR_VERSION, ConPtySource};
 
+/// **A real shell for a test** (T-TEST-SHELL-HYGIENE): the one door every test
+/// in the workspace starts a shell through, without the user's startup files
+/// and without their history. Tests only — this crate's own, and those of a
+/// crate that turns on the `test-shell` feature on its dev-dependency on this
+/// one. A build of the shipped program never has it.
+#[cfg(any(test, feature = "test-shell"))]
+#[doc(hidden)]
+pub mod test_shell;
+
 #[cfg(not(windows))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConPtySource {
@@ -1917,7 +1926,7 @@ impl PtySession {
     /// swap in an unrelated shell; off Windows it is empty for every arm, because a shell whose
     /// standard input is a terminal is already interactive.
     pub fn spawn_default(size: PtySize, wake: OutputWake) -> Result<Self, PtyError> {
-        Self::spawn_default_with(size, wake, None, &SystemShellEnvironment)
+        Self::spawn_default_with(size, wake, None, &SystemShellEnvironment, Self::spawn)
     }
 
     /// [`spawn_default`](Self::spawn_default), started in `working_directory`
@@ -1933,7 +1942,13 @@ impl PtySession {
         wake: OutputWake,
         working_directory: Option<PathBuf>,
     ) -> Result<Self, PtyError> {
-        Self::spawn_default_with(size, wake, working_directory, &SystemShellEnvironment)
+        Self::spawn_default_with(
+            size,
+            wake,
+            working_directory,
+            &SystemShellEnvironment,
+            Self::spawn,
+        )
     }
 
     /// Start `program` with `args` as this terminal's interactive shell, in `working_directory`,
@@ -1974,9 +1989,35 @@ impl PtySession {
         wake: OutputWake,
         working_directory: Option<PathBuf>,
     ) -> Result<Self, PtyError> {
+        Self::spawn_shell_in_with(
+            program,
+            args,
+            fallback_args,
+            environment,
+            size,
+            wake,
+            working_directory,
+            Self::spawn,
+        )
+    }
+
+    /// [`Self::spawn_shell_in`] with the one `spawn` it makes per attempt handed in — the seam
+    /// `test_shell` starts a test's shell through, so a test runs this door's fallback rule
+    /// rather than a copy of it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn spawn_shell_in_with(
+        program: impl Into<OsString>,
+        args: &[OsString],
+        fallback_args: &dyn Fn() -> Vec<OsString>,
+        environment: &[(OsString, OsString)],
+        size: PtySize,
+        wake: OutputWake,
+        working_directory: Option<PathBuf>,
+        spawn: impl FnMut(PtyCommand, PtySize, OutputWake) -> Result<Self, PtyError>,
+    ) -> Result<Self, PtyError> {
         let program = program.into();
         let fall_back = (!program_is_the_last_resort_shell(&program)).then_some(fallback_args);
-        Self::spawn_interactive(
+        Self::spawn_interactive_with(
             program,
             args,
             environment,
@@ -1986,6 +2027,7 @@ impl PtySession {
             wake,
             working_directory,
             fall_back,
+            spawn,
         )
     }
 
@@ -2023,14 +2065,17 @@ impl PtySession {
     /// The testable core of `spawn_default`: shell resolution goes through the injected
     /// `environment` rather than `std::env`/the real filesystem, so resolution-order and
     /// fallback-on-failure tests are deterministic regardless of what is installed on the host.
-    fn spawn_default_with(
+    /// `spawn` is the one each attempt makes: [`Self::spawn`] for the product, and `test_shell`'s
+    /// for a test, which starts every attempt without the user's startup files or history.
+    pub(crate) fn spawn_default_with(
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
         environment: &dyn ShellEnvironment,
+        spawn: impl FnMut(PtyCommand, PtySize, OutputWake) -> Result<Self, PtyError>,
     ) -> Result<Self, PtyError> {
         let resolved = resolve_default_shell(environment);
-        Self::spawn_interactive(
+        Self::spawn_interactive_with(
             resolved.program,
             // The resolved shell's own flags, stated by the only code that knows which shell it
             // picked — `-NoLogo` where that is a PowerShell, nothing at all off Windows, and the
@@ -2045,6 +2090,7 @@ impl PtySession {
             working_directory,
             shell_spawn_failure_should_fall_back(resolved.choice)
                 .then_some(&last_resort_arguments as &dyn Fn() -> Vec<OsString>),
+            spawn,
         )
     }
 
@@ -2542,6 +2588,7 @@ mod tests {
 
     use super::*;
     use bt_term::{DualPlaneSession, RESIZE_REQUEST_QUIET, TerminalAdapter, TerminalCursor};
+    use test_shell::TestShell;
 
     fn environment(rows: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
         rows.iter()
@@ -2799,7 +2846,7 @@ mod tests {
     }
 
     struct InteractiveOracle {
-        session: PtySession,
+        session: TestShell,
         terminal: TerminalAdapter,
         raw_output: Vec<u8>,
         pty_replies: Vec<u8>,
@@ -2817,8 +2864,7 @@ mod tests {
         #[cfg(windows)]
         fn spawn_holding(latch: &ProbeLatch) -> Self {
             let startup = format!(
-                "Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
-                 function global:prompt {{ Write-Host ('Q' * 110); (('P' * 81) + ' ') }}; \
+                "function global:prompt {{ Write-Host ('Q' * 110); (('P' * 81) + ' ') }}; \
                  function global:BTHOLD {{ Write-Host '{}'; \
                  while (-not (Test-Path -LiteralPath {})) {{ Start-Sleep -Milliseconds 20 }} }}",
                 ORACLE_HELD_MARKER,
@@ -2836,28 +2882,21 @@ mod tests {
         /// The line editor is the component that caches absolute rows, so which shell hosts it is
         /// part of the probe's subject: `bt-app` seats spawn `pwsh.exe`, whose PSReadLine is not
         /// the 2.0.0 that ships inside Windows PowerShell.
+        ///
+        /// Started through [`TestShell`]: `-NoProfile`, and history refused before the first
+        /// prompt (first in `startup`, or where it carries [`test_shell::HYGIENE`]). The host's
+        /// real `$PROFILE` chain was once an option here for the corruption hunt; a test running
+        /// the user's own profile is what T-TEST-SHELL-HYGIENE removed, so the reconstructions
+        /// are what the probes drive.
         fn spawn_shell_with(shell: &str, startup: &str, columns: u16, rows: u16) -> Self {
-            Self::spawn_shell_profile(shell, startup, columns, rows, false)
-        }
-
-        /// `load_profile` runs the host's real `$PROFILE` chain instead of `-NoProfile`. Nothing a
-        /// reconstruction can do is as faithful as the user's own conda hook and their own
-        /// dot-source of `scripts/shell-integration/folio.ps1`, so the corruption hunt
-        /// gets the real thing and the reconstruction is kept only as the controlled comparison.
-        fn spawn_shell_profile(
-            shell: &str,
-            startup: &str,
-            columns: u16,
-            rows: u16,
-            load_profile: bool,
-        ) -> Self {
-            let mut command = PtyCommand::new(shell).arg("-NoLogo");
-            if !load_profile {
-                command = command.arg("-NoProfile");
-            }
-            let command =
-                declare_probe_module_path(command.arg("-NoExit").arg("-Command").arg(startup));
-            let session = PtySession::spawn(command, size(columns, rows), no_wake()).unwrap();
+            let command = declare_probe_module_path(
+                PtyCommand::new(shell)
+                    .arg("-NoLogo")
+                    .arg("-NoExit")
+                    .arg("-Command")
+                    .arg(startup),
+            );
+            let session = TestShell::spawn(command, size(columns, rows)).unwrap();
             let terminal = TerminalAdapter::new(nz32(columns), nz32(rows));
             Self {
                 session,
@@ -2885,7 +2924,7 @@ mod tests {
                     });
                 }
                 self.pty_replies.extend_from_slice(&reply);
-                self.session.write(&reply).unwrap();
+                self.session.reply(&reply).unwrap();
             }
             had_output
         }
@@ -3002,10 +3041,12 @@ mod tests {
                 if silent_for >= PROBE_SILENCE_BUDGET || started.elapsed() >= PROBE_CEILING {
                     panic!(
                         "gave up waiting for current line {expected:?} after {:?}, the last {:?} \
-                         of it with the child silent and {} bytes read in all; got {:?}, screen {:?}",
+                         of it with the child silent and {} bytes read in all; {}; got {:?}, \
+                         screen {:?}",
                         started.elapsed(),
                         silent_for,
                         self.raw_output.len(),
+                        self.session.account(),
                         self.current_line(),
                         self.terminal.visible_text()
                     );
@@ -3033,12 +3074,13 @@ mod tests {
                 if silent_for >= PROBE_SILENCE_BUDGET || started.elapsed() >= PROBE_CEILING {
                     panic!(
                         "gave up waiting for output marker {:?} after {:?}, the last {:?} of it \
-                         with the child silent and {} bytes read since the wait began; current \
-                         line {:?}, screen {:?}",
+                         with the child silent and {} bytes read since the wait began; {}; \
+                         current line {:?}, screen {:?}",
                         String::from_utf8_lossy(expected),
                         started.elapsed(),
                         silent_for,
                         self.raw_output.len() - start,
+                        self.session.account(),
                         self.current_line(),
                         self.terminal.visible_text()
                     );
@@ -3819,7 +3861,7 @@ mod tests {
             .arg("-NoProfile")
             .arg("-Command")
             .arg("cmd.exe /D /C set");
-        let mut session = PtySession::spawn(command, size(80, 20), no_wake()).unwrap();
+        let mut session = TestShell::spawn(command, size(80, 20)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
         let mut output = Vec::new();
         let mut child_exited = false;
@@ -4237,7 +4279,7 @@ mod tests {
             .arg("/D")
             .arg("/C")
             .arg("echo BT_PTY_OK");
-        let mut session = PtySession::spawn(command, size(40, 8), no_wake()).unwrap();
+        let mut session = TestShell::spawn(command, size(40, 8)).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut output = Vec::new();
         let mut answered_cursor_query = false;
@@ -4245,7 +4287,7 @@ mod tests {
         while std::time::Instant::now() < deadline {
             output.extend(session.read_output());
             if !answered_cursor_query && output.windows(4).any(|bytes| bytes == b"\x1b[6n") {
-                session.write(b"\x1b[1;1R").unwrap();
+                session.reply(b"\x1b[1;1R").unwrap();
                 answered_cursor_query = true;
             }
             child_exited |= session.try_wait().unwrap().is_some();
@@ -4277,7 +4319,7 @@ mod tests {
     #[test]
     fn a_child_that_exited_answers_the_second_asker_too() {
         let command = PtyCommand::new("cmd.exe").arg("/D").arg("/C").arg("exit 7");
-        let mut session = PtySession::spawn(command, size(40, 8), no_wake()).unwrap();
+        let mut session = TestShell::spawn(command, size(40, 8)).unwrap();
         let deadline = Instant::now() + Duration::from_secs(15);
         let first = loop {
             let _ = session.read_output();
@@ -4314,7 +4356,7 @@ mod tests {
             .arg("-NoProfile")
             .arg("-Command")
             .arg("Start-Sleep -Seconds 30");
-        let mut session = PtySession::spawn(command, size(40, 8), no_wake()).unwrap();
+        let mut session = TestShell::spawn(command, size(40, 8)).unwrap();
         session.resize(size(96, 31)).unwrap();
         let actual = session.size().unwrap();
         assert_eq!((actual.columns.get(), actual.rows.get()), (96, 31));
@@ -4745,8 +4787,7 @@ mod tests {
         // notice is left behind. `powershell.exe` is a bare name here deliberately — it exercises
         // the "resolved by the OS at spawn time" half of the documented `BT_SHELL` semantics.
         let environment = shell::FakeShellEnvironment::new().with_var("BT_SHELL", "powershell.exe");
-        let mut session =
-            PtySession::spawn_default_with(size(40, 8), no_wake(), None, &environment).unwrap();
+        let mut session = TestShell::spawn_default_with(size(40, 8), &environment).unwrap();
         assert!(session.take_shell_fallback().is_none());
         assert!(session.child_id().is_some());
         session.shutdown().unwrap();
@@ -4757,8 +4798,7 @@ mod tests {
     fn spawn_default_falls_back_to_windows_powershell_when_bt_shell_cannot_start() {
         let missing = nonexistent_program("bt-shell");
         let environment = shell::FakeShellEnvironment::new().with_var("BT_SHELL", &missing);
-        let mut session =
-            PtySession::spawn_default_with(size(40, 8), no_wake(), None, &environment).unwrap();
+        let mut session = TestShell::spawn_default_with(size(40, 8), &environment).unwrap();
         let fallback = session
             .take_shell_fallback()
             .expect("a spawn failure on the resolved shell must leave a record of the fallback");
@@ -4792,8 +4832,7 @@ mod tests {
         assert_eq!(resolved.choice, ShellChoice::PowerShellCore);
         assert_eq!(resolved.program, pwsh_path.as_os_str());
 
-        let mut session =
-            PtySession::spawn_default_with(size(40, 8), no_wake(), None, &environment).unwrap();
+        let mut session = TestShell::spawn_default_with(size(40, 8), &environment).unwrap();
         let fallback = session
             .take_shell_fallback()
             .expect("an unresolvable pwsh.exe path must still fall back and leave a record");
@@ -4859,6 +4898,136 @@ mod tests {
         );
         assert!(refused.is_err());
         assert_eq!(tries, 1);
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE) — **a test's interactive PowerShell loads no history file and
+    /// saves no line.**
+    ///
+    /// The hygiene directory's history file is seeded with one line before the shell starts.
+    /// After the first prompt the line editor is asked how many of its history items came from a
+    /// file (`HistoryItem.FromHistoryFile`): none — neither the account's file nor the seeded one,
+    /// because a line editor told to save nothing before its first prompt loads nothing either.
+    /// That question was itself a typed and accepted line, and the seeded file holds only the
+    /// seed afterwards: nothing was saved.
+    ///
+    /// MUTATIONS: drop `-HistorySavePath` from `test_shell::powershell_hygiene` and the gate
+    /// refuses to type (it reads back the account's path); change `SaveNothing` to
+    /// `SaveIncrementally` there and it refuses too (it reads back the wrong style); make
+    /// `TestShell::establish` return at once with that second mutation in place and the line
+    /// editor loads the seed (one item from a file) and appends the typed line to it.
+    #[cfg(windows)]
+    #[test]
+    fn a_tests_powershell_loads_no_history_file_and_saves_no_line() {
+        const PROMPT: &str = "BTHYGIENE> ";
+        const SEED: &str = "Write-Output BT_SEEDED_HISTORY";
+        let hygiene = test_shell::Hygiene::new();
+        std::fs::write(hygiene.history_file(), format!("{SEED}\r\n")).unwrap();
+        let command = PtyCommand::new(WINDOWS_POWERSHELL)
+            .arg("-NoLogo")
+            .arg("-NoExit")
+            .arg("-Command")
+            .arg(format!("function global:prompt {{ '{PROMPT}' }}"));
+        let session = TestShell::spawn_in(hygiene, command, size(80, 10)).unwrap();
+        let mut oracle = InteractiveOracle {
+            session,
+            terminal: TerminalAdapter::new(nz32(80), nz32(10)),
+            raw_output: Vec::new(),
+            pty_replies: Vec::new(),
+            cpr_log: Vec::new(),
+            cpr_columns: 80,
+        };
+        oracle.wait_for_current_line(PROMPT.trim_end());
+        let start = oracle.raw_output.len();
+        // Split in the command and joined in the output, so the echo of the typed line is not
+        // read as the answer.
+        oracle.write_line(
+            "Write-Output ('BT_FROM_' + 'FILE=' + @([Microsoft.PowerShell.PSConsoleReadLine]::\
+             GetHistoryItems() | Where-Object FromHistoryFile).Count + ' BTFROMFILE' + 'END')",
+        );
+        oracle.wait_for_output_since(start, b"BTFROMFILEEND");
+        oracle.wait_for_current_line(PROMPT.trim_end());
+        let said = String::from_utf8_lossy(&oracle.raw_output[start..]).into_owned();
+        let from_file = said
+            .split("BT_FROM_FILE=")
+            .nth(1)
+            .and_then(|rest| rest.split_whitespace().next())
+            .unwrap_or_default()
+            .to_owned();
+        assert_eq!(
+            from_file, "0",
+            "the line editor loaded history from a file; it said {said:?}"
+        );
+        let history = oracle.session.hygiene().history_file();
+        assert_eq!(
+            std::fs::read_to_string(&history).unwrap(),
+            format!("{SEED}\r\n"),
+            "the line editor saved what was typed into {}",
+            history.display()
+        );
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE) — **a PowerShell whose history cannot be turned off is not
+    /// typed into, and the test says why.**
+    ///
+    /// The startup script shadows `Set-PSReadLineOption` with a function that throws, before the
+    /// history refusal runs; the refusal writes the reason and exits, and the first write panics
+    /// with it.
+    ///
+    /// MUTATION: make `TestShell::establish` return at once and the write succeeds, so the
+    /// expected panic never comes.
+    #[cfg(windows)]
+    #[test]
+    #[should_panic(
+        expected = "could not turn its history saving off, so nothing was typed into it"
+    )]
+    fn a_powershell_that_cannot_refuse_history_is_never_typed_into() {
+        let command = PtyCommand::new(WINDOWS_POWERSHELL)
+            .arg("-NoLogo")
+            .arg("-NoExit")
+            .arg("-Command")
+            .arg(format!(
+                "function global:Set-PSReadLineOption {{ throw 'BT_NO_HISTORY_OPTION' }}; {}",
+                test_shell::HYGIENE
+            ));
+        let mut shell = TestShell::spawn(command, size(80, 10)).unwrap();
+        shell.write(b"Write-Output never\r").unwrap();
+    }
+
+    /// RED (T-TEST-SHELL-HYGIENE, CI run 37221762304) — **a refused shell says why where a
+    /// waiting test can see it**: the reason is on the screen, and `TestShell::account` names it.
+    ///
+    /// On the runner a shell that never drew its prompt left an empty screen and a silence budget
+    /// running out, with the refusal (if that was what happened) only in a file nobody read.
+    ///
+    /// MUTATIONS: drop the console line from `powershell_hygiene`'s `catch` and the wait gives
+    /// up on a silent screen; read no refusal file in `TestShell::account` and the last
+    /// assertion fails.
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_shell_says_why_on_its_screen_and_in_its_account() {
+        let command = PtyCommand::new(WINDOWS_POWERSHELL)
+            .arg("-NoLogo")
+            .arg("-NoExit")
+            .arg("-Command")
+            .arg(format!(
+                "function global:Set-PSReadLineOption {{ throw 'BT_NO_HISTORY_OPTION' }}; {}",
+                test_shell::HYGIENE
+            ));
+        let session = TestShell::spawn(command, size(120, 10)).unwrap();
+        let mut oracle = InteractiveOracle {
+            session,
+            terminal: TerminalAdapter::new(nz32(120), nz32(10)),
+            raw_output: Vec::new(),
+            pty_replies: Vec::new(),
+            cpr_log: Vec::new(),
+            cpr_columns: 120,
+        };
+        oracle.wait_for_output_since(0, b"the history refusal failed");
+        let account = oracle.session.account();
+        assert!(
+            account.contains("history refusal refused: BT_NO_HISTORY_OPTION"),
+            "{account}"
+        );
     }
 
     #[cfg(windows)]
@@ -5303,7 +5472,6 @@ mod tests {
     /// Startup script shared by the probe children: a short prompt whose absolute row is easy to
     /// read out of a CUP, plus `BTDUMP`, which reads conhost's own buffer and viewport back to us.
     const PROBE_STARTUP_COMMON: &str = concat!(
-        "Set-PSReadLineOption -HistorySaveStyle SaveNothing; ",
         "function global:prompt { 'BTP> ' }; ",
         "function global:BTDUMP { param($n) $ui=$Host.UI.RawUI; ",
         "$w=$ui.BufferSize.Width; $bh=$ui.BufferSize.Height; ",
@@ -5344,8 +5512,7 @@ mod tests {
     /// shorter than the column its cursor actually starts in. Reproduce that split exactly.
     fn narrow_probe_seat_child() -> InteractiveOracle {
         let startup = format!(
-            "Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
-             function global:prompt {{ Write-Host -NoNewline '(base) '; '{SEAT_PROMPT}' }}; \
+            "function global:prompt {{ Write-Host -NoNewline '(base) '; '{SEAT_PROMPT}' }}; \
              Write-Host '{NARROW_PROBE_LINE}'"
         );
         let mut oracle =
@@ -5370,9 +5537,9 @@ mod tests {
     }
 
     /// One profile shape the corruption hunt can put a real shell into. The reconstruction shapes
-    /// isolate single ingredients; the `Real*` shapes are the reporting host's own environment,
-    /// because nothing synthesized here is as faithful as the user's own conda hook and their own
-    /// dot-source of `scripts/shell-integration/folio.ps1`.
+    /// isolate single ingredients; `RealCondaIntegration` runs the host's own conda hook and the
+    /// real integration script. The host's own `$PROFILE` chain is no longer a shape: a test does
+    /// not run the user's startup files (T-TEST-SHELL-HYGIENE).
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     enum ProfileScenario {
         /// A plain one-part prompt, no integration: the control.
@@ -5388,8 +5555,6 @@ mod tests {
         CondaIntegration,
         /// The host's real conda hook plus the real integration script, same order.
         RealCondaIntegration,
-        /// The host's own `$PROFILE` chain, run untouched.
-        RealProfile,
     }
 
     impl ProfileScenario {
@@ -5400,13 +5565,7 @@ mod tests {
                 Self::Integration => "integration",
                 Self::CondaIntegration => "conda+integration",
                 Self::RealCondaIntegration => "real-conda+real-integration",
-                Self::RealProfile => "real-profile",
             }
-        }
-
-        /// The host's own profile chain is the only shape that must not be suppressed.
-        fn loads_profile(self) -> bool {
-            self == Self::RealProfile
         }
 
         /// Whether the probe can predict the prompt text, or has to read it off the settled screen.
@@ -5416,7 +5575,7 @@ mod tests {
                 Self::Conda | Self::CondaIntegration => {
                     Some(format!("(base) {PROFILE_PROBE_PROMPT}"))
                 }
-                Self::RealCondaIntegration | Self::RealProfile => None,
+                Self::RealCondaIntegration => None,
             }
         }
     }
@@ -5454,18 +5613,6 @@ mod tests {
     const PROFILE_PROBE_NARROW: u16 = 70;
     const PROFILE_PROBE_ROWS: u16 = 26;
 
-    /// The repository root as a plain path. Deliberately not canonicalized: `canonicalize` returns
-    /// a `\?\` extended-length path, and the prompt is a function of the working directory, so
-    /// that would change the very geometry the recorded gesture is measured in.
-    fn repository_root() -> PathBuf {
-        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        manifest
-            .parent()
-            .and_then(Path::parent)
-            .expect("the crate is two levels below the repository root")
-            .to_path_buf()
-    }
-
     fn integration_script_path() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -5480,7 +5627,7 @@ mod tests {
     /// same order `$PROFILE` produces, because `profile.ps1` (conda) runs before
     /// `Microsoft.PowerShell_profile.ps1` (our dot-source).
     fn profile_probe_startup(shape: ProfileShape) -> String {
-        let mut startup = String::from("Set-PSReadLineOption -HistorySaveStyle SaveNothing; ");
+        let mut startup = String::new();
         match shape.scenario {
             ProfileScenario::Bare | ProfileScenario::Integration => {
                 startup.push_str(&format!(
@@ -5504,7 +5651,6 @@ mod tests {
                      Invoke-Expression }; ",
                 );
             }
-            ProfileScenario::RealProfile => {}
         }
         if matches!(
             shape.scenario,
@@ -5513,11 +5659,6 @@ mod tests {
                 | ProfileScenario::RealCondaIntegration
         ) {
             startup.push_str(&format!(". '{}'; ", integration_script_path().display()));
-        }
-        if matches!(shape.scenario, ProfileScenario::RealProfile) {
-            // The reporting host's own profile prints the conda noise line; adding the probe's copy
-            // would push the prompt down a row and change the very geometry under test.
-            return startup;
         }
         if shape.filled {
             startup.push_str(
@@ -5538,12 +5679,11 @@ mod tests {
         columns: u16,
         rows: u16,
     ) -> Option<(InteractiveOracle, String)> {
-        let mut oracle = InteractiveOracle::spawn_shell_profile(
+        let mut oracle = InteractiveOracle::spawn_shell_with(
             shell,
             &profile_probe_startup(shape),
             columns,
             rows,
-            shape.scenario.loads_profile(),
         );
         let expected = shape.scenario.synthetic_prompt();
         let deadline = Instant::now() + Duration::from_secs(25);
@@ -5665,7 +5805,7 @@ mod tests {
     ///
     /// Read the `BT_CONPTY_PROFILE_PROBE` lines on stderr. Each row of the sweep is one live child;
     /// the shapes isolate whether the conda-style two-part prompt, Folio's own shell
-    /// integration, the host's real profile chain, or a screen full of scrollback is what turns a
+    /// integration, the host's real conda hook, or a screen full of scrollback is what turns a
     /// narrowing resize into a stale render anchor.
     #[test]
     #[ignore = "dev probe: drives real interactive shells through ConPTY; host-timing sensitive"]
@@ -5680,7 +5820,6 @@ mod tests {
                     ProfileScenario::Integration,
                     ProfileScenario::CondaIntegration,
                     ProfileScenario::RealCondaIntegration,
-                    ProfileScenario::RealProfile,
                 ] {
                     let shape = ProfileShape { scenario, filled };
                     let Some(outcome) = run_profile_probe(shell, shape) else {
@@ -5890,7 +6029,7 @@ mod tests {
     /// which corrupts here corrupts in the product, and the frame it is judged on is the composed
     /// one the user actually reads — frozen transcript, staging and live rows together.
     struct AppResizeOracle {
-        pty: PtySession,
+        pty: TestShell,
         session: DualPlaneSession,
         raw_output: Vec<u8>,
         cpr_log: Vec<AppCprExchange>,
@@ -5923,14 +6062,16 @@ mod tests {
     }
 
     impl AppResizeOracle {
-        fn spawn(shell: &str, startup: &str, columns: u16, rows: u16, load_profile: bool) -> Self {
-            let mut command = PtyCommand::new(shell).arg("-NoLogo");
-            if !load_profile {
-                command = command.arg("-NoProfile");
-            }
-            let command =
-                declare_probe_module_path(command.arg("-NoExit").arg("-Command").arg(startup));
-            let pty = PtySession::spawn(command, size(columns, rows), no_wake()).unwrap();
+        /// Started through [`TestShell`], as [`InteractiveOracle::spawn_shell_with`] is.
+        fn spawn(shell: &str, startup: &str, columns: u16, rows: u16) -> Self {
+            let command = declare_probe_module_path(
+                PtyCommand::new(shell)
+                    .arg("-NoLogo")
+                    .arg("-NoExit")
+                    .arg("-Command")
+                    .arg(startup),
+            );
+            let pty = TestShell::spawn(command, size(columns, rows)).unwrap();
             Self {
                 pty,
                 session: DualPlaneSession::new(nz32(columns), nz32(rows)),
@@ -5985,7 +6126,7 @@ mod tests {
                         cursor: self.session.terminal().cursor(),
                     });
                 }
-                self.pty.write(&reply).unwrap();
+                self.pty.reply(&reply).unwrap();
             }
             self.flush_pending_resize(now);
             if self.session.finish_resize_if_quiescent(now).unwrap() && self.pending_reanchor {
@@ -6160,7 +6301,7 @@ mod tests {
                 .is_some()
         }
 
-        /// Park at a prompt the probe cannot predict — the host's own `$PROFILE` writes it — and
+        /// Park at a prompt the probe matches by a rule rather than by its whole text, and
         /// report the text it settled on, with the trailing space every prompt ends in restored.
         fn settle_at_prompt_matching(&mut self, accept: &dyn Fn(&str) -> bool) -> Option<String> {
             let deadline = Instant::now() + Duration::from_secs(25);
@@ -6236,10 +6377,6 @@ mod tests {
         filled: bool,
         /// What the typed command is, when the shape asks for input that already wraps at `wide`.
         wrapped_typed: &'static str,
-        /// Run the host's real `$PROFILE` chain instead of a reconstruction of it. The prompt is
-        /// then read off the settled screen rather than asserted, and the editor is configured the
-        /// way the reporting user actually configured it.
-        real_profile: bool,
         /// How long the gesture is left alone after the last commit before anything else is sent.
         /// The line editor notices a pseudoconsole resize on its own poll, not on the resize: the
         /// recording's editor repainted 827 ms after the commit, with no keystroke involved, and a
@@ -6255,7 +6392,6 @@ mod tests {
         rows: PROFILE_PROBE_ROWS,
         filled: true,
         wrapped_typed: PROFILE_PROBE_TYPED_WRAPPED,
-        real_profile: false,
         settle_after_commit: Duration::from_millis(0),
     };
 
@@ -6270,7 +6406,6 @@ mod tests {
         rows: 17,
         filled: false,
         wrapped_typed: RECORDED_TYPED,
-        real_profile: false,
         settle_after_commit: Duration::from_millis(2_500),
     };
 
@@ -6353,32 +6488,14 @@ mod tests {
 
     fn run_resize_burst_probe(shell: &str, shape: BurstShape) -> Option<BurstOutcome> {
         let profile = ProfileShape {
-            scenario: if shape.stage.real_profile {
-                ProfileScenario::RealProfile
-            } else {
-                ProfileScenario::CondaIntegration
-            },
+            scenario: ProfileScenario::CondaIntegration,
             filled: shape.stage.filled,
         };
-        let mut startup = profile_probe_startup(profile);
-        if shape.stage.real_profile {
-            // The reporting session's working directory is the repository root, and the prompt is
-            // a function of it. Tests run from the crate directory, so state it.
-            startup = format!("Set-Location '{}'; {startup}", repository_root().display());
-        }
-        let mut oracle = AppResizeOracle::spawn(
-            shell,
-            &startup,
-            shape.stage.wide,
-            shape.stage.wide_rows,
-            shape.stage.real_profile,
-        );
-        let settled = if shape.stage.real_profile {
-            oracle.settle_at_prompt_matching(&|line| line.ends_with('>'))
-        } else {
-            let want = format!("(base) {PROFILE_PROBE_PROMPT}");
-            oracle.settle_at_prompt(&want).then_some(want)
-        };
+        let startup = profile_probe_startup(profile);
+        let mut oracle =
+            AppResizeOracle::spawn(shell, &startup, shape.stage.wide, shape.stage.wide_rows);
+        let want = format!("(base) {PROFILE_PROBE_PROMPT}");
+        let settled = oracle.settle_at_prompt(&want).then_some(want);
         let Some(prompt) = settled else {
             eprintln!(
                 "BT_CONPTY_BURST_PROBE shell={shell} {} SETUP-FAILED line={:?}",
@@ -6391,10 +6508,8 @@ mod tests {
         oracle.pty.write(shape.typed().as_bytes()).unwrap();
         oracle.pump_for(Duration::from_millis(400));
 
-        // Whether the conda startup line the drag must not destroy is on screen at all. A stage
-        // driving the host's real `$PROFILE` inherits whatever that profile prints, which for pwsh
-        // is no conda hook and therefore no such line; requiring its survival there would report a
-        // clean gesture as corrupt.
+        // Whether the conda startup line the drag must not destroy is on screen at all: its
+        // survival is required only of a stage that printed it.
         let noise_present_before = has_noise(&oracle.composed_rows());
         let mut typed_after = String::new();
         let emit_mark = oracle.raw_output.len();
@@ -6683,29 +6798,10 @@ mod tests {
                 ..control
             },
             BurstShape {
-                label: "recorded-gesture-real-profile",
-                wrapped_input: true,
-                stage: BurstStage {
-                    real_profile: true,
-                    ..BURST_STAGE_RECORDED
-                },
-                ..control
-            },
-            BurstShape {
                 label: "recorded-gesture-woken",
                 wrapped_input: true,
                 wake_without_edit: true,
                 stage: BURST_STAGE_RECORDED,
-                ..control
-            },
-            BurstShape {
-                label: "recorded-gesture-woken-real-profile",
-                wrapped_input: true,
-                wake_without_edit: true,
-                stage: BurstStage {
-                    real_profile: true,
-                    ..BURST_STAGE_RECORDED
-                },
                 ..control
             },
             BurstShape {
@@ -6825,8 +6921,7 @@ mod tests {
     /// and is why this probe dot-sources the script the product ships.
     fn defer_probe_startup() -> String {
         format!(
-            "Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
-             function global:prompt {{ '{DEFER_PROBE_PROMPT}' }}; \
+            "function global:prompt {{ '{DEFER_PROBE_PROMPT}' }}; \
              . '{}'; Write-Host '{DEFER_PROBE_NOISE}'",
             integration_script_path().display()
         )
@@ -6867,7 +6962,6 @@ mod tests {
             &defer_probe_startup(),
             DEFER_PROBE_WIDE,
             DEFER_PROBE_ROWS,
-            false,
         );
         oracle.typed_input_gate = gated;
         if !oracle.settle_at_prompt(DEFER_PROBE_PROMPT) {
@@ -7104,7 +7198,6 @@ mod tests {
             &defer_probe_startup(),
             DEFER_PROBE_WIDE,
             DEFER_PROBE_ROWS,
-            false,
         );
         oracle.typed_input_gate = true;
         oracle.confirm_blank_gate = confirmed;
@@ -7237,9 +7330,9 @@ mod tests {
         format!(
             "Import-Module PSReadLine; \
              [Console]::Write(([string][char]27) + ']777;BT_PSRL_VERSION=' + \
-             (Get-Module PSReadLine).Version + [char]7); \
-             Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
+             (Get-Module PSReadLine).Version + [char]7); {} \
              function global:prompt {{ '{prompt}' }}; . '{}'",
+            test_shell::HYGIENE,
             integration_script_path().display()
         )
     }
@@ -7254,7 +7347,7 @@ mod tests {
         let startup = "Import-Module PSReadLine; \
             [Console]::Write(([string][char]27) + ']777;BT_PSRL_VERSION=' + \
             (Get-Module PSReadLine).Version + [char]7); \
-            Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
+            <#folio-test-shell-hygiene#> \
             Set-PSReadLineKeyHandler -Chord F24 -ScriptBlock { \
             [Console]::Write(([string][char]27) + ']777;BT_KEY_F24' + [char]7) }; \
             Set-PSReadLineKeyHandler -Chord Ctrl+Alt+F12 -ScriptBlock { \
@@ -7321,7 +7414,7 @@ mod tests {
         for shell in ["pwsh.exe", "powershell.exe"] {
             let mut outcomes = Vec::new();
             for invoke in [false, true] {
-                let mut oracle = AppResizeOracle::spawn(shell, &startup, 38, 14, false);
+                let mut oracle = AppResizeOracle::spawn(shell, &startup, 38, 14);
                 // The product-timing arm is the version that actually repaints. For 2.0.0, land
                 // the resize first and bracket the no-op injection at one stable geometry so the
                 // before/after row comparison measures the handler and nothing else.
@@ -7468,7 +7561,7 @@ mod tests {
                      [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($key, $arg) }}"
                 )
             };
-            let mut oracle = AppResizeOracle::spawn("pwsh.exe", &arm_startup, 38, 24, false);
+            let mut oracle = AppResizeOracle::spawn("pwsh.exe", &arm_startup, 38, 24);
             oracle.invoke_prompt_after_resize = true;
             assert!(
                 oracle
@@ -7557,9 +7650,8 @@ mod tests {
     #[test]
     #[ignore = "dev probe: proves sessions without OSC 133 receive no private repaint input"]
     fn invoke_prompt_requires_open_osc133_input_region_probe() {
-        let startup = "Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
-            function global:prompt { 'BTNOINTEGRATION> ' }";
-        let mut oracle = AppResizeOracle::spawn("pwsh.exe", startup, 50, 10, false);
+        let startup = "function global:prompt { 'BTNOINTEGRATION> ' }";
+        let mut oracle = AppResizeOracle::spawn("pwsh.exe", startup, 50, 10);
         oracle.invoke_prompt_after_resize = true;
         assert!(oracle.settle_at_prompt("BTNOINTEGRATION> "));
         oracle.project_resize(40, 10);
@@ -7777,7 +7869,7 @@ mod tests {
                      [Microsoft.PowerShell.PSConsoleReadLine]::InvokePrompt($key, $arg) }}"
                 )
             };
-            let mut oracle = AppResizeOracle::spawn("pwsh.exe", &arm_startup, 38, 24, false);
+            let mut oracle = AppResizeOracle::spawn("pwsh.exe", &arm_startup, 38, 24);
             oracle.invoke_prompt_after_resize = true;
             assert!(
                 oracle
@@ -7922,8 +8014,7 @@ mod tests {
             } else {
                 format!("$env:BT_PSREADLINE_REANCHOR_PROBE = '1'; {startup}")
             };
-            let mut oracle =
-                AppResizeOracle::spawn("pwsh.exe", &arm_startup, INITIAL_COLUMNS, 20, false);
+            let mut oracle = AppResizeOracle::spawn("pwsh.exe", &arm_startup, INITIAL_COLUMNS, 20);
             oracle.invoke_prompt_after_resize = true;
             assert!(oracle.settle_at_prompt(PROMPT));
             oracle.pty.write(TYPED.as_bytes()).unwrap();
@@ -8027,8 +8118,7 @@ mod tests {
             } else {
                 format!("$env:BT_PSREADLINE_REANCHOR_WHOLE_SCREEN_PROBE = '1'; {startup}")
             };
-            let mut oracle =
-                AppResizeOracle::spawn("pwsh.exe", &arm_startup, FINAL_COLUMNS, 20, false);
+            let mut oracle = AppResizeOracle::spawn("pwsh.exe", &arm_startup, FINAL_COLUMNS, 20);
             oracle.invoke_prompt_after_resize = true;
             oracle.reanchor_after_resize_quiescence = delayed;
             assert!(oracle.settle_at_prompt(PROMPT));
@@ -8192,8 +8282,7 @@ mod tests {
             } else {
                 startup.clone()
             };
-            let mut oracle =
-                AppResizeOracle::spawn("pwsh.exe", &arm_startup, INITIAL_COLUMNS, 20, false);
+            let mut oracle = AppResizeOracle::spawn("pwsh.exe", &arm_startup, INITIAL_COLUMNS, 20);
             oracle.invoke_prompt_after_resize = true;
             assert!(oracle.settle_at_prompt(PROMPT));
             let seed_mark = oracle.raw_output.len();
@@ -8296,7 +8385,7 @@ mod tests {
         // the glyph stream without those placeholders; the probe input itself contains no
         // semantically significant repeated whitespace, and prompt copy count is checked apart.
         let glyphs = |text: &str| text.replace(' ', "");
-        let mut oracle = AppResizeOracle::spawn("pwsh.exe", &startup, 38, 24, false);
+        let mut oracle = AppResizeOracle::spawn("pwsh.exe", &startup, 38, 24);
         oracle.invoke_prompt_after_resize = true;
         assert!(
             oracle
@@ -8545,7 +8634,7 @@ mod tests {
     /// Drain `session` until `needle` has been seen, or until the child has produced nothing at
     /// all for [`UNIX_CHILD_SILENCE_BUDGET`].
     #[cfg(unix)]
-    fn read_until(session: &PtySession, needle: &str) -> String {
+    fn read_until(session: &TestShell, needle: &str) -> String {
         let mut seen = String::new();
         let mut last_byte = Instant::now();
         loop {
@@ -8623,10 +8712,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_unix_child_is_heard_exits_with_its_own_code_and_is_reaped() {
-        let mut session = PtySession::spawn(
+        let mut session = TestShell::spawn(
             PtyCommand::new("/bin/sh").arg("-c").arg("echo hi; exit 3"),
             size(80, 24),
-            no_wake(),
         )
         .unwrap();
         let pid = session
@@ -8677,12 +8765,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_resize_reaches_a_unix_child_through_its_controlling_terminal() {
-        let mut session = PtySession::spawn(
+        let mut session = TestShell::spawn(
             PtyCommand::new("/bin/sh")
                 .arg("-c")
                 .arg("stty size; read reply; stty size"),
             size(80, 24),
-            no_wake(),
         )
         .unwrap();
 
@@ -8741,7 +8828,7 @@ mod tests {
         };
 
         // Dropped, which is the way a closing pane ends one.
-        let dropped = PtySession::spawn(deaf_to_hangup(), size(80, 24), no_wake()).unwrap();
+        let dropped = TestShell::spawn(deaf_to_hangup(), size(80, 24)).unwrap();
         let dropped_pid = dropped
             .child_id()
             .expect("a spawned child has a process id");
@@ -8756,7 +8843,7 @@ mod tests {
         wait_until_the_process_table_forgets(dropped_pid);
 
         // And again through the door `Drop` goes through, so that *how* it ended is readable.
-        let mut told = PtySession::spawn(deaf_to_hangup(), size(80, 24), no_wake()).unwrap();
+        let mut told = TestShell::spawn(deaf_to_hangup(), size(80, 24)).unwrap();
         let told_pid = told.child_id().expect("a spawned child has a process id");
         read_until(&told, "ready");
         let status = told
@@ -8797,12 +8884,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn shutting_a_session_down_hands_the_child_a_newline_first() {
-        let mut session = PtySession::spawn(
+        let mut session = TestShell::spawn(
             PtyCommand::new("/bin/sh")
                 .arg("-c")
                 .arg("trap \"\" HUP; echo ready; if read ignored; then exit 5; else exit 6; fi"),
             size(80, 24),
-            no_wake(),
         )
         .unwrap();
         let pid = session
@@ -8834,7 +8920,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn spawn_default_starts_a_real_shell_on_this_machine() {
-        let mut session = PtySession::spawn_default(size(80, 24), no_wake()).unwrap();
+        let mut session = TestShell::spawn_default(size(80, 24)).unwrap();
         assert!(
             session.take_shell_fallback().is_none(),
             "the resolved shell started, so there is nothing to report"

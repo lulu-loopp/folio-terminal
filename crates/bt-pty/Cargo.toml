@@ -38,6 +38,10 @@ miniz_oxide = "=0.8.9"
 # ConPTY to read back what the transport carried — the unit tests in `lib.rs` and
 # the integration tests in `tests/`, both of which see dev-dependencies.
 [dev-dependencies]
+# **This crate's own test door, for its own integration tests** (T-TEST-SHELL-HYGIENE): the
+# integration tests in `tests/` link the library built without `cfg(test)`, so they reach
+# `bt_pty::test_shell` only through the feature, named here on the package itself.
+bt-pty = { path = ".", features = ["test-shell"] }
 bt-term = { path = "../bt-term" }
 bt-winres = { path = "../bt-winres" }
 miniz_oxide = "=0.8.9"
@@ -47,6 +51,14 @@ miniz_oxide = "=0.8.9"
 # safe `kill` keeps this crate free of `unsafe`, which the workspace denies.
 [target.'cfg(unix)'.dev-dependencies]
 nix = { version = "0.28", features = ["signal"] }
+
+[features]
+# **A real shell for a test** (`src/test_shell.rs`; T-TEST-SHELL-HYGIENE): the one door every
+# test in the workspace starts a shell through — without the user's startup files, without
+# their history, under a temporary HOME/APPDATA/XDG. For tests only: `bt-app` and `bt-term`
+# name it on their *dev-dependency* on this crate, and so does this crate for its own
+# integration tests; a build of the shipped program never has it. It adds no package.
+test-shell = []
 
 [lints]
 workspace = true
