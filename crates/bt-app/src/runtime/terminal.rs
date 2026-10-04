@@ -707,9 +707,10 @@ impl Runtime<'_> {
     /// The three things the contract says are kept are kept by being *read off
     /// the leaf that is leaving*: its `profile` (the seat's own, decided when it
     /// was created — never "the current default", so a seat restarted twice
-    /// starts the same program both times), and `working_directory()`, which is
-    /// the **last trusted OSC 7 report** and is explicitly not a reading of the
-    /// live process. The manual name is kept by not being touched: it is the
+    /// starts the same program both times), and
+    /// [`LeafSession::place_for_a_new_shell`], which is the **last trusted OSC 7
+    /// report**, else the folder the shell was put down in, and is explicitly not
+    /// a reading of the live process. The manual name is kept by not being touched: it is the
     /// tab's (`TabSeed::manual_name`), and nothing here goes near a tab.
     ///
     /// **The tree is not rebuilt** (§1.1, last row): this replaces the runtime
@@ -736,7 +737,7 @@ impl Runtime<'_> {
         let Some(leaf) = self.sessions.get(&seat) else {
             return Ok(());
         };
-        let seed = restart_seed(&leaf.profile, leaf.session.working_directory());
+        let seed = restart_seed(&leaf.profile, leaf.place_for_a_new_shell().as_deref());
         // **The replacement is born at the old view's rung** (ticket 37): *Restart shell* keeps
         // the pane, so it keeps its text size, and the constructor is handed the rung rather
         // than the new leaf being repaired to it afterwards. Nothing else of the old view is

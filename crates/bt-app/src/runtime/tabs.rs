@@ -1292,7 +1292,9 @@ impl Runtime<'_> {
             return Ok(());
         };
         let profile = leaf.profile.clone();
-        let cwd = leaf.session.working_directory().map(Path::to_path_buf);
+        // §7.1.4's ladder, the one `Restart shell` reads: a shell that never reported is in the
+        // folder it was put down in.
+        let cwd = leaf.place_for_a_new_shell();
         // The source profile *is* the target profile, so `cwd_for_spawn` has no
         // namespace to cross and the folder arrives exactly as the shell reported
         // it. That is the sentence this row promises — the same shell, in the
