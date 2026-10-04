@@ -4,7 +4,8 @@
 use crate::{
     ApplicationChange, DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragRelease,
     DragSource, DropBatch, DropLanding, Fading, FloatDrag, FloatDragKind, FloatHeadPress,
-    HoverFloat, LeafId, MathHoverExit, MouseRoute, OwnPress, PanePress, PointerTarget, Popup,
+    HoverFloat, IN_PANE_SURFACES_TOP_FIRST, InPaneSurface, LeafId, MathHoverExit, MouseRoute,
+    OVER_IN_PANE_TOP_FIRST, OverInPane, OverWheel, OwnPress, PanePress, PointerTarget, Popup,
     PressAfterBlur, PressedCellTarget, PreviewBodyRung, PreviewSurface, RenameExit, RenameSubject,
     RowActivation, RowHost, RowPayload, RowPayloadKind, RowPress, Runtime, SpringGate, TabClick,
     TerminalReference, UserInputKind, WebHeadVerb, WheelAxis, WheelBurst, WheelRoute,
@@ -16,9 +17,9 @@ use crate::{
     press_pins_a_peek, press_reaches_no_grid, press_spends_itself_closing, pressed_row_identity,
     profiles, protocol_mouse_button, recoverable_wheel_scroll_amount, release_verdict, restore,
     right_press_raises_terminal_menu, risen_frame, route_forwarded_mouse_button,
-    route_forwarded_mouse_motion, search, seats, settings, settling, toast, tooltip, update,
-    upright_wheel, web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route,
-    wheel_zoom_notches, write_pty_input,
+    route_forwarded_mouse_motion, seats, settings, settling, toast, tooltip, update, upright_wheel,
+    web_page_cursor, websheet, wheel_axis, wheel_points_sideways, wheel_route, wheel_zoom_notches,
+    write_pty_input,
 };
 use crate::{TextSizeAim, TextStep, wheel_steps_text_size};
 use anyhow::Context;
@@ -1627,7 +1628,15 @@ impl Runtime<'_> {
         // through `VideoSeats::bar_deadline` on the turn this move ends. A
         // present forced here would be a repaint on every pointer move anywhere
         // in the window for as long as anything is playing.
-        self.note_video_hover(Some(position));
+        //
+        // **A hand on a surface inside a pane is not on the picture under it**
+        // (T-STRIP-HOVER-THROUGH): a pill standing over the bar must not light
+        // the bar's controls through it, so the playing surfaces hear that the
+        // hand has gone. Asked only while something is playing, so a window
+        // with no video pays nothing for it.
+        let on_the_picture = self.window.video.iter().next().is_none()
+            || self.in_pane_surface_at(position).is_none();
+        self.note_video_hover(on_the_picture.then_some(position));
         // The glance card's thumb, ahead of everything: it is the topmost thing
         // on the glass, and a gesture in flight is not a hover. It owns the
         // pointer outside the card too — a drag that let go the moment it left
@@ -2141,10 +2150,16 @@ impl Runtime<'_> {
         // have to be answered in: they share the pane's top-right corner, and on
         // a short pane the rail's own block reaches up under the capsule. A hand
         // on a toggle must not also be lighting a tick behind it.
+        //
+        // **And the capsule above the strip** (owner's ruling 2026-10-04): the
+        // strip is a surface inside the pane too and a hand on one of its words
+        // must not light a tick behind it, but where the two meet the capsule
+        // the reader summoned is drawn on top and takes the press. Both hovers
+        // read the router's answer (`pointer_target_at`, in the order of
+        // `IN_PANE_SURFACES_TOP_FIRST`), so this order only says which is asked
+        // first; the router already says which one owns the point.
         let on_search =
             self.drive_search_hover(self.window.mouse_route.is_none().then_some(position))?;
-        // The strip, beside the capsule: it is a surface inside the pane too, and
-        // a hand on one of its words must not also be lighting a tick behind it.
         let on_notice = self.drive_notice_hover(
             (self.window.mouse_route.is_none() && !on_search).then_some(position),
         )?;
@@ -2165,7 +2180,7 @@ impl Runtime<'_> {
             // moving produces no second pointer event to find it with.
             .or_else(|| self.preview_hex_anchor())
             .or_else(|| {
-                self.tooltip_anchor_at(position)
+                self.owned_tooltip_anchor_at(position)
                     .filter(|(anchor, _)| !self.layout_peek_suppresses(*anchor))
             });
         self.note_tooltip(anchor)?;
@@ -2228,6 +2243,16 @@ impl Runtime<'_> {
         // the hand until it came back.
         if matches!(self.window.mouse_route, Some(MouseRoute::Local(_))) {
             return self.extend_local_selection();
+        }
+        // **And a drag already handed to a program goes on being that
+        // program's** (T-STRIP-HOVER-THROUGH, confirmation review 2026-10-04),
+        // on the selection's terms one line up: its moves are reported in the
+        // pane the press went to, clamped into that pane's body, wherever the
+        // hand is — over the capsule, the strip, a pane head or the pane next
+        // door. What the pointer is over decides where a gesture *starts*; it
+        // does not take one away from its owner halfway.
+        if matches!(self.window.mouse_route, Some(MouseRoute::Forward { .. })) {
+            return self.forward_owned_drag_motion();
         }
         if hit.is_none() {
             return Ok(());
@@ -2294,6 +2319,21 @@ impl Runtime<'_> {
     /// [`Self::popover_trigger_at`]'s note: `float_hit_at` measures two
     /// captions before it looks at anything, and a window with nothing floating
     /// should pay none of it.
+    ///
+    /// **Then the surfaces inside a pane — the search capsule, then a notice
+    /// strip — and only then the docked chrome** (T-STRIP-HOVER-THROUGH,
+    /// 2026-10-04; the capsule above the strip by the owner's ruling of the same
+    /// day). The rule is the one above, one layer down: the pointer is asked in
+    /// the order the glass is painted, and both are painted over every pane's
+    /// own chrome, in the order [`crate::IN_PANE_SURFACES_TOP_FIRST`] states for
+    /// the paint and for this router at once. The ladder in
+    /// [`Self::docked_chrome_target_at`] knows nothing about strips, so asked
+    /// first it answered for whatever the band was covering — and the hover, the
+    /// files flyout's trigger, the `⌄`'s rest clock and the press router all read
+    /// that answer, while the strip's own hover and press asked a second list
+    /// beside it. A strip with nothing to press claims nothing
+    /// ([`Self::docked_notice_at`]), so a confirmation pill leaves the document
+    /// under it answering as before.
     pub(crate) fn pointer_target_at(
         &mut self,
         position: PhysicalPosition<f64>,
@@ -2303,8 +2343,206 @@ impl Runtime<'_> {
         {
             return Some(PointerTarget::Float(id, part));
         }
+        // The surfaces that stand inside a pane, top first — the one list the
+        // overlay's paint order is also read from (`OverlayStack::flattened`),
+        // so the surface the glass shows on top is the surface that answers.
+        for surface in IN_PANE_SURFACES_TOP_FIRST {
+            let claim = match surface {
+                InPaneSurface::SearchCapsule => {
+                    self.search_part_at(position).map(PointerTarget::Search)
+                }
+                InPaneSurface::NoticeStrip => self
+                    .docked_notice_at(position)
+                    .map(|(seat, element)| PointerTarget::Notice(seat, element)),
+            };
+            if claim.is_some() {
+                // **Unless a band painted above the in-pane surfaces covers
+                // the point** (confirmation review, 2026-10-04): a palette list
+                // or a menu row standing over the strip is the palette's or the
+                // menu's, and it answers through its own door. The point then
+                // reads as what the docked ladder says, exactly as it did
+                // before there were in-pane surfaces in this router.
+                if self.painted_over_in_pane_at(position, &OVER_IN_PANE_TOP_FIRST) {
+                    break;
+                }
+                return claim;
+            }
+        }
         self.docked_chrome_target_at(position)
             .map(PointerTarget::Chrome)
+    }
+
+    /// **Which surface inside a pane owns this point, if any** — the router's
+    /// answer ([`Self::pointer_target_at`]) read as a layer rather than as a
+    /// part, for the readers that only need to know *whether* the point is
+    /// spoken for: the press of any button, the wheel and the tip
+    /// (T-STRIP-HOVER-THROUGH, owner's ruling 2026-10-04).
+    ///
+    /// A floating window's own pill counts too — it is a strip standing inside
+    /// that window's body ([`Self::notice_at`] names it), so a notch or a right
+    /// click on it is not one on the document under it.
+    pub(in crate::runtime) fn in_pane_surface_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<InPaneSurface> {
+        match self.pointer_target_at(position)? {
+            PointerTarget::Search(_) => Some(InPaneSurface::SearchCapsule),
+            PointerTarget::Notice(..) => Some(InPaneSurface::NoticeStrip),
+            PointerTarget::Float(..) => {
+                self.notice_at(position).map(|_| InPaneSurface::NoticeStrip)
+            }
+            PointerTarget::Chrome(_) => None,
+        }
+    }
+
+    /// **Whether one of `families` — bands painted above the in-pane surfaces —
+    /// takes the pointer at this point** (T-STRIP-HOVER-THROUGH, confirmation
+    /// review 2026-10-04).
+    ///
+    /// `families` is [`OVER_IN_PANE_TOP_FIRST`] for a pane's own surfaces, and
+    /// the part of it above [`OverInPane::Float`] for a floating window's own
+    /// pill, which only what is painted over the window can cover. Each family
+    /// is asked by the hit test its own door uses, so "covered" here is exactly
+    /// "that door would have taken the gesture".
+    pub(in crate::runtime) fn painted_over_in_pane_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+        families: &[OverInPane],
+    ) -> bool {
+        families
+            .iter()
+            .any(|family| self.over_in_pane_claims(*family, position))
+    }
+
+    /// The topmost band of [`OVER_IN_PANE_TOP_FIRST`] that takes the pointer
+    /// here, read in the list's own order. Floating windows are not asked
+    /// again (see [`Self::over_in_pane_claims`]); they have stations of their
+    /// own in every reader that asks this.
+    pub(in crate::runtime) fn topmost_band_over_in_pane_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<OverInPane> {
+        OVER_IN_PANE_TOP_FIRST
+            .into_iter()
+            .find(|family| self.over_in_pane_claims(*family, position))
+    }
+
+    fn over_in_pane_claims(&mut self, family: OverInPane, position: PhysicalPosition<f64>) -> bool {
+        let (x, y) = (position.x, position.y);
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a pointer position is a surface coordinate, as every hit test here reads it"
+        )]
+        let (fx, fy) = (x as f32, y as f32);
+        match family {
+            OverInPane::FilePeek => self.file_peek_holds([fx, fy]),
+            OverInPane::Toast => toast::at(&self.window.toast_layouts, fx, fy).is_some(),
+            OverInPane::Palette => self
+                .window
+                .palette_layout
+                .clone()
+                .is_some_and(|layout| palette::wheel_part(&layout, x, y).is_some()),
+            OverInPane::TabMenu => self
+                .tab_menu_layout()
+                .is_some_and(|layout| profiles::tab_menu_hit(&layout, x, y).is_some()),
+            OverInPane::TermMenu => self
+                .term_menu_layout()
+                .is_some_and(|layout| profiles::term_menu_hit(&layout, x, y).is_some()),
+            OverInPane::GitMenu => self
+                .git_menu_layout()
+                .is_some_and(|layout| profiles::git_menu_hit(&layout, x, y).is_some()),
+            OverInPane::PaneMenu => self
+                .pane_menu_layout()
+                .is_some_and(|layout| profiles::pane_menu_hit(&layout, x, y).is_some()),
+            OverInPane::FileMenu => self
+                .file_menu_layout()
+                .is_some_and(|layout| profiles::file_menu_hit(&layout, x, y).is_some()),
+            // The modal band: the full-window cards and the settings sheet,
+            // which cover everything, and the four menus staged in the same
+            // band, which cover their own frames.
+            OverInPane::Modal => {
+                if self.a_modal_covers_the_window()
+                    || self
+                        .profile_menu_layout()
+                        .is_some_and(|layout| layout.contains(fx, fy))
+                    || self
+                        .root_menu_layout()
+                        .is_some_and(|layout| profiles::root_menu_hit(&layout, x, y).is_some())
+                {
+                    return true;
+                }
+                if self.window.graph_filter_menu.is_some()
+                    && self.graph_filter_menu_layout().is_some_and(|layout| {
+                        profiles::git_filter_menu_hit(&layout, x, y).is_some()
+                    })
+                {
+                    return true;
+                }
+                let Some(seat) = self.preview_menu_seat() else {
+                    return false;
+                };
+                let items = self.preview_menu_items(seat);
+                self.preview_menu_layout().is_some_and(|layout| {
+                    profiles::preview_menu_hit(&layout, &items, x, y).is_some()
+                })
+            }
+            // **Answered before this list is ever read**: a window's claim is
+            // the router's first step and is terminal there, so a point that
+            // reaches an in-pane claim is one no window stands over — and a
+            // window's own pill is asked only about the part of the list above
+            // this family. Asking the windows here again would be a second
+            // reader of the float question (`the_press_and_the_hover_ask_one_router`).
+            OverInPane::Float => false,
+            OverInPane::WebSheet => self
+                .window
+                .web_sheet_layouts
+                .iter()
+                .any(|(seat, layout)| websheet::hit(layout, *seat, fx, fy).is_some()),
+        }
+    }
+
+    /// A press of any button on a surface inside a pane: the left button is the
+    /// surface's own verb, every other button is swallowed. Returns whether the
+    /// point was one of theirs at all.
+    pub(in crate::runtime) fn press_in_pane_surface(
+        &mut self,
+        button: MouseButton,
+        position: PhysicalPosition<f64>,
+    ) -> Result<bool> {
+        let Some(surface) = self.in_pane_surface_at(position) else {
+            return Ok(false);
+        };
+        if button == MouseButton::Left {
+            match surface {
+                InPaneSurface::SearchCapsule => self.press_search(position)?,
+                InPaneSurface::NoticeStrip => self.press_notice(position)?,
+            };
+        }
+        Ok(true)
+    }
+
+    /// **The tip under the pointer, from the layer that owns the point**
+    /// (T-STRIP-HOVER-THROUGH, owner's ruling 2026-10-04).
+    ///
+    /// The anchor list is one flat list of every tippable box, so a control
+    /// hidden under a surface inside a pane is still in it. The router says
+    /// which layer the hand is on: on the capsule only the capsule's own
+    /// controls speak, on a strip nothing does (it has no tips, and what it
+    /// covers is covered), and anywhere else a capsule control cannot be the
+    /// one under the hand.
+    pub(in crate::runtime) fn owned_tooltip_anchor_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<(tooltip::TooltipAnchorId, tooltip::TipFace)> {
+        let owner = self.in_pane_surface_at(position);
+        self.tooltip_anchor_at(position).filter(|(id, _)| {
+            let capsule_control = matches!(id, tooltip::TooltipAnchorId::SearchControl(_));
+            match owner {
+                Some(InPaneSurface::SearchCapsule) => capsule_control,
+                Some(InPaneSurface::NoticeStrip) => false,
+                None => !capsule_control,
+            }
+        })
     }
 
     pub(crate) fn update_chrome_hover(&mut self, position: PhysicalPosition<f64>) -> Result<()> {
@@ -2337,6 +2575,10 @@ impl Runtime<'_> {
             // point inside a float is the float's, so there is no docked chrome
             // under this pointer to light.
             Some(PointerTarget::Float(..)) | None => None,
+            // **And a strip is opaque to it the same way**
+            // (T-STRIP-HOVER-THROUGH): the strip lights its own words through
+            // `drive_notice_hover`, and the chrome it covers lights nothing.
+            Some(PointerTarget::Notice(..) | PointerTarget::Search(_)) => None,
         });
         // `.pane:hover` is a second question about the same pointer, and it has
         // to be asked here rather than derived from `hover`: over a terminal's
@@ -3986,6 +4228,155 @@ impl Runtime<'_> {
         }
     }
 
+    /// **End the gesture a press on a cell latched, wherever the button comes
+    /// up** — and answer whether there was one (T-STRIP-HOVER-THROUGH,
+    /// confirmation review 2026-10-04).
+    ///
+    /// Every [`MouseRoute`] is a press that a pane took, and its release is
+    /// owed to that pane whatever is under the pointer now:
+    ///
+    /// * a formula mark's press ink comes off with the button (owner's ruling
+    ///   2026-09-14 ②);
+    /// * a selection drag is finished in the pane it began in — over the pane
+    ///   next door, over the chrome, past the window's edge — because a release
+    ///   left unanswered left the route latched and the next move went on
+    ///   selecting;
+    /// * a press handed to the program gets its release, at the cell the
+    ///   pointer stands over clamped into that pane's body
+    ///   ([`Self::forwarded_gesture_hit`]), in the encoding the press was sent
+    ///   in, and the route comes off. A child given a press and never its
+    ///   release holds a button down for ever.
+    ///
+    /// A button the mouse protocol has no name for ends nothing here, as it
+    /// forwarded nothing.
+    fn release_owned_gesture(&mut self, button: MouseButton) -> Result<bool> {
+        match self.window.mouse_route.as_ref().cloned() {
+            None => Ok(false),
+            Some(MouseRoute::MathBlock) => {
+                self.window.mouse_route = None;
+                if self.window.math_tool_pressed.take().is_some() {
+                    self.repaint_hovered_pane()?;
+                }
+                Ok(true)
+            }
+            // A selection is only ever begun by the left button, so only the
+            // left button's release ends it; any other button's release goes on
+            // down the ordinary road as an event of its own.
+            Some(MouseRoute::Local(drag)) => {
+                if button != MouseButton::Left {
+                    return Ok(false);
+                }
+                // Its shell gone, the selection is let go with nothing done.
+                if self.live_paste_target(drag.owner).is_none() {
+                    self.window.mouse_route = None;
+                    return Ok(true);
+                }
+                self.finish_local_selection(*drag)?;
+                Ok(true)
+            }
+            Some(MouseRoute::Forward {
+                button: latched,
+                owner,
+                ..
+            }) => {
+                // **Only the button that started the gesture ends it.** Any
+                // other button's release is not this gesture's: it is not
+                // forwarded under this route, it does not clear it, and it
+                // goes on down the ordinary road as an event of its own.
+                if protocol_mouse_button(button) != Some(latched) {
+                    return Ok(false);
+                }
+                // **To the shell the press was handed to, and to no other.** A
+                // shell that is gone (or whose tab is no longer on top) is owed
+                // nothing: the route comes off with no byte sent anywhere.
+                if self.live_paste_target(owner).is_none() {
+                    self.window.mouse_route = None;
+                    return Ok(true);
+                }
+                let seat = owner.seat;
+                let Some(hit) = self.forwarded_gesture_hit(seat) else {
+                    // A pane with no frame to name a cell in has no child to
+                    // tell; the latch still has to come off.
+                    self.window.mouse_route = None;
+                    return Ok(true);
+                };
+                let modes = self.leaf_terminal_modes(seat);
+                if let Some(bytes) = route_forwarded_mouse_button(
+                    &mut self.window.mouse_route,
+                    ElementState::Released,
+                    latched,
+                    hit,
+                    modes,
+                    self.window.modifiers,
+                    PressedCellTarget::Ordinary,
+                    owner,
+                ) {
+                    self.mouse_trace(|| {
+                        format!(
+                            "pane_release forwarded=1 bytes={} cell={},{}",
+                            bytes.len(),
+                            hit.row,
+                            hit.column
+                        )
+                    });
+                    self.answer_attention(seat, UserInputKind::MouseButton);
+                    self.send_mouse_input_to(seat, &bytes, "forward mouse button event to PTY")?;
+                }
+                Ok(true)
+            }
+        }
+    }
+
+    /// **The cell a gesture already handed to a program stands at** — the
+    /// owner pane's own, with the pointer clamped into its body
+    /// ([`Self::drag_hit_in_pane`]) and folded onto the live grid the program
+    /// sees, as the press was.
+    ///
+    /// The pane is the route's recorded owner ([`MouseRoute::Forward`]'s
+    /// `owner`), never the focused one: a focus moved while the button is held
+    /// does not redirect the gesture.
+    fn forwarded_gesture_hit(&self, seat: SeatId) -> Option<bt_render::GridHit> {
+        let hit = self.drag_hit_in_pane(seat)?;
+        let frame = self.pane_frame(seat)?;
+        Some(live_viewport_mouse_hit(frame, hit))
+    }
+
+    /// One move of a drag already handed to a program, reported to the pane
+    /// that took the press ([`Self::forwarded_gesture_hit`]).
+    fn forward_owned_drag_motion(&mut self) -> Result<()> {
+        let Some(MouseRoute::Forward { owner, .. }) = self.window.mouse_route else {
+            return Ok(());
+        };
+        // A gesture whose shell is gone is owed nothing, and is let go here
+        // rather than reported to whatever stands in its place.
+        if self.live_paste_target(owner).is_none() {
+            self.window.mouse_route = None;
+            return Ok(());
+        }
+        let seat = owner.seat;
+        let Some(hit) = self.forwarded_gesture_hit(seat) else {
+            return Ok(());
+        };
+        let modes = self.leaf_terminal_modes(seat);
+        let Some((sgr, button)) = route_forwarded_mouse_motion(
+            self.window.mouse_route.as_ref(),
+            modes,
+            self.window.modifiers,
+        ) else {
+            return Ok(());
+        };
+        let bytes = input::mouse_bytes(
+            sgr,
+            button,
+            input::MouseProtocolEvent::Motion,
+            hit.row,
+            hit.column,
+            self.window.modifiers,
+        );
+        self.answer_attention(seat, UserInputKind::MouseMotion);
+        self.send_mouse_input_to(seat, &bytes, "forward SGR mouse motion to PTY")
+    }
+
     pub(crate) fn mouse_input(&mut self, state: ElementState, button: MouseButton) -> Result<()> {
         // The road's first station (`BT_MOUSE_TRACE`). Everything a cross-monitor
         // report needs to be settled about the *frame* the click landed in is
@@ -4064,18 +4455,28 @@ impl Runtime<'_> {
             // router returns early for every surface above that arm: a click on
             // the tab strip has to hand the caret back too, and it never reaches
             // the level the capsule is answered at.
+            // Asked of the router, so a press on a window or a menu standing
+            // over the capsule is a press outside it.
             if self.window.search.is_focused()
-                && !self
+                && self
                     .window
-                    .search_layout
-                    .zip(self.window.pointer_position)
-                    .is_some_and(|(capsule, at)| {
-                        search::hit(&capsule, at.x as f32, at.y as f32).is_some()
-                    })
+                    .pointer_position
+                    .is_none_or(|at| self.search_at(at).is_none())
             {
                 self.window.search.blur();
                 self.after_search_change()?;
             }
+        }
+        // **A gesture in progress owns its release** (T-STRIP-HOVER-THROUGH,
+        // confirmation review 2026-10-04). A route latched by a press on a cell —
+        // a formula's mark, a selection, a press handed to the program — is
+        // ended by the button coming up wherever the pointer is, and ahead of
+        // every surface drawn there: the claims below decide where a gesture
+        // *starts*, and a release over the search capsule, a notice strip or any
+        // other surface is not a new gesture there but the end of the one the
+        // pane already owns.
+        if state == ElementState::Released && self.release_owned_gesture(button)? {
+            return Ok(());
         }
         // The quit card first, in the order it is drawn: every press is
         // swallowed, its own scrim included, and the answer is the application's
@@ -4831,6 +5232,32 @@ impl Runtime<'_> {
                 }
             }
         }
+        // **A surface inside a pane owns every press on the points it claims**
+        // (T-STRIP-HOVER-THROUGH and the owner's ruling of 2026-10-04) — the
+        // search capsule, then a notice strip, in the order
+        // `IN_PANE_SURFACES_TOP_FIRST` states for the paint and for
+        // `pointer_target_at` at once. Below every popup and floating window,
+        // which have all answered above, and above everything in the pane — the
+        // hosted page, the chrome router, the rendered page's context menu, the
+        // shell's own mouse protocol — so no reader below sees a press the glass
+        // shows landing on one of these two.
+        //
+        // The left button is the surface's own verb; **any other button is
+        // swallowed** rather than handed to what the surface covers, the same
+        // answer a toast's body gives: a right click on the strip is not a right
+        // click on the document under it. A release is not claimed — a gesture
+        // that began elsewhere ends wherever the hand lets go.
+        //
+        // *"The capsule is one control: any press hands the caret back"* (B74),
+        // which is why even a press on its bare padding is claimed. The pane
+        // underneath has already taken the layout focus: D40 runs above this and
+        // consumes nothing.
+        if state == ElementState::Pressed
+            && let Some(position) = self.window.pointer_position
+            && self.press_in_pane_surface(button, position)?
+        {
+            return Ok(());
+        }
         // **A press inside a hosted page is the page's** (web preview slice 1).
         //
         // Below every surface that floats over the window — each of those has
@@ -4841,28 +5268,6 @@ impl Runtime<'_> {
             && self.point_is_on_the_web_page(position)
         {
             self.press_web_page(state, button, position)?;
-            return Ok(());
-        }
-        // **The notice strip takes its own press — above the chrome router**
-        // (user report on a real machine, 2026-08-29).
-        //
-        // It used to stand *below* it, and for as long as the only pane that
-        // wore a strip was a terminal that was invisible: a terminal's body is
-        // cells rather than chrome, so the router looked at the band and passed.
-        // A **preview** pane's body is chrome all the way down — the rail, the
-        // document, the caret it puts in it — so the router claimed the press
-        // and the two words on the strip could be hovered, lit, and never
-        // pressed.
-        //
-        // Above it is also the order the *hover* already used
-        // (`drive_notice_hover` runs before every chrome question) and the order
-        // the strip is *drawn* in (`Layered::Notice` is above the pane). Three
-        // answers that have to agree, and this is the one that did not.
-        if state == ElementState::Pressed
-            && button == MouseButton::Left
-            && let Some(position) = self.window.pointer_position
-            && self.press_notice(position)?
-        {
             return Ok(());
         }
         // **A button coming up is heard even after the pointer has left this
@@ -4877,25 +5282,6 @@ impl Runtime<'_> {
         );
         if let Some(position) = router_position
             && self.chrome_mouse_input(state, button, position)?
-        {
-            return Ok(());
-        }
-        // **The capsule takes its own press** (§7.1.5d), above the rail it
-        // shares a corner with and below every surface that floats over the
-        // window — the order it is drawn in.
-        //
-        // *"The capsule is one control: any press hands the caret back"* (B74),
-        // which is why even a press on its bare padding is claimed rather than
-        // let through: a control you can click a hole in is a control that
-        // sometimes types into the shell behind it.
-        //
-        // The pane underneath has already taken the layout focus, exactly as it
-        // has for the rail below: D40 runs above this router and consumes
-        // nothing.
-        if state == ElementState::Pressed
-            && button == MouseButton::Left
-            && let Some(position) = self.window.pointer_position
-            && self.press_search(position)?
         {
             return Ok(());
         }
@@ -4931,18 +5317,6 @@ impl Runtime<'_> {
             && let Some(position) = self.window.pointer_position
             && self.press_command_rail(position)?
         {
-            return Ok(());
-        }
-        if state == ElementState::Released
-            && matches!(self.window.mouse_route, Some(MouseRoute::MathBlock))
-        {
-            self.window.mouse_route = None;
-            // The press ink comes off with the button, wherever it comes up —
-            // the gesture belongs to the mark it began on (owner's ruling
-            // 2026-09-14 ②).
-            if self.window.math_tool_pressed.take().is_some() {
-                self.repaint_hovered_pane()?;
-            }
             return Ok(());
         }
         if state == ElementState::Pressed
@@ -5008,16 +5382,6 @@ impl Runtime<'_> {
                 _ => {}
             }
             return Ok(());
-        }
-        // A selection drag already in flight is finished wherever the button comes
-        // up — over the pane next door, over the chrome, past the window's edge.
-        // The pane it began in owns the whole gesture, so nothing here needs the
-        // pointer to be over a cell; under the guard below, a release outside the
-        // pane left the route latched and the next move went on selecting.
-        if state == ElementState::Released
-            && let Some(MouseRoute::Local(drag)) = self.window.mouse_route.as_ref().cloned()
-        {
-            return self.finish_local_selection(*drag);
         }
         // **A rendered page's own context menu** (user report 2026-08-28),
         // asked before the cell lookup below because a preview seat has no cells
@@ -5106,6 +5470,11 @@ impl Runtime<'_> {
                 self.local_image_path_hit(hit),
             )
         });
+        // The shell the press is handed to — the focused one, which D40 made
+        // the pressed pane on the way down — recorded on the route as its owner.
+        let Some(owner) = self.paste_target(self.focused_leaf) else {
+            return Ok(());
+        };
         if let Some(bytes) = route_forwarded_mouse_button(
             &mut self.window.mouse_route,
             state,
@@ -5114,6 +5483,7 @@ impl Runtime<'_> {
             modes,
             self.window.modifiers,
             target,
+            owner,
         ) {
             self.mouse_trace(|| {
                 format!(
@@ -5132,9 +5502,20 @@ impl Runtime<'_> {
                 UserInputKind::MouseButton,
             );
         }
+        // **A gesture already handed to the program keeps the pane**: another
+        // button pressed over a cell while it is held is not forwarded and does
+        // not begin a selection that would take the route from it.
+        if matches!(self.window.mouse_route, Some(MouseRoute::Forward { .. })) {
+            return Ok(());
+        }
         match state {
             ElementState::Pressed if button == MouseButton::Left => {
-                self.begin_local_selection(hit_seat, hit)
+                // The selection is addressed to the shell in the pressed pane,
+                // as the forwarded press is to the focused one.
+                let Some(owner) = self.paste_target(hit_seat) else {
+                    return Ok(());
+                };
+                self.begin_local_selection(owner, hit)
             }
             _ => Ok(()),
         }
@@ -5495,6 +5876,32 @@ impl Runtime<'_> {
             .is_some()
         {
             self.mouse_trace(|| "wheel_route taken=overlay at=toast".to_owned());
+            return Ok(());
+        }
+        // **A band painted above the panes owns the notch over its own area**
+        // (T-STRIP-HOVER-THROUGH, final review 2026-10-04), whether or not it
+        // scrolls. The topmost band of `OVER_IN_PANE_TOP_FIRST` under the
+        // pointer says what it does with it ([`OverInPane::wheel`]): its own
+        // station below answers it (the palette's list, a floating window), or
+        // it is swallowed here (a menu, the download sheet) — a notch on a menu
+        // must not scroll the terminal under it.
+        if let Some(position) = self.window.pointer_position
+            && let Some(band) = self.topmost_band_over_in_pane_at(position)
+        {
+            if band.wheel() == OverWheel::Swallow {
+                self.mouse_trace(|| format!("wheel_route taken=overlay at=over-pane {band:?}"));
+                return Ok(());
+            }
+        } else if let Some(position) = self.window.pointer_position
+            && let Some(surface) = self.in_pane_surface_at(position)
+        {
+            // **A notch over a surface inside a pane is nobody's** — the
+            // capsule and a notice strip, asked of the one router
+            // ([`Self::in_pane_surface_at`]) so the wheel's owner is the
+            // hover's and the press's. Neither is a scroller and neither is
+            // transparent; a strip with nothing to press claims nothing, so a
+            // notch passes through a `Saved` exactly as a hover does.
+            self.mouse_trace(|| format!("wheel_route taken=overlay at=in-pane {surface:?}"));
             return Ok(());
         }
         // **A notch over the palette is the palette's** (DESIGN.md §7.55 ⑧,

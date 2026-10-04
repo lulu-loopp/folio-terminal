@@ -193,11 +193,13 @@ impl Runtime<'_> {
             // schematic. It also stores the capsule's rectangle for the press
             // router, so the box you can press is the box you can see.
             search: self.search_layers().into(),
-            // Beside the capsule, and above it in the list for the reason it
-            // is above it on the glass: the capsule floats over the pane's
-            // own text and this stands in a row the text was moved out of, so
-            // the two can never overlap and the order between them says which
-            // would win if the arithmetic were ever broken.
+            // Beside the capsule, and **under** it on the glass (owner's ruling
+            // 2026-10-04): the two meet — the capsule hangs from the seat's own
+            // top (`seats::search_capsule_host`), not from the body the strip
+            // leaves — and where they do, the surface the reader summoned is on
+            // top. The order is not this list's: `OverlayStack::flattened`
+            // paints both from `IN_PANE_SURFACES_TOP_FIRST`, the list the
+            // pointer router reads.
             pane_notices: self.notice_layers().into(),
             // **Above the capsule and the strip, below every menu.** It is a
             // notice standing on one pane's own body, and §7.7 ④ puts its Escape
@@ -1399,6 +1401,15 @@ impl Runtime<'_> {
         // root every hover consumer draws from, so the gate is here and nowhere
         // else.
         if self.pointer_over_a_float(position) {
+            return None;
+        }
+        // **And a surface inside a pane over the pointer is over the pane**
+        // (T-STRIP-HOVER-THROUGH, owner's ruling 2026-10-04), one layer down and
+        // in the router's own order: the capsule floats over the terminal's
+        // cells, so a link, a formula or a reference under it is under the
+        // capsule and not under the pointer. The two questions the router asks
+        // for these layers, asked here as facts because this root is `&self`.
+        if self.search_part_at(position).is_some() || self.docked_notice_at(position).is_some() {
             return None;
         }
         let seat = seats::pane_at(&self.seat_layout, position.x, position.y)?;

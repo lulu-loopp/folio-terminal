@@ -843,11 +843,24 @@ impl Seats {
     /// merely covered — a button that answers a hit test it is not drawn for is
     /// an invisible button.
     ///
+    /// **And so does the pane's notice strip** ([`Self::seat_wears_notice`];
+    /// T-STRIP-HOVER-THROUGH, 2026-10-04), for the same reason one surface over.
+    /// The corner is measured from the seat's own top and the strip takes the
+    /// top row of a headless pane's body, so the two doors stand under the band
+    /// — under its verbs and its `×` — and `Layered::Notice` is painted over
+    /// them: a ghost that went on wearing this corner was a pair of invisible
+    /// buttons, raising the files card and the pane menu from under the strip's
+    /// own words. Stood down rather than moved, because the strip is the thing
+    /// standing in that corner now, and the strip's `×` is the way back to it.
+    ///
     /// One predicate for the painter and for the hit test both, so the day the
     /// ghost is refused it is refused to both at once.
     #[must_use]
     pub fn seat_wears_ghost(&self, kind: SeatKind, seat: SeatId, capsule: Option<SeatId>) -> bool {
-        kind == SeatKind::Terminal && !self.seat_wears_head(kind) && capsule != Some(seat)
+        kind == SeatKind::Terminal
+            && !self.seat_wears_head(kind)
+            && capsule != Some(seat)
+            && !self.seat_wears_notice(seat)
     }
 
     /// Whether this seat wears the notice strip (§7.1.6j).
@@ -37507,6 +37520,132 @@ mod tests {",
             }),
             "the capsule owns this corner while it is up",
         );
+    }
+
+    /// **A notice strip stands the corner down too** (T-STRIP-HOVER-THROUGH,
+    /// owner's report on 0.4.6, 2026-10-03).
+    ///
+    /// The corner is measured from the seat's own top and the strip takes the
+    /// top row of a headless pane's body, so the two doors stand under the band
+    /// — under its verbs and its `×` — where `Layered::Notice` paints over them.
+    /// Hovering the strip's `×` raised the files card from the invisible folder
+    /// door, and a rest there opened the pane menu from the invisible `⌄`.
+    ///
+    /// Every band kind, every control on it, at two scales: the strip's own hit
+    /// test names the control, and nothing of the corner — not its hit test, not
+    /// the boxes the files flyout and the tips hang off, not the text-size mark,
+    /// not the paint — is there. And the witness that makes it a test rather than
+    /// a tautology: with the strip taken away, the same `×` is a door again.
+    ///
+    /// Red gate: drop the notice half of [`Seats::seat_wears_ghost`] and the
+    /// first assertion inside the loop names the control the ghost answered
+    /// through.
+    #[test]
+    fn a_notice_strip_stands_the_corner_ghost_down_under_every_control() {
+        use crate::notice::{self, Notice, NoticeElement, NoticeSay};
+
+        for dpi_milli in [1_000_u32, 1_500] {
+            let scale = dpi_milli as f32 / 1_000.0;
+            let metrics = seat_metrics(dpi_milli);
+            let viewport = viewport_of(1200, 800, dpi_milli);
+            let bare = Seats::lone_terminal();
+            let layout = solved(&bare, viewport, &metrics);
+            let seat = layout.rects[0].id;
+            let text_sizes = BTreeMap::from([(seat, 150_u16)]);
+
+            let mut seats = bare.clone();
+            seats.set_notices(std::collections::BTreeSet::from([seat]));
+            let layout = solved(&seats, viewport, &metrics);
+            let strip = pane_notice_strip(&seats, &layout, seat, scale)
+                .expect("a pane that wears a notice has a strip");
+
+            for kind in [
+                Notice::Offer,
+                Notice::Added,
+                Notice::DiskChanged,
+                Notice::DiskDeleted,
+            ] {
+                let say = NoticeSay::band(kind);
+                let widths = vec![90.0 * scale; say.verbs.len()];
+                let bar = notice::lay_out(strip, say, &widths, scale);
+                let controls = bar
+                    .verbs
+                    .iter()
+                    .map(|(verb, box_)| (NoticeElement::Verb(*verb), *box_))
+                    .chain(bar.close.map(|close| (NoticeElement::Close, close)));
+                for (element, box_) in controls {
+                    let (x, y) = ((box_[0] + box_[2]) / 2.0, (box_[1] + box_[3]) / 2.0);
+                    assert_eq!(
+                        notice::claim(&bar, x, y),
+                        Some(element),
+                        "{kind:?} at {scale}x: the strip names its own control"
+                    );
+                    assert_eq!(
+                        hit_pane_ghost(&seats, &layout, scale, None, f64::from(x), f64::from(y)),
+                        None,
+                        "{kind:?} at {scale}x: nothing of the corner answers under {element:?}"
+                    );
+                }
+            }
+            assert!(
+                pane_control_boxes(&seats, &layout, seat, scale, None).is_empty(),
+                "no door is registered for a tip or a flyout while the strip is up"
+            );
+            assert_eq!(pane_files_box(&seats, &layout, seat, scale, None), None);
+            assert_eq!(pane_chevron_box(&seats, &layout, seat, scale, None), None);
+            assert_eq!(
+                pane_text_size_box(&seats, &layout, seat, &text_sizes, scale, None),
+                None,
+                "the corner's text-size mark stands down with the doors beside it"
+            );
+            let (_, _, sprites) = pane_chrome(
+                &seats,
+                &layout,
+                scale,
+                ChromePointer {
+                    pane_hover: Some(seat),
+                    ..ChromePointer::default()
+                },
+                None,
+                (None, None),
+            );
+            assert!(
+                !sprites.iter().any(|sprite| {
+                    (sprite.mark == ChromeMark::Chevron { turned_degrees: 0 }
+                        || sprite.mark == crate::icons::ActionIcon::OpenFilesPane.mark())
+                        && in_the_pane_layer(sprite.rect, scale)
+                }),
+                "and nothing of it is drawn under the band"
+            );
+
+            // The witness: the same `×`, with no strip, is the corner's door —
+            // the glyph answers exactly as it did before the strip came.
+            let bar = notice::lay_out(strip, NoticeSay::band(Notice::Offer), &[90.0; 2], scale);
+            let close = bar.close.expect("a band has its `×`");
+            let (x, y) = ((close[0] + close[2]) / 2.0, (close[1] + close[3]) / 2.0);
+            let bare_layout = solved(&bare, viewport, &metrics);
+            assert!(
+                matches!(
+                    hit_pane_ghost(&bare, &bare_layout, scale, None, f64::from(x), f64::from(y)),
+                    Some(ChromeTarget::PaneFiles(_) | ChromeTarget::PaneMenu(_))
+                ),
+                "at {scale}x the strip's `×` stands on one of the corner's doors"
+            );
+            let folder = pane_files_box(&bare, &bare_layout, seat, scale, None)
+                .expect("with no strip the corner seats its folder");
+            assert_eq!(
+                hit_pane_ghost(
+                    &bare,
+                    &bare_layout,
+                    scale,
+                    None,
+                    f64::from((folder[0] + folder[2]) / 2.0),
+                    f64::from((folder[1] + folder[3]) / 2.0),
+                ),
+                Some(ChromeTarget::PaneFiles(seat)),
+                "and with no strip the folder answers as it always has"
+            );
+        }
     }
 
     // ── the folder beside it (user proposal, Claude 认可 2026-08-25, §7.1.6i) ──
