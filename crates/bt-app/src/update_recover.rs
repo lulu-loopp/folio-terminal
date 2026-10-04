@@ -113,7 +113,7 @@ use bt_platform::file_reads::{self, Lane};
 use crate::cli;
 use crate::update_apply::{ExitGuard, Leave, Left, Opens};
 use crate::update_apply_macos::{self, Hands, Limits, Road};
-use crate::update_txn::{Class, Header, Home};
+use crate::update_txn::{Actor, Class, Header, Home, Journal};
 
 /// **The recovery door's effects**: a lock holder's (its lines, the exchange,
 /// the check of a restored bundle), and the start of the installed Folio.
@@ -230,6 +230,7 @@ pub(crate) fn run_here(
                         world: &mut machine,
                         handed,
                         worker: None,
+                        actor: None,
                     });
                     if then_launch.is_none() {
                         guard.nobody_waiting();
@@ -241,6 +242,7 @@ pub(crate) fn run_here(
                         worker: None,
                         door: &door,
                         world: &mut world,
+                        actor: None,
                     });
                     if then_launch.is_none() {
                         guard.nobody_waiting();
@@ -296,6 +298,8 @@ struct DoorLeave<'a, W: World> {
     worker: Option<&'a WorkerCtx>,
     door: &'a Door<'a>,
     world: &'a mut W,
+    /// The lock-holder role allowed to reserve U-35's last trial.
+    actor: Option<Actor>,
 }
 
 impl<W: World> Leave for DoorLeave<'_, W> {
@@ -322,6 +326,32 @@ impl<W: World> Leave for DoorLeave<'_, W> {
 
     fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()> {
         self.world.spawn_detached(program, words)
+    }
+
+    fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+        let bytes = file_reads::read(Lane::UpdateJournal, self.door.home.journal()).ok()?;
+        let journal = Journal::parse(&bytes).ok()?;
+        Some((
+            PathBuf::from(journal.rescue),
+            crate::update_apply::failed_words(self.door.home).to_vec(),
+        ))
+    }
+
+    fn last_trial(&mut self) -> Result<Option<(PathBuf, Vec<OsString>)>, String> {
+        let (Some(worker), Some(actor)) = (self.worker, self.actor) else {
+            return Ok(None);
+        };
+        if !matches!(
+            update_apply_macos::opens_now(Some(worker), self.door.home),
+            Opens::Trial { .. }
+        ) {
+            return Ok(None);
+        }
+        let (txn, nonce) = crate::update_apply::reserve_last_trial(worker, self.door.home, actor)?;
+        let mut words = crate::update_apply::trial_words(txn, &nonce).to_vec();
+        words.extend(crate::update_apply::failed_words(self.door.home));
+        words.extend_from_slice(self.door.then_launch.unwrap_or(&[]));
+        Ok(Some((self.door.installed.to_path_buf(), words)))
     }
 
     fn acknowledged(&mut self) -> bool {
@@ -392,6 +422,7 @@ pub(crate) fn run(worker: &WorkerCtx, door: &Door<'_>, world: &mut impl World) -
         worker: Some(worker),
         door,
         world,
+        actor: Some(Actor::Recovery),
     });
     let home = door.home;
     let (log, whereabouts) = log_file(home, door.data);
@@ -486,6 +517,7 @@ pub(crate) fn run_windows(
         world,
         handed: then_launch.unwrap_or(&[]),
         worker: Some(worker),
+        actor: Some(Actor::Recovery),
     });
     let (log, whereabouts) = log_file(&road.home, &road.data);
     let appended = appended_to(&log);

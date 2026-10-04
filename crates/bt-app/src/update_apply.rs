@@ -51,7 +51,9 @@
 //! * [`ExitGuard`] — **the one way a road process leaves** (U-34): at its
 //!   exit, whatever the reason, a successor it holds still running opens
 //!   Folio, else it starts what the disk names ([`Opens`]); the recovery run
-//!   at logon with nothing done is the one exception ([`Opener`]).
+//!   at logon with nothing done is the one exception ([`Opener`]); since U-35,
+//!   two OS launch refusals reserve one final ordinary trial durably before
+//!   asking the same installed image to start once more.
 //!
 //! Every wait here sleeps through the worker's wait door
 //! (`bt_platform::wait::sleep_within`), on the `WorkerCtx` of the standalone
@@ -365,6 +367,43 @@ pub(crate) fn now_ms() -> u64 {
         .map_or(0, |since| {
             u64::try_from(since.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+/// **Reserve U-35's one last trial before it is launched.** The caller has
+/// already proved that the new image is live and that both the first start of
+/// it and the rescue copy were refused by the operating system. This takes the
+/// transaction lock once, requires `Moving` (so a failed trial can never come
+/// round here again), records `TrialStarting` durably, and returns the frozen
+/// trial words' transaction and nonce.
+pub(crate) fn reserve_last_trial(
+    worker: &WorkerCtx,
+    home: &Home,
+    actor: Actor,
+) -> Result<(TxnId, Nonce), String> {
+    let _lock = match install_txn::try_hold(&home.lock(), Hold::Exclusive) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return Err("the transaction lock is held".to_owned()),
+        Err(failure) => return Err(failure.to_string()),
+    };
+    let bytes = file_reads::read(Lane::UpdateJournal, home.journal())
+        .map_err(|error| format!("the journal could not be read: {error}"))?;
+    let journal = Journal::parse(&bytes).map_err(|refusal| refusal.to_string())?;
+    if journal.body.phase != Phase::Moving {
+        return Err(format!(
+            "the journal is {:?}, not Moving",
+            journal.body.phase.kind()
+        ));
+    }
+    let nonce = crate::update_job::mint_nonce();
+    let mut journaled = Journaled::of(home, worker, journal);
+    journaled.record(
+        actor,
+        &Event::TrialPlanned {
+            nonce,
+            began_ms: now_ms(),
+        },
+    )?;
+    Ok((journaled.journal.txn, nonce))
 }
 
 /// **How a trial's watch ended.**
@@ -1023,11 +1062,17 @@ pub(crate) trait Leave {
     /// It could not be started.
     fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()>;
     /// **What to start when [`Leave::opening`]'s program would not start**, or
-    /// started and never acknowledged: the next program the disk rule names —
-    /// on Windows the rescue copy with `--update-failed`, O's own image, known
-    /// to run — or `None`.
+    /// started and never acknowledged: the previous build's rescue copy with
+    /// `--update-failed`, or `None`.
     fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
         None
+    }
+    /// **Reserve and name the one last trial after both ordinary deliveries
+    /// were refused by the operating system** (0.4.7 U-35). The reservation
+    /// is durable before this returns. `Ok(None)` means this journal/disk state
+    /// is not eligible; `Err` names why it could not be reserved.
+    fn last_trial(&mut self) -> Result<Option<(PathBuf, Vec<OsString>)>, String> {
+        Ok(None)
     }
     /// **Whether the start just made was delivered** (round 2, blocker 2):
     /// a Folio holds the data directory's claim within
@@ -1159,7 +1204,10 @@ impl Left {
 /// where neither whole set is installed). A start is delivered only when it is
 /// acknowledged ([`Leave::acknowledged`]: a Folio holds the data directory);
 /// otherwise the next program the rule names ([`Leave::fallback`]); and when
-/// no start is delivered, this process shows the failure window itself
+/// both process creations are refused by the OS, U-35 reserves one final
+/// ordinary trial before asking for it once. A created but unacknowledged
+/// process does not trigger that reservation. When no start is delivered,
+/// this process shows the failure window itself
 /// ([`Leave::show_here`]). **The irrecoverable boundary** is what no process
 /// can survive from inside: the operating system refusing to show a window at
 /// all, or this process ended from outside (a kill, a power cut — the entrance
@@ -1259,18 +1307,43 @@ impl<L: Leave> ExitGuard<L> {
     /// The start the disk names, or its fallback.
     fn start(&mut self) -> Left {
         let mut why = Vec::new();
+        let mut attempts = 0usize;
+        let mut refused = 0usize;
         match self.leave.opening() {
             None => why.push(String::from("nothing could be named to start")),
             Some((program, words)) => {
-                if let Some(left) = self.deliver(&program, &words, &mut why) {
+                let delivered = self.deliver(&program, &words, &mut why);
+                attempts += 1;
+                refused += usize::from(delivered.refused);
+                if let Some(left) = delivered.left {
                     return left;
                 }
                 if let Some((next, words)) =
                     self.leave.fallback().filter(|(next, _)| *next != program)
-                    && let Some(left) = self.deliver(&next, &words, &mut why)
                 {
-                    return left;
+                    let delivered = self.deliver(&next, &words, &mut why);
+                    attempts += 1;
+                    refused += usize::from(delivered.refused);
+                    if let Some(left) = delivered.left {
+                        return left;
+                    }
                 }
+            }
+        }
+        // "Could not be launched" is the operating system refusing both
+        // process creations. A process that was created but never
+        // acknowledged is a different failure and is never started again as
+        // U-35's trial.
+        if attempts >= 2 && refused == attempts {
+            match self.leave.last_trial() {
+                Ok(Some((program, words))) => {
+                    let delivered = self.deliver(&program, &words, &mut why);
+                    if let Some(left) = delivered.left {
+                        return left;
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => why.push(format!("the last trial was not recorded: {error}")),
             }
         }
         let why = why.join("; ");
@@ -1280,27 +1353,41 @@ impl<L: Leave> ExitGuard<L> {
 
     /// One start, and its acknowledgement: `Some` once delivered; otherwise
     /// what failed is added to `why`.
-    fn deliver(
-        &mut self,
-        program: &Path,
-        words: &[OsString],
-        why: &mut Vec<String>,
-    ) -> Option<Left> {
+    fn deliver(&mut self, program: &Path, words: &[OsString], why: &mut Vec<String>) -> Delivery {
         match self.leave.start(program, words) {
             Ok(()) if self.leave.acknowledged() => {
-                return Some(Left::Started(program.to_path_buf()));
+                return Delivery {
+                    left: Some(Left::Started(program.to_path_buf())),
+                    refused: false,
+                };
             }
             Ok(()) => why.push(format!(
                 "{} started and no Folio took the data directory",
                 program.display()
             )),
-            Err(error) => why.push(format!(
-                "{} could not be started: {error}",
-                program.display()
-            )),
+            Err(error) => {
+                why.push(format!(
+                    "{} could not be started: {error}",
+                    program.display()
+                ));
+                return Delivery {
+                    left: None,
+                    refused: true,
+                };
+            }
         }
-        None
+        Delivery {
+            left: None,
+            refused: false,
+        }
     }
+}
+
+struct Delivery {
+    left: Option<Left>,
+    /// The operating system refused process creation (not merely an
+    /// unacknowledged process).
+    refused: bool,
 }
 
 impl<L: Leave> Drop for ExitGuard<L> {
@@ -1407,4 +1494,83 @@ pub(crate) fn owed_at_logon(ended: &Ended) -> bool {
             | Ended::Abandoned
             | Ended::Deferred(_)
     )
+}
+
+#[cfg(test)]
+mod exit_guard_tests {
+    use super::*;
+
+    struct Door {
+        primary_refused: bool,
+        fallback_refused: bool,
+        starts: Vec<PathBuf>,
+        last_trials: usize,
+    }
+
+    impl Leave for Door {
+        fn say(&mut self, _line: &str) {}
+
+        fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+            Some((PathBuf::from("primary"), Vec::new()))
+        }
+
+        fn start(&mut self, program: &Path, _words: &[OsString]) -> io::Result<()> {
+            self.starts.push(program.to_path_buf());
+            let refused = match program.to_string_lossy().as_ref() {
+                "primary" => self.primary_refused,
+                "fallback" => self.fallback_refused,
+                "last-trial" => true,
+                _ => unreachable!(),
+            };
+            if refused {
+                Err(io::Error::other("refused (test)"))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+            Some((PathBuf::from("fallback"), Vec::new()))
+        }
+
+        fn last_trial(&mut self) -> Result<Option<(PathBuf, Vec<OsString>)>, String> {
+            self.last_trials += 1;
+            Ok(Some((PathBuf::from("last-trial"), Vec::new())))
+        }
+
+        fn acknowledged(&mut self) -> bool {
+            false
+        }
+
+        fn show_here(&mut self, _why: &str) {}
+    }
+
+    /// RED (U-35) — the last trial belongs only to the `Err`/`Err` cell of
+    /// the two-launch decision table. A process that was created but did not
+    /// acknowledge is not an OS launch refusal.
+    ///
+    /// MUTATION: count an unacknowledged `Ok` as a refusal, or trigger after
+    /// only one `Err`.
+    #[test]
+    fn u35_the_last_trial_requires_two_os_launch_refusals() {
+        for (primary_refused, fallback_refused, expected) in [
+            (false, false, 0),
+            (false, true, 0),
+            (true, false, 0),
+            (true, true, 1),
+        ] {
+            let mut guard = ExitGuard::new(Door {
+                primary_refused,
+                fallback_refused,
+                starts: Vec::new(),
+                last_trials: 0,
+            });
+            assert!(matches!(guard.leave(), Left::ShownHere(_)));
+            assert_eq!(guard.inner().last_trials, expected);
+            assert_eq!(
+                guard.inner().starts.len(),
+                if expected == 1 { 3 } else { 2 }
+            );
+        }
+    }
 }

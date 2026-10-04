@@ -236,6 +236,9 @@ pub(crate) enum Outcome {
     /// `Update incomplete.` and the journal's folder — the rollback did not
     /// finish (`Failure::Incomplete`, U-29).
     Incomplete { folder: PathBuf },
+    /// The unfinished update's new build is running as its recorded trial
+    /// because neither recovery launch could be made (U-35).
+    Trial { folder: PathBuf },
 }
 
 /// **Everything the card draws, in the order it draws it** — decided here, from
@@ -328,6 +331,11 @@ pub(crate) fn failed(reason: &str, outcome: &Outcome) -> Paint {
             Some(folder.clone()),
             CardVerb::ShowFolder,
         ),
+        Outcome::Trial { folder } => (
+            Text::UpdateCardTrial,
+            Some(folder.clone()),
+            CardVerb::ShowFolder,
+        ),
     };
     Paint {
         heading: Some(reason.to_owned()),
@@ -355,6 +363,7 @@ fn reason(failure: &Failure) -> String {
         Failure::Stopped(Stop::Clone) => Text::UpdateFailedClone,
         Failure::Stopped(Stop::TooOld) => Text::UpdateFailedTooOld,
         Failure::RolledBack | Failure::Incomplete { .. } => Text::UpdateFailedTrial,
+        Failure::TrialIncomplete { .. } => Text::UpdateFailedTrialRunning,
         Failure::Interrupted => Text::UpdateFailedInterrupted,
         Failure::Stopped(Stop::Space { short_by }) => {
             return i18n::update_failed_space(&needed_megabytes(*short_by));
@@ -378,6 +387,9 @@ fn outcome(failure: &Failure) -> Outcome {
         Failure::Unsupported | Failure::Stopped(_) => Outcome::NothingChanged,
         Failure::RolledBack | Failure::Interrupted => Outcome::Restored,
         Failure::Incomplete { folder } => Outcome::Incomplete {
+            folder: folder.clone(),
+        },
+        Failure::TrialIncomplete { folder } => Outcome::Trial {
             folder: folder.clone(),
         },
     }
@@ -769,7 +781,7 @@ pub(crate) fn version_failed_in(lang: Lang, outcome: &Outcome, version: &str) ->
     match outcome {
         Outcome::NothingChanged => Text::VersionFailed,
         Outcome::Restored => Text::VersionFailedRestored,
-        Outcome::Incomplete { .. } => Text::VersionFailedIncomplete,
+        Outcome::Incomplete { .. } | Outcome::Trial { .. } => Text::VersionFailedIncomplete,
     }
     .in_lang(lang)
     .replace("{version}", version)
@@ -1752,6 +1764,34 @@ mod tests {
         assert_eq!(drawn.detail.as_deref(), Some("Update incomplete."));
         assert_eq!(drawn.folder, Some(folder));
         assert_eq!(drawn.verbs, vec![CardVerb::ShowFolder, CardVerb::Close]);
+        assert_eq!(drawn.primary(), Some(CardVerb::ShowFolder));
+    }
+
+    /// RED (U-35) — **the fallback trial's card says both facts**: the update
+    /// did not complete as intended, and this session is the new version's
+    /// trial. It keeps the unfinished transaction's Show folder action.
+    ///
+    /// MUTATION: map `Failure::TrialIncomplete` to the ordinary incomplete
+    /// texts; either sentence below changes.
+    #[test]
+    fn u35_the_fallback_trial_card_names_the_update_and_the_session() {
+        let folder = PathBuf::from("update-journal");
+        let drawn = paint(&State::Failed(
+            None,
+            Failure::TrialIncomplete {
+                folder: folder.clone(),
+            },
+        ))
+        .expect("the fallback trial has a card");
+        assert_eq!(
+            drawn.heading.as_deref(),
+            Some("The update did not complete as intended.")
+        );
+        assert_eq!(
+            drawn.detail.as_deref(),
+            Some("This session is a trial of the new version.")
+        );
+        assert_eq!(drawn.folder, Some(folder));
         assert_eq!(drawn.primary(), Some(CardVerb::ShowFolder));
     }
 

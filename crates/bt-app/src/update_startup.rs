@@ -77,8 +77,8 @@ use bt_platform::install_txn::{self, Held, Hold};
 use crate::cli;
 use crate::update_job::Failure;
 use crate::update_txn::{
-    AfterRollback, Class, Digest, Effect, Header, Home, JournalRead, Nonce, StartAction, StartView,
-    TxnId, after_rollback, at_start, rolled_back_untried,
+    AfterRollback, Class, Digest, Effect, Header, Home, Journal, JournalRead, Nonce, Phase,
+    StartAction, StartView, TxnId, after_rollback, at_start, rolled_back_untried,
 };
 
 /// **The pass has run.** Only [`pass`] makes one, and `launch_wire::hand_over`
@@ -249,10 +249,18 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     let admission = admit(start.home, world);
     let journal_path = start.home.journal();
     let mut untried = false;
+    let mut trial_starting = None;
     let journal = match file_reads::read(Lane::Install, &journal_path) {
         Ok(bytes) => match Header::parse(&bytes) {
             Ok(header) if start.failed.is_some() => {
                 untried = rolled_back_untried(&bytes);
+                trial_starting = Journal::parse(&bytes).ok().and_then(|journal| {
+                    if let Phase::TrialStarting { nonce, .. } = journal.body.phase {
+                        Some((journal.txn, nonce))
+                    } else {
+                        None
+                    }
+                });
                 JournalRead::Read(header)
             }
             Ok(header) => JournalRead::Read(header),
@@ -288,6 +296,17 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     };
     let header = header.clone();
     let trial = trial_of(start.trial, world);
+    let is_last_trial = trial
+        .zip(trial_starting)
+        .is_some_and(|(asked, planned)| asked == planned);
+    // A pre-launch U-35 reservation admits only the nonce it put on disk.
+    // Other destructive phases retain the frozen v1 rule (the transaction is
+    // the startup decision; the lock holder checks the nonce on the receipt).
+    let trial_for_view = if trial_starting.is_some() {
+        trial.filter(|_| is_last_trial)
+    } else {
+        trial
+    };
     // The card is read before a retirement removes the journal it is read
     // from. The word's value is not read (U-32, U-29's open point 6): the
     // card is this home's header, so the folder it names is this home's —
@@ -298,6 +317,9 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
         .map(|after| match after {
             AfterRollback::Restored if untried => Failure::Interrupted,
             AfterRollback::Restored => Failure::RolledBack,
+            AfterRollback::Incomplete if is_last_trial => Failure::TrialIncomplete {
+                folder: start.home.root().to_path_buf(),
+            },
             AfterRollback::Incomplete => Failure::Incomplete {
                 folder: start.home.root().to_path_buf(),
             },
@@ -317,8 +339,12 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
         rescue_image: measured
             .then(|| image(&start.home.rescue_program(&header.rescue)))
             .flatten(),
-        trial_of: trial.map(|(txn, _)| txn),
-        sent_by_rollback: start.failed.is_some(),
+        trial_of: trial_for_view.map(|(txn, _)| txn),
+        // `--update-failed` normally proves that a lock holder deliberately
+        // sent this start past a destructive header. In `TrialStarting`, only
+        // the exact reserved nonce carries that proof; another line must hand
+        // the transaction back instead of running the new build plainly.
+        sent_by_rollback: start.failed.is_some() && (trial_starting.is_none() || is_last_trial),
     };
     // The start's lock is let go before the job owner asks for it: a
     // transaction continued past is the job's, at this launch (U-33).
@@ -1440,6 +1466,95 @@ mod tests {
                 }),
                 "the folder of the journal the card was read from"
             );
+        }
+
+        /// RED (U-35) — **the exact trial reserved before the final launch is
+        /// admitted through the ordinary trial road and its launch card names
+        /// this session as the trial**. Merely carrying trial-shaped words
+        /// with another nonce keeps the ordinary incomplete card.
+        ///
+        /// MUTATION: identify the final trial from argv alone, or fail to
+        /// distinguish its card from another destructive start.
+        #[test]
+        fn u35_the_reserved_last_trial_is_admitted_and_named_by_its_card() {
+            use crate::update_txn::{Body, Inventories, Layout};
+
+            let Some(scene) = Scene::new("last-trial-card") else {
+                return;
+            };
+            let journal = Journal {
+                txn: txn(),
+                rescue: scene.rescue.to_string_lossy().into_owned(),
+                body: Body {
+                    adapter: crate::update_txn::Adapter::Ours,
+                    phase: Phase::TrialStarting {
+                        nonce: nonce(),
+                        began_ms: 42,
+                    },
+                    layout: Layout::Members(Inventories {
+                        old_shipped: vec!["folio.exe".to_owned()],
+                        old_present: Vec::new(),
+                        new: Vec::new(),
+                    }),
+                },
+            };
+            std::fs::write(scene.home.journal(), journal.encode()).unwrap();
+            let asked = cli::UpdateTrialArg {
+                txn: txn().to_string(),
+                nonce: nonce().to_string(),
+            };
+            let argv = [
+                OsString::from(cli::UPDATE_TRIAL_FLAG),
+                OsString::from(&asked.txn),
+                OsString::from(&asked.nonce),
+                OsString::from(cli::UPDATE_FAILED_FLAG),
+                scene.home.journal().into_os_string(),
+            ];
+            let mut world = Recorded {
+                admission: Some(scene.home.admission()),
+                ..Recorded::default()
+            };
+            let Verdict::Continue { trial, failed, .. } = run(
+                &Start {
+                    own_exe: &scene.own_exe,
+                    home: &scene.home,
+                    argv: &argv,
+                    trial: Some(&asked),
+                    failed: Some(&scene.home.journal()),
+                },
+                &mut world,
+            ) else {
+                panic!("the reserved trial continues in this image");
+            };
+            assert_eq!(trial, Some((txn(), nonce())));
+            assert_eq!(
+                failed,
+                Some(Failure::TrialIncomplete {
+                    folder: scene.home.root().to_path_buf()
+                })
+            );
+            assert!(world.spawned.is_empty(), "the trial is not handed back");
+
+            let another = cli::UpdateTrialArg {
+                txn: txn().to_string(),
+                nonce: Nonce::new([0x9d; 32]).to_string(),
+            };
+            let mut world = Recorded::default();
+            assert_eq!(
+                exited(run(
+                    &Start {
+                        own_exe: &scene.own_exe,
+                        home: &scene.home,
+                        argv: &argv,
+                        trial: Some(&another),
+                        failed: Some(&scene.home.journal()),
+                    },
+                    &mut world,
+                )),
+                0,
+                "another nonce is handed to recovery, not admitted"
+            );
+            assert_eq!(world.spawned.len(), 1);
         }
 
         /// RED (U-32) — **a trial started over `Stuck` that commits forward

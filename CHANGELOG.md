@@ -39,6 +39,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- If neither updater recovery launch can start, Folio makes one final protected trial of the new version and clearly reports if that cannot start either.
 - On Windows, Ctrl+Alt with a letter or digit reaches programs that asked for
   the kitty protocol or modifyOtherKeys.
 - Chinese font choices stay in Chinese coverage order instead of being sorted

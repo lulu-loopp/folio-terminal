@@ -543,6 +543,9 @@ pub(crate) struct WindowsLeave<'a, W: World> {
     /// The worker whose wait door the acknowledgement's wait sleeps through;
     /// `None` where none was lent (then it is asked once).
     pub(crate) worker: Option<&'a WorkerCtx>,
+    /// The lock-holder role allowed to reserve U-35's last trial. `None`
+    /// before the road has admitted this process as an applier.
+    pub(crate) actor: Option<Actor>,
 }
 
 impl<W: World> Leave for WindowsLeave<'_, W> {
@@ -566,6 +569,20 @@ impl<W: World> Leave for WindowsLeave<'_, W> {
         let (program, mut words) = self.road.opening(&Opens::Rescue);
         words.extend_from_slice(self.handed);
         Some((program.to_path_buf(), words))
+    }
+
+    fn last_trial(&mut self) -> Result<Option<(PathBuf, Vec<OsString>)>, String> {
+        let (Some(worker), Some(actor)) = (self.worker, self.actor) else {
+            return Ok(None);
+        };
+        if !matches!(opens_now(self.road), Opens::Trial { .. }) {
+            return Ok(None);
+        }
+        let (txn, nonce) = crate::update_apply::reserve_last_trial(worker, &self.road.home, actor)?;
+        let mut words = crate::update_apply::trial_words(txn, &nonce).to_vec();
+        words.extend(crate::update_apply::failed_words(&self.road.home));
+        words.extend_from_slice(self.handed);
+        Ok(Some((self.road.installed.clone(), words)))
     }
 
     fn acknowledged(&mut self) -> bool {
@@ -639,6 +656,7 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
         world: &mut world,
         handed: &[],
         worker: None,
+        actor: None,
     });
     guard.not_mine(None);
     let left = guard.leave();
@@ -668,6 +686,7 @@ pub(crate) fn apply(
         world,
         handed: &[],
         worker: Some(worker),
+        actor: Some(Actor::Applier),
     });
     // **The window's duty first** (U-34, `update_apply::OWNER_FILE`): taken
     // before the wait for O's lock, while O still runs. An applier that does
@@ -1467,7 +1486,7 @@ impl<'a> Txn<'a> {
             return Ok(Pre::Decide);
         }
         let over_stuck = match &self.j.journal.body.phase {
-            Phase::Moving => false,
+            Phase::Moving | Phase::TrialStarting { .. } => false,
             Phase::Stuck { .. } if recorded.is_none() => true,
             _ => return Ok(Pre::Decide),
         };

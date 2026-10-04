@@ -189,6 +189,9 @@ struct Fake {
     starts_die: usize,
     /// **Every start is refused** (U-34, round 2).
     refuse_every_start: bool,
+    /// So many successive starts are refused before later ones succeed
+    /// (U-35's two ordinary choices, then the last trial).
+    refuse_starts: usize,
     /// The failure windows shown in this process (U-34, round 2).
     shown: Vec<String>,
     /// Looks at every line as it is said (U-37).
@@ -213,7 +216,11 @@ impl World for Fake {
 
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
         self.opened.push((program.to_path_buf(), args.to_vec()));
-        if self.refuse_every_start || self.refuse_start_of.as_deref() == Some(program) {
+        if self.refuse_every_start
+            || self.refuse_start_of.as_deref() == Some(program)
+            || self.refuse_starts > 0
+        {
+            self.refuse_starts = self.refuse_starts.saturating_sub(1);
             return Err(io::Error::other("the system would not start it (test)"));
         }
         Ok(())
@@ -476,6 +483,7 @@ impl Install {
             refuse_start_of: None,
             starts_die: 0,
             refuse_every_start: false,
+            refuse_starts: 0,
             shown: Vec::new(),
             on_say: None,
             real_ack: None,
@@ -3496,6 +3504,82 @@ fn moved_in(tag: &str) -> Option<Install> {
     Some(install)
 }
 
+/// RED (U-35) — **when the new installed image and the rescue image are both
+/// refused by the operating system, the Windows exit guard reserves one last
+/// same-image trial before asking the OS for it**. The reservation is visible
+/// to that third launch, and a refusal leaves it durable for recovery; there
+/// is no fourth launch.
+///
+/// MUTATION: launch the last trial before `TrialPlanned` is durable, omit it,
+/// or recurse after its refusal.
+#[test]
+fn u35_two_windows_launch_refusals_reserve_exactly_one_last_trial() {
+    let Some(started) = moved_in("u35-last-trial-started") else {
+        return;
+    };
+    let road = started.road(limits(600, 20_000));
+    let mut world = started.world(Trial::Answers);
+    world.refuse_starts = 2;
+    let (left, world) = on_a_worker(move |worker| {
+        let mut guard = ExitGuard::new(WindowsLeave {
+            road: &road,
+            world: &mut world,
+            handed: &[],
+            worker: Some(worker),
+            actor: Some(Actor::Applier),
+        });
+        let left = guard.leave();
+        drop(guard);
+        (left, world)
+    });
+    assert_eq!(left, Left::Started(started.installed.clone()));
+    assert_eq!(world.opened.len(), 3, "the reserved trial starts");
+    assert!(matches!(
+        started.on_disk().body.phase,
+        Phase::TrialStarting { .. }
+    ));
+
+    let Some(install) = moved_in("u35-last-trial") else {
+        return;
+    };
+    let road = install.road(limits(600, 20_000));
+    let mut world = install.world(Trial::Answers);
+    world.refuse_every_start = true;
+    let (left, world) = on_a_worker(move |worker| {
+        let mut guard = ExitGuard::new(WindowsLeave {
+            road: &road,
+            world: &mut world,
+            handed: &[],
+            worker: Some(worker),
+            actor: Some(Actor::Applier),
+        });
+        let left = guard.leave();
+        drop(guard);
+        (left, world)
+    });
+    assert!(matches!(left, Left::ShownHere(_)), "{left:?}");
+    assert_eq!(world.opened.len(), 3, "one primary, rescue, last trial");
+    assert_eq!(world.opened[0].0, install.installed);
+    assert_eq!(world.opened[1].0, install.rescue);
+    assert_eq!(world.opened[2].0, install.installed);
+    assert!(
+        world.opened[2]
+            .1
+            .iter()
+            .any(|word| word == "--update-trial")
+    );
+    assert!(
+        world.opened[2]
+            .1
+            .iter()
+            .any(|word| word == "--update-failed")
+    );
+    assert!(matches!(
+        install.on_disk().body.phase,
+        Phase::TrialStarting { .. }
+    ));
+}
+
 /// A receipt at `nonce`'s name carrying exactly `receipt`'s fields.
 fn receipt_as(install: &Install, nonce: Nonce, receipt: &Receipt) {
     install_txn::durable_create(
@@ -4416,6 +4500,7 @@ fn bare_world(home: Home) -> Fake {
         refuse_start_of: None,
         starts_die: 0,
         refuse_every_start: false,
+        refuse_starts: 0,
         shown: Vec::new(),
         on_say: None,
         real_ack: None,

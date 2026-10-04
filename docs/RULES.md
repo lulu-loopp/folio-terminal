@@ -1056,7 +1056,18 @@ process with no application can raise (`bt_platform::standalone_alert`:
 Core Foundation's on macOS, the ownerless one on Windows). So a window
 follows Restart to update whatever the road met — a refused write, a
 hand-over past its 15 s, a refusal, a panic; the one exception is the
-recovery at logon that attempted nothing. **A trial nobody alive decides is
+recovery at logon that attempted nothing. **Since U-35, when the new live
+image's start and the previous build's rescue start are both refused by the
+operating system, the holder durably records `TrialStarting` with one nonce,
+then asks the same installed new image to start once as the ordinary trial,
+with `--update-failed` too.** A created but unacknowledged process is not this
+case. The exact trial takes the ordinary held-write, receipt, watchdog and
+deadline road; its receipt adopts it into `Trial` and may commit. If the same
+image is unlaunchable, that last start is refused too, the holder shows the
+failure window, `TrialStarting` and all rollback material stay on disk, and
+the next manual start hands the transaction to recovery for rollback. The
+reservation can be made only from `Moving`, so this last attempt cannot start
+another. **A trial nobody alive decides is
 decided anyway** (from a source build of 0.4.7 or later; every update from
 0.4.6 to any later version keeps the 0.4.6 road): a lock holder records a
 running trial of the new build only when its receipt names it exactly (pid and
@@ -1099,7 +1110,8 @@ on Windows too* (U-24), *Folio offers its own updates on Windows: the update
 job's gate is a build fact per platform …* (U-31); 2026-09-28 *every road process
 of an update leaves through one exit guard …* (U-34), *Folio offers its own
 updates on macOS too …* (U-32); 2026-09-29 *a trial nobody alive is deciding is
-decided anyway …* (U-37, U-38).
+decided anyway …* (U-37, U-38); 2026-10-04 *two OS launch refusals reserve one
+last ordinary trial before it starts …* (U-35).
 **Overrides.** The U-31 entry replaces the U-18 entry's "offers are the constant
 `false` until U-31/U-32" and the U-19 entry's "no shipped build shows any of
 this" for Windows, and replaces §7.52's "不下载、不替换、不重启" as a bound on
@@ -1112,7 +1124,8 @@ nothing". U-32 replaces U-31's "off for macOS until U-32" and U-29's "the card's
 folder is the one the rollback named". U-37 replaces U-29b's "a trial with a
 nonce no journal records … its receipt is never heard" where that trial still
 runs when a lock holder next looks and its receipt names it exactly: it is
-recorded, and its receipt commits.
+recorded, and its receipt commits. U-35 replaces U-32's remaining double-launch
+failure with the one reserved same-image trial and its named failure road.
 
 ### 37. The Explorer and Finder verbs — `folded`
 **Rule.** On Windows there is one verb in two registrations: the classic trees

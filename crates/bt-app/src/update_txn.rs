@@ -692,6 +692,16 @@ pub(crate) enum Phase {
     },
     Armed,
     Moving,
+    /// **A last-resort trial reserved before its process is launched**
+    /// (0.4.7 U-35): both the ordinary new-build start and the rescue-copy
+    /// start were refused. The nonce is durable before the same new image is
+    /// tried once more with `--update-trial`; recovery either adopts that
+    /// exact receipt into [`Phase::Trial`] or rolls back. No process identity
+    /// exists yet, which is why this is a distinct phase.
+    TrialStarting {
+        nonce: Nonce,
+        began_ms: u64,
+    },
     Trial {
         nonce: Nonce,
         process: TrialProcess,
@@ -741,6 +751,7 @@ pub(crate) enum PhaseKind {
     Handoff,
     Armed,
     Moving,
+    TrialStarting,
     Trial,
     Committed,
     RollbackIntent,
@@ -751,12 +762,13 @@ pub(crate) enum PhaseKind {
 }
 
 impl PhaseKind {
-    pub(crate) const ALL: [PhaseKind; 12] = [
+    pub(crate) const ALL: [PhaseKind; 13] = [
         PhaseKind::Allocated,
         PhaseKind::Prepared,
         PhaseKind::Handoff,
         PhaseKind::Armed,
         PhaseKind::Moving,
+        PhaseKind::TrialStarting,
         PhaseKind::Trial,
         PhaseKind::Committed,
         PhaseKind::RollbackIntent,
@@ -782,6 +794,7 @@ impl PhaseKind {
             PhaseKind::Handoff
             | PhaseKind::Armed
             | PhaseKind::Moving
+            | PhaseKind::TrialStarting
             | PhaseKind::Trial
             | PhaseKind::Committed
             | PhaseKind::RollbackIntent
@@ -804,6 +817,7 @@ impl PhaseKind {
             | PhaseKind::Handoff
             | PhaseKind::Armed
             | PhaseKind::Moving
+            | PhaseKind::TrialStarting
             | PhaseKind::Trial
             | PhaseKind::Abandoned
             | PhaseKind::Retired => HeaderOutcome::None,
@@ -819,6 +833,7 @@ impl Phase {
             Phase::Handoff { .. } => PhaseKind::Handoff,
             Phase::Armed => PhaseKind::Armed,
             Phase::Moving => PhaseKind::Moving,
+            Phase::TrialStarting { .. } => PhaseKind::TrialStarting,
             Phase::Trial { .. } => PhaseKind::Trial,
             Phase::Committed => PhaseKind::Committed,
             Phase::RollbackIntent { .. } => PhaseKind::RollbackIntent,
@@ -1068,7 +1083,10 @@ pub(crate) enum Event {
     Reverted,
     /// Exclusive admission taken and no process runs from the install.
     Admitted,
-    /// Every move is done and P started N with `nonce`.
+    /// **The exit guard reserved its last trial before launching it** (U-35).
+    TrialPlanned { nonce: Nonce, began_ms: u64 },
+    /// The reserved or directly launched trial is running with its exact
+    /// process identity.
     TrialBegan {
         nonce: Nonce,
         process: TrialProcess,
@@ -1109,6 +1127,7 @@ pub(crate) enum EventKind {
     EntranceFailed,
     Reverted,
     Admitted,
+    TrialPlanned,
     TrialBegan,
     RetrialBegan,
     ReceiptAccepted,
@@ -1119,7 +1138,7 @@ pub(crate) enum EventKind {
 }
 
 impl EventKind {
-    pub(crate) const ALL: [EventKind; 19] = [
+    pub(crate) const ALL: [EventKind; 20] = [
         EventKind::Prepared,
         EventKind::PrepareFailed,
         EventKind::LaunchedWithoutResume,
@@ -1132,6 +1151,7 @@ impl EventKind {
         EventKind::EntranceFailed,
         EventKind::Reverted,
         EventKind::Admitted,
+        EventKind::TrialPlanned,
         EventKind::TrialBegan,
         EventKind::RetrialBegan,
         EventKind::ReceiptAccepted,
@@ -1158,7 +1178,8 @@ impl EventKind {
             // R starts N too (U-29b): an exchange a dead applier left with the
             // new bundle live is decided by a trial, and a `Stuck` one with
             // the new bundle live is started only as one.
-            EventKind::TrialBegan
+            EventKind::TrialPlanned
+            | EventKind::TrialBegan
             | EventKind::RetrialBegan
             | EventKind::Reverted
             | EventKind::ReceiptAccepted
@@ -1185,6 +1206,7 @@ impl Event {
             Event::EntranceFailed => EventKind::EntranceFailed,
             Event::Reverted => EventKind::Reverted,
             Event::Admitted => EventKind::Admitted,
+            Event::TrialPlanned { .. } => EventKind::TrialPlanned,
             Event::TrialBegan { .. } => EventKind::TrialBegan,
             Event::RetrialBegan { .. } => EventKind::RetrialBegan,
             Event::ReceiptAccepted(_) => EventKind::ReceiptAccepted,
@@ -1272,7 +1294,22 @@ pub(crate) const TRANSITIONS: &[(PhaseKind, EventKind, PhaseKind)] = &[
     (PhaseKind::Armed, EventKind::Reverted, PhaseKind::Prepared),
     (PhaseKind::Armed, EventKind::Admitted, PhaseKind::Moving),
     (PhaseKind::Moving, EventKind::Reverted, PhaseKind::Prepared),
+    (
+        PhaseKind::Moving,
+        EventKind::TrialPlanned,
+        PhaseKind::TrialStarting,
+    ),
     (PhaseKind::Moving, EventKind::TrialBegan, PhaseKind::Trial),
+    (
+        PhaseKind::TrialStarting,
+        EventKind::TrialBegan,
+        PhaseKind::Trial,
+    ),
+    (
+        PhaseKind::TrialStarting,
+        EventKind::RollbackDeclared,
+        PhaseKind::RollbackIntent,
+    ),
     (
         PhaseKind::Moving,
         EventKind::RollbackDeclared,
@@ -1371,18 +1408,29 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
             })
         }
         (Phase::Armed, Event::Admitted) => Ok(Phase::Moving),
+        (Phase::Moving, Event::TrialPlanned { nonce, began_ms }) => Ok(Phase::TrialStarting {
+            nonce: *nonce,
+            began_ms: *began_ms,
+        }),
         (
-            Phase::Moving,
+            Phase::Moving | Phase::TrialStarting { .. },
             Event::TrialBegan {
                 nonce,
                 process,
                 began_ms,
             },
-        ) => Ok(Phase::Trial {
-            nonce: *nonce,
-            process: *process,
-            began_ms: *began_ms,
-        }),
+        ) => {
+            if let Phase::TrialStarting { nonce: planned, .. } = phase
+                && planned != nonce
+            {
+                return Err(Refusal::ReceiptForAnotherTrial);
+            }
+            Ok(Phase::Trial {
+                nonce: *nonce,
+                process: *process,
+                began_ms: *began_ms,
+            })
+        }
         (
             Phase::Trial { .. }
             | Phase::Stuck {
@@ -1432,6 +1480,9 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
             }),
         }),
         (Phase::Moving, Event::RollbackDeclared) => Ok(Phase::RollbackIntent { trial: None }),
+        (Phase::TrialStarting { .. }, Event::RollbackDeclared) => {
+            Ok(Phase::RollbackIntent { trial: None })
+        }
         (Phase::Trial { process, .. }, Event::RollbackDeclared) => Ok(Phase::RollbackIntent {
             trial: Some(*process),
         }),
@@ -1503,6 +1554,7 @@ pub(crate) const JOURNAL_WRITERS: &[(PhaseKind, &[Actor])] = &[
     (PhaseKind::Handoff, &[Actor::Old]),
     (PhaseKind::Armed, &[Actor::Applier]),
     (PhaseKind::Moving, &[Actor::Applier]),
+    (PhaseKind::TrialStarting, &[Actor::Applier, Actor::Recovery]),
     (PhaseKind::Trial, &[Actor::Applier, Actor::Recovery]),
     (PhaseKind::Committed, &[Actor::Applier, Actor::Recovery]),
     (
@@ -2024,6 +2076,10 @@ pub(crate) fn decide(disk: &Disk<'_>) -> Action {
             }
             _ => Action::DeclareRollback,
         },
+        // The U-35 launch was refused or died before a receipt could identify
+        // it. A live/ready process is adopted by `survey` before `decide`;
+        // reaching this arm means there is no trial to wait for.
+        Phase::TrialStarting { .. } => Action::DeclareRollback,
         Phase::Trial { began_ms, .. } => {
             let answered = disk.receipt.as_ref().is_some_and(|receipt| {
                 next(
@@ -3243,6 +3299,10 @@ mod tests {
             },
             Phase::Armed,
             Phase::Moving,
+            Phase::TrialStarting {
+                nonce: nonce(TRIAL_NONCE),
+                began_ms: BEGAN,
+            },
             trial_phase(),
             Phase::Committed,
             Phase::RollbackIntent { trial: None },
@@ -3365,6 +3425,10 @@ mod tests {
             Event::EntranceFailed,
             Event::Reverted,
             Event::Admitted,
+            Event::TrialPlanned {
+                nonce: nonce(TRIAL_NONCE),
+                began_ms: BEGAN,
+            },
             Event::TrialBegan {
                 nonce: nonce(TRIAL_NONCE),
                 process: TRIAL,
@@ -4261,6 +4325,68 @@ mod tests {
                 "after {done} moves: {disk:?}"
             );
         }
+    }
+
+    /// RED (U-35) — **the final trial is reserved durably before launch**:
+    /// only its planned nonce can become the recorded trial; if no exact
+    /// receipt/process is adopted, recovery declares rollback. This is one
+    /// pre-launch state, not another launcher or a retry loop.
+    ///
+    /// MUTATION: leave the reservation in `Moving`, accept another nonce, or
+    /// begin a fresh trial when recovery finds `TrialStarting`.
+    #[test]
+    fn u35_the_last_trial_is_reserved_then_adopted_or_rolled_back() {
+        let moving = journal(Phase::Moving, members_layout());
+        let planned = moving
+            .advance(&Event::TrialPlanned {
+                nonce: nonce(TRIAL_NONCE),
+                began_ms: BEGAN,
+            })
+            .expect("the reservation");
+        assert_eq!(
+            planned.body.phase,
+            Phase::TrialStarting {
+                nonce: nonce(TRIAL_NONCE),
+                began_ms: BEGAN,
+            }
+        );
+        assert_eq!(
+            planned.advance(&Event::TrialBegan {
+                nonce: nonce(0x99),
+                process: TRIAL,
+                began_ms: BEGAN + 1,
+            }),
+            Err(Refusal::ReceiptForAnotherTrial)
+        );
+        let trial = planned
+            .advance(&Event::TrialBegan {
+                nonce: nonce(TRIAL_NONCE),
+                process: TRIAL,
+                began_ms: BEGAN + 1,
+            })
+            .expect("the exact reserved trial");
+        assert_eq!(
+            trial.body.phase,
+            Phase::Trial {
+                nonce: nonce(TRIAL_NONCE),
+                process: TRIAL,
+                began_ms: BEGAN + 1,
+            }
+        );
+        assert_eq!(
+            trial
+                .advance(&Event::ReceiptAccepted(valid_receipt()))
+                .map(|journal| journal.body.phase),
+            Ok(Phase::Committed)
+        );
+        let disk = holder(&planned, flipped().located(&inventories()));
+        assert_eq!(decide(&disk), Action::DeclareRollback);
+        assert_eq!(
+            planned
+                .advance(&Event::RollbackDeclared)
+                .map(|journal| journal.body.phase),
+            Ok(Phase::RollbackIntent { trial: None })
+        );
     }
 
     /// RED (U-10) — **W7: a trial without its receipt is waited for only while

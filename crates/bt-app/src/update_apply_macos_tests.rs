@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use crate::update_apply::Left;
 use crate::update_prepare_macos::tests::fixture::{Scratch, on_macos, run, sign, version_of};
 use crate::update_txn::{
     Body, Cdhash, Class, Header, HeaderOutcome, Outcome, STUCK_ATTEMPT_LIMIT, StartAction,
@@ -225,6 +226,10 @@ struct Fake {
     on_say: Option<SayHook>,
     /// Every start dies before it takes the data directory (U-34, round 2).
     starts_die: bool,
+    /// Every detached LaunchServices start is refused by the OS (U-35).
+    refuse_every_relaunch: bool,
+    /// So many detached starts are refused before later ones succeed (U-35).
+    refuse_relaunches: usize,
     /// The failure windows shown in this process (U-34, round 2).
     shown: Vec<String>,
 }
@@ -244,6 +249,8 @@ impl Default for Fake {
             unverified: None,
             on_say: None,
             starts_die: false,
+            refuse_every_relaunch: false,
+            refuse_relaunches: 0,
             shown: Vec::new(),
         }
     }
@@ -299,6 +306,10 @@ impl Hands for Fake {
 impl World for Fake {
     fn relaunch(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
         self.relaunched.push((bundle.to_path_buf(), args.to_vec()));
+        if self.refuse_every_relaunch || self.refuse_relaunches > 0 {
+            self.refuse_relaunches = self.refuse_relaunches.saturating_sub(1);
+            return Err(io::Error::other("LaunchServices refused it (test)"));
+        }
         Ok(())
     }
 }
@@ -3133,6 +3144,85 @@ fn exchanged_at_moving(tag: &str) -> Install {
     install.write(Phase::Moving);
     assert_eq!(version_of(&install.installed), "2.0");
     install
+}
+
+/// RED (U-35) — **two LaunchServices refusals reserve one final trial before
+/// its launch** on the bundle road. The same installed bundle is tried again
+/// with the reserved nonce and the incomplete-card words; if that launch is
+/// refused too, `TrialStarting` remains for recovery and nothing loops.
+///
+/// MUTATION: launch before recording, omit the final trial, or retry it.
+#[test]
+fn u35_two_macos_launch_refusals_reserve_exactly_one_last_trial() {
+    if !on_macos() {
+        return;
+    }
+    let started = exchanged_at_moving("u35-last-trial-started");
+    let home = started.home.clone();
+    let data = started.data.clone();
+    let mut world = Fake {
+        refuse_relaunches: 2,
+        ..Fake::default()
+    };
+    let (left, world) = on_a_worker(move |worker| {
+        let mut guard = ExitGuard::new(MacLeave {
+            worker: Some(worker),
+            home: &home,
+            world: &mut world,
+            data: &data,
+            actor: Some(Actor::Applier),
+        });
+        let left = guard.leave();
+        drop(guard);
+        (left, world)
+    });
+    assert_eq!(left, Left::Started(started.installed.clone()));
+    assert_eq!(world.relaunched.len(), 3, "the reserved trial starts");
+    assert!(matches!(
+        started.on_disk().unwrap().body.phase,
+        Phase::TrialStarting { .. }
+    ));
+
+    let install = exchanged_at_moving("u35-last-trial");
+    let home = install.home.clone();
+    let data = install.data.clone();
+    let mut world = Fake {
+        refuse_every_relaunch: true,
+        ..Fake::default()
+    };
+    let left = on_a_worker(move |worker| {
+        let mut guard = ExitGuard::new(MacLeave {
+            worker: Some(worker),
+            home: &home,
+            world: &mut world,
+            data: &data,
+            actor: Some(Actor::Applier),
+        });
+        let left = guard.leave();
+        drop(guard);
+        (left, world)
+    });
+    let (left, world) = left;
+    assert!(matches!(left, Left::ShownHere(_)), "{left:?}");
+    assert_eq!(world.relaunched.len(), 3, "installed, rescue, last trial");
+    assert_eq!(world.relaunched[0].0, install.installed);
+    assert_eq!(world.relaunched[2].0, install.installed);
+    assert!(
+        world.relaunched[2]
+            .1
+            .iter()
+            .any(|word| word == "--update-trial")
+    );
+    assert!(
+        world.relaunched[2]
+            .1
+            .iter()
+            .any(|word| word == "--update-failed")
+    );
+    assert!(matches!(
+        install.on_disk().unwrap().body.phase,
+        Phase::TrialStarting { .. }
+    ));
 }
 
 /// A process of the installed (new) bundle's executable, running, recorded
