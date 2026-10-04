@@ -75,7 +75,6 @@ bt-app	-	crate::schemes::user_sources	std::fs::read_dir	1
 bt-app	-	crate::schemes::write_custom_copy	std::fs::write	1
 bt-app	-	crate::shell_integration::cached_profile_answer	std::fs::canonicalize	1
 bt-app	-	crate::shell_integration::install_script_at	std::fs::create_dir_all	1
-bt-app	-	crate::shell_integration::install_script_at	std::fs::write	1
 bt-app	-	crate::shell_integration::install_zdotdir	std::fs::create_dir_all	1
 bt-app	-	crate::shell_integration::install_zdotdir	std::fs::write	1
 bt-app	-	crate::shell_integration::profile_marks::Marks::write	std::fs::create_dir_all	1
@@ -104,8 +103,7 @@ bt-app	-	crate::webhost::WebSeat::go_to	std::fs::canonicalize	1
 bt-app	[debug_assertions]	crate::hang_watch::run_selftest_if_due	std::thread::sleep	1
 bt-app	[windows]	crate::attention_copilot::run_probe	std::process::Command::output	1
 bt-app	[windows]	crate::psreadline::run_probe	std::process::Command::output	1
-bt-app	[windows]	crate::shell_integration::run_profile_probe	std::process::Child::wait	1
-bt-app	[windows]	crate::shell_integration::run_profile_probe	std::thread::sleep	1
+bt-app	-	crate::shell_integration::run_powershell_probe	std::thread::sleep	1
 bt-persist	-	crate::atomic::commit_rename	std::fs::rename	1
 bt-persist	-	crate::atomic::write_temp	std::fs::File::sync_all	1
 bt-persist	-	crate::migrate::keep_oversized	std::fs::rename	1
