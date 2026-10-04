@@ -4754,7 +4754,7 @@ impl Text {
             Self::DescShellIntegration => pick(
                 lang,
                 "Command marks, folder tracking and inline math in new PowerShell sessions.",
-                "新 PowerShell 会话中的命令标记、当前目录与行内公式。",
+                "为新 PowerShell 会话提供命令标记、当前目录与行内公式。",
             ),
             Self::RowPowerShellProfileLine => pick(
                 lang,
