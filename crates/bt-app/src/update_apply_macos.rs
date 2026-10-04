@@ -464,7 +464,7 @@ impl Ended {
     /// **Whether this end deferred to a Folio proved to hold the data
     /// directory** (H.3): the exit guard then owes no start.
     pub(crate) fn deferred_to_a_holder(&self) -> bool {
-        matches!(self, Ended::Deferred(Deferral::Held))
+        matches!(self, Ended::Deferred(Deferral::Held | Deferral::WindowDuty))
     }
 
     /// The process's exit code.
@@ -667,15 +667,17 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
         until,
         road.limits.poll,
     );
-    match duty {
+    let lock_backed_duty = match duty {
         Window::Mine(duty) => {
+            let lock_backed = duty.is_lock_backed();
             if let Some(warning) = duty.warning() {
                 guard
                     .inner()
                     .world
                     .say(&format!("BT_UPDATE_APPLY {warning}"));
             }
-            duty.hold_until_process_exit();
+            guard.owns_window(duty);
+            lock_backed
         }
         other => {
             let owner = match &other {
@@ -690,7 +692,7 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
                 .say(&format!("BT_UPDATE_APPLY {other:?}; {}", left.said()));
             return Ended::Refused(format!("the window is not this applier's: {other:?}"));
         }
-    }
+    };
     let (ended, successor) = {
         let world = &mut *guard.inner().world;
         match Txn::hold(road, worker, Asker::LockHolder, window) {
@@ -713,6 +715,13 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
         }
     };
     guard.succeeded_by(successor);
+    if crate::update_apply::lock_backed_duty_stays_with_outgoing(
+        &road.home,
+        road.txn,
+        lock_backed_duty,
+    ) {
+        guard.not_mine(None);
+    }
     if ended.deferred_to_a_holder() {
         guard.window_elsewhere();
     }
@@ -787,7 +796,7 @@ pub(crate) fn recover(
                         hands.say(
                             "BT_UPDATE_RECOVER an election-lock holder has the update's window; the handed-off update is left to it",
                         );
-                        Ended::Deferred(Deferral::Held)
+                        Ended::Deferred(Deferral::WindowDuty)
                     }
                     Ok(None) => txn
                         .settle(worker, &places, None, hands, handed)

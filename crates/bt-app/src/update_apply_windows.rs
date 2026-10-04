@@ -688,15 +688,17 @@ pub(crate) fn apply(
         until,
         road.limits.poll,
     );
-    match window {
+    let lock_backed_duty = match window {
         Window::Mine(duty) => {
+            let lock_backed = duty.is_lock_backed();
             if let Some(warning) = duty.warning() {
                 guard
                     .inner()
                     .world
                     .say(&format!("BT_UPDATE_APPLY {warning}"));
             }
-            duty.hold_until_process_exit();
+            guard.owns_window(duty);
+            lock_backed
         }
         other => {
             let owner = match &other {
@@ -711,10 +713,14 @@ pub(crate) fn apply(
                 .say(&format!("BT_UPDATE_APPLY {other:?}; {}", left.said()));
             return Ended::Refused(format!("the window is not this applier's: {other:?}"));
         }
-    }
+    };
     let (ended, successor) =
         apply_under_the_lock(worker, road, txn, nonce, until, &mut *guard.inner().world);
     guard.succeeded_by(successor);
+    if crate::update_apply::lock_backed_duty_stays_with_outgoing(&road.home, txn, lock_backed_duty)
+    {
+        guard.not_mine(None);
+    }
     if ended.deferred_to_a_holder() {
         guard.window_elsewhere();
     }
@@ -827,7 +833,7 @@ pub(crate) fn recover(
                                 world.say(
                                     "BT_UPDATE_RECOVER an election-lock holder has the update's window; the handed-off update is left to it",
                                 );
-                                Ended::Deferred(Deferral::Held)
+                                Ended::Deferred(Deferral::WindowDuty)
                             }
                             Ok(None) => held
                                 .settle(worker, None, world)

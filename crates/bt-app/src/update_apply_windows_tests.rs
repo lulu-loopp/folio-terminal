@@ -494,6 +494,26 @@ impl Install {
         assert_eq!(armed.transaction(), self.txn.bytes());
     }
 
+    /// Record this test process as the holder before a fixture advances past
+    /// `Handoff`. In product, one `apply` call keeps this election success in
+    /// its exit guard while it advances the journal; a test that enters the
+    /// road directly at a later phase must represent that existing duty.
+    fn claim_window(&self) {
+        assert!(
+            crate::update_apply::take_the_window(
+                None,
+                &self.home,
+                self.txn,
+                Running {
+                    pid: std::process::id(),
+                    started: 0,
+                },
+                Instant::now(),
+            )
+            .is_mine()
+        );
+    }
+
     fn install(&self) -> PathBuf {
         self.installed.parent().unwrap().to_path_buf()
     }
@@ -1155,12 +1175,14 @@ fn backup_is_deleted_only_after_committed_and_the_run_value_is_gone_first() {
     assert_eq!(install.header().class, Class::Terminal);
 }
 
-/// RED (U-23) — **an applier started again over its own transaction goes on
-/// from the disk**: `Handoff` with an entrance already there (W4) removes it
-/// and reverts, nothing moved, the old build started again; `Armed` (W5)
-/// admits and goes on to `Committed`; `Moving` with some moves done (W6)
-/// declares the rollback, moves nothing further forward, and rolls back
-/// (U-24).
+/// RED (U-23) — **an applier that still owns its transaction goes on from the
+/// disk**: `Handoff` with an entrance already there (W4) removes it and
+/// reverts, nothing moved, the old build started again; a recorded holder at
+/// `Armed` (W5) admits and goes on to `Committed`; a recorded holder at
+/// `Moving` with some moves done (W6) declares the rollback, moves nothing
+/// further forward, and rolls back (U-24). An unmarked *later* applier may not
+/// use these resume rules: the journal says the earlier road was already
+/// taken.
 ///
 /// MUTATION: in `Txn::apply`, send `Armed` to `recover_from` (which reverts).
 #[test]
@@ -1183,6 +1205,7 @@ fn reentry_at_w4_w5_w6_continues_from_the_disk() {
         return;
     };
     install.arm();
+    install.claim_window();
     install.write(Phase::Armed);
     let (ended, world) = applied(
         &install,
@@ -1196,6 +1219,7 @@ fn reentry_at_w4_w5_w6_continues_from_the_disk() {
         return;
     };
     install.arm();
+    install.claim_window();
     install.move_first(2);
     install.write(Phase::Moving);
     let (ended, world) = applied(
@@ -2373,6 +2397,10 @@ fn a_live_applier_at_handoff_is_left_alone_on_both_platforms() {
 /// just armed leaves it: the journal `Armed` and the `Run` value written.
 fn armed(tag: &str) -> Option<Install> {
     let install = Install::new(tag)?;
+    // These tests enter in the middle of one live applier's road. The mark is
+    // its durable election record; an absent mark at `Armed` instead denotes
+    // a later contender, which must stand down.
+    install.claim_window();
     install.write(Phase::Armed);
     install.arm();
     Some(install)

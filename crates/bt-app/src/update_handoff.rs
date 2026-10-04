@@ -584,18 +584,24 @@ impl Leaving {
                             "Folio: the outgoing build owns the window duty; {warning}"
                         ));
                     }
-                    duty.hold_until_process_exit();
+                    guard.owns_window(duty);
                 }
                 Window::Theirs(owner) => guard.not_mine(Some(owner.pid)),
+                Window::RoadTaken(phase) => {
+                    crate::diagnostics::note(&format!(
+                        "Folio: the applier already took the update road to {phase:?}; the outgoing build starts nothing"
+                    ));
+                    guard.not_mine(None);
+                }
                 Window::Refused(refusal) => {
                     crate::diagnostics::note(&format!(
                         "Folio: the outgoing build's window election was refused: {}",
                         refusal.why()
                     ));
-                    if refusal.contended() {
-                        guard.not_mine(None);
-                    } else {
+                    if refusal.outgoing_keeps_duty() {
                         guard.inner().election_failure = Some(refusal.why().to_owned());
+                    } else {
+                        guard.not_mine(None);
                     }
                 }
             }
@@ -1851,18 +1857,61 @@ mod tests {
             ),
             "an election that cannot be held proves no owner"
         );
+        assert_eq!(
+            crate::update_apply::window_holder(&staged.home, TxnId::new([0x77; 16]), me),
+            Ok(None),
+            "recovery falls back to the mark when owner.lock cannot be opened"
+        );
 
         let mark = crate::update_apply::owner_path(&staged.home, txn);
         std::fs::remove_file(&mark).unwrap();
         std::fs::create_dir(&mark).unwrap();
         let answer = take(me);
-        let Window::Mine(duty) = answer else {
-            panic!("the lock holder owns despite an unreadable mark: {answer:?}");
+        let Window::Refused(refusal) = answer else {
+            panic!("an unreadable mark cannot be claimed through: {answer:?}");
         };
         assert!(
-            duty.warning()
-                .is_some_and(|warning| warning.contains("could not be read")),
-            "the read refusal, not a later replacement refusal, is named"
+            refusal.why().contains("could not be read"),
+            "the exhausted read refusal is named: {refusal:?}"
+        );
+    }
+
+    /// RED (T-UPDATE-LOCK-RACE round 3, R2-2) — **a transient owner-mark
+    /// read failure is asked again under the same election lock and budget;
+    /// only the successful second read is allowed to decide the duty.** The
+    /// injected pause returns immediately, so no clock chooses the result.
+    ///
+    /// MUTATION: return `Mine` on the first read error, or remove the read
+    /// retry in `take_the_window_within_using` (one attempt is observed).
+    #[test]
+    fn the_window_mark_is_retried_after_a_transient_read_failure() {
+        let folder = Folder::new("mark-read-retry");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let me = crate::update_apply::this_process();
+        let mut attempts = 0;
+        let answer = crate::update_apply::take_the_window_within_reads_at(
+            &staged.home,
+            txn,
+            me,
+            crate::update_apply::JOURNAL_WRITE_WITHIN,
+            || {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "the scanner still has the mark",
+                    ))
+                } else {
+                    Ok(None)
+                }
+            },
+        );
+        assert!(answer.is_mine(), "{answer:?}");
+        assert_eq!(attempts, 2);
+        assert_eq!(
+            crate::update_apply::window_owner(&staged.home, txn),
+            Some(me)
         );
     }
 
@@ -1872,7 +1921,7 @@ mod tests {
     /// immediately; no clock or sleep chooses the interleaving.
     ///
     /// MUTATION: remove the `refused_while_open` arm from
-    /// `update_apply::write_within`.
+    /// `update_apply::retry_within`.
     #[test]
     fn the_window_mark_is_retried_after_three_scanner_refusals() {
         let folder = Folder::new("mark-retry");
@@ -1912,7 +1961,7 @@ mod tests {
     /// contender refuses and the pair can never be `[Refused, Refused]`.**
     ///
     /// MUTATION: map the injected write failure back to `Window::Refused`, or
-    /// drop `held` before returning the holder's answer.
+    /// drop the duty instead of moving it into `ExitGuard::owns_window`.
     #[test]
     fn a_holder_that_cannot_write_still_owns_and_the_contender_refuses() {
         let folder = Folder::new("mark-write-fails");
@@ -1933,6 +1982,31 @@ mod tests {
                 )
             },
         );
+        let Window::Mine(duty) = holder else {
+            panic!("the holder did not own: {holder:?}");
+        };
+
+        struct Finished;
+        impl crate::update_apply::Leave for Finished {
+            fn say(&mut self, _line: &str) {}
+            fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+                None
+            }
+            fn start(&mut self, _program: &Path, _words: &[OsString]) -> io::Result<()> {
+                unreachable!("a live successor means no start")
+            }
+            fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+                None
+            }
+            fn acknowledged(&mut self) -> bool {
+                false
+            }
+            fn show_here(&mut self, _why: &str) {}
+        }
+
+        let mut guard = crate::update_apply::ExitGuard::new(Finished);
+        guard.owns_window(duty);
+        guard.succeeded_by(Some(me));
         let contender = crate::update_apply::take_the_window_within(
             None,
             &staged.home,
@@ -1940,7 +2014,6 @@ mod tests {
             Running { pid: 1, started: 1 },
             Duration::ZERO,
         );
-        assert!(holder.is_mine(), "{holder:?}");
         assert_eq!(
             crate::update_apply::window_holder(&staged.home, txn, Running { pid: 1, started: 1 },),
             Ok(Some(crate::update_apply::WindowHolder::Unmarked)),
@@ -1949,6 +2022,194 @@ mod tests {
         assert!(
             matches!(&contender, Window::Refused(refusal) if refusal.contended()),
             "{contender:?}"
+        );
+        assert_eq!(guard.leave(), Left::Succeeded(me.pid));
+        assert!(
+            matches!(
+                crate::update_apply::take_the_window_within(
+                    None,
+                    &staged.home,
+                    txn,
+                    Running { pid: 1, started: 1 },
+                    Duration::ZERO,
+                ),
+                Window::Refused(refusal) if refusal.contended()
+            ),
+            "the product guard retains the lock even after its final delivery"
+        );
+        drop(guard);
+        assert!(
+            crate::update_apply::take_the_window_within(
+                None,
+                &staged.home,
+                txn,
+                Running { pid: 1, started: 1 },
+                Duration::ZERO,
+            )
+            .is_mine(),
+            "only dropping the process's exit guard releases the retained lock"
+        );
+    }
+
+    /// RED (T-UPDATE-LOCK-RACE round 3, R2-1) — **an unmarked applier that
+    /// takes the road, commits, delivers its successor and exits is not
+    /// replaced by O.** While P's product exit guard lives its retained lock
+    /// refuses O; after that guard is gone, the absent mark is no invitation:
+    /// `Committed` is the durable record that P already acted, so O starts
+    /// nothing. No sleep chooses either observation.
+    ///
+    /// MUTATION: skip the journal-phase check for an absent mark (O writes its
+    /// own mark and records a second start).
+    #[test]
+    fn an_unmarked_applier_that_commits_and_exits_is_not_replaced_by_o() {
+        let folder = Folder::new("unmarked-applier-finished");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let applier = crate::update_apply::this_process();
+        let mut journal = staged.journal.clone();
+        journal.body.phase = Phase::Handoff { applier: nonce() };
+        install_txn::durable_write(&staged.home.journal(), &journal.encode()).unwrap();
+
+        let answer = crate::update_apply::take_the_window_within_writes_at(
+            &staged.home,
+            txn,
+            applier,
+            crate::update_apply::JOURNAL_WRITE_WITHIN,
+            |_mark, _bytes| {
+                Err(
+                    crate::update_apply::MarkWriteFailure::before_rename_for_test(
+                        "the mark stayed unwritable",
+                        false,
+                    ),
+                )
+            },
+        );
+        let Window::Mine(duty) = answer else {
+            panic!("P did not take the unmarked duty: {answer:?}");
+        };
+
+        struct Delivered;
+        impl crate::update_apply::Leave for Delivered {
+            fn say(&mut self, _line: &str) {}
+            fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+                None
+            }
+            fn start(&mut self, _program: &Path, _words: &[OsString]) -> io::Result<()> {
+                unreachable!("the committed applier left a live successor")
+            }
+            fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
+                None
+            }
+            fn acknowledged(&mut self) -> bool {
+                false
+            }
+            fn show_here(&mut self, _why: &str) {}
+        }
+
+        let mut applier_exit = crate::update_apply::ExitGuard::new(Delivered);
+        applier_exit.owns_window(duty);
+        applier_exit.succeeded_by(Some(applier));
+        assert!(
+            matches!(
+                crate::update_apply::take_the_window_within(
+                    None,
+                    &staged.home,
+                    txn,
+                    Running { pid: 1, started: 1 },
+                    Duration::ZERO,
+                ),
+                Window::Refused(refusal) if refusal.contended()
+            ),
+            "while P runs, its retained lock is the duty"
+        );
+
+        journal.body.phase = Phase::Committed;
+        install_txn::durable_write(&staged.home.journal(), &journal.encode()).unwrap();
+        assert_eq!(applier_exit.leave(), Left::Succeeded(applier.pid));
+        drop(applier_exit);
+
+        let installed = folder.0.join("folio.exe");
+        let mut starts = Starts::default();
+        let left = Leaving::over(&staged.home, txn, &folder.0).leave(
+            Running { pid: 1, started: 1 },
+            &installed,
+            &mut starts,
+            None,
+        );
+        assert_eq!(left, Left::NotMine(None));
+        assert!(
+            starts.calls.is_empty(),
+            "O must not start beside P's window"
+        );
+        assert_eq!(
+            crate::update_apply::window_owner(&staged.home, txn),
+            None,
+            "the proof is the journal, not a recreated mark"
+        );
+    }
+
+    /// RED (T-UPDATE-LOCK-RACE round 3, R2-1) — **every journal phase is on
+    /// exactly one side of the unmarked election:** allocation, preparation
+    /// and hand-off have not taken the applier road; every later or terminal
+    /// phase has. This is the phase column of the holder/outcome table.
+    ///
+    /// MUTATION: classify any phase after `Handoff` as open.
+    #[test]
+    fn every_journal_phase_decides_whether_an_unmarked_duty_is_open() {
+        for phase in PhaseKind::ALL {
+            assert_eq!(
+                crate::update_apply::window_duty_is_open(phase),
+                matches!(
+                    phase,
+                    PhaseKind::Allocated | PhaseKind::Prepared | PhaseKind::Handoff
+                ),
+                "{phase:?}"
+            );
+        }
+
+        let folder = Folder::new("phase-duty");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let mut journal = staged.journal.clone();
+        journal.body.phase = Phase::Handoff { applier: nonce() };
+        install_txn::durable_write(&staged.home.journal(), &journal.encode()).unwrap();
+        assert!(crate::update_apply::lock_backed_duty_stays_with_outgoing(
+            &staged.home,
+            txn,
+            true,
+        ));
+        assert!(
+            !crate::update_apply::lock_backed_duty_stays_with_outgoing(&staged.home, txn, false,),
+            "a recorded duty remains P's even before its road advances"
+        );
+        journal.body.phase = Phase::Committed;
+        install_txn::durable_write(&staged.home.journal(), &journal.encode()).unwrap();
+        assert!(
+            !crate::update_apply::lock_backed_duty_stays_with_outgoing(&staged.home, txn, true,),
+            "a completed unmarked road remains P's"
+        );
+    }
+
+    /// RED (T-UPDATE-LOCK-RACE round 3, R2-4) — **the election's own lock
+    /// wait cannot outlive the applier's existing deadline.** The supplied
+    /// clock makes an expired deadline exactly zero and a distant one exactly
+    /// `ELECTION_WITHIN`; no elapsed-time assertion is involved.
+    ///
+    /// MUTATION: return `ELECTION_WITHIN` without taking the minimum with the
+    /// applier deadline.
+    #[test]
+    fn the_window_election_is_bounded_by_the_applier_deadline() {
+        let now = Instant::now();
+        assert_eq!(
+            crate::update_apply::election_within(now - Duration::from_millis(1), now),
+            Duration::ZERO
+        );
+        assert_eq!(
+            crate::update_apply::election_within(
+                now + crate::update_apply::ELECTION_WITHIN.saturating_mul(2),
+                now,
+            ),
+            crate::update_apply::ELECTION_WITHIN
         );
     }
 
