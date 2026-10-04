@@ -516,8 +516,6 @@ pub(crate) struct MacLeave<'a, W: World> {
     pub(crate) world: &'a mut W,
     /// The data directory a started Folio takes: the acknowledgement.
     pub(crate) data: &'a Path,
-    /// The lock-holder role allowed to reserve U-35's last trial.
-    pub(crate) actor: Option<Actor>,
 }
 
 impl<W: World> Leave for MacLeave<'_, W> {
@@ -533,33 +531,6 @@ impl<W: World> Leave for MacLeave<'_, W> {
 
     fn start(&mut self, program: &Path, words: &[OsString]) -> io::Result<()> {
         self.world.relaunch(program, words)
-    }
-
-    /// The previous build's rescue clone, as an ordinary Folio. U-35 needs
-    /// the same two launch choices on both platforms before its last trial.
-    fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
-        let bytes = file_reads::read(Lane::UpdateJournal, self.home.journal()).ok()?;
-        let journal = Journal::parse(&bytes).ok()?;
-        Some((
-            PathBuf::from(journal.rescue),
-            crate::update_apply::failed_words(self.home).to_vec(),
-        ))
-    }
-
-    fn last_trial(&mut self) -> Result<Option<(PathBuf, Vec<OsString>)>, String> {
-        let (Some(worker), Some(actor)) = (self.worker, self.actor) else {
-            return Ok(None);
-        };
-        if !matches!(opens_now(Some(worker), self.home), Opens::Trial { .. }) {
-            return Ok(None);
-        }
-        let (txn, nonce) = crate::update_apply::reserve_last_trial(worker, self.home, actor)?;
-        let Some(bundle) = self.home.installed_bundle() else {
-            return Ok(None);
-        };
-        let mut words = crate::update_apply::trial_words(txn, &nonce).to_vec();
-        words.extend(crate::update_apply::failed_words(self.home));
-        Ok(Some((bundle, words)))
     }
 
     fn acknowledged(&mut self) -> bool {
@@ -637,7 +608,6 @@ pub(crate) fn run_here(home: &Path, txn: &str, nonce: &str) -> i32 {
         home: &home,
         world: &mut world,
         data: &data,
-        actor: None,
     });
     guard.not_mine(None);
     let left = guard.leave();
@@ -678,7 +648,6 @@ pub(crate) fn apply(worker: &WorkerCtx, road: &Road, world: &mut impl World) -> 
         home: &road.home,
         world,
         data: &road.data,
-        actor: Some(Actor::Applier),
     });
     // **The window's duty first** (U-34, `update_apply::OWNER_FILE`): taken
     // before the wait for O's lock, while O still runs. An applier that does
@@ -1605,7 +1574,7 @@ impl<'a> Txn<'a> {
             let actor = tenure.unwrap_or_else(|| self.asker.actor(self.phase()));
             let (trial, nonce) = match &self.journal.body.phase {
                 Phase::Trial { process, nonce, .. } => (Some(*process), Some(*nonce)),
-                Phase::RollbackIntent { trial } => (*trial, None),
+                Phase::RollbackIntent { trial, .. } => (*trial, None),
                 Phase::Stuck { trial, retrial, .. } => {
                     (*trial, retrial.map(|retrial| retrial.nonce))
                 }
@@ -1778,11 +1747,7 @@ impl<'a> Txn<'a> {
     ) -> Result<Pre, String> {
         let new_live = live == Some(places.new);
         let over_stuck = match &self.journal.body.phase {
-            Phase::Moving | Phase::TrialStarting { .. }
-                if new_live && stage == Some(places.old) =>
-            {
-                false
-            }
+            Phase::Moving if new_live && stage == Some(places.old) => false,
             Phase::Stuck { .. } if new_live && recorded.is_none() => true,
             _ => return Ok(Pre::Decide),
         };

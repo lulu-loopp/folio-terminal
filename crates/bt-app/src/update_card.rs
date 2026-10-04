@@ -1767,9 +1767,9 @@ mod tests {
         assert_eq!(drawn.primary(), Some(CardVerb::ShowFolder));
     }
 
-    /// RED (U-35) — **the fallback trial's card says both facts**: the update
-    /// did not complete as intended, and this session is the new version's
-    /// trial. It keeps the unfinished transaction's Show folder action.
+    /// RED (U-35 round 2) — **the fallback trial's card says what happened,
+    /// the held-write consequence and what to do, without protocol jargon.**
+    /// It keeps the unfinished transaction's Show folder action.
     ///
     /// MUTATION: map `Failure::TrialIncomplete` to the ordinary incomplete
     /// texts; either sentence below changes.
@@ -1783,13 +1783,12 @@ mod tests {
             },
         ))
         .expect("the fallback trial has a card");
-        assert_eq!(
-            drawn.heading.as_deref(),
-            Some("The update did not complete as intended.")
-        );
+        assert_eq!(drawn.heading.as_deref(), Some("The update did not finish."));
         assert_eq!(
             drawn.detail.as_deref(),
-            Some("This session is a trial of the new version.")
+            Some(
+                "Changes made now may not be kept until Folio confirms the update. Keep Folio open until then."
+            )
         );
         assert_eq!(drawn.folder, Some(folder));
         assert_eq!(drawn.primary(), Some(CardVerb::ShowFolder));

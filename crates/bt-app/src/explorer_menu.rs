@@ -2966,6 +2966,7 @@ mod tests {
             txn,
             Duration::from_millis(5),
             &|| {},
+            None,
             &mut crate::update_trial::watchdog_asleep(),
         );
         assert_eq!(gate.take_released(), vec![Writer::ExplorerRepair]);

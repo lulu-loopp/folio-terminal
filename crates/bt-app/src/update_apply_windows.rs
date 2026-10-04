@@ -543,8 +543,9 @@ pub(crate) struct WindowsLeave<'a, W: World> {
     /// The worker whose wait door the acknowledgement's wait sleeps through;
     /// `None` where none was lent (then it is asked once).
     pub(crate) worker: Option<&'a WorkerCtx>,
-    /// The lock-holder role allowed to reserve U-35's last trial. `None`
-    /// before the road has admitted this process as an applier.
+    /// The role this process records U-35's reservation as (`TrialStarting`'s
+    /// writers): the applier, or the recovery. `None` where the road never
+    /// became a holder — a refused line — so no reservation is made.
     pub(crate) actor: Option<Actor>,
 }
 
@@ -578,11 +579,14 @@ impl<W: World> Leave for WindowsLeave<'_, W> {
         if !matches!(opens_now(self.road), Opens::Trial { .. }) {
             return Ok(None);
         }
-        let (txn, nonce) = crate::update_apply::reserve_last_trial(worker, &self.road.home, actor)?;
-        let mut words = crate::update_apply::trial_words(txn, &nonce).to_vec();
-        words.extend(crate::update_apply::failed_words(&self.road.home));
+        let Some((txn, nonce)) =
+            crate::update_apply::reserve_last_trial(worker, &self.road.home, actor)?
+        else {
+            return Ok(None);
+        };
+        let (program, mut words) = self.road.opening(&Opens::LastTrial { txn, nonce });
         words.extend_from_slice(self.handed);
-        Ok(Some((self.road.installed.clone(), words)))
+        Ok(Some((program.to_path_buf(), words)))
     }
 
     fn acknowledged(&mut self) -> bool {
@@ -875,9 +879,11 @@ fn hold(road: &Road) -> Result<(Held, Journal), Ended> {
 /// header is not `destructive`, the installed build — with `--update-failed`
 /// after a retired rollback; while it is, by what the install folder holds,
 /// read by digest: every new file at its digest and no commit → the new build
-/// **only as a trial**; the whole new set committed, or the whole old set →
-/// the installed build with `--update-failed`; neither whole set, or a journal
-/// whose layout cannot be read → the rescue copy with `--update-failed`.
+/// **only as a trial** — at `TrialStarting` only as its reserved trial (U-35,
+/// `Opens::LastTrial`), which a start admits as that trial; the whole new set
+/// committed, or the whole old set → the installed build with
+/// `--update-failed`; neither whole set, or a journal whose layout cannot be
+/// read → the rescue copy with `--update-failed`.
 pub(crate) fn opens_now(road: &Road) -> Opens {
     let bytes = file_reads::read(Lane::UpdateJournal, road.home.journal()).ok();
     let Some(header) = bytes.as_deref().and_then(|bytes| Header::parse(bytes).ok()) else {
@@ -907,8 +913,15 @@ pub(crate) fn opens_now(road: &Road) -> Opens {
         inventories,
     };
     match layout.live(&site) {
+        // U-35: a reserved trial is the only one this transaction runs.
         Some(Live::New) if header.outcome != HeaderOutcome::Committed => {
-            Opens::Trial { txn: header.txn }
+            match journal.body.phase.reserved_trial() {
+                Some(nonce) => Opens::LastTrial {
+                    txn: header.txn,
+                    nonce,
+                },
+                None => Opens::Trial { txn: header.txn },
+            }
         }
         Some(_) => Opens::Installed { failed: true },
         None => Opens::Rescue,
@@ -1347,7 +1360,7 @@ impl<'a> Txn<'a> {
             let actor = tenure.unwrap_or_else(|| self.asker.actor(self.j.phase()));
             let (trial, nonce) = match &self.j.journal.body.phase {
                 Phase::Trial { process, nonce, .. } => (Some(*process), Some(*nonce)),
-                Phase::RollbackIntent { trial } => (*trial, None),
+                Phase::RollbackIntent { trial, .. } => (*trial, None),
                 Phase::Stuck { trial, retrial, .. } => {
                     (*trial, retrial.map(|retrial| retrial.nonce))
                 }
@@ -1406,6 +1419,10 @@ impl<'a> Txn<'a> {
                         world.say(
                             "BT_UPDATE_RECOVER the update was interrupted before the new version started",
                         );
+                    } else if self.j.phase() == PhaseKind::TrialStarting {
+                        // U-35: the reserved trial was asked to start and left
+                        // no receipt that names a running process.
+                        world.say("BT_UPDATE_RECOVER the last trial gave no receipt");
                     }
                     self.j.record(actor, &Event::RollbackDeclared)?;
                 }

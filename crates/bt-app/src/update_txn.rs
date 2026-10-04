@@ -693,11 +693,15 @@ pub(crate) enum Phase {
     Armed,
     Moving,
     /// **A last-resort trial reserved before its process is launched**
-    /// (0.4.7 U-35): both the ordinary new-build start and the rescue-copy
-    /// start were refused. The nonce is durable before the same new image is
-    /// tried once more with `--update-trial`; recovery either adopts that
-    /// exact receipt into [`Phase::Trial`] or rolls back. No process identity
-    /// exists yet, which is why this is a distinct phase.
+    /// (0.4.7 U-35, Windows): an exit guard found the new set live at
+    /// `Moving`, and the operating system refused both the new build's start
+    /// and the rescue copy's. The nonce is durable before the same new image
+    /// is asked once more with `--update-trial`, and it is the only trial this
+    /// transaction may run from here ([`Phase::reserved_trial`]). That trial
+    /// commits itself on its own exact receipt ([`Event::LastTrialReady`]); a
+    /// recovery that can run adopts that receipt into [`Phase::Trial`], ends a
+    /// handed-back instance that never became ready, or rolls back. No process
+    /// identity exists yet, which is why this is a distinct phase.
     TrialStarting {
         nonce: Nonce,
         began_ms: u64,
@@ -711,9 +715,22 @@ pub(crate) enum Phase {
     Committed,
     RollbackIntent {
         trial: Option<TrialProcess>,
+        /// **A trial of the new build was begun although no process is
+        /// recorded** (U-35 round 2): the rollback was declared over
+        /// `TrialStarting`, whose reserved trial was asked to start and may
+        /// have run. [`Phase::RolledBack::untried`] is then false, so the card
+        /// says the new version did not start — never that the update was
+        /// interrupted before it did. Absent when false, so every journal
+        /// written before it reads as before.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        trial_started: bool,
     },
     Stuck {
         trial: Option<TrialProcess>,
+        /// [`Phase::RollbackIntent`]'s `trial_started`, carried across failed
+        /// rollbacks to the `RolledBack` that follows.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        trial_started: bool,
         last_error: String,
         /// The rollbacks that failed, this one included: 1 at the first
         /// `Stuck`, one more at each failed retry ([`STUCK_ATTEMPT_LIMIT`]).
@@ -846,6 +863,19 @@ impl Phase {
 
     pub(crate) fn class(&self) -> Class {
         self.kind().class()
+    }
+
+    /// **The one trial a `TrialStarting` transaction runs** (U-35): its
+    /// reserved nonce, or `None` in every other phase. The single owner of
+    /// what is started at `TrialStarting` — the exit guards name it
+    /// (`update_apply_windows::opens_now`), a start admits only it
+    /// (`update_startup::run`), and only it commits itself
+    /// (`update_apply::commit_last_trial`).
+    pub(crate) fn reserved_trial(&self) -> Option<Nonce> {
+        match self {
+            Phase::TrialStarting { nonce, .. } => Some(*nonce),
+            _ => None,
+        }
     }
 
     /// **The header outcome of this phase** — what the lock holder writes into
@@ -1092,6 +1122,17 @@ pub(crate) enum Event {
         process: TrialProcess,
         began_ms: u64,
     },
+    /// **U-35's reserved last trial proved itself ready and commits its own
+    /// transaction** — recorded by that trial ([`Actor::Trial`]) under the
+    /// transaction lock, because the holders that would otherwise adopt it
+    /// all run the rescue copy the operating system refused. The receipt is
+    /// the ordinary U-37 readiness evidence, read back from disk; `process` is
+    /// the recording process's own pid and start instant, which the receipt
+    /// must name exactly. Only from [`Phase::TrialStarting`].
+    LastTrialReady {
+        receipt: Receipt,
+        process: TrialProcess,
+    },
     /// **The lock holder started the new build as a trial over a `Stuck`
     /// transaction whose new bundle is live** (U-29b, ruling 3): the nonce it
     /// gave, the process the list found, and when it began.
@@ -1129,6 +1170,7 @@ pub(crate) enum EventKind {
     Admitted,
     TrialPlanned,
     TrialBegan,
+    LastTrialReady,
     RetrialBegan,
     ReceiptAccepted,
     RollbackDeclared,
@@ -1138,7 +1180,7 @@ pub(crate) enum EventKind {
 }
 
 impl EventKind {
-    pub(crate) const ALL: [EventKind; 20] = [
+    pub(crate) const ALL: [EventKind; 21] = [
         EventKind::Prepared,
         EventKind::PrepareFailed,
         EventKind::LaunchedWithoutResume,
@@ -1153,6 +1195,7 @@ impl EventKind {
         EventKind::Admitted,
         EventKind::TrialPlanned,
         EventKind::TrialBegan,
+        EventKind::LastTrialReady,
         EventKind::RetrialBegan,
         EventKind::ReceiptAccepted,
         EventKind::RollbackDeclared,
@@ -1187,6 +1230,7 @@ impl EventKind {
             | EventKind::RolledBack
             | EventKind::RollbackFailed
             | EventKind::Retired => &[Actor::Applier, Actor::Recovery],
+            EventKind::LastTrialReady => &[Actor::Trial],
         }
     }
 }
@@ -1208,6 +1252,7 @@ impl Event {
             Event::Admitted => EventKind::Admitted,
             Event::TrialPlanned { .. } => EventKind::TrialPlanned,
             Event::TrialBegan { .. } => EventKind::TrialBegan,
+            Event::LastTrialReady { .. } => EventKind::LastTrialReady,
             Event::RetrialBegan { .. } => EventKind::RetrialBegan,
             Event::ReceiptAccepted(_) => EventKind::ReceiptAccepted,
             Event::RollbackDeclared => EventKind::RollbackDeclared,
@@ -1228,6 +1273,8 @@ pub(crate) enum Refusal {
     ReceiptForAnotherTransaction,
     /// A receipt whose nonce is not this trial's.
     ReceiptForAnotherTrial,
+    /// A last trial's receipt does not name that exact process.
+    ReceiptForAnotherProcess,
     /// An entrance's proof made for another transaction (U-22).
     EntranceForAnotherTransaction,
     /// **A receipt that arrives once `RollbackIntent` is durable is ignored, by
@@ -1304,6 +1351,11 @@ pub(crate) const TRANSITIONS: &[(PhaseKind, EventKind, PhaseKind)] = &[
         PhaseKind::TrialStarting,
         EventKind::TrialBegan,
         PhaseKind::Trial,
+    ),
+    (
+        PhaseKind::TrialStarting,
+        EventKind::LastTrialReady,
+        PhaseKind::Committed,
     ),
     (
         PhaseKind::TrialStarting,
@@ -1431,6 +1483,26 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
                 began_ms: *began_ms,
             })
         }
+        // U-35's reserved trial commits itself on the same evidence a holder
+        // adopts a handed-back trial by (U-37, H.3): a receipt of this
+        // transaction, at the reserved nonce, naming this very process by
+        // pid and start instant.
+        (Phase::TrialStarting { .. }, Event::LastTrialReady { receipt, .. })
+            if receipt.txn != *txn =>
+        {
+            Err(Refusal::ReceiptForAnotherTransaction)
+        }
+        (Phase::TrialStarting { nonce, .. }, Event::LastTrialReady { receipt, .. })
+            if receipt.nonce != *nonce =>
+        {
+            Err(Refusal::ReceiptForAnotherTrial)
+        }
+        (Phase::TrialStarting { .. }, Event::LastTrialReady { receipt, process })
+            if receipt.pid != process.pid || receipt.started != Some(process.started) =>
+        {
+            Err(Refusal::ReceiptForAnotherProcess)
+        }
+        (Phase::TrialStarting { .. }, Event::LastTrialReady { .. }) => Ok(Phase::Committed),
         (
             Phase::Trial { .. }
             | Phase::Stuck {
@@ -1461,6 +1533,7 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
         }
         (
             Phase::Stuck {
+                trial_started,
                 last_error,
                 attempts,
                 ..
@@ -1472,6 +1545,7 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
             },
         ) => Ok(Phase::Stuck {
             trial: Some(*process),
+            trial_started: *trial_started,
             last_error: last_error.clone(),
             attempts: *attempts,
             retrial: Some(Retrial {
@@ -1479,31 +1553,56 @@ pub(crate) fn next(txn: &TxnId, phase: &Phase, event: &Event) -> Result<Phase, R
                 began_ms: *began_ms,
             }),
         }),
-        (Phase::Moving, Event::RollbackDeclared) => Ok(Phase::RollbackIntent { trial: None }),
-        (Phase::TrialStarting { .. }, Event::RollbackDeclared) => {
-            Ok(Phase::RollbackIntent { trial: None })
-        }
+        (Phase::Moving, Event::RollbackDeclared) => Ok(Phase::RollbackIntent {
+            trial: None,
+            trial_started: false,
+        }),
+        (Phase::TrialStarting { .. }, Event::RollbackDeclared) => Ok(Phase::RollbackIntent {
+            trial: None,
+            trial_started: true,
+        }),
         (Phase::Trial { process, .. }, Event::RollbackDeclared) => Ok(Phase::RollbackIntent {
             trial: Some(*process),
+            trial_started: false,
         }),
-        (Phase::RollbackIntent { trial } | Phase::Stuck { trial, .. }, Event::RolledBack) => {
-            Ok(Phase::RolledBack {
-                untried: trial.is_none(),
-            })
-        }
-        (Phase::RollbackIntent { trial }, Event::RollbackFailed { error }) => Ok(Phase::Stuck {
+        (
+            Phase::RollbackIntent {
+                trial,
+                trial_started,
+            }
+            | Phase::Stuck {
+                trial,
+                trial_started,
+                ..
+            },
+            Event::RolledBack,
+        ) => Ok(Phase::RolledBack {
+            untried: trial.is_none() && !trial_started,
+        }),
+        (
+            Phase::RollbackIntent {
+                trial,
+                trial_started,
+            },
+            Event::RollbackFailed { error },
+        ) => Ok(Phase::Stuck {
             trial: *trial,
+            trial_started: *trial_started,
             last_error: error.clone(),
             attempts: 1,
             retrial: None,
         }),
         (
             Phase::Stuck {
-                trial, attempts, ..
+                trial,
+                trial_started,
+                attempts,
+                ..
             },
             Event::RollbackFailed { error },
         ) => Ok(Phase::Stuck {
             trial: *trial,
+            trial_started: *trial_started,
             last_error: error.clone(),
             attempts: attempts.saturating_add(1),
             retrial: None,
@@ -1544,7 +1643,11 @@ pub(crate) enum Actor {
 }
 
 /// **Who may write each phase into the journal** ((b).2, "Who may write
-/// what"). N writes no phase at all: its only write is its receipt.
+/// what"). N writes its receipt and, in one case only, one phase: U-35's
+/// reserved trial records `Committed` over `TrialStarting` from its own
+/// receipt ([`EventKind::LastTrialReady`], whose one author it is — the
+/// writer of the journal checks [`EventKind::authors`] too, so N can record
+/// no other event that ends in `Committed`).
 pub(crate) const JOURNAL_WRITERS: &[(PhaseKind, &[Actor])] = &[
     (PhaseKind::Allocated, &[Actor::Old]),
     (
@@ -1556,7 +1659,10 @@ pub(crate) const JOURNAL_WRITERS: &[(PhaseKind, &[Actor])] = &[
     (PhaseKind::Moving, &[Actor::Applier]),
     (PhaseKind::TrialStarting, &[Actor::Applier, Actor::Recovery]),
     (PhaseKind::Trial, &[Actor::Applier, Actor::Recovery]),
-    (PhaseKind::Committed, &[Actor::Applier, Actor::Recovery]),
+    (
+        PhaseKind::Committed,
+        &[Actor::Applier, Actor::Recovery, Actor::Trial],
+    ),
     (
         PhaseKind::RollbackIntent,
         &[Actor::Applier, Actor::Recovery],
@@ -1696,10 +1802,15 @@ pub(crate) const EFFECT_RIGHTS: &[Right] = &[
         effect: Effect::EndTrial,
         during: &[PhaseKind::Moving],
     },
+    // R ends a handed-back process of the new build that never became ready
+    // (U-37, H.3 step 2) over `Moving`, and over U-35's `TrialStarting`,
+    // whose reserved trial is exactly such a process when it is not ready. An
+    // applier never holds `TrialStarting`: only an exit guard writes it, as
+    // its road's last act, and an applier's entry refuses it.
     Right {
         actor: Actor::Recovery,
         effect: Effect::EndTrial,
-        during: &[PhaseKind::Moving],
+        during: &[PhaseKind::Moving, PhaseKind::TrialStarting],
     },
     // Both lock holders roll back, commit and retire (W7–W13, M7–M11).
     Right {
@@ -1780,11 +1891,13 @@ pub(crate) const EFFECT_RIGHTS: &[Right] = &[
         effect: Effect::DeleteJournal,
         during: TERMINAL,
     },
-    // N's one write.
+    // N's receipt, in its recorded `Trial` and in U-35's `TrialStarting`,
+    // which records no process yet. N's one journal write, U-35's
+    // `LastTrialReady`, is in `JOURNAL_WRITERS` and `EventKind::authors`.
     Right {
         actor: Actor::Trial,
         effect: Effect::WriteReceipt,
-        during: &[PhaseKind::Trial],
+        during: &[PhaseKind::TrialStarting, PhaseKind::Trial],
     },
     // An ordinary start retires a terminal transaction, and discards one whose
     // install was replaced by hand while it was preparing or deferred.
@@ -2131,7 +2244,7 @@ pub(crate) fn decide(disk: &Disk<'_>) -> Action {
         } if *attempts >= STUCK_ATTEMPT_LIMIT && !disk.trial_alive => Action::GiveUp {
             last_error: last_error.clone(),
         },
-        Phase::RollbackIntent { trial } | Phase::Stuck { trial, .. } => match trial {
+        Phase::RollbackIntent { trial, .. } | Phase::Stuck { trial, .. } => match trial {
             Some(process) if disk.trial_alive => Action::StopTrial(*process),
             _ => match restore(&journal.body.layout, &disk.located) {
                 Err(reason) => Action::StayStuck { reason },
@@ -3038,6 +3151,7 @@ mod tests {
             (
                 Phase::Stuck {
                     trial: None,
+                    trial_started: false,
                     last_error: "the move of `folio.exe` failed".to_owned(),
                     attempts: 2,
                     retrial: None,
@@ -3249,7 +3363,7 @@ mod tests {
         let inventories = inventories();
         let mut alive = matches!(
             journal.body.phase,
-            Phase::RollbackIntent { trial: Some(_) } | Phase::Stuck { trial: Some(_), .. }
+            Phase::RollbackIntent { trial: Some(_), .. } | Phase::Stuck { trial: Some(_), .. }
         );
         for _ in 0..64 {
             let view = Disk {
@@ -3305,10 +3419,17 @@ mod tests {
             },
             trial_phase(),
             Phase::Committed,
-            Phase::RollbackIntent { trial: None },
-            Phase::RollbackIntent { trial: Some(TRIAL) },
+            Phase::RollbackIntent {
+                trial: None,
+                trial_started: false,
+            },
+            Phase::RollbackIntent {
+                trial: Some(TRIAL),
+                trial_started: false,
+            },
             Phase::Stuck {
                 trial: Some(TRIAL),
+                trial_started: false,
                 last_error: "a file is held open".to_owned(),
                 attempts: 1,
                 retrial: Some(Retrial {
@@ -3378,6 +3499,7 @@ mod tests {
         let stuck_retried = journal(
             Phase::Stuck {
                 trial: None,
+                trial_started: false,
                 last_error: "held".to_owned(),
                 attempts: 1,
                 retrial: None,
@@ -3433,6 +3555,13 @@ mod tests {
                 nonce: nonce(TRIAL_NONCE),
                 process: TRIAL,
                 began_ms: BEGAN,
+            },
+            Event::LastTrialReady {
+                receipt: Receipt {
+                    started: Some(TRIAL.started),
+                    ..valid_receipt()
+                },
+                process: TRIAL,
             },
             Event::RetrialBegan {
                 nonce: nonce(TRIAL_NONCE),
@@ -3603,6 +3732,7 @@ mod tests {
         let stuck = journal(
             Phase::Stuck {
                 trial: None,
+                trial_started: false,
                 last_error: String::new(),
                 attempts: 1,
                 retrial: None,
@@ -3664,7 +3794,13 @@ mod tests {
             Header::parse(unknown.as_bytes()),
             Err(ParseRefusal::UnknownOutcome("maybe".to_owned()))
         );
-        let intent = journal(Phase::RollbackIntent { trial: None }, members_layout());
+        let intent = journal(
+            Phase::RollbackIntent {
+                trial: None,
+                trial_started: false,
+            },
+            members_layout(),
+        );
         let mut value: serde_json::Value = serde_json::from_slice(&intent.encode()).expect("json");
         value["outcome"] = serde_json::json!("committed");
         assert_eq!(
@@ -3796,7 +3932,8 @@ mod tests {
     /// table names for it, and every named writer records something.**
     ///
     /// (b).2: O writes `Allocated`, `Prepared`, `Handoff` and `Abandoned`; the
-    /// lock holder the rest and the revert; N no phase at all, only its
+    /// lock holder the rest and the revert; N writes no phase except U-35's
+    /// exact reserved trial writing `Committed` from its own readiness
     /// receipt. R writes `Trial` since U-29b: it starts N over an exchange a
     /// dead applier left with the new bundle live (the coordinator's ruling
     /// 1).
@@ -3823,7 +3960,11 @@ mod tests {
             }
         }
         for phase in PhaseKind::ALL {
-            assert!(!may_record(Actor::Trial, phase), "N records {phase:?}");
+            assert_eq!(
+                may_record(Actor::Trial, phase),
+                phase == PhaseKind::Committed,
+                "N's only journal row is U-35's commit: {phase:?}"
+            );
             assert!(
                 !may_record(Actor::Start, phase),
                 "a start records {phase:?}"
@@ -3837,8 +3978,61 @@ mod tests {
             .collect();
         assert_eq!(
             trial_rights,
-            vec![(Effect::WriteReceipt, &[PhaseKind::Trial][..])],
-            "N's only write is its receipt, and only during its trial"
+            vec![(
+                Effect::WriteReceipt,
+                &[PhaseKind::TrialStarting, PhaseKind::Trial][..]
+            )],
+            "N writes its receipt in the reserved or recorded trial phase"
+        );
+    }
+
+    /// RED (U-35 round 2, the review's B2) — **`TrialStarting`'s whole effect
+    /// table, every actor × every effect**: its trial writes its receipt, and
+    /// the recovery ends a handed-back instance of it that never became ready
+    /// (H.3 step 2). Nothing else — no move, swap, entrance, deletion or
+    /// cleanup before the phase becomes `Trial`, `Committed` or
+    /// `RollbackIntent`, whose own rows govern from there; and no applier
+    /// right, since no applier ever holds the phase.
+    ///
+    /// MUTATION: drop `TrialStarting` from Recovery's `EndTrial` row (the
+    /// review's B2: an unready last trial is never ended); or give the applier
+    /// that row back, or any other cell.
+    #[test]
+    fn u35_trial_starting_effect_rights_are_exhaustive() {
+        let mut actual = Vec::new();
+        for actor in [
+            Actor::Old,
+            Actor::Applier,
+            Actor::Recovery,
+            Actor::Trial,
+            Actor::Start,
+        ] {
+            for effect in [
+                Effect::WriteReceipt,
+                Effect::WriteEntrance,
+                Effect::RemoveEntrance,
+                Effect::MoveOldOut,
+                Effect::MoveNewIn,
+                Effect::MoveNewOut,
+                Effect::MoveOldBack,
+                Effect::Swap,
+                Effect::EndTrial,
+                Effect::DeleteRollbackMaterial,
+                Effect::DetachMount,
+                Effect::DeleteTxnDir,
+                Effect::DeleteJournal,
+            ] {
+                if may(actor, effect, PhaseKind::TrialStarting) {
+                    actual.push((actor, effect));
+                }
+            }
+        }
+        assert_eq!(
+            actual,
+            vec![
+                (Actor::Recovery, Effect::EndTrial),
+                (Actor::Trial, Effect::WriteReceipt),
+            ]
         );
     }
 
@@ -3891,8 +4085,10 @@ mod tests {
     /// version, and deleted the rollback source on that. Here the only roads
     /// to `Committed` are `ReceiptAccepted` in `Trial`, and in a `Stuck` whose
     /// holder started a trial over it (U-29b, ruling 3) — each on a receipt
-    /// with that trial's own nonce — and `decide` answers `Commit` only where
-    /// `next` would accept the receipt.
+    /// with that trial's own nonce — and, since U-35, `LastTrialReady` in
+    /// `TrialStarting`, recorded by that reserved trial on its own receipt;
+    /// and `decide` answers `Commit` only where `next` would accept the
+    /// receipt.
     ///
     /// MUTATION: delete the `receipt.nonce != *nonce` arm of `next`, and a
     /// receipt from another trial commits.
@@ -3906,6 +4102,11 @@ mod tests {
             into_committed,
             vec![
                 &(
+                    PhaseKind::TrialStarting,
+                    EventKind::LastTrialReady,
+                    PhaseKind::Committed
+                ),
+                &(
                     PhaseKind::Trial,
                     EventKind::ReceiptAccepted,
                     PhaseKind::Committed
@@ -3914,7 +4115,7 @@ mod tests {
                     PhaseKind::Stuck,
                     EventKind::ReceiptAccepted,
                     PhaseKind::Committed
-                )
+                ),
             ]
         );
         assert_eq!(
@@ -3965,9 +4166,13 @@ mod tests {
     #[test]
     fn a_receipt_after_rollback_intent_is_ignored() {
         for phase in [
-            Phase::RollbackIntent { trial: Some(TRIAL) },
+            Phase::RollbackIntent {
+                trial: Some(TRIAL),
+                trial_started: false,
+            },
             Phase::Stuck {
                 trial: None,
+                trial_started: false,
                 last_error: String::new(),
                 attempts: 1,
                 retrial: None,
@@ -4008,6 +4213,7 @@ mod tests {
             let journal = journal(
                 Phase::Stuck {
                     trial: Some(TRIAL),
+                    trial_started: false,
                     last_error: "a file is held open".to_owned(),
                     attempts: 1,
                     retrial: None,
@@ -4023,11 +4229,17 @@ mod tests {
             let view = start(JournalRead::Read(journal.header()), true);
             assert_eq!(at_start(&view), StartAction::HandToRescue);
         }
-        let stuck = journal(Phase::RollbackIntent { trial: None }, members_layout())
-            .advance(&Event::RollbackFailed {
-                error: "a file is held open".to_owned(),
-            })
-            .expect("recorded");
+        let stuck = journal(
+            Phase::RollbackIntent {
+                trial: None,
+                trial_started: false,
+            },
+            members_layout(),
+        )
+        .advance(&Event::RollbackFailed {
+            error: "a file is held open".to_owned(),
+        })
+        .expect("recorded");
         assert_eq!(stuck.body.phase.kind(), PhaseKind::Stuck);
     }
 
@@ -4327,13 +4539,18 @@ mod tests {
         }
     }
 
-    /// RED (U-35) — **the final trial is reserved durably before launch**:
-    /// only its planned nonce can become the recorded trial; if no exact
-    /// receipt/process is adopted, recovery declares rollback. This is one
-    /// pre-launch state, not another launcher or a retry loop.
+    /// RED (U-35, round 2) — **the last trial is reserved durably before
+    /// launch, and leaves `TrialStarting` three ways only**: a holder adopts
+    /// the reserved nonce's process into `Trial`; the reserved trial commits
+    /// itself on a receipt of this transaction, its nonce and its own process
+    /// (B3); or recovery declares a rollback, which is never read as
+    /// "untried" (m1). This is one pre-launch state, not another launcher or
+    /// a retry loop.
     ///
-    /// MUTATION: leave the reservation in `Moving`, accept another nonce, or
-    /// begin a fresh trial when recovery finds `TrialStarting`.
+    /// MUTATION: leave the reservation in `Moving`, accept another nonce,
+    /// begin a fresh trial when recovery finds `TrialStarting`, drop the
+    /// process check from `LastTrialReady`, or record `trial_started: false`
+    /// over `TrialStarting`.
     #[test]
     fn u35_the_last_trial_is_reserved_then_adopted_or_rolled_back() {
         let moving = journal(Phase::Moving, members_layout());
@@ -4379,13 +4596,109 @@ mod tests {
                 .map(|journal| journal.body.phase),
             Ok(Phase::Committed)
         );
-        let disk = holder(&planned, flipped().located(&inventories()));
-        assert_eq!(decide(&disk), Action::DeclareRollback);
+        // The receipt as the trial writes it (H.1): its pid and start instant.
+        let exact = Receipt {
+            started: Some(TRIAL.started),
+            ..valid_receipt()
+        };
         assert_eq!(
             planned
-                .advance(&Event::RollbackDeclared)
+                .advance(&Event::LastTrialReady {
+                    receipt: exact.clone(),
+                    process: TRIAL,
+                })
                 .map(|journal| journal.body.phase),
-            Ok(Phase::RollbackIntent { trial: None })
+            Ok(Phase::Committed),
+            "the exact ready last trial needs no rescue-copy holder"
+        );
+        for (other, refusal) in [
+            (
+                Receipt {
+                    started: Some(TRIAL.started.wrapping_add(1)),
+                    ..exact.clone()
+                },
+                Refusal::ReceiptForAnotherProcess,
+            ),
+            (
+                Receipt {
+                    pid: TRIAL.pid + 1,
+                    ..exact.clone()
+                },
+                Refusal::ReceiptForAnotherProcess,
+            ),
+            (valid_receipt(), Refusal::ReceiptForAnotherProcess),
+            (
+                Receipt {
+                    nonce: nonce(0x99),
+                    ..exact.clone()
+                },
+                Refusal::ReceiptForAnotherTrial,
+            ),
+            (
+                Receipt {
+                    txn: TxnId::new([0x01; 16]),
+                    ..exact.clone()
+                },
+                Refusal::ReceiptForAnotherTransaction,
+            ),
+        ] {
+            assert_eq!(
+                planned.advance(&Event::LastTrialReady {
+                    receipt: other.clone(),
+                    process: TRIAL,
+                }),
+                Err(refusal),
+                "{other:?}"
+            );
+        }
+        assert_eq!(
+            trial
+                .advance(&Event::LastTrialReady {
+                    receipt: exact.clone(),
+                    process: TRIAL,
+                })
+                .map(|journal| journal.body.phase),
+            Err(Refusal::Illegal {
+                from: PhaseKind::Trial,
+                event: EventKind::LastTrialReady,
+            }),
+            "once a holder adopted it, the holder commits it"
+        );
+        let disk = holder(&planned, flipped().located(&inventories()));
+        assert_eq!(decide(&disk), Action::DeclareRollback);
+        let intent = planned
+            .advance(&Event::RollbackDeclared)
+            .expect("the rollback over the reservation");
+        assert_eq!(
+            intent.body.phase,
+            Phase::RollbackIntent {
+                trial: None,
+                trial_started: true,
+            }
+        );
+        // The review's m1: the reserved trial was asked to start, so its
+        // rollback is never "interrupted before the new version started" —
+        // through `Stuck` too — while one from `Moving` still is.
+        let failed = intent
+            .advance(&Event::RollbackFailed {
+                error: "held".to_owned(),
+            })
+            .expect("a failed rollback");
+        for back in [&intent, &failed] {
+            assert_eq!(
+                back.advance(&Event::RolledBack)
+                    .map(|journal| journal.body.phase),
+                Ok(Phase::RolledBack { untried: false }),
+                "{:?}",
+                back.body.phase
+            );
+        }
+        assert_eq!(
+            moving
+                .advance(&Event::RollbackDeclared)
+                .and_then(|journal| journal.advance(&Event::RolledBack))
+                .map(|journal| journal.body.phase),
+            Ok(Phase::RolledBack { untried: true })
         );
     }
 
@@ -4422,7 +4735,10 @@ mod tests {
             journal
                 .advance(&Event::RollbackDeclared)
                 .map(|j| j.body.phase),
-            Ok(Phase::RollbackIntent { trial: Some(TRIAL) })
+            Ok(Phase::RollbackIntent {
+                trial: Some(TRIAL),
+                trial_started: false
+            })
         );
     }
 
@@ -4477,7 +4793,10 @@ mod tests {
     fn w9_rollback_stops_the_trial_moves_new_out_before_old_back_and_verifies() {
         let inventories = inventories();
         let journal = journal(
-            Phase::RollbackIntent { trial: Some(TRIAL) },
+            Phase::RollbackIntent {
+                trial: Some(TRIAL),
+                trial_started: false,
+            },
             members_layout(),
         );
         let mut disk = flipped();
@@ -4536,10 +4855,17 @@ mod tests {
     #[test]
     fn w10_stuck_retries_the_rollback_at_every_holder() {
         let inventories = inventories();
-        let intent = journal(Phase::RollbackIntent { trial: None }, members_layout());
+        let intent = journal(
+            Phase::RollbackIntent {
+                trial: None,
+                trial_started: false,
+            },
+            members_layout(),
+        );
         let stuck = journal(
             Phase::Stuck {
                 trial: None,
+                trial_started: false,
                 last_error: "a file was held open".to_owned(),
                 attempts: 1,
                 retrial: None,
@@ -4647,7 +4973,13 @@ mod tests {
     #[test]
     fn a_rollback_cut_after_any_move_is_finished_by_the_next_holder() {
         let inventories = inventories();
-        let journal = journal(Phase::RollbackIntent { trial: None }, members_layout());
+        let journal = journal(
+            Phase::RollbackIntent {
+                trial: None,
+                trial_started: false,
+            },
+            members_layout(),
+        );
         let Action::RollBack(Restore::Moves(moves)) =
             decide(&holder(&journal, flipped().located(&inventories)))
         else {
@@ -4791,7 +5123,10 @@ mod tests {
             journal
                 .advance(&Event::RollbackDeclared)
                 .map(|j| j.body.phase),
-            Ok(Phase::RollbackIntent { trial: None })
+            Ok(Phase::RollbackIntent {
+                trial: None,
+                trial_started: false
+            })
         );
         let nowhere = bundle(Some(new_bundle()), None);
         assert_eq!(decide(&holder(&journal, nowhere)), Action::DeclareRollback);
@@ -4844,6 +5179,7 @@ mod tests {
         let stuck = journal(
             Phase::Stuck {
                 trial: None,
+                trial_started: false,
                 last_error: "the exchange was refused".to_owned(),
                 attempts: STUCK_ATTEMPT_LIMIT,
                 retrial: None,
@@ -4959,7 +5295,10 @@ mod tests {
     #[test]
     fn m9_rollback_swaps_back_only_while_the_new_bundle_is_live() {
         let journal = journal(
-            Phase::RollbackIntent { trial: Some(TRIAL) },
+            Phase::RollbackIntent {
+                trial: Some(TRIAL),
+                trial_started: false,
+            },
             bundle_layout(),
         );
         let swapped = bundle(Some(new_bundle()), Some(old_bundle()));
@@ -4995,6 +5334,7 @@ mod tests {
         let journal = journal(
             Phase::Stuck {
                 trial: None,
+                trial_started: false,
                 last_error: "the exchange was refused".to_owned(),
                 attempts: 1,
                 retrial: None,
@@ -5022,7 +5362,13 @@ mod tests {
     #[test]
     fn stuck_counts_its_attempts_and_gives_up_at_the_bound() {
         let swapped = bundle(Some(new_bundle()), Some(old_bundle()));
-        let mut journal = journal(Phase::RollbackIntent { trial: None }, bundle_layout());
+        let mut journal = journal(
+            Phase::RollbackIntent {
+                trial: None,
+                trial_started: false,
+            },
+            bundle_layout(),
+        );
         for attempt in 1..=STUCK_ATTEMPT_LIMIT {
             assert!(matches!(
                 decide(&holder(&journal, swapped.clone())),
@@ -5080,13 +5426,17 @@ mod tests {
         };
         let stuck = Phase::Stuck {
             trial: None,
+            trial_started: false,
             last_error: "the exchange was refused".to_owned(),
             attempts: 2,
             retrial: None,
         };
         for phase in [
             stuck.clone(),
-            Phase::RollbackIntent { trial: None },
+            Phase::RollbackIntent {
+                trial: None,
+                trial_started: false,
+            },
             Phase::RolledBack { untried: false },
             Phase::Handoff {
                 applier: nonce(0x44),

@@ -51,9 +51,11 @@
 //! * [`ExitGuard`] — **the one way a road process leaves** (U-34): at its
 //!   exit, whatever the reason, a successor it holds still running opens
 //!   Folio, else it starts what the disk names ([`Opens`]); the recovery run
-//!   at logon with nothing done is the one exception ([`Opener`]); since U-35,
-//!   two OS launch refusals reserve one final ordinary trial durably before
-//!   asking the same installed image to start once more.
+//!   at logon with nothing done is the one exception ([`Opener`]); since U-35
+//!   (Windows), two OS launch refusals at `Moving` reserve one last trial
+//!   durably (`TrialStarting`, [`reserve_last_trial`]) before asking the same
+//!   installed image to start once more, and that trial can commit itself
+//!   ([`commit_last_trial`]).
 //!
 //! Every wait here sleeps through the worker's wait door
 //! (`bt_platform::wait::sleep_within`), on the `WorkerCtx` of the standalone
@@ -275,6 +277,9 @@ impl<'w> Journaled<'w> {
     /// The protocol's refusal, the writer table's, or the write's failure; the
     /// journal on disk and here stays at its last durable phase.
     pub(crate) fn record(&mut self, actor: Actor, event: &Event) -> Result<(), String> {
+        if !event.kind().authors().contains(&actor) {
+            return Err(format!("{actor:?} may not record {:?}", event.kind()));
+        }
         let next = self
             .journal
             .advance(event)
@@ -372,14 +377,15 @@ pub(crate) fn now_ms() -> u64 {
 /// **Reserve U-35's one last trial before it is launched.** The caller has
 /// already proved that the new image is live and that both the first start of
 /// it and the rescue copy were refused by the operating system. This takes the
-/// transaction lock once, requires `Moving` (so a failed trial can never come
-/// round here again), records `TrialStarting` durably, and returns the frozen
-/// trial words' transaction and nonce.
+/// transaction lock once, records `TrialStarting` durably only over `Moving`
+/// (so a failed trial can never come round here again; any other phase is
+/// `Ok(None)`, not eligible), and returns the frozen trial words' transaction
+/// and nonce.
 pub(crate) fn reserve_last_trial(
     worker: &WorkerCtx,
     home: &Home,
     actor: Actor,
-) -> Result<(TxnId, Nonce), String> {
+) -> Result<Option<(TxnId, Nonce)>, String> {
     let _lock = match install_txn::try_hold(&home.lock(), Hold::Exclusive) {
         Ok(Some(lock)) => lock,
         Ok(None) => return Err("the transaction lock is held".to_owned()),
@@ -389,10 +395,7 @@ pub(crate) fn reserve_last_trial(
         .map_err(|error| format!("the journal could not be read: {error}"))?;
     let journal = Journal::parse(&bytes).map_err(|refusal| refusal.to_string())?;
     if journal.body.phase != Phase::Moving {
-        return Err(format!(
-            "the journal is {:?}, not Moving",
-            journal.body.phase.kind()
-        ));
+        return Ok(None);
     }
     let nonce = crate::update_job::mint_nonce();
     let mut journaled = Journaled::of(home, worker, journal);
@@ -403,7 +406,104 @@ pub(crate) fn reserve_last_trial(
             began_ms: now_ms(),
         },
     )?;
-    Ok((journaled.journal.txn, nonce))
+    Ok(Some((journaled.journal.txn, nonce)))
+}
+
+/// **What U-35's reserved trial found when it asked to commit itself**
+/// ([`commit_last_trial`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LastTrialCommit {
+    /// Not yet: a holder has the transaction lock, or the receipt is not on
+    /// disk yet. The watch asks again at its next turn.
+    Pending,
+    /// `Committed` is durable — recorded here, or found already recorded.
+    Committed,
+    /// The journal no longer waits for this trial's own commit — a holder
+    /// adopted it into `Trial`, declared a rollback, or the transaction is
+    /// gone or another — so it never asks again; the watch's ordinary read
+    /// of the header decides from here.
+    NotItsOwn,
+}
+
+/// **U-35's reserved trial commits its own transaction** (U-35 round 2, the
+/// review's B3) — the one commit road that needs no rescue-copy process,
+/// because the operating system refused that copy and every holder runs it.
+///
+/// **The evidence is the ordinary one** (U-37, H.1/H.3): the receipt the
+/// trial's storage worker wrote, create-new, once its claim was adopted and its
+/// first pane text reached the glass. A holder commits a handed-back trial when
+/// that receipt names the running process exactly (pid and start instant);
+/// here the process it must name is the caller's own, and the receipt is read
+/// back from disk, so what commits is what is durable. **What replaces "a
+/// holder observed it"** is that this process is the reserved trial — admitted
+/// by its exact nonce ([`crate::update_txn::Phase::reserved_trial`]) — and
+/// asks only after its readiness edge.
+///
+/// **The lock.** Nobody holds `H\lock` while the trial becomes ready: the exit
+/// guard that reserved it let go and left. This takes it, one non-blocking
+/// attempt, for the read and the one write; a holder that has it (a recovery
+/// that could run after all) makes this `Pending`, and what it records first
+/// wins. The trial's shared `H\admission` keeps every rollback move off the
+/// install while it runs.
+///
+/// # Errors
+/// The journal or the receipt could not be read, or the protocol refused the
+/// event (a receipt of another process); nothing was recorded.
+pub(crate) fn commit_last_trial(
+    worker: &WorkerCtx,
+    home: &Home,
+    txn: TxnId,
+    nonce: Nonce,
+) -> Result<LastTrialCommit, String> {
+    let me = std::process::id();
+    commit_last_trial_as(worker, home, txn, nonce, me, install_flip::started_of(me))
+}
+
+/// [`commit_last_trial`] as the process `pid`, started at `started` — the
+/// caller's own in the product; a test names its own process too.
+pub(crate) fn commit_last_trial_as(
+    worker: &WorkerCtx,
+    home: &Home,
+    txn: TxnId,
+    nonce: Nonce,
+    pid: u32,
+    started: Option<u64>,
+) -> Result<LastTrialCommit, String> {
+    let _lock = match install_txn::try_hold(&home.lock(), Hold::Exclusive) {
+        Ok(Some(lock)) => lock,
+        Ok(None) => return Ok(LastTrialCommit::Pending),
+        Err(failure) => return Err(failure.to_string()),
+    };
+    let bytes = match file_reads::read(Lane::UpdateJournal, home.journal()) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(LastTrialCommit::NotItsOwn);
+        }
+        Err(error) => return Err(format!("the journal could not be read: {error}")),
+    };
+    let journal = Journal::parse(&bytes).map_err(|refusal| refusal.to_string())?;
+    if journal.txn != txn {
+        return Ok(LastTrialCommit::NotItsOwn);
+    }
+    if journal.body.phase == Phase::Committed {
+        return Ok(LastTrialCommit::Committed);
+    }
+    if journal.body.phase.reserved_trial() != Some(nonce) {
+        return Ok(LastTrialCommit::NotItsOwn);
+    }
+    let Some(receipt) = read_receipt(&home.receipt_path(txn, &nonce)) else {
+        return Ok(LastTrialCommit::Pending);
+    };
+    let receipt = receipt?;
+    // A process whose start instant cannot be read wrote a receipt without
+    // one, which names nobody: the protocol refuses it below.
+    let process = TrialProcess {
+        pid,
+        started: started.unwrap_or_default(),
+    };
+    let mut journaled = Journaled::of(home, worker, journal);
+    journaled.record(Actor::Trial, &Event::LastTrialReady { receipt, process })?;
+    Ok(LastTrialCommit::Committed)
 }
 
 /// **How a trial's watch ended.**
@@ -1068,9 +1168,11 @@ pub(crate) trait Leave {
         None
     }
     /// **Reserve and name the one last trial after both ordinary deliveries
-    /// were refused by the operating system** (0.4.7 U-35). The reservation
-    /// is durable before this returns. `Ok(None)` means this journal/disk state
-    /// is not eligible; `Err` names why it could not be reserved.
+    /// were refused by the operating system** (0.4.7 U-35; only the Windows
+    /// holders answer it). The reservation is durable before this returns.
+    /// `Ok(None)`: not eligible — no new build live and uncommitted, or a
+    /// phase other than `Moving` (`TrialStarting` already reserved; `Stuck`
+    /// has U-29b's retrial road). `Err` names why it could not be reserved.
     fn last_trial(&mut self) -> Result<Option<(PathBuf, Vec<OsString>)>, String> {
         Ok(None)
     }
@@ -1204,9 +1306,11 @@ impl Left {
 /// where neither whole set is installed). A start is delivered only when it is
 /// acknowledged ([`Leave::acknowledged`]: a Folio holds the data directory);
 /// otherwise the next program the rule names ([`Leave::fallback`]); and when
-/// both process creations are refused by the OS, U-35 reserves one final
-/// ordinary trial before asking for it once. A created but unacknowledged
-/// process does not trigger that reservation. When no start is delivered,
+/// both process creations are refused by the OS, U-35 reserves one last
+/// trial before asking for it once ([`Leave::last_trial`]; Windows only — a
+/// macOS start goes through `/usr/bin/open`, which reports no refusal by
+/// LaunchServices, so the cell cannot be observed there). A created but
+/// unacknowledged process does not trigger that reservation. When no start is delivered,
 /// this process shows the failure window itself
 /// ([`Leave::show_here`]). **The irrecoverable boundary** is what no process
 /// can survive from inside: the operating system refusing to show a window at
@@ -1437,6 +1541,12 @@ pub(crate) enum Opens {
     /// <journal>`: its writes are held back and its receipt is never heard
     /// (the new build is never started plainly before `Committed`, ruling 2).
     Trial { txn: TxnId },
+    /// **Windows only, U-35**: the journal is `TrialStarting`, so the one
+    /// trial it may run is its reserved one (`update_txn::Phase::reserved_trial`)
+    /// — the installed new build with that nonce, then `--update-failed
+    /// <journal>`, which a start admits as that very trial. Never a fresh
+    /// nonce: a start with any other is handed back to recovery.
+    LastTrial { txn: TxnId, nonce: Nonce },
     /// **Windows only, the fallback** (U-24): the journal is still
     /// `destructive` and the install folder holds neither whole set — a
     /// rollback that could not finish, or a layout that cannot be read — so
@@ -1454,6 +1564,11 @@ impl Opens {
             Opens::Installed { failed: true } | Opens::Rescue => failed_words(home).to_vec(),
             Opens::Trial { txn } => {
                 let mut words = trial_words(*txn, &crate::update_job::mint_nonce()).to_vec();
+                words.extend(failed_words(home));
+                words
+            }
+            Opens::LastTrial { txn, nonce } => {
+                let mut words = trial_words(*txn, nonce).to_vec();
                 words.extend(failed_words(home));
                 words
             }
@@ -1500,9 +1615,15 @@ pub(crate) fn owed_at_logon(ended: &Ended) -> bool {
 mod exit_guard_tests {
     use super::*;
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum StartStatus {
+        Created,
+        Refused,
+        Unacknowledged,
+    }
+
     struct Door {
-        primary_refused: bool,
-        fallback_refused: bool,
+        statuses: [StartStatus; 3],
         starts: Vec<PathBuf>,
         last_trials: usize,
     }
@@ -1516,13 +1637,7 @@ mod exit_guard_tests {
 
         fn start(&mut self, program: &Path, _words: &[OsString]) -> io::Result<()> {
             self.starts.push(program.to_path_buf());
-            let refused = match program.to_string_lossy().as_ref() {
-                "primary" => self.primary_refused,
-                "fallback" => self.fallback_refused,
-                "last-trial" => true,
-                _ => unreachable!(),
-            };
-            if refused {
+            if self.statuses[self.starts.len() - 1] == StartStatus::Refused {
                 Err(io::Error::other("refused (test)"))
             } else {
                 Ok(())
@@ -1539,38 +1654,54 @@ mod exit_guard_tests {
         }
 
         fn acknowledged(&mut self) -> bool {
-            false
+            self.statuses[self.starts.len() - 1] == StartStatus::Created
         }
 
         fn show_here(&mut self, _why: &str) {}
     }
 
-    /// RED (U-35) — the last trial belongs only to the `Err`/`Err` cell of
-    /// the two-launch decision table. A process that was created but did not
-    /// acknowledge is not an OS launch refusal.
+    /// RED (U-35 round 2) — **the complete primary × rescue × last-start
+    /// table**: created, refused and created-but-unacknowledged are distinct at
+    /// every position. The last start exists only after two refusals; its
+    /// creation is a delivery, while its refusal or non-acknowledgement names
+    /// the failure without a fourth request.
     ///
     /// MUTATION: count an unacknowledged `Ok` as a refusal, or trigger after
     /// only one `Err`.
     #[test]
     fn u35_the_last_trial_requires_two_os_launch_refusals() {
-        for (primary_refused, fallback_refused, expected) in [
-            (false, false, 0),
-            (false, true, 0),
-            (true, false, 0),
-            (true, true, 1),
-        ] {
-            let mut guard = ExitGuard::new(Door {
-                primary_refused,
-                fallback_refused,
-                starts: Vec::new(),
-                last_trials: 0,
-            });
-            assert!(matches!(guard.leave(), Left::ShownHere(_)));
-            assert_eq!(guard.inner().last_trials, expected);
-            assert_eq!(
-                guard.inner().starts.len(),
-                if expected == 1 { 3 } else { 2 }
-            );
+        let statuses = [
+            StartStatus::Created,
+            StartStatus::Refused,
+            StartStatus::Unacknowledged,
+        ];
+        for primary in statuses {
+            for rescue in statuses {
+                for last in statuses {
+                    let mut guard = ExitGuard::new(Door {
+                        statuses: [primary, rescue, last],
+                        starts: Vec::new(),
+                        last_trials: 0,
+                    });
+                    let left = guard.leave();
+                    let (attempts, last_trials, delivered) = match (primary, rescue, last) {
+                        (StartStatus::Created, _, _) => (1, 0, true),
+                        (_, StartStatus::Created, _) => (2, 0, true),
+                        (StartStatus::Refused, StartStatus::Refused, StartStatus::Created) => {
+                            (3, 1, true)
+                        }
+                        (StartStatus::Refused, StartStatus::Refused, _) => (3, 1, false),
+                        _ => (2, 0, false),
+                    };
+                    assert_eq!(
+                        matches!(left, Left::Started(_)),
+                        delivered,
+                        "{primary:?} / {rescue:?} / {last:?}: {left:?}"
+                    );
+                    assert_eq!(guard.inner().last_trials, last_trials);
+                    assert_eq!(guard.inner().starts.len(), attempts);
+                }
+            }
         }
     }
 }

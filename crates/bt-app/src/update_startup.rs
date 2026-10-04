@@ -34,7 +34,14 @@
 //!      when that cannot be started either does the start continue, with one
 //!      line and the *Update incomplete.* card; elsewhere a missing rescue
 //!      build is named in one line and the start continues untouched
-//!      (coordinator ruling, 2026-09-27);
+//!      (coordinator ruling, 2026-09-27) — except over U-35's
+//!      `TrialStarting`, where it continues as that transaction's reserved
+//!      trial, its writes held (U-35 round 2);
+//!    - `TrialStarting` (U-35) and this start names its reserved trial —
+//!      `--update-trial` with that exact nonce, with or without
+//!      `--update-failed` → run as that trial; any other nonce is no trial of
+//!      it, and `--update-failed` without the exact nonce does not let a start
+//!      past it;
 //!    - `destructive`, whatever its outcome, and this start carries
 //!      `--update-failed <journal>` → continue: a lock holder sent this start
 //!      after a rollback, or after its own recovery failed (U-29, U-29b).
@@ -77,8 +84,8 @@ use bt_platform::install_txn::{self, Held, Hold};
 use crate::cli;
 use crate::update_job::Failure;
 use crate::update_txn::{
-    AfterRollback, Class, Digest, Effect, Header, Home, Journal, JournalRead, Nonce, Phase,
-    StartAction, StartView, TxnId, after_rollback, at_start, rolled_back_untried,
+    AfterRollback, Class, Digest, Effect, Header, Home, Journal, JournalRead, Nonce, StartAction,
+    StartView, TxnId, after_rollback, at_start, rolled_back_untried,
 };
 
 /// **The pass has run.** Only [`pass`] makes one, and `launch_wire::hand_over`
@@ -93,6 +100,12 @@ static ADMISSION: OnceLock<Held> = OnceLock::new();
 /// only when the journal confirms this start is that transaction's trial, and
 /// the installation home whose journal said so.
 static TRIAL: OnceLock<Trial> = OnceLock::new();
+
+/// **This process is U-35's reserved trial** — admitted by the exact nonce
+/// `TrialStarting` records, or continued as it when no rescue build could be
+/// started — and so the one trial that commits itself on its own receipt
+/// (`update_apply::commit_last_trial`). Set only by [`pass`], with [`TRIAL`].
+static LAST_TRIAL: OnceLock<()> = OnceLock::new();
 
 /// What [`TRIAL`] holds.
 struct Trial {
@@ -137,6 +150,11 @@ pub(crate) fn trial() -> Option<(TxnId, Nonce)> {
 /// [`trial`] is.
 pub(crate) fn trial_home() -> Option<&'static Home> {
     TRIAL.get().map(|trial| &trial.home)
+}
+
+/// Whether this start is U-35's reserved trial ([`LAST_TRIAL`]).
+pub(crate) fn is_last_trial() -> bool {
+    LAST_TRIAL.get().is_some()
 }
 
 /// **Make this test process an update's trial** — what [`pass`] records when
@@ -194,6 +212,7 @@ pub(crate) enum Verdict {
     Continue {
         admission: Option<Held>,
         trial: Option<(TxnId, Nonce)>,
+        last_trial: bool,
         failed: Option<Failure>,
         waiting: Option<Home>,
     },
@@ -224,6 +243,7 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
         Verdict::Continue {
             admission,
             trial,
+            last_trial,
             failed,
             waiting,
         } => {
@@ -235,6 +255,9 @@ pub(crate) fn pass(request: &cli::CliRequest) -> Admitted {
             }
             if let Some((txn, nonce)) = trial {
                 let _ = TRIAL.set(Trial { txn, nonce, home });
+                if last_trial {
+                    let _ = LAST_TRIAL.set(());
+                }
             }
             if let Some(failure) = failed {
                 let _ = FAILED.set(failure);
@@ -252,18 +275,22 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
     let mut trial_starting = None;
     let journal = match file_reads::read(Lane::Install, &journal_path) {
         Ok(bytes) => match Header::parse(&bytes) {
-            Ok(header) if start.failed.is_some() => {
-                untried = rolled_back_untried(&bytes);
+            Ok(header) => {
+                if start.failed.is_some() {
+                    untried = rolled_back_untried(&bytes);
+                }
+                // Read whatever words this start carries (U-35 round 2, the
+                // review's m2): the reservation decides admission, not the
+                // card's word.
                 trial_starting = Journal::parse(&bytes).ok().and_then(|journal| {
-                    if let Phase::TrialStarting { nonce, .. } = journal.body.phase {
-                        Some((journal.txn, nonce))
-                    } else {
-                        None
-                    }
+                    journal
+                        .body
+                        .phase
+                        .reserved_trial()
+                        .map(|nonce| (journal.txn, nonce))
                 });
                 JournalRead::Read(header)
             }
-            Ok(header) => JournalRead::Read(header),
             Err(refusal) => {
                 world.say(&format!(
                     "BT_UPDATE_START {} is left as it is: {refusal}",
@@ -281,6 +308,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             return Verdict::Continue {
                 admission,
                 trial: None,
+                last_trial: false,
                 failed: None,
                 waiting: None,
             };
@@ -290,6 +318,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
         return Verdict::Continue {
             admission,
             trial: None,
+            last_trial: false,
             failed: None,
             waiting: None,
         };
@@ -354,12 +383,14 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
         StartAction::Continue => Verdict::Continue {
             admission,
             trial: None,
+            last_trial: false,
             failed,
             waiting,
         },
         StartAction::RunAsTrial => Verdict::Continue {
             admission,
             trial,
+            last_trial: is_last_trial,
             failed,
             waiting: None,
         },
@@ -368,11 +399,14 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
             Verdict::Continue {
                 admission,
                 trial: None,
+                last_trial: false,
                 failed,
                 waiting: None,
             }
         }
-        StartAction::HandToRescue => hand_to_rescue(start, &header, admission, world),
+        StartAction::HandToRescue => {
+            hand_to_rescue(start, &header, trial_starting, admission, world)
+        }
     }
 }
 
@@ -533,9 +567,18 @@ fn delete(effect: Effect, txn: TxnId, home: &Home) -> Result<(), install_txn::Fa
 /// a waiting transaction's does — no journal write, no deletion — on a macOS
 /// bundle with the *Update incomplete.* card and the home's folder. An app
 /// that never opens again is not an answer.
+///
+/// **Over U-35's `TrialStarting` it continues as that transaction's reserved
+/// trial instead** (`reserved`, U-35 round 2): the new build is live and not
+/// committed, so it runs only as the trial the journal reserved — its writes
+/// held, its card the last trial's, and its own receipt able to commit it
+/// (`update_apply::commit_last_trial`) — never plainly. Over every other
+/// destructive phase a refused rescue still continues plainly, as before
+/// (the open hole the U-35 round 2 report names for the owner).
 fn hand_to_rescue(
     start: &Start<'_>,
     header: &Header,
+    reserved: Option<(TxnId, Nonce)>,
     admission: Option<Held>,
     world: &mut impl World,
 ) -> Verdict {
@@ -572,6 +615,21 @@ fn hand_to_rescue(
             }
         }
     }
+    if let Some(reserved) = reserved {
+        world.say(&format!(
+            "BT_UPDATE_START transaction {} is unfinished and {refused} could not be started; Folio starts as its reserved trial, its writes held",
+            header.txn,
+        ));
+        return Verdict::Continue {
+            admission,
+            trial: Some(reserved),
+            last_trial: true,
+            failed: Some(Failure::TrialIncomplete {
+                folder: start.home.root().to_path_buf(),
+            }),
+            waiting: None,
+        };
+    }
     world.say(&format!(
         "BT_UPDATE_START transaction {} is unfinished and {refused} could not be started; Folio starts without it",
         header.txn,
@@ -579,6 +637,7 @@ fn hand_to_rescue(
     Verdict::Continue {
         admission,
         trial: None,
+        last_trial: false,
         failed: named.map(|home| Failure::Incomplete {
             folder: home.to_path_buf(),
         }),
@@ -1472,16 +1531,22 @@ mod tests {
             );
         }
 
-        /// RED (U-35) — **the exact trial reserved before the final launch is
-        /// admitted through the ordinary trial road and its launch card names
-        /// this session as the trial**. Merely carrying trial-shaped words
-        /// with another nonce keeps the ordinary incomplete card.
+        /// RED (U-35, round 2) — **the exact trial reserved before the final
+        /// launch is admitted through the ordinary trial road, with or without
+        /// `--update-failed` (the review's m2), and its launch card names this
+        /// session as the trial**; trial-shaped words with another nonce are
+        /// handed to recovery; and on Windows a plain start whose rescue build
+        /// cannot be started continues as the reserved trial (B3's "what the
+        /// next start does").
         ///
-        /// MUTATION: identify the final trial from argv alone, or fail to
-        /// distinguish its card from another destructive start.
+        /// MUTATION: identify the final trial from argv alone; read
+        /// `TrialStarting` only when `--update-failed` is present (the
+        /// card-less exact start is no trial); fail to distinguish its card
+        /// from another destructive start; or ignore the reservation in
+        /// `hand_to_rescue`.
         #[test]
         fn u35_the_reserved_last_trial_is_admitted_and_named_by_its_card() {
-            use crate::update_txn::{Body, Inventories, Layout};
+            use crate::update_txn::{Body, Inventories, Layout, Phase};
 
             let Some(scene) = Scene::new("last-trial-card") else {
                 return;
@@ -1539,6 +1604,35 @@ mod tests {
             );
             assert!(world.spawned.is_empty(), "the trial is not handed back");
 
+            let argv_without_card = [
+                OsString::from(cli::UPDATE_TRIAL_FLAG),
+                OsString::from(&asked.txn),
+                OsString::from(&asked.nonce),
+            ];
+            let mut world = Recorded::default();
+            let Verdict::Continue {
+                trial,
+                last_trial,
+                failed,
+                ..
+            } = run(
+                &Start {
+                    own_exe: &scene.own_exe,
+                    home: &scene.home,
+                    argv: &argv_without_card,
+                    trial: Some(&asked),
+                    failed: None,
+                },
+                &mut world,
+            )
+            else {
+                panic!("exact admission does not depend on the card word");
+            };
+            assert_eq!(trial, Some((txn(), nonce())));
+            assert!(last_trial);
+            assert_eq!(failed, None);
+            assert!(world.spawned.is_empty());
+
             let another = cli::UpdateTrialArg {
                 txn: txn().to_string(),
                 nonce: Nonce::new([0x9d; 32]).to_string(),
@@ -1559,6 +1653,43 @@ mod tests {
                 "another nonce is handed to recovery, not admitted"
             );
             assert_eq!(world.spawned.len(), 1);
+
+            // U-35 round 2: a plain start whose rescue build cannot be started
+            // continues as the reserved trial — held writes, the last trial's
+            // card — never as the new build plainly. (On macOS the start's own
+            // program is asked to recover first, U-29b; there is no
+            // `TrialStarting` on macOS, so the Windows road is what counts.)
+            if bt_platform::host_platform() == bt_platform::HostPlatform::Windows {
+                std::fs::remove_file(scene.home.rescue_program(&journal.rescue)).unwrap();
+                let mut world = Recorded::default();
+                let Verdict::Continue {
+                    trial,
+                    last_trial,
+                    failed,
+                    ..
+                } = run(
+                    &Start {
+                        own_exe: &scene.own_exe,
+                        home: &scene.home,
+                        argv: &[],
+                        trial: None,
+                        failed: None,
+                    },
+                    &mut world,
+                )
+                else {
+                    panic!("a start whose rescue is refused continues");
+                };
+                assert_eq!(world.spawned.len(), 1, "the rescue was asked first");
+                assert_eq!(trial, Some((txn(), nonce())), "{:?}", world.said);
+                assert!(last_trial);
+                assert_eq!(
+                    failed,
+                    Some(Failure::TrialIncomplete {
+                        folder: scene.home.root().to_path_buf()
+                    })
+                );
+            }
         }
 
         /// RED (U-32) — **a trial started over `Stuck` that commits forward
@@ -1602,6 +1733,7 @@ mod tests {
                     adapter: crate::update_txn::Adapter::Ours,
                     phase: Phase::Stuck {
                         trial: None,
+                        trial_started: false,
                         last_error: "the exchange back was refused".to_owned(),
                         attempts: 1,
                         retrial: None,
@@ -1692,6 +1824,7 @@ mod tests {
                 txn(),
                 std::time::Duration::from_millis(5),
                 &|| woke.set(true),
+                None,
                 &mut crate::update_trial::watchdog_asleep(),
             );
             assert!(woke.get(), "the watch read the commit and woke the window");

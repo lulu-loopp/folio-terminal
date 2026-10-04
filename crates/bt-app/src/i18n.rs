@@ -5653,8 +5653,8 @@ impl Text {
             // zh: pending U-35
             Self::UpdateCardTrial => pick(
                 lang,
-                "This session is a trial of the new version.",
-                "This session is a trial of the new version.",
+                "Changes made now may not be kept until Folio confirms the update. Keep Folio open until then.",
+                "Changes made now may not be kept until Folio confirms the update. Keep Folio open until then.",
             ),
             Self::UpdateCardUpdated => pick(lang, "Updated.", "已更新。"),
             Self::VersionUpToDate => pick(lang, "Up to date", "已是最新"),
@@ -5739,8 +5739,8 @@ impl Text {
             // zh: pending U-35
             Self::UpdateFailedTrialRunning => pick(
                 lang,
-                "The update did not complete as intended.",
-                "The update did not complete as intended.",
+                "The update did not finish.",
+                "The update did not finish.",
             ),
             Self::UpdateFailedInterrupted => pick(
                 lang,

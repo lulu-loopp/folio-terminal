@@ -64,8 +64,12 @@
 //! writes it create-new with `install_txn::durable_create` (flush file, rename
 //! that never replaces, flush directory). The window thread never writes it.
 //!
-//! **The journal has one writer, the lock holder.** N writes only its receipt;
-//! turning it into `Committed` is the applier's. A receipt that lands after the
+//! **The journal has one writer, the lock holder** — with one exception. N
+//! writes only its receipt, except U-35's reserved trial (Windows; started
+//! because the operating system refused the rescue copy every holder runs):
+//! once ready, its watch takes the transaction lock and records `Committed`
+//! from its own receipt as it is on disk, which must name this very process
+//! (`update_apply::commit_last_trial`). A receipt that lands after the
 //! journal says `RollbackIntent` is ignored **by rule** — the lock holder's rule
 //! (`update_txn::next` refuses it; U-18/U-21 hold it), not this module's. A
 //! rollback that is still `destructive` is therefore not an end here: its
@@ -83,6 +87,7 @@ use bt_platform::file_reads::{self, Lane};
 use bt_platform::install_flip::Running;
 
 use crate::persist;
+use crate::update_apply::LastTrialCommit;
 use crate::update_startup;
 use crate::update_txn::{Home, Receipt, TrialSight, TxnId, trial_sight};
 
@@ -478,22 +483,34 @@ pub(crate) fn take_released() -> Vec<Writer> {
 /// calls `wake` when a commit released the pending writes. Nothing at all
 /// outside a trial.
 pub(crate) fn begin_watch(wake: impl Fn() + Send + 'static) {
-    let (Some((txn, _)), Some(home)) = (update_startup::trial(), update_startup::trial_home())
+    let (Some((txn, nonce)), Some(home)) = (update_startup::trial(), update_startup::trial_home())
     else {
         return;
     };
     let journal = home.journal();
+    let last = update_startup::is_last_trial();
     let started = bt_platform::spawn_at_priority(
         "folio-trial-watch",
         bt_platform::ThreadPriority::BelowNormal,
         move |ctx| {
+            let mut commit = || crate::update_apply::commit_last_trial(ctx, home, txn, nonce);
             let mut hand_back =
                 |ready: bool| hand_back(ctx, home, txn, ready, FROM_TRIAL_SINCE, &mut Detached);
             let mut watchdog = Watchdog {
                 every: WATCHDOG,
                 hand_back: &mut hand_back,
             };
-            watch(&GATE, &journal, txn, WATCH_INTERVAL, &wake, &mut watchdog);
+            let own_commit: Option<&mut CommitItself<'_>> =
+                if last { Some(&mut commit) } else { None };
+            watch(
+                &GATE,
+                &journal,
+                txn,
+                WATCH_INTERVAL,
+                &wake,
+                own_commit,
+                &mut watchdog,
+            );
         },
     );
     if let Err(error) = started {
@@ -556,6 +573,11 @@ pub(crate) fn watchdog_asleep() -> Watchdog<'static> {
     }
 }
 
+/// **U-35's reserved trial asking to commit itself** — in the product
+/// `update_apply::commit_last_trial`; a test answers what it is told.
+pub(crate) type CommitItself<'a> =
+    dyn FnMut() -> Result<crate::update_apply::LastTrialCommit, String> + 'a;
+
 /// **What one read of the journal told the watch** (H.2 step 2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Read {
@@ -575,13 +597,20 @@ enum Read {
 /// handed back, single-flight (not while the recovery an earlier hand-back
 /// started still runs, by pid and start instant), and an `Unreadable` one is
 /// not (no holder could read it either); (4) the pause. Read-only on the
-/// journal: its one writer is not this process.
+/// journal — its writer is the lock holder — **except for U-35's reserved
+/// trial** (`commit_itself`, U-35 round 2): once this trial is ready (its
+/// receipt fell due), between steps 1 and 2 it asks to commit itself on that
+/// receipt, each turn until it is `Committed` (released at once), or the
+/// journal no longer waits for it (it never asks again). It is the one trial
+/// no holder can adopt — every holder runs the rescue copy the operating
+/// system refused — so without it a healthy trial would keep nothing.
 pub(crate) fn watch(
     gate: &Gate,
     journal: &Path,
     txn: TxnId,
     interval: Duration,
     wake: &dyn Fn(),
+    mut commit_itself: Option<&mut CommitItself<'_>>,
     watchdog: &mut Watchdog<'_>,
 ) {
     let begun = Instant::now();
@@ -589,6 +618,7 @@ pub(crate) fn watch(
     let mut recovery: Option<Running> = None;
     let mut unreadable_since: Option<Instant> = None;
     let (mut retry_at, mut pause) = (Instant::now(), RECEIPT_RETRY_FIRST);
+    let mut said_commit_refusal = false;
     loop {
         // (1) The receipt.
         if let Some(written) = gate.receipt_answered() {
@@ -617,6 +647,33 @@ pub(crate) fn watch(
                     retry_at = Instant::now() + pause;
                 }
                 None => {}
+            }
+        }
+        // U-35's reserved trial, once ready: the ordinary readiness edge, and
+        // what commits is the receipt as it is on disk, under the lock.
+        if gate.ready()
+            && let Some(commit) = commit_itself.as_deref_mut()
+        {
+            match commit() {
+                Ok(LastTrialCommit::Committed) => {
+                    if gate.decide(TrialSight::Committed) {
+                        eprintln!(
+                            "BT_UPDATE_TRIAL transaction {txn} is committed by its own receipt; its writes are released"
+                        );
+                        wake();
+                    }
+                    return;
+                }
+                Ok(LastTrialCommit::Pending) => {}
+                Ok(LastTrialCommit::NotItsOwn) => commit_itself = None,
+                Err(error) => {
+                    if !said_commit_refusal {
+                        said_commit_refusal = true;
+                        eprintln!(
+                            "BT_UPDATE_TRIAL transaction {txn} could not be committed by its own receipt: {error}"
+                        );
+                    }
+                }
             }
         }
         // (2) The journal.
@@ -996,12 +1053,14 @@ mod tests {
             (
                 Phase::RollbackIntent {
                     trial: Some(TrialProcess { pid: 1, started: 2 }),
+                    trial_started: false,
                 },
                 TrialSight::Undecided,
             ),
             (
                 Phase::Stuck {
                     trial: None,
+                    trial_started: false,
                     last_error: "held".to_owned(),
                     attempts: 1,
                     retrial: None,
@@ -1100,6 +1159,7 @@ mod tests {
                 &|| {
                     watch_woken.fetch_add(1, Ordering::SeqCst);
                 },
+                None,
                 &mut watchdog_asleep(),
             );
         });
@@ -1119,6 +1179,79 @@ mod tests {
         assert!(gate.take_released().is_empty(), "released once");
         assert!(!gate.defers(true), "a committed trial writes");
         assert!(!gate.defer(true, Writer::Pins), "and records nothing more");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-35 round 2, the review's B3) — **U-35's reserved trial asks to
+    /// commit itself only once it is ready, asks again while the answer is
+    /// `Pending`, and a commit of its own releases what it held back** —
+    /// with the journal still saying `TrialStarting` and nobody else writing
+    /// it, as when every holder's rescue copy is refused. A trial that is not
+    /// ready never asks: its writes stay held.
+    ///
+    /// The watch's own order is the seam: the watchdog (due at once here)
+    /// runs after the own-commit step of a turn, so the first turn sees a
+    /// trial that is not ready, and the watchdog's first call makes it ready
+    /// for the turns after it. No clock is waited on.
+    ///
+    /// MUTATION: drop `gate.ready() &&` from the watch's own-commit step (it
+    /// asks before readiness); or treat `Pending` as the end of asking.
+    #[test]
+    fn the_reserved_trial_commits_itself_only_once_ready() {
+        let root = scratch("own-commit");
+        let journal = root.join("journal.json");
+        std::fs::write(
+            &journal,
+            journal_bytes(
+                TXN,
+                Phase::TrialStarting {
+                    nonce: nonce(),
+                    began_ms: 1_700_000_000_000,
+                },
+            ),
+        )
+        .unwrap();
+        let gate = Gate::new();
+        assert!(gate.defer(true, Writer::Settings));
+        let (asked, asked_unready, woken) = (
+            std::cell::Cell::new(0_usize),
+            std::cell::Cell::new(0_usize),
+            std::cell::Cell::new(0_usize),
+        );
+        let mut commit = || {
+            asked.set(asked.get() + 1);
+            if !gate.ready() {
+                asked_unready.set(asked_unready.get() + 1);
+            }
+            // Pending twice — the lock held, the receipt not yet on disk —
+            // then committed.
+            if asked.get() <= 2 {
+                Ok(LastTrialCommit::Pending)
+            } else {
+                Ok(LastTrialCommit::Committed)
+            }
+        };
+        let mut becomes_ready = |_: bool| {
+            gate.ready_for_a_test();
+            None
+        };
+        watch(
+            &gate,
+            &journal,
+            TXN,
+            Duration::ZERO,
+            &|| woken.set(woken.get() + 1),
+            Some(&mut commit),
+            &mut Watchdog {
+                every: Duration::ZERO,
+                hand_back: &mut becomes_ready,
+            },
+        );
+        assert_eq!(asked_unready.get(), 0, "not ready: never asked");
+        assert_eq!(asked.get(), 3, "asked until committed");
+        assert_eq!(woken.get(), 1);
+        assert_eq!(gate.take_released(), vec![Writer::Settings]);
+        assert!(!gate.defers(true));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1160,6 +1293,7 @@ mod tests {
                 &|| {
                     woken.fetch_add(1, Ordering::SeqCst);
                 },
+                None,
                 &mut watchdog_asleep(),
             );
             assert_eq!(woken.load(Ordering::SeqCst), 0, "{ending:?}");
@@ -1204,6 +1338,7 @@ mod tests {
                 TXN,
                 Duration::from_millis(5),
                 &|| {},
+                None,
                 &mut watchdog,
             );
         });
@@ -1391,6 +1526,7 @@ mod tests {
                         TXN,
                         Duration::from_millis(10),
                         &|| {},
+                        None,
                         &mut watchdog,
                     );
                 },
@@ -1519,6 +1655,7 @@ mod tests {
                 TXN,
                 Duration::from_millis(5),
                 &|| {},
+                None,
                 &mut watchdog_asleep(),
             );
         });
