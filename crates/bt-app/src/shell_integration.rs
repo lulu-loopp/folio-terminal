@@ -2334,12 +2334,12 @@ mod tests {
         // One function, in the crate that spawns, naming all four and no platform.
         let region = crate::source_pin::code_of(crate::source_pin::source_region(
             include_str!("../../bt-pty/src/lib.rs"),
-            "fn resolved_environment(&self)",
+            "fn resolved_environment_layers(&self)",
         ));
         for name in DECLARED {
             assert!(
                 region.contains(&format!("\"{name}\"")),
-                "`resolved_environment` no longer declares {name}"
+                "`resolved_environment_layers` no longer declares {name}"
             );
         }
         assert!(

@@ -38052,9 +38052,9 @@ fn create_leaf_session(
             ));
         }
         resolved_program = Some(PathBuf::from(&program));
-        // **The shell's birth is an owner-thread door** (`doors::PtyBirth`, row 11): the one
-        // `spawn_shell_in`, admitted here and nowhere else. A refusal is this branch's own spawn
-        // failure.
+        // **The shell's birth is an owner-thread door** (`doors::PtyBirth`, row 11): the one join
+        // of the `bt-pty-birth` worker, admitted here and nowhere else. A refusal is this branch's
+        // own spawn failure.
         Some(
             bt_platform::admission::admitted::<doors::PtyBirth, _>(|token| {
                 pty_door::spawn_shell(

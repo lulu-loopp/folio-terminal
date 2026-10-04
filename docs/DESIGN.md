@@ -13688,3 +13688,15 @@ On Windows, every PTY birth worker asks `bt_platform::environment::fresh_logon_e
 The child block has one pure owner, `bt_pty::spawn_environment`. It begins with the fresh block. A process-inherited value survives only when it differs from the launch snapshot or had no launch-snapshot row, preserving explicit launch overrides while allowing a machine or account row removed since launch to disappear. Folio's terminal and pane declarations follow, and the selected profile's environment is last. Windows names compare case-insensitively and every replacement keeps the winning layer's spelling. The last-resort shell receives the refreshed process baseline and its own terminal declarations, never the failed profile's variables.
 
 Pinned by `bt_pty::tests::{fresh_environment_overlay_table,the_spawn_seam_asks_the_compositor_instead_of_using_raw_inherited_environment}` and, on Windows, `bt_platform::environment::tests::the_windows_logon_block_contains_system_root`.
+
+### 2026-10-04 — An unreadable account environment degrades one shell birth to inheritance and is retried (T-ENV-REFRESH round 2)
+
+The launch snapshot owner stores only a successful platform answer. A startup worker or platform
+failure leaves it empty, the affected shell birth uses the process's inherited environment with
+Folio's and the selected profile's declarations, and a later birth asks the same platform door
+again. Once that retry succeeds, its answer is the launch baseline for the rest of the process.
+
+The per-birth current-account read follows the same rule without a cache: a failed read uses the
+ordinary inherited spawn for that birth and the next birth asks again. Each actual failed read is
+written once to resident diagnostics. Pinned by
+`pty_door::tests::{a_current_environment_door_error_uses_the_inherited_spawn,a_snapshot_error_is_retried_and_a_later_spawn_composes_normally}`.

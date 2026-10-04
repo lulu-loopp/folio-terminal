@@ -1048,15 +1048,6 @@ impl PtyCommand {
         (environment, self.profile_environment.clone())
     }
 
-    #[cfg(test)]
-    fn resolved_environment(&self) -> Vec<(OsString, OsString)> {
-        let (mut environment, profile_environment) = self.resolved_environment_layers();
-        for (key, value) in profile_environment {
-            upsert_environment(&mut environment, key, value);
-        }
-        environment
-    }
-
     /// A color-capable interactive shell must not inherit a `NO_COLOR` that was aimed at the
     /// terminal process itself: `NO_COLOR` mutes programs that *emit* ANSI color, but the terminal
     /// *renders* it, so an inherited value is launch noise, not the user's intent for this session.
@@ -3294,7 +3285,7 @@ mod tests {
     fn powershell_declares_truecolor_environment_by_default() {
         let command = PtyCommand::powershell();
         assert!(command.strips_inherited_no_color());
-        let environment = command.resolved_environment();
+        let environment = command.resolved_environment_layers().0;
         assert_eq!(
             environment_value(&environment, "TERM_PROGRAM"),
             Some(std::ffi::OsStr::new("Folio"))
@@ -3317,7 +3308,7 @@ mod tests {
     fn plain_command_declares_terminal_identity_but_no_color_capability() {
         let command = PtyCommand::new("some-tool.exe");
         assert!(!command.strips_inherited_no_color());
-        let environment = command.resolved_environment();
+        let environment = command.resolved_environment_layers().0;
         assert_eq!(
             environment_value(&environment, "TERM_PROGRAM"),
             Some(std::ffi::OsStr::new("Folio"))
@@ -3347,7 +3338,8 @@ mod tests {
             .env("TERM", "better-terminal")
             .env(term_program_key, "UserTerminal")
             .env("TERM_PROGRAM_VERSION", "user-version")
-            .resolved_environment();
+            .resolved_environment_layers()
+            .0;
         assert_eq!(
             environment_value(&environment, "TERM_PROGRAM"),
             Some(std::ffi::OsStr::new("UserTerminal"))
@@ -3373,7 +3365,7 @@ mod tests {
         let interactive = PtyCommand::powershell();
         assert!(interactive.strips_inherited_no_color());
         assert_eq!(
-            environment_value(&interactive.resolved_environment(), "COLORTERM"),
+            environment_value(&interactive.resolved_environment_layers().0, "COLORTERM"),
             Some(std::ffi::OsStr::new("truecolor"))
         );
 
@@ -3386,7 +3378,7 @@ mod tests {
         };
         let command_opt_out = PtyCommand::powershell().env(no_color_key, "1");
         assert!(!command_opt_out.strips_inherited_no_color());
-        let environment = command_opt_out.resolved_environment();
+        let environment = command_opt_out.resolved_environment_layers().0;
         assert_eq!(environment_value(&environment, "COLORTERM"), None);
         assert_eq!(environment_value(&environment, "TERM"), None);
         assert_eq!(

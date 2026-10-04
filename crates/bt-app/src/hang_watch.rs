@@ -1015,10 +1015,10 @@ pub enum Station {
     /// parked controller to the page's window, in place of `request_environment`,
     /// `request_controller` and a pump dispatch on the gesture's turn.
     WebAdopt = 209,
-    /// **A shell's pseudoconsole and process being made** — `PtySession::spawn_shell_in`, from
-    /// `create_leaf_session` (§5.3 row 11; admission door `PtyBirth`). Its own name for the day the
-    /// call is admitted (A1d): the registry's lines each name the station their meter enters, and
-    /// this one had none.
+    /// **A shell's pseudoconsole and process being made** — the join of `bt-pty-birth`, from
+    /// `create_leaf_session` (§5.3 row 11; admission door `PtyBirth`). Its own name for the day
+    /// the call is admitted (A1d): the registry's lines each name the station their meter enters,
+    /// and this one had none.
     PtyBirth = 210,
     /// **The quit's bounded wait for the panes being taken apart** —
     /// `bt_pty::wait_for_retirements` in `settle_quit`'s `Retire` step (§5.3 row 15; door
@@ -1275,7 +1275,7 @@ impl Station {
             Self::WebWarmup => "warm_web_engine",
             Self::WebSpare => "make_spare_web_controller",
             Self::WebAdopt => "adopt_spare_web_controller",
-            Self::PtyBirth => "PtySession::spawn_shell_in",
+            Self::PtyBirth => "join bt-pty-birth",
             Self::PaneRetirementWait => "bt_pty::wait_for_retirements",
             Self::SessionWriteWait => "SessionWriter::wait_for",
             Self::SessionWriterRetire => "SessionWriter::close",
