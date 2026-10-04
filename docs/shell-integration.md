@@ -222,11 +222,30 @@ add Folio's guarded line to `$PROFILE.CurrentUserCurrentHost`; no confirmation i
 the success toast offers Undo. The installed fact is per edition, so every such row for that
 edition changes to the ordinary capability sentence together. The one existing **PowerShell
 `$PROFILE` line** row remains the only lasting removal surface. No button is offered when the row
-has any accepted `NoProfile` spelling or that edition reports an execution policy which refuses
-profile scripts; the latter gets an explicit policy capability sentence. Nor is it offered before
-that edition's first profile/policy observation has landed, or off Windows, where there is no
-profile probe. A missing profile file
-is created with only the managed line. Opening the Profiles page starts the existing background
+has any accepted `NoProfile` spelling, or when the execution policy that row would run under refuses
+profile scripts. Nor is it offered before that edition's first profile/policy observation has
+landed, or off Windows, where there is no profile probe. A missing profile file is created with only
+the managed line.
+
+The policy is read per row from the scope list the probe reports (`Get-ExecutionPolicy -List`), in
+PowerShell's precedence order — MachinePolicy, UserPolicy, Process, CurrentUser, LocalMachine, then
+the default — with the row's own `-ExecutionPolicy` (any spelling) as its Process scope. A refusing
+policy is one of three cases, and the capability sentence says which:
+
+* **Set by the user's own scopes** (CurrentUser, LocalMachine or the default decides, nothing above
+  CurrentUser is set). `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`, which needs no
+  elevation, would decide the effective policy, so the row offers one **Copy** button in the place
+  of the Enable button; it puts exactly that command on the clipboard and the window says what was
+  copied. Folio never runs it.
+* **Set by the organisation** (MachinePolicy or UserPolicy, i.e. Group Policy). No command and no
+  button: the user cannot change it.
+* **Set by the row itself** (a refusing Process scope: the row's own `-ExecutionPolicy`, or a
+  `PSExecutionPolicyPreference` in the environment). It outranks CurrentUser, so the command would
+  not help; the sentence says these arguments' policy refuses `$PROFILE`, with no button.
+
+After the user runs the command in any shell, the next visit to the Profiles page re-reads the
+policy (the page-entry observation edge) and the row becomes the ordinary Enable offer; the Enable
+click re-probes the policy for that row anyway. There is no polling. Opening the Profiles page starts the existing background
 profile/policy observation once for that visit; leaving and returning starts another observation,
 with no polling loop.
 

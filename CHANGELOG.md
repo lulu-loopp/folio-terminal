@@ -8,7 +8,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Added
 
-- PowerShell profiles whose startup command cannot be safely extended can enable Folio through that edition's `$PROFILE` in one click from Settings, with Undo.
+- PowerShell profiles whose startup command cannot be safely extended can enable Folio through that edition's `$PROFILE` in one click from Settings, with Undo. When PowerShell's execution policy blocks `$PROFILE`, the row says who set it and, when it is yours to change, offers the one command to copy.
 - In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder.
 - A pane can reset the terminal modes a program left behind (pane menu ▸ Reset terminal modes).
 - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,

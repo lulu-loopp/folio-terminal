@@ -7761,6 +7761,7 @@ impl SettingsPanel {
             | SettingsTarget::ProfileUp(_)
             | SettingsTarget::ProfileDown(_)
             | SettingsTarget::ProfileEnable(_)
+            | SettingsTarget::ProfileCopyPolicyCommand(_)
             | SettingsTarget::ProfileEdit(_)
             | SettingsTarget::ProfileMore(_)
             | SettingsTarget::ProfileNew
@@ -8359,6 +8360,7 @@ impl SettingsPanel {
             Some(
                 target @ (SettingsTarget::ProfileEdit(_)
                 | SettingsTarget::ProfileEnable(_)
+                | SettingsTarget::ProfileCopyPolicyCommand(_)
                 | SettingsTarget::ProfileNew
                 | SettingsTarget::EditorBack
                 | SettingsTarget::EditorBrowse
@@ -8818,10 +8820,8 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
                 .enumerate()
                 .flat_map(|(index, line)| {
                     let mut stops = vec![SettingsTarget::ProfileRow(index)];
-                    if line.profile_fallback
-                        == crate::shell_integration::PowerShellProfileFallback::Offer
-                    {
-                        stops.push(SettingsTarget::ProfileEnable(index));
+                    if let Some(button) = ProfileButton::of(line.profile_fallback) {
+                        stops.push(button.target(index));
                     }
                     stops.extend([
                         SettingsTarget::ProfileUp(index),
@@ -8951,6 +8951,7 @@ impl SettingsTarget {
             | Self::ProfileUp(index)
             | Self::ProfileDown(index)
             | Self::ProfileEnable(index)
+            | Self::ProfileCopyPolicyCommand(index)
             | Self::ProfileEdit(index)
             | Self::ProfileMore(index)
             | Self::ProfileMoreItem(index, _) => Some(index),
@@ -9084,6 +9085,9 @@ pub enum SettingsTarget {
     ProfileDown(usize),
     /// The one-click persistent fallback on an uncomposable PowerShell row.
     ProfileEnable(usize),
+    /// `Copy` on a row whose execution policy the user can change: puts
+    /// `shell_integration::POLICY_COMMAND` on the clipboard, and runs nothing.
+    ProfileCopyPolicyCommand(usize),
     /// One row of the Profiles page, away from its verbs.
     ///
     /// **A hover target and a focus stop** (§7.1.6c-6b). The action run is
@@ -9250,6 +9254,7 @@ pub fn target_popup(target: SettingsTarget) -> Option<DialogPopup> {
         | SettingsTarget::ProfileUp(_)
         | SettingsTarget::ProfileDown(_)
         | SettingsTarget::ProfileEnable(_)
+        | SettingsTarget::ProfileCopyPolicyCommand(_)
         | SettingsTarget::ProfileRow(_)
         | SettingsTarget::ProfileEdit(_)
         | SettingsTarget::ProfileNew
@@ -9331,6 +9336,7 @@ pub fn target_is_ground(target: SettingsTarget) -> bool {
         | SettingsTarget::ProfileUp(_)
         | SettingsTarget::ProfileDown(_)
         | SettingsTarget::ProfileEnable(_)
+        | SettingsTarget::ProfileCopyPolicyCommand(_)
         | SettingsTarget::ProfileRow(_)
         | SettingsTarget::ProfileEdit(_)
         | SettingsTarget::ProfileMore(_)
@@ -9487,6 +9493,49 @@ pub struct ShortcutLineLayout {
 /// describes a setting, and every row on this page describes *a thing that will
 /// run*, which is exactly the pretence J85 forbids a row to make by saying only
 /// its own name.
+/// **The one button a Profiles row may carry**, and which fallback state carries it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProfileButton {
+    /// `Enable via $PROFILE`, on an `Offer` row.
+    Enable,
+    /// `Copy`, on a row whose execution policy the user can change
+    /// (`PolicyChangeable`): copies `shell_integration::POLICY_COMMAND`.
+    CopyPolicyCommand,
+}
+
+impl ProfileButton {
+    #[must_use]
+    pub fn of(fallback: crate::shell_integration::PowerShellProfileFallback) -> Option<Self> {
+        use crate::shell_integration::PowerShellProfileFallback as Fallback;
+        match fallback {
+            Fallback::Offer => Some(Self::Enable),
+            Fallback::PolicyChangeable => Some(Self::CopyPolicyCommand),
+            Fallback::NotNeeded
+            | Fallback::Pending
+            | Fallback::Enabled
+            | Fallback::NoProfile
+            | Fallback::PolicyManaged
+            | Fallback::PolicyOwnArguments
+            | Fallback::Unsupported => None,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Enable => Text::ProfilesEnableViaProfile.text(),
+            Self::CopyPolicyCommand => Text::TermMenuCopy.text(),
+        }
+    }
+
+    #[must_use]
+    pub fn target(self, index: usize) -> SettingsTarget {
+        match self {
+            Self::Enable => SettingsTarget::ProfileEnable(index),
+            Self::CopyPolicyCommand => SettingsTarget::ProfileCopyPolicyCommand(index),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProfileLineLayout {
     /// Which row of [`SettingsContent::profiles`] this is.
@@ -9511,9 +9560,10 @@ pub struct ProfileLineLayout {
     pub caps: Option<[[f32; 4]; 2]>,
     pub up: [f32; 4],
     pub down: [f32; 4],
-    /// The `$PROFILE` fallback button of an `Offer` row: the right end of the
-    /// text column, one gap left of the verb run, and disjoint from every verb.
-    pub enable: Option<[f32; 4]>,
+    /// The row's one button — `Enable via $PROFILE` on an `Offer` row, `Copy` on
+    /// a row whose policy the user can change — at the right end of the text
+    /// column, one gap left of the verb run, and disjoint from every verb.
+    pub button: Option<(ProfileButton, [f32; 4])>,
     /// The one verb in the open — `Edit` (§7.1.6c-6b). It took this slot from
     /// `Duplicate` the moment there was an editor to open, which is the mock-up's
     /// own instruction: "when 5b lands Edit / Hide / Delete / Set as default,
@@ -9949,6 +9999,7 @@ impl SettingsLayout {
             SettingsTarget::ProfileUp(index)
             | SettingsTarget::ProfileDown(index)
             | SettingsTarget::ProfileEnable(index)
+            | SettingsTarget::ProfileCopyPolicyCommand(index)
             | SettingsTarget::ProfileEdit(index)
             | SettingsTarget::ProfileMore(index)
             | SettingsTarget::ProfileMoreItem(index, _)
@@ -12007,23 +12058,20 @@ pub fn layout_for_menus(
             // before the button — the Shortcuts row's rule, where the chord ends
             // one gap before the button that changes it. A button laid over the
             // run would answer every press aimed at a verb.
-            let enable = (line.profile_fallback
-                == crate::shell_integration::PowerShellProfileFallback::Offer)
-                .then(|| {
-                    let label = measure(
-                        Text::ProfilesEnableViaProfile.text(),
-                        px(BUTTON_FONT_LOGICAL_PX),
-                    );
-                    let width =
-                        (2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + label).ceil();
-                    let right = columns.text.1;
+            let button = ProfileButton::of(line.profile_fallback).map(|kind| {
+                let label = measure(kind.label(), px(BUTTON_FONT_LOGICAL_PX));
+                let width = (2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + label).ceil();
+                let right = columns.text.1;
+                (
+                    kind,
                     [
                         right - width,
                         middle - px(BUTTON_HEIGHT_LOGICAL_PX) / 2.0,
                         right,
                         middle + px(BUTTON_HEIGHT_LOGICAL_PX) / 2.0,
-                    ]
-                });
+                    ],
+                )
+            });
 
             let column = px(PROFILE_MARK_COLUMN_LOGICAL_PX);
             let side = px(PROFILE_MARK_LOGICAL_PX).round();
@@ -12031,7 +12079,7 @@ pub fn layout_for_menus(
             let mark_top = ((band[1] + band[3] - side) / 2.0).round();
             let mark = [mark_left, mark_top, mark_left + side, mark_top + side];
             let text_column_left = columns.text.0;
-            let text_column_right = enable.map_or(columns.text.1, |button| {
+            let text_column_right = button.map_or(columns.text.1, |(_, button)| {
                 button[0] - px(PROFILE_ROW_GAP_LOGICAL_PX)
             });
 
@@ -12082,7 +12130,7 @@ pub fn layout_for_menus(
                 caps,
                 up,
                 down,
-                enable,
+                button,
                 edit,
                 more,
             });
@@ -13400,8 +13448,10 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
         // row's dark `↑`. `ProfileRow` says the true thing and costs nothing:
         // pressing a row's band already does nothing but move the focus, which
         // is exactly what a press on a dark button is owed.
-        if placed.enable.is_some_and(|button| contains(button, x, y)) {
-            return SettingsTarget::ProfileEnable(placed.index);
+        if let Some((kind, button)) = placed.button
+            && contains(button, x, y)
+        {
+            return kind.target(placed.index);
         }
         if contains(placed.up, x, y) {
             return if placed.index == 0 {
@@ -14906,13 +14956,13 @@ fn push_profile_page(
         }
         // The fallback button is not one of the revealed verbs: it is the row's
         // own offer, in its own box beside the run, at rest and engaged alike.
-        let enable_target = SettingsTarget::ProfileEnable(placed.index);
-        if let Some(button) = placed.enable {
+        if let Some((kind, button)) = placed.button {
+            let enable_target = kind.target(placed.index);
             push_button(
                 &mut stack.quads,
                 &mut stack.labels,
                 button,
-                Text::ProfilesEnableViaProfile.text(),
+                kind.label(),
                 hover == Some(enable_target),
                 scale,
                 border,
@@ -32199,11 +32249,12 @@ mod tests {
         let mut lines = profile_lines();
         lines[0].profile_fallback = crate::shell_integration::PowerShellProfileFallback::Offer;
         let placed = profiles_page(&lines);
-        let button = placed.profiles[0].enable.expect("the offered fallback");
+        let (kind, button) = placed.profiles[0].button.expect("the offered fallback");
+        assert_eq!(kind, ProfileButton::Enable);
         assert!(
             placed.profiles[1..]
                 .iter()
-                .all(|line| line.enable.is_none())
+                .all(|line| line.button.is_none())
         );
 
         let target = hit(
@@ -32234,25 +32285,50 @@ mod tests {
         assert!(order.contains(&SettingsTarget::ProfileEnable(0)));
     }
 
-    /// PIN — **an `Offer` row's verbs are the verbs of any other row** (review
-    /// C-3 of T-INTEGRATION-INJECT-4). The fallback button has its own box, left
-    /// of the verb run; every verb's centre answers with its own verb, the
-    /// button's centre with the button, and no point of the row is claimed by
-    /// both — the placed boxes are disjoint, and the run stands where it stands
-    /// on a row with no offer. The row's sentences end before the button.
+    /// PIN — **a row with a button keeps the verbs of any other row** (review
+    /// C-3 of T-INTEGRATION-INJECT-4; round 4 for `Copy`). The button — `Enable
+    /// via $PROFILE` on an `Offer` row, `Copy` on a row whose policy the user can
+    /// change — has its own box, left of the verb run; every verb's centre
+    /// answers with its own verb, the button's centre with the button, and no
+    /// point of the row is claimed by both — the placed boxes are disjoint, and
+    /// the run stands where it stands on a row with no button. The row's
+    /// sentences end before the button.
     ///
-    /// RED (mutation: lay the button over the run again,
-    /// `[up[0], …, more[2], …]`): each verb's centre answers `ProfileEnable`,
-    /// and the boxes overlap.
+    /// RED (mutations: lay the button over the run again,
+    /// `[up[0], …, more[2], …]` — each verb's centre answers the button and the
+    /// boxes overlap; answer `ProfileEnable` for the Copy box).
     #[test]
     fn an_offer_rows_verbs_answer_beside_its_own_button() {
+        use crate::shell_integration::PowerShellProfileFallback;
+        for (state, kind, target) in [
+            (
+                PowerShellProfileFallback::Offer,
+                ProfileButton::Enable,
+                SettingsTarget::ProfileEnable(1),
+            ),
+            (
+                PowerShellProfileFallback::PolicyChangeable,
+                ProfileButton::CopyPolicyCommand,
+                SettingsTarget::ProfileCopyPolicyCommand(1),
+            ),
+        ] {
+            a_rows_button_stands_beside_its_verbs(state, kind, target);
+        }
+    }
+
+    fn a_rows_button_stands_beside_its_verbs(
+        state: crate::shell_integration::PowerShellProfileFallback,
+        expected_kind: ProfileButton,
+        target: SettingsTarget,
+    ) {
         let mut lines = profile_lines();
         // A middle row, so neither its `↑` nor its `↓` is the dark one.
-        lines[1].profile_fallback = crate::shell_integration::PowerShellProfileFallback::Offer;
+        lines[1].profile_fallback = state;
         let placed = profiles_page(&lines);
         let offer = &placed.profiles[1];
         let plain = &placed.profiles[2];
-        let button = offer.enable.expect("the offered fallback");
+        let (kind, button) = offer.button.expect("the row's button");
+        assert_eq!(kind, expected_kind);
         let centre = |rect: [f32; 4]| {
             (
                 f64::from((rect[0] + rect[2]) / 2.0),
@@ -32264,7 +32340,7 @@ mod tests {
             (offer.down, SettingsTarget::ProfileDown(1)),
             (offer.edit, SettingsTarget::ProfileEdit(1)),
             (offer.more, SettingsTarget::ProfileMore(1)),
-            (button, SettingsTarget::ProfileEnable(1)),
+            (button, target),
         ] {
             let (x, y) = centre(rect);
             assert_eq!(hit(&placed, &values(), x, y), expected);

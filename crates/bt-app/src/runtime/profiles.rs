@@ -377,6 +377,16 @@ impl Runtime<'_> {
         self.store_profiles()
     }
 
+    /// **`Copy` on a row whose execution policy the user can change**: the one command, on the
+    /// clipboard, on this click and no other — and the window says so in the words every copy
+    /// in this app says it with, the command in full. Folio runs nothing.
+    pub(crate) fn copy_policy_command(&mut self) -> Result<()> {
+        match copy_policy_command_with(crate::write_terminal_clipboard_text) {
+            Some(said) => self.toast(toast::ToastKind::Ok, toast::ToastAnchor::Window, None, said),
+            None => Ok(()),
+        }
+    }
+
     /// Remove the one managed line added by the toast this window is holding.
     pub(in crate::runtime) fn take_powershell_profile_undo(&mut self, card: toast::ToastId) {
         let Some((id, program, profile)) = self.window.powershell_profile_undo.take() else {
@@ -707,5 +717,49 @@ impl Runtime<'_> {
             self.present_chrome_change()?;
         }
         Ok(true)
+    }
+}
+
+/// Put [`shell_integration::POLICY_COMMAND`] on the clipboard through `write` — the app's
+/// clipboard door, or a test's — and return what the window says about it; `None` when the
+/// clipboard refused (the refusal is already logged by the shared door).
+fn copy_policy_command_with(write: impl FnOnce(&str) -> Result<()>) -> Option<String> {
+    crate::recoverable_clipboard_write(
+        write(shell_integration::POLICY_COMMAND),
+        "copy the execution policy command",
+    )
+    .then(|| i18n::graph_copied(shell_integration::POLICY_COMMAND))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::copy_policy_command_with;
+    use crate::shell_integration::POLICY_COMMAND;
+
+    /// PIN — **`Copy` puts exactly the one command on the clipboard, and says it in full**
+    /// (T-INTEGRATION-INJECT-4 round 4). Through the clipboard seam, never the real clipboard.
+    ///
+    /// RED (mutation: copy `"Set-ExecutionPolicy RemoteSigned"`, the LocalMachine scope that
+    /// needs elevation, instead of the const).
+    #[test]
+    fn copy_puts_exactly_the_policy_command_on_the_clipboard() {
+        let mut written = Vec::new();
+        let said = copy_policy_command_with(|text| {
+            written.push(text.to_owned());
+            Ok(())
+        });
+        assert_eq!(
+            written,
+            ["Set-ExecutionPolicy -Scope CurrentUser RemoteSigned"]
+        );
+        assert_eq!(written, [POLICY_COMMAND]);
+        assert_eq!(
+            said.as_deref(),
+            Some(crate::i18n::graph_copied(POLICY_COMMAND).as_str())
+        );
+        assert!(said.is_some_and(|said| said.contains(POLICY_COMMAND)));
+
+        let refused = copy_policy_command_with(|_| Err(anyhow::anyhow!("clipboard busy")));
+        assert_eq!(refused, None, "a refused copy says nothing was copied");
     }
 }

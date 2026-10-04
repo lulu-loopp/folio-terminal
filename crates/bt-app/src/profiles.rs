@@ -4035,6 +4035,19 @@ pub fn capability_text(profile: &Profile) -> crate::i18n::Text {
     )
 }
 
+/// The arguments row `index` starts with, as the launch hands them over.
+#[must_use]
+pub fn launch_arguments_of(index: usize) -> Vec<OsString> {
+    with_table(|table| {
+        table.get(index).map_or_else(Vec::new, |profile| {
+            launch_args(profile)
+                .into_iter()
+                .map(OsString::from)
+                .collect()
+        })
+    })
+}
+
 #[must_use]
 pub fn capability_text_for_launch(
     profile: &Profile,
@@ -4042,15 +4055,23 @@ pub fn capability_text_for_launch(
     powershell_integration: bool,
 ) -> crate::i18n::Text {
     if served_by(profile) == Integration::PowerShellOptIn {
-        match power_shell_profile_fallback_for_launch(profile, program, powershell_integration) {
+        let fallback =
+            power_shell_profile_fallback_for_launch(profile, program, powershell_integration);
+        if let Some(sentence) = fallback
+            .policy_cause()
+            .and_then(crate::shell_integration::PolicyCause::sentence)
+        {
+            return sentence;
+        }
+        match fallback {
             crate::shell_integration::PowerShellProfileFallback::NotNeeded => {}
             crate::shell_integration::PowerShellProfileFallback::Enabled => {
                 return crate::i18n::Text::CapPowerShellViaProfile;
             }
-            crate::shell_integration::PowerShellProfileFallback::PolicyBlocked => {
-                return crate::i18n::Text::CapPowerShellProfilePolicy;
-            }
-            crate::shell_integration::PowerShellProfileFallback::Pending
+            crate::shell_integration::PowerShellProfileFallback::PolicyChangeable
+            | crate::shell_integration::PowerShellProfileFallback::PolicyManaged
+            | crate::shell_integration::PowerShellProfileFallback::PolicyOwnArguments
+            | crate::shell_integration::PowerShellProfileFallback::Pending
             | crate::shell_integration::PowerShellProfileFallback::Offer
             | crate::shell_integration::PowerShellProfileFallback::NoProfile
             | crate::shell_integration::PowerShellProfileFallback::Unsupported => {

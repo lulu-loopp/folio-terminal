@@ -238,16 +238,21 @@ pub enum ExecutionPolicy {
 
 impl ExecutionPolicy {
     #[must_use]
+    /// A policy's name in any case, as PowerShell reads it — the probe prints the canonical
+    /// spelling, and a row's own `-ExecutionPolicy bypass` is the same policy.
     pub fn parse(text: &str) -> Self {
-        match text.trim() {
-            "Restricted" => Self::Restricted,
-            "AllSigned" => Self::AllSigned,
-            "RemoteSigned" => Self::RemoteSigned,
-            "Unrestricted" => Self::Unrestricted,
-            "Bypass" => Self::Bypass,
-            "Undefined" => Self::Undefined,
-            _ => Self::Unknown,
-        }
+        let text = text.trim();
+        [
+            Self::Restricted,
+            Self::AllSigned,
+            Self::RemoteSigned,
+            Self::Unrestricted,
+            Self::Bypass,
+            Self::Undefined,
+        ]
+        .into_iter()
+        .find(|policy| policy.name().eq_ignore_ascii_case(text))
+        .unwrap_or(Self::Unknown)
     }
 
     /// `Get-ExecutionPolicy`'s own word, for the reason line.

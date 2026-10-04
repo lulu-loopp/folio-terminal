@@ -372,13 +372,18 @@ pub fn install_recorded(
     result
 }
 
-fn install_for_program(program: &Path) -> io::Result<PathBuf> {
+/// The click's own re-probe: the policy is asked again, for the row that was clicked (its own
+/// `-ExecutionPolicy` included), and a policy that would not load `$PROFILE` is refused with the
+/// sentence the row would show.
+fn install_for_program(program: &Path, arguments: &[OsString]) -> io::Result<PathBuf> {
     let mut observed = probe_profile_observation(program)
         .ok_or_else(|| io::Error::other(Text::ShellProfileProbeFailed.text()))?;
     observed.line_present = profile_line_is_present(&observed.path);
     publish_profile_observation(program, observed.clone());
-    if observed.policy.blocks_script() {
-        return Err(io::Error::other(Text::CapPowerShellProfilePolicy.text()));
+    if let Some(sentence) =
+        policy_cause(observed.scopes, row_execution_policy(program, arguments)).sentence()
+    {
+        return Err(io::Error::other(sentence.text()));
     }
     let data = persist::storage_dir();
     let script = install_script_at(&data.join(SCRIPT_DIRECTORY), SCRIPT_FILE_PS1, SCRIPT_PS1)
@@ -406,12 +411,16 @@ fn undo_profile_install(profile: &Path) -> io::Result<()> {
     Ok(())
 }
 
-pub fn begin_profile_install(program: PathBuf, window: winit::window::WindowId) {
+pub fn begin_profile_install(
+    program: PathBuf,
+    arguments: Vec<OsString>,
+    window: winit::window::WindowId,
+) {
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-install",
         bt_platform::ThreadPriority::BelowNormal,
         move |_ctx| {
-            let outcome = match install_for_program(&program) {
+            let outcome = match install_for_program(&program, &arguments) {
                 Ok(profile) => ProfileInstallOutcome::Installed { program, profile },
                 Err(error) => ProfileInstallOutcome::Refused(error.to_string()),
             };

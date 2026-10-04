@@ -43914,8 +43914,15 @@ impl Runtime<'_> {
             if let Some(program) = self.app.profile_programs.program(&id).map(PathBuf::from)
                 && shell_integration::is_powershell(&program)
             {
-                shell_integration::begin_profile_install(program, self.window_id());
+                shell_integration::begin_profile_install(
+                    program,
+                    profiles::launch_arguments_of(index),
+                    self.window_id(),
+                );
             }
+        }
+        if let settings::SettingsTarget::ProfileCopyPolicyCommand(_) = target {
+            self.copy_policy_command()?;
         }
         self.apply_editor_choice(target)?;
         if let Some(mode) = settings::theme_requested(target) {
@@ -45323,6 +45330,7 @@ impl Runtime<'_> {
             | settings::SettingsTarget::ProfileUp(_)
             | settings::SettingsTarget::ProfileDown(_)
             | settings::SettingsTarget::ProfileEnable(_)
+            | settings::SettingsTarget::ProfileCopyPolicyCommand(_)
             | settings::SettingsTarget::MenuAction(_)
             | settings::SettingsTarget::MenuItemEdit(..)
             | settings::SettingsTarget::MenuItemDelete(..)
