@@ -51,15 +51,27 @@ pub const UPDATE_CHECK_SCHEMA_VERSION: u32 = 2;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpdateCheckV1 {
     pub schema_version: u32,
-    /// When the releases page was last **asked**, in milliseconds since the Unix
+    /// When the releases page last **answered**, in milliseconds since the Unix
     /// epoch. Zero means never.
     ///
-    /// Asked, not answered. It advances on a refusal, a timeout and a machine
-    /// with no network exactly as it advances on a `200`, and that is the whole
-    /// of the no-retry-storm rule: a laptop that has been on a train all day
-    /// makes one attempt, not one per window per minute.
+    /// Answered, since 0.4.7 (T-UPDATE-DAILY): a refusal leaves it where it was
+    /// and writes [`Self::attempted_at_ms`] instead, so the About page's "Last
+    /// checked" names the last answer and not a failure. A file written by an
+    /// earlier build may hold the time of a refused request here, which reads
+    /// as one more day of waiting and nothing worse.
     #[serde(default)]
     pub checked_at_ms: u64,
+    /// When a request that got **no answer** was made, in milliseconds since
+    /// the Unix epoch; zero when the last request was answered (0.4.7,
+    /// T-UPDATE-DAILY). Absent from the file when zero.
+    ///
+    /// The no-retry-storm rule: a check is due only when both this and
+    /// [`Self::checked_at_ms`] are a day old, so a laptop that has been on a
+    /// train all day makes one attempt across every window and every launch,
+    /// not one per window per minute. A build that does not know the key keeps
+    /// it through [`Self::extra`].
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub attempted_at_ms: u64,
     /// The tag the last successful answer named, verbatim. `None` until one
     /// arrives.
     #[serde(default)]
@@ -97,11 +109,21 @@ pub struct UpdateCheckV1 {
     pub extra: Map<String, Value>,
 }
 
+/// `skip_serializing_if` for a stamp whose zero means "none".
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes the field by reference"
+)]
+const fn is_zero(stamp: &u64) -> bool {
+    *stamp == 0
+}
+
 impl Default for UpdateCheckV1 {
     fn default() -> Self {
         Self {
             schema_version: UPDATE_CHECK_SCHEMA_VERSION,
             checked_at_ms: 0,
+            attempted_at_ms: 0,
             latest_tag: None,
             seen_tag: None,
             skipped_tag: None,

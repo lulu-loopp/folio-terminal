@@ -11,7 +11,7 @@ use crate::{
     mark_leaf_painted, math_copy_window, native_window, present_diagnostics, present_gate, preview,
     pty_drain_says_nothing_new, pty_frame_is_unchanged, sample_window_place, seats, settings,
     settling, startup_poll_delay, take_math_worker_notice, trace_sink, trace_unchanged_present,
-    webhost,
+    update, webhost,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -1745,6 +1745,13 @@ impl Runtime<'_> {
             })?;
             hang_watch::at(leaving);
         }
+        // The update check is the one external fact whose semantics is a
+        // schedule. The first open window turns it with the other application
+        // clocks; this only decides and books the next look, while the existing
+        // update worker performs the request.
+        let update_check_deadline = application_clocks
+            .then(|| update::advance_schedule(now, update::unix_epoch_ms()))
+            .flatten();
         hang_watch::during(hang_watch::Station::ClockAdvanceRenameBlinkIfDue, || {
             self.advance_rename_blink_if_due(now)
         })?;
@@ -2135,7 +2142,14 @@ impl Runtime<'_> {
         if application_clocks {
             hang_watch::during(hang_watch::Station::WebWarmup, || self.warm_web_engine(now));
         }
-        const DEADLINE_OWNERS: [&str; 54] = [
+        // Unlike the process-wide schedule, this clock belongs only to a
+        // window actually showing About. It wakes at the next relative-time
+        // bucket so “Last checked” ages under a motionless pointer.
+        let last_checked_deadline = (self.window.settings.is_open()
+            && self.window.settings.category() == settings::SettingsCategory::About)
+            .then(|| update::last_checked_deadline(now, update::unix_epoch_ms()))
+            .flatten();
+        const DEADLINE_OWNERS: [&str; 56] = [
             "startup poll",
             "IME cursor",
             "shell caret",
@@ -2183,6 +2197,8 @@ impl Runtime<'_> {
             "schemes watch",
             "storage watch",
             "git watch",
+            "update check",
+            "About last checked",
             "preview watch",
             "files watch",
             "refused frame",
@@ -2414,6 +2430,8 @@ impl Runtime<'_> {
             application_clocks
                 .then(|| self.app.git_watch.deadline())
                 .flatten(),
+            update_check_deadline,
+            last_checked_deadline,
             // And the preview seats', on the same terms and without the
             // application gate: absent for every window that is not currently
             // holding unanswered news about a file it has open, which is every

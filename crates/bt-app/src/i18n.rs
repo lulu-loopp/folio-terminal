@@ -6161,6 +6161,26 @@ impl LastChecked {
             Self::DaysAgo(elapsed / 86_400_000)
         }
     }
+
+    /// Milliseconds until [`Self::at`] changes its displayed bucket. `Never`
+    /// has no clock; every other form advances at the boundary of the unit it
+    /// displays, so an open About page can book one exact wake instead of
+    /// polling.
+    #[must_use]
+    pub const fn next_change_in_ms(checked_at_ms: u64, now_ms: u64) -> Option<u64> {
+        if checked_at_ms == 0 {
+            return None;
+        }
+        let elapsed = now_ms.saturating_sub(checked_at_ms);
+        let unit = if elapsed < 3_600_000 {
+            60_000
+        } else if elapsed < 86_400_000 {
+            3_600_000
+        } else {
+            86_400_000
+        };
+        Some(unit - elapsed % unit)
+    }
 }
 
 #[must_use]
@@ -8380,6 +8400,37 @@ fn move_refusal_notice_in(lang: Lang, said: &str, pane_is_now_a_tab: bool) -> St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED (T-UPDATE-DAILY) — **an open About page books exactly the next
+    /// displayed “Last checked” bucket, with no clock for Never.**
+    ///
+    /// MUTATION: return `None` for `MinutesAgo`; the motionless page's minute
+    /// row has no wake and this test goes red.
+    #[test]
+    fn last_checked_books_the_next_displayed_bucket_without_polling() {
+        let checked = 1_000_000;
+        assert_eq!(LastChecked::next_change_in_ms(0, checked), None);
+        assert_eq!(
+            LastChecked::next_change_in_ms(checked, checked),
+            Some(60_000)
+        );
+        assert_eq!(
+            LastChecked::next_change_in_ms(checked, checked + 119_999),
+            Some(1)
+        );
+        assert_eq!(
+            LastChecked::next_change_in_ms(checked, checked + 2 * 60_000),
+            Some(60_000)
+        );
+        assert_eq!(
+            LastChecked::next_change_in_ms(checked, checked + 2 * 3_600_000 + 1),
+            Some(3_600_000 - 1)
+        );
+        assert_eq!(
+            LastChecked::next_change_in_ms(checked, checked + 2 * 86_400_000),
+            Some(86_400_000)
+        );
+    }
 
     /// RED (T-UPDATE-ON-ABOUT) — the gear explains its dot in both language
     /// columns, and the unlit gear keeps the established one-word tip.
