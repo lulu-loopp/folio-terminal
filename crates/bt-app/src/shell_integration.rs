@@ -4075,7 +4075,7 @@ mod tests {
 
     #[cfg(windows)]
     fn real_powershell_output_until(
-        session: &mut bt_pty::PtySession,
+        session: &mut bt_pty::test_shell::TestShell,
         needle: &[u8],
         silent_for: std::time::Duration,
     ) -> Vec<u8> {
@@ -4085,15 +4085,18 @@ mod tests {
         let mut output = Vec::new();
         while !output.windows(needle.len()).any(|window| window == needle) {
             let now = std::time::Instant::now();
-            assert!(
-                now < absolute_deadline && now.duration_since(last_output) < silent_for,
-                "PowerShell never emitted {:?}; elapsed {:?}, silent {:?}, {} bytes; output was {:?}",
-                String::from_utf8_lossy(needle),
-                now.duration_since(started),
-                now.duration_since(last_output),
-                output.len(),
-                String::from_utf8_lossy(&output)
-            );
+            if now >= absolute_deadline || now.duration_since(last_output) >= silent_for {
+                panic!(
+                    "PowerShell never emitted {:?}; elapsed {:?}, silent {:?}, {} bytes; {}; \
+                     output was {:?}",
+                    String::from_utf8_lossy(needle),
+                    now.duration_since(started),
+                    now.duration_since(last_output),
+                    output.len(),
+                    session.account(),
+                    String::from_utf8_lossy(&output)
+                );
+            }
             let chunk = session.read_output();
             if chunk.is_empty() {
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -4126,15 +4129,69 @@ mod tests {
         );
     }
 
+    /// The shape of a composed row as this module's own classifier reads it — handed to
+    /// `bt_pty::test_shell` so the test shell does not read the row a second, different way
+    /// (`-noe -c` is the genuine Visual Studio row, and the subject here).
+    #[cfg(windows)]
+    fn test_shell_shape(
+        program: &Path,
+        arguments: &[OsString],
+    ) -> bt_pty::test_shell::PowerShellShape {
+        let parsed = classify_powershell_arguments(program, arguments)
+            .unwrap_or_else(|| panic!("the row is classified: {arguments:?}"));
+        bt_pty::test_shell::PowerShellShape {
+            draws_a_prompt: parsed.no_exit || matches!(parsed.terminal, PowerShellTerminal::None),
+            startup_text: match parsed.terminal {
+                PowerShellTerminal::Command { option, .. } => Some(option + 1),
+                _ => None,
+            },
+            has_no_profile: parsed
+                .non_terminal
+                .iter()
+                .any(|option| option.name == "noprofile"),
+        }
+    }
+
+    /// One composed row in its own test shell: `bt_pty::test_shell` with the row's shape, so the
+    /// argv is the composed one and the hygiene — `-NoProfile`, a temporary HOME, USERPROFILE,
+    /// APPDATA and LOCALAPPDATA, and the history refusal verified before a byte is typed — is
+    /// the one every real-shell test in the workspace has.
+    #[cfg(windows)]
+    fn real_row(
+        hygiene: bt_pty::test_shell::Hygiene,
+        program: &Path,
+        arguments: &[OsString],
+        columns: u16,
+        rows: u16,
+    ) -> bt_pty::test_shell::TestShell {
+        let home = hygiene.home();
+        let hygiene = hygiene.with_powershell_shape(test_shell_shape(program, arguments));
+        bt_pty::test_shell::TestShell::spawn_shell_in(
+            hygiene,
+            program.to_path_buf(),
+            arguments,
+            &|| last_resort_arguments(false),
+            &[],
+            bt_pty::PtySize::cells(
+                std::num::NonZeroU16::new(columns).unwrap(),
+                std::num::NonZeroU16::new(rows).unwrap(),
+            ),
+            Some(home),
+        )
+        .unwrap()
+    }
+
     /// Real-shell acceptance through the same headless ConPTY as a pane.
     ///
-    /// The Windows Known Folder that supplies `$PROFILE` cannot be redirected
-    /// by HOME/USERPROFILE (Part B measured that explicitly), so the hard rule
-    /// that tests never read the account's profile requires `-NoProfile` here.
-    /// The row's own `-NoExit -Command` lifetime and command composition are
-    /// otherwise unchanged. Before this process types a byte, user text points
-    /// PSReadLine at the scratch file, selects SaveNothing, and prints both
-    /// verified values; a failed verification exits the child instead.
+    /// Each row starts in its own `bt_pty::test_shell` (T-TEST-SHELL-HYGIENE), handed the row's
+    /// shape as `classify_powershell_arguments` reads it, so the composed argv is what runs:
+    /// the rows carry `-NoProfile` already (the Windows Known Folder that supplies `$PROFILE`
+    /// cannot be redirected by HOME/USERPROFILE — Part B measured that explicitly), and the
+    /// hygiene's history refusal stands where this test's own used to — at the head of the
+    /// user's `-Command` text (`HYGIENE`, replaced before the start; the parser is asked about
+    /// the text that runs), and as the first line of the `-NoExit -File` row's script, whose argv
+    /// stays exactly as written. The one-shot row draws no prompt and is not touched. Nothing
+    /// is typed into a row whose refusal was not read back.
     ///
     /// RED (mutation: drop the CRLF composition, add `-NoExit` to the one-shot
     /// row, or compose File) — prompt marks/effect, exit, and plain-file arms
@@ -4142,60 +4199,35 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn real_command_rows_integrate_without_touching_account_state() {
-        use std::sync::Arc;
+        use bt_pty::test_shell::{HYGIENE, Hygiene, powershell_hygiene};
 
         let root = temp_dir("real-command-rows");
-        let home = root.join("home");
-        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
         let integration = root.join(SCRIPT_FILE_PS1);
         std::fs::write(&integration, SCRIPT_PS1).unwrap();
-        let history = root.join("history.txt");
-        let history_literal = powershell_single_quoted(&history);
-        let safety = format!(
-            "Set-PSReadLineOption -HistorySavePath {history_literal} -HistorySaveStyle SaveNothing; if (((Get-PSReadLineOption).HistorySaveStyle -ne 'SaveNothing') -or ((Get-PSReadLineOption).HistorySavePath -ne {history_literal})) {{ exit 91 }}; Write-Output ('BT_SAFE|' + (Get-PSReadLineOption).HistorySavePath)"
-        );
-        let environment = vec![
-            (OsString::from("HOME"), home.clone().into_os_string()),
-            (OsString::from("USERPROFILE"), home.clone().into_os_string()),
-            (
-                OsString::from("APPDATA"),
-                home.join("AppData/Roaming").into_os_string(),
-            ),
-        ];
 
         for name in ["powershell.exe", "pwsh.exe"] {
             let Some(program) = bt_platform::program_on_path(Path::new(name)) else {
                 eprintln!("{name}: not installed; real command-row arm skipped");
                 continue;
             };
-            let user = format!("{safety}; $Global:BT_FOLIO_EFFECT = 'persisted'");
+            let hygiene = Hygiene::new();
+            let user = format!("{HYGIENE}; $Global:BT_FOLIO_EFFECT = 'persisted'");
+            let runs = user.replace(HYGIENE, &powershell_hygiene(&hygiene));
             let row = os_words(&["-NoProfile", "-NoExit", "-Command", &user]);
             let arguments = composed_powershell_arguments(
                 &program,
                 &row,
                 &integration,
-                Some(real_parse_answer(&program, &user)),
+                Some(real_parse_answer(&program, &runs)),
             )
             .expect("the valid command composes");
-            let mut session = bt_pty::PtySession::spawn_shell_in(
-                program.clone(),
-                &arguments,
-                &|| last_resort_arguments(false),
-                &environment,
-                bt_pty::PtySize::cells(
-                    std::num::NonZeroU16::new(100).unwrap(),
-                    std::num::NonZeroU16::new(30).unwrap(),
-                ),
-                Arc::new(|| {}),
-                Some(home.clone()),
-            )
-            .unwrap();
+            let mut session = real_row(hygiene, &program, &arguments, 100, 30);
             let mut output = real_powershell_output_until(
                 &mut session,
                 b"\x1b]133;B",
                 std::time::Duration::from_secs(20),
             );
-            assert!(output.windows(8).any(|window| window == b"BT_SAFE|"));
             assert!(
                 output
                     .windows(b"\x1b]7;".len())
@@ -4214,6 +4246,10 @@ mod tests {
                     .windows(b"\x1b]133".len())
                     .any(|window| window == b"\x1b]133")
             );
+            assert!(
+                !session.hygiene().history_file().exists(),
+                "SaveNothing wrote no scratch history either"
+            );
             session.shutdown().unwrap();
 
             let one_shot = "Write-Output INJECT3_ONESHOT";
@@ -4226,19 +4262,7 @@ mod tests {
             )
             .expect("one-shot command composes without changing its lifetime");
             assert!(!arguments.iter().any(|argument| argument == "-NoExit"));
-            let mut session = bt_pty::PtySession::spawn_shell_in(
-                program.clone(),
-                &arguments,
-                &|| last_resort_arguments(false),
-                &environment,
-                bt_pty::PtySize::cells(
-                    std::num::NonZeroU16::new(100).unwrap(),
-                    std::num::NonZeroU16::new(30).unwrap(),
-                ),
-                Arc::new(|| {}),
-                Some(home.clone()),
-            )
-            .unwrap();
+            let mut session = real_row(Hygiene::new(), &program, &arguments, 100, 30);
             let output = real_powershell_output_until(
                 &mut session,
                 b"INJECT3_ONESHOT",
@@ -4251,10 +4275,14 @@ mod tests {
             );
             session.shutdown().unwrap();
 
-            let file = root.join(format!("{name}-plain.ps1"));
+            let hygiene = Hygiene::new();
+            let file = hygiene.root().join(format!("{name}-plain.ps1"));
             std::fs::write(
                 &file,
-                format!("{safety}; Write-Output INJECT3_FILE_PLAIN\r\n"),
+                format!(
+                    "{}\r\nWrite-Output INJECT3_FILE_PLAIN\r\n",
+                    powershell_hygiene(&hygiene)
+                ),
             )
             .unwrap();
             let row = vec![
@@ -4267,25 +4295,12 @@ mod tests {
                 composed_powershell_arguments(&program, &row, &integration, Some(true)),
                 None
             );
-            let mut session = bt_pty::PtySession::spawn_shell_in(
-                program.clone(),
-                &row,
-                &|| last_resort_arguments(false),
-                &environment,
-                bt_pty::PtySize::cells(
-                    std::num::NonZeroU16::new(100).unwrap(),
-                    std::num::NonZeroU16::new(30).unwrap(),
-                ),
-                Arc::new(|| {}),
-                Some(home.clone()),
-            )
-            .unwrap();
+            let mut session = real_row(hygiene, &program, &row, 100, 30);
             let output = real_powershell_output_until(
                 &mut session,
                 b"INJECT3_FILE_PLAIN",
                 std::time::Duration::from_secs(20),
             );
-            assert!(output.windows(8).any(|window| window == b"BT_SAFE|"));
             assert!(
                 !output
                     .windows(b"\x1b]133".len())
@@ -4301,10 +4316,12 @@ mod tests {
             r"C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\Common7\Tools\Microsoft.VisualStudio.DevShell.dll",
         );
         if vs_program.is_file() && vs_module.is_file() {
+            let hygiene = Hygiene::new();
             let vs = format!(
-                "{safety}; &{{Import-Module {}; Enter-VsDevShell a2ec33a6}}; Write-Output INJECT3_VS_READY",
+                "{HYGIENE}; &{{Import-Module {}; Enter-VsDevShell a2ec33a6}}; Write-Output INJECT3_VS_READY",
                 powershell_single_quoted(&vs_module)
             );
+            let runs = vs.replace(HYGIENE, &powershell_hygiene(&hygiene));
             let row = vec![
                 OsString::from("-NoProfile"),
                 OsString::from("-noe"),
@@ -4315,22 +4332,10 @@ mod tests {
                 &vs_program,
                 &row,
                 &integration,
-                Some(real_parse_answer(&vs_program, &vs)),
+                Some(real_parse_answer(&vs_program, &runs)),
             )
             .expect("the installed Developer PowerShell row composes");
-            let mut session = bt_pty::PtySession::spawn_shell_in(
-                vs_program,
-                &arguments,
-                &|| last_resort_arguments(false),
-                &environment,
-                bt_pty::PtySize::cells(
-                    std::num::NonZeroU16::new(120).unwrap(),
-                    std::num::NonZeroU16::new(35).unwrap(),
-                ),
-                Arc::new(|| {}),
-                Some(home.clone()),
-            )
-            .unwrap();
+            let mut session = real_row(hygiene, &vs_program, &arguments, 120, 35);
             let output = real_powershell_output_until(
                 &mut session,
                 b"\x1b]133;B",
@@ -4354,14 +4359,14 @@ mod tests {
                 b"INJECT3_CL_OK",
                 std::time::Duration::from_secs(20),
             );
+            assert!(
+                !session.hygiene().history_file().exists(),
+                "SaveNothing wrote no scratch history either"
+            );
             session.shutdown().unwrap();
         } else {
             eprintln!("Visual Studio Build Tools Developer PowerShell is absent; arm skipped");
         }
-        assert!(
-            !history.exists(),
-            "SaveNothing wrote no scratch history either"
-        );
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -5106,11 +5111,12 @@ mod tests {
     /// The real producer end to end: this build's macOS seed, through
     /// [`shell_command`] with the real scripts written into a sandbox, spawned
     /// over a real pty, and asked by the shell itself. The reader's home is a
-    /// sandbox under `std::env::temp_dir()` — `TMPDIR` decides where, so a run on
-    /// a shared machine points it inside its own work tree — holding a
-    /// `.zprofile`, a `.bash_profile` and a `.profile` that each put a marker at
-    /// the front of `PATH`. No file of the account running the test is read or
-    /// written: `HOME` is the sandbox and `ZDOTDIR` is Folio's copy in it.
+    /// `bt_pty::test_shell::Hygiene` directory under `std::env::temp_dir()` —
+    /// `TMPDIR` decides where, so a run on a shared machine points it inside its
+    /// own work tree — holding a `.zprofile`, a `.bash_profile` and a `.profile`
+    /// that each put a marker at the front of `PATH`. No file of the account
+    /// running the test is read or written: `HOME`, `HISTFILE` and `XDG_*` are the
+    /// sandbox's and `ZDOTDIR` is Folio's copy in it.
     ///
     /// `ps -ww -o command= -p $$` is the reporter's own question, widened so a
     /// long init-file path is not cut at the terminal's width. zsh and sh answer
@@ -5123,10 +5129,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn a_login_row_starts_a_login_shell() {
-        use std::{
-            sync::Arc,
-            time::{Duration, Instant},
-        };
+        use std::time::{Duration, Instant};
 
         struct Mac;
         impl ShellEnvironment for Mac {
@@ -5139,24 +5142,24 @@ mod tests {
         }
 
         const MARKER: &str = "/folio-login-marker-74";
-        let sandbox =
-            std::env::temp_dir().join(format!("folio-login-shell-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&sandbox);
-        let home = sandbox.join("home");
-        let zdotdir = sandbox.join("zdotdir");
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&zdotdir).unwrap();
-        for name in [".zprofile", ".bash_profile", ".profile"] {
-            std::fs::write(home.join(name), format!("export PATH=\"{MARKER}:$PATH\"\n")).unwrap();
-        }
-        for name in ZDOTDIR_FILES {
-            std::fs::write(zdotdir.join(name), SCRIPT_ZSH).unwrap();
-        }
-        let script = sandbox.join(SCRIPT_FILE);
-        std::fs::write(&script, SCRIPT).unwrap();
-        let scripts = Scripts {
-            bash: Some(&script),
-            zdotdir: Some(&zdotdir),
+        // One `bt_pty::test_shell::Hygiene` per shell: its own temporary `HOME`, `ZDOTDIR`,
+        // `HISTFILE` and `XDG_*`, holding the startup files this test writes — the files this
+        // test is about, so the shell is not told to skip them (`reading_startup_files`).
+        let sandbox = || {
+            let hygiene = bt_pty::test_shell::Hygiene::new().reading_startup_files();
+            let home = hygiene.home();
+            let zdotdir = hygiene.root().join("zdotdir");
+            std::fs::create_dir_all(&zdotdir).unwrap();
+            for name in [".zprofile", ".bash_profile", ".profile"] {
+                std::fs::write(home.join(name), format!("export PATH=\"{MARKER}:$PATH\"\n"))
+                    .unwrap();
+            }
+            for name in ZDOTDIR_FILES {
+                std::fs::write(zdotdir.join(name), SCRIPT_ZSH).unwrap();
+            }
+            let script = hygiene.root().join(SCRIPT_FILE);
+            std::fs::write(&script, SCRIPT).unwrap();
+            (hygiene, home, zdotdir, script)
         };
 
         let rows = profiles::shipped_for(profiles::SeedPlatform::MacOs, &Mac);
@@ -5170,11 +5173,17 @@ mod tests {
             let profiles::ProgramSource::Path(program) = &row.program else {
                 panic!("{id} names one path");
             };
+            let (hygiene, home, zdotdir, script) = sandbox();
+            let scripts = Scripts {
+                bash: Some(&script),
+                zdotdir: Some(&zdotdir),
+            };
             let mut command = shell_command(row, &[], scripts, &bare());
             command
                 .environment
                 .push((OsString::from("HOME"), home.clone().into_os_string()));
-            let mut session = bt_pty::PtySession::spawn_shell_in(
+            let mut session = bt_pty::test_shell::TestShell::spawn_shell_in(
+                hygiene,
                 program.clone(),
                 &command.arguments,
                 &|| last_resort_arguments(false),
@@ -5183,7 +5192,6 @@ mod tests {
                     std::num::NonZeroU16::new(200).unwrap(),
                     std::num::NonZeroU16::new(24).unwrap(),
                 ),
-                Arc::new(|| {}),
                 Some(home.clone()),
             )
             .unwrap();
@@ -5220,7 +5228,6 @@ mod tests {
             );
             session.shutdown().unwrap();
         }
-        let _ = std::fs::remove_dir_all(&sandbox);
     }
 
     /// PIN — **a Bourne shell is told it has no integration rather than handed

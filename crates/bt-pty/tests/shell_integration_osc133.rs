@@ -25,10 +25,10 @@
 //! thing that says the green one is measuring the script and not the shell.
 //!
 //! **Nothing here touches the user's own shell.** The script reaches the child as an
-//! argument (`-NoProfile … -Command <guarded text loader>`), never through `$PROFILE`;
-//! `-NoProfile` also means the real one is not so much as read. The line
-//! editor is told to save no history, so the user's own history file is not written
-//! either.
+//! argument (`-Command <guarded text loader>`), never through `$PROFILE`; the shell is
+//! started through `bt_pty::test_shell`, so the real profile is not so much as read
+//! (`-NoProfile`), the line editor saves no history (read back before anything is
+//! typed), and HOME/APPDATA are the test's own.
 
 #![cfg(windows)]
 #![allow(clippy::disallowed_methods)]
@@ -36,13 +36,12 @@
 use std::{
     num::{NonZeroU16, NonZeroU32},
     path::{Path, PathBuf},
-    sync::Arc,
     time::{Duration, Instant},
 };
 
+use bt_pty::test_shell::{HYGIENE, TestShell};
 use bt_pty::{
-    PtyCommand, PtySession, PtySize, SystemShellEnvironment, WINDOWS_POWERSHELL,
-    resolve_powershell_seven,
+    PtyCommand, PtySize, SystemShellEnvironment, WINDOWS_POWERSHELL, resolve_powershell_seven,
 };
 use bt_term::DualPlaneSession;
 
@@ -151,7 +150,7 @@ fn generations() -> Vec<String> {
 /// about bytes on the wire and a marker the parser consumed is still a marker that
 /// arrived.
 struct ShellProbe {
-    pty: PtySession,
+    pty: TestShell,
     session: DualPlaneSession,
     raw: Vec<u8>,
     started: Instant,
@@ -161,15 +160,13 @@ struct ShellProbe {
 impl ShellProbe {
     /// `shell`, started the way a pane starts it, running `startup` and staying open.
     ///
-    /// `-NoProfile` is the isolation and is load-bearing twice over: the user's own
-    /// `$PROFILE` is not read, so nothing they have installed can make the red arm
-    /// green, and nothing this test does can reach a file they own.
+    /// Through `TestShell`, whose `-NoProfile` is load-bearing twice over here: the
+    /// user's own `$PROFILE` is not read, so nothing they have installed can make the red
+    /// arm green, and nothing this test does can reach a file they own.
     fn spawn(shell: &str, startup: &str, execution_policy: Option<&str>) -> Self {
         let columns = NonZeroU16::new(80).unwrap();
         let rows = NonZeroU16::new(20).unwrap();
-        let mut command = PtyCommand::interactive_shell(shell)
-            .arg("-NoLogo")
-            .arg("-NoProfile");
+        let mut command = PtyCommand::interactive_shell(shell).arg("-NoLogo");
         if let Some(policy) = execution_policy {
             command = command.arg("-ExecutionPolicy").arg(policy);
             // Ticket 2 owns Folio's per-pane PSModulePath prefix. Keep this ticket's Restricted
@@ -192,7 +189,7 @@ impl ShellProbe {
             }
         }
         let command = command.arg("-NoExit").arg("-Command").arg(startup);
-        let pty = PtySession::spawn(command, PtySize::cells(columns, rows), Arc::new(|| {}))
+        let pty = TestShell::spawn(command, PtySize::cells(columns, rows))
             .unwrap_or_else(|error| panic!("{shell} starts on a supported host: {error:?}"));
         Self {
             pty,
@@ -215,7 +212,7 @@ impl ShellProbe {
         self.raw.extend_from_slice(&bytes);
         self.session.feed(&bytes).unwrap();
         for reply in self.session.take_pty_writes() {
-            self.pty.write(&reply).unwrap();
+            self.pty.reply(&reply).unwrap();
         }
         true
     }
@@ -257,17 +254,18 @@ impl ShellProbe {
         }
     }
 
-    fn give_up_if_stalled(&self, waiting_for: &str) {
+    fn give_up_if_stalled(&mut self, waiting_for: &str) {
         let silent_for = self.last_output.elapsed();
         if silent_for < SILENCE_BUDGET && self.started.elapsed() < CEILING {
             return;
         }
         panic!(
             "gave up waiting for {waiting_for} after {:?}, the last {:?} of it with the child \
-             silent and {} bytes read in all; screen {:?}",
+             silent and {} bytes read in all; {}; screen {:?}",
             self.started.elapsed(),
             silent_for,
             self.raw.len(),
+            self.pty.account(),
             self.session.terminal().visible_text()
         );
     }
@@ -297,16 +295,11 @@ impl ShellProbe {
 
 /// A shell with a known prompt and a line editor that writes nothing to disk.
 ///
-/// `SaveNothing` is isolation, not tidiness: PSReadLine's default is to append every
-/// line typed in any session to one file in the user's own profile directory, and a
-/// test suite has no business writing there.
+/// The history refusal is `TestShell`'s (`bt_pty::test_shell`), read back before
+/// anything is typed; [`HYGIENE`] says where it goes — here, before the prompt, and in
+/// the integrated arm after PSReadLine is available.
 fn bare_startup() -> String {
-    format!(
-        "Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
-         if ((Get-PSReadLineOption).HistorySaveStyle -ne 'SaveNothing') \
-         {{ throw 'BT_HISTORY_SAVING_WAS_NOT_DISABLED' }}; \
-         function global:prompt {{ '{PROMPT}' }}"
-    )
+    format!("{HYGIENE} function global:prompt {{ '{PROMPT}' }}")
 }
 
 /// The product's guarded text-evaluation loader, with the probe's history refusal and known
@@ -452,7 +445,6 @@ fn restricted_windows_powershell_still_integrates_without_printing_an_error() {
     assert!(occurrences(&raw, COMMAND_START) > 0, "{text:?}");
     assert!(occurrences(&raw, DIRECTORY_MARKER) > 0, "{text:?}");
     for error in [
-        "BT_HISTORY_SAVING_WAS_NOT_DISABLED",
         "ParserError",
         "Import-Module :",
         "cannot be loaded because running scripts is disabled",

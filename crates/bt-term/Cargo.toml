@@ -29,6 +29,11 @@ unicode-width.workspace = true
 # The grapheme-cluster ceiling this crate's captures are measured against lives there.
 bt-unicode = { path = "../bt-unicode" }
 proptest = "1"
+# **A real shell for a test** (T-TEST-SHELL-HYGIENE): the shell-integration tests start
+# Git Bash, cmd and PowerShell through `bt_pty::test_shell::Hygiene`, without the user's
+# startup files or history. `bt-pty` names this crate only as a dev-dependency of its own,
+# so the library graph has no cycle.
+bt-pty = { path = "../bt-pty", features = ["test-shell"] }
 
 [lints]
 workspace = true
