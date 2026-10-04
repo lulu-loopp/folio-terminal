@@ -812,7 +812,7 @@ impl Runtime<'_> {
             PointerTarget::Float(..) => None,
             // A strip covers the chrome under it the way a window does
             // (T-STRIP-HOVER-THROUGH): the point is the strip's, not a target.
-            PointerTarget::Notice(..) => None,
+            PointerTarget::Notice(..) | PointerTarget::Search(_) => None,
         }
     }
 

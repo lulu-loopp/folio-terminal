@@ -731,11 +731,11 @@ fn the_modal_family_covers_the_float_and_the_tip_covers_them_both() {
     assert_eq!(
         order,
         vec![
-            0, 24, 16, 13, 26, 1, 19, 2, 14, 17, 18, 3, 4, 5, 6, 7, 12, 15, 22, 25, 8, 20, 23, 9,
+            0, 24, 16, 13, 26, 1, 19, 2, 17, 14, 18, 3, 4, 5, 6, 7, 12, 15, 22, 25, 8, 20, 23, 9,
             10, 11, 21
         ],
         "bottom to top: pane bars, video bars, terminal thumbs, command rails, formula marks, \
-             rail, flight, ground, search capsule, integration strips, download sheet, schematic, \
+             rail, flight, ground, integration strips, search capsule (owner's ruling 2026-10-04), download sheet, schematic, \
              float, modal, file menu, pane menu, git menu, terminal menu, tab menu, command \
              palette, notices, key hint, Cards bubble, tip, glance, ghost, window ring"
     );
@@ -40992,13 +40992,14 @@ fn a_panes_notice_strip_is_asked_between_the_floats_and_the_docked_chrome() {
          a strip, then the chrome the strip covers"
     );
     assert!(
-        router[strip..docked].contains("returnSome(PointerTarget::Notice(seat,element));"),
+        router[strip..docked].contains(".map(|(seat,element)|PointerTarget::Notice(seat,element))")
+            && router[strip..docked].contains("ifclaim.is_some(){returnclaim;}"),
         "and the strip's claim is the whole answer, so nothing under it is asked"
     );
     assert_eq!(
         reader_names(&calls_of("Runtime", "docked_notice_at")),
-        ["pointer_target_at"],
-        "a pane's strip is placed in the order by the router and nowhere else"
+        ["pane_hit_context", "pointer_target_at"],
+        "a pane's strip is placed in the order by the router, and read as a fact only by the cells' hover root, which cannot ask the router"
     );
     let at = squeezed_body("Runtime", "notice_at");
     assert!(
@@ -41018,42 +41019,204 @@ fn a_panes_notice_strip_is_asked_between_the_floats_and_the_docked_chrome() {
     }
 }
 
-/// RED (the same report) — **the strip's hover is asked before the capsule's**,
-/// the order the two are painted in (`Layered::Notice` is staged above the
-/// search layer) and the order their presses are taken in (`press_notice` runs
-/// before `press_search`). The capsule hangs from the seat's own top, so on a
-/// pane wearing a strip the two meet.
+/// RED (owner's ruling 2026-10-04, T-STRIP-HOVER-THROUGH follow-up) — **the
+/// search capsule is above the notice strip, on the glass and to the pointer,
+/// and the two orders are one list.**
 ///
-/// Red gate: ask `drive_search_hover` first again and the hover lights a
-/// toggle under the strip while the press goes to the strip's word.
+/// A surface the reader summoned (Ctrl+F) outranks a notice nobody asked for.
+/// `IN_PANE_SURFACES_TOP_FIRST` is read by the paint (`OverlayStack::flattened`,
+/// bottom first) and by the router (`pointer_target_at`, top first); the hover
+/// and the press of every button read the router. The capsule hangs from the
+/// seat's own top, so on a pane wearing a strip the two meet.
+///
+/// Red gates: put the strip first in the list, or paint the two bands by hand,
+/// and the paint assertions fail; ask `drive_notice_hover` before
+/// `drive_search_hover` and the hover assertion fails; take the in-pane press
+/// below the chrome router, or answer the strip and the capsule by doors of
+/// their own, and the click assertions fail.
 #[test]
-fn the_strips_hover_is_asked_before_the_capsules() {
+fn the_capsule_is_above_the_strip_for_the_paint_the_hover_and_the_press() {
+    assert_eq!(
+        IN_PANE_SURFACES_TOP_FIRST,
+        [InPaneSurface::SearchCapsule, InPaneSurface::NoticeStrip],
+        "the capsule the reader summoned is the top surface inside a pane"
+    );
+    // The paint, run: the strip is laid down first and the capsule over it.
+    let layer = |opacity| marks::OverlayLayer {
+        opacity,
+        ..marks::OverlayLayer::default()
+    };
+    let stack = OverlayStack {
+        search: vec![layer(0.25)].into(),
+        pane_notices: vec![layer(0.5)].into(),
+        ..OverlayStack::default()
+    };
+    let painted: Vec<f32> = stack
+        .flattened()
+        .layers
+        .iter()
+        .map(|layer| layer.opacity)
+        .collect();
+    assert_eq!(
+        painted,
+        [0.5, 0.25],
+        "paint: the strip, then the capsule over it"
+    );
+    let paint = squeezed(item_body(&ItemQuery::method("OverlayStack", "flattened")));
+    assert!(
+        paint.contains("IN_PANE_SURFACES_TOP_FIRST.iter().rev()"),
+        "paint: the two bands are placed by the one list, bottom first"
+    );
+    // The router reads the same list, top first, between the floats and the
+    // docked chrome.
+    let router = squeezed_body("Runtime", "pointer_target_at");
+    let float = router
+        .find("self.float_hit_at(position)")
+        .expect("floats first");
+    let in_pane = router
+        .find("forsurfaceinIN_PANE_SURFACES_TOP_FIRST")
+        .expect("pointer: the router walks the one list");
+    let docked = router
+        .find("self.docked_chrome_target_at(position)")
+        .expect("and the docked chrome last");
+    assert!(
+        float < in_pane && in_pane < docked,
+        "floats, then the in-pane surfaces, then the chrome"
+    );
+    // Hover.
     let moved = squeezed_body("Runtime", "pointer_moved");
-    let strip = moved
-        .find("self.drive_notice_hover(")
-        .expect("the strip's hover is driven on every move");
     let capsule = moved
         .find("self.drive_search_hover(")
-        .expect("and the capsule's");
+        .expect("the capsule's hover is driven on every move");
+    let strip = moved
+        .find("self.drive_notice_hover(")
+        .expect("and the strip's");
     assert!(
-        strip < capsule,
-        "the strip, which is on top, is asked first"
+        capsule < strip,
+        "hover: the capsule, which is on top, is asked first"
     );
     assert!(
-        moved[capsule..]
-            .starts_with("self.drive_search_hover((self.window.mouse_route.is_none()&&!on_notice)"),
-        "and a hand the strip has claimed lights nothing on the capsule under it"
+        moved[strip..]
+            .starts_with("self.drive_notice_hover((self.window.mouse_route.is_none()&&!on_search)"),
+        "and a hand the capsule has claimed lights nothing on the strip under it"
     );
+    for (gesture, door) in [
+        ("drive_search_hover", "self.search_at("),
+        ("press_search", "self.search_at("),
+        ("drive_notice_hover", "self.notice_at("),
+        ("press_notice", "self.notice_at("),
+    ] {
+        assert!(
+            squeezed_body("Runtime", gesture).contains(door),
+            "`{gesture}` reads the router's answer"
+        );
+    }
+    // Click: one door for both surfaces and every button, above the pane.
     let press = squeezed_body("Runtime", "mouse_input");
-    let pressed_strip = press
-        .find("self.press_notice(position)?")
-        .expect("the strip takes its own press");
-    let pressed_capsule = press
-        .find("self.press_search(position)?")
-        .expect("and the capsule its own");
+    let gate = press
+        .find("self.press_in_pane_surface(button,position)?")
+        .expect("click: the in-pane surfaces take their presses through one door");
+    for below in [
+        "self.point_is_on_the_web_page(position)",
+        "self.chrome_mouse_input(state,button,position)?",
+        "self.preview_rendered_surface_at(position)",
+    ] {
+        assert!(
+            press[gate..].contains(below),
+            "click: `{below}` is asked below the in-pane surfaces, never above them"
+        );
+    }
+    let door = squeezed_body("Runtime", "press_in_pane_surface");
     assert!(
-        pressed_strip < pressed_capsule,
-        "the press already asked the strip first; the hover now agrees"
+        door.contains("self.in_pane_surface_at(position)")
+            && door.contains("InPaneSurface::SearchCapsule=>self.press_search(position)?")
+            && door.contains("InPaneSurface::NoticeStrip=>self.press_notice(position)?"),
+        "click: the door asks the router which surface, and hands the left button to it"
+    );
+    assert_eq!(
+        reader_names(&calls_of("Runtime", "press_search")),
+        ["press_in_pane_surface"],
+        "the capsule's press has one caller"
+    );
+    assert_eq!(
+        reader_names(&calls_of("Runtime", "press_notice")),
+        ["press_in_pane_surface"],
+        "and so does the strip's"
+    );
+}
+
+/// RED (independent review of `d0e62ef1`, 2026-10-04) — **every pointer reader
+/// below the in-pane surfaces takes their claim from the router**: the wheel,
+/// a press of any button (a rendered page's context menu included), the tip,
+/// the root the cells' hovers draw from, the files flyout's reference trigger,
+/// a playing video's bar and a hosted page's own hover.
+///
+/// Red gates: drop the wheel's in-pane station and a notch on the strip's frame
+/// scrolls what is under it; let `press_in_pane_surface` take the left button
+/// only and a right click on a pill opens the page menu under it; read the tip
+/// off the flat list again and a hidden control's tip speaks through the layer
+/// above it; drop the root's gate and a link under the capsule underlines.
+#[test]
+fn every_pointer_reader_below_the_in_pane_surfaces_reads_their_claim() {
+    let wheel = squeezed_body("Runtime", "mouse_wheel");
+    let station = wheel
+        .find("letSome(surface)=self.in_pane_surface_at(position)")
+        .expect("wheel: a notch asks the router whether a surface inside a pane owns it");
+    for below in [
+        "self.point_is_on_the_web_page(position)",
+        "self.preview_surface_at(position)",
+        "seats::files_body_at(",
+    ] {
+        assert!(
+            wheel[station..].contains(below),
+            "wheel: `{below}` is asked below the in-pane surfaces"
+        );
+    }
+    let answer = &wheel[station..wheel.len().min(station + 200)];
+    assert!(
+        answer.contains("returnOk(());"),
+        "wheel: a notch on a claimed point is nobody's"
+    );
+    let door = squeezed_body("Runtime", "press_in_pane_surface");
+    assert!(
+        door.contains("ifbutton==MouseButton::Left{") && door.ends_with("Ok(true)}"),
+        "press: every button on a claimed point is taken, only the left one acts"
+    );
+    let moved = squeezed_body("Runtime", "pointer_moved");
+    assert!(
+        moved.contains("self.owned_tooltip_anchor_at(position)"),
+        "tip: the pane-level tip is read through the router's owner"
+    );
+    let owned = squeezed_body("Runtime", "owned_tooltip_anchor_at");
+    for arm in [
+        "Some(InPaneSurface::SearchCapsule)=>capsule_control",
+        "Some(InPaneSurface::NoticeStrip)=>false",
+        "None=>!capsule_control",
+    ] {
+        assert!(owned.contains(arm), "tip: `{arm}`");
+    }
+    let root = squeezed_body("Runtime", "pane_hit_context");
+    assert!(
+        root.contains("self.search_part_at(position).is_some()")
+            && root.contains("self.docked_notice_at(position).is_some()"),
+        "cells: the root every cell hover draws from is gated by the in-pane surfaces"
+    );
+    let trigger = squeezed_body("Runtime", "float_trigger_at");
+    assert!(
+        trigger.contains(
+            "Some(PointerTarget::Float(..)|PointerTarget::Search(_)|PointerTarget::Notice(..),)=>None,"
+        ),
+        "flyout: a reference under a claimed point raises no files card"
+    );
+    assert!(
+        moved.contains("self.in_pane_surface_at(position).is_none();")
+            && moved.contains("self.note_video_hover(on_the_picture.then_some(position));"),
+        "video: a hand on a claimed point is not on the picture"
+    );
+    assert!(
+        squeezed_body("Runtime", "drive_web_pointer")
+            .contains("self.in_pane_surface_at(position).is_none()"),
+        "page: a hand on a claimed point is not on the hosted page"
     );
 }
 

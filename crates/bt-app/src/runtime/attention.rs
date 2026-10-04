@@ -607,7 +607,7 @@ impl Runtime<'_> {
                 self.notice_part_at(host, position)
                     .map(|element| (host, element))
             }
-            PointerTarget::Chrome(_) => None,
+            PointerTarget::Search(_) | PointerTarget::Chrome(_) => None,
         }
     }
 

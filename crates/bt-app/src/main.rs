@@ -31187,12 +31187,11 @@ struct OverlayStack {
     ///
     /// **A pane's integration notice strip** (7.1.6j), beside the capsule.
     ///
-    /// Above it in this list and never over it on the glass: the capsule floats
-    /// over the pane's own text and the strip stands in a row the text was moved
-    /// out of (`seats::pane_body_viewport` takes it), so the two cannot share a
-    /// pixel. The order is a statement rather than a fix — if the arithmetic
-    /// were ever broken, the surface that says what is *missing* should be the
-    /// one seen to survive.
+    /// **Under the capsule** (owner's ruling 2026-10-04). The two do meet — the
+    /// capsule hangs from the seat's own top, the strip takes the top row of
+    /// the body — and where they do, the surface the reader summoned is the one
+    /// on top. The two are painted by [`IN_PANE_SURFACES_TOP_FIRST`], the same
+    /// list the pointer router reads, so the order is stated once.
     ///
     /// One per pane and not a singleton: the offer is about one shell's startup
     /// file, and two PowerShell panes in one tab each owe their own.
@@ -31449,6 +31448,22 @@ impl OverlayStack {
             drag_ghost,
             window_ring,
         } = self;
+        // The surfaces inside a pane, painted bottom first from the one list
+        // the pointer router reads top first ([`IN_PANE_SURFACES_TOP_FIRST`]).
+        let (mut search, mut pane_notices) = (Some(search), Some(pane_notices));
+        let in_pane = IN_PANE_SURFACES_TOP_FIRST.iter().rev().fold(
+            marks::Band::default(),
+            |mut band, surface| {
+                band.append(
+                    match surface {
+                        InPaneSurface::SearchCapsule => search.take(),
+                        InPaneSurface::NoticeStrip => pane_notices.take(),
+                    }
+                    .unwrap_or_default(),
+                );
+                band
+            },
+        );
         [
             preview_bars,
             video_bars,
@@ -31458,8 +31473,7 @@ impl OverlayStack {
             rail,
             flight,
             ground,
-            search,
-            pane_notices,
+            in_pane,
             web_sheet,
             layout_peek,
             float,
@@ -34006,9 +34020,36 @@ enum PointerTarget {
     /// by it, so it is not under the pointer — the same sentence the `Float` arm
     /// says about the panes behind a window, one layer down.
     Notice(SeatId, notice::NoticeElement),
-    /// No window and no strip claimed it, so the answer is the docked chrome's.
+    /// **The search capsule claimed it** (owner's ruling 2026-10-04), and this is
+    /// the part of it the pointer is on. Above the strip for the reason
+    /// [`IN_PANE_SURFACES_TOP_FIRST`] gives.
+    Search(search::SearchElement),
+    /// No window and no in-pane surface claimed it, so the answer is the docked
+    /// chrome's.
     Chrome(seats::ChromeTarget),
 }
+
+/// One of the surfaces that stand **inside** a pane, over its own chrome and
+/// under every floating window (owner's ruling 2026-10-04).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InPaneSurface {
+    /// The search capsule (Ctrl+F, §7.1.5d).
+    SearchCapsule,
+    /// A pane's notice strip (§7.1.6j).
+    NoticeStrip,
+}
+
+/// **The surfaces inside a pane, top first — one statement of the paint order
+/// and the pointer order at once** (owner's ruling 2026-10-04).
+///
+/// A surface the reader summoned outranks a notice nobody asked for, so the
+/// search capsule is painted over the notice strip and answers the pointer
+/// before it; the strip's controls under the capsule do not answer, the rest of
+/// the strip does. [`OverlayStack::flattened`] paints this list bottom first and
+/// [`Runtime::pointer_target_at`] asks it top first, so the two cannot drift: a
+/// change to the order here is a change to both.
+const IN_PANE_SURFACES_TOP_FIRST: [InPaneSurface; 2] =
+    [InPaneSurface::SearchCapsule, InPaneSurface::NoticeStrip];
 
 /// Which surface a files tree is drawn on — the two hosts P81 asks to be wired.
 ///
@@ -48217,7 +48258,7 @@ impl Runtime<'_> {
             // **And a strip is no row either** (T-STRIP-HOVER-THROUGH,
             // 2026-10-04): it is drawn over whatever it covers, so a glance
             // cannot arm from under it.
-            Some(PointerTarget::Notice(..)) => None,
+            Some(PointerTarget::Notice(..) | PointerTarget::Search(_)) => None,
             Some(PointerTarget::Chrome(seats::ChromeTarget::FilesRow { seat, index })) => {
                 Some((RowHost::Column(seat), index))
             }
@@ -52387,8 +52428,11 @@ mod mouse_trace_station_tests {
         // spends it in two ways — a whole rung or a carried fraction — each with its
         // own `wheel_route taken=text-size` line above it. 24 → 25 on 2026-09-24
         // (ticket 57): a notch under a modal card is swallowed, with its own
-        // `wheel_route taken=overlay at=modal` line above it.
-        assert_every_exit_is_traced("mouse_wheel", 25);
+        // `wheel_route taken=overlay at=modal` line above it. 25 → 26 on
+        // 2026-10-04 (T-STRIP-HOVER-THROUGH): a notch on the search capsule or a
+        // notice strip is swallowed, with its own `wheel_route taken=overlay
+        // at=in-pane` line above it.
+        assert_every_exit_is_traced("mouse_wheel", 26);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }
@@ -53522,10 +53566,14 @@ mod files_locate_door_tests {
         // in the document. What keeps it honest is that the strip's own door is
         // asked above the chrome router entirely, off the very rectangle the
         // pill was drawn in; remove that rung and the words stop answering on
-        // both hosts at once.
+        // both hosts at once. Since T-STRIP-HOVER-THROUGH the rung is the one
+        // door of the surfaces inside a pane, which hands the strip's left
+        // press to `press_notice`.
         let router = method_body("Runtime", "mouse_input");
         assert!(
-            router.contains("self.press_notice(position)?"),
+            router.contains("self.press_in_pane_surface(button, position)?")
+                && method_body("Runtime", "press_in_pane_surface")
+                    .contains("self.press_notice(position)?"),
             "the press router does not reach the strip's own door before the chrome, so the words on a window's pill land in the document instead of answering it"
         );
         // ⑤ One verb, one buffer, whichever host was pressed.

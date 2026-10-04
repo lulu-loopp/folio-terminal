@@ -1751,7 +1751,7 @@ impl Runtime<'_> {
             // not the covered column's ground either.
             Some(PointerTarget::Float(..)) => return None,
             // A pane's notice strip is not a file and not a column's ground.
-            Some(PointerTarget::Notice(..)) => return None,
+            Some(PointerTarget::Notice(..) | PointerTarget::Search(_)) => return None,
             Some(PointerTarget::Chrome(seats::ChromeTarget::FilesRow { seat, index })) => {
                 (seat, index)
             }

@@ -1899,21 +1899,28 @@ impl Runtime<'_> {
         &mut self,
         position: PhysicalPosition<f64>,
     ) -> Option<float::FloatTrigger> {
-        match self.chrome_target_at(position) {
-            Some(seats::ChromeTarget::TabFiles(index)) => self
+        match self.pointer_target_at(position) {
+            Some(PointerTarget::Chrome(seats::ChromeTarget::TabFiles(index))) => self
                 .window
                 .tabs
                 .get(index)
                 .map(|tab| float::FloatTrigger::Tab(tab.id)),
-            Some(seats::ChromeTarget::PaneFiles(seat)) => Some(float::FloatTrigger::Pane(LeafId {
-                tab: self.window.tabs[self.window.active_tab].id,
-                seat,
-            })),
+            Some(PointerTarget::Chrome(seats::ChromeTarget::PaneFiles(seat))) => {
+                Some(float::FloatTrigger::Pane(LeafId {
+                    tab: self.window.tabs[self.window.active_tab].id,
+                    seat,
+                }))
+            }
             // **And a folder named in the output** (user ruling 2026-08-27,
             // §7.29). Last, for [`Self::row_under`]'s reason: the chrome is
             // drawn over the panes, so a cell is what is left when nothing on
-            // the glass has claimed the point.
-            _ => self.folder_reference_trigger(),
+            // the glass has claimed the point — which a window, the capsule and
+            // a strip each have (T-STRIP-HOVER-THROUGH): a reference under one
+            // of them is not under the pointer.
+            Some(
+                PointerTarget::Float(..) | PointerTarget::Search(_) | PointerTarget::Notice(..),
+            ) => None,
+            Some(PointerTarget::Chrome(_)) | None => self.folder_reference_trigger(),
         }
     }
 
@@ -2117,7 +2124,7 @@ impl Runtime<'_> {
                 }
             }
             // A strip raises no popover, and what it covers raises none either.
-            PointerTarget::Notice(..) => None,
+            PointerTarget::Notice(..) | PointerTarget::Search(_) => None,
             PointerTarget::Chrome(target) => Some(self.docked_popover_trigger(target)),
         }
     }

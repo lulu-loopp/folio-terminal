@@ -1765,7 +1765,12 @@ impl Runtime<'_> {
         if self.window.web.is_empty() {
             return;
         }
-        let inside = self.web_page_at(position);
+        // **A hand on a surface inside a pane is not on the page under it**
+        // (T-STRIP-HOVER-THROUGH): the page hears that the hand has left, as it
+        // does when the hand goes anywhere else the router says is not the page.
+        let inside = self
+            .web_page_at(position)
+            .filter(|_| self.in_pane_surface_at(position).is_none());
         if inside.is_none() && !self.window.web_pointer_inside {
             return;
         }
