@@ -485,7 +485,11 @@ fn perform(
 /// `H\<txn>` or the journal, removed durably.
 fn delete(effect: Effect, txn: TxnId, home: &Home) -> Result<(), install_txn::Failure> {
     match effect {
-        Effect::DeleteTxnDir => install_txn::durable_remove(&home.transaction(txn)),
+        Effect::DeleteTxnDir => {
+            install_txn::durable_remove(&home.transaction(txn))?;
+            crate::shell_integration::remove_trial_script(txn);
+            Ok(())
+        }
         _ => install_txn::durable_remove(&home.journal()),
     }
 }
