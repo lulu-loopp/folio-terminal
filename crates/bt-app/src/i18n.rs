@@ -3825,7 +3825,7 @@ impl Text {
             Self::CapPowerShellNotProvided => pick(
                 lang,
                 "PowerShell integration is not provided for these arguments.",
-                "PowerShell integration is not provided for these arguments.", // zh: pending T-INTEGRATION-INJECT-1
+                "自定义启动参数，不提供 PowerShell 整合。",
             ),
             Self::CapWslBash => pick(
                 lang,
@@ -4750,30 +4750,26 @@ impl Text {
                 "This file was deleted. What you are reading is still here.",
                 "文件已被删除。你正在读的这一份还在。",
             ),
-            Self::RowShellIntegration => pick(
-                lang,
-                "Shell integration",
-                "Shell integration", // zh: pending T-INTEGRATION-INJECT-1
-            ),
+            Self::RowShellIntegration => pick(lang, "Shell integration", "Shell 整合"),
             Self::DescShellIntegration => pick(
                 lang,
                 "Command marks, folder tracking and inline math in new PowerShell sessions.",
-                "Command marks, folder tracking and inline math in new PowerShell sessions.", // zh: pending T-INTEGRATION-INJECT-1
+                "新 PowerShell 会话中的命令标记、当前目录与行内公式。",
             ),
             Self::RowPowerShellProfileLine => pick(
                 lang,
                 "PowerShell $PROFILE line",
-                "PowerShell $PROFILE line", // zh: pending T-INTEGRATION-INJECT-1
+                "PowerShell $PROFILE 整合行",
             ),
             Self::DescPowerShellProfileLine => pick(
                 lang,
                 "An earlier Folio added this startup line.",
-                "An earlier Folio added this startup line.", // zh: pending T-INTEGRATION-INJECT-1
+                "旧版 Folio 添加了此启动行。",
             ),
             Self::RemovePowerShellProfileLine => pick(
                 lang,
                 "Remove the line from $PROFILE",
-                "Remove the line from $PROFILE", // zh: pending T-INTEGRATION-INJECT-1
+                "从 $PROFILE 移除此行",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -5906,26 +5902,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        (Self::RowShellIntegration, HostPlatform::Windows),
-        (Self::RowShellIntegration, HostPlatform::MacOs),
-        (Self::RowShellIntegration, HostPlatform::OtherUnix),
-        (Self::DescShellIntegration, HostPlatform::Windows),
-        (Self::DescShellIntegration, HostPlatform::MacOs),
-        (Self::DescShellIntegration, HostPlatform::OtherUnix),
-        (Self::RowPowerShellProfileLine, HostPlatform::Windows),
-        (Self::RowPowerShellProfileLine, HostPlatform::MacOs),
-        (Self::RowPowerShellProfileLine, HostPlatform::OtherUnix),
-        (Self::DescPowerShellProfileLine, HostPlatform::Windows),
-        (Self::DescPowerShellProfileLine, HostPlatform::MacOs),
-        (Self::DescPowerShellProfileLine, HostPlatform::OtherUnix),
-        (Self::RemovePowerShellProfileLine, HostPlatform::Windows),
-        (Self::RemovePowerShellProfileLine, HostPlatform::MacOs),
-        (Self::RemovePowerShellProfileLine, HostPlatform::OtherUnix),
-        (Self::CapPowerShellNotProvided, HostPlatform::Windows),
-        (Self::CapPowerShellNotProvided, HostPlatform::MacOs),
-        (Self::CapPowerShellNotProvided, HostPlatform::OtherUnix),
-    ];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
