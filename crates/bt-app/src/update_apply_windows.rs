@@ -107,9 +107,9 @@
 //! U-24, now applied by it): every way out of the applier and of the
 //! recovery — a normal end, any refusal once the home is known, a panic
 //! unwinding — goes through `update_apply::ExitGuard` ([`WindowsLeave`]). The
-//! applier has the duty only once it has taken the window's mark
-//! (`update_apply::OWNER_FILE`), before it waits for O's lock; before that, and
-//! when another live process holds the mark, it starts nothing. A successor
+//! applier has the duty only once it has won the window election
+//! (`update_apply::OWNER_FILE` and its lock), before it waits for O's lock;
+//! before that, and when another process owns the election, it starts nothing. A successor
 //! it leaves behind still running — the trial it started, the mark's holder
 //! found at `Handoff` — opens Folio; otherwise one start of what the disk
 //! names once the lock is let go ([`opens_now`]), counted only when a Folio
@@ -139,7 +139,7 @@
 //! `Stuck`, `RolledBack` → the rollback and its retirement (W9–W11);
 //! `Committed` → its retirement (W12). **A `Handoff` whose window's mark names a
 //! live process is left to it** — the one rule for both platforms
-//! (`update_apply::the_window_is_theirs`, U-34): R writes nothing, waits for
+//! (`update_apply::window_holder`, U-34): R writes nothing, waits for
 //! nothing and opens nothing; that process opens Folio. Any other process of
 //! the rescue image — an applier that never took the mark — is not waited
 //! for. **A running trial the journal does not record** (0.4.7 ticket U-37)
@@ -161,7 +161,7 @@ use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use bt_platform::HostPlatform;
 use bt_platform::admission::WorkerCtx;
@@ -175,8 +175,8 @@ use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
     BeforeDeciding, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave, Limits, Opener,
-    Opens, Watch, Watched, Window, failed_words, now_ms, owed_at_logon, read_receipt, stop_trial,
-    trial_runs, trial_words,
+    Opens, TransactionLock, Watch, Watched, Window, failed_words, now_ms, owed_at_logon,
+    read_receipt, stop_trial, trial_runs, trial_words,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -669,9 +669,9 @@ pub(crate) fn apply(
         handed: &[],
         worker: Some(worker),
     });
-    // **The window's duty first** (U-34, `update_apply::OWNER_FILE`): taken
-    // before the wait for O's lock, while O still runs. An applier that does
-    // not get it leaves the transaction untouched: the process that has the
+    // **The window's duty first** (U-34, `update_apply::OWNER_FILE` and its
+    // lock): taken before the wait for O's lock, while O still runs. An
+    // applier that does not get it leaves the transaction untouched: the process that has the
     // duty opens Folio, and the next start or logon finishes the update.
     // A live owner that is not this applier is O at its end, which leaves
     // anyway: wait for it to go (round 6), within the applier's own wait for
@@ -680,21 +680,24 @@ pub(crate) fn apply(
     // admission all spend the same `old_within` — the election's own wait for
     // its lock too (round 8).
     let until = Instant::now() + road.limits.old_within;
-    let window = loop {
-        match crate::update_apply::take_the_window(&road.home, txn, road.me, until) {
-            Window::Theirs(_) if Instant::now() < until => {
-                bt_platform::wait::sleep_within(
-                    worker,
-                    road.limits
-                        .poll
-                        .min(until.saturating_duration_since(Instant::now())),
-                );
-            }
-            decided => break decided,
-        }
-    };
+    let window = crate::update_apply::take_the_window_for_applier(
+        worker,
+        &road.home,
+        txn,
+        road.me,
+        until,
+        road.limits.poll,
+    );
     match window {
-        Window::Mine => {}
+        Window::Mine(duty) => {
+            if let Some(warning) = duty.warning() {
+                guard
+                    .inner()
+                    .world
+                    .say(&format!("BT_UPDATE_APPLY {warning}"));
+            }
+            guard.owns_window(duty);
+        }
         other => {
             let owner = match &other {
                 Window::Theirs(owner) => Some(owner.pid),
@@ -709,9 +712,10 @@ pub(crate) fn apply(
             return Ended::Refused(format!("the window is not this applier's: {other:?}"));
         }
     }
-    let (ended, successor) =
+    let (ended, successor, transaction_lock) =
         apply_under_the_lock(worker, road, txn, nonce, until, &mut *guard.inner().world);
     guard.succeeded_by(successor);
+    guard.road_ended(transaction_lock);
     if ended.deferred_to_a_holder() {
         guard.window_elsewhere();
     }
@@ -723,8 +727,9 @@ pub(crate) fn apply(
     ended
 }
 
-/// **The applier's road under the transaction lock**: where it ended, and
-/// the trial it started, which opens Folio while it runs.
+/// **The applier's road under the transaction lock**: where it ended, the
+/// trial it started, which opens Folio while it runs, and whether the road
+/// ever held that lock ([`ExitGuard::road_ended`]).
 fn apply_under_the_lock(
     worker: &WorkerCtx,
     road: &Road,
@@ -732,16 +737,49 @@ fn apply_under_the_lock(
     nonce: Nonce,
     window: Instant,
     world: &mut impl World,
-) -> (Ended, Option<Running>) {
-    let lock = match install_txn::hold_within(
+) -> (Ended, Option<Running>, TransactionLock) {
+    apply_under_the_lock_with(worker, road, txn, nonce, window, world, |path, within| {
+        install_txn::hold_within(path, Hold::Exclusive, within)
+    })
+}
+
+fn apply_under_the_lock_with(
+    worker: &WorkerCtx,
+    road: &Road,
+    txn: TxnId,
+    nonce: Nonce,
+    window: Instant,
+    world: &mut impl World,
+    hold: impl FnOnce(&Path, Duration) -> Result<Option<install_txn::Held>, install_txn::Failure>,
+) -> (Ended, Option<Running>, TransactionLock) {
+    let lock = match hold(
         &road.home.lock(),
-        Hold::Exclusive,
         window.saturating_duration_since(Instant::now()),
     ) {
         Ok(Some(held)) => held,
-        Ok(None) => return (Ended::OldHeldTheLock, None),
-        Err(failure) => return (Ended::Failed(failure.to_string()), None),
+        Ok(None) => return (Ended::OldHeldTheLock, None, TransactionLock::NeverHeld),
+        Err(failure) => {
+            return (
+                Ended::Failed(failure.to_string()),
+                None,
+                TransactionLock::NeverHeld,
+            );
+        }
     };
+    let (ended, successor) = under_the_lock(worker, road, txn, nonce, window, world, lock);
+    (ended, successor, TransactionLock::Held)
+}
+
+/// [`apply_under_the_lock_with`] once `lock` is held.
+fn under_the_lock(
+    worker: &WorkerCtx,
+    road: &Road,
+    txn: TxnId,
+    nonce: Nonce,
+    window: Instant,
+    world: &mut impl World,
+    lock: install_txn::Held,
+) -> (Ended, Option<Running>) {
     let journal = match read_journal(&road.home) {
         Ok(Some(journal)) => journal,
         Ok(None) => return (Ended::Refused("there is no journal".to_owned()), None),
@@ -797,16 +835,27 @@ pub(crate) fn recover(
             let txn = journal.txn;
             match Txn::of(road, worker, journal, lock, Asker::Rescue) {
                 Ok(mut held) => {
-                    let mut ended = if held.j.phase() == PhaseKind::Handoff
-                        && let Some(applier) =
-                            crate::update_apply::the_window_is_theirs(&road.home, txn, road.me)
-                    {
-                        world.say(&format!(
-                            "BT_UPDATE_RECOVER {} has the update's window; the handed-off update is left to it",
-                            applier.pid
-                        ));
-                        held.successor = Some(applier);
-                        Ended::LockHeld
+                    let mut ended = if held.j.phase() == PhaseKind::Handoff {
+                        match crate::update_apply::window_holder(&road.home, txn, road.me) {
+                            Ok(Some(crate::update_apply::WindowHolder::Marked(applier))) => {
+                                world.say(&format!(
+                                    "BT_UPDATE_RECOVER {} has the update's window; the handed-off update is left to it",
+                                    applier.pid
+                                ));
+                                held.successor = Some(applier);
+                                Ended::LockHeld
+                            }
+                            Ok(Some(crate::update_apply::WindowHolder::Unmarked)) => {
+                                world.say(
+                                    "BT_UPDATE_RECOVER an election-lock holder has the update's window; the handed-off update is left to it",
+                                );
+                                Ended::Deferred(Deferral::WindowDuty)
+                            }
+                            Ok(None) => held
+                                .settle(worker, None, world)
+                                .unwrap_or_else(Ended::Failed),
+                            Err(why) => Ended::Failed(why),
+                        }
                     } else {
                         held.settle(worker, None, world)
                             .unwrap_or_else(Ended::Failed)

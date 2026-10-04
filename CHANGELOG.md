@@ -45,6 +45,8 @@ All notable changes to Folio are recorded here. The format follows
 
 - PowerShell integration preparation can be retried after a failed or missing write, concurrent preparations cannot leave a partial script, and an update trial's temporary script is removed when that transaction is retired.
 - PowerShell's integration loader now keeps its PSReadLine reflection state process-wide and silently leaves the shell unchanged if its owned script cannot be read.
+- Folio left running now learns about a new version within a day.
+- Two Folio windows can no longer both start the same update.
 - On Windows, Ctrl+Alt with a letter or digit reaches programs that asked for
   the kitty protocol or modifyOtherKeys.
 - Chinese font choices stay in Chinese coverage order instead of being sorted

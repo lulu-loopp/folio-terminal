@@ -45,9 +45,12 @@
 //!   trial beside a candidate, never a rollback under it;
 //! * [`OWNER_FILE`] — **the window's owner** (U-34): the one process that has
 //!   taken the duty that a Folio window follows *Restart to update*, handed
-//!   from O to P explicitly ([`take_the_window`]); recovery that finds
-//!   `Handoff` leaves it to a live process the mark names
-//!   ([`the_window_is_theirs`]), writes nothing and opens nothing;
+//!   from O to P explicitly ([`take_the_window`]); the mark names a recorded
+//!   live owner, the lock names a live unrecorded owner, and the journal says
+//!   whether an owner whose lock is now gone already took its road; recovery
+//!   that finds `Handoff` leaves it to a live process the mark names or whose
+//!   election lock is still held ([`window_holder`]), writes nothing and opens
+//!   nothing;
 //! * [`ExitGuard`] — **the one way a road process leaves** (U-34): at its
 //!   exit, whatever the reason, a successor it holds still running opens
 //!   Folio, else it starts what the disk names ([`Opens`]); the recovery run
@@ -158,7 +161,7 @@ impl Ended {
     /// **Whether this end deferred to a Folio proved to hold the data
     /// directory** (H.3): the exit guard then owes no start.
     pub(crate) fn deferred_to_a_holder(&self) -> bool {
-        matches!(self, Ended::Deferred(Deferral::Held))
+        matches!(self, Ended::Deferred(Deferral::Held | Deferral::WindowDuty))
     }
 
     /// The process's exit code.
@@ -194,6 +197,28 @@ impl Ended {
 /// one twice the last.
 pub(crate) const JOURNAL_WRITE_WITHIN: Duration = Duration::from_secs(2);
 
+fn retry_within<T, E>(
+    until: Instant,
+    mut operation: impl FnMut() -> Result<T, E>,
+    is_retryable: impl Fn(&E) -> bool,
+    wait: &mut impl FnMut(Duration) -> bool,
+) -> Result<T, E> {
+    let mut pause = Duration::from_millis(10);
+    loop {
+        match operation() {
+            Ok(answer) => return Ok(answer),
+            Err(failure) if is_retryable(&failure) => {
+                let left = until.saturating_duration_since(Instant::now());
+                if left.is_zero() || !wait(pause.min(left)) {
+                    return Err(failure);
+                }
+                pause = pause.saturating_mul(2);
+            }
+            Err(failure) => return Err(failure),
+        }
+    }
+}
+
 /// **Write the journal's bytes durably** (`install_txn::durable_write`), and
 /// while the rename is refused because another program holds `journal.json`
 /// open (`install_txn::Failure::refused_while_open`: Windows only), ask again
@@ -206,22 +231,17 @@ pub(crate) const JOURNAL_WRITE_WITHIN: Duration = Duration::from_secs(2);
 /// The last failure, as a sentence; the journal keeps its last durable
 /// bytes.
 pub(crate) fn write_journal(worker: &WorkerCtx, path: &Path, bytes: &[u8]) -> Result<(), String> {
-    let until = Instant::now() + JOURNAL_WRITE_WITHIN;
-    let mut pause = Duration::from_millis(10);
-    loop {
-        match install_txn::durable_write(path, bytes) {
-            Ok(()) => return Ok(()),
-            Err(failure) if failure.refused_while_open() => {
-                let left = until.saturating_duration_since(Instant::now());
-                if left.is_zero() {
-                    return Err(failure.to_string());
-                }
-                bt_platform::wait::sleep_within(worker, pause.min(left));
-                pause = pause.saturating_mul(2);
-            }
-            Err(failure) => return Err(failure.to_string()),
-        }
-    }
+    let mut wait = |pause| {
+        bt_platform::wait::sleep_within(worker, pause);
+        true
+    };
+    retry_within(
+        Instant::now() + JOURNAL_WRITE_WITHIN,
+        || install_txn::durable_write(path, bytes),
+        install_txn::Failure::refused_while_open,
+        &mut wait,
+    )
+    .map_err(|failure| failure.to_string())
 }
 
 /// **A holder of the journal under its lock**, as [`watch_trial`] needs it:
@@ -677,6 +697,10 @@ pub(crate) enum Deferral {
     /// The data directory's claim is held: a Folio runs on this data, and its
     /// holder is the acknowledged window (U-34's delivery test).
     Held,
+    /// Another process holds the update window's election lock without a
+    /// readable mark. Its exit guard, not a data-directory holder, opens the
+    /// window.
+    WindowDuty,
     /// Whether a candidate runs cannot be known.
     Unlistable(String),
     /// The data directory's claim could not be asked about
@@ -695,6 +719,9 @@ impl Deferral {
             Deferral::Held => {
                 String::from("a Folio holds the data directory; nothing is started beside it")
             }
+            Deferral::WindowDuty => String::from(
+                "another process holds the update window duty; nothing is started beside it",
+            ),
             Deferral::Unlistable(why) => format!("what runs cannot be read ({why})"),
             Deferral::Denied(why) => format!("the data directory cannot be asked about ({why})"),
         }
@@ -916,18 +943,186 @@ fn owner_named(bytes: &[u8]) -> Option<Running> {
 /// **The process the window's mark names**, or `None` when there is none, or
 /// it cannot be read.
 pub(crate) fn window_owner(home: &Home, txn: TxnId) -> Option<Running> {
-    let bytes = file_reads::read(Lane::UpdateJournal, owner_path(home, txn)).ok()?;
-    owner_named(&bytes)
+    read_window_owner(home, txn).ok().flatten()
+}
+
+/// The mark's parsed owner. A missing or malformed mark has no owner; another
+/// read failure is kept distinct because it is not evidence that the mark is
+/// stale.
+fn read_window_owner(home: &Home, txn: TxnId) -> io::Result<Option<Running>> {
+    match file_reads::read(Lane::UpdateJournal, owner_path(home, txn)) {
+        Ok(bytes) => Ok(owner_named(&bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The durable transaction phase that says whether an unmarked election is
+/// still open. The transaction identity is checked with the phase: a journal
+/// for another transaction cannot authorize this contender.
+pub(crate) fn read_window_phase(home: &Home, txn: TxnId) -> Result<PhaseKind, String> {
+    let bytes =
+        file_reads::read(Lane::UpdateJournal, home.journal()).map_err(|error| error.to_string())?;
+    let journal = Journal::parse(&bytes).map_err(|refusal| refusal.to_string())?;
+    if journal.txn != txn {
+        return Err(format!(
+            "the journal is transaction {}, not {txn}",
+            journal.txn
+        ));
+    }
+    Ok(journal.body.phase.kind())
+}
+
+/// Before and through `Handoff`, no applier road has been taken. Every later
+/// or terminal phase is the durable evidence that one has.
+pub(crate) const fn window_duty_is_open(phase: PhaseKind) -> bool {
+    matches!(
+        phase,
+        PhaseKind::Allocated | PhaseKind::Prepared | PhaseKind::Handoff
+    )
+}
+
+/// **Whether an applier's road ever held the transaction lock `H\lock`** —
+/// what [`ExitGuard::road_ended`] decides by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransactionLock {
+    /// The road stopped before it had the lock: O may still hold it.
+    NeverHeld,
+    /// The road had the lock, so O's process had already ended.
+    Held,
+}
+
+/// A successful election. When the owner mark could not be replaced before
+/// its rename, `held` is the election lock itself: the exit guard owns it
+/// through the road and its final delivery, so another live contender can
+/// never become a second owner. Once that guard is gone, the journal records
+/// that the road was taken.
+pub(crate) struct WindowDuty {
+    _held: Option<install_txn::Held>,
+    warning: Option<String>,
+}
+
+impl WindowDuty {
+    fn recorded(held: install_txn::Held, warning: Option<String>) -> Self {
+        drop(held);
+        Self {
+            _held: None,
+            warning,
+        }
+    }
+
+    fn held(held: install_txn::Held, warning: String) -> Self {
+        Self {
+            _held: Some(held),
+            warning: Some(warning),
+        }
+    }
+
+    /// The non-fatal mark failure that made the lock, rather than durable
+    /// bytes, the record of this process's duty.
+    pub(crate) fn warning(&self) -> Option<&str> {
+        self.warning.as_deref()
+    }
+
+    /// Whether the mark did not land and the real election lock is this
+    /// duty's live record.
+    pub(crate) const fn is_lock_backed(&self) -> bool {
+        self._held.is_some()
+    }
+}
+
+impl std::fmt::Debug for WindowDuty {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.warning {
+            Some(warning) => f.debug_tuple("Mine").field(warning).finish(),
+            None => f.write_str("Mine"),
+        }
+    }
+}
+
+/// Why a contender could not enter the election.
+pub(crate) struct WindowRefusal {
+    why: String,
+    contended: bool,
+    retryable: bool,
+    outgoing_keeps_duty: bool,
+}
+
+impl WindowRefusal {
+    /// The refusal's diagnostic sentence.
+    pub(crate) fn why(&self) -> &str {
+        &self.why
+    }
+
+    /// Whether another process currently holds the election and therefore
+    /// carries the duty.
+    #[cfg(test)]
+    pub(crate) const fn contended(&self) -> bool {
+        self.contended
+    }
+
+    /// Whether an applier should ask the same election again inside its one
+    /// existing deadline.
+    const fn retryable(&self) -> bool {
+        self.retryable
+    }
+
+    /// Whether O remains the only candidate after this refusal. This is true
+    /// only when the election lock could not be opened; contention or an
+    /// unreadable mark is evidence that the duty may already be elsewhere.
+    pub(crate) const fn outgoing_keeps_duty(&self) -> bool {
+        self.outgoing_keeps_duty
+    }
+}
+
+impl std::fmt::Debug for WindowRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Refused").field(&self.why).finish()
+    }
 }
 
 /// **Who has the duty a window follows**, as [`take_the_window`] found it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub(crate) enum Window {
     /// This process: it opens a window when it leaves.
-    Mine,
+    Mine(WindowDuty),
     /// This live process has it: it opens the window.
     Theirs(Running),
+    /// The mark and lock are now gone, but the journal records that an
+    /// applier already took or finished the road. Its exit guard opened the
+    /// window, so this later contender starts nothing.
+    RoadTaken(PhaseKind),
+    /// This process proved no duty. Contention or an unreadable mark leaves
+    /// it elsewhere; a lock-open failure is left to O, which armed the duty.
+    Refused(WindowRefusal),
 }
+
+impl Window {
+    /// Whether this process won the duty.
+    #[cfg(test)]
+    pub(crate) const fn is_mine(&self) -> bool {
+        matches!(self, Self::Mine(_))
+    }
+}
+
+impl PartialEq for Window {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Mine(_), Self::Mine(_)) => true,
+            (Self::Theirs(left), Self::Theirs(right)) => left == right,
+            (Self::RoadTaken(left), Self::RoadTaken(right)) => left == right,
+            (Self::Refused(left), Self::Refused(right)) => {
+                left.why == right.why
+                    && left.contended == right.contended
+                    && left.retryable == right.retryable
+                    && left.outgoing_keeps_duty == right.outgoing_keeps_duty
+            }
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Window {}
 
 /// `H\<txn>\owner.lock`: the election's lock (round 5).
 pub(crate) fn owner_lock_path(home: &Home, txn: TxnId) -> PathBuf {
@@ -935,59 +1130,395 @@ pub(crate) fn owner_lock_path(home: &Home, txn: TxnId) -> PathBuf {
 }
 
 /// **How long a contender waits for the election's lock** (round 5): its
-/// holder keeps it for the few milliseconds of one read and one durable write,
-/// so a contender that waits longer is waiting for a holder that is stuck — it
-/// then takes the duty itself (a second start is possible, never none).
+/// holder normally keeps it for the few milliseconds of one read and one
+/// durable write. A contender that cannot take it within this bound refuses
+/// the duty: the holder may merely be delayed inside the election.
 pub(crate) const ELECTION_WITHIN: Duration = Duration::from_secs(5);
+
+/// The election-lock part of the applier's one wait for O. Supplying `now`
+/// keeps the bound itself deterministic in tests.
+pub(crate) fn election_within(until: Instant, now: Instant) -> Duration {
+    ELECTION_WITHIN.min(until.saturating_duration_since(now))
+}
 
 /// **Take the duty a window follows, unless a live process already has it**
 /// ([`OWNER_FILE`]; round 5, Codex's finding 14): one exclusive operating-
 /// system lock, `H\<txn>\owner.lock` (`install_txn::hold_within`: `LockFileEx`
-/// on Windows, `flock` on Unix), is held around the whole read-check-replace —
-/// read the mark; absent, unreadable or naming a process that no longer runs
-/// (pid and start instant) → write this process durably, [`Window::Mine`];
-/// naming this process → `Mine`; naming another live process →
-/// [`Window::Theirs`]. A holder that dies inside the election releases the lock
-/// with its process, so there is no half-held state and nothing to clean up. A
-/// contender waits up to [`ELECTION_WITHIN`] for the lock (`install_txn`'s own
-/// bounded poll); a lock it cannot take or open, or a mark it cannot write,
-/// makes it answer `Mine` — the bias is a second start, never none. There is
-/// no third answer.
+/// on Windows, `flock` on Unix), is held around the whole decision. **The one
+/// rule is: a readable live mark owns, a held lock owns while it lives, and
+/// without either an applier may claim only while the journal still says the
+/// applier road has not been taken; the outgoing build, which holds the
+/// transaction lock while it asks, may claim without either
+/// ([`Contender`]).** A mark read or replacement refused by a scanner is
+/// re-asked with [`write_journal`]'s [`JOURNAL_WRITE_WITHIN`] discipline. After
+/// a successful rename the visible mark records the duty; before the rename
+/// the exit guard retains the lock through the road and its final delivery
+/// ([`ExitGuard::road_ended`] says when that duty goes back to O). Once that
+/// guard is gone, a phase past `Handoff` is the durable record that the road
+/// already ran. A holder that dies before acting releases its lock while the
+/// journal remains `Handoff`, so the next contender can take the duty.
 ///
 /// **By `until`** (round 8, Codex's finding 15): the wait for the lock is the
 /// smaller of [`ELECTION_WITHIN`] and what is left before `until` — the
 /// applier's road deadline — so an election begun near that deadline never
 /// carries the applier's wait for O past it.
-pub(crate) fn take_the_window(home: &Home, txn: TxnId, me: Running, until: Instant) -> Window {
+pub(crate) fn take_the_window(
+    worker: Option<&WorkerCtx>,
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    until: Instant,
+) -> Window {
     take_the_window_within(
+        worker,
         home,
         txn,
         me,
-        ELECTION_WITHIN.min(until.saturating_duration_since(Instant::now())),
+        election_within(until, Instant::now()),
+        Contender::Applier,
     )
 }
 
-/// [`take_the_window`], waiting up to `within` for the election's lock — zero
-/// in O's panic road, which waits for nothing.
+/// [`take_the_window`], as `contender`, waiting up to `within` for the
+/// election's lock — zero in O's panic road, which waits for nothing.
 pub(crate) fn take_the_window_within(
+    worker: Option<&WorkerCtx>,
     home: &Home,
     txn: TxnId,
     me: Running,
     within: Duration,
+    contender: Contender,
 ) -> Window {
-    let lock = install_txn::hold_within(&owner_lock_path(home, txn), Hold::Exclusive, within);
-    let Ok(Some(_held)) = lock else {
-        return Window::Mine;
-    };
-    match window_owner(home, txn) {
-        Some(owner) if owner == me => Window::Mine,
-        Some(owner) if install_flip::still_running(owner) => Window::Theirs(owner),
-        // Absent, unreadable, or its process gone: this process takes it.
-        _ => {
-            let _ = install_txn::durable_write(&owner_path(home, txn), owner_value(me).as_bytes());
-            Window::Mine
+    take_the_window_within_using(
+        home,
+        txn,
+        me,
+        within,
+        contender,
+        ElectionOps {
+            after_lock: || {},
+            read_owner: || read_window_owner(home, txn),
+            read_phase: || read_window_phase(home, txn),
+            write: |path: &Path, bytes: &[u8]| {
+                MarkWriteFailure::from_result(install_txn::durable_write(path, bytes))
+            },
+            wait: |pause| match worker {
+                Some(worker) => {
+                    bt_platform::wait::sleep_within(worker, pause);
+                    true
+                }
+                None => false,
+            },
+        },
+    )
+}
+
+pub(crate) struct MarkWriteFailure {
+    why: String,
+    refused_while_open: bool,
+    after_rename: bool,
+}
+
+impl MarkWriteFailure {
+    fn from_result(result: Result<(), install_txn::Failure>) -> Result<(), Self> {
+        result.map_err(|failure| Self {
+            refused_while_open: failure.refused_while_open(),
+            after_rename: matches!(
+                failure.stage,
+                install_txn::Stage::OpenDirectory | install_txn::Stage::FlushDirectory
+            ),
+            why: failure.to_string(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn before_rename_for_test(why: &str, refused_while_open: bool) -> Self {
+        Self {
+            why: why.to_owned(),
+            refused_while_open,
+            after_rename: false,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn after_rename_for_test(why: &str) -> Self {
+        Self {
+            why: why.to_owned(),
+            refused_while_open: false,
+            after_rename: true,
+        }
+    }
+}
+
+struct ElectionOps<AfterLock, ReadOwner, ReadPhase, Write, Wait> {
+    after_lock: AfterLock,
+    read_owner: ReadOwner,
+    read_phase: ReadPhase,
+    write: Write,
+    wait: Wait,
+}
+
+/// **Who asks for the window duty.** Only an applier reads the journal in an
+/// unmarked election.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Contender {
+    /// The outgoing build O. It holds the transaction lock `H\lock` until its
+    /// process ends (`update_handoff::Staged::lock`, kept by `update_job` until
+    /// the process leaves), and every applier road takes that lock before it
+    /// writes the journal (`update_apply_windows::apply_under_the_lock_with`,
+    /// `update_apply_macos::Txn::hold`). So while O asks, no applier road can
+    /// have moved the journal past `Handoff`: a later phase there is O's own
+    /// record (`Abandoned` when its applier could not be started), never
+    /// evidence of a road taken, and O does not read it.
+    Outgoing,
+    /// An applier: an absent or dead mark may be claimed only while the
+    /// journal says no applier road has been taken.
+    Applier,
+}
+
+fn take_the_window_within_using<AfterLock, ReadOwner, ReadPhase, Write, Wait>(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    within: Duration,
+    contender: Contender,
+    operations: ElectionOps<AfterLock, ReadOwner, ReadPhase, Write, Wait>,
+) -> Window
+where
+    AfterLock: FnOnce(),
+    ReadOwner: FnMut() -> io::Result<Option<Running>>,
+    ReadPhase: FnMut() -> Result<PhaseKind, String>,
+    Write: FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure>,
+    Wait: FnMut(Duration) -> bool,
+{
+    let ElectionOps {
+        after_lock,
+        mut read_owner,
+        mut read_phase,
+        mut write,
+        mut wait,
+    } = operations;
+    let until = Instant::now() + within;
+    let held = match install_txn::hold_within(&owner_lock_path(home, txn), Hold::Exclusive, within)
+    {
+        Ok(Some(held)) => held,
+        Ok(None) => {
+            return Window::Refused(WindowRefusal {
+                why: "the window election is still held".to_owned(),
+                contended: true,
+                retryable: true,
+                outgoing_keeps_duty: false,
+            });
+        }
+        Err(failure) => {
+            return Window::Refused(WindowRefusal {
+                why: format!("the window election: {failure}"),
+                contended: false,
+                retryable: false,
+                outgoing_keeps_duty: true,
+            });
+        }
+    };
+    after_lock();
+    let read_until = until.min(Instant::now() + JOURNAL_WRITE_WITHIN);
+    match retry_within(read_until, &mut read_owner, |_| true, &mut wait) {
+        Err(error) => {
+            drop(held);
+            Window::Refused(WindowRefusal {
+                why: format!("the window's mark could not be read: {error}"),
+                contended: false,
+                retryable: true,
+                outgoing_keeps_duty: false,
+            })
+        }
+        Ok(Some(owner)) if owner == me => Window::Mine(WindowDuty::recorded(held, None)),
+        Ok(Some(owner)) if install_flip::still_running(owner) => {
+            drop(held);
+            Window::Theirs(owner)
+        }
+        // Absent, malformed, or its process gone: for an applier the journal
+        // decides whether the duty is still open before this process records
+        // itself; the outgoing build has nothing to learn there
+        // ([`Contender::Outgoing`]).
+        Ok(_) => {
+            if contender == Contender::Applier {
+                match retry_within(read_until, &mut read_phase, |_| true, &mut wait) {
+                    Ok(phase) if window_duty_is_open(phase) => {}
+                    Ok(phase) => {
+                        drop(held);
+                        return Window::RoadTaken(phase);
+                    }
+                    Err(why) => {
+                        drop(held);
+                        return Window::Refused(WindowRefusal {
+                            why: format!(
+                                "the update journal could not be read for the window election: {why}"
+                            ),
+                            contended: false,
+                            retryable: true,
+                            outgoing_keeps_duty: false,
+                        });
+                    }
+                }
+            }
+            let mark = owner_path(home, txn);
+            let bytes = owner_value(me);
+            let write_until = until.min(Instant::now() + JOURNAL_WRITE_WITHIN);
+            match retry_within(
+                write_until,
+                || write(&mark, bytes.as_bytes()),
+                |failure| failure.refused_while_open,
+                &mut wait,
+            ) {
+                Ok(()) => Window::Mine(WindowDuty::recorded(held, None)),
+                Err(failure) if failure.after_rename => Window::Mine(WindowDuty::recorded(
+                    held,
+                    Some(format!(
+                        "the window's mark was replaced but its directory was not flushed: {}",
+                        failure.why
+                    )),
+                )),
+                Err(failure) => Window::Mine(WindowDuty::held(
+                    held,
+                    format!(
+                        "the window's mark could not be replaced; owner.lock records the duty: {}",
+                        failure.why
+                    ),
+                )),
+            }
+        }
+    }
+}
+
+/// [`take_the_window_within`] with a test step after the election lock is held
+/// and before the mark is read. It lets a test hold a contender at that exact
+/// state without using the clock as synchronization.
+#[cfg(test)]
+pub(crate) fn take_the_window_within_at(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    within: Duration,
+    after_lock: impl FnOnce(),
+) -> Window {
+    take_the_window_within_using(
+        home,
+        txn,
+        me,
+        within,
+        Contender::Applier,
+        ElectionOps {
+            after_lock,
+            read_owner: || read_window_owner(home, txn),
+            read_phase: || read_window_phase(home, txn),
+            write: |path: &Path, bytes: &[u8]| {
+                MarkWriteFailure::from_result(install_txn::durable_write(path, bytes))
+            },
+            wait: |_| false,
+        },
+    )
+}
+
+/// [`take_the_window_within_at`] with an injected mark writer and pause. The
+/// pause returns immediately, so scanner retries are deterministic.
+#[cfg(test)]
+pub(crate) fn take_the_window_within_writes_at(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    within: Duration,
+    write: impl FnMut(&Path, &[u8]) -> Result<(), MarkWriteFailure>,
+) -> Window {
+    take_the_window_within_using(
+        home,
+        txn,
+        me,
+        within,
+        Contender::Applier,
+        ElectionOps {
+            after_lock: || {},
+            read_owner: || read_window_owner(home, txn),
+            read_phase: || read_window_phase(home, txn),
+            write,
+            wait: |_| true,
+        },
+    )
+}
+
+/// [`take_the_window_within_at`] with an injected mark reader and immediate
+/// pauses. It pins transient read refusals without depending on the clock.
+#[cfg(test)]
+pub(crate) fn take_the_window_within_reads_at(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    within: Duration,
+    read: impl FnMut() -> io::Result<Option<Running>>,
+) -> Window {
+    take_the_window_within_using(
+        home,
+        txn,
+        me,
+        within,
+        Contender::Applier,
+        ElectionOps {
+            after_lock: || {},
+            read_owner: read,
+            read_phase: || read_window_phase(home, txn),
+            write: |path: &Path, bytes: &[u8]| {
+                MarkWriteFailure::from_result(install_txn::durable_write(path, bytes))
+            },
+            wait: |_| true,
+        },
+    )
+}
+
+fn ask_for_the_window_until(
+    until: Instant,
+    poll: Duration,
+    mut ask: impl FnMut() -> Window,
+    mut wait: impl FnMut(Duration),
+) -> Window {
+    loop {
+        let answer = ask();
+        let asks_again = matches!(&answer, Window::Theirs(_))
+            || matches!(&answer, Window::Refused(refusal) if refusal.retryable());
+        let left = until.saturating_duration_since(Instant::now());
+        if !asks_again || left.is_zero() {
+            return answer;
+        }
+        wait(poll.min(left));
+    }
+}
+
+/// **The one applier election loop**, shared by Windows and macOS: another
+/// live marked owner or a contended election is asked again while the one
+/// `old_within` deadline has time left. No retry receives a fresh budget.
+pub(crate) fn take_the_window_for_applier(
+    worker: &WorkerCtx,
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    until: Instant,
+    poll: Duration,
+) -> Window {
+    ask_for_the_window_until(
+        until,
+        poll,
+        || take_the_window(Some(worker), home, txn, me, until),
+        |pause| bt_platform::wait::sleep_within(worker, pause),
+    )
+}
+
+/// [`take_the_window_for_applier`] with injected asks and pauses.
+#[cfg(test)]
+pub(crate) fn take_the_window_for_applier_at(
+    until: Instant,
+    poll: Duration,
+    ask: impl FnMut() -> Window,
+    wait: impl FnMut(Duration),
+) -> Window {
+    ask_for_the_window_until(until, poll, ask, wait)
 }
 
 /// **Clear the window's mark** — O, as it hands the transaction over, before
@@ -1000,11 +1531,36 @@ pub(crate) fn clear_the_window(owner: &Path) -> Result<(), String> {
     install_txn::durable_remove(owner).map_err(|failure| failure.to_string())
 }
 
-/// **The live process the window's mark names, if it is not `me`** — the one
-/// R leaves a `Handoff` to. A process the mark does not name is never waited
-/// for, however it runs.
-pub(crate) fn the_window_is_theirs(home: &Home, txn: TxnId, me: Running) -> Option<Running> {
-    window_owner(home, txn).filter(|owner| *owner != me && install_flip::still_running(*owner))
+/// A live owner recovery finds at `Handoff`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WindowHolder {
+    /// The durable mark names the owner.
+    Marked(Running),
+    /// Another process holds `owner.lock`; a pre-rename failure left no mark,
+    /// but the lock is the live authority.
+    Unmarked,
+}
+
+/// **The live owner of the window duty, if it is not `me`**, as recovery asks
+/// at `Handoff`. Recovery first tries the election lock without waiting. A
+/// holder is an owner even without readable mark bytes; with the lock free,
+/// the exact live mark remains the durable answer. If the lock file itself
+/// cannot be opened, recovery falls back to that mark: an open refusal is not
+/// allowed to stall a persistent `Handoff` forever.
+pub(crate) fn window_holder(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+) -> Result<Option<WindowHolder>, String> {
+    match install_txn::try_hold(&owner_lock_path(home, txn), Hold::Exclusive) {
+        Ok(None) => Ok(Some(WindowHolder::Unmarked)),
+        Ok(Some(_held)) => Ok(window_owner(home, txn)
+            .filter(|owner| *owner != me && install_flip::still_running(*owner))
+            .map(WindowHolder::Marked)),
+        Err(_failure) => Ok(window_owner(home, txn)
+            .filter(|owner| *owner != me && install_flip::still_running(*owner))
+            .map(WindowHolder::Marked)),
+    }
 }
 
 /// **What a road process's exit guard asks of the platform it runs on**
@@ -1099,8 +1655,8 @@ pub(crate) enum Left {
     /// instant — and opens Folio: nothing was started.
     Succeeded(u32),
     /// Another process has the duty a window follows ([`OWNER_FILE`]), or
-    /// nobody is proven to have it and this process never took it: nothing
-    /// was started here.
+    /// this process left the duty with the outgoing build: nothing was
+    /// started here.
     NotMine(Option<u32>),
     /// The recovery run at logon, with nothing done and nobody waiting (W8):
     /// nothing was started.
@@ -1126,9 +1682,9 @@ impl Left {
             Left::NotMine(Some(pid)) => {
                 format!("{pid} has the duty to open Folio; nothing was started here")
             }
-            Left::NotMine(None) => {
-                String::from("this process never took the duty to open Folio; nothing was started")
-            }
+            Left::NotMine(None) => String::from(
+                "the window duty stayed with another process; nothing was started here",
+            ),
             Left::NobodyWaiting => String::from("nobody is waiting; nothing was started"),
             Left::Elsewhere => String::from(
                 "a Folio holds the data directory and opens Folio; nothing was started",
@@ -1174,6 +1730,11 @@ impl Left {
 /// whether it has the duty at all.
 pub(crate) struct ExitGuard<L: Leave> {
     leave: L,
+    /// This process's election success. An unrecorded one carries the live
+    /// election lock, held in product and tests alike through the road and
+    /// the guard's final delivery, and released only when the guard itself is
+    /// dropped.
+    window_duty: Option<WindowDuty>,
     successor: Option<Running>,
     waiting: bool,
     /// A Folio is proved to hold the data directory (U-37, H.3).
@@ -1189,6 +1750,7 @@ impl<L: Leave> ExitGuard<L> {
     pub(crate) fn new(leave: L) -> Self {
         Self {
             leave,
+            window_duty: None,
             successor: None,
             waiting: true,
             elsewhere: false,
@@ -1197,9 +1759,46 @@ impl<L: Leave> ExitGuard<L> {
         }
     }
 
+    /// Own an election success for the rest of this guard's lifetime. A
+    /// recorded success carries no lock; an unrecorded one carries the real
+    /// operating-system lock in [`WindowDuty`].
+    pub(crate) fn owns_window(&mut self, duty: WindowDuty) {
+        self.window_duty = Some(duty);
+    }
+
+    /// **An applier's road has ended**, having held the transaction lock or
+    /// not: the one place that decides whether a duty this guard owns only
+    /// through the election lock (no mark landed) goes back to the outgoing
+    /// build O.
+    ///
+    /// O holds `H\lock` until its process ends (`update_handoff::Staged::lock`;
+    /// `update_job` keeps the staged transaction "until the process leaves"),
+    /// and an applier's road takes that lock before anything else
+    /// (`update_apply_windows::apply_under_the_lock_with`,
+    /// `update_apply_macos::Txn::hold`). So:
+    ///
+    /// * **held** — O's process had ended before this road began. While this
+    ///   guard held `owner.lock`, O found no mark, and its election met that
+    ///   lock and stood down. Nobody else is left to open Folio, so this guard
+    ///   keeps the duty, whatever phase the road left the journal in.
+    /// * **never held** — the road took no step, and O may still be waiting.
+    ///   This guard starts nothing and lets `owner.lock` go when it is dropped.
+    ///   O then finds the lock free, the mark absent and `Handoff`, and takes
+    ///   the duty.
+    pub(crate) fn road_ended(&mut self, lock: TransactionLock) {
+        if lock == TransactionLock::NeverHeld
+            && self
+                .window_duty
+                .as_ref()
+                .is_some_and(WindowDuty::is_lock_backed)
+        {
+            self.not_mine(None);
+        }
+    }
+
     /// **This process does not have the duty a window follows**
-    /// ([`OWNER_FILE`]): `owner` has it, or nobody is proven to — then the
-    /// process that armed first (O) keeps it. The guard starts nothing.
+    /// ([`OWNER_FILE`]): the named owner, an election-lock holder, or the
+    /// outgoing build keeps it. The guard starts nothing.
     pub(crate) fn not_mine(&mut self, owner: Option<u32>) {
         self.not_mine = Some(owner);
     }
