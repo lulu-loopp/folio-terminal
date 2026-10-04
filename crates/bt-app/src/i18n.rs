@@ -5700,18 +5700,20 @@ impl Text {
                 "{version} available · {command}",
                 "有新版 {version} · {command}",
             ),
-            Self::VersionFailed => {
-                pick(lang, "{version} was not installed.", "{version} 未能安装。")
-            }
+            Self::VersionFailed => pick(
+                lang,
+                "{version} was not installed.",
+                "{version} 未成功安装。",
+            ),
             Self::VersionFailedRestored => pick(
                 lang,
                 "{version} was not installed. The previous version was restored.",
-                "{version} 未能安装，已恢复旧版。",
+                "{version} 安装未成功，已恢复旧版。",
             ),
             Self::VersionFailedIncomplete => pick(
                 lang,
                 "The update to {version} is incomplete.",
-                "更新至 {version} 未完成。",
+                "{version} 的更新未完成。",
             ),
             Self::VersionLastChecked => pick(lang, "Last checked: {when}", "上次检查：{when}"),
             Self::VersionNeverChecked => pick(lang, "Never", "从未"),
