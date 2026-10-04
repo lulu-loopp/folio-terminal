@@ -20,9 +20,14 @@ if ($env:TERM_PROGRAM -eq 'Folio' -and -not (Test-Path env:FORCE_HYPERLINK)) {
     $env:FORCE_HYPERLINK = '1'
 }
 
-# PSConsoleHostReadLine is the supported console-host extension point. Importing PSReadLine here
-# makes its original entry point available on both supported PowerShell generations.
-Import-Module PSReadLine -ErrorAction SilentlyContinue
+# PSConsoleHostReadLine is the supported console-host extension point. The host loader can revive
+# the assembly-only state used by pwsh under Restricted policy, where the module's registered name
+# is Microsoft.PowerShell.PSReadLine. Do not replace either already-loaded form.
+$psReadLineModule = Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine | Select-Object -Last 1
+if (-not $psReadLineModule) {
+    Import-Module PSReadLine -ErrorAction SilentlyContinue
+    $psReadLineModule = Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine | Select-Object -Last 1
+}
 
 $originalPrompt = (Get-Command prompt -CommandType Function -ErrorAction Stop).ScriptBlock
 $readLineCommand = Get-Command PSConsoleHostReadLine -ErrorAction SilentlyContinue
@@ -239,7 +244,7 @@ $Global:__FolioShellIntegration = @{
 # proven below. The real-ConPTY probe established that 2.0.0 implements InvokePrompt with ED 2,
 # which clears the visible viewport, so unsupported/unproven versions consume the same chord as a
 # no-op rather than leaking it into the input buffer.
-$psReadLineVersion = (Get-Module PSReadLine).Version
+$psReadLineVersion = $psReadLineModule.Version
 # A PSReadLine that derives its edit anchor from the prompt's own cell width — the
 # Folio fork, 2.4.6-bt.anchorfix and later — keeps its coordinates true across
 # every resize (the `%=` quotient loss upstream never fixed, probed 2026-08-13), so the

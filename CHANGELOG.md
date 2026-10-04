@@ -27,6 +27,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
+- PowerShell panes have command marks, folder tracking and inline formulas without any setup; nothing is added to your PowerShell profile.
 - The new-version notice and the update button are on About → Version; the daily check switch moved there too, and turning it off stops only the daily check.
 - The README says how to uninstall each kind of copy, and the zip's
   `uninstall.cmd` prints its lines in Chinese as well as English.

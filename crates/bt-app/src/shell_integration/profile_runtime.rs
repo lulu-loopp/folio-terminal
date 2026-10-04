@@ -25,22 +25,19 @@ fn script_at(data: &Path) -> PathBuf {
     data.join(SCRIPT_DIRECTORY).join(SCRIPT_FILE_PS1)
 }
 
-pub fn startup_needed(record_exists: bool, script_exists: bool) -> bool {
-    record_exists || script_exists
+fn schedule_preparation(start: impl FnOnce()) {
+    start();
 }
 
-fn schedule_migration(record_exists: bool, script_exists: bool, start: impl FnOnce()) {
-    if startup_needed(record_exists, script_exists) {
-        start();
-    }
-}
-
-/// Only two metadata questions on the caller. No profile read, process query or
-/// migration on the window thread; pristine installs don't even start a worker.
+/// No profile read, process query, script read or script write happens on the caller. The joined
+/// preparation worker refreshes Folio's own embedded script; a second worker then observes
+/// whether an older Folio line is present, without editing a profile. The join is the readiness
+/// barrier for the embedded script: when this returns, a first PowerShell pane can name the
+/// current bytes.
 ///
-/// **Not in an update's trial** (`update_trial`, F-7): the migration rewrites
-/// profiles and the marks record, which are O's until the trial is committed;
-/// the commit calls this again, and it runs then.
+/// **Not in an update's trial** (`update_trial`, F-7): publishing the embedded
+/// script is an O-side durable write. The commit calls this again, and only then
+/// repairs the Folio-owned file and observes legacy profile lines.
 pub fn begin_startup_migration() {
     if crate::update_trial::defer(crate::update_trial::Writer::ProfileMigration) {
         return;
@@ -49,29 +46,68 @@ pub fn begin_startup_migration() {
         return;
     }
     let data = persist::storage_dir();
-    schedule_migration(
-        data.join(RECORD_FILE).exists(),
-        script_at(&data).exists(),
-        || {
-            let _ = bt_platform::spawn_at_priority(
-                "powershell-profile-migration",
-                bt_platform::ThreadPriority::BelowNormal,
-                move |_ctx| {
-                    let report = operate(&data, Asker::InApp, Action::Migrate);
-                    for refusal in report.refusals() {
-                        eprintln!(
-                            "BT_SHELL_PROFILE {}: {}",
-                            refusal.path.display(),
-                            refusal.reason
-                        );
-                    }
-                    if let Some(wake) = WAKE.get() {
-                        wake();
-                    }
-                },
-            );
+    let mut worker = None;
+    schedule_preparation(|| {
+        worker = bt_platform::spawn_at_priority(
+            "powershell-script-prepare",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |_ctx| {
+                let _ = repair_powershell_script();
+            },
+        )
+        .ok();
+    });
+    // This startup barrier is before a native window or pane exists. It makes
+    // the worker's script publication a precondition of the first shell rather
+    // than a race with it; every filesystem operation remains on the worker.
+    if let Some(worker) = worker {
+        let _ = worker.join();
+    }
+    let _ = bt_platform::spawn_at_priority(
+        "powershell-profile-observation",
+        bt_platform::ThreadPriority::BelowNormal,
+        move |_ctx| {
+            let report = observe_profile_lines(&data);
+            for refusal in report.refusals() {
+                eprintln!(
+                    "BT_SHELL_PROFILE {}: {}",
+                    refusal.path.display(),
+                    refusal.reason
+                );
+            }
+            if let Some(wake) = WAKE.get() {
+                wake();
+            }
         },
     );
+}
+
+fn profile_line_is_present(path: &Path) -> bool {
+    bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path)
+        .and_then(|bytes| Decoded::read(&bytes))
+        .is_ok_and(|decoded| profile_suppresses_integration_offer(&decoded.text))
+}
+
+/// Read-only startup discovery for the conditional Settings remover. Legacy marks remain useful
+/// as candidate locations, but no migration is allowed to rewrite a profile now that integration
+/// is process-scoped.
+fn observe_profile_lines(data: &Path) -> Report {
+    warm_profile_answers();
+    let marks = match Marks::read(data) {
+        Ok(marks) => marks,
+        Err(error) => {
+            publish_powershell_profile_line_present(false);
+            return Report {
+                files: vec![FileReport {
+                    path: data.join(RECORD_FILE),
+                    fate: Fate::Refused(error.to_string()),
+                }],
+            };
+        }
+    };
+    let (paths, report) = candidates(&marks);
+    publish_powershell_profile_line_present(paths.iter().any(|path| profile_line_is_present(path)));
+    report
 }
 
 fn candidates(marks: &Marks) -> (Vec<PathBuf>, Report) {
@@ -175,20 +211,8 @@ fn warm_profile_answers() {
 }
 
 fn operate(data: &Path, asker: Asker, action: Action) -> Report {
-    let managed = if action == Action::Remove {
-        Ok(MANAGED_LINE)
-    } else {
-        account_managed_line(data)
-    };
     warm_profile_answers();
-    operate_with(data, asker, action, managed, |marks| {
-        // This closure is reached only while enabled, under the same account lock
-        // as removal. Off cannot race a late script repair.
-        if action == Action::Migrate && std::env::var_os("BT_POWERSHELL_PROFILE").is_none() {
-            let _ = powershell_script_repaired();
-        }
-        candidates(marks)
-    })
+    operate_with(data, asker, action, Ok(MANAGED_LINE), candidates)
 }
 
 fn operate_with(
@@ -219,9 +243,6 @@ fn operate_with(
         Ok(marks) => marks,
         Err(e) => return refused_record(e),
     };
-    if action == Action::Migrate && marks.is_off() {
-        return Report::default();
-    }
     let managed = match managed {
         Ok(managed) => managed,
         Err(e) => return refused_record(e),
@@ -250,6 +271,11 @@ fn operate_with(
         })
         .files,
     );
+    if action != Action::Remove || asker == Asker::InApp {
+        publish_powershell_profile_line_present(
+            paths.iter().any(|path| profile_line_is_present(path)),
+        );
+    }
     // Probe refusals name executables, not profiles. They are reported on this
     // run, and retried through discovery, never treated as profile candidates.
     marks.profile_refusals = report
@@ -269,6 +295,15 @@ fn operate_with(
 }
 
 /// Install's record transaction. Unit tests inject both profile and data root.
+#[cfg(test)]
+fn enable_record(data: &Path) -> io::Result<()> {
+    let _lock = lock(data, Asker::InApp)?;
+    let mut marks = Marks::read(data)?;
+    marks.powershell_state = PowerShellState::Enabled {};
+    marks.write(data)
+}
+
+#[cfg(test)]
 pub fn install_recorded(
     profile: &Path,
     data: &Path,
@@ -298,37 +333,6 @@ pub fn install_recorded(
     }
     marks.write(data)?;
     result
-}
-
-fn enable_record(data: &Path) -> io::Result<()> {
-    let _lock = lock(data, Asker::InApp)?;
-    let mut marks = Marks::read(data)?;
-    marks.powershell_state = PowerShellState::Enabled {};
-    marks.write(data)
-}
-
-pub fn begin_enable() {
-    let _ = bt_platform::spawn_at_priority(
-        "powershell-profile-enable",
-        bt_platform::ThreadPriority::BelowNormal,
-        |_ctx| {
-            let data = persist::storage_dir();
-            if let Err(error) = enable_record(&data) {
-                let report = Report {
-                    files: vec![FileReport {
-                        path: data.join(RECORD_FILE),
-                        fate: Fate::Refused(error.to_string()),
-                    }],
-                };
-                if let Ok(mut outcome) = REMOVAL.lock() {
-                    *outcome = Some(report);
-                }
-                if let Some(wake) = WAKE.get() {
-                    wake();
-                }
-            }
-        },
-    );
 }
 
 pub fn begin_removal() {
@@ -370,10 +374,8 @@ mod tests {
     ///
     /// The rule is [`Report::window_text`]'s and not the toast call site's,
     /// because the call site is what broke it: an empty successful report was
-    /// given the words `No Folio profile lines found.`, and the first-run
-    /// card's PowerShell row left off presses the same `Off` the Settings page
-    /// sends, which runs a removal — so a brand-new machine's first sight of
-    /// Folio was a message about a `$PROFILE` line it never had.
+    /// given the words `No Folio profile lines found.`. The explicit Settings
+    /// cleanup action must remain silent when there was no legacy line.
     ///
     /// MUTATIONS:
     /// ① give the empty report words again and `Done` greets a new reader with
@@ -404,30 +406,6 @@ mod tests {
     }
 
     #[test]
-    fn shell_integration_offer_predicate_never_grants_write_ownership() {
-        let source = include_str!("../shell_integration.rs");
-        let offer = source
-            .split_once("pub fn offer_for(profile: &Path) -> Offer {")
-            .unwrap()
-            .1
-            .split_once("\n}\n")
-            .unwrap()
-            .0;
-        assert!(offer.contains("profile_suppresses_integration_offer(&decoded.text)"));
-        let writer = source
-            .split_once("fn add_profile_with_forms(")
-            .unwrap()
-            .1
-            .split_once("\n}\n")
-            .unwrap()
-            .0;
-        assert!(writer.contains("forms.owns("));
-        assert!(!writer.contains("profile_suppresses_integration_offer"));
-        let marks = include_str!("profile_marks.rs");
-        assert!(!marks.contains("profile_suppresses_integration_offer"));
-    }
-
-    #[test]
     fn shell_integration_old_enabled_record_is_read_without_claiming_user_code() {
         let root = super::super::tests::temp_dir("old-enabled-handwritten");
         let profile = root.join("profile.ps1");
@@ -448,18 +426,6 @@ mod tests {
         assert_eq!(fs::read(&profile).unwrap(), original);
         assert!(report.text(false).is_empty());
         assert!(Marks::read(&root).unwrap().is_off());
-    }
-
-    #[test]
-    fn shell_integration_offer_respects_handwritten_installation() {
-        let root = super::super::tests::temp_dir("offer-loose");
-        let profile = root.join("profile.ps1");
-        for line in [r". 'D:\x\folio.ps1'", r". 'D:\x\FOLIO.PS1'", MANAGED_LINE] {
-            fs::write(&profile, line).unwrap();
-            assert_eq!(offer_for(&profile), Offer::Silent, "{line}");
-        }
-        fs::write(&profile, "  # . 'D:\\x\\folio.ps1'\r\n").unwrap();
-        assert_eq!(offer_for(&profile), Offer::Owed(profile));
     }
 
     #[test]
@@ -538,93 +504,6 @@ mod tests {
     }
 
     #[test]
-    fn shell_integration_followup_off_is_persisted_and_skips_discovery() {
-        let root = super::super::tests::temp_dir("followup-off");
-        let profile = root.join("profile.ps1");
-        fs::write(&profile, LEGACY_LINE).unwrap();
-        let report = operate_with(
-            &root,
-            Asker::InApp,
-            Action::Remove,
-            Ok(MANAGED_LINE),
-            |_| (vec![profile.clone()], Report::default()),
-        );
-        assert_eq!(report.exit_code(), 0);
-        let before = fs::read(root.join(RECORD_FILE)).unwrap();
-        let report = operate_with(
-            &root,
-            Asker::InApp,
-            Action::Migrate,
-            Ok(MANAGED_LINE),
-            |_| panic!("off must not probe"),
-        );
-        assert_eq!(report.exit_code(), 0);
-        assert_eq!(fs::read(root.join(RECORD_FILE)).unwrap(), before);
-        let record: serde_json::Value = serde_json::from_slice(&before).unwrap();
-        assert_eq!(record["version"], 2);
-        assert_eq!(record["powershell_state"]["state"], "off");
-        assert_eq!(record["powershell_state"]["by"], "user");
-        assert!(
-            record["powershell_state"]["at"]
-                .as_str()
-                .unwrap()
-                .ends_with('Z')
-        );
-    }
-
-    #[test]
-    fn shell_integration_followup_off_skips_script_repair_until_user_enables() {
-        let root = super::super::tests::temp_dir("off-repair");
-        let script = script_at(&root);
-        fs::create_dir_all(script.parent().unwrap()).unwrap();
-        fs::write(&script, "user's existing script").unwrap();
-        let report = operate_with(
-            &root,
-            Asker::InApp,
-            Action::Remove,
-            Ok(MANAGED_LINE),
-            |_| (vec![], Report::default()),
-        );
-        assert_eq!(report.exit_code(), 0);
-        for _ in 0..3 {
-            let mut probes = 0;
-            let mut writes = 0;
-            let report = operate_with(
-                &root,
-                Asker::InApp,
-                Action::Migrate,
-                Ok(MANAGED_LINE),
-                |_| {
-                    probes += 2;
-                    writes += 1;
-                    fs::write(&script, "repaired").unwrap();
-                    (vec![], Report::default())
-                },
-            );
-            assert_eq!(report.exit_code(), 0);
-            assert_eq!((probes, writes), (0, 0));
-            assert_eq!(
-                fs::read_to_string(&script).unwrap(),
-                "user's existing script"
-            );
-        }
-        enable_record(&root).unwrap();
-        assert!(!Marks::read(&root).unwrap().is_off());
-        let mut reached = false;
-        operate_with(
-            &root,
-            Asker::InApp,
-            Action::Migrate,
-            Ok(MANAGED_LINE),
-            |_| {
-                reached = true;
-                (vec![], Report::default())
-            },
-        );
-        assert!(reached);
-    }
-
-    #[test]
     fn shell_integration_followup_schema_one_upgrades_without_losing_other_owners() {
         let root = super::super::tests::temp_dir("schema-one");
         let mut old = serde_json::to_value(Marks::default()).unwrap();
@@ -656,16 +535,14 @@ mod tests {
     }
 
     #[test]
-    fn shell_integration_never_enabled_does_not_schedule_or_probe() {
+    fn shell_integration_startup_always_schedules_owned_script_preparation() {
         let mut workers = 0;
         let mut probes = 0;
-        schedule_migration(false, false, || {
+        schedule_preparation(|| {
             workers += 1;
             probes += 2;
         });
-        assert_eq!((workers, probes), (0, 0));
-        assert!(startup_needed(true, false));
-        assert!(startup_needed(false, true));
+        assert_eq!((workers, probes), (1, 2));
     }
 
     #[test]
@@ -804,18 +681,13 @@ mod tests {
         assert_eq!(fs::read(&profile).unwrap(), MANAGED_LINE.as_bytes());
     }
 
-    /// PIN — **two of Folio's own writers that meet on the record both finish,
-    /// and neither of them says anything to the reader.**
+    /// PIN — **the two retired installer writers still serialize correctly for
+    /// uninstall and historical-record fixtures.**
     ///
-    /// These are the two that met on a clean Windows 10 machine on 2026-09-21,
-    /// driven here exactly as the first-run card drives them: `Done` with the
-    /// PowerShell row on spends [`crate::first_run::Application::PowerShellOffer`],
-    /// which starts the enable worker ([`enable_record`]), and
-    /// [`crate::first_run::Application::PowerShellIntent`], which the first
-    /// PowerShell pane to name its `$PROFILE` spends through
-    /// [`install_recorded`] on the window thread. The loser of that meeting
-    /// reported *"lock acquisition failed because the operation would block"* in
-    /// a red toast, on a machine where both rows had in fact been written.
+    /// These are the two writers that met on a clean Windows 10 machine on
+    /// 2026-09-21. The product no longer reaches either installer path, but
+    /// uninstall and old marks must remain safe while those historical records
+    /// are supported.
     ///
     /// The third holder is what makes the meeting certain rather than likely:
     /// both writers are let go while the record is held, so both are queued
@@ -864,84 +736,6 @@ mod tests {
             "the installer's marks: {marks:?}"
         );
         assert!(marks.profile_refusals.is_empty(), "{marks:?}");
-    }
-
-    /// PIN — **the first-run card's `Done` raises nothing**, with the two rows
-    /// the clean-machine run had on.
-    ///
-    /// The card installs nothing itself; it spends
-    /// [`crate::first_run::Application`]s, and this drives the two that reach
-    /// the record — the Explorer row's does not — through the very functions
-    /// `Done` reaches, against a temporary data root and a temporary
-    /// `$PROFILE`. What the window would be told is a [`Report`], so the pin is
-    /// that there is no report to tell: `begin_enable` builds one only out of
-    /// an error, and [`Report::window_text`] is the whole of what a toast can
-    /// say.
-    #[test]
-    fn shell_integration_first_run_done_tells_the_window_nothing() {
-        let root = super::super::tests::temp_dir("first-run-done");
-        let profile = root.join("profile.ps1");
-        fs::write(&profile, b"# mine\r\n").unwrap();
-        let script = script_at(&root);
-        // The card the clean Windows 10 machine put up: three rows, no package
-        // for Explorer's first page, no agent on the path — with the two rows
-        // that arrived off switched on, as they were switched on there.
-        let mut rows = crate::first_run::rows_for(
-            bt_platform::HostPlatform::Windows,
-            &crate::first_run::Machine {
-                explorer_first_page_available: false,
-                claude_found: false,
-                claude_installable: false,
-                codex_found: false,
-                codex_installable: false,
-                copilot_found: false,
-                copilot_installable: false,
-                powershell_integration_installed: false,
-                install_channel: crate::install_channel::Channel::Ours,
-            },
-        );
-        for row in &mut rows {
-            if matches!(
-                row.kind,
-                crate::first_run::RowKind::Explorer | crate::first_run::RowKind::PowerShell
-            ) {
-                row.on = true;
-            }
-        }
-        let spent =
-            crate::first_run::applications(&rows, crate::first_run::ExplorerShape::ClassicOnly);
-        assert!(
-            spent.contains(&crate::first_run::Application::PowerShellOffer(true))
-                && spent.contains(&crate::first_run::Application::PowerShellIntent),
-            "the card no longer spends the two answers this pin is about: {spent:?}"
-        );
-        let (install, enable) = std::thread::scope(|scope| {
-            let installer = scope.spawn(|| {
-                install_recorded(
-                    &profile,
-                    &root,
-                    &script,
-                    MANAGED_LINE,
-                    std::time::UNIX_EPOCH,
-                )
-            });
-            let enabler = scope.spawn(|| enable_record(&root));
-            (installer.join().unwrap(), enabler.join().unwrap())
-        });
-        assert!(install.is_ok() && enable.is_ok(), "{install:?} {enable:?}");
-        // What `begin_enable` would have put in front of the reader.
-        let report = enable.err().map_or_else(Report::default, |error| Report {
-            files: vec![FileReport {
-                path: root.join(RECORD_FILE),
-                fate: Fate::Refused(error.to_string()),
-            }],
-        });
-        assert_eq!(report.window_text(), None, "the corner spoke");
-        let written = fs::read_to_string(&profile).unwrap();
-        assert!(
-            written.starts_with("# mine\r\n") && written.contains(MANAGED_LINE),
-            "{written:?}"
-        );
     }
 
     /// A holder of the record that is not this process's: a raw OS lock taken

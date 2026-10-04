@@ -5209,7 +5209,7 @@ impl DualPlaneSession {
     /// the only answer there is, because nothing else about a running shell says
     /// so. The app asks it for one thing: an offer to install the integration
     /// retracts itself the moment the integration speaks, whoever installed it
-    /// and however (`bt_app::shell_integration::Offer::showing`).
+    /// and however the host chooses to present it.
     ///
     /// **Any marker, and deliberately not the narrower question the predicate
     /// above asks.** A shell that reports its prompt boundaries and nothing else

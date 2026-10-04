@@ -18,8 +18,8 @@ use crate::{
     presentation_physical_size, preview, preview_image_placement, preview_trace, profiles,
     rail_change_strands_its_popups, rail_is_searching, rail_overlay_layer, rail_zone_wants_open,
     restated_scroll, restore, restore_row_seed, risen_frame, row_verb, schedule_leaf_grid_change,
-    scrollback_quota, seats, shell_integration, size_authority_for_rectangle, solve_seats,
-    solve_tree, trace_sink, trace_unchanged_present, video_seat, webhost,
+    scrollback_quota, seats, size_authority_for_rectangle, solve_seats, solve_tree, trace_sink,
+    trace_unchanged_present, video_seat, webhost,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
@@ -32,7 +32,7 @@ use bt_render::{
 use bt_viewport::horizontal::ContentColumn;
 use bt_viewport::{ViewSelection, ViewportFrame};
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::MouseScrollDelta;
@@ -687,84 +687,9 @@ impl Runtime<'_> {
     /// they now have. That is why this ends in `commit_seat_geometry` and why
     /// nothing else has to remember to.
     pub(crate) fn settle_pane_notices(&mut self) -> Result<()> {
-        let offering = self
-            .app
-            .settings_store
-            .loaded()
-            .powershell_integration_offer;
-        // **This run's one ask, carried through the loop and put back after it**
-        // (user ruling 2026-08-27 — `shell_integration::offer_once_per_run` is
-        // the rule). A local because the loop borrows the tab's leaves and the
-        // count lives on the application; copying a `bool` in and out is the
-        // whole of the reconciliation, and it cannot go stale because nothing
-        // between the two lines can reach the field.
-        let mut already_asked = self.app.powershell_integration_asked;
-        // **The intent the first-run card left behind, and the shell that
-        // finally answers it** (§7.56 §4.3). Where a `$PROFILE` is comes from
-        // the shell and is never computed here, so a row left on when the card
-        // was answered is a row waiting for exactly this moment: the first
-        // PowerShell in this process to name its own profile.
-        //
-        // Not gated on `offering`: the intent is an instruction the reader gave,
-        // and whether *strips* are offered is a different question they answered
-        // on the same card.
-        let pending = self.app.settings_store.loaded().powershell_install_pending;
-        let mut named_profile: Option<PathBuf> = None;
-        let mut presence = std::collections::BTreeSet::new();
+        let presence = std::collections::BTreeSet::new();
         let mut states: std::collections::BTreeMap<NoticeHost, notice::Notice> =
             std::collections::BTreeMap::new();
-        for (seat, leaf) in &mut self.sessions {
-            if leaf.integration_offer.is_none() {
-                // Not a PowerShell at all, or the machine has not answered where
-                // this one's `$PROFILE` is yet. Neither is a decision, so neither
-                // is written down: the probe wakes the loop when it lands.
-                let asked = leaf
-                    .program
-                    .as_deref()
-                    .filter(|program| offering && shell_integration::is_powershell(program))
-                    .and_then(shell_integration::profile_probe)
-                    .flatten();
-                if let Some(profile) = asked {
-                    leaf.integration_offer = Some(shell_integration::offer_once_per_run(
-                        &profile,
-                        &mut already_asked,
-                    ));
-                }
-            }
-            // Asked of every PowerShell pane rather than only of the ones the
-            // strip is computed for, because the probe is cached per program and
-            // the intent is owed an answer even on a machine whose reader has
-            // switched the strip off. The first answer wins; the rest cost a
-            // lookup.
-            if pending && named_profile.is_none() {
-                named_profile = leaf
-                    .program
-                    .as_deref()
-                    .filter(|program| shell_integration::is_powershell(program))
-                    .and_then(shell_integration::profile_probe)
-                    .flatten();
-            }
-            let showing = offering
-                .then_some(leaf.integration_offer.as_ref())
-                .flatten()
-                .and_then(|offer| {
-                    offer.showing(
-                        leaf.output_revision > 0,
-                        leaf.session.shell_integration_seen(),
-                    )
-                });
-            if let Some(state) = showing {
-                presence.insert(*seat);
-                states.insert(NoticeHost::Seat(*seat), state);
-            }
-        }
-        self.app.powershell_integration_asked = already_asked;
-        // **The intent is spent here, after the borrow ends**, because writing
-        // it down is a write to the settings store and the loop above holds the
-        // panes.
-        if let Some(profile) = named_profile {
-            self.spend_powershell_intent(&profile);
-        }
         // **And the previews, on exactly the same terms** (user ruling
         // 2026-08-29). A document whose file moved under unsaved edits, and one
         // whose file is gone, each owe their reader a sentence — and the band
@@ -813,14 +738,8 @@ impl Runtime<'_> {
             states.insert(NoticeHost::Float(id), state);
         }
         // **Two changes, not one, and they gate different work.** Whether a seat
-        // *wears* a strip decides the pane's height, so a change to that set is a
-        // layout change and re-solves. Which strip it wears — `Offer` before the
-        // write, `Added` after it — changes only what is drawn in a row that is
-        // already there, so a change to the *content* repaints the overlay and
-        // moves no rectangle. Folding the two into one set was the bug the live
-        // run caught: pressing `Add` turned `Offer` into `Added` without adding
-        // or removing a seat, the set was equal, and the strip went on saying
-        // "not installed" over a profile it had just written to.
+        // *wears* a strip decides the pane's height, so a change to that set is a layout change
+        // and re-solves. A content-only change repaints the overlay and moves no rectangle.
         let geometry_moved = self.seats.set_notices(presence);
         let content_changed = self.window.notice_states != states;
         self.window.notice_states = states;
@@ -835,25 +754,8 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// Take one pane's strip down without deciding anything.
-    ///
-    /// [`shell_integration::Offer::Closed`] and not `Silent`: nothing was
-    /// answered. What that still buys the reader is the *next launch* — this run
-    /// has spent its one ask either way (user ruling 2026-08-27,
-    /// [`shell_integration::offer_once_per_run`]), while `Don't show again`
-    /// writes the setting and ends the asking for good. Before that ruling the
-    /// difference was the next PowerShell pane, which is how a reader with four
-    /// of them was asked four times.
+    /// Take one pane's preview-file strip down without deciding anything else.
     pub(in crate::runtime) fn close_pane_notice(&mut self, host: NoticeHost) -> Result<()> {
-        if let NoticeHost::Seat(seat) = host
-            && let Some(leaf) = self.sessions.get_mut(&seat)
-        {
-            if leaf.integration_offer.is_none() {
-                return Ok(());
-            }
-            leaf.integration_offer = Some(shell_integration::Offer::Closed);
-            return self.settle_pane_notices();
-        }
         // **A preview's `×` is `Keep my edits`** and its own verb is the same
         // door (user ruling 2026-08-29): both of them mean "I have read this",
         // and the edits were never in danger from anything but a press on the

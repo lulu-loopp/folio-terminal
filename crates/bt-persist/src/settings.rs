@@ -244,8 +244,9 @@ use serde::{Deserialize, Serialize};
 /// `SETTINGS_MIGRATIONS` is the map of the road from an old file to this one — five version numbers
 /// for one release would name four documents nobody ever wrote.
 ///
-/// **v32 carries the first-run card's two keys** (user ruling, 2026-09-06, `docs/DESIGN.md` §7.56):
-/// [`SettingsV1::first_run_card`] and [`SettingsV1::powershell_install_pending`].
+/// **v32 carried the first-run card's two keys** (user ruling, 2026-09-06,
+/// `docs/DESIGN.md` §7.56): [`SettingsV1::first_run_card`] and the now-retired
+/// `powershell_install_pending`.
 ///
 /// **The step lands neither the v13-v16 way nor the v28 way, and it is the first on this ladder
 /// that carries a *rule* rather than a value.** `first_run_card` is written `Shown` into every file
@@ -579,7 +580,7 @@ pub const DEFAULT_FOCUS_CARD_HEIGHT: u32 = 160;
 ///   "minimum_contrast": "Off" | "Ratio2" | "Ratio3" | "Ratio45",
 ///   "web_color_scheme": "FollowTheme" | "Light" | "Dark",
 ///   "terminal_notifications": true | false,
-///   "powershell_integration_offer": true | false
+///   "shell_integration": true | false,
 ///   "focus_card_height": 160 | 240 | 320,
 ///   "line_wrapping": true | false,
 ///   "key_hints": true | false,
@@ -996,23 +997,14 @@ pub struct SettingsV1 {
     #[serde(default = "default_terminal_notifications")]
     pub terminal_notifications: bool,
 
-    /// **Whether a PowerShell pane with no integration is offered one** — the Terminal page's
-    /// `Offer PowerShell integration` row, and what the notice strip's `Don't show again` writes
-    /// (DESIGN §7.1.6j).
+    /// **Whether new PowerShell panes receive Folio's process-scoped integration loader.**
     ///
-    /// `true` is the default because the offer is the only way the fact reaches anybody. Folio's
-    /// PowerShell integration is opt-in by necessity — `pwsh` has one startup file and no
-    /// argument that would source a second one after it — so a reader whose `$PROFILE` does not
-    /// dot-source `folio.ps1` gets no prompt marks, no exit-code dots and no busy breathing, and
-    /// nothing anywhere says so. The strip is the saying.
-    ///
-    /// Off is silence about the whole subject and nothing else: no pane is changed, no file is
-    /// read, and a `$PROFILE` that already loads the script was never going to be asked about
-    /// anyway. It is a switch on the asking, which is why it is one boolean and not a per-pane
-    /// record — a reader who says "stop asking" has answered for every PowerShell they will ever
-    /// open, and a table of dismissed panes would ask again tomorrow from a new one.
-    #[serde(default = "default_powershell_integration_offer")]
-    pub powershell_integration_offer: bool,
+    /// This is additive in the current schema: old files omit it and therefore receive the
+    /// shipped answer, `true`. Retired `powershell_integration_offer` and
+    /// `powershell_install_pending` keys are ignored by serde, so documents written by earlier
+    /// builds continue to load without preserving a second answer to this question.
+    #[serde(default = "default_shell_integration")]
+    pub shell_integration: bool,
     /// **How tall a focus card's body stands**, in logical pixels — the Appearance page's
     /// `Focus card height` row (`docs/DESIGN.md` §7.1.6b′, user ruling 2026-08-21).
     ///
@@ -1045,9 +1037,8 @@ pub struct SettingsV1 {
     ///
     /// **A receipt and not a taste, and it lives here anyway.** A reader never sets this to
     /// `false`; the window does, on the frame the bubble first appears. It is in this file rather
-    /// than in a record of its own because [`SettingsV1::powershell_integration_offer`] is the
-    /// same bit — *does this window still owe this reader this sentence* — and a second file for
-    /// the second one of them would be a second answer to one question.
+    /// than in a record of its own because it is a tiny durable receipt rather than a separate
+    /// document with its own lifecycle.
     #[serde(default = "default_cards_gesture_hint_offer")]
     pub cards_gesture_hint_offer: bool,
     /// **Whether a line too long for the pane wraps onto the next row** — the Terminal page's
@@ -1240,19 +1231,6 @@ pub struct SettingsV1 {
     /// not raise it.
     #[serde(default)]
     pub first_run_card: FirstRunCardV1,
-    /// **The first-run card's PowerShell row was left on, and no PowerShell has
-    /// yet said where its own `$PROFILE` is** (v32, `docs/DESIGN.md` §7.56).
-    ///
-    /// An intent and not an answer. Where that file lives comes from the shell
-    /// and is never computed here, so on the launch the card appears on there is
-    /// nothing to write to yet; the first PowerShell that names its own profile
-    /// performs the write and clears this. A machine that never starts a
-    /// PowerShell never gets the line, which is correct.
-    ///
-    /// `#[serde(default)]` because `false` is the honest missing-key answer:
-    /// nobody who never saw the card ever recorded an intent.
-    #[serde(default)]
-    pub powershell_install_pending: bool,
     /// **Whether a web page has ever committed in this profile** (v39, 0.4.5 ticket 60) — see
     /// [`WebPagesUsedV1`]. A receipt about this machine, beside `first_run_card`: no Settings row,
     /// and an import leaves it as it stands.
@@ -1383,12 +1361,12 @@ fn default_terminal_notifications() -> bool {
     true
 }
 
-/// `serde`'s door for a v18 key missing from a file this build is reading.
+/// `serde`'s door for the additive shell-integration key when an older file is read.
 ///
 /// [`default_terminal_notifications`]'s twin and for its reason: the default is `true` and a
-/// `bool`'s own default is `false`, so a file that lost the key would come back as a reader who
-/// had pressed `Don't show again` — the one answer this product must not put in somebody's mouth.
-fn default_powershell_integration_offer() -> bool {
+/// `bool`'s own default is `false`, so an older file with no answer would otherwise turn off a
+/// feature that ships on.
+fn default_shell_integration() -> bool {
     true
 }
 
@@ -1415,9 +1393,9 @@ fn default_line_wrapping() -> bool {
 
 /// `serde`'s door for a v22 key missing from a file this build is reading.
 ///
-/// [`default_powershell_integration_offer`]'s reason exactly, and it is the same *kind* of key: a
-/// `bool`'s own default is `false`, so a file that had lost this one would come back as a reader
-/// who had switched the offer off — the one answer this product must not put in somebody's mouth.
+/// The retired v18 offer default's reason exactly: a `bool`'s own default is `false`, so a file
+/// that had lost this one would come back as a reader who had switched the offer off — the one
+/// answer this product must not put in somebody's mouth.
 fn default_key_hints() -> bool {
     true
 }
@@ -1503,8 +1481,8 @@ impl Default for SettingsV1 {
             web_color_scheme: WebColorSchemeV1::FollowTheme,
 
             terminal_notifications: true,
-            // A PowerShell with no integration is told so, once, in its own pane.
-            powershell_integration_offer: true,
+            // Every safe PowerShell launch receives the process-scoped loader.
+            shell_integration: true,
             // The body every card has stood on since F2 — see
             // `DEFAULT_FOCUS_CARD_HEIGHT`.
             focus_card_height: DEFAULT_FOCUS_CARD_HEIGHT,
@@ -1541,8 +1519,6 @@ impl Default for SettingsV1 {
             // been asked yet. The migration is what makes this untrue for
             // everybody who was already here.
             first_run_card: FirstRunCardV1::NotShown,
-            // Nobody has recorded an intent about a file nobody has named.
-            powershell_install_pending: false,
             // A profile being written for the first time has opened no page.
             web_pages_used: WebPagesUsedV1::Never,
             // Starting a program again opens that program — see `LaunchOpensV1`.
@@ -1639,10 +1615,9 @@ pub enum PsReadLineInviteV1 {
 /// back: the reader saw it, and a card that reappears after being closed is a
 /// card that will be closed faster the second time.
 ///
-/// **None of the card's four answers is stored here.** Three of them are read
-/// off the registry and off the agents' own files, `update_check` has its own
-/// field, and the PowerShell row stores an intent
-/// ([`SettingsV1::powershell_install_pending`]) rather than an answer.
+/// **None of the card's answers is stored here.** Explorer and agent state are
+/// read from the registry and the agents' own files, and `update_check` has its
+/// own field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FirstRunCardV1 {
     /// Never shown. The only state from which the card appears.

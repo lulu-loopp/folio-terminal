@@ -3,13 +3,13 @@
 
 use crate::{
     FilesFocusArrival, Popup, Runtime, cli, i18n, launch_wire, persist, profile_menu_anchor,
-    profiles, seats, settings, shell_integration, text_field, toast,
+    profiles, seats, settings, text_field, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger};
 use std::path::{Path, PathBuf};
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 
 impl Runtime<'_> {
     /// **Which profile a second launch's tab starts as, and what could not be
@@ -94,53 +94,6 @@ impl Runtime<'_> {
             .and_then(|leaf| leaf.session.working_directory().map(Path::to_path_buf));
         let source_profile = self.session_profile();
         self.new_tab_seeded_from(profile, place, &source_profile, source_cwd)
-    }
-
-    /// Write the line into this pane's `$PROFILE`.
-    ///
-    /// **The one write this product makes into a file that belongs to somebody
-    /// else's shell**, and it happens here and only here: on a press, on the
-    /// pane the offer is about, into the path that pane's own shell named. A
-    /// copy of the file is taken first (`shell_integration::add_to_profile`).
-    ///
-    /// A write that fails leaves the strip exactly as it was, offering the same
-    /// verb. There is nothing else honest to do: the reader pressed a word that
-    /// says it will add a line, and a strip that changed to "added" over a file
-    /// that did not change would be this product lying about a file it had just
-    /// failed to touch.
-    pub(in crate::runtime) fn add_to_profile(&mut self, seat: SeatId) -> Result<()> {
-        let Some(profile) = self
-            .sessions
-            .get(&seat)
-            .and_then(|leaf| leaf.integration_offer.as_ref())
-            .and_then(shell_integration::Offer::profile)
-            .map(Path::to_path_buf)
-        else {
-            return Ok(());
-        };
-        match shell_integration::install_into_profile(&profile, SystemTime::now()) {
-            Ok(written) => {
-                match &written.backup {
-                    Some(backup) => eprintln!(
-                        "BT_SHELL_INTEGRATION wrote {} (copy kept at {})",
-                        written.profile.display(),
-                        backup.display()
-                    ),
-                    None => eprintln!("BT_SHELL_INTEGRATION wrote {}", written.profile.display()),
-                }
-                if let Some(leaf) = self.sessions.get_mut(&seat) {
-                    leaf.integration_offer = Some(shell_integration::Offer::Added);
-                }
-                self.settle_pane_notices()
-            }
-            Err(error) => {
-                eprintln!(
-                    "BT_SHELL_INTEGRATION could not write {}: {error}",
-                    profile.display()
-                );
-                Ok(())
-            }
-        }
     }
 
     /// Where the profile picker hangs right now, or `None` when it is shut.

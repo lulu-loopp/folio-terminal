@@ -2741,7 +2741,7 @@ mod tests {
     fn a_settings_file_written_from_nothing_has_never_shown_the_card() {
         let fresh = crate::SettingsV1::default();
         assert_eq!(fresh.first_run_card, crate::FirstRunCardV1::NotShown);
-        assert!(!fresh.powershell_install_pending);
+        assert!(fresh.shell_integration);
         assert_eq!(
             crate::FirstRunCardV1::default(),
             crate::FirstRunCardV1::NotShown,

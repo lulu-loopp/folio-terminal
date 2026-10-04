@@ -30,10 +30,9 @@
 //!
 //! # What an import leaves alone
 //!
-//! Four keys of `settings.json` are receipts about *this machine* and not
+//! Three keys of `settings.json` are receipts about *this machine* and not
 //! preferences: whether the first-run card has been put up here
-//! (`first_run_card`), whether this machine owes its `$PROFILE` a line
-//! (`powershell_install_pending`), whether the cards' gesture hint has been
+//! (`first_run_card`), whether the cards' gesture hint has been
 //! shown here (`cards_gesture_hint_offer`, which has one spender and one
 //! restorer and no third opinion — `the_cards_offer_is_spent_in_one_place_and_given_back_in_one`),
 //! and whether a web page has ever committed here (`web_pages_used`, 0.4.5
@@ -102,7 +101,7 @@ pub(crate) enum SettingChange {
     FocusMode(bool),
     MinimumContrast(MinimumContrastV1),
     TerminalNotifications(bool),
-    PowerShellOffer(bool),
+    ShellIntegration(bool),
     FocusCardHeight(u32),
     LineWrapping(bool),
     KeyHints(bool),
@@ -152,7 +151,7 @@ impl SettingChange {
             Self::FocusMode(_) => SettingsRow::FocusMode,
             Self::MinimumContrast(_) => SettingsRow::MinimumContrast,
             Self::TerminalNotifications(_) => SettingsRow::Notifications,
-            Self::PowerShellOffer(_) => SettingsRow::PowerShellOffer,
+            Self::ShellIntegration(_) => SettingsRow::ShellIntegration,
             Self::FocusCardHeight(_) => SettingsRow::FocusCardHeight,
             Self::LineWrapping(_) => SettingsRow::LineWrapping,
             Self::KeyHints(_) => SettingsRow::KeyHints,
@@ -217,7 +216,7 @@ impl SettingChange {
             Self::FocusMode(value) => settings.focus_mode = value,
             Self::MinimumContrast(value) => settings.minimum_contrast = value,
             Self::TerminalNotifications(value) => settings.terminal_notifications = value,
-            Self::PowerShellOffer(value) => settings.powershell_integration_offer = value,
+            Self::ShellIntegration(value) => settings.shell_integration = value,
             Self::FocusCardHeight(value) => settings.focus_card_height = value,
             Self::LineWrapping(value) => settings.line_wrapping = value,
             Self::KeyHints(value) => settings.key_hints = value,
@@ -293,7 +292,7 @@ pub(crate) fn plan_settings(
         focus_mode,
         minimum_contrast,
         terminal_notifications,
-        powershell_integration_offer,
+        shell_integration,
         focus_card_height,
         cards_gesture_hint_offer: _,
         line_wrapping,
@@ -311,7 +310,6 @@ pub(crate) fn plan_settings(
         // This machine's own receipts — see the module header, and the third
         // one above.
         first_run_card: _,
-        powershell_install_pending: _,
         web_pages_used: _,
         launch_opens,
         option_sends_alt,
@@ -429,8 +427,8 @@ pub(crate) fn plan_settings(
         SettingChange::TerminalNotifications(terminal_notifications),
     );
     offer(
-        current.powershell_integration_offer != powershell_integration_offer,
-        SettingChange::PowerShellOffer(powershell_integration_offer),
+        current.shell_integration != shell_integration,
+        SettingChange::ShellIntegration(shell_integration),
     );
     offer(
         current.focus_card_height != focus_card_height,
@@ -677,7 +675,7 @@ mod tests {
             focus_mode: !base.focus_mode,
             minimum_contrast: MinimumContrastV1::Ratio45,
             terminal_notifications: !base.terminal_notifications,
-            powershell_integration_offer: !base.powershell_integration_offer,
+            shell_integration: !base.shell_integration,
             focus_card_height: base.focus_card_height + 10,
             cards_gesture_hint_offer: !base.cards_gesture_hint_offer,
             line_wrapping: !base.line_wrapping,
@@ -731,7 +729,6 @@ mod tests {
             }
             let expected = SettingsV1 {
                 first_run_card: current.first_run_card,
-                powershell_install_pending: current.powershell_install_pending,
                 cards_gesture_hint_offer: current.cards_gesture_hint_offer,
                 web_pages_used: current.web_pages_used,
                 ..imported.clone()

@@ -4576,25 +4576,21 @@ impl PreviewSurface {
 
 /// **Which host is wearing a notice strip** (B1, 2026-09-01).
 ///
-/// The strip is one band with two hosts, exactly as a document is one picture
-/// with two hosts (§7.39: 一份内容在浮窗与 pane 里是同一张画、同一套手势). It
-/// was keyed by [`SeatId`] alone from the day it was written, and for as long as
-/// the only thing that could wear it was a shell that is nothing but a seat that
-/// was the whole truth. The 2026-08-29 ruling gave it to previews as well, and a
-/// preview is the one kind of content this window can tear off its layout — so
-/// from that day the news reached a floated document's buffer and there was no
-/// row for it to stand in, because a float is not in the tree and has no seat.
+/// The strip follows a document across its two hosts (§7.39: 一份内容在浮窗与
+/// pane 里是同一张画、同一套手势). A preview is the one kind of content this
+/// window can tear off its layout, so disk news must reach both its pane seat
+/// and its floated document even though a float is not in the tree.
 ///
 /// A [`SeatId`] and a [`float::FloatId`] are both `u64`-shaped and would answer
 /// for one another if either were used bare — [`PreviewSurface`]'s own reason
 /// for being a type rather than a number, one band along.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 enum NoticeHost {
-    /// A leaf of the tab's layout tree — a terminal wearing its shell's offer,
-    /// or a preview pane wearing its document's disk news.
+    /// A leaf of the tab's layout tree — a terminal, or a preview pane wearing
+    /// its document's disk news.
     Seat(SeatId),
     /// A preview float, wearing its document's disk news and nothing else: a
-    /// window is torn off a *preview*, so a shell's offer can never arrive here.
+    /// window is torn off a *preview*.
     Float(float::FloatId),
 }
 
@@ -11777,7 +11773,6 @@ struct LeafSession {
     /// exists. Filling it at spawn would have meant either blocking the spawn on
     /// a second PowerShell starting, or composing the path — and composing it is
     /// the bug this whole slice was opened by.
-    integration_offer: Option<shell_integration::Offer>,
     /// **A multi-line paste aimed at this shell, waiting for the card's answer** (0.4.4 ticket
     /// 02) — `None` on every pane but the one the card is asking about.
     ///
@@ -12588,21 +12583,6 @@ struct App {
     /// file off. Cached beside the field above rather than read on every frame — one half of it is
     /// a file read and the other half is a process — and refreshed when the probe's answer lands.
     copilot_readiness: attention_copilot::Readiness,
-    /// **Whether this run has already put the PowerShell integration strip in
-    /// front of the reader** (user ruling 2026-08-27; §7.1.6j).
-    ///
-    /// On `App` because the ruling is about the *run* and a window is not the
-    /// run: opening a second window is not being asked a second time, and
-    /// neither is opening a fourth pane in the first one. The offer itself stays
-    /// on the leaf, where it belongs — this counts, and the leaf records.
-    ///
-    /// **Not persisted, and that is deliberate**: `settings.json` already holds
-    /// `powershell_integration_offer`, which is the reader ending the asking for
-    /// good. A second bool on disk saying "asked once" would be a third state
-    /// nobody chose — a question that stopped being asked without anybody
-    /// deciding it should — and there would be no control anywhere that put it
-    /// back. This one dies with the process, so tomorrow's launch asks once.
-    powershell_integration_asked: bool,
     /// **This process's voice in the notification centre** (§7.6).
     ///
     /// On `App` and not on `WindowRuntime`, which is the opposite of
@@ -14338,11 +14318,9 @@ struct WindowRuntime {
     ///
     /// Beside [`Self::search_layout`] and for its reason: this is a function of
     /// the *rectangle*, and the rectangle belongs to the solve. Keyed by host and
-    /// not a singleton, because two PowerShell panes in one tab each owe their
-    /// own — the offer is about one shell's startup file, and the pane is the
-    /// only place a sentence about one shell can honestly be put — and because a
-    /// torn-off window owes the same sentence about the file it is showing
-    /// ([`NoticeHost`]).
+    /// not a singleton, because each preview surface can carry independent disk
+    /// news and a torn-off window owes the same sentence about the file it is
+    /// showing ([`NoticeHost`]).
     ///
     /// **Written in one place** ([`Runtime::notice_layers`]) and read in three:
     /// the pane lane's paint, the float lane's paint, and the press router. The
@@ -14353,12 +14331,9 @@ struct WindowRuntime {
     /// Which strip's control the pointer is on. One, because there is one
     /// pointer.
     notice_hover: Option<(NoticeHost, notice::NoticeElement)>,
-    /// **The strip each host showed last time this was settled** — the content
-    /// half of the projection, kept so that a change from `Offer` to `Added`
-    /// repaints even though it adds and removes no seat (§7.1.6j). The presence
-    /// half lives on `Seats`, because that is the half a body's height reads —
-    /// and for a float it lives nowhere, because a window's body is derived from
-    /// its frame every frame and has no solve to be told about.
+    /// **The strip each host showed last time this was settled** — the content half of the
+    /// projection. The presence half lives on `Seats`, because that is the half a body's height
+    /// reads; for a float it lives nowhere because its body is derived from its frame.
     notice_states: std::collections::BTreeMap<NoticeHost, notice::Notice>,
     /// **Who has just tried to edit a page that will not take it, and when**
     /// (owner's ruling 2026-09-12).
@@ -31185,7 +31160,7 @@ struct OverlayStack {
     /// dialog and tip is entitled to cover it, because it is a control that
     /// lives inside a pane rather than one that floats over the window.
     ///
-    /// **A pane's integration notice strip** (7.1.6j), beside the capsule.
+    /// **A pane's notice strip** (7.1.6j), beside the capsule.
     ///
     /// Above it in this list and never over it on the glass: the capsule floats
     /// over the pane's own text and the strip stands in a row the text was moved
@@ -31194,8 +31169,8 @@ struct OverlayStack {
     /// were ever broken, the surface that says what is *missing* should be the
     /// one seen to survive.
     ///
-    /// One per pane and not a singleton: the offer is about one shell's startup
-    /// file, and two PowerShell panes in one tab each owe their own.
+    /// One per pane and not a singleton: preview disk news belongs to the
+    /// surface whose buffer observed it.
     pane_notices: marks::Band,
     /// **The download sheet** (§7.7 ④, W2 slice ④) — the one failure card that
     /// stands *over* a page rather than instead of one.
@@ -38022,11 +37997,13 @@ fn create_leaf_session(
         // environment is one of the things the spawn now lays down, and a
         // function that asked this module five separate questions about one
         // index is a function no test can put a profile in front of.
-        let mut command = shell_integration::shell_command(
+        let mut command = shell_integration::shell_command_for_program(
             row,
             &place.arguments,
             shell_integration::Scripts::installed(),
             &bt_pty::SystemShellEnvironment,
+            Some(Path::new(program)),
+            shell_integration::powershell_integration_enabled(),
         );
         // **The two variables that make an agent in this pane able to say something.**
         //
@@ -38267,7 +38244,6 @@ fn create_leaf_session(
         presented_metrics: metrics,
         frame_image_references: FrameImageReferences::default(),
         // Nobody has asked the machine where this shell's `$PROFILE` is yet.
-        integration_offer: None,
         // Nothing has been pasted into a shell that has just started.
         pending_paste: None,
     })
@@ -41550,6 +41526,7 @@ impl Runtime<'_> {
             });
         }
         let theme_mode = startup_theme_mode(settings_store.loaded(), session_store.loaded());
+        shell_integration::set_powershell_integration(settings_store.loaded().shell_integration);
         // **The carry-forward's own write, and the only one it ever makes.**
         // Paid here rather than left to the next theme change, because a profile
         // that never touches the row again would otherwise carry its choice in a
@@ -42138,7 +42115,6 @@ impl Runtime<'_> {
             copilot_readiness: attention_copilot::readiness(),
             // Nobody has been asked yet, which is the only thing a launch can
             // truthfully say about it — see the field.
-            powershell_integration_asked: false,
             notifications: NotificationDesk::new(proxy.clone()),
             session_store,
             settings_store,
@@ -42826,7 +42802,14 @@ impl Runtime<'_> {
         settings::SettingsValues,
     ) {
         (
-            settings::visible_rows(self.window.rail.layout),
+            {
+                let mut rows = settings::visible_rows(self.window.rail.layout);
+                settings::retain_powershell_profile_remover(
+                    &mut rows,
+                    shell_integration::powershell_profile_line_present(),
+                );
+                rows
+            },
             {
                 // **The fourth refusal, on the row it is about** (§7.54). The
                 // claim is refused outside this table — by Windows, to a chord
@@ -43045,12 +43028,8 @@ impl Runtime<'_> {
             multiline_paste_ask: self.app.settings_store.loaded().multiline_paste_ask,
             terminal_notifications: self.app.settings_store.loaded().terminal_notifications,
             turn_end_notification: self.app.settings_store.loaded().turn_end_notification,
-            powershell_integration_offer: self
-                .app
-                .settings_store
-                .loaded()
-                .powershell_integration_offer,
-            powershell_install_pending: self.app.settings_store.loaded().powershell_install_pending,
+            shell_integration: self.app.settings_store.loaded().shell_integration,
+            powershell_profile_line_present: shell_integration::powershell_profile_line_present(),
             git_panel: self.app.settings_store.loaded().git_panel,
             update_check: self.app.settings_store.loaded().update_check,
             version_update: update_card::version_row(
@@ -43730,26 +43709,8 @@ impl Runtime<'_> {
         if let Some(enabled) = settings::turn_end_notification_requested(target) {
             self.apply_turn_end_notification(enabled);
         }
-        if let Some(enabled) = settings::powershell_integration_offer_requested(target) {
-            self.apply_powershell_integration_offer(enabled)?;
-            if !enabled
-                && !self
-                    .app
-                    .settings_store
-                    .loaded()
-                    .powershell_integration_offer
-            {
-                shell_integration::begin_removal();
-            }
-            if enabled
-                && self
-                    .app
-                    .settings_store
-                    .loaded()
-                    .powershell_integration_offer
-            {
-                shell_integration::begin_enable();
-            }
+        if let Some(enabled) = settings::shell_integration_requested(target) {
+            self.apply_shell_integration(enabled)?;
         }
         // The machine fact travels with the press: what the switch's `On` reaches
         // is `explorer_menu::place_when_on`'s answer about this Windows and this
@@ -43942,6 +43903,9 @@ impl Runtime<'_> {
                 // handed to the reveal door.
                 Some(settings::LinkDestination::Configuration(door)) => {
                     self.open_configuration_door(door);
+                }
+                None if row == settings::SettingsRow::PowerShellProfileLine => {
+                    shell_integration::begin_removal();
                 }
                 None => {}
             },
@@ -44162,7 +44126,7 @@ impl Runtime<'_> {
             | Row::MultilinePaste
             | Row::Notifications
             | Row::TurnEndNotifications
-            | Row::PowerShellOffer
+            | Row::ShellIntegration
             // And doubly never again, for `ContextMenu`'s reason over a different store: what a
             // reset would be putting back is not a value in this file, it is a block in the user's
             // own `~/.claude/settings.json`.
@@ -44197,6 +44161,7 @@ impl Runtime<'_> {
             | Row::ExportSettings
             | Row::ImportSettings
             | Row::SettingsFolder
+            | Row::PowerShellProfileLine
             // And the uninstaller's rows (T-UNINSTALL-UX): a door, a switch that
             // lives for one visit, and a fact about who installed this copy.
             | Row::Uninstall
@@ -64047,20 +64012,19 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     Ok(())
                 }
             }),
-            // The answer is already in `shell_integration::profile_probe`; what
-            // is owed is the turn that reads it, decides which panes owe a strip
-            // and re-solves the ones whose bodies just got a row shorter. Every
-            // window, because a `pwsh` is a `pwsh` in all of them.
+            // The answer is already in the legacy-profile observation or
+            // removal report. What is owed is a frame that reveals or hides the
+            // conditional Settings cleanup verb, plus any removal result.
             AppEvent::PowerShellProfileProbed => {
                 // **Whether there is anything to say is the report's own
                 // answer** (`Report::window_text`), and not a test written
                 // here. A removal that found nothing to remove changed nothing,
-                // so it says nothing: the card's PowerShell row left off is a
-                // removal, and on the machine that card is for there has never
-                // been a line to take out.
+                // so it says nothing.
                 let mut removal = shell_integration::take_removal();
                 self.for_each_window(|runtime| {
-                    runtime.settle_pane_notices()?;
+                    if runtime.refresh_chrome() {
+                        runtime.present_chrome_change()?;
+                    }
                     if let Some((refused, text)) =
                         removal.take().and_then(|report| report.window_text())
                     {

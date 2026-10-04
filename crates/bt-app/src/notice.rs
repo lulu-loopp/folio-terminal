@@ -2,12 +2,10 @@
 //! pane's body** (`docs/DESIGN.md` §7.1.6j, user ruling 2026-08-21; widened by
 //! the user ruling of 2026-08-29).
 //!
-//! It was written for the PowerShell integration offer and it is still shaped by
-//! it, but nothing below this line knows what a shell is. What it knows is a
-//! band: a sentence that gives way, a row of pressable words that never do, and
-//! an `×` that outlives both. The second thing that wears it is a **preview**
-//! whose file moved on the disk under unsaved edits — the same band, in the same
-//! row of the same body, because a reader who meets both must not meet two
+//! What this module knows is a band: a sentence that gives way, a row of
+//! pressable words that never do, and an `×` that outlives both. A **preview**
+//! whose file moved on the disk under unsaved edits wears it in the same row of
+//! the same body, because a reader who meets both states must not meet two
 //! heights, two grounds and two ideas of where the close button lives.
 //!
 //! Spec authority is `docs/design/ui-mockup.html`: the `.pnotice` block for the
@@ -73,12 +71,6 @@ const CLOSE_GLYPH_LOGICAL_PX: f32 = 10.0;
 /// offers a different verb — see [`Notice`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NoticeVerb {
-    /// Write the line into this pane's `$PROFILE`, keeping a copy first.
-    Add,
-    /// Stop offering, for good, everywhere — the setting and not a dismissal.
-    Never,
-    /// Start this pane's shell again, so the line that was just written is read.
-    Restart,
     /// Throw this window's unsaved edits away and take the file as it now is.
     ReloadFromDisk,
     /// Keep the edits and take the strip down. Nothing is written and nothing is
@@ -98,16 +90,9 @@ pub enum NoticeVerb {
 
 impl NoticeVerb {
     /// The word.
-    ///
-    /// `Restart` spends the pane menu's own string rather than a second
-    /// spelling of one verb: both surfaces call `Runtime::restart_shell`, and a
-    /// verb written twice is a verb that will one day be translated twice.
     #[must_use]
     pub fn text(self) -> &'static str {
         match self {
-            Self::Add => Text::PowerShellNoticeAdd.text(),
-            Self::Never => Text::PowerShellNoticeNever.text(),
-            Self::Restart => Text::TermMenuShellAgain.text(),
             Self::ReloadFromDisk => Text::PreviewDiskReload.text(),
             Self::KeepMyEdits => Text::PreviewDiskKeep.text(),
             Self::OpenExternally => Text::PreviewOpenExternally.text(),
@@ -118,13 +103,6 @@ impl NoticeVerb {
 /// What the strip is saying, which decides what it offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Notice {
-    /// The integration is not installed. Two verbs: install it, or end the
-    /// asking.
-    Offer,
-    /// It has been written into the file. **One** verb, because the strip is now
-    /// a report of one thing that happened and the only thing left to decide is
-    /// whether to make it true now or when the next shell starts.
-    Added,
     /// **A preview's file was rewritten under unsaved edits** (user ruling
     /// 2026-08-29). Two verbs, and they are the two answers a person can give:
     /// take the file, or keep what you typed.
@@ -140,8 +118,6 @@ impl Notice {
     #[must_use]
     pub fn text(self) -> &'static str {
         match self {
-            Self::Offer => Text::PowerShellNoticeBody.text(),
-            Self::Added => Text::PowerShellNoticeAdded.text(),
             Self::DiskChanged => Text::PreviewDiskChanged.text(),
             Self::DiskDeleted => Text::PreviewDiskDeleted.text(),
         }
@@ -151,8 +127,6 @@ impl Notice {
     #[must_use]
     pub fn verbs(self) -> &'static [NoticeVerb] {
         match self {
-            Self::Offer => &[NoticeVerb::Add, NoticeVerb::Never],
-            Self::Added => &[NoticeVerb::Restart],
             // **Reload on the right**, nearest the `×`: it is the destructive
             // one, and the layout drops words leftmost-first when the pane
             // narrows — so the word that survives a narrow pane must be the one
@@ -171,10 +145,9 @@ impl Notice {
 /// one question — *here is something you did not ask for, and here is what you
 /// can do about it* — on two kinds of surface:
 ///
-/// * a **band** across the top of a pane's body, which is what a shell's offer
-///   has always been: a terminal is a column of rows, there is nothing to float
-///   over, and a strip parked on the first line would hide output for as long as
-///   it is up. It takes a row and the body yields.
+/// * a **band** across the top of a pane's body: a terminal is a column of rows,
+///   there is nothing to float over, and a strip parked on the first line would
+///   hide output for as long as it is up. It takes a row and the body yields.
 /// * a **pill** over the bottom edge of a preview's body, which is what every
 ///   preview's news is since the ruling: a document, a picture or a recording is
 ///   a *surface*, and a message that lasts a second is not worth a row that
@@ -207,8 +180,7 @@ pub struct NoticeSay<'a> {
 }
 
 impl<'a> NoticeSay<'a> {
-    /// One of the fixed states in a band — a shell's offer, and the two answers
-    /// to it.
+    /// One of the fixed preview states in the band form.
     #[must_use]
     pub fn band(notice: Notice) -> Self {
         Self {
@@ -674,6 +646,39 @@ fn centred(rect: [f32; 4], size: f32) -> [f32; 4] {
 mod tests {
     use super::*;
 
+    /// RED (T-INTEGRATION-INJECT-1) — retiring the PowerShell prompt removes
+    /// its notice states and verbs without disturbing the preview strip.
+    ///
+    /// MUTATION: remove `ReloadFromDisk` from `DiskChanged::verbs`.
+    #[test]
+    fn the_retired_powershell_strip_leaves_only_the_preview_notice_model() {
+        let states = [Notice::DiskChanged, Notice::DiskDeleted];
+        assert_eq!(
+            states.map(Notice::text),
+            [
+                Text::PreviewDiskChanged.text(),
+                Text::PreviewDiskDeleted.text()
+            ]
+        );
+        assert_eq!(
+            Notice::DiskChanged.verbs(),
+            &[NoticeVerb::KeepMyEdits, NoticeVerb::ReloadFromDisk]
+        );
+        assert!(Notice::DiskDeleted.verbs().is_empty());
+        assert_eq!(
+            [
+                NoticeVerb::ReloadFromDisk.text(),
+                NoticeVerb::KeepMyEdits.text(),
+                NoticeVerb::OpenExternally.text(),
+            ],
+            [
+                Text::PreviewDiskReload.text(),
+                Text::PreviewDiskKeep.text(),
+                Text::PreviewOpenExternally.text(),
+            ]
+        );
+    }
+
     /// RED (31) — **The notice values follow their UI roles.**
     ///
     /// These product constants differ from their role values on BASE.
@@ -768,9 +773,13 @@ mod tests {
         let flash = lay_out(STRIP, NoticeSay::pill("Saved", &[]), &[], 1.0);
         assert!(flash.verbs.is_empty() && flash.close.is_none());
         assert!(flash.text[2] > flash.text[0]);
-        // And the band is untouched: a shell's offer keeps its row, its hairline
-        // and its ×.
-        let band = lay_out(STRIP, NoticeSay::band(Notice::Offer), &[90.0, 100.0], 1.0);
+        // And the band form keeps its row, hairline and ×.
+        let band = lay_out(
+            STRIP,
+            NoticeSay::band(Notice::DiskChanged),
+            &[90.0, 100.0],
+            1.0,
+        );
         assert!(band.close.is_some(), "the terminal's band lost its way out");
         assert!(band.edge[3] > band.edge[1]);
     }
@@ -834,7 +843,12 @@ mod tests {
     /// arithmetic, in the order it is decided.
     #[test]
     fn the_close_keeps_the_trailing_column_and_the_sentence_takes_what_is_left() {
-        let bar = lay_out(STRIP, NoticeSay::band(Notice::Offer), &[90.0, 100.0], 1.0);
+        let bar = lay_out(
+            STRIP,
+            NoticeSay::band(Notice::DiskChanged),
+            &[90.0, 100.0],
+            1.0,
+        );
         assert_eq!(
             close_of(&bar)[2],
             694.0,
@@ -844,7 +858,7 @@ mod tests {
         let boxes: Vec<[f32; 4]> = bar.verbs.iter().map(|(_, box_)| *box_).collect();
         assert_eq!(
             bar.verbs.iter().map(|(verb, _)| *verb).collect::<Vec<_>>(),
-            [NoticeVerb::Add, NoticeVerb::Never],
+            [NoticeVerb::KeepMyEdits, NoticeVerb::ReloadFromDisk],
             "read left to right in the order the notice gives them"
         );
         assert!(
@@ -877,7 +891,7 @@ mod tests {
     fn a_narrow_pane_keeps_its_verbs_and_gives_up_its_sentence() {
         let bar = lay_out(
             [0.0, 0.0, 275.0, 30.0],
-            NoticeSay::band(Notice::Offer),
+            NoticeSay::band(Notice::DiskChanged),
             &[90.0, 100.0],
             1.0,
         );
@@ -892,7 +906,7 @@ mod tests {
             build(&bar, "", None, &bt_render::chrome_palette(), 1.0)
                 .labels
                 .iter()
-                .all(|label| label.text != Notice::Offer.text()),
+                .all(|label| label.text != Notice::DiskChanged.text()),
             "the sentence is not drawn where there is no room for it"
         );
     }
@@ -902,7 +916,12 @@ mod tests {
     /// terminal cell that is nowhere near the pointer.
     #[test]
     fn the_strip_claims_its_whole_width_and_answers_for_every_part_of_it() {
-        let bar = lay_out(STRIP, NoticeSay::band(Notice::Offer), &[90.0, 100.0], 1.0);
+        let bar = lay_out(
+            STRIP,
+            NoticeSay::band(Notice::DiskChanged),
+            &[90.0, 100.0],
+            1.0,
+        );
         assert_eq!(hit(&bar, 105.0, 55.0), Some(NoticeElement::Body));
         assert_eq!(hit(&bar, 690.0, 55.0), Some(NoticeElement::Close));
         let (verb, box_) = bar.verbs[0];
@@ -917,21 +936,8 @@ mod tests {
     /// The second state offers one verb and not three. A card is the report of
     /// one thing that happened, and the moment it offers two answers it is a
     /// dialog.
-    #[test]
-    fn the_written_state_offers_one_verb() {
-        assert_eq!(Notice::Added.verbs(), [NoticeVerb::Restart]);
-        let bar = lay_out(STRIP, NoticeSay::band(Notice::Added), &[80.0], 1.0);
-        assert_eq!(bar.verbs.len(), 1);
-        assert_eq!(bar.verbs[0].0, NoticeVerb::Restart);
-    }
-
     /// The verb reuses the pane menu's own string, which is the one this build
     /// already ships for the one function both surfaces call.
-    #[test]
-    fn the_restart_verb_is_the_pane_menus_verb() {
-        assert_eq!(NoticeVerb::Restart.text(), Text::TermMenuShellAgain.text());
-    }
-
     /// A stand-in for a proportional face: every character the same width, which
     /// is all this arithmetic needs and is monotonic in a prefix's length, which
     /// is what `settings::ellipsized`'s binary search needs.
@@ -963,7 +969,7 @@ mod tests {
     #[test]
     fn a_notice_bars_actions_never_overlap_its_text() {
         let font = FONT_LOGICAL_PX;
-        let widths: Vec<f32> = Notice::Offer
+        let widths: Vec<f32> = Notice::DiskChanged
             .verbs()
             .iter()
             .map(|verb| measured(verb.text(), font))
@@ -972,11 +978,16 @@ mod tests {
         let mut seen_elided = false;
         for width in (1..=900).map(|step| step as f32) {
             let strip = [0.0, 0.0, width, 30.0];
-            let bar = lay_out(strip, NoticeSay::band(Notice::Offer), &widths, 1.0);
+            let bar = lay_out(strip, NoticeSay::band(Notice::DiskChanged), &widths, 1.0);
             let available = bar.text[2] - bar.text[0];
-            let say = sentence(NoticeSay::band(Notice::Offer), &bar, font, &mut measured);
+            let say = sentence(
+                NoticeSay::band(Notice::DiskChanged),
+                &bar,
+                font,
+                &mut measured,
+            );
             seen_elided |= say.ends_with('\u{2026}');
-            seen_without_every_verb |= bar.verbs.len() < Notice::Offer.verbs().len();
+            seen_without_every_verb |= bar.verbs.len() < Notice::DiskChanged.verbs().len();
 
             for (index, (verb, box_)) in bar.verbs.iter().enumerate() {
                 // Whole, which is the half of the ruling that is about the
@@ -984,7 +995,7 @@ mod tests {
                 // all of it is on the strip. The caption is looked up by the
                 // verb and never by position, because a row that has dropped a
                 // word is exactly the row where the two disagree.
-                let offered = Notice::Offer
+                let offered = Notice::DiskChanged
                     .verbs()
                     .iter()
                     .position(|offered| offered == verb)
@@ -1036,7 +1047,7 @@ mod tests {
                     "at {width}px the drawn sentence is wider than its box: {say:?}"
                 );
                 assert!(
-                    Notice::Offer
+                    Notice::DiskChanged
                         .text()
                         .starts_with(say.trim_end_matches('\u{2026}')),
                     "at {width}px the sentence is not a prefix of itself: {say:?}"
@@ -1068,14 +1079,14 @@ mod tests {
     #[test]
     fn the_seven_hundred_pixel_window_draws_no_word_under_its_sentence() {
         let font = FONT_LOGICAL_PX;
-        let widths: Vec<f32> = Notice::Offer
+        let widths: Vec<f32> = Notice::DiskChanged
             .verbs()
             .iter()
             .map(|verb| measured(verb.text(), font))
             .collect();
         let bar = lay_out(
             [0.0, 0.0, 660.0, 30.0],
-            NoticeSay::band(Notice::Offer),
+            NoticeSay::band(Notice::DiskChanged),
             &widths,
             1.0,
         );
@@ -1086,7 +1097,12 @@ mod tests {
             bar.text,
             bar.verbs
         );
-        let say = sentence(NoticeSay::band(Notice::Offer), &bar, font, &mut measured);
+        let say = sentence(
+            NoticeSay::band(Notice::DiskChanged),
+            &bar,
+            font,
+            &mut measured,
+        );
         let layer = build(&bar, &say, None, &bt_render::chrome_palette(), 1.0);
         for label in &layer.labels {
             assert!(

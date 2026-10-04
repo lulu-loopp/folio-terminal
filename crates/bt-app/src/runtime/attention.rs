@@ -316,20 +316,12 @@ impl Runtime<'_> {
 
     /// What one host's strip is saying, or nothing when it wears none.
     ///
-    /// **Three kinds of host and each answers with one of two facts**: a
-    /// terminal seat from its shell's offer, a preview seat and a preview float
-    /// from the buffer under them. A window can never answer with the first —
-    /// it is torn off a preview — which is why its arm asks only the second.
+    /// A preview seat or float answers from the buffer under it; a terminal seat
+    /// carries no preview notice and therefore answers `None`.
     pub(crate) fn notice_on(&self, host: NoticeHost) -> Option<notice::Notice> {
         let NoticeHost::Seat(seat) = host else {
             return self.preview_disk_notice_on(self.notice_surface(host));
         };
-        if let Some(leaf) = self.sessions.get(&seat) {
-            return leaf.integration_offer.as_ref()?.showing(
-                leaf.output_revision > 0,
-                leaf.session.shell_integration_seen(),
-            );
-        }
         self.preview_disk_notice_on(self.preview_here(seat))
     }
 
@@ -368,13 +360,9 @@ impl Runtime<'_> {
         // a preview wears it too. `notice_on` is what tells them apart, and a
         // host that wears none answers `None` and costs one lookup.
         let now = Instant::now();
-        // **Two kinds of wearer and two shapes** (owner's ruling 2026-09-12). A
-        // shell's offer is a *band* across the top of its pane's body, because a
-        // terminal is a column of rows with nothing to float over. Everything a
-        // preview has to say is a *pill* over the bottom edge of its document,
-        // because a document is a surface — and because the band it used to be
-        // stood there empty for every hour it had nothing in it, which is the
-        // report this ruling answers.
+        // Preview news is a *pill* over the bottom edge of its document because
+        // a document is a surface. Terminal seats remain in the walk so the
+        // shared host projection explicitly clears any stale strip geometry.
         let wearers: Vec<(NoticeHost, bool)> = self
             .seats
             .terminals()
@@ -564,29 +552,8 @@ impl Runtime<'_> {
         };
         // Which seat, when the host is one. `None` is a float, and every arm
         // below that needs a seat is an arm a float's strip cannot show.
-        let seat = match host {
-            NoticeHost::Seat(seat) => Some(seat),
-            NoticeHost::Float(_) => None,
-        };
         match element {
             notice::NoticeElement::Close => self.close_pane_notice(host)?,
-            notice::NoticeElement::Verb(notice::NoticeVerb::Add) => {
-                if let Some(seat) = seat {
-                    self.add_to_profile(seat)?;
-                }
-            }
-            notice::NoticeElement::Verb(notice::NoticeVerb::Never) => {
-                self.apply_powershell_integration_offer(false)?;
-            }
-            notice::NoticeElement::Verb(notice::NoticeVerb::Restart) => {
-                // The strip goes first: `restart_shell` builds a whole new leaf
-                // for this seat, and the offer that one carries is decided from
-                // the file as it now stands.
-                self.close_pane_notice(host)?;
-                if let Some(seat) = seat {
-                    self.restart_shell(seat)?;
-                }
-            }
             notice::NoticeElement::Verb(notice::NoticeVerb::ReloadFromDisk) => {
                 self.reload_preview_from_disk(host)?;
             }

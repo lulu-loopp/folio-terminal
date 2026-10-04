@@ -26,8 +26,6 @@
 //! and the two verbs and the one promise are pinned so that the thing which
 //! scrolls away is never the way out.
 
-use std::path::PathBuf;
-
 use bt_persist::FirstRunCardV1;
 use bt_platform::HostPlatform;
 use bt_render::{
@@ -42,7 +40,6 @@ use crate::{
     install_channel::Channel,
     marks::OverlayLayer,
     settings::{SettingsRow, SettingsTarget, push_float_window},
-    shell_integration,
 };
 
 // ── when it appears ────────────────────────────────────────────────────────
@@ -101,8 +98,6 @@ pub enum RowKind {
     /// Explorer's right-click menu. One switch, and on Windows 11 with the
     /// package beside `folio.exe` it means both registrations.
     Explorer,
-    /// The PowerShell integration. The one row whose work happens later.
-    PowerShell,
     Claude,
     Codex,
     Copilot,
@@ -116,7 +111,6 @@ impl RowKind {
         match self {
             Self::Update => Capability::UpdateCheck,
             Self::Explorer => Capability::ExplorerMenu,
-            Self::PowerShell => Capability::PowerShellProfile,
             Self::Claude | Self::Codex | Self::Copilot => Capability::AgentDiscovery,
         }
     }
@@ -180,16 +174,6 @@ pub enum Capability {
     /// deciding between them is its own ticket rather than a row this card can
     /// silently mean instead.
     ExplorerMenu,
-    /// Appending a line to the shell startup file that belongs to the reader.
-    ///
-    /// Windows only **because that is where the shell with no other door is**.
-    /// `pwsh` has one startup file at one well-known path and no argument that
-    /// would source a second one after it, so the only automatic install
-    /// available is editing `$PROFILE` — somebody else's file, which is exactly
-    /// what this card exists to ask about. Every shell a Mac ships has a door
-    /// that needs no such edit; see [`rows_for`] for why that means no row
-    /// rather than a different row.
-    PowerShellProfile,
     /// Finding Claude Code, Codex and Copilot CLI on this machine at all.
     ///
     /// Windows only **today**, and the boundary is discovery rather than the
@@ -268,7 +252,6 @@ impl Capability {
         match self {
             Self::UpdateCheck => true,
             Self::ExplorerMenu
-            | Self::PowerShellProfile
             | Self::AgentDiscovery
             | Self::PsReadLineModule
             | Self::WindowBackdrop => matches!(platform, HostPlatform::Windows),
@@ -347,14 +330,6 @@ pub struct Machine {
     pub codex_installable: bool,
     pub copilot_found: bool,
     pub copilot_installable: bool,
-    /// Whether the `$PROFILE` this machine has already loads `folio.ps1`.
-    ///
-    /// Known only once a PowerShell has said where its own profile is, which on
-    /// a first launch it usually has not — so the honest default is `false`, and
-    /// a reader whose profile turns out to already carry the line has their
-    /// recorded intent cleared by the shell that reports it rather than by this
-    /// row being withheld.
-    pub powershell_integration_installed: bool,
     /// **How this copy was installed** — `install_channel`'s fact, read through
     /// `install_channel::channel()`, and [`Channel::Unknown`] when the card's
     /// one turn of waiting ran out before it landed. Decides whether the
@@ -436,7 +411,7 @@ pub struct Row {
 /// **Row order is deliberate.** The update check, which arrives on everywhere,
 /// opens the card, so the reader is first told what Folio *does* and only then
 /// asked what it *may* do — and in a body that can scroll, it is guaranteed to
-/// be above the fold. Then the two Windows writes, then the agents. The
+/// be above the fold. Then the Windows Explorer write, then the agents. The
 /// Explorer row, second, also arrives on where a package manager will remove
 /// the verb again when it uninstalls Folio ([`explorer_arrives_on`]); every
 /// other row arrives off.
@@ -460,21 +435,9 @@ pub fn rows(machine: &Machine) -> Vec<Row> {
 /// [`Card::open`]'s rule rather than this function's, because it is about
 /// whether a modal goes up and not about what is in it.
 ///
-/// **There is no macOS shell-integration row, and that is the mechanism's
-/// answer rather than a gap.** The Windows card offers the PowerShell row
-/// because `pwsh` has no way in but the reader's own `$PROFILE` — one file, no
-/// `--init-file`, so the install is an edit to somebody else's file and this
-/// card exists to ask before making one. Every shell M1-5 resolves on a Mac has
-/// a door that touches nothing on disk: bash and its family take
-/// `--init-file <script>`, and zsh — which is what `/bin/zsh` and a `chsh`'d
-/// Homebrew zsh both are, and what `resolve_default_shell` answers for almost
-/// every macOS account — takes `ZDOTDIR` pointed at a directory of Folio's own
-/// under Folio's own data root, whose `.zshrc` hands `ZDOTDIR` straight back
-/// (`shell_integration`'s table). Both are arguments to one child process. So
-/// the integration is **already on** for the first pane a Mac ever opens,
-/// nothing outside Folio's directory is written, and there is nothing to
-/// consent to. A row saying otherwise would be this card asking permission for
-/// a write it does not make.
+/// **There is no shell-integration row on any platform.** Each supported shell
+/// receives integration in its own Folio child process, using only Folio-owned
+/// files, so first run has no machine change to explain or request.
 #[must_use]
 pub fn rows_for(platform: HostPlatform, machine: &Machine) -> Vec<Row> {
     let offered = |kind: RowKind| kind.offered_on(platform);
@@ -495,15 +458,6 @@ pub fn rows_for(platform: HostPlatform, machine: &Machine) -> Vec<Row> {
             line: explorer_shape(machine).line(),
             tip: Tip::Fixed(Text::FirstRunTipExplorer),
             on: explorer_arrives_on(machine.install_channel),
-        });
-    }
-    if offered(RowKind::PowerShell) && !machine.powershell_integration_installed {
-        rows.push(Row {
-            kind: RowKind::PowerShell,
-            group_break_above: false,
-            line: Text::FirstRunRowPowerShell,
-            tip: Tip::Fixed(Text::FirstRunTipPowerShell),
-            on: false,
         });
     }
     let agents = [
@@ -596,15 +550,6 @@ pub enum Application {
     /// [`crate::explorer_menu::ExplorerPlace::Off`] — a row left off asks for
     /// nothing, and off is already the factory state.
     Explorer(ExplorerPlace),
-    /// Whether a pane with no integration is still offered one, applied **both
-    /// ways** — §7.56's table: the card asked, so the strip does not. A row left
-    /// on leaves the offer standing, because the line is being installed and the
-    /// offer's own gate closes the moment it is there; a row turned off is an
-    /// answer, so the strip never asks again.
-    PowerShellOffer(bool),
-    /// The intent itself, recorded for the first PowerShell that names its own
-    /// `$PROFILE`. Not a Settings row, and never one.
-    PowerShellIntent,
     ClaudeHooks,
     CodexNotify,
     CopilotHooks,
@@ -631,21 +576,17 @@ pub fn settings_target(application: Application) -> Option<SettingsTarget> {
         // `Explorer(Off)`, because a row left off asks for nothing — so the card
         // presses `On` and the dialog reads back the place this machine can give.
         Application::Explorer(place) => choice(SettingsRow::ContextMenu, place.on()),
-        Application::PowerShellOffer(on) => choice(SettingsRow::PowerShellOffer, on),
         Application::ClaudeHooks => choice(SettingsRow::ClaudeHooks, true),
         Application::CodexNotify => choice(SettingsRow::CodexNotify, true),
         Application::CopilotHooks => choice(SettingsRow::CopilotHooks, true),
-        Application::PowerShellIntent => None,
     }
 }
 
 /// Everything `Done` does, in the order it does it.
 ///
-/// **A row that is off spends nothing**, with the two exceptions that are not
-/// exceptions at all: the update check arrives on, so turning it off *is* an
-/// answer, and the PowerShell offer is the one question with a second surface,
-/// so leaving its row off is the answer that closes that surface too. Every
-/// other row's off is the factory state and needs recording nowhere.
+/// **A row that is off spends nothing**, except that the update check arrives
+/// on, so turning it off is itself an answer. Every other row's off is the
+/// factory state and needs recording nowhere.
 #[must_use]
 pub fn applications(rows: &[Row], shape: ExplorerShape) -> Vec<Application> {
     let mut spent = Vec::new();
@@ -653,12 +594,6 @@ pub fn applications(rows: &[Row], shape: ExplorerShape) -> Vec<Application> {
         match row.kind {
             RowKind::Update => spent.push(Application::UpdateCheck(row.on)),
             RowKind::Explorer if row.on => spent.push(Application::Explorer(shape.place())),
-            RowKind::PowerShell => {
-                spent.push(Application::PowerShellOffer(row.on));
-                if row.on {
-                    spent.push(Application::PowerShellIntent);
-                }
-            }
             RowKind::Claude if row.on => spent.push(Application::ClaudeHooks),
             RowKind::Codex if row.on => spent.push(Application::CodexNotify),
             RowKind::Copilot if row.on => spent.push(Application::CopilotHooks),
@@ -832,9 +767,7 @@ impl Card {
 /// update check on — writes nothing outside `settings.json`, and does not come
 /// back. An Explorer row that arrived on (a copy whose manager has an uninstall
 /// hook, [`explorer_arrives_on`]) is no exception: arriving on is what the card
-/// proposes, and only `Done` spends a proposal. The one difference from pressing `Done` with the card untouched is the
-/// PowerShell offer: `Not now` means *nothing was asked*, so the one question
-/// that has a second surface keeps it, exactly as it works today.
+/// proposes, and only `Done` spends a proposal.
 ///
 /// **A window shut while the card is up spends this too, and spends it by
 /// construction**: `Shown` is written when the card goes up and nothing is
@@ -843,48 +776,6 @@ impl Card {
 #[must_use]
 pub fn declined() -> Vec<Application> {
     Vec::new()
-}
-
-// ── the intent, and the shell that finally answers it ──────────────────────
-
-/// What a recorded PowerShell intent does when a shell names its own `$PROFILE`.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PendingStep {
-    /// Nothing to do: no intent, or no shell has spoken yet.
-    Wait,
-    /// Write the line into this file.
-    Write(PathBuf),
-    /// Clear the intent without writing: the profile already loads `folio.ps1`,
-    /// which is the reader having the thing they asked for.
-    Clear,
-}
-
-/// The step a recorded intent takes against one shell's answer.
-///
-/// `offer` is [`shell_integration::offer_for`]'s reading of that file, which is
-/// the same reading the strip is built on — so an intent and a strip can never
-/// disagree about whether a profile carries the line.
-#[must_use]
-pub fn pending_step(pending: bool, profile: Option<&shell_integration::Offer>) -> PendingStep {
-    if !pending {
-        return PendingStep::Wait;
-    }
-    match profile {
-        Some(shell_integration::Offer::Owed(path)) => PendingStep::Write(path.clone()),
-        // Already carries the line — by another route, by hand, or by a copy
-        // under a name this build does not recognise. All three are the reader
-        // having what they asked for.
-        Some(_) => PendingStep::Clear,
-        None => PendingStep::Wait,
-    }
-}
-
-/// What the Terminal page's PowerShell row says while an intent is outstanding.
-///
-/// `None` while there is none, which is the row's own sentence.
-#[must_use]
-pub fn pending_row_line(pending: bool) -> Option<Text> {
-    pending.then_some(Text::ShellIntegrationPending)
 }
 
 // ── the keyboard ───────────────────────────────────────────────────────────
@@ -2041,6 +1932,7 @@ mod tests {
     use super::*;
     use crate::install_channel::{self, MARKER_FILE_NAME, Manager};
     use crate::settings;
+    use std::path::PathBuf;
 
     /// RED (ticket 21) — **the first-run card's option rows are as tall as a
     /// Settings single-line row, not airier.**
@@ -2123,7 +2015,6 @@ mod tests {
             codex_installable: true,
             copilot_found: true,
             copilot_installable: true,
-            powershell_integration_installed: false,
             install_channel: Channel::Ours,
         }
     }
@@ -2226,7 +2117,6 @@ mod tests {
             [
                 RowKind::Update,
                 RowKind::Explorer,
-                RowKind::PowerShell,
                 RowKind::Claude,
                 RowKind::Codex,
                 RowKind::Copilot
@@ -2239,10 +2129,7 @@ mod tests {
             ..every_row()
         };
         let offered = rows(&none);
-        assert_eq!(
-            kinds(&offered),
-            [RowKind::Update, RowKind::Explorer, RowKind::PowerShell]
-        );
+        assert_eq!(kinds(&offered), [RowKind::Update, RowKind::Explorer]);
         assert!(
             offered.iter().all(|row| !row.group_break_above),
             "the card is opening a group gap with nothing in the group"
@@ -2254,20 +2141,15 @@ mod tests {
         };
         assert_eq!(
             kinds(&rows(&configured)),
-            [
-                RowKind::Update,
-                RowKind::Explorer,
-                RowKind::PowerShell,
-                RowKind::Copilot
-            ],
+            [RowKind::Update, RowKind::Explorer, RowKind::Copilot],
             "a row is being offered for a configuration that already calls Folio"
         );
         assert!(
-            rows(&configured)[3].group_break_above,
+            rows(&configured)[2].group_break_above,
             "the gap moved off the first agent row that is actually shown"
         );
         assert!(
-            rows(&configured)[..3]
+            rows(&configured)[..2]
                 .iter()
                 .all(|row| !row.group_break_above),
             "a group gap is being opened inside Folio's own three rows"
@@ -2303,7 +2185,6 @@ mod tests {
             );
             for kind in [
                 RowKind::Explorer,
-                RowKind::PowerShell,
                 RowKind::Claude,
                 RowKind::Codex,
                 RowKind::Copilot,
@@ -2404,7 +2285,6 @@ mod tests {
             [
                 RowKind::Update,
                 RowKind::Explorer,
-                RowKind::PowerShell,
                 RowKind::Claude,
                 RowKind::Codex,
                 RowKind::Copilot
@@ -2795,18 +2675,6 @@ mod tests {
             );
         }
         assert_eq!(
-            settings::powershell_integration_offer_requested(target(Application::PowerShellOffer(
-                false
-            ))),
-            Some(false)
-        );
-        assert_eq!(
-            settings::powershell_integration_offer_requested(target(Application::PowerShellOffer(
-                true
-            ))),
-            Some(true)
-        );
-        assert_eq!(
             settings::claude_hooks_requested(target(Application::ClaudeHooks)),
             Some(true)
         );
@@ -2818,36 +2686,23 @@ mod tests {
             settings::copilot_hooks_requested(target(Application::CopilotHooks)),
             Some(true)
         );
-        assert_eq!(
-            settings_target(Application::PowerShellIntent),
-            None,
-            "the one answer that is not a row has been given one"
-        );
     }
 
     /// PIN (§7.56 §8) — **`Done` applies every row that is on, and a row that is
     /// off spends nothing that is not an answer.**
     ///
-    /// The two that spend something either way are not exceptions: the update
-    /// check arrives on, so turning it off *is* an answer, and the PowerShell
-    /// offer is the one question with a second surface, so a row left off has to
-    /// close that surface too (§7).
+    /// The update check spends something either way because it arrives on, so turning it off is
+    /// itself an answer.
     ///
     /// MUTATIONS:
     /// ① apply an off row as `install = false` and `Done` on an untouched card
     ///    removes an Explorer entry the reader had from a previous install;
-    /// ② drop `PowerShellOffer(false)` and the strip asks again minutes later
-    ///    about the question the card just asked;
-    /// ③ drop `PowerShellIntent` and a row left on installs nothing, ever.
     #[test]
     fn done_spends_the_rows_that_are_on_and_the_two_answers_that_are_answers() {
         let untouched = rows(&every_row());
         assert_eq!(
             applications(&untouched, ExplorerShape::FirstPageAndClassic),
-            [
-                Application::UpdateCheck(true),
-                Application::PowerShellOffer(false)
-            ],
+            [Application::UpdateCheck(true)],
             "an untouched card is doing something to this machine other than what it arrived \
              saying it would"
         );
@@ -2863,8 +2718,6 @@ mod tests {
                 // Settings row now spells. The pair the two applications used to
                 // be is what `FirstPage` means.
                 Application::Explorer(ExplorerPlace::FirstPage),
-                Application::PowerShellOffer(true),
-                Application::PowerShellIntent,
                 Application::ClaudeHooks,
                 Application::CodexNotify,
                 Application::CopilotHooks
@@ -2888,122 +2741,11 @@ mod tests {
     /// nothing.**
     ///
     /// Not "apply the rows as they stand": the card closes with the factory
-    /// values, which is what the machine already has, and the one question with
-    /// a second surface keeps it. `Shown` was written when the card went up, so
-    /// nothing comes back.
-    ///
-    /// MUTATION: route `Not now` through `applications` and a reader who
-    /// declined has `powershell_integration_offer` written `false` — the strip
-    /// they were never asked about, silenced by declining to answer.
+    /// values, which is what the machine already has. `Shown` was written when the card went up,
+    /// so nothing comes back.
     #[test]
     fn declining_writes_nothing_outside_the_card_s_own_state() {
         assert!(declined().is_empty());
-    }
-
-    /// PIN (§7.56 §7) — **`Done` with the PowerShell row off is a removal, and
-    /// on the machine this card is for it removes nothing, writes nothing and
-    /// says nothing.**
-    ///
-    /// The row off spends `PowerShellOffer(false)`, which is the Settings
-    /// page's own `Off` press, and that press runs
-    /// `shell_integration::begin_removal`. That is right — the answer has to
-    /// reach a `$PROFILE` a previous install wrote — but the card only ever
-    /// appears on a machine that has never run Folio, where there is no line to
-    /// take out. So the report comes back empty, and an empty report tells the
-    /// window nothing (`Report::window_text`). A new reader's first sight of
-    /// Folio is the terminal, not a corner toast about a file they never had.
-    ///
-    /// MUTATIONS:
-    /// ① give the empty report words and `Done` greets a new machine with
-    ///    `No Folio profile lines found.`;
-    /// ② let the removal write and a reader who answered `off` has a `$PROFILE`
-    ///    of their own rewritten for a line it does not contain.
-    #[test]
-    fn done_with_the_powershell_row_off_removes_nothing_and_says_nothing() {
-        let untouched = rows(&every_row());
-        assert!(
-            applications(&untouched, ExplorerShape::FirstPageAndClassic)
-                .contains(&Application::PowerShellOffer(false))
-        );
-        let press = settings_target(Application::PowerShellOffer(false)).expect("a row's press");
-        assert_eq!(
-            settings::powershell_integration_offer_requested(press),
-            Some(false),
-            "the card's off is the dialog's own Off, and Off is what runs the removal"
-        );
-
-        let root = std::env::temp_dir().join(format!(
-            "folio-first-run-off-{}-{}",
-            std::process::id(),
-            line!()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let data = root.join("data");
-        std::fs::create_dir_all(&data).unwrap();
-        let profile = root.join("profile.ps1");
-        let original = b"# a profile of somebody's own\r\n";
-        std::fs::write(&profile, original).unwrap();
-        let report = shell_integration::remove_shell_integration_at(
-            &data,
-            Some(std::slice::from_ref(&profile)),
-        );
-        assert_eq!(report.exit_code(), 0);
-        assert_eq!(
-            report.window_text(),
-            None,
-            "a machine that has never run Folio is being told about a line it never had"
-        );
-        assert_eq!(std::fs::read(&profile).unwrap(), original);
-        let _ = std::fs::remove_dir_all(&root);
-    }
-
-    /// PIN (§7.56 §4.3) — **the intent is spent by the first shell to name its
-    /// own `$PROFILE`, and a profile that already loads the script clears it
-    /// without writing.**
-    ///
-    /// MUTATIONS:
-    /// ① write over a `Silent` offer and a reader whose profile already
-    ///    dot-sources `folio.ps1` gets a second copy of the line;
-    /// ② act with no intent recorded and every launch edits `$PROFILE`;
-    /// ③ leave the intent standing on a `Silent` answer and the card's row waits
-    ///    for a shell that has already spoken, for ever.
-    #[test]
-    fn the_recorded_intent_is_spent_by_the_first_shell_that_names_its_profile() {
-        let owed = shell_integration::Offer::Owed(PathBuf::from(r"C:\Users\alice\profile.ps1"));
-        assert_eq!(
-            pending_step(true, Some(&owed)),
-            PendingStep::Write(PathBuf::from(r"C:\Users\alice\profile.ps1"))
-        );
-        assert_eq!(
-            pending_step(true, Some(&shell_integration::Offer::Silent)),
-            PendingStep::Clear,
-            "a profile that already loads the script is about to be given the line twice"
-        );
-        assert_eq!(
-            pending_step(false, Some(&owed)),
-            PendingStep::Wait,
-            "a $PROFILE is being written on a machine that never recorded an intent"
-        );
-        assert_eq!(pending_step(true, None), PendingStep::Wait);
-    }
-
-    /// PIN (§7.56 §4.3) — **the Terminal page's PowerShell row says which state
-    /// it is in while an intent is outstanding.**
-    ///
-    /// The row is neither "installed" nor "off"; a row that read `Off` over a
-    /// write that is coming would be this window disagreeing with itself about
-    /// a file.
-    ///
-    /// MUTATION: return the sentence unconditionally and the row says a shell is
-    /// about to be joined on every machine that never asked for it.
-    #[test]
-    fn the_settings_row_says_the_write_is_waiting_for_a_shell() {
-        assert_eq!(
-            pending_row_line(true),
-            Some(Text::ShellIntegrationPending),
-            "a row that asked for the integration reads as though nothing was asked"
-        );
-        assert_eq!(pending_row_line(false), None);
     }
 
     /// PIN (§7.56 §6, v4 §5) — **the focus order is every switch and then the
@@ -3113,30 +2855,20 @@ mod tests {
     fn a_switch_changes_the_card_and_nothing_else_until_done() {
         let mut card = Card::default();
         assert!(card.open(rows(&every_row()), ExplorerShape::ClassicOnly));
-        assert_eq!(
-            card.done(),
-            [
-                Application::UpdateCheck(true),
-                Application::PowerShellOffer(false)
-            ]
-        );
+        assert_eq!(card.done(), [Application::UpdateCheck(true)]);
         assert!(card.flip(1));
         assert!(card.rows()[1].on);
         assert_eq!(
             card.done(),
             [
                 Application::UpdateCheck(true),
-                Application::Explorer(ExplorerPlace::ShowMoreOptions),
-                Application::PowerShellOffer(false)
+                Application::Explorer(ExplorerPlace::ShowMoreOptions)
             ]
         );
         assert!(card.flip(1));
         assert_eq!(
             card.done(),
-            [
-                Application::UpdateCheck(true),
-                Application::PowerShellOffer(false)
-            ],
+            [Application::UpdateCheck(true)],
             "a row flipped on and off again left something behind"
         );
         assert!(card.set(1, true));
@@ -3321,7 +3053,13 @@ mod tests {
         // same window; this probe needs the last row's switch to still reach
         // below the footer, so its window is 30 px shorter than the shared
         // short fixture.
-        let surface = (SHORT_SURFACE.0, SHORT_SURFACE.1 - 30.0);
+        // The retired PowerShell row removed one row-height from the card, so
+        // keep the same clipping posture by removing that height from this
+        // deliberately short fixture too.
+        let surface = (
+            SHORT_SURFACE.0,
+            SHORT_SURFACE.1 - 30.0 - ROW_HEIGHT_LOGICAL_PX * SCALE,
+        );
         let placed = layout(&content, surface.0, surface.1, SCALE, 0.0);
         let middle = |rect: [f32; 4]| {
             (
@@ -3798,13 +3536,12 @@ mod tests {
             );
             assert!(!text.trim().is_empty());
         }
-        // Each of the four rows that writes a file the reader owns names that
+        // Each of the three rows that writes a file the reader owns names that
         // file, and no two rows name the same one.
         for (row, named) in [
-            (2_usize, "$PROFILE"),
-            (3, "~/.claude/settings.json"),
-            (4, "~/.codex/config.toml"),
-            (5, "~/.copilot/hooks/folio.json"),
+            (2_usize, "settings.json"),
+            (3, "config.toml"),
+            (4, "folio.json"),
         ] {
             assert!(
                 tips[row].2.contains(named),
@@ -3819,7 +3556,7 @@ mod tests {
         let short = layout(
             &measured(&rows(&every_row())),
             SHORT_SURFACE.0,
-            SHORT_SURFACE.1,
+            SHORT_SURFACE.1 - ROW_HEIGHT_LOGICAL_PX * SCALE,
             SCALE,
             0.0,
         );
@@ -4152,49 +3889,6 @@ mod tests {
             (card_width(400.0, 1.0) - 368.0).abs() < 0.51,
             "a window narrower than the card did not hand it 92%"
         );
-    }
-
-    /// PIN (user ruling 2026-09-06 — 「PowerShell 那一行要带上整合的名字」) —
-    /// **the PowerShell row names the integration, in both languages, before it
-    /// says what the reader gets.**
-    ///
-    /// Every other row on this card says only a result, and this one may not:
-    /// the reader who later goes to Settings to change it has to know what the
-    /// thing is called, and the card is the only place they will ever be told.
-    ///
-    /// **The English column puts the benefit first from 2026-09-07** (copy
-    /// audit, user-approved the same day; §7.56 ⓪″). The ruling above is
-    /// untouched — the row still names the thing, so the Settings row it
-    /// belongs to is still findable — and only the order moved, which is that
-    /// audit's own "benefit before mechanism". The Chinese column did not
-    /// change and still opens with the name.
-    ///
-    /// MUTATIONS:
-    /// ① drop the name and the row is one anonymous result among several, and
-    ///    the Settings row it belongs to is unfindable;
-    /// ② put the Chinese benefit first and its half goes red, because that
-    ///    column was not part of the English audit.
-    #[test]
-    fn the_powershell_row_carries_the_integration_s_name_in_both_languages() {
-        for (lang, name, first) in [
-            (crate::i18n::Lang::English, "PowerShell", false),
-            (crate::i18n::Lang::Chinese, "PowerShell 整合", true),
-        ] {
-            let line = Text::FirstRunRowPowerShell.in_lang(lang);
-            assert!(
-                line.contains(name),
-                "the PowerShell row does not carry {name:?}: {line:?}"
-            );
-            assert!(
-                !first || line.starts_with(name),
-                "the name is not the first thing the line says: {line:?}"
-            );
-            assert!(
-                line.len() > name.len(),
-                "the line is the name and nothing else, so it says what the switch is and not \
-                 what it gets you: {line:?}"
-            );
-        }
     }
 }
 

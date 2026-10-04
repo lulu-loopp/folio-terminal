@@ -71,9 +71,12 @@ per-seat 重启用的 cwd 是**最后一次 OSC 7 上报**，不是去读那个�
   见到 D）的未闭合区域，在重启边界处**按既有的"格式错误标记保守恢复"同一纪律强制闭合**
   （`docs/shell-integration.md`「Accepted v1 trust boundary」段落旁的恢复规则：A/C/D 会闭合
   一个未终止的命令）——重启边界起到一个隐式 D 的作用，不留悬空区域,但不虚构一个退出码。
-  新屏幕的 OSC 133 authority 从零开始：只有新 shell 真的重新 source 了集成脚本并发出新的
+  新屏幕的 OSC 133 authority 从零开始：只有新 shell 重新加载了集成脚本并发出新的
   A/C/D,这块新live区域才重新获得基于标记的权威,否则退回既有的 cursor/WRAPLINE 启发式
   （与任何从未发过 OSC 133 的屏幕同等对待）。
+- **重新应用同一条进程组合**（2026-10-04）：PowerShell restart 与首次 spawn、split、duplicate、
+  restore、Recent 共用同一 spawn seam；安全参数行且设置开启时，再次追加
+  `-NoExit -Command <guarded loader>`。因此 restart 不依赖 `$PROFILE`，也不产生第二套集成规则。
 - **全新 TERM_PROGRAM/TERM_PROGRAM_VERSION/COLORTERM 声明**：这不是"设计上应该"，是
   `crates/bt-pty/src/lib.rs` 已经实现的行为——每次 spawn（含 restart 触发的这次）都会声明
   `TERM_PROGRAM=BetterTerminal`、`TERM_PROGRAM_VERSION`、`COLORTERM=truecolor`（除非调用方

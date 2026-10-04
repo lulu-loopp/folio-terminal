@@ -10,8 +10,7 @@
 //! 2. **The macro facts of §2.7**: four `macro_rules!` definitions in
 //!    `bt-app`, one of them constructing items — exactly the `Text` enum and
 //!    its test list, nothing else in that arm; no source inclusion, no
-//!    `module_path!`, no `compile_error!`; one line-number invocation, in the
-//!    item the plan names.
+//!    `module_path!`, no `compile_error!`, and no line-number invocation.
 //! 3. **Needle provenance** (§2.6), in both of its cases, with the needles
 //!    written in this file: one query whose caller is inside the universe being
 //!    read, and one whose caller is outside it — which is the shape of the two
@@ -22,9 +21,9 @@ use std::path::Path;
 use std::sync::Arc;
 
 use bt_source::{
-    DiskScope, Index, ItemRecord, MacroKind, MacroShape, ModuleSpec, Needle, Package, Pattern,
-    Provenance, QueryFailure, Scope, Search, Site, Span, Universe, Vendor, View, Why, Workspace,
-    needle, report, universes,
+    DiskScope, Index, MacroKind, MacroShape, ModuleSpec, Needle, Package, Pattern, Provenance,
+    QueryFailure, Scope, Search, Site, Universe, Vendor, View, Why, Workspace, needle, report,
+    universes,
 };
 
 fn workspace() -> Workspace {
@@ -58,15 +57,6 @@ fn bt_source() -> Arc<Index> {
     )
     .expect("this crate is where it says it is");
     Index::shared(&universe).unwrap_or_else(|rejections| panic!("{}", report(&rejections)))
-}
-
-/// The smallest callable whose bytes hold `span`.
-fn item_at(index: &Index, span: Span) -> Option<&ItemRecord> {
-    index
-        .items()
-        .iter()
-        .filter(|record| span.within(record.whole()))
-        .min_by_key(|record| record.whole().len())
 }
 
 // ── §2.4 — the ten, regenerated ───────────────────────────────────────────
@@ -238,6 +228,7 @@ fn the_macro_facts_of_this_tree_are_asserted() {
         MacroShape::SourceInclusion,
         MacroShape::ModulePath,
         MacroShape::CompileError,
+        MacroShape::LineNumber,
     ] {
         assert!(
             !by_shape.contains_key(&format!("{absent:?}")),
@@ -263,19 +254,6 @@ fn the_macro_facts_of_this_tree_are_asserted() {
             item_arms[0].spelling
         );
     }
-
-    let line_numbers: Vec<&bt_source::UnsupportedMacroShape> = index
-        .unsupported_macro_shapes()
-        .iter()
-        .filter(|reported| reported.shape == MacroShape::LineNumber)
-        .collect();
-    assert_eq!(line_numbers.len(), 1, "{line_numbers:#?}");
-    let owner = item_at(&index, line_numbers[0].span).expect("it is inside a test");
-    assert_eq!(
-        owner.name(),
-        "done_with_the_powershell_row_off_removes_nothing_and_says_nothing",
-        "the single line-number invocation is where §2.7 says it is"
-    );
 }
 
 /// `Ok` when `arm` — an item-constructing arm's expansion as the index spells

@@ -1179,6 +1179,7 @@ text_entries! {
     /// already sent OSC 133, and a settings page has never had that. Said this
     /// way the sentence is true in every state and needs no probe.
     CapPowerShell,
+    CapPowerShellNotProvided,
     /// WSL. The same everything, and the same honest condition — a `zsh` or
     /// `fish` login never reads the init file the launcher was handed.
     CapWslBash,
@@ -2018,18 +2019,6 @@ text_entries! {
     /// dot-source the script: what is missing, and what this terminal uses it
     /// for. `$PROFILE`, `Folio` and `folio.ps1` are names and stay in Latin in
     /// both columns.
-    PowerShellNoticeBody,
-    /// The verb that writes the line. It names the file it writes into, because
-    /// the one thing a reader must know before pressing it is *which* file
-    /// changes.
-    PowerShellNoticeAdd,
-    /// The verb that answers the question for good. Not "never" and not "no
-    /// thanks": it says what pressing it stops, which is the asking.
-    PowerShellNoticeNever,
-    /// What the strip says after the write. **Two facts and no thanks**: the
-    /// line is in the file, and the shell already running was started before it
-    /// and cannot see it.
-    PowerShellNoticeAdded,
 
     // ── the preview's disk strip (§7.1.3, user ruling 2026-08-29) ──────────
     // The same strip and therefore the same block shape. **Four entries**: two
@@ -2054,12 +2043,13 @@ text_entries! {
     PreviewDiskDeleted,
 
     // ── its settings row (Terminal page) ───────────────────────────────────
-    /// `Terminal ▸ Offer PowerShell integration` — the row that turns the offer
-    /// back on after `Don't show again`.
-    RowPowerShellOffer,
-    /// Its sentence. Says the two things the row's four words cannot: which
-    /// panes are ever asked, and that the asking is all this does.
-    DescPowerShellOffer,
+    /// `Terminal ▸ Shell integration for PowerShell`.
+    RowShellIntegration,
+    /// What the process-scoped integration supplies to new panes.
+    DescShellIntegration,
+    RowPowerShellProfileLine,
+    DescPowerShellProfileLine,
+    RemovePowerShellProfileLine,
 
     // ── Claude Code's hooks (attention plan §3.3, Terminal page) ────────────
     /// `Terminal ▸ Claude Code hooks` — the row that lets an agent say it is waiting.
@@ -2813,11 +2803,6 @@ text_entries! {
     /// line has to say where the entry is. `Show more options` is left in
     /// English because Windows shows it in English on a Chinese machine too.
     FirstRunRowExplorer10,
-    /// The PowerShell row. **The line carries the integration's own name**
-    /// (user ruling 2026-09-06): the reader who later goes looking for this in
-    /// Settings has to know what it is called, so the name comes first and the
-    /// result follows it on the same short line.
-    FirstRunRowPowerShell,
     /// The Claude Code row, listed only on a machine that has `claude`.
     FirstRunRowClaude,
     /// The Codex row. It says **a turn has ended** and not "is waiting", which
@@ -2843,15 +2828,6 @@ text_entries! {
     /// where the entry lands is the row's own line, and what a press registers
     /// — an entry for this Windows account — is the same either way.
     FirstRunTipExplorer,
-    /// The PowerShell row's tooltip: the reader's own `$PROFILE`, and the dated
-    /// copy taken beside it first.
-    FirstRunTipPowerShell,
-    /// **What the Terminal page's PowerShell row says while an intent is
-    /// outstanding** (§7.56). The row is neither installed nor off; it says
-    /// which. Where `$PROFILE` is comes from the shell and is never computed
-    /// here, so a row left on when the card was answered is a row waiting for a
-    /// shell to name its own file.
-    ShellIntegrationPending,
     ShellProfileEncoding,
     ShellMarksVersion,
     ShellMarksPath,
@@ -2865,7 +2841,6 @@ text_entries! {
     ShellProfileHardLink,
     ShellProfileReadOnly,
     ShellProfileChanged,
-    ShellProfileScriptLocation,
     ShellProfileNothing,
 
     // ── the application menu bar (M3-2, macOS) ─────────────────────────────
@@ -3839,8 +3814,13 @@ impl Text {
             ),
             Self::CapPowerShell => pick(
                 lang,
-                "Prompt marks, directory, exit codes and hyperlinks, with folio.ps1 dot-sourced",
-                "命令标记、当前目录、退出码、链接；需点源 folio.ps1",
+                "Prompt marks, directory, exit codes and hyperlinks",
+                "命令标记、当前目录、退出码、链接",
+            ),
+            Self::CapPowerShellNotProvided => pick(
+                lang,
+                "PowerShell integration is not provided for these arguments.",
+                "PowerShell integration is not provided for these arguments.", // zh: pending T-INTEGRATION-INJECT-1
             ),
             Self::CapWslBash => pick(
                 lang,
@@ -4008,8 +3988,8 @@ impl Text {
             ),
             Self::CapPowerShellNoLinks => pick(
                 lang,
-                "Prompt marks, directory and exit codes with folio.ps1 dot-sourced; no hyperlinks",
-                "点源 folio.ps1 后提供命令标记、当前目录、退出码；不含链接",
+                "Prompt marks, directory and exit codes; no hyperlinks",
+                "命令标记、当前目录、退出码；不含链接",
             ),
             Self::CapWslBashNoLinks => pick(
                 lang,
@@ -4746,22 +4726,10 @@ impl Text {
             // other stay as source has no way to connect that to a line missing
             // from their `$PROFILE`, and "command marks and status" did not
             // tell them.
-            Self::PowerShellNoticeBody => pick(
-                lang,
-                "PowerShell integration is not installed. It marks commands, follows the current directory and typesets inline $…$ formulas in output.",
-                "尚未安装 PowerShell 整合。它提供命令标记、当前目录跟随，以及输出中行内公式 $…$ 的渲染。",
-            ),
-            Self::PowerShellNoticeAdd => pick(lang, "Add to $PROFILE", "加进 $PROFILE"),
-            Self::PowerShellNoticeNever => pick(lang, "Don't show again", "不再提示"),
             // "Takes effect in a new shell" and not "restart to apply": the
             // second is an instruction, and there is a verb beside this sentence
             // that carries out the instruction. This states when the line starts
             // working, which is also true of the shell the reader opens tomorrow.
-            Self::PowerShellNoticeAdded => pick(
-                lang,
-                "Added to $PROFILE. Takes effect in a new shell.",
-                "已加进 $PROFILE。新开的 shell 生效。",
-            ),
             // 「文件在磁盘上已更改」 — the fact, said plainly. It does not say
             // *who* changed it, because this window does not know and a guess
             // ("another program") would be one more thing to disbelieve.
@@ -4777,11 +4745,30 @@ impl Text {
                 "This file was deleted. What you are reading is still here.",
                 "文件已被删除。你正在读的这一份还在。",
             ),
-            Self::RowPowerShellOffer => pick(lang, "PowerShell integration", "PowerShell 整合"),
-            Self::DescPowerShellOffer => pick(
+            Self::RowShellIntegration => pick(
                 lang,
-                "On offers setup. Off removes Folio's profile lines.",
-                "开启时提示安装整合。关闭时移除 Folio 写入 $PROFILE 的行。",
+                "Shell integration",
+                "Shell integration", // zh: pending T-INTEGRATION-INJECT-1
+            ),
+            Self::DescShellIntegration => pick(
+                lang,
+                "Command marks, folder tracking and inline math in new PowerShell sessions.",
+                "Command marks, folder tracking and inline math in new PowerShell sessions.", // zh: pending T-INTEGRATION-INJECT-1
+            ),
+            Self::RowPowerShellProfileLine => pick(
+                lang,
+                "PowerShell $PROFILE line",
+                "PowerShell $PROFILE line", // zh: pending T-INTEGRATION-INJECT-1
+            ),
+            Self::DescPowerShellProfileLine => pick(
+                lang,
+                "An earlier Folio added this startup line.",
+                "An earlier Folio added this startup line.", // zh: pending T-INTEGRATION-INJECT-1
+            ),
+            Self::RemovePowerShellProfileLine => pick(
+                lang,
+                "Remove the line from $PROFILE",
+                "Remove the line from $PROFILE", // zh: pending T-INTEGRATION-INJECT-1
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -5513,11 +5500,6 @@ impl Text {
             ),
             // 「整合」 and not 「集成」, on `CapNone`'s ruling above and for its
             // reason: one object may only have one name.
-            Self::FirstRunRowPowerShell => pick(
-                lang,
-                "Jump between commands in PowerShell",
-                "PowerShell 整合，支持命令间跳转",
-            ),
             Self::FirstRunRowClaude => pick(
                 lang,
                 "Mark the tab when Claude Code is waiting",
@@ -5542,11 +5524,6 @@ impl Text {
                 lang,
                 "Adds the entry for this Windows account only.",
                 "为当前 Windows 账户注册此菜单项",
-            ),
-            Self::FirstRunTipPowerShell => pick(
-                lang,
-                "Takes a dated copy of your $PROFILE, then appends one line to it.",
-                "先做带日期的副本，再追加一行到 $PROFILE",
             ),
             Self::ShellProfileEncoding => pick(
                 lang,
@@ -5607,20 +5584,10 @@ impl Text {
                 "The profile changed during the operation; retry when the editor is finished.",
                 "$PROFILE 在操作期间被改动，等编辑器关闭后重试。",
             ),
-            Self::ShellProfileScriptLocation => pick(
-                lang,
-                "The script must be under APPDATA\\Folio or APPDATA\\BetterTerminal, in shell-integration.",
-                "脚本必须位于 APPDATA\\Folio 或 APPDATA\\BetterTerminal 的 shell-integration 下。",
-            ),
             Self::ShellProfileNothing => pick(
                 lang,
                 "No Folio profile lines found.",
                 "未找到 Folio 整合行。",
-            ),
-            Self::ShellIntegrationPending => pick(
-                lang,
-                "Takes effect in the next PowerShell session",
-                "下次启动 PowerShell 时生效",
             ),
 
             // ── the application menu bar (M3-2, macOS) ─────────────────────
@@ -5896,21 +5863,8 @@ impl Text {
         Self::PsReadLineProbing,
         Self::PsReadLineRowNotOurs,
         Self::PsReadLineRemovedToast,
-        // — the `$PROFILE` integration: the row, the strip a pane raises, and
-        //   the line an outstanding first-run intent leaves on the row. The
-        //   strip cannot rise off Windows at all — `shell_integration`'s profile
-        //   probe answers `None` there — and the row is not on the page.
-        Self::RowPowerShellOffer,
-        Self::DescPowerShellOffer,
-        Self::PowerShellNoticeBody,
-        Self::ShellIntegrationPending,
         // Only the Windows PowerShell discovery worker can emit this refusal.
         Self::ShellProfileProbeFailed,
-        // The refusal `shell_integration::install_into_profile` gives when the
-        // data folder is not under `%APPDATA%`. The install is reached only from
-        // the strip above and the first-run PowerShell intent, and neither
-        // rises off Windows.
-        Self::ShellProfileScriptLocation,
         // — the Acrylic row's reason, which only a Windows with no backdrop
         //   reads: off Windows this build has no backdrop to ask for and
         //   `settings::visible_rows_for` does not offer the row at all (§13.32
@@ -5925,7 +5879,6 @@ impl Text {
         // — two first-run rows whose capabilities `first_run::rows_for` answers
         //   `false` for off Windows (M3-6): a Mac's card has one row, and it is
         //   the update check.
-        Self::FirstRunRowPowerShell,
         Self::FirstRunTipExplorer,
         // — the card that says the web engine is not installed (M4-3). It names
         //   a Microsoft product because on Windows that is the thing to install;
@@ -5938,7 +5891,26 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        (Self::RowShellIntegration, HostPlatform::Windows),
+        (Self::RowShellIntegration, HostPlatform::MacOs),
+        (Self::RowShellIntegration, HostPlatform::OtherUnix),
+        (Self::DescShellIntegration, HostPlatform::Windows),
+        (Self::DescShellIntegration, HostPlatform::MacOs),
+        (Self::DescShellIntegration, HostPlatform::OtherUnix),
+        (Self::RowPowerShellProfileLine, HostPlatform::Windows),
+        (Self::RowPowerShellProfileLine, HostPlatform::MacOs),
+        (Self::RowPowerShellProfileLine, HostPlatform::OtherUnix),
+        (Self::DescPowerShellProfileLine, HostPlatform::Windows),
+        (Self::DescPowerShellProfileLine, HostPlatform::MacOs),
+        (Self::DescPowerShellProfileLine, HostPlatform::OtherUnix),
+        (Self::RemovePowerShellProfileLine, HostPlatform::Windows),
+        (Self::RemovePowerShellProfileLine, HostPlatform::MacOs),
+        (Self::RemovePowerShellProfileLine, HostPlatform::OtherUnix),
+        (Self::CapPowerShellNotProvided, HostPlatform::Windows),
+        (Self::CapPowerShellNotProvided, HostPlatform::MacOs),
+        (Self::CapPowerShellNotProvided, HostPlatform::OtherUnix),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -8612,14 +8584,14 @@ mod tests {
 
     #[test]
     fn shell_integration_followup_settings_copy_budget() {
-        let description = Text::DescPowerShellOffer.in_lang(Lang::English);
+        let description = Text::DescShellIntegration.in_lang(Lang::English);
         let lines = crate::tooltip::wrap(description, 39.0, |run| run.chars().count() as f32);
         assert!(lines.len() <= 2, "{lines:?}");
         assert_eq!(
-            Text::RowPowerShellOffer.in_lang(Lang::English),
-            "PowerShell integration"
+            Text::RowShellIntegration.in_lang(Lang::English),
+            "Shell integration"
         );
-        assert!(description.contains("Off removes"));
+        assert!(description.contains("new PowerShell sessions"));
     }
 
     #[test]
@@ -9278,7 +9250,8 @@ mod tests {
     /// ([`crate::settings::visible_rows_for`]) and words that differ by platform
     /// — and this is the half that can be walked: every entry in the table, in
     /// both languages, read on the Mac column, against the vocabulary of the
-    /// other machine.
+    /// other machine. `PowerShell` is deliberately not such vocabulary: pwsh
+    /// and Folio's PowerShell integration are supported on every platform.
     ///
     /// **The exemption list is the other half of the claim.** An entry on it is
     /// one no Mac ever draws, because the surface it belongs to does not exist
@@ -9296,7 +9269,7 @@ mod tests {
     /// exemption list, and this names it.
     #[test]
     fn no_string_a_mac_reader_meets_names_a_windows_program() {
-        const WINDOWS_WORDS: [&str; 12] = [
+        const WINDOWS_WORDS: [&str; 11] = [
             // A folder only one machine has (0.4.4 ticket 07: the dark scheme
             // row sent a Mac reader to `%APPDATA%\Folio\schemes`).
             "APPDATA",
@@ -9308,7 +9281,6 @@ mod tests {
             "folio-here",
             ".msix",
             "PSReadLine",
-            "PowerShell",
             "Windows",
             // The web engine one machine has to be given and the other is born
             // with (M4-3). The one card that names it is a card no Mac can

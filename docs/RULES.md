@@ -76,13 +76,16 @@ Entries: §1.3 *the thread and resource model*; the `bt-pty` crate doc. Owner:
 prompt/input/output boundary for each screen that emits them: scanned before
 `vte` swallows them by `bt_term::inline_image::Osc1337Scanner`, kept in
 `bt_term::command_marks::CommandMarkLedger`, surfaced as
-`AdapterEvent::ShellIntegration`. PowerShell integration stays opt-in: Folio
-appends exactly one generated managed line (`profile_marks::managed_line_for`,
-carrying its own guard and version comment) to the `$PROFILE` **the shell itself
-named** — never a path this build assembles — keeps a dated `.bak-<YYYYMMDD>`
-beside it, and records the write in `integration-marks.json` so that
-`profile_runtime::begin_removal`, `--remove-shell-integration` and
-`--uninstall-cleanup` can undo exactly what Folio wrote. Every writer of that
+`AdapterEvent::ShellIntegration`. PowerShell integration is process-scoped and on
+by default: for an actual `powershell` or `pwsh` executable whose row contains
+only documented non-terminal host switches, the single spawn seam appends exactly
+`-NoExit -Command <guarded text loader>`. The loader reads Folio's own
+`shell-integration/folio.ps1`; it never writes `$PROFILE` or changes execution
+policy. Unknown, terminal or bare arguments receive no injection, and the profile
+capability sentence says so. Restart, split, duplicate, restore and Recent all use
+that same seam. An older Folio-managed `$PROFILE` line is observed but left
+byte-identical; only the explicit Settings remover, `--remove-shell-integration`
+or `--uninstall-cleanup` removes it. Every writer of that
 record takes the advisory lock with an explicit asker: `Asker::InApp` waits
 behind Folio's own writers with no deadline, and up to `OUR_TURN` for a holder
 in another process, reporting only that second wait running out; `Asker::Door`
@@ -90,10 +93,10 @@ refuses at once with the same error. Which holder is ours is known by
 construction — every writer in this process stands in `profile_marks`'s
 in-process queue before it takes the OS lock — never by asking the OS. `cmd.exe` carries `A` and `D` through its
 prompt string; `B` is still refused where there is no `C`.
-**From.** §7.6 *terminal notifications* (the single scanner seam, no vendor
-patch); §7.57 *`cmd.exe` finally has a scale on its command rail*; §7.1.6j (the
-opt-in `$PROFILE` offer, the backup, "ask the shell for `$PROFILE`, never spell
-it"); `docs/shell-integration.md`, which states it is the authority for the
+**From.** T-INTEGRATION-INJECT-1 (owner ruling 2026-10-04); §7.6 *terminal notifications* (the single scanner seam, no vendor
+patch); §7.57 *`cmd.exe` finally has a scale on its command rail*; superseded
+§7.1.6j (the old opt-in `$PROFILE` offer and backup; only its shell-owned
+profile-path discovery remains); `docs/shell-integration.md`, which states it is the authority for the
 protocol; trailing entry 2026-09-21 *Folio's own writers wait their turn for the
 marks record*; trailing entry 2026-09-21 *a removal that found nothing says
 nothing in the window*; trailing entry 2026-09-23 *a writer of Folio's waits
@@ -103,7 +106,9 @@ bound is only for a holder in another process*.
 case surfaced as a red toast. The 2026-09-23 entry replaces that entry's
 "`Asker::InApp` … waits its turn up to `OUR_TURN`" for a holder in this process,
 which gave a false `WouldBlock` whenever our own writer's I/O outlasted two
-seconds on a slow disk. There is no §7.1.5c; the marks rules live in the
+seconds. T-INTEGRATION-INJECT-1 replaces §7.1.6j's opt-in offer and automatic
+profile writer with process-scoped injection and an explicit legacy-line remover.
+There is no §7.1.5c; the marks rules live in the
 sections above.
 
 ### 5. The printed-path chain — `folded`
@@ -851,6 +856,10 @@ Trailing entry: 2026-09-25 (ticket 60) — `settings.json` v39 carries `web_page
 a receipt; the structural step writes `Never` and stays pure, and the window process
 completes the upgrade at startup from the session it has already loaded (a typed page
 record writes `Used` through the receipt's one writer; nothing writes `Never`).
+Trailing entry: 2026-10-04 (T-INTEGRATION-INJECT-1) — `shell_integration` is an
+additive default-on key in the current schema, with no migration rung; retired
+PowerShell offer and pending-intent keys remain accepted as unknown input and are
+not serialized.
 
 ### 32. Profiles — `not yet folded`
 Entries: §7.1.6c-6 *profiles as data*; §7.1.6c-6d *`profiles.json` is followed
@@ -901,9 +910,9 @@ each refused line named; *settings* through `parse_document` — an older part
 migrated, a future part refused whole — and then **each changed value through the
 function a press on its row calls, never by writing `settings.json` and waiting**,
 with the store's writes held so the batch lands as one write. A part the file does
-not carry is left alone. Four keys are receipts about this machine and are not
-imported (`first_run_card`, `powershell_install_pending`,
-`cards_gesture_hint_offer`, `web_pages_used`); `Focus mode` and `Offer PowerShell integration` are
+not carry is left alone. Three keys are receipts about this machine and are not
+imported (`first_run_card`, `cards_gesture_hint_offer`, `web_pages_used`);
+`Focus mode` and `Shell integration` are
 imported by pressing the row's own item, their only door; a row this platform
 does not have is stored and named. No confirmation before an import — it is the
 reader's deliberate gesture — and no network: syncing the file or the folder is a
@@ -924,8 +933,8 @@ doc. Strings are compiled in; the language revision invalidates the caches.
 `first_run_card` is `NotShown`. `Shown` is written the moment the card goes up,
 never when it is answered, and the v31 → v32 migration marks every existing file
 `Shown`. The card asks together the questions whose answers leave a mark outside
-what the reader opened: the update check, Explorer's right-click menu, the
-PowerShell integration, and each agent found on the path whose own configuration
+what the reader opened: the update check, Explorer's right-click menu, and each
+agent found on the path whose own configuration
 does not yet call Folio. Each row declares the platform capability it needs
 (`first_run::Capability`), and a row appears only where the platform has that
 capability and the machine can honour the row (`rows_for(platform, machine)`:
@@ -938,11 +947,9 @@ the card waits one turn for a fact that has not landed, then builds it as
 unknown, which is off); every other row arrives off. Every answer leaves the card
 as the press the Settings page sends (`settings_target`, through
 `apply_settings_choice_announcing`); the card installs nothing itself. `Done`
-spends every row that is on, and also the update check's and the PowerShell
-offer's answers when they are off. `Not now`, `Esc` and closing the window spend
-nothing, a row that arrived on included. The PowerShell row records an intent
-(`powershell_install_pending`) that the first PowerShell to name its `$PROFILE`
-spends. Success is silent; a failure raises its own card. Each row is one line;
+spends every row that is on, and also the update check's answer when it is off.
+`Not now`, `Esc` and closing the window spend nothing, a row that arrived on included.
+Each row is one line;
 the mechanism, and the address of the reader's own file, are in the row's
 tooltip, which only the pointer raises. Focus opens on the first switch with the
 ring hidden until a key the card acts on; `Enter` is `Done` and `Esc` is `Not
@@ -955,7 +962,8 @@ keeps its switches); 2026-09-26 *the first-run card's Explorer row arrives on
 exactly where the install marker says the manager has an uninstall hook*.
 **Overrides.** v4 and v5 replace v3's headings, second lines, row lines and
 hover fill. The 2026-09-26 entry replaces "the update check is the only row that
-arrives on".
+arrives on". T-INTEGRATION-INJECT-1 removes the PowerShell row and its pending
+intent; process-scoped integration asks no first-run question.
 
 ### 36. The update check — `folded`
 **Rule.** **The check.** At most once every 24 hours across every window on the
@@ -1162,8 +1170,7 @@ turn for the marks record*.
 **Overrides.** §7.47 replaces the silently refusing switch. The 2026-09-20
 occupancy entry replaces row-level checks with `install_checked`.
 **The debt this rule carries, from the entry's own admission.**
-`Runtime::apply_psreadline`, the three agent-hook rows, `add_to_profile` and
-`spend_powershell_intent` — five press handlers — still take the marks lock **on
+`Runtime::apply_psreadline` and the three agent-hook rows — four press handlers — still take the marks lock **on
 the window thread**, deliberately, because each already reads and writes those
 files synchronously there. Moving them onto workers is named as a 0.4.4 ticket
 and **no ticket id has been issued**. See `docs/ARCHITECTURE.md` §5.3 rows 2–4.
@@ -1199,8 +1206,9 @@ sweep without participating in that guard.
 Entries: the attention plan's endpoint section; §7.51; §13.37.
 
 ### 41. The uninstall doors — `folded`
-**Rule.** Folio writes four classes of thing outside its own folder — edits to
-other programs' files (agent hooks, the `$PROFILE` line, the patched module),
+**Rule.** Folio must undo classes of thing outside its own folder — edits to
+other programs' files (agent hooks and the patched module), historical `$PROFILE`
+lines that current Folio only detects/removes,
 system registrations (the Explorer verb, the sparse package, the toast identity),
 and its own data roots — and **every one of them must be inert and silent when
 `folio.exe` is missing, and must have a non-interactive undo owned by the module

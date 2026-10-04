@@ -7,7 +7,7 @@
 //!
 //! | profile | mechanism |
 //! |---|---|
-//! | PowerShell | an exact guarded `$PROFILE` line, installed on explicit opt-in |
+//! | PowerShell | `-NoExit -Command <guarded text loader>`, when the row's switches are safe |
 //! | Git Bash | `bash --init-file <script> <its own words, less the login flag>` |
 //! | a zsh | `ZDOTDIR`, pointed at a directory holding the script three times |
 //! | WSL | `wsl.exe … -e sh -c <the login-shell question> folio <script> <zdotdir>` |
@@ -36,7 +36,10 @@
 use std::{
     ffi::{OsStr, OsString},
     path::{Path, PathBuf},
-    sync::OnceLock,
+    sync::{
+        OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use bt_platform::LocaleDeclaration;
@@ -50,8 +53,8 @@ use crate::{
 pub mod profile_marks;
 mod profile_runtime;
 pub use profile_runtime::{
-    begin_enable, begin_removal, begin_startup_migration, remove_shell_integration,
-    remove_shell_integration_at, take_removal,
+    begin_removal, begin_startup_migration, remove_shell_integration, remove_shell_integration_at,
+    take_removal,
 };
 
 /// The script, compiled in.
@@ -429,27 +432,33 @@ fn install_zdotdir() -> Option<PathBuf> {
     Some(directory)
 }
 
-/// Where this build's installed halves are on this machine — **one per door
-/// that has a file**, because bash's is a file and zsh's is a directory.
+/// Where this build's installed integration assets are on this machine — **one
+/// per door that has a file**, because bash and PowerShell use files while zsh
+/// uses a directory.
 ///
-/// A pair rather than two parameters, so that a caller cannot hand the bash
-/// script to a zsh: which one a profile is served by is [`profiles::Integration`]'s
-/// answer and not the caller's, and it is asked inside [`shell_command`].
+/// One value rather than three parameters, so a caller cannot hand the bash
+/// script to zsh or PowerShell: the profile family is answered inside the
+/// composition.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Scripts<'a> {
     /// `folio.bash`, named by `--init-file`.
     pub bash: Option<&'a Path>,
     /// The directory `folio.zsh` was written into, named by `ZDOTDIR`.
     pub zdotdir: Option<&'a Path>,
+    /// `folio.ps1`, read as text by the PowerShell startup command.
+    pub powershell: Option<&'a Path>,
 }
 
 impl<'a> Scripts<'a> {
-    /// The pair this machine has, both written out on first use.
+    /// The integration assets this machine has. PowerShell's was prepared by
+    /// the pre-window startup worker; the older shell doors retain their
+    /// first-use preparation.
     #[must_use]
     pub fn installed() -> Scripts<'static> {
         Scripts {
             bash: script_path(),
             zdotdir: zdotdir_path(),
+            powershell: powershell_script_repaired(),
         }
     }
 }
@@ -480,11 +489,28 @@ pub struct ShellCommand {
 /// variable this process already has one of, and prefixing rather than replacing
 /// it means the composition has to see what is there.
 #[must_use]
+#[cfg(test)]
 pub fn shell_command(
     profile: &Profile,
     place_arguments: &[OsString],
     scripts: Scripts<'_>,
     environment: &dyn ShellEnvironment,
+) -> ShellCommand {
+    shell_command_for_program(profile, place_arguments, scripts, environment, None, false)
+}
+
+/// [`shell_command`] with the resolved executable and the reader's PowerShell
+/// integration switch. The program is supplied at the spawn seam: a profile's
+/// declared integration is a hint, while the executable actually being born is
+/// the authority for whether PowerShell syntax is admissible.
+#[must_use]
+pub fn shell_command_for_program(
+    profile: &Profile,
+    place_arguments: &[OsString],
+    scripts: Scripts<'_>,
+    environment: &dyn ShellEnvironment,
+    program: Option<&Path>,
+    powershell_integration: bool,
 ) -> ShellCommand {
     // The row's login flag and then its own words (0.4.6 ticket 74): what the row
     // asks the program for, before any door below trades a word for its script.
@@ -497,6 +523,14 @@ pub fn shell_command(
             .collect::<Vec<_>>()
     };
     let mut command = shell_command_for(profile, scripts, environment, &own);
+    if let Some(program) = program {
+        command.arguments = compose_powershell_arguments(
+            program,
+            &command.arguments,
+            scripts.powershell,
+            powershell_integration,
+        );
+    }
     let mine = &profile.env;
     command.environment.extend(hyperlink_declaration(
         profiles::served_by(profile),
@@ -518,6 +552,107 @@ pub fn shell_command(
     }
     layer_profile_environment(&mut command.environment, mine);
     command
+}
+
+/// Compose a PowerShell process's complete argv without changing the row's own words.
+///
+/// This is the one process-scoped integration seam. It is deliberately pure so the exact argv
+/// can be pinned independently of ConPTY and every way a leaf is requested.
+#[must_use]
+pub fn compose_powershell_arguments(
+    program: &Path,
+    row_arguments: &[OsString],
+    script: Option<&Path>,
+    enabled: bool,
+) -> Vec<OsString> {
+    let mut arguments = row_arguments.to_vec();
+    if enabled
+        && let Some(script) = script
+        && is_powershell(program)
+        && powershell_arguments_are_safe(program, row_arguments)
+    {
+        arguments.push(OsString::from("-NoExit"));
+        arguments.push(OsString::from("-Command"));
+        arguments.push(OsString::from(powershell_load_command(program, script)));
+    }
+    arguments
+}
+
+/// Whether every existing word is a documented non-terminal PowerShell host
+/// option whose arity Folio knows. This is intentionally an allowlist: a new
+/// host switch is unsafe until its relationship with the appended `-Command`
+/// is understood.
+#[must_use]
+pub fn powershell_arguments_are_safe(program: &Path, arguments: &[OsString]) -> bool {
+    let pwsh = program
+        .file_stem()
+        .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case("pwsh"));
+    let mut at = 0;
+    while at < arguments.len() {
+        let word = arguments[at].to_string_lossy();
+        let Some(option) = word.strip_prefix('-').or_else(|| word.strip_prefix('/')) else {
+            return false;
+        };
+        let option = option.to_ascii_lowercase();
+        let takes_value = matches!(
+            option.as_str(),
+            "executionpolicy"
+                | "windowstyle"
+                | "inputformat"
+                | "outputformat"
+                | "configurationname"
+        ) || (!pwsh && matches!(option.as_str(), "version" | "psconsolefile"))
+            || (pwsh
+                && matches!(
+                    option.as_str(),
+                    "workingdirectory" | "settingsfile" | "custompipename" | "configurationfile"
+                ));
+        if takes_value {
+            at += 1;
+            if at == arguments.len() {
+                return false;
+            }
+        } else if !(matches!(
+            option.as_str(),
+            "nologo" | "noprofile" | "noexit" | "sta" | "mta"
+        ) || (pwsh && at == 0 && matches!(option.as_str(), "login" | "l")))
+        {
+            return false;
+        }
+        at += 1;
+    }
+    true
+}
+
+fn powershell_single_quoted(value: &Path) -> String {
+    let mut escaped = String::new();
+    for character in value.to_string_lossy().chars() {
+        if matches!(
+            character,
+            '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}'
+        ) {
+            escaped.push(character);
+        }
+        escaped.push(character);
+    }
+    format!("'{escaped}'")
+}
+
+/// The command text appended after `-NoExit -Command`.
+#[must_use]
+pub fn powershell_load_command(program: &Path, script: &Path) -> String {
+    let path = powershell_single_quoted(script);
+    let revive = if program
+        .file_stem()
+        .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case("pwsh"))
+    {
+        "if (-not (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and ([AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq 'Microsoft.PowerShell.PSReadLine' })) { Import-Module (Join-Path $PSHOME 'Modules\\PSReadLine\\Microsoft.PowerShell.PSReadLine.dll') }; "
+    } else {
+        ""
+    };
+    format!(
+        "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ {revive}if ((Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and -not (Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction Ignore)) {{ $Global:__FolioReadLineType = (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine | Where-Object ImplementingAssembly | Select-Object -Last 1).ImplementingAssembly.GetType('Microsoft.PowerShell.PSConsoleReadLine'); function global:PSConsoleHostReadLine {{ $lastRunStatus = $?; Microsoft.PowerShell.Core\\Set-StrictMode -Off; $Global:__FolioReadLineType::ReadLine($host.Runspace, $ExecutionContext, $lastRunStatus) }} }}; if (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) {{ . ([scriptblock]::Create([IO.File]::ReadAllText({path}))) }} }}"
+    )
 }
 
 /// Write this profile's own environment over what the terminal has said —
@@ -1102,6 +1237,31 @@ const SCRIPT_FILE_PS1: &str = "folio.ps1";
 /// The sub-directory of `%APPDATA%\Folio\` both scripts live in.
 const SCRIPT_DIRECTORY: &str = "shell-integration";
 
+static POWERSHELL_INTEGRATION: AtomicBool = AtomicBool::new(true);
+static REPAIRED_POWERSHELL_SCRIPT: OnceLock<Option<PathBuf>> = OnceLock::new();
+static POWERSHELL_PROFILE_LINE_PRESENT: AtomicBool = AtomicBool::new(false);
+
+/// Publish the persisted answer for subsequent shell births.
+pub fn set_powershell_integration(enabled: bool) {
+    POWERSHELL_INTEGRATION.store(enabled, Ordering::Release);
+}
+
+#[must_use]
+pub fn powershell_integration_enabled() -> bool {
+    POWERSHELL_INTEGRATION.load(Ordering::Acquire)
+}
+
+/// The startup/removal worker's cached answer for the conditional Settings
+/// verb. Reading Settings never touches the profile itself.
+#[must_use]
+pub fn powershell_profile_line_present() -> bool {
+    POWERSHELL_PROFILE_LINE_PRESENT.load(Ordering::Acquire)
+}
+
+fn publish_powershell_profile_line_present(present: bool) {
+    POWERSHELL_PROFILE_LINE_PRESENT.store(present, Ordering::Release);
+}
+
 /// Whether this program is a PowerShell at all.
 ///
 /// The stem rather than the whole leaf, for [`profiles::derive_integration`]'s
@@ -1179,16 +1339,6 @@ fn profile_key(program: &Path) -> PathBuf {
     }
 }
 
-fn profile_slot(program: &Path) -> (ProfileAnswer, bool) {
-    let key = profile_key(program);
-    let mut answers = PROFILE_ANSWERS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    let fresh = !answers.contains_key(&key);
-    (answers.entry(key).or_default().clone(), fresh)
-}
-
 /// Resolving executable aliases can touch disk, so it happens only on workers.
 /// All aliases point at the same OnceLock before any worker asks PowerShell.
 fn cached_profile_answer(program: &Path) -> Option<PathBuf> {
@@ -1262,51 +1412,6 @@ static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 /// reader typed something.
 pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = WAKE.set(Box::new(wake));
-}
-
-/// Where `program` keeps its `$PROFILE`, or `None` while it is still being
-/// asked.
-///
-/// The outer `Option` is "has the machine answered"; the inner one is the
-/// answer, which is `None` for a shell that could not be started or said
-/// nothing. Asking is started by the first call and never repeated: a
-/// `$PROFILE` path is a property of an installation, and a build that re-asked
-/// per pane would start a process every time somebody split a window.
-#[must_use]
-pub fn profile_probe(program: &Path) -> Option<Option<PathBuf>> {
-    // **The diagnostics door**, in the family of `BT_PSREADLINE_DOCUMENTS` and
-    // for exactly its reason: the two verbs below write into a file that belongs
-    // to the reader's shell, and exercising them on a development machine must
-    // not mean editing that developer's own `$PROFILE`. `BT_POWERSHELL_PROFILE=
-    // <file>` moves the whole path — read and write together, so a run cannot
-    // report "installed" about one file while writing another.
-    if let Some(sandbox) = std::env::var_os("BT_POWERSHELL_PROFILE") {
-        let sandbox = PathBuf::from(sandbox);
-        return Some(sandbox.is_absolute().then_some(sandbox));
-    }
-    let (slot, fresh) = profile_slot(program);
-    if let Some(answer) = slot.get() {
-        return Some(answer.clone());
-    }
-    if fresh {
-        begin_profile_probe(program);
-    }
-    None
-}
-
-/// The same OnceLock is shared with startup. A pane never waits for its value.
-fn begin_profile_probe(program: &Path) {
-    let program = program.to_path_buf();
-    let _ = bt_platform::spawn_at_priority(
-        "powershell-profile-probe",
-        bt_platform::ThreadPriority::BelowNormal,
-        move |_ctx| {
-            cached_profile_answer(&program);
-            if let Some(wake) = WAKE.get() {
-                wake();
-            }
-        },
-    );
 }
 
 #[cfg(windows)]
@@ -1405,22 +1510,13 @@ pub fn integration_line() -> String {
     profile_marks::MANAGED_LINE.to_owned()
 }
 
-fn account_managed_line(data: &Path) -> std::io::Result<&'static str> {
-    let appdata = std::env::var_os("APPDATA")
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            std::io::Error::other(crate::i18n::Text::ShellProfileScriptLocation.text())
-        })?;
-    profile_marks::managed_line_for(data, &appdata)
-}
-
-/// Where PowerShell's script is on this machine, written out on first use.
+/// Where PowerShell's script is on this machine, repaired before the first pane.
 ///
 /// [`script_path`]'s sibling, down to the compare-before-write: the two scripts
 /// are two halves of one agreement with this build, they ship inside the same
 /// executable, and they land in the same directory. What differs is *when* —
-/// bash's is written because a bash is starting, and this one is written
-/// because somebody pressed the verb that is about to name it.
+/// bash's is written because a bash is starting, and this one is written by the
+/// startup preparation worker before any native window or pane exists.
 pub fn script_path_ps1() -> Option<PathBuf> {
     install_script_at(
         &persist::storage_dir().join(SCRIPT_DIRECTORY),
@@ -1429,15 +1525,20 @@ pub fn script_path_ps1() -> Option<PathBuf> {
     )
 }
 
-/// Script upkeep is started by the migration worker once per resident run.
-/// Reading a pane's offer is side-effect free; it cannot start migration or write
-/// shared data. Both scripts still use install_script_at's compare-and-repair.
+/// Script upkeep is started by the startup worker once per resident run.
+/// Both scripts still use `install_script_at`'s compare-and-repair.
 pub fn powershell_script_repaired() -> Option<&'static Path> {
-    static REPAIRED: OnceLock<Option<PathBuf>> = OnceLock::new();
-    REPAIRED.get_or_init(script_path_ps1).as_deref()
+    REPAIRED_POWERSHELL_SCRIPT.get().and_then(Option::as_deref)
+}
+
+fn repair_powershell_script() -> Option<&'static Path> {
+    REPAIRED_POWERSHELL_SCRIPT
+        .get_or_init(script_path_ps1)
+        .as_deref()
 }
 
 /// What one write into a profile did.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfileWrite {
     /// The file that now carries the line.
@@ -1457,6 +1558,7 @@ pub fn add_to_profile(
     add_profile_with_forms(profile, line, &profile_marks::Forms::new(&[]), at)
 }
 
+#[cfg(test)]
 fn add_profile_with_forms(
     profile: &Path,
     line: &str,
@@ -1697,150 +1799,6 @@ fn backup_path(profile: &Path, at: std::time::SystemTime) -> PathBuf {
     profile.with_file_name(name)
 }
 
-/// What one pane owes the reader about its shell integration, and what has been
-/// done about it (§7.1.6j).
-///
-/// **On the leaf**, beside the profile and the program, for their reason: it is
-/// a fact about *this process* — which PowerShell it is and what its startup
-/// file says — so a tear-out carries it with the shell rather than re-deriving
-/// it from whichever tab the pane lands in. The strip drawn from it is a
-/// projection ([`crate::seats::Seats::set_notices`]); this is the record.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum Offer {
-    /// Nothing to say. This pane is not a PowerShell, or its `$PROFILE` already
-    /// dot-sources the script, or the reader has ended the asking, or this run
-    /// has already asked somewhere else ([`offer_once_per_run`]).
-    #[default]
-    Silent,
-    /// Owed, and this is the file it is about. Shown once the shell has spoken —
-    /// see [`Offer::showing`].
-    Owed(PathBuf),
-    /// The line has been written into that file.
-    Added,
-    /// Dismissed with the `×` or with Esc. **Not** the same as [`Self::Silent`]:
-    /// nothing was decided, so the next *run* asks again — which since the one
-    /// ask per run ([`offer_once_per_run`], user ruling 2026-08-27) is the whole
-    /// of what the distinction buys. It used to be the next PowerShell pane.
-    Closed,
-}
-
-impl Offer {
-    /// Whether a pane holding this offer draws a strip, and which one.
-    ///
-    /// `spoken` is whether the shell has put anything on its screen at all,
-    /// which is the honest reading of "the first prompt has been drawn" for the
-    /// one pane that cannot report a prompt: a shell with no integration sends
-    /// no `OSC 133;A`, so waiting for one would be waiting forever in exactly
-    /// the case the offer exists for.
-    ///
-    /// `markers_seen` retracts it outright. A `133` on the primary screen is the
-    /// integration answering for itself, and it can arrive in a pane this
-    /// function said was owed one — a reader who installed the script some other
-    /// way, a `$PROFILE` that sources a copy under a name this build does not
-    /// recognise, a shell that was restarted after the line was written. The
-    /// offer is a claim about what is missing, and evidence that nothing is
-    /// missing ends it without anybody pressing anything.
-    #[must_use]
-    pub fn showing(&self, spoken: bool, markers_seen: bool) -> Option<crate::notice::Notice> {
-        if markers_seen {
-            return None;
-        }
-        match self {
-            Self::Owed(_) if spoken => Some(crate::notice::Notice::Offer),
-            Self::Added => Some(crate::notice::Notice::Added),
-            Self::Silent | Self::Owed(_) | Self::Closed => None,
-        }
-    }
-
-    /// The `$PROFILE` this offer is about, while it is still an offer.
-    #[must_use]
-    pub fn profile(&self) -> Option<&Path> {
-        match self {
-            Self::Owed(profile) => Some(profile.as_path()),
-            Self::Silent | Self::Added | Self::Closed => None,
-        }
-    }
-}
-
-/// What a pane whose `$PROFILE` is `profile` owes.
-///
-/// **The file is read here and once.** A `$PROFILE` is read by the shell at
-/// startup and by nothing afterwards, so its contents at the moment this pane
-/// started are the contents this pane is running under; re-reading it every
-/// frame would be asking the disk a question whose answer cannot change what the
-/// running shell does. The one thing that *can* change — somebody installing the
-/// integration elsewhere — is caught by the marker instead ([`Offer::showing`]),
-/// which is evidence rather than a guess.
-///
-/// The path is passed rather than derived, and that is the whole seam: it comes
-/// from [`profile_probe`], which asks the shell, and a test can put any path in
-/// front of this function including one on a drive the Documents known folder
-/// has never heard of.
-#[must_use]
-pub fn offer_for(profile: &Path) -> Offer {
-    match bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, profile)
-        .and_then(|bytes| profile_marks::Decoded::read(&bytes))
-    {
-        Ok(decoded) if profile_suppresses_integration_offer(&decoded.text) => Offer::Silent,
-        Ok(_) | Err(_) => Offer::Owed(profile.to_path_buf()),
-    }
-}
-
-/// The same answer, spent against **this run's one ask** (user ruling
-/// 2026-08-27).
-///
-/// The strip was a per-leaf fact and nothing above it counted, so the question
-/// was put again at every launch *and* at every new PowerShell pane in a window
-/// that had already asked and been closed. `×` deliberately decides nothing
-/// ([`Offer::Closed`]) — the right answer to "did this reader say no?" and the
-/// wrong one to "how many times may this reader be asked?": somebody with four
-/// PowerShell panes was asked four times about one file, and closing each one
-/// bought them nothing.
-///
-/// So the counting lives one layer up, on the process. `asked` starts `false` at
-/// launch; the first pane that is actually **owed** a strip turns it true and
-/// keeps its offer, and every pane after it — any tab, any window — is given
-/// [`Offer::Silent`], which is the record that this pane is not being asked
-/// rather than a claim that it has nothing to be asked about.
-///
-/// **A pane that owes nothing spends nothing.** A `$PROFILE` that already
-/// dot-sources the script answers `Silent` and leaves the ask where it was, so a
-/// reader whose first PowerShell is integrated and whose second is not is still
-/// asked once — about the second.
-///
-/// **It is not written to disk, and that is the whole difference between this
-/// and `Don't show again`.** The flag dies with the process, so tomorrow's
-/// launch asks once more; the setting (`powershell_integration_offer`) is what
-/// ends the asking for good, and it is still the only thing that can.
-#[must_use]
-pub fn offer_once_per_run(profile: &Path, asked: &mut bool) -> Offer {
-    let offer = offer_for(profile);
-    if !matches!(offer, Offer::Owed(_)) {
-        return offer;
-    }
-    if *asked {
-        return Offer::Silent;
-    }
-    *asked = true;
-    offer
-}
-
-/// Write the line into `profile`, installing the script first if it is not on
-/// disk yet.
-///
-/// Returns what was written and what was copied, or the reason nothing was.
-pub fn install_into_profile(
-    profile: &Path,
-    at: std::time::SystemTime,
-) -> std::io::Result<ProfileWrite> {
-    let data = persist::storage_dir();
-    let line = account_managed_line(&data)?;
-    let script = script_path_ps1().ok_or_else(|| {
-        std::io::Error::other("the integration script could not be written to %APPDATA%")
-    })?;
-    profile_runtime::install_recorded(profile, &data, &script, line, at)
-}
-
 /// The script's own text, for the tests that check what ships.
 #[cfg(test)]
 pub(crate) const fn script_source() -> &'static str {
@@ -1869,6 +1827,7 @@ pub(crate) const fn script_source_zsh() -> &'static str {
 mod tests {
     use super::*;
     use crate::profiles::{Origin, ProgramSource};
+    use bt_source::{Index, Pattern, Search, View, needle};
 
     #[test]
     fn shell_integration_startup_and_pane_share_one_query_even_on_failure() {
@@ -2049,7 +2008,10 @@ mod tests {
         ] {
             assert!(removed < main.find(later).unwrap(), "{later}");
         }
-        assert!(source.contains("shell_integration::begin_startup_migration();"));
+        let prepare = source
+            .find("shell_integration::begin_startup_migration();")
+            .expect("startup prepares the PowerShell script");
+        assert!(prepare < source.find("opening_window_attributes(").unwrap());
         assert!(source.contains("shell_integration::begin_removal();"));
         let runtime = include_str!("shell_integration/profile_runtime.rs");
         let worker = runtime
@@ -2059,7 +2021,11 @@ mod tests {
             .split_once("fn candidates")
             .unwrap()
             .0;
-        assert!(worker.find("spawn_at_priority").unwrap() < worker.find("operate(&data").unwrap());
+        let spawned = worker.find("\"powershell-script-prepare\"").unwrap();
+        let repaired = worker.find("repair_powershell_script()").unwrap();
+        let joined = worker.find("worker.join()").unwrap();
+        let observed = worker.find("\"powershell-profile-observation\"").unwrap();
+        assert!(spawned < repaired && repaired < joined && joined < observed);
         let probe = source_for_profile_probe();
         assert!(probe.contains("quiet_command_named"));
         assert!(probe.contains("-NoProfile"));
@@ -2070,10 +2036,8 @@ mod tests {
     /// and the console door keeps its sentence.**
     ///
     /// Two doors read the same `Report` and they owe different things. The
-    /// window is not owed a toast about a `$PROFILE` line that was never there
-    /// — that toast was a new machine's first sight of Folio, because the
-    /// first-run card's PowerShell row left off presses the Settings page's
-    /// `Off` and `Off` runs a removal. Somebody who typed
+    /// window is not owed a toast about a `$PROFILE` line that was never there.
+    /// Somebody who typed
     /// `--remove-shell-integration` *is* owed an answer, so that door still
     /// prints `ShellProfileNothing`.
     ///
@@ -2229,6 +2193,179 @@ mod tests {
 
     fn bare() -> Env {
         Env(Vec::new())
+    }
+
+    #[test]
+    fn powershell_spawn_appends_the_exact_loader_suffix_and_escapes_every_apostrophe() {
+        let script =
+            Path::new("C:/Folio/用户 目录/a'b\u{2018}c\u{2019}d\u{201a}e\u{201b}f/folio.ps1");
+        let row_words = [OsString::from("-NoProfile")];
+        let actual =
+            compose_powershell_arguments(Path::new("pwsh.exe"), &row_words, Some(script), true);
+        assert_eq!(&actual[..1], row_words.as_slice());
+        assert_eq!(actual[1], "-NoExit");
+        assert_eq!(actual[2], "-Command");
+        let load = actual[3].to_string_lossy();
+        for doubled in ["a''b", "b‘ ‘c", "c’ ’d", "d‚ ‚e", "e‛ ‛f"] {
+            let expected = doubled.replace(' ', "");
+            assert!(
+                load.contains(&expected),
+                "{expected:?} was not doubled in {load:?}"
+            );
+        }
+        assert!(load.contains("用户 目录"), "{load}");
+        assert!(load.contains("[IO.File]::ReadAllText("), "{load}");
+        assert!(load.contains("[scriptblock]::Create"), "{load}");
+        assert!(!actual.iter().skip(1).any(|word| word == "-NoLogo"));
+    }
+
+    #[test]
+    fn powershell_argument_allowlist_composes_only_documented_non_terminal_switches() {
+        let script = Path::new("C:/Folio/folio.ps1");
+        let composed = |program: &str, words: &[&str], enabled: bool| {
+            let own = words.iter().map(OsString::from).collect::<Vec<_>>();
+            compose_powershell_arguments(Path::new(program), &own, Some(script), enabled)
+                .iter()
+                .map(|word| word.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+
+        let common = [
+            vec![],
+            vec!["-NoLogo"],
+            vec!["/NoProfile"],
+            vec!["-NoExit"],
+            vec!["-Sta"],
+            vec!["-Mta"],
+            vec!["-ExecutionPolicy", "RemoteSigned"],
+            vec!["-WindowStyle", "Hidden"],
+            vec!["-InputFormat", "Text"],
+            vec!["-OutputFormat", "Text"],
+            vec!["-ConfigurationName", "Microsoft.PowerShell"],
+        ];
+        for program in ["powershell.exe", "pwsh.exe"] {
+            for words in &common {
+                let actual = composed(program, words, true);
+                assert_eq!(
+                    &actual[..words.len()],
+                    words.as_slice(),
+                    "{program} {words:?}"
+                );
+                assert_eq!(
+                    &actual[words.len()..words.len() + 2],
+                    ["-NoExit", "-Command"]
+                );
+                assert_eq!(
+                    actual.last().unwrap(),
+                    &powershell_load_command(Path::new(program), script),
+                    "{program} {words:?}"
+                );
+            }
+        }
+        for words in [
+            vec!["-Version", "5.1"],
+            vec!["-PSConsoleFile", "console.psc1"],
+        ] {
+            assert_eq!(
+                composed("powershell.exe", &words, true).len(),
+                words.len() + 3
+            );
+        }
+        for words in [
+            vec!["-Login"],
+            vec!["-l"],
+            vec!["-WorkingDirectory", "C:/demo"],
+            vec!["-SettingsFile", "settings.json"],
+            vec!["-CustomPipeName", "folio"],
+            vec!["-ConfigurationFile", "folio.pssc"],
+        ] {
+            assert_eq!(composed("pwsh.exe", &words, true).len(), words.len() + 3);
+        }
+
+        let refused = [
+            vec!["-File", "x.ps1"],
+            vec!["-f", "x.ps1"],
+            vec!["-Command"],
+            vec!["-c"],
+            vec!["-EncodedCommand", "QQA="],
+            vec!["-ec", "QQA="],
+            vec!["-cwa", "Get-Date"],
+            vec!["/c", "Get-Date"],
+            vec!["Get-Date"],
+            vec!["-NonInteractive"],
+        ];
+        for program in ["powershell.exe", "pwsh.exe"] {
+            for words in &refused {
+                assert_eq!(
+                    composed(program, words, true),
+                    *words,
+                    "unsafe argv changed: {program} {words:?}"
+                );
+            }
+        }
+        assert_eq!(composed("pwsh.exe", &[], false), Vec::<String>::new());
+    }
+
+    #[test]
+    fn powershell_loader_is_guarded_and_pwsh_revives_only_the_loaded_assembly() {
+        let path = Path::new("C:/Folio/folio.ps1");
+        let winps = powershell_load_command(Path::new("powershell.exe"), path);
+        let pwsh = powershell_load_command(Path::new("pwsh.exe"), path);
+        for load in [&winps, &pwsh] {
+            assert!(load.starts_with(
+                "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage')"
+            ));
+            assert!(load.contains("Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine"));
+            assert!(load.contains("function global:PSConsoleHostReadLine"));
+            assert!(load.contains("Microsoft.PowerShell.Core\\Set-StrictMode -Off"));
+        }
+        assert!(!winps.contains("GetAssemblies"));
+        assert!(pwsh.contains("GetAssemblies"));
+        assert!(pwsh.contains("Microsoft.PowerShell.PSReadLine.dll"));
+    }
+
+    #[test]
+    fn every_terminal_birth_uses_the_one_powershell_composition() {
+        let index = Index::of_package("bt-app");
+        let constructor = index
+            .body_of(&bt_source::ItemQuery::function("create_leaf_session"))
+            .expect("the one terminal-leaf constructor");
+        assert_eq!(
+            constructor.matches("shell_command_for_program(").count(),
+            1,
+            "the leaf constructor must ask the PowerShell composition exactly once"
+        );
+
+        let found = index
+            .search(&Search::new(
+                needle!(Pattern::identifier("create_leaf_session")),
+                View::Identifiers,
+            ))
+            .expect("the constructor's complete call census")
+            .in_the_product(index);
+        let mut owners = found
+            .owners(index)
+            .into_keys()
+            .map(|identity| match identity.type_owner {
+                Some(owner) => format!("{owner}::{}", identity.name),
+                None => identity.name,
+            })
+            .collect::<Vec<_>>();
+        owners.sort();
+        owners.dedup();
+        assert_eq!(
+            owners,
+            [
+                "Runtime::pop_out_preview",
+                "Runtime::restart_shell",
+                "Runtime::split_seat",
+                "create_leaf_session",
+                "create_tab_state",
+            ],
+            "new tab, restore, Recent and Duplicate enter through create_tab_state; split, \
+             Restart shell and preview stand-in enter directly; every terminal birth still \
+             reaches the constructor that composes PowerShell"
+        );
     }
 
     fn prompt_of(command: &ShellCommand) -> String {
@@ -2541,6 +2678,7 @@ mod tests {
         let doors = Scripts {
             bash: Some(script),
             zdotdir: Some(zdotdir),
+            powershell: None,
         };
         let first = shell_command(&row("wsl"), &place, doors, &bare());
         assert_eq!(
@@ -2646,6 +2784,7 @@ mod tests {
                 Scripts {
                     bash: Some(Path::new(unreachable)),
                     zdotdir: Some(Path::new(unreachable)),
+                    powershell: None,
                 },
                 &bare(),
             );
@@ -2662,6 +2801,7 @@ mod tests {
         Scripts {
             bash: Some(script),
             zdotdir: None,
+            powershell: None,
         }
     }
 
@@ -2670,6 +2810,7 @@ mod tests {
         Scripts {
             bash: Some(Path::new(bash)),
             zdotdir: Some(Path::new(zdotdir)),
+            powershell: None,
         }
     }
 
@@ -2955,6 +3096,7 @@ mod tests {
         let scripts = Scripts {
             bash: Some(&script),
             zdotdir: Some(&zdotdir),
+            powershell: None,
         };
 
         let rows = profiles::shipped_for(profiles::SeedPlatform::MacOs, &Mac);
@@ -3703,105 +3845,6 @@ mod tests {
         assert_eq!(parse_profile_answer(""), None);
     }
 
-    /// A shell whose file already carries the line is asked nothing. This is the
-    /// state the machine this was written on is in, and a build that offered
-    /// here would be offering to install something that is installed.
-    #[test]
-    fn a_profile_that_already_loads_the_script_owes_nothing() {
-        let documents = temp_dir("installed");
-        let profile = documents.join(PROFILE_LEAF);
-        std::fs::write(&profile, LINE).unwrap();
-        assert_eq!(offer_for(&profile), Offer::Silent);
-        let absent = documents.join("never-written.ps1");
-        assert_eq!(
-            offer_for(&absent),
-            Offer::Owed(absent.clone()),
-            "a profile that is not there is a profile with no line in it"
-        );
-    }
-
-    /// PIN — **one ask per run, and the run is the process** (user ruling
-    /// 2026-08-27).
-    ///
-    /// Red gate for the whole of the ruling, and the four cases are the four
-    /// sentences it was given in. The failure it exists to stop is the one the
-    /// release audit reported: a reader with two PowerShell panes asked twice
-    /// about one file, and asked again at the next launch no matter how many
-    /// times they had closed it.
-    #[test]
-    fn one_powershell_is_asked_per_run_and_the_next_run_asks_again() {
-        let documents = temp_dir("once-per-run");
-        let first = documents.join("first.ps1");
-        let second = documents.join("second.ps1");
-
-        // One run. The first pane that owes a strip is the only pane asked.
-        let mut asked = false;
-        assert_eq!(
-            offer_once_per_run(&first, &mut asked),
-            Offer::Owed(first.clone())
-        );
-        assert!(asked, "the run has spent its ask");
-        assert_eq!(
-            offer_once_per_run(&second, &mut asked),
-            Offer::Silent,
-            "a second PowerShell pane in the same run is not asked, whatever \
-             tab or window it stands in"
-        );
-
-        // A new process starts over: the flag is not written down anywhere.
-        let mut next_run = false;
-        assert_eq!(
-            offer_once_per_run(&second, &mut next_run),
-            Offer::Owed(second.clone()),
-            "the next launch asks once more — `Don't show again` is the setting, \
-             and this is not it"
-        );
-
-        // And a pane that owes nothing does not spend the ask.
-        let installed = documents.join("installed.ps1");
-        std::fs::write(&installed, LINE).unwrap();
-        let mut spent = false;
-        assert_eq!(offer_once_per_run(&installed, &mut spent), Offer::Silent);
-        assert!(
-            !spent,
-            "a shell that is already integrated asked nothing, so it spent nothing"
-        );
-        assert_eq!(
-            offer_once_per_run(&first, &mut spent),
-            Offer::Owed(first),
-            "and the pane that does owe one still gets it"
-        );
-    }
-
-    /// A strip is drawn once the shell has spoken, and it takes itself down the
-    /// moment the integration speaks for itself — however it came to be
-    /// installed.
-    #[test]
-    fn the_offer_waits_for_the_shell_and_retires_when_a_marker_arrives() {
-        let owed = Offer::Owed(PathBuf::from(r"D:\Documents\PowerShell\p.ps1"));
-        assert_eq!(
-            owed.showing(false, false),
-            None,
-            "nothing is said over a pane that has not drawn a prompt yet"
-        );
-        assert_eq!(
-            owed.showing(true, false),
-            Some(crate::notice::Notice::Offer)
-        );
-        assert_eq!(
-            owed.showing(true, true),
-            None,
-            "a 133 on the primary screen is the integration answering for itself"
-        );
-        assert_eq!(
-            Offer::Added.showing(false, false),
-            Some(crate::notice::Notice::Added)
-        );
-        assert_eq!(Offer::Added.showing(true, true), None);
-        assert_eq!(Offer::Closed.showing(true, false), None);
-        assert_eq!(Offer::Silent.showing(true, false), None);
-    }
-
     /// Which programs are asked about at all.
     #[test]
     fn the_program_name_says_whether_this_is_a_powershell() {
@@ -4046,16 +4089,13 @@ mod tests {
     /// the repair itself, over a temp directory rather than the machine's own
     /// `%APPDATA%`: a stale copy (an upgrade), a truncated one (a half-finished
     /// write) and a missing one (a cleaner) are one finding and get one answer.
-    /// The second is that anything ever asks — the repair existed for bash,
-    /// which names its script on every spawn, and had no caller at all for
-    /// PowerShell, whose script is named by a line in a file written once. So an
-    /// upgraded `folio.ps1` was never noticed and `offer_for` went on answering
-    /// `Silent`, which is this build saying "installed".
+    /// The second is that startup asks before any PowerShell pane can spawn. The repair existed
+    /// for bash, which names its script on every spawn, and previously had no unconditional caller
+    /// for PowerShell, whose script was named only by an optional profile line.
     ///
-    /// Red gate: remove the `powershell_script_repaired()` call from
-    /// `offer_for`'s first arm and the second half fails; make
-    /// `install_script_at` return early whenever the file merely exists and the
-    /// first half fails.
+    /// Red gate: remove the startup worker's `repair_powershell_script()` call and the second half
+    /// fails; make `install_script_at` return early whenever the file merely exists and the first
+    /// half fails.
     #[test]
     fn an_installed_script_that_is_not_this_builds_is_rewritten() {
         let directory = temp_dir("stale-script");
@@ -4088,15 +4128,15 @@ mod tests {
             "an identical file is read, not written"
         );
 
-        // The second half: a profile that declares the integration is what asks.
+        // The second half: startup prepares the owned copy before any pane asks for it.
         let source = include_str!("shell_integration/profile_runtime.rs");
         let body = source
-            .split_once("fn operate(data: &Path, asker: Asker, action: Action) -> Report {")
-            .expect("startup migration")
+            .split_once("pub fn begin_startup_migration() {")
+            .expect("startup preparation")
             .1;
         let end = body.find("\n}\n").expect("its end");
         assert!(
-            body[..end].contains("powershell_script_repaired()"),
+            body[..end].contains("repair_powershell_script()"),
             "startup compares the installed integration against what this build ships"
         );
     }

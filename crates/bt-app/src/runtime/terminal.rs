@@ -7,12 +7,11 @@ use crate::{
     RailJumpLanding, ReferenceCard, RowHost, Runtime, SelectionDrag, SelectionDragMode, Step,
     TerminalReference, UserInputKind, apply_stored_terminal_font, attention_trace, cmdrail,
     coalesce, create_leaf_session, cubic_bezier, deliver_osc_attention,
-    drain_may_take_another_slice, drain_tab_pty, drain_whole_units, files, first_run, hang_watch,
+    drain_may_take_another_slice, drain_tab_pty, drain_whole_units, files, hang_watch,
     in_drain_feed_turn, input, input_line_needs_a_space_first, local_image_activation, marks,
     mouse_trace, paste_text, presentation_physical_size, reference_card, reference_run_rect,
-    restart_seed, scrollback_quota, seats, shell_integration, shell_literal,
-    should_copy_on_select_release, stepped_command_mark, terminal_link_answers_a_press, termscroll,
-    toast, write_pty_input,
+    restart_seed, scrollback_quota, seats, shell_literal, should_copy_on_select_release,
+    stepped_command_mark, terminal_link_answers_a_press, termscroll, toast, write_pty_input,
 };
 use crate::{LeafView, TextStep, pane_cell_metrics, step_leaf_text_scale};
 use anyhow::Context;
@@ -298,67 +297,6 @@ impl Runtime<'_> {
             occurred_at: Instant::now(),
             source: FrameSource::Expose,
         })
-    }
-
-    /// Record, or clear, the intent the PowerShell row leaves behind.
-    pub(in crate::runtime) fn record_powershell_install_pending(&mut self, pending: bool) {
-        if self.app.settings_store.loaded().powershell_install_pending == pending {
-            return;
-        }
-        let mut settings = self.app.settings_store.loaded().clone();
-        settings.powershell_install_pending = pending;
-        self.app.settings_store.store(settings);
-    }
-
-    /// Spend the first-run card's PowerShell intent against the profile a shell
-    /// has just named (§7.56 §4.3).
-    ///
-    /// **The write goes through `shell_integration::install_into_profile`** —
-    /// the same call the strip's own `Add to $PROFILE` makes, with the same
-    /// dated copy taken first. The intent is cleared either way and never
-    /// retried: on a failure the strip is left standing with the same verb on
-    /// it, which is the path that already handles a `$PROFILE` this program
-    /// could not write and the reason this row cannot fail on the card.
-    ///
-    /// A profile that already loads the script clears the intent without
-    /// writing, because that is the reader having the thing they asked for.
-    pub(in crate::runtime) fn spend_powershell_intent(&mut self, profile: &std::path::Path) {
-        // The flag is read here rather than passed in as a `true` the caller
-        // already checked: this function asks whether there is an intent, it
-        // does not assert that there is one.
-        let pending = self.app.settings_store.loaded().powershell_install_pending;
-        let offer = shell_integration::offer_for(profile);
-        match first_run::pending_step(pending, Some(&offer)) {
-            first_run::PendingStep::Wait => return,
-            first_run::PendingStep::Clear => {}
-            first_run::PendingStep::Write(path) => {
-                match shell_integration::install_into_profile(&path, std::time::SystemTime::now()) {
-                    Ok(written) => {
-                        eprintln!("BT_SHELL_INTEGRATION first-run intent wrote {written:?}");
-                        // The file now declares the integration, so every pane
-                        // that was owed a strip about it is owed nothing. Said
-                        // here rather than left to the next reconciliation,
-                        // because the offer each of those panes holds was read
-                        // before the line existed.
-                        for leaf in self.sessions.values_mut() {
-                            if matches!(
-                                leaf.integration_offer,
-                                Some(shell_integration::Offer::Owed(_))
-                            ) {
-                                leaf.integration_offer = Some(shell_integration::Offer::Silent);
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        // Silent on screen, `Runtime::add_to_profile`'s own
-                        // discipline: the strip stays exactly as it was, showing
-                        // the verb that would try again.
-                        eprintln!("BT_SHELL_INTEGRATION first-run intent failed: {error}");
-                    }
-                }
-            }
-        }
-        self.record_powershell_install_pending(false);
     }
 
     /// One terminal pane's body, or `None` when there is no bar to stand on it.

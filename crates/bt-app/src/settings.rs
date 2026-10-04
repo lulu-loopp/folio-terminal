@@ -198,9 +198,8 @@ const ROW_MARK_GAP_LOGICAL_PX: f32 = 6.0;
 /// revises 0817's fixed row height).
 ///
 /// The fixed height came with a fixed rule — one line, ellipsised — and the
-/// ruling that replaced it came from a screenshot: `Offer PowerShell
-/// integration`, `Claude Code hooks`, `Notifications` and `Turn finished` were
-/// all cut, four rows in a column, and every one of them was cut in the half of
+/// ruling that replaced it came from a screenshot: long integration, hooks,
+/// notification and turn-finished sentences were all cut in the half of
 /// the sentence that carried the fact. A row's sentence now **wraps** and the
 /// row grows to hold it; a row whose sentence fits on one line, or that has no
 /// sentence at all, is exactly as tall as it was.
@@ -3767,22 +3766,15 @@ pub enum SettingsRow {
     /// been interrupted by their agent finishing is looking for the switch that
     /// stops it, and a switch behind a disclosure is a switch they do not find.
     TurnEndNotifications,
-    /// **Whether a PowerShell pane with no integration is offered one** — the
-    /// notice strip's `Don't show again`, said as a row (§7.1.6j, ruled
-    /// 2026-08-21).
-    ///
-    /// **Directly under [`Self::PsReadLine`]**, because the two are the same
-    /// page's two PowerShell rows and they answer the same reader's two
-    /// questions in the order they arrive: what is wrong with the module this
-    /// shell already loads, and what this shell is not loading at all. Filing
-    /// this one below `Scrollback` would put a row about capacity between two
-    /// rows about one shell.
-    ///
-    /// **Not an Advanced row**, and the test is `Explorer context menu`'s: this
-    /// is where a reader who dismissed the strip comes to undo that, and a
-    /// switch that can only be found behind a disclosure is a switch that
-    /// dismissing was permanent for.
-    PowerShellOffer,
+    /// Whether new PowerShell panes receive Folio's process-scoped integration.
+    /// Directly under [`Self::PsReadLine`] because both controls describe the
+    /// PowerShell pane Folio is about to start. It is not an Advanced row: the
+    /// feature is on by default and its switch must be visible where its effect
+    /// is described.
+    ShellIntegration,
+    /// Conditional cleanup door for a `$PROFILE` line written by an earlier
+    /// Folio. It is absent when the startup worker found no such line.
+    PowerShellProfileLine,
     /// **Whether Claude Code tells this window when it is waiting for you**
     /// (`docs/plans/attention/plan.md` §3.3, ruled 2026-08-25).
     ///
@@ -3795,11 +3787,9 @@ pub enum SettingsRow {
     /// with the file the moment anybody edited it by hand — silently, which is
     /// the one thing a switch may not do.
     ///
-    /// **Beside the two PowerShell rows and under them**, because it answers
-    /// the same reader's third question in the same order: what is wrong with
-    /// the module this shell loads, what this shell is not loading, and what
-    /// the *program running in* this shell has no way to tell the terminal. It
-    /// is the only one of the three about a program Folio did not start.
+    /// **Beside the PowerShell controls and under them**, because it answers
+    /// what a program running in that shell has no way to tell the terminal. It
+    /// is about a program Folio did not start.
     ///
     /// **Not an Advanced row**, on `Explorer context menu`'s test: a reader who
     /// has just watched an agent wait for them with no dot on its tab is
@@ -3950,7 +3940,8 @@ impl SettingsRow {
             // than the pane is set is the same kind of question as how much of
             // the past the pane keeps, asked sideways.
             Self::PsReadLine
-            | Self::PowerShellOffer
+            | Self::ShellIntegration
+            | Self::PowerShellProfileLine
             | Self::Scrollback
             | Self::LineWrapping
             | Self::CopyOnSelect
@@ -4099,7 +4090,8 @@ impl SettingsRow {
     pub const fn needs(self) -> Option<Capability> {
         match self {
             Self::ContextMenu => Some(Capability::ExplorerMenu),
-            Self::PowerShellOffer => Some(Capability::PowerShellProfile),
+            Self::ShellIntegration => None,
+            Self::PowerShellProfileLine => None,
             Self::PsReadLine => Some(Capability::PsReadLineModule),
             Self::Acrylic => Some(Capability::WindowBackdrop),
             Self::OptionSendsAlt => Some(Capability::OptionKey),
@@ -4123,7 +4115,8 @@ impl SettingsRow {
             Self::MultilinePaste => Text::RowMultilinePaste.text(),
             Self::Notifications => Text::RowNotifications.text(),
             Self::TurnEndNotifications => Text::RowTurnEndNotifications.text(),
-            Self::PowerShellOffer => Text::RowPowerShellOffer.text(),
+            Self::ShellIntegration => Text::RowShellIntegration.text(),
+            Self::PowerShellProfileLine => Text::RowPowerShellProfileLine.text(),
             Self::ClaudeHooks => Text::RowClaudeHooks.text(),
             Self::CodexNotify => Text::RowCodexNotify.text(),
             Self::CopilotHooks => Text::RowCopilotHooks.text(),
@@ -4297,11 +4290,8 @@ impl SettingsRow {
             // `$PROFILE` is, and until then this row is neither installed nor
             // off — so it says which, rather than reading `Off` over a write
             // that is coming.
-            Self::PowerShellOffer => {
-                crate::first_run::pending_row_line(values.powershell_install_pending)
-                    .unwrap_or(Text::DescPowerShellOffer)
-                    .text()
-            }
+            Self::ShellIntegration => Text::DescShellIntegration.text(),
+            Self::PowerShellProfileLine => Text::DescPowerShellProfileLine.text(),
             // Two facts and no opinion, `Explorer context menu`'s shape: what
             // is written, and where. The second is there because a reader who
             // does not know a terminal is about to edit a file belonging to
@@ -4588,9 +4578,10 @@ impl SettingsRow {
             Self::AboutIssues | Self::AboutLicences => SettingsControl::Link,
             // A door with a verb on it, drawn the way the three above are: the
             // row names what it does and the verb is the one thing to press.
-            Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder => {
-                SettingsControl::Link
-            }
+            Self::ExportSettings
+            | Self::ImportSettings
+            | Self::SettingsFolder
+            | Self::PowerShellProfileLine => SettingsControl::Link,
             // The uninstaller's door is a door like them; on a copy a package
             // manager installed, the row states the fact instead (T-UNINSTALL-UX).
             Self::Uninstall => SettingsControl::Link,
@@ -4706,7 +4697,8 @@ impl SettingsRow {
             | Self::QuakeDismiss
             | Self::QuakeRestore
             | Self::PsReadLine
-            | Self::PowerShellOffer
+            | Self::ShellIntegration
+            | Self::PowerShellProfileLine
             // On the row above's test, said again for the reader who has just watched an agent
             // wait for them with nothing on its tab: this is what they are looking for, and a
             // switch behind a disclosure is a switch they will not find.
@@ -4845,7 +4837,7 @@ impl SettingsRow {
             | Self::MultilinePaste
             | Self::Notifications
             | Self::TurnEndNotifications
-            | Self::PowerShellOffer
+            | Self::ShellIntegration
             | Self::ClaudeHooks
             | Self::CodexNotify
             | Self::CopilotHooks
@@ -4919,7 +4911,7 @@ impl SettingsRow {
             | Self::AboutIssues
             | Self::AboutLicences
             | Self::ExportSettings | Self::ImportSettings | Self::SettingsFolder
-            | Self::Uninstall | Self::UninstallBy => 0,
+            | Self::PowerShellProfileLine | Self::Uninstall | Self::UninstallBy => 0,
         }
     }
 
@@ -4947,7 +4939,7 @@ impl SettingsRow {
             | Self::MultilinePaste
             | Self::Notifications
             | Self::TurnEndNotifications
-            | Self::PowerShellOffer
+            | Self::ShellIntegration
             | Self::ClaudeHooks
             | Self::CodexNotify
             | Self::CopilotHooks
@@ -5073,6 +5065,7 @@ impl SettingsRow {
             | Self::ExportSettings
             | Self::ImportSettings
             | Self::SettingsFolder
+            | Self::PowerShellProfileLine
             | Self::Uninstall
             | Self::UninstallBy => None,
         }
@@ -5423,9 +5416,9 @@ impl SettingsRow {
             Self::TurnEndNotifications => FORMULA_OPTIONS
                 .iter()
                 .position(|it| *it == values.turn_end_notification),
-            Self::PowerShellOffer => FORMULA_OPTIONS
+            Self::ShellIntegration => FORMULA_OPTIONS
                 .iter()
-                .position(|it| *it == values.powershell_integration_offer),
+                .position(|it| *it == values.shell_integration),
             // The *file's* answer and not a stored one, like `ContextMenu`
             // below and for its reason: what is ticked is whether the user's
             // own Claude Code settings call this program, and only that file
@@ -5575,6 +5568,7 @@ impl SettingsRow {
             | Self::ExportSettings
             | Self::ImportSettings
             | Self::SettingsFolder
+            | Self::PowerShellProfileLine
             | Self::Uninstall
             | Self::UninstallBy => None,
         }
@@ -5598,6 +5592,7 @@ impl SettingsRow {
             Self::ImportSettings => Some(Text::ImportVerb.text()),
             Self::SettingsFolder => Some(Text::AboutOpen.text()),
             Self::Uninstall => Some(Text::UninstallVerb.text()),
+            Self::PowerShellProfileLine => Some(Text::RemovePowerShellProfileLine.text()),
             // The manager's own name: a proper noun, in no column of the table.
             Self::UninstallBy => crate::uninstall::managed_uninstall()
                 .map(|(manager, _)| crate::uninstall::manager_name(manager)),
@@ -5635,7 +5630,10 @@ impl SettingsRow {
     pub const fn opens_a_dialog(self) -> bool {
         matches!(
             self,
-            Self::ExportSettings | Self::ImportSettings | Self::Uninstall
+            Self::ExportSettings
+                | Self::ImportSettings
+                | Self::Uninstall
+                | Self::PowerShellProfileLine
         )
     }
 
@@ -5916,6 +5914,20 @@ pub fn visible_rows_for(
     rows
 }
 
+/// Apply the worker-observed legacy profile state to an already-built Settings page.
+///
+/// The switch is unconditional; only the one-shot cleanup verb is conditional.
+pub fn retain_powershell_profile_remover(rows: &mut Vec<SettingsRow>, line_present: bool) {
+    rows.retain(|row| *row != SettingsRow::PowerShellProfileLine);
+    if line_present
+        && let Some(after) = rows
+            .iter()
+            .position(|row| *row == SettingsRow::ShellIntegration)
+    {
+        rows.insert(after + 1, SettingsRow::PowerShellProfileLine);
+    }
+}
+
 /// The order, with no platform question asked of it.
 fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     // ── Appearance, everyday ──
@@ -6062,11 +6074,11 @@ fn every_row_of_the_dialog(tab_layout: TabLayoutMode) -> Vec<SettingsRow> {
     rows.push(SettingsRow::QuakeDismiss);
     rows.push(SettingsRow::QuakeRestore);
     rows.push(SettingsRow::PsReadLine);
-    // **Beside it**, because the two are this page's two PowerShell rows and
-    // they answer one reader's two questions in the order they arrive: what is
-    // wrong with the module this shell already loads, and what this shell is not
-    // loading at all (§7.1.6j).
-    rows.push(SettingsRow::PowerShellOffer);
+    // **Beside it**, because the two are this page's PowerShell controls: first
+    // the module this shell already loads, then what Folio loads into its own
+    // new panes. The conditional cleanup verb for an old profile line follows
+    // the switch it is about.
+    rows.push(SettingsRow::ShellIntegration);
     // **Under the PSReadLine row**, which is the mock-up's own order for this page
     // (4838, then 4862): the row that reports a fact about the machine stands
     // first and the row that changes what a pane does stands under it.
@@ -6533,16 +6545,9 @@ pub struct SettingsValues {
     pub turn_end_notification: bool,
     /// Whether a PowerShell pane with no integration is offered one — the row
     /// the notice strip's `Don't show again` writes (§7.1.6j).
-    pub powershell_integration_offer: bool,
-    /// **Whether the first-run card's PowerShell row is still waiting for a
-    /// shell to name its own `$PROFILE`** (§7.56).
-    ///
-    /// It changes what the row above says and nothing else. The row is neither
-    /// "installed" nor "off" while this is true, and its sentence says which —
-    /// [`Text::ShellIntegrationPending`]. Read from `settings.json` like the row
-    /// itself, because an intent is a thing a reader recorded rather than a fact
-    /// about the machine.
-    pub powershell_install_pending: bool,
+    pub shell_integration: bool,
+    /// Cached by the startup/removal worker; Settings performs no profile I/O.
+    pub powershell_profile_line_present: bool,
     /// Whether the Files column offers its Git page at all.
     pub git_panel: bool,
     /// Whether a modifier held on its own raises the card that lists what it
@@ -6813,8 +6818,8 @@ impl SettingsValues {
             multiline_paste_ask: true,
             terminal_notifications: true,
             turn_end_notification: true,
-            powershell_integration_offer: true,
-            powershell_install_pending: false,
+            shell_integration: true,
+            powershell_profile_line_present: false,
             git_panel: true,
             key_hints: true,
             // Option composes text, which is the platform's own answer.
@@ -9465,9 +9470,8 @@ pub struct ProfileLineLayout {
     ///
     /// **Two, always, whether the sentence needs both or not.** These sentences
     /// were written to about fifty-eight characters a line and measured at two
-    /// (plan §4); a row that gave them one would cut the *condition* off the end
-    /// of the two PowerShell rows — `— with folio.ps1 dot-sourced` — which is
-    /// the half that makes the sentence honest. And the pair is reserved on
+    /// (plan §4); a row that gave them one would cut the condition or refusal
+    /// off the end of the longer capability sentences. And the pair is reserved on
     /// every row alike, because the dialog is one height and a page whose rows
     /// grew with the wording would be a dialog whose size depended on the
     /// language it was reading.
@@ -10428,9 +10432,9 @@ pub fn turn_end_notification_requested(target: SettingsTarget) -> Option<bool> {
 /// Whether a PowerShell pane with no integration is offered one, as a press on
 /// its picker (§7.1.6j).
 #[must_use]
-pub fn powershell_integration_offer_requested(target: SettingsTarget) -> Option<bool> {
+pub fn shell_integration_requested(target: SettingsTarget) -> Option<bool> {
     match target {
-        SettingsTarget::Choice(SettingsRow::PowerShellOffer, index) => {
+        SettingsTarget::Choice(SettingsRow::ShellIntegration, index) => {
             FORMULA_OPTIONS.get(index).copied()
         }
         _ => None,
@@ -19063,7 +19067,7 @@ mod tests {
     /// read off this machine, so their length is a fact about the machine rather
     /// than about the copy. What is held here instead is the entry each of them
     /// falls back to when there is no version to name.
-    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 26] = {
+    const OTHERWISE: [(SettingsRow, Text, bt_platform::HostPlatform); 25] = {
         use bt_platform::HostPlatform::{MacOs, Windows};
         [
             // The other end of a value the fixture had to pick one end of.
@@ -19094,12 +19098,6 @@ mod tests {
             (
                 SettingsRow::QuakeHotkey,
                 Text::DescQuakeHotkeyTaken,
-                Windows,
-            ),
-            // An intent recorded on the card and not yet written to a $PROFILE.
-            (
-                SettingsRow::PowerShellOffer,
-                Text::ShellIntegrationPending,
                 Windows,
             ),
             // What `attention_copilot::row_description` says about a machine
@@ -25924,14 +25922,14 @@ mod tests {
             .collect::<Vec<_>>(),
             vec![
                 SettingsRow::PsReadLine,
-                SettingsRow::PowerShellOffer,
+                SettingsRow::ShellIntegration,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::CopyOnSelect,
                 SettingsRow::MultilinePaste,
                 SettingsRow::Notifications
             ],
-            "the mock-up's order for this page, with the two PowerShell rows \n             together at the top: the row that reports a fact about the machine, \n             the row that offers what this one is missing, then the pane's two \n             axes — what it keeps of what has gone past, and what it does with a \n             line wider than itself — and last the only row on this page whose \n             answer shows up outside this window"
+            "the Terminal page begins with the PSReadLine fact and process-scoped integration \n             switch, then the pane's two axes — what it keeps of what has gone past, and what it \n             does with a line wider than itself — and last the only row on this page whose answer \n             shows up outside this window; the legacy-line remover is inserted only when observed"
         );
     }
 
@@ -26018,7 +26016,7 @@ mod tests {
             terminal,
             vec![
                 SettingsRow::PsReadLine,
-                SettingsRow::PowerShellOffer,
+                SettingsRow::ShellIntegration,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::CopyOnSelect,
@@ -26049,6 +26047,29 @@ mod tests {
         assert!(
             !SettingsRow::LineWrapping.advanced(),
             "the Terminal page has no Advanced group and this row does not open one"
+        );
+    }
+
+    #[test]
+    fn the_legacy_profile_remover_exists_only_while_a_line_is_observed() {
+        let base = visible_rows_for(
+            bt_platform::HostPlatform::Windows,
+            TabLayoutMode::Horizontal,
+        );
+        assert!(base.contains(&SettingsRow::ShellIntegration));
+        assert!(!base.contains(&SettingsRow::PowerShellProfileLine));
+
+        let mut absent = base.clone();
+        retain_powershell_profile_remover(&mut absent, false);
+        assert!(absent.contains(&SettingsRow::ShellIntegration));
+        assert!(!absent.contains(&SettingsRow::PowerShellProfileLine));
+
+        let mut present = base;
+        retain_powershell_profile_remover(&mut present, true);
+        assert!(present.contains(&SettingsRow::PowerShellProfileLine));
+        assert_eq!(
+            SettingsRow::PowerShellProfileLine.stated_value(),
+            Some("Remove the line from $PROFILE")
         );
     }
 
@@ -27332,10 +27353,9 @@ mod tests {
     fn a_mac_is_not_offered_a_row_about_a_facility_it_has_not_got() {
         use bt_platform::HostPlatform::{MacOs, Windows};
 
-        const NOT_ON_A_MAC: [SettingsRow; 4] = [
+        const NOT_ON_A_MAC: [SettingsRow; 3] = [
             SettingsRow::ContextMenu,
             SettingsRow::PsReadLine,
-            SettingsRow::PowerShellOffer,
             SettingsRow::Acrylic,
         ];
         for layout in [TabLayoutMode::Horizontal, TabLayoutMode::Vertical] {
@@ -27982,7 +28002,7 @@ mod tests {
                 SettingsRow::QuakeDismiss,
                 SettingsRow::QuakeRestore,
                 SettingsRow::PsReadLine,
-                SettingsRow::PowerShellOffer,
+                SettingsRow::ShellIntegration,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::CopyOnSelect,
@@ -28057,7 +28077,7 @@ mod tests {
                 SettingsRow::QuakeDismiss,
                 SettingsRow::QuakeRestore,
                 SettingsRow::PsReadLine,
-                SettingsRow::PowerShellOffer,
+                SettingsRow::ShellIntegration,
                 SettingsRow::Scrollback,
                 SettingsRow::LineWrapping,
                 SettingsRow::CopyOnSelect,

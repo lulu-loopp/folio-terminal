@@ -25,9 +25,8 @@
 //! thing that says the green one is measuring the script and not the shell.
 //!
 //! **Nothing here touches the user's own shell.** The script reaches the child as an
-//! argument (`-NoProfile … -Command ". '<script>'"`), never through `$PROFILE`, which
-//! is the one file this product refuses to edit on its own (`bt_app::shell_integration`
-//! says why); `-NoProfile` also means the real one is not so much as read. The line
+//! argument (`-NoProfile … -Command <guarded text loader>`), never through `$PROFILE`;
+//! `-NoProfile` also means the real one is not so much as read. The line
 //! editor is told to save no history, so the user's own history file is not written
 //! either.
 
@@ -73,6 +72,7 @@ const COMMAND_START: &[u8] = b"\x1b]133;B\x07";
 /// which started sending some *other* member of the family from somewhere else would
 /// be caught rather than quietly tolerated.
 const ANY_MARKER: &[u8] = b"\x1b]133;";
+const DIRECTORY_MARKER: &[u8] = b"\x1b]7;file://";
 
 /// How long the probe waits on a child that has gone **silent**, as opposed to one
 /// that is merely slow — `bt-pty`'s `PROBE_SILENCE_BUDGET` and `bt-app`'s
@@ -164,15 +164,34 @@ impl ShellProbe {
     /// `-NoProfile` is the isolation and is load-bearing twice over: the user's own
     /// `$PROFILE` is not read, so nothing they have installed can make the red arm
     /// green, and nothing this test does can reach a file they own.
-    fn spawn(shell: &str, startup: &str) -> Self {
+    fn spawn(shell: &str, startup: &str, execution_policy: Option<&str>) -> Self {
         let columns = NonZeroU16::new(80).unwrap();
         let rows = NonZeroU16::new(20).unwrap();
-        let command = PtyCommand::interactive_shell(shell)
+        let mut command = PtyCommand::interactive_shell(shell)
             .arg("-NoLogo")
-            .arg("-NoProfile")
-            .arg("-NoExit")
-            .arg("-Command")
-            .arg(startup);
+            .arg("-NoProfile");
+        if let Some(policy) = execution_policy {
+            command = command.arg("-ExecutionPolicy").arg(policy);
+            // Ticket 2 owns Folio's per-pane PSModulePath prefix. Keep this ticket's Restricted
+            // loader probe on the stock 5.1 module roots so a Documents copy installed by an
+            // earlier development build cannot replace the subject of the test. This declaration
+            // belongs to the child only and writes nothing.
+            if policy.eq_ignore_ascii_case("Restricted") {
+                let program_files = std::env::var_os("ProgramFiles").expect("ProgramFiles");
+                let system_root = std::env::var_os("SystemRoot").expect("SystemRoot");
+                let module_path = format!(
+                    "{};{}",
+                    PathBuf::from(program_files)
+                        .join("WindowsPowerShell/Modules")
+                        .display(),
+                    PathBuf::from(system_root)
+                        .join("System32/WindowsPowerShell/v1.0/Modules")
+                        .display()
+                );
+                command = command.env("PSModulePath", module_path);
+            }
+        }
+        let command = command.arg("-NoExit").arg("-Command").arg(startup);
         let pty = PtySession::spawn(command, PtySize::cells(columns, rows), Arc::new(|| {}))
             .unwrap_or_else(|error| panic!("{shell} starts on a supported host: {error:?}"));
         Self {
@@ -284,21 +303,49 @@ impl ShellProbe {
 fn bare_startup() -> String {
     format!(
         "Set-PSReadLineOption -HistorySaveStyle SaveNothing; \
+         if ((Get-PSReadLineOption).HistorySaveStyle -ne 'SaveNothing') \
+         {{ throw 'BT_HISTORY_SAVING_WAS_NOT_DISABLED' }}; \
          function global:prompt {{ '{PROMPT}' }}"
     )
 }
 
-/// The same shell with the integration dot-sourced — the single difference between the
-/// two arms.
-///
-/// After the prompt definition, because that is where a user's own dot-source line
-/// sits: the script wraps whatever `prompt` it finds, and one installed before the
-/// prompt it is meant to wrap would be wrapping a different function.
-fn integrated_startup() -> String {
+/// The product's guarded text-evaluation loader, with the probe's history refusal and known
+/// prompt inserted after PSReadLine is available but before `folio.ps1` wraps the prompt.
+fn integrated_startup(shell: &str) -> String {
+    let mut path = String::new();
+    for character in script_path().display().to_string().chars() {
+        if matches!(
+            character,
+            '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}'
+        ) {
+            path.push(character);
+        }
+        path.push(character);
+    }
+    let is_pwsh = Path::new(shell)
+        .file_stem()
+        .is_some_and(|stem| stem.to_string_lossy().eq_ignore_ascii_case("pwsh"));
+    let revive = if is_pwsh {
+        "if (-not (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and \
+         ([AppDomain]::CurrentDomain.GetAssemblies() | Where-Object { $_.GetName().Name -eq \
+         'Microsoft.PowerShell.PSReadLine' })) { Import-Module (Join-Path $PSHOME \
+         'Modules\\PSReadLine\\Microsoft.PowerShell.PSReadLine.dll') }; "
+    } else {
+        ""
+    };
     format!(
-        "{}; . '{}'",
-        bare_startup(),
-        script_path().display().to_string().replace('\'', "''")
+        "if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ {revive}\
+         if ((Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine) -and -not \
+         (Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction Ignore)) {{ \
+         $Global:__FolioReadLineType = (Get-Module PSReadLine, Microsoft.PowerShell.PSReadLine | \
+         Where-Object ImplementingAssembly | Select-Object -Last 1).ImplementingAssembly.\
+         GetType('Microsoft.PowerShell.PSConsoleReadLine'); function global:PSConsoleHostReadLine \
+         {{ $lastRunStatus = $?; Microsoft.PowerShell.Core\\Set-StrictMode -Off; \
+         $Global:__FolioReadLineType::ReadLine($host.Runspace, $ExecutionContext, \
+         $lastRunStatus) }} }}; {}; if (Get-Module PSReadLine, \
+         Microsoft.PowerShell.PSReadLine) {{ . ([scriptblock]::Create(\
+         [IO.File]::ReadAllText('{path}'))) }} }}",
+        bare_startup()
     )
 }
 
@@ -333,7 +380,7 @@ fn position(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[test]
 fn a_powershell_without_the_integration_script_sends_no_osc_133_at_all() {
     for shell in generations() {
-        let raw = ShellProbe::spawn(&shell, &bare_startup()).run_one_command();
+        let raw = ShellProbe::spawn(&shell, &bare_startup(), None).run_one_command();
         assert!(
             position(&raw, RAN_MARKER.as_bytes()).is_some(),
             "{shell}: the bare arm has to have actually run its command, or its silence \
@@ -349,7 +396,7 @@ fn a_powershell_without_the_integration_script_sends_no_osc_133_at_all() {
     }
 }
 
-/// GREEN — dot-source `folio.ps1` into that same shell and both markers arrive on the
+/// GREEN — text-evaluate `folio.ps1` into that same shell and both markers arrive on the
 /// wire: `133;A` opening every prompt and `133;B` opening the input it asks for, in
 /// that order, through a real console host and a real ConPTY.
 ///
@@ -362,7 +409,7 @@ fn a_powershell_without_the_integration_script_sends_no_osc_133_at_all() {
 #[test]
 fn the_integration_script_makes_a_real_powershell_announce_prompt_start_and_command_start() {
     for shell in generations() {
-        let raw = ShellProbe::spawn(&shell, &integrated_startup()).run_one_command();
+        let raw = ShellProbe::spawn(&shell, &integrated_startup(&shell), None).run_one_command();
         let text = String::from_utf8_lossy(&raw);
         let prompt_starts = occurrences(&raw, PROMPT_START);
         let command_starts = occurrences(&raw, COMMAND_START);
@@ -387,6 +434,33 @@ fn the_integration_script_makes_a_real_powershell_announce_prompt_start_and_comm
         assert!(
             position(&raw, PROMPT_START) < position(&raw, COMMAND_START),
             "{shell}: A opens the prompt whose input B opens, so A comes first; {text:?}"
+        );
+        assert!(
+            occurrences(&raw, DIRECTORY_MARKER) > 0,
+            "{shell}: the current directory OSC 7 never reached the pty; {text:?}"
+        );
+    }
+}
+
+#[test]
+fn restricted_windows_powershell_still_integrates_without_printing_an_error() {
+    let shell = WINDOWS_POWERSHELL;
+    let raw =
+        ShellProbe::spawn(shell, &integrated_startup(shell), Some("Restricted")).run_one_command();
+    let text = String::from_utf8_lossy(&raw);
+    assert!(occurrences(&raw, PROMPT_START) > 0, "{text:?}");
+    assert!(occurrences(&raw, COMMAND_START) > 0, "{text:?}");
+    assert!(occurrences(&raw, DIRECTORY_MARKER) > 0, "{text:?}");
+    for error in [
+        "BT_HISTORY_SAVING_WAS_NOT_DISABLED",
+        "ParserError",
+        "Import-Module :",
+        "cannot be loaded because running scripts is disabled",
+        "无法加载",
+    ] {
+        assert!(
+            !text.contains(error),
+            "Restricted 5.1 printed {error:?}: {text:?}"
         );
     }
 }

@@ -1066,11 +1066,8 @@ fn settings_defaults_render_formulas_at_the_current_schema_version() {
          of its users never learn they have"
     );
     assert!(
-        defaults.powershell_integration_offer,
-        "the offer is the only way the fact reaches anybody: a PowerShell whose \
-         $PROFILE does not load the script emits no markers and says nothing \
-         about it, so a default of `false` would be this product keeping the one \
-         thing it knows and the reader does not"
+        defaults.shell_integration,
+        "safe PowerShell launches receive integration unless the reader switches it off"
     );
     assert_eq!(
         defaults.scrollback_lines, 100_000,
@@ -1855,14 +1852,13 @@ fn settings_v16_migrates_with_notifications_on_and_v17_keeps_the_silence_it_was_
 /// is why this is a setting and not a per-pane record — and the setting is only worth being one
 /// if it is on disk.
 #[test]
-fn settings_v17_migrates_with_the_offer_on_and_v18_keeps_the_silence_it_was_asked_for() {
+fn retired_profile_offer_keys_do_not_override_the_additive_shell_integration_default() {
     let (migrated, report) = read_settings(&fixture_path("settings_v17_notifications_off.json"));
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(migrated.schema_version, SETTINGS_SCHEMA_VERSION);
     assert!(
-        migrated.powershell_integration_offer,
-        "no build that could write a v17 file offered anything, so `false` would freeze an \
-         absence rather than preserve a choice"
+        migrated.shell_integration,
+        "a document from before process-scoped injection receives its additive default"
     );
     assert!(
         !migrated.terminal_notifications,
@@ -1873,8 +1869,8 @@ fn settings_v17_migrates_with_the_offer_on_and_v18_keeps_the_silence_it_was_aske
     assert_eq!(report, ReadReport::Loaded);
     assert_eq!(quiet.schema_version, SETTINGS_SCHEMA_VERSION);
     assert!(
-        !quiet.powershell_integration_offer,
-        "a reader who ended the conversation is not asked again"
+        quiet.shell_integration,
+        "ending the retired profile-editing invitation does not silently disable the new loader"
     );
     assert_eq!(quiet.minimum_contrast, MinimumContrastV1::Ratio3);
 
@@ -1887,8 +1883,10 @@ fn settings_v17_migrates_with_the_offer_on_and_v18_keeps_the_silence_it_was_aske
     write_settings_atomic(&path, &quiet).unwrap();
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert!(
-        on_disk.contains(r#""powershell_integration_offer": false"#),
-        "the answer is written as its own key: {on_disk}"
+        on_disk.contains(r#""shell_integration": true"#)
+            && !on_disk.contains("powershell_integration_offer")
+            && !on_disk.contains("powershell_install_pending"),
+        "only the current process-scoped answer is written: {on_disk}"
     );
     let (round_tripped, report) = read_settings(&path);
     assert_eq!(report, ReadReport::Loaded);
@@ -1922,8 +1920,8 @@ fn settings_v18_migrates_to_the_height_cards_already_had_and_v19_keeps_a_taller_
          rather than a new default being chosen"
     );
     assert!(
-        !migrated.powershell_integration_offer,
-        "one key crosses; every sibling crosses untouched"
+        migrated.shell_integration,
+        "the retired v18 invitation answer is ignored and the additive setting defaults on"
     );
 
     let (tall, report) = read_settings(&fixture_path("settings_v19_focus_card_height.json"));

@@ -3914,7 +3914,14 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
                         (false, true) => crate::i18n::agent_not_found_on_windows(title(index)),
                         (false, false) => crate::i18n::profile_not_installed(title(index)),
                     },
-                    capability: available.then(|| capability_text(profile).text()),
+                    capability: available.then(|| {
+                        capability_text_for_launch(
+                            profile,
+                            programs.program(&profile.id).map(Path::new),
+                            crate::shell_integration::powershell_integration_enabled(),
+                        )
+                        .text()
+                    }),
                     is_agent,
                     is_default: index == default,
                     default_is_automatic: automatic,
@@ -3996,11 +4003,10 @@ fn command_line(profile: &Profile, resolved: Option<&OsStr>) -> String {
 /// [`PathNamespace`] rather than over the profile's id: a duplicate of WSL is
 /// not `wsl`, and it gets WSL's sentence because it gets WSL's door.
 ///
-/// Two of the answers carry their condition **in the sentence**, because this
-/// page cannot probe for it: whether `folio.ps1` has been dot-sourced, and
-/// whether a WSL login lands in bash, are known only to a live session that has
-/// already spoken. Said this way each sentence is true in every state and never
-/// needs a probe to stay true.
+/// The WSL answer carries its condition **in the sentence**, because this page
+/// cannot know whether a WSL login lands in bash or zsh until a live session
+/// has spoken. The PowerShell answer instead receives the resolved executable,
+/// the row arguments and the global switch used by the spawn seam.
 ///
 /// **Hyperlinks are the third dimension** (§7.1.6c-6c, J85 closed). Every
 /// sentence above names them, and four of them would be claiming something this
@@ -4011,7 +4017,35 @@ fn command_line(profile: &Profile, resolved: Option<&OsStr>) -> String {
 /// ([`crate::shell_integration::declares_hyperlinks`]) and each sentence has a
 /// twin that names their absence rather than passing over it.
 #[must_use]
+#[cfg(test)]
 pub fn capability_text(profile: &Profile) -> crate::i18n::Text {
+    capability_text_for_launch(
+        profile,
+        Some(Path::new("pwsh")),
+        crate::shell_integration::powershell_integration_enabled(),
+    )
+}
+
+#[must_use]
+pub fn capability_text_for_launch(
+    profile: &Profile,
+    program: Option<&Path>,
+    powershell_integration: bool,
+) -> crate::i18n::Text {
+    if served_by(profile) == Integration::PowerShellOptIn {
+        let arguments = launch_args(profile)
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>();
+        if !powershell_integration
+            || !program.is_some_and(crate::shell_integration::is_powershell)
+            || !program.is_some_and(|program| {
+                crate::shell_integration::powershell_arguments_are_safe(program, &arguments)
+            })
+        {
+            return crate::i18n::Text::CapPowerShellNotProvided;
+        }
+    }
     capability_of_parts(
         served_by(profile),
         profile.paths,
@@ -25759,6 +25793,34 @@ mod tests {
                 .to_lowercase()
                 .contains("hyperlinks still work"),
             "the editor's own length says the one thing that is not lost"
+        );
+    }
+
+    #[test]
+    fn a_powershell_profile_capability_says_when_process_integration_is_not_provided() {
+        let profile = shipped()
+            .into_iter()
+            .find(|profile| profile.id == "pwsh")
+            .expect("the shipped PowerShell 7 row");
+        assert_ne!(
+            capability_text_for_launch(&profile, Some(Path::new("pwsh.exe")), true),
+            crate::i18n::Text::CapPowerShellNotProvided
+        );
+        assert_eq!(
+            capability_text_for_launch(&profile, Some(Path::new("pwsh.exe")), false),
+            crate::i18n::Text::CapPowerShellNotProvided
+        );
+        let terminal = Profile {
+            args: vec!["-Command".to_owned(), "Get-Date".to_owned()],
+            ..profile.clone()
+        };
+        assert_eq!(
+            capability_text_for_launch(&terminal, Some(Path::new("pwsh.exe")), true),
+            crate::i18n::Text::CapPowerShellNotProvided
+        );
+        assert_eq!(
+            capability_text_for_launch(&profile, Some(Path::new("cmd.exe")), true),
+            crate::i18n::Text::CapPowerShellNotProvided
         );
     }
 

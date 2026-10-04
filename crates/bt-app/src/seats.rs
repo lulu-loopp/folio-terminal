@@ -17711,9 +17711,8 @@ pub fn pane_foot_geometry(rect: [f32; 4], scale: f32) -> FilesPaneGeometry {
 /// ([`news_pill_box`]), a standing fact as the padlock in the row above
 /// ([`PreviewRailGeometry::lock`]). The strip this used to take off the top of
 /// the body — the 2026-08-29 ruling's, for a file rewritten under unsaved edits
-/// — is the pill's now, and it is the terminal's alone that still stands in a
-/// layout ([`pane_notice_strip`]): a shell's offer is a row in a column of rows
-/// and has no document to float over.
+/// — is the pill's now. [`pane_notice_strip`] remains the shared band geometry,
+/// but preview layout no longer reserves it.
 #[must_use]
 pub fn preview_pane_geometry(
     rect: [f32; 4],

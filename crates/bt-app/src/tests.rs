@@ -44138,7 +44138,6 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         frame_image_references: FrameImageReferences::default(),
         // Nothing was started, so there is no `$PROFILE` this fixture could
         // be owed an answer about.
-        integration_offer: Some(shell_integration::Offer::Silent),
         // Nothing has been pasted into a fixture.
         pending_paste: None,
         // A fixture is not a restore, so nothing is owed to its prompt.

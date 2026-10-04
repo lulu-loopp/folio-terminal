@@ -30,13 +30,16 @@ macro_rules! managed_line {
 pub const MANAGED_LINE: &str = managed_line!("Folio");
 pub const LEGACY_MANAGED_LINE: &str = managed_line!("BetterTerminal");
 
+#[cfg(test)]
 pub fn managed_line_for(data: &Path, appdata: &Path) -> io::Result<&'static str> {
     if data == appdata.join(persist::STORAGE_NAME) {
         Ok(MANAGED_LINE)
     } else if data == appdata.join(persist::PREVIOUS_STORAGE_NAME) {
         Ok(LEGACY_MANAGED_LINE)
     } else {
-        Err(io::Error::other(Text::ShellProfileScriptLocation.text()))
+        Err(io::Error::other(
+            "the integration script is outside Folio's data folder",
+        ))
     }
 }
 
@@ -79,6 +82,7 @@ impl Forms {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Action {
+    #[cfg(test)]
     Migrate,
     Remove,
 }
@@ -149,6 +153,7 @@ fn invalid_encoding() -> io::Error {
 
 /// None means byte-identical. Each line keeps its own terminator; removal
 /// consumes only the owned line's terminator, never a neighbouring blank line.
+#[cfg(test)]
 pub fn rewrite(bytes: &[u8], forms: &Forms, action: Action) -> io::Result<Option<Vec<u8>>> {
     rewrite_recorded(bytes, forms, action, || Ok(()))
 }
@@ -645,11 +650,8 @@ impl Report {
     /// said is the report itself rather than the one call site that raises a
     /// toast, because the call site said it wrong once already: an empty
     /// successful report was turned into the words
-    /// [`Text::ShellProfileNothing`], and the first-run card's PowerShell row
-    /// left off presses the Settings page's own `Off`, which runs a removal —
-    /// so a brand-new machine's first sight of Folio was a corner toast about a
-    /// `$PROFILE` line it had never had. A caller that asks the report cannot
-    /// make that mistake again.
+    /// [`Text::ShellProfileNothing`]. A caller that asks the report cannot make
+    /// that mistake again.
     ///
     /// **The console door is a different door and keeps its words.** Somebody
     /// who typed `--remove-shell-integration` asked a question and is owed an

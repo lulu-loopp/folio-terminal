@@ -53,7 +53,6 @@ App.web_spare	-	LIFE	web	proposed by census-1
 App.web_warmup	-	LIFE	web	proposed by census-1
 LeafSession.attention	-	LIFE	attention (→ bt-workbench)	the 2026-09-25 table
 LeafSession.frame_image_references	-	PROJ	frame	the 2026-09-25 table
-LeafSession.integration_offer	-	OBS	terminal	the 2026-09-25 table
 LeafSession.projection	-	PROJ	frame	the 2026-09-25 table
 LeafSession.pty	-	LIFE	panes	the 2026-09-25 table
 LeafSession.session	-	HUB	terminal	the 2026-09-25 table

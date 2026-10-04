@@ -428,10 +428,8 @@ impl Runtime<'_> {
             SettingChange::TerminalNotifications(enabled) => {
                 self.apply_terminal_notifications(enabled);
             }
-            // Through the row's own press too: its door is more than the store —
-            // it starts the `$PROFILE` work the answer asks for.
-            SettingChange::PowerShellOffer(enabled) => {
-                self.press_imported_switch(settings::SettingsRow::PowerShellOffer, enabled)?;
+            SettingChange::ShellIntegration(enabled) => {
+                self.press_imported_switch(settings::SettingsRow::ShellIntegration, enabled)?;
             }
             SettingChange::FocusCardHeight(height) => {
                 self.apply_focus_card_height(height)?;

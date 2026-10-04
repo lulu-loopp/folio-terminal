@@ -84,7 +84,6 @@ settings.rs: adopted: .read
 settings.rs: get: .read
 settings.rs: scanned: .read
 shell_integration.rs: add_profile_with_forms: profile_marks::Decoded::read
-shell_integration.rs: offer_for: profile_marks::Decoded::read
 shell_integration.rs: profile_path_reason: std::fs::File::open
 shell_integration.rs: read_profile_for_edit: .open
 shell_integration.rs: read_profile_for_edit: .read

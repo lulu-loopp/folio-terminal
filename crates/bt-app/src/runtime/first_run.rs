@@ -1,6 +1,7 @@
 //! `first_run` — moved out of `main.rs`'s `impl Runtime` blocks by
 //! `scripts/dev/bt-app-move-topic.py`. Bodies unchanged.
 
+use crate::shell_integration;
 use crate::{
     Announce, Runtime, attention_codex, attention_copilot, attention_hooks, attention_ownership,
     diagnostics, explorer_menu, first_run, i18n, install_channel, persist, psreadline, restore,
@@ -618,11 +619,6 @@ impl Runtime<'_> {
             copilot_found: copilot_on_path,
             copilot_installable: attention_copilot::state() == attention_copilot::State::Absent
                 && attention_copilot::readiness() == attention_copilot::Readiness::Ready,
-            // Unknown on this launch, and honestly so: no shell has said where
-            // its `$PROFILE` is yet. A reader whose file already carries the
-            // line has their recorded intent cleared by the shell that reports
-            // it — `first_run::pending_step`.
-            powershell_integration_installed: false,
             install_channel: install_channel::channel()
                 .unwrap_or(install_channel::Channel::Unknown),
         };
@@ -801,11 +797,6 @@ impl Runtime<'_> {
         for application in spent {
             if let Some(target) = first_run::settings_target(*application) {
                 self.apply_settings_choice_announcing(target, Announce::OnlyFailures)?;
-            } else {
-                // The one answer that is not a row: an intent about a `$PROFILE`
-                // no shell has named yet.
-                debug_assert_eq!(*application, first_run::Application::PowerShellIntent);
-                self.record_powershell_install_pending(true);
             }
         }
         Ok(())
@@ -970,28 +961,14 @@ impl Runtime<'_> {
         Ok(())
     }
 
-    /// Whether a PowerShell pane with no integration is offered one (§7.1.6j).
-    ///
-    /// **It reaches the panes that are already open**, which is what separates it from
-    /// [`Self::apply_terminal_notifications`] two functions up: that switch is read at the moment
-    /// a toast would be raised, and this one is read by a strip that is on the glass right now.
-    /// Turning it off with a strip up and leaving the strip up would be a row that promises to
-    /// stop asking while the question is still on screen; turning it on wants the offer back in
-    /// the pane the reader is looking at rather than in the next one they open.
-    ///
-    /// [`Offer::Closed`] is not disturbed by either direction. A pane whose strip was dismissed
-    /// with `×` said "not now" about that pane, and this row is about the asking in general —
-    /// re-asking there on an unrelated press would be this switch answering a question it was not
-    /// asked.
-    pub(crate) fn apply_powershell_integration_offer(&mut self, enabled: bool) -> Result<()> {
+    /// Persist the process-scoped PowerShell integration switch for subsequent pane births.
+    pub(crate) fn apply_shell_integration(&mut self, enabled: bool) -> Result<()> {
         let mut settings = self.app.settings_store.loaded().clone();
-        settings.powershell_integration_offer = enabled;
-        if !enabled {
-            settings.powershell_install_pending = false;
-        }
+        settings.shell_integration = enabled;
         if !self.app.settings_store.store(settings) {
             return Ok(());
         }
-        self.settle_pane_notices()
+        shell_integration::set_powershell_integration(enabled);
+        Ok(())
     }
 }
