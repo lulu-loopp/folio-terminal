@@ -2968,7 +2968,12 @@ text_entries! {
     VersionAvailable,
     VersionDownloading,
     VersionManaged,
+    /// A failed update that stopped before anything installed moved (`update_card::Outcome::NothingChanged`).
     VersionFailed,
+    /// A failed update whose replaced files were put back (`update_card::Outcome::Restored`).
+    VersionFailedRestored,
+    /// A failed update whose rollback did not finish (`update_card::Outcome::Incomplete`).
+    VersionFailedIncomplete,
     VersionLastChecked,
     VersionNeverChecked,
     VersionJustNow,
@@ -5697,8 +5702,18 @@ impl Text {
             ),
             Self::VersionFailed => pick(
                 lang,
-                "{version} wasn't installed. This version was restored.",
-                "{version} 未装上，已恢复当前版本。",
+                "{version} was not installed.", // zh: pending T-UPDATE-FAILURE-COPY
+                "{version} was not installed.", // zh: pending T-UPDATE-FAILURE-COPY
+            ),
+            Self::VersionFailedRestored => pick(
+                lang,
+                "{version} was not installed. The previous version was restored.", // zh: pending T-UPDATE-FAILURE-COPY
+                "{version} was not installed. The previous version was restored.", // zh: pending T-UPDATE-FAILURE-COPY
+            ),
+            Self::VersionFailedIncomplete => pick(
+                lang,
+                "The update to {version} is incomplete.", // zh: pending T-UPDATE-FAILURE-COPY
+                "The update to {version} is incomplete.", // zh: pending T-UPDATE-FAILURE-COPY
             ),
             Self::VersionLastChecked => pick(lang, "Last checked: {when}", "上次检查：{when}"),
             Self::VersionNeverChecked => pick(lang, "Never", "从未"),
@@ -5938,7 +5953,21 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &{
+        use HostPlatform::{MacOs, OtherUnix, Windows};
+        use Text::{VersionFailed, VersionFailedIncomplete, VersionFailedRestored};
+        [
+            (VersionFailed, Windows),
+            (VersionFailed, MacOs),
+            (VersionFailed, OtherUnix),
+            (VersionFailedRestored, Windows),
+            (VersionFailedRestored, MacOs),
+            (VersionFailedRestored, OtherUnix),
+            (VersionFailedIncomplete, Windows),
+            (VersionFailedIncomplete, MacOs),
+            (VersionFailedIncomplete, OtherUnix),
+        ]
+    };
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -6166,13 +6195,6 @@ pub fn version_managed_in(lang: Lang, version: &str, command: &str) -> String {
         .in_lang(lang)
         .replace("{version}", version)
         .replace("{command}", command)
-}
-
-#[must_use]
-pub fn version_failed_in(lang: Lang, version: &str) -> String {
-    Text::VersionFailed
-        .in_lang(lang)
-        .replace("{version}", version)
 }
 
 /// **The elapsed-time form About → Version's "Last checked" line names** —
