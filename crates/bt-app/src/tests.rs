@@ -21030,7 +21030,7 @@ fn the_tab_menus_subject_is_an_id_resolved_when_the_verb_runs() {
     assert!(
         duplicate.contains("state.focused()")
             && duplicate.contains("leaf.profile")
-            && duplicate.contains("leaf.session.working_directory()"),
+            && duplicate.contains("leaf.place_for_a_new_shell()"),
         "both facts come off one leaf of the tab the menu names"
     );
     assert!(
@@ -24948,10 +24948,82 @@ fn a_restart_carries_the_seats_own_profile_and_its_last_reported_folder() {
         "a pane that is running has a profile this build has"
     );
 
-    // A shell that never said where it stood is an absence, not a fallback:
-    // `spawn_place` answers `None` with the profile's own starting
-    // directory, which is what a brand-new pane on that profile gets.
+    // A pane with no place at all is an absence, not a fallback: `spawn_place`
+    // answers `None` with the profile's own starting directory, which is what a
+    // brand-new pane on that profile gets.
     assert_eq!(restart_seed(profile, None).cwd, None);
+}
+
+/// RED (T-RESTART-CWD, 2026-10-04) — **a pane whose shell never reported a
+/// folder is started again where it was born** (`docs/M2-restart-shell-contract.md`
+/// §1.1: 无上报则该 seat 的初始 cwd).
+///
+/// `Restart shell` read only the shell's OSC 7 report, so a pane opened by
+/// `New terminal in folder…` (or split off into a folder) whose shell has no
+/// integration restarted at its profile's default folder. The ladder is
+/// [`LeafSession::place_for_a_new_shell`]: the report, else the folder the
+/// spawn put the shell down in, except the shell's-own-home mark, which is
+/// handed on as nothing so the next spawn asks for the home again.
+///
+/// MUTATIONS, each observed red: drop the spawn rung (answer `None` after the
+/// report) — the first assertion; read the spawn rung before the report — the
+/// second; drop the shell's-home exception — the third.
+#[test]
+fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
+    let born_in = PathBuf::from(r"D:\Projects\chosen-folder");
+
+    let silent = LeafSession {
+        spawn_place: Some(born_in.clone()),
+        ..leaf_saying("no report from this shell")
+    };
+    assert_eq!(
+        restart_seed(&silent.profile, silent.place_for_a_new_shell().as_deref()).cwd,
+        Some(born_in.clone()),
+        "the folder the pane was born in, not the profile's default"
+    );
+
+    let reported = LeafSession {
+        spawn_place: Some(born_in.clone()),
+        ..leaf_saying("\u{1b}]7;file://localhost/D:/Developer/folio-terminal\u{7}")
+    };
+    assert_eq!(
+        reported.place_for_a_new_shell(),
+        Some(PathBuf::from(r"D:\Developer\folio-terminal")),
+        "a report is the first rung and beats where the shell was born"
+    );
+
+    let mut at_home = LeafSession {
+        spawn_place: Some(PathBuf::from("~")),
+        ..leaf_saying("no report from this shell either")
+    };
+    at_home.session.set_spawn_at_shell_home(true);
+    assert_eq!(
+        at_home.place_for_a_new_shell(),
+        None,
+        "`~` is a mark for the profile's home, asked for again by handing on nothing"
+    );
+}
+
+/// RED (T-RESTART-CWD, 2026-10-04) — **every verb that starts a shell in a
+/// pane's place reads the one ladder**: `Restart shell`, every split (which
+/// is `Duplicate pane` and `Split with`), and `Duplicate tab`.
+///
+/// Those verbs spawn a ConPTY and cannot run here, so this is their bodies, read
+/// through `bt_source`.
+///
+/// MUTATION, observed red: put `leaf.session.working_directory()` back in any one
+/// of the three bodies.
+#[test]
+fn every_verb_that_starts_a_shell_in_a_panes_place_reads_the_one_ladder() {
+    for door in ["restart_shell", "split_seat", "duplicate_tab"] {
+        let body = method_body("Runtime", door);
+        assert!(
+            body.contains("leaf.place_for_a_new_shell()")
+                && !body.contains("session.working_directory()"),
+            "`{door}` reads where the pane stands through \
+             `LeafSession::place_for_a_new_shell`:\n{body}"
+        );
+    }
 }
 
 /// PIN (ticket #62) — **`Clear scrollback…` asks by count, and asks nothing

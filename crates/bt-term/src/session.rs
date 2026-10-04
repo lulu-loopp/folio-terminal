@@ -11817,6 +11817,17 @@ impl DualPlaneSession {
         self.spawn_at_shell_home = at_shell_home;
     }
 
+    /// Whether the spawn directory is the shell's-own-home mark rather than a place — what
+    /// [`Self::set_spawn_at_shell_home`] was told.
+    ///
+    /// Read by a caller that starts *another* shell for this pane's place (`Restart shell`, a
+    /// split, a duplicate): the mark is not a folder to hand on, it is "this profile's home", and
+    /// the one way to ask for that again is to hand on nothing.
+    #[must_use]
+    pub fn spawned_at_shell_home(&self) -> bool {
+        self.spawn_at_shell_home
+    }
+
     /// Where relative text printed into this pane is measured from: §7.1.4's ladder read once —
     /// the last OSC 7 report, else where the shell was put down.
     ///
