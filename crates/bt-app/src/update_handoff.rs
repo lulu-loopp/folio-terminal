@@ -71,7 +71,7 @@ use bt_platform::install_txn::{self, Held};
 use bt_platform::file_reads::{self, Lane};
 
 use crate::cli;
-use crate::update_apply::{ExitGuard, Leave, Left, Window};
+use crate::update_apply::{Contender, ExitGuard, Leave, Left, Window};
 use crate::update_txn::{
     Class, Event, Header, HeaderOutcome, Home, Journal, Nonce, Refusal, TxnId,
 };
@@ -576,6 +576,7 @@ impl Leaving {
                 } else {
                     Duration::ZERO
                 },
+                Contender::Outgoing,
             );
             match window {
                 Window::Mine(duty) => {
@@ -588,10 +589,7 @@ impl Leaving {
                 }
                 Window::Theirs(owner) => guard.not_mine(Some(owner.pid)),
                 Window::RoadTaken(phase) => {
-                    crate::diagnostics::note(&format!(
-                        "Folio: the applier already took the update road to {phase:?}; the outgoing build starts nothing"
-                    ));
-                    guard.not_mine(None);
+                    unreachable!("the outgoing build never reads the journal to elect ({phase:?})")
                 }
                 Window::Refused(refusal) => {
                     crate::diagnostics::note(&format!(
@@ -2013,6 +2011,7 @@ mod tests {
             txn,
             Running { pid: 1, started: 1 },
             Duration::ZERO,
+            crate::update_apply::Contender::Applier,
         );
         assert_eq!(
             crate::update_apply::window_holder(&staged.home, txn, Running { pid: 1, started: 1 },),
@@ -2032,6 +2031,7 @@ mod tests {
                     txn,
                     Running { pid: 1, started: 1 },
                     Duration::ZERO,
+                    crate::update_apply::Contender::Applier,
                 ),
                 Window::Refused(refusal) if refusal.contended()
             ),
@@ -2045,88 +2045,51 @@ mod tests {
                 txn,
                 Running { pid: 1, started: 1 },
                 Duration::ZERO,
+                crate::update_apply::Contender::Applier,
             )
             .is_mine(),
             "only dropping the process's exit guard releases the retained lock"
         );
     }
 
-    /// RED (T-UPDATE-LOCK-RACE round 3, R2-1) — **an unmarked applier that
-    /// takes the road, commits, delivers its successor and exits is not
-    /// replaced by O.** While P's product exit guard lives its retained lock
-    /// refuses O; after that guard is gone, the absent mark is no invitation:
-    /// `Committed` is the durable record that P already acted, so O starts
-    /// nothing. No sleep chooses either observation.
+    /// RED (T-UPDATE-LOCK-RACE round 4) — **the outgoing build never reads the
+    /// journal to elect: an applier that could not be started leaves the
+    /// journal `Abandoned` in O's own hand, and O still opens Folio exactly
+    /// once.** O holds the transaction lock while it asks, so no applier road
+    /// can have moved the journal; `Abandoned` here is O's record, not a road
+    /// taken. An applier asking at the same state does read the journal, and
+    /// stands down.
     ///
-    /// MUTATION: skip the journal-phase check for an absent mark (O writes its
-    /// own mark and records a second start).
+    /// MUTATION: in `Leaving::leave`, elect as `Contender::Applier` (O reads
+    /// `Abandoned` as a road taken and starts nothing).
     #[test]
-    fn an_unmarked_applier_that_commits_and_exits_is_not_replaced_by_o() {
-        let folder = Folder::new("unmarked-applier-finished");
+    fn an_outgoing_build_whose_applier_never_started_still_opens_folio() {
+        let folder = Folder::new("applier-never-started");
         let staged = staged(&folder);
         let txn = TxnId::new(TXN);
-        let applier = crate::update_apply::this_process();
-        let mut journal = staged.journal.clone();
-        journal.body.phase = Phase::Handoff { applier: nonce() };
-        install_txn::durable_write(&staged.home.journal(), &journal.encode()).unwrap();
-
-        let answer = crate::update_apply::take_the_window_within_writes_at(
-            &staged.home,
-            txn,
-            applier,
-            crate::update_apply::JOURNAL_WRITE_WITHIN,
-            |_mark, _bytes| {
-                Err(
-                    crate::update_apply::MarkWriteFailure::before_rename_for_test(
-                        "the mark stayed unwritable",
-                        false,
-                    ),
-                )
-            },
-        );
-        let Window::Mine(duty) = answer else {
-            panic!("P did not take the unmarked duty: {answer:?}");
-        };
-
-        struct Delivered;
-        impl crate::update_apply::Leave for Delivered {
-            fn say(&mut self, _line: &str) {}
-            fn opening(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
-                None
-            }
-            fn start(&mut self, _program: &Path, _words: &[OsString]) -> io::Result<()> {
-                unreachable!("the committed applier left a live successor")
-            }
-            fn fallback(&mut self) -> Option<(PathBuf, Vec<OsString>)> {
-                None
-            }
-            fn acknowledged(&mut self) -> bool {
-                false
-            }
-            fn show_here(&mut self, _why: &str) {}
-        }
-
-        let mut applier_exit = crate::update_apply::ExitGuard::new(Delivered);
-        applier_exit.owns_window(duty);
-        applier_exit.succeeded_by(Some(applier));
+        let (spawner, _) = recording(&staged, true);
+        let answered =
+            perform(HandoffJob::new(&staged, nonce(), spawner).expect("Prepared → Handoff"));
         assert!(
-            matches!(
-                crate::update_apply::take_the_window_within(
-                    None,
-                    &staged.home,
-                    txn,
-                    Running { pid: 1, started: 1 },
-                    Duration::ZERO,
-                ),
-                Window::Refused(refusal) if refusal.contended()
-            ),
-            "while P runs, its retained lock is the duty"
+            matches!(answered, HandedOff::NotStarted { .. }),
+            "{answered:?}"
         );
-
-        journal.body.phase = Phase::Committed;
-        install_txn::durable_write(&staged.home.journal(), &journal.encode()).unwrap();
-        assert_eq!(applier_exit.leave(), Left::Succeeded(applier.pid));
-        drop(applier_exit);
+        assert_eq!(
+            on_disk(&staged.home).body.phase.kind(),
+            PhaseKind::Abandoned
+        );
+        assert_eq!(
+            crate::update_apply::take_the_window_within(
+                None,
+                &staged.home,
+                txn,
+                Running { pid: 2, started: 2 },
+                Duration::ZERO,
+                crate::update_apply::Contender::Applier,
+            ),
+            Window::RoadTaken(PhaseKind::Abandoned),
+            "an applier reads the journal"
+        );
 
         let installed = folder.0.join("folio.exe");
         let mut starts = Starts::default();
@@ -2136,22 +2099,15 @@ mod tests {
             &mut starts,
             None,
         );
-        assert_eq!(left, Left::NotMine(None));
-        assert!(
-            starts.calls.is_empty(),
-            "O must not start beside P's window"
-        );
-        assert_eq!(
-            crate::update_apply::window_owner(&staged.home, txn),
-            None,
-            "the proof is the journal, not a recreated mark"
-        );
+        assert_eq!(left, Left::Started(installed.clone()));
+        assert_eq!(starts.calls.len(), 1, "{:?}", starts.calls);
+        assert_eq!(starts.calls[0].0, installed);
     }
 
     /// RED (T-UPDATE-LOCK-RACE round 3, R2-1) — **every journal phase is on
-    /// exactly one side of the unmarked election:** allocation, preparation
-    /// and hand-off have not taken the applier road; every later or terminal
-    /// phase has. This is the phase column of the holder/outcome table.
+    /// exactly one side of an applier's unmarked election:** allocation,
+    /// preparation and hand-off have not taken the applier road; every later
+    /// or terminal phase has.
     ///
     /// MUTATION: classify any phase after `Handoff` as open.
     #[test]
@@ -2166,28 +2122,6 @@ mod tests {
                 "{phase:?}"
             );
         }
-
-        let folder = Folder::new("phase-duty");
-        let staged = staged(&folder);
-        let txn = TxnId::new(TXN);
-        let mut journal = staged.journal.clone();
-        journal.body.phase = Phase::Handoff { applier: nonce() };
-        install_txn::durable_write(&staged.home.journal(), &journal.encode()).unwrap();
-        assert!(crate::update_apply::lock_backed_duty_stays_with_outgoing(
-            &staged.home,
-            txn,
-            true,
-        ));
-        assert!(
-            !crate::update_apply::lock_backed_duty_stays_with_outgoing(&staged.home, txn, false,),
-            "a recorded duty remains P's even before its road advances"
-        );
-        journal.body.phase = Phase::Committed;
-        install_txn::durable_write(&staged.home.journal(), &journal.encode()).unwrap();
-        assert!(
-            !crate::update_apply::lock_backed_duty_stays_with_outgoing(&staged.home, txn, true,),
-            "a completed unmarked road remains P's"
-        );
     }
 
     /// RED (T-UPDATE-LOCK-RACE round 3, R2-4) — **the election's own lock
@@ -2246,6 +2180,7 @@ mod tests {
                     txn,
                     me,
                     Duration::ZERO,
+                    crate::update_apply::Contender::Applier,
                 )
             },
             |_| drop(holder.take()),
@@ -2287,6 +2222,7 @@ mod tests {
                 txn,
                 Running { pid: 1, started: 1 },
                 Duration::ZERO,
+                crate::update_apply::Contender::Applier,
             ),
             Window::Theirs(me)
         );
@@ -2631,6 +2567,7 @@ mod tests {
             txn,
             Running { pid: 1, started: 1 },
             Duration::ZERO,
+            crate::update_apply::Contender::Applier,
         );
         release.send(()).unwrap();
         let first = first.join().unwrap();

@@ -2788,6 +2788,121 @@ fn an_applier_that_never_gets_the_lock_still_opens_folio() {
     );
 }
 
+/// **The window's mark held open by a scanner** (no delete sharing), naming a
+/// process that is gone: an applier reads it as stale and claims, but every
+/// replacement is refused before the rename, so the applier owns the duty
+/// through `owner.lock` alone. `None` where the platform replaces an open
+/// file.
+fn mark_held_open(install: &Install) -> Option<std::fs::File> {
+    let mark = crate::update_apply::owner_path(&install.home, install.txn);
+    std::fs::create_dir_all(mark.parent().unwrap()).unwrap();
+    std::fs::write(&mark, format!("{}:1", std::process::id())).unwrap();
+    bt_platform::trust_harness::hold_without_delete_sharing(&mark).ok()
+}
+
+/// RED (T-UPDATE-LOCK-RACE round 4) — **an applier that owns the window only
+/// through the election lock, and whose road stops at `Handoff` after it held
+/// the transaction lock, opens the one window itself.** O keeps that lock
+/// until its process ends, so O is gone by then, and it had stood down
+/// against this applier's `owner.lock`. Driven through the product `apply`:
+/// the mark's replacement is refused before the rename ([`mark_held_open`]),
+/// and the journal names another applier's nonce, so the road stops at
+/// `Handoff` with the transaction lock held.
+///
+/// MUTATION: in `ExitGuard::road_ended`, hand a lock-only duty back whether
+/// or not the transaction lock was held (nothing is opened).
+#[test]
+fn a_lock_only_applier_that_stops_at_handoff_after_the_lock_opens_the_one_window() {
+    let Some(install) = Install::new("lock-only-held") else {
+        return;
+    };
+    let Some(scanner) = mark_held_open(&install) else {
+        return;
+    };
+    let journal = std::fs::read(install.home.journal()).unwrap();
+    let (ended, world) = match start(
+        install.road(limits(20_000, 20_000)),
+        install.txn,
+        Nonce::new([0x55; 32]),
+        install.world(Trial::Answers),
+    )
+    .join()
+    {
+        Ok(answer) => answer,
+        Err(panic) => std::panic::resume_unwind(panic),
+    };
+    drop(scanner);
+    assert!(
+        said_at(&world, "owner.lock records the duty").is_some(),
+        "the duty is lock-only: {:?}",
+        world.said
+    );
+    assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
+    assert_eq!(
+        std::fs::read(install.home.journal()).unwrap(),
+        journal,
+        "the road stopped at Handoff"
+    );
+    assert_eq!(
+        world.opened,
+        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        "the applier opens the one window: {:?}",
+        world.said
+    );
+    assert!(world.shown.is_empty(), "{:?}", world.shown);
+}
+
+/// RED (T-UPDATE-LOCK-RACE round 4) — **an applier that owns the window only
+/// through the election lock, and whose road never held the transaction lock,
+/// gives the duty back to O: it opens nothing, and O, finding the election
+/// lock free and no live mark, opens the one window.** The transaction lock
+/// is held by this test, standing for O, until the applier's one deadline has
+/// passed; the applier's product `apply` runs through its own election.
+///
+/// MUTATION: in `update_apply_windows::apply`, drop the duty instead of
+/// `guard.owns_window(duty)` (the applier and O each open a window).
+#[test]
+fn a_lock_only_applier_that_never_held_the_lock_gives_the_window_back_to_o() {
+    let Some(install) = Install::new("lock-only-never") else {
+        return;
+    };
+    let Some(scanner) = mark_held_open(&install) else {
+        return;
+    };
+    let held = install_txn::try_hold(&install.home.lock(), Hold::Exclusive)
+        .unwrap()
+        .unwrap();
+    let (ended, world) = applied(&install, limits(600, 20_000), install.world(Trial::Answers));
+    drop(held);
+    drop(scanner);
+    assert!(
+        said_at(&world, "owner.lock records the duty").is_some(),
+        "the duty is lock-only: {:?}",
+        world.said
+    );
+    assert_eq!(ended, Ended::OldHeldTheLock, "{:?}", world.said);
+    assert!(
+        world.opened.is_empty(),
+        "the applier opens nothing: {:?}",
+        world.opened
+    );
+    assert!(world.shown.is_empty(), "{:?}", world.shown);
+
+    let mut starts = Starts::default();
+    let left = Leaving::over(&install.home, install.txn, &install.data).leave(
+        Running { pid: 1, started: 1 },
+        &install.installed,
+        &mut starts,
+        None,
+    );
+    assert_eq!(left, Left::Started(install.installed.clone()));
+    assert_eq!(
+        starts.calls,
+        vec![(install.installed.clone(), failed_then(&install, &[]))],
+        "O opens the one window"
+    );
+}
+
 /// RED (U-34) — **a panic inside the applier's road still opens Folio**: the
 /// exit guard is a `Drop`, so the panic unwinding through the road starts what
 /// the disk names — here the journal still `Handoff`, the old set whole, the
@@ -3417,7 +3532,7 @@ fn the_applier_waits_for_o_within_one_budget() {
     let nonce = install.applier;
     let mut world = install.world(Trial::Answers);
     let expired = Instant::now() - Duration::from_millis(1);
-    let ((ended, successor), asked) = on_a_worker(move |worker| {
+    let ((ended, successor, transaction_lock), asked) = on_a_worker(move |worker| {
         let mut asked = None;
         let answer = apply_under_the_lock_with(
             worker,
@@ -3436,6 +3551,10 @@ fn the_applier_waits_for_o_within_one_budget() {
     assert_eq!(asked, Some(Duration::ZERO));
     assert_eq!(ended, Ended::OldHeldTheLock);
     assert_eq!(successor, None);
+    assert_eq!(
+        transaction_lock,
+        crate::update_apply::TransactionLock::NeverHeld
+    );
 }
 
 /// RED (U-34, round 7) — **a late applier after O's wait ran out never

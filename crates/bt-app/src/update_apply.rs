@@ -982,15 +982,14 @@ pub(crate) const fn window_duty_is_open(phase: PhaseKind) -> bool {
     )
 }
 
-/// An unmarked applier that never advanced the journal did not take the road:
-/// it starts nothing and releases the retained lock back to armed O. A road
-/// that advanced past `Handoff` keeps the duty through its exit guard.
-pub(crate) fn lock_backed_duty_stays_with_outgoing(
-    home: &Home,
-    txn: TxnId,
-    lock_backed: bool,
-) -> bool {
-    lock_backed && read_window_phase(home, txn).is_ok_and(window_duty_is_open)
+/// **Whether an applier's road ever held the transaction lock `H\lock`** —
+/// what [`ExitGuard::road_ended`] decides by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TransactionLock {
+    /// The road stopped before it had the lock: O may still hold it.
+    NeverHeld,
+    /// The road had the lock, so O's process had already ended.
+    Held,
 }
 
 /// A successful election. When the owner mark could not be replaced before
@@ -1147,15 +1146,17 @@ pub(crate) fn election_within(until: Instant, now: Instant) -> Duration {
 /// system lock, `H\<txn>\owner.lock` (`install_txn::hold_within`: `LockFileEx`
 /// on Windows, `flock` on Unix), is held around the whole decision. **The one
 /// rule is: a readable live mark owns, a held lock owns while it lives, and
-/// without either a contender may claim only while the journal still says the
-/// applier road has not been taken.** A mark read or replacement refused by a
-/// scanner is re-asked with [`write_journal`]'s [`JOURNAL_WRITE_WITHIN`]
-/// discipline. After a successful rename the visible mark records the duty;
-/// before the rename the exit guard retains the lock through the road and its
-/// final delivery. Once that guard is gone, a phase past `Handoff` is the
-/// durable record that the road already ran. A holder that dies before acting
-/// releases its lock while the journal remains `Handoff`, so the next
-/// contender can take the duty.
+/// without either an applier may claim only while the journal still says the
+/// applier road has not been taken; the outgoing build, which holds the
+/// transaction lock while it asks, may claim without either
+/// ([`Contender`]).** A mark read or replacement refused by a scanner is
+/// re-asked with [`write_journal`]'s [`JOURNAL_WRITE_WITHIN`] discipline. After
+/// a successful rename the visible mark records the duty; before the rename
+/// the exit guard retains the lock through the road and its final delivery
+/// ([`ExitGuard::road_ended`] says when that duty goes back to O). Once that
+/// guard is gone, a phase past `Handoff` is the durable record that the road
+/// already ran. A holder that dies before acting releases its lock while the
+/// journal remains `Handoff`, so the next contender can take the duty.
 ///
 /// **By `until`** (round 8, Codex's finding 15): the wait for the lock is the
 /// smaller of [`ELECTION_WITHIN`] and what is left before `until` — the
@@ -1174,23 +1175,26 @@ pub(crate) fn take_the_window(
         txn,
         me,
         election_within(until, Instant::now()),
+        Contender::Applier,
     )
 }
 
-/// [`take_the_window`], waiting up to `within` for the election's lock — zero
-/// in O's panic road, which waits for nothing.
+/// [`take_the_window`], as `contender`, waiting up to `within` for the
+/// election's lock — zero in O's panic road, which waits for nothing.
 pub(crate) fn take_the_window_within(
     worker: Option<&WorkerCtx>,
     home: &Home,
     txn: TxnId,
     me: Running,
     within: Duration,
+    contender: Contender,
 ) -> Window {
     take_the_window_within_using(
         home,
         txn,
         me,
         within,
+        contender,
         ElectionOps {
             after_lock: || {},
             read_owner: || read_window_owner(home, txn),
@@ -1254,11 +1258,30 @@ struct ElectionOps<AfterLock, ReadOwner, ReadPhase, Write, Wait> {
     wait: Wait,
 }
 
+/// **Who asks for the window duty.** Only an applier reads the journal in an
+/// unmarked election.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Contender {
+    /// The outgoing build O. It holds the transaction lock `H\lock` until its
+    /// process ends (`update_handoff::Staged::lock`, kept by `update_job` until
+    /// the process leaves), and every applier road takes that lock before it
+    /// writes the journal (`update_apply_windows::apply_under_the_lock_with`,
+    /// `update_apply_macos::Txn::hold`). So while O asks, no applier road can
+    /// have moved the journal past `Handoff`: a later phase there is O's own
+    /// record (`Abandoned` when its applier could not be started), never
+    /// evidence of a road taken, and O does not read it.
+    Outgoing,
+    /// An applier: an absent or dead mark may be claimed only while the
+    /// journal says no applier road has been taken.
+    Applier,
+}
+
 fn take_the_window_within_using<AfterLock, ReadOwner, ReadPhase, Write, Wait>(
     home: &Home,
     txn: TxnId,
     me: Running,
     within: Duration,
+    contender: Contender,
     operations: ElectionOps<AfterLock, ReadOwner, ReadPhase, Write, Wait>,
 ) -> Window
 where
@@ -1313,28 +1336,31 @@ where
             drop(held);
             Window::Theirs(owner)
         }
-        // Absent, malformed, or its process gone: the journal decides whether
-        // the duty is still open before this process records itself.
+        // Absent, malformed, or its process gone: for an applier the journal
+        // decides whether the duty is still open before this process records
+        // itself; the outgoing build has nothing to learn there
+        // ([`Contender::Outgoing`]).
         Ok(_) => {
-            let phase = match retry_within(read_until, &mut read_phase, |_| true, &mut wait) {
-                Ok(phase) if window_duty_is_open(phase) => phase,
-                Ok(phase) => {
-                    drop(held);
-                    return Window::RoadTaken(phase);
+            if contender == Contender::Applier {
+                match retry_within(read_until, &mut read_phase, |_| true, &mut wait) {
+                    Ok(phase) if window_duty_is_open(phase) => {}
+                    Ok(phase) => {
+                        drop(held);
+                        return Window::RoadTaken(phase);
+                    }
+                    Err(why) => {
+                        drop(held);
+                        return Window::Refused(WindowRefusal {
+                            why: format!(
+                                "the update journal could not be read for the window election: {why}"
+                            ),
+                            contended: false,
+                            retryable: true,
+                            outgoing_keeps_duty: false,
+                        });
+                    }
                 }
-                Err(why) => {
-                    drop(held);
-                    return Window::Refused(WindowRefusal {
-                        why: format!(
-                            "the update journal could not be read for the window election: {why}"
-                        ),
-                        contended: false,
-                        retryable: true,
-                        outgoing_keeps_duty: false,
-                    });
-                }
-            };
-            debug_assert!(window_duty_is_open(phase));
+            }
             let mark = owner_path(home, txn);
             let bytes = owner_value(me);
             let write_until = until.min(Instant::now() + JOURNAL_WRITE_WITHIN);
@@ -1380,6 +1406,7 @@ pub(crate) fn take_the_window_within_at(
         txn,
         me,
         within,
+        Contender::Applier,
         ElectionOps {
             after_lock,
             read_owner: || read_window_owner(home, txn),
@@ -1407,6 +1434,7 @@ pub(crate) fn take_the_window_within_writes_at(
         txn,
         me,
         within,
+        Contender::Applier,
         ElectionOps {
             after_lock: || {},
             read_owner: || read_window_owner(home, txn),
@@ -1432,6 +1460,7 @@ pub(crate) fn take_the_window_within_reads_at(
         txn,
         me,
         within,
+        Contender::Applier,
         ElectionOps {
             after_lock: || {},
             read_owner: read,
@@ -1701,10 +1730,11 @@ impl Left {
 /// whether it has the duty at all.
 pub(crate) struct ExitGuard<L: Leave> {
     leave: L,
-    /// An unrecorded election winner's live ownership record. The same value
-    /// is held in product and tests, through the road and the guard's final
-    /// delivery, and is released only when the guard itself is dropped.
-    _window_duty: Option<WindowDuty>,
+    /// This process's election success. An unrecorded one carries the live
+    /// election lock, held in product and tests alike through the road and
+    /// the guard's final delivery, and released only when the guard itself is
+    /// dropped.
+    window_duty: Option<WindowDuty>,
     successor: Option<Running>,
     waiting: bool,
     /// A Folio is proved to hold the data directory (U-37, H.3).
@@ -1720,7 +1750,7 @@ impl<L: Leave> ExitGuard<L> {
     pub(crate) fn new(leave: L) -> Self {
         Self {
             leave,
-            _window_duty: None,
+            window_duty: None,
             successor: None,
             waiting: true,
             elsewhere: false,
@@ -1733,7 +1763,37 @@ impl<L: Leave> ExitGuard<L> {
     /// recorded success carries no lock; an unrecorded one carries the real
     /// operating-system lock in [`WindowDuty`].
     pub(crate) fn owns_window(&mut self, duty: WindowDuty) {
-        self._window_duty = Some(duty);
+        self.window_duty = Some(duty);
+    }
+
+    /// **An applier's road has ended**, having held the transaction lock or
+    /// not: the one place that decides whether a duty this guard owns only
+    /// through the election lock (no mark landed) goes back to the outgoing
+    /// build O.
+    ///
+    /// O holds `H\lock` until its process ends (`update_handoff::Staged::lock`;
+    /// `update_job` keeps the staged transaction "until the process leaves"),
+    /// and an applier's road takes that lock before anything else
+    /// (`update_apply_windows::apply_under_the_lock_with`,
+    /// `update_apply_macos::Txn::hold`). So:
+    ///
+    /// * **held** — O's process had ended before this road began. While this
+    ///   guard held `owner.lock`, O found no mark, and its election met that
+    ///   lock and stood down. Nobody else is left to open Folio, so this guard
+    ///   keeps the duty, whatever phase the road left the journal in.
+    /// * **never held** — the road took no step, and O may still be waiting.
+    ///   This guard starts nothing and lets `owner.lock` go when it is dropped.
+    ///   O then finds the lock free, the mark absent and `Handoff`, and takes
+    ///   the duty.
+    pub(crate) fn road_ended(&mut self, lock: TransactionLock) {
+        if lock == TransactionLock::NeverHeld
+            && self
+                .window_duty
+                .as_ref()
+                .is_some_and(WindowDuty::is_lock_backed)
+        {
+            self.not_mine(None);
+        }
     }
 
     /// **This process does not have the duty a window follows**

@@ -175,8 +175,8 @@ use crate::install_channel::Channel;
 use crate::update_adapter::Layouts;
 use crate::update_apply::{
     BeforeDeciding, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave, Limits, Opener,
-    Opens, Watch, Watched, Window, failed_words, now_ms, owed_at_logon, read_receipt, stop_trial,
-    trial_runs, trial_words,
+    Opens, TransactionLock, Watch, Watched, Window, failed_words, now_ms, owed_at_logon,
+    read_receipt, stop_trial, trial_runs, trial_words,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -688,9 +688,8 @@ pub(crate) fn apply(
         until,
         road.limits.poll,
     );
-    let lock_backed_duty = match window {
+    match window {
         Window::Mine(duty) => {
-            let lock_backed = duty.is_lock_backed();
             if let Some(warning) = duty.warning() {
                 guard
                     .inner()
@@ -698,7 +697,6 @@ pub(crate) fn apply(
                     .say(&format!("BT_UPDATE_APPLY {warning}"));
             }
             guard.owns_window(duty);
-            lock_backed
         }
         other => {
             let owner = match &other {
@@ -713,14 +711,11 @@ pub(crate) fn apply(
                 .say(&format!("BT_UPDATE_APPLY {other:?}; {}", left.said()));
             return Ended::Refused(format!("the window is not this applier's: {other:?}"));
         }
-    };
-    let (ended, successor) =
+    }
+    let (ended, successor, transaction_lock) =
         apply_under_the_lock(worker, road, txn, nonce, until, &mut *guard.inner().world);
     guard.succeeded_by(successor);
-    if crate::update_apply::lock_backed_duty_stays_with_outgoing(&road.home, txn, lock_backed_duty)
-    {
-        guard.not_mine(None);
-    }
+    guard.road_ended(transaction_lock);
     if ended.deferred_to_a_holder() {
         guard.window_elsewhere();
     }
@@ -732,8 +727,9 @@ pub(crate) fn apply(
     ended
 }
 
-/// **The applier's road under the transaction lock**: where it ended, and
-/// the trial it started, which opens Folio while it runs.
+/// **The applier's road under the transaction lock**: where it ended, the
+/// trial it started, which opens Folio while it runs, and whether the road
+/// ever held that lock ([`ExitGuard::road_ended`]).
 fn apply_under_the_lock(
     worker: &WorkerCtx,
     road: &Road,
@@ -741,7 +737,7 @@ fn apply_under_the_lock(
     nonce: Nonce,
     window: Instant,
     world: &mut impl World,
-) -> (Ended, Option<Running>) {
+) -> (Ended, Option<Running>, TransactionLock) {
     apply_under_the_lock_with(worker, road, txn, nonce, window, world, |path, within| {
         install_txn::hold_within(path, Hold::Exclusive, within)
     })
@@ -755,15 +751,35 @@ fn apply_under_the_lock_with(
     window: Instant,
     world: &mut impl World,
     hold: impl FnOnce(&Path, Duration) -> Result<Option<install_txn::Held>, install_txn::Failure>,
-) -> (Ended, Option<Running>) {
+) -> (Ended, Option<Running>, TransactionLock) {
     let lock = match hold(
         &road.home.lock(),
         window.saturating_duration_since(Instant::now()),
     ) {
         Ok(Some(held)) => held,
-        Ok(None) => return (Ended::OldHeldTheLock, None),
-        Err(failure) => return (Ended::Failed(failure.to_string()), None),
+        Ok(None) => return (Ended::OldHeldTheLock, None, TransactionLock::NeverHeld),
+        Err(failure) => {
+            return (
+                Ended::Failed(failure.to_string()),
+                None,
+                TransactionLock::NeverHeld,
+            );
+        }
     };
+    let (ended, successor) = under_the_lock(worker, road, txn, nonce, window, world, lock);
+    (ended, successor, TransactionLock::Held)
+}
+
+/// [`apply_under_the_lock_with`] once `lock` is held.
+fn under_the_lock(
+    worker: &WorkerCtx,
+    road: &Road,
+    txn: TxnId,
+    nonce: Nonce,
+    window: Instant,
+    world: &mut impl World,
+    lock: install_txn::Held,
+) -> (Ended, Option<Running>) {
     let journal = match read_journal(&road.home) {
         Ok(Some(journal)) => journal,
         Ok(None) => return (Ended::Refused("there is no journal".to_owned()), None),
