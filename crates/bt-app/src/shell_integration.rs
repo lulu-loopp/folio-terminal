@@ -433,32 +433,29 @@ fn install_zdotdir() -> Option<PathBuf> {
 }
 
 /// Where this build's installed integration assets are on this machine — **one
-/// per door that has a file**, because bash and PowerShell use files while zsh
-/// uses a directory.
+/// per door that has a file**, because bash's is a file and zsh's is a directory.
 ///
-/// One value rather than three parameters, so a caller cannot hand the bash
-/// script to zsh or PowerShell: the profile family is answered inside the
-/// composition.
+/// A pair rather than two parameters, so that a caller cannot hand the bash
+/// script to a zsh: which one a profile is served by is [`profiles::Integration`]'s
+/// answer and not the caller's, and it is asked inside [`shell_command`].
+///
+/// PowerShell's script is not here: it is prepared and named on the shell's
+/// birth worker ([`compose_powershell_birth`]), never on the window thread.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Scripts<'a> {
     /// `folio.bash`, named by `--init-file`.
     pub bash: Option<&'a Path>,
     /// The directory `folio.zsh` was written into, named by `ZDOTDIR`.
     pub zdotdir: Option<&'a Path>,
-    /// `folio.ps1`, read as text by the PowerShell startup command.
-    pub powershell: Option<&'a Path>,
 }
 
 impl<'a> Scripts<'a> {
-    /// The integration assets this machine has. PowerShell's was prepared by
-    /// the pre-window startup worker; the older shell doors retain their
-    /// first-use preparation.
+    /// The pair this machine has, both written out on first use.
     #[must_use]
     pub fn installed() -> Scripts<'static> {
         Scripts {
             bash: script_path(),
             zdotdir: zdotdir_path(),
-            powershell: powershell_script_repaired(),
         }
     }
 }
@@ -492,28 +489,11 @@ pub struct ShellCommand {
 /// variable this process already has one of, and prefixing rather than replacing
 /// it means the composition has to see what is there.
 #[must_use]
-#[cfg(test)]
 pub fn shell_command(
     profile: &Profile,
     place_arguments: &[OsString],
     scripts: Scripts<'_>,
     environment: &dyn ShellEnvironment,
-) -> ShellCommand {
-    shell_command_for_program(profile, place_arguments, scripts, environment, None, false)
-}
-
-/// [`shell_command`] with the resolved executable and the reader's PowerShell
-/// integration switch. The program is supplied at the spawn seam: a profile's
-/// declared integration is a hint, while the executable actually being born is
-/// the authority for whether PowerShell syntax is admissible.
-#[must_use]
-pub fn shell_command_for_program(
-    profile: &Profile,
-    place_arguments: &[OsString],
-    scripts: Scripts<'_>,
-    environment: &dyn ShellEnvironment,
-    program: Option<&Path>,
-    powershell_integration: bool,
 ) -> ShellCommand {
     // The row's login flag and then its own words (0.4.6 ticket 74): what the row
     // asks the program for, before any door below trades a word for its script.
@@ -526,14 +506,6 @@ pub fn shell_command_for_program(
             .collect::<Vec<_>>()
     };
     let mut command = shell_command_for(profile, scripts, environment, &own);
-    if let Some(program) = program {
-        command.arguments = compose_powershell_arguments(
-            program,
-            &command.arguments,
-            scripts.powershell,
-            powershell_integration,
-        );
-    }
     let mine = &profile.env;
     command.environment.extend(hyperlink_declaration(
         profiles::served_by(profile),
@@ -581,20 +553,59 @@ pub fn compose_powershell_arguments(
     arguments
 }
 
+/// **A shell's argv, finished on its birth worker** (`pty_door::spawn_shell`).
+///
+/// The row's words come from the window thread; the PowerShell load is appended here, because
+/// naming the script means preparing it ([`powershell_script_for_birth`]) and that is disk work —
+/// a compare, maybe a write — which can stall on a redirected or sleeping drive. Asked here, a slow
+/// disk delays this one pane's birth and never the window. Nothing is prepared for a program the
+/// composer would not load into.
+#[must_use]
+pub fn compose_powershell_birth(
+    program: &Path,
+    arguments: &[OsString],
+    powershell_integration: bool,
+) -> Vec<OsString> {
+    compose_with_prepared(
+        program,
+        arguments,
+        powershell_integration,
+        powershell_script_for_birth,
+    )
+}
+
+/// [`compose_powershell_birth`] with the preparation handed in: `prepare` is asked only when the
+/// composer would load into this argv, and its answer is the script named.
+fn compose_with_prepared(
+    program: &Path,
+    arguments: &[OsString],
+    powershell_integration: bool,
+    prepare: impl FnOnce() -> Option<PathBuf>,
+) -> Vec<OsString> {
+    if !(powershell_integration
+        && is_powershell(program)
+        && powershell_arguments_are_safe(program, arguments))
+    {
+        return arguments.to_vec();
+    }
+    compose_powershell_arguments(
+        program,
+        arguments,
+        prepare().as_deref(),
+        powershell_integration,
+    )
+}
+
 /// The complete argument list `bt-pty`'s last-resort retry is started with when a pane's own
 /// program would not start: [`bt_pty::LAST_RESORT_ARGUMENTS`] through
-/// [`compose_powershell_arguments`], so the retry — Windows PowerShell — carries the same load
-/// as any other PowerShell this process starts, and `/bin/sh` off Windows carries nothing.
+/// [`compose_powershell_birth`], so the retry — Windows PowerShell — carries the same load as any
+/// other PowerShell this process starts, and `/bin/sh` off Windows carries nothing. Asked by
+/// `bt-pty` only when the retry happens, on the birth worker.
 #[must_use]
-pub fn last_resort_arguments(scripts: Scripts<'_>, powershell_integration: bool) -> Vec<OsString> {
-    let own = bt_pty::LAST_RESORT_ARGUMENTS
-        .iter()
-        .map(OsString::from)
-        .collect::<Vec<_>>();
-    compose_powershell_arguments(
+pub fn last_resort_arguments(powershell_integration: bool) -> Vec<OsString> {
+    compose_powershell_birth(
         Path::new(bt_pty::LAST_RESORT_SHELL),
-        &own,
-        scripts.powershell,
+        &bt_pty::last_resort_arguments(),
         powershell_integration,
     )
 }
@@ -1265,7 +1276,12 @@ const SCRIPT_FILE_PS1: &str = "folio.ps1";
 const SCRIPT_DIRECTORY: &str = "shell-integration";
 
 static POWERSHELL_INTEGRATION: AtomicBool = AtomicBool::new(true);
-static REPAIRED_POWERSHELL_SCRIPT: OnceLock<Option<PathBuf>> = OnceLock::new();
+/// The durable `folio.ps1`, compared and repaired once per process — outside a trial, or after
+/// its commit.
+static DURABLE_POWERSHELL_SCRIPT: OnceLock<Option<PathBuf>> = OnceLock::new();
+/// The script an update's trial names while its writes are held back (see
+/// [`powershell_script_for_birth`]).
+static TRIAL_POWERSHELL_SCRIPT: OnceLock<Option<PathBuf>> = OnceLock::new();
 static POWERSHELL_PROFILE_LINE_PRESENT: AtomicBool = AtomicBool::new(false);
 
 /// Publish the persisted answer for subsequent shell births.
@@ -1537,31 +1553,79 @@ pub fn integration_line() -> String {
     profile_marks::MANAGED_LINE.to_owned()
 }
 
-/// Where PowerShell's script is on this machine, repaired before the first pane.
+/// **The `folio.ps1` a PowerShell birth names** — called on a birth worker or the
+/// preparation worker, never on the window thread.
 ///
-/// [`script_path`]'s sibling, down to the compare-before-write: the two scripts
-/// are two halves of one agreement with this build, they ship inside the same
-/// executable, and they land in the same directory. What differs is *when* —
-/// bash's is written because a bash is starting, and this one is written by the
-/// startup preparation worker before any native window or pane exists.
-pub fn script_path_ps1() -> Option<PathBuf> {
-    install_script_at(
-        &persist::storage_dir().join(SCRIPT_DIRECTORY),
-        SCRIPT_FILE_PS1,
-        SCRIPT_PS1,
+/// The rule, by whether this process's durable writes are held back (`update_trial`, F-7):
+///
+/// - **Not a trial, or a committed one**: the durable copy under Folio's data folder, compared
+///   with the bytes this build carries and rewritten when it differs ([`install_script_at`]).
+/// - **A trial not yet committed**: a read, never a write, of the durable copy — named when it
+///   already holds this build's bytes. When it is stale or missing, the trial writes this build's
+///   bytes into its own folder under the system temporary directory (one per transaction,
+///   [`trial_script_directory`]) and names that, leaving the durable copy exactly as the old build
+///   left it. The commit releases [`update_trial::Writer::PowerShellScript`], which repairs the
+///   durable copy; births after it name the durable copy.
+///
+/// [`update_trial::Writer::PowerShellScript`]: crate::update_trial::Writer::PowerShellScript
+pub fn powershell_script_for_birth() -> Option<PathBuf> {
+    let durable = persist::storage_dir().join(SCRIPT_DIRECTORY);
+    if crate::update_trial::defer(crate::update_trial::Writer::PowerShellScript) {
+        return TRIAL_POWERSHELL_SCRIPT
+            .get_or_init(|| {
+                powershell_script_in_trial(&durable, &trial_script_directory()?, SCRIPT_PS1)
+            })
+            .clone();
+    }
+    DURABLE_POWERSHELL_SCRIPT
+        .get_or_init(|| install_script_at(&durable, SCRIPT_FILE_PS1, SCRIPT_PS1))
+        .clone()
+}
+
+/// A trial's own folder for the script: under the system temporary directory, which holds none
+/// of the old build's data, named by the transaction so two trials never share one.
+fn trial_script_directory() -> Option<PathBuf> {
+    let (txn, _) = crate::update_startup::trial()?;
+    Some(
+        std::env::temp_dir()
+            .join(format!("folio-trial-{txn}"))
+            .join(SCRIPT_DIRECTORY),
     )
 }
 
-/// Script upkeep is started by the startup worker once per resident run.
-/// Both scripts still use `install_script_at`'s compare-and-repair.
-pub fn powershell_script_repaired() -> Option<&'static Path> {
-    REPAIRED_POWERSHELL_SCRIPT.get().and_then(Option::as_deref)
+/// The trial half of [`powershell_script_for_birth`]'s rule, over directories a test can name:
+/// the durable copy when it already holds `text` (read only), otherwise `text` written into
+/// `trial_directory`. Never writes into `durable_directory`.
+fn powershell_script_in_trial(
+    durable_directory: &Path,
+    trial_directory: &Path,
+    text: &str,
+) -> Option<PathBuf> {
+    let durable = durable_directory.join(SCRIPT_FILE_PS1);
+    if bt_platform::file_reads::read_to_string(bt_platform::file_reads::Lane::Settings, &durable)
+        .is_ok_and(|existing| existing == text)
+    {
+        return Some(durable);
+    }
+    install_script_at(trial_directory, SCRIPT_FILE_PS1, text)
 }
 
-fn repair_powershell_script() -> Option<&'static Path> {
-    REPAIRED_POWERSHELL_SCRIPT
-        .get_or_init(script_path_ps1)
-        .as_deref()
+/// **Prepare the script ahead of the first PowerShell birth, on a worker nobody waits for.**
+///
+/// Started at launch and again when an update's trial is committed (the release of
+/// [`update_trial::Writer::PowerShellScript`], which is then the durable write). A birth that
+/// arrives first prepares it itself on its own worker; the two meet in a `OnceLock`, so the file
+/// is compared once.
+///
+/// [`update_trial::Writer::PowerShellScript`]: crate::update_trial::Writer::PowerShellScript
+pub fn begin_powershell_script_preparation() {
+    let _ = bt_platform::spawn_at_priority(
+        "powershell-script-prepare",
+        bt_platform::ThreadPriority::BelowNormal,
+        |_ctx| {
+            let _ = powershell_script_for_birth();
+        },
+    );
 }
 
 /// What one write into a profile did.
@@ -2048,11 +2112,15 @@ mod tests {
             .split_once("fn candidates")
             .unwrap()
             .0;
-        let spawned = worker.find("\"powershell-script-prepare\"").unwrap();
-        let repaired = worker.find("repair_powershell_script()").unwrap();
-        let joined = worker.find("worker.join()").unwrap();
-        let observed = worker.find("\"powershell-profile-observation\"").unwrap();
-        assert!(spawned < repaired && repaired < joined && joined < observed);
+        assert!(worker.contains("\"powershell-profile-observation\""));
+        assert!(
+            !worker.contains(".join()"),
+            "the window thread waits for no startup worker"
+        );
+        let warmed = source
+            .find("shell_integration::begin_powershell_script_preparation();")
+            .expect("launch starts the script's preparation");
+        assert!(warmed < source.find("opening_window_attributes(").unwrap());
         let probe = source_for_profile_probe();
         assert!(probe.contains("quiet_command_named"));
         assert!(probe.contains("-NoProfile"));
@@ -2333,49 +2401,161 @@ mod tests {
         assert_eq!(composed("pwsh.exe", &[], false), Vec::<String>::new());
     }
 
-    /// RED (mutation: `last_resort_arguments` returns `bt_pty::LAST_RESORT_ARGUMENTS` unchanged)
-    /// — the shell `bt-pty` retries with when a pane's program will not start is a PowerShell on
-    /// Windows and is handed the same load as every other PowerShell birth, and only while the
-    /// switch is on and the script is prepared.
+    /// RED (mutations: `compose_with_prepared` asks `prepare` before its gate; or
+    /// `last_resort_arguments` composes for some program other than `bt_pty::LAST_RESORT_SHELL`)
+    /// — a birth prepares the script only for an argv the composer will load into, and the
+    /// last-resort retry is composed like every other PowerShell birth: on Windows it is a
+    /// PowerShell and is handed the same load; off Windows `/bin/sh` is handed nothing.
     #[test]
-    fn the_last_resort_retry_is_composed_like_every_other_powershell_birth() {
-        let script = Path::new("C:/Folio/folio.ps1");
-        let scripts = Scripts {
-            powershell: Some(script),
-            ..Scripts::default()
+    fn a_birth_prepares_the_script_only_for_an_argv_that_loads_it() {
+        let script = PathBuf::from("C:/Folio/folio.ps1");
+        let asked = std::cell::Cell::new(0);
+        let prepare = || {
+            asked.set(asked.get() + 1);
+            Some(script.clone())
         };
-        let own = bt_pty::LAST_RESORT_ARGUMENTS
-            .iter()
-            .map(OsString::from)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            last_resort_arguments(scripts, true),
-            compose_powershell_arguments(
-                Path::new(bt_pty::LAST_RESORT_SHELL),
-                &own,
-                Some(script),
-                true
-            )
-        );
-        assert_eq!(last_resort_arguments(scripts, false), own);
-        assert_eq!(last_resort_arguments(Scripts::default(), true), own);
-        if cfg!(windows) {
-            let composed = last_resort_arguments(scripts, true);
-            assert_eq!(composed[..1], [OsString::from("-NoLogo")]);
+        for (program, words, enabled) in [
+            ("cmd.exe", vec![], true),
+            ("bash.exe", vec!["--login"], true),
+            ("pwsh.exe", vec!["-Command", "Get-Date"], true),
+            ("pwsh.exe", vec![], false),
+        ] {
+            let own = words.iter().map(OsString::from).collect::<Vec<_>>();
             assert_eq!(
-                composed[1..3],
+                compose_with_prepared(Path::new(program), &own, enabled, prepare),
+                own,
+                "{program} {words:?} {enabled}"
+            );
+        }
+        assert_eq!(
+            asked.get(),
+            0,
+            "nothing prepared for an argv that does not load it"
+        );
+
+        let own = vec![OsString::from("-NoLogo")];
+        let composed = compose_with_prepared(Path::new("pwsh.exe"), &own, true, prepare);
+        assert_eq!(asked.get(), 1);
+        assert_eq!(
+            composed,
+            compose_powershell_arguments(Path::new("pwsh.exe"), &own, Some(&script), true)
+        );
+
+        let retry = compose_with_prepared(
+            Path::new(bt_pty::LAST_RESORT_SHELL),
+            &bt_pty::last_resort_arguments(),
+            true,
+            prepare,
+        );
+        if cfg!(windows) {
+            assert_eq!(retry[..1], [OsString::from("-NoLogo")]);
+            assert_eq!(
+                retry[1..3],
                 [OsString::from("-NoExit"), OsString::from("-Command")]
             );
             assert_eq!(
-                composed[3],
+                retry[3],
                 OsString::from(powershell_load_command(
                     Path::new(bt_pty::LAST_RESORT_SHELL),
-                    script
+                    &script
                 ))
             );
         } else {
-            assert_eq!(last_resort_arguments(scripts, true), own);
+            assert_eq!(retry, bt_pty::last_resort_arguments());
         }
+        let source = Index::of_package("bt-app")
+            .body_of(&bt_source::ItemQuery::function("last_resort_arguments"))
+            .expect("the retry's composition");
+        assert!(
+            source.contains("Path::new(bt_pty::LAST_RESORT_SHELL)")
+                && source.contains("&bt_pty::last_resort_arguments()")
+                && source.contains("compose_powershell_birth("),
+            "the retry's argv is the last-resort shell's own words through the birth composer"
+        );
+    }
+
+    /// RED (mutations: `powershell_script_in_trial` installs into the durable directory; or names
+    /// the trial copy even when the durable one already holds this build's bytes; or
+    /// `powershell_script_for_birth` stops asking the trial gate) — **the trial rule**: a trial
+    /// whose durable script already holds this build's bytes names the durable path and writes
+    /// nothing; a trial facing a stale or missing durable script writes its own copy and leaves
+    /// the durable file byte for byte as it was; outside a trial (or after the commit) the durable
+    /// file is the one written.
+    #[test]
+    fn a_trial_names_a_matching_durable_script_and_otherwise_its_own_copy() {
+        let root = temp_dir("trial-script");
+        let durable = root.join("data").join(SCRIPT_DIRECTORY);
+        let trial = root.join("trial").join(SCRIPT_DIRECTORY);
+        let shipped = "# this build\n";
+
+        // Matching durable copy: named, read only.
+        std::fs::create_dir_all(&durable).unwrap();
+        std::fs::write(durable.join(SCRIPT_FILE_PS1), shipped).unwrap();
+        let before = std::fs::metadata(durable.join(SCRIPT_FILE_PS1))
+            .unwrap()
+            .modified()
+            .unwrap();
+        assert_eq!(
+            powershell_script_in_trial(&durable, &trial, shipped),
+            Some(durable.join(SCRIPT_FILE_PS1))
+        );
+        assert!(
+            !trial.exists(),
+            "nothing written for a matching durable copy"
+        );
+        assert_eq!(
+            std::fs::metadata(durable.join(SCRIPT_FILE_PS1))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            before
+        );
+
+        // Stale, then missing: the trial's own copy, the durable one untouched.
+        for stale in [Some("# an older build\n"), None] {
+            let _ = std::fs::remove_dir_all(&trial);
+            match stale {
+                Some(text) => std::fs::write(durable.join(SCRIPT_FILE_PS1), text).unwrap(),
+                None => std::fs::remove_file(durable.join(SCRIPT_FILE_PS1)).unwrap(),
+            }
+            let named = powershell_script_in_trial(&durable, &trial, shipped);
+            assert_eq!(named, Some(trial.join(SCRIPT_FILE_PS1)), "{stale:?}");
+            assert_eq!(
+                std::fs::read_to_string(trial.join(SCRIPT_FILE_PS1)).unwrap(),
+                shipped
+            );
+            match stale {
+                Some(text) => assert_eq!(
+                    std::fs::read_to_string(durable.join(SCRIPT_FILE_PS1)).unwrap(),
+                    text,
+                    "the old build's copy is left as it was"
+                ),
+                None => assert!(!durable.join(SCRIPT_FILE_PS1).exists()),
+            }
+        }
+
+        // The commit's write, and every write outside a trial: the durable copy, repaired.
+        std::fs::write(durable.join(SCRIPT_FILE_PS1), "# an older build\n").unwrap();
+        assert_eq!(
+            install_script_at(&durable, SCRIPT_FILE_PS1, shipped),
+            Some(durable.join(SCRIPT_FILE_PS1))
+        );
+        assert_eq!(
+            std::fs::read_to_string(durable.join(SCRIPT_FILE_PS1)).unwrap(),
+            shipped
+        );
+
+        // And the birth asks the trial gate by this writer, so a commit releases it.
+        let body = Index::of_package("bt-app")
+            .body_of(&bt_source::ItemQuery::function(
+                "powershell_script_for_birth",
+            ))
+            .expect("the birth's script");
+        assert!(
+            body.contains("update_trial::defer(crate::update_trial::Writer::PowerShellScript)")
+        );
+        assert!(body.contains("powershell_script_in_trial("));
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -2402,23 +2582,34 @@ mod tests {
         let constructor = index
             .body_of(&bt_source::ItemQuery::function("create_leaf_session"))
             .expect("the one terminal-leaf constructor");
-        assert_eq!(
-            constructor.matches("shell_command_for_program(").count(),
-            1,
-            "the leaf constructor must ask the PowerShell composition exactly once"
-        );
-        // RED (mutation: pass `bt_pty::LAST_RESORT_ARGUMENTS` to the birth instead) — the
-        // last-resort retry's argv is composed once, by the same composer, and handed to the birth.
+        // RED (mutations: compose on the window thread in the constructor; or drop the switch
+        // from the birth; or have the birth worker hand bt-pty `bt_pty::last_resort_arguments`) —
+        // the constructor reads the switch once and hands it to the birth, and the birth worker
+        // composes both the pane's argv and the last-resort retry's with the one composer.
         assert_eq!(
             constructor
-                .matches("shell_integration::last_resort_arguments(")
+                .matches("shell_integration::powershell_integration_enabled()")
                 .count(),
             1,
-            "the leaf constructor must compose the last-resort retry's arguments exactly once"
+            "the leaf constructor reads the switch exactly once"
         );
         assert!(
-            constructor.contains("&fallback_arguments,"),
-            "the composed retry arguments must reach the birth"
+            !constructor.contains("compose_powershell"),
+            "the window thread composes no PowerShell load"
+        );
+        let birth = index
+            .body_of(&bt_source::ItemQuery::function("spawn_shell"))
+            .expect("the birth door");
+        assert_eq!(
+            birth
+                .matches("shell_integration::compose_powershell_birth(")
+                .count(),
+            1,
+            "the birth worker composes the pane's argv"
+        );
+        assert!(
+            birth.contains("shell_integration::last_resort_arguments(powershell_integration)"),
+            "and the retry's, with the same switch"
         );
 
         let found = index
@@ -2763,7 +2954,6 @@ mod tests {
         let doors = Scripts {
             bash: Some(script),
             zdotdir: Some(zdotdir),
-            powershell: None,
         };
         let first = shell_command(&row("wsl"), &place, doors, &bare());
         assert_eq!(
@@ -2869,7 +3059,6 @@ mod tests {
                 Scripts {
                     bash: Some(Path::new(unreachable)),
                     zdotdir: Some(Path::new(unreachable)),
-                    powershell: None,
                 },
                 &bare(),
             );
@@ -2886,7 +3075,6 @@ mod tests {
         Scripts {
             bash: Some(script),
             zdotdir: None,
-            powershell: None,
         }
     }
 
@@ -2895,7 +3083,6 @@ mod tests {
         Scripts {
             bash: Some(Path::new(bash)),
             zdotdir: Some(Path::new(zdotdir)),
-            powershell: None,
         }
     }
 
@@ -3181,7 +3368,6 @@ mod tests {
         let scripts = Scripts {
             bash: Some(&script),
             zdotdir: Some(&zdotdir),
-            powershell: None,
         };
 
         let rows = profiles::shipped_for(profiles::SeedPlatform::MacOs, &Mac);
@@ -3202,7 +3388,7 @@ mod tests {
             let mut session = bt_pty::PtySession::spawn_shell_in(
                 program.clone(),
                 &command.arguments,
-                &last_resort_arguments(scripts, false),
+                &|| last_resort_arguments(false),
                 &command.environment,
                 bt_pty::PtySize::cells(
                     std::num::NonZeroU16::new(200).unwrap(),
@@ -4181,9 +4367,9 @@ mod tests {
     /// for bash, which names its script on every spawn, and previously had no unconditional caller
     /// for PowerShell, whose script was named only by an optional profile line.
     ///
-    /// Red gate: remove the startup worker's `repair_powershell_script()` call and the second half
-    /// fails; make `install_script_at` return early whenever the file merely exists and the first
-    /// half fails.
+    /// Red gate: name the durable path without `install_script_at` in `powershell_script_for_birth`
+    /// and the second half fails; make `install_script_at` return early whenever the file merely
+    /// exists and the first half fails.
     #[test]
     fn an_installed_script_that_is_not_this_builds_is_rewritten() {
         let directory = temp_dir("stale-script");
@@ -4216,16 +4402,16 @@ mod tests {
             "an identical file is read, not written"
         );
 
-        // The second half: startup prepares the owned copy before any pane asks for it.
-        let source = include_str!("shell_integration/profile_runtime.rs");
-        let body = source
-            .split_once("pub fn begin_startup_migration() {")
-            .expect("startup preparation")
-            .1;
-        let end = body.find("\n}\n").expect("its end");
+        // The second half: the durable copy every birth outside a trial names is the one
+        // `install_script_at` compares against what this build ships.
+        let body = Index::of_package("bt-app")
+            .body_of(&bt_source::ItemQuery::function(
+                "powershell_script_for_birth",
+            ))
+            .expect("the birth's script");
         assert!(
-            body[..end].contains("repair_powershell_script()"),
-            "startup compares the installed integration against what this build ships"
+            body.contains("install_script_at(&durable, SCRIPT_FILE_PS1, SCRIPT_PS1)"),
+            "a birth compares the installed integration against what this build ships"
         );
     }
 

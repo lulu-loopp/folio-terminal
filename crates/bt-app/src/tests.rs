@@ -56114,7 +56114,7 @@ fn every_owner_door_takes_its_own_token_by_value() {
         WaitToken<'_, doors::PtyBirth>,
         OsString,
         &[OsString],
-        &[OsString],
+        bool,
         &[(OsString, OsString)],
         &[(OsString, OsString)],
         PtySize,

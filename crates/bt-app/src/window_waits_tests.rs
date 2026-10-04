@@ -4381,6 +4381,22 @@ impl<'r> Scope<'r> {
                 }
             } else if tok.kind == Kind::Punct && text == "|" {
                 self.closure(toks, index);
+            } else if tok.kind == Kind::Ident
+                && s.is(toks.get(index + 1), "=")
+                && !index.checked_sub(1).is_some_and(|p| {
+                    [".", "::", "let", "mut", "ref", "type", "const", "static"]
+                        .iter()
+                        .any(|w| s.is(toks.get(p), w))
+                })
+                && self.bindings.contains_key(text)
+            {
+                // **An assignment to a binding already in scope** — `worker = spawn(…).ok();`
+                // after `let mut worker = None;`, possibly inside a closure — adds what is
+                // assigned to what the binding can hold. Without it a binding declared empty and
+                // filled later is untyped, and a wait on it (`worker.join()`) is no site at all.
+                let end = depth_zero(s, toks, index + 2, &[";", ","]);
+                let types = self.expression(&toks[index + 2..end]);
+                self.add(vec![text], &types);
             }
         }
     }
@@ -5457,6 +5473,39 @@ fn bare_sites_rendered(rows: &BTreeMap<BareKey, usize>) -> String {
         out.push_str(&format!("{package}\t{arm}\t{item}\t{entry}\t{count}\n"));
     }
     out
+}
+
+/// RED (T-INTEGRATION-INJECT-1 follow-up, mutation: drop the assignment arm of `Scope::bind`) —
+/// **a binding declared empty and filled by a later assignment is typed by what is assigned**.
+///
+/// The inventory below missed `let mut worker = None; … worker = spawn(…).ok(); … worker.join()`
+/// on the window thread because nothing typed `worker`: a `let` was the only way a binding got a
+/// type. `create_leaf_session`'s `resolved_program` is that shape in the product today (`None`,
+/// then `Some(PathBuf::from(…))`), so it is the witness; with the arm gone it has no `PathBuf` and
+/// this fails, and a join written that way is again no site at all.
+#[test]
+fn a_binding_filled_by_assignment_takes_the_assigned_types() {
+    let world = World::new();
+    let reader = Reader::new(&world);
+    let (src, record) = world
+        .srcs
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| s.package == "bt-app")
+        .flat_map(|(at, s)| s.index.items().iter().map(move |record| (at, s, record)))
+        .find(|(_, s, record)| {
+            record.kind().is_callable()
+                && s.product_item(record)
+                && record.name() == "create_leaf_session"
+        })
+        .map(|(at, _, record)| (at, record))
+        .expect("the leaf constructor");
+    let scope = Scope::of(&reader, src, record);
+    let types = scope.value("resolved_program");
+    assert!(
+        types.iter().any(|ty| ty.ends_with("PathBuf")),
+        "`resolved_program` is assigned `Some(PathBuf::from(…))`; the scope says {types:?}"
+    );
 }
 
 /// RED (A2a, revision (j)1 and (j)11.6) — **every vocabulary site in the product outside a

@@ -471,7 +471,6 @@ mod tests {
                 crate::shell_integration::Scripts {
                     bash: Some(std::path::Path::new(r"C:\Folio\folio.bash")),
                     zdotdir: Some(std::path::Path::new(r"C:\Folio\zdotdir")),
-                    powershell: None,
                 },
                 &bt_pty::SystemShellEnvironment,
             );

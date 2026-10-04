@@ -15,6 +15,7 @@ use std::sync::{Mutex, OnceLock};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use crate::shell_integration;
 use bt_platform::admission::{WaitToken, WorkerCtx, doors};
 use bt_platform::environment::Environment;
 use bt_pty::{EnvironmentRefresh, OutputWake, PtyError, PtySession, PtySize};
@@ -141,7 +142,7 @@ pub(crate) fn spawn_shell(
     token: WaitToken<'_, doors::PtyBirth>,
     program: OsString,
     args: &[OsString],
-    fallback_args: &[OsString],
+    powershell_integration: bool,
     folio_environment: &[(OsString, OsString)],
     profile_environment: &[(OsString, OsString)],
     size: PtySize,
@@ -150,13 +151,20 @@ pub(crate) fn spawn_shell(
 ) -> Result<PtySession, PtyError> {
     let _ = token;
     let args = args.to_vec();
-    let fallback_args = fallback_args.to_vec();
     let folio_environment = folio_environment.to_vec();
     let profile_environment = profile_environment.to_vec();
     let worker = bt_platform::spawn_at_priority(
         "bt-pty-birth",
         bt_platform::ThreadPriority::BelowNormal,
         move |ctx| {
+            // The PowerShell load is composed here, off the window thread, because naming the
+            // script prepares it; the retry's argv is composed only if the retry happens.
+            let args = shell_integration::compose_powershell_birth(
+                std::path::Path::new(&program),
+                &args,
+                powershell_integration,
+            );
+            let fallback_args = || shell_integration::last_resort_arguments(powershell_integration);
             let inherited = std::env::vars_os().collect();
             let refresh = environment_refresh(
                 || launch_environment_snapshot(ctx),

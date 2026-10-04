@@ -131,6 +131,12 @@ pub(crate) enum Writer {
     /// The zsh integration directory a starting zsh is pointed at
     /// (`shell_integration::zdotdir_path`).
     ZshScripts,
+    /// The PowerShell integration script a starting PowerShell loads, in the
+    /// data folder (`shell_integration::powershell_script_for_birth`). Held
+    /// back, a trial names the durable copy only when it already holds this
+    /// build's bytes and otherwise writes its own copy under the system
+    /// temporary directory; the release repairs the durable copy on a worker.
+    PowerShellScript,
     /// The launch's replacement of Folio's own older PSReadLine and its stamp
     /// (`psreadline::upgrade_recorded`, ticket 56).
     PsReadLineUpgrade,
@@ -146,7 +152,7 @@ pub(crate) enum Writer {
 impl Writer {
     /// Every writer, in release order.
     #[cfg(test)]
-    pub(crate) const ALL: [Writer; 15] = [
+    pub(crate) const ALL: [Writer; 16] = [
         Writer::DataFolderMove,
         Writer::DataFolder,
         Writer::RefusedCopies,
@@ -159,6 +165,7 @@ impl Writer {
         Writer::ProfileMigration,
         Writer::BashScript,
         Writer::ZshScripts,
+        Writer::PowerShellScript,
         Writer::PsReadLineUpgrade,
         Writer::ExplorerRepair,
         Writer::ToastIdentity,

@@ -228,7 +228,6 @@ crates/bt-app/src/settings.rs	settings::tests::the_capped_dialog_holds_every_eve
 crates/bt-app/src/settings.rs	settings::tests::the_maximum_height_row_offers_the_mock_ups_own_four_heights	include_str!	../../../docs/design/ui-mockup.html	P14	no
 crates/bt-app/src/settings.rs	settings::tests::the_mock_up_carries_the_rail_this_slice_gave_it	include_str!	../../../docs/design/ui-mockup.html	P14	no
 crates/bt-app/src/settings.rs	settings::tests::the_theme_row_wears_the_mock_ups_own_order_and_its_own_line	include_str!	../../../docs/design/ui-mockup.html	P14	no
-crates/bt-app/src/shell_integration.rs	shell_integration::tests::an_installed_script_that_is_not_this_builds_is_rewritten	include_str!	operate	P14	no
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::every_shell_is_told_this_terminal_renders_hyperlinks_unless_it_was_already_told	include_str!	../../../scripts/shell-integration/folio.ps1	P14	no
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::shell_integration_startup_and_removal_doors_are_above_window_work	include_str!	begin_startup_migration;candidates;main	P14	no
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_bash_script_ships_with_unix_line_endings	include_str!	../../../scripts/shell-integration/folio.bash	P14	no
@@ -237,7 +236,6 @@ crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_startup_cha
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::the_term_variables_a_pane_is_given_are_the_same_on_every_platform	include_str!	resolved_environment	P14	no
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::writing_the_profile_leaves_no_half_written_file_in_the_folder	include_str!	replace_profile	P14	no
 crates/bt-app/src/shell_integration.rs	shell_integration::tests::zsh_is_pointed_at_a_directory_and_never_handed_bashs_flag	include_str!	../../../scripts/shell-integration/folio.zsh	P14	no
-crates/bt-app/src/shell_integration/profile_runtime.rs	shell_integration::profile_runtime::tests::shell_integration_offer_predicate_never_grants_write_ownership	include_str!	add_profile_with_forms;offer_for	P14	no
 crates/bt-app/src/shortcuts.rs	shortcuts::tests::docs_shortcuts_md_is_the_bindings_table	fixture / manifest read	target	P14	no
 crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_archive_has_ten_files_and_cleanup_only_wrapper	include_str!	../../../scripts/release/package.ps1	P17	no
 crates/bt-app/src/uninstall_tests.rs	uninstall_tests::uninstall_door_precedes_every_startup_effect	include_str!	main	P17	no

@@ -38250,21 +38250,16 @@ fn create_leaf_session(
         // environment is one of the things the spawn now lays down, and a
         // function that asked this module five separate questions about one
         // index is a function no test can put a profile in front of.
-        let scripts = shell_integration::Scripts::installed();
-        let powershell_integration = shell_integration::powershell_integration_enabled();
-        let mut command = shell_integration::shell_command_for_program(
+        let mut command = shell_integration::shell_command(
             row,
             &place.arguments,
-            scripts,
+            shell_integration::Scripts::installed(),
             &bt_pty::SystemShellEnvironment,
-            Some(Path::new(program)),
-            powershell_integration,
         );
-        // **The retry is a PowerShell this process starts too**: when `program` will not start,
-        // `bt-pty` falls back once to its last-resort shell, and that shell is composed by the same
-        // function from the same two answers as the one it replaces.
-        let fallback_arguments =
-            shell_integration::last_resort_arguments(scripts, powershell_integration);
+        // **The PowerShell load is finished on the birth worker**, not here: naming `folio.ps1`
+        // means preparing it, which is disk work. The switch is read here, once, and travels with
+        // the birth, which composes both this argv and the last-resort retry's with it.
+        let powershell_integration = shell_integration::powershell_integration_enabled();
         // **The two variables that make an agent in this pane able to say something.**
         //
         // They are added here, after the profile's own environment, because they are not a property
@@ -38298,7 +38293,7 @@ fn create_leaf_session(
                     token,
                     program.into(),
                     &command.arguments,
-                    &fallback_arguments,
+                    powershell_integration,
                     &command.environment,
                     &command.profile_environment,
                     pty_size(grid, PhysicalSize::new(body.width, body.height)),
@@ -41857,6 +41852,9 @@ impl Runtime<'_> {
             eprintln!("{}", replacement.log_line());
         }
         shell_integration::begin_startup_migration();
+        // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
+        // PowerShell birth that arrives before it finishes prepares it on its own birth worker.
+        shell_integration::begin_powershell_script_preparation();
         // Three registry reads, on this thread, finishing before the next line
         // (§7.40 ②). This used to start a worker running `wsl.exe --list` and a
         // `getent` inside the distribution — and the `profiles::title` call
@@ -51114,6 +51112,10 @@ impl App {
                 }
                 Writer::ZshScripts => {
                     let _ = shell_integration::zdotdir_path();
+                }
+                // On a worker: the window thread waits for no disk here either.
+                Writer::PowerShellScript => {
+                    shell_integration::begin_powershell_script_preparation()
                 }
                 Writer::PsReadLineUpgrade => {
                     if let Some(documents) = psreadline::documents_directory()

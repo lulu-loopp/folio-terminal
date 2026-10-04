@@ -25,19 +25,15 @@ fn script_at(data: &Path) -> PathBuf {
     data.join(SCRIPT_DIRECTORY).join(SCRIPT_FILE_PS1)
 }
 
-fn schedule_preparation(start: impl FnOnce()) {
-    start();
-}
-
-/// No profile read, process query, script read or script write happens on the caller. The joined
-/// preparation worker refreshes Folio's own embedded script; a second worker then observes
-/// whether an older Folio line is present, without editing a profile. The join is the readiness
-/// barrier for the embedded script: when this returns, a first PowerShell pane can name the
-/// current bytes.
+/// No profile read, process query, script read or script write happens on the caller, and the
+/// caller waits for nothing: one worker observes whether an older Folio line is present, without
+/// editing a profile, and wakes the window when it knows. Folio's own script is prepared elsewhere
+/// (`shell_integration::begin_powershell_script_preparation` at launch, and on each PowerShell
+/// birth's worker), so this observation never stands between a window and its first pane.
 ///
-/// **Not in an update's trial** (`update_trial`, F-7): publishing the embedded
-/// script is an O-side durable write. The commit calls this again, and only then
-/// repairs the Folio-owned file and observes legacy profile lines.
+/// **Held back in an update's trial** behind [`crate::update_trial::Writer::ProfileMigration`], as
+/// the migration it replaced was. The observation itself only reads; the commit's release calls
+/// this again, so the conditional Settings verb appears then.
 pub fn begin_startup_migration() {
     if crate::update_trial::defer(crate::update_trial::Writer::ProfileMigration) {
         return;
@@ -46,23 +42,6 @@ pub fn begin_startup_migration() {
         return;
     }
     let data = persist::storage_dir();
-    let mut worker = None;
-    schedule_preparation(|| {
-        worker = bt_platform::spawn_at_priority(
-            "powershell-script-prepare",
-            bt_platform::ThreadPriority::BelowNormal,
-            move |_ctx| {
-                let _ = repair_powershell_script();
-            },
-        )
-        .ok();
-    });
-    // This startup barrier is before a native window or pane exists. It makes
-    // the worker's script publication a precondition of the first shell rather
-    // than a race with it; every filesystem operation remains on the worker.
-    if let Some(worker) = worker {
-        let _ = worker.join();
-    }
     let _ = bt_platform::spawn_at_priority(
         "powershell-profile-observation",
         bt_platform::ThreadPriority::BelowNormal,
@@ -536,17 +515,6 @@ mod tests {
             assert!(Marks::read(&root).is_err());
             assert_eq!(fs::read(root.join(RECORD_FILE)).unwrap(), bytes);
         }
-    }
-
-    #[test]
-    fn shell_integration_startup_always_schedules_owned_script_preparation() {
-        let mut workers = 0;
-        let mut probes = 0;
-        schedule_preparation(|| {
-            workers += 1;
-            probes += 2;
-        });
-        assert_eq!((workers, probes), (1, 2));
     }
 
     #[test]

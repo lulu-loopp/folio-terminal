@@ -196,6 +196,13 @@ pub const LAST_RESORT_SHELL: &str = shell::BOURNE_SHELL;
 pub const LAST_RESORT_ARGUMENTS: &[&str] = &["-NoLogo"];
 #[cfg(unix)]
 pub const LAST_RESORT_ARGUMENTS: &[&str] = &[];
+
+/// [`LAST_RESORT_ARGUMENTS`] as an argument list: the retry's arguments for a caller with nothing
+/// to add.
+#[must_use]
+pub fn last_resort_arguments() -> Vec<OsString> {
+    LAST_RESORT_ARGUMENTS.iter().map(OsString::from).collect()
+}
 const READER_CHUNK_BYTES: usize = 16 * 1024;
 const PTY_DUMP_ENV: &str = "BT_PTY_DUMP";
 /// Explicit opt-in only, including release builds. This records your keystrokes, including
@@ -1914,21 +1921,22 @@ impl PtySession {
     /// retry is skipped when the program is already that shell, where it would repeat an
     /// identical, already-failed spawn.
     ///
-    /// `fallback_args` is that retry's complete argument list ([`LAST_RESORT_ARGUMENTS`] for a
-    /// caller with nothing to add): the variables above belong to the shell that would not start,
-    /// but an argument the caller adds to *every* PowerShell it starts belongs to the retry too.
+    /// `fallback_args` answers that retry's complete argument list ([`last_resort_arguments`] for
+    /// a caller with nothing to add): the variables above belong to the shell that would not
+    /// start, but an argument the caller adds to *every* PowerShell it starts belongs to the retry
+    /// too. It is asked only when the retry happens, because composing it may cost the caller
+    /// something (the app prepares a script file for it) that a spawn which starts has no use for.
     pub fn spawn_shell_in(
         program: impl Into<OsString>,
         args: &[OsString],
-        fallback_args: &[OsString],
+        fallback_args: &dyn Fn() -> Vec<OsString>,
         environment: &[(OsString, OsString)],
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
     ) -> Result<Self, PtyError> {
         let program = program.into();
-        let fall_back =
-            (!program_is_the_last_resort_shell(&program)).then(|| fallback_args.to_vec());
+        let fall_back = (!program_is_the_last_resort_shell(&program)).then_some(fallback_args);
         Self::spawn_interactive(
             program,
             args,
@@ -1950,7 +1958,7 @@ impl PtySession {
     pub fn spawn_refreshed(
         program: impl Into<OsString>,
         args: &[OsString],
-        fallback_args: &[OsString],
+        fallback_args: &dyn Fn() -> Vec<OsString>,
         folio_environment: &[(OsString, OsString)],
         profile_environment: &[(OsString, OsString)],
         refresh: EnvironmentRefresh,
@@ -1959,8 +1967,7 @@ impl PtySession {
         working_directory: Option<PathBuf>,
     ) -> Result<Self, PtyError> {
         let program = program.into();
-        let fall_back =
-            (!program_is_the_last_resort_shell(&program)).then(|| fallback_args.to_vec());
+        let fall_back = (!program_is_the_last_resort_shell(&program)).then_some(fallback_args);
         Self::spawn_interactive(
             program,
             args,
@@ -1998,7 +2005,7 @@ impl PtySession {
             wake,
             working_directory,
             shell_spawn_failure_should_fall_back(resolved.choice)
-                .then(|| LAST_RESORT_ARGUMENTS.iter().map(OsString::from).collect()),
+                .then_some(&last_resort_arguments as &dyn Fn() -> Vec<OsString>),
         )
     }
 
@@ -2018,7 +2025,7 @@ impl PtySession {
         size: PtySize,
         wake: OutputWake,
         working_directory: Option<PathBuf>,
-        fall_back: Option<Vec<OsString>>,
+        fall_back: Option<&dyn Fn() -> Vec<OsString>>,
     ) -> Result<Self, PtyError> {
         Self::spawn_interactive_with(
             program,
@@ -2047,7 +2054,7 @@ impl PtySession {
         wake: OutputWake,
         working_directory: Option<PathBuf>,
         // The retry's complete argument list when a failure is recoverable, `None` when it is not.
-        fall_back: Option<Vec<OsString>>,
+        fall_back: Option<&dyn Fn() -> Vec<OsString>>,
         mut spawn: impl FnMut(PtyCommand, PtySize, OutputWake) -> Result<Self, PtyError>,
     ) -> Result<Self, PtyError> {
         // A directory that no longer exists would fail the spawn outright, and a
@@ -2098,7 +2105,7 @@ impl PtySession {
                      using {LAST_RESORT_SHELL} instead",
                     Path::new(&program).display()
                 );
-                let fallback = PtyCommand::last_resort_shell(&fallback_args)
+                let fallback = PtyCommand::last_resort_shell(&fallback_args())
                     .working_directory(working_directory);
                 let fallback = match environment_refresh {
                     Some(refresh) => fallback.refresh_environment(refresh),
@@ -4780,7 +4787,7 @@ mod tests {
             PtySize::cells(NonZeroU16::new(80).unwrap(), NonZeroU16::new(24).unwrap()),
             Arc::new(|| {}),
             None,
-            Some(fallback_args.to_vec()),
+            Some(&|| fallback_args.to_vec()),
             |command, _, _| {
                 attempts.push(command);
                 Err(PtyError::Backend("refused by the test".into()))
