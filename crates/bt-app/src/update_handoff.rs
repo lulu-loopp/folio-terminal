@@ -561,8 +561,8 @@ impl Leaving {
                 bt_platform::wait::sleep_within(worker, Duration::from_millis(50).min(left));
             }
         }
-        if let Some((home, txn)) = &self.transaction
-            && let Window::Theirs(owner) = crate::update_apply::take_the_window_within(
+        if let Some((home, txn)) = &self.transaction {
+            let window = crate::update_apply::take_the_window_within(
                 home,
                 *txn,
                 me,
@@ -572,9 +572,12 @@ impl Leaving {
                 } else {
                     Duration::ZERO
                 },
-            )
-        {
-            guard.not_mine(Some(owner.pid));
+            );
+            match window {
+                Window::Mine => {}
+                Window::Theirs(owner) => guard.not_mine(Some(owner.pid)),
+                Window::Refused(_) => guard.not_mine(None),
+            }
         }
         guard.leave()
     }
@@ -1749,8 +1752,8 @@ mod tests {
     /// RED (U-34, round 2) — **the window's mark is taken by exactly one live
     /// process**: created for the first taker; refused to a second while the
     /// first runs (by pid and start instant); taken over from an owner that no
-    /// longer runs; and `Mine` when the election cannot be held at all — the
-    /// bias is a second start, never none (there is no third answer).
+    /// longer runs; and refused when the election cannot be held, the mark
+    /// cannot be read, or its replacement is refused — none proves ownership.
     ///
     /// MUTATION: in `update_apply::take_the_window_within`, replace the mark
     /// whatever it names (a second live taker then gets it too).
@@ -1786,15 +1789,40 @@ mod tests {
             crate::update_apply::window_owner(&staged.home, txn),
             Some(other)
         );
-        assert_eq!(
-            crate::update_apply::take_the_window(
-                &staged.home,
-                TxnId::new([0x77; 16]),
-                me,
-                Instant::now() + crate::update_apply::ELECTION_WITHIN
+
+        std::fs::write(
+            crate::update_apply::owner_path(&staged.home, txn),
+            format!("{}:{}", me.pid, me.started.wrapping_add(1)),
+        )
+        .unwrap();
+        let mark = crate::update_apply::owner_path(&staged.home, txn);
+        if let Ok(scanner) = bt_platform::trust_harness::hold_without_delete_sharing(&mark) {
+            assert!(
+                matches!(take(me), Window::Refused(_)),
+                "a replacement refusal proves no owner"
+            );
+            drop(scanner);
+        }
+
+        assert!(
+            matches!(
+                crate::update_apply::take_the_window(
+                    &staged.home,
+                    TxnId::new([0x77; 16]),
+                    me,
+                    Instant::now() + crate::update_apply::ELECTION_WITHIN
+                ),
+                Window::Refused(_)
             ),
-            Window::Mine,
-            "an election that cannot be held answers Mine: a second start, never none"
+            "an election that cannot be held proves no owner"
+        );
+
+        let mark = crate::update_apply::owner_path(&staged.home, txn);
+        std::fs::remove_file(&mark).unwrap();
+        std::fs::create_dir(&mark).unwrap();
+        assert!(
+            matches!(take(me), Window::Refused(_)),
+            "an unreadable mark proves no owner"
         );
     }
 
@@ -2051,6 +2079,67 @@ mod tests {
         std::fs::write(&mark, format!("{}:{}", me.pid, me.started)).unwrap();
         drop(inside);
         assert_eq!(contender.join().unwrap(), Window::Theirs(me));
+        assert_eq!(
+            crate::update_apply::window_owner(&staged.home, txn),
+            Some(me)
+        );
+    }
+
+    /// RED (T-UPDATE-LOCK-RACE) — **a contender delayed anywhere inside the
+    /// election remains the only winner**: a second contender whose bounded
+    /// lock ask ends while the first is paused must refuse the duty, then the
+    /// first writes its identity and answers `Mine`.
+    ///
+    /// The pause is a channel at the seam immediately after the first
+    /// contender acquires `owner.lock`; no clock decides the interleaving.
+    /// Both contenders see the same stale mark. Before this fix, a bounded
+    /// lock refusal was `Mine`, so the deterministic answers were two winners.
+    ///
+    /// MUTATION: in `update_apply::take_the_window_within_after_lock`, map an
+    /// untaken election lock to `Window::Mine`.
+    #[test]
+    fn a_delayed_contender_inside_the_election_is_the_only_winner() {
+        let folder = Folder::new("delayed-election");
+        let staged = staged(&folder);
+        let txn = TxnId::new(TXN);
+        let me = crate::update_apply::this_process();
+        let stale = Running {
+            pid: me.pid,
+            started: me.started.wrapping_add(1),
+        };
+        std::fs::write(
+            crate::update_apply::owner_path(&staged.home, txn),
+            format!("{}:{}", stale.pid, stale.started),
+        )
+        .unwrap();
+
+        let (inside, entered) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let home = staged.home.clone();
+        let first = std::thread::spawn(move || {
+            crate::update_apply::take_the_window_within_at(
+                &home,
+                txn,
+                me,
+                crate::update_apply::ELECTION_WITHIN,
+                || {
+                    inside.send(()).unwrap();
+                    proceed.recv().unwrap();
+                },
+            )
+        });
+        entered.recv().unwrap();
+        let second = crate::update_apply::take_the_window_within(
+            &staged.home,
+            txn,
+            Running { pid: 1, started: 1 },
+            Duration::ZERO,
+        );
+        release.send(()).unwrap();
+        let first = first.join().unwrap();
+
+        assert_eq!(first, Window::Mine);
+        assert!(matches!(second, Window::Refused(_)), "{second:?}");
         assert_eq!(
             crate::update_apply::window_owner(&staged.home, txn),
             Some(me)

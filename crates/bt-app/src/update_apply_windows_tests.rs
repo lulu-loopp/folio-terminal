@@ -3122,10 +3122,12 @@ fn a_start_counts_only_when_acknowledged_and_the_last_resort_is_a_window_here() 
 /// RED (U-34, rounds 4 and 5; Codex's finding 14) — **a stale window's mark is
 /// taken over by exactly one of two contenders racing for it** (a soak): the
 /// election is one exclusive lock around read-check-replace, so the first in
-/// replaces the stale value and the second reads the live winner, `Theirs`. Two threads race, released together by a
-/// barrier, over many rounds, each round from a fresh stale mark; the two
-/// contenders are both live processes (this test and a synthetic program it
-/// started), so neither can be taken for a dead owner.
+/// replaces the stale value and the second reads the live winner, `Theirs`.
+/// If an outside scanner refuses that second read or replacement, it may
+/// instead answer `Refused`; it may never become another winner. Two threads
+/// race, released together by a barrier, over many rounds, each round from a
+/// fresh stale mark; the two contenders are both live processes (this test and
+/// a synthetic program it started), so neither can be taken for a dead owner.
 ///
 /// MUTATION: in `update_apply::take_the_window_within`, skip the lock (check,
 /// then `durable_write`) — both contenders then answer `Mine` in some round.
@@ -3184,8 +3186,11 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
         assert_eq!(mine, 1, "round {round}: {answers:?}");
         let winner = contenders[answers.iter().position(|a| *a == Window::Mine).unwrap()];
         assert!(
-            answers.contains(&Window::Theirs(winner)),
-            "round {round}: the loser names the winner: {answers:?}"
+            answers.contains(&Window::Theirs(winner))
+                || answers
+                    .iter()
+                    .any(|answer| matches!(answer, Window::Refused(_))),
+            "round {round}: the loser names the winner or truthfully refuses: {answers:?}"
         );
         assert_eq!(
             crate::update_apply::window_owner(&install.home, install.txn),
@@ -3370,7 +3375,7 @@ fn applied_on(install: &Install, road: Road, world: Fake) -> (Ended, Fake) {
 /// is one budget**: a wait for O's mark that spent most of `old_within` leaves
 /// only the rest for the election's lock (held here by the test, so the
 /// election has to wait) and then for O's transaction lock (held too), so the
-/// applier ends `OldHeldTheLock` at the one deadline — not an election's 5 s
+/// applier refuses the window at the one deadline — not an election's 5 s
 /// later, nor a fresh `old_within` later.
 ///
 /// MUTATIONS: in `take_the_window`, wait the full `ELECTION_WITHIN`; in
@@ -3425,7 +3430,11 @@ fn the_applier_waits_for_o_within_one_budget() {
     drop(election);
     drop(held);
     install.children.end(old);
-    assert_eq!(ended, Ended::OldHeldTheLock, "{:?}", world.said);
+    assert!(
+        matches!(&ended, Ended::Refused(why) if why.contains("window election is still held")),
+        "{ended:?}; {:?}",
+        world.said
+    );
     // The deadline is 2 s; what follows it is the guard's leave in this
     // world, which waits for nothing.
     assert!(

@@ -916,8 +916,18 @@ fn owner_named(bytes: &[u8]) -> Option<Running> {
 /// **The process the window's mark names**, or `None` when there is none, or
 /// it cannot be read.
 pub(crate) fn window_owner(home: &Home, txn: TxnId) -> Option<Running> {
-    let bytes = file_reads::read(Lane::UpdateJournal, owner_path(home, txn)).ok()?;
-    owner_named(&bytes)
+    read_window_owner(home, txn).ok().flatten()
+}
+
+/// The mark's parsed owner. A missing or malformed mark has no owner; another
+/// read failure is kept distinct because it is not evidence that the mark is
+/// stale.
+fn read_window_owner(home: &Home, txn: TxnId) -> io::Result<Option<Running>> {
+    match file_reads::read(Lane::UpdateJournal, owner_path(home, txn)) {
+        Ok(bytes) => Ok(owner_named(&bytes)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 /// **Who has the duty a window follows**, as [`take_the_window`] found it.
@@ -927,6 +937,10 @@ pub(crate) enum Window {
     Mine,
     /// This live process has it: it opens the window.
     Theirs(Running),
+    /// The election could not prove who has the duty. This process must not
+    /// open a window: a contender inside the election may be its owner, or
+    /// the replacement of a stale mark may not have reached the disk.
+    Refused(String),
 }
 
 /// `H\<txn>\owner.lock`: the election's lock (round 5).
@@ -935,24 +949,25 @@ pub(crate) fn owner_lock_path(home: &Home, txn: TxnId) -> PathBuf {
 }
 
 /// **How long a contender waits for the election's lock** (round 5): its
-/// holder keeps it for the few milliseconds of one read and one durable write,
-/// so a contender that waits longer is waiting for a holder that is stuck — it
-/// then takes the duty itself (a second start is possible, never none).
+/// holder normally keeps it for the few milliseconds of one read and one
+/// durable write. A contender that cannot take it within this bound refuses
+/// the duty: the holder may merely be delayed inside the election.
 pub(crate) const ELECTION_WITHIN: Duration = Duration::from_secs(5);
 
 /// **Take the duty a window follows, unless a live process already has it**
 /// ([`OWNER_FILE`]; round 5, Codex's finding 14): one exclusive operating-
 /// system lock, `H\<txn>\owner.lock` (`install_txn::hold_within`: `LockFileEx`
 /// on Windows, `flock` on Unix), is held around the whole read-check-replace —
-/// read the mark; absent, unreadable or naming a process that no longer runs
+/// read the mark; absent, malformed or naming a process that no longer runs
 /// (pid and start instant) → write this process durably, [`Window::Mine`];
 /// naming this process → `Mine`; naming another live process →
 /// [`Window::Theirs`]. A holder that dies inside the election releases the lock
-/// with its process, so there is no half-held state and nothing to clean up. A
-/// contender waits up to [`ELECTION_WITHIN`] for the lock (`install_txn`'s own
-/// bounded poll); a lock it cannot take or open, or a mark it cannot write,
-/// makes it answer `Mine` — the bias is a second start, never none. There is
-/// no third answer.
+/// with its process, so there is no half-held state and nothing to clean up.
+/// A contender waits up to [`ELECTION_WITHIN`] for the lock (`install_txn`'s
+/// own bounded poll). It answers [`Window::Refused`] when the lock cannot be
+/// taken or opened, or when the replacement cannot be made durable: none of
+/// those states proves that this process owns the duty. Thus an arbitrary
+/// delay or refusal at any step can remove a winner, but can never add one.
 ///
 /// **By `until`** (round 8, Codex's finding 15): the wait for the lock is the
 /// smaller of [`ELECTION_WITHIN`] and what is left before `until` — the
@@ -975,19 +990,53 @@ pub(crate) fn take_the_window_within(
     me: Running,
     within: Duration,
 ) -> Window {
-    let lock = install_txn::hold_within(&owner_lock_path(home, txn), Hold::Exclusive, within);
-    let Ok(Some(_held)) = lock else {
-        return Window::Mine;
+    take_the_window_within_after_lock(home, txn, me, within, || {})
+}
+
+fn take_the_window_within_after_lock(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    within: Duration,
+    after_lock: impl FnOnce(),
+) -> Window {
+    let _held = match install_txn::hold_within(&owner_lock_path(home, txn), Hold::Exclusive, within)
+    {
+        Ok(Some(held)) => held,
+        Ok(None) => {
+            return Window::Refused("the window election is still held".to_owned());
+        }
+        Err(failure) => {
+            return Window::Refused(format!("the window election: {failure}"));
+        }
     };
-    match window_owner(home, txn) {
-        Some(owner) if owner == me => Window::Mine,
-        Some(owner) if install_flip::still_running(owner) => Window::Theirs(owner),
-        // Absent, unreadable, or its process gone: this process takes it.
-        _ => {
-            let _ = install_txn::durable_write(&owner_path(home, txn), owner_value(me).as_bytes());
-            Window::Mine
+    after_lock();
+    match read_window_owner(home, txn) {
+        Err(error) => Window::Refused(format!("the window's mark: {error}")),
+        Ok(Some(owner)) if owner == me => Window::Mine,
+        Ok(Some(owner)) if install_flip::still_running(owner) => Window::Theirs(owner),
+        // Absent, malformed, or its process gone: this process takes it.
+        Ok(_) => {
+            match install_txn::durable_write(&owner_path(home, txn), owner_value(me).as_bytes()) {
+                Ok(()) => Window::Mine,
+                Err(failure) => Window::Refused(format!("the window's mark: {failure}")),
+            }
         }
     }
+}
+
+/// [`take_the_window_within`] with a test step after the election lock is held
+/// and before the mark is read. It lets a test hold a contender at that exact
+/// state without using the clock as synchronization.
+#[cfg(test)]
+pub(crate) fn take_the_window_within_at(
+    home: &Home,
+    txn: TxnId,
+    me: Running,
+    within: Duration,
+    after_lock: impl FnOnce(),
+) -> Window {
+    take_the_window_within_after_lock(home, txn, me, within, after_lock)
 }
 
 /// **Clear the window's mark** — O, as it hands the transaction over, before

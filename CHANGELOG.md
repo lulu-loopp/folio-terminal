@@ -39,6 +39,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Two Folio windows can no longer both start the same update.
 - On Windows, Ctrl+Alt with a letter or digit reaches programs that asked for
   the kitty protocol or modifyOtherKeys.
 - Chinese font choices stay in Chinese coverage order instead of being sorted
