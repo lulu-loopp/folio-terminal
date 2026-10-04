@@ -36,6 +36,7 @@
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
+    io::Write,
     path::{Path, PathBuf},
     sync::{
         Mutex, OnceLock,
@@ -46,8 +47,6 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use bt_platform::LocaleDeclaration;
 use bt_pty::ShellEnvironment;
-#[cfg(windows)]
-use std::io::Write;
 
 use crate::{
     persist,
@@ -1141,21 +1140,36 @@ pub fn compose_powershell_birth(
     arguments: &[OsString],
     powershell_integration: bool,
 ) -> Vec<OsString> {
-    compose_with_prepared(
+    compose_with_prepared_and_retry(
         program,
         arguments,
         powershell_integration,
         powershell_script_for_birth,
+        schedule_parse_retry,
     )
 }
 
 /// [`compose_powershell_birth`] with the preparation handed in: `prepare` is asked only when the
 /// composer would load into this argv, and its answer is the script named.
+#[cfg(test)]
 fn compose_with_prepared(
     program: &Path,
     arguments: &[OsString],
     powershell_integration: bool,
     prepare: impl FnOnce() -> Option<PathBuf>,
+) -> Vec<OsString> {
+    compose_with_prepared_and_retry(program, arguments, powershell_integration, prepare, |_| {})
+}
+
+/// The birth seam with its background retry handed in. The callback is told
+/// only about a command whose parse answer is unknown; it must return without
+/// waiting for the question to be answered.
+fn compose_with_prepared_and_retry(
+    program: &Path,
+    arguments: &[OsString],
+    powershell_integration: bool,
+    prepare: impl FnOnce() -> Option<PathBuf>,
+    retry: impl FnOnce(ParseQuestion),
 ) -> Vec<OsString> {
     if !powershell_integration || !is_powershell(program) {
         return arguments.to_vec();
@@ -1180,6 +1194,9 @@ fn compose_with_prepared(
         PowerShellTerminal::Command { .. } | PowerShellTerminal::EncodedCommand { .. }
     ) && parse_answer != Some(true)
     {
+        if let Some(text) = command_text(program, arguments) {
+            retry(ParseQuestion::new(program, arguments, text));
+        }
         return arguments.to_vec();
     }
     let Some(script) = prepare().filter(|path| path.is_file()) else {
@@ -1914,7 +1931,7 @@ pub fn is_powershell(program: &Path) -> bool {
 /// where their startup file is would be absurd. `-NonInteractive` so nothing can
 /// stop for a prompt on a thread with no console.
 ///
-/// Windows only, like its one reader: off Windows [`run_profile_probe`] asks no PowerShell.
+/// Windows only, like its one reader: off Windows the profile path is not asked.
 #[cfg(windows)]
 const PROFILE_COMMAND: &str = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $PROFILE.CurrentUserCurrentHost";
 
@@ -1946,12 +1963,20 @@ struct ParseKey {
     arguments: Vec<OsString>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+const PARSE_PROBE_ATTEMPT_LIMIT: u8 = 3;
+const PROBE_OUTPUT_PREFIX_LIMIT: usize = 32;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 enum ParseAnswer {
-    Pending,
+    Pending {
+        attempt: u8,
+    },
     Valid,
     Invalid,
-    Failed,
+    Failed {
+        attempts: u8,
+        failure: ParseProbeFailure,
+    },
 }
 
 /// Process-owned answers from the target PowerShell parser.
@@ -1975,11 +2000,10 @@ fn cached_parse_answer(program: &Path, arguments: &[OsString]) -> Option<bool> {
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .get(&parse_key(program, arguments))
-        .copied()
     {
         Some(ParseAnswer::Valid) => Some(true),
         Some(ParseAnswer::Invalid) => Some(false),
-        Some(ParseAnswer::Pending | ParseAnswer::Failed) | None => None,
+        Some(ParseAnswer::Pending { .. } | ParseAnswer::Failed { .. }) | None => None,
     }
 }
 
@@ -2005,6 +2029,16 @@ struct ParseQuestion {
     text: String,
 }
 
+impl ParseQuestion {
+    fn new(program: &Path, arguments: &[OsString], text: String) -> Self {
+        Self {
+            key: parse_key(program, arguments),
+            program: program.to_path_buf(),
+            text,
+        }
+    }
+}
+
 fn parse_questions(programs: &profiles::ProfilePrograms) -> Vec<ParseQuestion> {
     profiles::table()
         .profiles()
@@ -2018,57 +2052,212 @@ fn parse_questions(programs: &profiles::ProfilePrograms) -> Vec<ParseQuestion> {
                 .into_iter()
                 .map(OsString::from)
                 .collect::<Vec<_>>();
-            Some(ParseQuestion {
-                key: parse_key(&program, &arguments),
-                text: command_text(&program, &arguments)?,
-                program,
-            })
+            let text = command_text(&program, &arguments)?;
+            Some(ParseQuestion::new(&program, &arguments, text))
         })
         .collect()
 }
 
-fn ask_parse_question(question: ParseQuestion) {
-    let should_ask = {
+#[derive(Clone)]
+struct ParseAttempt {
+    question: ParseQuestion,
+    number: u8,
+}
+
+/// Claim one bounded attempt before starting any worker or process. A failed
+/// answer remains unknown, and the next birth may claim the next attempt; a
+/// pending, grammatical or exhausted answer starts nothing.
+fn claim_parse_attempt(question: ParseQuestion) -> Option<ParseAttempt> {
+    let number = {
         let mut answers = PARSE_ANSWERS
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if answers.contains_key(&question.key) {
-            false
-        } else {
-            answers.insert(question.key.clone(), ParseAnswer::Pending);
-            true
-        }
+        let number = match answers.get(&question.key) {
+            None => 1,
+            Some(ParseAnswer::Failed { attempts, .. }) if *attempts < PARSE_PROBE_ATTEMPT_LIMIT => {
+                attempts + 1
+            }
+            Some(
+                ParseAnswer::Pending { .. }
+                | ParseAnswer::Valid
+                | ParseAnswer::Invalid
+                | ParseAnswer::Failed { .. },
+            ) => return None,
+        };
+        answers.insert(
+            question.key.clone(),
+            ParseAnswer::Pending { attempt: number },
+        );
+        number
     };
-    if !should_ask {
-        return;
-    }
-    let answer = match run_parse_probe(&question.program, &question.text) {
-        Some(true) => ParseAnswer::Valid,
-        Some(false) => ParseAnswer::Invalid,
-        None => ParseAnswer::Failed,
+    Some(ParseAttempt { question, number })
+}
+
+fn publish_parse_attempt(key: ParseKey, number: u8, result: Result<bool, ParseProbeFailure>) {
+    let answer = match result {
+        Ok(true) => ParseAnswer::Valid,
+        Ok(false) => ParseAnswer::Invalid,
+        Err(failure) => ParseAnswer::Failed {
+            attempts: number,
+            failure,
+        },
     };
-    PARSE_ANSWERS
+    let mut answers = PARSE_ANSWERS
         .get_or_init(Default::default)
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .insert(question.key, answer);
+        .unwrap_or_else(|error| error.into_inner());
+    if matches!(
+        answers.get(&key),
+        Some(ParseAnswer::Pending { attempt }) if *attempt == number
+    ) {
+        answers.insert(key, answer);
+    }
+    drop(answers);
     if let Some(wake) = WAKE.get() {
         wake();
     }
 }
 
-const PARSE_COMMAND: &str = "$enc=[Text.UTF8Encoding]::new($false);[Console]::InputEncoding=$enc;$source=[Console]::In.ReadToEnd();$tokens=$null;$errors=$null;[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)>$null;if($errors.Count -eq 0){[Console]::Out.Write('1')}else{[Console]::Out.Write('0')}";
+fn run_parse_attempt(attempt: ParseAttempt) {
+    let result = run_parse_probe(&attempt.question.program, &attempt.question.text);
+    publish_parse_attempt(attempt.question.key, attempt.number, result);
+}
 
-fn run_parse_probe(program: &Path, text: &str) -> Option<bool> {
-    #[cfg(windows)]
-    {
-        run_profile_probe(program, PARSE_COMMAND, Some(text)).map(|output| output == b"1")
+fn ask_parse_question(question: ParseQuestion) {
+    if let Some(attempt) = claim_parse_attempt(question) {
+        run_parse_attempt(attempt);
     }
-    #[cfg(not(windows))]
-    {
-        let _ = (program, text);
-        None
+}
+
+/// A birth that meets a transient failure starts at most one background retry
+/// for the exact row and then continues with the original argv. Claiming before
+/// the thread door coalesces concurrent births; the attempt limit makes a
+/// permanently failing host quiet for the rest of this process.
+fn request_parse_retry(
+    question: ParseQuestion,
+    start: impl FnOnce(ParseAttempt) -> Result<(), String>,
+) {
+    let Some(attempt) = claim_parse_attempt(question) else {
+        return;
+    };
+    let key = attempt.question.key.clone();
+    let number = attempt.number;
+    if let Err(error) = start(attempt) {
+        publish_parse_attempt(key, number, Err(ParseProbeFailure::WorkerSpawn(error)));
+    }
+}
+
+fn schedule_parse_retry(question: ParseQuestion) {
+    request_parse_retry(question, |attempt| {
+        spawn_powershell_preparation(PowershellPreparation::ParseAttempt(attempt))
+    });
+}
+
+const PARSE_COMMAND: &str = "$enc=[Text.UTF8Encoding]::new($false);[Console]::InputEncoding=$enc;[Console]::OutputEncoding=$enc;$source=[Console]::In.ReadToEnd();$tokens=$null;$errors=$null;[System.Management.Automation.Language.Parser]::ParseInput($source,[ref]$tokens,[ref]$errors)>$null;if($errors.Count -eq 0){[Console]::Out.Write('1')}else{[Console]::Out.Write('0')}";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProbeOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ParseProbeFailure {
+    WorkerSpawn(String),
+    Spawn(String),
+    Stdin {
+        error: String,
+        stdout: String,
+        stderr: String,
+    },
+    Deadline {
+        stdout: String,
+        stderr: String,
+    },
+    Wait {
+        error: String,
+        stdout: String,
+        stderr: String,
+    },
+    Exit {
+        code: Option<i32>,
+        stdout: String,
+        stderr: String,
+    },
+    OutputNotRecognised {
+        stdout: String,
+        stderr: String,
+    },
+}
+
+impl std::fmt::Display for ParseProbeFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::WorkerSpawn(error) => write!(formatter, "worker spawn: {error}"),
+            Self::Spawn(error) => write!(formatter, "process spawn: {error}"),
+            Self::Stdin {
+                error,
+                stdout,
+                stderr,
+            } => write!(
+                formatter,
+                "stdin write: {error}; stdout first bytes {stdout}; stderr first bytes {stderr}"
+            ),
+            Self::Deadline { stdout, stderr } => write!(
+                formatter,
+                "five-second deadline; stdout first bytes {stdout}; stderr first bytes {stderr}"
+            ),
+            Self::Wait {
+                error,
+                stdout,
+                stderr,
+            } => write!(
+                formatter,
+                "process wait: {error}; stdout first bytes {stdout}; stderr first bytes {stderr}"
+            ),
+            Self::Exit {
+                code,
+                stdout,
+                stderr,
+            } => write!(
+                formatter,
+                "exit status {code:?}; stdout first bytes {stdout}; stderr first bytes {stderr}"
+            ),
+            Self::OutputNotRecognised { stdout, stderr } => write!(
+                formatter,
+                "output not recognised; stdout first bytes {stdout}; stderr first bytes {stderr}"
+            ),
+        }
+    }
+}
+
+fn output_prefix(bytes: &[u8]) -> String {
+    let mut rendered = bytes
+        .iter()
+        .take(PROBE_OUTPUT_PREFIX_LIMIT)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if bytes.len() > PROBE_OUTPUT_PREFIX_LIMIT {
+        rendered.push_str(" …");
+    }
+    format!("[{rendered}]")
+}
+
+fn run_parse_probe(program: &Path, text: &str) -> Result<bool, ParseProbeFailure> {
+    let output = run_powershell_probe(program, PARSE_COMMAND, Some(text))?;
+    parse_probe_answer(output)
+}
+
+fn parse_probe_answer(output: ProbeOutput) -> Result<bool, ParseProbeFailure> {
+    match output.stdout.as_slice() {
+        b"1" => Ok(true),
+        b"0" => Ok(false),
+        _ => Err(ParseProbeFailure::OutputNotRecognised {
+            stdout: output_prefix(&output.stdout),
+            stderr: output_prefix(&output.stderr),
+        }),
     }
 }
 
@@ -2107,7 +2296,7 @@ fn cached_profile_answer(program: &Path) -> Option<PathBuf> {
         answers.insert(profile_key(program), slot.clone());
         slot
     };
-    answer_once(&slot, || run_profile_path_probe(&resolved))
+    answer_once(&slot, || run_profile_probe(&resolved))
 }
 
 fn answer_once(
@@ -2164,8 +2353,41 @@ pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = WAKE.set(Box::new(wake));
 }
 
-#[cfg(windows)]
-fn run_profile_probe(program: &Path, command: &str, input: Option<&str>) -> Option<Vec<u8>> {
+fn powershell_probe_command(program: &Path) -> Result<std::process::Command, ParseProbeFailure> {
+    #[cfg(windows)]
+    {
+        bt_platform::quiet_command_named(program).ok_or_else(|| {
+            ParseProbeFailure::Spawn(format!(
+                "the named child-process door could not resolve {}",
+                program.display()
+            ))
+        })
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(bt_platform::quiet_command(program))
+    }
+}
+
+fn stopped_output(mut child: std::process::Child) -> ProbeOutput {
+    let _ = child.kill();
+    child.wait_with_output().map_or_else(
+        |_| ProbeOutput {
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        },
+        |output| ProbeOutput {
+            stdout: output.stdout,
+            stderr: output.stderr,
+        },
+    )
+}
+
+fn run_powershell_probe(
+    program: &Path,
+    command: &str,
+    input: Option<&str>,
+) -> Result<ProbeOutput, ParseProbeFailure> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time a PowerShell pane is opened.
     //
@@ -2175,7 +2397,7 @@ fn run_profile_probe(program: &Path, command: &str, input: Option<&str>) -> Opti
     // asks about the program a pane will run, so it asks about the one an
     // administrator installed.
     use std::process::Stdio;
-    let mut child = bt_platform::quiet_command_named(program)?
+    let mut child = powershell_probe_command(program)?
         .args(["-NoProfile", "-NonInteractive", "-Command", command])
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -2183,17 +2405,26 @@ fn run_profile_probe(program: &Path, command: &str, input: Option<&str>) -> Opti
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
-        .ok()?;
-    if let Some(input) = input
-        && child
-            .stdin
-            .take()
-            .is_none_or(|mut stdin| stdin.write_all(input.as_bytes()).is_err())
-    {
-        let _ = child.kill();
-        return None;
+        .map_err(|error| ParseProbeFailure::Spawn(error.to_string()))?;
+    if let Some(input) = input {
+        let written = child.stdin.take().map_or_else(
+            || Err("the piped stdin handle was absent".to_owned()),
+            |mut stdin| {
+                stdin
+                    .write_all(input.as_bytes())
+                    .map_err(|error| error.to_string())
+            },
+        );
+        if let Err(error) = written {
+            let output = stopped_output(child);
+            return Err(ParseProbeFailure::Stdin {
+                error,
+                stdout: output_prefix(&output.stdout),
+                stderr: output_prefix(&output.stderr),
+            });
+        }
     }
     let _started_pid = child.id(); // Only this owned child may be stopped.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -2203,29 +2434,53 @@ fn run_profile_probe(program: &Path, command: &str, input: Option<&str>) -> Opti
             Ok(None) if std::time::Instant::now() < deadline => {
                 std::thread::sleep(std::time::Duration::from_millis(20))
             }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
+            Ok(None) => {
+                let output = stopped_output(child);
+                return Err(ParseProbeFailure::Deadline {
+                    stdout: output_prefix(&output.stdout),
+                    stderr: output_prefix(&output.stderr),
+                });
+            }
+            Err(error) => {
+                let output = stopped_output(child);
+                return Err(ParseProbeFailure::Wait {
+                    error: error.to_string(),
+                    stdout: output_prefix(&output.stdout),
+                    stderr: output_prefix(&output.stderr),
+                });
             }
         }
     }
-    let output = child.wait_with_output().ok()?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| ParseProbeFailure::Wait {
+            error: error.to_string(),
+            stdout: "[]".to_owned(),
+            stderr: "[]".to_owned(),
+        })?;
     if !output.status.success() {
-        return None;
+        return Err(ParseProbeFailure::Exit {
+            code: output.status.code(),
+            stdout: output_prefix(&output.stdout),
+            stderr: output_prefix(&output.stderr),
+        });
     }
-    Some(output.stdout)
+    Ok(ProbeOutput {
+        stdout: output.stdout,
+        stderr: output.stderr,
+    })
+}
+
+#[cfg(windows)]
+fn run_profile_probe(program: &Path) -> Option<PathBuf> {
+    let output = run_powershell_probe(program, PROFILE_COMMAND, None).ok()?;
+    let path = parse_profile_answer(std::str::from_utf8(&output.stdout).ok()?)?;
+    path.is_absolute().then_some(path)
 }
 
 #[cfg(not(windows))]
-fn run_profile_probe(_program: &Path, _command: &str, _input: Option<&str>) -> Option<Vec<u8>> {
+fn run_profile_probe(_program: &Path) -> Option<PathBuf> {
     None
-}
-
-fn run_profile_path_probe(program: &Path) -> Option<PathBuf> {
-    let output = run_profile_probe(program, PROFILE_COMMAND, None)?;
-    let path = parse_profile_answer(std::str::from_utf8(&output).ok()?)?;
-    path.is_absolute().then_some(path)
 }
 
 /// Read the one line the probe command writes.
@@ -2374,17 +2629,31 @@ fn powershell_script_in_trial(
 /// is compared once.
 ///
 /// [`update_trial::Writer::PowerShellScript`]: crate::update_trial::Writer::PowerShellScript
-fn begin_powershell_preparation(questions: Vec<ParseQuestion>) {
-    let _ = bt_platform::spawn_at_priority(
+enum PowershellPreparation {
+    ScriptAndQuestions(Vec<ParseQuestion>),
+    ParseAttempt(ParseAttempt),
+}
+
+fn spawn_powershell_preparation(work: PowershellPreparation) -> Result<(), String> {
+    bt_platform::spawn_at_priority(
         "powershell-script-prepare",
         bt_platform::ThreadPriority::BelowNormal,
-        move |_ctx| {
-            let _ = powershell_script_for_birth();
-            for question in questions {
-                ask_parse_question(question);
+        move |_ctx| match work {
+            PowershellPreparation::ScriptAndQuestions(questions) => {
+                let _ = powershell_script_for_birth();
+                for question in questions {
+                    ask_parse_question(question);
+                }
             }
+            PowershellPreparation::ParseAttempt(attempt) => run_parse_attempt(attempt),
         },
-    );
+    )
+    .map(drop)
+    .map_err(|error| error.to_string())
+}
+
+fn begin_powershell_preparation(questions: Vec<ParseQuestion>) {
+    let _ = spawn_powershell_preparation(PowershellPreparation::ScriptAndQuestions(questions));
 }
 
 /// Prepare the script and ask the target parser about every command-bearing
@@ -2893,7 +3162,9 @@ mod tests {
             .expect("launch starts the script's preparation");
         assert!(warmed < source.find("opening_window_attributes(").unwrap());
         let probe = source_for_profile_probe();
-        assert!(probe.contains("quiet_command_named"));
+        let command = source_for_probe_command();
+        assert!(command.contains("quiet_command_named"));
+        assert!(command.contains("quiet_command(program)"));
         assert!(probe.contains("-NoProfile"));
         assert!(probe.contains("from_secs(5)"));
         let parse_probe = include_str!("shell_integration.rs")
@@ -2903,7 +3174,7 @@ mod tests {
             .split_once("fn profile_key")
             .expect("the item after that probe")
             .0;
-        assert!(parse_probe.contains("run_profile_probe(program, PARSE_COMMAND, Some(text))"));
+        assert!(parse_probe.contains("run_powershell_probe(program, PARSE_COMMAND, Some(text))"));
         assert!(probe.contains("Stdio::piped()"));
         assert!(probe.contains("input.as_bytes()"));
         assert!(!probe.contains(".arg(input)"));
@@ -2974,10 +3245,20 @@ mod tests {
 
     fn source_for_profile_probe() -> &'static str {
         include_str!("shell_integration.rs")
-            .split_once("fn run_profile_probe(program: &Path, command: &str, input: Option<&str>)")
+            .split_once("fn run_powershell_probe(")
             .unwrap()
             .1
-            .split_once("#[cfg(not(windows))]")
+            .split_once("#[cfg(windows)]\nfn run_profile_probe")
+            .unwrap()
+            .0
+    }
+
+    fn source_for_probe_command() -> &'static str {
+        include_str!("shell_integration.rs")
+            .split_once("fn powershell_probe_command(")
+            .unwrap()
+            .1
+            .split_once("fn stopped_output")
             .unwrap()
             .0
     }
@@ -3329,10 +3610,13 @@ mod tests {
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        answers.insert(parse_key(program, &first), ParseAnswer::Pending);
+        answers.insert(
+            parse_key(program, &first),
+            ParseAnswer::Pending { attempt: 1 },
+        );
         assert_eq!(
             answers.get(&parse_key(program, &first)),
-            Some(&ParseAnswer::Pending)
+            Some(&ParseAnswer::Pending { attempt: 1 })
         );
         drop(answers);
         assert_eq!(cached_parse_answer(program, &first), None);
@@ -3345,18 +3629,156 @@ mod tests {
         assert_eq!(cached_parse_answer(program, &changed), None);
         for (arguments, answer) in [
             (os_words(&["-Command", "broken'"]), ParseAnswer::Invalid),
-            (os_words(&["-Command", "probe failed"]), ParseAnswer::Failed),
+            (
+                os_words(&["-Command", "probe failed"]),
+                ParseAnswer::Failed {
+                    attempts: 1,
+                    failure: ParseProbeFailure::Deadline {
+                        stdout: "[]".to_owned(),
+                        stderr: "[]".to_owned(),
+                    },
+                },
+            ),
         ] {
+            let expected = matches!(answer, ParseAnswer::Invalid).then_some(false);
             PARSE_ANSWERS
                 .get_or_init(Default::default)
                 .lock()
                 .unwrap()
                 .insert(parse_key(program, &arguments), answer);
-            assert_eq!(
-                cached_parse_answer(program, &arguments),
-                answer.eq(&ParseAnswer::Invalid).then_some(false)
+            assert_eq!(cached_parse_answer(program, &arguments), expected);
+        }
+    }
+
+    /// RED (mutations: collapse a nonzero exit into `None`, accept arbitrary
+    /// stdout, or omit either output prefix) — the diagnostic names the stage
+    /// that failed and carries the first bytes needed to distinguish encoding,
+    /// host output and a silent child.
+    #[test]
+    fn a_parse_probe_failure_names_its_stage_and_first_output_bytes() {
+        let malformed = parse_probe_answer(ProbeOutput {
+            stdout: vec![0xef, 0xbb, 0xbf, b'1'],
+            stderr: "错误".as_bytes().to_vec(),
+        })
+        .expect_err("a BOM is not the probe's one-byte protocol");
+        let rendered = malformed.to_string();
+        assert!(rendered.starts_with("output not recognised"));
+        assert!(rendered.contains("[ef bb bf 31]"));
+        assert!(rendered.contains("[e9 94 99 e8 af af]"));
+
+        let exited = ParseProbeFailure::Exit {
+            code: Some(23),
+            stdout: "[31]".to_owned(),
+            stderr: "[]".to_owned(),
+        }
+        .to_string();
+        assert!(exited.starts_with("exit status Some(23)"));
+        assert!(exited.contains("stdout first bytes [31]"));
+        assert!(exited.contains("stderr first bytes []"));
+    }
+
+    /// RED (mutation: make `Failed` an occupied terminal cache entry again) —
+    /// a transient probe failure remains unknown and the next request can turn
+    /// the exact row into a valid answer.
+    #[test]
+    fn a_failed_parse_probe_is_unknown_and_the_next_request_can_answer() {
+        let program = Path::new("C:/unique/parser-retry/pwsh.exe");
+        let arguments = os_words(&["-Command", "'天下為公'"]);
+        let question = ParseQuestion::new(program, &arguments, "'天下為公'".to_owned());
+
+        let first = claim_parse_attempt(question.clone()).expect("first attempt");
+        publish_parse_attempt(
+            first.question.key,
+            first.number,
+            Err(ParseProbeFailure::Deadline {
+                stdout: "[]".to_owned(),
+                stderr: "[]".to_owned(),
+            }),
+        );
+        assert_eq!(cached_parse_answer(program, &arguments), None);
+
+        let second = claim_parse_attempt(question).expect("failure is retryable");
+        assert_eq!(second.number, 2);
+        publish_parse_attempt(second.question.key, second.number, Ok(true));
+        assert_eq!(cached_parse_answer(program, &arguments), Some(true));
+    }
+
+    /// RED (mutation: raise `PARSE_PROBE_ATTEMPT_LIMIT` from three to four) — a permanently
+    /// failing parser starts three children for an exact row, never one per
+    /// pane birth for the rest of the process.
+    #[test]
+    fn a_permanently_failed_parse_probe_has_a_process_attempt_limit() {
+        let program = Path::new("C:/unique/parser-attempt-limit/pwsh.exe");
+        let arguments = os_words(&["-Command", "Write-Output 雪"]);
+        let question = ParseQuestion::new(program, &arguments, "Write-Output 雪".to_owned());
+
+        assert_eq!(PARSE_PROBE_ATTEMPT_LIMIT, 3);
+        for expected in 1..=3 {
+            let attempt = claim_parse_attempt(question.clone()).expect("bounded attempt");
+            assert_eq!(attempt.number, expected);
+            publish_parse_attempt(
+                attempt.question.key,
+                attempt.number,
+                Err(ParseProbeFailure::Exit {
+                    code: Some(17),
+                    stdout: "[31]".to_owned(),
+                    stderr: "[e9 9b aa]".to_owned(),
+                }),
             );
         }
+        assert!(claim_parse_attempt(question).is_none());
+        assert_eq!(cached_parse_answer(program, &arguments), None);
+    }
+
+    /// RED (mutation: execute the claimed attempt inside `request_parse_retry`
+    /// before handing it to `start`) — a birth with an unknown answer returns
+    /// its original argv after handing one job to the scheduler; it neither
+    /// prepares the script nor executes the parser job itself. A second birth
+    /// sees Pending and does not hand over another job.
+    #[test]
+    fn a_birth_schedules_a_parse_retry_without_waiting_for_it() {
+        let program = Path::new("C:/unique/parser-birth-retry/pwsh.exe");
+        let arguments = os_words(&["-Command", "Write-Output '混合 script'"]);
+        let question =
+            ParseQuestion::new(program, &arguments, "Write-Output '混合 script'".to_owned());
+        let failed = claim_parse_attempt(question).expect("first attempt");
+        publish_parse_attempt(
+            failed.question.key,
+            failed.number,
+            Err(ParseProbeFailure::Stdin {
+                error: "fixture".to_owned(),
+                stdout: "[]".to_owned(),
+                stderr: "[]".to_owned(),
+            }),
+        );
+
+        let prepared = std::cell::Cell::new(false);
+        let scheduled = std::cell::RefCell::new(None);
+        let actual = compose_with_prepared_and_retry(
+            program,
+            &arguments,
+            true,
+            || {
+                prepared.set(true);
+                None
+            },
+            |retry| {
+                request_parse_retry(retry, |attempt| {
+                    *scheduled.borrow_mut() = Some(attempt);
+                    Ok(())
+                });
+            },
+        );
+        assert_eq!(actual, arguments);
+        assert!(!prepared.get());
+        assert_eq!(
+            scheduled.borrow().as_ref().map(|attempt| attempt.number),
+            Some(2)
+        );
+        request_parse_retry(
+            ParseQuestion::new(program, &arguments, "Write-Output '混合 script'".to_owned()),
+            |_| panic!("a concurrent birth scheduled a second parser child"),
+        );
     }
 
     /// RED (mutations: `compose_with_prepared` asks `prepare` before its gate; or
@@ -3655,24 +4077,53 @@ mod tests {
     fn real_powershell_output_until(
         session: &mut bt_pty::PtySession,
         needle: &[u8],
-        within: std::time::Duration,
+        silent_for: std::time::Duration,
     ) -> Vec<u8> {
-        let deadline = std::time::Instant::now() + within;
+        let started = std::time::Instant::now();
+        let absolute_deadline = started + std::time::Duration::from_secs(180);
+        let mut last_output = started;
         let mut output = Vec::new();
         while !output.windows(needle.len()).any(|window| window == needle) {
+            let now = std::time::Instant::now();
             assert!(
-                std::time::Instant::now() < deadline,
-                "PowerShell never emitted {:?}; output was {:?}",
+                now < absolute_deadline && now.duration_since(last_output) < silent_for,
+                "PowerShell never emitted {:?}; elapsed {:?}, silent {:?}, {} bytes; output was {:?}",
                 String::from_utf8_lossy(needle),
+                now.duration_since(started),
+                now.duration_since(last_output),
+                output.len(),
                 String::from_utf8_lossy(&output)
             );
             let chunk = session.read_output();
             if chunk.is_empty() {
                 std::thread::sleep(std::time::Duration::from_millis(10));
+            } else {
+                last_output = std::time::Instant::now();
             }
             output.extend(chunk);
         }
         output
+    }
+
+    #[cfg(windows)]
+    fn real_parse_answer(program: &Path, text: &str) -> bool {
+        let mut failures = Vec::new();
+        for attempt in 1..=PARSE_PROBE_ATTEMPT_LIMIT {
+            match run_parse_probe(program, text) {
+                Ok(answer) => return answer,
+                Err(failure) => {
+                    eprintln!(
+                        "{} target parser attempt {attempt}/{PARSE_PROBE_ATTEMPT_LIMIT} failed: {failure}",
+                        program.display()
+                    );
+                    failures.push(failure);
+                }
+            }
+        }
+        panic!(
+            "{} target parser gave no answer in {PARSE_PROBE_ATTEMPT_LIMIT} attempts: {failures:?}",
+            program.display()
+        );
     }
 
     /// Real-shell acceptance through the same headless ConPTY as a pane.
@@ -3723,7 +4174,7 @@ mod tests {
                 &program,
                 &row,
                 &integration,
-                Some(run_parse_probe(&program, &user).expect("target parser answered")),
+                Some(real_parse_answer(&program, &user)),
             )
             .expect("the valid command composes");
             let mut session = bt_pty::PtySession::spawn_shell_in(
@@ -3771,7 +4222,7 @@ mod tests {
                 &program,
                 &row,
                 &integration,
-                Some(run_parse_probe(&program, one_shot).expect("target parser answered")),
+                Some(real_parse_answer(&program, one_shot)),
             )
             .expect("one-shot command composes without changing its lifetime");
             assert!(!arguments.iter().any(|argument| argument == "-NoExit"));
@@ -3864,7 +4315,7 @@ mod tests {
                 &vs_program,
                 &row,
                 &integration,
-                Some(run_parse_probe(&vs_program, &vs).expect("5.1 parser answered")),
+                Some(real_parse_answer(&vs_program, &vs)),
             )
             .expect("the installed Developer PowerShell row composes");
             let mut session = bt_pty::PtySession::spawn_shell_in(

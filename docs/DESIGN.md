@@ -13851,3 +13851,19 @@ The composer now models the two console-host parsers as separate ordered switch 
 `shell_integration::PARSE_ANSWERS` owns the process cache by resolved executable plus exact argv. Startup and profile-program refresh add questions, and the existing below-normal `powershell-script-prepare` worker asks them with the command source on UTF-8 stdin and a fixed five-second parser command; pane birth and the window thread never wait. That worker also owns best-effort script preparation. Success alone is memoized, a cached path is rechecked at birth, failed or missing writes retry, and concurrent writers land through atomic replacement. A trial writes only below its transaction-named temporary root, which transaction retirement now removes. The loader catches an unreadable owned script without disturbing the shell, keeps the PSReadLine reflection type in the process-global integration table, and limits assembly revival to pwsh's already-loaded in-box assembly.
 
 The contract is pinned by the edition/prefix table, exact VS Developer PowerShell and conda rows, composition/encoding/length cases, every cache state and row edit, retry/missing-file and two-writer atomic tests, loader/source-state and retirement tests, plus a real headless ConPTY exercise for both installed editions and the genuine installed Visual Studio developer-shell row. Each named classifier, composition, cache-key, preparation, loader and atomic-write mutation was observed red before restoration.
+
+### 2026-10-04 — Follow-up: a failed PowerShell parser probe is a bounded unknown, not a process-lifetime verdict (T-INTEGRATION-INJECT-3 round 2)
+
+The parser probe now runs on Windows, macOS and Linux through the registered quiet child-process
+door and reports which stage failed — worker or process spawn, stdin, five-second deadline, wait,
+exit status, or output shape — with the first stdout and stderr bytes. The deadline still ends a
+hung child; because the work is background work, a slow or cold answer costs only the current
+birth's integration rather than making that birth wait.
+
+A failure remains unknown. A later birth atomically claims a background retry for the exact
+resolved executable and argv, while concurrent births keep their original argv and start nothing;
+three attempts per key bound a permanently failing host. Valid and invalid parser answers remain
+terminal. Pinned by `a_failed_parse_probe_is_unknown_and_the_next_request_can_answer`,
+`a_permanently_failed_parse_probe_has_a_process_attempt_limit`,
+`a_birth_schedules_a_parse_retry_without_waiting_for_it`, and the real command-row exercise whose
+failure now names every probe stage and output prefix.

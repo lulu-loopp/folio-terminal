@@ -210,7 +210,10 @@ answer appends `CRLF` and the loader inside that same terminal command; Folio pr
 `NoExit` and never adds one to a terminal command. The exact executable and argv own the process
 cache entry, so an edited row must answer a new question. File, CommandWithArgs, stdin,
 NonInteractive, unknown or invalid argv, an unavailable parse answer, and an overlong Windows
-command line are left unchanged. The Settings capability sentence reads that same answer.
+command line are left unchanged. A failed probe is an unavailable answer rather than an invalid
+command: a later birth may schedule the next background attempt, up to three attempts for the
+exact executable and argv in one process, and the birth never waits. The Settings capability
+sentence reads that same answer.
 
 The bash script is also installed automatically, for one session at a time:
 

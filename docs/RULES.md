@@ -88,7 +88,10 @@ inside the same command. Existing `NoExit` is preserved and a terminal command
 never gains it. `File`, `CommandWithArgs`, stdin, `NonInteractive`, invalid or
 unknown argv, an unknown/failed/invalid parse answer, and a composed Windows
 command line above 32,766 UTF-16 code units are left byte-for-byte unchanged;
-Settings projects that same current answer. The loader reads Folio's own
+Settings projects that same current answer. A probe failure is unknown, not
+invalid: the next birth may schedule another question on the background worker,
+but no birth waits for it, and one exact executable and argv may start at most
+three parser probes in a process. The loader reads Folio's own
 `shell-integration/folio.ps1`; it never writes `$PROFILE` or changes execution
 policy. Restart, split, duplicate, restore and Recent all use that same seam. An
 older Folio-managed `$PROFILE` line is observed but left
