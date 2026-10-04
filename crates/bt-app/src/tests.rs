@@ -191,6 +191,15 @@ fn reader_names(found: &Found) -> Vec<String> {
     names
 }
 
+/// A shell a forwarded press can be handed to.
+fn a_shell() -> PasteTarget {
+    PasteTarget {
+        tab: TabId(1),
+        seat: SeatId(1),
+        incarnation: 1,
+    }
+}
+
 /// A file on a volume this machine holds.
 fn a_local_file() -> bt_term::PathVerdict {
     bt_term::PathVerdict {
@@ -10963,7 +10972,7 @@ fn local_selection_route(mode: SelectionDragMode) -> MouseRoute {
     let hit = hyperlink_hit("https://example.test");
     MouseRoute::Local(Box::new(SelectionDrag {
         mode,
-        origin_seat: SeatId(1),
+        owner: a_shell(),
         origin_row: 1,
         origin_column: 2,
         origin: ViewSelection {
@@ -11030,6 +11039,7 @@ fn selection_release_copy_policy_covers_drag_word_and_line_but_not_click_or_forw
     let forwarded = MouseRoute::Forward {
         button: input::MouseProtocolButton::Left,
         sgr: true,
+        owner: a_shell(),
     };
     assert!(!should_copy_on_select_release(
         Some(&forwarded),
@@ -24028,6 +24038,7 @@ fn forwarded_mouse_hit_stays_bound_to_the_presented_frame_during_an_unpresented_
         session.terminal_modes(),
         ModifiersState::empty(),
         PressedCellTarget::Ordinary,
+        a_shell(),
     )
     .unwrap();
 
@@ -24053,6 +24064,7 @@ fn a_tracked_pane_keeps_a_press_on_an_ordinary_cell_and_shift_still_takes_it_bac
         session.terminal_modes(),
         ModifiersState::CONTROL,
         PressedCellTarget::Ordinary,
+        a_shell(),
     );
     assert!(forwarded.is_some());
     assert!(matches!(route, Some(MouseRoute::Forward { .. })));
@@ -24067,6 +24079,7 @@ fn a_tracked_pane_keeps_a_press_on_an_ordinary_cell_and_shift_still_takes_it_bac
             session.terminal_modes(),
             ModifiersState::CONTROL | ModifiersState::SHIFT,
             PressedCellTarget::Ordinary,
+            a_shell(),
         )
         .is_none()
     );
@@ -24097,6 +24110,7 @@ fn a_verified_target_under_a_tracked_press_is_ours_on_the_primary_screen() {
                 modes,
                 modifiers,
                 PressedCellTarget::Ours,
+                a_shell(),
             )
             .is_none(),
             "a press on a mark this window painted writes nothing to the child"
@@ -24116,6 +24130,7 @@ fn a_verified_target_under_a_tracked_press_is_ours_on_the_primary_screen() {
                 modes,
                 modifiers,
                 PressedCellTarget::Ours,
+                a_shell(),
             )
             .is_none()
         );
@@ -24137,6 +24152,7 @@ fn a_tracked_press_on_a_plain_cell_is_still_the_programs() {
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(b"\x1b[<0;3;2M".to_vec())
     );
@@ -24169,6 +24185,7 @@ fn a_prompt_start_that_retires_tracking_takes_the_next_press_back_from_the_child
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(b"\x1b[<0;3;2M".to_vec()),
         "the leftover mode is still routing presses at a program that is gone"
@@ -24187,6 +24204,7 @@ fn a_prompt_start_that_retires_tracking_takes_the_next_press_back_from_the_child
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         )
         .is_none(),
         "and afterwards the press is this window's, to select with"
@@ -24228,6 +24246,7 @@ fn a_press_already_forwarded_when_the_prompt_arrives_is_released_in_its_own_enco
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         )
         .is_some()
     );
@@ -24252,6 +24271,7 @@ fn a_press_already_forwarded_when_the_prompt_arrives_is_released_in_its_own_enco
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(b"\x1b[<0;3;2m".to_vec()),
         "the release the forwarded press is owed, in the encoding that press \
@@ -24288,6 +24308,7 @@ fn a_release_keeps_the_press_encoding_when_the_program_switches_protocol_mid_cli
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(vec![0x1b, b'[', b'M', b' ', b'#', b'"'])
     );
@@ -24308,6 +24329,7 @@ fn a_release_keeps_the_press_encoding_when_the_program_switches_protocol_mid_cli
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(vec![0x1b, b'[', b'M', b'#', b'#', b'"']),
         "the release answers the press, not the modes"
@@ -24348,6 +24370,7 @@ fn a_forwarded_drag_keeps_its_press_encoding_when_the_program_drops_sgr_mid_drag
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(b"\x1b[<0;3;2M".to_vec())
     );
@@ -24404,6 +24427,7 @@ fn a_forwarded_drag_keeps_its_press_encoding_when_the_program_adds_sgr_mid_drag(
             session.terminal_modes(),
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(vec![0x1b, b'[', b'M', b' ', b'#', b'"'])
     );
@@ -24458,6 +24482,7 @@ fn a_hover_with_no_press_in_flight_reads_the_modes_as_they_are() {
             Some(&MouseRoute::Forward {
                 button: input::MouseProtocolButton::Left,
                 sgr: true,
+                owner: a_shell(),
             }),
             modes,
             ModifiersState::empty(),
@@ -24560,6 +24585,7 @@ fn the_same_verified_target_on_the_alternate_screen_is_the_windows_too() {
                 modes,
                 modifiers,
                 PressedCellTarget::Ours,
+                a_shell(),
             )
             .is_none(),
             "a press on a mark this window painted writes nothing to the child, \
@@ -24578,6 +24604,7 @@ fn the_same_verified_target_on_the_alternate_screen_is_the_windows_too() {
                 modes,
                 modifiers,
                 PressedCellTarget::Ours,
+                a_shell(),
             )
             .is_none(),
             "and the release of that pair finds no forward latched to answer"
@@ -24606,6 +24633,7 @@ fn a_tracked_press_on_a_plain_cell_is_still_the_programs_on_the_alternate_screen
             modes,
             ModifiersState::empty(),
             PressedCellTarget::Ordinary,
+            a_shell(),
         ),
         Some(b"\x1b[<0;3;2M".to_vec())
     );
@@ -24661,6 +24689,7 @@ fn an_osc_8_link_on_the_alternate_screen_is_found_and_keeps_its_press() {
             modes,
             ModifiersState::empty(),
             target,
+            a_shell(),
         )
         .is_none(),
         "the press stays here, so `begin_local_selection` gets to arm the link"
@@ -24686,6 +24715,7 @@ fn shift_keeps_a_tracked_press_local_on_every_cell_and_on_both_screens() {
                     session.terminal_modes(),
                     ModifiersState::SHIFT,
                     target,
+                    a_shell(),
                 )
                 .is_none()
             );
@@ -24718,6 +24748,7 @@ fn only_a_left_press_can_be_taken_from_a_tracking_program_on_either_screen() {
                     session.terminal_modes(),
                     ModifiersState::empty(),
                     PressedCellTarget::Ours,
+                    a_shell(),
                 )
                 .is_some(),
                 "there is no local verb on the other two buttons to trade the hole for"
@@ -24780,6 +24811,7 @@ fn a_right_press_is_the_windows_unless_the_program_tracks_and_then_shift_takes_i
                 modes,
                 modifiers,
                 PressedCellTarget::Ordinary,
+                a_shell(),
             )
             .is_some();
             assert_ne!(
@@ -24803,6 +24835,7 @@ fn a_right_press_is_the_windows_unless_the_program_tracks_and_then_shift_takes_i
                 idle.terminal_modes(),
                 modifiers,
                 PressedCellTarget::Ordinary,
+                a_shell(),
             )
             .is_none()
         );
@@ -25463,6 +25496,7 @@ fn stationary_double_click_stays_strictly_paired_across_tui_repaints() {
                     session.terminal_modes(),
                     ModifiersState::empty(),
                     PressedCellTarget::Ordinary,
+                    a_shell(),
                 )
                 .expect("tracked click must produce one PTY write per edge"),
             );
@@ -41284,6 +41318,7 @@ fn a_forwarded_press_is_released_to_its_pane_over_the_capsule_and_the_strip() {
         session.terminal_modes(),
         ModifiersState::empty(),
         PressedCellTarget::Ordinary,
+        a_shell(),
     );
     assert!(pressed.is_some() && matches!(route, Some(MouseRoute::Forward { .. })));
     let released = route_forwarded_mouse_button(
@@ -41294,6 +41329,7 @@ fn a_forwarded_press_is_released_to_its_pane_over_the_capsule_and_the_strip() {
         session.terminal_modes(),
         ModifiersState::empty(),
         PressedCellTarget::Ordinary,
+        a_shell(),
     )
     .expect("the release is owed to the forwarded press");
     assert_eq!(
@@ -41319,7 +41355,7 @@ fn a_forwarded_press_is_released_to_its_pane_over_the_capsule_and_the_strip() {
     }
     let release = squeezed_body("Runtime", "release_owned_gesture");
     assert!(
-        release.contains("Some(MouseRoute::Forward{..})=>")
+        release.contains("Some(MouseRoute::Forward{button:latched,owner,..})=>")
             && release.contains("self.forwarded_gesture_hit(seat)")
             && release.contains("ElementState::Released,"),
         "the forwarded release is sent from the owner's cell"
@@ -41364,7 +41400,7 @@ fn a_text_selection_drawn_into_the_strip_is_finished_in_its_own_pane() {
     let release = squeezed_body("Runtime", "release_owned_gesture");
     assert!(
         release.contains(
-            "Some(MouseRoute::Local(drag))=>{self.finish_local_selection(*drag)?;Ok(true)}"
+            "ifself.live_paste_target(drag.owner).is_none(){self.window.mouse_route=None;returnOk(true);}self.finish_local_selection(*drag)?;Ok(true)}"
         ),
         "a selection's release finishes it, wherever the pointer is"
     );
@@ -41454,6 +41490,260 @@ fn the_in_pane_surfaces_yield_to_every_band_painted_above_them() {
     assert!(
         surface.contains("self.pointer_target_at(position)?"),
         "and the claim is the router's"
+    );
+}
+
+/// RED (final review of `f5d0fc2b`) — **a forwarded gesture is delivered to
+/// the shell it was handed to, and to no other.**
+///
+/// The route used to record a button and an encoding and nothing else, and its
+/// moves and release went to whichever pane held the focus *then*. Run: the
+/// press records its owner (tab, seat, incarnation); a focus moved to another
+/// pane does not change it; and the owner's liveness — the paste address's own
+/// rule — is false for a pane that closed, a shell restarted in the same seat
+/// and a tab no longer on top. Read: the release and the drag's moves take the
+/// seat from the route, ask whether the owner is live, and drop the route
+/// without a byte when it is not.
+///
+/// Red gates: take the release's seat from `focused_leaf` again (focus moved
+/// mid-drag) and the owner assertion fails; drop the liveness question from the
+/// release or from the moves (owner closed mid-drag) and the drop assertion
+/// naming that door fails.
+#[test]
+fn a_forwarded_gesture_is_delivered_to_the_shell_it_was_handed_to() {
+    let mut session =
+        DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+    session.feed(b"\x1b[?1002h\x1b[?1006h").unwrap();
+    let owner = PasteTarget {
+        tab: TabId(7),
+        seat: SeatId(2),
+        incarnation: 41,
+    };
+    let mut route = None;
+    route_forwarded_mouse_button(
+        &mut route,
+        ElementState::Pressed,
+        input::MouseProtocolButton::Left,
+        bt_render::GridHit { row: 1, column: 1 },
+        session.terminal_modes(),
+        ModifiersState::empty(),
+        PressedCellTarget::Ordinary,
+        owner,
+    )
+    .expect("a tracked press is forwarded");
+    // The focus moves to seat 3 while the button is held: nothing about the
+    // route names the focus, so the gesture is still seat 2's.
+    assert!(
+        matches!(route, Some(MouseRoute::Forward { owner: recorded, .. }) if recorded == owner),
+        "the press records the shell it was handed to"
+    );
+    assert!(
+        paste_target_is_live(TabId(7), Some(41), owner),
+        "while it stands, it is owed"
+    );
+    assert!(
+        !paste_target_is_live(TabId(7), None, owner),
+        "a closed pane is owed nothing"
+    );
+    assert!(
+        !paste_target_is_live(TabId(7), Some(42), owner),
+        "nor a shell restarted in the same seat"
+    );
+    assert!(
+        !paste_target_is_live(TabId(8), Some(41), owner),
+        "nor a pane whose tab is no longer on top"
+    );
+
+    let release = squeezed_body("Runtime", "release_owned_gesture");
+    let motion = squeezed_body("Runtime", "forward_owned_drag_motion");
+    for (door, body) in [("release", &release), ("motion", &motion)] {
+        assert!(
+            !body.contains("focused_leaf"),
+            "{door}: the gesture is delivered to its recorded owner, not to the focus"
+        );
+        assert!(
+            body.contains("letseat=owner.seat;"),
+            "{door}: the seat is the route's"
+        );
+        assert!(
+            body.contains(
+                "ifself.live_paste_target(owner).is_none(){self.window.mouse_route=None;"
+            ),
+            "{door}: a gone owner drops the route with nothing sent"
+        );
+    }
+    assert!(
+        release.contains("self.send_mouse_input_to(seat,&bytes,"),
+        "release: written into the owner's own pipe"
+    );
+    // A selection drag is addressed the same way.
+    assert!(
+        squeezed_body("Runtime", "extend_local_selection").contains(
+            "ifself.live_paste_target(owner).is_none(){self.window.mouse_route=None;returnOk(());}letseat=owner.seat;"
+        ),
+        "selection: its moves go to its own shell, and a gone shell lets it go"
+    );
+    assert!(
+        squeezed_body("Runtime", "mouse_input").contains(
+            "letSome(owner)=self.paste_target(hit_seat)else{returnOk(());};self.begin_local_selection(owner,hit)"
+        ),
+        "selection: the press records its shell"
+    );
+    let press = squeezed_body("Runtime", "mouse_input");
+    assert!(
+        press.contains("letSome(owner)=self.paste_target(self.focused_leaf)else{returnOk(());};"),
+        "the press records the shell it is handed to"
+    );
+}
+
+/// RED (final review of `f5d0fc2b`) — **only the button that started a
+/// forwarded gesture ends it**, and another button pressed and let go while it
+/// is held is not forwarded under it.
+///
+/// Run: left down forwarded; right down and up (over an overlay, or anywhere);
+/// left up. The child hears exactly a left press and a left release, and the
+/// route stands until the left release and comes off there. Read: the owned
+/// release hands a different button's release on down the ordinary road, and
+/// the cell road takes no second button while a forwarded gesture is latched.
+///
+/// Red gates: drop the latched-button test from the release arm, or let a
+/// second press overwrite the route, and the chord's byte list is wrong; drop
+/// the owned release's button test and its assertion fails.
+#[test]
+fn a_chord_under_a_forwarded_gesture_leaves_it_whole() {
+    let mut session =
+        DualPlaneSession::new(NonZeroU32::new(12).unwrap(), NonZeroU32::new(4).unwrap());
+    session.feed(b"\x1b[?1002h\x1b[?1006h").unwrap();
+    let modes = session.terminal_modes();
+    let at = bt_render::GridHit { row: 1, column: 2 };
+    let mut route = None;
+    let mut heard: Vec<Vec<u8>> = Vec::new();
+    let mut step = |state, button| {
+        if let Some(bytes) = route_forwarded_mouse_button(
+            &mut route,
+            state,
+            button,
+            at,
+            modes,
+            ModifiersState::empty(),
+            PressedCellTarget::Ordinary,
+            a_shell(),
+        ) {
+            heard.push(bytes);
+        }
+        matches!(
+            route,
+            Some(MouseRoute::Forward {
+                button: input::MouseProtocolButton::Left,
+                ..
+            })
+        )
+    };
+    assert!(step(
+        ElementState::Pressed,
+        input::MouseProtocolButton::Left
+    ));
+    assert!(
+        step(ElementState::Pressed, input::MouseProtocolButton::Right),
+        "a second button's press does not take the route"
+    );
+    assert!(
+        step(ElementState::Released, input::MouseProtocolButton::Right),
+        "and its release does not end the left gesture"
+    );
+    assert!(
+        !step(ElementState::Released, input::MouseProtocolButton::Left),
+        "the left release ends it"
+    );
+    assert_eq!(
+        heard,
+        [b"\x1b[<0;3;2M".to_vec(), b"\x1b[<0;3;2m".to_vec()],
+        "the child hears exactly left down and left up"
+    );
+    assert!(route.is_none());
+
+    let release = squeezed_body("Runtime", "release_owned_gesture");
+    assert!(
+        release.contains("ifprotocol_mouse_button(button)!=Some(latched){returnOk(false);}"),
+        "the owned release hands another button's release on as an event of its own"
+    );
+    assert!(
+        release.contains("ifbutton!=MouseButton::Left{returnOk(false);}"),
+        "and a selection, begun by the left button, is ended only by it"
+    );
+    let road = squeezed_body("Runtime", "mouse_input");
+    assert!(
+        road.contains(
+            "ifmatches!(self.window.mouse_route,Some(MouseRoute::Forward{..})){returnOk(());}match state"
+                .replace(' ', "")
+                .as_str()
+        ),
+        "the cell road begins no selection under a latched forwarded gesture"
+    );
+}
+
+/// RED (final review of `f5d0fc2b`) — **a band painted above the panes owns the
+/// wheel over its own area, whether or not it scrolls.**
+///
+/// Yielding the in-pane claim to the menus left the notch to fall through them:
+/// a notch on a pane menu over a strip, or over plain terminal, scrolled the
+/// terminal beneath. Every band of `OVER_IN_PANE_TOP_FIRST` now declares
+/// ([`OverInPane::wheel`], an exhaustive match) whether its own station
+/// answers the notch or it swallows it, and `mouse_wheel` asks the topmost one
+/// before the hosted page and every pane — with a strip under the menu or not.
+///
+/// Red gates: remove the station, or declare a menu `OwnStation` (there is no
+/// menu station for it to reach), and the assertion naming it fails.
+#[test]
+fn a_band_painted_above_the_panes_owns_the_wheel_over_its_area() {
+    for band in OVER_IN_PANE_TOP_FIRST {
+        let expected = match band {
+            OverInPane::Palette | OverInPane::Float => OverWheel::OwnStation,
+            _ => OverWheel::Swallow,
+        };
+        assert_eq!(band.wheel(), expected, "{band:?}");
+    }
+    let wheel = squeezed_body("Runtime", "mouse_wheel");
+    let station = wheel
+        .find("letSome(band)=self.topmost_band_over_in_pane_at(position){ifband.wheel()==OverWheel::Swallow{")
+        .expect("the wheel asks the topmost band over the panes what it does with a notch");
+    assert!(
+        wheel[station..wheel.len().min(station + 260)].contains("returnOk(());"),
+        "a band that swallows ends the notch there"
+    );
+    for (band, own) in [
+        (
+            OverInPane::Palette,
+            "palette::wheel_part(&layout,position.x,position.y)",
+        ),
+        (OverInPane::Float, "self.float_hit_at(position)"),
+    ] {
+        let at = wheel
+            .find(own)
+            .unwrap_or_else(|| panic!("{band:?} has a station"));
+        assert!(
+            at > station,
+            "{band:?}'s own station is below the gate that lets it through"
+        );
+    }
+    for beneath in [
+        "self.point_is_on_the_web_page(position)",
+        "seats::files_body_at(",
+        "self.preview_surface_at(position)",
+        "self.in_pane_surface_at(position)",
+    ] {
+        let at = wheel
+            .find(beneath)
+            .unwrap_or_else(|| panic!("`{beneath}` is on the wheel's road"));
+        assert!(
+            at > station,
+            "`{beneath}` is asked only after the bands above it"
+        );
+    }
+    assert!(
+        squeezed_body("Runtime", "topmost_band_over_in_pane_at")
+            .contains("OVER_IN_PANE_TOP_FIRST.into_iter().find("),
+        "the topmost band is read off the paint-ordered list"
     );
 }
 

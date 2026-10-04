@@ -21012,6 +21012,14 @@ enum MouseRoute {
     Forward {
         button: input::MouseProtocolButton,
         sgr: bool,
+        /// **The shell the press was handed to** (T-STRIP-HOVER-THROUGH, final
+        /// review 2026-10-04) — tab, seat and incarnation. The moves and the
+        /// release of this gesture are owed to it and to nobody else: a focus
+        /// moved while the button is held does not redirect them, and a shell
+        /// that is gone — its pane closed, its program restarted, its tab no
+        /// longer on top — is owed nothing, so the route is dropped without a
+        /// byte sent to whatever stands there now.
+        owner: PasteTarget,
     },
     MathBlock,
 }
@@ -21210,6 +21218,21 @@ fn right_press_raises_terminal_menu(modes: TerminalModes, modifiers: ModifiersSt
     modes.mouse_tracking == MouseTracking::Off || modifiers.shift_key()
 }
 
+/// **One button event of a gesture handed to the program**, and what it does
+/// to the route that holds the gesture.
+///
+/// **One gesture, one button** (T-STRIP-HOVER-THROUGH, final review
+/// 2026-10-04). A press is forwarded only when no forwarded gesture is already
+/// latched, and only the release of the button that latched it ends it. While
+/// it is held, another button's press and release are not forwarded under it
+/// and do not touch it: they go on down the window's ordinary road as events of
+/// their own, where an overlay, a menu or the window's own surfaces can take
+/// them — and a child holding the left button is never told the left button
+/// came up because the right one did.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one button event and the six facts it is judged on; the owner is the press's address"
+)]
 fn route_forwarded_mouse_button(
     route: &mut Option<MouseRoute>,
     state: ElementState,
@@ -21218,15 +21241,17 @@ fn route_forwarded_mouse_button(
     modes: TerminalModes,
     modifiers: ModifiersState,
     target: PressedCellTarget,
+    owner: PasteTarget,
 ) -> Option<Vec<u8>> {
     let forward = !modifiers.shift_key()
         && modes.mouse_tracking != MouseTracking::Off
         && !press_belongs_to_the_window(button, target);
     match state {
-        ElementState::Pressed if forward => {
+        ElementState::Pressed if forward && route.is_none() => {
             *route = Some(MouseRoute::Forward {
                 button,
                 sgr: modes.sgr_mouse,
+                owner,
             });
             Some(input::mouse_bytes(
                 modes.sgr_mouse,
@@ -21243,9 +21268,17 @@ fn route_forwarded_mouse_button(
         // click retires `1006` (§7.1.5i); reading it here would split one click
         // across two protocols.
         ElementState::Released => {
-            let Some(MouseRoute::Forward { sgr, .. }) = route else {
+            let Some(MouseRoute::Forward {
+                sgr,
+                button: latched,
+                ..
+            }) = route
+            else {
                 return None;
             };
+            if *latched != button {
+                return None;
+            }
             let sgr = *sgr;
             *route = None;
             Some(input::mouse_bytes(
@@ -21287,7 +21320,7 @@ fn route_forwarded_mouse_motion(
         return None;
     }
     match route {
-        Some(MouseRoute::Forward { button, sgr })
+        Some(MouseRoute::Forward { button, sgr, .. })
             if modes.mouse_tracking != MouseTracking::Click =>
         {
             Some((*sgr, *button))
@@ -21306,7 +21339,13 @@ struct SelectionDrag {
     /// touch. A selection is set on one shell's session and made of one frame's
     /// anchors, so the pointer wandering into the pane next door — or onto the
     /// chrome, or off the window — must still be answered in cells of *this* one.
-    origin_seat: SeatId,
+    ///
+    /// **Named as a shell — tab, seat and incarnation — since the final review
+    /// of T-STRIP-HOVER-THROUGH (2026-10-04)**, the forwarded route's own
+    /// address: a seat number alone would answer for whatever pane wears it
+    /// after a tab switch or a restart, and a gesture whose shell is gone is
+    /// let go without touching anything that stands there now.
+    owner: PasteTarget,
     origin_row: u32,
     origin_column: u32,
     origin: ViewSelection,
@@ -34074,6 +34113,44 @@ enum OverInPane {
     Modal,
     Float,
     WebSheet,
+}
+
+/// **What a band painted above the in-pane surfaces does with a wheel notch
+/// over its own area** (T-STRIP-HOVER-THROUGH, final review 2026-10-04): it
+/// either has a station of its own in `Runtime::mouse_wheel` that scrolls it,
+/// or it swallows the notch. Either way nothing beneath it scrolls.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OverWheel {
+    /// Its own station answers the notch — the palette's list, a floating
+    /// window's tree or document.
+    OwnStation,
+    /// Not a scroller and not transparent: the notch is nobody's.
+    Swallow,
+}
+
+impl OverInPane {
+    /// The wheel's answer for this band, asked exhaustively so a family added
+    /// to [`OVER_IN_PANE_TOP_FIRST`] has to say which it is.
+    ///
+    /// The glance card, the modal band's scrollers (the first-run card and
+    /// settings) and the toasts have stations *above* the one that asks this,
+    /// which return first; what reaches here over them is the part with no
+    /// scroller — a glance card with no document, a menu in the modal band —
+    /// and that is swallowed.
+    const fn wheel(self) -> OverWheel {
+        match self {
+            Self::Palette | Self::Float => OverWheel::OwnStation,
+            Self::FilePeek
+            | Self::Toast
+            | Self::TabMenu
+            | Self::TermMenu
+            | Self::GitMenu
+            | Self::PaneMenu
+            | Self::FileMenu
+            | Self::Modal
+            | Self::WebSheet => OverWheel::Swallow,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -52504,8 +52581,10 @@ mod mouse_trace_station_tests {
         // `wheel_route taken=overlay at=modal` line above it. 25 → 26 on
         // 2026-10-04 (T-STRIP-HOVER-THROUGH): a notch on the search capsule or a
         // notice strip is swallowed, with its own `wheel_route taken=overlay
-        // at=in-pane` line above it.
-        assert_every_exit_is_traced("mouse_wheel", 26);
+        // at=in-pane` line above it. 26 → 27 the same day: a notch on a band
+        // painted above the panes that does not scroll is swallowed, with its
+        // own `wheel_route taken=overlay at=over-pane` line above it.
+        assert_every_exit_is_traced("mouse_wheel", 27);
         assert_every_exit_is_traced("scroll_rail", 3);
         assert_every_exit_is_traced("aim_focus_card_window", 10);
     }

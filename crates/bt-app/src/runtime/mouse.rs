@@ -5,9 +5,9 @@ use crate::{
     ApplicationChange, DividerDrag, DividerGrip, Drag, DragCarry, DragLatch, DragRelease,
     DragSource, DropBatch, DropLanding, Fading, FloatDrag, FloatDragKind, FloatHeadPress,
     HoverFloat, IN_PANE_SURFACES_TOP_FIRST, InPaneSurface, LeafId, MathHoverExit, MouseRoute,
-    OVER_IN_PANE_TOP_FIRST, OverInPane, OwnPress, PanePress, PointerTarget, Popup, PressAfterBlur,
-    PressedCellTarget, PreviewBodyRung, PreviewSurface, RenameExit, RenameSubject, RowActivation,
-    RowHost, RowPayload, RowPayloadKind, RowPress, Runtime, SpringGate, TabClick,
+    OVER_IN_PANE_TOP_FIRST, OverInPane, OverWheel, OwnPress, PanePress, PointerTarget, Popup,
+    PressAfterBlur, PressedCellTarget, PreviewBodyRung, PreviewSurface, RenameExit, RenameSubject,
+    RowActivation, RowHost, RowPayload, RowPayloadKind, RowPress, Runtime, SpringGate, TabClick,
     TerminalReference, UserInputKind, WebHeadVerb, WheelAxis, WheelBurst, WheelRoute,
     a_right_press_is_on_the_pane_menus_head, answered_once, button_router_position, crumb_segments,
     drain_whole_units, files, files_row_activation, first_run, float, float_grasp, float_sizing_of,
@@ -2414,6 +2414,19 @@ impl Runtime<'_> {
             .any(|family| self.over_in_pane_claims(*family, position))
     }
 
+    /// The topmost band of [`OVER_IN_PANE_TOP_FIRST`] that takes the pointer
+    /// here, read in the list's own order. Floating windows are not asked
+    /// again (see [`Self::over_in_pane_claims`]); they have stations of their
+    /// own in every reader that asks this.
+    pub(in crate::runtime) fn topmost_band_over_in_pane_at(
+        &mut self,
+        position: PhysicalPosition<f64>,
+    ) -> Option<OverInPane> {
+        OVER_IN_PANE_TOP_FIRST
+            .into_iter()
+            .find(|family| self.over_in_pane_claims(*family, position))
+    }
+
     fn over_in_pane_claims(&mut self, family: OverInPane, position: PhysicalPosition<f64>) -> bool {
         let (x, y) = (position.x, position.y);
         #[expect(
@@ -4246,15 +4259,41 @@ impl Runtime<'_> {
                 }
                 Ok(true)
             }
+            // A selection is only ever begun by the left button, so only the
+            // left button's release ends it; any other button's release goes on
+            // down the ordinary road as an event of its own.
             Some(MouseRoute::Local(drag)) => {
+                if button != MouseButton::Left {
+                    return Ok(false);
+                }
+                // Its shell gone, the selection is let go with nothing done.
+                if self.live_paste_target(drag.owner).is_none() {
+                    self.window.mouse_route = None;
+                    return Ok(true);
+                }
                 self.finish_local_selection(*drag)?;
                 Ok(true)
             }
-            Some(MouseRoute::Forward { .. }) => {
-                let Some(protocol_button) = protocol_mouse_button(button) else {
+            Some(MouseRoute::Forward {
+                button: latched,
+                owner,
+                ..
+            }) => {
+                // **Only the button that started the gesture ends it.** Any
+                // other button's release is not this gesture's: it is not
+                // forwarded under this route, it does not clear it, and it
+                // goes on down the ordinary road as an event of its own.
+                if protocol_mouse_button(button) != Some(latched) {
                     return Ok(false);
-                };
-                let seat = self.focused_leaf;
+                }
+                // **To the shell the press was handed to, and to no other.** A
+                // shell that is gone (or whose tab is no longer on top) is owed
+                // nothing: the route comes off with no byte sent anywhere.
+                if self.live_paste_target(owner).is_none() {
+                    self.window.mouse_route = None;
+                    return Ok(true);
+                }
+                let seat = owner.seat;
                 let Some(hit) = self.forwarded_gesture_hit(seat) else {
                     // A pane with no frame to name a cell in has no child to
                     // tell; the latch still has to come off.
@@ -4265,11 +4304,12 @@ impl Runtime<'_> {
                 if let Some(bytes) = route_forwarded_mouse_button(
                     &mut self.window.mouse_route,
                     ElementState::Released,
-                    protocol_button,
+                    latched,
                     hit,
                     modes,
                     self.window.modifiers,
                     PressedCellTarget::Ordinary,
+                    owner,
                 ) {
                     self.mouse_trace(|| {
                         format!(
@@ -4280,11 +4320,7 @@ impl Runtime<'_> {
                         )
                     });
                     self.answer_attention(seat, UserInputKind::MouseButton);
-                    self.send_user_input(
-                        &bytes,
-                        "forward mouse button event to PTY",
-                        UserInputKind::MouseButton,
-                    )?;
+                    self.send_mouse_input_to(seat, &bytes, "forward mouse button event to PTY")?;
                 }
                 Ok(true)
             }
@@ -4296,8 +4332,9 @@ impl Runtime<'_> {
     /// ([`Self::drag_hit_in_pane`]) and folded onto the live grid the program
     /// sees, as the press was.
     ///
-    /// The owner is the focused pane: the press that latched the route moved
-    /// the focus there (D40) and nothing moves it while a button is held.
+    /// The pane is the route's recorded owner ([`MouseRoute::Forward`]'s
+    /// `owner`), never the focused one: a focus moved while the button is held
+    /// does not redirect the gesture.
     fn forwarded_gesture_hit(&self, seat: SeatId) -> Option<bt_render::GridHit> {
         let hit = self.drag_hit_in_pane(seat)?;
         let frame = self.pane_frame(seat)?;
@@ -4307,7 +4344,16 @@ impl Runtime<'_> {
     /// One move of a drag already handed to a program, reported to the pane
     /// that took the press ([`Self::forwarded_gesture_hit`]).
     fn forward_owned_drag_motion(&mut self) -> Result<()> {
-        let seat = self.focused_leaf;
+        let Some(MouseRoute::Forward { owner, .. }) = self.window.mouse_route else {
+            return Ok(());
+        };
+        // A gesture whose shell is gone is owed nothing, and is let go here
+        // rather than reported to whatever stands in its place.
+        if self.live_paste_target(owner).is_none() {
+            self.window.mouse_route = None;
+            return Ok(());
+        }
+        let seat = owner.seat;
         let Some(hit) = self.forwarded_gesture_hit(seat) else {
             return Ok(());
         };
@@ -5424,6 +5470,11 @@ impl Runtime<'_> {
                 self.local_image_path_hit(hit),
             )
         });
+        // The shell the press is handed to — the focused one, which D40 made
+        // the pressed pane on the way down — recorded on the route as its owner.
+        let Some(owner) = self.paste_target(self.focused_leaf) else {
+            return Ok(());
+        };
         if let Some(bytes) = route_forwarded_mouse_button(
             &mut self.window.mouse_route,
             state,
@@ -5432,6 +5483,7 @@ impl Runtime<'_> {
             modes,
             self.window.modifiers,
             target,
+            owner,
         ) {
             self.mouse_trace(|| {
                 format!(
@@ -5450,9 +5502,20 @@ impl Runtime<'_> {
                 UserInputKind::MouseButton,
             );
         }
+        // **A gesture already handed to the program keeps the pane**: another
+        // button pressed over a cell while it is held is not forwarded and does
+        // not begin a selection that would take the route from it.
+        if matches!(self.window.mouse_route, Some(MouseRoute::Forward { .. })) {
+            return Ok(());
+        }
         match state {
             ElementState::Pressed if button == MouseButton::Left => {
-                self.begin_local_selection(hit_seat, hit)
+                // The selection is addressed to the shell in the pressed pane,
+                // as the forwarded press is to the focused one.
+                let Some(owner) = self.paste_target(hit_seat) else {
+                    return Ok(());
+                };
+                self.begin_local_selection(owner, hit)
             }
             _ => Ok(()),
         }
@@ -5815,20 +5878,29 @@ impl Runtime<'_> {
             self.mouse_trace(|| "wheel_route taken=overlay at=toast".to_owned());
             return Ok(());
         }
-        // **A notch over a surface inside a pane is nobody's**
-        // (T-STRIP-HOVER-THROUGH, owner's ruling 2026-10-04) — the toast's
-        // sentence above, for the capsule and a notice strip, asked of the one
-        // router ([`Self::in_pane_surface_at`]) so the wheel's owner is the
-        // hover's and the press's. Neither is a scroller and neither is
-        // transparent: a notch on the strip's frame must not scroll the
-        // terminal, the document, the graph or the picture under it. A strip
-        // with nothing to press claims nothing, so a notch passes through a
-        // `Saved` exactly as a hover does. Asked after the palette, which is
-        // drawn over every pane, and before the hosted page and every pane
-        // below, which these two stand over.
+        // **A band painted above the panes owns the notch over its own area**
+        // (T-STRIP-HOVER-THROUGH, final review 2026-10-04), whether or not it
+        // scrolls. The topmost band of `OVER_IN_PANE_TOP_FIRST` under the
+        // pointer says what it does with it ([`OverInPane::wheel`]): its own
+        // station below answers it (the palette's list, a floating window), or
+        // it is swallowed here (a menu, the download sheet) — a notch on a menu
+        // must not scroll the terminal under it.
         if let Some(position) = self.window.pointer_position
+            && let Some(band) = self.topmost_band_over_in_pane_at(position)
+        {
+            if band.wheel() == OverWheel::Swallow {
+                self.mouse_trace(|| format!("wheel_route taken=overlay at=over-pane {band:?}"));
+                return Ok(());
+            }
+        } else if let Some(position) = self.window.pointer_position
             && let Some(surface) = self.in_pane_surface_at(position)
         {
+            // **A notch over a surface inside a pane is nobody's** — the
+            // capsule and a notice strip, asked of the one router
+            // ([`Self::in_pane_surface_at`]) so the wheel's owner is the
+            // hover's and the press's. Neither is a scroller and neither is
+            // transparent; a strip with nothing to press claims nothing, so a
+            // notch passes through a `Saved` exactly as a hover does.
             self.mouse_trace(|| format!("wheel_route taken=overlay at=in-pane {surface:?}"));
             return Ok(());
         }

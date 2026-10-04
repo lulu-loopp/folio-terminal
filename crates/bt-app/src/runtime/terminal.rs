@@ -3,7 +3,7 @@
 
 use crate::{
     ApplicationChange, AttentionDelivery, CommandFlash, DrainOutcome, Fading, FilesFocusArrival,
-    FlashBand, FormulaSwitches, LeafId, LeafSession, LocalImageActivation, MouseRoute,
+    FlashBand, FormulaSwitches, LeafId, LeafSession, LocalImageActivation, MouseRoute, PasteTarget,
     RailJumpLanding, ReferenceCard, RowHost, Runtime, SelectionDrag, SelectionDragMode, Step,
     TerminalReference, UserInputKind, apply_stored_terminal_font, attention_trace, cmdrail,
     coalesce, create_leaf_session, cubic_bezier, deliver_osc_attention,
@@ -1367,9 +1367,10 @@ impl Runtime<'_> {
     /// focused leaf, even though D40 has just made them the same pane.
     pub(in crate::runtime) fn begin_local_selection(
         &mut self,
-        seat: SeatId,
+        owner: PasteTarget,
         hit: bt_render::GridHit,
     ) -> Result<()> {
+        let seat = owner.seat;
         self.dismiss_peek()?;
         let count = self
             .window
@@ -1444,7 +1445,7 @@ impl Runtime<'_> {
         }
         self.window.mouse_route = Some(MouseRoute::Local(Box::new(SelectionDrag {
             mode,
-            origin_seat: seat,
+            owner,
             origin_row: hit.row,
             origin_column: hit.column,
             origin,
@@ -1461,7 +1462,7 @@ impl Runtime<'_> {
             };
             format!(
                 "begin_local_selection route=local seat={:?} origin={},{} mode={:?} control={} hyperlink={:?} image={:?}",
-                drag.origin_seat,
+                drag.owner.seat,
                 drag.origin_row,
                 drag.origin_column,
                 drag.mode,
@@ -1487,13 +1488,16 @@ impl Runtime<'_> {
         // Copied out field by field rather than by cloning the drag whole: this
         // runs on every pointer move of a gesture, and the anchors are the only
         // part of it with anything to clone.
-        let (mode, seat, origin_row, origin_column) = (
-            drag.mode,
-            drag.origin_seat,
-            drag.origin_row,
-            drag.origin_column,
-        );
+        let (mode, owner, origin_row, origin_column) =
+            (drag.mode, drag.owner, drag.origin_row, drag.origin_column);
         let origin = drag.origin.clone();
+        // A selection whose shell is gone is let go, not carried on in
+        // whatever pane wears its seat now.
+        if self.live_paste_target(owner).is_none() {
+            self.window.mouse_route = None;
+            return Ok(());
+        }
+        let seat = owner.seat;
         let Some(hit) = self.drag_hit_in_pane(seat) else {
             return Ok(());
         };
@@ -1602,14 +1606,14 @@ impl Runtime<'_> {
     /// Let go of a selection drag: settle its last extent, then spend what the
     /// press promised — a click's dismissal, a drag's copy, a Ctrl+click's link.
     ///
-    /// Everything here is asked of `drag.origin_seat`. The release's own cell is
+    /// Everything here is asked of `drag.owner.seat`. The release's own cell is
     /// read only when the button truly came up inside that pane, because every
     /// question below is "did it come up on the cell it went down on", and a point
     /// in another pane — or on the chrome — cannot answer that yes. Letting a
     /// neighbour's cell answer would let a release two panes away read as a click
     /// on the origin cell and quietly clear the selection the drag just made.
     pub(in crate::runtime) fn finish_local_selection(&mut self, drag: SelectionDrag) -> Result<()> {
-        let seat = drag.origin_seat;
+        let seat = drag.owner.seat;
         self.extend_local_selection()?;
         let release_hit = self
             .pane_frame_hit()
