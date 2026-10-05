@@ -3807,10 +3807,7 @@ impl Text {
             Self::NavProfiles => pick(lang, "Profiles", "配置文件"),
             Self::CategoryProfiles => pick(lang, "PROFILES", "配置文件"),
             Self::ProfilesDuplicate => pick(lang, "Duplicate", "复制"),
-            // zh: pending T-INTEGRATION-INJECT-4
-            Self::ProfilesEnableViaProfile => {
-                pick(lang, "Enable via $PROFILE", "Enable via $PROFILE")
-            }
+            Self::ProfilesEnableViaProfile => pick(lang, "Enable via $PROFILE", "经 $PROFILE 启用"),
             // Lower case, because it is a badge and not a heading: the type
             // raises it in the English and there is no case to raise in the
             // Chinese, which is the same ruling `CategoryGeneral` carries.
@@ -3851,41 +3848,35 @@ impl Text {
                 "PowerShell integration is not provided for these arguments.",
                 "自定义启动参数，不提供 PowerShell 整合。",
             ),
-            // zh: pending T-INTEGRATION-INJECT-4
             Self::CapPowerShellViaProfile => pick(
                 lang,
                 "Prompt marks, directory, exit codes and hyperlinks, loaded via $PROFILE",
-                "Prompt marks, directory, exit codes and hyperlinks, loaded via $PROFILE",
+                "命令标记、当前目录、退出码、链接，经 $PROFILE 加载",
             ),
-            // zh: pending T-INTEGRATION-INJECT-4
             Self::CapPowerShellPolicyChangeable => pick(
                 lang,
                 "PowerShell integration is not provided for these arguments. The execution policy blocks $PROFILE until one command is run.",
-                "PowerShell integration is not provided for these arguments. The execution policy blocks $PROFILE until one command is run.",
+                "自定义启动参数，不提供 PowerShell 整合。执行策略阻止 $PROFILE，运行此命令即可。",
             ),
-            // zh: pending T-INTEGRATION-INJECT-4
             Self::ProfilesCopyPolicyCommand => pick(
                 lang,
                 "Copy the execution policy command",
-                "Copy the execution policy command",
+                "复制执行策略命令",
             ),
-            // zh: pending T-INTEGRATION-INJECT-4
             Self::CapPowerShellPolicyManaged => pick(
                 lang,
                 "PowerShell integration is not provided for these arguments. Your organization's execution policy blocks $PROFILE.",
-                "PowerShell integration is not provided for these arguments. Your organization's execution policy blocks $PROFILE.",
+                "自定义启动参数，不提供 PowerShell 整合。组织的执行策略阻止 $PROFILE。",
             ),
-            // zh: pending T-INTEGRATION-INJECT-4
             Self::CapPowerShellPolicyProcess => pick(
                 lang,
                 "PowerShell integration is not provided for these arguments. The execution policy set for this process blocks $PROFILE.",
-                "PowerShell integration is not provided for these arguments. The execution policy set for this process blocks $PROFILE.",
+                "自定义启动参数，不提供 PowerShell 整合。此进程的执行策略阻止 $PROFILE。",
             ),
-            // zh: pending T-INTEGRATION-INJECT-4
             Self::CapPowerShellPolicyLocation => pick(
                 lang,
                 "PowerShell integration is not provided for these arguments. $PROFILE is stored where the execution policy may refuse it.",
-                "PowerShell integration is not provided for these arguments. $PROFILE is stored where the execution policy may refuse it.",
+                "自定义启动参数，不提供 PowerShell 整合。$PROFILE 所在位置可能被执行策略拒绝。",
             ),
             Self::CapWslBash => pick(
                 lang,
@@ -4823,20 +4814,18 @@ impl Text {
             ),
             Self::DescPowerShellProfileLine => pick(
                 lang,
-                // zh: pending T-INTEGRATION-INJECT-4
                 "Folio added this startup line.",
-                "Folio added this startup line.",
+                "Folio 添加了此启动行。",
             ),
             Self::RemovePowerShellProfileLine => pick(
                 lang,
                 "Remove the line from $PROFILE",
                 "从 $PROFILE 移除此行",
             ),
-            // zh: pending T-INTEGRATION-INJECT-4
             Self::ShellProfileAddedToast => pick(
                 lang,
                 "Added one line to $PROFILE. It takes effect only in Folio.",
-                "Added one line to $PROFILE. It takes effect only in Folio.",
+                "已在 $PROFILE 添加一行，仅在 Folio 中生效。",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -5982,24 +5971,6 @@ impl Text {
 
     #[cfg(test)]
     const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        (Self::ProfilesEnableViaProfile, HostPlatform::Windows),
-        (Self::ProfilesEnableViaProfile, HostPlatform::MacOs),
-        (Self::CapPowerShellViaProfile, HostPlatform::Windows),
-        (Self::CapPowerShellViaProfile, HostPlatform::MacOs),
-        (Self::CapPowerShellPolicyChangeable, HostPlatform::Windows),
-        (Self::CapPowerShellPolicyChangeable, HostPlatform::MacOs),
-        (Self::ProfilesCopyPolicyCommand, HostPlatform::Windows),
-        (Self::ProfilesCopyPolicyCommand, HostPlatform::MacOs),
-        (Self::CapPowerShellPolicyManaged, HostPlatform::Windows),
-        (Self::CapPowerShellPolicyManaged, HostPlatform::MacOs),
-        (Self::CapPowerShellPolicyProcess, HostPlatform::Windows),
-        (Self::CapPowerShellPolicyProcess, HostPlatform::MacOs),
-        (Self::CapPowerShellPolicyLocation, HostPlatform::Windows),
-        (Self::CapPowerShellPolicyLocation, HostPlatform::MacOs),
-        (Self::DescPowerShellProfileLine, HostPlatform::Windows),
-        (Self::DescPowerShellProfileLine, HostPlatform::MacOs),
-        (Self::ShellProfileAddedToast, HostPlatform::Windows),
-        (Self::ShellProfileAddedToast, HostPlatform::MacOs),
         (Self::UpdateCardTrial, HostPlatform::Windows),
         (Self::UpdateCardTrial, HostPlatform::MacOs),
         (Self::UpdateFailedTrialRunning, HostPlatform::Windows),
