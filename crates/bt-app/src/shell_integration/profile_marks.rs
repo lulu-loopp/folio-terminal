@@ -697,10 +697,10 @@ impl ProfileFiles {
         }
     }
 
+    /// Written only under the marks lock ([`lock`]), which has made the data root.
     pub fn write(&self, data: &Path) -> io::Result<()> {
         let path = data.join(FILES_RECORD);
         super::refuse_profile_path(&path)?;
-        fs::create_dir_all(data)?;
         let bytes = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
         bt_persist::atomic_write(&path, &bytes).map_err(io::Error::other)
     }

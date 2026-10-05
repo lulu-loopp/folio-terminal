@@ -152,7 +152,7 @@ conditions — 22 declarations, each confirmed:
 | `files::is_concealed` | `cfg(windows)` / `cfg(not(windows))` |
 | `psreadline::run_probe` | `cfg(windows)` / `cfg(not(windows))` |
 | `shell_integration::installed_powershells` | `cfg(windows)` / `cfg(not(windows))` |
-| `shell_integration::run_profile_probe` | `cfg(windows)` / `cfg(not(windows))` |
+| `shell_integration::run_profile_path_probe` | `cfg(windows)` / `cfg(not(windows))` |
 | `wsl::<CurrentUser as Registry>::string` | `cfg(windows)` / `cfg(not(windows))` impl blocks |
 | `wsl::<CurrentUser as Registry>::subkeys` | `cfg(windows)` / `cfg(not(windows))` impl blocks |
 | `hang_watch::run_selftest_if_due` | `cfg(debug_assertions)` / `cfg(not(debug_assertions))` |

@@ -135,7 +135,7 @@ fn the_identities_bt_app_declares_twice_are_the_ten() {
             "crate::panic_selftest_if_due",
             "crate::psreadline::run_probe",
             "crate::shell_integration::installed_powershells",
-            "crate::shell_integration::run_profile_probe",
+            "crate::shell_integration::run_profile_path_probe",
             "crate::wsl::<CurrentUser as Registry>::string",
             "crate::wsl::<CurrentUser as Registry>::subkeys",
         ],

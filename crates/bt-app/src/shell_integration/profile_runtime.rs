@@ -194,17 +194,13 @@ fn observe_profile_lines(
 
 /// What each installed PowerShell answered about where its `$PROFILE` is: `None` for one that
 /// did not answer.
-type ProfileAnswers = Vec<(PathBuf, Option<PathBuf>)>;
+type PathAnswers = Vec<(PathBuf, Option<PathBuf>)>;
 
 /// Every `$PROFILE` a removal must look at: the sandbox's alone when it is set; otherwise every
 /// recorded path ([`Marks`], [`ProfileFiles`]) and every path an edition named in `answers`.
 /// An edition that did not answer is reported [`Fate::Unlocated`] — not a refusal: what Folio
 /// recorded is removed whatever any shell says (release read M1).
-fn candidates(
-    marks: &Marks,
-    files: &ProfileFiles,
-    answers: ProfileAnswers,
-) -> (Vec<PathBuf>, Report) {
+fn candidates(marks: &Marks, files: &ProfileFiles, answers: PathAnswers) -> (Vec<PathBuf>, Report) {
     let mut report = Report::default();
     match sandbox_profile() {
         Ok(Some(path)) => return (vec![path], report),
@@ -296,7 +292,7 @@ pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) ->
 /// fallback for a line an older Folio wrote without that record (release read M1). `patience` is
 /// the asker's ([`PROBE_DEADLINE`], [`REMOVAL_PROBE_DEADLINE`]). The record is read here without
 /// the lock — to decide only which editions to ask; the removal reads it again under the lock.
-fn profile_answers(data: &Path, patience: std::time::Duration) -> ProfileAnswers {
+fn profile_answers(data: &Path, patience: std::time::Duration) -> PathAnswers {
     // The sandbox door replaces the whole candidate set, so no shell is asked.
     if profile_sandboxed() {
         return Vec::new();
@@ -314,7 +310,7 @@ fn answers_for(
     files: &ProfileFiles,
     programs: Vec<PathBuf>,
     mut ask: impl FnMut(&Path) -> Option<PathBuf>,
-) -> ProfileAnswers {
+) -> PathAnswers {
     programs
         .into_iter()
         .filter(|program| files.located(powershell_edition(program)).is_none())
@@ -408,18 +404,14 @@ fn operate_with(
         .collect();
     // Merely discovering a hand-written installation must not create an
     // enabled record. Existing records and explicit Off decisions still persist.
-    if records
-        && (record_path.exists() || !marks.profile_refusals.is_empty())
-        && let Err(e) = marks.write(data)
-    {
-        report.files.extend(refused_record(e).files);
-    }
-    // What the removal retired is written back only where the record already is.
-    if records
-        && data.join(FILES_RECORD).exists()
-        && let Err(e) = files.write(data)
-    {
-        report.files.extend(refused_record(e).files);
+    // What the removal retired is written back only where its record already is.
+    let written = [
+        (records && (record_path.exists() || !marks.profile_refusals.is_empty()))
+            .then(|| marks.write(data)),
+        (records && data.join(FILES_RECORD).exists()).then(|| files.write(data)),
+    ];
+    for error in written.into_iter().flatten().filter_map(Result::err) {
+        report.files.extend(refused_record(error).files);
     }
     report
 }
