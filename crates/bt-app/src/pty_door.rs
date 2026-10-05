@@ -11,119 +11,20 @@
 
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::{Mutex, OnceLock};
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use crate::shell_integration;
-use bt_platform::admission::{WaitToken, WorkerCtx, doors};
+use bt_platform::admission::{WaitToken, doors};
 use bt_platform::environment::Environment;
 use bt_pty::{EnvironmentRefresh, OutputWake, PtyError, PtySession, PtySize};
 
-type SnapshotResult = Result<Option<Environment>, String>;
-type SnapshotWorker = JoinHandle<SnapshotResult>;
-
-struct LaunchEnvironmentSnapshot {
-    worker: Mutex<Option<Result<SnapshotWorker, String>>>,
-    attempt: Mutex<()>,
-    result: OnceLock<Option<Environment>>,
-}
-
-impl LaunchEnvironmentSnapshot {
-    const fn new() -> Self {
-        Self {
-            worker: Mutex::new(None),
-            attempt: Mutex::new(()),
-            result: OnceLock::new(),
-        }
-    }
-
-    fn begin(&self) {
-        if self.result.get().is_some() {
-            return;
-        }
-        let mut worker = self
-            .worker
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        worker.get_or_insert_with(|| {
-            bt_platform::spawn_at_priority(
-                "bt-environment-snapshot",
-                bt_platform::ThreadPriority::BelowNormal,
-                |ctx| {
-                    bt_platform::environment::fresh_logon_environment(ctx)
-                        .map_err(|error| error.to_string())
-                },
-            )
-            .map_err(|error| error.to_string())
-        });
-    }
-
-    fn snapshot(&self, fresh: impl FnOnce() -> SnapshotResult) -> SnapshotResult {
-        if let Some(result) = self.result.get() {
-            return Ok(result.clone());
-        }
-        // Only a successful snapshot is permanent. A failed worker or platform read leaves this
-        // owner empty, so the next spawn enters this same attempt and asks the door again.
-        let _attempt = self
-            .attempt
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(result) = self.result.get() {
-            return Ok(result.clone());
-        }
-        let pending = self
-            .worker
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        let result = match pending {
-            Some(Ok(pending)) => pending
-                .join()
-                .map_err(|_| "launch environment snapshot worker panicked".to_owned())
-                .and_then(|result| result),
-            Some(Err(error)) => Err(error),
-            None => fresh(),
-        };
-        if let Ok(snapshot) = &result {
-            let _ = self.result.set(snapshot.clone());
-        }
-        result
-    }
-}
-
-static LAUNCH_ENVIRONMENT_SNAPSHOT: LaunchEnvironmentSnapshot = LaunchEnvironmentSnapshot::new();
-
-/// Start the launch-time account snapshot before the resident run can create a window.
-pub(crate) fn begin_launch_environment_snapshot() {
-    LAUNCH_ENVIRONMENT_SNAPSHOT.begin();
-}
-
-fn launch_environment_snapshot(worker: &WorkerCtx) -> SnapshotResult {
-    LAUNCH_ENVIRONMENT_SNAPSHOT.snapshot(|| {
-        bt_platform::environment::fresh_logon_environment(worker).map_err(|error| error.to_string())
-    })
-}
-
 fn environment_refresh(
-    launch_snapshot: impl FnOnce() -> SnapshotResult,
-    fresh: impl FnOnce() -> SnapshotResult,
-    inherited: Environment,
+    fresh: impl FnOnce() -> Result<Option<Environment>, String>,
+    launch_overrides: Environment,
     mut diagnostic: impl FnMut(&str),
 ) -> Option<EnvironmentRefresh> {
-    let launch_snapshot = match launch_snapshot() {
-        Ok(Some(snapshot)) => snapshot,
-        Ok(None) => return None,
-        Err(error) => {
-            diagnostic(&format!(
-                "recoverable launch environment snapshot failure: {error}; using inherited \
-                 environment"
-            ));
-            return None;
-        }
-    };
     match fresh() {
-        Ok(Some(fresh)) => Some(EnvironmentRefresh::new(fresh, launch_snapshot, inherited)),
+        Ok(Some(fresh)) => Some(EnvironmentRefresh::new(fresh, launch_overrides)),
         Ok(None) => None,
         Err(error) => {
             diagnostic(&format!(
@@ -168,12 +69,11 @@ pub(crate) fn spawn_shell(
             let fallback_args = || shell_integration::last_resort_arguments(powershell_integration);
             let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
             let refresh = environment_refresh(
-                || launch_environment_snapshot(ctx),
                 || {
                     bt_platform::environment::fresh_logon_environment(ctx)
                         .map_err(|error| error.to_string())
                 },
-                inherited.clone(),
+                Vec::new(),
                 |line| eprintln!("{line}"),
             );
             let before_folio = refresh
@@ -271,18 +171,14 @@ mod tests {
             &mut folio,
             &profile,
         );
-        bt_pty::spawn_environment(&before_folio, &[], &[], &folio, &profile)
+        bt_pty::spawn_environment(&before_folio, &[], &folio, &profile)
     }
 
     /// RED (T-ENV-REFRESH-3, mutation `derive_prompt_from_launch_environment`) — a prompt added
     /// to the current account block after Folio launched is wrapped, not replaced by the default.
     #[test]
     fn cmd_prompt_wraps_the_fresh_value_that_was_absent_at_launch() {
-        let refresh = EnvironmentRefresh::new(
-            environment(&[("PROMPT", "$T$G")]),
-            environment(&[]),
-            environment(&[]),
-        );
+        let refresh = EnvironmentRefresh::new(environment(&[("PROMPT", "$T$G")]), environment(&[]));
         let result = environment_after_birth(
             &refresh,
             shell_integration::EnvironmentDerivation {
@@ -302,11 +198,8 @@ mod tests {
     /// WSLENV after launch remain ahead of Folio's declarations.
     #[test]
     fn wslenv_keeps_fresh_user_entries_and_adds_folios() {
-        let refresh = EnvironmentRefresh::new(
-            environment(&[("WSLENV", "USER_VALUE/u")]),
-            environment(&[("WSLENV", "OLD_VALUE/u")]),
-            environment(&[("WSLENV", "OLD_VALUE/u")]),
-        );
+        let refresh =
+            EnvironmentRefresh::new(environment(&[("WSLENV", "USER_VALUE/u")]), environment(&[]));
         let result = environment_after_birth(
             &refresh,
             shell_integration::EnvironmentDerivation {
@@ -327,11 +220,8 @@ mod tests {
     /// bridge carries the current account's startup directory.
     #[test]
     fn zsh_carries_the_fresh_zdotdir_in_bt_user_zdotdir() {
-        let refresh = EnvironmentRefresh::new(
-            environment(&[("ZDOTDIR", "/fresh/zsh")]),
-            environment(&[("ZDOTDIR", "/launch/zsh")]),
-            environment(&[("ZDOTDIR", "/launch/zsh")]),
-        );
+        let refresh =
+            EnvironmentRefresh::new(environment(&[("ZDOTDIR", "/fresh/zsh")]), environment(&[]));
         let result = environment_after_birth(
             &refresh,
             shell_integration::EnvironmentDerivation {
@@ -352,13 +242,12 @@ mod tests {
         );
     }
 
-    /// RED (T-ENV-REFRESH-3, mutation `fresh_wins_over_explicit_launch_override`) — an inherited
-    /// value that differs from the launch snapshot is an explicit launch override and still wins.
+    /// RED (T-ENV-REFRESH-3, mutation `fresh_wins_over_explicit_launch_override`) — a value the
+    /// caller identifies as a launch override still wins.
     #[test]
     fn an_explicit_launch_override_still_wins_before_derivation() {
         let refresh = EnvironmentRefresh::new(
             environment(&[("PROMPT", "fresh")]),
-            environment(&[("PROMPT", "account-at-launch")]),
             environment(&[("PROMPT", "explicit-override")]),
         );
         let result = environment_after_birth(
@@ -380,11 +269,8 @@ mod tests {
     /// overlay its default when the current account block already answers the convention.
     #[test]
     fn force_hyperlink_respects_the_fresh_answer() {
-        let refresh = EnvironmentRefresh::new(
-            environment(&[("FORCE_HYPERLINK", "0")]),
-            environment(&[]),
-            environment(&[]),
-        );
+        let refresh =
+            EnvironmentRefresh::new(environment(&[("FORCE_HYPERLINK", "0")]), environment(&[]));
         let result = environment_after_birth(
             &refresh,
             shell_integration::EnvironmentDerivation {
@@ -405,9 +291,8 @@ mod tests {
     fn a_current_environment_door_error_uses_the_inherited_spawn() {
         let mut diagnostics = Vec::new();
         let refresh = environment_refresh(
-            || Ok(Some(environment(&[("PATH", "launch")]))),
             || Err("CreateEnvironmentBlock refused".to_owned()),
-            environment(&[("PATH", "inherited"), ("天下", "为公")]),
+            environment(&[]),
             |line| diagnostics.push(line.to_owned()),
         );
         let spawn = match refresh {
@@ -419,17 +304,15 @@ mod tests {
         assert!(diagnostics[0].contains("CreateEnvironmentBlock refused"));
     }
 
-    /// RED (T-ENV-REFRESH round 2, mutation `cache_snapshot_error`) — a transient snapshot
-    /// failure degrades only its spawn; the next spawn retries, caches the success, and can compose
-    /// its fresh, inherited and declaration layers normally.
+    /// RED (T-ENV-REFRESH round 2, mutation `cache_current_environment_error`) — a transient
+    /// current-account read failure degrades only its spawn; the next spawn asks again and can
+    /// compose its fresh account block and explicit override layer normally.
     #[test]
-    fn a_snapshot_error_is_retried_and_a_later_spawn_composes_normally() {
-        let snapshot = LaunchEnvironmentSnapshot::new();
+    fn a_current_environment_error_is_retried_and_a_later_spawn_composes_normally() {
         let mut first_diagnostics = Vec::new();
         let first = environment_refresh(
-            || snapshot.snapshot(|| Err("OpenProcessToken refused".to_owned())),
-            || panic!("a spawn without a snapshot does not ask for a current block"),
-            environment(&[("PATH", "inherited")]),
+            || Err("OpenProcessToken refused".to_owned()),
+            environment(&[]),
             |line| first_diagnostics.push(line.to_owned()),
         );
         assert!(
@@ -440,20 +323,13 @@ mod tests {
 
         let expected = EnvironmentRefresh::new(
             environment(&[("PATH", "fresh")]),
-            environment(&[("PATH", "launch")]),
-            environment(&[("PATH", "inherited")]),
+            environment(&[("PORTABLE_ROOT", "chosen")]),
         );
         let second = environment_refresh(
-            || snapshot.snapshot(|| Ok(Some(environment(&[("PATH", "launch")])))),
             || Ok(Some(environment(&[("PATH", "fresh")]))),
-            environment(&[("PATH", "inherited")]),
+            environment(&[("PORTABLE_ROOT", "chosen")]),
             |_| panic!("the retry succeeds"),
         );
         assert_eq!(second, Some(expected));
-
-        let cached = snapshot
-            .snapshot(|| panic!("a successful snapshot is the permanent launch baseline"))
-            .expect("cached snapshot");
-        assert_eq!(cached, Some(environment(&[("PATH", "launch")])));
     }
 }
