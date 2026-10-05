@@ -29,10 +29,12 @@
 //!   gone: the data directory's claim, tried until had and let go at once;
 //! * [`watch_trial`] — a trial waited for (W7, W8, M7, M8), on both platforms:
 //!   the one the journal records (`Trial`, or the retrial over `Stuck`), or
-//!   the one this holder just launched and has not yet found; its receipt
-//!   offered to the protocol, `Committed` recorded on the one it accepts;
-//!   else the trial gone or its deadline passed (U-29b's watch, moved here by
-//!   U-24, the coordinator's ruling 4);
+//!   the one this holder just launched and has not yet found — named only by
+//!   exact evidence, never because it started after the launch
+//!   ([`launched_trial`], U-40); its receipt offered to the protocol,
+//!   `Committed` recorded on the one it accepts; else the trial gone or its
+//!   deadline passed (U-29b's watch, moved here by U-24, the coordinator's
+//!   ruling 4);
 //! * [`stop_trial`] — W9/M9's stop: asked to quit, 5 s of grace, then ended —
 //!   each through `bt_platform::install_flip::ask`, which touches nothing that
 //!   is not that very trial (pid, start instant and image);
@@ -577,9 +579,10 @@ pub(crate) struct Watch<'a> {
 /// **The trial, waited for** (W7, W8, M7, M8): the one the journal records —
 /// `Trial`, or the retrial a holder started over `Stuck` (U-29b) — or, while
 /// the journal records none, the one this holder just launched (`started`:
-/// its nonce and when), which `find` names from what it can see (given the
-/// launch's `began_ms` and the receipt, if one is there already) and which is
-/// then recorded (`TrialBegan` over `Moving`, `RetrialBegan` over `Stuck`).
+/// its nonce and when), which `find` names by exact evidence only (given the
+/// launch's nonce and the receipt at its name, if one is there already: on
+/// macOS [`launched_trial`]) and which is then recorded (`TrialBegan` over
+/// `Moving`, `RetrialBegan` over `Stuck`).
 /// Then, polling through the wait door until the deadline counted from its
 /// start: a receipt the journal accepts — this transaction's, this trial's
 /// nonce — is recorded as `Committed` by the watch's
@@ -601,7 +604,7 @@ pub(crate) fn watch_trial(
     worker: &WorkerCtx,
     txn: &mut impl Recording,
     watch: &Watch<'_>,
-    find: &mut dyn FnMut(u64, Option<&Receipt>) -> Option<TrialProcess>,
+    find: &mut dyn FnMut(Nonce, Option<&Receipt>) -> Option<TrialProcess>,
     launch_over: &mut dyn FnMut() -> bool,
     alive: &mut dyn FnMut(TrialProcess) -> bool,
     say: &mut dyn FnMut(&str),
@@ -643,7 +646,7 @@ pub(crate) fn watch_trial(
                 // before its trial could be seen (U-38).
                 let over = launch_over();
                 let found = receipt.as_ref().and_then(|read| read.as_ref().ok());
-                if let Some(process) = find(began_ms, found) {
+                if let Some(process) = find(nonce, found) {
                     let event = if txn.journal().body.phase.kind() == PhaseKind::Stuck {
                         Event::RetrialBegan {
                             nonce,
@@ -731,6 +734,51 @@ pub(crate) fn trial_runs(process: TrialProcess, images: &[&Path]) -> bool {
         images,
     )
     .unwrap_or(false)
+}
+
+/// **The trial this holder launched, by exact evidence only** (0.4.7 ticket
+/// U-40): the process its launch's own receipt names — the receipt at the
+/// nonce's name, of this transaction and nonce, by its pid and the start
+/// instant it carries (none carried names no running process; the receipt
+/// still answers by its nonce) — else the process of the new build's
+/// executable `program` that carries this trial's own words,
+/// `--update-trial <txn> <nonce>` ([`trial_words`]), in its arguments
+/// (`install_flip::arguments_of`, by pid and start instant). The nonce is the
+/// launch's own, so no other process carries it. **A process is never taken
+/// for the trial because it started after the launch**: a person's start of
+/// the new build in that instant hands itself to the recovery build and
+/// leaves at once, and a holder that recorded it saw its trial end without a
+/// receipt and rolled back a healthy one (the macOS rehearsal's defect 9, in
+/// the instant between the launch and the trial's record). `None` until one
+/// of the two is there. The macOS holders' `find`; the Windows trial's pid is
+/// its launch's own.
+pub(crate) fn launched_trial(
+    txn: TxnId,
+    nonce: Nonce,
+    program: &Path,
+    receipt: Option<&Receipt>,
+) -> Option<TrialProcess> {
+    if let Some(receipt) = receipt.filter(|receipt| receipt.txn == txn && receipt.nonce == nonce) {
+        return Some(TrialProcess {
+            pid: receipt.pid,
+            started: receipt.started.unwrap_or(0),
+        });
+    }
+    let words = trial_words(txn, &nonce);
+    install_flip::running_from(program)
+        .ok()?
+        .into_iter()
+        .find(|process| {
+            install_flip::arguments_of(*process).is_ok_and(|arguments| {
+                arguments
+                    .windows(words.len())
+                    .any(|carried| carried == words)
+            })
+        })
+        .map(|process| TrialProcess {
+            pid: process.pid,
+            started: process.started,
+        })
 }
 
 /// **What a lock holder finds of the processes of the new build that the
