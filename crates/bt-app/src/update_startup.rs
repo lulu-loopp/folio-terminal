@@ -93,6 +93,15 @@ use crate::update_txn::{
 /// admission is taken.
 pub(crate) struct Admitted(());
 
+impl Admitted {
+    /// **What this start was sent to report** ([`failed`]) — asked of the
+    /// pass's own witness by the hand-over, which carries it to the Folio that
+    /// is already running (`launch_wire::hand_over`, U-36).
+    pub(crate) fn failed(&self) -> Option<Failure> {
+        failed()
+    }
+}
+
 /// This process's shared hold on `H\admission`, kept until the process ends.
 static ADMISSION: OnceLock<Held> = OnceLock::new();
 

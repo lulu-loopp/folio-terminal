@@ -167,7 +167,9 @@ on the first ask and remembers a settled answer, but never `Sweeping`; and
 anything asks — the updated build's road (`docs/plans/design/self-update-2026-09-16.md`
 §C.7, R-3). A process that never has a window never writes the table (§4.2, *who may
 take the data directory's claim*). A second process hands its argv down the launch pipe
-(`launch_wire::hand_over`) and leaves through `bt_platform::leave_process`.
+(`launch_wire::hand_over`) and leaves through `bt_platform::leave_process`; what its
+update pass sent it to report crosses with it (`launch_wire::Report`, U-36) and is told
+to the running process's update job where the launch lands (`Job::told_by_a_launch`).
 
 ### 2.2 The twenty-four kinds of child process
 

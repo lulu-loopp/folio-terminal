@@ -1449,15 +1449,59 @@ impl<W: Copy + Eq> Job<W> {
     #[must_use]
     pub(crate) fn after_rollback(mut self, failure: Option<Failure>) -> Self {
         if let Some(failure) = failure {
-            self.said_incomplete = matches!(
-                failure,
-                Failure::Incomplete { .. } | Failure::TrialIncomplete { .. }
-            );
-            self.last_failure = Some((None, failure.clone()));
-            self.state = State::Failed(None, failure);
-            self.offered_this_launch = true;
+            self.told(failure);
         }
         self
+    }
+
+    /// **The card stands at `Failed` with an earlier transaction's
+    /// `failure`**, and this launch raises no offer by itself — what a start a
+    /// rollback sent is told, whether at its own start ([`Self::after_rollback`])
+    /// or handed to this one ([`Self::told_by_a_launch`]). Being told an update
+    /// is incomplete is kept until a commit says otherwise
+    /// ([`Self::after_commit`]); a later report does not take it back.
+    fn told(&mut self, failure: Failure) {
+        self.said_incomplete |= matches!(
+            failure,
+            Failure::Incomplete { .. } | Failure::TrialIncomplete { .. }
+        );
+        self.last_failure = Some((None, failure.clone()));
+        self.state = State::Failed(None, failure);
+        self.offered_this_launch = true;
+    }
+
+    /// **A start a rollback sent handed itself to this running Folio**
+    /// (`launch_wire`, U-36): its report reaches this job where the launch
+    /// landed — `landed`, the window it opened or opened a tab in, or `None`
+    /// when no window could be opened ([`Self::hand_over`] then seats the card
+    /// in the next ordinary window). Answers whether the card was raised.
+    ///
+    /// **It is the card that start would have shown cold**, and it is that
+    /// start's one report: raised once, in the window the reader is looking at
+    /// now, over whatever this launch shows — no card, an offer nobody has
+    /// pressed (its tag stays askable from About → Version), or an earlier
+    /// failure, closed or not (the newest report wins). **A transaction this
+    /// launch is running is not disturbed** (RULES §36): from the press to the
+    /// quit, and while the launch pass settles an earlier launch's transaction,
+    /// the report is kept as the launch's last failure, which About → Version
+    /// names with Details once the job is back at `Idle`, and no card is
+    /// raised over the transaction's.
+    pub(crate) fn told_by_a_launch(&mut self, failure: Failure, landed: Option<W>) -> bool {
+        let running = matches!(
+            self.state,
+            State::Downloading(..)
+                | State::Staged(_)
+                | State::Verified(_)
+                | State::Quitting(_)
+                | State::Committing(_)
+        ) || !matches!(self.launch, Launch::Done);
+        if running {
+            self.last_failure = Some((None, failure));
+            return false;
+        }
+        self.told(failure);
+        self.presenter = landed;
+        true
     }
 
     /// **This process's trial was committed** — the trial's watch read
@@ -3533,5 +3577,136 @@ mod tests {
         }));
         assert!(job.after_commit("0.4.7"));
         assert_eq!(job.state(), &State::Updated("0.4.7".to_owned()));
+    }
+
+    /// An unfinished rollback's report, its folder not ASCII.
+    fn incomplete() -> Failure {
+        Failure::Incomplete {
+            folder: PathBuf::from(r"D:\工具\Folio 终端\.folio-update"),
+        }
+    }
+
+    /// RED (U-36) — **a report handed over raises its card in the window the
+    /// launch landed in, over no card, an unpressed offer or an earlier
+    /// failure, and the evidence that lands later does not take it down.**
+    ///
+    /// The receiving half of `launch_wire`'s report: the card the start would
+    /// have shown cold, raised once, where the reader now is. An offer nobody
+    /// pressed is not a transaction — its card gives way and its tag stays
+    /// askable from About → Version once the failure is closed. The newest
+    /// report wins over an earlier one, closed or not. And the launch's one
+    /// unasked offer is spent, as at a start a rollback sent: a check landing
+    /// after the report keeps the failure up.
+    ///
+    /// MUTATIONS: in `Job::told_by_a_launch`, leave `presenter` as it was (the
+    /// card stays in window 1 or is not drawn); leave `offered_this_launch`
+    /// unset in `told` (the later `consider` replaces the failure with an
+    /// offer); assign `said_incomplete` in `told` instead of keeping it (a
+    /// later report makes Update and restart askable over an incomplete one).
+    #[test]
+    fn a_report_handed_over_raises_its_card_where_the_launch_landed() {
+        // No card yet: a launch still pending, and the evidence after it.
+        let mut pending = job();
+        assert!(pending.told_by_a_launch(Failure::RolledBack, Some(3)));
+        assert_eq!(pending.card_window(), Some(3));
+        assert_eq!(
+            pending.consider(
+                gathered("v0.4.8", None, Some(Channel::Ours)),
+                &one_window(),
+                || txn(9)
+            ),
+            None
+        );
+        assert_eq!(
+            pending.state(),
+            &State::Failed(None, Failure::RolledBack),
+            "the check that lands after the report raises nothing over it"
+        );
+
+        // An offer nobody pressed gives way, and stays askable.
+        let mut offered = available("v0.4.8");
+        assert!(offered.told_by_a_launch(Failure::Interrupted, Some(2)));
+        assert_eq!(offered.state(), &State::Failed(None, Failure::Interrupted));
+        assert_eq!(offered.card_window(), Some(2));
+        offered
+            .answer_verb(Verb::Later, &Unsupported, &Recording::default().shared())
+            .expect("Close is Later");
+        assert!(
+            offered.offer_again(2, Some("v0.4.8")),
+            "the offer the report replaced is asked for from About → Version"
+        );
+
+        // An earlier report, its card closed: the newer report is raised.
+        let mut earlier = available("v0.4.8");
+        assert!(earlier.told_by_a_launch(incomplete(), Some(5)));
+        earlier
+            .answer_verb(Verb::Later, &Unsupported, &Recording::default().shared())
+            .expect("Close is Later");
+        assert_eq!(earlier.card_window(), None, "the earlier card was closed");
+        assert!(earlier.told_by_a_launch(Failure::RolledBack, Some(6)));
+        assert_eq!(earlier.state(), &State::Failed(None, Failure::RolledBack));
+        assert_eq!(earlier.card_window(), Some(6));
+        // And a third over the second, still up: the newest wins.
+        assert!(earlier.told_by_a_launch(Failure::Interrupted, Some(5)));
+        assert_eq!(earlier.state(), &State::Failed(None, Failure::Interrupted));
+        assert_eq!(earlier.card_window(), Some(5));
+        assert_eq!(
+            earlier.asked_offer(Some("v0.4.8")),
+            None,
+            "being told an update is incomplete is not taken back by a later report"
+        );
+
+        // No window could be opened: the card waits for the next one.
+        let mut nowhere = job();
+        assert!(nowhere.told_by_a_launch(Failure::RolledBack, None));
+        assert_eq!(nowhere.card_window(), None);
+        assert!(nowhere.hand_over(&one_window()));
+        assert_eq!(nowhere.card_window(), Some(1));
+    }
+
+    /// RED (U-36) — **a report handed over never disturbs a transaction this
+    /// launch is running** (RULES §36): from the press to the quit, and while
+    /// the launch pass settles an earlier launch's transaction, the state and
+    /// its card stay; the report is kept as the launch's last failure, which
+    /// About → Version names once the job is back at `Idle`.
+    ///
+    /// MUTATION: drop the `running` guard of `Job::told_by_a_launch` — the
+    /// download's card is replaced by the failure and its driver is orphaned.
+    #[test]
+    fn a_report_handed_over_never_disturbs_a_running_transaction() {
+        let mut job = available("v0.4.8");
+        let driver = Starting::default();
+        job.answer_verb(Verb::Press, &driver, &Recording::default().shared())
+            .expect("the press is taken");
+        assert!(matches!(job.state(), State::Downloading(..)));
+        assert!(!job.told_by_a_launch(Failure::RolledBack, Some(4)));
+        assert!(
+            matches!(job.state(), State::Downloading(..)),
+            "the download goes on"
+        );
+        assert_eq!(job.card_window(), Some(1), "its card stays where it was");
+        assert_eq!(
+            job.last_failure().map(|(_, failure)| failure),
+            Some(&Failure::RolledBack)
+        );
+        job.answer_verb(Verb::Cancel, &Unsupported, &Recording::default().shared())
+            .expect("Cancel");
+        assert_eq!(job.state(), &State::Idle);
+        assert!(
+            job.show_failure(1),
+            "About → Version's Details raises the report once the job is idle"
+        );
+        assert_eq!(job.state(), &State::Failed(None, Failure::RolledBack));
+
+        // The launch pass settling an earlier launch's transaction.
+        let home = crate::update_txn::Home::at(PathBuf::from(r"D:\工具\.folio-update"));
+        let mut settling =
+            self::job().after_start(Some(home), super::resumer_for_this_copy(), || {});
+        assert!(!settling.told_by_a_launch(incomplete(), Some(4)));
+        assert_eq!(settling.card_window(), None);
+        assert_eq!(
+            settling.last_failure().map(|(_, failure)| failure),
+            Some(&incomplete())
+        );
     }
 }
