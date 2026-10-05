@@ -282,10 +282,15 @@ that has one, is the way to it.
 Folio records — in `integration-profile-files.json` beside its marks record, under the same lock —
 which edition named the file, whether it is creating the file and which folders it is creating for
 it, and, for a file that was there, the one copy it takes before its first write into that file
-(`<profile>.bak-YYYYMMDD[-n]`). A later write while the line is installed takes no further copy, and
-a removal takes none: it puts the file back to what Folio's write found, every byte outside the line
-kept. When the line is taken out — by Undo, by the Settings row, by `--remove-shell-integration` or
-by either uninstall verb — the copy is deleted, since the write it guarded is undone; a file Folio
+(`<profile>.bak-YYYYMMDD[-n]`), with the SHA-256 of the bytes it will hold. A later write while
+the line is installed takes no further copy, and a removal takes none: it takes out the managed
+line and its own line ending and keeps every other byte, including any edit made since. It does not
+take out the blank line Enable put in front of the managed line when the file already held text, so
+a file that was there before keeps one more blank line than it had — inert to PowerShell, and the
+one byte-level difference a removal leaves. When the line is taken out — by Undo, by the Settings
+row, by `--remove-shell-integration` or by either uninstall verb — the copy is deleted, since the
+write it guarded is undone, but only while it still holds the recorded bytes: a file of that name
+Folio did not write stays; a file Folio
 created is deleted when nothing but whitespace is left in it, and then each folder it created, if
 empty. A file that was there before, or that holds anything else, is never deleted. In the terms of
 the uninstall inventory:

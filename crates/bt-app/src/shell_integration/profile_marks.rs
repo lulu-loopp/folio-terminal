@@ -633,6 +633,12 @@ pub struct ProfileFile {
     /// The copy of the file as it stood before Folio's first write into it — at most one.
     #[serde(default)]
     pub backup: Option<PathBuf>,
+    /// The SHA-256 of the bytes that copy holds, recorded with its name before it is written: the
+    /// copy is deleted only while it still holds exactly those bytes, so a file of that name
+    /// that Folio did not write — after a crash between the record and the copy — is never
+    /// Folio's to delete (release read review F3).
+    #[serde(default)]
+    pub backup_sha256: Option<String>,
 }
 
 impl ProfileFile {
@@ -643,6 +649,7 @@ impl ProfileFile {
             created_file: false,
             created_folders: Vec::new(),
             backup: None,
+            backup_sha256: None,
         }
     }
 
@@ -770,8 +777,15 @@ impl ProfileFiles {
         if entry.created_file || entry.backup.is_some() {
             return None;
         }
+        // The bytes the copy will hold — the file as it stands now, which the write checks again
+        // before it copies; a file that changes in between leaves a copy whose bytes differ, and
+        // that copy is never deleted.
+        let Ok(Some(bytes)) = super::read_profile_for_edit(profile) else {
+            return None;
+        };
         let copy = super::free_backup_path(profile, at);
         entry.backup = Some(copy.clone());
+        entry.backup_sha256 = Some(sha256(&bytes));
         Some(copy)
     }
 
@@ -793,7 +807,7 @@ impl ProfileFiles {
             if let Some(copy) = attempted.backup
                 && previous.as_ref().and_then(|p| p.backup.as_ref()) != Some(&copy)
             {
-                let _ = fs::remove_file(copy);
+                let _ = remove_our_copy(&copy, attempted.backup_sha256.as_deref());
             }
         }
         if restored == ProfileFile::new(profile) {
@@ -834,13 +848,11 @@ impl ProfileFiles {
         }
         let entry = &mut self.profiles[index];
         if let Some(copy) = entry.backup.take() {
-            match fs::remove_file(&copy) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                    entry.backup = Some(copy);
-                    return Err(e);
-                }
-                _ => {}
+            if let Err(e) = remove_our_copy(&copy, entry.backup_sha256.as_deref()) {
+                entry.backup = Some(copy);
+                return Err(e);
             }
+            entry.backup_sha256 = None;
         }
         entry.created_file = false;
         entry.created_folders.clear();
@@ -849,6 +861,26 @@ impl ProfileFiles {
         }
         Ok(())
     }
+}
+
+/// SHA-256, lower-case hex.
+fn sha256(bytes: &[u8]) -> String {
+    bt_winres::digest::hex(&bt_winres::digest::sha256(bytes))
+}
+
+/// **Delete a copy Folio recorded, only while it is the copy Folio wrote**: a file at that name
+/// holding exactly the recorded bytes. A name with no file is nothing to do; a file whose bytes
+/// differ — or a record with no digest — is not provably Folio's and stays.
+fn remove_our_copy(copy: &Path, expected: Option<&str>) -> io::Result<()> {
+    let bytes = match bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, copy) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    if expected.is_some_and(|expected| sha256(&bytes) == expected) {
+        fs::remove_file(copy)?;
+    }
+    Ok(())
 }
 
 /// Each folder, deepest first, removed only if it is empty: a folder somebody has put anything

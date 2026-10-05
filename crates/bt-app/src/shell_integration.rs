@@ -2381,6 +2381,12 @@ fn policy_cause(
             .unwrap_or(scopes.default);
         (policy, PolicyCause::Changeable)
     };
+    // A policy this build has no name for (`Unknown`: only a scope the probe printed in words a
+    // newer PowerShell may use — every Process-scope value is read by
+    // [`process_scope_value`]) is neither a refusal nor a permission this build can vouch for.
+    if deciding == ExecutionPolicy::Unknown {
+        return PolicyCause::Undetermined;
+    }
     let (applies, cause) = if !deciding.blocks_script() {
         (deciding, PolicyCause::Allows)
     } else if refused == PolicyCause::Changeable {
@@ -2392,6 +2398,24 @@ fn policy_cause(
         return PolicyCause::Location;
     }
     cause
+}
+
+/// **What a PowerShell makes of a Process-scope value** — the `-ExecutionPolicy` on its command
+/// line, or the `PSExecutionPolicyPreference` in its environment (measured 2026-10-05 on both
+/// editions, release read review F1): one of the five policy names, in any case and nothing
+/// around it, is that policy; **anything else is `Restricted`** — `Undefined`, a name with a
+/// space around it, garbage. Windows PowerShell runs such a session under `Restricted`;
+/// PowerShell 7 does the same for the variable and refuses to start on such an
+/// `-ExecutionPolicy`, so no session of that row loads anything either way. An empty variable is
+/// no variable (Windows keeps no empty value), which the reader of the block decides.
+fn process_scope_value(value: &str) -> crate::psreadline::ExecutionPolicy {
+    use crate::psreadline::ExecutionPolicy::{
+        AllSigned, Bypass, RemoteSigned, Restricted, Unrestricted,
+    };
+    [Restricted, AllSigned, RemoteSigned, Unrestricted, Bypass]
+        .into_iter()
+        .find(|policy| policy.name().eq_ignore_ascii_case(value))
+        .unwrap_or(Restricted)
 }
 
 /// What the row's own arguments say about its Process scope — through the classifier, the one
@@ -2408,9 +2432,7 @@ fn row_process_scope(program: &Path, arguments: &[OsString]) -> RowProcessScope 
         .find(|option| option.parameter == "executionpolicy")
         .and_then(|option| option.value)
         .map_or(RowProcessScope::Absent, |value| {
-            RowProcessScope::Set(crate::psreadline::ExecutionPolicy::parse(
-                &arguments[value].to_string_lossy(),
-            ))
+            RowProcessScope::Set(process_scope_value(&arguments[value].to_string_lossy()))
         })
 }
 
@@ -3490,9 +3512,9 @@ fn ordinary_process_scope(
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case("PSExecutionPolicyPreference"))
             .map(|(_, value)| value.to_string_lossy())
-            .filter(|value| !value.trim().is_empty())
+            .filter(|value| !value.is_empty())
             .map_or(crate::psreadline::ExecutionPolicy::Undefined, |value| {
-                crate::psreadline::ExecutionPolicy::parse(&value)
+                process_scope_value(&value)
             }),
     )
 }
@@ -4841,11 +4863,12 @@ mod tests {
         }
     }
 
-    /// PIN — **the default is PowerShell's own answer** (review of round 4, item 7). The process
-    /// scope came from `PSExecutionPolicyPreference` and the row clears it with
-    /// `-ExecutionPolicy Undefined`; nothing else is set, so the machine's default decides — and
-    /// the probe's `NoProcess=` answer is what that default is, on a server (`RemoteSigned`) as
-    /// on a client (`Restricted`).
+    /// PIN — **the default is PowerShell's own answer** (review of round 4, item 7). Nothing is set
+    /// in any scope — the Process scope `Undefined`, which is an ordinary session with no
+    /// `PSExecutionPolicyPreference` (a row's own `-ExecutionPolicy Undefined` is *not* this: both
+    /// editions read it as `Restricted`, [`process_scope_value`]) — so the machine's default
+    /// decides, and the probe's `NoProcess=` answer is what that default is, on a server
+    /// (`RemoteSigned`) as on a client (`Restricted`).
     ///
     /// RED (mutation: `.unwrap_or(scopes.default)` → `.unwrap_or(Restricted)`).
     #[test]
@@ -5368,8 +5391,30 @@ mod tests {
                 "the account's environment could not be read",
                 observed(scopes(none, none, none, RemoteSigned, none), None, here),
             ),
+            (
+                "the account's environment sets an invalid preference",
+                observed(
+                    scopes(none, none, none, RemoteSigned, none),
+                    Some(process_scope_value("Garbage")),
+                    here,
+                ),
+            ),
+            (
+                "a scope in a policy name this build does not know",
+                observed(
+                    scopes(
+                        none,
+                        none,
+                        none,
+                        crate::psreadline::ExecutionPolicy::Unknown,
+                        none,
+                    ),
+                    Some(none),
+                    here,
+                ),
+            ),
         ];
-        let rows: [(&str, Option<RowProcessScope>); 5] = [
+        let rows: [(&str, Option<RowProcessScope>); 6] = [
             ("no -ExecutionPolicy", Some(RowProcessScope::Absent)),
             (
                 "-ExecutionPolicy Bypass",
@@ -5381,19 +5426,25 @@ mod tests {
             ),
             ("-ep:Bypass", Some(RowProcessScope::Unreadable)),
             ("-NoProfile", None),
+            (
+                "-ExecutionPolicy Undefined",
+                Some(RowProcessScope::Set(process_scope_value("Undefined"))),
+            ),
         ];
         #[rustfmt::skip]
         let expected = [
-            //                     nothing           Bypass            Restricted     -ep:Bypass  -NoProfile
-            /* nothing refuses */ [Offer,            Offer,            PolicyProcess, Unreadable, NoProfile],
-            /* client default  */ [PolicyChangeable, PolicyChangeable, PolicyProcess, Unreadable, NoProfile],
-            /* CurrentUser     */ [PolicyChangeable, PolicyChangeable, PolicyProcess, Unreadable, NoProfile],
-            /* LocalMachine    */ [PolicyChangeable, PolicyChangeable, PolicyProcess, Unreadable, NoProfile],
-            /* MachinePolicy   */ [PolicyManaged,    PolicyManaged,    PolicyManaged, Unreadable, NoProfile],
-            /* UserPolicy      */ [PolicyManaged,    PolicyManaged,    PolicyManaged, Unreadable, NoProfile],
-            /* account's env   */ [PolicyProcess,    PolicyProcess,    PolicyProcess, Unreadable, NoProfile],
-            /* GP RemoteSigned */ [PolicyLocation,   PolicyLocation,   PolicyLocation, Unreadable, NoProfile],
-            /* env unreadable  */ [Undetermined,     Undetermined,     Undetermined,  Unreadable, NoProfile],
+            //                     nothing           Bypass            Restricted     -ep:Bypass  -NoProfile -ep Undefined
+            /* nothing refuses */ [Offer,            Offer,            PolicyProcess, Unreadable, NoProfile, PolicyProcess],
+            /* client default  */ [PolicyChangeable, PolicyChangeable, PolicyProcess, Unreadable, NoProfile, PolicyProcess],
+            /* CurrentUser     */ [PolicyChangeable, PolicyChangeable, PolicyProcess, Unreadable, NoProfile, PolicyProcess],
+            /* LocalMachine    */ [PolicyChangeable, PolicyChangeable, PolicyProcess, Unreadable, NoProfile, PolicyProcess],
+            /* MachinePolicy   */ [PolicyManaged,    PolicyManaged,    PolicyManaged, Unreadable, NoProfile, PolicyManaged],
+            /* UserPolicy      */ [PolicyManaged,    PolicyManaged,    PolicyManaged, Unreadable, NoProfile, PolicyManaged],
+            /* account's env   */ [PolicyProcess,    PolicyProcess,    PolicyProcess, Unreadable, NoProfile, PolicyProcess],
+            /* GP RemoteSigned */ [PolicyLocation,   PolicyLocation,   PolicyLocation, Unreadable, NoProfile, PolicyLocation],
+            /* env unreadable  */ [Undetermined,     Undetermined,     Undetermined,  Unreadable, NoProfile, Undetermined],
+            /* env garbage     */ [PolicyProcess,    PolicyProcess,    PolicyProcess, Unreadable, NoProfile, PolicyProcess],
+            /* unknown name    */ [Undetermined,     Undetermined,     Undetermined,  Unreadable, NoProfile, Undetermined],
         ];
         let state = |session: &ProfileObservation, row: Option<RowProcessScope>, present| {
             profile_fallback_from_parts(
@@ -5472,7 +5523,7 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn an_ordinary_sessions_process_scope_is_the_accounts_environment() {
-        use crate::psreadline::ExecutionPolicy::{AllSigned, Bypass, Undefined};
+        use crate::psreadline::ExecutionPolicy::{AllSigned, Bypass, Restricted, Undefined};
         let block = |pairs: &[(&str, &str)]| -> Vec<(OsString, OsString)> {
             pairs
                 .iter()
@@ -5495,9 +5546,19 @@ mod tests {
             ordinary_process_scope(Some(&block(&[("PSExecutionPolicyPreference", "Bypass")]))),
             Some(Bypass)
         );
+        // PowerShell's own reading, measured on both editions: anything but one of the five names
+        // exactly (any case) is `Restricted` — garbage, a padded name, `Undefined` itself.
+        for value in [" ", "Garbage", " Bypass ", "Undefined", "无效"] {
+            assert_eq!(
+                ordinary_process_scope(Some(&block(&[("PSExecutionPolicyPreference", value)]))),
+                Some(Restricted),
+                "{value:?}"
+            );
+        }
         assert_eq!(
-            ordinary_process_scope(Some(&block(&[("PSExecutionPolicyPreference", " ")]))),
-            Some(Undefined)
+            ordinary_process_scope(Some(&block(&[("PSExecutionPolicyPreference", "")]))),
+            Some(Undefined),
+            "an empty value is no value"
         );
     }
 

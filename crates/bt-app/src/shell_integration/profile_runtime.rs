@@ -992,6 +992,49 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
+    /// PIN (release read review F3) — **a copy is deleted only while it is the copy Folio wrote.**
+    /// The record names the copy and its bytes' SHA-256 before the copy is written; a power loss
+    /// between the two, and a file of exactly that name appearing afterwards with other bytes,
+    /// leaves a file Folio did not make — the removal keeps it, and clears the record. The copy
+    /// Folio did write (same bytes) is deleted as before.
+    ///
+    /// RED (mutation: `copy_unchecked` — `remove_our_copy` deletes whatever stands at the
+    /// recorded name: the stranger's file is gone).
+    #[test]
+    fn a_recorded_copy_is_deleted_only_while_it_holds_the_bytes_folio_wrote() {
+        let root = super::super::tests::temp_dir("profile-copy-digest");
+        let data = root.join("data");
+        let profile = root.join("profile.ps1");
+        let mine = "Set-Location D:\\工作\r\n";
+        fs::write(&profile, mine).unwrap();
+        let copy = {
+            let _lock = lock(&data, Asker::InApp).unwrap();
+            let mut files = ProfileFiles::read(&data).unwrap();
+            let copy = files
+                .before_write(&profile, None, std::time::UNIX_EPOCH)
+                .expect("a file that was there gets one copy");
+            files.write(&data).unwrap();
+            copy
+        };
+        // The power went before the copy was written; a file of that name appears later.
+        fs::write(&copy, "not Folio's 不是\r\n").unwrap();
+        undo_profile_install(&profile, &data).unwrap();
+        assert_eq!(
+            fs::read_to_string(&copy).unwrap(),
+            "not Folio's 不是\r\n",
+            "a file Folio did not write stays"
+        );
+        assert!(ProfileFiles::read(&data).unwrap().entry(&profile).is_none());
+        fs::remove_file(&copy).unwrap();
+
+        // The copy Folio did write goes with the line.
+        let written = enable(&profile, &data).backup.expect("one copy");
+        assert_eq!(fs::read_to_string(&written).unwrap(), mine);
+        undo_profile_install(&profile, &data).unwrap();
+        assert!(!written.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     /// PIN (release read M1) — **a PowerShell that does not say where its `$PROFILE` is refuses
     /// nothing**: the line Folio recorded is removed whatever any shell answers, the silent
     /// edition is named with what is left there, and the run's exit code is 0 — so the uninstall
