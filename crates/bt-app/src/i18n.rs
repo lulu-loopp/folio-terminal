@@ -2942,6 +2942,8 @@ text_entries! {
     UpdateCardRestored,
     /// After the reason, when the rollback did not finish; the journal's folder follows.
     UpdateCardIncomplete,
+    // zh: pending U-35
+    UpdateCardTrial,
     /// The trial over a `Stuck` transaction committed forward after its card said *Update incomplete.* (U-32).
     UpdateCardUpdated,
     /// About > Version: no newer release is known.
@@ -2995,6 +2997,8 @@ text_entries! {
     UpdateFailedSpace,
     /// The new build did not prove itself and a rollback followed (`update_job::Failure::RolledBack`, `Incomplete`; U-29).
     UpdateFailedTrial,
+    // zh: pending U-35
+    UpdateFailedTrialRunning,
     /// The update stopped before the new build ever ran and the old one is back (`update_job::Failure::Interrupted`; U-42a).
     UpdateFailedInterrupted,
     /// The release needs a newer updater than the running build (`update_job::Stop::TooOld`; U-42c).
@@ -5709,6 +5713,12 @@ impl Text {
             Self::UpdateCardNothingChanged => pick(lang, "Nothing changed.", "什么都没变。"),
             Self::UpdateCardRestored => pick(lang, "Previous version restored.", "已恢复旧版。"),
             Self::UpdateCardIncomplete => pick(lang, "Update incomplete.", "更新未完成。"),
+            // zh: pending U-35
+            Self::UpdateCardTrial => pick(
+                lang,
+                "Changes made now may not be kept until Folio confirms the update. Keep Folio open until then.",
+                "Changes made now may not be kept until Folio confirms the update. Keep Folio open until then.",
+            ),
             Self::UpdateCardUpdated => pick(lang, "Updated.", "已更新。"),
             Self::VersionUpToDate => pick(lang, "Up to date", "已是最新"),
             Self::VersionChecking => pick(lang, "Checking…", "检查中…"),
@@ -5789,6 +5799,12 @@ impl Text {
             Self::UpdateFailedTrial => {
                 pick(lang, "The new version did not start.", "新版本未能启动。")
             }
+            // zh: pending U-35
+            Self::UpdateFailedTrialRunning => pick(
+                lang,
+                "The update did not finish.",
+                "The update did not finish.",
+            ),
             Self::UpdateFailedInterrupted => pick(
                 lang,
                 "The update was interrupted before the new version started.",
@@ -5984,6 +6000,10 @@ impl Text {
         (Self::DescPowerShellProfileLine, HostPlatform::MacOs),
         (Self::ShellProfileAddedToast, HostPlatform::Windows),
         (Self::ShellProfileAddedToast, HostPlatform::MacOs),
+        (Self::UpdateCardTrial, HostPlatform::Windows),
+        (Self::UpdateCardTrial, HostPlatform::MacOs),
+        (Self::UpdateFailedTrialRunning, HostPlatform::Windows),
+        (Self::UpdateFailedTrialRunning, HostPlatform::MacOs),
     ];
 }
 

@@ -116,12 +116,30 @@ none is in the usage block):
 
 | word | where | written by | read by |
 |---|---|---|---|
-| `--update-trial <txn> <nonce>` — exact, two values, no `=` form | the ordinary grammar: `cli::parse` → `CliRequest::update_trial`, the values kept as text | the applier, starting the new build as the trial | `update_startup::pass`, which makes it this start's trial only when the journal's header names that transaction |
+| `--update-trial <txn> <nonce>` — exact, two values, no `=` form | the ordinary grammar: `cli::parse` → `CliRequest::update_trial`, the values kept as text | the applier, starting the new build as the trial; since U-35, also the exit guard's one last trial after `TrialStarting` is durable | `update_startup::pass`, which makes it this start's trial when the journal's header names that transaction; a U-35 `TrialStarting` additionally requires its exact reserved nonce, with or without `--update-failed` |
 | `--update-recover` | the rescue door above; spelled once, as `bt_platform::logon_hook::RECOVER_FLAG` | the logon entrance (`logon_hook::command`, U-22), and `--then-launch`'s writer | the rescue build (`update_recover`, U-22) |
 | `--from-trial <pid>:<started>:<ready\|unready>` — after `--update-recover` (and its home) only, last, and never with `--then-launch`: the line is logon-shaped (0.4.7 U-37, design revision (h) H.4; the mixed line is refused) | `cli::update_door` (`UpdateDoor::Recover::handed_back`, `cli::HandedBack`) | a trial's watch handing its transaction back (`update_trial::hand_back`), only to a rescue build of 0.4.7 or later — an older one refuses the line | the rescue build, which ends that exact instance when it is unready, and counts it a candidate when it is ready (H.3) |
 | `--then-launch <argument>…` — after `--update-recover` only, and last; everything after it is another start's command line, verbatim | `cli::update_door` (`UpdateDoor::Recover::then_launch`); in the ordinary grammar it is an unknown flag | an ordinary start that meets a destructive transaction (`cli::recover_command_line`, from `update_startup`; on macOS with the home named before it, U-29) | the rescue build, which starts the installed `folio.exe` with those arguments once the transaction is finished, so that start never sees the word (U-22) |
 | `--update-failed <journal>` — exact, one value, written first (U-29) | the ordinary grammar: `cli::parse` → `CliRequest::update_failed`, kept as a path | the macOS applier after a rollback, finished or not (`update_apply::failed_words`, through `open -n -a`), and the rescue build before a handed command line whenever the header's outcome is `rolled_back`; **on Windows since U-24** the applier and the recovery after a rollback, finished or not (`<install>\folio.exe --update-failed <journal>`), before a trial started over `Stuck`, and before the rescue copy they fall back to | `update_startup::pass`: the card from the header alone (`update_txn::after_rollback` → `update_job::Failure::RolledBack`, or `Incomplete` with the journal's folder; `Job::after_rollback`), read before a retirement removes the journal; past a `destructive` header whose outcome is `rolled_back` the start continues instead of handing itself back (`StartView::sent_by_rollback`); since U-29b past a `destructive` header of any outcome, with *Update incomplete.* (the recovery sends the word on its failure roads too), a trial's start included |
 | `--update-feed <file-URL>` — exact, one value (U-30b); typed by a person rehearsing an update, never written by a build | the ordinary grammar: `cli::parse` → `CliRequest::update_feed`, kept as text; the rescue build's doors, `attention` and `--uninstall-cleanup` refuse it (their grammars have no room for it) | the person running the clean-VM checklist (`docs/plans/release/clean-vm.md` §4.4, precondition 3; `scripts/release/cleanvm/updater/guest/keys.ps1`, its `launchfeed` step) | `main`, once the log is open: `update::use_feed` — the diagnostics line `update feed: <url>`; the check reads the feed's `releases.json` (`update::Feed` through `update::check_source`) and a press copies the offer's two files (`update_job::FeedCopy` through `update_job::transport_for`), both through `file_reads` on `Lane::Update`, never github.com. For this process only: no environment variable, no setting; what it writes is only whose answer it is, `update-check.json`'s `local_stamp` and `local_tag` beside the stamp and the tag its check wrote (U-42e), which the first ordinary start (no flag) reads to forget exactly those; a hand-over to a running Folio does not carry it. The checksum and the signer checks are unchanged, so a feed delivers only a build the same signer signed |
+
+**U-35's pre-launch row (Windows).** `update_apply::ExitGuard` distinguishes an
+OS process-creation refusal from a process that was created but never
+acknowledged. Only when the primary new-image opening and the previous build's
+rescue opening both return an OS error does `reserve_last_trial` take the
+transaction lock and record `Moving → TrialStarting { nonce, began_ms }`; only
+then is the same new image requested once more with both frozen words. The
+reserved nonce (`update_txn::Phase::reserved_trial`) is then the one owner of
+what is started: `update_apply_windows::opens_now` names it
+(`Opens::LastTrial`), `update_startup::run` admits only it, and a start whose
+rescue build is refused continues as it. That trial commits itself once ready
+(`update_apply::commit_last_trial`: `TrialStarting → Committed` by
+`LastTrialReady`, its own receipt read back under the transaction lock, naming
+its pid and start instant); a recovery surveys the row before deciding — an
+exact receipt/process becomes `Trial`, an unready handed-back instance is
+ended, otherwise `RollbackIntent`. Since only `Moving` accepts `TrialPlanned`,
+this exit road cannot reserve a second last trial. macOS holders never reserve
+(`/usr/bin/open` reports no LaunchServices refusal).
 
 **After the doors and the parse, the update pass** (`update_startup::pass`,
 0.4.6 U-12): on the window thread in `Starting`, before `persist::storage_dir`,

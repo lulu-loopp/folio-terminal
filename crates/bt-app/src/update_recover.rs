@@ -113,7 +113,7 @@ use bt_platform::file_reads::{self, Lane};
 use crate::cli;
 use crate::update_apply::{ExitGuard, Leave, Left, Opens};
 use crate::update_apply_macos::{self, Hands, Limits, Road};
-use crate::update_txn::{Class, Header, Home};
+use crate::update_txn::{Actor, Class, Header, Home};
 
 /// **The recovery door's effects**: a lock holder's (its lines, the exchange,
 /// the check of a restored bundle), and the start of the installed Folio.
@@ -230,6 +230,7 @@ pub(crate) fn run_here(
                         world: &mut machine,
                         handed,
                         worker: None,
+                        actor: None,
                     });
                     if then_launch.is_none() {
                         guard.nobody_waiting();
@@ -486,6 +487,7 @@ pub(crate) fn run_windows(
         world,
         handed: then_launch.unwrap_or(&[]),
         worker: Some(worker),
+        actor: Some(Actor::Recovery),
     });
     let (log, whereabouts) = log_file(&road.home, &road.data);
     let appended = appended_to(&log);
