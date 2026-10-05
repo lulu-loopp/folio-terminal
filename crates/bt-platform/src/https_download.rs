@@ -755,7 +755,7 @@ pub(crate) mod loopback {
         /// Write these bytes.
         Send(Vec<u8>),
         /// Write one byte every `.0`, for at most `.1` or until the client goes
-        /// away — bounded, so a download whose budget does not hold ends in a
+        /// away — bounded, so a download whose stall rule does not hold ends in a
         /// failed assertion rather than a hung test.
         Trickle(Duration, Duration),
         /// Say nothing for this long.

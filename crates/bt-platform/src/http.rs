@@ -71,9 +71,13 @@
 //! ([`crate::https_download::DOWNLOAD_IDLE_TIMEOUT`], 30 s), or a stretch of
 //! that length whose body carried fewer than `floor` bytes
 //! ([`crate::https_download::DOWNLOAD_FLOOR_BYTES`]) — never for how long the
-//! whole takes, on the monotonic clock, and a cancel lands within
+//! whole takes, on the monotonic clock, and a
+//! [`crate::https_download::DownloadMonitor::cancel`] lands within
 //! [`crate::https_download::DOWNLOAD_CANCEL_LATENCY`] in every phase —
-//! connecting, waiting for headers, and inside the body.
+//! connecting, waiting for headers, and inside the body. When that call is made
+//! is the caller's: the update job's transport passes its job's cancel on to
+//! the monitor from the monitor's progress wake, so a job cancelled while the
+//! transfer is wholly silent stops at the idle timeout, not at this latency.
 //!
 //! That last sentence is why the download runs WinHTTP in **asynchronous
 //! mode** and the check above does not. A synchronous call blocks inside

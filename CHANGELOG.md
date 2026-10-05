@@ -109,13 +109,15 @@ All notable changes to Folio are recorded here. The format follows
 - Open in Folio, `folio <folder>`, `--cwd`, New terminal in folder… and New
   terminal here open the folder you chose even when the profile's Starting
   directory is Home or a fixed folder, and that pane's Restart shell, Duplicate
-  and splits start there too (issue #16).
+  and splits start in the folder it last reported, else the one you chose
+  (issue #16).
 - About → Version says what an update is doing after the download: Verifying,
   then ready with Restart…, then Restarting…, instead of Downloading again or
   offering Update and restart for an update already downloaded.
 - In Settings, Enter on About's buttons presses them, and when a focused
-  button stops being pressable the focus moves to the next control on the page
-  instead of staying on it with no ring.
+  button stops being pressable the focus moves to the nearest control before
+  it on the page (after it when none is before) instead of staying on it with no
+  ring.
 - An update download on a slow connection is no longer stopped after ten
   minutes; it stops only when the transfer stalls. This holds for updates made
   from this version on: updating from 0.4.6 still uses 0.4.6's download.

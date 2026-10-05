@@ -423,7 +423,9 @@ all failing rather than reaching `Verified`; a monotonic end-to-end deadline tha
 periodic bytes cannot defeat; and cancellation with a stated latency during DNS,
 headers, body, hashing and expansion, not merely between chunks. Progress carries
 **at most one pending wake**, so a stalled W cannot accumulate a backlog. Its
-timeouts are its own: 30 s idle, 10 min end-to-end.
+timeouts are its own: 30 s idle, and — since revision (i), 2026-10-05, which replaced
+"10 min end-to-end" — a 30 s stretch of the body carrying fewer than 64 KiB; nothing
+bounds the whole call but what those two imply from the ceiling.
 
 **The archive's real layout.** `package.ps1:472-497` calls `CreateFromDirectory(…, $true)`,
 so the zip contains `folio-<version>/<name>` — a versioned root, spelled with the
@@ -488,7 +490,7 @@ the crate's tests walk (`crates/bt-app/src/i18n.rs:5620` onward).
 | **`RunOnce` survivability** — whether the key is honoured after a hard power cut mid-flip, and whether security software strips it | force power loss at each boundary of C.4 on the Win11 clean VM and observe the next logon |
 | **Quarantine through the whole path** | `xattr -l` at every step of C.2–C.5 for a real downloaded dmg; if it appears, find which step applies it |
 | **A manual launch racing health** | start Folio by hand during the 90 s window, repeatedly, and assert the transaction completes rather than rolling back a healthy install |
-| **200 MB / 10 min / 90 s / 60 s are estimates** | measure the real asset sizes at the candidate release and the download time on a throttled 1 Mbit link; a release that outgrows the cap must fail the release gate, not the reader's machine |
+| **200 MB / 30 s · 64 KiB / 90 s / 60 s are estimates** (the 10-minute end-to-end figure is gone since revision (i)) | measure the real asset sizes at the candidate release and the download time on a throttled 1 Mbit link; a release that outgrows the cap must fail the release gate, not the reader's machine |
 | **MSIX registration after a version change** | on the Win11 VM with the first-page verb on, run a full transaction and read `msix::registered()` before and after. A repair failure must be visible, must not claim nothing changed, and must not leave a broken registration silently enabled |
 
 ## I. Review ledger

@@ -1097,8 +1097,8 @@ is doing — `Verifying <tag>` (`Staged`), `<tag> ready` with **Restart…**, wh
 raises the Ready card again (`Verified`), `Restarting…` (`Quitting`,
 `Committing`) — with the bar full and no verb while nothing can be pressed (all
 2026-10-05); the control is a keyboard stop only while it is enabled. A focus on any
-Settings control that stops being a stop goes to the nearest stop after it on the page,
-else the nearest before it, and to the dialog's `×` only when the page has no stop
+Settings control that stops being a stop goes to the nearest stop before it on the page,
+else the nearest after it, and to the dialog's `×` only when the page has no stop
 (2026-10-05); a managed copy names its
 manager's command with **Copy command**; every other ineligible answer (not
 ours, unknown, no updater flag, no release file here, offers off in this build)

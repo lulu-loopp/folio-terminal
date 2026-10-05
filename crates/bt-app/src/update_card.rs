@@ -840,8 +840,9 @@ pub(crate) enum RowFoot {
     /// that is not ours, not known, or has no release file here (§D).
     #[default]
     ReleasesPage,
-    /// `Restart…`: a job waits at `Verified`, and the foot raises its
-    /// card again in the window it is pressed in. `tag` is the offer's.
+    /// A job waits at `Verified`; the row's control is `Restart…`
+    /// ([`VersionControl::Restart`]), whose press raises the Ready card again in
+    /// the window it is pressed in (`dispatch_version_control`). `tag` is the offer's.
     Restart { tag: String },
     /// `Copy`: a package manager updates this copy, and this is its command.
     Copy { command: &'static str },
