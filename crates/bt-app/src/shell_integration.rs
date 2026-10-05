@@ -57,7 +57,7 @@ pub mod profile_marks;
 mod profile_runtime;
 pub use profile_runtime::{
     ProfileInstallOutcome, begin_profile_install, begin_profile_install_undo,
-    begin_profile_observation_for, begin_removal, begin_startup_migration,
+    begin_profile_observation_for, begin_removal, begin_startup_migration, profile_installs_for,
     remove_shell_integration, remove_shell_integration_at, take_profile_installs, take_removal,
 };
 
@@ -2170,16 +2170,53 @@ pub fn is_powershell(program: &Path) -> bool {
 ///
 /// After the path, the effective policy and then the five scopes it is decided from, one
 /// `Scope=Policy` line each (`Get-ExecutionPolicy -List`), so the row can say who set a
-/// refusing policy ([`policy_cause`]).
+/// refusing policy ([`policy_cause`]). Then two more facts the same run can answer without
+/// running anything:
+///
+/// * `Zone=` — where PowerShell will think the profile came from. The file's own Mark of the
+///   Web (`Zone.Identifier`'s `ZoneId`) when it has one; otherwise the zone of the path itself
+///   where the edition can say (Windows PowerShell's .NET answers `Intranet` for
+///   `\\files\share`, `Internet` for `\\files.example.com\share`; PowerShell 7's cannot and
+///   answers nothing). `RemoteSigned` refuses an unsigned profile from the `Internet` or
+///   `Untrusted` zone ([`ProfileZone`]).
+/// * `NoProcess=` — the effective policy once the probe's own Process scope is cleared (an
+///   in-process change of the probe's own session; nothing persistent is written). When no other
+///   scope is set this is the machine's default, which `Get-ExecutionPolicy` never names.
 ///
 /// Windows only, like its one reader: off Windows the profile path is not asked.
 #[cfg(windows)]
-const PROFILE_COMMAND: &str = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $PROFILE.CurrentUserCurrentHost; (Get-ExecutionPolicy).ToString(); Get-ExecutionPolicy -List | ForEach-Object { '{0}={1}' -f $_.Scope, $_.ExecutionPolicy }";
+const PROFILE_COMMAND: &str = r#"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $p = $PROFILE.CurrentUserCurrentHost; $p; (Get-ExecutionPolicy).ToString(); Get-ExecutionPolicy -List | ForEach-Object { '{0}={1}' -f $_.Scope, $_.ExecutionPolicy }; $z = 'Unknown'; $m = Get-Content -LiteralPath $p -Stream Zone.Identifier -ErrorAction SilentlyContinue | Select-String '^ZoneId=(\d+)'; if ($m) { $z = $m.Matches[0].Groups[1].Value } else { try { $c = "$([System.Security.Policy.Zone]::CreateFromUrl($p).SecurityZone)"; if ($c) { $z = $c } } catch { } }; 'Zone=' + $z; Set-ExecutionPolicy -Scope Process -ExecutionPolicy Undefined -Force -ErrorAction SilentlyContinue; 'NoProcess=' + (Get-ExecutionPolicy).ToString()"#;
 
 /// **The one command a user may run to let PowerShell load `$PROFILE`**: the CurrentUser scope,
 /// which needs no elevation, set to `RemoteSigned`. Folio copies it on the user's click and
 /// never runs it.
 pub const POLICY_COMMAND: &str = "Set-ExecutionPolicy -Scope CurrentUser RemoteSigned";
+
+/// The policy [`POLICY_COMMAND`] writes into the CurrentUser scope — what decides once it has
+/// run, so what the profile's zone is judged against ([`policy_cause`]).
+const POLICY_COMMAND_POLICY: crate::psreadline::ExecutionPolicy =
+    crate::psreadline::ExecutionPolicy::RemoteSigned;
+
+/// **Where PowerShell will think `$PROFILE` came from** — the URL security zone `RemoteSigned`
+/// asks about. Read by the probe ([`PROFILE_COMMAND`]'s `Zone=`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileZone {
+    /// This computer: a local path with no Mark of the Web.
+    Local,
+    Intranet,
+    Trusted,
+    Internet,
+    Untrusted,
+    /// The edition could not say: a network path PowerShell 7's .NET has no zone answer for.
+    Unknown,
+}
+
+impl ProfileZone {
+    /// Whether `RemoteSigned` would load an unsigned profile from here — known to.
+    fn loads_under_remote_signed(self) -> bool {
+        matches!(self, Self::Local | Self::Intranet | Self::Trusted)
+    }
+}
 
 /// The five scopes `Get-ExecutionPolicy -List` reports, and the policy that applies when every
 /// one of them is `Undefined`.
@@ -2190,10 +2227,25 @@ struct PolicyScopes {
     process: crate::psreadline::ExecutionPolicy,
     current_user: crate::psreadline::ExecutionPolicy,
     local_machine: crate::psreadline::ExecutionPolicy,
-    /// What applies when no scope is set: the probe's effective answer when every scope it
-    /// reported was `Undefined` (then that answer *is* the default), and otherwise Windows'
-    /// client default, `Restricted`.
+    /// What applies when no scope is set: the probe's `NoProcess=` answer, the effective policy
+    /// with its own Process scope cleared. [`policy_cause`] reads it only when MachinePolicy,
+    /// UserPolicy, CurrentUser and LocalMachine are all `Undefined` too — and then that answer is
+    /// the machine's default, as PowerShell itself resolved it.
     default: crate::psreadline::ExecutionPolicy,
+}
+
+/// **What a row's own arguments say about its Process scope.**
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RowProcessScope {
+    /// The row carries no `-ExecutionPolicy`; the process scope is the environment's.
+    Absent,
+    /// The row's own `-ExecutionPolicy` — the **last** occurrence, as both editions' binders
+    /// take it.
+    Set(crate::psreadline::ExecutionPolicy),
+    /// The classifier cannot read the row's arguments (a `-ep:Bypass` colon form, which neither
+    /// binder reads as an option either; an option the table does not know), so this build
+    /// cannot say what the process scope is — and makes no claim about the policy.
+    Unreadable,
 }
 
 /// **Who decides that `$PROFILE` may not load**, for one row.
@@ -2209,18 +2261,27 @@ pub enum PolicyCause {
     /// The process scope refuses: the row's own `-ExecutionPolicy`, or a
     /// `PSExecutionPolicyPreference` in the environment. It is above CurrentUser, so
     /// [`POLICY_COMMAND`] would not change it.
-    OwnArguments,
+    Process,
+    /// `RemoteSigned` is (or, after [`POLICY_COMMAND`], would be) the deciding policy and the
+    /// profile's zone is one it refuses, or one this edition cannot name ([`ProfileZone`]).
+    Location,
+    /// The row's arguments cannot be read ([`RowProcessScope::Unreadable`]): no claim.
+    Unreadable,
 }
 
 impl PolicyCause {
-    /// The capability sentence for a policy that refuses `$PROFILE`; `None` when it allows it.
+    /// The capability sentence for a cause that keeps `$PROFILE` from being offered; `None`
+    /// when the policy allows it. An unreadable row says only what is true without a claim:
+    /// the shipped "not provided" sentence.
     #[must_use]
     pub fn sentence(self) -> Option<crate::i18n::Text> {
         match self {
             Self::Allows => None,
             Self::Changeable => Some(crate::i18n::Text::CapPowerShellPolicyChangeable),
             Self::Organisation => Some(crate::i18n::Text::CapPowerShellPolicyManaged),
-            Self::OwnArguments => Some(crate::i18n::Text::CapPowerShellPolicyOwnArguments),
+            Self::Process => Some(crate::i18n::Text::CapPowerShellPolicyProcess),
+            Self::Location => Some(crate::i18n::Text::CapPowerShellPolicyLocation),
+            Self::Unreadable => Some(crate::i18n::Text::CapPowerShellNotProvided),
         }
     }
 }
@@ -2232,7 +2293,9 @@ impl PowerShellProfileFallback {
         match self {
             Self::PolicyChangeable => Some(PolicyCause::Changeable),
             Self::PolicyManaged => Some(PolicyCause::Organisation),
-            Self::PolicyOwnArguments => Some(PolicyCause::OwnArguments),
+            Self::PolicyProcess => Some(PolicyCause::Process),
+            Self::PolicyLocation => Some(PolicyCause::Location),
+            Self::Unreadable => Some(PolicyCause::Unreadable),
             Self::NotNeeded
             | Self::Pending
             | Self::Offer
@@ -2250,50 +2313,62 @@ impl PowerShellProfileFallback {
 /// This is also the answer to "would [`POLICY_COMMAND`] make the policy permissive": `Changeable`
 /// is returned only when nothing above CurrentUser is set, which is exactly when the CurrentUser
 /// scope the command writes becomes the deciding one; anything set above it is the cause instead.
-fn policy_cause(
-    scopes: PolicyScopes,
-    row_process: Option<crate::psreadline::ExecutionPolicy>,
-) -> PolicyCause {
+/// And whichever policy will decide — the one that does now, or [`POLICY_COMMAND_POLICY`] once
+/// the command has run — when it is `RemoteSigned`, the profile's zone has to be one it loads
+/// from, or the cause is the location ([`ProfileZone::loads_under_remote_signed`]).
+fn policy_cause(scopes: PolicyScopes, zone: ProfileZone, row: RowProcessScope) -> PolicyCause {
     use crate::psreadline::ExecutionPolicy;
     let set = |policy: &ExecutionPolicy| *policy != ExecutionPolicy::Undefined;
-    let verdict = |policy: ExecutionPolicy, refused: PolicyCause| {
-        if policy.blocks_script() {
-            refused
-        } else {
-            PolicyCause::Allows
-        }
+    let process = match row {
+        RowProcessScope::Unreadable => return PolicyCause::Unreadable,
+        RowProcessScope::Set(policy) => policy,
+        RowProcessScope::Absent => scopes.process,
     };
-    if let Some(policy) = [scopes.machine_policy, scopes.user_policy]
+    let (deciding, refused) = if let Some(policy) = [scopes.machine_policy, scopes.user_policy]
         .into_iter()
         .find(set)
     {
-        return verdict(policy, PolicyCause::Organisation);
+        (policy, PolicyCause::Organisation)
+    } else if set(&process) {
+        (process, PolicyCause::Process)
+    } else {
+        let policy = [scopes.current_user, scopes.local_machine]
+            .into_iter()
+            .find(set)
+            .unwrap_or(scopes.default);
+        (policy, PolicyCause::Changeable)
+    };
+    let (applies, cause) = if !deciding.blocks_script() {
+        (deciding, PolicyCause::Allows)
+    } else if refused == PolicyCause::Changeable {
+        (POLICY_COMMAND_POLICY, PolicyCause::Changeable)
+    } else {
+        return refused;
+    };
+    if applies == ExecutionPolicy::RemoteSigned && !zone.loads_under_remote_signed() {
+        return PolicyCause::Location;
     }
-    let process = row_process.unwrap_or(scopes.process);
-    if set(&process) {
-        return verdict(process, PolicyCause::OwnArguments);
-    }
-    let policy = [scopes.current_user, scopes.local_machine]
-        .into_iter()
-        .find(set)
-        .unwrap_or(scopes.default);
-    verdict(policy, PolicyCause::Changeable)
+    cause
 }
 
-/// The process scope a row asks for with its own `-ExecutionPolicy` (any accepted spelling).
-fn row_execution_policy(
-    program: &Path,
-    arguments: &[OsString],
-) -> Option<crate::psreadline::ExecutionPolicy> {
-    let parsed = classify_powershell_arguments(program, arguments)?;
-    let value = parsed
+/// What the row's own arguments say about its Process scope — through the classifier, the one
+/// reader of a PowerShell row: its parsed `executionpolicy` option, the last one as the binders
+/// take it, or [`RowProcessScope::Unreadable`] when it cannot read the row at all.
+fn row_process_scope(program: &Path, arguments: &[OsString]) -> RowProcessScope {
+    let Some(parsed) = classify_powershell_arguments(program, arguments) else {
+        return RowProcessScope::Unreadable;
+    };
+    parsed
         .non_terminal
         .iter()
-        .find(|option| option.parameter == "executionpolicy")?
-        .value?;
-    Some(crate::psreadline::ExecutionPolicy::parse(
-        &arguments[value].to_string_lossy(),
-    ))
+        .rev()
+        .find(|option| option.parameter == "executionpolicy")
+        .and_then(|option| option.value)
+        .map_or(RowProcessScope::Absent, |value| {
+            RowProcessScope::Set(crate::psreadline::ExecutionPolicy::parse(
+                &arguments[value].to_string_lossy(),
+            ))
+        })
 }
 
 /// **The path is asked of the shell and never composed**, and the machine this
@@ -2339,6 +2414,7 @@ fn powershell_edition(program: &Path) -> PowerShellEdition {
 struct ProfileObservation {
     path: PathBuf,
     scopes: PolicyScopes,
+    zone: ProfileZone,
     line_present: bool,
 }
 
@@ -2364,8 +2440,14 @@ pub enum PowerShellProfileFallback {
     PolicyChangeable,
     /// Group Policy refuses `$PROFILE` ([`PolicyCause::Organisation`]).
     PolicyManaged,
-    /// The row's own process scope refuses `$PROFILE` ([`PolicyCause::OwnArguments`]).
-    PolicyOwnArguments,
+    /// The process scope refuses `$PROFILE` ([`PolicyCause::Process`]).
+    PolicyProcess,
+    /// `RemoteSigned` decides and `$PROFILE`'s zone is one it refuses or one this edition cannot
+    /// name ([`PolicyCause::Location`]).
+    PolicyLocation,
+    /// The row's arguments cannot be read, so nothing is claimed and nothing offered
+    /// ([`PolicyCause::Unreadable`]).
+    Unreadable,
     /// This platform has no `$PROFILE` probe ([`PROFILE_PROBE_EXISTS`]), so nothing is observed
     /// and nothing is offered.
     Unsupported,
@@ -2402,7 +2484,7 @@ pub fn powershell_profile_fallback(
         .unwrap_or_else(|error| error.into_inner())
         .get(&powershell_edition(program))
         .cloned();
-    let row_process = row_execution_policy(program, arguments);
+    let row = row_process_scope(program, arguments);
     profile_fallback_from_parts(
         PROFILE_PROBE_EXISTS,
         integration_enabled,
@@ -2411,7 +2493,7 @@ pub fn powershell_profile_fallback(
         no_profile,
         observed.map(|observed| {
             (
-                policy_cause(observed.scopes, row_process),
+                policy_cause(observed.scopes, observed.zone, row),
                 observed.line_present,
             )
         }),
@@ -2445,7 +2527,9 @@ fn profile_fallback_from_parts(
         None => PowerShellProfileFallback::Pending,
         Some((PolicyCause::Changeable, _)) => PowerShellProfileFallback::PolicyChangeable,
         Some((PolicyCause::Organisation, _)) => PowerShellProfileFallback::PolicyManaged,
-        Some((PolicyCause::OwnArguments, _)) => PowerShellProfileFallback::PolicyOwnArguments,
+        Some((PolicyCause::Process, _)) => PowerShellProfileFallback::PolicyProcess,
+        Some((PolicyCause::Location, _)) => PowerShellProfileFallback::PolicyLocation,
+        Some((PolicyCause::Unreadable, _)) => PowerShellProfileFallback::Unreadable,
         Some((PolicyCause::Allows, true)) => PowerShellProfileFallback::Enabled,
         Some((PolicyCause::Allows, false)) => PowerShellProfileFallback::Offer,
     }
@@ -3031,43 +3115,52 @@ fn parse_profile_observation(stdout: &str) -> Option<ProfileObservation> {
     if !path.is_absolute() {
         return None;
     }
-    let effective = ExecutionPolicy::parse(lines.next()?);
+    let _effective = lines.next()?;
     let mut reported = BTreeMap::new();
     for line in lines {
-        let (scope, policy) = line.split_once('=')?;
-        reported.insert(scope.trim().to_owned(), ExecutionPolicy::parse(policy));
+        let (key, value) = line.split_once('=')?;
+        reported.insert(key.trim().to_owned(), value.trim().to_owned());
     }
-    let scope = |name: &str| reported.get(name).copied();
-    let machine_policy = scope("MachinePolicy")?;
-    let user_policy = scope("UserPolicy")?;
-    let process = scope("Process")?;
-    let current_user = scope("CurrentUser")?;
-    let local_machine = scope("LocalMachine")?;
-    let none_set = [
-        machine_policy,
-        user_policy,
-        process,
-        current_user,
-        local_machine,
-    ]
-    .into_iter()
-    .all(|policy| policy == ExecutionPolicy::Undefined);
+    let scope = |name: &str| {
+        reported
+            .get(name)
+            .map(|value| ExecutionPolicy::parse(value))
+    };
+    let zone = match reported.get("Zone")?.as_str() {
+        "0" | "MyComputer" => ProfileZone::Local,
+        "1" | "Intranet" => ProfileZone::Intranet,
+        "2" | "Trusted" => ProfileZone::Trusted,
+        "3" | "Internet" => ProfileZone::Internet,
+        "4" | "Untrusted" => ProfileZone::Untrusted,
+        // No zone answer: a local path with no Mark of the Web is this computer's — the rule
+        // PowerShell itself applies to a local file — and a network path is unknown.
+        _ if is_network_path(&path) => ProfileZone::Unknown,
+        _ => ProfileZone::Local,
+    };
     Some(ProfileObservation {
-        path,
         scopes: PolicyScopes {
-            machine_policy,
-            user_policy,
-            process,
-            current_user,
-            local_machine,
-            default: if none_set {
-                effective
-            } else {
-                ExecutionPolicy::Restricted
-            },
+            machine_policy: scope("MachinePolicy")?,
+            user_policy: scope("UserPolicy")?,
+            process: scope("Process")?,
+            current_user: scope("CurrentUser")?,
+            local_machine: scope("LocalMachine")?,
+            default: scope("NoProcess")?,
         },
+        path,
+        zone,
         line_present: false,
     })
+}
+
+/// Whether `path` names a network share (`\\server\share\…`, or its `\\?\UNC\` spelling).
+#[cfg(windows)]
+fn is_network_path(path: &Path) -> bool {
+    use std::path::{Component, Prefix};
+    matches!(
+        path.components().next(),
+        Some(Component::Prefix(prefix))
+            if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
+    )
 }
 
 /// Read the one line the probe command writes.
@@ -4135,10 +4228,10 @@ mod tests {
     /// Profiles page's fallback is one edition fact applied to every row.
     #[test]
     fn inject4_powershell_profile_fallback_row_model_covers_every_state() {
-        use PolicyCause::{Allows, Changeable, Organisation, OwnArguments};
+        use PolicyCause::{Allows, Changeable, Location, Organisation, Process, Unreadable};
         use PowerShellProfileFallback::{
-            Enabled, NoProfile, NotNeeded, Offer, Pending, PolicyChangeable, PolicyManaged,
-            PolicyOwnArguments,
+            Enabled, NoProfile, NotNeeded, Offer, Pending, PolicyChangeable, PolicyLocation,
+            PolicyManaged, PolicyProcess,
         };
         let decide = |composable, pending, no_profile, observed| {
             profile_fallback_from_parts(true, true, composable, pending, no_profile, observed)
@@ -4150,7 +4243,9 @@ mod tests {
         for (cause, state) in [
             (Changeable, PolicyChangeable),
             (Organisation, PolicyManaged),
-            (OwnArguments, PolicyOwnArguments),
+            (Process, PolicyProcess),
+            (Location, PolicyLocation),
+            (Unreadable, PowerShellProfileFallback::Unreadable),
         ] {
             assert_eq!(decide(false, false, false, Some((cause, false))), state);
             assert_eq!(decide(false, false, false, Some((cause, true))), state);
@@ -4179,42 +4274,65 @@ mod tests {
         }
     }
 
+    fn probe_answer(path: &str, current_user: &str, zone: &str, no_process: &str) -> String {
+        format!(
+            "\r\n{path}\r\nRemoteSigned\r\n\
+             MachinePolicy=Undefined\r\nUserPolicy=Undefined\r\nProcess=Undefined\r\n\
+             CurrentUser={current_user}\r\nLocalMachine=Undefined\r\n\
+             Zone={zone}\r\nNoProcess={no_process}\r\n"
+        )
+    }
+
     /// PIN — **the profile probe's answer is the path the shell names, its effective policy,
-    /// then the five scopes**. The effective answer is the default only when no scope is set; a
-    /// relative path, or a scope list missing a scope, is no answer.
+    /// the five scopes, the profile's zone and the policy with no Process scope** (rounds 4–5).
+    /// The default is the `NoProcess=` answer — PowerShell's own resolution, never a constant.
+    /// A zone named by number (a Mark of the Web) or by name is that zone; no zone answer is
+    /// this computer for a local path and unknown for a network one. A relative path, or an
+    /// answer missing a scope, the zone or `NoProcess=`, is no answer.
     ///
-    /// RED (mutations: drop the `is_absolute` check; take the default from the effective answer
-    /// whatever the scopes say).
+    /// RED (mutations: drop the `is_absolute` check; take the default from a constant
+    /// `Restricted`; read a missing zone on a network path as local).
     #[cfg(windows)]
     #[test]
     fn the_profile_probe_answer_is_a_path_a_policy_and_its_scopes() {
-        use crate::psreadline::ExecutionPolicy::{RemoteSigned, Restricted, Undefined};
-        let answer = |effective: &str, current_user: &str| {
-            format!(
-                "\r\nD:\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1\r\n{effective}\r\n\
-                 MachinePolicy=Undefined\r\nUserPolicy=Undefined\r\nProcess=Undefined\r\n\
-                 CurrentUser={current_user}\r\nLocalMachine=Undefined\r\n"
-            )
-        };
-        let observed =
-            parse_profile_observation(&answer("RemoteSigned", "Undefined")).expect("an answer");
-        assert_eq!(
-            observed.path,
-            PathBuf::from(r"D:\Documents\PowerShell\Microsoft.PowerShell_profile.ps1")
-        );
+        use crate::psreadline::ExecutionPolicy::{RemoteSigned, Undefined};
+        let local = r"D:\Documents\PowerShell\Microsoft.PowerShell_profile.ps1";
+        let share = r"\\files.example.com\home\me\Microsoft.PowerShell_profile.ps1";
+        let observed = parse_profile_observation(&probe_answer(
+            local,
+            "Undefined",
+            "MyComputer",
+            "RemoteSigned",
+        ))
+        .expect("an answer");
+        assert_eq!(observed.path, PathBuf::from(local));
         assert_eq!(observed.scopes.current_user, Undefined);
         assert_eq!(
             observed.scopes.default, RemoteSigned,
-            "no scope set: the effective answer is the default"
+            "the probe's own resolution"
         );
+        assert_eq!(observed.zone, ProfileZone::Local);
         assert!(!observed.line_present, "presence is read from the file");
-        let set = parse_profile_observation(&answer("RemoteSigned", "RemoteSigned")).unwrap();
-        assert_eq!(set.scopes.current_user, RemoteSigned);
-        assert_eq!(set.scopes.default, Restricted);
+        for (zone, path, expected) in [
+            ("3", local, ProfileZone::Internet),
+            ("Intranet", share, ProfileZone::Intranet),
+            ("Internet", share, ProfileZone::Internet),
+            ("Unknown", local, ProfileZone::Local),
+            ("NoZone", local, ProfileZone::Local),
+            ("Unknown", share, ProfileZone::Unknown),
+        ] {
+            let parsed =
+                parse_profile_observation(&probe_answer(path, "Undefined", zone, "Restricted"))
+                    .expect("an answer");
+            assert_eq!(parsed.zone, expected, "Zone={zone} for {path}");
+        }
         assert!(
             parse_profile_observation("C:\\p\\profile.ps1\r\nRestricted\r\n").is_none(),
             "no scope list, no answer"
         );
+        let without_zone = probe_answer(local, "Undefined", "MyComputer", "Restricted")
+            .replace("Zone=MyComputer\r\n", "");
+        assert!(parse_profile_observation(&without_zone).is_none());
         assert!(parse_profile_observation("profile.ps1\r\nBypass\r\n").is_none());
         assert!(parse_profile_observation("  \r\n").is_none());
     }
@@ -4238,8 +4356,8 @@ mod tests {
 
     /// PIN — **who set a refusing policy, read in PowerShell's precedence order** (round 4,
     /// the owner's ruling of 2026-10-04). Group Policy is the organisation's; a process scope
-    /// is the row's own; CurrentUser, LocalMachine or the default is the user's to change — and
-    /// then, and only then, [`POLICY_COMMAND`] decides the effective policy.
+    /// is the row's or the environment's; CurrentUser, LocalMachine or the default is the user's
+    /// to change — and then, and only then, [`POLICY_COMMAND`] decides the effective policy.
     ///
     /// RED (mutations: read Process before Group Policy; treat a refusing LocalMachine as the
     /// organisation's; let a set CurrentUser fall through to LocalMachine).
@@ -4248,97 +4366,159 @@ mod tests {
         use crate::psreadline::ExecutionPolicy::{
             AllSigned, Bypass, RemoteSigned, Restricted, Undefined,
         };
-        use PolicyCause::{Allows, Changeable, Organisation, OwnArguments};
+        use PolicyCause::{Allows, Changeable, Organisation, Process};
+        use RowProcessScope::{Absent, Set};
         let none = Undefined;
+        let here = ProfileZone::Local;
         for (name, list, row, cause) in [
             (
                 "Group Policy refuses over a permissive CurrentUser",
                 scopes(Restricted, none, none, RemoteSigned, none),
-                None,
+                Absent,
                 Organisation,
             ),
             (
                 "UserPolicy refuses",
                 scopes(none, AllSigned, none, none, none),
-                None,
+                Absent,
                 Organisation,
             ),
             (
                 "Group Policy allows over the row's own refusal",
                 scopes(RemoteSigned, none, none, none, none),
-                Some(Restricted),
+                Set(Restricted),
                 Allows,
             ),
             (
                 "the row's own -ExecutionPolicy Restricted",
                 scopes(none, none, none, RemoteSigned, none),
-                Some(Restricted),
-                OwnArguments,
+                Set(Restricted),
+                Process,
             ),
             (
                 "a refusing process scope from the environment",
                 scopes(none, none, AllSigned, none, none),
-                None,
-                OwnArguments,
+                Absent,
+                Process,
             ),
             (
                 "the row's own -ExecutionPolicy Bypass over a refusing CurrentUser",
                 scopes(none, none, none, Restricted, none),
-                Some(Bypass),
+                Set(Bypass),
                 Allows,
             ),
             (
                 "CurrentUser Restricted, the rest Undefined",
                 scopes(none, none, none, Restricted, none),
-                None,
+                Absent,
                 Changeable,
             ),
             (
                 "LocalMachine AllSigned, CurrentUser Undefined",
                 scopes(none, none, none, none, AllSigned),
-                None,
+                Absent,
                 Changeable,
             ),
             (
                 "a set CurrentUser wins over LocalMachine",
                 scopes(none, none, none, RemoteSigned, AllSigned),
-                None,
+                Absent,
                 Allows,
             ),
             (
                 "nothing set: the default decides",
                 scopes(none, none, none, none, none),
-                None,
+                Absent,
                 Changeable,
             ),
         ] {
-            assert_eq!(policy_cause(list, row), cause, "{name}");
+            assert_eq!(policy_cause(list, here, row), cause, "{name}");
         }
         // And `Changeable` means the command works: the CurrentUser scope it writes, then read.
         let command_policy = crate::psreadline::ExecutionPolicy::parse(
             POLICY_COMMAND.rsplit(' ').next().expect("a policy word"),
         );
+        assert_eq!(command_policy, POLICY_COMMAND_POLICY);
         assert!(POLICY_COMMAND.contains("-Scope CurrentUser"));
         for list in [
             scopes(none, none, none, Restricted, none),
             scopes(none, none, none, none, AllSigned),
             scopes(none, none, none, none, none),
         ] {
-            assert_eq!(policy_cause(list, None), Changeable);
+            assert_eq!(policy_cause(list, here, Absent), Changeable);
             let after = PolicyScopes {
                 current_user: command_policy,
                 ..list
             };
-            assert_eq!(policy_cause(after, None), Allows, "{list:?}");
+            assert_eq!(policy_cause(after, here, Absent), Allows, "{list:?}");
+        }
+    }
+
+    /// PIN — **the default is PowerShell's own answer** (review of round 4, item 7). The process
+    /// scope came from `PSExecutionPolicyPreference` and the row clears it with
+    /// `-ExecutionPolicy Undefined`; nothing else is set, so the machine's default decides — and
+    /// the probe's `NoProcess=` answer is what that default is, on a server (`RemoteSigned`) as
+    /// on a client (`Restricted`).
+    ///
+    /// RED (mutation: `.unwrap_or(scopes.default)` → `.unwrap_or(Restricted)`).
+    #[test]
+    fn a_cleared_process_scope_falls_to_the_probes_own_default() {
+        use crate::psreadline::ExecutionPolicy::{AllSigned, RemoteSigned, Restricted, Undefined};
+        let none = Undefined;
+        for (default, cause) in [
+            (RemoteSigned, PolicyCause::Allows),
+            (Restricted, PolicyCause::Changeable),
+        ] {
+            let list = PolicyScopes {
+                default,
+                ..scopes(none, none, AllSigned, none, none)
+            };
+            assert_eq!(
+                policy_cause(list, ProfileZone::Local, RowProcessScope::Set(Undefined)),
+                cause,
+                "default {default:?}"
+            );
+        }
+    }
+
+    /// PIN — **`RemoteSigned` and where `$PROFILE` lives** (review of round 4, item 6). Whichever
+    /// policy will decide — the one deciding now, or `RemoteSigned` once [`POLICY_COMMAND`] has
+    /// run — when it is `RemoteSigned`, a profile in the Internet or Untrusted zone, or on a share
+    /// whose zone this edition cannot name, is not promised: no Enable, no Copy. `Bypass` and
+    /// `Unrestricted` load from anywhere; an intranet share loads under `RemoteSigned`.
+    ///
+    /// RED (mutations: skip the zone check; judge the changeable case by the refusing policy
+    /// instead of `POLICY_COMMAND_POLICY`; treat `Unknown` as loadable).
+    #[test]
+    fn remote_signed_is_judged_against_the_profiles_zone() {
+        use crate::psreadline::ExecutionPolicy::{Bypass, RemoteSigned, Restricted, Undefined};
+        use PolicyCause::{Allows, Changeable, Location};
+        use ProfileZone::{Internet, Intranet, Local, Trusted, Unknown, Untrusted};
+        let none = Undefined;
+        let remote_signed = scopes(none, none, none, RemoteSigned, none);
+        let refusing = scopes(none, none, none, Restricted, none);
+        let bypassed = scopes(none, none, Bypass, none, none);
+        for (zone, now, after_command, bypass) in [
+            (Local, Allows, Changeable, Allows),
+            (Intranet, Allows, Changeable, Allows),
+            (Trusted, Allows, Changeable, Allows),
+            (Internet, Location, Location, Allows),
+            (Untrusted, Location, Location, Allows),
+            (Unknown, Location, Location, Allows),
+        ] {
+            let row = RowProcessScope::Absent;
+            assert_eq!(policy_cause(remote_signed, zone, row), now, "{zone:?}");
+            assert_eq!(policy_cause(refusing, zone, row), after_command, "{zone:?}");
+            assert_eq!(policy_cause(bypassed, zone, row), bypass, "{zone:?}");
         }
     }
 
     /// PIN — **each refusing cause is its own row state and its own sentence, and only the
-    /// changeable one has a button** (round 4). The first sentence of each is the shipped
-    /// "not provided" one.
+    /// changeable one has a button** (rounds 4–5). The first sentence of each is the shipped
+    /// "not provided" one; an unreadable row says that sentence alone.
     ///
     /// RED (mutations: map `Organisation` to `PolicyChangeable`; give `PolicyManaged` the Copy
-    /// button).
+    /// button; give `Unreadable` the Enable button).
     #[test]
     fn each_policy_cause_is_its_own_row_and_sentence() {
         use crate::i18n::Text;
@@ -4357,9 +4537,21 @@ mod tests {
                 None,
             ),
             (
-                PolicyCause::OwnArguments,
-                PowerShellProfileFallback::PolicyOwnArguments,
-                Text::CapPowerShellPolicyOwnArguments,
+                PolicyCause::Process,
+                PowerShellProfileFallback::PolicyProcess,
+                Text::CapPowerShellPolicyProcess,
+                None,
+            ),
+            (
+                PolicyCause::Location,
+                PowerShellProfileFallback::PolicyLocation,
+                Text::CapPowerShellPolicyLocation,
+                None,
+            ),
+            (
+                PolicyCause::Unreadable,
+                PowerShellProfileFallback::Unreadable,
+                Text::CapPowerShellNotProvided,
                 None,
             ),
         ] {
@@ -4399,6 +4591,7 @@ mod tests {
         let observed = |current_user| ProfileObservation {
             path: PathBuf::from("profile.ps1"),
             scopes: scopes(Undefined, Undefined, Undefined, current_user, Undefined),
+            zone: ProfileZone::Local,
             line_present: false,
         };
         publish_profile_observation(program, observed(Restricted));
@@ -4419,30 +4612,135 @@ mod tests {
         }
     }
 
-    /// PIN — **a row's own `-ExecutionPolicy`, in any accepted spelling and case, is its process
-    /// scope** (round 4).
+    /// PIN — **a row's own `-ExecutionPolicy` is read by the classifier, the last one wins, and
+    /// a row the classifier cannot read makes no claim** (rounds 4–5). Any accepted spelling
+    /// and case; a repeated option takes its last value, as both editions' binders do (pinned
+    /// against them by `the_real_binders_read_the_execution_policy_as_the_classifier_does`); a
+    /// colon form (`-ep:Bypass`) is not an option to either binder and not one to the
+    /// classifier, so the row is `Unreadable`.
     ///
-    /// RED (mutation: `row_execution_policy` answers `None`).
+    /// RED (mutations: `row_process_scope` takes the first occurrence; answers `Absent` for an
+    /// argv the classifier cannot read).
     #[test]
     fn a_rows_own_execution_policy_is_its_process_scope() {
         use crate::psreadline::ExecutionPolicy::{Bypass, Restricted};
+        use RowProcessScope::{Absent, Set, Unreadable};
         for (program, words, expected) in [
             (
                 "pwsh.exe",
                 vec!["-ExecutionPolicy", "Restricted", "-File", "a.ps1"],
-                Some(Restricted),
+                Set(Restricted),
             ),
             (
                 "powershell.exe",
                 vec!["-ep", "bypass", "-NoExit", "-File", "a.ps1"],
-                Some(Bypass),
+                Set(Bypass),
             ),
-            ("pwsh.exe", vec!["-NoExit", "-File", "a.ps1"], None),
+            (
+                "pwsh.exe",
+                vec!["-ep", "Restricted", "-ep", "Bypass", "-File", "a.ps1"],
+                Set(Bypass),
+            ),
+            (
+                "powershell.exe",
+                vec![
+                    "-ep",
+                    "Bypass",
+                    "-ExecutionPolicy",
+                    "Restricted",
+                    "-File",
+                    "a.ps1",
+                ],
+                Set(Restricted),
+            ),
+            ("pwsh.exe", vec!["-NoExit", "-File", "a.ps1"], Absent),
+            ("pwsh.exe", vec!["-ep:Bypass", "-File", "a.ps1"], Unreadable),
+            (
+                "powershell.exe",
+                vec!["-ExecutionPolicy:Bypass", "-File", "a.ps1"],
+                Unreadable,
+            ),
+            (
+                "pwsh.exe",
+                vec!["-NoProfile:$false", "-File", "a.ps1"],
+                Unreadable,
+            ),
         ] {
             assert_eq!(
-                row_execution_policy(Path::new(program), &os_words(&words)),
+                row_process_scope(Path::new(program), &os_words(&words)),
                 expected,
                 "{program} {words:?}"
+            );
+        }
+        // An unreadable row offers nothing, whatever the edition's policy.
+        assert_eq!(
+            policy_cause(
+                scopes(
+                    crate::psreadline::ExecutionPolicy::Undefined,
+                    crate::psreadline::ExecutionPolicy::Undefined,
+                    crate::psreadline::ExecutionPolicy::Undefined,
+                    crate::psreadline::ExecutionPolicy::RemoteSigned,
+                    crate::psreadline::ExecutionPolicy::Undefined,
+                ),
+                ProfileZone::Local,
+                Unreadable,
+            ),
+            PolicyCause::Unreadable
+        );
+    }
+
+    /// PIN — **the classifier reads `-ExecutionPolicy` exactly as the real binders do** (review
+    /// of round 4, items 4–5). On each installed edition, started through `bt_pty::test_shell`
+    /// (no profile, no history, a one-shot `-Command`): a repeated option is bound to its last
+    /// value, and a colon form is not bound at all — PowerShell 7 takes `-ep:Bypass` for a
+    /// script file's name, Windows PowerShell for the command's own text; either way the process
+    /// scope is not `Bypass`.
+    ///
+    /// RED (mutation: the classifier's `row_process_scope` takes the first occurrence — the
+    /// classifier's answer then disagrees with the binder's).
+    #[cfg(windows)]
+    #[test]
+    fn the_real_binders_read_the_execution_policy_as_the_classifier_does() {
+        use bt_pty::test_shell::Hygiene;
+        let query = "(Get-ExecutionPolicy -Scope Process).ToString()";
+        for name in ["powershell.exe", "pwsh.exe"] {
+            let Some(program) = bt_platform::program_on_path(Path::new(name)) else {
+                eprintln!("{name}: not installed; real binder arm skipped");
+                continue;
+            };
+            let bound = |words: &[&str]| -> String {
+                let hygiene = Hygiene::new();
+                let output = hygiene
+                    .command(&program, bt_platform::quiet_command)
+                    .args(["-NonInteractive"])
+                    .args(words)
+                    .args(["-Command", query])
+                    .output()
+                    .expect("the shell starts");
+                String::from_utf8_lossy(&output.stdout).trim().to_owned()
+            };
+            for words in [
+                ["-ep", "Restricted", "-ep", "Bypass"],
+                ["-ep", "Bypass", "-ep", "Restricted"],
+            ] {
+                let mut row = os_words(&words);
+                row.extend(os_words(&["-Command", query]));
+                let RowProcessScope::Set(classified) = row_process_scope(&program, &row) else {
+                    panic!("{name} {words:?}: the classifier reads a repeated -ep");
+                };
+                assert_eq!(bound(&words), classified.name(), "{name} {words:?}");
+            }
+            let colon = bound(&["-ep:Bypass"]);
+            assert_ne!(
+                colon, "Bypass",
+                "{name}: -ep:Bypass is not bound as an option"
+            );
+            let mut row = os_words(&["-ep:Bypass"]);
+            row.extend(os_words(&["-Command", query]));
+            assert_eq!(
+                row_process_scope(&program, &row),
+                RowProcessScope::Unreadable,
+                "{name}"
             );
         }
     }

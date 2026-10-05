@@ -1185,11 +1185,16 @@ text_entries! {
     /// The effective execution policy refuses `$PROFILE` and one command the user may run
     /// (`shell_integration::POLICY_COMMAND`) would allow it.
     CapPowerShellPolicyChangeable,
+    /// The row menu's item for the policy command: what `Copy` copies, named.
+    ProfilesCopyPolicyCommand,
     /// The effective execution policy refusing `$PROFILE` is set by Group Policy.
     CapPowerShellPolicyManaged,
-    /// The execution policy the row's own arguments (or environment) set for the process
-    /// refuses `$PROFILE`, so no user-scope command would change it.
-    CapPowerShellPolicyOwnArguments,
+    /// The execution policy set for the PowerShell process — by the row's own
+    /// `-ExecutionPolicy` or by `PSExecutionPolicyPreference` — refuses `$PROFILE`, so no
+    /// user-scope command would change it. One sentence true for both sources.
+    CapPowerShellPolicyProcess,
+    /// `$PROFILE` is stored where `RemoteSigned` refuses it, or where this edition cannot tell.
+    CapPowerShellPolicyLocation,
     /// WSL. The same everything, and the same honest condition — a `zsh` or
     /// `fish` login never reads the init file the launcher was handed.
     CapWslBash,
@@ -3855,16 +3860,28 @@ impl Text {
                 "PowerShell integration is not provided for these arguments. The execution policy blocks $PROFILE until one command is run.",
             ),
             // zh: pending T-INTEGRATION-INJECT-4
+            Self::ProfilesCopyPolicyCommand => pick(
+                lang,
+                "Copy the execution policy command",
+                "Copy the execution policy command",
+            ),
+            // zh: pending T-INTEGRATION-INJECT-4
             Self::CapPowerShellPolicyManaged => pick(
                 lang,
                 "PowerShell integration is not provided for these arguments. Your organization's execution policy blocks $PROFILE.",
                 "PowerShell integration is not provided for these arguments. Your organization's execution policy blocks $PROFILE.",
             ),
             // zh: pending T-INTEGRATION-INJECT-4
-            Self::CapPowerShellPolicyOwnArguments => pick(
+            Self::CapPowerShellPolicyProcess => pick(
                 lang,
-                "PowerShell integration is not provided for these arguments. Their execution policy blocks $PROFILE.",
-                "PowerShell integration is not provided for these arguments. Their execution policy blocks $PROFILE.",
+                "PowerShell integration is not provided for these arguments. The execution policy set for this process blocks $PROFILE.",
+                "PowerShell integration is not provided for these arguments. The execution policy set for this process blocks $PROFILE.",
+            ),
+            // zh: pending T-INTEGRATION-INJECT-4
+            Self::CapPowerShellPolicyLocation => pick(
+                lang,
+                "PowerShell integration is not provided for these arguments. $PROFILE is stored where the execution policy may refuse it.",
+                "PowerShell integration is not provided for these arguments. $PROFILE is stored where the execution policy may refuse it.",
             ),
             Self::CapWslBash => pick(
                 lang,
@@ -5955,10 +5972,14 @@ impl Text {
         (Self::CapPowerShellViaProfile, HostPlatform::MacOs),
         (Self::CapPowerShellPolicyChangeable, HostPlatform::Windows),
         (Self::CapPowerShellPolicyChangeable, HostPlatform::MacOs),
+        (Self::ProfilesCopyPolicyCommand, HostPlatform::Windows),
+        (Self::ProfilesCopyPolicyCommand, HostPlatform::MacOs),
         (Self::CapPowerShellPolicyManaged, HostPlatform::Windows),
         (Self::CapPowerShellPolicyManaged, HostPlatform::MacOs),
-        (Self::CapPowerShellPolicyOwnArguments, HostPlatform::Windows),
-        (Self::CapPowerShellPolicyOwnArguments, HostPlatform::MacOs),
+        (Self::CapPowerShellPolicyProcess, HostPlatform::Windows),
+        (Self::CapPowerShellPolicyProcess, HostPlatform::MacOs),
+        (Self::CapPowerShellPolicyLocation, HostPlatform::Windows),
+        (Self::CapPowerShellPolicyLocation, HostPlatform::MacOs),
         (Self::DescPowerShellProfileLine, HostPlatform::Windows),
         (Self::DescPowerShellProfileLine, HostPlatform::MacOs),
         (Self::ShellProfileAddedToast, HostPlatform::Windows),

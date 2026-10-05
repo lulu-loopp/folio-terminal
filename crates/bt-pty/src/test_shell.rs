@@ -138,6 +138,23 @@ pub const PANE_ANNOUNCEMENTS: [&str; 10] = [
     "BT_USER_ZDOTDIR",
 ];
 
+/// **What a PowerShell child must not inherit from the session that runs the tests**: the
+/// module path. PowerShell 7 rewrites `PSModulePath` for every process it starts, and a Windows
+/// PowerShell started from it then autoloads PowerShell 7's copy of
+/// `Microsoft.PowerShell.Security` and fails — `Get-ExecutionPolicy` is not found (measured
+/// 2026-10-04 from a PowerShell 7 session; a run from cmd or a CI step that is not PowerShell 7
+/// does not see it). With the variable absent each edition computes its own default, which is
+/// what a test means by "this PowerShell".
+const POWERSHELL_INHERITED: [&str; 1] = ["PSModulePath"];
+
+/// The names `family` is started without, on top of [`PANE_ANNOUNCEMENTS`].
+fn not_inherited(family: Family) -> &'static [&'static str] {
+    match family {
+        Family::PowerShell => &POWERSHELL_INHERITED,
+        Family::Cmd | Family::Posix(_) | Family::Program => &[],
+    }
+}
+
 fn is_pane_announcement(key: &OsStr) -> bool {
     PANE_ANNOUNCEMENTS
         .iter()
@@ -505,6 +522,19 @@ impl Hygiene {
                 crate::EnvironmentRefresh::new(inherited.clone(), inherited.clone(), inherited)
             }
         });
+        if let Some(refresh) = command.environment_refresh.as_mut() {
+            for list in [
+                &mut refresh.fresh,
+                &mut refresh.launch_snapshot,
+                &mut refresh.inherited,
+            ] {
+                list.retain(|(key, _)| {
+                    !not_inherited(family)
+                        .iter()
+                        .any(|name| crate::environment_key_eq(key, OsStr::new(name)))
+                });
+            }
+        }
         for (key, value, settable) in self.environment(family) {
             let chosen = command
                 .environment
@@ -623,7 +653,7 @@ impl Hygiene {
         let mut command = new(program.to_os_string());
         command.args(self.flagged(family, Vec::new()));
         // Without the pane announcements; a test that wants one sets it after this, and wins.
-        for name in PANE_ANNOUNCEMENTS {
+        for name in PANE_ANNOUNCEMENTS.iter().chain(not_inherited(family)) {
             command.env_remove(name);
         }
         match std::env::var_os("WSLENV") {
@@ -1129,7 +1159,8 @@ mod tests {
     /// kept.
     ///
     /// RED (mutations: `is_pane_announcement` answers `false`; `Hygiene::command`
-    /// removes nothing; `prepare` leaves `environment_refresh` as it found it).
+    /// removes nothing; `prepare` leaves `environment_refresh` as it found it;
+    /// `not_inherited` answers `&[]` for PowerShell).
     #[test]
     fn a_test_shell_does_not_inherit_what_folio_announces_to_its_pane() {
         let block = |pairs: &[(&str, &str)]| {
@@ -1176,6 +1207,13 @@ mod tests {
                 "{name} is removed from a child off a pseudoconsole"
             );
         }
+        // And a PowerShell child computes its own module path (`POWERSHELL_INHERITED`).
+        assert!(
+            removed
+                .iter()
+                .any(|key| crate::environment_key_eq(key, OsStr::new("PSModulePath"))),
+            "a PowerShell child does not inherit the session's PSModulePath"
+        );
 
         let (prepared, _) = hygiene.prepare(
             PtyCommand::new("powershell.exe")

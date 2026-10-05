@@ -933,11 +933,25 @@ const GHOST_ROW_ALPHA: f32 = 0.55;
 /// four, then the switch, then the two that change what the table means.
 #[must_use]
 pub fn row_menu_items(line: &crate::profiles::ProfileLine) -> Vec<RowMenuItem> {
-    let mut items = vec![RowMenuItem {
+    // **The row's own fallback verb first, on every row that has one**
+    // (T-INTEGRATION-INJECT-4 round 5). The button in the open stands only where
+    // the text column can spare it ([`profile_button_fits`]); this item is the
+    // same verb at every width, which is the row's own rule — one verb in the
+    // open and the rest behind the `⋯` — applied to a verb that is in the open
+    // only while there is room for it.
+    let mut items: Vec<RowMenuItem> = ProfileButton::of(line.profile_fallback)
+        .map(|button| RowMenuItem {
+            verb: button.verb(),
+            label: button.menu_label(),
+            refusal: None,
+        })
+        .into_iter()
+        .collect();
+    items.push(RowMenuItem {
         verb: RowVerb::Duplicate,
         label: Text::ProfilesDuplicate.text(),
         refusal: None,
-    }];
+    });
     items.push(RowMenuItem {
         verb: RowVerb::Hide,
         label: if line.hidden {
@@ -9002,6 +9016,12 @@ pub enum RowVerb {
     /// 2026-08-17, Q4). The `default` badge on the row remains a report and not a
     /// control.
     SetDefault,
+    /// The row's `$PROFILE` offer ([`ProfileButton::Enable`]), behind the `⋯` on
+    /// every row that has it — the way that is there at every dialog width, where
+    /// the button in the open is there only when it fits.
+    EnableViaProfile,
+    /// The row's policy command ([`ProfileButton::CopyPolicyCommand`]), likewise.
+    CopyPolicyCommand,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -9515,7 +9535,9 @@ impl ProfileButton {
             | Fallback::Enabled
             | Fallback::NoProfile
             | Fallback::PolicyManaged
-            | Fallback::PolicyOwnArguments
+            | Fallback::PolicyProcess
+            | Fallback::PolicyLocation
+            | Fallback::Unreadable
             | Fallback::Unsupported => None,
         }
     }
@@ -9534,6 +9556,46 @@ impl ProfileButton {
             Self::CopyPolicyCommand => SettingsTarget::ProfileCopyPolicyCommand(index),
         }
     }
+
+    /// The same verb, behind the row's `⋯`.
+    #[must_use]
+    pub fn verb(self) -> RowVerb {
+        match self {
+            Self::Enable => RowVerb::EnableViaProfile,
+            Self::CopyPolicyCommand => RowVerb::CopyPolicyCommand,
+        }
+    }
+
+    /// The menu item's words: `Copy` alone says nothing in a list of verbs, so the
+    /// item names what it copies.
+    fn menu_label(self) -> &'static str {
+        match self {
+            Self::Enable => Text::ProfilesEnableViaProfile.text(),
+            Self::CopyPolicyCommand => Text::ProfilesCopyPolicyCommand.text(),
+        }
+    }
+}
+
+/// **Whether a row's button stands in the open**: its width may be at most
+/// [`COMBO_MAX_ROW_SHARE`] of the row's text column — the share every picker on
+/// every other page may take of its row ([`combo_width`]'s clamp), so the row's
+/// sentences keep at least the other half. Where it does not fit, the row's
+/// sentence still says what is true and the verb is behind the `⋯`
+/// ([`row_menu_items`]); a box that slid out of its column into the rail is what
+/// this rule exists to stop (review of round 4: drawn clipped, pressed whole).
+/// **A foot verb is never wider than the row it stands in** (T-INTEGRATION-INJECT-4 round 5).
+/// The four foot verbs have fixed widths the page was drawn at; at the narrowest width the
+/// dialog admits, the row is narrower than `Restore all defaults`, and a button right-aligned
+/// past the row's left edge reached into the rail — drawn cut by the content box and, before
+/// [`SettingsLayout::shows`] asked both axes, pressed whole. Narrowed to the row instead, as a
+/// picker is clamped to its share of the row, the verb stays one whole button and its label
+/// ellipsises inside it ([`push_button`]).
+fn foot_verb_width(wanted: f32, row_left: f32, row_right: f32) -> f32 {
+    wanted.min(row_right - row_left)
+}
+
+fn profile_button_fits(button_width: f32, text_column: (f32, f32)) -> bool {
+    button_width <= COMBO_MAX_ROW_SHARE * (text_column.1 - text_column.0)
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -9956,25 +10018,12 @@ impl SettingsLayout {
             .is_some_and(|body| item[1] >= body[1] && item[3] <= body[3])
     }
 
-    /// **The scroll that brings the focused control into view**, given the one
-    /// this layout was built at — or that same number when it is already there.
-    ///
-    /// *Minimal* movement, which is the whole of the rule: a row one pixel below
-    /// the fold rises one pixel, not to the top of the box. Scrolling further
-    /// than the fix requires moves rows the user was reading for a reason they
-    /// did not ask about, and the browsers this behaviour is borrowed from
-    /// (`scrollIntoView({ block: "nearest" })`) settled the same way.
-    ///
-    /// The row's whole [`RowLayout::band`] is what has to fit, not its control:
-    /// a combo brought exactly to the content edge leaves its own title cut off
-    /// above it, and the ring drawn round it is then a ring half outside the box
-    /// that clips it. `Close` never moves anything — the header does not scroll.
-    #[must_use]
-    pub fn scroll_to_show(&self, target: SettingsTarget, scroll: f32) -> f32 {
-        // The rail does not scroll and neither does the header, so neither moves
-        // anything: `Nav` is the second target in this dialog whose answer is
-        // "nowhere", and it is the first one that is a control.
-        let band = match target {
+    /// **The band of the scrolling page a target lives in** — its row's, or its own box when it
+    /// is a row of its own; `None` for what does not scroll (the rail, the header, the dialog
+    /// and the scrim). What [`Self::scroll_to_show`] brings into view, and what a press on the
+    /// target is inside.
+    pub(crate) fn band_of(&self, target: SettingsTarget) -> Option<[f32; 4]> {
+        match target {
             SettingsTarget::Combo(row)
             | SettingsTarget::Link(row)
             | SettingsTarget::Slider(row)
@@ -10028,11 +10077,29 @@ impl SettingsLayout {
             SettingsTarget::Nav(_)
             | SettingsTarget::Close
             | SettingsTarget::Scrim
-            | SettingsTarget::Panel => {
-                return scroll;
-            }
-        };
-        let Some(band) = band else {
+            | SettingsTarget::Panel => None,
+        }
+    }
+
+    /// **The scroll that brings the focused control into view**, given the one
+    /// this layout was built at — or that same number when it is already there.
+    ///
+    /// *Minimal* movement, which is the whole of the rule: a row one pixel below
+    /// the fold rises one pixel, not to the top of the box. Scrolling further
+    /// than the fix requires moves rows the user was reading for a reason they
+    /// did not ask about, and the browsers this behaviour is borrowed from
+    /// (`scrollIntoView({ block: "nearest" })`) settled the same way.
+    ///
+    /// The row's whole [`RowLayout::band`] is what has to fit, not its control:
+    /// a combo brought exactly to the content edge leaves its own title cut off
+    /// above it, and the ring drawn round it is then a ring half outside the box
+    /// that clips it. `Close` never moves anything — the header does not scroll.
+    #[must_use]
+    pub fn scroll_to_show(&self, target: SettingsTarget, scroll: f32) -> f32 {
+        // The rail does not scroll and neither does the header, so neither moves
+        // anything: `Nav` is the second target in this dialog whose answer is
+        // "nowhere", and it is the first one that is a control.
+        let Some(band) = self.band_of(target) else {
             return scroll;
         };
         let above = self.clip[1] - band[1];
@@ -10049,14 +10116,22 @@ impl SettingsLayout {
         (scroll + travel).clamp(0.0, self.max_scroll)
     }
 
-    /// Whether a content box landed wholly inside the scroll viewport.
+    /// Whether a content box landed wholly inside the box the page is drawn
+    /// clipped to — **on both axes**.
     ///
     /// Partly-visible is not visible enough to press: a combo sliced by the
     /// content edge would take a click aimed at the row above it. The vertical
     /// rail already answers a scrolled list this way (`seats::hit_rail_chrome`),
     /// and a dialog that scrolls is the same list with a different border.
+    ///
+    /// **Sideways too** (T-INTEGRATION-INJECT-4 round 5): the page is drawn
+    /// through [`clip_content`] with this same box, which cuts both axes, so a
+    /// box whose left edge has slid past the content box's into the rail is a
+    /// box whose tail is not drawn. Pressing it would be pressing the rail's
+    /// empty space. This is the one place the rule is asked: [`hit`] puts every
+    /// box [`content_presses`] lists through it.
     fn shows(&self, rect: [f32; 4]) -> bool {
-        rect[1] >= self.clip[1] && rect[3] <= self.clip[3]
+        wholly_inside(rect, self.clip)
     }
 
     /// Whether a box the Advanced group **holds** has been revealed far enough to
@@ -11585,15 +11660,19 @@ pub fn layout_for_menus(
                             .editor
                             .map_or(ENV_GHOSTS.len(), EditorSubject::ghost_count);
                         let mine = content_of.editor.map_or(0, |editor| editor.env_rows);
+                        // **The name column is 170px where the row has it, and never more
+                        // than a picker's share of what the row leaves for the two fields**
+                        // (T-INTEGRATION-INJECT-4 round 5): at the narrowest width the dialog
+                        // admits, a fixed 170px ran past the row and the value column turned
+                        // inside out, both cut by the content box. [`COMBO_MAX_ROW_SHARE`] is
+                        // the page's own clamp for a box beside a column of text.
+                        let remove_side = px(ENV_REMOVE_SIDE_LOGICAL_PX);
+                        let remove_left = row_right - remove_side;
+                        let fields = remove_left - px(2.0 * ENVTAB_GAP_LOGICAL_PX) - row_left;
+                        let name_width =
+                            px(ENV_NAME_WIDTH_LOGICAL_PX).min(COMBO_MAX_ROW_SHARE * fields);
                         for ordinal in 0..ghosts + mine {
-                            let remove_side = px(ENV_REMOVE_SIDE_LOGICAL_PX);
-                            let remove_left = row_right - remove_side;
-                            let name = [
-                                row_left,
-                                line,
-                                row_left + px(ENV_NAME_WIDTH_LOGICAL_PX),
-                                line + field_height,
-                            ];
+                            let name = [row_left, line, row_left + name_width, line + field_height];
                             placed_env.push(EnvRowLayout {
                                 index: ordinal.checked_sub(ghosts),
                                 name,
@@ -11615,7 +11694,12 @@ pub fn layout_for_menus(
                         placed_env_add = Some([
                             row_left,
                             line,
-                            row_left + px(ENV_ADD_WIDTH_LOGICAL_PX),
+                            row_left
+                                + foot_verb_width(
+                                    px(ENV_ADD_WIDTH_LOGICAL_PX),
+                                    row_left,
+                                    row_right,
+                                ),
                             line + px(ENV_ADD_HEIGHT_LOGICAL_PX),
                         ]);
                         [row_left, control_top, row_right, band[3]]
@@ -11851,11 +11935,15 @@ pub fn layout_for_menus(
             // answering the same question about two different kinds of row.
             PageItem::EditorFoot => {
                 cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
-                let width = if content_of.editor.is_some_and(|editor| editor.user) {
-                    px(DELETE_PROFILE_WIDTH_LOGICAL_PX)
-                } else {
-                    px(RESTORE_ALL_WIDTH_LOGICAL_PX)
-                };
+                let width = foot_verb_width(
+                    if content_of.editor.is_some_and(|editor| editor.user) {
+                        px(DELETE_PROFILE_WIDTH_LOGICAL_PX)
+                    } else {
+                        px(RESTORE_ALL_WIDTH_LOGICAL_PX)
+                    },
+                    row_left,
+                    row_right,
+                );
                 editor_foot = Some([
                     row_right - width,
                     cursor,
@@ -11874,7 +11962,8 @@ pub fn layout_for_menus(
             // margin the hint line used to open.
             PageItem::Reset => {
                 cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
-                let button = px(RESET_ADVANCED_WIDTH_LOGICAL_PX);
+                let button =
+                    foot_verb_width(px(RESET_ADVANCED_WIDTH_LOGICAL_PX), row_left, row_right);
                 reset_advanced = Some([
                     row_right - button,
                     cursor,
@@ -11977,7 +12066,7 @@ pub fn layout_for_menus(
             });
         }
         cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
-        let width = px(RESTORE_ALL_WIDTH_LOGICAL_PX);
+        let width = foot_verb_width(px(RESTORE_ALL_WIDTH_LOGICAL_PX), row_left, row_right);
         // **The note takes what the verb leaves, and it wraps** — §7.1.6c-5′'s
         // ruling, met on the one sentence in this dialog that is not a row's.
         // The column left over is 340px at the dialog's own width and the
@@ -12058,11 +12147,11 @@ pub fn layout_for_menus(
             // before the button — the Shortcuts row's rule, where the chord ends
             // one gap before the button that changes it. A button laid over the
             // run would answer every press aimed at a verb.
-            let button = ProfileButton::of(line.profile_fallback).map(|kind| {
+            let button = ProfileButton::of(line.profile_fallback).and_then(|kind| {
                 let label = measure(kind.label(), px(BUTTON_FONT_LOGICAL_PX));
                 let width = (2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + label).ceil();
                 let right = columns.text.1;
-                (
+                profile_button_fits(width, columns.text).then_some((
                     kind,
                     [
                         right - width,
@@ -12070,7 +12159,7 @@ pub fn layout_for_menus(
                         right,
                         middle + px(BUTTON_HEIGHT_LOGICAL_PX) / 2.0,
                     ],
-                )
+                ))
             });
 
             let column = px(PROFILE_MARK_COLUMN_LOGICAL_PX);
@@ -12154,7 +12243,7 @@ pub fn layout_for_menus(
         // blank one: a profile with no program is a row that cannot start, and
         // this block's default state is meant to be foolproof.
         cursor += px(FOOT_MARGIN_TOP_LOGICAL_PX);
-        let width = px(NEW_PROFILE_WIDTH_LOGICAL_PX);
+        let width = foot_verb_width(px(NEW_PROFILE_WIDTH_LOGICAL_PX), row_left, row_right);
         new_profile = Some([
             row_right - width,
             cursor,
@@ -13431,10 +13520,35 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
             return SettingsTarget::Nav(item.category);
         }
     }
+    // **Every box on the page answers through one door** — [`content_presses`]
+    // lists them, in the order a press is resolved, and [`SettingsLayout::shows`]
+    // decides here, once, which of them can be pressed: only a box wholly inside
+    // the content box it is drawn clipped to. A row cannot forget the rule,
+    // because no row asks it.
+    if let Some((_, target)) = content_presses(layout, values)
+        .into_iter()
+        .find(|(rect, _)| layout.shows(*rect) && contains(*rect, x, y))
+    {
+        return target;
+    }
+    if contains(layout.frame, x, y) {
+        return SettingsTarget::Panel;
+    }
+    SettingsTarget::Scrim
+}
+
+/// **Every pressable box of the scrolling page, in the order a press is resolved**,
+/// with the target each answers — the one list [`hit`] asks [`SettingsLayout::shows`]
+/// about. A box is listed whether or not it is visible; whether it may answer is
+/// decided in that one place, not per row. What a reveal has not finished
+/// uncovering ([`SettingsLayout::reveals`]) is left out here, because that is a
+/// fact about the box's group rather than about the content box.
+fn content_presses(
+    layout: &SettingsLayout,
+    values: &SettingsValues,
+) -> Vec<([f32; 4], SettingsTarget)> {
+    let mut presses = Vec::new();
     for placed in &layout.profiles {
-        if !layout.shows(placed.band) {
-            continue;
-        }
         // **A dark button answers with its own row**, which is the same
         // sentence an unavailable picker item answers with `Menu`: nothing
         // happened, and the press belongs to the surface the control is standing
@@ -13448,116 +13562,91 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
         // row's dark `↑`. `ProfileRow` says the true thing and costs nothing:
         // pressing a row's band already does nothing but move the focus, which
         // is exactly what a press on a dark button is owed.
-        if let Some((kind, button)) = placed.button
-            && contains(button, x, y)
-        {
-            return kind.target(placed.index);
+        if let Some((kind, button)) = placed.button {
+            presses.push((button, kind.target(placed.index)));
         }
-        if contains(placed.up, x, y) {
-            return if placed.index == 0 {
+        presses.push((
+            placed.up,
+            if placed.index == 0 {
                 SettingsTarget::ProfileRow(placed.index)
             } else {
                 SettingsTarget::ProfileUp(placed.index)
-            };
-        }
-        if contains(placed.down, x, y) {
-            return if placed.index + 1 >= layout.profiles.len() {
+            },
+        ));
+        presses.push((
+            placed.down,
+            if placed.index + 1 >= layout.profiles.len() {
                 SettingsTarget::ProfileRow(placed.index)
             } else {
                 SettingsTarget::ProfileDown(placed.index)
-            };
-        }
-        if contains(placed.edit, x, y) {
-            return SettingsTarget::ProfileEdit(placed.index);
-        }
-        if contains(placed.more, x, y) {
-            return SettingsTarget::ProfileMore(placed.index);
-        }
-        if contains(placed.band, x, y) {
-            return SettingsTarget::ProfileRow(placed.index);
-        }
+            },
+        ));
+        presses.push((placed.edit, SettingsTarget::ProfileEdit(placed.index)));
+        presses.push((placed.more, SettingsTarget::ProfileMore(placed.index)));
+        presses.push((placed.band, SettingsTarget::ProfileRow(placed.index)));
     }
-    if let Some(new_profile) = layout.new_profile
-        && layout.shows(new_profile)
-        && contains(new_profile, x, y)
-    {
-        return SettingsTarget::ProfileNew;
+    if let Some(new_profile) = layout.new_profile {
+        presses.push((new_profile, SettingsTarget::ProfileNew));
     }
-    if let Some(crumb) = layout.crumb
-        && layout.shows(crumb.band)
-        && contains(crumb.back, x, y)
-    {
-        return SettingsTarget::EditorBack;
+    if let Some(crumb) = layout.crumb {
+        presses.push((crumb.back, SettingsTarget::EditorBack));
     }
-    if let Some(browse) = layout.browse
-        && layout.shows(browse)
-        && contains(browse, x, y)
-    {
-        return SettingsTarget::EditorBrowse;
+    if let Some(browse) = layout.browse {
+        presses.push((browse, SettingsTarget::EditorBrowse));
     }
-    if let Some(link) = layout.version_link
-        && layout.shows(link)
-        && contains(link, x, y)
-    {
-        return SettingsTarget::MenuAction(SettingsRow::AboutVersion);
+    if let Some(link) = layout.version_link {
+        presses.push((link, SettingsTarget::MenuAction(SettingsRow::AboutVersion)));
     }
-    if let Some(door) = layout.update_door
-        && layout.shows(door)
-        && contains(door, x, y)
-    {
-        return if values.version_update.control.enabled() {
-            SettingsTarget::Link(SettingsRow::AboutVersion)
-        } else {
-            SettingsTarget::Panel
-        };
+    if let Some(door) = layout.update_door {
+        presses.push((
+            door,
+            if values.version_update.control.enabled() {
+                SettingsTarget::Link(SettingsRow::AboutVersion)
+            } else {
+                SettingsTarget::Panel
+            },
+        ));
     }
     // **The environment table stands inside the editor's Advanced group**, so
     // every cell of it answers on that group's terms as well as the page's: asked
     // per box rather than per table, because the table is taller than most of
     // what a reveal has uncovered on its way past — half a table is exactly the
     // case the rule is about.
+    let revealed = |rect: [f32; 4]| layout.reveals(rect).then_some(rect);
     for (ordinal, line) in layout.env_rows.iter().enumerate() {
-        // **A ghost is one target and the whole line is it** (§7.1.6c-6c): a
-        // press adopts it, and until then there are no cells to land in — its
-        // `✕` is reserved and never struck, because a column that disappeared on
-        // the first rows would bend the table's right edge (mock-up,
-        // `.envrow.ghost .env-del`).
         let Some(index) = line.index else {
-            if (layout.shows(line.name) && layout.reveals(line.name) && contains(line.name, x, y))
-                || (layout.shows(line.value)
-                    && layout.reveals(line.value)
-                    && contains(line.value, x, y))
-            {
-                return SettingsTarget::EnvGhost(ordinal);
+            // **A ghost is one target and the whole line is it** (§7.1.6c-6c): a
+            // press adopts it, and until then there are no cells to land in — its
+            // `✕` is reserved and never struck, because a column that disappeared on
+            // the first rows would bend the table's right edge (mock-up,
+            // `.envrow.ghost .env-del`).
+            for cell in [line.name, line.value].into_iter().filter_map(revealed) {
+                presses.push((cell, SettingsTarget::EnvGhost(ordinal)));
             }
             continue;
         };
-        if layout.shows(line.name) && layout.reveals(line.name) && contains(line.name, x, y) {
-            return SettingsTarget::EnvName(index);
-        }
-        if layout.shows(line.value) && layout.reveals(line.value) && contains(line.value, x, y) {
-            return SettingsTarget::EnvValue(index);
-        }
-        if layout.shows(line.remove) && layout.reveals(line.remove) && contains(line.remove, x, y) {
-            return SettingsTarget::EnvRemove(index);
+        for (cell, target) in [
+            (line.name, SettingsTarget::EnvName(index)),
+            (line.value, SettingsTarget::EnvValue(index)),
+            (line.remove, SettingsTarget::EnvRemove(index)),
+        ] {
+            if let Some(cell) = revealed(cell) {
+                presses.push((cell, target));
+            }
         }
     }
-    if let Some(add) = layout.env_add
-        && layout.shows(add)
-        && layout.reveals(add)
-        && contains(add, x, y)
-    {
-        return SettingsTarget::EnvAdd;
+    if let Some(add) = layout.env_add.and_then(revealed) {
+        presses.push((add, SettingsTarget::EnvAdd));
     }
-    if let Some(foot) = layout.editor_foot
-        && layout.shows(foot)
-        && contains(foot, x, y)
-    {
-        return if values.editor.is_some_and(|editor| editor.user) {
-            SettingsTarget::EditorDelete
-        } else {
-            SettingsTarget::EditorRestore
-        };
+    if let Some(foot) = layout.editor_foot {
+        presses.push((
+            foot,
+            if values.editor.is_some_and(|editor| editor.user) {
+                SettingsTarget::EditorDelete
+            } else {
+                SettingsTarget::EditorRestore
+            },
+        ));
     }
     for placed in &layout.rows {
         // **A row the reveal has not finished uncovering answers nothing.** It is
@@ -13568,60 +13657,42 @@ pub fn hit(layout: &SettingsLayout, values: &SettingsValues, x: f64, y: f64) -> 
         if placed.row.advanced() && !layout.reveals(placed.band) {
             continue;
         }
-        if layout.shows(placed.combo) && contains(placed.combo, x, y) {
-            // **A row this machine cannot honour is dialog body**, which is
-            // `option_enabled`'s ruling one level up and enforced in the same
-            // one place: a rule spelled only at the draw leaves a greyed row
-            // that still opens its picker under the pointer.
-            return if placed.row.available(values) {
+        // **A row this machine cannot honour is dialog body**, which is
+        // `option_enabled`'s ruling one level up and enforced in the same
+        // one place: a rule spelled only at the draw leaves a greyed row
+        // that still opens its picker under the pointer.
+        presses.push((
+            placed.combo,
+            if placed.row.available(values) {
                 placed.row.control_target()
             } else {
                 SettingsTarget::Panel
-            };
-        }
+            },
+        ));
     }
     for line in &layout.shortcuts {
-        if let Some(record) = line.record
-            && layout.shows(record)
-            && contains(record, x, y)
-        {
-            return SettingsTarget::Record(line.index);
+        if let Some(record) = line.record {
+            presses.push((record, SettingsTarget::Record(line.index)));
         }
-        if let Some(restore) = line.restore
-            && layout.shows(restore)
-            && contains(restore, x, y)
-        {
-            return SettingsTarget::RestoreRow(line.index);
+        if let Some(restore) = line.restore {
+            presses.push((restore, SettingsTarget::RestoreRow(line.index)));
         }
     }
-    if let Some(restore_all) = layout.restore_all
-        && layout.shows(restore_all)
-        && contains(restore_all, x, y)
-    {
-        return SettingsTarget::RestoreAll;
+    if let Some(restore_all) = layout.restore_all {
+        presses.push((restore_all, SettingsTarget::RestoreAll));
     }
     // The disclosure's whole band answers, not just the triangle: the heading is
     // the control, exactly as a files-tree row is — a 10px glyph is not a thing
     // to ask somebody to hit, and the word beside it is what they are aiming at.
-    if let Some(group) = layout.advanced
-        && layout.shows(group.band)
-        && contains(group.band, x, y)
-    {
-        return SettingsTarget::Advanced(group.group);
+    if let Some(group) = layout.advanced {
+        presses.push((group.band, SettingsTarget::Advanced(group.group)));
     }
     // The verb closes the group and is therefore inside it: it is the last band
     // the reveal uncovers, and until it is wholly uncovered it is a picture.
-    if let Some(reset) = layout.reset_advanced
-        && layout.shows(reset)
-        && layout.reveals(reset)
-        && contains(reset, x, y)
-    {
-        return SettingsTarget::ResetAdvanced(layout.category);
+    if let Some(reset) = layout.reset_advanced.and_then(revealed) {
+        presses.push((reset, SettingsTarget::ResetAdvanced(layout.category)));
     }
-    if contains(layout.frame, x, y) {
-        return SettingsTarget::Panel;
-    }
-    SettingsTarget::Scrim
+    presses
 }
 
 /// Every fill, label and mark the overlay draws, bottom layer first.
@@ -32382,6 +32453,249 @@ mod tests {
                 "the row's text {text:?} runs under the button {button:?}"
             );
         }
+    }
+
+    // ── what can be pressed is what is drawn (T-INTEGRATION-INJECT-4 round 5) ──
+
+    /// The scales the harness lays every page out at.
+    const PRESS_SCALES: [f32; 3] = [1.0, 1.5, 2.0];
+
+    /// The Profiles rows the harness stands on: the fixture's four, with one row offering
+    /// `Enable via $PROFILE` and one offering `Copy`, so both buttons are on the page.
+    fn pressable_profile_lines() -> Vec<crate::profiles::ProfileLine> {
+        let mut lines = profile_lines();
+        lines[1].profile_fallback = crate::shell_integration::PowerShellProfileFallback::Offer;
+        lines[2].profile_fallback =
+            crate::shell_integration::PowerShellProfileFallback::PolicyChangeable;
+        lines
+    }
+
+    /// One page of the dialog at a surface `width` (physical) and `scale`, scrolled `scroll`;
+    /// `None` where the dialog refuses to open. `editor` lays out the Profiles editor instead
+    /// of the list.
+    fn page_at(
+        category: SettingsCategory,
+        editor: Option<EditorSubject>,
+        width: f32,
+        scale: f32,
+        scroll: f32,
+    ) -> Option<SettingsLayout> {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let shortcuts = shortcut_lines();
+        let lines = pressable_profile_lines();
+        let content = match editor {
+            Some(subject) => editing_content(&rows, &lines, subject),
+            None => profiles_content(&rows, &shortcuts, &lines),
+        };
+        layout_for_menu(
+            width,
+            (SURFACE.1 * scale).round(),
+            scale,
+            None,
+            None,
+            content,
+            category,
+            scroll,
+            MENU_UNSCROLLED,
+            &mut measure,
+        )
+    }
+
+    /// **The narrowest surface the dialog admits** at `scale` — found from the layout's own
+    /// refusal, not restated: the least width at which it still opens.
+    fn narrowest_admitted(scale: f32) -> f32 {
+        let opens =
+            |width: f32| page_at(SettingsCategory::Profiles, None, width, scale, 0.0).is_some();
+        let (mut refused, mut opened) = (1.0_f32, (SURFACE.0 * scale).round());
+        assert!(opens(opened), "the dialog opens on the fixture's surface");
+        while opened - refused > 1.0 {
+            let middle = ((refused + opened) / 2.0).floor();
+            if opens(middle) {
+                opened = middle;
+            } else {
+                refused = middle;
+            }
+        }
+        opened
+    }
+
+    /// The pages the harness walks: every category of the page table, and the Profiles
+    /// editor — a page added to [`SettingsCategory::ALL`] is walked without being named here.
+    fn pressable_pages() -> Vec<(SettingsCategory, Option<EditorSubject>)> {
+        let mut pages: Vec<_> = SettingsCategory::ALL
+            .into_iter()
+            .map(|category| (category, None))
+            .collect();
+        pages.push((SettingsCategory::Profiles, Some(editor_subject(false))));
+        pages
+    }
+
+    /// **Every point that answers a page target lies inside the box the page is drawn clipped
+    /// to, and within its target's row** — over a grid of the whole dialog. Sideways the row is
+    /// not the limit: a picker may be wider than its row at the narrowest width and is drawn,
+    /// and pressable, where it stands; the clip is what drawing cuts. A target with no band (the
+    /// rail, the header, the dialog, the scrim) is not the page's and is not asked.
+    fn every_press_is_inside_what_is_drawn(placed: &SettingsLayout, what: &str) {
+        let values = values();
+        // Sideways no box is cut: what a box shows is all of it, so `shows` refusing a box is
+        // never a button drawn half and pressed not at all.
+        for (rect, target) in content_presses(placed, &values) {
+            assert!(
+                rect[0] >= placed.clip[0] && rect[2] <= placed.clip[2],
+                "{what}: {target:?} at {rect:?} reaches past the page's clip {:?} sideways",
+                placed.clip
+            );
+        }
+        let step = (6.0 * placed.scale).round().max(1.0);
+        let frame = placed.frame;
+        let mut y = frame[1] + step / 2.0;
+        while y < frame[3] {
+            let mut x = frame[0] + step / 2.0;
+            while x < frame[2] {
+                let target = hit(placed, &values, f64::from(x), f64::from(y));
+                if let Some(band) = placed.band_of(target) {
+                    assert!(
+                        contains(placed.clip, x, y),
+                        "{what}: ({x}, {y}) answers {target:?} outside the page's clip {:?}",
+                        placed.clip
+                    );
+                    assert!(
+                        y >= band[1] && y < band[3],
+                        "{what}: ({x}, {y}) answers {target:?} outside its row {band:?}"
+                    );
+                }
+                x += step;
+            }
+            y += step;
+        }
+    }
+
+    /// PIN — **what can be pressed is what is drawn, on every page, at every admitted width**
+    /// (T-INTEGRATION-INJECT-4 round 5; the review's blocker, the second instance of C-3's
+    /// class). The page is drawn through [`clip_content`] with [`SettingsLayout::clip`]; every
+    /// pressable box goes through [`SettingsLayout::shows`] in [`hit`]. Walked over every page
+    /// of the page table and the profile editor, at 100/150/200%, at the narrowest surface the
+    /// dialog admits and at the fixture's wide one, at the top and the bottom of each page's
+    /// scroll.
+    ///
+    /// RED (mutations: `shows` asks the vertical axis only, as before this round — the Enable
+    /// button's tail over the rail answers at the narrowest width; `profile_button_fits`
+    /// answers `true`; `foot_verb_width` keeps the fixed width — `Restore all defaults` reaches
+    /// into the rail on Shortcuts; `hit` tests each box with `contains` alone).
+    #[test]
+    fn every_press_on_every_page_is_inside_what_is_drawn() {
+        for scale in PRESS_SCALES {
+            for width in [narrowest_admitted(scale), (SURFACE.0 * scale).round()] {
+                for (category, editor) in pressable_pages() {
+                    let Some(top) = page_at(category, editor, width, scale, 0.0) else {
+                        continue;
+                    };
+                    let bottom = page_at(category, editor, width, scale, top.max_scroll)
+                        .expect("the same page, scrolled");
+                    for (placed, at) in [(&top, "top"), (&bottom, "bottom")] {
+                        let what = format!(
+                            "{category:?}{} at {scale}x, {width}px, {at}",
+                            if editor.is_some() { " editor" } else { "" }
+                        );
+                        every_press_is_inside_what_is_drawn(placed, &what);
+                    }
+                }
+            }
+        }
+    }
+
+    /// PIN — **the one door: a box that reaches past the page's clip answers no press, on either
+    /// axis** (T-INTEGRATION-INJECT-4 round 5). The layout keeps today's boxes inside the clip;
+    /// this pins the rule that holds whatever a future row places — a box moved half into the
+    /// rail answers nothing, not even on its visible half, which is the vertical rule
+    /// (`Self::shows`'s "partly visible is not visible enough") said sideways.
+    ///
+    /// RED (mutations: `shows` asks the vertical axis only; `hit` drops the `shows` filter).
+    #[test]
+    fn a_box_reaching_past_the_clip_answers_no_press() {
+        let mut lines = profile_lines();
+        lines[1].profile_fallback = crate::shell_integration::PowerShellProfileFallback::Offer;
+        let mut placed = profiles_page(&lines);
+        let (kind, button) = placed.profiles[1]
+            .button
+            .expect("the offer stands at 720px");
+        let width = button[2] - button[0];
+        let reaching = [
+            placed.clip[0] - width / 2.0,
+            button[1],
+            placed.clip[0] + width / 2.0,
+            button[3],
+        ];
+        placed.profiles[1].button = Some((kind, reaching));
+        let middle_y = f64::from((reaching[1] + reaching[3]) / 2.0);
+        for x in [reaching[0] + 2.0, reaching[2] - 2.0] {
+            assert_ne!(
+                hit(&placed, &values(), f64::from(x), middle_y),
+                SettingsTarget::ProfileEnable(1),
+                "a box reaching past the clip answered at {x}"
+            );
+        }
+    }
+
+    /// PIN — **an Offer or PolicyChangeable row at the narrowest admitted width still tells the
+    /// truth and still has its verb** (round 5). Where the text column cannot spare the button
+    /// (the page's control share, [`COMBO_MAX_ROW_SHARE`]), no button stands in the open — and
+    /// nothing answers for one — while the row's `⋯` offers the same verb first; at the wide
+    /// surface the button stands. The row's sentence is unchanged either way.
+    ///
+    /// RED (mutations: `profile_button_fits` answers `true` — the button stands over the rail;
+    /// `row_menu_items` leaves the row's verb out — the narrow row has no way to it).
+    #[test]
+    fn a_rows_button_that_does_not_fit_is_behind_its_menu() {
+        let lines = pressable_profile_lines();
+        for scale in PRESS_SCALES {
+            let narrow = page_at(
+                SettingsCategory::Profiles,
+                None,
+                narrowest_admitted(scale),
+                scale,
+                0.0,
+            )
+            .expect("the narrowest admitted width opens");
+            let wide = page_at(
+                SettingsCategory::Profiles,
+                None,
+                (SURFACE.0 * scale).round(),
+                scale,
+                0.0,
+            )
+            .expect("the wide surface opens");
+            for (index, kind, verb) in [
+                (1, ProfileButton::Enable, RowVerb::EnableViaProfile),
+                (
+                    2,
+                    ProfileButton::CopyPolicyCommand,
+                    RowVerb::CopyPolicyCommand,
+                ),
+            ] {
+                assert_eq!(
+                    narrow.profiles[index].button, None,
+                    "at {scale}x the narrow row has no room for {kind:?}"
+                );
+                assert_eq!(
+                    wide.profiles[index].button.map(|(kind, _)| kind),
+                    Some(kind),
+                    "at {scale}x the wide row has its {kind:?}"
+                );
+                let items = row_menu_items(&lines[index]);
+                assert_eq!(items.first().map(|item| item.verb), Some(verb));
+                assert_eq!(
+                    items.iter().filter(|item| item.verb == verb).count(),
+                    1,
+                    "the verb is offered once"
+                );
+            }
+        }
+        // A row with no fallback verb has none behind its menu either.
+        assert!(row_menu_items(&lines[0]).iter().all(|item| !matches!(
+            item.verb,
+            RowVerb::EnableViaProfile | RowVerb::CopyPolicyCommand
+        )));
     }
 
     /// PIN — **the first row's `↑` and the last row's `↓` are dark, not absent,

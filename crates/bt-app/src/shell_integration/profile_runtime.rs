@@ -380,8 +380,12 @@ fn install_for_program(program: &Path, arguments: &[OsString]) -> io::Result<Pat
         .ok_or_else(|| io::Error::other(Text::ShellProfileProbeFailed.text()))?;
     observed.line_present = profile_line_is_present(&observed.path);
     publish_profile_observation(program, observed.clone());
-    if let Some(sentence) =
-        policy_cause(observed.scopes, row_execution_policy(program, arguments)).sentence()
+    if let Some(sentence) = policy_cause(
+        observed.scopes,
+        observed.zone,
+        row_process_scope(program, arguments),
+    )
+    .sentence()
     {
         return Err(io::Error::other(sentence.text()));
     }
@@ -453,6 +457,18 @@ pub fn begin_profile_install_undo(
             answer_profile_install(window, outcome);
         },
     );
+}
+
+/// **The answers addressed to `window`**, oldest first — what the window owed them delivers; an
+/// answer for a window that has since closed is delivered nowhere.
+pub fn profile_installs_for(
+    answers: &[ProfileInstallAnswer],
+    window: winit::window::WindowId,
+) -> impl Iterator<Item = &ProfileInstallOutcome> {
+    answers
+        .iter()
+        .filter(move |answer| answer.window == window)
+        .map(|answer| &answer.outcome)
 }
 
 /// Every answer that has arrived since the last call, oldest first.
@@ -574,8 +590,12 @@ mod tests {
     /// receives its own outcome and the Undo handle inside it; the second answer does not
     /// replace the first.
     ///
-    /// RED (mutation: keep one slot, `answers.clear()` before the push in
-    /// `answer_profile_install`): the first window's answer is gone.
+    /// Delivered through [`profile_installs_for`], the filter the window's event handler reads
+    /// its answers through (review of round 4, item 9), and not by a filter of this test's own.
+    ///
+    /// RED (mutations: keep one slot, `answers.clear()` before the push in
+    /// `answer_profile_install` — the first window's answer is gone; drop the window filter in
+    /// `profile_installs_for` — each window receives both).
     #[test]
     fn two_windows_clicks_in_flight_each_get_their_own_answer() {
         let first = winit::window::WindowId::from(7_u64);
@@ -588,10 +608,8 @@ mod tests {
         answer_profile_install(second, installed("profile B.ps1"));
         let answers = take_profile_installs();
         let mine = |window| {
-            answers
-                .iter()
-                .filter(|answer: &&ProfileInstallAnswer| answer.window == window)
-                .map(|answer| answer.outcome.clone())
+            profile_installs_for(&answers, window)
+                .cloned()
                 .collect::<Vec<_>>()
         };
         assert_eq!(mine(first), vec![installed("profile A.ps1")]);

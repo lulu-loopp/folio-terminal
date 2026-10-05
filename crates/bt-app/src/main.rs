@@ -43910,16 +43910,7 @@ impl Runtime<'_> {
             self.apply_profile_action(action)?;
         }
         if let settings::SettingsTarget::ProfileEnable(index) = target {
-            let id = profiles::id(index);
-            if let Some(program) = self.app.profile_programs.program(&id).map(PathBuf::from)
-                && shell_integration::is_powershell(&program)
-            {
-                shell_integration::begin_profile_install(
-                    program,
-                    profiles::launch_arguments_of(index),
-                    self.window_id(),
-                );
-            }
+            self.enable_via_profile(index);
         }
         if let settings::SettingsTarget::ProfileCopyPolicyCommand(_) = target {
             self.copy_policy_command()?;
@@ -44923,6 +44914,12 @@ impl Runtime<'_> {
                 self.apply_default_profile(&id)?;
                 return Ok(());
             }
+            // The row's button, behind the `⋯`: the same press, through the same door.
+            settings::RowVerb::EnableViaProfile => {
+                self.enable_via_profile(index);
+                return Ok(());
+            }
+            settings::RowVerb::CopyPolicyCommand => return self.copy_policy_command(),
         }
         self.store_profiles()
     }
@@ -64351,9 +64348,10 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                             text,
                         )?;
                     }
-                    let here = runtime.window_id();
-                    for answer in installs.iter().filter(|answer| answer.window == here) {
-                        match answer.outcome.clone() {
+                    for outcome in
+                        shell_integration::profile_installs_for(&installs, runtime.window_id())
+                    {
+                        match outcome.clone() {
                             shell_integration::ProfileInstallOutcome::Installed {
                                 program,
                                 profile,

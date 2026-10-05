@@ -377,6 +377,22 @@ impl Runtime<'_> {
         self.store_profiles()
     }
 
+    /// **`Enable via $PROFILE` on row `index`**, from its button or its `⋯`: the
+    /// install worker is asked for that row's program and arguments, on behalf of
+    /// this window.
+    pub(crate) fn enable_via_profile(&mut self, index: usize) {
+        let id = profiles::id(index);
+        if let Some(program) = self.app.profile_programs.program(&id).map(PathBuf::from)
+            && shell_integration::is_powershell(&program)
+        {
+            shell_integration::begin_profile_install(
+                program,
+                profiles::launch_arguments_of(index),
+                self.window_id(),
+            );
+        }
+    }
+
     /// **`Copy` on a row whose execution policy the user can change**: the one command, on the
     /// clipboard, on this click and no other — and the window says so in the words every copy
     /// in this app says it with, the command in full. Folio runs nothing.

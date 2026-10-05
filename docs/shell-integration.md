@@ -237,11 +237,30 @@ policy is one of three cases, and the capability sentence says which:
   elevation, would decide the effective policy, so the row offers one **Copy** button in the place
   of the Enable button; it puts exactly that command on the clipboard and the window says what was
   copied. Folio never runs it.
+
+Either button stands in the row only while the text column can spare it (at most the share of the
+row a picker may take on any other page); at narrow dialog widths it is not drawn, and the row's
+`⋯` menu, which offers the same verb first on every row that has one, is the way to it.
 * **Set by the organisation** (MachinePolicy or UserPolicy, i.e. Group Policy). No command and no
   button: the user cannot change it.
-* **Set by the row itself** (a refusing Process scope: the row's own `-ExecutionPolicy`, or a
-  `PSExecutionPolicyPreference` in the environment). It outranks CurrentUser, so the command would
-  not help; the sentence says these arguments' policy refuses `$PROFILE`, with no button.
+* **Set for the process** (a refusing Process scope: the row's own `-ExecutionPolicy`, its last
+  occurrence as both binders take it, or a `PSExecutionPolicyPreference` in the environment). It
+  outranks CurrentUser, so the command would not help; the sentence says the policy set for this
+  process refuses `$PROFILE`, with no button.
+
+Two more cases offer nothing:
+
+* **Where `$PROFILE` is stored.** `RemoteSigned` refuses an unsigned script from the Internet or
+  Untrusted zone. The probe reports the profile's zone: its Mark of the Web, or the path's own zone
+  where Windows PowerShell can name it (PowerShell 7 cannot), or this computer for a local path.
+  When `RemoteSigned` is the policy that decides, or would decide once the command has run, and the
+  zone is remote or cannot be named (a share PowerShell 7 is asked about), the row says `$PROFILE`
+  is stored where the policy may refuse it.
+* **A row this build cannot read** (for example `-ep:Bypass`: the colon form is not an option to
+  either binder) makes no claim about its policy and shows only the "not provided" sentence.
+
+The default policy, used when no scope is set, is not a constant: the probe asks the edition for
+its effective policy with the probe's own Process scope cleared.
 
 After the user runs the command in any shell, the next visit to the Profiles page re-reads the
 policy (the page-entry observation edge) and the row becomes the ordinary Enable offer; the Enable

@@ -43,6 +43,7 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- In a narrow Settings window, a button whose edge is cut off no longer answers a click on the space beside it.
 - PowerShell integration preparation can be retried after a failed or missing write, concurrent preparations cannot leave a partial script, and an update trial's temporary script is removed when that transaction is retired.
 - PowerShell's integration loader now keeps its PSReadLine reflection state process-wide and silently leaves the shell unchanged if its owned script cannot be read.
 - Folio left running now learns about a new version within a day.

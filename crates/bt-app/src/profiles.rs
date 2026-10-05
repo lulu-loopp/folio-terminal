@@ -4070,7 +4070,9 @@ pub fn capability_text_for_launch(
             }
             crate::shell_integration::PowerShellProfileFallback::PolicyChangeable
             | crate::shell_integration::PowerShellProfileFallback::PolicyManaged
-            | crate::shell_integration::PowerShellProfileFallback::PolicyOwnArguments
+            | crate::shell_integration::PowerShellProfileFallback::PolicyProcess
+            | crate::shell_integration::PowerShellProfileFallback::PolicyLocation
+            | crate::shell_integration::PowerShellProfileFallback::Unreadable
             | crate::shell_integration::PowerShellProfileFallback::Pending
             | crate::shell_integration::PowerShellProfileFallback::Offer
             | crate::shell_integration::PowerShellProfileFallback::NoProfile
