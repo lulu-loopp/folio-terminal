@@ -111,6 +111,9 @@ All notable changes to Folio are recorded here. The format follows
 - About → Version says what an update is doing after the download: Verifying,
   then ready with Restart…, then Restarting…, instead of Downloading again or
   offering Update and restart for an update already downloaded.
+- In Settings, Enter on About's buttons presses them, and the keyboard focus
+  moves on when the Version button stops being pressable instead of staying on
+  it with no ring.
 
 ### Known issues
 

@@ -7852,6 +7852,21 @@ impl SettingsPanel {
         }
     }
 
+    /// **Every frame's half of [`Self::keep_focus_reachable`]** (047-EXPERIENCE): the placement
+    /// the frame's layout made, and a focus that is no longer a stop put on one.
+    ///
+    /// A stop can stop being one while nobody presses anything — About's Version control is a stop
+    /// only while it is enabled, and a check or a download disables it — and the ring is drawn
+    /// only on a stop. The runtime calls this on the road every draw comes through
+    /// (`Runtime::settings_layout`). A dialog nobody has put a focus in is left with none, so
+    /// the first `Tab` still lands on the first stop.
+    pub fn keep_focus_on_a_stop(&mut self, content: SettingsContent<'_>, placed: Vec<usize>) {
+        self.note_placed(placed);
+        if self.focus.is_some() {
+            self.keep_focus_reachable(content);
+        }
+    }
+
     /// Put the focus back on something the dialog still holds.
     ///
     /// The row list is conditional ([`visible_rows`]), so choosing `Horizontal`
@@ -8399,6 +8414,11 @@ impl SettingsPanel {
                 | SettingsTarget::EditorRestore
                 | SettingsTarget::EditorDelete),
             ) => SettingsKeyVerdict::Chose(target),
+            // **A door opens on `Enter` as it does under the pointer** (047-EXPERIENCE): the
+            // About page's doors and Version's control are stops because pressing them is an
+            // action, and the press leaves through `apply_settings_choice`'s `Link` arm on both
+            // roads. This arm was missing, so the keyboard reached every door and opened none.
+            Some(target @ SettingsTarget::Link(_)) => SettingsKeyVerdict::Chose(target),
             // A field has already taken its own `Enter` before the walk got
             // here (`Runtime::settings_field_key`), so reaching this arm means
             // the field is not the focus after all.
@@ -32710,6 +32730,96 @@ mod tests {
                         every_press_is_inside_what_is_drawn(placed, &what);
                         let stops = page_stops(category, editor, placed);
                         every_stop_is_a_drawn_pressable_box(placed, &stops, &what);
+                    }
+                }
+            }
+        }
+    }
+
+    /// RED (047-EXPERIENCE) — **`Enter` presses the door the ring is on, and the keyboard never
+    /// rests on a control that is not a stop.**
+    ///
+    /// Two halves of one walk. Every About door — Version's control among them — answers `Enter`
+    /// with the press the pointer makes; the arm was missing, so the keyboard reached every door
+    /// and opened none. And on every page the harness walks, with the ring on each of its stops,
+    /// About's Version control then disabling itself (a check in flight, a download, verifying,
+    /// a recovery Retry cannot race): the frame's rule
+    /// ([`SettingsPanel::keep_focus_on_a_stop`]) leaves the focus on a stop of the new order —
+    /// where the precedent every vanished stop follows puts it, the order's first stop.
+    ///
+    /// MUTATIONS, each observed red: delete the `Link` arm of `SettingsPanel::activate` — every
+    /// door answers `Inert`; make `keep_focus_on_a_stop` only note the placement — the focus
+    /// stays on the disabled Version control.
+    #[test]
+    fn the_keyboard_presses_its_door_and_never_rests_on_a_control_that_is_not_a_stop() {
+        use crate::update_card::{VersionControl, VersionRow};
+        use crate::update_job::Bytes;
+
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let shortcuts = shortcut_lines();
+        let lines = pressable_profile_lines();
+        let about = profiles_content(&rows, &shortcuts, &lines);
+        let doors: Vec<SettingsTarget> = page_order(about, SettingsCategory::About, &[])
+            .into_iter()
+            .filter(|stop| matches!(stop, SettingsTarget::Link(_)))
+            .collect();
+        assert!(
+            doors.contains(&SettingsTarget::Link(SettingsRow::AboutVersion)),
+            "the fixture's Version control is enabled"
+        );
+        for door in doors {
+            let mut panel = SettingsPanel::default();
+            panel.toggle(about);
+            panel.select_category(SettingsCategory::About);
+            panel.focus_to(door);
+            assert_eq!(
+                panel.key(SettingsKey::Activate, about, about.values),
+                SettingsKeyVerdict::Chose(door),
+                "Enter on {door:?} presses it"
+            );
+        }
+
+        let busy = [
+            VersionControl::Check { enabled: false },
+            VersionControl::Progress(Bytes::default()),
+            VersionControl::Downloaded,
+            VersionControl::Retry { enabled: false },
+        ];
+        for (category, editor) in pressable_pages() {
+            let placed = page_at(category, editor, (SURFACE.0).round(), 1.0, 0.0)
+                .expect("the fixture's surface opens the dialog");
+            let content = match editor {
+                Some(subject) => editing_content(&rows, &lines, subject),
+                None => profiles_content(&rows, &shortcuts, &lines),
+            };
+            let buttons = placed.placed_profile_buttons();
+            let before = focus_order(content, category, &buttons);
+            for control in &busy {
+                let changed = SettingsContent {
+                    values: Box::leak(Box::new(SettingsValues {
+                        version_update: VersionRow {
+                            control: control.clone(),
+                            ..VersionRow::default()
+                        },
+                        ..SettingsValues::sample()
+                    })),
+                    ..content
+                };
+                let after = focus_order(changed, category, &buttons);
+                for stop in &before {
+                    let mut panel = SettingsPanel::default();
+                    panel.toggle(content);
+                    panel.select_category(category);
+                    panel.focus_to(*stop);
+                    panel.keep_focus_on_a_stop(changed, buttons.clone());
+                    let focus = panel.focus().expect("a placed focus is kept somewhere");
+                    assert!(
+                        after.contains(&focus),
+                        "{category:?}: the ring was on {stop:?}, the Version control became \
+                         {control:?}, and the focus rests on {focus:?}, which is no stop"
+                    );
+                    if !after.contains(stop) {
+                        assert_eq!(Some(&focus), after.first(), "{category:?}: {stop:?}");
                     }
                 }
             }

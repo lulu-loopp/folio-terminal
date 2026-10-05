@@ -43076,7 +43076,7 @@ impl Runtime<'_> {
             start.elapsed().as_micros().saturating_sub(content_us)
         });
         let (gpu, renderer) = (&mut self.app.gpu, &mut self.window.renderer);
-        self.window.settings_geometry.read(inputs, |inputs| {
+        let laid = self.window.settings_geometry.read(inputs, |inputs| {
             let leaving_station = hang_watch::enter(hang_watch::Station::Settings);
             let mut measure_us = 0;
             let mut measure_calls = 0;
@@ -43097,7 +43097,20 @@ impl Runtime<'_> {
             }
             hang_watch::at(leaving_station);
             laid
-        })
+        });
+        // **The keyboard never rests on a control that is not a stop** (047-EXPERIENCE). A stop
+        // can stop being one while nobody presses anything — About's Version control is a stop
+        // only while enabled, and it disables itself while a check or a download runs — and the
+        // ring is drawn only on a stop, so a focus left behind there is a keyboard with no ring.
+        // Asked on the one road every draw, hover and hit test comes through, with the placement
+        // this layout made, and answered by the rule every press already ends with
+        // ([`settings::SettingsPanel::keep_focus_reachable`]: the page's first stop).
+        if let Some(layout) = &laid {
+            self.window
+                .settings
+                .keep_focus_on_a_stop(content, layout.placed_profile_buttons());
+        }
+        laid
     }
 
     /// The dialog's contents this frame, for the callers that need them beside a
