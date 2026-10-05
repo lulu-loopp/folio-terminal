@@ -43,6 +43,13 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- "Enable via $PROFILE" is offered only when your other PowerShell windows would load the profile too; on a machine whose policy refuses scripts it offers the command that allows them, so enabling it can no longer make every PowerShell window print an error.
+- Undo, removing the `$PROFILE` line and uninstalling also remove the profile file and folder Folio created and the one backup copy it kept; a file you had, or added to, stays.
+- Uninstalling no longer stops because a PowerShell was slow to start; it says which profile it could not check and goes on, and with "remove settings and data" on, nothing is deleted unless every other step succeeded.
+- The winget copy's Uninstall row says to close Folio first, and its command runs winget only after the cleanup succeeded, in Command Prompt and PowerShell alike.
+- The "Remove the line from $PROFILE" row appears only for a line Folio wrote, and a Profiles row's "could not be determined" no longer reads as a refusal; Folio asks again when the page is opened.
+- In a narrow Settings window, a profile's "default" badge no longer runs under its button.
+- The privacy notes and the README describe the update check where it now is (About → Automatic check), and that Check still asks when the automatic check is off.
 - A click on a pane's title-bar controls while the pane is moving lands only on a control that is drawn there.
 - In a narrow Settings window, a button whose edge is cut off no longer answers a click on the space beside it.
 - Commands Folio runs to learn about the machine no longer leave helper processes behind after a timeout or after Folio exits.

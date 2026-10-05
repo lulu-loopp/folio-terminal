@@ -91,20 +91,35 @@ command line above 32,766 UTF-16 code units are left byte-for-byte unchanged;
 Settings projects that same current answer. A probe failure is unknown, not
 invalid: the next birth may schedule another question on the background worker,
 but no birth waits for it, and one exact executable and argv may start at most
-three parser probes in a process. Startup and every profile-table change ask all
+three parser probes from births in a process; a visit to the Profiles page asks a
+failed question once more, and the row says "could not be determined" while the
+last answer is a failure. Startup and every profile-table change ask all
 command-bearing PowerShell rows on the existing background preparation worker;
 a birth with no answer yet still starts as written and never waits. The loader
 reads Folio's own `shell-integration/folio.ps1`. Restart, split, duplicate,
 restore and Recent all use that same seam. A row which cannot be composed may
 offer one Settings action which writes the guarded managed line to that edition's
-`$PROFILE.CurrentUserCurrentHost`; rows with `NoProfile` or a script-refusing
-execution policy do not. The installed fact and policy are observed per edition,
-once on each Profiles-page visit, and Undo removes only the managed line. The
-PowerShell script returns outside `TERM_PROGRAM=Folio`, so that line is inert
-in other terminals; a nested PowerShell inherits the declaration intentionally.
+`$PROFILE.CurrentUserCurrentHost`; rows with `NoProfile` do not, and neither does
+any row unless both an ordinary session of the edition (the scopes without a row's
+arguments, its Process scope the account's fresh environment's) and the row
+itself (its own `-ExecutionPolicy`) would load that file — the file every session
+of the edition reads (release read B1). A present line is "loaded via $PROFILE"
+under the same two conditions only. The installed fact and policy are observed per
+edition, once on each Profiles-page visit; a question that got no answer is said as
+undetermined and asked again on the next visit. Before writing, Folio records in
+`integration-profile-files.json`, under the marks lock, the edition, whether it is
+creating the file and its folders, and the one copy it takes of a file that was
+there before its first write; Undo, the Settings remover, `--remove-shell-integration`
+and both uninstall verbs remove the managed line, then the copy, then — only when
+Folio created it and nothing but whitespace is left — the file and each empty
+folder it created. A removal takes no copy. A PowerShell that does not say where
+its `$PROFILE` is, and that the record does not locate, is reported with what is
+left there and refuses nothing. The Settings remover is offered only for a line in
+a form Folio owns. The PowerShell script returns outside `TERM_PROGRAM=Folio`, so
+that line is inert in other terminals; a nested PowerShell is integrated only where
+its `$PROFILE` carries the line, by inheriting the declaration.
 The bash and zsh scripts act wherever they are sourced.
-The one existing Settings remover, `--remove-shell-integration`, or
-`--uninstall-cleanup` removes a managed line. No path changes execution policy.
+No path changes execution policy.
 Every writer of that
 record takes the advisory lock with an explicit asker: `Asker::InApp` waits
 behind Folio's own writers with no deadline, and up to `OUR_TURN` for a holder
@@ -1308,8 +1323,9 @@ Entries: the attention plan's endpoint section; §7.51; §13.37.
 
 ### 41. The uninstall doors — `folded`
 **Rule.** Folio must undo classes of thing outside its own folder — edits to
-other programs' files (agent hooks and the patched module), historical `$PROFILE`
-lines that current Folio only detects/removes,
+other programs' files (agent hooks and the patched module), the `$PROFILE` line
+(written again since T-INTEGRATION-INJECT-4 by the one-click fallback, §4) with the
+file, folders and one copy its write recorded,
 system registrations (the Explorer verb, the sparse package, the toast identity),
 and its own data roots — and **every one of them must be inert and silent when
 `folio.exe` is missing, and must have a non-interactive undo owned by the module
@@ -1355,7 +1371,14 @@ script) says otherwise, and after a cleanup that completed hands the program's
 own files to a remover that takes them once the process that asked has gone —
 on Windows only the files the release installed and then the folder if empty, on
 macOS the bundle; a link among them refuses the removal, and a managed copy is
-left to its manager. `--uninstall-cleanup` is unchanged, for the managers' hooks.
+left to its manager. **Nothing irreversible precedes a step that can refuse**
+(release read M1): the claims and the purge's preflight, then every removal row,
+then the program's step, and the purge of settings and data last — only when
+nothing before it refused; a run that refused keeps the data and says so on each
+data row, for both verbs. A managed copy's row names the manager's command with the
+cleanup joined before it by `cmd /c "… && …"` where the manager runs none, and
+says to close Folio first. `--uninstall-cleanup` is otherwise unchanged, for the
+managers' hooks.
 **From.** `docs/plans/design/clean-uninstall-2026-09-20.md` — §1 what is left
 outside, §3 the six committed rules, and §6 *what the reviews changed*, which
 states that it rules, together with its closure addendum; the owner's ruling of
