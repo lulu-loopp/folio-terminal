@@ -8,7 +8,7 @@ use crate::{
 use anyhow::Result;
 use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Instant;
 
 impl Runtime<'_> {
