@@ -19089,6 +19089,16 @@ impl LeafSession {
             .or_else(|| self.spawn_place.clone())
     }
 
+    /// **What the `+` and a picker row carry from this pane**: its reported folder, always
+    /// **carried** — a new tab beside a pane keeps the profile's starting rule whatever the pane
+    /// was born in (coordinator's ruling 2026-10-05). Only the verbs that start a shell *in this
+    /// pane's place* read [`Self::seed_place_for_a_new_shell`].
+    fn place_for_a_new_tab_beside(&self) -> Option<profiles::SeedPlace> {
+        self.session
+            .working_directory()
+            .map(|cwd| profiles::SeedPlace::Carried(cwd.to_path_buf()))
+    }
+
     /// [`Self::place_for_a_new_shell`] with the kind a spawn weighs it by: **named** for a pane
     /// born in a named folder ([`Self::born_named`]), **carried** otherwise. Restart shell,
     /// Duplicate tab, Duplicate pane and the splits read this; `profiles::place_for` decides.

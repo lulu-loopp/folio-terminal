@@ -25229,6 +25229,21 @@ fn a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profi
         Some(PathBuf::from(r"E:\固定")),
         "a pane not born in a named folder keeps its profile's fixed folder"
     );
+    // The `+` and a picker row beside a pane born named still carry (the review's unpinned
+    // clause). MUTATION, observed red: answer `place_for_a_new_tab_beside` with
+    // `seed_place_for_a_new_shell` — the folder arrives named.
+    let reported = LeafSession {
+        spawn_place: Some(PathBuf::from(r"D:\项目\clicked")),
+        born_named: true,
+        ..leaf_saying("\u{1b}]7;file://localhost/D:/Developer/elsewhere\u{7}")
+    };
+    assert_eq!(
+        reported.place_for_a_new_tab_beside(),
+        Some(profiles::SeedPlace::Carried(PathBuf::from(
+            r"D:\Developer\elsewhere"
+        ))),
+        "a new tab beside a pane born in a named folder carries its folder"
+    );
 }
 
 #[test]
@@ -25347,6 +25362,16 @@ fn every_verb_that_starts_a_shell_in_a_panes_place_reads_the_one_ladder() {
              `LeafSession::seed_place_for_a_new_shell`:\n{body}"
         );
     }
+    // And the `+` and a picker row carry, whatever the pane under them was born in (coordinator's
+    // ruling 2026-10-05; the review's unpinned clause). Its leaf half is pinned by
+    // `a_pane_born_in_a_named_folder_starts_its_next_shells_there_whatever_the_profile_says`.
+    // MUTATION, observed red: read `LeafSession::seed_place_for_a_new_shell` here instead.
+    let beside = method_body("Runtime", "new_tab_with_profile");
+    assert!(
+        beside.contains("LeafSession::place_for_a_new_tab_beside")
+            && !beside.contains("seed_place_for_a_new_shell"),
+        "the `+` carries the pane's folder:\n{beside}"
+    );
 }
 
 /// PIN (ticket #62) — **`Clear scrollback…` asks by count, and asks nothing
