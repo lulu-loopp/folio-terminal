@@ -923,6 +923,15 @@ asks this machine once, at launch.
 *Environment* — audience: whoever can already run programs as this user; carries
 diagnostics only and grants no privilege; read at process start with no reload;
 **set-but-empty is off**, and a name containing `TRACE` keeps the console.
+This configuration entrance is not a pane's inherited process block. On Windows
+each pane birth reads the current account block and then applies only launcher
+overrides a caller identified explicitly, followed by Folio's declarations and
+the profile's. A difference from Folio's inherited environment is never itself
+an override: the parent may be a terminal, Explorer, a resident hotkey process,
+or the old build handing off an update. No current product start road identifies
+an override. If the account read fails, that birth alone uses ordinary process
+inheritance and the next birth asks again. On non-Windows hosts the platform has
+no fresh-account block and pane birth retains ordinary inheritance.
 **The contrast that matters**: `profiles.json` and the pins are watched live
 through the storage watch on the data directory, re-read behind the shared quiet
 window and compared field by field, with an unparseable mid-run file leaving the

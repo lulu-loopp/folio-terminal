@@ -43022,16 +43022,15 @@ impl Runtime<'_> {
         // by every road to showing it — the gear, a press on the rail, an arrow
         // walking it, and a page the dialog fell back to because the one it was
         // on lost its rows. A trigger hung off those four separately is a
-        // trigger with a fifth door somebody will add later. Idempotent and an
-        // atomic load after the first call — see `psreadline::begin_probe`.
-        if content.probes_psreadline(self.window.settings.category()) {
-            psreadline::begin_probe();
-        }
+        // trigger with a fifth door somebody will add later.
         let psreadline_opened = self
             .window
             .settings
             .take_psreadline_open_edge(content.probes_psreadline(self.window.settings.category()));
         if psreadline_opened {
+            // A failed machine query remains unknown and is retried at the next
+            // real reader edge, never on every frame while this page is open.
+            psreadline::begin_probe();
             // An out-of-band module change becomes visible when the reader
             // opens its page. A redraw or hover on the open page is not an edge.
             self.psreadline_documents();
@@ -71979,7 +71978,6 @@ fn main() -> Result<()> {
     // first turn. Below the six argv doors, whose processes never have a window, and above the
     // hand-over, which is this phase's one wait (§5.3 row 18).
     bt_platform::admission::enter_window_thread();
-    pty_door::begin_launch_environment_snapshot();
     // **An update comes first** (`update_startup`, 0.4.6 U-12). The admission is
     // taken shared here, before the data directory is resolved (which may move
     // it), before settings, sidecars and the hand-over below; then one look at

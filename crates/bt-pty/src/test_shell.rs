@@ -906,22 +906,17 @@ impl Hygiene {
         command.environment_refresh = Some(match command.environment_refresh.take() {
             Some(refresh) => crate::EnvironmentRefresh::new(
                 without_pane_announcements(refresh.fresh),
-                without_pane_announcements(refresh.launch_snapshot),
-                without_pane_announcements(refresh.inherited),
+                without_pane_announcements(refresh.launch_overrides),
             ),
             None => {
                 let inherited = without_pane_announcements(std::env::vars_os());
-                crate::EnvironmentRefresh::new(inherited.clone(), inherited.clone(), inherited)
+                crate::EnvironmentRefresh::new(inherited, Vec::new())
             }
         });
         if family == Family::PowerShell
             && let Some(refresh) = command.environment_refresh.as_mut()
         {
-            for list in [
-                &mut refresh.fresh,
-                &mut refresh.launch_snapshot,
-                &mut refresh.inherited,
-            ] {
+            for list in [&mut refresh.fresh, &mut refresh.launch_overrides] {
                 *list = with_fresh_module_path(std::mem::take(list));
             }
         }
@@ -1666,7 +1661,7 @@ mod tests {
             .environment_refresh
             .as_ref()
             .expect("a test shell starts from a cleaned block");
-        for list in [&refresh.fresh, &refresh.launch_snapshot, &refresh.inherited] {
+        for list in [&refresh.fresh, &refresh.launch_overrides] {
             assert!(
                 list.iter().all(|(key, _)| !is_pane_announcement(key)),
                 "{list:?}"
