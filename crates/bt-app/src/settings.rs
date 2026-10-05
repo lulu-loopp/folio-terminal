@@ -12190,11 +12190,27 @@ pub fn layout_for_menus(
             // before the button — the Shortcuts row's rule, where the chord ends
             // one gap before the button that changes it. A button laid over the
             // run would answer every press aimed at a verb.
+            //
+            // **And the badge keeps its room** (census item 9): the badge hangs off the title
+            // in the same text column, so the button stands only where the badge still fits
+            // before it, and the title gives way to the badge — never the other way round, and
+            // no two boxes of the row overlap.
+            let badge_margin = px(PROFILE_BADGE_MARGIN_LEFT_LOGICAL_PX);
+            let badge_width = badge_text(line).map(|text| {
+                measure(text, px(PROFILE_BADGE_FONT_LOGICAL_PX))
+                    + px(PROFILE_BADGE_TRACKING_EM * PROFILE_BADGE_FONT_LOGICAL_PX)
+                        * text.chars().count() as f32
+                    + 2.0 * px(PROFILE_BADGE_PADDING_X_LOGICAL_PX)
+            });
             let button = ProfileButton::of(line.profile_fallback).and_then(|kind| {
                 let label = measure(kind.label(), px(BUTTON_FONT_LOGICAL_PX));
                 let width = (2.0 * border + 2.0 * px(BUTTON_PADDING_X_LOGICAL_PX) + label).ceil();
                 let right = columns.text.1;
-                profile_button_fits(width, columns.text).then_some((
+                let badge_fits = badge_width.is_none_or(|badge| {
+                    columns.text.0 + badge_margin + badge
+                        <= right - width - px(PROFILE_ROW_GAP_LOGICAL_PX)
+                });
+                (profile_button_fits(width, columns.text) && badge_fits).then_some((
                     kind,
                     [
                         right - width,
@@ -12216,18 +12232,18 @@ pub fn layout_for_menus(
             });
 
             let title_width = measure(line.title, px(ROW_TITLE_FONT_LOGICAL_PX));
+            let title_right =
+                text_column_right - badge_width.map_or(0.0, |badge| badge_margin + badge);
             let title = [
                 text_column_left,
                 top,
-                (text_column_left + title_width).min(text_column_right),
+                (text_column_left + title_width)
+                    .min(title_right)
+                    .max(text_column_left),
                 top + px(ROW_TITLE_LINE_LOGICAL_PX),
             ];
-            let badge = badge_text(line).map(|text| {
-                let width = measure(text, px(PROFILE_BADGE_FONT_LOGICAL_PX))
-                    + px(PROFILE_BADGE_TRACKING_EM * PROFILE_BADGE_FONT_LOGICAL_PX)
-                        * text.chars().count() as f32
-                    + 2.0 * px(PROFILE_BADGE_PADDING_X_LOGICAL_PX);
-                let left = title[2] + px(PROFILE_BADGE_MARGIN_LEFT_LOGICAL_PX);
+            let badge = badge_width.map(|width| {
+                let left = title[2] + badge_margin;
                 let height = px(PROFILE_BADGE_HEIGHT_LOGICAL_PX);
                 let badge_top = ((title[1] + title[3] - height) / 2.0).round();
                 [left, badge_top, left + width, badge_top + height]
@@ -32532,12 +32548,30 @@ mod tests {
         scale: f32,
         scroll: f32,
     ) -> Option<SettingsLayout> {
+        page_with(
+            &pressable_profile_lines(),
+            category,
+            editor,
+            width,
+            scale,
+            scroll,
+        )
+    }
+
+    /// [`page_at`] over the profile rows `lines`.
+    fn page_with(
+        lines: &[crate::profiles::ProfileLine],
+        category: SettingsCategory,
+        editor: Option<EditorSubject>,
+        width: f32,
+        scale: f32,
+        scroll: f32,
+    ) -> Option<SettingsLayout> {
         let rows = visible_rows(TabLayoutMode::Vertical);
         let shortcuts = shortcut_lines();
-        let lines = pressable_profile_lines();
         let content = match editor {
-            Some(subject) => editing_content(&rows, &lines, subject),
-            None => profiles_content(&rows, &shortcuts, &lines),
+            Some(subject) => editing_content(&rows, lines, subject),
+            None => profiles_content(&rows, &shortcuts, lines),
         };
         layout_for_menu(
             width,
@@ -32704,9 +32738,78 @@ mod tests {
                             if editor.is_some() { " editor" } else { "" }
                         );
                         every_press_is_inside_what_is_drawn(placed, &what);
+                        no_two_boxes_of_a_profile_row_overlap(placed, &what);
                         let stops = page_stops(category, editor, placed);
                         every_stop_is_a_drawn_pressable_box(placed, &stops, &what);
                     }
+                }
+            }
+        }
+    }
+
+    /// **No two drawn boxes of a profile row overlap**: the title, the badge, the button, the
+    /// sentences and the verb run (census item 9 — the `default` badge ran under the Enable
+    /// button at narrow widths).
+    fn no_two_boxes_of_a_profile_row_overlap(placed: &SettingsLayout, what: &str) {
+        let overlap =
+            |a: [f32; 4], b: [f32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+        for row in &placed.profiles {
+            let mut boxes: Vec<(&str, [f32; 4])> = vec![
+                ("title", row.title),
+                ("description", row.desc),
+                ("up", row.up),
+                ("down", row.down),
+                ("edit", row.edit),
+                ("more", row.more),
+            ];
+            boxes.extend(row.badge.map(|badge| ("badge", badge)));
+            boxes.extend(row.button.map(|(_, button)| ("button", button)));
+            if let Some([first, second]) = row.caps {
+                boxes.push(("capability 1", first));
+                boxes.push(("capability 2", second));
+            }
+            for (at, (name, a)) in boxes.iter().enumerate() {
+                for (other, b) in &boxes[at + 1..] {
+                    assert!(
+                        !overlap(*a, *b),
+                        "{what}: row {}'s {name} {a:?} overlaps its {other} {b:?}",
+                        row.index
+                    );
+                }
+            }
+        }
+    }
+
+    /// PIN (census item 9) — **the `default` badge and the row's button never overlap**: the
+    /// badged default row offering Enable or Copy, at every width from the narrowest the dialog
+    /// admits to the wide surface, at 100/150/200%. Where the badge would not fit before the
+    /// button, the button is behind the row's `⋯`; the title gives way to the badge.
+    ///
+    /// RED (mutations: `badge_unclamped` — the title is not shortened for the badge;
+    /// `button_ignores_badge` — the button stands without the badge's room).
+    #[test]
+    fn the_default_badge_and_the_rows_button_never_overlap() {
+        for fallback in [
+            crate::shell_integration::PowerShellProfileFallback::Offer,
+            crate::shell_integration::PowerShellProfileFallback::PolicyChangeable,
+        ] {
+            let mut lines = pressable_profile_lines();
+            lines[0].profile_fallback = fallback;
+            for scale in PRESS_SCALES {
+                let mut width = narrowest_admitted(scale);
+                while width <= (SURFACE.0 * scale).round() {
+                    let placed =
+                        page_with(&lines, SettingsCategory::Profiles, None, width, scale, 0.0)
+                            .expect("an admitted width opens");
+                    assert!(
+                        placed.profiles[0].badge.is_some(),
+                        "the default row is badged"
+                    );
+                    no_two_boxes_of_a_profile_row_overlap(
+                        &placed,
+                        &format!("{fallback:?} at {scale}x, {width}px"),
+                    );
+                    width += 7.0 * scale;
                 }
             }
         }

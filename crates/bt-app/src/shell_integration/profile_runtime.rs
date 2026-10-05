@@ -123,6 +123,30 @@ fn profile_bytes_carry_the_line(bytes: &[u8]) -> bool {
     Decoded::read(bytes).is_ok_and(|decoded| profile_suppresses_integration_offer(&decoded.text))
 }
 
+/// **Whether the Settings remover has anything to remove here**: a line in one of the exact
+/// forms the removal owns ([`Forms::owns`]) — never the looser test above, which also
+/// recognises a line somebody wrote by hand and the remover cannot prove is Folio's (census
+/// item 5: the verb stood on screen and did nothing). A hand-written line still integrates the
+/// edition, and its row says so; it offers no verb.
+fn profile_carries_an_owned_line(path: &Path, forms: &Forms) -> bool {
+    bt_platform::file_reads::read(bt_platform::file_reads::Lane::Settings, path).is_ok_and(
+        |bytes| {
+            Decoded::read(&bytes)
+                .is_ok_and(|decoded| decoded.text.lines().any(|line| forms.owns(line)))
+        },
+    )
+}
+
+/// The forms a removal owns, for the record `marks` and the data root `data`.
+fn owned_forms(marks: &Marks, data: &Path) -> Forms {
+    let mut scripts = marks.powershell_scripts.clone();
+    let script = script_at(data);
+    if !scripts.contains(&script) {
+        scripts.push(script);
+    }
+    Forms::new(&scripts)
+}
+
 /// Read-only startup discovery for the conditional Settings remover. Legacy marks remain useful
 /// as candidate locations, but no migration is allowed to rewrite a profile now that integration
 /// is process-scoped.
@@ -158,8 +182,13 @@ fn observe_profile_lines(
             };
         }
     };
+    let forms = owned_forms(&marks, data);
     let (paths, report) = candidates(&marks, &files, answers);
-    publish_powershell_profile_line_present(paths.iter().any(|path| profile_line_is_present(path)));
+    publish_powershell_profile_line_present(
+        paths
+            .iter()
+            .any(|path| profile_carries_an_owned_line(path, &forms)),
+    );
     report
 }
 
@@ -365,7 +394,9 @@ fn operate_with(
     );
     if action != Action::Remove || asker == Asker::InApp {
         publish_powershell_profile_line_present(
-            paths.iter().any(|path| profile_line_is_present(path)),
+            paths
+                .iter()
+                .any(|path| profile_carries_an_owned_line(path, &forms)),
         );
     }
     // Probe refusals name executables, not profiles. They are reported on this
@@ -817,6 +848,46 @@ mod tests {
         );
         undo_profile_install(&in_folder, &data).unwrap();
         assert!(!in_folder.exists() && folder.is_dir());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// PIN (census item 5) — **the Settings remover stands only for a line it can prove is
+    /// Folio's.** A hand-written line that dot-sources `folio.ps1` still integrates the edition
+    /// (the observation's "present", which keeps Enable away), but no exact form the removal owns
+    /// is in it, so the remover row is not offered — it would press and remove nothing. Each
+    /// managed and literal legacy form is offered.
+    ///
+    /// RED (mutation: `loose_remover` — the remover's presence reads `profile_line_is_present`,
+    /// as it did: the hand-written line shows a verb that does nothing).
+    #[test]
+    fn the_remover_stands_only_for_a_line_it_can_prove_is_folios() {
+        let root = super::super::tests::temp_dir("profile-owned-line");
+        let data = root.join("data");
+        let forms = owned_forms(&Marks::default(), &data);
+        let profile = root.join("profile.ps1");
+        for (text, integrates, removable) in [
+            (". 'D:\\工具\\folio.ps1'\r\n", true, false),
+            (
+                "# . \"$env:APPDATA\\Folio\\shell-integration\\folio.ps1\"\r\n",
+                false,
+                false,
+            ),
+            (format!("# mine\r\n{MANAGED_LINE}\r\n").as_str(), true, true),
+            (format!("{LEGACY_LINE}\n").as_str(), true, true),
+            (
+                format!(". \"{}\"\r\n", script_at(&data).display()).as_str(),
+                true,
+                true,
+            ),
+        ] {
+            fs::write(&profile, text).unwrap();
+            assert_eq!(profile_line_is_present(&profile), integrates, "{text}");
+            assert_eq!(
+                profile_carries_an_owned_line(&profile, &forms),
+                removable,
+                "{text}"
+            );
+        }
         fs::remove_dir_all(root).unwrap();
     }
 
