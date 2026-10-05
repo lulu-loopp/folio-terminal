@@ -185,7 +185,7 @@ fn fresh_module_path() -> Option<Option<OsString>> {
 const MODULE_ANALYSIS_CACHE: &str = "PSModuleAnalysisCachePath";
 
 /// **The module analysis cache a PowerShell test child starts with: one per edition, shared by
-/// every test child, and warm** (T-INTEGRATION-INJECT-4 round 7).
+/// every test child, and proven warm** (T-INTEGRATION-INJECT-4 round 7; WARMUP 2026-10-05).
 ///
 /// A PowerShell's first command lookup analyses every module on its path that its analysis cache
 /// does not already describe. A real account's cache (`%LOCALAPPDATA%\Microsoft\Windows\
@@ -197,9 +197,10 @@ const MODULE_ANALYSIS_CACHE: &str = "PSModuleAnalysisCachePath";
 /// in the history refusal — past every test's wait; with a warm cache the same child reached its
 /// prompt in 0.4 s. So the cache is the tests' own (under the temporary directory, never the
 /// account's), one per edition because the editions write different files, and it is warmed
-/// once per test process, before the first child of that edition, by a one-shot lookup of a
-/// command that does not exist — which analyses every module on the path, as the slow first
-/// lookup would have. Children started meanwhile wait for the warm-up rather than race it.
+/// once per test process, before the first child of that edition, by lookups of a command that
+/// does not exist — which analyse every module on the path, as the slow first lookup would have
+/// — until a fresh process's lookup analyses nothing ([`complete_analysis_cache`]). Children
+/// started meanwhile wait for the warm-up rather than race it.
 fn warmed_module_analysis_cache(program: &OsStr) -> PathBuf {
     static WARMED: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
     let edition = program_name(program).unwrap_or_else(|| "powershell".to_owned());
@@ -212,10 +213,10 @@ fn warmed_module_analysis_cache(program: &OsStr) -> PathBuf {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     // **A warm-up never fails a test** (review of round 7, item 2). When it cannot finish — the
     // program cannot start (a fallback test's missing `pwsh.exe`), the folder or the copy is
-    // refused, another test process holds the file, PowerShell's delayed save comes after the
-    // wait — the edition stays cold, the next child of that edition tries again, and this child
-    // runs on whatever cache there is: slower at worst, and its give-up message names the
-    // warm-up's outcome ([`TestShell::account`]).
+    // refused, the lookups do not come to one that analyses nothing — the edition stays cold,
+    // the next child of that edition tries again, and this child runs on whatever cache there
+    // is: slower at worst, and its give-up message names the warm-up's outcome
+    // ([`TestShell::account`]).
     let outcome = if warmed.contains(&cache) {
         return cache;
     } else {
@@ -236,32 +237,22 @@ fn warmed_module_analysis_cache(program: &OsStr) -> PathBuf {
 
 /// The warm-up that makes `cache` what a pane's is: **the account's own analysis cache, copied,
 /// then completed for the module path a test child gets** ([`fresh_module_path`]). `Ok` with what
-/// it did when it finished; `Err` with why when it did not.
+/// it did and what proved it when it finished; `Err` with why when it did not.
 ///
 /// A pane's PowerShell uses the account's cache, which its sessions keep warm; the copy gives a
 /// test child that same start without a test ever writing the account's file. The edition is
 /// asked where that file is ([`account_analysis_cache`]) — PowerShell 7 names it with a hash
 /// only it knows. The copy is written under a name of this process's own and renamed into
 /// place, so two test processes warming at once each put a whole file there and neither reads
-/// half of the other's. A lookup of a command that does not exist then analyses whatever the
-/// copy does not describe, with the pane announcements removed and the per-user data folders
-/// pointed into `root`, so the warm-up writes nothing but the cache.
-///
-/// **The shell stays until what it analysed is on disk.** PowerShell writes the cache on a timer,
-/// about 14 s after it changed (measured on both editions, 2026-10-05), not when the process
-/// ends, and while a long analysis runs the timer can fire half-way through it: on the CI runner
-/// a warm-up that stopped at the first write left a cache that still cost the next child 19 s
-/// (scratch run 37261258948). So the warm-up waits for a write *after* its lookup ended, and
-/// stops waiting 30 s after it. When the lookup changed nothing, no write comes and the whole
-/// 30 s is spent; when a write comes, it stops at once.
+/// half of the other's. An account with no cache yet (a CI runner whose job has not started a
+/// Windows PowerShell before) leaves the whole analysis to [`complete_analysis_cache`].
 fn warm_module_analysis_cache(
     program: &OsStr,
     root: &Path,
     cache: &Path,
 ) -> Result<String, String> {
-    const CEILING: Duration = Duration::from_secs(300);
     let shown = Path::new(program).display();
-    std::fs::create_dir_all(root.join("appdata")).map_err(|error| {
+    std::fs::create_dir_all(root).map_err(|error| {
         format!(
             "{shown} not warmed: the folder {} cannot be made: {error}",
             root.display()
@@ -285,7 +276,144 @@ fn warm_module_analysis_cache(
         Some(account) => format!("the account has no cache at {} yet", account.display()),
         None => "the edition did not say where the account's cache is".to_owned(),
     };
-    let literal = powershell_literal(&cache.to_string_lossy());
+    match complete_analysis_cache(program, root, cache) {
+        Ok(lookups) => Ok(format!(
+            "{shown} warmed {} in {:?} ({copied}; {lookups})",
+            cache.display(),
+            started.elapsed()
+        )),
+        Err(why) => Err(format!("{shown} not warmed: {why} ({copied})")),
+    }
+}
+
+/// How many lookups [`complete_analysis_cache`] makes before it says the cache cannot be
+/// completed: the first analyses what the cache lacks and stays until its save is on disk, the
+/// second finds nothing left; one more covers what a save dropped (see there) or another test
+/// process wrote over meanwhile.
+const ANALYSIS_LOOKUPS: usize = 3;
+
+/// How long one lookup's process stays for PowerShell's own save of what it analysed.
+/// PowerShell writes 10 s after the first change and then once nothing has changed for 3 s
+/// (13–14 s, measured on both editions, 2026-10-05); a save that has not ended a minute after the
+/// lookup is not coming.
+const ANALYSIS_SAVE_WAIT: Duration = Duration::from_secs(60);
+
+/// What one lookup of a command that does not exist did to the analysis cache it started from.
+#[derive(Debug, PartialEq, Eq)]
+enum AnalysisLookup {
+    /// The cache described every module on the path: nothing was analysed, nothing was or will
+    /// be saved. The lookup's own time, in milliseconds.
+    AnalysedNothing(u64),
+    /// Modules were analysed, and PowerShell's save of them has ended.
+    Saved(u64),
+    /// Modules were analysed, and the save had not ended within [`ANALYSIS_SAVE_WAIT`].
+    SaveNotEnded(u64),
+}
+
+/// What a lookup's process reports about itself ([`analysis_lookup`]'s script): its lookup's
+/// time; how many changes were waiting to be saved when the lookup returned; whether the cache
+/// file was written while the lookup ran; and whether the count then came back to 0 within
+/// [`ANALYSIS_SAVE_WAIT`] (true when it already was).
+#[derive(Debug, Clone, Copy)]
+struct LookupFacts {
+    milliseconds: u64,
+    queued: u64,
+    written_during: bool,
+    save_ended: bool,
+}
+
+/// **A lookup analysed nothing only when nothing was waiting to be saved and nothing was saved
+/// while it ran.** The count alone is not enough: a save sets it back to 0 when it ends, and a
+/// module analysed while that save was being written is dropped with it — on disk neither then
+/// nor later (measured here: a module analysed while a 35.7 MB save was at 2.4 MB left the count
+/// at 0 after the save and no save came in the next 25 s; a fresh process analysed it again). A
+/// lookup long enough to be saved half-way (every from-nothing lookup on the CI runner was: a
+/// 293,527-byte save at 13–18 s, scratch runs 37336349718 and 37339927076) is therefore never
+/// the proof, whatever the count says after it; the next lookup is.
+fn judged_lookup(facts: LookupFacts) -> AnalysisLookup {
+    if facts.queued == 0 && !facts.written_during {
+        AnalysisLookup::AnalysedNothing(facts.milliseconds)
+    } else if facts.save_ended {
+        AnalysisLookup::Saved(facts.milliseconds)
+    } else {
+        AnalysisLookup::SaveNotEnded(facts.milliseconds)
+    }
+}
+
+/// **Lookups of a command that does not exist, each in a fresh process on `cache`, until one
+/// analyses nothing** ([`judged_lookup`]) — the proof that a child starting on `cache` has
+/// nothing left to analyse. `Ok` names every lookup and what it did; `Err` says why there was no
+/// such lookup.
+///
+/// **Why a fresh lookup is the proof, and the file is not** (WARMUP, CI run 37318864463: from an
+/// account with no cache, the warm-up said "warmed" after 47 s and three Windows PowerShell
+/// children then sat silent for 30 s at their first lookup). PowerShell saves the cache from a
+/// background task, 10 s after the first change and then once nothing has changed for 3 s; the
+/// warm-up of rounds 7–8 stopped at the first sign of a save after its lookup, or after 30 s
+/// without one, and called whatever file there was warm. Two ways that file is short of what
+/// the lookup analysed, both measured here and both open to that warm-up:
+///
+/// * **The process ends during the save.** It does not wait for the background task, and the
+///   file's write time passes the lookup's end at the save's first byte, not its last: a 17.67 MB
+///   cache was left at 4.46 MB in one run of three, and a fresh process on it analysed every
+///   module again (528 changes). On the CI runner one save of the 1.65 MB cache took 1.44 s from
+///   its first visible byte to its last (scratch run 37332806509).
+/// * **The save drops what was analysed while it was written** ([`judged_lookup`]). When that is
+///   the end of the analysis, no later save comes; the warm-up waited out its 30 s and took the
+///   half-way file.
+///
+/// Neither was caught on the CI runner itself: ten runs of the old command from nothing (three at
+/// once, six under eight spinning threads) each left a whole file. What the runner does show is
+/// what makes both possible — a save in the middle of every from-nothing lookup and a save that
+/// spans more than a second. So the proof is PowerShell's own state, read by reflection like
+/// [`account_analysis_cache`]'s location: the count of changes waiting to be saved
+/// (`_saveCacheToDiskQueued`), which a save sets back to 0 only after its last byte (measured on
+/// both editions), and the file's write time around the lookup. A lookup that analysed something
+/// stays until its save has ended, and the next lookup, in a fresh process, checks. An edition
+/// that does not show the count cannot prove a warm cache, and the warm-up says so instead of
+/// claiming one.
+fn complete_analysis_cache(program: &OsStr, root: &Path, cache: &Path) -> Result<String, String> {
+    const CEILING: Duration = Duration::from_secs(300);
+    let started = Instant::now();
+    let mut lookups = Vec::new();
+    for _ in 0..ANALYSIS_LOOKUPS {
+        let budget = CEILING
+            .checked_sub(started.elapsed())
+            .ok_or_else(|| format!("the lookups did not end within {CEILING:?}"))?;
+        let number = lookups.len() + 1;
+        match judged_lookup(analysis_lookup(program, root, cache, budget)?) {
+            AnalysisLookup::AnalysedNothing(milliseconds) => {
+                lookups.push(format!(
+                    "lookup {number} analysed nothing and took {milliseconds} ms"
+                ));
+                return Ok(lookups.join(", "));
+            }
+            AnalysisLookup::Saved(milliseconds) => lookups.push(format!(
+                "lookup {number} analysed for {milliseconds} ms and its save ended"
+            )),
+            AnalysisLookup::SaveNotEnded(milliseconds) => lookups.push(format!(
+                "lookup {number} analysed for {milliseconds} ms and its save had not ended \
+                 {ANALYSIS_SAVE_WAIT:?} later"
+            )),
+        }
+    }
+    Err(format!(
+        "every one of {ANALYSIS_LOOKUPS} lookups analysed modules the cache did not describe ({})",
+        lookups.join(", ")
+    ))
+}
+
+/// One lookup for [`complete_analysis_cache`], in a one-shot `program` on `cache` with the
+/// module path a test child gets, the pane announcements removed and the per-user data folders
+/// pointed into `root`, so it writes nothing but the cache. Ended at `budget`. The file's write
+/// time is read through .NET, not `Get-Item`, so that reading it looks up no command.
+fn analysis_lookup(
+    program: &OsStr,
+    root: &Path,
+    cache: &Path,
+    budget: Duration,
+) -> Result<LookupFacts, String> {
+    let save_wait = ANALYSIS_SAVE_WAIT.as_secs();
     let mut command = bt_platform::quiet_command(program);
     command
         .args([
@@ -293,11 +421,21 @@ fn warm_module_analysis_cache(
             "-NonInteractive",
             "-Command",
             &format!(
-                "Get-Command -Name '__folio_test_shell_warm__' -ErrorAction SilentlyContinue | \
-                 Out-Null; $done = [DateTime]::UtcNow; $until = $done.AddSeconds(30); \
-                 while ([DateTime]::UtcNow -lt $until -and -not ((Test-Path -LiteralPath \
-                 {literal}) -and (Get-Item -LiteralPath {literal}).LastWriteTimeUtc -gt $done)) \
-                 {{ Start-Sleep -Milliseconds 200 }}"
+                "$p = $env:{MODULE_ANALYSIS_CACHE}; $before = [IO.File]::GetLastWriteTimeUtc($p); \
+                 $w = [Diagnostics.Stopwatch]::StartNew(); Get-Command -Name \
+                 '__folio_test_shell_warm__' -ErrorAction SilentlyContinue | Out-Null; $ms = \
+                 $w.ElapsedMilliseconds; $written = [int]([IO.File]::GetLastWriteTimeUtc($p) -ne \
+                 $before); $d = $null; $t = [psobject].Assembly.GetType(\
+                 'System.Management.Automation.AnalysisCache'); foreach ($n in 's_cacheData', \
+                 'cacheData') {{ $f = $t.GetField($n, [Reflection.BindingFlags]'NonPublic,Static'); \
+                 if ($f) {{ $d = $f.GetValue($null); break }} }}; $q = $null; if ($d) {{ $q = \
+                 $d.GetType().GetField('_saveCacheToDiskQueued', \
+                 [Reflection.BindingFlags]'NonPublic,Instance') }}; if (-not $q) {{ \
+                 [Console]::Out.Write('unknown ' + $ms); exit }}; $queued = $q.GetValue($d); \
+                 $until = [DateTime]::UtcNow.AddSeconds({save_wait}); while ($q.GetValue($d) -ne 0 \
+                 -and [DateTime]::UtcNow -lt $until) {{ Start-Sleep -Milliseconds 50 }}; \
+                 [Console]::Out.Write('facts ' + $ms + ' ' + $queued + ' ' + $written + ' ' + \
+                 [int]($q.GetValue($d) -eq 0))"
             ),
         ])
         .env(MODULE_ANALYSIS_CACHE, cache)
@@ -306,7 +444,7 @@ fn warm_module_analysis_cache(
         .env("POWERSHELL_TELEMETRY_OPTOUT", "1")
         .env("POWERSHELL_UPDATECHECK", "Off")
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null());
     for name in PANE_ANNOUNCEMENTS {
         command.env_remove(name);
@@ -320,38 +458,52 @@ fn warm_module_analysis_cache(
         }
         None => {}
     }
+    std::fs::create_dir_all(root.join("appdata"))
+        .map_err(|error| format!("the folder {} cannot be made: {error}", root.display()))?;
+    let started = Instant::now();
     let mut child = command
         .spawn()
-        .map_err(|error| format!("{shown} not warmed: it could not be started ({error})"))?;
+        .map_err(|error| format!("it could not be started ({error})"))?;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
-            Ok(None) if started.elapsed() > CEILING => {
+            Ok(None) if started.elapsed() > budget => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!(
-                    "{shown} not warmed: the warm-up did not end within {CEILING:?} ({copied})"
-                ));
+                return Err(format!("a lookup did not end within {budget:?}"));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-            Err(error) => {
-                return Err(format!(
-                    "{shown} not warmed: the warm-up could not be waited for ({error})"
-                ));
-            }
+            Err(error) => return Err(format!("a lookup could not be waited for ({error})")),
         }
     }
-    if cache.is_file() {
-        Ok(format!(
-            "{shown} warmed {} in {:?} ({copied})",
-            cache.display(),
-            started.elapsed()
-        ))
-    } else {
-        Err(format!(
-            "{shown} not warmed: no cache was written at {} ({copied})",
-            cache.display()
-        ))
+    // A few words: the pipe holds them whole, so reading after the exit cannot block the child.
+    let mut said = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        use std::io::Read;
+        let _ = stdout.read_to_string(&mut said);
+    }
+    let words = said.split_whitespace().collect::<Vec<_>>();
+    let number = |index: usize| words.get(index).and_then(|word| word.parse::<u64>().ok());
+    match (
+        words.first().copied(),
+        number(1),
+        number(2),
+        number(3),
+        number(4),
+    ) {
+        (Some("facts"), Some(milliseconds), Some(queued), Some(written), Some(ended)) => {
+            Ok(LookupFacts {
+                milliseconds,
+                queued,
+                written_during: written == 1,
+                save_ended: ended == 1,
+            })
+        }
+        (Some("unknown"), Some(milliseconds), ..) => Err(format!(
+            "the edition does not show whether its lookup ({milliseconds} ms) analysed anything, \
+             so a warm cache cannot be proven"
+        )),
+        _ => Err(format!("a lookup said {said:?}")),
     }
 }
 
@@ -1691,8 +1843,88 @@ mod tests {
         assert!(
             warmed
                 .iter()
-                .any(|line| line.starts_with("powershell.exe warmed ")),
-            "this process warmed the Windows PowerShell cache before its first child: {warmed:?}"
+                .any(|line| line.starts_with("powershell.exe warmed ")
+                    && line.contains(" analysed nothing and took ")),
+            "this process warmed the Windows PowerShell cache before its first child, and a \
+             fresh lookup on it analysed nothing: {warmed:?}"
+        );
+    }
+
+    /// RED (WARMUP) — **a lookup analysed nothing only when nothing was waiting to be saved and
+    /// nothing was saved while it ran.** A save that ends sets the count back to 0 and drops what
+    /// was analysed while it was being written, so a count of 0 after a lookup that was saved
+    /// half-way proves nothing; a lookup whose save has ended is never the proof either.
+    ///
+    /// RED (mutations: judge by the count alone — the half-way save is taken for a warm cache;
+    /// take an ended save for nothing analysed — a lookup that analysed is taken for the proof).
+    #[test]
+    fn a_lookup_analysed_nothing_only_when_nothing_was_waiting_and_nothing_was_saved() {
+        let facts = |queued, written_during, save_ended| LookupFacts {
+            milliseconds: 7,
+            queued,
+            written_during,
+            save_ended,
+        };
+        for (queued, written_during, save_ended, judged) in [
+            (0, false, true, AnalysisLookup::AnalysedNothing(7)),
+            (0, true, true, AnalysisLookup::Saved(7)),
+            (528, false, true, AnalysisLookup::Saved(7)),
+            (528, true, true, AnalysisLookup::Saved(7)),
+            (528, false, false, AnalysisLookup::SaveNotEnded(7)),
+            (1, true, false, AnalysisLookup::SaveNotEnded(7)),
+        ] {
+            assert_eq!(
+                judged_lookup(facts(queued, written_during, save_ended)),
+                judged,
+                "queued {queued}, written while it ran {written_during}, save ended {save_ended}"
+            );
+        }
+    }
+
+    /// RED (WARMUP) — **a cache cut short is completed, and only a fresh lookup that analyses
+    /// nothing calls it warm.** CI run 37318864463: the warm-up of rounds 7–8 ended its process at
+    /// the first byte of PowerShell's background save, left a cut-off file, said "warmed", and
+    /// every Windows PowerShell child of the run analysed the whole module path again. Half of a
+    /// whole cache stands for that file here.
+    ///
+    /// RED (mutations: count a lookup whose save ended as the last one — no lookup that analysed
+    /// nothing is named; leave a lookup's process as soon as it has analysed, without waiting for
+    /// its save — no lookup ever finds the cache whole, and the completion fails).
+    #[cfg(windows)]
+    #[test]
+    fn a_cache_cut_short_is_completed_and_only_a_lookup_that_analyses_nothing_proves_it() {
+        let program = OsStr::new("powershell.exe");
+        let shared = warmed_module_analysis_cache(program);
+        let whole = std::fs::read(&shared).unwrap_or_else(|error| {
+            panic!(
+                "the shared cache {} is not there: {error}",
+                shared.display()
+            )
+        });
+        let hygiene = Hygiene::new();
+        let root = hygiene.root().join("analysis");
+        std::fs::create_dir_all(&root).unwrap();
+        let cache = root.join("ModuleAnalysisCache");
+        std::fs::write(&cache, &whole[..whole.len() / 2]).unwrap();
+
+        let completed = complete_analysis_cache(program, &root, &cache)
+            .unwrap_or_else(|why| panic!("the cut cache was not completed: {why}"));
+        assert!(
+            completed.starts_with("lookup 1 analysed for "),
+            "the first lookup analysed what the cut file had lost: {completed}"
+        );
+        assert!(
+            completed
+                .rsplit(", ")
+                .next()
+                .is_some_and(|last| last.contains(" analysed nothing and took ")),
+            "the last lookup, in a fresh process, analysed nothing: {completed}"
+        );
+        let again = complete_analysis_cache(program, &root, &cache)
+            .unwrap_or_else(|why| panic!("the completed cache was not found whole: {why}"));
+        assert!(
+            again.starts_with("lookup 1 analysed nothing and took "),
+            "the completed file is whole on disk: {again}"
         );
     }
 
