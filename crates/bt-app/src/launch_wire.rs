@@ -9,11 +9,22 @@
 //! # No free payload crosses, here either
 //!
 //! The attention wire's founding rule, at the second door and in its strongest form: this channel
-//! carries **five declared fields and nothing else** — a folder, a profile id, whether the launch
-//! asked for a window of its own, whether it asked for a tab, and who started it. There is no room
-//! in it for a command to run, a document to open or a name to type, because a channel that carried
-//! any of those would be a channel worth attacking: it is answered by a process that has a terminal
-//! in it.
+//! carries **six declared fields and nothing else** — a folder, a profile id, whether the launch
+//! asked for a window of its own, whether it asked for a tab, who started it, and what an update's
+//! rollback sent the launch to report (0.4.7 U-36: a word from a closed set, and for an unfinished
+//! rollback the folder of its journal). There is no room in it for a command to run, a document to
+//! open or a name to type, because a channel that carried any of those would be a channel worth
+//! attacking: it is answered by a process that has a terminal in it.
+//!
+//! # The report crosses because nothing else can carry it
+//!
+//! A start that a rollback sent (`--update-failed`, or the start a refused rescue build left with
+//! *Update incomplete.*) learns what to report from its own pass (`crate::update_startup`), and
+//! that pass has already retired a rolled-back journal under the transaction lock before this start
+//! asks who holds the data directory — the order F-6 fixes. The word itself is only on the command
+//! line, and the Folio that holds the data directory may be another copy with another installation
+//! home. So the running Folio cannot read the report from the disk; the start's verdict crosses
+//! instead, decided once on that side, as the landing is decided once on this one.
 //!
 //! # The wire carries the origin; the decision is made on this side
 //!
@@ -48,6 +59,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use bt_platform::launch_pipe::LaunchPipe;
 
 use crate::cli;
+use crate::update_job::Failure;
 
 /// The wire's version, and it is [`crate::attention_wire`]'s reason exactly: a `folio.exe` started
 /// from a shortcut may be a different build from the one holding the data directory — a user who
@@ -62,7 +74,93 @@ use crate::cli;
 /// defaults would therefore be quietly changing what somebody else's build said — so v1 is dropped,
 /// which is this constant's own rule and lands a mixed pair of builds on the behaviour every Folio
 /// had before the channel existed: each launch opens its own window.
+///
+/// **Still 2 since U-36, because the report is a key and never a value.** A v2 reader takes the keys
+/// it knows and reads no other (it has since 0.3), so a key added beside them is ignored by every
+/// earlier build and changes nothing it says; its absence is what every earlier sender writes, and
+/// means what it always meant — nothing to report. A version bump instead would have made every
+/// launch between a 0.4.6 and a later build open a second, non-writing window. The rule this keeps
+/// is the converse: **a v2 grammar grows by new keys, never by new values of a known key** — a
+/// value this build does not know drops the whole frame, as `from` always has.
 const WIRE_VERSION: u64 = 2;
+
+/// The key the report crosses as ([`Report`]), absent when there is nothing to report.
+const REPORT_KEY: &str = "failed";
+
+/// The key an unfinished rollback's journal folder crosses as, beside [`REPORT_KEY`] and only with
+/// [`Report::Incomplete`].
+const REPORT_FOLDER_KEY: &str = "failed_folder";
+
+/// **What a start a rollback sent was told to report**, in the words it crosses the pipe in
+/// (0.4.7 U-36).
+///
+/// The three of `crate::update_job::Failure`'s kinds that a start can carry to another Folio, and
+/// no other. `TrialIncomplete` is deliberately not one of them: its card tells the reader that
+/// *this* session is the update's trial, which is false of every process but the trial itself — and
+/// a trial never hands itself over (`crate::update_trial::take_the_claim`). The kinds a driver
+/// reports (`Unsupported`, `Stopped`) are this launch's own and never a start's.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Report {
+    /// The previous version was put back (`Failure::RolledBack`).
+    RolledBack,
+    /// The update stopped before the new version ran, and the previous one was put back
+    /// (`Failure::Interrupted`).
+    Interrupted,
+    /// Putting the previous version back did not finish; `folder` is where its journal is
+    /// (`Failure::Incomplete`). A sender always names it — its own pass read the journal there —
+    /// and the frame always carries it; it is `None` only once [`accept`] has taken away a
+    /// folder that is not a local path, which leaves the report and drops the folder.
+    Incomplete { folder: Option<PathBuf> },
+}
+
+impl Report {
+    /// The report a start carries for `failure`, or `None` for a failure no other Folio may be told.
+    #[must_use]
+    pub(crate) fn of(failure: &Failure) -> Option<Self> {
+        match failure {
+            Failure::RolledBack => Some(Self::RolledBack),
+            Failure::Interrupted => Some(Self::Interrupted),
+            Failure::Incomplete { folder } => Some(Self::Incomplete {
+                folder: folder.clone(),
+            }),
+            Failure::TrialIncomplete { .. } | Failure::Unsupported | Failure::Stopped(_) => None,
+        }
+    }
+
+    /// The failure the update job is told, the same one the start itself would have shown.
+    #[must_use]
+    pub(crate) fn failure(&self) -> Failure {
+        match self {
+            Self::RolledBack => Failure::RolledBack,
+            Self::Interrupted => Failure::Interrupted,
+            Self::Incomplete { folder } => Failure::Incomplete {
+                folder: folder.clone(),
+            },
+        }
+    }
+
+    /// The token this report crosses as — short and from a closed set, [`origin_token`]'s rule.
+    const fn token(&self) -> &'static str {
+        match self {
+            Self::RolledBack => "rolled-back",
+            Self::Interrupted => "interrupted",
+            Self::Incomplete { .. } => "incomplete",
+        }
+    }
+
+    /// A token and its folder, read back: the folder comes with `incomplete` and with nothing else,
+    /// and anything else is not a report this build knows.
+    fn from_token(token: &str, folder: Option<String>) -> Option<Self> {
+        match (token, folder) {
+            ("rolled-back", None) => Some(Self::RolledBack),
+            ("interrupted", None) => Some(Self::Interrupted),
+            ("incomplete", Some(folder)) => Some(Self::Incomplete {
+                folder: Some(PathBuf::from(folder)),
+            }),
+            _ => None,
+        }
+    }
+}
 
 /// **The most bytes a folder may cross as.**
 ///
@@ -81,8 +179,9 @@ const MAX_PROFILE_BYTES: usize = 128;
 
 /// **One launch, in the words it crosses the pipe in.**
 ///
-/// Five fields, and the shape is the ruling: a second `folio.exe` is saying what it was asked for
-/// and who asked, and the process that is already up decides where that lands ([`landing`]). It is
+/// Six fields, and the shape is the ruling: a second `folio.exe` is saying what it was asked for,
+/// who asked and what it was sent to report, and the process that is already up decides where that
+/// lands ([`landing`]). It is
 /// deliberately not a `CliRequest` — that type carries a bare positional and a COM switch, neither
 /// of which this channel has any business carrying, and a message that was "the command line" would
 /// grow a field every time the command line did.
@@ -101,6 +200,10 @@ pub(crate) struct LaunchRequest {
     pub(crate) tab: bool,
     /// Who started this launch — see [`cli::LaunchOrigin`]. Not a decision; [`landing`] is.
     pub(crate) origin: cli::LaunchOrigin,
+    /// **What an update's rollback sent this launch to report** (U-36) — the start's own verdict
+    /// (`crate::update_startup::failed`), never the command line's word re-read. The running
+    /// Folio's update job is told it where the launch lands ([`Self::told`]).
+    pub(crate) report: Option<Report>,
 }
 
 /// **Where one launch lands.**
@@ -212,7 +315,35 @@ impl LaunchRequest {
             new_window: request.new_window,
             tab: request.tab,
             origin: request.origin,
+            report: None,
         })
+    }
+
+    /// **The request one start hands over**: its command line ([`Self::from_cli`]) and what its
+    /// update pass sent it to report (`failed`, `crate::update_startup::failed`) — the one function
+    /// [`hand_over`] builds its request with.
+    pub(crate) fn of_start(
+        request: &cli::CliRequest,
+        failed: Option<&Failure>,
+        kind: impl Fn(&Path) -> cli::PathKind,
+        here: Option<&Path>,
+    ) -> Option<Self> {
+        Some(Self {
+            report: failed.and_then(Report::of),
+            ..Self::from_cli(request, kind, here)?
+        })
+    }
+
+    /// **Tell the running Folio's update job what this launch reports**, once it has landed in
+    /// `landed` (the window it opened or opened a tab in; `None` when none could be). Answers
+    /// whether the job raised the report's card; `None` when there is nothing to report.
+    pub(crate) fn told<W: Copy + Eq>(
+        &self,
+        job: &mut crate::update_job::Job<W>,
+        landed: Option<W>,
+    ) -> Option<bool> {
+        let report = self.report.as_ref()?;
+        Some(job.told_by_a_launch(report.failure(), landed))
     }
 
     /// The line this request crosses as.
@@ -229,6 +360,20 @@ impl LaunchRequest {
         value.insert("new".to_owned(), self.new_window.into());
         value.insert("tab".to_owned(), self.tab.into());
         value.insert("from".to_owned(), origin_token(self.origin).into());
+        // **Only when there is something to report**: a launch with nothing to report writes
+        // exactly the frame every earlier build writes (see [`WIRE_VERSION`]).
+        if let Some(report) = &self.report {
+            value.insert(REPORT_KEY.to_owned(), report.token().into());
+            if let Report::Incomplete {
+                folder: Some(folder),
+            } = report
+            {
+                value.insert(
+                    REPORT_FOLDER_KEY.to_owned(),
+                    folder.to_string_lossy().into_owned().into(),
+                );
+            }
+        }
         serde_json::Value::Object(value).to_string()
     }
 
@@ -268,6 +413,19 @@ impl LaunchRequest {
             // written by something that is not this build — and the field decides whether a
             // reader's own row is consulted at all.
             origin: origin_from_token(object.get("from")?.as_str()?)?,
+            // **Optional, and from the closed set when present** ([`WIRE_VERSION`]'s rule): absent
+            // is what every earlier sender writes and reads as nothing to report; a word this
+            // build has no report for, a folder with the wrong word or without one, is not a frame
+            // this build understands. Here the folder is only bounded, as `cwd` is here; whether it
+            // is a place on this machine is [`accept`]'s question, asked of both paths alike.
+            report: match (
+                object.get(REPORT_KEY),
+                bounded(REPORT_FOLDER_KEY, MAX_FOLDER_BYTES)?,
+            ) {
+                (None, None) => None,
+                (None, Some(_)) => return None,
+                (Some(token), folder) => Some(Report::from_token(token.as_str()?, folder)?),
+            },
         })
     }
 
@@ -321,20 +479,41 @@ impl Refusal {
     }
 }
 
-/// **Whether the running Folio will take this request**, asked identically at both ends.
+/// **Whether the running Folio will take this request, and the request it takes.**
 ///
-/// The one machine question on this wire, and the door it goes through is the door a path printed
-/// into a pane goes through: drive-rooted, nameable by this filesystem, no NUL — and, because what
-/// this path is for is a shell standing in it, a directory that is actually there.
-pub(crate) fn accept(request: &LaunchRequest) -> Result<(), Refusal> {
-    let Some(cwd) = request.cwd.as_deref() else {
-        return Ok(());
-    };
-    if bt_transcript::paths::is_local_absolute_path(cwd) && cwd.is_dir() {
-        Ok(())
-    } else {
-        Err(Refusal::NoSuchFolder)
+/// The one machine question on this wire, and the one place it is asked: **every path that arrives
+/// over the wire goes through [`is_a_local_path`]** — the door a path printed into a pane goes
+/// through: drive-rooted, nameable by this filesystem, no NUL; never a share on another machine or
+/// a device. There are two such paths, `cwd` and an unfinished rollback's journal folder
+/// ([`Report::Incomplete`]); `profile` is a slug and no path. What fails it is answered by what the
+/// path is for:
+///
+/// * **`cwd`** is where a shell will stand, so it must also be a directory that is there, and a
+///   launch that names anything else is refused ([`Refusal::NoSuchFolder`]).
+/// * **The report's folder** is only named on a card and handed to the file manager by its Show
+///   folder (U-36 round 2), so one that is not local is taken away and **the report stays**: the
+///   reader is still told the update is incomplete, on a card that names no folder. A report is
+///   never dropped for its folder — losing it is the defect U-36 closed — and a share is never put
+///   on a card whose button would hand this account's credentials to another machine's SMB server.
+///   Existence is not asked: the journal's folder is not a place anything stands in.
+pub(crate) fn accept(mut request: LaunchRequest) -> Result<LaunchRequest, Refusal> {
+    if let Some(cwd) = request.cwd.as_deref()
+        && !(is_a_local_path(cwd) && cwd.is_dir())
+    {
+        return Err(Refusal::NoSuchFolder);
     }
+    if let Some(Report::Incomplete { folder }) = &mut request.report
+        && folder.as_deref().is_some_and(|path| !is_a_local_path(path))
+    {
+        *folder = None;
+    }
+    Ok(request)
+}
+
+/// **The one rule every path on this wire meets** ([`accept`]): a local absolute path, by the gate
+/// a printed path meets ([`bt_transcript::paths::is_local_absolute_path`]).
+fn is_a_local_path(path: &Path) -> bool {
+    bt_transcript::paths::is_local_absolute_path(path)
 }
 
 /// The reply a server writes, and the client reads back.
@@ -515,33 +694,11 @@ pub(crate) fn open(
             LaunchPipe::start(
                 directory,
                 |line| {
-                    let request = LaunchRequest::decode(line)?;
-                    // **Decided once, here, and carried** (review C-5). The admitted request goes
-                    // to `commit` as a value; there is no second decode and no second `accept`, so
-                    // a folder deleted in the middle of the conversation cannot turn a launch the
-                    // client was told about into nothing at all.
-                    let decision = match accept(&request) {
-                        Err(refusal) => bt_platform::launch_pipe::Decision {
-                            reply: Reply::Refused(refusal).encode(),
-                            admitted: None,
-                        },
-                        Ok(()) => match admit(
-                            request,
-                            crate::hang_watch::window_thread_can_serve(
-                                bt_platform::launch_pipe::HANDOVER_BUDGET,
-                            ),
-                        ) {
-                            Some(admission) => bt_platform::launch_pipe::Decision {
-                                reply: Reply::Taken.encode(),
-                                admitted: Some(admission),
-                            },
-                            None => bt_platform::launch_pipe::Decision {
-                                reply: Reply::Refused(Refusal::NotServing).encode(),
-                                admitted: None,
-                            },
-                        },
-                    };
-                    Some(decision)
+                    decide(line, || {
+                        crate::hang_watch::window_thread_can_serve(
+                            bt_platform::launch_pipe::HANDOVER_BUDGET,
+                        )
+                    })
                 },
                 move |admission| {
                     park(admission);
@@ -551,6 +708,36 @@ pub(crate) fn open(
             .ok()
         })
         .as_ref()
+}
+
+/// **One line, answered** — the listener's whole decision, `None` for a line that is not a request.
+///
+/// **Decided once, here, and carried** (review C-5). The admitted request goes to `commit` as a
+/// value; there is no second decode and no second `accept`, so a folder deleted in the middle of
+/// the conversation cannot turn a launch the client was told about into nothing at all.
+/// `window_thread_can_serve` is [`admit`]'s one impure input, asked only of a request whose folder
+/// was accepted.
+fn decide(
+    line: &str,
+    window_thread_can_serve: impl FnOnce() -> bool,
+) -> Option<bt_platform::launch_pipe::Decision<Admission>> {
+    let request = LaunchRequest::decode(line)?;
+    Some(match accept(request) {
+        Err(refusal) => bt_platform::launch_pipe::Decision {
+            reply: Reply::Refused(refusal).encode(),
+            admitted: None,
+        },
+        Ok(request) => match admit(request, window_thread_can_serve()) {
+            Some(admission) => bt_platform::launch_pipe::Decision {
+                reply: Reply::Taken.encode(),
+                admitted: Some(admission),
+            },
+            None => bt_platform::launch_pipe::Decision {
+                reply: Reply::Refused(Refusal::NotServing).encode(),
+                admitted: None,
+            },
+        },
+    })
 }
 
 /// Spend an admission's place on the request it was taken for.
@@ -592,14 +779,17 @@ pub(crate) fn take() -> Vec<LaunchRequest> {
 /// before the loop exists, admitted only in `Starting`, minted in `main`.
 pub(crate) fn hand_over(
     token: bt_platform::admission::WaitToken<'_, bt_platform::admission::doors::LaunchHandOver>,
-    _admitted: &crate::update_startup::Admitted,
+    admitted: &crate::update_startup::Admitted,
     directory: &Path,
     argv: &cli::CliRequest,
     say: impl Fn(&str),
 ) -> Option<i32> {
     let _ = token;
-    let request = LaunchRequest::from_cli(
+    // **What the pass sent this start to report crosses with it** (U-36): the
+    // [`crate::update_startup::Admitted`] is the pass's own word for it.
+    let request = LaunchRequest::of_start(
         argv,
+        admitted.failed().as_ref(),
         cli::machine_path_kind,
         std::env::current_dir().ok().as_deref(),
     )?;
@@ -627,13 +817,25 @@ pub(crate) fn hand_over(
         }
     })
     .ok()?;
-    match answer? {
+    after_reply(request, answer?, say)
+}
+
+/// **What the start does with the running Folio's answer** — `Some(code)` to leave, `None` to carry
+/// on and open its own window ([`hand_over`]'s two words).
+fn after_reply(request: LaunchRequest, answer: Reply, say: impl Fn(&str)) -> Option<i32> {
+    match answer {
         Reply::Taken => Some(0),
         // **The running Folio said it could not serve this, so this process does** (review C-2).
         // `None` is the same word every other "carry on and open a window" path answers with, and
         // that is deliberate: a new way of being refused must not arrive with a new way of doing
         // nothing.
         Reply::Refused(Refusal::NotServing) => None,
+        // **A launch with a report is never refused into nothing** (U-36). Nobody typed it at a
+        // console — a lock holder started it to tell the reader what became of an update — so the
+        // sentence below would reach no one and the report would be lost with it. It opens its own
+        // window instead, as every launch the running Folio cannot take does, and that window
+        // says both: the report on the update card, the gone folder on a cold launch's card.
+        Reply::Refused(Refusal::NoSuchFolder) if request.report.is_some() => None,
         Reply::Refused(Refusal::NoSuchFolder) => {
             // **[`cli::CliRefusal::NoSuchPath`] and not `NoSuchFolder`**, and the
             // difference is the second half of each sentence rather than the
@@ -702,6 +904,7 @@ mod tests {
                 new_window: true,
                 tab: false,
                 origin: cli::LaunchOrigin::Plain,
+                report: None,
             }
         );
         assert_eq!(
@@ -763,10 +966,11 @@ mod tests {
         let file = here.join(format!("bt-app-launch-wire-{}.txt", std::process::id()));
         std::fs::write(&file, b"x").expect("write a fixture into the scratch directory");
         let asking = |cwd: Option<PathBuf>| {
-            accept(&LaunchRequest {
+            accept(LaunchRequest {
                 cwd,
                 ..LaunchRequest::default()
             })
+            .map(drop)
         };
         assert_eq!(asking(Some(here.clone())), Ok(()));
         assert_eq!(asking(None), Ok(()), "a launch that named no folder is one");
@@ -1137,6 +1341,464 @@ mod tests {
             "",
         ] {
             assert_eq!(Reply::decode(line), None, "{line} is not an answer");
+        }
+    }
+
+    // ── U-36: what a start a rollback sent reports, across the hand-over ─────
+
+    /// The folder of an unfinished rollback's journal, in a home whose path is not ASCII.
+    fn journal_folder() -> PathBuf {
+        PathBuf::from(r"D:\工具\Folio 终端\.folio-update")
+    }
+
+    /// The command line a lock holder starts the installed build with after a rollback: the
+    /// journal's word first (`update_apply::failed_words`), then the handed start's own words.
+    fn sent_by_a_rollback() -> cli::CliRequest {
+        argv(&[
+            "--update-failed",
+            r"D:\工具\Folio 终端\.folio-update\journal.json",
+            "--cwd",
+            r"D:\Developer\笔记",
+        ])
+    }
+
+    /// The three reports a start can carry, an unfinished rollback's naming `folder`.
+    fn reports(folder: PathBuf) -> [Failure; 3] {
+        [
+            Failure::RolledBack,
+            Failure::Interrupted,
+            Failure::Incomplete {
+                folder: Some(folder),
+            },
+        ]
+    }
+
+    /// **RED (U-36) — a start a rollback sent, which finds a Folio running, has its report raised
+    /// as the card in the window its launch landed in, and every window's Version row moves.**
+    ///
+    /// The product's own seams end to end, except the kernel object between them (the platform's
+    /// pipe carries a line byte for byte, `bt_platform::launch_pipe`'s own tests): the request is
+    /// built by [`LaunchRequest::of_start`] — what [`hand_over`] sends — from the command line a
+    /// lock holder writes and the pass's verdict; the listener's [`decide`] answers it; [`park`]
+    /// and [`take`] carry it to the window thread; and [`LaunchRequest::told`] tells the running
+    /// Folio's job, whose card and Version row are read through `update_card::shown`, the one
+    /// comparison the loop repaints from. Before U-36 the request had no report and the job no
+    /// card: the failure was dropped on the way.
+    ///
+    /// MUTATIONS: build the hand-over's request with [`LaunchRequest::from_cli`] (the report is
+    /// never set); drop the report from `encode` or `decode`; drop the `told` call's job update
+    /// (`Job::told_by_a_launch` returns before `told`) — each leaves the job without a card.
+    #[test]
+    fn a_report_crosses_the_hand_over_and_its_card_rises_where_the_launch_landed() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = take();
+        // The listener's `accept` asks the disk, so the handed folder is one that exists.
+        let here = std::env::temp_dir().join(format!("bt-app-u36-笔记-{}", std::process::id()));
+        std::fs::create_dir_all(&here).expect("a scratch folder");
+        let start = argv(&[
+            "--update-failed",
+            r"D:\工具\Folio 终端\.folio-update\journal.json",
+            "--cwd",
+            &here.to_string_lossy(),
+        ]);
+        // A local path on the platform the test runs on, so [`accept`] keeps it.
+        for failure in reports(here.join(".folio-update")) {
+            let request =
+                LaunchRequest::of_start(&start, Some(&failure), all_folders, Some(Path::new(HERE)))
+                    .expect("a start a rollback sent is a launch this wire carries");
+            assert!(request.is_sayable(), "{failure:?} can be said");
+            let decision = decide(&request.encode(), || true).expect("the line is a request");
+            assert_eq!(Reply::decode(&decision.reply), Some(Reply::Taken));
+            park(decision.admitted.expect("the running Folio admitted it"));
+            let arrived = take();
+            assert_eq!(arrived.len(), 1, "one launch reached the window thread");
+            let arrived = &arrived[0];
+            assert_eq!(
+                arrived.cwd,
+                Some(here.clone()),
+                "the launch is still the launch it was"
+            );
+
+            let mut job = crate::update_job::Job::<u32>::with_offers(true);
+            let before = crate::update_card::shown(
+                &job,
+                false,
+                crate::update::CheckView::default(),
+                None,
+                0,
+            );
+            const LANDED: u32 = 7;
+            assert_eq!(arrived.told(&mut job, Some(LANDED)), Some(true));
+            assert_eq!(
+                job.state(),
+                &crate::update_job::State::Failed(None, failure.clone()),
+                "the card is the one the start would have shown cold"
+            );
+            assert_eq!(
+                job.card_window(),
+                Some(LANDED),
+                "in the window the launch landed in"
+            );
+            let after = crate::update_card::shown(
+                &job,
+                false,
+                crate::update::CheckView::default(),
+                None,
+                0,
+            );
+            assert_eq!(after.card.as_ref().map(|(window, _)| *window), Some(LANDED));
+            assert!(
+                crate::update_card::version_changed(&before, &after),
+                "every window's About → Version row is repainted, because any may show it"
+            );
+        }
+        // A launch with nothing to report tells the job nothing.
+        let plain = LaunchRequest::of_start(&argv(&[]), None, all_folders, None)
+            .expect("an empty command line crosses");
+        let mut job = crate::update_job::Job::<u32>::with_offers(true);
+        assert_eq!(plain.told(&mut job, Some(1)), None);
+        assert_eq!(job.card_window(), None);
+        let _ = std::fs::remove_dir(&here);
+    }
+
+    /// **RED (U-36) — the start's hand-over builds its request with its pass's report.**
+    ///
+    /// The one line no in-process test can run — `hand_over` speaks to a kernel object — read
+    /// from the source: the request goes through [`LaunchRequest::of_start`] with what the
+    /// pass's witness says, and is answered through [`after_reply`].
+    ///
+    /// MUTATION: build the request with `LaunchRequest::from_cli` in `hand_over`, or pass `None`
+    /// for the report.
+    #[test]
+    fn the_hand_over_sends_what_the_pass_sent_it_to_report() {
+        let body = bt_source::Index::of_package("bt-app")
+            .body_of(&bt_source::ItemQuery::function("hand_over").in_module("crate::launch_wire"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        assert!(
+            body.contains("LaunchRequest::of_start(")
+                && body.contains("admitted.failed().as_ref()"),
+            "the hand-over's request no longer carries the pass's report:\n{body}"
+        );
+        assert!(
+            body.contains("after_reply(request, answer?, say)"),
+            "the answer is read somewhere other than the tested function:\n{body}"
+        );
+    }
+
+    /// **RED (U-36 round 2) — every path the wire carries meets one gate, and a report whose
+    /// folder fails it keeps the report and loses the folder.**
+    ///
+    /// The journal folder of an `incomplete` report is named on the card and handed to the file
+    /// manager by its Show folder, so a share there would be a click that offers this account's
+    /// credentials to another machine. [`accept`] holds it to the gate `cwd` meets
+    /// ([`is_a_local_path`]). What fails is taken away and the report stays: the reader is told
+    /// the update is incomplete, on a card that names no folder and offers the releases page. A
+    /// local folder is kept, with Show folder.
+    ///
+    /// MUTATIONS: drop the report-folder half of `accept` (the share reaches the card and its
+    /// Show folder); drop the report instead of its folder (the reader is told nothing).
+    #[test]
+    fn a_report_folder_that_is_not_local_is_taken_away_and_the_report_kept() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = take();
+        let local = std::env::temp_dir().join("工具").join(".folio-update");
+        for (sent, kept) in [
+            (
+                PathBuf::from(r"\\server\share\Folio 终端\.folio-update"),
+                None,
+            ),
+            (PathBuf::from(r"\\.\pipe\folio"), None),
+            (PathBuf::from(r"工具\.folio-update"), None),
+            (local.clone(), Some(local.clone())),
+        ] {
+            let request = LaunchRequest {
+                report: Some(Report::Incomplete {
+                    folder: Some(sent.clone()),
+                }),
+                ..LaunchRequest::default()
+            };
+            let decision = decide(&request.encode(), || true).expect("the line is a request");
+            assert_eq!(
+                Reply::decode(&decision.reply),
+                Some(Reply::Taken),
+                "a report is never refused for its folder: {sent:?}"
+            );
+            park(decision.admitted.expect("admitted"));
+            let arrived = take();
+            assert_eq!(arrived.len(), 1);
+            assert_eq!(
+                arrived[0].report,
+                Some(Report::Incomplete {
+                    folder: kept.clone()
+                }),
+                "{sent:?}"
+            );
+            let mut job = crate::update_job::Job::<u32>::with_offers(true);
+            assert_eq!(arrived[0].told(&mut job, Some(2)), Some(true));
+            let (_, paint) = crate::update_card::shown(
+                &job,
+                false,
+                crate::update::CheckView::default(),
+                None,
+                0,
+            )
+            .card
+            .expect("the card is up");
+            assert_eq!(paint.folder, kept, "{sent:?}");
+            assert_eq!(
+                paint.verbs.first(),
+                Some(if kept.is_some() {
+                    &crate::update_card::CardVerb::ShowFolder
+                } else {
+                    &crate::update_card::CardVerb::Releases
+                }),
+                "Show folder only with a folder to show: {sent:?}"
+            );
+        }
+    }
+
+    /// **RED (U-36) — a trial's report and a driver's failure never cross.**
+    ///
+    /// `TrialIncomplete`'s card says *this session is the update's trial*, which is false of
+    /// every process but the trial; a trial never hands itself over, and if one ever did its
+    /// report would be a lie on the other side. `Unsupported` and `Stopped` are a running job's
+    /// own and never a start's.
+    ///
+    /// MUTATION: map `Failure::TrialIncomplete` to [`Report::Incomplete`] in [`Report::of`].
+    #[test]
+    fn a_trials_report_and_a_drivers_failure_never_cross() {
+        for failure in [
+            Failure::TrialIncomplete {
+                folder: journal_folder(),
+            },
+            Failure::Unsupported,
+            Failure::Stopped(crate::update_job::Stop::Download),
+        ] {
+            let request = LaunchRequest::of_start(
+                &sent_by_a_rollback(),
+                Some(&failure),
+                all_folders,
+                Some(Path::new(HERE)),
+            )
+            .expect("the launch still crosses");
+            assert_eq!(request.report, None, "{failure:?} is not carried");
+            assert!(
+                !request.encode().contains(REPORT_KEY),
+                "and nothing of it is written"
+            );
+        }
+    }
+
+    /// **RED (U-36) — the report is a closed set, its folder is bounded like a folder, and it
+    /// comes with `incomplete` and nothing else.**
+    ///
+    /// The decode rule of the other two text fields and of `from`, at the new keys: a word this
+    /// build does not know, a folder without its word or a word without its folder, an empty or
+    /// overlong folder or one carrying a control byte, is not a frame this build understands.
+    ///
+    /// MUTATIONS: read an unknown token as no report (the first line is taken); drop the
+    /// `(None, Some(_))` arm (the orphan folder is taken); bound the folder by nothing (the long
+    /// one is taken).
+    #[test]
+    fn a_report_is_a_closed_word_and_its_folder_is_bounded() {
+        let long = "C:\\".to_owned() + &"a".repeat(MAX_FOLDER_BYTES);
+        let base = r#""v":2,"new":false,"tab":false,"from":"plain""#;
+        for line in [
+            format!(r#"{{{base},"failed":"updated"}}"#),
+            format!(r#"{{{base},"failed":true}}"#),
+            format!(r#"{{{base},"failed":"incomplete"}}"#),
+            format!(r#"{{{base},"failed":"rolled-back","failed_folder":"C:\\x"}}"#),
+            format!(r#"{{{base},"failed_folder":"C:\\x"}}"#),
+            format!(r#"{{{base},"failed":"incomplete","failed_folder":""}}"#),
+            format!(r#"{{{base},"failed":"incomplete","failed_folder":"C:\\a\rb"}}"#),
+            format!(r#"{{{base},"failed":"incomplete","failed_folder":"{long}"}}"#),
+        ] {
+            assert_eq!(
+                LaunchRequest::decode(&line),
+                None,
+                "{line} is not a request this build understands"
+            );
+        }
+        assert_eq!(
+            LaunchRequest::decode(&format!(
+                r#"{{{base},"failed":"incomplete","failed_folder":"D:\\工具\\Folio 终端\\.folio-update"}}"#
+            ))
+            .and_then(|request| request.report),
+            Some(Report::Incomplete {
+                folder: Some(journal_folder())
+            }),
+            "and a well-formed one is"
+        );
+    }
+
+    /// **RED (U-36) — a launch with a report is never refused into nothing.**
+    ///
+    /// Nobody is at a console for a start a lock holder made, so a refused folder would have ended
+    /// the start with a sentence nobody reads and the report with it; it opens its own window
+    /// instead, which shows both. A launch with nothing to report keeps its sentence and its code.
+    ///
+    /// MUTATION: drop the guarded `NoSuchFolder` arm of `after_reply` — the reported launch leaves
+    /// with code 2.
+    #[test]
+    fn a_launch_with_a_report_is_never_refused_into_nothing() {
+        let said = std::cell::RefCell::new(Vec::new());
+        let say = |line: &str| said.borrow_mut().push(line.to_owned());
+        let reported = LaunchRequest::of_start(
+            &sent_by_a_rollback(),
+            Some(&Failure::RolledBack),
+            all_folders,
+            Some(Path::new(HERE)),
+        )
+        .expect("it crosses");
+        assert_eq!(
+            after_reply(reported.clone(), Reply::Refused(Refusal::NoSuchFolder), say),
+            None,
+            "the start opens its own window, and its card"
+        );
+        assert!(said.borrow().is_empty(), "and prints nothing nobody reads");
+        assert_eq!(after_reply(reported, Reply::Taken, say), Some(0));
+        let plain = from(&["--cwd", r"D:\gone"]).expect("it crosses");
+        assert_eq!(
+            after_reply(plain, Reply::Refused(Refusal::NoSuchFolder), say),
+            Some(2)
+        );
+        assert_eq!(said.borrow().len(), 1, "a person's launch still says why");
+    }
+
+    /// **0.4.6's reader of this wire**: the same body as `LaunchRequest::decode` and
+    /// `origin_from_token` at `v0.4.6-preview` (that file did not change between the tag and
+    /// U-36), with the constants it reads inlined, its comments left out and its result named
+    /// `Request` — the frozen fixture the compatibility
+    /// tests below hold every later frame to. A copy, and deliberately: it is not this build's
+    /// reader but a build already on people's machines, and it must not move when this one does.
+    mod as_0_4_6 {
+        use std::path::PathBuf;
+
+        use crate::cli;
+
+        const WIRE_VERSION: u64 = 2;
+        const MAX_FOLDER_BYTES: usize = 2048;
+        const MAX_PROFILE_BYTES: usize = 128;
+
+        #[derive(Debug, PartialEq, Eq)]
+        pub(super) struct Request {
+            pub(super) cwd: Option<PathBuf>,
+            pub(super) profile: Option<String>,
+            pub(super) new_window: bool,
+            pub(super) tab: bool,
+            pub(super) origin: cli::LaunchOrigin,
+        }
+
+        fn origin_from_token(token: &str) -> Option<cli::LaunchOrigin> {
+            match token {
+                "plain" => Some(cli::LaunchOrigin::Plain),
+                "explorer" => Some(cli::LaunchOrigin::Explorer),
+                "here" => Some(cli::LaunchOrigin::Here),
+                _ => None,
+            }
+        }
+
+        pub(super) fn decode(line: &str) -> Option<Request> {
+            let value: serde_json::Value = serde_json::from_str(line.trim()).ok()?;
+            let object = value.as_object()?;
+            if object.get("v")?.as_u64()? != WIRE_VERSION {
+                return None;
+            }
+            let bounded = |key: &str, bound: usize| -> Option<Option<String>> {
+                let Some(value) = object.get(key) else {
+                    return Some(None);
+                };
+                let text = value.as_str()?;
+                (!text.is_empty() && text.len() <= bound && !text.chars().any(char::is_control))
+                    .then(|| Some(text.to_owned()))
+            };
+            Some(Request {
+                cwd: bounded("cwd", MAX_FOLDER_BYTES)?.map(PathBuf::from),
+                profile: bounded("profile", MAX_PROFILE_BYTES)?,
+                new_window: object.get("new")?.as_bool()?,
+                tab: object.get("tab")?.as_bool()?,
+                origin: origin_from_token(object.get("from")?.as_str()?)?,
+            })
+        }
+    }
+
+    /// **Frames a 0.4.6 `folio.exe` writes**, as JSON — one per shape its `encode` has: no folder
+    /// or profile, both, and each origin. What 0.4.6 sends is fixed; these are its words.
+    const FRAMES_0_4_6: [&str; 4] = [
+        r#"{"v":2,"new":false,"tab":false,"from":"plain"}"#,
+        r#"{"v":2,"cwd":"D:\\Developer\\笔记","profile":"winps","new":true,"tab":false,"from":"plain"}"#,
+        r#"{"v":2,"cwd":"C:\\Users","new":false,"tab":true,"from":"explorer"}"#,
+        r#"{"v":2,"new":false,"tab":false,"from":"here"}"#,
+    ];
+
+    /// **RED (U-36) — old sender → new receiver: a 0.4.6 frame is read as the launch it was, with
+    /// nothing to report; and a launch of this build with nothing to report is the 0.4.6 frame.**
+    ///
+    /// The half of compatibility this build can hold by itself. A 0.4.6 start reports nothing (it
+    /// has no key to report with), so its launch lands exactly as before and the running Folio's
+    /// job is told nothing; and a launch of this build that has nothing to report writes no new
+    /// key, so it is, as JSON, the frame 0.4.6 writes for the same launch.
+    ///
+    /// MUTATIONS: make the report key required, or write it as `null` when there is none — the
+    /// first assertion or the second goes red; bump [`WIRE_VERSION`] — every frame here is dropped.
+    #[test]
+    fn a_0_4_6_frame_is_the_same_launch_with_nothing_to_report() {
+        for frame in FRAMES_0_4_6 {
+            let request =
+                LaunchRequest::decode(frame).expect("a 0.4.6 launch is one this build takes");
+            assert_eq!(request.report, None, "{frame} reports nothing");
+            let ours: serde_json::Value =
+                serde_json::from_str(&request.encode()).expect("this build writes JSON");
+            let theirs: serde_json::Value =
+                serde_json::from_str(frame).expect("the fixture is JSON");
+            assert_eq!(
+                ours, theirs,
+                "with nothing to report this build writes 0.4.6's frame"
+            );
+        }
+    }
+
+    /// **RED (U-36) — new sender → old receiver: a 0.4.6 Folio takes a launch with a report as the
+    /// same launch, and only the report is lost — as it was before U-36.**
+    ///
+    /// The other half, against the frozen reader above: the report rides in keys 0.4.6 does not
+    /// read, inside the version it does, so a 0.4.6 that is running when a later build's rollback
+    /// sends its start opens the window or tab it always would; it shows no card, because it has
+    /// no way to (RULES §36 names this).
+    ///
+    /// MUTATIONS: send the report under `from` or another key 0.4.6 reads, or bump
+    /// [`WIRE_VERSION`] for it — the frozen reader drops the frame, and the start opens a second,
+    /// non-writing window.
+    #[test]
+    fn a_0_4_6_receiver_takes_a_reported_launch_as_the_same_launch() {
+        for failure in reports(journal_folder()) {
+            let request = LaunchRequest::of_start(
+                &sent_by_a_rollback(),
+                Some(&failure),
+                all_folders,
+                Some(Path::new(HERE)),
+            )
+            .expect("it crosses");
+            assert!(request.report.is_some(), "{failure:?} is carried");
+            let old = as_0_4_6::decode(&request.encode())
+                .unwrap_or_else(|| panic!("0.4.6 dropped {}", request.encode()));
+            assert_eq!(
+                old,
+                as_0_4_6::Request {
+                    cwd: request.cwd.clone(),
+                    profile: request.profile.clone(),
+                    new_window: request.new_window,
+                    tab: request.tab,
+                    origin: request.origin,
+                },
+                "0.4.6 reads the same launch"
+            );
+        }
+        for frame in FRAMES_0_4_6 {
+            assert!(
+                as_0_4_6::decode(frame).is_some(),
+                "the frozen reader reads its own build's frames: {frame}"
+            );
         }
     }
 }

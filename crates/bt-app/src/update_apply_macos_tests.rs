@@ -2854,7 +2854,7 @@ fn recovery_failure_still_opens_with_the_incomplete_card() {
         (failed, trial)
     };
     let incomplete = |install: &Install| crate::update_job::Failure::Incomplete {
-        folder: install.home.root().to_path_buf(),
+        folder: Some(install.home.root().to_path_buf()),
     };
 
     // A folder where the transaction lock should be: the lock cannot be

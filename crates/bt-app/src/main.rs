@@ -52009,6 +52009,40 @@ mod launch_landing_tests {
         );
     }
 
+    /// **RED (U-36) — every launch the wire carries tells the update job what
+    /// it reports, with the window it landed in, and the card follows in the
+    /// same turn.**
+    ///
+    /// The window thread's half of `launch_wire`'s report, which needs a live
+    /// window and so is read from the source: the window `land_one_launch_request`
+    /// answers is the one handed to `LaunchRequest::told` (whose behaviour
+    /// `launch_wire`'s and `update_job`'s tests hold), and `settle_update_card` —
+    /// which ran at this turn's head, before the launches — is asked again, so
+    /// the card and every window's Version row are drawn this turn.
+    ///
+    /// MUTATIONS: drop the `tell_the_update_job` call (the report is dropped
+    /// on this side); pass `None` for the landed window (the card goes to the
+    /// most recent window rather than the one the launch opened); drop the
+    /// `settle_update_card` call.
+    #[test]
+    fn a_handed_launch_tells_the_update_job_where_it_landed() {
+        let settle = method_body("FolioApp", "settle_launch_requests");
+        assert!(
+            settle.contains("let landed = self.land_one_launch_request(event_loop, &request)?;")
+                && settle.contains("self.tell_the_update_job(&request, landed)?"),
+            "a launch's report is not told where it landed:\n{settle}"
+        );
+        let tell = method_body("FolioApp", "tell_the_update_job");
+        assert!(
+            tell.contains("request.told(&mut app.update_job, landed)"),
+            "the job is told by some door other than the tested one:\n{tell}"
+        );
+        assert!(
+            tell.contains("self.settle_update_card()"),
+            "the card waits for some later turn's comparison:\n{tell}"
+        );
+    }
+
     /// **RED — `--new-window` opens a window in this process, through the door
     /// `Ctrl+Shift+M` already goes through.**
     ///
@@ -61526,9 +61560,40 @@ impl FolioApp {
             return Ok(());
         }
         for request in launch_wire::take() {
-            self.land_one_launch_request(event_loop, &request)?;
+            let landed = self.land_one_launch_request(event_loop, &request)?;
+            self.tell_the_update_job(&request, landed)?;
         }
         Ok(())
+    }
+
+    /// **What a handed-over launch was sent to report, told to the update
+    /// job** (U-36): a start a rollback sent, which found this Folio running,
+    /// raises its card here — in the window it landed in — instead of in a
+    /// window of its own (`launch_wire::LaunchRequest::told`, which says when
+    /// a running transaction keeps it off the screen). Nothing for a launch
+    /// with nothing to report.
+    ///
+    /// **And the card follows in this turn**: [`Self::settle_update_card`]
+    /// runs at the turn's head, before this, so it is asked again here; the
+    /// card is drawn in its window and every window's About → Version row is
+    /// repainted by that one comparison.
+    fn tell_the_update_job(
+        &mut self,
+        request: &launch_wire::LaunchRequest,
+        landed: Option<WindowId>,
+    ) -> Result<()> {
+        let Some(app) = self.app.as_mut() else {
+            return Ok(());
+        };
+        let Some(raised) = request.told(&mut app.update_job, landed) else {
+            return Ok(());
+        };
+        diagnostics::note(if raised {
+            "Folio: update job — a launch handed over reports an earlier update's failure; its card is raised"
+        } else {
+            "Folio: update job — a launch handed over reports an earlier update's failure; the running update keeps the card"
+        });
+        self.settle_update_card()
     }
 
     /// **One request, landed**, and the window it landed in.
