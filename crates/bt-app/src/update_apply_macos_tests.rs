@@ -1024,6 +1024,55 @@ fn the_old_bundle_is_removed_only_after_committed() {
     );
 }
 
+/// RED (U-40) — **a process of the installed executable that the applier
+/// finds at its process check (M4) is waited for within the window, and the
+/// update goes on once it has left**: a person's start in that instant hands
+/// itself to the recovery build and is gone within moments, so it never
+/// reverts the update. One that is still there when the window ends reverts
+/// it, as before, naming what holds the executable.
+///
+/// MUTATION: in `Txn::at_armed`, revert at the first sighting of a process
+/// of the installed executable (the rule before U-40).
+#[test]
+fn a_persons_start_at_the_process_check_is_waited_for() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("armed-person");
+    let children = Children::default();
+    let person = children.start(&install.installed, "person");
+    let mut world = launching(a_healthy_trial(&install, &children, None));
+    let leaves = children.clone();
+    world.on_say = Some(Box::new(move |line| {
+        if line.contains("the exchange waits for it to leave") {
+            leaves.end(person);
+        }
+    }));
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), world);
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert!(
+        said(&world, &format!("(pid {person}) runs; the exchange waits")),
+        "{:?}",
+        world.said
+    );
+    assert!(children.ended(person).is_some());
+    assert_eq!(version_of(&install.installed), "2.0");
+
+    // A copy that stays past the window still reverts the transaction.
+    let install = Install::new("armed-stays");
+    let children = Children::default();
+    let stays = children.start(&install.installed, "copy");
+    let (ended, world) = applied(install.road(limits(1_500, 5_000)), Fake::default());
+    assert_eq!(ended, Ended::Reverted, "{:?}", world.said);
+    assert!(
+        said(&world, "held open by another process: ") && said(&world, &format!("(pid {stays})")),
+        "{:?}",
+        world.said
+    );
+    assert_eq!(version_of(&install.installed), "1.0");
+    assert_eq!(children.status(stays), None, "the copy runs on");
+}
+
 /// **Where a person's start of the new build falls in the applier's road**
 /// (U-40): each instant between the exchange and the receipt at which a
 /// second start can meet a live applier.

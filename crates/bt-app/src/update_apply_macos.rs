@@ -27,7 +27,10 @@
 //!    `EntranceFailed`, `Abandoned`, cleared.
 //! 3. **Admit** (M4 → M5): exclusive admission on `H/admission`, within what
 //!    is left of the window, and no process running from the installed
-//!    bundle's executable (`bt_platform::install_flip::running_from`) →
+//!    bundle's executable (`bt_platform::install_flip::running_from`) — one
+//!    still there is waited for within the same window, as the Windows road
+//!    waits for a held file (`update_apply::until_let_go`, U-40: a person's
+//!    start that hands itself to the recovery build is gone within moments) →
 //!    `Admitted`: the journal says `Moving` (the note's `Exchanging`), with
 //!    both identities already in its layout since `Prepared`. Refused → the
 //!    plist removed, `Reverted` to `Prepared`.
@@ -1206,24 +1209,38 @@ impl<'a> Txn<'a> {
                     return self.revert(Actor::Applier);
                 }
             };
-        match install_flip::running_from(places.program) {
-            Ok(running) if running.is_empty() => {}
-            Ok(running) => {
-                world.say(&format!(
-                    "BT_UPDATE_APPLY {} still runs from {}",
-                    running
-                        .iter()
-                        .map(|process| process.pid.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    places.program.display()
-                ));
-                return self.revert(Actor::Applier);
-            }
-            Err(error) => {
-                world.say(&format!("BT_UPDATE_APPLY the process list: {error}"));
-                return self.revert(Actor::Applier);
-            }
+        // A process of the installed executable that is leaving — a person's
+        // start that hands itself to the recovery build is gone within moments
+        // — is waited for within the window, as the Windows road waits for a
+        // held file (U-40); only one still running when the window ends
+        // reverts the transaction.
+        let program = places.program;
+        let mut said_waiting = false;
+        let let_go = crate::update_apply::until_let_go(
+            window,
+            self.road.limits.poll,
+            &mut Instant::now,
+            &mut || {
+                let running = install_flip::running_from(program)
+                    .map_err(|error| format!("the process list: {error}"))?;
+                let held: Vec<String> = running
+                    .iter()
+                    .map(|process| format!("{} (pid {})", program.display(), process.pid))
+                    .collect();
+                if !held.is_empty() && !said_waiting {
+                    said_waiting = true;
+                    world.say(&format!(
+                        "BT_UPDATE_APPLY {} runs; the exchange waits for it to leave",
+                        held.join(", ")
+                    ));
+                }
+                Ok(held)
+            },
+            &mut |pause| bt_platform::wait::sleep_within(worker, pause),
+        );
+        if let Err(why) = let_go {
+            world.say(&format!("BT_UPDATE_APPLY {why}"));
+            return self.revert(Actor::Applier);
         }
         self.record(Actor::Applier, &Event::Admitted)?;
         let live = crate::update_prepare_macos::identity(worker, places.installed);

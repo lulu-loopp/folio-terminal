@@ -377,6 +377,42 @@ pub(crate) fn wait_for_the_claim(
     }
 }
 
+/// **Wait until nothing `held` names is held any more, within `window`**
+/// (E-7 on Windows; the macOS process check since U-40): ask, and while
+/// something is held sleep one `poll` (never past `window`) and ask again — so
+/// a hold let go is seen at the next poll, and a hold that outlasts `window`
+/// refuses with the names still held. A holder decides from what is still
+/// held when its window ends, never from a sighting of something already
+/// leaving — a person's start that hands itself to the recovery build is gone
+/// within moments. `now` is the clock and `sleep` the pause (the worker's wait
+/// door in the product), so a test can count the polls (U-42d, review
+/// finding 5).
+///
+/// # Errors
+/// What `held` refused with, or what is still held when `window` passed.
+pub(crate) fn until_let_go(
+    window: Instant,
+    poll: Duration,
+    now: &mut dyn FnMut() -> Instant,
+    held: &mut dyn FnMut() -> Result<Vec<String>, String>,
+    sleep: &mut dyn FnMut(Duration),
+) -> Result<(), String> {
+    loop {
+        let names = held()?;
+        if names.is_empty() {
+            return Ok(());
+        }
+        let left = window.saturating_duration_since(now());
+        if left.is_zero() {
+            return Err(format!(
+                "held open by another process: {}",
+                names.join(", ")
+            ));
+        }
+        sleep(poll.min(left));
+    }
+}
+
 /// The receipt at `path`: `None` while there is none, else what it says.
 pub(crate) fn read_receipt(path: &Path) -> Option<Result<Receipt, String>> {
     match file_reads::read(Lane::UpdateJournal, path) {
