@@ -107,8 +107,10 @@ pub(crate) enum Report {
     /// (`Failure::Interrupted`).
     Interrupted,
     /// Putting the previous version back did not finish; `folder` is where its journal is
-    /// (`Failure::Incomplete`).
-    Incomplete { folder: PathBuf },
+    /// (`Failure::Incomplete`). A sender always names it — its own pass read the journal there —
+    /// and the frame always carries it; it is `None` only once [`accept`] has taken away a
+    /// folder that is not a local path, which leaves the report and drops the folder.
+    Incomplete { folder: Option<PathBuf> },
 }
 
 impl Report {
@@ -153,7 +155,7 @@ impl Report {
             ("rolled-back", None) => Some(Self::RolledBack),
             ("interrupted", None) => Some(Self::Interrupted),
             ("incomplete", Some(folder)) => Some(Self::Incomplete {
-                folder: PathBuf::from(folder),
+                folder: Some(PathBuf::from(folder)),
             }),
             _ => None,
         }
@@ -362,7 +364,10 @@ impl LaunchRequest {
         // exactly the frame every earlier build writes (see [`WIRE_VERSION`]).
         if let Some(report) = &self.report {
             value.insert(REPORT_KEY.to_owned(), report.token().into());
-            if let Report::Incomplete { folder } = report {
+            if let Report::Incomplete {
+                folder: Some(folder),
+            } = report
+            {
                 value.insert(
                     REPORT_FOLDER_KEY.to_owned(),
                     folder.to_string_lossy().into_owned().into(),
@@ -411,8 +416,8 @@ impl LaunchRequest {
             // **Optional, and from the closed set when present** ([`WIRE_VERSION`]'s rule): absent
             // is what every earlier sender writes and reads as nothing to report; a word this
             // build has no report for, a folder with the wrong word or without one, is not a frame
-            // this build understands. The folder is bounded and checked as `cwd` is, because it is
-            // what the card names and what its Show folder hands to the file manager.
+            // this build understands. Here the folder is only bounded, as `cwd` is here; whether it
+            // is a place on this machine is [`accept`]'s question, asked of both paths alike.
             report: match (
                 object.get(REPORT_KEY),
                 bounded(REPORT_FOLDER_KEY, MAX_FOLDER_BYTES)?,
@@ -474,20 +479,41 @@ impl Refusal {
     }
 }
 
-/// **Whether the running Folio will take this request**, asked identically at both ends.
+/// **Whether the running Folio will take this request, and the request it takes.**
 ///
-/// The one machine question on this wire, and the door it goes through is the door a path printed
-/// into a pane goes through: drive-rooted, nameable by this filesystem, no NUL — and, because what
-/// this path is for is a shell standing in it, a directory that is actually there.
-pub(crate) fn accept(request: &LaunchRequest) -> Result<(), Refusal> {
-    let Some(cwd) = request.cwd.as_deref() else {
-        return Ok(());
-    };
-    if bt_transcript::paths::is_local_absolute_path(cwd) && cwd.is_dir() {
-        Ok(())
-    } else {
-        Err(Refusal::NoSuchFolder)
+/// The one machine question on this wire, and the one place it is asked: **every path that arrives
+/// over the wire goes through [`is_a_local_path`]** — the door a path printed into a pane goes
+/// through: drive-rooted, nameable by this filesystem, no NUL; never a share on another machine or
+/// a device. There are two such paths, `cwd` and an unfinished rollback's journal folder
+/// ([`Report::Incomplete`]); `profile` is a slug and no path. What fails it is answered by what the
+/// path is for:
+///
+/// * **`cwd`** is where a shell will stand, so it must also be a directory that is there, and a
+///   launch that names anything else is refused ([`Refusal::NoSuchFolder`]).
+/// * **The report's folder** is only named on a card and handed to the file manager by its Show
+///   folder (U-36 round 2), so one that is not local is taken away and **the report stays**: the
+///   reader is still told the update is incomplete, on a card that names no folder. A report is
+///   never dropped for its folder — losing it is the defect U-36 closed — and a share is never put
+///   on a card whose button would hand this account's credentials to another machine's SMB server.
+///   Existence is not asked: the journal's folder is not a place anything stands in.
+pub(crate) fn accept(mut request: LaunchRequest) -> Result<LaunchRequest, Refusal> {
+    if let Some(cwd) = request.cwd.as_deref()
+        && !(is_a_local_path(cwd) && cwd.is_dir())
+    {
+        return Err(Refusal::NoSuchFolder);
     }
+    if let Some(Report::Incomplete { folder }) = &mut request.report
+        && folder.as_deref().is_some_and(|path| !is_a_local_path(path))
+    {
+        *folder = None;
+    }
+    Ok(request)
+}
+
+/// **The one rule every path on this wire meets** ([`accept`]): a local absolute path, by the gate
+/// a printed path meets ([`bt_transcript::paths::is_local_absolute_path`]).
+fn is_a_local_path(path: &Path) -> bool {
+    bt_transcript::paths::is_local_absolute_path(path)
 }
 
 /// The reply a server writes, and the client reads back.
@@ -696,12 +722,12 @@ fn decide(
     window_thread_can_serve: impl FnOnce() -> bool,
 ) -> Option<bt_platform::launch_pipe::Decision<Admission>> {
     let request = LaunchRequest::decode(line)?;
-    Some(match accept(&request) {
+    Some(match accept(request) {
         Err(refusal) => bt_platform::launch_pipe::Decision {
             reply: Reply::Refused(refusal).encode(),
             admitted: None,
         },
-        Ok(()) => match admit(request, window_thread_can_serve()) {
+        Ok(request) => match admit(request, window_thread_can_serve()) {
             Some(admission) => bt_platform::launch_pipe::Decision {
                 reply: Reply::Taken.encode(),
                 admitted: Some(admission),
@@ -940,10 +966,11 @@ mod tests {
         let file = here.join(format!("bt-app-launch-wire-{}.txt", std::process::id()));
         std::fs::write(&file, b"x").expect("write a fixture into the scratch directory");
         let asking = |cwd: Option<PathBuf>| {
-            accept(&LaunchRequest {
+            accept(LaunchRequest {
                 cwd,
                 ..LaunchRequest::default()
             })
+            .map(drop)
         };
         assert_eq!(asking(Some(here.clone())), Ok(()));
         assert_eq!(asking(None), Ok(()), "a launch that named no folder is one");
@@ -1335,13 +1362,13 @@ mod tests {
         ])
     }
 
-    /// The three reports a start can carry.
-    fn reports() -> [Failure; 3] {
+    /// The three reports a start can carry, an unfinished rollback's naming `folder`.
+    fn reports(folder: PathBuf) -> [Failure; 3] {
         [
             Failure::RolledBack,
             Failure::Interrupted,
             Failure::Incomplete {
-                folder: journal_folder(),
+                folder: Some(folder),
             },
         ]
     }
@@ -1374,7 +1401,8 @@ mod tests {
             "--cwd",
             &here.to_string_lossy(),
         ]);
-        for failure in reports() {
+        // A local path on the platform the test runs on, so [`accept`] keeps it.
+        for failure in reports(here.join(".folio-update")) {
             let request =
                 LaunchRequest::of_start(&start, Some(&failure), all_folders, Some(Path::new(HERE)))
                     .expect("a start a rollback sent is a launch this wire carries");
@@ -1457,6 +1485,78 @@ mod tests {
         );
     }
 
+    /// **RED (U-36 round 2) — every path the wire carries meets one gate, and a report whose
+    /// folder fails it keeps the report and loses the folder.**
+    ///
+    /// The journal folder of an `incomplete` report is named on the card and handed to the file
+    /// manager by its Show folder, so a share there would be a click that offers this account's
+    /// credentials to another machine. [`accept`] holds it to the gate `cwd` meets
+    /// ([`is_a_local_path`]). What fails is taken away and the report stays: the reader is told
+    /// the update is incomplete, on a card that names no folder and offers the releases page. A
+    /// local folder is kept, with Show folder.
+    ///
+    /// MUTATIONS: drop the report-folder half of `accept` (the share reaches the card and its
+    /// Show folder); drop the report instead of its folder (the reader is told nothing).
+    #[test]
+    fn a_report_folder_that_is_not_local_is_taken_away_and_the_report_kept() {
+        let _guard = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
+        let _ = take();
+        let local = std::env::temp_dir().join("工具").join(".folio-update");
+        for (sent, kept) in [
+            (
+                PathBuf::from(r"\\server\share\Folio 终端\.folio-update"),
+                None,
+            ),
+            (PathBuf::from(r"\\.\pipe\folio"), None),
+            (PathBuf::from(r"工具\.folio-update"), None),
+            (local.clone(), Some(local.clone())),
+        ] {
+            let request = LaunchRequest {
+                report: Some(Report::Incomplete {
+                    folder: Some(sent.clone()),
+                }),
+                ..LaunchRequest::default()
+            };
+            let decision = decide(&request.encode(), || true).expect("the line is a request");
+            assert_eq!(
+                Reply::decode(&decision.reply),
+                Some(Reply::Taken),
+                "a report is never refused for its folder: {sent:?}"
+            );
+            park(decision.admitted.expect("admitted"));
+            let arrived = take();
+            assert_eq!(arrived.len(), 1);
+            assert_eq!(
+                arrived[0].report,
+                Some(Report::Incomplete {
+                    folder: kept.clone()
+                }),
+                "{sent:?}"
+            );
+            let mut job = crate::update_job::Job::<u32>::with_offers(true);
+            assert_eq!(arrived[0].told(&mut job, Some(2)), Some(true));
+            let (_, paint) = crate::update_card::shown(
+                &job,
+                false,
+                crate::update::CheckView::default(),
+                None,
+                0,
+            )
+            .card
+            .expect("the card is up");
+            assert_eq!(paint.folder, kept, "{sent:?}");
+            assert_eq!(
+                paint.verbs.first(),
+                Some(if kept.is_some() {
+                    &crate::update_card::CardVerb::ShowFolder
+                } else {
+                    &crate::update_card::CardVerb::Releases
+                }),
+                "Show folder only with a folder to show: {sent:?}"
+            );
+        }
+    }
+
     /// **RED (U-36) — a trial's report and a driver's failure never cross.**
     ///
     /// `TrialIncomplete`'s card says *this session is the update's trial*, which is false of
@@ -1525,7 +1625,7 @@ mod tests {
             ))
             .and_then(|request| request.report),
             Some(Report::Incomplete {
-                folder: journal_folder()
+                folder: Some(journal_folder())
             }),
             "and a well-formed one is"
         );
@@ -1565,8 +1665,10 @@ mod tests {
         assert_eq!(said.borrow().len(), 1, "a person's launch still says why");
     }
 
-    /// **0.4.6's reader of this wire, verbatim** (`v0.4.6-preview`, `LaunchRequest::decode`; the
-    /// file did not change between that tag and U-36) — the frozen fixture the compatibility
+    /// **0.4.6's reader of this wire**: the same body as `LaunchRequest::decode` and
+    /// `origin_from_token` at `v0.4.6-preview` (that file did not change between the tag and
+    /// U-36), with the constants it reads inlined, its comments left out and its result named
+    /// `Request` — the frozen fixture the compatibility
     /// tests below hold every later frame to. A copy, and deliberately: it is not this build's
     /// reader but a build already on people's machines, and it must not move when this one does.
     mod as_0_4_6 {
@@ -1669,7 +1771,7 @@ mod tests {
     /// non-writing window.
     #[test]
     fn a_0_4_6_receiver_takes_a_reported_launch_as_the_same_launch() {
-        for failure in reports() {
+        for failure in reports(journal_folder()) {
             let request = LaunchRequest::of_start(
                 &sent_by_a_rollback(),
                 Some(&failure),

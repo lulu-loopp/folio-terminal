@@ -496,8 +496,11 @@ pub(crate) enum Failure {
     /// **The new version did not prove itself and putting the previous one
     /// back did not finish** (U-29): the transaction is still `rolled_back`
     /// and destructive — `Stuck`, or not begun — and `folder` is where its
-    /// journal is, which the card names.
-    Incomplete { folder: PathBuf },
+    /// journal is, which the card names and Show folder opens. `None` only for
+    /// a report handed over from another start whose folder is not a local
+    /// path (`launch_wire::accept`, U-36 round 2): the card then names no
+    /// folder.
+    Incomplete { folder: Option<PathBuf> },
     /// **Recovery could not be launched, so this already-running new build is
     /// the recorded trial** (0.4.7 U-35). The update is still incomplete and
     /// `folder` is where its journal is; unlike [`Failure::Incomplete`], the
@@ -1496,6 +1499,9 @@ impl<W: Copy + Eq> Job<W> {
                 | State::Committing(_)
         ) || !matches!(self.launch, Launch::Done);
         if running {
+            // Kept, not queued: if this transaction then fails, its own failure
+            // replaces the report here (`Self::apply`), and the report is no
+            // longer named anywhere. The rule RULES §36 states.
             self.last_failure = Some((None, failure));
             return false;
         }
@@ -3533,11 +3539,16 @@ mod tests {
     fn a_launch_sent_by_a_rollback_raises_the_failed_card() {
         let folder = PathBuf::from("/Applications/.Folio.app.folio-update");
         let mut job = job().after_rollback(Some(Failure::Incomplete {
-            folder: folder.clone(),
+            folder: Some(folder.clone()),
         }));
         assert_eq!(
             job.state(),
-            &State::Failed(None, Failure::Incomplete { folder })
+            &State::Failed(
+                None,
+                Failure::Incomplete {
+                    folder: Some(folder)
+                }
+            )
         );
         assert_eq!(job.card_window(), None, "no window yet");
         let first = Presenters {
@@ -3582,7 +3593,7 @@ mod tests {
     /// An unfinished rollback's report, its folder not ASCII.
     fn incomplete() -> Failure {
         Failure::Incomplete {
-            folder: PathBuf::from(r"D:\工具\Folio 终端\.folio-update"),
+            folder: Some(PathBuf::from(r"D:\工具\Folio 终端\.folio-update")),
         }
     }
 

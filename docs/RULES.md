@@ -1043,7 +1043,9 @@ may still be committed forward, nothing can be asked. **A launch a rollback sent
 that finds a Folio already running hands its report over with its launch**
 (U-36): the launch wire carries the start's own verdict — *Previous version
 restored.*, the update stopped before the new version ran, or *Update
-incomplete.* and its journal's folder; never a trial's card, which is true only
+incomplete.* and its journal's folder, which the receiver holds to the gate the
+launch's own folder meets — not a local path, it is dropped and the card names no
+folder and offers the releases page, the report kept; never a trial's card, which is true only
 of the trial — in two keys a v2 reader of 0.4.6 ignores, so that build takes the
 launch unchanged and shows no card. The running Folio's job is told it as that
 start would have been at its own start: the failed card is raised in the window

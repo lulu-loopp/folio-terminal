@@ -234,8 +234,9 @@ pub(crate) enum Outcome {
     /// (`Failure::RolledBack`, U-29).
     Restored,
     /// `Update incomplete.` and the journal's folder — the rollback did not
-    /// finish (`Failure::Incomplete`, U-29).
-    Incomplete { folder: PathBuf },
+    /// finish (`Failure::Incomplete`, U-29). No folder when a report handed
+    /// over named none this side accepts (U-36 round 2).
+    Incomplete { folder: Option<PathBuf> },
     /// The unfinished update's new build is running as its recorded trial
     /// because neither recovery launch could be made (U-35).
     Trial { folder: PathBuf },
@@ -326,11 +327,18 @@ pub(crate) fn failed(reason: &str, outcome: &Outcome) -> Paint {
     let (detail, folder, first) = match outcome {
         Outcome::NothingChanged => (Text::UpdateCardNothingChanged, None, CardVerb::Releases),
         Outcome::Restored => (Text::UpdateCardRestored, None, CardVerb::Releases),
-        Outcome::Incomplete { folder } => (
+        // Show folder only with a folder to show: a report handed over without
+        // one offers the releases page, as the other failures do (U-36 round 2).
+        Outcome::Incomplete {
+            folder: Some(folder),
+        } => (
             Text::UpdateCardIncomplete,
             Some(folder.clone()),
             CardVerb::ShowFolder,
         ),
+        Outcome::Incomplete { folder: None } => {
+            (Text::UpdateCardIncomplete, None, CardVerb::Releases)
+        }
         Outcome::Trial { folder } => (
             Text::UpdateCardTrial,
             Some(folder.clone()),
@@ -1156,7 +1164,7 @@ mod tests {
             (
                 "incomplete",
                 after(Failure::Incomplete {
-                    folder: PathBuf::from("journal"),
+                    folder: Some(PathBuf::from("journal")),
                 }),
                 format!("{banner} · The update to v0.4.7 is incomplete."),
                 false,
@@ -1758,7 +1766,7 @@ mod tests {
         let drawn = failed(
             "The previous version could not be put back.",
             &Outcome::Incomplete {
-                folder: folder.clone(),
+                folder: Some(folder.clone()),
             },
         );
         assert_eq!(drawn.detail.as_deref(), Some("Update incomplete."));
@@ -1822,7 +1830,7 @@ mod tests {
         let incomplete = paint(&State::Failed(
             None,
             Failure::Incomplete {
-                folder: folder.clone(),
+                folder: Some(folder.clone()),
             },
         ))
         .expect("a failed job has a card");

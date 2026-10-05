@@ -359,7 +359,7 @@ pub(crate) fn run(start: &Start<'_>, world: &mut impl World) -> Verdict {
                 folder: start.home.root().to_path_buf(),
             },
             AfterRollback::Incomplete => Failure::Incomplete {
-                folder: start.home.root().to_path_buf(),
+                folder: Some(start.home.root().to_path_buf()),
             },
         });
     // The transaction lock is asked for only where its answer decides
@@ -648,7 +648,7 @@ fn hand_to_rescue(
         trial: None,
         last_trial: false,
         failed: named.map(|home| Failure::Incomplete {
-            folder: home.to_path_buf(),
+            folder: Some(home.to_path_buf()),
         }),
         waiting: None,
     }
@@ -1397,7 +1397,7 @@ mod tests {
             assert_eq!(
                 failed,
                 Some(Failure::Incomplete {
-                    folder: scene.home.root().to_path_buf()
+                    folder: Some(scene.home.root().to_path_buf())
                 })
             );
             assert!(world.spawned.is_empty(), "{:?}", world.spawned);
@@ -1534,7 +1534,7 @@ mod tests {
             assert_eq!(
                 failed,
                 Some(Failure::Incomplete {
-                    folder: scene.home.root().to_path_buf()
+                    folder: Some(scene.home.root().to_path_buf())
                 }),
                 "the folder of the journal the card was read from"
             );
@@ -1863,7 +1863,7 @@ mod tests {
             // updated card comes back once, in the last active window.
             let mut closed: Job<u32> =
                 Job::with_offers(true).after_rollback(Some(Failure::Incomplete {
-                    folder: scene.home.root().to_path_buf(),
+                    folder: Some(scene.home.root().to_path_buf()),
                 }));
             closed.hand_over(&presenters);
             closed
@@ -2030,7 +2030,7 @@ mod tests {
             assert_eq!(
                 failed,
                 Some(Failure::Incomplete {
-                    folder: home.root().to_path_buf()
+                    folder: Some(home.root().to_path_buf())
                 })
             );
             assert_eq!(world.said.len(), 1, "{:?}", world.said);
