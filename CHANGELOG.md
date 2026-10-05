@@ -6,6 +6,10 @@ All notable changes to Folio are recorded here. The format follows
 
 ## Unreleased
 
+Nothing yet.
+
+## 0.4.7-preview — 2026-10-06
+
 ### Added
 
 - PowerShell profiles whose startup command cannot be safely extended can enable Folio through that edition's `$PROFILE` in one click from Settings, with Undo. When PowerShell's execution policy blocks `$PROFILE`, the row says who set it and, when it is yours to change, offers the one command to copy.
@@ -136,6 +140,13 @@ All notable changes to Folio are recorded here. The format follows
   could not be recorded (its record kept out by another program, or a folder
   made read-only) runs without saving what it changes until the next start or
   logon finishes the update.
+- Updating from 0.4.6 still uses 0.4.6's updater: on macOS, do not open Folio
+  while the update is finishing, or 0.4.6 may come back although 0.4.7 works.
+- Updating from 0.4.6: if the update fails while another 0.4.6 window is open,
+  that window does not say so.
+- macOS: the first self-update makes macOS show its "software was added that
+  can run in the background" notice for Folio's login item — the updater's
+  recovery entry, removed once the update finishes.
 
 ### Internal
 

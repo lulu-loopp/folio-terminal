@@ -2948,7 +2948,6 @@ text_entries! {
     UpdateCardRestored,
     /// After the reason, when the rollback did not finish; the journal's folder follows.
     UpdateCardIncomplete,
-    // zh: pending U-35
     UpdateCardTrial,
     /// The trial over a `Stuck` transaction committed forward after its card said *Update incomplete.* (U-32).
     UpdateCardUpdated,
@@ -3011,7 +3010,6 @@ text_entries! {
     UpdateFailedSpace,
     /// The new build did not prove itself and a rollback followed (`update_job::Failure::RolledBack`, `Incomplete`; U-29).
     UpdateFailedTrial,
-    // zh: pending U-35
     UpdateFailedTrialRunning,
     /// The update stopped before the new build ever ran and the old one is back (`update_job::Failure::Interrupted`; U-42a).
     UpdateFailedInterrupted,
