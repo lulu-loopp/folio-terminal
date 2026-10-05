@@ -844,8 +844,10 @@ mod tests {
     use bt_platform::install_flip::Running;
     use bt_platform::install_txn::{self, Hold};
 
+    #[cfg(windows)]
+    use super::Detached;
     use super::{
-        Detached, FolioCopy, HandedOff, HandoffJob, Leaving, Looked, Spawner, Staged, StartCount,
+        FolioCopy, HandedOff, HandoffJob, Leaving, Looked, Spawner, Staged, StartCount,
         apply_command_line, counted_start, look, perform, perform_counted,
     };
     use crate::persist::SessionStore;

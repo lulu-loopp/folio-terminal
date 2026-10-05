@@ -215,7 +215,11 @@ configuration or assignment refusal is diagnosed once and the resumed probe
 still runs uncontained. macOS and Linux put the child in a new process group
 before `exec`. Their guard observes the leader with `waitid(WNOWAIT)`, signals
 and unregisters the group under the registry's one lock, and only then reaps
-the leader, so a reused process-group id is never signalled. Deliberate hand-offs above keep
+the leader, so a reused process-group id is never signalled. A probe settles
+once: whichever of `try_wait`, `wait` or `kill` first sees the leader exit does
+that and keeps the status, and every later wait answers from it, as
+`std::process::Child` does, so poll-then-collect and kill-then-collect are legal
+on every platform. Deliberate hand-offs above keep
 using `Command::spawn` and are never given a probe guard.
 
 **Not a child: the Windows identity check.** `bt_platform::trust` (0.4.6 U-15)

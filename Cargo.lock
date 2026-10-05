@@ -386,6 +386,7 @@ name = "bt-platform"
 version = "0.4.6"
 dependencies = [
  "block2 0.6.2",
+ "bt-pty",
  "bt-transcript",
  "bt-unicode",
  "bt-winres",

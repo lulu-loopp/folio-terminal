@@ -936,6 +936,14 @@ objc2-user-notifications = { version = "0.3", default-features = false, features
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 winit.workspace = true
 
+# **A real shell for a test** (T-PROBE-CHILD): the Unix probe tests stand a
+# `/bin/sh -c` child and grandchild in for a probed tool, and every test shell
+# in the workspace starts through `bt_pty::test_shell` (T-TEST-SHELL-HYGIENE).
+# A path crate already in the workspace, so it adds no package, and being a
+# *dev*-dependency it is not in the shipped graph.
+[target.'cfg(unix)'.dev-dependencies]
+bt-pty = { path = "../bt-pty", features = ["test-shell"] }
+
 [target.'cfg(windows)'.dependencies]
 # The web preview's engine (`src/webview.rs`). It is a thin, generated binding
 # over the WebView2 SDK's COM interfaces on top of the same `windows` 0.62 this
