@@ -906,6 +906,22 @@ live*, which reverses §7.1.6c-6's explicit statement that the file is not watch
 the 2026-09-26 entry *on macOS the shipped `zsh`, `bash` and `sh` rows start a login
 shell* (issue #12), which supersedes the Mac port's Q8 for macOS: a login shell is a
 row's `login` switch, and the `Program` field takes a program and never a command line.
+**Where a new pane starts** (2026-10-05, GitHub issue #16): a folder named for this
+launch — `Open in Folio`, `folio <folder>`, `--cwd`, `folio-here.cmd`, a second launch
+handed over, a folder given to the Dock icon or a Service, `New terminal in folder…`,
+a folder row's `New terminal here` — always wins; otherwise the profile's
+`Starting directory` (Home, or a fixed folder); otherwise, for "the current pane's
+folder", the folder carried from the pane it was opened beside, a restart, a duplicate
+or a saved session; otherwise the profile's home. A named Windows folder is crossed
+into a WSL profile's namespace as before. `profiles::place_for` is the one owner of
+this order; a seed only says whether its folder is named (`SeedPlace::Named`) or
+carried (`SeedPlace::Carried`). **A pane born in a named folder hands its folder on as
+named** (coordinator's ruling 2026-10-05, with the owner's 2026-10-04 "Restart shell goes
+back to the folder the pane was first opened in"): its Restart shell, Duplicate tab,
+Duplicate pane and splits start where it stands (its last reported folder, else that named
+folder) whatever the profile's starting place; its `+` and picker rows do not. That fact
+lives on the pane for the life of the process only — the session document has no field for
+it, so a restored pane's folder is carried and its next shells follow its profile.
 
 ### 33. The three configuration entrances — `folded`
 **Rule.** Three entrances, each with a declared audience, and **a configuration
@@ -1100,7 +1116,14 @@ the one update surface: its line is `Folio <version> (<commit>) · <state>`, and
 its single control is read from the job's actionable state and route, never
 from the check's offer alone — `Pending` names its state and has no verb; an
 eligible offer has **Update and restart** (the card's Update); a download shows
-its progress; `Verified` raises its card again; a managed copy names its
+`Downloading <tag>` and its progress; past the download the line says what the job
+is doing — `Verifying <tag>` (`Staged`), `<tag> ready` with **Restart…**, which
+raises the Ready card again (`Verified`), `Restarting…` (`Quitting`,
+`Committing`) — with the bar full and no verb while nothing can be pressed (all
+2026-10-05); the control is a keyboard stop only while it is enabled. A focus on any
+Settings control that stops being a stop goes to the nearest stop before it on the page,
+else the nearest after it, and to the dialog's `×` only when the page has no stop
+(2026-10-05); a managed copy names its
 manager's command with **Copy command**; every other ineligible answer (not
 ours, unknown, no updater flag, no release file here, offers off in this build)
 opens the releases page. A release links to that tag's notes. A failure stays
