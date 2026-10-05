@@ -2181,14 +2181,20 @@ pub fn is_powershell(program: &Path) -> bool {
 ///   the editions differ. PowerShell 7 keys on the Mark of the Web alone (an unmarked file on any
 ///   share is `MyComputer` and loads); Windows PowerShell maps the path's URL zone as well (the
 ///   dotted share is `Internet` and is refused). An edition without the function answers
-///   nothing, and nothing is promised.
+///   nothing, and then the next two lines are what can still be known.
+/// * `Local=` and `Marked=` — by public means only: whether the profile's path is on a local
+///   fixed drive (`[Uri]`, `[IO.DriveInfo]`), and whether the file carries a Mark of the Web
+///   (`Get-Item -Stream Zone.Identifier`). Read only when the edition gave no zone answer
+///   ([`remote_signed_loads`]): the zone function is internal, and a future edition that renames
+///   it, or a language mode that refuses the reflection, must not take every local profile's
+///   road away.
 /// * `NoProcess=` — the effective policy once the probe's own Process scope is cleared (an
 ///   in-process change of the probe's own session; nothing persistent is written). When no other
 ///   scope is set this is the machine's default, which `Get-ExecutionPolicy` never names.
 ///
 /// Windows only, like its one reader: off Windows the profile path is not asked.
 #[cfg(windows)]
-const PROFILE_COMMAND: &str = r#"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $p = $PROFILE.CurrentUserCurrentHost; $p; (Get-ExecutionPolicy).ToString(); Get-ExecutionPolicy -List | ForEach-Object { '{0}={1}' -f $_.Scope, $_.ExecutionPolicy }; $z = 'Unknown'; try { $z = [string][psobject].Assembly.GetType('System.Management.Automation.ClrFacade').GetMethod('GetFileSecurityZone', [Reflection.BindingFlags]'NonPublic,Static').Invoke($null, @([string]$p)) } catch { }; 'Zone=' + $z; Set-ExecutionPolicy -Scope Process -ExecutionPolicy Undefined -Force -ErrorAction SilentlyContinue; 'NoProcess=' + (Get-ExecutionPolicy).ToString()"#;
+const PROFILE_COMMAND: &str = r#"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $p = $PROFILE.CurrentUserCurrentHost; $p; (Get-ExecutionPolicy).ToString(); Get-ExecutionPolicy -List | ForEach-Object { '{0}={1}' -f $_.Scope, $_.ExecutionPolicy }; $z = 'Unknown'; try { $z = [string][psobject].Assembly.GetType('System.Management.Automation.ClrFacade').GetMethod('GetFileSecurityZone', [Reflection.BindingFlags]'NonPublic,Static').Invoke($null, @([string]$p)) } catch { }; 'Zone=' + $z; $local = $false; try { $local = (-not ([Uri]$p).IsUnc) -and ([IO.DriveInfo]::new([IO.Path]::GetPathRoot($p)).DriveType -eq [IO.DriveType]::Fixed) } catch { }; 'Local=' + $local; 'Marked=' + [bool](Get-Item -LiteralPath $p -Stream Zone.Identifier -ErrorAction SilentlyContinue); Set-ExecutionPolicy -Scope Process -ExecutionPolicy Undefined -Force -ErrorAction SilentlyContinue; 'NoProcess=' + (Get-ExecutionPolicy).ToString()"#;
 
 /// **The one command a user may run to let PowerShell load `$PROFILE`**: the CurrentUser scope,
 /// which needs no elevation, set to `RemoteSigned`. Folio copies it on the user's click and
@@ -2401,13 +2407,77 @@ fn powershell_edition(program: &Path) -> PowerShellEdition {
 struct ProfileObservation {
     path: PathBuf,
     scopes: PolicyScopes,
-    /// **Whether this edition's `RemoteSigned` would load an unsigned `$PROFILE` from where it
-    /// is** — the edition's own zone answer ([`PROFILE_COMMAND`]'s `Zone=`): `Some(true)` for
-    /// this computer, the intranet or a trusted site, `Some(false)` for the Internet or an
-    /// untrusted site, `None` when the edition gave no answer.
-    remote_signed_loads: Option<bool>,
+    /// **What the edition said about whether its `RemoteSigned` would load an unsigned
+    /// `$PROFILE` from where it is** — its own zone answer ([`PROFILE_COMMAND`]'s `Zone=`):
+    /// `Some(true)` for this computer, the intranet or a trusted site, `Some(false)` for the
+    /// Internet or an untrusted site, `None` when the edition gave no answer.
+    edition_says: Option<bool>,
+    /// What can be known without the edition's answer ([`PROFILE_COMMAND`]'s `Local=`/`Marked=`).
+    location: ProfileLocation,
     line_present: bool,
 }
+
+/// Where `$PROFILE` is, as far as public means can say: the fallback's two facts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProfileLocation {
+    /// On a local fixed drive (not a share, not a removable drive).
+    local_fixed: bool,
+    /// The file carries a `Zone.Identifier` stream.
+    marked: bool,
+}
+
+impl ProfileLocation {
+    /// The kind of path, for the diagnostics line.
+    fn kind(self) -> &'static str {
+        match (self.local_fixed, self.marked) {
+            (_, true) => "a profile carrying a Mark of the Web",
+            (true, false) => "a profile on a local fixed drive",
+            (false, false) => "a profile on a network or removable drive",
+        }
+    }
+}
+
+impl ProfileObservation {
+    /// [`remote_signed_loads`] for this observation.
+    fn remote_signed_loads(&self) -> Option<bool> {
+        remote_signed_loads(self.edition_says, self.location)
+    }
+}
+
+/// **Whether `RemoteSigned` would load the profile from where it is** — the edition's own answer
+/// when it gave one, in every case. Without one, the one fallback this build keeps: an unmarked
+/// profile on a local fixed drive loads under `RemoteSigned` on both editions (measured
+/// 2026-10-05, round 6), so its road stays; a marked file or a network or removable path cannot
+/// be known without the edition, and is `None` — the Location sentence.
+fn remote_signed_loads(edition_says: Option<bool>, location: ProfileLocation) -> Option<bool> {
+    edition_says.or((location.local_fixed && !location.marked).then_some(true))
+}
+
+/// **The editions whose missing zone answer has been said in diagnostics** — once per edition
+/// per process, so a future break of the internal zone function is noticed without a line per
+/// probe.
+#[derive(Default)]
+struct FallbackNotices(Mutex<std::collections::BTreeSet<PowerShellEdition>>);
+
+impl FallbackNotices {
+    /// The diagnostics line for this edition's first unanswered observation; `None` after it.
+    fn first(&self, program: &Path, location: ProfileLocation) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert(powershell_edition(program))
+            .then(|| {
+                format!(
+                    "BT_SHELL_PROFILE {}: the edition did not answer whether RemoteSigned loads \
+                     {}; using the fallback",
+                    program.display(),
+                    location.kind()
+                )
+            })
+    }
+}
+
+static FALLBACK_NOTICES: OnceLock<FallbackNotices> = OnceLock::new();
 
 static PROFILE_OBSERVATIONS: OnceLock<Mutex<BTreeMap<PowerShellEdition, ProfileObservation>>> =
     OnceLock::new();
@@ -2484,7 +2554,7 @@ pub fn powershell_profile_fallback(
         no_profile,
         observed.map(|observed| {
             (
-                policy_cause(observed.scopes, observed.remote_signed_loads, row),
+                policy_cause(observed.scopes, observed.remote_signed_loads(), row),
                 observed.line_present,
             )
         }),
@@ -2527,6 +2597,13 @@ fn profile_fallback_from_parts(
 }
 
 fn publish_profile_observation(program: &Path, observed: ProfileObservation) {
+    if observed.edition_says.is_none()
+        && let Some(line) = FALLBACK_NOTICES
+            .get_or_init(Default::default)
+            .first(program, observed.location)
+    {
+        eprintln!("{line}");
+    }
     PROFILE_OBSERVATIONS
         .get_or_init(Default::default)
         .lock()
@@ -3120,7 +3197,10 @@ fn probe_profile_observation_unless(
     if sandboxed { None } else { ask() }
 }
 
-/// Whether the `$PROFILE` sandbox is set — the one reading of the variable.
+/// Whether the `$PROFILE` sandbox is set: the question the probes and `warm_profile_answers` ask
+/// before starting a shell. The variable is read twice more, each for its value: by
+/// `profile_runtime::sandbox_profile` (the sandboxed profile's path) and on the uninstaller's own
+/// road (`uninstall.rs`).
 fn profile_sandboxed() -> bool {
     std::env::var_os("BT_POWERSHELL_PROFILE").is_some()
 }
@@ -3151,10 +3231,19 @@ fn parse_profile_observation(stdout: &str) -> Option<ProfileObservation> {
     };
     // The edition's `SecurityZone`, by name; anything else — `NoZone`, `Unknown`, an answer
     // this build has no name for — is no answer.
-    let remote_signed_loads = match reported.get("Zone")?.as_str() {
+    let edition_says = match reported.get("Zone")?.as_str() {
         "MyComputer" | "Intranet" | "Trusted" => Some(true),
         "Internet" | "Untrusted" => Some(false),
         _ => None,
+    };
+    let fact = |name: &str| {
+        reported
+            .get(name)
+            .map(|value| value.eq_ignore_ascii_case("True"))
+    };
+    let location = ProfileLocation {
+        local_fixed: fact("Local")?,
+        marked: fact("Marked")?,
     };
     Some(ProfileObservation {
         scopes: PolicyScopes {
@@ -3166,7 +3255,8 @@ fn parse_profile_observation(stdout: &str) -> Option<ProfileObservation> {
             default: scope("NoProcess")?,
         },
         path,
-        remote_signed_loads,
+        edition_says,
+        location,
         line_present: false,
     })
 }
@@ -4288,7 +4378,7 @@ mod tests {
             "\r\n{path}\r\nRemoteSigned\r\n\
              MachinePolicy=Undefined\r\nUserPolicy=Undefined\r\nProcess=Undefined\r\n\
              CurrentUser={current_user}\r\nLocalMachine=Undefined\r\n\
-             Zone={zone}\r\nNoProcess={no_process}\r\n"
+             Zone={zone}\r\nLocal=True\r\nMarked=False\r\nNoProcess={no_process}\r\n"
         )
     }
 
@@ -4320,7 +4410,25 @@ mod tests {
             observed.scopes.default, RemoteSigned,
             "the probe's own resolution"
         );
-        assert_eq!(observed.remote_signed_loads, Some(true));
+        assert_eq!(observed.edition_says, Some(true));
+        assert_eq!(
+            observed.location,
+            ProfileLocation {
+                local_fixed: true,
+                marked: false
+            }
+        );
+        let facts = probe_answer(local, "Undefined", "NoZone", "Restricted")
+            .replace("Local=True", "Local=False")
+            .replace("Marked=False", "Marked=True");
+        let facts = parse_profile_observation(&facts).expect("an answer");
+        assert_eq!(
+            facts.location,
+            ProfileLocation {
+                local_fixed: false,
+                marked: true
+            }
+        );
         assert!(!observed.line_present, "presence is read from the file");
         for (zone, path, expected) in [
             ("Internet", local, Some(false)),
@@ -4335,10 +4443,7 @@ mod tests {
             let parsed =
                 parse_profile_observation(&probe_answer(path, "Undefined", zone, "Restricted"))
                     .expect("an answer");
-            assert_eq!(
-                parsed.remote_signed_loads, expected,
-                "Zone={zone} for {path}"
-            );
+            assert_eq!(parsed.edition_says, expected, "Zone={zone} for {path}");
         }
         assert!(
             parse_profile_observation("C:\\p\\profile.ps1\r\nRestricted\r\n").is_none(),
@@ -4541,6 +4646,78 @@ mod tests {
         );
     }
 
+    /// PIN — **a private API is not a single point of failure for the ordinary case** (review of
+    /// round 7, item 1). The edition's own zone answer wins in every combination. Without it, an
+    /// unmarked profile on a local fixed drive keeps its road (Offer, or Copy where the policy is
+    /// the user's), while a marked file or a network path cannot be known and gets the Location
+    /// sentence.
+    ///
+    /// RED (mutations: the fallback answers `None` always — the local unmarked rows lose the
+    /// road; it ignores the mark; it ignores the drive; it wins over the edition's answer).
+    #[test]
+    fn the_editions_answer_wins_and_the_fallback_covers_only_what_can_be_known() {
+        use crate::psreadline::ExecutionPolicy::{RemoteSigned, Restricted, Undefined};
+        let at = |local_fixed, marked| ProfileLocation {
+            local_fixed,
+            marked,
+        };
+        let every = [
+            at(true, false),
+            at(true, true),
+            at(false, false),
+            at(false, true),
+        ];
+        for answer in [Some(true), Some(false)] {
+            for location in every {
+                assert_eq!(
+                    remote_signed_loads(answer, location),
+                    answer,
+                    "{answer:?} at {location:?}"
+                );
+            }
+        }
+        assert_eq!(remote_signed_loads(None, at(true, false)), Some(true));
+        assert_eq!(remote_signed_loads(None, at(true, true)), None);
+        assert_eq!(remote_signed_loads(None, at(false, false)), None);
+        assert_eq!(remote_signed_loads(None, at(false, true)), None);
+
+        // Through the row: no answer + local unmarked is the road it was before round 6.
+        let none = Undefined;
+        let permissive = scopes(none, none, none, RemoteSigned, none);
+        let refusing = scopes(none, none, none, Restricted, none);
+        let row = RowProcessScope::Absent;
+        let cause = |list, location| policy_cause(list, remote_signed_loads(None, location), row);
+        assert_eq!(cause(permissive, at(true, false)), PolicyCause::Allows);
+        assert_eq!(cause(refusing, at(true, false)), PolicyCause::Changeable);
+        assert_eq!(cause(permissive, at(true, true)), PolicyCause::Location);
+        assert_eq!(cause(permissive, at(false, false)), PolicyCause::Location);
+        assert_eq!(cause(refusing, at(false, false)), PolicyCause::Location);
+    }
+
+    /// PIN — **a missing zone answer is said in diagnostics once per edition**, naming the kind of
+    /// path (review of round 7, item 1), so a future break of the internal zone function shows.
+    ///
+    /// RED (mutation: `FallbackNotices::first` answers every time).
+    #[test]
+    fn a_missing_zone_answer_is_said_once_per_edition() {
+        let notices = FallbackNotices::default();
+        let local = ProfileLocation {
+            local_fixed: true,
+            marked: false,
+        };
+        let first = notices
+            .first(Path::new("powershell.exe"), local)
+            .expect("the first unanswered observation is said");
+        assert!(first.contains("did not answer whether RemoteSigned loads"));
+        assert!(first.contains("a profile on a local fixed drive"));
+        assert!(first.contains("using the fallback"));
+        assert_eq!(notices.first(Path::new("powershell.exe"), local), None);
+        assert!(
+            notices.first(Path::new("pwsh.exe"), local).is_some(),
+            "the other edition is said once too"
+        );
+    }
+
     /// PIN — **a run inside the `$PROFILE` sandbox asks no shell** (round 6; U-35's ordinary-start
     /// test went red on CI because a sandboxed child started real PowerShell probes).
     ///
@@ -4654,7 +4831,11 @@ mod tests {
         let observed = |current_user| ProfileObservation {
             path: PathBuf::from("profile.ps1"),
             scopes: scopes(Undefined, Undefined, Undefined, current_user, Undefined),
-            remote_signed_loads: Some(true),
+            edition_says: Some(true),
+            location: ProfileLocation {
+                local_fixed: true,
+                marked: false,
+            },
             line_present: false,
         };
         publish_profile_observation(program, observed(Restricted));

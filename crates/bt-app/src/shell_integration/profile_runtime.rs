@@ -382,7 +382,7 @@ fn install_for_program(program: &Path, arguments: &[OsString]) -> io::Result<Pat
     publish_profile_observation(program, observed.clone());
     if let Some(sentence) = policy_cause(
         observed.scopes,
-        observed.remote_signed_loads,
+        observed.remote_signed_loads(),
         row_process_scope(program, arguments),
     )
     .sentence()

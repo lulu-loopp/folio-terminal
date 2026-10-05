@@ -260,7 +260,11 @@ Two more cases offer nothing:
   policy that decides, or would decide once the command has run, and the edition says it would not
   load the profile from there (or gives no answer), the row says `$PROFILE` is stored where the
   policy may refuse it. A line already installed where the edition says it loads shows the
-  ordinary "loaded via $PROFILE" sentence.
+  ordinary "loaded via $PROFILE" sentence. The edition's zone function is internal; when an
+  edition gives no answer, the same probe run's public facts decide what can still be known — an
+  unmarked profile on a local fixed drive loads, so its row keeps the button; a marked file or a
+  network or removable path gets the Location sentence — and diagnostics say once per edition
+  that the fallback was used.
 * **A row this build cannot read** (for example `-ep:Bypass`: the colon form is not an option to
   either binder) makes no claim about its policy and shows only the "not provided" sentence.
 

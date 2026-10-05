@@ -14012,3 +14012,16 @@ Pinned by:
   - It waits for PowerShell to save the cache after the lookup ended. PowerShell saves on a timer about 14 s after a change, not at exit (measured on both editions). During a long analysis the timer fires half-way, so the second scratch run found a warm-up that stopped at the first save still left the next child 19 s of analysis.
 - **The product is not affected the same way.** A pane and Folio's probes use the account's own analysis cache, which an account's first PowerShell session warms.
 - Pinned by `test_shell::tests::a_powershell_child_starts_with_the_shared_warm_analysis_cache`.
+
+**Round 8 (review of rounds 6–7).**
+- **The zone answer is no longer a single point of failure.** It comes from an internal function reached by reflection. When an edition gives no answer (a future 7.x renames the function, or a language mode refuses the reflection), Folio falls back to what the same probe run knows by public means: `Local=` (the path is on a local fixed drive, from `[Uri]` and `[IO.DriveInfo]`) and `Marked=` (the file carries a `Zone.Identifier` stream, from `Get-Item -Stream`).
+  - An unmarked profile on a local fixed drive loads under `RemoteSigned` on both editions (measured in round 6), so its road stays.
+  - A marked file, or a network or removable path, cannot be known without the edition and gets the Location sentence.
+  - The edition's answer, when there is one, wins in every case (`remote_signed_loads`).
+  - The fallback is said once per edition in diagnostics: `BT_SHELL_PROFILE <program>: the edition did not answer whether RemoteSigned loads <kind of path>; using the fallback`.
+- **A test-shell warm-up never fails a test.**
+  - Every outcome short of a finished warm-up — the program cannot start, the folder or copy is refused, another test process holds the file, the save comes after the 30 s wait, the 300 s ceiling — is recorded for the give-up message and leaves the edition cold, so the next child tries again.
+  - The account's cache is copied under a name of the process's own and renamed into place, so two test processes warming at once never leave half a file.
+- **Pinned by:**
+  - `shell_integration::tests::{the_editions_answer_wins_and_the_fallback_covers_only_what_can_be_known,a_missing_zone_answer_is_said_once_per_edition,the_profile_probe_answer_is_a_path_a_policy_and_its_scopes}`;
+  - `test_shell::tests::a_warm_up_that_cannot_finish_leaves_the_edition_cold_and_the_test_running`.
