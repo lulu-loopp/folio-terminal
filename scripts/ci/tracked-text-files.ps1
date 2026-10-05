@@ -1,25 +1,10 @@
-# Shared scope for the tracked-text integrity gates. Keep exclusions here so a
-# file cannot be text for one integrity check and invisible to the other.
+# Shared scope for the tracked-text integrity gates. A tracked file is text exactly when its bytes
+# are strict UTF-8 and contain no NUL. Every binary is named in tracked-binary-files.tsv, and each
+# row is checked against the current bytes so the list can only shrink deliberately.
 
-$script:TrackedTextBinaryExtensions = @(
-    '.avi', '.bin', '.btcr', '.dat', '.dll', '.exe', '.gif', '.icc', '.ico',
-    '.jpeg', '.jpg', '.mkv', '.mov', '.mp4', '.nupkg', '.otf', '.packdump',
-    '.pdf', '.pfb', '.png', '.recording', '.ttf', '.vte', '.webm', '.wmv',
-    '.woff', '.woff2', '.zip'
-)
+$script:StrictUtf8 = [Text.UTF8Encoding]::new($false, $true)
 
-function Test-VendoredThirdPartyNotice([string] $Relative) {
-    $path = $Relative.Replace('\', '/')
-    if ($path -eq 'THIRD-PARTY-NOTICES.md' -or $path.StartsWith('licenses/')) {
-        return $true
-    }
-    if (-not $path.StartsWith('vendor/')) { return $false }
-    if ($path -match '/licenses?/') { return $true }
-    $name = [IO.Path]::GetFileName($path)
-    return $name -match '^(?i:LICENSE|LICENCE|COPYING|NOTICE|AUTHORS|CONTRIBUTORS)(?:[.-].*)?$'
-}
-
-function Get-TrackedTextFiles([string] $Repo) {
+function Get-TrackedPaths([string] $Repo) {
     Push-Location $Repo
     try {
         $tracked = @(& git -c core.quotepath=false ls-files)
@@ -27,15 +12,66 @@ function Get-TrackedTextFiles([string] $Repo) {
     } finally {
         Pop-Location
     }
+    return $tracked
+}
+
+function Read-ReasonList([string] $Path, [string] $Header) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "missing integrity exemption list $Path"
+    }
+    $rows = @{}
+    $lines = @(Get-Content -LiteralPath $Path)
+    $first = $lines | Where-Object { $_ -and -not $_.StartsWith('#') } | Select-Object -First 1
+    if ($first -ne $Header) { throw "$Path must begin its rows with '$Header'" }
+    foreach ($line in $lines) {
+        if (-not $line -or $line.StartsWith('#') -or $line -eq $Header) { continue }
+        $parts = $line -split "`t", 2
+        if ($parts.Count -ne 2 -or -not $parts[0] -or -not $parts[1]) {
+            throw "$Path has a row without an exact path and a reason: $line"
+        }
+        $relative = $parts[0].Replace('\', '/')
+        if ($rows.ContainsKey($relative)) { throw "$Path lists $relative twice" }
+        $rows[$relative] = $parts[1]
+    }
+    return $rows
+}
+
+function Get-TrackedTextFiles([string] $Repo) {
+    $tracked = @(Get-TrackedPaths $Repo)
+    $binary = Read-ReasonList (Join-Path $PSScriptRoot 'tracked-binary-files.tsv') "path`treason"
+    $seenBinary = @{}
+    $out = @()
 
     foreach ($relative in $tracked) {
-        if (Test-VendoredThirdPartyNotice $relative) { continue }
-        $extension = [IO.Path]::GetExtension($relative).ToLowerInvariant()
-        if ($script:TrackedTextBinaryExtensions -contains $extension) { continue }
+        $relative = $relative.Replace('\', '/')
         $full = Join-Path $Repo $relative
         if (-not (Test-Path -LiteralPath $full -PathType Leaf)) {
             throw "$relative is tracked but cannot be read from the working tree"
         }
-        [pscustomobject]@{ Relative = $relative; Full = $full }
+        $bytes = [IO.File]::ReadAllBytes($full)
+        $hasNul = [Array]::IndexOf($bytes, [byte]0) -ge 0
+        $validUtf8 = $true
+        try { $null = $script:StrictUtf8.GetString($bytes) } catch { $validUtf8 = $false }
+        $isText = -not $hasNul -and $validUtf8
+
+        if ($binary.ContainsKey($relative)) {
+            $seenBinary[$relative] = $true
+            if ($isText) {
+                throw "$relative is listed as binary but is now strict UTF-8 text without NUL; remove the stale exemption"
+            }
+            continue
+        }
+        if (-not $isText) {
+            $reason = if ($hasNul) { 'contains NUL bytes' } else { 'is not strict UTF-8' }
+            throw "$relative $reason but has no exact binary exemption"
+        }
+        $out += [pscustomobject]@{ Relative = $relative; Full = $full; Bytes = $bytes }
     }
+
+    foreach ($relative in $binary.Keys) {
+        if (-not $seenBinary.ContainsKey($relative)) {
+            throw "$relative is listed as binary but is not a tracked readable file"
+        }
+    }
+    return $out
 }

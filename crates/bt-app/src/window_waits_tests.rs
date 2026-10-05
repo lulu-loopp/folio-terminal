@@ -841,12 +841,212 @@ fn callees_in(world: &World, body: &str, site_name: &str) -> Vec<String> {
         .collect()
 }
 
+// Parsed by the guard but deliberately absent from the Rust build: these are source-shape
+// fixtures, including calls Rust would reject precisely because the scanner's tentative type is
+// not the receiver's real type.
+#[cfg(any())]
+fn receiver_typing_source_shapes() {
+    let annotated: CappedReads = unreachable!();
+    annotated.kill();
+
+    let constructed = CappedReads::new(unreachable!(), 1);
+    constructed.observe(0);
+    let literal = CappedReads { imaginary: () };
+    let tuple = Phases(0);
+
+    let mut reassigned = CappedReads::new(unreachable!(), 1);
+    reassigned = unreachable!();
+    reassigned.kill();
+
+    let factory = Pending::new(None, Vec::new());
+    factory.kill();
+
+    let contains = passthrough(CappedReads::new(unreachable!(), 1));
+    contains.kill();
+    let _ = (literal, tuple);
+}
+
+fn source_shape_body<'a>(world: &'a World) -> Body<'a> {
+    let (src, record) = world
+        .srcs
+        .iter()
+        .enumerate()
+        .find_map(|(src, source)| {
+            source
+                .index
+                .items()
+                .iter()
+                .find(|record| record.name() == "receiver_typing_source_shapes")
+                .map(|record| (src, record))
+        })
+        .expect("the cfg-false source-shape fixture is indexed");
+    Body::new(world, src, record)
+}
+
+/// RED (T-GUARDS-BLIND round 2) — typing is allowed to narrow only a non-empty answer. A written
+/// first-party type with no method of this name, a reassigned local, a factory returning a wrapper,
+/// and an initializer that merely contains a constructor all remain attributed by name. A genuine
+/// constructor local still narrows to its own method.
+///
+/// MUTATIONS: return the empty `typed` set instead of `any_method`; omit the assignment invalidator;
+/// accept `Option<Self>` as `Self`; scan past the initializer head. The corresponding assertion
+/// below goes red for each mutation.
+#[test]
+fn receiver_typing_only_narrows_a_non_empty_source_stated_answer() {
+    const PROBE_KILL: &str = "bt-platform crate::ProbeChild::kill";
+    let world = World::new();
+    let body = source_shape_body(&world);
+    assert_eq!(
+        body.locals.get("annotated").map(|(_, ty)| ty),
+        Some(&BTreeSet::from(["CappedReads".to_owned()])),
+        "a direct annotation states its type"
+    );
+    for name in ["reassigned", "factory", "contains"] {
+        assert!(
+            !body.locals.contains_key(name),
+            "`{name}` is not a source-stated current receiver type"
+        );
+    }
+    for name in ["constructed", "literal", "tuple"] {
+        assert!(
+            body.locals.contains_key(name),
+            "`{name}` is a real constructor head: {:?}",
+            body.locals
+        );
+    }
+
+    let mut kills = BTreeMap::new();
+    for site in body.sites().into_iter().filter(|site| site.name == "kill") {
+        let Form::Method(Some(chain)) = &site.form else {
+            panic!("the fixture's kill is a receiver call");
+        };
+        kills.insert(
+            chain[0],
+            body.resolve(&site)
+                .iter()
+                .map(|callable| world.key(callable))
+                .collect::<BTreeSet<_>>(),
+        );
+    }
+    for name in ["annotated", "reassigned", "factory", "contains"] {
+        assert!(
+            kills[name].contains(PROBE_KILL),
+            "`{name}.kill()` stays name-matched: {:?}",
+            kills[name]
+        );
+    }
+    let observe = body
+        .sites()
+        .into_iter()
+        .find(|site| site.name == "observe")
+        .expect("the real typed call");
+    assert_eq!(
+        body.resolve(&observe)
+            .iter()
+            .map(|callable| world.key(callable))
+            .collect::<Vec<_>>(),
+        ["bt-pty crate::CappedReads::observe"],
+        "a real first-party constructor and method still narrow"
+    );
+}
+
+/// RED (T-GUARDS-BLIND round 2) — the real-tree diff against the pre-round-1 local-receiver rule.
+/// Every smaller callee set is non-empty, comes from a source-stated current local type, and drops
+/// only methods owned by a different type. The rows are printed for the ticket report.
+///
+/// MUTATION: make the local receiver branch return `any_method`; the required non-vacuous shrink
+/// inventory is empty and this test goes red.
+#[test]
+fn real_tree_receiver_narrowing_only_removes_other_types_methods() {
+    let world = World::new();
+    let mut shrinks = Vec::new();
+    for (src_at, src) in world.srcs.iter().enumerate() {
+        let reach = &world.reach[src_at];
+        for record in src
+            .index
+            .items()
+            .iter()
+            .filter(|record| record.kind().is_callable() && src.product_item(record))
+        {
+            let body = Body::new(&world, src_at, record);
+            for site in body.sites() {
+                let Form::Method(Some(chain)) = &site.form else {
+                    continue;
+                };
+                if body
+                    .locals
+                    .get(chain[0])
+                    .is_none_or(|(bound, _)| *bound >= site.at)
+                {
+                    continue;
+                }
+                let before: BTreeSet<String> = world
+                    .callables
+                    .get(site.name)
+                    .into_iter()
+                    .flatten()
+                    .filter(|callable| {
+                        reach.contains(&callable.src) && callable.type_owner.is_some()
+                    })
+                    .map(|callable| world.key(callable))
+                    .collect();
+                let after: BTreeSet<String> = body
+                    .resolve(&site)
+                    .iter()
+                    .map(|callable| world.key(callable))
+                    .collect();
+                if before == after || !after.is_subset(&before) {
+                    continue;
+                }
+                let types = body
+                    .receiver_types(&site)
+                    .expect("only a source-stated local can narrow");
+                assert!(!after.is_empty(), "typing may never narrow to empty");
+                let removed: Vec<String> = before.difference(&after).cloned().collect();
+                for callable in world
+                    .callables
+                    .get(site.name)
+                    .into_iter()
+                    .flatten()
+                    .filter(|callable| removed.contains(&world.key(callable)))
+                {
+                    assert!(
+                        callable
+                            .type_owner
+                            .as_ref()
+                            .is_some_and(|owner| !types.contains(owner)),
+                        "{} lost a method of its own stated type {types:?}",
+                        src.location(site.at)
+                    );
+                }
+                shrinks.push(format!(
+                    "{}\t{}\t{}\t{}\t{}",
+                    key_of(src, record),
+                    src.location(site.at),
+                    types.iter().cloned().collect::<Vec<_>>().join("|"),
+                    after.iter().cloned().collect::<Vec<_>>().join("|"),
+                    removed.join("|")
+                ));
+            }
+        }
+    }
+    assert!(
+        !shrinks.is_empty(),
+        "the real tree must exercise the local-receiver narrowing this audit guards"
+    );
+    for row in shrinks {
+        eprintln!("CALLEE_SHRINK\t{row}");
+    }
+}
+
 /// RED (T-PROBE-CHILD round 4, T-GUARDS-BLIND) — **a receiver whose field declaration writes
 /// its type does not become every method with the same name**: `PtySession::shutdown` binds
-/// `child` from `self.child`, whose declaration says `Child`, not `ProbeChild`. That remains true
-/// whether `bt-platform` is unreachable, a dev-dependency, or a product dependency. A real
-/// `ProbeChild` arm in `GitChild::kill` is still attributed, and a local made by the first-party
-/// `CappedReads::new` is still attributed to `CappedReads::observe`.
+/// `child` from `self.child`, whose declaration says the foreign `Child`, not `ProbeChild`. In the
+/// real graph and with a dev-only edge `ProbeChild` is unreachable. With an artificial product
+/// edge the tightened round-2 rule deliberately falls back to the name match, but the inventory
+/// still attributes this source spelling to the registered `Child::kill` vocabulary effect before
+/// treating it as a first-party edge. A real `ProbeChild` arm in `GitChild::kill` and a local made
+/// by the first-party `CappedReads::new` remain attributed to their actual callees.
 ///
 /// MUTATIONS: remove `self_field_types` from `local_types`, and the product-edge collision goes
 /// red; make the local branch of `Body::resolve` return no methods, and the `CappedReads` assertion
@@ -892,8 +1092,8 @@ fn a_test_only_edge_lends_product_code_no_first_party_callee() {
     );
     let callees = callees_in(&product_edge, PTY_SHUTDOWN, "kill");
     assert!(
-        !callees.iter().any(|key| key == PROBE_KILL),
-        "reachability revived a type collision: {callees:?}"
+        callees.iter().any(|key| key == PROBE_KILL),
+        "typed-empty must fall back to the old name match: {callees:?}"
     );
 
     let callees = callees_in(&as_written, "bt-app crate::git::GitChild::kill", "kill");
@@ -913,46 +1113,6 @@ fn a_test_only_edge_lends_product_code_no_first_party_callee() {
             .any(|key| key == "bt-pty crate::CappedReads::observe"),
         "a first-party constructor local still has its method: {callees:?}"
     );
-}
-
-/// RED (T-GUARDS-BLIND) — the three deliberately small local spellings the resolver claims are
-/// all read mechanically. No return-type or data-flow inference is hidden behind that claim.
-///
-/// MUTATIONS: remove, one at a time, the annotation branch, `new_call`, and `literal` in
-/// `local_types`/`constructor_type`; the corresponding row is absent and this test goes red.
-#[test]
-fn written_local_annotation_and_constructor_shapes_are_read() {
-    #[derive(Default)]
-    struct WrittenShape {}
-    impl WrittenShape {
-        fn new() -> Self {
-            Self {}
-        }
-    }
-
-    let annotated: WrittenShape = Default::default();
-    let constructed = WrittenShape::new();
-    let literal = WrittenShape {};
-    let _ = (annotated, constructed, literal);
-
-    let world = World::new();
-    let (src, record) = world
-        .srcs
-        .iter()
-        .enumerate()
-        .flat_map(|(src, source)| source.index.items().iter().map(move |record| (src, record)))
-        .find(|(_, record)| {
-            record.name() == "written_local_annotation_and_constructor_shapes_are_read"
-        })
-        .expect("this test's body is indexed");
-    let body = Body::new(&world, src, record);
-    for name in ["annotated", "constructed", "literal"] {
-        assert_eq!(
-            body.locals.get(name).map(|(_, types)| types),
-            Some(&BTreeSet::from(["WrittenShape".to_owned()])),
-            "the `{name}` spelling carries its written type"
-        );
-    }
 }
 
 /// RED (T-TEST-SHELL-HYGIENE review) — **a `cfg` predicate is read as a product build reads
@@ -1552,18 +1712,50 @@ impl World {
         }
     }
 
-    /// The upper-case names a type is written with: `Option<JoinHandle<()>>` is both.
-    fn type_names(src: &Src, toks: &[Tok]) -> BTreeSet<String> {
+    /// The first-party receiver type a written type spells. References are peeled, but a generic
+    /// wrapper is its own type: `&ProbeChild` says `ProbeChild`, while `Arc<ProbeChild>` says
+    /// `Arc` and therefore supplies no first-party type.
+    fn written_type(&self, from: usize, src: &Src, toks: &[Tok]) -> BTreeSet<String> {
+        let Some(name) = toks
+            .iter()
+            .take_while(|tok| !src.is(Some(tok), "<"))
+            .filter(|tok| tok.kind == Kind::Ident)
+            .map(|tok| src.text(*tok))
+            .find(|name| name.starts_with(|c: char| c.is_ascii_uppercase()))
+        else {
+            return BTreeSet::new();
+        };
+        if self.is_reachable_type(from, name) {
+            BTreeSet::from([name.to_owned()])
+        } else {
+            BTreeSet::new()
+        }
+    }
+
+    fn written_interior_types(&self, from: usize, src: &Src, toks: &[Tok]) -> BTreeSet<String> {
         toks.iter()
             .filter(|tok| tok.kind == Kind::Ident)
             .map(|tok| src.text(*tok))
-            .filter(|name| name.starts_with(|c: char| c.is_ascii_uppercase()))
+            .filter(|name| {
+                name.starts_with(|c: char| c.is_ascii_uppercase())
+                    && self.is_reachable_type(from, name)
+            })
             .map(ToOwned::to_owned)
             .collect()
     }
 
+    fn is_reachable_type(&self, from: usize, name: &str) -> bool {
+        self.reach[from].iter().any(|at| {
+            self.srcs[*at].index.items().iter().any(|record| {
+                record.kind().is_type()
+                    && record.name() == name
+                    && self.srcs[*at].product_item(record)
+            })
+        })
+    }
+
     /// The types `field` is declared with on any of `owners`.
-    fn field_types(&self, owners: &BTreeSet<String>, field: &str) -> BTreeSet<String> {
+    fn field_types(&self, from: usize, owners: &BTreeSet<String>, field: &str) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
         for owner in owners {
             let declared = self.fields.get(&(owner.clone(), field.to_owned()));
@@ -1571,11 +1763,33 @@ impl World {
                 let src = &self.srcs[*at];
                 let toks = src.lex(record.whole().start(), record.whole().end());
                 if let Some(colon) = toks.iter().position(|t| src.is(Some(t), ":")) {
-                    out.extend(Self::type_names(src, &toks[colon + 1..]));
+                    out.extend(self.written_type(from, src, &toks[colon + 1..]));
                 }
             }
         }
         out
+    }
+
+    /// Whether this associated function is a source-stated constructor of `owner`.
+    fn constructor_returns_owner(&self, callable: &Callable, owner: &str) -> bool {
+        let Some(record) = callable.record else {
+            return false;
+        };
+        let src = &self.srcs[callable.src];
+        let toks = src.lex(record.declaration().start(), record.declaration().end());
+        let Some(arrow) = toks.iter().position(|tok| src.is(Some(tok), "->")) else {
+            return false;
+        };
+        let returned: Vec<&str> = toks[arrow + 1..]
+            .iter()
+            .take_while(|tok| !src.is(Some(tok), "where") && !src.is(Some(tok), "{"))
+            .map(|tok| src.text(*tok))
+            .collect();
+        returned == ["Self"]
+            || (returned.last() == Some(&owner)
+                && returned.iter().all(|part| {
+                    *part == "::" || part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                }))
     }
 }
 
@@ -1607,7 +1821,7 @@ struct Body<'w> {
     src: usize,
     record: &'static ItemRecord,
     params: HashMap<&'static str, Vec<Tok>>,
-    /// Simple, uniquely named locals whose type the source writes or constructs.
+    /// Simple locals whose current type is stated by one unshadowed, unreassigned binding.
     locals: HashMap<&'static str, (usize, BTreeSet<String>)>,
     toks: Vec<Tok>,
 }
@@ -1681,27 +1895,49 @@ impl<'w> Body<'w> {
         if here.is_empty() { methods } else { here }
     }
 
+    fn receiver_types(&self, site: &Site) -> Option<BTreeSet<String>> {
+        let Form::Method(Some(chain)) = &site.form else {
+            return None;
+        };
+        let mut types = match chain[0] {
+            "self" => self
+                .record
+                .type_owner()
+                .map(|owner| BTreeSet::from([owner.to_owned()]))
+                .unwrap_or_default(),
+            first => {
+                if let Some(ty) = self.params.get(first) {
+                    self.world.written_type(self.src, self.s(), ty)
+                } else if let Some((bound, ty)) = self.locals.get(first)
+                    && *bound < site.at
+                {
+                    ty.clone()
+                } else {
+                    BTreeSet::new()
+                }
+            }
+        };
+        for field in &chain[1..] {
+            types = self.world.field_types(self.src, &types, field);
+        }
+        (!types.is_empty()).then_some(types)
+    }
+
     fn receiver_is_typed(&self, site: &Site) -> bool {
         match &site.form {
-            Form::Method(Some(chain)) => {
-                chain[0] == "self"
-                    || self.params.contains_key(chain[0])
-                    || self
-                        .locals
-                        .get(chain[0])
-                        .is_some_and(|(bound, _)| *bound < site.at)
-            }
-            Form::Method(None) => false,
+            Form::Method(_) => self.receiver_types(site).is_some(),
             _ => true,
         }
     }
 
-    /// The first-party items a call can be, by what the source says of it: a receiver whose type
-    /// is written (`self`, a field of it, a parameter, or a simple local annotation/constructor)
-    /// narrows by that type; one whose type is not written answers every method of the name the
-    /// package can reach. Return types, arbitrary calls, aliases, assignments, and bindings with
-    /// more than one possible local name stay name-matched; this resolver does no data-flow or
-    /// compiler inference.
+    /// The first-party items a call can be, by what the source states. A written receiver type may
+    /// only narrow a non-empty answer; if that type has no reachable first-party method of this
+    /// name, resolution falls back to the pre-typing name match. Mechanical receiver types are
+    /// `self`, a directly written field or parameter type, `let x: T`, and an initializer whose
+    /// head is a first-party `T::new(…)`, `T { … }`, or tuple constructor `T(…)`; `T::new` must be
+    /// declared to return `Self`/`T`. Shadowing, later assignment, branches, method chains,
+    /// factories, aliases, and generic/reference interiors not themselves written stay
+    /// name-matched. The resolver performs no return-type or data-flow inference.
     fn resolve(&self, site: &Site) -> Vec<Callable> {
         let world = self.world;
         let reach = &world.reach[self.src];
@@ -1739,29 +1975,16 @@ impl<'w> Body<'w> {
                 })
                 .collect(),
             Form::Method(Some(chain)) if chain.as_slice() == ["self"] => self.own_methods(&all),
-            Form::Method(Some(chain)) => {
-                let mut types = match chain[0] {
-                    "self" => self
-                        .record
-                        .type_owner()
-                        .map(|owner| BTreeSet::from([owner.to_owned()]))
-                        .unwrap_or_default(),
-                    first => {
-                        if let Some(ty) = self.params.get(first) {
-                            World::type_names(self.s(), ty)
-                        } else if let Some((bound, ty)) = self.locals.get(first)
-                            && *bound < site.at
-                        {
-                            ty.clone()
-                        } else {
-                            return any_method();
-                        }
-                    }
+            Form::Method(Some(_)) => {
+                let Some(types) = self.receiver_types(site) else {
+                    return any_method();
                 };
-                for field in &chain[1..] {
-                    types = world.field_types(&types, field);
+                let typed = methods_of(&all, &types);
+                if typed.is_empty() {
+                    any_method()
+                } else {
+                    typed
                 }
-                methods_of(&all, &types)
             }
             Form::Method(None) => any_method(),
             Form::Path(quals) => match quals.last().copied().unwrap_or_default() {
@@ -1819,50 +2042,97 @@ fn top_level_token(s: &Src, toks: &[Tok], wanted: &str) -> Option<usize> {
     None
 }
 
-/// A type named by a constructor at the head of an initializer: `T::new(…)` or `T { … }`.
-fn constructor_type(s: &Src, toks: &[Tok]) -> BTreeSet<String> {
-    for (at, tok) in toks.iter().enumerate() {
-        if tok.kind != Kind::Ident || !s.text(*tok).starts_with(|c: char| c.is_ascii_uppercase()) {
-            continue;
-        }
-        let literal = s.is(toks.get(at + 1), "{");
-        let new_call = s.is(toks.get(at + 1), "::")
-            && s.is(toks.get(at + 2), "new")
-            && s.is(toks.get(at + 3), "(");
-        if literal || new_call {
-            return BTreeSet::from([s.text(*tok).to_owned()]);
-        }
+/// A type named by a constructor at the exact head of an initializer.
+fn constructor_type(world: &World, from: usize, s: &Src, toks: &[Tok]) -> BTreeSet<String> {
+    let Some(owner) = toks.first().filter(|tok| {
+        tok.kind == Kind::Ident && s.text(**tok).starts_with(|c: char| c.is_ascii_uppercase())
+    }) else {
+        return BTreeSet::new();
+    };
+    let owner = s.text(*owner);
+    if !world.is_reachable_type(from, owner) {
+        return BTreeSet::new();
     }
-    BTreeSet::new()
+    if s.is(toks.get(1), "{") {
+        return BTreeSet::from([owner.to_owned()]);
+    }
+    if s.is(toks.get(1), "(") {
+        return BTreeSet::from([owner.to_owned()]);
+    }
+    let Some(constructor) = toks
+        .get(2)
+        .filter(|tok| s.is(toks.get(1), "::") && tok.kind == Kind::Ident && s.is(toks.get(3), "("))
+    else {
+        return BTreeSet::new();
+    };
+    let constructor = s.text(*constructor);
+    if constructor != "new" {
+        return BTreeSet::new();
+    }
+    if world
+        .callables
+        .get(constructor)
+        .into_iter()
+        .flatten()
+        .any(|callable| {
+            world.reach[from].contains(&callable.src)
+                && callable.type_owner.as_deref() == Some(owner)
+                && world.constructor_returns_owner(callable, owner)
+        })
+    {
+        BTreeSet::from([owner.to_owned()])
+    } else {
+        BTreeSet::new()
+    }
 }
 
 /// Types mechanically carried from `self.field` at the head of an initializer.
 fn self_field_types(
     world: &World,
+    from: usize,
     src: &Src,
     record: &ItemRecord,
+    pattern: &[Tok],
     toks: &[Tok],
 ) -> BTreeSet<String> {
-    let Some(self_at) = toks.iter().position(|tok| src.is(Some(tok), "self")) else {
-        return BTreeSet::new();
-    };
-    if self_at > 1 || !src.is(toks.get(self_at + 1), ".") {
+    if !pattern.iter().any(|tok| src.is(Some(tok), "Some")) {
         return BTreeSet::new();
     }
-    let Some(field) = toks.get(self_at + 2).filter(|tok| tok.kind == Kind::Ident) else {
+    if !src.is(toks.first(), "self")
+        || !src.is(toks.get(1), ".")
+        || !src.is(toks.get(3), ".")
+        || !src.is(toks.get(4), "take")
+        || !src.is(toks.get(5), "(")
+    {
+        return BTreeSet::new();
+    }
+    let Some(field) = toks.get(2).filter(|tok| tok.kind == Kind::Ident) else {
         return BTreeSet::new();
     };
     let Some(owner) = record.type_owner() else {
         return BTreeSet::new();
     };
-    world.field_types(&BTreeSet::from([owner.to_owned()]), src.text(*field))
+    let mut out = BTreeSet::new();
+    if let Some(declared) = world
+        .fields
+        .get(&(owner.to_owned(), src.text(*field).to_owned()))
+    {
+        for (at, field) in declared {
+            let field_src = &world.srcs[*at];
+            let written = field_src.lex(field.whole().start(), field.whole().end());
+            if let Some(colon) = written.iter().position(|tok| field_src.is(Some(tok), ":")) {
+                out.extend(world.written_interior_types(from, field_src, &written[colon + 1..]));
+            }
+        }
+    }
+    out
 }
 
 /// Locals whose receiver type is present in the source without inference: one simple binding,
-/// one binding of that name in the body, and either `let x: T`, `T::new(…)`, `T { … }`, or a
-/// `self.field` initializer whose field declaration writes its type. A destructuring wrapper such
-/// as `let Some(mut child) = self.child.take()` still has one lower-case binding and is therefore
-/// mechanical; tuples and shadowed names stay name-matched.
+/// one binding of that name in the body, no later assignment, and either `let x: T`, an exact-head
+/// constructor accepted by [`constructor_type`], or exactly `self.field` with a written field
+/// type. Destructuring, branches, method chains, factories, tuples and shadowed names stay
+/// name-matched.
 fn local_types(
     world: &World,
     src: usize,
@@ -1897,12 +2167,12 @@ fn local_types(
         }
         let name = names[0];
         let types = if let Some(colon) = top_level_token(s, pattern, ":") {
-            World::type_names(s, &pattern[colon + 1..])
+            world.written_type(src, s, &pattern[colon + 1..])
         } else {
             let initializer = &statement[equal + 1..];
-            let constructed = constructor_type(s, initializer);
+            let constructed = constructor_type(world, src, s, initializer);
             if constructed.is_empty() {
-                self_field_types(world, s, record, initializer)
+                self_field_types(world, src, s, record, pattern, initializer)
             } else {
                 constructed
             }
@@ -1910,13 +2180,22 @@ fn local_types(
         if types.is_empty() {
             continue;
         }
-        if found.insert(name, (tok.start, types)).is_some() {
+        let bound = toks.get(end).map_or(tok.end, |end| end.start);
+        if found.insert(name, (bound, types)).is_some() {
             ambiguous.insert(name);
         }
     }
     for name in ambiguous {
         found.remove(name);
     }
+    found.retain(|name, (bound, _)| {
+        !toks.iter().enumerate().any(|(at, tok)| {
+            tok.start > *bound
+                && tok.kind == Kind::Ident
+                && s.text(*tok) == *name
+                && s.is(toks.get(at + 1), "=")
+        })
+    });
     found
 }
 
@@ -3570,7 +3849,7 @@ const PINNED: [Pinned; 40] = [
         body: DIRWATCH_WINDOWS,
         edges: &[&[CLOSE_WINDOWS], &[CLOSE_WINDOWS], &[CLOSE_WINDOWS]],
         effects: &[("SetEvent", 1), ("JoinHandle::join", 1)],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: CLOSE_WINDOWS,
@@ -3582,13 +3861,13 @@ const PINNED: [Pinned; 40] = [
         body: DIRWATCH_MACOS,
         edges: &[&[STOPPER_SIGNAL]],
         effects: &[("JoinHandle::join", 1)],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: STOPPER_SIGNAL,
         edges: &[],
         effects: &[],
-        leaves: &[],
+        leaves: &["signal"],
     },
     Pinned {
         body: SHUTDOWN,
@@ -3664,7 +3943,7 @@ const PINNED: [Pinned; 40] = [
         body: ATTENTION_WINDOWS,
         edges: &[],
         effects: &[("SetEvent", 1), ("JoinHandle::join", 1), ("CloseHandle", 1)],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: ATTENTION_UNIX,
@@ -3674,13 +3953,13 @@ const PINNED: [Pinned; 40] = [
             ("JoinHandle::join", 1),
             ("libc::close", 1),
         ],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: LAUNCH_WINDOWS,
         edges: &[],
         effects: &[("SetEvent", 1), ("JoinHandle::join", 1), ("CloseHandle", 1)],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: LAUNCH_UNIX,
@@ -3690,7 +3969,7 @@ const PINNED: [Pinned; 40] = [
             ("JoinHandle::join", 1),
             ("libc::close", 1),
         ],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: ENGINE_WINDOWS,
@@ -3702,7 +3981,7 @@ const PINNED: [Pinned; 40] = [
         body: ENGINE_WINDOWS_SHUTDOWN,
         edges: &[],
         effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
-        leaves: &[],
+        leaves: &["load", "take"],
     },
     Pinned {
         body: ENGINE_MACOS,
@@ -3714,7 +3993,7 @@ const PINNED: [Pinned; 40] = [
         body: ENGINE_MACOS_SHUTDOWN,
         edges: &[],
         effects: &[("thread::sleep", 1), ("JoinHandle::join", 1)],
-        leaves: &[],
+        leaves: &["load", "take"],
     },
     Pinned {
         body: ENGINE_PORTABLE_SHUTDOWN,
@@ -3754,7 +4033,7 @@ const PINNED: [Pinned; 40] = [
         body: PTY,
         edges: &[&[DUMP_FINISH], &[PTY_SHUTDOWN]],
         effects: &[],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: DUMP_FINISH,
@@ -3779,7 +4058,7 @@ const PINNED: [Pinned; 40] = [
             &[JOIN_WITHIN],
         ],
         effects: &[("Child::try_wait", 2)],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: INPUT_CLOSE,
@@ -3943,11 +4222,10 @@ fn check_pinned(
 /// vocabulary effects by call site, and every edge is itself a pinned body; a `Drop` that is not a
 /// row reaches no registered door, no pinned body and no vocabulary that waits.
 ///
-/// A call is resolved to first-party items by what its source says: a receiver whose type is
-/// written (`self`, a field of it, a parameter) narrows by that type, and one whose type is not
-/// written answers every method of that name the package can reach — which is why a row may list
-/// a leaf. This is a pinned-edge check over the stated inventory, not a whole-program analysis
-/// (§11, A1e's row).
+/// A call follows [`Body::resolve`]'s source-stated rule: typing can only narrow a non-empty answer;
+/// every untyped or typed-empty receiver answers every method of that name the package can reach —
+/// which is why a row may list a leaf. This is a pinned-edge check over the stated inventory, not
+/// a whole-program analysis (§11, A1e's row).
 fn every_drop_that_may_wait_is_a_row_of_the_closed_inventory(
     world: &World,
     words: &[Word],

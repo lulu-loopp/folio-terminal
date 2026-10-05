@@ -139,33 +139,47 @@ jobs:
             $planted[$original.Length] = 0
             [IO.File]::WriteAllBytes($file, $planted)
             $failed = $false
+            $message = ""
             try {
               & ./scripts/ci/check-no-nul.ps1 *> $null
             } catch {
               $failed = $true
+              $message = $_.Exception.Message
             }
             if (-not $failed) { throw "the no-NUL gate accepted a planted NUL byte" }
+            if ($message -notmatch [regex]::Escape($file) -or $message -notmatch 'NUL') {
+              throw "the no-NUL gate failed for the wrong reason: $message"
+            }
           } finally {
             [IO.File]::WriteAllBytes($file, $original)
           }
           exit 0
 
       # An already committed conflict marker has no unmerged index entry. Plant
-      # one in a tracked document and require the raw-byte gate to refuse it.
+      # one after a first-line UTF-8 BOM and require the byte gate to name it.
       - name: the conflict-marker gate can actually fail
         shell: pwsh
         run: |
           $file = "README.md"
           $original = [IO.File]::ReadAllBytes($file)
           try {
-            [IO.File]::AppendAllText($file, "`n<<<<<<< planted`n=======`n>>>>>>> planted`n")
+            $body = [Text.Encoding]::UTF8.GetBytes("<<<<<<< planted`n=======`n>>>>>>> planted`n")
+            $planted = [byte[]]::new(3 + $body.Length)
+            [Array]::Copy([Text.Encoding]::UTF8.GetPreamble(), $planted, 3)
+            [Array]::Copy($body, 0, $planted, 3, $body.Length)
+            [IO.File]::WriteAllBytes($file, $planted)
             $failed = $false
+            $message = ""
             try {
               & ./scripts/ci/check-conflict-markers.ps1 *> $null
             } catch {
               $failed = $true
+              $message = $_.Exception.Message
             }
             if (-not $failed) { throw "the conflict-marker gate accepted planted markers" }
+            if ($message -notmatch [regex]::Escape($file) -or $message -notmatch 'conflict marker') {
+              throw "the conflict-marker gate failed for the wrong reason: $message"
+            }
           } finally {
             [IO.File]::WriteAllBytes($file, $original)
           }
@@ -857,11 +871,18 @@ jobs:
       - name: test the macOS updater modules
         run: |
           set -euo pipefail
+          skip=the_trial_is_launched_through_launch_services_and_found_by_its_image
+          skip_log="$RUNNER_TEMP/macos-updater-skip-list.log"
+          cargo test --locked -p bt-app --bin folio -- --list | tee "$skip_log"
+          grep -Eq "(^|::)${skip}: test$" "$skip_log" || {
+            echo "the macOS updater skip '$skip' names no test"
+            exit 1
+          }
           run_app_filter() {
             filter="$1"
             log="$RUNNER_TEMP/macos-updater-${filter//[^a-zA-Z0-9]/-}.log"
             cargo test --locked -p bt-app --bin folio "$filter" -- \
-              --skip the_trial_is_launched_through_launch_services_and_found_by_its_image | tee "$log"
+              --skip "$skip" | tee "$log"
             grep -Eq '^running [1-9][0-9]* tests?$' "$log" || {
               echo "the macOS updater filter '$filter' selected no tests"
               exit 1

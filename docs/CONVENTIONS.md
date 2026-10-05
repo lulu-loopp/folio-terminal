@@ -121,9 +121,13 @@ PTY 字节流、用户输入、外部 API、配置文件是边界，要校验；
 The tracked-text integrity gates run before source-reading guards:
 `scripts/ci/check-no-nul.ps1` refuses a NUL byte that could make grep classify
 source as binary, and `scripts/ci/check-conflict-markers.ps1` refuses a
-committed line beginning `<<<<<<< ` or `>>>>>>> `. Both read raw bytes, fail on
-an unreadable tracked text file, and share one explicit binary/third-party
-notice exclusion list. `gates-can-fail` plants each forbidden state separately.
+committed line beginning `<<<<<<< ` or `>>>>>>> `, including after a first-line
+UTF-8 BOM. Text means strict UTF-8 bytes with no NUL; every binary is an exact
+path with a reason, and the shared reader rejects an unlisted binary, a missing
+or now-text binary row, an unreadable file, and zero scanned text files. A text
+fixture with an intentional marker likewise needs an exact live reason row.
+`gates-can-fail` plants each forbidden state and checks the refusal names both
+the planted file and reason.
 
 ### 【事故】驱动真实子进程的测试，超时按"孩子静默多久"算，不按墙钟总额
 

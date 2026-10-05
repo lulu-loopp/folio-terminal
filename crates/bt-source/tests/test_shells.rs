@@ -36,9 +36,11 @@
 //! A shell whose program reaches the start through a name that does not say
 //! so (`Command::new(program)` with `program` a parameter), including a neutral
 //! constant, and direct `portable_pty` backend use inside `bt-pty`'s own tests.
-//! Mechanical `use … as …` aliases of the named doors are resolved in their
-//! lexical module or block scope; macro-generated imports and type aliases that
-//! do not come from a `use` declaration stay review-owned.
+//! Mechanical `use … as …` aliases of a named door are resolved in their
+//! lexical module or block scope. A parent-module alias needs no alias inference:
+//! the canonical member (`Command::new`, `quiet_command`, `PtySession::spawn`)
+//! remains a literal suffix/identifier in the call. Macro-generated imports and
+//! type aliases that do not come from a `use` declaration stay review-owned.
 
 use std::path::{Path, PathBuf};
 
@@ -524,7 +526,8 @@ fn every_real_shell_a_test_starts_goes_through_the_test_shell_door() {
 /// MUTATION: drop the `in_the_product` filter and the product call is named;
 /// drop the identifier half of `shell_in_argument` and `git_bash()` and
 /// `ComSpec` are not. Replace an aliased door's canonical suffix in
-/// `active_alias_is` with an unrelated one and the three alias rows disappear.
+/// `active_alias_is` with an unrelated one and the three renamed-door rows disappear. Remove the
+/// canonical suffix/identifier search and the three parent-module rows disappear.
 #[test]
 fn the_guard_names_each_raw_shell_start_and_nothing_else() {
     let index = fixture();
@@ -548,11 +551,17 @@ fn the_guard_names_each_raw_shell_start_and_nothing_else() {
          through bt_pty::test_shell::Hygiene::command",
         "37: quiet_command starts the name `git_bash` (bash) — a test's shell is started \
          through bt_pty::test_shell::Hygiene::command",
-        "42: Command::new starts the literal \"pwsh\" (pwsh) — a test's shell is started through \
+        "45: Command::new starts the literal \"pwsh\" (pwsh) — a test's shell is started through \
          bt_pty::test_shell::Hygiene::command",
-        "43: quiet_command starts the name `git_bash` (bash) — a test's shell is started through \
+        "46: quiet_command starts the name `git_bash` (bash) — a test's shell is started through \
          bt_pty::test_shell::Hygiene::command",
-        "44: PtySession::spawn — a test's pseudoconsole child is started through \
+        "47: PtySession::spawn — a test's pseudoconsole child is started through \
+         bt_pty::test_shell::TestShell",
+        "48: Command::new starts the literal \"zsh\" (zsh) — a test's shell is started through \
+         bt_pty::test_shell::Hygiene::command",
+        "49: quiet_command starts the name `git_bash` (bash) — a test's shell is started through \
+         bt_pty::test_shell::Hygiene::command",
+        "50: PtySession::spawn — a test's pseudoconsole child is started through \
          bt_pty::test_shell::TestShell",
     ];
     expected.sort_unstable();

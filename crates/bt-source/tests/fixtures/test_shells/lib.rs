@@ -39,9 +39,15 @@ mod tests {
 
     #[test]
     fn aliases_do_not_hide_shell_starts() {
+        use bt_platform as platform;
+        use bt_pty as pty;
+        use std::process as proc;
         let _ = ProcessCommand::new("pwsh").output();
         let _ = hush(&git_bash()).output();
         let _ = Session::spawn(command(), size(), wake());
+        let _ = proc::Command::new("zsh").output();
+        let _ = platform::quiet_command(&git_bash()).output();
+        let _ = pty::PtySession::spawn(command(), size(), wake());
     }
 
     #[test]
