@@ -176,7 +176,7 @@ use crate::update_adapter::Layouts;
 use crate::update_apply::{
     BeforeDeciding, Deferral, Ended, ExitGuard, HandedBack, Journaled, Leave, Limits, Opener,
     Opens, TransactionLock, Watch, Watched, Window, failed_words, now_ms, owed_at_logon,
-    read_receipt, stop_trial, trial_runs, trial_words,
+    read_receipt, stop_trial, trial_runs, trial_words, until_let_go,
 };
 
 /// **What H.3 answered before `decide`** (U-37).
@@ -1895,38 +1895,6 @@ fn read_digest_at(path: &Path) -> Result<Option<Digest>, String> {
             Ok(true) => String::from("held open by another program"),
             _ => error.to_string(),
         }),
-    }
-}
-
-/// **Wait until nothing `held` names is held any more, within `window`**
-/// (E-7): ask, and while something is held sleep one `poll` (never past
-/// `window`) and ask again — so a hold let go is seen at the next poll, and a
-/// hold that outlasts `window` refuses with the names still held. `now` is the
-/// clock and `sleep` the pause (the worker's wait door in the product), so a
-/// test can count the polls (U-42d, review finding 5).
-///
-/// # Errors
-/// What `held` refused with, or the files still held when `window` passed.
-fn until_let_go(
-    window: Instant,
-    poll: std::time::Duration,
-    now: &mut dyn FnMut() -> Instant,
-    held: &mut dyn FnMut() -> Result<Vec<String>, String>,
-    sleep: &mut dyn FnMut(std::time::Duration),
-) -> Result<(), String> {
-    loop {
-        let names = held()?;
-        if names.is_empty() {
-            return Ok(());
-        }
-        let left = window.saturating_duration_since(now());
-        if left.is_zero() {
-            return Err(format!(
-                "held open by another process: {}",
-                names.join(", ")
-            ));
-        }
-        sleep(poll.min(left));
     }
 }
 

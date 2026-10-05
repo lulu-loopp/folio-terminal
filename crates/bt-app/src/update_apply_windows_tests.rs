@@ -205,6 +205,10 @@ struct Fake {
     /// holding the data directory, asked through `update_apply::claimed_within`
     /// for this long — a denied claim question is no acknowledgement.
     real_ack: Option<Duration>,
+    /// **A person's start of the new build just before the trial** (U-40):
+    /// the installed program started with no trial words at each launch, its
+    /// pid kept here.
+    beside_launch: Option<Arc<Mutex<Vec<u32>>>>,
 }
 
 impl World for Fake {
@@ -256,6 +260,10 @@ impl World for Fake {
 
     fn launch_trial(&mut self, program: &Path, args: &[OsString]) -> io::Result<u32> {
         self.launched.push(args.to_vec());
+        if let Some(people) = &self.beside_launch {
+            let person = self.children.start(program, &[OsString::from("person")]);
+            people.lock().unwrap().push(person);
+        }
         let pid = self.children.start(program, args);
         if self.hold_at_launch {
             self.held = Some(
@@ -496,6 +504,7 @@ impl Install {
             on_say: None,
             before_start: None,
             real_ack: None,
+            beside_launch: None,
         }
     }
 
@@ -2761,6 +2770,50 @@ fn a_start_beside_an_unrecorded_trial_commits_it_and_starts_nothing_more() {
         world.said
     );
     assert!(world.opened.is_empty(), "{:?}", world.said);
+}
+
+/// PIN (U-40) — **the Windows applier's trial is the process its own launch
+/// created, whatever person's start of the new build runs beside it**: a
+/// process of the installed program started just before the trial is never
+/// recorded; it leaves at once, as a start that hands itself to the recovery
+/// build does, the trial's receipt commits, and the trial is the one window.
+/// The macOS road names its trial by the words it carries (LaunchServices
+/// reports no pid); this is the Windows half of U-40's table, unchanged: the
+/// pid is the launch's own.
+///
+/// MUTATION: in `Txn::trial`, record the earliest-started process of the
+/// installed program in place of the pid the launch answered.
+#[test]
+fn a_persons_start_beside_the_launch_is_never_the_recorded_trial() {
+    let Some(install) = Install::new("beside") else {
+        return;
+    };
+    let people: Arc<Mutex<Vec<u32>>> = Arc::default();
+    let mut world = install.world(Trial::Silent);
+    world.beside_launch = Some(Arc::clone(&people));
+    let children = world.children.clone();
+    let applier = start(
+        install.road(limits(20_000, 20_000)),
+        install.txn,
+        install.applier,
+        world,
+    );
+    until_journal(&install, PhaseKind::Trial);
+    let Phase::Trial { process, nonce, .. } = install.on_disk().body.phase else {
+        unreachable!()
+    };
+    let person = people.lock().unwrap()[0];
+    assert_ne!(process.pid, person, "the person's start is never the trial");
+    children.end(person);
+    install.receipt(nonce, nonce, process.pid);
+    let (ended, world) = applier.join().unwrap();
+    assert_eq!(ended, Ended::Committed, "{:?}", world.said);
+    assert!(
+        world.opened.is_empty(),
+        "the trial is the one window: {:?}",
+        world.opened
+    );
+    assert!(runs(process), "the trial runs on");
 }
 
 /// PIN (U-38, the Windows twin of the macOS defect 2) — **a trial that dies
@@ -5119,6 +5172,7 @@ fn bare_world(home: Home) -> Fake {
         on_say: None,
         before_start: None,
         real_ack: None,
+        beside_launch: None,
     }
 }
 

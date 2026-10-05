@@ -21,6 +21,14 @@
 //!   applier's process check before the exchange (M4), the trial's pid after
 //!   its launch through LaunchServices (`open` reports no pid), and the
 //!   Windows recovery's look for an applier still alive (W3) are this list.
+//! * **[`arguments_of`]** (0.4.7 ticket U-40, macOS): the command line a
+//!   process recorded by its pid *and* its start time was started with — read
+//!   only, through `sysctl(KERN_PROCARGS2)`, and answered only while that
+//!   very process runs (its start time is asked before and after the read, so
+//!   a pid reused in between is never answered for). `open` reports no pid, so
+//!   a trial LaunchServices started is told from any other process of the same
+//!   executable by the words it carries. `Unsupported` elsewhere: the Windows
+//!   trial's pid is its launch's own.
 //! * **[`still_running`]**: whether a process recorded by its pid *and* its
 //!   start time still runs — a pid alone may have been reused (F-7). The start
 //!   time is `proc_pidinfo`'s on macOS (microseconds since the epoch) and
@@ -104,6 +112,54 @@ pub fn still_running(process: Running) -> bool {
 #[must_use]
 pub fn started_of(pid: u32) -> Option<u64> {
     imp::started_of(pid)
+}
+
+/// **The arguments `process` was started with**, its program's own name
+/// first — see the module header.
+///
+/// # Errors
+/// `NotFound` when `process` (its pid with its start instant) does not run,
+/// before or after the read; the read's own error; `Unsupported` off macOS.
+pub fn arguments_of(process: Running) -> io::Result<Vec<OsString>> {
+    let gone = || {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("{} does not run as recorded", process.pid),
+        )
+    };
+    if !still_running(process) {
+        return Err(gone());
+    }
+    let arguments = imp::arguments_of(process.pid)?;
+    if !still_running(process) {
+        return Err(gone());
+    }
+    Ok(arguments)
+}
+
+/// **The arguments in a `KERN_PROCARGS2` answer**: a native `int` count, the
+/// executable's path and the NULs that pad it, then that many NUL-ended
+/// arguments (the environment follows, and is not read). `None` for bytes
+/// that do not hold as many arguments as they count. An empty first argument
+/// cannot be told from the padding — the format's own limit, as `ps` meets
+/// it; a program started through LaunchServices or a shell names itself.
+#[cfg(any(target_os = "macos", test))]
+fn procargs2_arguments(bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let (count, rest) = bytes.split_first_chunk::<4>()?;
+    let count = usize::try_from(i32::from_ne_bytes(*count)).ok()?;
+    let path_end = rest.iter().position(|byte| *byte == 0)?;
+    let mut rest = &rest[path_end..];
+    let start = rest.iter().position(|byte| *byte != 0)?;
+    rest = &rest[start..];
+    // The count is the answer's own claim: room is reserved for no more
+    // arguments than the bytes after it could hold (each ends in a NUL).
+    let mut arguments = Vec::with_capacity(count.min(rest.len()));
+    for _ in 0..count {
+        let end = rest.iter().position(|byte| *byte == 0)?;
+        arguments.push(rest[..end].to_vec());
+        rest = &rest[end + 1..];
+    }
+    Some(arguments)
 }
 
 /// **The image's file name for this exact live process**, or `None` after it
@@ -306,6 +362,58 @@ mod imp {
         (written == size).then(|| info.pbi_start_tvsec * 1_000_000 + info.pbi_start_tvusec)
     }
 
+    pub(super) fn arguments_of(pid: u32) -> io::Result<Vec<std::ffi::OsString>> {
+        use std::os::unix::ffi::OsStringExt;
+        let pid = libc::c_int::try_from(pid)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "a pid past c_int"))?;
+        let mut most: libc::c_int = 0;
+        let mut size = size_of::<libc::c_int>();
+        let mut name = [libc::CTL_KERN, libc::KERN_ARGMAX];
+        // SAFETY: `name` holds two integers; `most` is `size` bytes and lives
+        // across the call; nothing is written to the kernel.
+        let asked = unsafe {
+            libc::sysctl(
+                name.as_mut_ptr(),
+                2,
+                (&raw mut most).cast(),
+                &raw mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if asked != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut buffer = vec![0u8; usize::try_from(most).map_err(|_| io::Error::other("ARG_MAX"))?];
+        let mut size = buffer.len();
+        let mut name = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
+        // SAFETY: `name` holds three integers; the buffer is `size` bytes and
+        // lives across the call, which writes at most that many and says how
+        // many; nothing is written to the kernel.
+        let asked = unsafe {
+            libc::sysctl(
+                name.as_mut_ptr(),
+                3,
+                buffer.as_mut_ptr().cast(),
+                &raw mut size,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if asked != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        buffer.truncate(size);
+        super::procargs2_arguments(&buffer)
+            .map(|arguments| {
+                arguments
+                    .into_iter()
+                    .map(std::ffi::OsString::from_vec)
+                    .collect()
+            })
+            .ok_or_else(|| io::Error::other("the process's arguments could not be read whole"))
+    }
+
     pub(super) fn image_name(pid: u32) -> Option<std::ffi::OsString> {
         let pid = libc::c_int::try_from(pid).ok()?;
         let path = image_of(pid)?;
@@ -447,6 +555,13 @@ mod imp {
         // closed when `owned` is dropped.
         let owned = unsafe { OwnedHandle::from_raw_handle(process.0) };
         creation_of(HANDLE(owned.as_raw_handle()))
+    }
+
+    pub(super) fn arguments_of(_pid: u32) -> io::Result<Vec<std::ffi::OsString>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "install_flip reads a process's arguments on macOS only",
+        ))
     }
 
     pub(super) fn image_name(pid: u32) -> Option<std::ffi::OsString> {
@@ -649,6 +764,13 @@ mod imp {
 
     pub(super) fn image_name(_pid: u32) -> Option<std::ffi::OsString> {
         None
+    }
+
+    pub(super) fn arguments_of(_pid: u32) -> io::Result<Vec<std::ffi::OsString>> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "install_flip reads a process's arguments on macOS only",
+        ))
     }
 
     pub(super) fn parent_pid(_me: u32) -> Option<u32> {
@@ -943,6 +1065,107 @@ mod tests {
     impl Drop for Scratch {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// RED (U-40) — **a `KERN_PROCARGS2` answer gives exactly its counted
+    /// arguments**: the count, the executable's path and its padding are
+    /// skipped, the environment after them is not read, and an answer that
+    /// holds fewer arguments than it counts gives none.
+    ///
+    /// The macOS updater tells the trial it launched through LaunchServices
+    /// from any other process of the same executable by these words.
+    ///
+    /// MUTATION: in `procargs2_arguments`, start the arguments right after
+    /// the path's own NUL (the padding is read as empty arguments). The
+    /// boastful count's bound on what is reserved has no observable red here:
+    /// a 64-bit host grants the unbounded reservation (tried on Windows).
+    #[test]
+    fn a_procargs2_answer_gives_exactly_its_counted_arguments() {
+        let words: [&[u8]; 4] = [
+            b"/Applications/Folio.app/Contents/MacOS/folio",
+            b"--update-trial",
+            "\u{6587}\u{4ef6}\u{5939} mixed \u{0627}".as_bytes(),
+            b"",
+        ];
+        let mut answer = 4i32.to_ne_bytes().to_vec();
+        answer.extend_from_slice(b"/Applications/Folio.app/Contents/MacOS/folio\0\0\0\0\0");
+        for word in words {
+            answer.extend_from_slice(word);
+            answer.push(0);
+        }
+        answer.extend_from_slice(b"HOME=/Users/someone\0LANG=zh_CN.UTF-8\0");
+        let read = procargs2_arguments(&answer).expect("the answer holds its four");
+        assert_eq!(read, words.map(<[u8]>::to_vec).to_vec());
+
+        let mut short = 6i32.to_ne_bytes().to_vec();
+        short.extend_from_slice(&answer[4..answer.len() - 37]);
+        assert_eq!(procargs2_arguments(&short), None, "fewer than it counts");
+        assert_eq!(procargs2_arguments(&answer[..3]), None, "no count");
+
+        // A count the bytes cannot hold reserves nothing it cannot use.
+        let mut boastful = i32::MAX.to_ne_bytes().to_vec();
+        boastful.extend_from_slice(&answer[4..]);
+        assert_eq!(
+            procargs2_arguments(&boastful),
+            None,
+            "far fewer than it counts"
+        );
+    }
+
+    /// RED (U-40) — **a process's arguments are answered only while it is
+    /// that very process**: read by its pid and start instant, refused for the
+    /// same pid at another instant and once it has ended; off macOS the read
+    /// is refused by name.
+    ///
+    /// MUTATION: in `arguments_of`, read without asking `still_running` first
+    /// and after.
+    #[test]
+    fn a_processs_arguments_are_read_only_while_it_is_that_process() {
+        #[cfg(target_os = "macos")]
+        {
+            // `cat` reads its standard input first, which stays open until
+            // the test ends it, so it never reaches the file it names.
+            let named = "\u{6587}\u{4ef6} trial";
+            let mut child = crate::quiet_command("/bin/cat")
+                .args(["-u", "-", named])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let me = Running {
+                pid: child.id(),
+                started: started_of(child.id()).expect("a process just started runs"),
+            };
+            let read = arguments_of(me);
+            let other_start = arguments_of(Running {
+                pid: me.pid,
+                started: me.started + 1,
+            });
+            let _ = child.kill();
+            let _ = child.wait();
+            let after = arguments_of(me);
+            assert_eq!(
+                read.unwrap(),
+                ["/bin/cat", "-u", "-", named].map(OsString::from),
+            );
+            assert_eq!(other_start.unwrap_err().kind(), io::ErrorKind::NotFound);
+            assert_eq!(after.unwrap_err().kind(), io::ErrorKind::NotFound);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let me = Running {
+                pid: std::process::id(),
+                started: started_of(std::process::id()).unwrap_or(0),
+            };
+            let refused = arguments_of(me).unwrap_err().kind();
+            assert!(
+                matches!(
+                    refused,
+                    io::ErrorKind::Unsupported | io::ErrorKind::NotFound
+                ),
+                "{refused:?}"
+            );
         }
     }
 
