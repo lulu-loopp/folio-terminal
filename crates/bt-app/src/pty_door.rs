@@ -143,6 +143,7 @@ pub(crate) fn spawn_shell(
     program: OsString,
     args: &[OsString],
     powershell_integration: bool,
+    environment_derivation: shell_integration::EnvironmentDerivation,
     folio_environment: &[(OsString, OsString)],
     profile_environment: &[(OsString, OsString)],
     size: PtySize,
@@ -165,15 +166,25 @@ pub(crate) fn spawn_shell(
                 powershell_integration,
             );
             let fallback_args = || shell_integration::last_resort_arguments(powershell_integration);
-            let inherited = std::env::vars_os().collect();
+            let inherited: Vec<(OsString, OsString)> = std::env::vars_os().collect();
             let refresh = environment_refresh(
                 || launch_environment_snapshot(ctx),
                 || {
                     bt_platform::environment::fresh_logon_environment(ctx)
                         .map_err(|error| error.to_string())
                 },
-                inherited,
+                inherited.clone(),
                 |line| eprintln!("{line}"),
+            );
+            let before_folio = refresh
+                .as_ref()
+                .map_or_else(|| inherited.clone(), EnvironmentRefresh::before_folio);
+            let mut folio_environment = folio_environment;
+            shell_integration::derive_environment_for_birth(
+                environment_derivation,
+                &before_folio,
+                &mut folio_environment,
+                &profile_environment,
             );
             match refresh {
                 Some(refresh) => PtySession::spawn_refreshed(
@@ -238,6 +249,153 @@ mod tests {
         rows.iter()
             .map(|(name, value)| (OsString::from(name), OsString::from(value)))
             .collect()
+    }
+
+    fn value(environment: &Environment, wanted: &str) -> Option<String> {
+        environment
+            .iter()
+            .find(|(name, _)| name.to_string_lossy().eq_ignore_ascii_case(wanted))
+            .map(|(_, value)| value.to_string_lossy().into_owned())
+    }
+
+    fn environment_after_birth(
+        refresh: &EnvironmentRefresh,
+        derivation: shell_integration::EnvironmentDerivation,
+        mut folio: Environment,
+        profile: Environment,
+    ) -> Environment {
+        let before_folio = refresh.before_folio();
+        shell_integration::derive_environment_for_birth(
+            derivation,
+            &before_folio,
+            &mut folio,
+            &profile,
+        );
+        bt_pty::spawn_environment(&before_folio, &[], &[], &folio, &profile)
+    }
+
+    /// RED (T-ENV-REFRESH-3, mutation `derive_prompt_from_launch_environment`) — a prompt added
+    /// to the current account block after Folio launched is wrapped, not replaced by the default.
+    #[test]
+    fn cmd_prompt_wraps_the_fresh_value_that_was_absent_at_launch() {
+        let refresh = EnvironmentRefresh::new(
+            environment(&[("PROMPT", "$T$G")]),
+            environment(&[]),
+            environment(&[]),
+        );
+        let result = environment_after_birth(
+            &refresh,
+            shell_integration::EnvironmentDerivation {
+                integration: crate::profiles::Integration::CmdPrompt,
+                crosses_wsl: false,
+                forwards_terminal_into_wsl: false,
+            },
+            environment(&[("PROMPT", "launch-derived")]),
+            environment(&[]),
+        );
+        let prompt = value(&result, "PROMPT").expect("cmd declaration");
+        assert!(prompt.ends_with("$T$G"), "{prompt:?}");
+        assert!(!prompt.contains("launch-derived"), "{prompt:?}");
+    }
+
+    /// RED (T-ENV-REFRESH-3, mutation `derive_wslenv_from_launch_environment`) — names added to
+    /// WSLENV after launch remain ahead of Folio's declarations.
+    #[test]
+    fn wslenv_keeps_fresh_user_entries_and_adds_folios() {
+        let refresh = EnvironmentRefresh::new(
+            environment(&[("WSLENV", "USER_VALUE/u")]),
+            environment(&[("WSLENV", "OLD_VALUE/u")]),
+            environment(&[("WSLENV", "OLD_VALUE/u")]),
+        );
+        let result = environment_after_birth(
+            &refresh,
+            shell_integration::EnvironmentDerivation {
+                integration: crate::profiles::Integration::BashInitFile,
+                crosses_wsl: true,
+                forwards_terminal_into_wsl: true,
+            },
+            environment(&[("WSLENV", "OLD_VALUE/u:TERM_PROGRAM/u")]),
+            environment(&[]),
+        );
+        let listed = value(&result, "WSLENV").expect("WSL declaration");
+        assert!(listed.starts_with("USER_VALUE/u:"), "{listed:?}");
+        assert!(listed.contains("TERM_PROGRAM/u"), "{listed:?}");
+        assert!(!listed.contains("OLD_VALUE/u"), "{listed:?}");
+    }
+
+    /// RED (T-ENV-REFRESH-3, mutation `derive_user_zdotdir_from_launch_environment`) — the zsh
+    /// bridge carries the current account's startup directory.
+    #[test]
+    fn zsh_carries_the_fresh_zdotdir_in_bt_user_zdotdir() {
+        let refresh = EnvironmentRefresh::new(
+            environment(&[("ZDOTDIR", "/fresh/zsh")]),
+            environment(&[("ZDOTDIR", "/launch/zsh")]),
+            environment(&[("ZDOTDIR", "/launch/zsh")]),
+        );
+        let result = environment_after_birth(
+            &refresh,
+            shell_integration::EnvironmentDerivation {
+                integration: crate::profiles::Integration::ZshDotDir,
+                crosses_wsl: false,
+                forwards_terminal_into_wsl: false,
+            },
+            environment(&[
+                ("ZDOTDIR", "/folio/zsh"),
+                ("BT_USER_ZDOTDIR", "/launch/zsh"),
+            ]),
+            environment(&[]),
+        );
+        assert_eq!(value(&result, "ZDOTDIR").as_deref(), Some("/folio/zsh"));
+        assert_eq!(
+            value(&result, "BT_USER_ZDOTDIR").as_deref(),
+            Some("/fresh/zsh")
+        );
+    }
+
+    /// RED (T-ENV-REFRESH-3, mutation `fresh_wins_over_explicit_launch_override`) — an inherited
+    /// value that differs from the launch snapshot is an explicit launch override and still wins.
+    #[test]
+    fn an_explicit_launch_override_still_wins_before_derivation() {
+        let refresh = EnvironmentRefresh::new(
+            environment(&[("PROMPT", "fresh")]),
+            environment(&[("PROMPT", "account-at-launch")]),
+            environment(&[("PROMPT", "explicit-override")]),
+        );
+        let result = environment_after_birth(
+            &refresh,
+            shell_integration::EnvironmentDerivation {
+                integration: crate::profiles::Integration::CmdPrompt,
+                crosses_wsl: false,
+                forwards_terminal_into_wsl: false,
+            },
+            environment(&[("PROMPT", "launch-derived")]),
+            environment(&[]),
+        );
+        let prompt = value(&result, "PROMPT").expect("cmd declaration");
+        assert!(prompt.ends_with("explicit-override"), "{prompt:?}");
+        assert!(!prompt.ends_with("fresh"), "{prompt:?}");
+    }
+
+    /// RED (T-ENV-REFRESH-3, mutation `force_hyperlink_ignores_fresh_answer`) — Folio does not
+    /// overlay its default when the current account block already answers the convention.
+    #[test]
+    fn force_hyperlink_respects_the_fresh_answer() {
+        let refresh = EnvironmentRefresh::new(
+            environment(&[("FORCE_HYPERLINK", "0")]),
+            environment(&[]),
+            environment(&[]),
+        );
+        let result = environment_after_birth(
+            &refresh,
+            shell_integration::EnvironmentDerivation {
+                integration: crate::profiles::Integration::BashInitFile,
+                crosses_wsl: false,
+                forwards_terminal_into_wsl: false,
+            },
+            environment(&[("FORCE_HYPERLINK", "1")]),
+            environment(&[]),
+        );
+        assert_eq!(value(&result, "FORCE_HYPERLINK").as_deref(), Some("0"));
     }
 
     /// RED (T-ENV-REFRESH round 2, mutation `refresh_after_current_environment_error`) — a current

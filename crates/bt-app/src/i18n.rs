@@ -1142,6 +1142,7 @@ text_entries! {
     /// dialog has never had. It arrives with the row menu in the next slice,
     /// where the refusals that have reasons have to live anyway.
     ProfilesDuplicate,
+    ProfilesEnableViaProfile,
     /// The badges. They report and are not controls, which is why they wear the
     /// group label's type and the ink an unavailable thing wears.
     ProfilesBadgeDefault,
@@ -1180,6 +1181,20 @@ text_entries! {
     /// way the sentence is true in every state and needs no probe.
     CapPowerShell,
     CapPowerShellNotProvided,
+    CapPowerShellViaProfile,
+    /// The effective execution policy refuses `$PROFILE` and one command the user may run
+    /// (`shell_integration::POLICY_COMMAND`) would allow it.
+    CapPowerShellPolicyChangeable,
+    /// The row menu's item for the policy command: what `Copy` copies, named.
+    ProfilesCopyPolicyCommand,
+    /// The effective execution policy refusing `$PROFILE` is set by Group Policy.
+    CapPowerShellPolicyManaged,
+    /// The execution policy set for the PowerShell process — by the row's own
+    /// `-ExecutionPolicy` or by `PSExecutionPolicyPreference` — refuses `$PROFILE`, so no
+    /// user-scope command would change it. One sentence true for both sources.
+    CapPowerShellPolicyProcess,
+    /// `$PROFILE` is stored where `RemoteSigned` refuses it, or where this edition cannot tell.
+    CapPowerShellPolicyLocation,
     /// WSL. The same everything, and the same honest condition — a `zsh` or
     /// `fish` login never reads the init file the launcher was handed.
     CapWslBash,
@@ -2050,6 +2065,7 @@ text_entries! {
     RowPowerShellProfileLine,
     DescPowerShellProfileLine,
     RemovePowerShellProfileLine,
+    ShellProfileAddedToast,
 
     // ── Claude Code's hooks (attention plan §3.3, Terminal page) ────────────
     /// `Terminal ▸ Claude Code hooks` — the row that lets an agent say it is waiting.
@@ -3791,6 +3807,7 @@ impl Text {
             Self::NavProfiles => pick(lang, "Profiles", "配置文件"),
             Self::CategoryProfiles => pick(lang, "PROFILES", "配置文件"),
             Self::ProfilesDuplicate => pick(lang, "Duplicate", "复制"),
+            Self::ProfilesEnableViaProfile => pick(lang, "Enable via $PROFILE", "经 $PROFILE 启用"),
             // Lower case, because it is a badge and not a heading: the type
             // raises it in the English and there is no case to raise in the
             // Chinese, which is the same ruling `CategoryGeneral` carries.
@@ -3830,6 +3847,36 @@ impl Text {
                 lang,
                 "PowerShell integration is not provided for these arguments.",
                 "自定义启动参数，不提供 PowerShell 整合。",
+            ),
+            Self::CapPowerShellViaProfile => pick(
+                lang,
+                "Prompt marks, directory, exit codes and hyperlinks, loaded via $PROFILE",
+                "命令标记、当前目录、退出码、链接，经 $PROFILE 加载",
+            ),
+            Self::CapPowerShellPolicyChangeable => pick(
+                lang,
+                "PowerShell integration is not provided for these arguments. The execution policy blocks $PROFILE until one command is run.",
+                "自定义启动参数，不提供 PowerShell 整合。执行策略阻止 $PROFILE，运行此命令即可。",
+            ),
+            Self::ProfilesCopyPolicyCommand => pick(
+                lang,
+                "Copy the execution policy command",
+                "复制执行策略命令",
+            ),
+            Self::CapPowerShellPolicyManaged => pick(
+                lang,
+                "PowerShell integration is not provided for these arguments. Your organization's execution policy blocks $PROFILE.",
+                "自定义启动参数，不提供 PowerShell 整合。组织的执行策略阻止 $PROFILE。",
+            ),
+            Self::CapPowerShellPolicyProcess => pick(
+                lang,
+                "PowerShell integration is not provided for these arguments. The execution policy set for this process blocks $PROFILE.",
+                "自定义启动参数，不提供 PowerShell 整合。此进程的执行策略阻止 $PROFILE。",
+            ),
+            Self::CapPowerShellPolicyLocation => pick(
+                lang,
+                "PowerShell integration is not provided for these arguments. $PROFILE is stored where the execution policy may refuse it.",
+                "自定义启动参数，不提供 PowerShell 整合。$PROFILE 所在位置可能被执行策略拒绝。",
             ),
             Self::CapWslBash => pick(
                 lang,
@@ -4767,13 +4814,18 @@ impl Text {
             ),
             Self::DescPowerShellProfileLine => pick(
                 lang,
-                "An earlier Folio added this startup line.",
-                "旧版 Folio 添加了此启动行。",
+                "Folio added this startup line.",
+                "Folio 添加了此启动行。",
             ),
             Self::RemovePowerShellProfileLine => pick(
                 lang,
                 "Remove the line from $PROFILE",
                 "从 $PROFILE 移除此行",
+            ),
+            Self::ShellProfileAddedToast => pick(
+                lang,
+                "Added one line to $PROFILE. It takes effect only in Folio.",
+                "已在 $PROFILE 添加一行，仅在 Folio 中生效。",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window

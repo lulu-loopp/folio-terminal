@@ -47,7 +47,23 @@ checked=0
 markers() {
     tr '\033' '\n' < "$transcript" |
         sed -n 's/^\]\(7;[^\a]*\)\a.*/\1/p;s/^\]\(133;[^\a]*\)\a.*/\1/p' |
-        sed 's/^7;.*/7/'
+        sed 's/^7;.*/7/' |
+        awk '
+            { lines[NR] = $0 }
+            END {
+                count = NR
+                # Cygwin Bash 5.3 can redraw PS1 once after the final prompt
+                # hook when stdin reaches EOF. It has no OSC 7, C, or D and
+                # therefore is not a command region; discard only that exact
+                # terminal orphan pair.
+                if (count >= 4 && lines[count - 3] == "133;A" &&
+                        lines[count - 2] == "133;B" &&
+                        lines[count - 1] == "133;A" && lines[count] == "133;B") {
+                    count -= 2
+                }
+                for (i = 1; i <= count; i++) print lines[i]
+            }
+        '
 }
 
 # Run one bash with `home` as its whole world, `rcfile` as its startup file and

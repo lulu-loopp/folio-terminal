@@ -1267,6 +1267,12 @@ impl Runtime<'_> {
                 return Ok(());
             }
             let key = settings_key_of(&event.logical_key, self.window.modifiers, event.repeat);
+            // The walk visits what the layout drew: a button it did not place is not a stop.
+            let placed = self
+                .settings_layout()
+                .map(|layout| layout.placed_profile_buttons())
+                .unwrap_or_default();
+            self.window.settings.note_placed(placed);
             let before = self.window.settings.category();
             let (rows, shortcuts, profile_lines, scheme_files, values) = self.settings_content();
             let content =

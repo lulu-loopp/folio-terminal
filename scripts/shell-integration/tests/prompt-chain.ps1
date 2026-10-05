@@ -77,6 +77,7 @@ function Invoke-Session {
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
     $psi.UseShellExecute = $false
+    $psi.EnvironmentVariables['TERM_PROGRAM'] = 'Folio'
     $process = [System.Diagnostics.Process]::Start($psi)
     $stdout = $process.StandardOutput.ReadToEndAsync()
     $stderr = $process.StandardError.ReadToEndAsync()
