@@ -891,6 +891,16 @@ live*, which reverses §7.1.6c-6's explicit statement that the file is not watch
 the 2026-09-26 entry *on macOS the shipped `zsh`, `bash` and `sh` rows start a login
 shell* (issue #12), which supersedes the Mac port's Q8 for macOS: a login shell is a
 row's `login` switch, and the `Program` field takes a program and never a command line.
+**Where a new pane starts** (2026-10-05, GitHub issue #16): a folder named for this
+launch — `Open in Folio`, `folio <folder>`, `--cwd`, `folio-here.cmd`, a second launch
+handed over, a folder given to the Dock icon or a Service, `New terminal in folder…`,
+a folder row's `New terminal here` — always wins; otherwise the profile's
+`Starting directory` (Home, or a fixed folder); otherwise, for "the current pane's
+folder", the folder carried from the pane it was opened beside, a restart, a duplicate
+or a saved session; otherwise the profile's home. A named Windows folder is crossed
+into a WSL profile's namespace as before. `profiles::place_for` is the one owner of
+this order; a seed only says whether its folder is named (`SeedPlace::Named`) or
+carried (`SeedPlace::Carried`).
 
 ### 33. The three configuration entrances — `folded`
 **Rule.** Three entrances, each with a declared audience, and **a configuration

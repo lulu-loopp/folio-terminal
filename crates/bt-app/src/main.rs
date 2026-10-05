@@ -9525,6 +9525,25 @@ fn git_full_path(root: &Path, path: &str) -> PathBuf {
     root.join(path.replace('/', std::path::MAIN_SEPARATOR_STR))
 }
 
+/// **The seed of the tab a command line asked for** (§7.2) — the first launch's own, built from
+/// [`cli::resolve`]'s plan. A function so the launch's place can be pinned without a window.
+fn cli_leaf_seed(plan: &cli::CliPlan) -> LeafSeed {
+    LeafSeed {
+        profile: profiles::id(plan.profile),
+        // **Named** (GitHub issue #16): `Open in Folio`, `folio <folder>`, `--cwd` and
+        // `folio-here.cmd` all said where, so the profile's own starting place does not overrule it.
+        cwd: plan.cwd.clone().map(profiles::SeedPlace::Named),
+        // A profile the command line named and this build has
+        // not got is reported on a card naming the id, not by
+        // the leaf banner: the banner is for a *saved* pane
+        // whose shell has gone, and a launch argument has a
+        // reader standing right there.
+        unknown_profile_id: None,
+        card_skip: 0,
+        prefill: None,
+    }
+}
+
 /// **What a `Restart shell…` spawns** — `docs/M2-restart-shell-contract.md`
 /// §1.1, as a function of the leaf that is leaving.
 ///
@@ -9555,7 +9574,8 @@ fn git_full_path(root: &Path, path: &str) -> PathBuf {
 fn restart_seed(profile: &str, standing_in: Option<&Path>) -> LeafSeed {
     LeafSeed {
         profile: profile.to_owned(),
-        cwd: standing_in.map(Path::to_path_buf),
+        // Carried, not named: a restart keeps the profile's starting rule (`place_for`).
+        cwd: standing_in.map(|path| profiles::SeedPlace::Carried(path.to_path_buf())),
         // A running pane's profile is one this build has, by construction — it
         // started a process from it.
         unknown_profile_id: None,
@@ -35432,7 +35452,8 @@ fn revive_plan(
                         .map(Path::new)
                         .and_then(|cwd| {
                             profiles::revived_cwd(profiles::index_of_id(&leaf.profile_id), cwd)
-                        }),
+                        })
+                        .map(profiles::SeedPlace::Carried),
                     // The third fact read out of the same saved leaf in the same
                     // pass, for the reason the two above it are: a pane revived
                     // with somebody else's aim is a card pointed at the wrong
@@ -36293,7 +36314,11 @@ struct LeafSeed {
     /// Where this shell opens. `None` is "wherever a fresh shell would" — an
     /// absence rather than a path, so that "the saved folder is gone" and "no
     /// folder was ever saved" arrive as one case instead of two.
-    cwd: Option<PathBuf>,
+    ///
+    /// **And how it came to be handed this folder** (GitHub issue #16): one named for this
+    /// launch outranks the profile's starting place, one carried from another pane does not —
+    /// `profiles::place_for` owns that order and every road only says which kind it has.
+    cwd: Option<profiles::SeedPlace>,
     /// **Where this pane's focus card was aimed** when the session was written
     /// (§7.1.6b′, user ruling 2026-08-21). `0` for every seed that was not
     /// revived from disk, which is what a shell born now is aimed at.
@@ -37663,12 +37688,16 @@ fn split_axis(direction: bt_persist::SplitDirectionV1, auto: Axis) -> Axis {
 /// place is crossed from there; a profile with no name for it inherits nothing
 /// rather than a path it cannot read, and starts where a fresh tab of that
 /// profile starts — `cwd_for_spawn`'s own rule, not a second one.
+///
+/// **And the two branches are two kinds of place** (GitHub issue #16): the named one is
+/// [`profiles::SeedPlace::Named`] and outranks the profile's own starting place; the one carried
+/// from the focused pane is [`profiles::SeedPlace::Carried`] and does not.
 fn new_tab_cwd(
     profile: &str,
     place: Option<&Path>,
     source_profile: &str,
     focused: Option<&Path>,
-) -> Option<PathBuf> {
+) -> Option<profiles::SeedPlace> {
     // **Both profiles are named by id and placed against the table here**, one
     // call before the answer is used. `index_of_id` is the standing rule for an
     // id the table no longer holds — the fallback profile, never the reader's
@@ -37684,8 +37713,29 @@ fn new_tab_cwd(
             profiles::PathNamespace::Windows,
             profiles::paths(profile),
             place,
-        ),
-        None => profiles::cwd_for_spawn(source_profile, profile, focused),
+        )
+        .map(profiles::SeedPlace::Named),
+        None => profiles::cwd_for_spawn(source_profile, profile, focused)
+            .map(profiles::SeedPlace::Carried),
+    }
+}
+
+/// **The seed of every new tab** — the `+`, a picker row, `Duplicate tab`, `New terminal in
+/// folder…`, a folder row's `New terminal here`, and a second launch handed over to this one
+/// (which is also where a Service and a folder given to the Dock icon land). One function, so
+/// `Runtime::new_tab_seeded_from` and the pin on GitHub issue #16 build the same seed.
+fn new_tab_leaf_seed(
+    profile: &str,
+    place: Option<&Path>,
+    source_profile: &str,
+    source_cwd: Option<&Path>,
+) -> LeafSeed {
+    LeafSeed {
+        profile: profile.to_owned(),
+        cwd: new_tab_cwd(profile, place, source_profile, source_cwd),
+        unknown_profile_id: None,
+        card_skip: 0,
+        prefill: None,
     }
 }
 
@@ -37815,7 +37865,7 @@ impl SplitSeed {
         match self {
             Self::Inherit => LeafSeed {
                 profile: source_profile.to_owned(),
-                cwd: source_cwd.map(Path::to_path_buf),
+                cwd: source_cwd.map(|cwd| profiles::SeedPlace::Carried(cwd.to_path_buf())),
                 // A running pane's profile is one this build has, by construction.
                 unknown_profile_id: None,
                 // **A new pane is aimed at the tail**, whichever of the three
@@ -37831,7 +37881,8 @@ impl SplitSeed {
                     profiles::index_of_id(source_profile),
                     profiles::index_of_id(profile),
                     source_cwd,
-                ),
+                )
+                .map(profiles::SeedPlace::Carried),
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
@@ -37840,14 +37891,16 @@ impl SplitSeed {
             // `FOS_FORCEFILESYSTEM` is what makes it answer with a path at all —
             // so it is a directory in the *source profile's* namespace exactly
             // when that profile speaks Windows, and `cwd_for_spawn` is asked the
-            // same translation question with `pwsh` as the origin.
+            // same translation question with `pwsh` as the origin. **Named**, because the
+            // reader just pointed at it: it outranks the profile's starting place (#16).
             Self::Folder(path) => LeafSeed {
                 profile: source_profile.to_owned(),
                 cwd: profiles::translate_cwd(
                     profiles::PathNamespace::Windows,
                     profiles::paths(profiles::index_of_id(source_profile)),
                     path,
-                ),
+                )
+                .map(profiles::SeedPlace::Named),
                 unknown_profile_id: None,
                 card_skip: 0,
                 prefill: None,
@@ -42148,23 +42201,7 @@ impl Runtime<'_> {
             let leaves = seats
                 .terminals()
                 .into_iter()
-                .map(|seat| {
-                    (
-                        seat,
-                        LeafSeed {
-                            profile: profiles::id(cli_plan.profile),
-                            cwd: cli_plan.cwd.clone(),
-                            // A profile the command line named and this build has
-                            // not got is reported on a card naming the id, not by
-                            // the leaf banner: the banner is for a *saved* pane
-                            // whose shell has gone, and a launch argument has a
-                            // reader standing right there.
-                            unknown_profile_id: None,
-                            card_skip: 0,
-                            prefill: None,
-                        },
-                    )
-                })
+                .map(|seat| (seat, cli_leaf_seed(&cli_plan)))
                 .collect();
             (
                 seats,

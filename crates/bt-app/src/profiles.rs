@@ -556,9 +556,12 @@ pub enum StartAt {
     ///
     /// Not the same sentence as [`Self::Inherit`] with nothing to inherit: this
     /// one *refuses* an inheritance that exists, which is what somebody who
-    /// keeps one profile pinned to a home directory is asking for.
+    /// keeps one profile pinned to a home directory is asking for. A folder named
+    /// for the launch itself ([`SeedPlace::Named`]) is not an inheritance and wins.
     Home,
-    /// This place, always — a folder chosen through the system's own picker.
+    /// This place whenever nobody names one — a folder chosen through the
+    /// system's own picker. A folder named for the launch itself
+    /// ([`SeedPlace::Named`]) wins over it; a carried one does not.
     ///
     /// Held in the namespace the picker speaks, which is Windows', and
     /// translated into the profile's at spawn through [`translate_cwd`] rather
@@ -4974,10 +4977,52 @@ pub fn home_directory(environment: &dyn ShellEnvironment) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// **A folder a new leaf is handed, and how it came to be handed it** — the one thing
+/// [`place_for`] weighs against the profile's own [`StartAt`].
+///
+/// Two kinds, because the profile editor's question ("where does a new tab of this profile
+/// start?") is about the folders a pane *carries*, never about a folder a person named for this
+/// launch (GitHub issue #16; coordinator's ruling 2026-10-05: a place the user explicitly asked
+/// for in this launch always wins over a profile's default starting place).
+///
+/// Either way the path is already written in the namespace of the profile being started
+/// ([`translate_cwd`] has been asked by whoever made the seed).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SeedPlace {
+    /// Carried over from somewhere the pane did not name for itself: the pane a new tab or a
+    /// split was opened beside, `Duplicate tab`, `Restart shell`, a saved session, a Recent row.
+    /// The profile's [`StartAt`] decides whether it is used.
+    Carried(PathBuf),
+    /// Named for this launch: `Open in Folio`, `folio <folder>`, `--cwd`, `folio-here.cmd`, a
+    /// second launch handed over to this one, a folder given to the Dock icon or a Service,
+    /// `New terminal in folder…` and a folder row's `New terminal here`. It outranks the
+    /// profile's [`StartAt`].
+    Named(PathBuf),
+}
+
+impl SeedPlace {
+    /// The folder, whichever way it came.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        match self {
+            Self::Carried(path) | Self::Named(path) => path,
+        }
+    }
+
+    /// The same kind of place, standing somewhere else.
+    #[must_use]
+    fn with_path(&self, path: PathBuf) -> Self {
+        match self {
+            Self::Carried(_) => Self::Carried(path),
+            Self::Named(_) => Self::Named(path),
+        }
+    }
+}
+
 #[must_use]
 pub fn spawn_place(
     profile: usize,
-    inherited: Option<PathBuf>,
+    inherited: Option<SeedPlace>,
     environment: &dyn ShellEnvironment,
 ) -> SpawnPlace {
     // **A folder that is no longer a directory is no folder** (T-RESTART-CWD round 2). Every
@@ -4988,7 +5033,8 @@ pub fn spawn_place(
     // launch); answered here, it falls to what no folder falls to for this profile — its own
     // starting directory or the account's home. The check is `revived_cwd`'s, the one a restore
     // already made, so a WSL folder, which Windows cannot see, is taken at its word.
-    let inherited = inherited.and_then(|cwd| revived_cwd(profile, &cwd));
+    let inherited = inherited
+        .and_then(|place| revived_cwd(profile, place.path()).map(|cwd| place.with_path(cwd)));
     let (start_at, starting_dir, namespace) = with_table(|table| {
         table.get(profile).map_or_else(
             || {
@@ -5016,11 +5062,15 @@ pub fn spawn_place(
 /// Split off for [`merge`]'s reason one function over: the rule is worth pinning
 /// without moving the process's own profile table to pin it, and `cargo test`
 /// runs this crate's cases in one process.
-fn place_for(
+///
+/// **The one owner of the starting-place precedence** (`docs/RULES.md`, "Where a new pane
+/// starts"): a folder named for this launch, then the profile's [`StartAt`], then — for
+/// `StartAt::Inherit` only — a carried folder, then the profile's home.
+pub(crate) fn place_for(
     start_at: &StartAt,
     starting_dir: &StartingDir,
     namespace: PathNamespace,
-    inherited: Option<PathBuf>,
+    inherited: Option<SeedPlace>,
     environment: &dyn ShellEnvironment,
 ) -> SpawnPlace {
     // **The reader's question first, the machine's second.** What the editor
@@ -5028,16 +5078,19 @@ fn place_for(
     // `starting_dir` decides which of the two channels it travels on, and a
     // place that never arrived falls through to the profile's home exactly as an
     // untranslatable inheritance already did.
-    let place = match start_at.clone() {
-        StartAt::Inherit => inherited,
+    let place = match (inherited, start_at.clone()) {
+        // **A folder named for this launch wins outright** (GitHub issue #16). The editor's
+        // question is where a new tab starts when nobody says; somebody just said.
+        (Some(SeedPlace::Named(named)), _) => Some(named),
+        (carried, StartAt::Inherit) => carried.map(|place| place.path().to_path_buf()),
         // Not "inherit with nothing to inherit" — this one *refuses* a folder
-        // that was there, which is the whole of what the reader asked for.
-        StartAt::Home => None,
+        // that was carried, which is the whole of what the reader asked for.
+        (_, StartAt::Home) => None,
         // Written in the picker's namespace and crossed into the profile's here,
         // through the one door every crossing in this module goes through. A
         // pair that cannot cross falls to the home below, which is
         // `cwd_for_spawn`'s own rule and not a second one.
-        StartAt::Fixed(fixed) => translate_cwd(PathNamespace::Windows, namespace, &fixed),
+        (_, StartAt::Fixed(fixed)) => translate_cwd(PathNamespace::Windows, namespace, &fixed),
     };
     match starting_dir {
         StartingDir::AccountHome => {
@@ -17360,7 +17413,7 @@ mod tests {
                 &row.start_at,
                 &row.starting_dir,
                 row.paths,
-                inherited,
+                inherited.map(SeedPlace::Carried),
                 machine,
             )
         };
@@ -17530,7 +17583,11 @@ mod tests {
         // A directory that exists: since T-RESTART-CWD round 2 one that does not is no folder.
         let here = std::env::temp_dir();
         assert_eq!(
-            spawn_place(index_of_id("pwsh"), Some(here.clone()), &machine),
+            spawn_place(
+                index_of_id("pwsh"),
+                Some(SeedPlace::Carried(here.clone())),
+                &machine
+            ),
             SpawnPlace {
                 working_directory: Some(here.clone()),
                 arguments: Vec::new(),
@@ -17542,7 +17599,7 @@ mod tests {
         assert_eq!(
             spawn_place(
                 index_of_id("wsl"),
-                Some(PathBuf::from("/mnt/d/Developer")),
+                Some(SeedPlace::Carried(PathBuf::from("/mnt/d/Developer"))),
                 &machine
             ),
             SpawnPlace {
@@ -17576,23 +17633,30 @@ mod tests {
         for id in ["pwsh", "gitbash", "cmd"] {
             let profile = index_of_id(id);
             assert_eq!(
-                spawn_place(profile, Some(live.clone()), &machine).working_directory,
+                spawn_place(profile, Some(SeedPlace::Carried(live.clone())), &machine)
+                    .working_directory,
                 Some(live.clone()),
                 "{id}: a folder that is there is where the shell starts"
             );
             assert_eq!(
-                spawn_place(profile, Some(gone.clone()), &machine),
+                spawn_place(profile, Some(SeedPlace::Carried(gone.clone())), &machine),
                 spawn_place(profile, None, &machine),
                 "{id}: a folder that is gone is answered as no folder"
             );
             assert_eq!(
-                spawn_place(profile, Some(gone.clone()), &machine).working_directory,
+                spawn_place(profile, Some(SeedPlace::Carried(gone.clone())), &machine)
+                    .working_directory,
                 Some(PathBuf::from(home))
             );
         }
         let unseen = PathBuf::from("/mnt/d/folio-restart-cwd-no-such-directory");
         assert_eq!(
-            spawn_place(index_of_id("wsl"), Some(unseen.clone()), &machine).directory,
+            spawn_place(
+                index_of_id("wsl"),
+                Some(SeedPlace::Carried(unseen.clone())),
+                &machine
+            )
+            .directory,
             Some(unseen),
             "a WSL folder is taken at its word: Windows cannot see it to check"
         );
@@ -17610,13 +17674,20 @@ mod tests {
         let machine = FakeMachine::default().with_var("USERPROFILE", r"C:\Users\dev");
         let wsl = index_of_id("wsl");
         assert_eq!(
-            spawn_place(wsl, Some(PathBuf::from("~")), &machine),
+            spawn_place(wsl, Some(SeedPlace::Carried(PathBuf::from("~"))), &machine),
             spawn_place(wsl, None, &machine),
             "`--cd ~` is the same launch as no place at all"
         );
-        assert!(spawn_place(wsl, Some(PathBuf::from("~")), &machine).at_shell_home);
         assert!(
-            !spawn_place(wsl, Some(PathBuf::from("/home/alice/src")), &machine).at_shell_home,
+            spawn_place(wsl, Some(SeedPlace::Carried(PathBuf::from("~"))), &machine).at_shell_home
+        );
+        assert!(
+            !spawn_place(
+                wsl,
+                Some(SeedPlace::Carried(PathBuf::from("/home/alice/src"))),
+                &machine
+            )
+            .at_shell_home,
             "a folder the pane inherited is not its home"
         );
     }
@@ -25443,7 +25514,8 @@ mod tests {
     #[test]
     fn the_three_starting_answers_are_inherit_home_and_one_fixed_place() {
         let machine = FakeMachine::fully_equipped();
-        let inherited = Some(PathBuf::from(r"D:\Developer"));
+        let carried = PathBuf::from(r"D:\Developer");
+        let inherited = Some(SeedPlace::Carried(carried.clone()));
 
         let place = place_for(
             &StartAt::Inherit,
@@ -25452,7 +25524,7 @@ mod tests {
             inherited.clone(),
             &machine,
         );
-        assert_eq!(place.working_directory, inherited);
+        assert_eq!(place.working_directory, Some(carried));
 
         let place = place_for(
             &StartAt::Home,
@@ -25504,6 +25576,84 @@ mod tests {
             &machine,
         );
         assert_eq!(place.arguments, ["--cd", "~"]);
+    }
+
+    /// RED (GitHub issue #16) — **a folder named for this launch wins over every starting
+    /// answer the profile editor offers; a carried one wins only over `Inherit`.**
+    ///
+    /// `Open in Folio` on `D:\项目\clicked` with a profile set to Home or to a fixed folder used
+    /// to open the profile's folder: the explicit place reached `place_for` as an inheritance and
+    /// Home/Fixed threw it away. Both channels are pinned — a Windows process's working
+    /// directory, and a WSL launcher's `--cd` (the named folder already crossed into the
+    /// distribution's namespace by whoever made the seed).
+    ///
+    /// MUTATION, observed red: drop the `(Some(SeedPlace::Named(named)), _)` arm from
+    /// `place_for`, so a named folder falls to the `StartAt` arms like a carried one — the Home
+    /// and Fixed rows open the profile's folder again.
+    #[test]
+    fn a_folder_named_for_the_launch_outranks_the_profiles_starting_place() {
+        let machine = FakeMachine::fully_equipped();
+        let clicked = PathBuf::from(r"D:\项目\clicked");
+        let named = || Some(SeedPlace::Named(clicked.clone()));
+        let carried = || Some(SeedPlace::Carried(clicked.clone()));
+        let home = machine.var_os("USERPROFILE").map(PathBuf::from);
+        let fixed = StartAt::Fixed(PathBuf::from(r"E:\work"));
+        for start_at in [StartAt::Inherit, StartAt::Home, fixed.clone()] {
+            let place = place_for(
+                &start_at,
+                &StartingDir::AccountHome,
+                PathNamespace::Windows,
+                named(),
+                &machine,
+            );
+            assert_eq!(
+                place.working_directory,
+                Some(clicked.clone()),
+                "{start_at:?}: the folder somebody named for this launch is where it opens"
+            );
+            assert_eq!(place.directory, Some(clicked.clone()), "{start_at:?}");
+        }
+        let carried_to = |start_at: &StartAt| {
+            place_for(
+                start_at,
+                &StartingDir::AccountHome,
+                PathNamespace::Windows,
+                carried(),
+                &machine,
+            )
+            .working_directory
+        };
+        assert_eq!(carried_to(&StartAt::Inherit), Some(clicked.clone()));
+        assert_eq!(
+            carried_to(&StartAt::Home),
+            home,
+            "a carried folder is still refused by Home"
+        );
+        assert_eq!(
+            carried_to(&fixed),
+            Some(PathBuf::from(r"E:\work")),
+            "and by a fixed folder"
+        );
+        // A WSL profile is told the named place on its launcher flag, in its own namespace.
+        let wsl = StartingDir::LauncherFlag {
+            flag: "--cd".to_owned(),
+            home: "~".to_owned(),
+        };
+        for start_at in [StartAt::Inherit, StartAt::Home, fixed] {
+            let place = place_for(
+                &start_at,
+                &wsl,
+                PathNamespace::Wsl,
+                Some(SeedPlace::Named(PathBuf::from("/mnt/d/项目/clicked"))),
+                &machine,
+            );
+            assert_eq!(
+                place.arguments,
+                ["--cd", "/mnt/d/项目/clicked"],
+                "{start_at:?}"
+            );
+            assert!(!place.at_shell_home, "{start_at:?}");
+        }
     }
 
     /// PIN — **a new profile wears the chassis and a duplicate wears the brand.**

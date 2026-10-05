@@ -3362,7 +3362,11 @@ fn launch_plan_on_disk(session_path: &Path) -> (LaunchPlan, Vec<RevivedShape>) {
             let folders = seats
                 .terminals()
                 .iter()
-                .map(|seat| leaves.get(seat).and_then(|leaf| leaf.cwd.clone()))
+                .map(|seat| {
+                    leaves
+                        .get(seat)
+                        .and_then(|leaf| leaf.cwd.as_ref().map(|place| place.path().to_path_buf()))
+                })
                 .collect();
             (kinds, folders)
         })
@@ -4128,7 +4132,7 @@ fn each_saved_pane_comes_back_as_the_shell_it_was_saved_as() {
         leaves[&left],
         LeafSeed {
             profile: "pwsh".to_owned(),
-            cwd: Some(here),
+            cwd: Some(profiles::SeedPlace::Carried(here)),
             unknown_profile_id: None,
             card_skip: 0,
             prefill: None,
@@ -4250,7 +4254,11 @@ fn two_panes_save_and_revive_their_own_two_folders() {
     let [revived_left, revived_right] = revived.terminals()[..] else {
         panic!("the tree came back with its two terminals");
     };
-    let folder = |seat: SeatId| folders.get(&seat).and_then(|leaf| leaf.cwd.clone());
+    let folder = |seat: SeatId| {
+        folders
+            .get(&seat)
+            .and_then(|leaf| leaf.cwd.as_ref().map(|place| place.path().to_path_buf()))
+    };
     assert_eq!(folders.len(), 2, "not collapsed to one");
     assert_eq!(
         folder(revived_left),
@@ -5266,7 +5274,7 @@ fn a_saved_pane_that_named_no_folder_contributes_no_entry() {
     let [left, right] = seats.terminals()[..] else {
         panic!("a row of two terminals holds two terminal seats");
     };
-    assert_eq!(one[&left].cwd, Some(here));
+    assert_eq!(one[&left].cwd, Some(profiles::SeedPlace::Carried(here)));
     assert_eq!(
         one[&right].cwd, None,
         "a folder that is no longer a directory is answered like one never named"
@@ -20066,7 +20074,7 @@ fn a_tab_opened_in_a_chosen_folder_stands_there_and_not_where_the_pane_was() {
 
     assert_eq!(
         new_tab_cwd(pwsh, Some(&chosen), pwsh, Some(&pane)),
-        Some(chosen.clone()),
+        Some(profiles::SeedPlace::Named(chosen.clone())),
         "the folder that was named out loud wins over the pane's own"
     );
     // The crossing is the chooser's, and the chooser speaks Windows: a WSL
@@ -20074,13 +20082,15 @@ fn a_tab_opened_in_a_chosen_folder_stands_there_and_not_where_the_pane_was() {
     // the same journey `StartAt::Fixed` makes at spawn.
     assert_eq!(
         new_tab_cwd(wsl, Some(&chosen), pwsh, Some(&pane)),
-        Some(PathBuf::from("/mnt/d/Developer/folio-terminal")),
+        Some(profiles::SeedPlace::Named(PathBuf::from(
+            "/mnt/d/Developer/folio-terminal"
+        ))),
     );
     // Nobody said: the pane answers, exactly as it did before this row
     // existed.
     assert_eq!(
         new_tab_cwd(pwsh, None, pwsh, Some(&pane)),
-        Some(pane.clone()),
+        Some(profiles::SeedPlace::Carried(pane.clone())),
     );
     assert_eq!(new_tab_cwd(pwsh, None, pwsh, None), None);
 
@@ -20093,6 +20103,142 @@ fn a_tab_opened_in_a_chosen_folder_stands_there_and_not_where_the_pane_was() {
         folder_pick_outcome(Some(FolderPick::NewTabIn), Ok(Some(chosen.clone()))),
         Some((FolderPick::NewTabIn, chosen)),
     );
+}
+
+/// RED (GitHub issue #16) — **every road that names a folder for this launch opens the pane
+/// there, whatever the profile's starting place says; every road that carries a folder keeps the
+/// profile's rule.**
+///
+/// Each road is driven through the function the product builds its seed with — `cli::resolve`
+/// and [`cli_leaf_seed`] for the first launch, [`new_tab_leaf_seed`] for every new tab (a second
+/// launch handed over, a Service and a folder on the Dock all land through
+/// `Runtime::new_tab_with_profile(&profile, request.cwd.clone())`, pinned by
+/// `a_request_opens_its_tab_where_it_asked_and_raises_the_window`), [`SplitSeed::applied`],
+/// [`restart_seed`] and [`revive_plan`] — and the seed is then placed by
+/// `profiles::place_for`, the function `profiles::spawn_place` hands the table row to.
+///
+/// MUTATIONS, each observed red: drop `place_for`'s `Named` arm — every named road opens the
+/// profile's folder under Home and Fixed; make `cli_leaf_seed` hand its folder over as
+/// `SeedPlace::Carried` — the two first-launch rows; make `new_tab_cwd`'s chosen-folder branch
+/// `Carried` — the three new-tab rows; make `SplitSeed::Folder` `Carried` — the pane row.
+#[test]
+fn every_road_that_names_a_folder_opens_there_whatever_the_profile_says() {
+    struct Machine;
+    impl bt_pty::ShellEnvironment for Machine {
+        fn var_os(&self, _: &str) -> Option<std::ffi::OsString> {
+            Some(r"C:\Users\用户".into())
+        }
+        fn is_file(&self, _: &Path) -> bool {
+            false
+        }
+    }
+    let home = Some(PathBuf::from(r"C:\Users\用户"));
+    let fixed = PathBuf::from(r"E:\固定");
+    let pwsh = "pwsh";
+    let clicked = PathBuf::from(r"D:\项目\clicked");
+    let pane = PathBuf::from(r"D:\elsewhere");
+    let directory = |_: &Path| cli::PathKind::Directory;
+    let handed_over = launch_wire::LaunchRequest {
+        cwd: Some(clicked.clone()),
+        tab: true,
+        ..launch_wire::LaunchRequest::default()
+    };
+    let named: Vec<(&str, LeafSeed)> = vec![
+        (
+            "Open in Folio, --cwd, folio-here.cmd (first launch)",
+            cli_leaf_seed(&cli::resolve(
+                &cli::CliRequest {
+                    cwd: Some(clicked.clone()),
+                    origin: cli::LaunchOrigin::Explorer,
+                    ..cli::CliRequest::default()
+                },
+                profiles::index_of_id(pwsh),
+                directory,
+            )),
+        ),
+        (
+            "folio <folder> (first launch)",
+            cli_leaf_seed(&cli::resolve(
+                &cli::CliRequest {
+                    path: Some(clicked.clone()),
+                    ..cli::CliRequest::default()
+                },
+                profiles::index_of_id(pwsh),
+                directory,
+            )),
+        ),
+        (
+            "a second launch, a Service, a folder on the Dock",
+            new_tab_leaf_seed(pwsh, handed_over.cwd.as_deref(), pwsh, Some(&pane)),
+        ),
+        (
+            "New terminal in folder… (new tab), New terminal here",
+            new_tab_leaf_seed(pwsh, Some(&clicked), pwsh, Some(&pane)),
+        ),
+        (
+            "New terminal in folder… (pane)",
+            SplitSeed::Folder(clicked.clone()).applied(pwsh, Some(&pane)),
+        ),
+    ];
+    let place = |seed: &LeafSeed, start_at: &profiles::StartAt| {
+        profiles::place_for(
+            start_at,
+            &profiles::StartingDir::AccountHome,
+            profiles::PathNamespace::Windows,
+            seed.cwd.clone(),
+            &Machine,
+        )
+        .working_directory
+    };
+    let start_ats = [
+        profiles::StartAt::Inherit,
+        profiles::StartAt::Home,
+        profiles::StartAt::Fixed(fixed.clone()),
+    ];
+    for (road, seed) in &named {
+        for start_at in &start_ats {
+            assert_eq!(
+                place(seed, start_at),
+                Some(clicked.clone()),
+                "{road} under {start_at:?}: the folder named for this launch wins"
+            );
+        }
+    }
+    // The carried roads keep the profile's rule: Duplicate tab, the `+`, a split, Restart shell
+    // and a restored session start where the pane stood only under `Inherit`.
+    let here = std::env::current_dir().expect("a test runs somewhere");
+    let (seats, _, restored, _files, _preview) =
+        revive_plan(&saved_row_of_two(&here.to_string_lossy(), ""));
+    let carried: Vec<(&str, LeafSeed)> = vec![
+        (
+            "the + and Duplicate tab",
+            new_tab_leaf_seed(pwsh, None, pwsh, Some(&pane)),
+        ),
+        (
+            "Duplicate pane and a split",
+            SplitSeed::Inherit.applied(pwsh, Some(&pane)),
+        ),
+        (
+            "Split with",
+            SplitSeed::Profile(pwsh.to_owned()).applied(pwsh, Some(&pane)),
+        ),
+        ("Restart shell", restart_seed(pwsh, Some(&pane))),
+        (
+            "a restored session",
+            restored[&seats.terminals()[0]].clone(),
+        ),
+    ];
+    for (road, seed) in &carried {
+        let stood = seed.cwd.as_ref().map(|place| place.path().to_path_buf());
+        assert!(stood.is_some(), "{road} carries a folder");
+        assert_eq!(place(seed, &start_ats[0]), stood, "{road} under Inherit");
+        assert_eq!(place(seed, &start_ats[1]), home, "{road} under Home");
+        assert_eq!(
+            place(seed, &start_ats[2]),
+            Some(fixed.clone()),
+            "{road} under a fixed folder"
+        );
+    }
 }
 
 /// PIN — the profile picker hangs off the button that is **drawn**, and in
@@ -24975,7 +25121,11 @@ fn a_restart_carries_the_seats_own_profile_and_its_last_reported_folder() {
         seed.profile, profile,
         "the seat's own profile, never the current default"
     );
-    assert_eq!(seed.cwd.as_deref(), Some(reported.as_path()));
+    assert_eq!(
+        seed.cwd,
+        Some(profiles::SeedPlace::Carried(reported.clone())),
+        "carried, so a restart keeps the profile's starting rule"
+    );
     assert_eq!(
         seed.unknown_profile_id, None,
         "a pane that is running has a profile this build has"
@@ -25011,7 +25161,7 @@ fn a_pane_that_never_reported_a_folder_is_started_again_where_it_was_born() {
     };
     assert_eq!(
         restart_seed(&silent.profile, silent.place_for_a_new_shell().as_deref()).cwd,
-        Some(born_in.clone()),
+        Some(profiles::SeedPlace::Carried(born_in.clone())),
         "the folder the pane was born in, not the profile's default"
     );
 
@@ -48635,15 +48785,20 @@ fn a_seeded_split_carries_the_profile_and_the_directory_the_row_promised() {
     // Duplicate: both halves, unchanged.
     let same = SplitSeed::Inherit.applied(wsl, Some(Path::new("/home/me/src")));
     assert_eq!(same.profile, wsl);
-    assert_eq!(same.cwd.as_deref(), Some(Path::new("/home/me/src")));
+    assert_eq!(
+        same.cwd,
+        Some(profiles::SeedPlace::Carried(PathBuf::from("/home/me/src")))
+    );
 
     // Split with… : the named profile, standing where this pane stands, in
     // the spelling the named profile can read.
     let crossed = SplitSeed::Profile(wsl.to_owned()).applied(pwsh, Some(&here));
     assert_eq!(crossed.profile, wsl);
     assert_eq!(
-        crossed.cwd.as_deref(),
-        Some(Path::new("/mnt/d/Developer")),
+        crossed.cwd,
+        Some(profiles::SeedPlace::Carried(PathBuf::from(
+            "/mnt/d/Developer"
+        ))),
         "the directory crosses the namespace rather than being copied into it"
     );
 
@@ -48659,12 +48814,14 @@ fn a_seeded_split_carries_the_profile_and_the_directory_the_row_promised() {
     // crosses when the pane is a WSL one.
     let folder = SplitSeed::Folder(here.clone()).applied(pwsh, None);
     assert_eq!(folder.profile, pwsh);
-    assert_eq!(folder.cwd.as_deref(), Some(here.as_path()));
+    assert_eq!(folder.cwd, Some(profiles::SeedPlace::Named(here.clone())));
     let folder_for_wsl = SplitSeed::Folder(here.clone()).applied(wsl, None);
     assert_eq!(folder_for_wsl.profile, wsl);
     assert_eq!(
-        folder_for_wsl.cwd.as_deref(),
-        Some(Path::new("/mnt/d/Developer")),
+        folder_for_wsl.cwd,
+        Some(profiles::SeedPlace::Named(PathBuf::from(
+            "/mnt/d/Developer"
+        ))),
         "the chooser speaks Windows, and a WSL pane does not"
     );
 }

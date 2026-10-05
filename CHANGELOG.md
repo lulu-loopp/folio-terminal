@@ -105,6 +105,9 @@ All notable changes to Folio are recorded here. The format follows
 - Pointing at a pane's notice strip — its words or its `×` — no longer also
   answers the pane's corner folder or `⌄` hidden under it: the files card no
   longer opens and the pane menu no longer drops from under the strip.
+- Open in Folio, `folio <folder>`, `--cwd`, New terminal in folder… and New
+  terminal here open the folder you chose even when the profile's Starting
+  directory is Home or a fixed folder (issue #16).
 
 ### Known issues
 
