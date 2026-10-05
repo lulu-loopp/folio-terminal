@@ -15,6 +15,18 @@ use std::time::Instant;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, MouseButton};
 
+/// Carry the page's keyboard receipt with its tab during a window transfer.
+/// This is a write to the web module's window-owned focus receipt; the app
+/// coordinator supplies the leaf selected during transfer preparation.
+pub(crate) fn carry_web_keyboard_receipt(
+    source: &mut crate::WindowRuntime,
+    target: &mut crate::WindowRuntime,
+    leaf: LeafId,
+) {
+    source.web_keyboard = None;
+    target.web_keyboard = Some(leaf);
+}
+
 impl Runtime<'_> {
     /// **The web engine, asked for on an idle turn after startup** (0.4.5 ticket 54,
     /// D-64; `docs/ARCHITECTURE.md` §5.3 row 21).

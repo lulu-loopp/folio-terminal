@@ -1901,6 +1901,121 @@ impl FloatHost {
         Some(self.pinned.remove(index))
     }
 
+    /// **Carry a live preview float into another window with the tab that owns
+    /// its buffer** (DESIGN §7.1.3, the tab-transfer contract).
+    ///
+    /// A `FloatId` is minted by its host and is therefore window-local. The
+    /// receiving host assigns a fresh id, while `FloatPreview` keeps the same
+    /// tab and page identities. The rectangle is physical pixels of the old
+    /// window: convert it back through the old scale, apply the receiving
+    /// window's scale, then clamp it into the receiving viewport. The preview
+    /// remains the same visible surface even when the two windows have
+    /// different scales or sizes.
+    ///
+    /// Only live pinned preview floats travel this way. Files floats are
+    /// window-level views, and a dismissed float has already stopped being a
+    /// visible surface. `None` leaves the source host untouched.
+    pub fn transfer_preview_to(
+        &mut self,
+        target: &mut Self,
+        id: FloatId,
+        source_scale: f32,
+        target_scale: f32,
+        target_viewport: [f32; 4],
+    ) -> Option<(FloatId, FloatId, FloatPreview)> {
+        let source = self.live(id)?;
+        if !self.is_pinned(id) {
+            return None;
+        }
+        let preview = source.preview()?;
+        let mut win = self.wipe(id)?;
+        debug_assert_eq!(win.epoch, id);
+        debug_assert!(matches!(&win.tenant, FloatTenant::Preview(_)));
+        debug_assert!(source_scale.is_finite() && source_scale > 0.0);
+        debug_assert!(target_scale.is_finite() && target_scale > 0.0);
+
+        // A pinned arrival follows the same door as `open`: it supersedes a
+        // pending hover intent and dismisses a live peek, but does not take the
+        // keyboard from the receiving window.
+        target.settling = None;
+        let now = Instant::now();
+        if let Some(peek) = target.peek.as_mut()
+            && peek.dismissed_at.is_none()
+        {
+            peek.dismissed_at = Some(now);
+            target.closing_at = None;
+        }
+
+        target.epoch += 1;
+        let target_id = target.epoch;
+        let scale_ratio = target_scale / source_scale;
+        let scaled_frame = win.frame.map(|edge| (edge * scale_ratio).round());
+        win.epoch = target_id;
+        win.frame = clamp_pinned(scaled_frame, target_viewport, target_scale);
+        win.focused = false;
+        target.pinned.push(win);
+        target.blur();
+        Some((id, target_id, preview))
+    }
+
+    /// **Move every selected preview surface as one id-remapping batch.**
+    ///
+    /// The old ids still exist in the tab's view maps while this host is being
+    /// drained. Minting one target id at a time can therefore reuse a later
+    /// source id (`source: 1, 6; target epoch: 5` would map `1 → 6` and erase
+    /// the view for source `6`). Raise the target watermark past the whole
+    /// source set before minting any replacement id, so each old key remains
+    /// unambiguous until its own view is re-keyed.
+    pub fn transfer_previews_to(
+        &mut self,
+        target: &mut Self,
+        ids: &[FloatId],
+        source_scale: f32,
+        target_scale: f32,
+        target_viewport: [f32; 4],
+    ) -> Option<Vec<(FloatId, FloatId, FloatPreview)>> {
+        if ids
+            .iter()
+            .enumerate()
+            .any(|(index, id)| ids[..index].contains(id))
+        {
+            return None;
+        }
+        let previews: Vec<FloatPreview> = ids
+            .iter()
+            .map(|id| {
+                let win = self.live(*id)?;
+                self.is_pinned(*id).then_some(())?;
+                win.preview()
+            })
+            .collect::<Option<_>>()?;
+
+        if let Some(last_source_id) = ids.iter().copied().max() {
+            target.epoch = target.epoch.max(last_source_id);
+        }
+
+        Some(
+            ids.iter()
+                .copied()
+                .zip(previews)
+                .map(|(id, preview)| {
+                    let (from, to, received) = self
+                        .transfer_preview_to(
+                            target,
+                            id,
+                            source_scale,
+                            target_scale,
+                            target_viewport,
+                        )
+                        .expect("the live pinned previews were validated as a batch");
+                    debug_assert_eq!(preview.tab, received.tab);
+                    debug_assert_eq!(preview.page, received.page);
+                    (from, to, received)
+                })
+                .collect(),
+        )
+    }
+
     /// Take the peek away outright, whatever it is — the geometry change's own
     /// closer (§3.2: TRANSIENT dissolves).
     ///
@@ -5180,6 +5295,101 @@ mod tests {
         assert_eq!(
             host.live(tree).expect("open").frame,
             frame(100.0, 100.0, 264.0, 300.0)
+        );
+    }
+
+    /// A preview float belongs to its tab's content plane, but its `FloatId`
+    /// belongs to the window that hosts it. Transfer keeps both facts true when
+    /// those owners change: a new id is minted by the target, and the old
+    /// physical frame is converted through logical size and clamped in the
+    /// target's viewport.
+    #[test]
+    fn a_preview_float_transfers_with_its_tab_and_target_window_geometry() {
+        const SOURCE_SCALE: f32 = 1.0;
+        const TARGET_SCALE: f32 = 2.0;
+        let now = Instant::now();
+        let mut source = FloatHost::default();
+        let source_tree = source.open(
+            FloatMode::Pinned,
+            None,
+            files_tenant("C:/source"),
+            frame(20.0, 80.0, 264.0, 300.0),
+            None,
+            now,
+        );
+        let tab = TabId(77);
+        let page = LeafId {
+            tab,
+            seat: crate::SeatId(3),
+        };
+        let source_preview = source.open(
+            FloatMode::Pinned,
+            None,
+            FloatTenant::Preview(FloatPreview {
+                tab,
+                page: Some(page),
+            }),
+            frame(100.0, 150.0, 430.0, 250.0),
+            None,
+            now,
+        );
+
+        let mut target = FloatHost::default();
+        let target_tree = target.open(
+            FloatMode::Pinned,
+            None,
+            files_tenant("C:/target"),
+            frame(20.0, 80.0, 264.0, 300.0),
+            None,
+            now,
+        );
+        let target_preview = target.open(
+            FloatMode::Pinned,
+            None,
+            FloatTenant::Preview(FloatPreview {
+                tab: TabId(88),
+                page: None,
+            }),
+            frame(400.0, 200.0, 430.0, 250.0),
+            None,
+            now,
+        );
+
+        let viewport = [0.0, 80.0, 1200.0, 900.0];
+        let (from, received, carried) = source
+            .transfer_preview_to(
+                &mut target,
+                source_preview,
+                SOURCE_SCALE,
+                TARGET_SCALE,
+                viewport,
+            )
+            .expect("the source owns a live pinned preview float");
+
+        assert_eq!(from, source_preview);
+        assert!(source.live(source_tree).is_some());
+        assert!(source.live(source_preview).is_none());
+        assert_eq!(stack(&source), vec![source_tree]);
+        assert_eq!(carried.tab, tab);
+        assert_eq!(carried.page, Some(page));
+        assert_eq!(
+            received, 3,
+            "the target host mints after its existing floats"
+        );
+        assert_eq!(
+            stack(&target),
+            vec![target_tree, target_preview, received],
+            "the moved surface is visible in the target host without replacing its floats"
+        );
+        let moved = target
+            .live(received)
+            .expect("the target owns the moved float");
+        assert_eq!(moved.preview().map(|tenant| tenant.tab), Some(tab));
+        assert_eq!(moved.preview().and_then(|tenant| tenant.page), Some(page));
+        assert_eq!(moved.frame, frame(200.0, 300.0, 860.0, 500.0));
+        assert!(
+            !moved.focused,
+            "moving a float does not take the receiving window's keyboard"
         );
     }
 
