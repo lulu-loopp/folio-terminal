@@ -17,10 +17,13 @@
 //!   transport said it would ([`Partial::finish`]). A failure at any stage
 //!   removes the temporary file, so **a partial body never stands under the
 //!   final name** and nothing of it survives the call;
-//! * **the deadlines** — [`DOWNLOAD_IDLE_TIMEOUT`] of silence and
-//!   [`DOWNLOAD_BUDGET`] for the whole call, both on the monotonic clock, so a
-//!   body that trickles one byte at a time still ends at the budget
-//!   ([`Deadlines`]);
+//! * **the one rule about time: a download is given up when it stops moving**
+//!   — [`DOWNLOAD_IDLE_TIMEOUT`] with nothing heard, or, once its body has
+//!   begun, a stretch of that length that carried fewer than
+//!   [`DOWNLOAD_FLOOR_BYTES`]. How long the whole takes is never a reason, so a
+//!   slow honest link finishes and a trickle does not; the longest a download
+//!   can run follows from its ceiling ([`longest_download`]). On the monotonic
+//!   clock ([`Deadlines`]);
 //! * **the vocabulary** — every failure names its stage ([`DownloadStage`]:
 //!   connect, status, headers, body, rename) and a reason that never quotes the
 //!   body;
@@ -45,7 +48,7 @@
 //! digest is what catches it.
 //!
 //! **Not on the window thread.** A download blocks its caller for as long as
-//! the transfer takes — up to [`DOWNLOAD_BUDGET`]. It runs on the update job's
+//! the transfer takes — up to [`longest_download`]. It runs on the update job's
 //! own worker (U-18). Nothing here can tell which thread called it today; the
 //! thread door's `WorkerCtx` (A1b) and its source prohibitions (A1e) are what
 //! will make "a worker only" a type rather than this sentence.
@@ -65,9 +68,16 @@ use std::{
 /// before it is abandoned (§E: "30 s idle").
 pub const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// How long one download may take, end to end, however steadily bytes arrive
-/// (§E: "10 min end-to-end").
-pub const DOWNLOAD_BUDGET: Duration = Duration::from_secs(10 * 60);
+/// **The least a download's body must carry in every stretch of
+/// [`DOWNLOAD_IDLE_TIMEOUT`]** — about 2 KB/s — or it is given up as stalled
+/// (047-EXPERIENCE; it replaces §E's "10 min end-to-end", which failed every
+/// link slower than about 70 KB/s on a 42 MB archive).
+///
+/// What the end-to-end budget was protecting against is a transfer that does
+/// not finish: one that falls silent (the idle timeout) and one that keeps a
+/// worker forever by trickling a byte just inside it. This floor is the second
+/// half: no honest link is that slow, and a trickle is.
+pub const DOWNLOAD_FLOOR_BYTES: u64 = 64 * 1024;
 
 /// The most any download may be, whatever the offer says (§E: "against a
 /// 200 MB cap"). A release archive is about a tenth of it; the number is a
@@ -106,10 +116,12 @@ pub struct HttpsDownload<'a> {
     /// The most body this will write — the offer's size of the asset. Taken as
     /// no more than [`DOWNLOAD_CEILING_LIMIT`].
     pub ceiling: u64,
-    /// [`DOWNLOAD_IDLE_TIMEOUT`] in the product.
+    /// [`DOWNLOAD_IDLE_TIMEOUT`] in the product: the longest silence, and the
+    /// length of the stretch [`Self::floor`] is counted over.
     pub idle_timeout: Duration,
-    /// [`DOWNLOAD_BUDGET`] in the product.
-    pub budget: Duration,
+    /// [`DOWNLOAD_FLOOR_BYTES`] in the product: the least the body must carry
+    /// in every stretch of [`Self::idle_timeout`].
+    pub floor: u64,
     /// Progress out, cancellation in.
     pub monitor: &'a Arc<DownloadMonitor>,
 }
@@ -121,6 +133,25 @@ impl HttpsDownload<'_> {
     pub fn effective_ceiling(&self) -> u64 {
         self.ceiling.min(DOWNLOAD_CEILING_LIMIT)
     }
+
+    /// The longest this download can run before [`Deadlines`] ends it —
+    /// [`longest_download`] for its ceiling.
+    #[must_use]
+    pub fn longest(&self) -> Duration {
+        longest_download(self.effective_ceiling(), self.idle_timeout, self.floor)
+    }
+}
+
+/// **The longest a download of at most `ceiling` bytes can run** under
+/// [`Deadlines`]: one stretch of `idle` before the body begins, one per `floor`
+/// bytes of the ceiling after it, and the stretch the last bytes arrive in. Not
+/// a deadline of its own — a consequence of the rule, which is what a stack
+/// that insists on a whole-transfer timer (macOS's `timeoutIntervalForResource`)
+/// is given, so that timer never ends a download the rule would have kept.
+#[must_use]
+pub fn longest_download(ceiling: u64, idle: Duration, floor: u64) -> Duration {
+    let stretches = ceiling.div_ceil(floor.max(1)).saturating_add(2);
+    idle.saturating_mul(u32::try_from(stretches).unwrap_or(u32::MAX))
 }
 
 /// A file that arrived whole.
@@ -334,65 +365,109 @@ pub fn admit_length(announced: Option<u64>, ceiling: u64) -> Result<(), Download
     }
 }
 
-/// **The two deadlines, on the monotonic clock.**
+/// **A download is given up when it stops moving** — the one rule about time,
+/// on the monotonic clock.
 ///
-/// `budget` runs from the start and nothing moves it; `idle` runs from the last
-/// thing the transport reported and every report moves it. So a trickle defeats
-/// the idle timeout and still meets the budget.
+/// Two ways of not moving, measured over one length, `idle`: nothing heard for
+/// that long (`idle` runs from the last thing the transport reported, and every
+/// report moves it), or — once the body has begun — a stretch of that length
+/// that carried fewer than `floor` bytes (stretches run back to back from the
+/// first body byte the monitor counts, and only a stretch that met the floor
+/// starts the next). A trickle that defeats the first is caught by the second;
+/// how long the whole download takes is neither.
+///
+/// The clock is a parameter of the `_at` forms, which the product calls with
+/// `Instant::now()` and the tests with instants they compose.
 #[derive(Clone, Copy, Debug)]
 pub struct Deadlines {
-    started: Instant,
     last_heard: Instant,
+    /// The current stretch of the body: when it began, and the count then.
+    /// `None` until the monitor has counted a byte.
+    stretch: Option<(Instant, u64)>,
     idle: Duration,
-    budget: Duration,
+    floor: u64,
 }
 
 impl Deadlines {
-    /// Both clocks start now.
+    /// The silence clock starts now.
     #[must_use]
-    pub fn start(idle: Duration, budget: Duration) -> Self {
-        let now = Instant::now();
+    pub fn start(idle: Duration, floor: u64) -> Self {
+        Self::start_at(Instant::now(), idle, floor)
+    }
+
+    /// [`Self::start`] at `now`.
+    #[must_use]
+    pub fn start_at(now: Instant, idle: Duration, floor: u64) -> Self {
         Self {
-            started: now,
             last_heard: now,
+            stretch: None,
             idle,
-            budget,
+            floor,
         }
     }
 
     /// The transport reported something.
     pub fn heard(&mut self) {
-        self.last_heard = Instant::now();
+        self.heard_at(Instant::now());
+    }
+
+    /// [`Self::heard`] at `now`.
+    pub fn heard_at(&mut self, now: Instant) {
+        self.last_heard = now;
     }
 
     /// Whether the download may keep waiting at `stage`.
     ///
     /// # Errors
     ///
-    /// The cancellation, the budget or the idle timeout, in that order, named
-    /// at `stage`.
+    /// The cancellation, the silence or the floor, in that order, named at
+    /// `stage`.
     pub fn check(
-        &self,
+        &mut self,
+        stage: DownloadStage,
+        monitor: &DownloadMonitor,
+    ) -> Result<(), DownloadError> {
+        self.check_at(Instant::now(), stage, monitor)
+    }
+
+    /// [`Self::check`] at `now`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::check`].
+    pub fn check_at(
+        &mut self,
+        now: Instant,
         stage: DownloadStage,
         monitor: &DownloadMonitor,
     ) -> Result<(), DownloadError> {
         if monitor.is_cancelled() {
             return Err(DownloadError::cancelled_at(stage));
         }
-        if self.started.elapsed() >= self.budget {
-            return Err(DownloadError::at(
-                stage,
-                format!(
-                    "the download did not finish inside its budget of {} s",
-                    self.budget.as_secs_f64()
-                ),
-            ));
-        }
-        if self.last_heard.elapsed() >= self.idle {
+        if now.saturating_duration_since(self.last_heard) >= self.idle {
             return Err(DownloadError::at(
                 stage,
                 format!("nothing arrived for {} s", self.idle.as_secs_f64()),
             ));
+        }
+        let received = monitor.peek().received;
+        match self.stretch {
+            None if received > 0 => self.stretch = Some((now, received)),
+            Some((began, at_start)) if now.saturating_duration_since(began) >= self.idle => {
+                let carried = received.saturating_sub(at_start);
+                if carried < self.floor {
+                    return Err(DownloadError::at(
+                        stage,
+                        format!(
+                            "the download stalled: {carried} bytes arrived in {} s, fewer than {}",
+                            self.idle.as_secs_f64(),
+                            self.floor
+                        ),
+                    ));
+                }
+                self.stretch = Some((now, received));
+            }
+            None | Some(_) => {}
         }
         Ok(())
     }
@@ -400,11 +475,22 @@ impl Deadlines {
     /// How long the next wait may block before [`Self::check`] must run again.
     #[must_use]
     pub fn slice(&self) -> Duration {
-        let to_budget = self.budget.saturating_sub(self.started.elapsed());
-        let to_idle = self.idle.saturating_sub(self.last_heard.elapsed());
+        self.slice_at(Instant::now())
+    }
+
+    /// [`Self::slice`] at `now`.
+    #[must_use]
+    pub fn slice_at(&self, now: Instant) -> Duration {
+        let to_idle = self
+            .idle
+            .saturating_sub(now.saturating_duration_since(self.last_heard));
+        let to_stretch = self.stretch.map_or(self.idle, |(began, _)| {
+            self.idle
+                .saturating_sub(now.saturating_duration_since(began))
+        });
         DOWNLOAD_CANCEL_LATENCY
-            .min(to_budget)
             .min(to_idle)
+            .min(to_stretch)
             .max(Duration::from_millis(1))
     }
 }
@@ -841,7 +927,7 @@ mod tests {
             file_name: "asset.zip",
             ceiling,
             idle_timeout: Duration::from_secs(5),
-            budget: Duration::from_secs(15),
+            floor: super::DOWNLOAD_FLOOR_BYTES,
             monitor,
         }
     }
@@ -1049,6 +1135,132 @@ mod tests {
         assert_eq!(
             request(&directory, u64::MAX, &monitor).effective_ceiling(),
             DOWNLOAD_CEILING_LIMIT
+        );
+    }
+
+    /// RED (047-EXPERIENCE) — **a download is given up when it stops moving, and never for
+    /// how long it takes.** On a composed clock (one base instant, offsets added; nothing
+    /// sleeps or measures):
+    ///
+    /// * a 42 MB archive at 20 KB/s — 35 minutes, three and a half times the old ten-minute
+    ///   budget — is kept to the end;
+    /// * a body that trickles one byte every 20 s, which the 30 s silence clock never catches,
+    ///   is given up as stalled one stretch after its first byte;
+    /// * a body that falls silent is given up 30 s after the last thing heard;
+    /// * a stretch carrying exactly the floor is kept, one byte fewer is not;
+    /// * before the body, headers heard now and then are not held to the floor.
+    ///
+    /// MUTATIONS, each observed red: give `check_at` back a ten-minute whole-download limit —
+    /// the slow archive fails at 600 s; drop the floor's refusal — the trickle is kept for the
+    /// whole simulated hour.
+    #[test]
+    fn a_download_is_given_up_when_it_stops_moving_and_never_for_its_length() {
+        use super::{
+            DOWNLOAD_FLOOR_BYTES, DOWNLOAD_IDLE_TIMEOUT, Deadlines, DownloadMonitor,
+            longest_download,
+        };
+        use std::time::Instant;
+
+        let base = Instant::now();
+        let at = |seconds: u64| base + Duration::from_secs(seconds);
+        let fresh = || {
+            (
+                DownloadMonitor::new(|| {}),
+                Deadlines::start_at(base, DOWNLOAD_IDLE_TIMEOUT, DOWNLOAD_FLOOR_BYTES),
+            )
+        };
+
+        // A slow honest link: 20 KB every second, for 2 100 s.
+        let (monitor, mut deadlines) = fresh();
+        let archive: u64 = 42_000_000;
+        let mut received = 0;
+        let mut second = 0;
+        while received < archive {
+            second += 1;
+            received = (received + 20_000).min(archive);
+            monitor.report(received);
+            deadlines.heard_at(at(second));
+            deadlines
+                .check_at(at(second), DownloadStage::Body, &monitor)
+                .unwrap_or_else(|error| panic!("kept at {second} s: {error}"));
+        }
+        assert_eq!(second, 2_100, "the archive took 35 minutes");
+
+        // A trickle: one byte every 20 s.
+        let (monitor, mut deadlines) = fresh();
+        let mut ended = None;
+        for second in 1..=3_600 {
+            if second % 20 == 0 {
+                monitor.report(second / 20);
+                deadlines.heard_at(at(second));
+            }
+            if let Err(error) = deadlines.check_at(at(second), DownloadStage::Body, &monitor) {
+                ended = Some((second, error));
+                break;
+            }
+        }
+        let (second, error) = ended.expect("a trickle is given up");
+        assert_eq!(second, 50, "one stretch after its first byte (at 20 s)");
+        assert_eq!(
+            error.reason,
+            "the download stalled: 1 bytes arrived in 30 s, fewer than 65536"
+        );
+        assert_eq!(error.stage, DownloadStage::Body);
+
+        // A body that falls silent.
+        let (monitor, mut deadlines) = fresh();
+        monitor.report(1_000_000);
+        deadlines.heard_at(at(10));
+        deadlines
+            .check_at(at(10), DownloadStage::Body, &monitor)
+            .expect("moving");
+        deadlines
+            .check_at(at(39), DownloadStage::Body, &monitor)
+            .expect("29 s of silence is not 30");
+        let error = deadlines
+            .check_at(at(40), DownloadStage::Body, &monitor)
+            .expect_err("30 s of silence");
+        assert_eq!(error.reason, "nothing arrived for 30 s");
+
+        // The floor's edge: exactly the floor in a stretch is enough.
+        for (carried, kept) in [
+            (DOWNLOAD_FLOOR_BYTES, true),
+            (DOWNLOAD_FLOOR_BYTES - 1, false),
+        ] {
+            let (monitor, mut deadlines) = fresh();
+            monitor.report(1);
+            deadlines.heard_at(at(1));
+            deadlines
+                .check_at(at(1), DownloadStage::Body, &monitor)
+                .expect("the stretch begins");
+            monitor.report(1 + carried);
+            deadlines.heard_at(at(30));
+            assert_eq!(
+                deadlines
+                    .check_at(at(31), DownloadStage::Body, &monitor)
+                    .is_ok(),
+                kept,
+                "{carried} bytes in a stretch"
+            );
+        }
+
+        // Before the body there is no floor: headers heard every 20 s for 100 s.
+        let (monitor, mut deadlines) = fresh();
+        for second in (20..=100).step_by(20) {
+            deadlines.heard_at(at(second));
+            deadlines
+                .check_at(at(second), DownloadStage::Headers, &monitor)
+                .expect("no body yet");
+        }
+
+        // The longest a download can run follows from its ceiling.
+        assert_eq!(
+            longest_download(
+                DOWNLOAD_CEILING_LIMIT,
+                DOWNLOAD_IDLE_TIMEOUT,
+                DOWNLOAD_FLOOR_BYTES
+            ),
+            DOWNLOAD_IDLE_TIMEOUT * 3_202
         );
     }
 

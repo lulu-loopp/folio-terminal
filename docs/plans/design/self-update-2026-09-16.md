@@ -3175,3 +3175,19 @@ asserting both the recovery's decision and the exit guard's result:
 - **an unlistable candidate folder:** the result is `Deferred`.
 - **the recovery's own starter:** a live parent of the installed executable is not a candidate. A
   person's start at `Moving` with nothing else running still reaches `decide`.
+
+## Revision 2026-10-05 (i) — a download is given up when it stops moving, never for its length (047-EXPERIENCE)
+
+§E's "10 min end-to-end" failed every link slower than about 70 KB/s on a 42 MB archive: the
+download stopped with "Download stopped. / Nothing changed." and Retry failed the same way. What
+the end-to-end deadline protected against is a transfer that does not finish — one that falls
+silent, and one that holds the worker by trickling a byte just inside the idle timeout. Both are
+now one rule, `https_download::Deadlines`: a download is given up when it stops moving — 30 s
+with nothing heard (`DOWNLOAD_IDLE_TIMEOUT`, unchanged), or, once its body has begun, a 30 s
+stretch that carried fewer than `DOWNLOAD_FLOOR_BYTES` (64 KiB, about 2 KB/s). How long the whole
+takes is never a reason. The longest a download can run follows from its ceiling
+(`longest_download`: one stretch per floor of the ceiling, plus two), and that is what macOS's
+`timeoutIntervalForResource` is set to, so the stack's own whole-transfer timer never ends a
+download the rule keeps. The sentence "a monotonic end-to-end deadline that periodic bytes cannot
+defeat" above is replaced by this rule; cancel, the ceiling, the temporary file and progress are
+unchanged. It helps from 0.4.7 on: the 0.4.6 → 0.4.7 hop runs 0.4.6's downloader.

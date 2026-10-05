@@ -114,6 +114,9 @@ All notable changes to Folio are recorded here. The format follows
 - In Settings, Enter on About's buttons presses them, and the keyboard focus
   moves on when the Version button stops being pressable instead of staying on
   it with no ring.
+- An update download on a slow connection is no longer stopped after ten
+  minutes; it stops only when the transfer stalls. This holds for updates made
+  from this version on: updating from 0.4.6 still uses 0.4.6's download.
 
 ### Known issues
 
