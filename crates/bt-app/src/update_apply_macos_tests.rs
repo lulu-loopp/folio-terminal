@@ -463,6 +463,26 @@ impl Install {
             launch_agent::arm(&self.agents, self.txn.bytes(), &rescue, self.home.root()).unwrap();
     }
 
+    /// **This test process is the applier that took the window at `Handoff`**
+    /// (T-UPDATE-LOCK-RACE): its election record, the mark naming it, as one
+    /// `apply` keeps it while it carries its own road past `Handoff`. A
+    /// fixture that enters that road at a later phase stages the applier that
+    /// still owns it; without the mark it would stage a *later* contender,
+    /// which the election turns away (`Window::RoadTaken`). The Windows
+    /// fixtures' twin is `Install::claim_window` there.
+    fn claim_window(&self) {
+        assert!(
+            crate::update_apply::take_the_window(
+                None,
+                &self.home,
+                self.txn,
+                crate::update_apply::this_process(),
+                Instant::now(),
+            )
+            .is_mine()
+        );
+    }
+
     /// The installation after the exchange: the new bundle live, the old one
     /// in `stage/`.
     fn exchanged(&self) {
@@ -1242,14 +1262,16 @@ fn a_dead_trial_beside_a_persons_start_is_still_rolled_back() {
     }
 }
 
-/// RED (U-28, M4–M6; U-29b) — **an applier started again over its own
-/// transaction goes on from what is live**: at `Armed` it admits, exchanges
-/// and commits; at `Moving` with the old bundle live it removes the plist and
-/// reverts to `Prepared` (M5); at `Moving` with the new bundle live it starts
-/// the trial nobody started and commits on its receipt, or rolls back when it
-/// cannot start one (M6, as the coordinator's ruling 1 of U-29b decides it
-/// for recovery too). A hand-over to another applier is refused and nothing
-/// is touched.
+/// RED (U-28, M4–M6; U-29b) — **an applier that still owns its transaction
+/// goes on from what is live**: a recorded holder at `Armed` admits,
+/// exchanges and commits; at `Moving` with the old bundle live it removes the
+/// plist and reverts to `Prepared` (M5); at `Moving` with the new bundle live
+/// it starts the trial nobody started and commits on its receipt, or rolls
+/// back when it cannot start one (M6, as the coordinator's ruling 1 of U-29b
+/// decides it for recovery too). A hand-over to another applier is refused
+/// and nothing is touched. An unmarked *later* applier may not use these
+/// resume rules (T-UPDATE-LOCK-RACE round 3): see
+/// `an_unmarked_later_applier_stands_down_and_the_recovery_finishes_the_road`.
 ///
 /// M5/M6: "recovery decides by reading the installed bundle's version, not by
 /// trusting the phase" (§C.4).
@@ -1266,6 +1288,7 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
     }
     // M4.
     let install = Install::new("m4");
+    install.claim_window();
     let rescue = install.home.rescue_executable(install.txn).unwrap();
     let armed = launch_agent::arm(
         &install.agents,
@@ -1290,6 +1313,7 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
 
     // M5.
     let install = Install::new("m5");
+    install.claim_window();
     install.write(Phase::Moving);
     let rescue = install.home.rescue_executable(install.txn).unwrap();
     let _plist = launch_agent::arm(
@@ -1314,6 +1338,7 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
     // M6 as U-29b rules it: decided by a trial, which commits here; and a
     // trial that cannot start is rolled back (M9, U-29).
     let install = Install::new("m6");
+    install.claim_window();
     install.write(Phase::Moving);
     install_flip::exchange(&install.installed, &install.stage()).unwrap();
     let children = Children::default();
@@ -1328,6 +1353,7 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
     assert_eq!(version_of(&install.installed), "2.0", "kept");
 
     let install = Install::new("m6-no-trial");
+    install.claim_window();
     install.write(Phase::Moving);
     install_flip::exchange(&install.installed, &install.stage()).unwrap();
     let world = launching(Box::new(|_, _| Err(io::Error::other("no open (test)"))));
@@ -1350,6 +1376,54 @@ fn reentry_at_M4_M5_M6_continues_from_the_live_identity() {
     let (ended, _) = applied(road, Fake::default());
     assert!(matches!(ended, Ended::Refused(_)), "{ended:?}");
     assert_eq!(std::fs::read(install.home.journal()).unwrap(), before);
+    assert_eq!(version_of(&install.installed), "1.0");
+}
+
+/// RED (T-UPDATE-LOCK-RACE round 3 on macOS) — **an applier that arrives
+/// over a transaction already past `Handoff` without the window's mark stands
+/// down, and the recovery at the next start finishes the road.** The product
+/// never starts one: O's hand-over is the only `--update-apply`, built only
+/// from `Prepared`, with the mark cleared just before `Handoff`
+/// (`update_handoff::HandoffJob::new`, `perform_counted`), so such a process
+/// is a later contender — a stray or repeated start. The election answers
+/// `RoadTaken(Armed)`: the journal, the entrance and the bundles stay exactly
+/// as they are and nothing is started (the applier that took the road owns
+/// its window; a dead one's road is the recovery's, which runs no election).
+/// The recovery then does what the cell needs: at `Armed`, nothing moved,
+/// back to `Prepared` with the entrance removed.
+///
+/// MUTATION: in `update_apply::window_duty_is_open`, count `Armed` as open (a
+/// later applier resumes a road it does not own).
+#[test]
+fn an_unmarked_later_applier_stands_down_and_the_recovery_finishes_the_road() {
+    if !on_macos() {
+        return;
+    }
+    let install = Install::new("later");
+    install.arm();
+    install.write(Phase::Armed);
+    let before = std::fs::read(install.home.journal()).unwrap();
+    let (ended, world) = applied(install.road(limits(5_000, 5_000)), Fake::default());
+    assert!(
+        matches!(&ended, Ended::Refused(why) if why.contains("RoadTaken(Armed)")),
+        "{ended:?}: {:?}",
+        world.said
+    );
+    assert_eq!(std::fs::read(install.home.journal()).unwrap(), before);
+    assert!(install.plist().exists(), "the entrance is the recovery's");
+    assert_eq!(version_of(&install.installed), "1.0", "nothing exchanged");
+    assert_eq!(world.exchanges, 0);
+    assert!(world.relaunched.is_empty(), "{:?}", world.relaunched);
+
+    let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
+    assert_eq!(ended, Some(Ended::Reverted), "{:?}", hands.said);
+    assert_eq!(
+        install.on_disk().unwrap().body.phase,
+        Phase::Prepared {
+            deferred_launches: 0
+        }
+    );
+    assert!(!install.plist().exists());
     assert_eq!(version_of(&install.installed), "1.0");
 }
 
@@ -2945,6 +3019,8 @@ fn a_failed_applier_still_opens_the_live_bundle_with_the_incomplete_card() {
     );
 
     let install = Install::new("fail-write");
+    // The applier whose own road met the refused write still owns its window.
+    install.claim_window();
     install.write(Phase::Armed);
     install.arm();
     std::fs::write(install.home.lock(), b"").unwrap();
