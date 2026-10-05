@@ -7024,6 +7024,9 @@ pub struct SettingsPanel {
     agents_visit_read: bool,
     /// The Profiles page's external `$PROFILE`/policy refresh edge.
     profiles_visit_read: bool,
+    /// **The Profiles rows whose button the latest layout placed** ([`Self::note_placed`]) —
+    /// what the keyboard walk is handed, so a button the layout did not place is not a stop.
+    placed_buttons: Vec<usize>,
     /// **The gear's update mark, carried onto the page it led to** (0.4.6
     /// T-GEAR-MARK-LANDS). Set by [`Self::carry_update_mark`] on the frame this
     /// visit to `About` shows the Version row while the gear is lit — the frame
@@ -7361,6 +7364,12 @@ impl SettingsPanel {
         !std::mem::replace(&mut self.agents_visit_read, true)
     }
 
+    /// **What the latest layout placed**, told by the window before a key is walked: the rows
+    /// whose `$PROFILE` button stands in the open ([`SettingsLayout::placed_profile_buttons`]).
+    pub fn note_placed(&mut self, placed: Vec<usize>) {
+        self.placed_buttons = placed;
+    }
+
     /// Consume the first showing of the Profiles list on this page visit.
     pub fn take_profiles_open_edge(&mut self, showing: bool) -> bool {
         if !self.open || !showing {
@@ -7473,7 +7482,11 @@ impl SettingsPanel {
         self.category = content.first_category();
         self.focus = self
             .open
-            .then(|| page_order(content, self.category).first().copied())
+            .then(|| {
+                page_order(content, self.category, &self.placed_buttons)
+                    .first()
+                    .copied()
+            })
             .flatten();
     }
 
@@ -7918,7 +7931,7 @@ impl SettingsPanel {
         {
             return;
         }
-        let order = focus_order(content, self.category);
+        let order = focus_order(content, self.category, &self.placed_buttons);
         if self.focus.is_some_and(|focus| order.contains(&focus)) {
             return;
         }
@@ -8204,7 +8217,10 @@ impl SettingsPanel {
         if !self.on_nav() || self.menu.is_some() {
             return false;
         }
-        let Some(landing) = page_order(content, self.category).first().copied() else {
+        let Some(landing) = page_order(content, self.category, &self.placed_buttons)
+            .first()
+            .copied()
+        else {
             return false;
         };
         self.focus = Some(landing);
@@ -8470,7 +8486,10 @@ impl SettingsPanel {
                 }
             }
             (_, Some(SettingsTarget::Nav(_))) => self.step_nav(content, delta),
-            _ => self.step_in(&page_order(content, self.category), delta),
+            _ => {
+                let order = page_order(content, self.category, &self.placed_buttons);
+                self.step_in(&order, delta)
+            }
         }
     }
 
@@ -8515,7 +8534,7 @@ impl SettingsPanel {
                 .copied()
                 .is_some_and(|item| self.select_category(item));
         }
-        let order = page_order(content, self.category);
+        let order = page_order(content, self.category, &self.placed_buttons);
         let landing = if last { order.last() } else { order.first() };
         let Some(landing) = landing.copied() else {
             return false;
@@ -8563,7 +8582,8 @@ impl SettingsPanel {
 
     /// One step along the dialog's Tab order, wrapping at both ends.
     fn step_focus(&mut self, content: SettingsContent<'_>, delta: isize) -> bool {
-        self.step_in(&focus_order(content, self.category), delta)
+        let order = focus_order(content, self.category, &self.placed_buttons);
+        self.step_in(&order, delta)
     }
 
     /// One step along any list of stops, wrapping at both ends.
@@ -8777,8 +8797,9 @@ impl SettingsPanel {
 pub fn focus_order(
     content: SettingsContent<'_>,
     category: SettingsCategory,
+    placed: &[usize],
 ) -> Vec<SettingsTarget> {
-    let page = page_order(content, category);
+    let page = page_order(content, category, placed);
     let mut order = Vec::with_capacity(page.len() + 2);
     order.push(SettingsTarget::Close);
     if content.has_content(category) {
@@ -8796,7 +8817,11 @@ pub fn focus_order(
 /// rule the conditional Sidebar row taught: a ring on a control nobody can see
 /// is a dialog that looks like it has swallowed the keyboard.
 #[must_use]
-pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> Vec<SettingsTarget> {
+pub fn page_order(
+    content: SettingsContent<'_>,
+    category: SettingsCategory,
+    placed: &[usize],
+) -> Vec<SettingsTarget> {
     if category == SettingsCategory::Shortcuts {
         let mut order = Vec::new();
         for (index, line) in content.shortcuts.iter().enumerate() {
@@ -8834,7 +8859,13 @@ pub fn page_order(content: SettingsContent<'_>, category: SettingsCategory) -> V
                 .enumerate()
                 .flat_map(|(index, line)| {
                     let mut stops = vec![SettingsTarget::ProfileRow(index)];
-                    if let Some(button) = ProfileButton::of(line.profile_fallback) {
+                    // **A button is a stop only where the layout placed it** (round 6): the
+                    // placement is decided once, by `profile_button_fits` in the layout, and
+                    // `placed` is that decision handed over — a button that is not drawn is not
+                    // a stop, and the row's `⋯` carries its verb at every width.
+                    if let Some(button) = ProfileButton::of(line.profile_fallback)
+                        && placed.contains(&index)
+                    {
                         stops.push(button.target(index));
                     }
                     stops.extend([
@@ -10022,6 +10053,17 @@ impl SettingsLayout {
     /// is a row of its own; `None` for what does not scroll (the rail, the header, the dialog
     /// and the scrim). What [`Self::scroll_to_show`] brings into view, and what a press on the
     /// target is inside.
+    /// **The rows this layout placed a button on** — what the keyboard walk is handed
+    /// ([`page_order`]), so a button the layout did not place is not a stop.
+    #[must_use]
+    pub fn placed_profile_buttons(&self) -> Vec<usize> {
+        self.profiles
+            .iter()
+            .filter(|line| line.button.is_some())
+            .map(|line| line.index)
+            .collect()
+    }
+
     pub(crate) fn band_of(&self, target: SettingsTarget) -> Option<[f32; 4]> {
         match target {
             SettingsTarget::Combo(row)
@@ -17663,7 +17705,7 @@ mod tests {
             "a page with rows has a word in the rail"
         );
         assert_eq!(
-            page_order(content, SettingsCategory::About),
+            page_order(content, SettingsCategory::About, &[]),
             vec![
                 SettingsTarget::Link(SettingsRow::AboutVersion),
                 SettingsTarget::Combo(SettingsRow::AutoCheck),
@@ -21605,10 +21647,10 @@ mod tests {
         let rows = flat_rows();
         let lines = shortcut_lines();
         let mut content = content_with(&rows, &lines, every_group_open());
-        let settled = focus_order(content, PAGE);
+        let settled = focus_order(content, PAGE, &[]);
         content.advanced_reveal = Some((PAGE, 1.0));
         assert_eq!(
-            focus_order(content, PAGE),
+            focus_order(content, PAGE, &[]),
             settled,
             "and the Tab order it lands on is the Tab order it would have had \
              with no clock at all"
@@ -21936,7 +21978,7 @@ mod tests {
         let lines = shortcut_lines();
         let mut content = content_with(&rows, &lines, every_group_open());
         content.advanced_reveal = Some((PAGE, 0.5));
-        let order = focus_order(content, PAGE);
+        let order = focus_order(content, PAGE, &[]);
         for row in advanced_rows_of_page() {
             assert!(
                 !order.contains(&row.control_target()),
@@ -22239,7 +22281,7 @@ mod tests {
         let mut panel = SettingsPanel::default();
         panel.toggle(shut);
         panel.select_category(SettingsCategory::Appearance);
-        let order = focus_order(shut, SettingsCategory::Appearance);
+        let order = focus_order(shut, SettingsCategory::Appearance, &[]);
         let at = order
             .iter()
             .position(|stop| *stop == SettingsTarget::Advanced(SettingsCategory::Appearance))
@@ -28623,7 +28665,7 @@ mod tests {
         // off exactly as it does on a freshly opened dialog: every claim below
         // about "the first key lights it" would otherwise be starting from a
         // dialog somebody had already pressed a key on.
-        if let Some(first) = page_order(content(&rows, &lines), category).first() {
+        if let Some(first) = page_order(content(&rows, &lines), category, &[]).first() {
             panel.press(*first);
         }
         panel
@@ -28650,7 +28692,7 @@ mod tests {
     fn page_focus_order() -> Vec<SettingsTarget> {
         let rows = flat_rows();
         let lines = shortcut_lines();
-        focus_order(content(&rows, &lines), PAGE)
+        focus_order(content(&rows, &lines), PAGE, &[])
     }
 
     /// PIN: **the Tab order is the page's order** — the close first, because it
@@ -28694,14 +28736,14 @@ mod tests {
             // controls.
             .chain([SettingsTarget::ResetAdvanced(PAGE)])
             .collect();
-        assert_eq!(focus_order(content(&flat, &lines), PAGE), expected);
+        assert_eq!(focus_order(content(&flat, &lines), PAGE, &[]), expected);
         // And a shut group is a group whose rows and whose verb are nowhere in
         // the order: a ring on a control nobody can see is a dialog that looks
         // like it has swallowed the keyboard, which is the conditional Sidebar
         // row's own lesson with the whole group in it.
         let shut = content_with(&flat, &lines, AdvancedOpen::default());
         assert_eq!(
-            focus_order(shut, PAGE),
+            focus_order(shut, PAGE, &[]),
             [SettingsTarget::Close, SettingsTarget::Nav(PAGE)]
                 .into_iter()
                 .chain(
@@ -28718,7 +28760,7 @@ mod tests {
         // every word of it in the Tab order would make reaching a page's first
         // row cost as many presses as the rail is long.
         assert_eq!(
-            focus_order(content(&flat, &lines), PAGE)
+            focus_order(content(&flat, &lines), PAGE, &[])
                 .iter()
                 .filter(|stop| matches!(stop, SettingsTarget::Nav(_)))
                 .count(),
@@ -28728,12 +28770,12 @@ mod tests {
 
         let down = visible_rows(TabLayoutMode::Vertical);
         assert!(
-            focus_order(content(&down, &lines), PAGE)
+            focus_order(content(&down, &lines), PAGE, &[])
                 .contains(&SettingsTarget::Combo(SettingsRow::Sidebar)),
             "the sidebar row is a keyboard stop while the tabs run down the side"
         );
         assert!(
-            !focus_order(content(&flat, &lines), PAGE)
+            !focus_order(content(&flat, &lines), PAGE, &[])
                 .contains(&SettingsTarget::Combo(SettingsRow::Sidebar)),
             "and is not one while the dialog is not drawing it"
         );
@@ -28771,7 +28813,9 @@ mod tests {
         // where a user who overshot expects to land.
         assert_eq!(
             panel.focus(),
-            page_order(content(&rows, &lines), rail[0]).first().copied(),
+            page_order(content(&rows, &lines), rail[0], &[])
+                .first()
+                .copied(),
             "opening seats the keyboard on the page, as it always has"
         );
         keyed(&mut panel, SettingsKey::Left);
@@ -28804,7 +28848,9 @@ mod tests {
             keyed(&mut panel, way_in);
             assert_eq!(
                 panel.focus(),
-                page_order(content(&rows, &lines), rail[0]).first().copied(),
+                page_order(content(&rows, &lines), rail[0], &[])
+                    .first()
+                    .copied(),
                 "{way_in:?} takes the keyboard into the page"
             );
         }
@@ -29613,7 +29659,7 @@ mod tests {
         let flat = flat_rows();
         panel.keep_focus_reachable(content(&flat, &lines));
         assert!(
-            focus_order(content(&flat, &lines), PAGE)
+            focus_order(content(&flat, &lines), PAGE, &[])
                 .contains(&panel.focus().expect("an open dialog holds a focus")),
             "the focus landed somewhere the dialog is actually drawing"
         );
@@ -30261,7 +30307,7 @@ mod tests {
             .expect("this window hosts the dialog")
         };
         let at_rest = page(UNSCROLLED);
-        let order = page_order(content(&rows, &lines), SettingsCategory::Shortcuts);
+        let order = page_order(content(&rows, &lines), SettingsCategory::Shortcuts, &[]);
         for slot in 1..=4u8 {
             let id = format!("summon-pip-{slot}");
             assert!(
@@ -31089,7 +31135,7 @@ mod tests {
         let table = crate::shortcuts::Shortcuts::defaults();
         let lines = table.editor_rows();
         let rows = visible_rows(TabLayoutMode::Horizontal);
-        let order = page_order(content(&rows, &lines), SettingsCategory::Shortcuts);
+        let order = page_order(content(&rows, &lines), SettingsCategory::Shortcuts, &[]);
         assert_eq!(
             order.last(),
             Some(&SettingsTarget::RestoreAll),
@@ -31113,7 +31159,7 @@ mod tests {
         let mut edited = crate::shortcuts::Shortcuts::defaults();
         edited.set("new-tab", crate::shortcuts::parse_chord("Ctrl+Shift+Y"));
         let lines = edited.editor_rows();
-        let order = page_order(content(&rows, &lines), SettingsCategory::Shortcuts);
+        let order = page_order(content(&rows, &lines), SettingsCategory::Shortcuts, &[]);
         assert!(
             order.contains(&SettingsTarget::RestoreRow(0)),
             "and an edited row grows the stop that undoes it"
@@ -32224,6 +32270,7 @@ mod tests {
         let order = focus_order(
             editing_content(&rows, &lines, subject),
             SettingsCategory::Profiles,
+            &[],
         );
         assert_eq!(order[0], SettingsTarget::Close);
         assert_eq!(order[1], SettingsTarget::Nav(SettingsCategory::Profiles));
@@ -32345,7 +32392,11 @@ mod tests {
             editor: None,
             values: Box::leak(Box::new(values())),
         };
-        let order = page_order(content, SettingsCategory::Profiles);
+        let order = page_order(
+            content,
+            SettingsCategory::Profiles,
+            &placed.placed_profile_buttons(),
+        );
         assert_eq!(
             order
                 .iter()
@@ -32519,6 +32570,60 @@ mod tests {
         opened
     }
 
+    /// The page's keyboard stops, for the same content [`page_at`] lays out, with the placement
+    /// that layout made.
+    fn page_stops(
+        category: SettingsCategory,
+        editor: Option<EditorSubject>,
+        placed: &SettingsLayout,
+    ) -> Vec<SettingsTarget> {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let shortcuts = shortcut_lines();
+        let lines = pressable_profile_lines();
+        let content = match editor {
+            Some(subject) => editing_content(&rows, &lines, subject),
+            None => profiles_content(&rows, &shortcuts, &lines),
+        };
+        page_order(content, category, &placed.placed_profile_buttons())
+    }
+
+    /// **Every keyboard stop of the page is a box the page draws and presses** (round 6, review
+    /// of round 5 (c)): a stop with a band is listed by [`content_presses`] under that target, and
+    /// sideways inside the clip — a button the layout did not place is no stop at all.
+    fn every_stop_is_a_drawn_pressable_box(
+        placed: &SettingsLayout,
+        stops: &[SettingsTarget],
+        what: &str,
+    ) {
+        let presses = content_presses(placed, &values());
+        for stop in stops {
+            if placed.band_of(*stop).is_none() {
+                continue;
+            }
+            // A dark `↑`/`↓` (the first row's up, the last row's down) is drawn and answers its
+            // own row — "dark, not absent" — so its box is listed under the row.
+            let band = placed.band_of(*stop);
+            let answers = |rect: &[f32; 4], target: &SettingsTarget| {
+                target == stop
+                    || (Some(*rect) != band
+                        && matches!(
+                            (stop, target),
+                            (
+                                SettingsTarget::ProfileUp(index)
+                                    | SettingsTarget::ProfileDown(index),
+                                SettingsTarget::ProfileRow(row),
+                            ) if index == row
+                        ))
+            };
+            assert!(
+                presses.iter().any(|(rect, target)| answers(rect, target)
+                    && rect[0] >= placed.clip[0]
+                    && rect[2] <= placed.clip[2]),
+                "{what}: the keyboard stop {stop:?} is no drawn, pressable box"
+            );
+        }
+    }
+
     /// The pages the harness walks: every category of the page table, and the Profiles
     /// editor — a page added to [`SettingsCategory::ALL`] is walked without being named here.
     fn pressable_pages() -> Vec<(SettingsCategory, Option<EditorSubject>)> {
@@ -32598,6 +32703,8 @@ mod tests {
                             if editor.is_some() { " editor" } else { "" }
                         );
                         every_press_is_inside_what_is_drawn(placed, &what);
+                        let stops = page_stops(category, editor, placed);
+                        every_stop_is_a_drawn_pressable_box(placed, &stops, &what);
                     }
                 }
             }
@@ -32774,6 +32881,7 @@ mod tests {
         let order = focus_order(
             profiles_content(&rows, &shortcuts, &lines),
             SettingsCategory::Profiles,
+            &[],
         );
         assert_eq!(order[0], SettingsTarget::Close);
         assert_eq!(order[1], SettingsTarget::Nav(SettingsCategory::Profiles));

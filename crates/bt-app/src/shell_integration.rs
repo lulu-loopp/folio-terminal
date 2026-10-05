@@ -2173,19 +2173,22 @@ pub fn is_powershell(program: &Path) -> bool {
 /// refusing policy ([`policy_cause`]). Then two more facts the same run can answer without
 /// running anything:
 ///
-/// * `Zone=` — where PowerShell will think the profile came from. The file's own Mark of the
-///   Web (`Zone.Identifier`'s `ZoneId`) when it has one; otherwise the zone of the path itself
-///   where the edition can say (Windows PowerShell's .NET answers `Intranet` for
-///   `\\files\share`, `Internet` for `\\files.example.com\share`; PowerShell 7's cannot and
-///   answers nothing). `RemoteSigned` refuses an unsigned profile from the `Internet` or
-///   `Untrusted` zone ([`ProfileZone`]).
+/// * `Zone=` — **the edition's own answer** to where its `RemoteSigned` would place the profile:
+///   `ClrFacade.GetFileSecurityZone`, the function each edition's authorization manager itself
+///   asks, reached by reflection (it is internal). Measured 2026-10-05 on both editions with a
+///   file and its Mark of the Web, and through real UNC paths (`\\localhost\c$`,
+///   `\\127.0.0.1\c$`): in all ten cases the answer predicted the edition's own decision — and
+///   the editions differ. PowerShell 7 keys on the Mark of the Web alone (an unmarked file on any
+///   share is `MyComputer` and loads); Windows PowerShell maps the path's URL zone as well (the
+///   dotted share is `Internet` and is refused). An edition without the function answers
+///   nothing, and nothing is promised.
 /// * `NoProcess=` — the effective policy once the probe's own Process scope is cleared (an
 ///   in-process change of the probe's own session; nothing persistent is written). When no other
 ///   scope is set this is the machine's default, which `Get-ExecutionPolicy` never names.
 ///
 /// Windows only, like its one reader: off Windows the profile path is not asked.
 #[cfg(windows)]
-const PROFILE_COMMAND: &str = r#"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $p = $PROFILE.CurrentUserCurrentHost; $p; (Get-ExecutionPolicy).ToString(); Get-ExecutionPolicy -List | ForEach-Object { '{0}={1}' -f $_.Scope, $_.ExecutionPolicy }; $z = 'Unknown'; $m = Get-Content -LiteralPath $p -Stream Zone.Identifier -ErrorAction SilentlyContinue | Select-String '^ZoneId=(\d+)'; if ($m) { $z = $m.Matches[0].Groups[1].Value } else { try { $c = "$([System.Security.Policy.Zone]::CreateFromUrl($p).SecurityZone)"; if ($c) { $z = $c } } catch { } }; 'Zone=' + $z; Set-ExecutionPolicy -Scope Process -ExecutionPolicy Undefined -Force -ErrorAction SilentlyContinue; 'NoProcess=' + (Get-ExecutionPolicy).ToString()"#;
+const PROFILE_COMMAND: &str = r#"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding; $p = $PROFILE.CurrentUserCurrentHost; $p; (Get-ExecutionPolicy).ToString(); Get-ExecutionPolicy -List | ForEach-Object { '{0}={1}' -f $_.Scope, $_.ExecutionPolicy }; $z = 'Unknown'; try { $z = [string][psobject].Assembly.GetType('System.Management.Automation.ClrFacade').GetMethod('GetFileSecurityZone', [Reflection.BindingFlags]'NonPublic,Static').Invoke($null, @([string]$p)) } catch { }; 'Zone=' + $z; Set-ExecutionPolicy -Scope Process -ExecutionPolicy Undefined -Force -ErrorAction SilentlyContinue; 'NoProcess=' + (Get-ExecutionPolicy).ToString()"#;
 
 /// **The one command a user may run to let PowerShell load `$PROFILE`**: the CurrentUser scope,
 /// which needs no elevation, set to `RemoteSigned`. Folio copies it on the user's click and
@@ -2196,27 +2199,6 @@ pub const POLICY_COMMAND: &str = "Set-ExecutionPolicy -Scope CurrentUser RemoteS
 /// run, so what the profile's zone is judged against ([`policy_cause`]).
 const POLICY_COMMAND_POLICY: crate::psreadline::ExecutionPolicy =
     crate::psreadline::ExecutionPolicy::RemoteSigned;
-
-/// **Where PowerShell will think `$PROFILE` came from** — the URL security zone `RemoteSigned`
-/// asks about. Read by the probe ([`PROFILE_COMMAND`]'s `Zone=`).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ProfileZone {
-    /// This computer: a local path with no Mark of the Web.
-    Local,
-    Intranet,
-    Trusted,
-    Internet,
-    Untrusted,
-    /// The edition could not say: a network path PowerShell 7's .NET has no zone answer for.
-    Unknown,
-}
-
-impl ProfileZone {
-    /// Whether `RemoteSigned` would load an unsigned profile from here — known to.
-    fn loads_under_remote_signed(self) -> bool {
-        matches!(self, Self::Local | Self::Intranet | Self::Trusted)
-    }
-}
 
 /// The five scopes `Get-ExecutionPolicy -List` reports, and the policy that applies when every
 /// one of them is `Undefined`.
@@ -2263,7 +2245,7 @@ pub enum PolicyCause {
     /// [`POLICY_COMMAND`] would not change it.
     Process,
     /// `RemoteSigned` is (or, after [`POLICY_COMMAND`], would be) the deciding policy and the
-    /// profile's zone is one it refuses, or one this edition cannot name ([`ProfileZone`]).
+    /// edition says its `RemoteSigned` would not load the profile from where it is, or gave no answer.
     Location,
     /// The row's arguments cannot be read ([`RowProcessScope::Unreadable`]): no claim.
     Unreadable,
@@ -2314,9 +2296,14 @@ impl PowerShellProfileFallback {
 /// is returned only when nothing above CurrentUser is set, which is exactly when the CurrentUser
 /// scope the command writes becomes the deciding one; anything set above it is the cause instead.
 /// And whichever policy will decide — the one that does now, or [`POLICY_COMMAND_POLICY`] once
-/// the command has run — when it is `RemoteSigned`, the profile's zone has to be one it loads
-/// from, or the cause is the location ([`ProfileZone::loads_under_remote_signed`]).
-fn policy_cause(scopes: PolicyScopes, zone: ProfileZone, row: RowProcessScope) -> PolicyCause {
+/// the command has run — when it is `RemoteSigned`, the edition has to have said it would load
+/// the profile from where it is (`remote_signed_loads`, [`ProfileObservation`]), or the cause is
+/// the location.
+fn policy_cause(
+    scopes: PolicyScopes,
+    remote_signed_loads: Option<bool>,
+    row: RowProcessScope,
+) -> PolicyCause {
     use crate::psreadline::ExecutionPolicy;
     let set = |policy: &ExecutionPolicy| *policy != ExecutionPolicy::Undefined;
     let process = match row {
@@ -2345,7 +2332,7 @@ fn policy_cause(scopes: PolicyScopes, zone: ProfileZone, row: RowProcessScope) -
     } else {
         return refused;
     };
-    if applies == ExecutionPolicy::RemoteSigned && !zone.loads_under_remote_signed() {
+    if applies == ExecutionPolicy::RemoteSigned && remote_signed_loads != Some(true) {
         return PolicyCause::Location;
     }
     cause
@@ -2414,7 +2401,11 @@ fn powershell_edition(program: &Path) -> PowerShellEdition {
 struct ProfileObservation {
     path: PathBuf,
     scopes: PolicyScopes,
-    zone: ProfileZone,
+    /// **Whether this edition's `RemoteSigned` would load an unsigned `$PROFILE` from where it
+    /// is** — the edition's own zone answer ([`PROFILE_COMMAND`]'s `Zone=`): `Some(true)` for
+    /// this computer, the intranet or a trusted site, `Some(false)` for the Internet or an
+    /// untrusted site, `None` when the edition gave no answer.
+    remote_signed_loads: Option<bool>,
     line_present: bool,
 }
 
@@ -2493,7 +2484,7 @@ pub fn powershell_profile_fallback(
         no_profile,
         observed.map(|observed| {
             (
-                policy_cause(observed.scopes, observed.zone, row),
+                policy_cause(observed.scopes, observed.remote_signed_loads, row),
                 observed.line_present,
             )
         }),
@@ -2955,15 +2946,28 @@ pub fn install_wake(wake: impl Fn() + Send + Sync + 'static) {
     let _ = WAKE.set(Box::new(wake));
 }
 
+/// **The probe's PowerShell finds its modules where a pane's would, not where Folio's parent
+/// put them.** A pane's environment is the fresh logon block on Windows (T-ENV-REFRESH), but a
+/// child of this door inherits Folio's own — and a Folio started from a PowerShell 7 session
+/// carries 7's `PSModulePath`, with which a Windows PowerShell probe loads 7's
+/// `Microsoft.PowerShell.Security` and finds no `Get-ExecutionPolicy` (measured 2026-10-05). Without
+/// the variable each edition computes its own module path; every command this door runs (the
+/// parser, `$PROFILE`, the policy cmdlets, the zone question) is answered by the edition's inbox
+/// modules, which that path always holds. Off Windows a pane inherits, and so does the probe.
 fn powershell_probe_command(program: &Path) -> Result<std::process::Command, ParseProbeFailure> {
     #[cfg(windows)]
     {
-        bt_platform::quiet_command_named(program).ok_or_else(|| {
-            ParseProbeFailure::Spawn(format!(
-                "the named child-process door could not resolve {}",
-                program.display()
-            ))
-        })
+        bt_platform::quiet_command_named(program)
+            .map(|mut command| {
+                command.env_remove("PSModulePath");
+                command
+            })
+            .ok_or_else(|| {
+                ParseProbeFailure::Spawn(format!(
+                    "the named child-process door could not resolve {}",
+                    program.display()
+                ))
+            })
     }
     #[cfg(not(windows))]
     {
@@ -3090,16 +3094,35 @@ fn run_profile_probe(_program: &Path) -> Option<PathBuf> {
 const PROFILE_PROBE_EXISTS: bool = cfg!(windows);
 
 fn probe_profile_observation(program: &Path) -> Option<ProfileObservation> {
-    #[cfg(windows)]
-    {
-        let output = run_powershell_probe(program, PROFILE_COMMAND, None).ok()?;
-        parse_profile_observation(std::str::from_utf8(&output.stdout).ok()?)
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = program;
-        None
-    }
+    probe_profile_observation_unless(profile_sandboxed(), || {
+        #[cfg(windows)]
+        {
+            let output = run_powershell_probe(program, PROFILE_COMMAND, None).ok()?;
+            parse_profile_observation(std::str::from_utf8(&output.stdout).ok()?)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = program;
+            None
+        }
+    })
+}
+
+/// **The `$PROFILE` sandbox replaces every real profile, so a sandboxed run asks no shell about
+/// one** (`BT_POWERSHELL_PROFILE`, the test door — `warm_profile_answers` already kept that
+/// promise; the edition observation added in this ticket did not, and a sandboxed test's child
+/// started a real PowerShell per edition and read the real `$PROFILE`'s path inside a 3-second
+/// wait: U-35's `a_start_that_is_no_trial_writes_as_it_always_has` on CI, round 6).
+fn probe_profile_observation_unless(
+    sandboxed: bool,
+    ask: impl FnOnce() -> Option<ProfileObservation>,
+) -> Option<ProfileObservation> {
+    if sandboxed { None } else { ask() }
+}
+
+/// Whether the `$PROFILE` sandbox is set — the one reading of the variable.
+fn profile_sandboxed() -> bool {
+    std::env::var_os("BT_POWERSHELL_PROFILE").is_some()
 }
 
 /// Read what [`PROFILE_COMMAND`] writes: the profile path, then the effective execution policy.
@@ -3126,16 +3149,12 @@ fn parse_profile_observation(stdout: &str) -> Option<ProfileObservation> {
             .get(name)
             .map(|value| ExecutionPolicy::parse(value))
     };
-    let zone = match reported.get("Zone")?.as_str() {
-        "0" | "MyComputer" => ProfileZone::Local,
-        "1" | "Intranet" => ProfileZone::Intranet,
-        "2" | "Trusted" => ProfileZone::Trusted,
-        "3" | "Internet" => ProfileZone::Internet,
-        "4" | "Untrusted" => ProfileZone::Untrusted,
-        // No zone answer: a local path with no Mark of the Web is this computer's — the rule
-        // PowerShell itself applies to a local file — and a network path is unknown.
-        _ if is_network_path(&path) => ProfileZone::Unknown,
-        _ => ProfileZone::Local,
+    // The edition's `SecurityZone`, by name; anything else — `NoZone`, `Unknown`, an answer
+    // this build has no name for — is no answer.
+    let remote_signed_loads = match reported.get("Zone")?.as_str() {
+        "MyComputer" | "Intranet" | "Trusted" => Some(true),
+        "Internet" | "Untrusted" => Some(false),
+        _ => None,
     };
     Some(ProfileObservation {
         scopes: PolicyScopes {
@@ -3147,20 +3166,9 @@ fn parse_profile_observation(stdout: &str) -> Option<ProfileObservation> {
             default: scope("NoProcess")?,
         },
         path,
-        zone,
+        remote_signed_loads,
         line_present: false,
     })
-}
-
-/// Whether `path` names a network share (`\\server\share\…`, or its `\\?\UNC\` spelling).
-#[cfg(windows)]
-fn is_network_path(path: &Path) -> bool {
-    use std::path::{Component, Prefix};
-    matches!(
-        path.components().next(),
-        Some(Component::Prefix(prefix))
-            if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..))
-    )
 }
 
 /// Read the one line the probe command writes.
@@ -4274,6 +4282,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     fn probe_answer(path: &str, current_user: &str, zone: &str, no_process: &str) -> String {
         format!(
             "\r\n{path}\r\nRemoteSigned\r\n\
@@ -4286,12 +4295,12 @@ mod tests {
     /// PIN — **the profile probe's answer is the path the shell names, its effective policy,
     /// the five scopes, the profile's zone and the policy with no Process scope** (rounds 4–5).
     /// The default is the `NoProcess=` answer — PowerShell's own resolution, never a constant.
-    /// A zone named by number (a Mark of the Web) or by name is that zone; no zone answer is
-    /// this computer for a local path and unknown for a network one. A relative path, or an
-    /// answer missing a scope, the zone or `NoProcess=`, is no answer.
+    /// The zone is the edition's own `SecurityZone` name, read as whether `RemoteSigned` loads
+    /// from there; `NoZone` or anything unnamed is no answer, never a guess. A relative path, or
+    /// an answer missing a scope, the zone or `NoProcess=`, is no answer.
     ///
     /// RED (mutations: drop the `is_absolute` check; take the default from a constant
-    /// `Restricted`; read a missing zone on a network path as local).
+    /// `Restricted`; read `NoZone` as this computer).
     #[cfg(windows)]
     #[test]
     fn the_profile_probe_answer_is_a_path_a_policy_and_its_scopes() {
@@ -4311,20 +4320,25 @@ mod tests {
             observed.scopes.default, RemoteSigned,
             "the probe's own resolution"
         );
-        assert_eq!(observed.zone, ProfileZone::Local);
+        assert_eq!(observed.remote_signed_loads, Some(true));
         assert!(!observed.line_present, "presence is read from the file");
         for (zone, path, expected) in [
-            ("3", local, ProfileZone::Internet),
-            ("Intranet", share, ProfileZone::Intranet),
-            ("Internet", share, ProfileZone::Internet),
-            ("Unknown", local, ProfileZone::Local),
-            ("NoZone", local, ProfileZone::Local),
-            ("Unknown", share, ProfileZone::Unknown),
+            ("Internet", local, Some(false)),
+            ("Untrusted", share, Some(false)),
+            ("Intranet", share, Some(true)),
+            ("Trusted", share, Some(true)),
+            ("MyComputer", share, Some(true)),
+            ("NoZone", local, None),
+            ("Unknown", share, None),
+            ("3", local, None),
         ] {
             let parsed =
                 parse_profile_observation(&probe_answer(path, "Undefined", zone, "Restricted"))
                     .expect("an answer");
-            assert_eq!(parsed.zone, expected, "Zone={zone} for {path}");
+            assert_eq!(
+                parsed.remote_signed_loads, expected,
+                "Zone={zone} for {path}"
+            );
         }
         assert!(
             parse_profile_observation("C:\\p\\profile.ps1\r\nRestricted\r\n").is_none(),
@@ -4369,7 +4383,7 @@ mod tests {
         use PolicyCause::{Allows, Changeable, Organisation, Process};
         use RowProcessScope::{Absent, Set};
         let none = Undefined;
-        let here = ProfileZone::Local;
+        let here = Some(true);
         for (name, list, row, cause) in [
             (
                 "Group Policy refuses over a permissive CurrentUser",
@@ -4474,43 +4488,92 @@ mod tests {
                 ..scopes(none, none, AllSigned, none, none)
             };
             assert_eq!(
-                policy_cause(list, ProfileZone::Local, RowProcessScope::Set(Undefined)),
+                policy_cause(list, Some(true), RowProcessScope::Set(Undefined)),
                 cause,
                 "default {default:?}"
             );
         }
     }
 
-    /// PIN — **`RemoteSigned` and where `$PROFILE` lives** (review of round 4, item 6). Whichever
-    /// policy will decide — the one deciding now, or `RemoteSigned` once [`POLICY_COMMAND`] has
-    /// run — when it is `RemoteSigned`, a profile in the Internet or Untrusted zone, or on a share
-    /// whose zone this edition cannot name, is not promised: no Enable, no Copy. `Bypass` and
-    /// `Unrestricted` load from anywhere; an intranet share loads under `RemoteSigned`.
+    /// PIN — **`RemoteSigned` and where `$PROFILE` lives, by the edition's own word** (review of
+    /// round 4 item 6; review of round 5 (a), (d)). Whichever policy will decide — the one deciding
+    /// now, or `RemoteSigned` once [`POLICY_COMMAND`] has run — when it is `RemoteSigned`, the row
+    /// is promised only where the edition said its `RemoteSigned` loads from there. A PowerShell 7
+    /// profile on a redirected share (the edition says yes) keeps Enable and Copy; a Windows
+    /// PowerShell one on a share it maps to the Internet zone (the edition says no), or an edition
+    /// that gave no answer, gets the Location sentence. `Bypass` and `Unrestricted` load from
+    /// anywhere. And a line already installed where it loads is Enabled, not the Location sentence.
     ///
     /// RED (mutations: skip the zone check; judge the changeable case by the refusing policy
-    /// instead of `POLICY_COMMAND_POLICY`; treat `Unknown` as loadable).
+    /// instead of `POLICY_COMMAND_POLICY`; treat no answer as loadable).
     #[test]
     fn remote_signed_is_judged_against_the_profiles_zone() {
         use crate::psreadline::ExecutionPolicy::{Bypass, RemoteSigned, Restricted, Undefined};
         use PolicyCause::{Allows, Changeable, Location};
-        use ProfileZone::{Internet, Intranet, Local, Trusted, Unknown, Untrusted};
         let none = Undefined;
         let remote_signed = scopes(none, none, none, RemoteSigned, none);
         let refusing = scopes(none, none, none, Restricted, none);
         let bypassed = scopes(none, none, Bypass, none, none);
         for (zone, now, after_command, bypass) in [
-            (Local, Allows, Changeable, Allows),
-            (Intranet, Allows, Changeable, Allows),
-            (Trusted, Allows, Changeable, Allows),
-            (Internet, Location, Location, Allows),
-            (Untrusted, Location, Location, Allows),
-            (Unknown, Location, Location, Allows),
+            (Some(true), Allows, Changeable, Allows),
+            (Some(false), Location, Location, Allows),
+            (None, Location, Location, Allows),
         ] {
             let row = RowProcessScope::Absent;
             assert_eq!(policy_cause(remote_signed, zone, row), now, "{zone:?}");
             assert_eq!(policy_cause(refusing, zone, row), after_command, "{zone:?}");
             assert_eq!(policy_cause(bypassed, zone, row), bypass, "{zone:?}");
         }
+        // (d): installed where the edition says it loads — Enabled.
+        assert_eq!(
+            profile_fallback_from_parts(
+                true,
+                true,
+                false,
+                false,
+                false,
+                Some((
+                    policy_cause(remote_signed, Some(true), RowProcessScope::Absent),
+                    true
+                )),
+            ),
+            PowerShellProfileFallback::Enabled
+        );
+    }
+
+    /// PIN — **a run inside the `$PROFILE` sandbox asks no shell** (round 6; U-35's ordinary-start
+    /// test went red on CI because a sandboxed child started real PowerShell probes).
+    ///
+    /// RED (mutation: `probe_profile_observation_unless` asks whatever `sandboxed` says).
+    #[test]
+    fn a_sandboxed_run_asks_no_shell_about_the_real_profile() {
+        assert!(
+            probe_profile_observation_unless(true, || panic!("a sandboxed run asked a shell"))
+                .is_none()
+        );
+        let asked = std::cell::Cell::new(false);
+        let _ = probe_profile_observation_unless(false, || {
+            asked.set(true);
+            None
+        });
+        assert!(asked.get(), "an ordinary run asks");
+    }
+
+    /// PIN — **a probe's PowerShell computes its own module path** (round 6): the door does not
+    /// hand it the module path of whatever session started Folio.
+    ///
+    /// RED (mutation: drop the `env_remove("PSModulePath")` in `powershell_probe_command`).
+    #[cfg(windows)]
+    #[test]
+    fn a_probe_powershell_computes_its_own_module_path() {
+        let command = powershell_probe_command(Path::new("powershell.exe"))
+            .expect("Windows PowerShell is on every supported Windows");
+        assert!(
+            command
+                .get_envs()
+                .any(|(key, value)| key.eq_ignore_ascii_case("PSModulePath") && value.is_none()),
+            "the probe's module path is the edition's own"
+        );
     }
 
     /// PIN — **each refusing cause is its own row state and its own sentence, and only the
@@ -4591,7 +4654,7 @@ mod tests {
         let observed = |current_user| ProfileObservation {
             path: PathBuf::from("profile.ps1"),
             scopes: scopes(Undefined, Undefined, Undefined, current_user, Undefined),
-            zone: ProfileZone::Local,
+            remote_signed_loads: Some(true),
             line_present: false,
         };
         publish_profile_observation(program, observed(Restricted));
@@ -4682,7 +4745,7 @@ mod tests {
                     crate::psreadline::ExecutionPolicy::RemoteSigned,
                     crate::psreadline::ExecutionPolicy::Undefined,
                 ),
-                ProfileZone::Local,
+                Some(true),
                 Unreadable,
             ),
             PolicyCause::Unreadable

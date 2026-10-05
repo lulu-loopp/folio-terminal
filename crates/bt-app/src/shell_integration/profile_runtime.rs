@@ -240,7 +240,7 @@ pub fn remove_shell_integration_at(data: &Path, profiles: Option<&[PathBuf]>) ->
 /// here leaves `candidates` reading a cache it would have filled anyway.
 fn warm_profile_answers() {
     // The sandbox door replaces the whole candidate set, so no shell is asked.
-    if std::env::var_os("BT_POWERSHELL_PROFILE").is_some() {
+    if profile_sandboxed() {
         return;
     }
     for program in installed_powershells() {
@@ -382,7 +382,7 @@ fn install_for_program(program: &Path, arguments: &[OsString]) -> io::Result<Pat
     publish_profile_observation(program, observed.clone());
     if let Some(sentence) = policy_cause(
         observed.scopes,
-        observed.zone,
+        observed.remote_signed_loads,
         row_process_scope(program, arguments),
     )
     .sentence()

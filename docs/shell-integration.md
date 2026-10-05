@@ -251,11 +251,16 @@ row a picker may take on any other page); at narrow dialog widths it is not draw
 Two more cases offer nothing:
 
 * **Where `$PROFILE` is stored.** `RemoteSigned` refuses an unsigned script from the Internet or
-  Untrusted zone. The probe reports the profile's zone: its Mark of the Web, or the path's own zone
-  where Windows PowerShell can name it (PowerShell 7 cannot), or this computer for a local path.
-  When `RemoteSigned` is the policy that decides, or would decide once the command has run, and the
-  zone is remote or cannot be named (a share PowerShell 7 is asked about), the row says `$PROFILE`
-  is stored where the policy may refuse it.
+  Untrusted zone, and the two editions decide the zone differently (measured 2026-10-05 through
+  real UNC paths and a Mark of the Web): PowerShell 7 keys on the file's Mark of the Web alone, so
+  an unmarked profile on a redirected share loads; Windows PowerShell also maps the path's URL
+  zone, so a profile on a share it places in the Internet zone (`\\host.example.com\…`) is
+  refused. The probe asks the row's own edition for its answer — the zone function its
+  authorization manager uses — so each row follows its edition's rule. When `RemoteSigned` is the
+  policy that decides, or would decide once the command has run, and the edition says it would not
+  load the profile from there (or gives no answer), the row says `$PROFILE` is stored where the
+  policy may refuse it. A line already installed where the edition says it loads shows the
+  ordinary "loaded via $PROFILE" sentence.
 * **A row this build cannot read** (for example `-ep:Bypass`: the colon form is not an option to
   either binder) makes no claim about its policy and shows only the "not provided" sentence.
 

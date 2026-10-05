@@ -138,21 +138,57 @@ pub const PANE_ANNOUNCEMENTS: [&str; 10] = [
     "BT_USER_ZDOTDIR",
 ];
 
-/// **What a PowerShell child must not inherit from the session that runs the tests**: the
-/// module path. PowerShell 7 rewrites `PSModulePath` for every process it starts, and a Windows
-/// PowerShell started from it then autoloads PowerShell 7's copy of
-/// `Microsoft.PowerShell.Security` and fails — `Get-ExecutionPolicy` is not found (measured
-/// 2026-10-04 from a PowerShell 7 session; a run from cmd or a CI step that is not PowerShell 7
-/// does not see it). With the variable absent each edition computes its own default, which is
-/// what a test means by "this PowerShell".
-const POWERSHELL_INHERITED: [&str; 1] = ["PSModulePath"];
+/// The variable a PowerShell finds its modules through.
+const MODULE_PATH: &str = "PSModulePath";
 
-/// The names `family` is started without, on top of [`PANE_ANNOUNCEMENTS`].
-fn not_inherited(family: Family) -> &'static [&'static str] {
-    match family {
-        Family::PowerShell => &POWERSHELL_INHERITED,
-        Family::Cmd | Family::Posix(_) | Family::Program => &[],
+/// **The module path a PowerShell test child starts with: the one a pane gets** — the current
+/// user's fresh logon block's (`bt_platform::environment::fresh_logon_environment`, the block a
+/// pane is composed from on Windows), from which each edition then computes its own (Windows
+/// PowerShell adds the account's Documents path; PowerShell 7 puts its own directories first).
+///
+/// Not the session's: PowerShell 7 rewrites `PSModulePath` for every process it starts, so a
+/// test run from a PowerShell 7 session — every CI step here is one — hands a Windows PowerShell
+/// child 7's directories, and the child loads 7's `Microsoft.PowerShell.Security` (and
+/// `Get-ExecutionPolicy` is not found) and 7's PSReadLine, which no Windows PowerShell pane loads.
+/// Measured 2026-10-05 (T-INTEGRATION-INJECT-4 round 6).
+///
+/// `None` where the platform has no fresh logon block: a pane inherits there, and so does the
+/// child. `Some(None)` where the block names no module path. Asked once per test process.
+fn fresh_module_path() -> Option<Option<OsString>> {
+    static FRESH: std::sync::OnceLock<Option<Option<OsString>>> = std::sync::OnceLock::new();
+    FRESH
+        .get_or_init(|| {
+            let worker = bt_platform::spawn_at_priority(
+                "bt-test-shell-logon",
+                bt_platform::ThreadPriority::BelowNormal,
+                bt_platform::environment::fresh_logon_environment,
+            )
+            .unwrap_or_else(|error| panic!("the test shell's logon worker cannot start: {error}"));
+            let block = worker
+                .join()
+                .expect("the test shell's logon worker panicked")
+                .unwrap_or_else(|error| {
+                    panic!("the current user's fresh logon block cannot be read: {error}")
+                });
+            block.map(|block| {
+                block
+                    .into_iter()
+                    .find(|(key, _)| crate::environment_key_eq(key, OsStr::new(MODULE_PATH)))
+                    .map(|(_, value)| value)
+            })
+        })
+        .clone()
+}
+
+/// `block` with its module path replaced by the fresh logon's, for a PowerShell child.
+fn with_fresh_module_path(mut block: Vec<(OsString, OsString)>) -> Vec<(OsString, OsString)> {
+    if let Some(fresh) = fresh_module_path() {
+        block.retain(|(key, _)| !crate::environment_key_eq(key, OsStr::new(MODULE_PATH)));
+        if let Some(value) = fresh {
+            block.push((MODULE_PATH.into(), value));
+        }
     }
+    block
 }
 
 fn is_pane_announcement(key: &OsStr) -> bool {
@@ -387,6 +423,12 @@ impl Hygiene {
         self.root.join("history-refusal.failed")
     }
 
+    /// What the shell said about itself before anything was typed: its module path and the
+    /// PSReadLine it loaded ([`powershell_hygiene`] writes it; [`TestShell::account`] reads it).
+    fn facts_file(&self) -> PathBuf {
+        self.root.join("shell-facts")
+    }
+
     fn directories(&self) -> Vec<PathBuf> {
         let mut directories = vec![self.home()];
         directories.extend(self.xdg().into_iter().map(|(_, path)| path));
@@ -522,17 +564,15 @@ impl Hygiene {
                 crate::EnvironmentRefresh::new(inherited.clone(), inherited.clone(), inherited)
             }
         });
-        if let Some(refresh) = command.environment_refresh.as_mut() {
+        if family == Family::PowerShell
+            && let Some(refresh) = command.environment_refresh.as_mut()
+        {
             for list in [
                 &mut refresh.fresh,
                 &mut refresh.launch_snapshot,
                 &mut refresh.inherited,
             ] {
-                list.retain(|(key, _)| {
-                    !not_inherited(family)
-                        .iter()
-                        .any(|name| crate::environment_key_eq(key, OsStr::new(name)))
-                });
+                *list = with_fresh_module_path(std::mem::take(list));
             }
         }
         for (key, value, settable) in self.environment(family) {
@@ -653,8 +693,19 @@ impl Hygiene {
         let mut command = new(program.to_os_string());
         command.args(self.flagged(family, Vec::new()));
         // Without the pane announcements; a test that wants one sets it after this, and wins.
-        for name in PANE_ANNOUNCEMENTS.iter().chain(not_inherited(family)) {
+        for name in PANE_ANNOUNCEMENTS {
             command.env_remove(name);
+        }
+        if family == Family::PowerShell {
+            match fresh_module_path() {
+                Some(Some(value)) => {
+                    command.env(MODULE_PATH, value);
+                }
+                Some(None) => {
+                    command.env_remove(MODULE_PATH);
+                }
+                None => {}
+            }
         }
         match std::env::var_os("WSLENV") {
             Some(listed) => match wslenv_without_announcements(&listed) {
@@ -794,6 +845,16 @@ fn powershell_literal(text: &str) -> String {
 /// its name and moved into place, so a reader never sees half of it.
 #[must_use]
 pub fn powershell_hygiene(hygiene: &Hygiene) -> String {
+    // **The shell says what it is made of**, in both outcomes, so a give-up message carries the
+    // module path it ran with and the line editor it loaded (round 6: a Windows PowerShell went
+    // silent on CI after its module path changed, and nothing said which PSReadLine it had).
+    let facts = powershell_literal(&hygiene.facts_file().to_string_lossy());
+    let tell = format!(
+        "try {{ Set-Content -LiteralPath {facts} -Encoding UTF8 -ErrorAction Stop -Value \
+         ('PSModulePath ' + $env:PSModulePath + [char]10 + 'PSReadLine ' + (@(Get-Module \
+         PSReadLine | ForEach-Object {{ [string]$_.Version + ' at ' + $_.ModuleBase }}) -join ', ')) \
+         }} catch {{ }};"
+    );
     let history = powershell_literal(&hygiene.history_file().to_string_lossy());
     let proof = hygiene.proof_file();
     let partial = powershell_literal(&format!("{}.part", proof.to_string_lossy()));
@@ -808,7 +869,7 @@ pub fn powershell_hygiene(hygiene: &Hygiene) -> String {
          [IO.File]::WriteAllText({partial}, $__FolioTestShell); [IO.File]::Move({partial}, {proof}) \
          }} else {{ Set-Content -LiteralPath {partial} -Value $__FolioTestShell -NoNewline \
          -Encoding UTF8 -ErrorAction Stop; Move-Item -LiteralPath {partial} -Destination {proof} \
-         -Force -ErrorAction Stop }}; $__FolioTestShell = $null }} catch {{ \
+         -Force -ErrorAction Stop }}; $__FolioTestShell = $null; {tell} }} catch {{ {tell} \
          if ($ExecutionContext.SessionState.LanguageMode -eq 'FullLanguage') {{ \
          [IO.File]::WriteAllText({refusal}, [string]$_) }} else {{ Set-Content -LiteralPath \
          {refusal} -Value ([string]$_) -Encoding UTF8 -ErrorAction SilentlyContinue }}; \
@@ -1073,7 +1134,18 @@ impl TestShell {
             Ok(None) => "is still running".to_owned(),
             Err(error) => format!("cannot be asked whether it is running ({error})"),
         };
-        format!("{program}: history refusal {refusal}; the shell {child}")
+        let facts = match std::fs::read_to_string(self.hygiene.facts_file()) {
+            Ok(facts) => format!(
+                "reported {}",
+                facts
+                    .trim_start_matches('\u{feff}')
+                    .trim()
+                    .replace("\r\n", "; ")
+                    .replace('\n', "; ")
+            ),
+            Err(_) => "reported nothing about its module path or line editor".to_owned(),
+        };
+        format!("{program}: history refusal {refusal}; the shell {child}; it {facts}")
     }
 
     pub fn read_output(&self) -> Vec<u8> {
@@ -1160,7 +1232,7 @@ mod tests {
     ///
     /// RED (mutations: `is_pane_announcement` answers `false`; `Hygiene::command`
     /// removes nothing; `prepare` leaves `environment_refresh` as it found it;
-    /// `not_inherited` answers `&[]` for PowerShell).
+    /// `command` leaves the session's `PSModulePath` in place).
     #[test]
     fn a_test_shell_does_not_inherit_what_folio_announces_to_its_pane() {
         let block = |pairs: &[(&str, &str)]| {
@@ -1207,13 +1279,22 @@ mod tests {
                 "{name} is removed from a child off a pseudoconsole"
             );
         }
-        // And a PowerShell child computes its own module path (`POWERSHELL_INHERITED`).
-        assert!(
-            removed
-                .iter()
-                .any(|key| crate::environment_key_eq(key, OsStr::new("PSModulePath"))),
-            "a PowerShell child does not inherit the session's PSModulePath"
-        );
+        // And a PowerShell child's module path is the fresh logon's, as a pane's is.
+        let module_path = command
+            .get_envs()
+            .find(|(key, _)| crate::environment_key_eq(key, OsStr::new(MODULE_PATH)))
+            .map(|(_, value)| value.map(OsStr::to_owned));
+        match fresh_module_path() {
+            Some(fresh) => assert_eq!(
+                module_path,
+                Some(fresh),
+                "a PowerShell child starts with the fresh logon's module path"
+            ),
+            None => assert_eq!(
+                module_path, None,
+                "where a pane inherits, so does the child"
+            ),
+        }
 
         let (prepared, _) = hygiene.prepare(
             PtyCommand::new("powershell.exe")
