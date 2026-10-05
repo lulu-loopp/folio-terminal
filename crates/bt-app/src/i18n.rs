@@ -2960,6 +2960,18 @@ text_entries! {
     /// Value-carrying templates for About > Version.
     VersionAvailable,
     VersionDownloading,
+    // zh: pending 047-EXPERIENCE
+    /// Both files are on disk and the job is checking them (`update_job::State::Staged`).
+    VersionVerifying,
+    // zh: pending 047-EXPERIENCE
+    /// Verified and waiting for the restart (`update_job::State::Verified`).
+    VersionReady,
+    // zh: pending 047-EXPERIENCE
+    /// The verb beside [`Self::VersionReady`]: it raises the Ready card, which asks first.
+    VersionRestart,
+    // zh: pending 047-EXPERIENCE
+    /// Folio is quitting to put the update in place (`State::Quitting`, `State::Committing`).
+    VersionRestarting,
     VersionManaged,
     /// A failed update that stopped before anything installed moved (`update_card::Outcome::NothingChanged`).
     VersionFailed,
@@ -5719,6 +5731,14 @@ impl Text {
             Self::VersionDetails => pick(lang, "Details", "详情"),
             Self::VersionAvailable => pick(lang, "{version} available", "有新版 {version}"),
             Self::VersionDownloading => pick(lang, "Downloading {version}", "正在下载 {version}"),
+            // zh: pending 047-EXPERIENCE
+            Self::VersionVerifying => pick(lang, "Verifying {version}", "Verifying {version}"),
+            // zh: pending 047-EXPERIENCE
+            Self::VersionReady => pick(lang, "{version} ready", "{version} ready"),
+            // zh: pending 047-EXPERIENCE
+            Self::VersionRestart => pick(lang, "Restart…", "Restart…"),
+            // zh: pending 047-EXPERIENCE
+            Self::VersionRestarting => pick(lang, "Restarting…", "Restarting…"),
             Self::VersionManaged => pick(
                 lang,
                 "{version} available · {command}",
@@ -5966,7 +5986,16 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        (Self::VersionVerifying, HostPlatform::Windows),
+        (Self::VersionVerifying, HostPlatform::MacOs),
+        (Self::VersionReady, HostPlatform::Windows),
+        (Self::VersionReady, HostPlatform::MacOs),
+        (Self::VersionRestart, HostPlatform::Windows),
+        (Self::VersionRestart, HostPlatform::MacOs),
+        (Self::VersionRestarting, HostPlatform::Windows),
+        (Self::VersionRestarting, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
@@ -6184,6 +6213,20 @@ pub fn version_available_in(lang: Lang, version: &str) -> String {
 #[must_use]
 pub fn version_downloading_in(lang: Lang, version: &str) -> String {
     Text::VersionDownloading
+        .in_lang(lang)
+        .replace("{version}", version)
+}
+
+#[must_use]
+pub fn version_verifying_in(lang: Lang, version: &str) -> String {
+    Text::VersionVerifying
+        .in_lang(lang)
+        .replace("{version}", version)
+}
+
+#[must_use]
+pub fn version_ready_in(lang: Lang, version: &str) -> String {
+    Text::VersionReady
         .in_lang(lang)
         .replace("{version}", version)
 }

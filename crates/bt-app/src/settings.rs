@@ -14242,19 +14242,24 @@ pub fn build(
                     && let Some(door) = layout.update_door
                 {
                     let target = SettingsTarget::Link(placed.row);
-                    if let crate::update_card::VersionControl::Progress(bytes) =
-                        values.version_update.control
-                    {
+                    // The download's bar, or — once every byte is on disk — the same bar, full.
+                    let share = match values.version_update.control {
+                        crate::update_card::VersionControl::Progress(bytes) => Some(
+                            bytes
+                                .total
+                                .filter(|total| *total > 0)
+                                .map_or(0.35, |total| bytes.received as f32 / total as f32)
+                                .clamp(0.0, 1.0),
+                        ),
+                        crate::update_card::VersionControl::Downloaded => Some(1.0),
+                        _ => None,
+                    };
+                    if let Some(share) = share {
                         content_stack.quads.push(OverlayQuad {
                             rect: door,
                             color: palette.dialog_hover,
                             alpha: 1.0,
                         });
-                        let share = bytes
-                            .total
-                            .filter(|total| *total > 0)
-                            .map_or(0.35, |total| bytes.received as f32 / total as f32)
-                            .clamp(0.0, 1.0);
                         content_stack.quads.push(OverlayQuad {
                             rect: [
                                 door[0],

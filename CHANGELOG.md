@@ -108,6 +108,9 @@ All notable changes to Folio are recorded here. The format follows
 - Open in Folio, `folio <folder>`, `--cwd`, New terminal in folder… and New
   terminal here open the folder you chose even when the profile's Starting
   directory is Home or a fixed folder (issue #16).
+- About → Version says what an update is doing after the download: Verifying,
+  then ready with Restart…, then Restarting…, instead of Downloading again or
+  offering Update and restart for an update already downloaded.
 
 ### Known issues
 

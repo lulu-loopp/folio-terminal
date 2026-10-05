@@ -1086,7 +1086,12 @@ the one update surface: its line is `Folio <version> (<commit>) · <state>`, and
 its single control is read from the job's actionable state and route, never
 from the check's offer alone — `Pending` names its state and has no verb; an
 eligible offer has **Update and restart** (the card's Update); a download shows
-its progress; `Verified` raises its card again; a managed copy names its
+`Downloading <tag>` and its progress; past the download the line says what the job
+is doing — `Verifying <tag>` (`Staged`), `<tag> ready` with **Restart…**, which
+raises the Ready card again (`Verified`), `Restarting…` (`Quitting`,
+`Committing`) — with the bar full and no verb while nothing can be pressed (all
+2026-10-05); the control is a keyboard stop only while it is enabled, and a focus
+it leaves behind goes to the dialog's first stop; a managed copy names its
 manager's command with **Copy command**; every other ineligible answer (not
 ours, unknown, no updater flag, no release file here, offers off in this build)
 opens the releases page. A release links to that tag's notes. A failure stays

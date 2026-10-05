@@ -29,8 +29,9 @@ pub(crate) enum VersionEffect {
 /// **About → Version's control, answered through the update job's own entries**
 /// (T-UPDATE-ON-ABOUT round 2, R1–R3).
 ///
-/// *Update and restart* raises the card again for a job waiting at `Verified`
-/// (`Job::reopen`, as the row's foot always did), presses the card's `Update`
+/// *Restart…* raises the card again for a job waiting at `Verified`
+/// (`Job::reopen`, as the row's foot always did) — and so does an *Update and
+/// restart* drawn before the job got there; *Update and restart* presses the card's `Update`
 /// on an `Available` offer, and from `Idle` first raises the asked offer
 /// (`Job::offer_again`) in `window`. *Retry* closes a failed card that is still
 /// up (its Later), raises the asked offer and presses `Update` — one new
@@ -71,11 +72,20 @@ pub(crate) fn dispatch_version_control<W: Copy + Eq>(
             }
             VersionEffect::None
         }
+        // The Ready card again, which asks before it quits. A row drawn before the job moved
+        // on answers nothing.
+        update_card::VersionControl::Restart => {
+            if matches!(job.state(), update_job::State::Verified(_)) {
+                job.reopen(window);
+            }
+            VersionEffect::None
+        }
         update_card::VersionControl::OpenReleases => VersionEffect::Releases,
         update_card::VersionControl::CopyCommand { command } => VersionEffect::Copy(command),
         update_card::VersionControl::Check { enabled: false }
         | update_card::VersionControl::Retry { enabled: false }
-        | update_card::VersionControl::Progress(_) => VersionEffect::None,
+        | update_card::VersionControl::Progress(_)
+        | update_card::VersionControl::Downloaded => VersionEffect::None,
     }
 }
 
@@ -614,6 +624,34 @@ mod tests {
             &mut job,
             3,
             &VersionControl::UpdateAndRestart,
+            Some("v0.4.7"),
+            &driver,
+            &no_door(),
+        );
+        assert_eq!(effect, VersionEffect::None);
+        assert!(matches!(job.state(), State::Verified(_)));
+        assert_eq!(job.card_window(), Some(3));
+        assert_eq!(driver.count.get(), 0);
+    }
+
+    /// RED (047-EXPERIENCE) — **the row a verified job draws is `Restart…`, and pressing it
+    /// raises the Ready card in the pressed window**; nothing is downloaded again and the job
+    /// stays Verified until the card's own Restart.
+    ///
+    /// MUTATION, observed red: answer `VersionControl::Restart` with `VersionEffect::None` and
+    /// no `reopen` — the card is not raised.
+    #[test]
+    fn the_ready_row_restarts_through_its_card() {
+        let offer =
+            Offer::mint(TxnId::new([4; 16]), "v0.4.7", HostPlatform::Windows).expect("an offer");
+        let mut job = Job::<u32>::verified_for_test(offer);
+        let row = row(&job, "v0.4.7");
+        assert_eq!(row.control, VersionControl::Restart);
+        let driver = Starts::default();
+        let effect = dispatch_version_control(
+            &mut job,
+            3,
+            &row.control,
             Some("v0.4.7"),
             &driver,
             &no_door(),
