@@ -5702,11 +5702,10 @@ impl Text {
             Self::UpdateCardNothingChanged => pick(lang, "Nothing changed.", "什么都没变。"),
             Self::UpdateCardRestored => pick(lang, "Previous version restored.", "已恢复旧版。"),
             Self::UpdateCardIncomplete => pick(lang, "Update incomplete.", "更新未完成。"),
-            // zh: pending U-35
             Self::UpdateCardTrial => pick(
                 lang,
                 "Changes made now may not be kept until Folio confirms the update. Keep Folio open until then.",
-                "Changes made now may not be kept until Folio confirms the update. Keep Folio open until then.",
+                "更新确认前，所做更改可能不会保留。保持 Folio 打开。",
             ),
             Self::UpdateCardUpdated => pick(lang, "Updated.", "已更新。"),
             Self::VersionUpToDate => pick(lang, "Up to date", "已是最新"),
@@ -5788,12 +5787,9 @@ impl Text {
             Self::UpdateFailedTrial => {
                 pick(lang, "The new version did not start.", "新版本未能启动。")
             }
-            // zh: pending U-35
-            Self::UpdateFailedTrialRunning => pick(
-                lang,
-                "The update did not finish.",
-                "The update did not finish.",
-            ),
+            Self::UpdateFailedTrialRunning => {
+                pick(lang, "The update did not finish.", "更新尚未完成。")
+            }
             Self::UpdateFailedInterrupted => pick(
                 lang,
                 "The update was interrupted before the new version started.",
@@ -5970,12 +5966,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        (Self::UpdateCardTrial, HostPlatform::Windows),
-        (Self::UpdateCardTrial, HostPlatform::MacOs),
-        (Self::UpdateFailedTrialRunning, HostPlatform::Windows),
-        (Self::UpdateFailedTrialRunning, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
