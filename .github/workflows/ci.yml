@@ -1160,6 +1160,9 @@ jobs:
       - name: recover Linux rendering after real device loss
         run: cargo test -p bt-render --lib --locked -j 2 a_lost_device -- --test-threads=1
 
+      - name: test Linux application source wiring
+        run: cargo test -p bt-app --bin folio --locked -j 2 linux_trash_app_source_tests
+
       - name: test X11 and Wayland window handles
         run: cargo test -p bt-app --bin folio --locked -j 2 linux_window_tests
 

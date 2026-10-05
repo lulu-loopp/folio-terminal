@@ -416,13 +416,6 @@ where
 
     /// Stop admission, cancel in-flight work, and join the worker from an
     /// application-retirement worker.
-    ///
-    /// TEMPORARY (2026-10-06, PR4 of the port split): the caller of this —
-    /// `retire_linux_desktop`'s bounded retirement worker — arrives with the
-    /// Linux trash and shutdown PR (PR5 of the port split). Until then the
-    /// retirement has no caller, so the dead-code lint is silenced rather than
-    /// the shutdown deferred; the lane's own tests exercise it in the meantime.
-    #[allow(dead_code)]
     pub(crate) fn shutdown(mut self, _worker: &WorkerCtx, cutoff: Instant) -> Result<(), String> {
         self.signal_shutdown();
         while self

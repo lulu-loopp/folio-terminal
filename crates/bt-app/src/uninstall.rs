@@ -57,6 +57,12 @@ enum Remover {
     Absent,
     RecoverySnapshots,
     RuntimeClaims,
+    /// Linux settings and keybindings in the data-claim-tagged XDG config namespace.
+    #[cfg(target_os = "linux")]
+    LinuxConfig,
+    /// Linux Chromium cache in the data-claim-tagged XDG cache namespace.
+    #[cfg(target_os = "linux")]
+    LinuxCache,
     /// macOS: every update entrance in `~/Library/LaunchAgents`, by the
     /// entrance door's own name shape (`bt_platform::launch_agent::sweep`).
     UpdateEntrances,
@@ -247,6 +253,22 @@ const INVENTORY: &[Mark] = &[
         kind: Kind::Data,
         remover: Remover::Data(HostPlatform::OtherUnix, Base::Xdg, "Folio"),
         writer: "persist.rs:storage_location",
+    },
+    #[cfg(target_os = "linux")]
+    Mark {
+        name: "Unix configuration",
+        says: Text::CleanupMarkUnixConfig,
+        kind: Kind::Data,
+        remover: Remover::LinuxConfig,
+        writer: "persist.rs:SettingsStore::open;persist.rs:KeybindingsStore::open",
+    },
+    #[cfg(target_os = "linux")]
+    Mark {
+        name: "Unix Chromium cache",
+        says: Text::CleanupMarkUnixCache,
+        kind: Kind::Data,
+        remover: Remover::LinuxCache,
+        writer: "../bt-platform/src/linux_web_dirs.rs:prepare_linux_web_dirs",
     },
     Mark {
         name: "User configuration recovery copies",
@@ -610,6 +632,36 @@ impl Scope {
                 purge_roots.push((mark, purge_root(&head, &folio)));
             }
         }
+        #[cfg(target_os = "linux")]
+        if platform == HostPlatform::OtherUnix {
+            let Some(data_root) = data.first() else {
+                return Err(said(Text::CleanupRoot));
+            };
+            let namespace =
+                PathBuf::from("Folio").join(bt_platform::instance::directory_tag(data_root));
+            let home = env("HOME")
+                .map(PathBuf::from)
+                .filter(|path| !path.as_os_str().is_empty() && path.is_absolute());
+            for (remover, variable, default, child) in [
+                (Remover::LinuxConfig, "XDG_CONFIG_HOME", ".config", None),
+                (
+                    Remover::LinuxCache,
+                    "XDG_CACHE_HOME",
+                    ".cache",
+                    Some("Chromium"),
+                ),
+            ] {
+                let root = env(variable)
+                    .map(PathBuf::from)
+                    .filter(|path| !path.as_os_str().is_empty() && path.is_absolute())
+                    .or_else(|| home.as_ref().map(|home| home.join(default)));
+                if let Some(root) = root {
+                    let relative =
+                        child.map_or_else(|| namespace.clone(), |name| namespace.join(name));
+                    purge_roots.push((mark_of(remover), purge_root(&root, &relative)));
+                }
+            }
+        }
         let profiles = env("BT_POWERSHELL_PROFILE")
             .map(|_| named("BT_POWERSHELL_PROFILE").map(|p| vec![p]))
             .transpose()?;
@@ -932,6 +984,8 @@ fn execute_with_claim<T>(
                 entries.push(Entry::new(label, Fate::Kept(Text::CleanupRuntime)));
             }
             Remover::Data(..) | Remover::RecoverySnapshots | Remover::RuntimeClaims => {}
+            #[cfg(target_os = "linux")]
+            Remover::LinuxConfig | Remover::LinuxCache => {}
         }
     }
     if purge {

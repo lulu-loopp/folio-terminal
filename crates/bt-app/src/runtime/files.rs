@@ -359,34 +359,122 @@ impl Runtime<'_> {
         let name = path
             .file_name()
             .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-        match bt_platform::recycle(&path) {
-            Ok(false) => return Ok(()),
-            Ok(true) => {}
-            Err(error) => {
-                return self.toast(
+        #[cfg(target_os = "linux")]
+        {
+            let Some(parent) = path.parent().map(Path::to_path_buf) else {
+                return Ok(());
+            };
+            let target = crate::TrashTarget::File {
+                leaf: LeafId {
+                    tab: self.window.tabs[active].id,
+                    seat,
+                },
+                root,
+                key: key.to_owned(),
+                name: name.clone(),
+                parent,
+            };
+            match self.app.submit_trash(path, target) {
+                Ok(_) => Ok(()),
+                Err(error) => self.toast(
                     toast::ToastKind::Error,
                     toast::ToastAnchor::FilesColumn(seat),
                     Some(name),
                     i18n::not_deleted(&error),
-                );
+                ),
             }
         }
-        if let Some(directory) = path.parent() {
-            let directory = directory.to_path_buf();
-            self.refresh_files_dirs_at(&directory);
-        }
-        // The selection cannot stay on a row that has gone. It is dropped rather
-        // than moved to a neighbour: which neighbour is the next row *after the
-        // re-read*, and the re-read has not happened on this frame — a guess made
-        // now would put the accent on whichever row happened to be there before.
-        if let Some(state) = self.window.tabs[active].files.get_mut(&seat)
-            && state.sel.as_deref() == Some(key)
+        #[cfg(not(target_os = "linux"))]
         {
-            state.sel = None;
+            match bt_platform::recycle(&path) {
+                Ok(false) => return Ok(()),
+                Ok(true) => {}
+                Err(error) => {
+                    return self.toast(
+                        toast::ToastKind::Error,
+                        toast::ToastAnchor::FilesColumn(seat),
+                        Some(name),
+                        i18n::not_deleted(&error),
+                    );
+                }
+            }
+            if let Some(directory) = path.parent() {
+                self.refresh_files_dirs_at(directory);
+            }
+            if let Some(state) = self.window.tabs[active].files.get_mut(&seat)
+                && state.sel.as_deref() == Some(key)
+            {
+                state.sel = None;
+            }
+            self.mark_session_dirty(Instant::now());
+            self.refresh_chrome();
+            self.present_chrome_change()
         }
-        self.mark_session_dirty(Instant::now());
-        self.refresh_chrome();
-        self.present_chrome_change()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn complete_trash_file(
+        &mut self,
+        leaf: LeafId,
+        root: &str,
+        key: &str,
+        name: &str,
+        parent: PathBuf,
+        outcome: std::result::Result<bool, String>,
+    ) -> Result<()> {
+        if self.window.leaving.is_some() {
+            return Ok(());
+        }
+        let Some(index) = self.window.tabs.iter().position(|tab| tab.id == leaf.tab) else {
+            return Ok(());
+        };
+        let tab = &self.window.tabs[index];
+        if tab
+            .seats
+            .tree()
+            .find_seat(leaf.seat)
+            .is_none_or(|seat| seat.kind != bt_layout::SeatKind::Files)
+            || tab
+                .files
+                .get(&leaf.seat)
+                .is_none_or(|files| files.root != root)
+        {
+            return Ok(());
+        }
+        match outcome {
+            Ok(false) => Ok(()),
+            Err(error) => self.toast(
+                toast::ToastKind::Error,
+                toast::ToastAnchor::FilesColumn(leaf.seat),
+                Some(name.to_owned()),
+                i18n::not_deleted(&error),
+            ),
+            Ok(true) => {
+                let parent_key = files::parent_key(key).unwrap_or_default();
+                self.ask_files_dir_at(leaf, parent_key, parent);
+                if let Some(files) = self.window.tabs[index].files.get_mut(&leaf.seat)
+                    && files.sel.as_deref() == Some(key)
+                {
+                    files.sel = None;
+                }
+                self.mark_session_dirty(Instant::now());
+                self.refresh_chrome();
+                self.present_chrome_change()
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn ask_files_dir_at(&mut self, leaf: LeafId, key: String, path: PathBuf) {
+        let request = files::DirRequest {
+            window: self.window_id(),
+            host: files::FilesHost::Docked(leaf),
+            key,
+            path,
+        };
+        if !self.app.files_worker.request(request) {
+            self.disable_files_worker();
+        }
     }
 
     /// Ask every files column that is showing this directory to read it again.

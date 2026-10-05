@@ -170,6 +170,8 @@ mod toast;
 mod tooltip;
 mod trace;
 mod trace_sink;
+#[cfg(target_os = "linux")]
+mod trash_lane;
 mod uninstall;
 mod update;
 // Which adapter a copy's update takes, and whether its road is built (0.4.7 ticket U-41a1).
@@ -800,6 +802,9 @@ enum AppEvent {
     /// A native Linux clipboard reader published its one bounded answer.
     #[cfg(target_os = "linux")]
     LinuxClipboardReady,
+    /// A native Linux trash transaction published its result.
+    #[cfg(target_os = "linux")]
+    TrashAnswered,
     /// **A hand-off to the system has been answered** (`handoff_lane`, `docs/DESIGN.md`
     /// 2026-09-22 — *a hand-off to the system runs on its own lane*).
     ///
@@ -859,6 +864,8 @@ impl AppEvent {
             Self::ClipboardPictureReady => Station::ClipboardRead,
             #[cfg(target_os = "linux")]
             Self::LinuxClipboardReady => Station::ClipboardRead,
+            #[cfg(target_os = "linux")]
+            Self::TrashAnswered => Station::Files,
             Self::FileIndexReady => Station::FileIndex,
             Self::WebPageSpoke => Station::WebSpoke,
             Self::PsReadLineProbed
@@ -12380,6 +12387,17 @@ struct App {
     #[cfg(target_os = "linux")]
     clipboard_lane:
         Option<linux_clipboard_lane::ClipboardLane<ClipboardTargetToken, ClipboardWriteTarget>>,
+    /// App-owned Linux trash transactions and the duties their results carry.
+    #[cfg(target_os = "linux")]
+    trash_lane: Option<trash_lane::TrashLane>,
+    #[cfg(target_os = "linux")]
+    pending_trash: HashMap<trash_lane::TrashId, TrashTarget>,
+    /// Folder news owed until locally accepted scheme deletes settle.
+    #[cfg(target_os = "linux")]
+    schemes_rescan_owed: bool,
+    /// A last-window close awaiting accepted trash transactions.
+    #[cfg(target_os = "linux")]
+    pending_last_window_close: Option<WindowId>,
     /// **The OS hand-off lane** — the one thread every hand-off that leaves a window runs on
     /// (`handoff_lane`). On the application, like the workers beside it: the ids it mints have to
     /// be unique across windows, because an answer finds its window by id.
@@ -19859,6 +19877,22 @@ enum ClipboardFieldTarget {
         tab: TabId,
         seat: SeatId,
         identity: Arc<()>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+enum TrashTarget {
+    File {
+        leaf: LeafId,
+        root: String,
+        key: String,
+        name: String,
+        parent: PathBuf,
+    },
+    Scheme {
+        window: WindowId,
+        window_identity: Arc<()>,
+        file: String,
     },
 }
 
@@ -41893,6 +41927,10 @@ impl Runtime<'_> {
         // own words and a build that silently rewrote one it could not read
         // would destroy the copy they could have fixed by hand.
         let mut keybindings_store = persist::KeybindingsStore::open();
+        #[cfg(target_os = "linux")]
+        if let Err(error) = persist::start_linux_config_migration() {
+            eprintln!("recoverable Linux config migration start failure: {error}");
+        }
         let mut shortcuts = shortcuts::Shortcuts::defaults();
         let overrides: Vec<shortcuts::Override> = keybindings_store
             .loaded()
@@ -42479,6 +42517,14 @@ impl Runtime<'_> {
             event_proxy: proxy.clone(),
             #[cfg(target_os = "linux")]
             clipboard_lane: None,
+            #[cfg(target_os = "linux")]
+            trash_lane: None,
+            #[cfg(target_os = "linux")]
+            pending_trash: HashMap::new(),
+            #[cfg(target_os = "linux")]
+            schemes_rescan_owed: false,
+            #[cfg(target_os = "linux")]
+            pending_last_window_close: None,
             git_watch: git_watch::GitWatch::default(),
             handoff_lane,
             layout_tables,
@@ -46065,21 +46111,6 @@ impl Runtime<'_> {
     /// missing. Pinned by `a_deletion_this_window_made_raises_one_card_not_two`.
     fn delete_scheme_file(&mut self, file: &str) -> Result<()> {
         let file = file.to_owned();
-        // **Which rows this file was answering for**, asked before it goes. A
-        // scheme that is not in force needs no fallback at all — deleting it
-        // changes nothing on screen — and one that is needs the default put in
-        // its row, which is the rule this verb has always had, now asked per row
-        // instead of assumed about the canvas in force.
-        let in_force = [
-            self.app.settings_store.loaded().light_scheme.clone(),
-            self.app.settings_store.loaded().dark_scheme.clone(),
-        ];
-        let catalogue = schemes::catalogue();
-        let falls: [bool; 2] = [true, false].map(|light| {
-            let index = usize::from(!light);
-            catalogue.user_file_of(&in_force[index], light) == Some(file.as_str())
-        });
-        drop(catalogue);
         let path = match schemes::user_dir() {
             Ok(directory) => directory.join(&file),
             Err(error) => {
@@ -46091,48 +46122,65 @@ impl Runtime<'_> {
                 );
             }
         };
-        match bt_platform::recycle(&path) {
-            // The shell asked, and the answer was no. Nothing happened and
-            // nothing is said: "cancelled" is a card about a decision the reader
-            // made half a second ago and is still looking at.
-            Ok(false) => return Ok(()),
-            Ok(true) => {}
-            Err(error) => {
-                return self.toast(
+        #[cfg(target_os = "linux")]
+        {
+            let target = TrashTarget::Scheme {
+                window: self.window.window.id(),
+                window_identity: Arc::clone(&self.window.instance_identity),
+                file: file.clone(),
+            };
+            match self.app.submit_trash(path, target) {
+                Ok(_) => Ok(()),
+                Err(error) => self.toast(
                     toast::ToastKind::Error,
                     toast::ToastAnchor::Window,
                     Some(i18n::Text::SchemeDeleted.text().to_owned()),
                     i18n::not_deleted(&error),
-                );
+                ),
             }
         }
-        // Only the rows this file was actually answering for fall back, and a
-        // row that was on something else is not touched: `apply_scheme` takes
-        // `None` for "leave this canvas alone", which is what makes deleting a
-        // scheme nobody is wearing a pure file operation.
-        if falls[0] || falls[1] {
-            self.apply_scheme(falls[0].then(String::new), falls[1].then(String::new))?;
+        #[cfg(not(target_os = "linux"))]
+        {
+            // **Which rows this file was answering for**, asked before it goes.
+            let in_force = [
+                self.app.settings_store.loaded().light_scheme.clone(),
+                self.app.settings_store.loaded().dark_scheme.clone(),
+            ];
+            let catalogue = schemes::catalogue();
+            let falls: [bool; 2] = [true, false].map(|light| {
+                let index = usize::from(!light);
+                catalogue.user_file_of(&in_force[index], light) == Some(file.as_str())
+            });
+            drop(catalogue);
+            match bt_platform::recycle(&path) {
+                // The shell asked, and the answer was no. Nothing happened and
+                // nothing is said: "cancelled" is a card about a decision the reader
+                // made half a second ago and is still looking at.
+                Ok(false) => return Ok(()),
+                Ok(true) => {}
+                Err(error) => {
+                    return self.toast(
+                        toast::ToastKind::Error,
+                        toast::ToastAnchor::Window,
+                        Some(i18n::Text::SchemeDeleted.text().to_owned()),
+                        i18n::not_deleted(&error),
+                    );
+                }
+            }
+            if falls[0] || falls[1] {
+                self.apply_scheme(falls[0].then(String::new), falls[1].then(String::new))?;
+            }
+            let after = schemes::rescan();
+            let fallback = (falls[0] || falls[1]).then(|| after.default_name(falls[0]).to_owned());
+            drop(after);
+            self.refresh_scheme_sources();
+            self.toast(
+                toast::ToastKind::Ok,
+                toast::ToastAnchor::Window,
+                Some(i18n::Text::SchemeDeleted.text().to_owned()),
+                i18n::scheme_deleted(&file, fallback.as_deref()),
+            )
         }
-        // Ahead of the watcher, so the picker has lost the entry by the next
-        // frame rather than by the next quiet window — and so the verdict the
-        // watcher does eventually reach is about a folder that already matches
-        // the settings.
-        let after = schemes::rescan();
-        // The canvas whose row moved is the one whose default the card names,
-        // and a file nobody was wearing moves no row at all — so there is
-        // nothing to name and the sentence says only that the file has gone.
-        let fallback = (falls[0] || falls[1]).then(|| after.default_name(falls[0]).to_owned());
-        drop(after);
-        self.refresh_scheme_sources();
-        self.toast(
-            toast::ToastKind::Ok,
-            toast::ToastAnchor::Window,
-            Some(i18n::Text::SchemeDeleted.text().to_owned()),
-            // **The file and not the scheme's name**: what is in the Recycle Bin
-            // is spelled the way the file was, and that is the string somebody
-            // going to fetch it back has to recognise.
-            i18n::scheme_deleted(&file, fallback.as_deref()),
-        )
     }
 
     /// Note which file each canvas's scheme is coming from, now.
@@ -46142,16 +46190,7 @@ impl Runtime<'_> {
     /// needed, because by the time it is needed the connection it records is
     /// exactly what has been lost.
     fn refresh_scheme_sources(&mut self) {
-        let names = [
-            self.app.settings_store.loaded().light_scheme.clone(),
-            self.app.settings_store.loaded().dark_scheme.clone(),
-        ];
-        let catalogue = schemes::catalogue();
-        for (index, light) in [true, false].into_iter().enumerate() {
-            self.app.scheme_source[index] = catalogue
-                .file_of(&names[index], light)
-                .map(|file| (names[index].clone(), file.to_owned()));
-        }
+        self.app.refresh_scheme_sources();
     }
 
     /// The schemes folder moved and has gone quiet: read it again
@@ -46163,6 +46202,11 @@ impl Runtime<'_> {
     /// being the polling R31 forbids.
     fn advance_scheme_watch(&mut self, now: Instant) -> Result<()> {
         if !self.app.scheme_watch.due(now) {
+            return Ok(());
+        }
+        #[cfg(target_os = "linux")]
+        if self.app.scheme_trash_pending() {
+            self.app.schemes_rescan_owed = true;
             return Ok(());
         }
         self.reread_schemes()
@@ -51245,6 +51289,135 @@ impl Runtime<'_> {
 }
 
 impl App {
+    #[cfg(target_os = "linux")]
+    fn submit_trash(
+        &mut self,
+        path: PathBuf,
+        target: TrashTarget,
+    ) -> std::result::Result<trash_lane::TrashId, String> {
+        if self.trash_lane.is_none() {
+            let proxy = self.event_proxy.clone();
+            self.trash_lane = Some(
+                trash_lane::TrashLane::spawn(move || {
+                    let _ = proxy.send_event(AppEvent::TrashAnswered);
+                })
+                .map_err(|error| error.to_string())?,
+            );
+        }
+        if self
+            .trash_lane
+            .as_ref()
+            .is_some_and(|lane| lane.pending_count() >= crate::handoff_lane::CAPACITY)
+        {
+            return Err(trash_lane::LANE_FULL.to_owned());
+        }
+        let scheme = matches!(&target, TrashTarget::Scheme { .. });
+        let id = self
+            .trash_lane
+            .as_mut()
+            .ok_or_else(|| trash_lane::LANE_GONE.to_owned())?
+            .submit(path)?;
+        self.pending_trash.insert(id, target);
+        if scheme {
+            self.schemes_rescan_owed = true;
+        }
+        Ok(id)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn trash_pending_count(&self) -> usize {
+        self.trash_lane
+            .as_ref()
+            .map_or(0, trash_lane::TrashLane::pending_count)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn scheme_trash_pending(&self) -> bool {
+        self.pending_trash
+            .values()
+            .any(|target| matches!(target, TrashTarget::Scheme { .. }))
+    }
+
+    fn refresh_scheme_sources(&mut self) {
+        let names = [
+            self.settings_store.loaded().light_scheme.clone(),
+            self.settings_store.loaded().dark_scheme.clone(),
+        ];
+        let catalogue = schemes::catalogue();
+        for (index, light) in [true, false].into_iter().enumerate() {
+            self.scheme_source[index] = catalogue
+                .file_of(&names[index], light)
+                .map(|file| (names[index].clone(), file.to_owned()));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn rescan_schemes_without_window(&mut self) {
+        let source = self.scheme_source.clone();
+        let after = schemes::rescan();
+        let current = self.settings_store.loaded().clone();
+        let verdict = schemes::rescan_verdict(
+            &after,
+            [&current.light_scheme, &current.dark_scheme],
+            source,
+            bt_render::schemes_in_force(),
+            self.scheme_fault.as_deref(),
+        );
+        bt_render::set_schemes(verdict.schemes.0, verdict.schemes.1);
+        self.scheme_fault = verdict.fault;
+        let mut renamed = current;
+        for (index, name) in verdict.renamed {
+            if index == 0 {
+                renamed.light_scheme = name;
+            } else {
+                renamed.dark_scheme = name;
+            }
+        }
+        self.settings_store.store(renamed);
+        self.refresh_scheme_sources();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn successful_scheme_trash(&mut self, file: &str) -> Option<String> {
+        let settings = self.settings_store.loaded().clone();
+        let falls = [
+            self.scheme_source[0]
+                .as_ref()
+                .is_some_and(|(name, source)| name == &settings.light_scheme && source == file),
+            self.scheme_source[1]
+                .as_ref()
+                .is_some_and(|(name, source)| name == &settings.dark_scheme && source == file),
+        ];
+        let fallback = if falls[0] || falls[1] {
+            Some(schemes::catalogue().default_name(falls[0]).to_owned())
+        } else {
+            None
+        };
+        if falls[0] || falls[1] {
+            let mut next = settings;
+            if falls[0] {
+                next.light_scheme.clear();
+            }
+            if falls[1] {
+                next.dark_scheme.clear();
+            }
+            self.settings_store.store(next);
+            if adopt_stored_schemes(self.settings_store.loaded()) == ThemeChange::Changed {
+                let change = ApplicationChange {
+                    font: false,
+                    look: true,
+                    caret: false,
+                    option: false,
+                    paid_by: None,
+                };
+                self.pending_application_change =
+                    Some(change.merged_with(self.pending_application_change));
+            }
+            self.refresh_scheme_sources();
+        }
+        fallback
+    }
+
     fn decoration_senders(&self) -> DecorationSenders {
         DecorationSenders {
             math: self.math_worker.tasks.clone(),
@@ -51267,7 +51440,13 @@ impl App {
                 // start's, which makes it as every start does.
                 Writer::DataFolderMove => {}
                 Writer::DataFolder => {
-                    let _ = std::fs::create_dir_all(persist::storage_dir());
+                    let _ = persist::make_data_folder(&persist::storage_dir());
+                    #[cfg(target_os = "linux")]
+                    if let Some(config) =
+                        persist::linux_config_directory_for(&persist::storage_dir())
+                    {
+                        let _ = persist::make_data_folder(&config);
+                    }
                 }
                 Writer::RefusedCopies => update_trial::keep_owed_copies(),
                 Writer::Session => self.session_store.release_trial(),
@@ -51305,6 +51484,10 @@ impl App {
                     }
                 }
             }
+        }
+        #[cfg(target_os = "linux")]
+        if let Err(error) = persist::start_linux_config_migration() {
+            eprintln!("recoverable Linux config migration start failure: {error}");
         }
     }
 
@@ -61073,6 +61256,123 @@ impl FolioApp {
         adopted
     }
 
+    #[cfg(target_os = "linux")]
+    fn drain_trash_answers(&mut self) -> Result<()> {
+        let completions = self
+            .app
+            .as_mut()
+            .and_then(|app| app.trash_lane.as_mut())
+            .map_or_else(Vec::new, trash_lane::TrashLane::answers);
+        for completion in completions {
+            let target = self
+                .app
+                .as_mut()
+                .and_then(|app| app.pending_trash.remove(&completion.id));
+            let Some(target) = target else {
+                continue;
+            };
+            match target {
+                TrashTarget::File {
+                    leaf,
+                    root,
+                    key,
+                    name,
+                    parent,
+                } => {
+                    if let Some(owner) = self.owner_of(leaf.tab)
+                        && let Some(mut runtime) = self.runtime(owner)
+                    {
+                        runtime.complete_trash_file(
+                            leaf,
+                            &root,
+                            &key,
+                            &name,
+                            parent,
+                            completion.outcome,
+                        )?;
+                    }
+                }
+                TrashTarget::Scheme {
+                    window,
+                    window_identity,
+                    file,
+                } => match completion.outcome {
+                    Ok(true) => {
+                        let fallback = self
+                            .app
+                            .as_mut()
+                            .map(|app| app.successful_scheme_trash(&file));
+                        if let Some(mut runtime) = self.runtime(window)
+                            && runtime.window.leaving.is_none()
+                            && Arc::ptr_eq(&window_identity, &runtime.window.instance_identity)
+                        {
+                            runtime.toast(
+                                toast::ToastKind::Ok,
+                                toast::ToastAnchor::Window,
+                                Some(i18n::Text::SchemeDeleted.text().to_owned()),
+                                i18n::scheme_deleted(&file, fallback.flatten().as_deref()),
+                            )?;
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        if let Some(mut runtime) = self.runtime(window)
+                            && runtime.window.leaving.is_none()
+                            && Arc::ptr_eq(&window_identity, &runtime.window.instance_identity)
+                        {
+                            runtime.toast(
+                                toast::ToastKind::Error,
+                                toast::ToastAnchor::Window,
+                                Some(i18n::Text::SchemeDeleted.text().to_owned()),
+                                i18n::not_deleted(&error),
+                            )?;
+                        }
+                    }
+                },
+            }
+        }
+
+        let rescan = self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.schemes_rescan_owed && !app.scheme_trash_pending());
+        if rescan {
+            if let Some(app) = self.app.as_mut() {
+                app.schemes_rescan_owed = false;
+            }
+            let live = (0..self.windows.len()).find_map(|index| {
+                let id = self.windows.key_at(index)?;
+                (!self.is_leaving(id)).then_some(id)
+            });
+            if let Some(id) = live {
+                if let Some(mut runtime) = self.runtime(id) {
+                    runtime.reread_schemes()?;
+                }
+            } else if let Some(app) = self.app.as_mut() {
+                app.rescan_schemes_without_window();
+            }
+        }
+        self.settle_application_change()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn settle_pending_last_window_close(&mut self) -> Result<()> {
+        let Some(app) = self.app.as_ref() else {
+            return Ok(());
+        };
+        if app.quit.is_some() || app.quit_requested || app.trash_pending_count() > 0 {
+            return Ok(());
+        }
+        let Some(window) = self
+            .app
+            .as_mut()
+            .and_then(|app| app.pending_last_window_close.take())
+        else {
+            return Ok(());
+        };
+        self.close(window)
+    }
+
     /// **Give every hand-off answer to the window that asked for it** (`handoff_lane`).
     ///
     /// Each answer is offered to every open window and claimed by the one whose duties hold its
@@ -61287,6 +61587,16 @@ impl FolioApp {
         // program: it goes when the windows go, and comes back holding what the
         // restore row says — see `retire_the_summon_with_the_run` below.
         let ending = a_run_ends_with_its_last_visible_window(self.windows_left_after(id));
+        #[cfg(target_os = "linux")]
+        if ending
+            && let Some(app) = self.app.as_mut()
+            && app.trash_pending_count() > 0
+        {
+            // Keep the last window and session writer alive until accepted
+            // trash results have updated their owning facts.
+            app.pending_last_window_close = Some(id);
+            return Ok(());
+        }
         let leaving_at = Instant::now() + quit::PAGE_TEARDOWN_DEADLINE;
         let Some(mut runtime) = self.runtime(id) else {
             return Ok(());
@@ -61534,6 +61844,14 @@ impl FolioApp {
             (app.web_spare.has_let_go(), app.run_retiring_until)
         });
         if !self.windows.is_empty() {
+            return web_spare::RunControl::Wait;
+        }
+        #[cfg(target_os = "linux")]
+        if self
+            .app
+            .as_ref()
+            .is_some_and(|app| app.trash_pending_count() > 0)
+        {
             return web_spare::RunControl::Wait;
         }
         web_spare::after_the_last_window(
@@ -63345,6 +63663,18 @@ impl FolioApp {
             else {
                 return Ok(());
             };
+            #[cfg(target_os = "linux")]
+            if self
+                .app
+                .as_ref()
+                .is_some_and(|app| app.trash_pending_count() > 0)
+                && !matches!(
+                    step,
+                    quit::QuitStep::Ask | quit::QuitStep::WaitForPages | quit::QuitStep::Abandon
+                )
+            {
+                return Ok(());
+            }
             match step {
                 // Both of these are waits, and the loop has to go back round for
                 // them: one for a press, one for a browser process.
@@ -63892,6 +64222,28 @@ impl FolioApp {
         event_loop.exit();
     }
 
+    fn settle_trash_answers_for_turn(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.drain_trash_answers()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
+        }
+    }
+
+    fn settle_pending_last_window_close_for_turn(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        {
+            self.settle_pending_last_window_close()
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Ok(())
+        }
+    }
+
     fn about_to_wait_inner(&mut self, event_loop: &ActiveEventLoop) {
         if self.app.is_none() {
             return;
@@ -64009,7 +64361,9 @@ impl FolioApp {
             // line, exactly as the drag handover above does, so that the press,
             // the window and the frame it appears in are all one turn.
             .and_then(|()| self.settle_quake(event_loop))
+            .and_then(|()| self.settle_trash_answers_for_turn())
             .and_then(|()| self.settle_quit(event_loop))
+            .and_then(|()| self.settle_pending_last_window_close_for_turn())
         {
             self.fail(event_loop, error);
             return;
@@ -64637,6 +64991,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             AppEvent::NativeDialogReady => Ok(()),
             #[cfg(target_os = "linux")]
             AppEvent::LinuxClipboardReady => Ok(()),
+            #[cfg(target_os = "linux")]
+            AppEvent::TrashAnswered => Ok(()),
             #[cfg(target_os = "linux")]
             AppEvent::WindowCloseRequested(window_id) => {
                 self.window_event(event_loop, window_id, WindowEvent::CloseRequested);
@@ -70596,6 +70952,110 @@ fn press_owned_title_bar(
     }
 }
 
+#[cfg(target_os = "linux")]
+fn retire_linux_desktop(
+    token: bt_platform::admission::WaitToken<'_, doors::DesktopRetire>,
+    clipboard_lane: Option<
+        linux_clipboard_lane::ClipboardLane<ClipboardTargetToken, ClipboardWriteTarget>,
+    >,
+    trash_lane: Option<trash_lane::TrashLane>,
+) -> Result<()> {
+    let cutoff = Instant::now() + crate::persist::SESSION_SAVE_BUDGET;
+    let worker: std::thread::JoinHandle<std::result::Result<(), String>> =
+        bt_platform::spawn_at_priority(
+            "bt-desktop-retire",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |ctx| {
+                let clipboard = clipboard_lane
+                    .map(|lane| lane.shutdown(ctx, cutoff))
+                    .unwrap_or(Ok(()));
+                let trash = trash_lane
+                    .map(|lane| lane.shutdown(ctx).map_err(|error| error.to_string()))
+                    .unwrap_or(Ok(()));
+                let clipboard_owners = bt_platform::release_clipboard_on_worker(ctx, cutoff);
+                let notifications = bt_platform::shutdown_notifications(ctx);
+                let helpers = bt_platform::shutdown_helpers(ctx);
+                let watches = bt_platform::shutdown_watches(ctx);
+                let hotkeys = bt_platform::linux_hotkey::shutdown_hotkey_worker(ctx);
+                let system_settings = bt_platform::shutdown_system_settings(ctx);
+                clipboard
+                    .and(trash)
+                    .and(clipboard_owners)
+                    .and(notifications)
+                    .and(helpers)
+                    .and(watches)
+                    .and(hotkeys)
+                    .and(system_settings)
+            },
+        )
+        .context("start desktop retirement worker")?;
+    join_linux_desktop_retirement(token, worker, cutoff)
+}
+
+#[cfg(target_os = "linux")]
+fn join_linux_desktop_retirement(
+    _token: bt_platform::admission::WaitToken<'_, doors::DesktopRetire>,
+    worker: std::thread::JoinHandle<std::result::Result<(), String>>,
+    cutoff: Instant,
+) -> Result<()> {
+    while !worker.is_finished() {
+        if Instant::now() >= cutoff {
+            return Err(anyhow!(
+                "Linux desktop retirement exceeded its cutoff; continuing shutdown"
+            ));
+        }
+        std::thread::sleep(crate::persist::SESSION_JOIN_POLL);
+    }
+    worker
+        .join()
+        .map_err(|_| anyhow!("desktop retirement worker panicked"))?
+        .map_err(|error| anyhow!(error))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_desktop_retirement_tests {
+    use super::join_linux_desktop_retirement;
+    use std::sync::{Arc, Barrier};
+
+    #[test]
+    fn an_unfinished_retirement_worker_is_left_running_at_the_exit_budget() {
+        crate::tests::on_the_window_thread_exiting();
+
+        let release = Arc::new(Barrier::new(2));
+        let worker_release = Arc::clone(&release);
+        let returned = Arc::new(Barrier::new(2));
+        let worker_returned = Arc::clone(&returned);
+        let worker = bt_platform::spawn_at_priority(
+            "bt-desktop-retire-test",
+            bt_platform::ThreadPriority::BelowNormal,
+            move |_worker| {
+                worker_release.wait();
+                worker_returned.wait();
+                Ok::<(), String>(())
+            },
+        )
+        .expect("the controlled retirement worker starts");
+
+        let timed_out = bt_platform::admission::admitted::<
+            bt_platform::admission::doors::DesktopRetire,
+            _,
+        >(move |token| {
+            join_linux_desktop_retirement(token, worker, std::time::Instant::now())
+        })
+        .expect("the exiting window thread is admitted");
+        assert!(
+            timed_out
+                .expect_err("an unfinished worker exceeds a zero-length test budget")
+                .to_string()
+                .contains("continuing shutdown"),
+            "the timeout reports that shutdown can proceed"
+        );
+
+        release.wait();
+        returned.wait();
+    }
+}
+
 fn native_window_from_handle(handle: RawWindowHandle) -> Result<bt_platform::NativeWindow> {
     match handle {
         #[cfg(windows)]
@@ -70683,6 +71143,84 @@ mod linux_window_tests {
         assert!(
             app.contains("self.window_event(event_loop, window_id, WindowEvent::CloseRequested);")
         );
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_trash_app_source_tests {
+    use bt_source::{Index, ItemQuery};
+
+    fn method(owner: &str, name: &str) -> &'static str {
+        Index::of_package("bt-app")
+            .body_of(&ItemQuery::method(owner, name))
+            .unwrap_or_else(|failure| panic!("{failure}"))
+    }
+
+    #[test]
+    fn file_delete_admits_only_a_live_row_and_captures_its_leaf_and_parent() {
+        let delete = method("Runtime", "delete_files_row");
+        let checked = delete
+            .find("row.key == key")
+            .expect("the key is resolved against the current tree");
+        let admitted = delete
+            .find("self.app.submit_trash(path, target)")
+            .expect("Linux queues the captured path");
+        assert!(checked < admitted, "a stale key reached trash admission");
+        assert!(delete.contains("TrashTarget::File"));
+        assert!(delete.contains("leaf: LeafId"));
+        assert!(delete.contains("root,"));
+        assert!(delete.contains("parent,"));
+        let completion = method("FolioApp", "drain_trash_answers");
+        assert!(completion.contains("self.owner_of(leaf.tab)"));
+        assert!(completion.contains("runtime.complete_trash_file("));
+    }
+
+    #[test]
+    fn scheme_delete_keeps_window_duty_and_current_selection_verdict() {
+        let delete = method("Runtime", "delete_scheme_file");
+        assert!(delete.contains("self.app.submit_trash(path, target)"));
+        assert!(delete.contains("window_identity: Arc::clone(&self.window.instance_identity)"));
+        let settle = method("App", "successful_scheme_trash");
+        assert!(settle.contains("self.scheme_source[0]"));
+        assert!(settle.contains("self.scheme_source[1]"));
+        assert!(settle.contains("source == file"));
+        assert!(settle.contains("adopt_stored_schemes("));
+        let watcher = method("Runtime", "advance_scheme_watch");
+        assert!(watcher.contains("self.app.scheme_trash_pending()"));
+        assert!(watcher.contains("self.app.schemes_rescan_owed = true"));
+        let completion = method("FolioApp", "drain_trash_answers");
+        assert!(completion.contains("!app.scheme_trash_pending()"));
+        assert!(completion.contains("runtime.reread_schemes()?"));
+    }
+
+    #[test]
+    fn accepted_trash_holds_the_final_close_and_quit_writes() {
+        let close = method("FolioApp", "close");
+        let waits = close
+            .find("app.trash_pending_count() > 0")
+            .expect("the ordinary last-window close is deferred");
+        let snapshot = close
+            .find("runtime.close_window(ending)")
+            .expect("the saved window picture is still recorded");
+        assert!(
+            waits < snapshot,
+            "the session was photographed before trash settled"
+        );
+
+        let quit = method("FolioApp", "settle_quit");
+        let wait = quit
+            .find("app.trash_pending_count() > 0")
+            .expect("Quit waits for accepted trash transactions");
+        let action = quit
+            .find("match step {")
+            .expect("the quit step is dispatched");
+        assert!(
+            wait < action,
+            "a quit save or photograph ran while trash was pending"
+        );
+
+        let end = method("FolioApp", "run_end");
+        assert!(end.contains("app.trash_pending_count() > 0"));
     }
 }
 
@@ -72862,6 +73400,27 @@ fn main() -> Result<()> {
     // The session that outlived every question is released once the loop has
     // returned, never before a question could still be in flight.
     bt_platform::video::shutdown_media_session();
+    #[cfg(target_os = "linux")]
+    {
+        let clipboard_lane = application
+            .app
+            .as_mut()
+            .and_then(|app| app.clipboard_lane.take());
+        let trash_lane = application
+            .app
+            .as_mut()
+            .and_then(|app| app.trash_lane.take());
+        drop(application);
+        if let Err(error) =
+            bt_platform::admission::admitted::<doors::DesktopRetire, _>(move |token| {
+                retire_linux_desktop(token, clipboard_lane, trash_lane)
+            })
+            .map_err(|error| anyhow!("desktop retirement refused: {error:?}"))
+            .and_then(|result| result)
+        {
+            diagnostics::note(&format!("desktop retirement: {error}"));
+        }
+    }
     // **An update's exit guard** (0.4.6 U-34): after a Restart to update, this
     // process leaves behind the applier it started, or starts Folio again —
     // here, with the loop over and the session's sentinel gone, after letting
@@ -72987,7 +73546,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 28] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 32] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -73007,6 +73566,8 @@ mod platform_gate_tests {
         "git.rs",
         // The same question one layer up, in the panel.
         "git_panel.rs",
+        // Linux-only cleanup labels remain available to all translation tests.
+        "i18n.rs",
         // First-window display and clipboard identities are strict; optional
         // service failures remain local to their operation.
         "main.rs",
@@ -73014,6 +73575,8 @@ mod platform_gate_tests {
         "owner_door.rs",
         // Which rows the palette offers on this machine.
         "palette_index.rs",
+        // Linux configuration files share the existing data writer but use XDG paths.
+        "persist.rs",
         // Test fixtures compose Windows-only namespace translation with profile
         // overrides; production profile policy uses the portable platform interface.
         "profiles.rs",
@@ -73023,6 +73586,8 @@ mod platform_gate_tests {
         "quake.rs",
         // Linux clipboard reads return on a later turn and are adopted by destination identity.
         "runtime/clipboard.rs",
+        // Linux recycle answers return through TrashLane and are adopted by the live file row.
+        "runtime/files.rs",
         // Linux page input follows this runtime's shortcut and IME owner ladder.
         "runtime/keyboard.rs",
         // Linux's client frame starts a native resize from this pointer gesture.
@@ -73042,6 +73607,8 @@ mod platform_gate_tests {
         "shell_literal.rs",
         // Linux field identities reject delayed clipboard answers after a field is replaced.
         "text_field.rs",
+        // Explicit Linux purge inventories only this data namespace's XDG roots.
+        "uninstall.rs",
         // Native junction and sharing-mode fixtures, never product platform policy.
         "uninstall_tests.rs",
         // Only the real detached-handoff regression fixture; the handoff API is portable.

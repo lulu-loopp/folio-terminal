@@ -403,6 +403,10 @@ text_entries! {
     CleanupMarkPreferences,
     CleanupMarkSavedState,
     CleanupMarkUnixData,
+    #[cfg(any(target_os = "linux", test))]
+    CleanupMarkUnixConfig,
+    #[cfg(any(target_os = "linux", test))]
+    CleanupMarkUnixCache,
     CleanupMarkRecovery,
     CleanupMarkUpdateEntrances,
     CleanupMarkUpdateHome,
@@ -4945,6 +4949,12 @@ impl Text {
                 pick(lang, "Saved Application State", "Saved Application State")
             }
             Self::CleanupMarkUnixData => pick(lang, "Unix data", "Unix 数据"),
+            #[cfg(any(target_os = "linux", test))]
+            // zh: pending
+            Self::CleanupMarkUnixConfig => pick(lang, "Unix config", "Unix config"),
+            #[cfg(any(target_os = "linux", test))]
+            // zh: pending
+            Self::CleanupMarkUnixCache => pick(lang, "Unix cache", "Unix cache"),
             Self::CleanupMarkRecovery => {
                 pick(lang, "User configuration recovery copies", "用户配置备份")
             }
@@ -5966,7 +5976,12 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
+        (Self::CleanupMarkUnixConfig, HostPlatform::Windows),
+        (Self::CleanupMarkUnixConfig, HostPlatform::MacOs),
+        (Self::CleanupMarkUnixCache, HostPlatform::Windows),
+        (Self::CleanupMarkUnixCache, HostPlatform::MacOs),
+    ];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────

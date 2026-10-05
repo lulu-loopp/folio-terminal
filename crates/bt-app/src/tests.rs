@@ -3078,7 +3078,11 @@ fn the_files_menus_second_batch_makes_a_row_and_recycles_one() {
     let delete = body("delete_files_row");
     assert!(
         delete.contains("bt_platform::recycle(&path)"),
-        "the row goes to the Recycle Bin"
+        "non-Linux platforms keep their native recycle call"
+    );
+    assert!(
+        delete.contains("self.app.submit_trash(path, target)"),
+        "Linux admits the captured row path to the asynchronous trash lane"
     );
     for permanent in [
         "std::fs::remove_file",
@@ -56032,8 +56036,8 @@ fn a_door_answers_by_role_and_phase<D: bt_platform::admission::Door>(
 /// door, through the real thread door, for the doors the product now reaches only inside an
 /// admission.
 ///
-/// MUTATION: widen a door's phases in `bt_platform::admission::doors` (`CompositorBirth` to
-/// `[Running, Exiting]`), or narrow one (`WebController` back to `[Running]`), and this names it.
+/// MUTATION: widen `DesktopRetire` to `Running` in `bt_platform::admission::doors`;
+/// the explicit row below goes red.
 #[test]
 fn every_owner_door_is_refused_on_a_worker_and_admitted_only_in_its_phases() {
     use bt_platform::admission::Phase::{Exiting, Running, Starting};
@@ -56054,6 +56058,8 @@ fn every_owner_door_is_refused_on_a_worker_and_admitted_only_in_its_phases() {
     a_door_answers_by_role_and_phase::<doors::SessionWriterRetire>(&[Exiting]);
     a_door_answers_by_role_and_phase::<doors::TraceFlush>(&[Exiting]);
     a_door_answers_by_role_and_phase::<doors::UpdateLeave>(&[Exiting]);
+    // Desktop retirement waits only after the event loop enters Exiting.
+    a_door_answers_by_role_and_phase::<doors::DesktopRetire>(&[Exiting]);
     a_door_answers_by_role_and_phase::<doors::LaunchHandOver>(&[Starting]);
     a_door_answers_by_role_and_phase::<doors::WebController>(&[Running, Exiting]);
     a_door_answers_by_role_and_phase::<doors::WebEnvironment>(&[Running]);
@@ -56065,7 +56071,7 @@ fn every_owner_door_is_refused_on_a_worker_and_admitted_only_in_its_phases() {
     a_door_answers_by_role_and_phase::<doors::SetCursor>(&[Running]);
     assert_eq!(
         doors::ALL.len(),
-        25,
+        26,
         "a door added to the registry is a door this list has to name"
     );
 }
