@@ -14022,6 +14022,52 @@ Pinned by:
   - `shell_integration::tests::{the_editions_answer_wins_and_the_fallback_covers_only_what_can_be_known,a_missing_zone_answer_is_said_once_per_edition,the_profile_probe_answer_is_a_path_a_policy_and_its_scopes}`;
   - `test_shell::tests::a_warm_up_that_cannot_finish_leaves_the_edition_cold_and_the_test_running`.
 
+**WARMUP (CI run 37318864463: a "warmed" cache from an account with none, and silent children behind it).**
+- **What happened.** The conpty job ran before anything on its runner had used Windows PowerShell, so the account had no analysis cache to copy. The warm-up analysed from nothing (47 s) and said "warmed". Three 5.1 children then sat silent for 30 s at their first command lookups.
+- **How PowerShell saves the cache.** From a background task: 10 s after the first change, then once nothing has changed for 3 s. A process does not wait for that task when it exits. The count of changes waiting to be saved (`_saveCacheToDiskQueued`) goes back to 0 only after the save's last byte. This was measured on both editions.
+- **Two ways the rounds 7–8 warm-up took a file short of what its lookup analysed.** That warm-up stopped at the first sign of a save after its lookup, or after 30 s without one. Both ways were measured here:
+  - **The process ended during the save.** The file's write time passes the lookup's end at the save's first byte, not its last.
+    - A 17.67 MB synthetic cache was left at 4.46 MB in one run of three. A fresh process on it analysed every module again (528 changes).
+    - On the CI runner one save of the 1.65 MB cache took 1.44 s from its first visible byte to its last.
+  - **The save dropped what was analysed while it was being written.**
+    - A module analysed while a 35.7 MB save stood at 2.4 MB left the count at 0 after the save. No save came in the next 25 s, and a fresh process analysed that module again.
+    - When that is the end of a lookup, the old warm-up waited out its 30 s and took the half-way file.
+  - Windows PowerShell analyses again whatever a cache lacks, so every child of such a run pays for it behind a line that says "warmed".
+- **On the runner, neither was caught directly** (scratch runs 37332806509, 37336349718 and 37339927076, account caches moved away). Ten runs of the old command from nothing each left a whole file: three of them at once, and six under eight spinning threads.
+  - The runner does show what makes both possible. Every from-nothing lookup had a 293,527-byte save in its middle, at 13–18 s, and a save there can span more than a second.
+- **Hypotheses measured and refuted on the runner:**
+  - (1) The lookup leaves something for the child's startup. It does not.
+    - Its cache (1,650,003 bytes) equals one made by running the child's own startup commands first.
+    - On a copy of either, `Set-PSReadLineOption` takes 97–114 ms, against 12,327 ms on an empty cache.
+    - `Get-Module -ListAvailable` adds 34 KB and makes nothing faster.
+  - (3) The cache is keyed differently for children. It is not: children use the shared file, and none rewrote it.
+  - (4) Concurrency re-analyses. It does not: three children started at once on a whole cache reached their prompts in 0.42–0.67 s.
+- **The fix: a cache is called warm only when a fresh process's lookup on it analyses nothing** (`complete_analysis_cache`, `judged_lookup`).
+  - A lookup analysed nothing only if nothing was waiting to be saved after it **and** the file was not written while it ran. A half-way save resets the count and may have dropped entries, so the count alone proves nothing.
+  - A lookup that analysed something stays until its save has ended (at most 60 s), and the next lookup checks.
+  - The edition stays cold, and the line says why, in two cases:
+    - three lookups without a clean one;
+    - an edition that does not show the count.
+  - The line names every lookup.
+- **Measured on the runner with the account's caches moved away** (fd71f42d, scratch runs 37336349718 and 37339927076):
+
+  | | run 37336349718 | run 37339927076 |
+  |---|---|---|
+  | warm-up | 47.9 s | 86.2 s |
+  | lookup 1 (analysed, save ended) | 42.4 s | 77.3 s |
+  | lookup 2 (analysed nothing) | 144 ms | 89 ms |
+  | first child, after the warm-up | 0.53 s | 0.86 s |
+  | the next children | 0.30–0.67 s, three at once included | same range |
+
+  - The whole bt-pty suite after it was green in both runs.
+  - The later commit adds only the file-unwritten condition to the judgement; in those runs lookup 2 took 89–144 ms, far inside PowerShell's 10 s save delay, so nothing could have been written while it ran.
+  - Here, from the account's copied cache, the warm-up takes 0.45 s, where the old one waited out 30 s for a save that never came.
+- **Pinned by:**
+  - `test_shell::tests::a_lookup_analysed_nothing_only_when_nothing_was_waiting_and_nothing_was_saved`, the judgement table;
+  - `a_cache_cut_short_is_completed_and_only_a_lookup_that_analyses_nothing_proves_it`, where half of a whole cache is completed by lookup 1 and proven by lookup 2;
+  - `a_powershell_child_starts_with_the_shared_warm_analysis_cache`, which now requires the line to name a lookup that analysed nothing.
+  - Each is red under its named mutations: the count alone; an ended save taken as the proof; a saved lookup taken as the last; a lookup that does not wait for its save.
+
 ### 2026-10-05 — A start a rollback sent hands its report to a Folio already running, in two keys every v2 reader ignores (U-36)
 
 **What was lost.** A start that a lock holder sends after a rollback (`--update-failed`, or the macOS start whose rescue build could not be started) learns its card from its own update pass. When a Folio already held the data directory, that start handed its launch over and left, and the launch wire had no field for the card: the running Folio opened a window or tab and said nothing. The running Folio cannot learn it from the disk instead: the pass retires a rolled-back journal under the transaction lock before the start asks who holds the data directory (F-6's order), the word that a rollback sent the start exists only on its command line, and the data directory's claim is per account, so the running Folio may be another copy with another installation home. The record is complete only in the start's verdict, so the verdict crosses.
