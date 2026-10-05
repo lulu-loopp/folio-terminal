@@ -21206,7 +21206,7 @@ fn the_tab_menus_subject_is_an_id_resolved_when_the_verb_runs() {
     assert!(
         duplicate.contains("state.focused()")
             && duplicate.contains("leaf.profile")
-            && duplicate.contains("leaf.place_for_a_new_shell()"),
+            && duplicate.contains("leaf.seed_place_for_a_new_shell()"),
         "both facts come off one leaf of the tab the menu names"
     );
     assert!(
@@ -25331,6 +25331,9 @@ fn the_session_save_writes_the_one_ladder() {
 /// Those verbs spawn a ConPTY and cannot run here, so this is their bodies, read
 /// through `bt_source`.
 ///
+/// Since 2026-10-05 the ladder is read with its kind (`LeafSession::seed_place_for_a_new_shell`,
+/// which reads `place_for_a_new_shell`), so a pane born in a named folder hands it on as named.
+///
 /// MUTATION, observed red: put `leaf.session.working_directory()` back in any one
 /// of the three bodies.
 #[test]
@@ -25338,10 +25341,10 @@ fn every_verb_that_starts_a_shell_in_a_panes_place_reads_the_one_ladder() {
     for door in ["restart_shell", "split_seat", "duplicate_tab"] {
         let body = method_body("Runtime", door);
         assert!(
-            body.contains("leaf.place_for_a_new_shell()")
+            body.contains("leaf.seed_place_for_a_new_shell()")
                 && !body.contains("session.working_directory()"),
             "`{door}` reads where the pane stands through \
-             `LeafSession::place_for_a_new_shell`:\n{body}"
+             `LeafSession::seed_place_for_a_new_shell`:\n{body}"
         );
     }
 }
