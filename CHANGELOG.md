@@ -9,7 +9,7 @@ All notable changes to Folio are recorded here. The format follows
 ### Added
 
 - PowerShell profiles whose startup command cannot be safely extended can enable Folio through that edition's `$PROFILE` in one click from Settings, with Undo. When PowerShell's execution policy blocks `$PROFILE`, the row says who set it and, when it is yours to change, offers the one command to copy.
-- In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder.
+- In an image or video preview, ‹ › and the arrow keys step to the previous or next file of the same kind in that folder. In a video preview, seeking moved to Shift+← and Shift+→.
 - A pane can reset the terminal modes a program left behind (pane menu ▸ Reset terminal modes).
 - Programs that ask for it can tell Ctrl+Enter, Shift+Enter, Alt+Enter,
   Shift+Tab, Ctrl+I, Ctrl+M and Esc apart from Enter, Tab and a lone escape:
@@ -28,8 +28,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Changed
 
-- New panes derive Folio's prompt, WSL forwarding, hyperlink and zsh startup declarations from the account environment at the moment the pane starts, so changes made after Folio opened are kept.
-- Folio's PowerShell integration script does nothing when your `$PROFILE` is read by another terminal; PowerShell started inside Folio stays integrated. A PowerShell on another machine reached by ssh is integrated only if ssh forwards `TERM_PROGRAM`. The bash and zsh scripts are unchanged: a copy you source yourself, for example on a server you ssh into from Folio, keeps working.
+- On Windows, new panes derive Folio's prompt, WSL forwarding, hyperlink and zsh startup declarations from the account environment at the moment the pane starts, so changes made after Folio opened are kept.
+- Folio's PowerShell integration script does nothing when your `$PROFILE` is read by another terminal. By default, a PowerShell you start by typing `pwsh` or `powershell` in a pane is not integrated; it is when your `$PROFILE` has Folio's line. A PowerShell on another machine reached by ssh is integrated only if ssh forwards `TERM_PROGRAM`. The bash and zsh scripts are unchanged: a copy you source yourself, for example on a server you ssh into from Folio, keeps working.
 - On Windows, a newly installed command is found in a new tab without restarting Folio.
 - PowerShell panes have command marks, folder tracking and inline formulas without setup when their command line can be safely extended; Settings offers the per-edition `$PROFILE` fallback for rows that cannot be extended.
 - PowerShell profile rows that run a command at startup — including Visual Studio Developer PowerShell and conda environments — now keep that command and receive the same command marks, folder tracking and inline formulas when PowerShell confirms the command parses.
@@ -97,9 +97,10 @@ All notable changes to Folio are recorded here. The format follows
   was restored when nothing had been replaced; it says the previous version was
   restored only when it was, and says the update is incomplete when putting it
   back did not finish.
-- Restart shell, Duplicate pane, the splits and Duplicate tab start the new
-  shell in the folder the pane was opened in when its shell never reported
-  one, instead of the profile's default folder. A folder that has since been
+- On a profile that starts in the current pane's folder, Restart shell,
+  Duplicate pane, the splits and Duplicate tab start the new shell in the
+  folder the pane was opened in when its shell never reported one, instead of
+  the profile's default folder. A folder that has since been
   deleted opens the profile's own starting folder rather than the folder Folio
   itself was started from.
 - Pointing at a pane's notice strip — its words or its `×` — no longer also
