@@ -7969,9 +7969,12 @@ impl SettingsPanel {
             self.recording = None;
         }
         // **A control that stopped being a stop hands the focus to its neighbour on the page**
-        // (coordinator's ruling 2026-10-05): the nearest stop after it in the order it stood
-        // in, else the nearest before it, and the dialog's `×` only when the page has no stop at
-        // all — so pressing Check and then Enter again does not close Settings.
+        // (coordinator's rulings 2026-10-05): the nearest stop before it in the order it stood
+        // in, else the nearest after it, and the dialog's `×` only when the page has no stop at
+        // all. Before first, because what follows a control can be a bigger verb than it — the
+        // last `↺` on Shortcuts is followed by `Restore all` — and a habitual second Enter must
+        // not reach it; and never the `×`, so Enter on Check and Enter again does not close
+        // Settings.
         let page = page_order(content, self.category, &self.placed_buttons);
         self.focus = match self.focus {
             Some(lost) => nearest_stop(&self.seen_order, lost, &page)
@@ -7983,8 +7986,8 @@ impl SettingsPanel {
     }
 }
 
-/// The stop of `page` nearest to `lost` in `seen` — the order `lost` stood in: the first one
-/// after it, else the last one before it. `None` when `lost` was not in `seen` or no neighbour
+/// The stop of `page` nearest to `lost` in `seen` — the order `lost` stood in: the last one
+/// before it, else the first one after it. `None` when `lost` was not in `seen` or no neighbour
 /// of it is on `page`.
 fn nearest_stop(
     seen: &[SettingsTarget],
@@ -7992,10 +7995,11 @@ fn nearest_stop(
     page: &[SettingsTarget],
 ) -> Option<SettingsTarget> {
     let at = seen.iter().position(|target| *target == lost)?;
-    seen[at + 1..]
+    seen[..at]
         .iter()
+        .rev()
         .find(|target| page.contains(target))
-        .or_else(|| seen[..at].iter().rev().find(|target| page.contains(target)))
+        .or_else(|| seen[at + 1..].iter().find(|target| page.contains(target)))
         .copied()
 }
 
@@ -32777,7 +32781,7 @@ mod tests {
     /// About's Version control then disabling itself (a check in flight, a download, verifying,
     /// a recovery Retry cannot race): the frame's rule
     /// ([`SettingsPanel::keep_focus_on_a_stop`]) leaves the focus on a stop of the new order —
-    /// on its nearest neighbour in the order it stood in (after it, else before it), never the ×.
+    /// on its nearest neighbour in the order it stood in (before it, else after it), never the ×.
     ///
     /// MUTATIONS, each observed red: delete the `Link` arm of `SettingsPanel::activate` — every
     /// door answers `Inert`; make `keep_focus_on_a_stop` only note the placement — the focus
@@ -32853,14 +32857,15 @@ mod tests {
                          {control:?}, and the focus rests on {focus:?}, which is no stop"
                     );
                     if !after.contains(stop) {
-                        // The nearest stop of the page after it, else before it; `×` only for a
+                        // The nearest stop of the page before it, else after it; `×` only for a
                         // page with no stop.
                         let page = page_order(changed, category, &buttons);
                         let at = before.iter().position(|seen| seen == stop).expect("a stop");
-                        let neighbour = before[at + 1..]
+                        let neighbour = before[..at]
                             .iter()
+                            .rev()
                             .find(|seen| page.contains(seen))
-                            .or_else(|| before[..at].iter().rev().find(|seen| page.contains(seen)))
+                            .or_else(|| before[at + 1..].iter().find(|seen| page.contains(seen)))
                             .or(after.first());
                         assert_eq!(Some(&focus), neighbour, "{category:?}: {stop:?}");
                         assert_ne!(
@@ -32874,15 +32879,16 @@ mod tests {
         }
     }
 
-    /// RED (coordinator's ruling 2026-10-05) — **Enter on Check, then Enter again, does not close
+    /// RED (coordinator's rulings 2026-10-05) — **Enter on Check, then Enter again, does not close
     /// Settings**: the Version control stops being a stop while the check runs, and the focus
-    /// goes to the next stop of the About page, not to the dialog's `×`. With a failed update's
-    /// Details link standing before the control, "next" is the stop after it (Automatic check),
-    /// not the page's first stop (Details).
+    /// goes to its nearest neighbour on the About page, not to the dialog's `×`. Nothing stands
+    /// before Check, so the neighbour is the stop after it (Automatic check); with a failed
+    /// update's Details link standing before the control, the neighbour is Details, whose Enter
+    /// raises the failed card again.
     ///
     /// MUTATIONS, each observed red: give `keep_focus_reachable` back its old answer
-    /// (`order.first()`, the `×`) — the second Enter closes Settings; answer the page's first stop
-    /// instead of the neighbour (`page.first()` before `nearest_stop`) — the Details row.
+    /// (`order.first()`, the `×`) — the second Enter closes Settings; look after the lost stop
+    /// before looking before it in `nearest_stop` — the Details case lands on Automatic check.
     #[test]
     fn enter_on_check_then_enter_again_does_not_close_settings() {
         use crate::update_card::{VersionControl, VersionLink, VersionRow};
@@ -32902,11 +32908,13 @@ mod tests {
             ..profiles_content(&rows, &shortcuts, &lines)
         };
         let version = SettingsTarget::Link(SettingsRow::AboutVersion);
-        let next = SettingsTarget::Combo(SettingsRow::AutoCheck);
-        for (before, after, what) in [
+        let auto_check = SettingsTarget::Combo(SettingsRow::AutoCheck);
+        let details = SettingsTarget::MenuAction(SettingsRow::AboutVersion);
+        for (before, after, next, what) in [
             (
                 with(VersionControl::Check { enabled: true }, None),
                 with(VersionControl::Check { enabled: false }, None),
+                auto_check,
                 "Check, then Checking…",
             ),
             (
@@ -32918,6 +32926,7 @@ mod tests {
                     VersionControl::Retry { enabled: false },
                     Some(VersionLink::Details),
                 ),
+                details,
                 "Retry beside Details, then Retry disabled",
             ),
         ] {
@@ -32935,7 +32944,7 @@ mod tests {
             assert_eq!(
                 panel.focus(),
                 Some(next),
-                "{what}: the next stop of the page"
+                "{what}: the nearest stop of the page"
             );
             assert_ne!(
                 panel.key(SettingsKey::Activate, after, after.values),
@@ -32944,6 +32953,49 @@ mod tests {
             );
             assert!(panel.is_open(), "{what}");
         }
+    }
+
+    /// RED (coordinator's ruling 2026-10-05, review of 047-EXPERIENCE) — **Enter on the last row's
+    /// `↺`, then Enter again, does not restore every shortcut.** The `↺` stops being a stop once
+    /// its row is back at its default; the focus goes to the stop before it — that row's own
+    /// Record — not to `Restore all` after it, which resets every binding with no question.
+    ///
+    /// MUTATION, observed red: look after the lost stop before looking before it in
+    /// `nearest_stop` — the focus lands on `Restore all` and the second Enter chooses it.
+    #[test]
+    fn enter_on_the_last_reset_then_enter_again_does_not_restore_all() {
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let mut overridden = shortcut_lines();
+        let last = overridden
+            .iter()
+            .rposition(|line| line.recordable)
+            .expect("a recordable line");
+        overridden[last].overridden = true;
+        let defaults = shortcut_lines();
+        let before = content(&rows, &overridden);
+        let after = content(&rows, &defaults);
+        let reset = SettingsTarget::RestoreRow(last);
+        assert_eq!(
+            page_order(before, SettingsCategory::Shortcuts, &[]).last(),
+            Some(&SettingsTarget::RestoreAll),
+            "Restore all follows the last ↺"
+        );
+        let mut panel = SettingsPanel::default();
+        panel.toggle(before);
+        panel.select_category(SettingsCategory::Shortcuts);
+        panel.focus_to(reset);
+        assert_eq!(
+            panel.key(SettingsKey::Activate, before, before.values),
+            SettingsKeyVerdict::Chose(reset)
+        );
+        // The runtime's restore ends with this rule (`apply_shortcut_edit`).
+        panel.keep_focus_reachable(after);
+        assert_eq!(panel.focus(), Some(SettingsTarget::Record(last)));
+        assert_ne!(
+            panel.key(SettingsKey::Activate, after, after.values),
+            SettingsKeyVerdict::Chose(SettingsTarget::RestoreAll),
+            "a second Enter does not restore every shortcut"
+        );
     }
 
     /// PIN — **the one door: a box that reaches past the page's clip answers no press, on either
