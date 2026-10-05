@@ -64,8 +64,12 @@
 //! writes it create-new with `install_txn::durable_create` (flush file, rename
 //! that never replaces, flush directory). The window thread never writes it.
 //!
-//! **The journal has one writer, the lock holder.** N writes only its receipt;
-//! turning it into `Committed` is the applier's. A receipt that lands after the
+//! **The journal has one writer, the lock holder** — with one exception. N
+//! writes only its receipt, except U-35's reserved trial (Windows; started
+//! because the operating system refused the rescue copy every holder runs):
+//! once ready, its watch takes the transaction lock and records `Committed`
+//! from its own receipt as it is on disk, which must name this very process
+//! (`update_apply::commit_last_trial`). A receipt that lands after the
 //! journal says `RollbackIntent` is ignored **by rule** — the lock holder's rule
 //! (`update_txn::next` refuses it; U-18/U-21 hold it), not this module's. A
 //! rollback that is still `destructive` is therefore not an end here: its
@@ -83,6 +87,7 @@ use bt_platform::file_reads::{self, Lane};
 use bt_platform::install_flip::Running;
 
 use crate::persist;
+use crate::update_apply::LastTrialCommit;
 use crate::update_startup;
 use crate::update_txn::{Home, Receipt, TrialSight, TxnId, trial_sight};
 
@@ -381,11 +386,11 @@ impl Gate {
         self.state().receipt_owed = true;
     }
 
-    /// **The receipt written again, create-new, when a write of it was
-    /// refused** (U-37): a home that refused it — made read-only, a scanner's
-    /// handle — may take it a moment later, and a receipt that never lands is
-    /// a healthy trial nobody can commit. `None` when nothing is owed; an
-    /// existing receipt is the one owed, never overwritten.
+    /// **The receipt written again when a write of it was refused** (U-37): a
+    /// home that refused it — made read-only, a scanner's handle — may take it
+    /// a moment later, and a receipt that never lands is a healthy trial nobody
+    /// can commit. `None` when nothing is owed; written by the one rule for
+    /// what is already at the receipt's name ([`write_receipt`]).
     fn write_owed_receipt(&self) -> Option<Result<(), String>> {
         let job = {
             let state = self.state();
@@ -394,11 +399,7 @@ impl Gate {
             }
             state.receipt_job.clone()?
         };
-        let written = match bt_platform::install_txn::durable_create(&job.path, &job.bytes) {
-            Ok(()) => Ok(()),
-            Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => Ok(()),
-            Err(failure) => Err(failure.to_string()),
-        };
+        let written = write_receipt(&job);
         if written.is_ok() {
             self.state().receipt_owed = false;
         }
@@ -478,22 +479,34 @@ pub(crate) fn take_released() -> Vec<Writer> {
 /// calls `wake` when a commit released the pending writes. Nothing at all
 /// outside a trial.
 pub(crate) fn begin_watch(wake: impl Fn() + Send + 'static) {
-    let (Some((txn, _)), Some(home)) = (update_startup::trial(), update_startup::trial_home())
+    let (Some((txn, nonce)), Some(home)) = (update_startup::trial(), update_startup::trial_home())
     else {
         return;
     };
     let journal = home.journal();
+    let last = update_startup::is_last_trial();
     let started = bt_platform::spawn_at_priority(
         "folio-trial-watch",
         bt_platform::ThreadPriority::BelowNormal,
         move |ctx| {
+            let mut commit = || crate::update_apply::commit_last_trial(ctx, home, txn, nonce);
             let mut hand_back =
                 |ready: bool| hand_back(ctx, home, txn, ready, FROM_TRIAL_SINCE, &mut Detached);
             let mut watchdog = Watchdog {
                 every: WATCHDOG,
                 hand_back: &mut hand_back,
             };
-            watch(&GATE, &journal, txn, WATCH_INTERVAL, &wake, &mut watchdog);
+            let own_commit: Option<&mut CommitItself<'_>> =
+                if last { Some(&mut commit) } else { None };
+            watch(
+                &GATE,
+                &journal,
+                txn,
+                WATCH_INTERVAL,
+                &wake,
+                own_commit,
+                &mut watchdog,
+            );
         },
     );
     if let Err(error) = started {
@@ -556,6 +569,11 @@ pub(crate) fn watchdog_asleep() -> Watchdog<'static> {
     }
 }
 
+/// **U-35's reserved trial asking to commit itself** — in the product
+/// `update_apply::commit_last_trial`; a test answers what it is told.
+pub(crate) type CommitItself<'a> =
+    dyn FnMut() -> Result<crate::update_apply::LastTrialCommit, String> + 'a;
+
 /// **What one read of the journal told the watch** (H.2 step 2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Read {
@@ -575,13 +593,20 @@ enum Read {
 /// handed back, single-flight (not while the recovery an earlier hand-back
 /// started still runs, by pid and start instant), and an `Unreadable` one is
 /// not (no holder could read it either); (4) the pause. Read-only on the
-/// journal: its one writer is not this process.
+/// journal — its writer is the lock holder — **except for U-35's reserved
+/// trial** (`commit_itself`, U-35 round 2): once this trial is ready (its
+/// receipt fell due), between steps 1 and 2 it asks to commit itself on that
+/// receipt, each turn until it is `Committed` (released at once), or the
+/// journal no longer waits for it (it never asks again). It is the one trial
+/// no holder can adopt — every holder runs the rescue copy the operating
+/// system refused — so without it a healthy trial would keep nothing.
 pub(crate) fn watch(
     gate: &Gate,
     journal: &Path,
     txn: TxnId,
     interval: Duration,
     wake: &dyn Fn(),
+    mut commit_itself: Option<&mut CommitItself<'_>>,
     watchdog: &mut Watchdog<'_>,
 ) {
     let begun = Instant::now();
@@ -589,6 +614,7 @@ pub(crate) fn watch(
     let mut recovery: Option<Running> = None;
     let mut unreadable_since: Option<Instant> = None;
     let (mut retry_at, mut pause) = (Instant::now(), RECEIPT_RETRY_FIRST);
+    let mut said_commit_refusal = false;
     loop {
         // (1) The receipt.
         if let Some(written) = gate.receipt_answered() {
@@ -617,6 +643,39 @@ pub(crate) fn watch(
                     retry_at = Instant::now() + pause;
                 }
                 None => {}
+            }
+        }
+        // U-35's reserved trial, once ready: the ordinary readiness edge, and
+        // what commits is the receipt as it is on disk, under the lock.
+        if gate.ready()
+            && let Some(commit) = commit_itself.as_deref_mut()
+        {
+            match commit() {
+                Ok(LastTrialCommit::Committed) => {
+                    if gate.decide(TrialSight::Committed) {
+                        eprintln!(
+                            "BT_UPDATE_TRIAL transaction {txn} is committed by its own receipt; its writes are released"
+                        );
+                        wake();
+                    }
+                    return;
+                }
+                Ok(LastTrialCommit::Pending) => {}
+                Ok(LastTrialCommit::NotItsOwn) => commit_itself = None,
+                Ok(LastTrialCommit::Unprovable) => {
+                    eprintln!(
+                        "BT_UPDATE_TRIAL transaction {txn}: this process cannot read its own start instant, so its receipt names nobody; it is not committed by itself, and a recovery decides"
+                    );
+                    commit_itself = None;
+                }
+                Err(error) => {
+                    if !said_commit_refusal {
+                        said_commit_refusal = true;
+                        eprintln!(
+                            "BT_UPDATE_TRIAL transaction {txn} could not be committed by its own receipt: {error}"
+                        );
+                    }
+                }
             }
         }
         // (2) The journal.
@@ -730,6 +789,80 @@ pub(crate) fn take_the_claim_within(
 pub(crate) struct ReceiptJob {
     pub(crate) path: PathBuf,
     pub(crate) bytes: Vec<u8>,
+}
+
+/// **What a receipt already at a trial's own name is to that trial** (U-35
+/// round 3) — the one meaning the writer ([`write_receipt`]), U-35's
+/// self-commit (`update_apply::commit_last_trial`) and, by the same test, a
+/// recovery's survey (`update_apply::survey`, which adopts only a receipt
+/// naming a running process exactly) all read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AtItsName {
+    /// This very receipt: the same bytes are already there.
+    Its,
+    /// **An earlier attempt of the same trial**: a receipt of the same
+    /// transaction and nonce that names no running process — the process it
+    /// names has ended, or its pid now belongs to a process started at
+    /// another instant (pid and start instant together, so a reused pid is
+    /// never mistaken for it), or it names no start instant and so names
+    /// nobody. It is evidence about a process that cannot answer for this
+    /// one, and only the trial with that nonce writes there, so this trial
+    /// replaces it.
+    Earlier,
+    /// A receipt naming a running process, a receipt of another transaction
+    /// or nonce, or bytes that are no receipt: never written over.
+    Kept,
+}
+
+/// [`AtItsName`] for `there` — what was read at the name of `mine`'s receipt.
+pub(crate) fn at_its_name(there: &Receipt, mine: &Receipt) -> AtItsName {
+    if there == mine {
+        return AtItsName::Its;
+    }
+    if there.txn == mine.txn && there.nonce == mine.nonce && !names_a_running_process(there) {
+        AtItsName::Earlier
+    } else {
+        AtItsName::Kept
+    }
+}
+
+/// **Whether `receipt` names a process that runs now** — by its pid and its
+/// start instant together; a receipt without a start instant names nobody.
+pub(crate) fn names_a_running_process(receipt: &Receipt) -> bool {
+    receipt.started.is_some_and(|started| {
+        bt_platform::install_flip::still_running(Running {
+            pid: receipt.pid,
+            started,
+        })
+    })
+}
+
+/// **Write a trial's receipt** — create-new, through
+/// `install_txn::durable_create`; where the name is taken, by [`AtItsName`]:
+/// the same receipt is already written; **an earlier attempt of the same trial
+/// is replaced whole** by `install_txn::durable_write` (a temporary, a flush,
+/// one rename, a flush of the folder), so a ready trial that died before its
+/// transaction was decided never stops the next attempt of that trial from
+/// proving itself (U-35 round 3, the review's F1); anything else is refused
+/// and left byte for byte. Two attempts of one trial can never both be ready:
+/// each must first hold the data directory's claim (§C.7).
+///
+/// # Errors
+/// The write failed, or the name holds a receipt that is kept.
+pub(crate) fn write_receipt(job: &ReceiptJob) -> Result<(), String> {
+    let failure = match bt_platform::install_txn::durable_create(&job.path, &job.bytes) {
+        Ok(()) => return Ok(()),
+        Err(failure) if failure.error.kind() == io::ErrorKind::AlreadyExists => failure,
+        Err(failure) => return Err(failure.to_string()),
+    };
+    let mine = Receipt::parse(&job.bytes).map_err(|refusal| refusal.to_string())?;
+    let there = crate::update_apply::read_receipt(&job.path).and_then(Result::ok);
+    match there.map(|there| at_its_name(&there, &mine)) {
+        Some(AtItsName::Its) => Ok(()),
+        Some(AtItsName::Earlier) => bt_platform::install_txn::durable_write(&job.path, &job.bytes)
+            .map_err(|failure| failure.to_string()),
+        Some(AtItsName::Kept) | None => Err(format!("{failure}; the receipt there is kept")),
+    }
 }
 
 /// **The storage worker has the receipt**: its answer is read by the watch,
@@ -996,12 +1129,14 @@ mod tests {
             (
                 Phase::RollbackIntent {
                     trial: Some(TrialProcess { pid: 1, started: 2 }),
+                    trial_started: false,
                 },
                 TrialSight::Undecided,
             ),
             (
                 Phase::Stuck {
                     trial: None,
+                    trial_started: false,
                     last_error: "held".to_owned(),
                     attempts: 1,
                     retrial: None,
@@ -1100,6 +1235,7 @@ mod tests {
                 &|| {
                     watch_woken.fetch_add(1, Ordering::SeqCst);
                 },
+                None,
                 &mut watchdog_asleep(),
             );
         });
@@ -1119,6 +1255,79 @@ mod tests {
         assert!(gate.take_released().is_empty(), "released once");
         assert!(!gate.defers(true), "a committed trial writes");
         assert!(!gate.defer(true, Writer::Pins), "and records nothing more");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-35 round 2, the review's B3) — **U-35's reserved trial asks to
+    /// commit itself only once it is ready, asks again while the answer is
+    /// `Pending`, and a commit of its own releases what it held back** —
+    /// with the journal still saying `TrialStarting` and nobody else writing
+    /// it, as when every holder's rescue copy is refused. A trial that is not
+    /// ready never asks: its writes stay held.
+    ///
+    /// The watch's own order is the seam: the watchdog (due at once here)
+    /// runs after the own-commit step of a turn, so the first turn sees a
+    /// trial that is not ready, and the watchdog's first call makes it ready
+    /// for the turns after it. No clock is waited on.
+    ///
+    /// MUTATION: drop `gate.ready() &&` from the watch's own-commit step (it
+    /// asks before readiness); or treat `Pending` as the end of asking.
+    #[test]
+    fn the_reserved_trial_commits_itself_only_once_ready() {
+        let root = scratch("own-commit");
+        let journal = root.join("journal.json");
+        std::fs::write(
+            &journal,
+            journal_bytes(
+                TXN,
+                Phase::TrialStarting {
+                    nonce: nonce(),
+                    began_ms: 1_700_000_000_000,
+                },
+            ),
+        )
+        .unwrap();
+        let gate = Gate::new();
+        assert!(gate.defer(true, Writer::Settings));
+        let (asked, asked_unready, woken) = (
+            std::cell::Cell::new(0_usize),
+            std::cell::Cell::new(0_usize),
+            std::cell::Cell::new(0_usize),
+        );
+        let mut commit = || {
+            asked.set(asked.get() + 1);
+            if !gate.ready() {
+                asked_unready.set(asked_unready.get() + 1);
+            }
+            // Pending twice — the lock held, the receipt not yet on disk —
+            // then committed.
+            if asked.get() <= 2 {
+                Ok(LastTrialCommit::Pending)
+            } else {
+                Ok(LastTrialCommit::Committed)
+            }
+        };
+        let mut becomes_ready = |_: bool| {
+            gate.ready_for_a_test();
+            None
+        };
+        watch(
+            &gate,
+            &journal,
+            TXN,
+            Duration::ZERO,
+            &|| woken.set(woken.get() + 1),
+            Some(&mut commit),
+            &mut Watchdog {
+                every: Duration::ZERO,
+                hand_back: &mut becomes_ready,
+            },
+        );
+        assert_eq!(asked_unready.get(), 0, "not ready: never asked");
+        assert_eq!(asked.get(), 3, "asked until committed");
+        assert_eq!(woken.get(), 1);
+        assert_eq!(gate.take_released(), vec![Writer::Settings]);
+        assert!(!gate.defers(true));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1160,6 +1369,7 @@ mod tests {
                 &|| {
                     woken.fetch_add(1, Ordering::SeqCst);
                 },
+                None,
                 &mut watchdog_asleep(),
             );
             assert_eq!(woken.load(Ordering::SeqCst), 0, "{ending:?}");
@@ -1204,6 +1414,7 @@ mod tests {
                 TXN,
                 Duration::from_millis(5),
                 &|| {},
+                None,
                 &mut watchdog,
             );
         });
@@ -1391,6 +1602,7 @@ mod tests {
                         TXN,
                         Duration::from_millis(10),
                         &|| {},
+                        None,
                         &mut watchdog,
                     );
                 },
@@ -1519,6 +1731,7 @@ mod tests {
                 TXN,
                 Duration::from_millis(5),
                 &|| {},
+                None,
                 &mut watchdog_asleep(),
             );
         });
@@ -1629,7 +1842,9 @@ mod tests {
                 nonce: nonce(),
                 pid,
                 version: "0.0.1".to_owned(),
-                started: None,
+                // A process that runs: this test process, by its own start
+                // instant; any other pid at that instant names nobody.
+                started: bt_platform::install_flip::started_of(std::process::id()),
             }
             .encode();
             store
@@ -1642,11 +1857,139 @@ mod tests {
                 .unwrap()
                 .result
         };
-        assert_eq!(write(1), Ok(()));
+        assert_eq!(write(std::process::id()), Ok(()));
         let first = std::fs::read(&path).unwrap();
         assert!(write(2).is_err(), "the second receipt is refused");
         assert_eq!(std::fs::read(&path).unwrap(), first);
         store.close();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-35 round 3, the review's F1) — **what is already at a trial's
+    /// receipt name decides whether its receipt is written there**: the same
+    /// receipt is already written; an earlier attempt of the same trial — this
+    /// transaction and nonce, naming no running process (its pid at another
+    /// start instant, as a reused pid would be, or no start instant at all) —
+    /// is replaced; a receipt naming a running process, or one of another
+    /// transaction or nonce, is never written over.
+    ///
+    /// MUTATION: in `at_its_name`, drop `!names_a_running_process(there)` (a
+    /// live receipt is replaced); drop the transaction and nonce check (a
+    /// foreign one is replaced); or in `write_receipt`, never replace (the
+    /// earlier attempt stays).
+    #[test]
+    fn a_receipt_is_replaced_only_when_it_is_an_earlier_attempt_of_the_same_trial() {
+        let root = scratch("receipt-rule");
+        let home = Home::at(root.join("home"));
+        std::fs::create_dir_all(home.transaction(TXN)).unwrap();
+        let path = home.receipt_path(TXN, &nonce());
+        let me = std::process::id();
+        let now = bt_platform::install_flip::started_of(me);
+        let receipt = |txn: TxnId, nonce: Nonce, pid: u32, started: Option<u64>| Receipt {
+            txn,
+            nonce,
+            pid,
+            version: "0.4.7".to_owned(),
+            started,
+        };
+        let mine = receipt(TXN, nonce(), me, now);
+        let job = ReceiptJob {
+            path: path.clone(),
+            bytes: mine.encode(),
+        };
+        assert!(now.is_some(), "this process reads its own start instant");
+        let other_txn = TxnId::new([0x11; 16]);
+        let other_nonce = Nonce::new([0x22; 32]);
+        let running = Receipt {
+            version: "0.4.6".to_owned(),
+            ..mine.clone()
+        };
+        // (what is there, whether this receipt replaces it)
+        for (there, replaced) in [
+            // A running process: this one, by its true start instant.
+            (running, false),
+            // Its pid at another start instant: a reused pid names nobody.
+            (receipt(TXN, nonce(), me, now.map(|at| at + 1)), true),
+            // No start instant: names nobody.
+            (receipt(TXN, nonce(), 4, None), true),
+            // Another transaction's, or another nonce's, at this name.
+            (receipt(other_txn, nonce(), 4, None), false),
+            (receipt(TXN, other_nonce, 4, None), false),
+        ] {
+            let written_there = there.encode();
+            std::fs::write(&path, &written_there).unwrap();
+            let answer = write_receipt(&job);
+            let on_disk = std::fs::read(&path).unwrap();
+            if replaced {
+                assert_eq!(answer, Ok(()), "an earlier attempt: {there:?}");
+                assert_eq!(on_disk, job.bytes, "replaced: {there:?}");
+            } else {
+                assert!(answer.is_err(), "kept: {there:?}");
+                assert_eq!(on_disk, written_there, "byte for byte: {there:?}");
+            }
+        }
+        // The same receipt already there is written.
+        std::fs::write(&path, &job.bytes).unwrap();
+        assert_eq!(write_receipt(&job), Ok(()));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// RED (U-35 round 3, the review's F3) — **`Unprovable` is said once and
+    /// never asked again**: the trial stays uncommitted, its writes held,
+    /// until the journal is decided by somebody else.
+    ///
+    /// The seam is the watch's own order, as in
+    /// `the_reserved_trial_commits_itself_only_once_ready`: the watchdog, due
+    /// every turn, makes the trial ready on its first call and writes the
+    /// decision a recovery would on its third.
+    ///
+    /// MUTATION: in the watch, treat `Unprovable` as `Pending` (asked every
+    /// turn for ever).
+    #[test]
+    fn an_unprovable_trial_stops_asking_to_commit_itself() {
+        let root = scratch("unprovable");
+        let journal = root.join("journal.json");
+        std::fs::write(
+            &journal,
+            journal_bytes(
+                TXN,
+                Phase::TrialStarting {
+                    nonce: nonce(),
+                    began_ms: 1_700_000_000_000,
+                },
+            ),
+        )
+        .unwrap();
+        let gate = Gate::new();
+        assert!(gate.defer(true, Writer::Settings));
+        let (asked, turns) = (std::cell::Cell::new(0_usize), std::cell::Cell::new(0_usize));
+        let mut commit = || {
+            asked.set(asked.get() + 1);
+            Ok(LastTrialCommit::Unprovable)
+        };
+        let mut watchdog_turn = |_: bool| {
+            turns.set(turns.get() + 1);
+            match turns.get() {
+                1 => gate.ready_for_a_test(),
+                3 => std::fs::write(&journal, journal_bytes(TXN, Phase::Committed)).unwrap(),
+                _ => {}
+            }
+            None
+        };
+        watch(
+            &gate,
+            &journal,
+            TXN,
+            Duration::ZERO,
+            &|| {},
+            Some(&mut commit),
+            &mut Watchdog {
+                every: Duration::ZERO,
+                hand_back: &mut watchdog_turn,
+            },
+        );
+        assert_eq!(asked.get(), 1, "asked once, then never again");
+        assert!(turns.get() >= 3);
         let _ = std::fs::remove_dir_all(&root);
     }
 

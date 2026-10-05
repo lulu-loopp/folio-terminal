@@ -504,10 +504,10 @@ pub(crate) struct ReceiptWritten {
 }
 
 /// Write a trial's receipt, on the thread that calls this — the storage
-/// worker. Create-new: an existing receipt is refused, never written over.
+/// worker. Create-new; an existing receipt is never written over unless it is
+/// an earlier attempt of the same trial (`update_trial::write_receipt`).
 fn write_receipt(job: &crate::update_trial::ReceiptJob) -> ReceiptWritten {
-    let result = bt_platform::install_txn::durable_create(&job.path, &job.bytes)
-        .map_err(|failure| failure.to_string());
+    let result = crate::update_trial::write_receipt(job);
     ReceiptWritten {
         by: bt_platform::admission::role(),
         result,

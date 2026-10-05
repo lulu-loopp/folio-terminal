@@ -498,6 +498,11 @@ pub(crate) enum Failure {
     /// and destructive — `Stuck`, or not begun — and `folder` is where its
     /// journal is, which the card names.
     Incomplete { folder: PathBuf },
+    /// **Recovery could not be launched, so this already-running new build is
+    /// the recorded trial** (0.4.7 U-35). The update is still incomplete and
+    /// `folder` is where its journal is; unlike [`Failure::Incomplete`], the
+    /// card also tells the reader that this session is the trial.
+    TrialIncomplete { folder: PathBuf },
 }
 
 /// **Why a driver stopped** (U-18 decision 11, grown by the macOS Prepare,
@@ -594,8 +599,9 @@ pub(crate) enum State {
     /// **The update this launch said was incomplete has completed** (U-32):
     /// this process is the trial a lock holder started over a `Stuck`
     /// transaction whose new build was live, its card stood at
-    /// [`Failure::Incomplete`] from the start, and the trial's watch then read
-    /// `Committed` — the receipt committed it forward. The card follows the
+    /// [`Failure::Incomplete`] or [`Failure::TrialIncomplete`] from the start,
+    /// and the trial's watch then read `Committed` — the receipt committed it
+    /// forward. The card follows the
     /// journal's final phase, not the phase at launch; the version is this
     /// build's own.
     Updated(String),
@@ -1350,8 +1356,9 @@ pub(crate) struct Job<W> {
     /// launch left ([`Self::after_start`], U-33).
     launch: Launch,
     /// **This launch was sent to say an update is incomplete** — its card
-    /// started at [`Failure::Incomplete`] ([`Self::after_rollback`]). Read by
-    /// [`Self::after_commit`] (U-32).
+    /// started at [`Failure::Incomplete`] or [`Failure::TrialIncomplete`]
+    /// ([`Self::after_rollback`]). Read by [`Self::after_commit`] (U-32,
+    /// U-35).
     said_incomplete: bool,
 }
 
@@ -1442,7 +1449,10 @@ impl<W: Copy + Eq> Job<W> {
     #[must_use]
     pub(crate) fn after_rollback(mut self, failure: Option<Failure>) -> Self {
         if let Some(failure) = failure {
-            self.said_incomplete = matches!(failure, Failure::Incomplete { .. });
+            self.said_incomplete = matches!(
+                failure,
+                Failure::Incomplete { .. } | Failure::TrialIncomplete { .. }
+            );
             self.last_failure = Some((None, failure.clone()));
             self.state = State::Failed(None, failure);
             self.offered_this_launch = true;
@@ -1465,7 +1475,10 @@ impl<W: Copy + Eq> Job<W> {
     pub(crate) fn after_commit(&mut self, version: &str) -> bool {
         let standing = matches!(
             self.state,
-            State::Failed(None, Failure::Incomplete { .. }) | State::Idle
+            State::Failed(
+                None,
+                Failure::Incomplete { .. } | Failure::TrialIncomplete { .. }
+            ) | State::Idle
         );
         if !(self.said_incomplete && standing) {
             return false;
@@ -3506,5 +3519,19 @@ mod tests {
 
         let plain = self::job().after_rollback(None);
         assert_eq!(plain.state(), &State::Pending(Pending::AwaitingBoth));
+    }
+
+    /// RED (U-35) — **a fallback trial's incomplete card follows its journal
+    /// to `Updated` when that recorded trial commits**, just as the existing
+    /// retrial over `Stuck` does.
+    ///
+    /// MUTATION: omit `Failure::TrialIncomplete` from `said_incomplete`.
+    #[test]
+    fn u35_a_fallback_trial_that_commits_reports_updated() {
+        let mut job = job().after_rollback(Some(Failure::TrialIncomplete {
+            folder: PathBuf::from("update-journal"),
+        }));
+        assert!(job.after_commit("0.4.7"));
+        assert_eq!(job.state(), &State::Updated("0.4.7".to_owned()));
     }
 }

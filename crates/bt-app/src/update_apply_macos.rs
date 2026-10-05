@@ -1598,7 +1598,7 @@ impl<'a> Txn<'a> {
             let actor = tenure.unwrap_or_else(|| self.asker.actor(self.phase()));
             let (trial, nonce) = match &self.journal.body.phase {
                 Phase::Trial { process, nonce, .. } => (Some(*process), Some(*nonce)),
-                Phase::RollbackIntent { trial } => (*trial, None),
+                Phase::RollbackIntent { trial, .. } => (*trial, None),
                 Phase::Stuck { trial, retrial, .. } => {
                     (*trial, retrial.map(|retrial| retrial.nonce))
                 }

@@ -36,8 +36,9 @@ use bt_platform::trust::FileVersion;
 use bt_platform::trust_harness::{Behaviour, IDENTITY, TestCa};
 use bt_winres::digest::sha256;
 
-use crate::update_apply::{Left, Window};
+use crate::update_apply::{LastTrialCommit, Left, Window, commit_last_trial_as};
 use crate::update_handoff::{Leaving, Spawner};
+use crate::update_job::Failure;
 use crate::update_prepare_windows::tests::build_that;
 use crate::update_txn::{
     Adapter, Body, Class, Header, HeaderOutcome, Member, Outcome, PhaseKind, Receipt,
@@ -155,6 +156,7 @@ enum Trial {
 type MoveHook = Box<dyn FnMut(&Move) + Send>;
 type SayHook = Box<dyn FnMut(&str) + Send>;
 type DisarmHook = Box<dyn FnMut() + Send>;
+type StartHook = Box<dyn FnMut(usize, &Path, &[OsString]) + Send>;
 
 /// **The stand-in world**: its lines kept, the entrance through the real door
 /// over [`Memory`], the trial a real synthetic process, every other start
@@ -189,10 +191,16 @@ struct Fake {
     starts_die: usize,
     /// **Every start is refused** (U-34, round 2).
     refuse_every_start: bool,
+    /// So many successive starts are refused before later ones succeed
+    /// (U-35's two ordinary choices, then the last trial).
+    refuse_starts: usize,
     /// The failure windows shown in this process (U-34, round 2).
     shown: Vec<String>,
     /// Looks at every line as it is said (U-37).
     on_say: Option<SayHook>,
+    /// Looks immediately before each detached start, so a test can observe
+    /// the journal at the process-creation boundary.
+    before_start: Option<StartHook>,
     /// **Acknowledge a start only as the product does** (U-37, H.3): a Folio
     /// holding the data directory, asked through `update_apply::claimed_within`
     /// for this long — a denied claim question is no acknowledgement.
@@ -212,8 +220,15 @@ impl World for Fake {
     }
 
     fn spawn_detached(&mut self, program: &Path, args: &[OsString]) -> io::Result<()> {
+        if let Some(look) = &mut self.before_start {
+            look(self.opened.len(), program, args);
+        }
         self.opened.push((program.to_path_buf(), args.to_vec()));
-        if self.refuse_every_start || self.refuse_start_of.as_deref() == Some(program) {
+        if self.refuse_every_start
+            || self.refuse_start_of.as_deref() == Some(program)
+            || self.refuse_starts > 0
+        {
+            self.refuse_starts = self.refuse_starts.saturating_sub(1);
             return Err(io::Error::other("the system would not start it (test)"));
         }
         Ok(())
@@ -476,8 +491,10 @@ impl Install {
             refuse_start_of: None,
             starts_die: 0,
             refuse_every_start: false,
+            refuse_starts: 0,
             shown: Vec::new(),
             on_say: None,
+            before_start: None,
             real_ack: None,
         }
     }
@@ -1375,6 +1392,7 @@ fn flipped_at(install: &Install, phase: Phase) {
 fn stuck(attempts: u8) -> Phase {
     Phase::Stuck {
         trial: None,
+        trial_started: false,
         last_error: "an earlier attempt".to_owned(),
         attempts,
         retrial: None,
@@ -1609,7 +1627,10 @@ fn rollback_from_a_half_moved_install_uses_the_digests_not_the_phase() {
                     began_ms: now_ms(),
                 }
             }
-            _ => Phase::RollbackIntent { trial: None },
+            _ => Phase::RollbackIntent {
+                trial: None,
+                trial_started: false,
+            },
         };
         install.write(journal_phase);
         let (code, world) = recovered(
@@ -1669,7 +1690,13 @@ fn a_failed_move_back_is_stuck_with_everything_kept() {
     let Some(install) = Install::new("stuck") else {
         return;
     };
-    flipped_at(&install, Phase::RollbackIntent { trial: None });
+    flipped_at(
+        &install,
+        Phase::RollbackIntent {
+            trial: None,
+            trial_started: false,
+        },
+    );
     let mut world = install.world(Trial::Silent);
     let folder = install.install();
     let taken = Arc::new(Mutex::new(None::<String>));
@@ -1749,7 +1776,13 @@ fn a_new_file_held_without_sharing_is_named_as_the_rollback_s_reason() {
     let Some(install) = Install::new("held-new") else {
         return;
     };
-    flipped_at(&install, Phase::RollbackIntent { trial: None });
+    flipped_at(
+        &install,
+        Phase::RollbackIntent {
+            trial: None,
+            trial_started: false,
+        },
+    );
     let name = a_new_name_besides_the_program(&install);
     let hold = install_flip::hold_unshared(&install.install().join(&name))
         .expect("the test holds the new file");
@@ -2025,7 +2058,10 @@ fn the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity() {
     install.arm();
     let trial = install.start_trial();
     let beside = install.start_trial();
-    install.write(Phase::RollbackIntent { trial: Some(trial) });
+    install.write(Phase::RollbackIntent {
+        trial: Some(trial),
+        trial_started: false,
+    });
     let began = Instant::now();
     let (code, world) = recovered(
         &install,
@@ -2056,6 +2092,7 @@ fn the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity() {
             pid: running.pid,
             started: running.started + 1,
         }),
+        trial_started: false,
     });
     let (code, world) = recovered(
         &install,
@@ -2086,6 +2123,7 @@ fn the_trial_is_asked_to_quit_before_it_is_ended_and_only_by_its_identity() {
     };
     install.write(Phase::RollbackIntent {
         trial: Some(stranger),
+        trial_started: false,
     });
     let (code, world) = recovered(
         &install,
@@ -2211,7 +2249,13 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
                 });
             }
             "committed" => flipped_at(&install, Phase::Committed),
-            "intent" => flipped_at(&install, Phase::RollbackIntent { trial: None }),
+            "intent" => flipped_at(
+                &install,
+                Phase::RollbackIntent {
+                    trial: None,
+                    trial_started: false,
+                },
+            ),
             "rolled-back" => {
                 install.arm();
                 install.write(Phase::RolledBack { untried: false });
@@ -2220,7 +2264,13 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
                 flipped_at(&install, stuck(1));
                 block_rolledout(&install);
             }
-            "waits" => flipped_at(&install, Phase::RollbackIntent { trial: None }),
+            "waits" => flipped_at(
+                &install,
+                Phase::RollbackIntent {
+                    trial: None,
+                    trial_started: false,
+                },
+            ),
             "bound-old" => {
                 install.arm();
                 install.write(stuck(STUCK_ATTEMPT_LIMIT));
@@ -3619,6 +3669,525 @@ fn moved_in(tag: &str) -> Option<Install> {
     Some(install)
 }
 
+/// The journal's phase and the words, at one process creation.
+type Seen = (Phase, Vec<OsString>);
+
+/// RED (U-35) — **when the new installed image and the rescue image are both
+/// refused by the operating system, the Windows exit guard reserves one last
+/// same-image trial before asking the OS for it**. The reservation is visible
+/// to that third launch, and a refusal leaves it durable for recovery; there
+/// is no fourth launch.
+///
+/// MUTATION: in `reserve_last_trial`, return the nonce without recording
+/// `TrialPlanned` (the third launch sees `Moving`: the review's m4); omit
+/// the last trial; or recurse after its refusal.
+#[test]
+fn u35_two_windows_launch_refusals_reserve_exactly_one_last_trial() {
+    let Some(started) = moved_in("u35-last-trial-started") else {
+        return;
+    };
+    let road = started.road(limits(600, 20_000));
+    let mut world = started.world(Trial::Answers);
+    world.refuse_starts = 2;
+    // What the journal on disk said, and the words, at the moment of the third
+    // process creation (the review's m4) — recorded, asserted after.
+    let observed: Arc<Mutex<Option<Seen>>> = Arc::default();
+    let saw = Arc::clone(&observed);
+    let home = started.home.clone();
+    world.before_start = Some(Box::new(move |at, _program, args| {
+        if at == 2 {
+            let journal = Journal::parse(&std::fs::read(home.journal()).unwrap()).unwrap();
+            *saw.lock().unwrap() = Some((journal.body.phase, args.to_vec()));
+        }
+    }));
+    let (left, world) = on_a_worker(move |worker| {
+        let mut guard = ExitGuard::new(WindowsLeave {
+            road: &road,
+            world: &mut world,
+            handed: &[],
+            worker: Some(worker),
+            actor: Some(Actor::Applier),
+        });
+        let left = guard.leave();
+        drop(guard);
+        (left, world)
+    });
+    assert_eq!(left, Left::Started(started.installed.clone()));
+    let (phase, args) = observed
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("a third process creation");
+    let Phase::TrialStarting { nonce, .. } = phase else {
+        panic!("the reservation is durable before the third launch: {phase:?}");
+    };
+    assert_eq!(args[0], OsString::from(cli::UPDATE_TRIAL_FLAG));
+    assert_eq!(TxnId::parse(&args[1].to_string_lossy()), Ok(started.txn));
+    assert_eq!(
+        Nonce::parse(&args[2].to_string_lossy()),
+        Ok(nonce),
+        "the third launch carries the reserved nonce"
+    );
+    assert_eq!(world.opened.len(), 3, "the reserved trial starts");
+    assert!(matches!(
+        started.on_disk().body.phase,
+        Phase::TrialStarting { .. }
+    ));
+
+    let Some(install) = moved_in("u35-last-trial") else {
+        return;
+    };
+    let road = install.road(limits(600, 20_000));
+    let mut world = install.world(Trial::Answers);
+    world.refuse_every_start = true;
+    let (left, world) = on_a_worker(move |worker| {
+        let mut guard = ExitGuard::new(WindowsLeave {
+            road: &road,
+            world: &mut world,
+            handed: &[],
+            worker: Some(worker),
+            actor: Some(Actor::Applier),
+        });
+        let left = guard.leave();
+        drop(guard);
+        (left, world)
+    });
+    assert!(matches!(left, Left::ShownHere(_)), "{left:?}");
+    assert_eq!(world.opened.len(), 3, "one primary, rescue, last trial");
+    assert_eq!(world.opened[0].0, install.installed);
+    assert_eq!(world.opened[1].0, install.rescue);
+    assert_eq!(world.opened[2].0, install.installed);
+    assert!(
+        world.opened[2]
+            .1
+            .iter()
+            .any(|word| word == "--update-trial")
+    );
+    assert!(
+        world.opened[2]
+            .1
+            .iter()
+            .any(|word| word == "--update-failed")
+    );
+    assert!(matches!(
+        install.on_disk().body.phase,
+        Phase::TrialStarting { .. }
+    ));
+}
+
+/// **The exit guard's U-35 cell, as the product reaches it**: the new set
+/// live at `Moving`, the installed build and the rescue copy refused by the
+/// operating system, the reserved trial's start created and acknowledged.
+/// Answers the reserved nonce and every start the guard asked for.
+fn reserved_by_the_guard(install: &Install) -> (Nonce, Vec<(PathBuf, Vec<OsString>)>) {
+    let road = install.road(limits(600, 20_000));
+    let mut world = install.world(Trial::Answers);
+    world.refuse_starts = 2;
+    let (left, world) = on_a_worker(move |worker| {
+        let mut guard = ExitGuard::new(WindowsLeave {
+            road: &road,
+            world: &mut world,
+            handed: &[],
+            worker: Some(worker),
+            actor: Some(Actor::Applier),
+        });
+        let left = guard.leave();
+        drop(guard);
+        (left, world)
+    });
+    assert_eq!(left, Left::Started(install.installed.clone()));
+    let Phase::TrialStarting { nonce, .. } = install.on_disk().body.phase else {
+        panic!("reserved: {:?}", install.on_disk().body.phase);
+    };
+    (nonce, world.opened)
+}
+
+/// This test process, by pid and start instant: the reserved trial a test
+/// stands in for, as `commit_last_trial` names its caller.
+fn this_process() -> (u32, Option<u64>) {
+    let me = std::process::id();
+    (me, install_flip::started_of(me))
+}
+
+/// RED (U-35 round 2, the review's B3) — **a reserved last trial that became
+/// ready commits its own transaction, with no rescue-copy process at all**:
+/// the guard asked for the rescue once and the operating system refused it;
+/// from there, the trial's own receipt — read back under the transaction
+/// lock and naming the trial exactly — makes `Committed` durable. Before the
+/// receipt exists, and while a holder has the lock, it waits (`Pending`) and
+/// writes nothing; asked again after the commit, it answers `Committed`.
+///
+/// MUTATION: take `Actor::Trial` out of `LastTrialReady`'s authors (the
+/// commit is refused: B3's "keeps nothing"); or skip the lock in
+/// `commit_last_trial_as` (it commits under a holder's lock).
+#[test]
+fn u35_a_ready_last_trial_commits_itself_without_any_rescue_process() {
+    let Some(install) = moved_in("u35-commits-itself") else {
+        return;
+    };
+    let (nonce, opened) = reserved_by_the_guard(&install);
+    let (home, txn) = (install.home.clone(), install.txn);
+    let (me, started) = this_process();
+    let (before, held, committed, again) = on_a_worker(move |worker| {
+        let before = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let receipt = Receipt {
+            txn,
+            nonce,
+            pid: me,
+            version: "0.4.7".to_owned(),
+            started,
+        };
+        install_txn::durable_create(&home.receipt_path(txn, &nonce), &receipt.encode()).unwrap();
+        let lock = install_txn::try_hold(&home.lock(), Hold::Exclusive)
+            .unwrap()
+            .expect("the test holds the transaction lock");
+        let held = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        drop(lock);
+        let committed = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let again = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        (before, held, committed, again)
+    });
+    assert_eq!(before, Ok(LastTrialCommit::Pending), "no receipt yet");
+    assert_eq!(held, Ok(LastTrialCommit::Pending), "a holder has the lock");
+    assert_eq!(committed, Ok(LastTrialCommit::Committed));
+    assert_eq!(again, Ok(LastTrialCommit::Committed));
+    assert_eq!(install.on_disk().body.phase, Phase::Committed);
+    assert_eq!(install.header().outcome, HeaderOutcome::Committed);
+    // The rescue copy was asked for once, by the guard, and refused; nothing
+    // after that started anything.
+    let rescue_starts: Vec<_> = opened
+        .iter()
+        .filter(|(program, _)| *program == install.rescue)
+        .collect();
+    assert_eq!(rescue_starts.len(), 1, "{opened:?}");
+    assert_eq!(opened.len(), 3, "{opened:?}");
+}
+
+/// RED (U-35 round 2, the review's B3 and B2) — **a reserved last trial that
+/// is not healthy commits nothing, and the recovery ends it and rolls back
+/// once a rescue copy can run**: a receipt at the reserved nonce that names
+/// another process, one that runs, is refused and the journal stays
+/// `TrialStarting` (its writes stay held); the recovery handed that unready
+/// instance back ends
+/// exactly it — `EndTrial` over `TrialStarting` — and restores the old build,
+/// and the card it leaves never says the new version was not tried (m1).
+///
+/// MUTATION: drop `TrialStarting` from Recovery's `EndTrial` row (the
+/// recovery defers for ever, the review's B2); or record
+/// `trial_started: false` over `TrialStarting`.
+#[test]
+fn u35_an_unready_last_trial_commits_nothing_and_the_recovery_ends_it() {
+    let Some(install) = moved_in("u35-unready") else {
+        return;
+    };
+    let (nonce, _opened) = reserved_by_the_guard(&install);
+    // A receipt at the reserved name naming another process that runs — this
+    // test process, which is no process of the new build — and the unready
+    // instance that asks to commit on it.
+    let (me, _) = this_process();
+    install.receipt(nonce, nonce, me);
+    let unready = install.start_trial();
+    let (home, txn) = (install.home.clone(), install.txn);
+    let refused = on_a_worker(move |worker| {
+        commit_last_trial_as(
+            worker,
+            &home,
+            txn,
+            nonce,
+            unready.pid,
+            Some(unready.started),
+        )
+    });
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|why| why.contains("ReceiptForAnotherProcess")),
+        "{refused:?}"
+    );
+    assert!(matches!(
+        install.on_disk().body.phase,
+        Phase::TrialStarting { .. }
+    ));
+
+    let mut road = install.road(limits(5_000, 5_000));
+    road.handed_back = Some(crate::update_apply::HandedBack {
+        process: Running {
+            pid: unready.pid,
+            started: unready.started,
+        },
+        ready: false,
+    });
+    let mut world = install.world(Trial::Silent);
+    let (code, world) = on_a_worker(move |worker| {
+        let code = crate::update_recover::run_windows(worker, &road, None, &mut world);
+        (code, world)
+    });
+    assert_eq!(code, 0, "{:?}", world.said);
+    assert!(!deferred(&world), "{:?}", world.said);
+    assert!(said_at(&world, "is asked to").is_some(), "{:?}", world.said);
+    assert!(!runs(unready), "that exact instance was ended");
+    rolled_back_on_disk(&install);
+    assert_eq!(
+        install.on_disk().body.phase,
+        Phase::Retired {
+            outcome: Outcome::RolledBack,
+            untried: false,
+        }
+    );
+}
+
+/// The receipt this test process writes as the trial: its own pid and start
+/// instant, as `update_trial::receipt_due` makes it.
+fn own_receipt(install: &Install, nonce: Nonce) -> crate::update_trial::ReceiptJob {
+    let (me, started) = this_process();
+    crate::update_trial::ReceiptJob {
+        path: install.home.receipt_path(install.txn, &nonce),
+        bytes: Receipt {
+            txn: install.txn,
+            nonce,
+            pid: me,
+            version: "0.4.7".to_owned(),
+            started,
+        }
+        .encode(),
+    }
+}
+
+/// RED (U-35 round 3, the review's F1) — **a ready reserved trial that dies
+/// before its commit does not stop the next attempt of that trial from
+/// committing**: the first attempt's create-new receipt names a process that
+/// has ended; the next start, its rescue refused, continues as the same
+/// reserved trial; until its own receipt is on disk it waits (`Pending`, not a
+/// refusal); its receipt replaces the earlier attempt's, by the same durable
+/// write; and it commits — with no rescue process at all.
+///
+/// MUTATION: in `update_trial::write_receipt`, keep every existing receipt
+/// (create-new only: the next attempt can never commit); or in
+/// `commit_last_trial_as`, read an earlier attempt's receipt as a refusal.
+#[test]
+fn u35_a_reserved_trial_that_died_ready_does_not_stop_the_next_from_committing() {
+    let Some(install) = moved_in("u35-died-ready") else {
+        return;
+    };
+    let (nonce, _opened) = reserved_by_the_guard(&install);
+    // The first attempt became ready, wrote its receipt, and died.
+    let first = install.start_trial();
+    install.receipt(nonce, nonce, first.pid);
+    install.children.end(first.pid);
+    let stale = std::fs::read(install.home.receipt_path(install.txn, &nonce)).unwrap();
+
+    let mut world = StartsRecorded {
+        said: Vec::new(),
+        spawned: Vec::new(),
+        refuse: true,
+    };
+    let crate::update_startup::Verdict::Continue {
+        trial, last_trial, ..
+    } = a_start(&install, &[], &mut world)
+    else {
+        panic!("a start whose rescue is refused continues");
+    };
+    assert_eq!(
+        (trial, last_trial),
+        (Some((install.txn, nonce)), true),
+        "{:?}",
+        world.said
+    );
+
+    let (home, txn) = (install.home.clone(), install.txn);
+    let (me, started) = this_process();
+    let job = own_receipt(&install, nonce);
+    let (before, written, committed) = on_a_worker(move |worker| {
+        let before = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let written = crate::update_trial::write_receipt(&job);
+        let committed = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        (before, written, committed)
+    });
+    assert_eq!(before, Ok(LastTrialCommit::Pending), "an earlier attempt's");
+    assert_eq!(written, Ok(()));
+    assert_ne!(
+        std::fs::read(install.home.receipt_path(install.txn, &nonce)).unwrap(),
+        stale
+    );
+    assert_eq!(committed, Ok(LastTrialCommit::Committed));
+    assert_eq!(install.on_disk().body.phase, Phase::Committed);
+}
+
+/// RED (U-35 round 3, the review's F3) — **a reserved trial that cannot read
+/// its own start instant gets one answer, `Unprovable`, and nothing is
+/// written**: its receipt would name nobody, so neither it nor a holder can
+/// ever accept it, and asking again would be for ever.
+///
+/// MUTATION: in `commit_last_trial_as`, go on without the start instant
+/// (the protocol then refuses every turn: `Err`).
+#[test]
+fn u35_a_trial_that_cannot_read_its_start_instant_is_unprovable() {
+    let Some(install) = moved_in("u35-unprovable") else {
+        return;
+    };
+    let (nonce, _opened) = reserved_by_the_guard(&install);
+    let (me, _) = this_process();
+    install.receipt(nonce, nonce, std::process::id());
+    let (home, txn) = (install.home.clone(), install.txn);
+    let answer =
+        on_a_worker(move |worker| commit_last_trial_as(worker, &home, txn, nonce, me, None));
+    assert_eq!(answer, Ok(LastTrialCommit::Unprovable));
+    assert!(matches!(
+        install.on_disk().body.phase,
+        Phase::TrialStarting { .. }
+    ));
+}
+
+/// A start's world that records what it starts, and refuses every start
+/// when `refuse` — the rescue copy the operating system will not start.
+struct StartsRecorded {
+    said: Vec<String>,
+    spawned: Vec<PathBuf>,
+    refuse: bool,
+}
+
+impl crate::update_startup::World for StartsRecorded {
+    fn say(&mut self, line: &str) {
+        self.said.push(line.to_owned());
+    }
+
+    fn spawn_detached(&mut self, program: &Path, _args: &[OsString]) -> io::Result<()> {
+        self.spawned.push(program.to_path_buf());
+        if self.refuse {
+            Err(io::Error::other("the system would not start it (test)"))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn retire_entrance(&mut self, _txn: TxnId) -> Result<(), String> {
+        panic!("a destructive journal is never retired by a start")
+    }
+
+    fn mounts_under(&mut self, _folder: &Path) -> Result<Vec<PathBuf>, String> {
+        Ok(Vec::new())
+    }
+
+    fn on_a_worker(&mut self, _job: crate::update_startup::OffThread) -> io::Result<()> {
+        panic!("nothing is mounted on Windows")
+    }
+}
+
+/// A start of the installed build with `argv`, over `install`'s home.
+fn a_start(
+    install: &Install,
+    argv: &[OsString],
+    world: &mut StartsRecorded,
+) -> crate::update_startup::Verdict {
+    let trial = argv
+        .first()
+        .is_some_and(|word| word.as_os_str() == cli::UPDATE_TRIAL_FLAG)
+        .then(|| cli::UpdateTrialArg {
+            txn: argv[1].to_string_lossy().into_owned(),
+            nonce: argv[2].to_string_lossy().into_owned(),
+        });
+    let failed = argv
+        .iter()
+        .position(|word| word.as_os_str() == cli::UPDATE_FAILED_FLAG)
+        .map(|at| PathBuf::from(&argv[at + 1]));
+    crate::update_startup::run(
+        &crate::update_startup::Start {
+            own_exe: &install.installed,
+            home: &install.home,
+            argv,
+            trial: trial.as_ref(),
+            failed: failed.as_deref(),
+        },
+        world,
+    )
+}
+
+/// RED (U-35 round 2, the review's M1) — **at `TrialStarting` the exit guards
+/// and a start read what is started from one owner, the reservation**: the
+/// guard names the reserved trial (never a fresh nonce), and the start those
+/// words make runs as that very trial, with nothing handed back; a start with
+/// any other nonce is handed to the recovery; and a plain start whose rescue
+/// copy the operating system refuses continues as the reserved trial — its
+/// writes held, its card the last trial's — never as the new build plainly.
+///
+/// MUTATION: in `opens_now`, answer `Opens::Trial` (a fresh nonce) at
+/// `TrialStarting` (its start is handed back: the review's M1 chain); or in
+/// `update_startup::hand_to_rescue`, ignore the reservation (the plain start
+/// writes durably before `Committed`).
+#[test]
+fn u35_the_guard_and_a_start_agree_on_the_reserved_trial() {
+    let Some(install) = moved_in("u35-agree") else {
+        return;
+    };
+    let (nonce, _opened) = reserved_by_the_guard(&install);
+    let road = install.road(limits(600, 20_000));
+    assert_eq!(
+        opens_now(&road),
+        Opens::LastTrial {
+            txn: install.txn,
+            nonce,
+        }
+    );
+    let (program, words) = road.opening(&opens_now(&road));
+    assert_eq!(program, install.installed.as_path());
+    let reserved = Some((install.txn, nonce));
+    let incomplete = Some(Failure::TrialIncomplete {
+        folder: install.home.root().to_path_buf(),
+    });
+
+    let mut world = StartsRecorded {
+        said: Vec::new(),
+        spawned: Vec::new(),
+        refuse: false,
+    };
+    let crate::update_startup::Verdict::Continue {
+        trial,
+        last_trial,
+        failed,
+        ..
+    } = a_start(&install, &words, &mut world)
+    else {
+        panic!("the guard's start is the reserved trial: {:?}", world.said);
+    };
+    assert_eq!((trial, last_trial), (reserved, true));
+    assert_eq!(failed, incomplete);
+    assert!(world.spawned.is_empty(), "nothing is handed back");
+
+    let fresh = Opens::Trial { txn: install.txn }.words(&install.home);
+    let mut world = StartsRecorded {
+        said: Vec::new(),
+        spawned: Vec::new(),
+        refuse: false,
+    };
+    assert!(matches!(
+        a_start(&install, &fresh, &mut world),
+        crate::update_startup::Verdict::Exit(0)
+    ));
+    assert_eq!(world.spawned, vec![install.rescue.clone()]);
+
+    let mut world = StartsRecorded {
+        said: Vec::new(),
+        spawned: Vec::new(),
+        refuse: true,
+    };
+    let crate::update_startup::Verdict::Continue {
+        trial,
+        last_trial,
+        failed,
+        ..
+    } = a_start(&install, &[], &mut world)
+    else {
+        panic!("a start whose rescue is refused continues");
+    };
+    assert_eq!(world.spawned, vec![install.rescue.clone()]);
+    assert_eq!((trial, last_trial), (reserved, true), "{:?}", world.said);
+    assert_eq!(failed, incomplete);
+    assert!(matches!(
+        install.on_disk().body.phase,
+        Phase::TrialStarting { .. }
+    ));
+}
+
 /// A receipt at `nonce`'s name carrying exactly `receipt`'s fields.
 fn receipt_as(install: &Install, nonce: Nonce, receipt: &Receipt) {
     install_txn::durable_create(
@@ -4295,7 +4864,13 @@ fn a_deferral_before_a_fresh_stuck_retrial_is_the_roads_end() {
         let Some(install) = Install::new(&format!("stuck-{claim:?}")) else {
             return;
         };
-        flipped_at(&install, Phase::RollbackIntent { trial: None });
+        flipped_at(
+            &install,
+            Phase::RollbackIntent {
+                trial: None,
+                trial_started: false,
+            },
+        );
         block_rolledout(&install);
         let unlistable = matches!(claim, Claim::Free);
         let row = make_row(&install, Candidate::NotSeen, claim);
@@ -4539,8 +5114,10 @@ fn bare_world(home: Home) -> Fake {
         refuse_start_of: None,
         starts_die: 0,
         refuse_every_start: false,
+        refuse_starts: 0,
         shown: Vec::new(),
         on_say: None,
+        before_start: None,
         real_ack: None,
     }
 }
@@ -4626,6 +5203,7 @@ fn trial_part(root: &Path) {
                 plan.txn,
                 Duration::from_millis(20),
                 &|| {},
+                None,
                 &mut watchdog,
             );
             std::fs::write(root.join("trial-decided"), b"").unwrap();

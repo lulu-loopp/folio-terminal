@@ -225,6 +225,9 @@ struct Fake {
     on_say: Option<SayHook>,
     /// Every start dies before it takes the data directory (U-34, round 2).
     starts_die: bool,
+    /// **Every relaunch returns an error** (U-35 round 2): what `open_bundle`
+    /// answers only when `/usr/bin/open` itself cannot be spawned.
+    refuse_relaunch: bool,
     /// The failure windows shown in this process (U-34, round 2).
     shown: Vec<String>,
 }
@@ -244,6 +247,7 @@ impl Default for Fake {
             unverified: None,
             on_say: None,
             starts_die: false,
+            refuse_relaunch: false,
             shown: Vec::new(),
         }
     }
@@ -299,6 +303,9 @@ impl Hands for Fake {
 impl World for Fake {
     fn relaunch(&mut self, bundle: &Path, args: &[OsString]) -> io::Result<()> {
         self.relaunched.push((bundle.to_path_buf(), args.to_vec()));
+        if self.refuse_relaunch {
+            return Err(io::Error::other("open could not be spawned (test)"));
+        }
         Ok(())
     }
 }
@@ -1290,6 +1297,7 @@ fn recover_door(install: &Install, then_launch: Vec<OsString>, hands: Fake) -> (
 fn stuck(attempts: u8) -> Phase {
     Phase::Stuck {
         trial: None,
+        trial_started: false,
         last_error: "the exchange is refused (test)".to_owned(),
         attempts,
         retrial: None,
@@ -1455,7 +1463,10 @@ fn rollback_from_the_new_live_swaps_and_from_the_old_live_does_not() {
     }
     let install = Install::new("new-live");
     install.exchanged();
-    install.write(Phase::RollbackIntent { trial: None });
+    install.write(Phase::RollbackIntent {
+        trial: None,
+        trial_started: false,
+    });
     install.arm();
     let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
     assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
@@ -1471,7 +1482,10 @@ fn rollback_from_the_new_live_swaps_and_from_the_old_live_does_not() {
     );
 
     let install = Install::new("old-live");
-    install.write(Phase::RollbackIntent { trial: None });
+    install.write(Phase::RollbackIntent {
+        trial: None,
+        trial_started: false,
+    });
     install.arm();
     let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
     assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
@@ -1759,7 +1773,10 @@ fn the_trial_is_asked_to_quit_before_it_is_killed() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let trial = recorded(&install.installed.join(EXE), pid);
-    install.write(Phase::RollbackIntent { trial: Some(trial) });
+    install.write(Phase::RollbackIntent {
+        trial: Some(trial),
+        trial_started: false,
+    });
     let began = Instant::now();
     let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
     assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
@@ -1787,7 +1804,10 @@ fn the_trial_is_asked_to_quit_before_it_is_killed() {
     let stranger = children.start(&install.stage(), "by-hand");
     std::thread::sleep(Duration::from_millis(200));
     let trial = recorded(&install.stage().join(EXE), stranger);
-    install.write(Phase::RollbackIntent { trial: Some(trial) });
+    install.write(Phase::RollbackIntent {
+        trial: Some(trial),
+        trial_started: false,
+    });
     let (ended, hands) = recovered(install.recovery(limits(5_000, 5_000)), Fake::default());
     assert_eq!(ended, Some(Ended::RolledBack), "{:?}", hands.said);
     assert!(!hands.said.iter().any(|line| line.contains("is asked to")));
@@ -2217,7 +2237,10 @@ fn every_phase_left_by_a_dead_applier_still_opens_folio() {
             "rollback-intent",
             |install, _| {
                 install.exchanged();
-                install.write(Phase::RollbackIntent { trial: None });
+                install.write(Phase::RollbackIntent {
+                    trial: None,
+                    trial_started: false,
+                });
                 install.arm();
             },
             plain,
@@ -2376,7 +2399,10 @@ fn a_new_live_bundle_is_never_started_plainly_before_committed() {
     // A running copy keeps the admission: the swap back waits.
     let install = Install::new("plain-waits");
     install.exchanged();
-    install.write(Phase::RollbackIntent { trial: None });
+    install.write(Phase::RollbackIntent {
+        trial: None,
+        trial_started: false,
+    });
     install.arm();
     std::fs::write(install.home.admission(), b"").unwrap();
     let copy = install_txn::try_hold(&install.home.admission(), Hold::Shared)
@@ -3135,6 +3161,50 @@ fn exchanged_at_moving(tag: &str) -> Install {
     install
 }
 
+/// RED (U-35 round 2, the review's B1) — **U-35 does not apply on macOS: its
+/// exit guard's road is the one before U-35.** A LaunchServices refusal — a
+/// Gatekeeper assessment, a damaged bundle, a crash at launch — is never an
+/// error of `open_bundle`, which answers one only when `/usr/bin/open` cannot
+/// be spawned, so the two-refusal cell cannot be observed here. Even with
+/// every relaunch erring, the guard asks for the installed bundle once, starts
+/// no rescue clone, reserves nothing, and shows the failure window; the
+/// journal stays `Moving`.
+///
+/// MUTATION: give `MacLeave` round 1's `fallback` (the rescue clone through
+/// LaunchServices) or its `last_trial` (a reservation).
+#[test]
+fn u35_does_not_apply_on_macos() {
+    if !on_macos() {
+        return;
+    }
+    let install = exchanged_at_moving("u35-not-on-macos");
+    let home = install.home.clone();
+    let data = install.data.clone();
+    let mut world = Fake {
+        refuse_relaunch: true,
+        ..Fake::default()
+    };
+    let (left, world) = on_a_worker(move |worker| {
+        let mut guard = ExitGuard::new(MacLeave {
+            worker: Some(worker),
+            home: &home,
+            world: &mut world,
+            data: &data,
+        });
+        let left = guard.leave();
+        drop(guard);
+        (left, world)
+    });
+    assert!(
+        matches!(left, crate::update_apply::Left::ShownHere(_)),
+        "{left:?}"
+    );
+    assert_eq!(world.relaunched.len(), 1, "{:?}", world.relaunched);
+    assert_eq!(world.relaunched[0].0, install.installed);
+    assert_eq!(world.shown.len(), 1);
+    assert_eq!(install.on_disk().unwrap().body.phase, Phase::Moving);
+}
+
 /// A process of the installed (new) bundle's executable, running, recorded
 /// by its pid and start instant.
 fn a_candidate(install: &Install, children: &Children) -> TrialProcess {
@@ -3721,7 +3791,10 @@ fn a_deferral_before_a_fresh_stuck_retrial_is_the_roads_end() {
         let install = Install::new(&format!("stuck-{tag}"));
         install.arm();
         install.exchanged();
-        install.write(Phase::RollbackIntent { trial: None });
+        install.write(Phase::RollbackIntent {
+            trial: None,
+            trial_started: false,
+        });
         let children = Children::default();
         let row = mac_row(&install, &claim, false);
         let mut world = Fake {
