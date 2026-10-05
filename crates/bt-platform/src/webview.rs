@@ -4554,6 +4554,14 @@ pub use macos::{
     web_environment_epoch, webview2_runtime_version,
 };
 
+// TEMPORARY (2026-10-06, PR2 of the port split): `linux_process::shutdown_helpers`
+// rings this when the helper workers retire. The real shim — `webview_linux`'s
+// `mod linux` and its `shutdown_actor` — arrives with the Linux web actor (PR7 of
+// the port split); until then there is no browser actor to stop, so this is a
+// no-op.
+#[cfg(target_os = "linux")]
+pub(crate) fn shutdown_linux_actor() {}
+
 /// **The page host, on a platform whose engine has not been written yet.**
 ///
 /// Neither of the two real ones: a Linux build has no web engine this product

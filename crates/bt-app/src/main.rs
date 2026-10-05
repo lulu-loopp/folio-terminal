@@ -445,6 +445,8 @@ const PANIC_LOG_FILENAME: &str = "folio-panic.log";
 #[derive(Clone, Copy, Debug)]
 enum AppEvent {
     PtyOutput,
+    #[cfg(target_os = "linux")]
+    NativeDialogReady,
     /// A keyboard layout's copied Shift table landed from the worker road.
     /// The answer is in `App::layout_tables`; this event only breaks a parked
     /// loop, and the next key lookup drains the channel too if the wake is lost.
@@ -823,6 +825,8 @@ impl AppEvent {
     fn station(&self) -> hang_watch::Station {
         use hang_watch::Station;
         match self {
+            #[cfg(target_os = "linux")]
+            Self::NativeDialogReady => Station::Chrome,
             Self::PreviewReady => Station::Preview,
             Self::MathReady => Station::Math,
             Self::FilesReady => Station::Files,
@@ -29025,6 +29029,16 @@ impl NotificationDesk {
             .as_ref()
             .map(bt_platform::Notifier::take_activations)
             .unwrap_or_default()
+    }
+
+    #[cfg(target_os = "linux")]
+    fn take_failure(&mut self) -> Option<String> {
+        let failure = self.voice.as_ref()?.take_failures().into_iter().next()?;
+        if self.refused {
+            return None;
+        }
+        self.refused = true;
+        Some(failure)
     }
 }
 
@@ -60866,6 +60880,20 @@ impl FolioApp {
     /// The queue is drained before the loop over it, so the borrow of the application ends before
     /// the first window is reached.
     fn route_clicked_notifications(&mut self) -> Result<()> {
+        #[cfg(target_os = "linux")]
+        if let Some(error) = self
+            .app
+            .as_mut()
+            .and_then(|app| app.notifications.take_failure())
+        {
+            eprintln!("desktop notification refused: {error}");
+            if let Some(id) = self.frontmost_window().or_else(|| self.windows.key_at(0))
+                && !self.is_leaving(id)
+                && let Some(mut runtime) = self.runtime(id)
+            {
+                runtime.raise_notification_refusal(&error)?;
+            }
+        }
         let Some(app) = self.app.as_ref() else {
             return Ok(());
         };
@@ -64364,6 +64392,8 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                 let (mut batch, gone) = self.drain_files_answers();
                 self.for_each_window(|runtime| runtime.apply_files_results(&mut batch, gone))
             }
+            #[cfg(target_os = "linux")]
+            AppEvent::NativeDialogReady => Ok(()),
             AppEvent::PreviewReady => {
                 let (mut batch, gone) = self.drain_preview_answers();
                 self.for_each_window(|runtime| runtime.apply_preview_results(&mut batch, gone))
@@ -72177,6 +72207,14 @@ fn main() -> Result<()> {
         }
     };
     let _ = SUMMON_PROXY.set(event_loop.create_proxy());
+    #[cfg(target_os = "linux")]
+    {
+        let proxy = event_loop.create_proxy();
+        bt_platform::install_dialog_wake(move || {
+            let _ = proxy.send_event(AppEvent::NativeDialogReady);
+        })
+        .map_err(|error| anyhow!(error))?;
+    }
     // **The application delegate, and it has to be here** (M3-1, X-4).
     //
     // After `build` and not before it: what `EventLoop::new` does on the machine
@@ -72362,7 +72400,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 18] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 20] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -72392,6 +72430,10 @@ mod platform_gate_tests {
         "profiles.rs",
         // A PowerShell module, which is a Windows fact end to end.
         "psreadline.rs",
+        // The Linux-only minimize restore bridge has only the Linux quake summon caller.
+        "runtime/windows.rs",
+        // Native failure fixture: Linux reports async watch-start failure; other starts refuse inline.
+        "scheme_watch.rs",
         // Which shells can be integrated with here.
         "shell_integration.rs",
         // Native invalid-name, Windows spelling and direct CRT test fixtures only;
@@ -75023,7 +75065,10 @@ mod edit_menu_clipboard_tests {
             item_body(&ItemQuery::function("rename_pastes")).contains("input::is_paste_shortcut("),
             "the name box spells its own paste chord"
         );
-        let door = method_body("Runtime", "paste_into_field");
+        // PR1's extraction (the port split) made `apply_clipboard_text_to_field`
+        // the door that carries a field's own insert; that is where the skip is
+        // pinned until the Linux async read rewrites this test in PR4.
+        let door = method_body("Runtime", "apply_clipboard_text_to_field");
         for insert in [
             "self.search_ime(",
             "self.graph_search_ime(",
@@ -76686,7 +76731,11 @@ mod clipboard_path_tests {
         let paste = method_body("Runtime", "paste_from_clipboard_into");
         assert!(paste.contains("bt_platform::clipboard_payload()"));
         assert!(paste.contains("hang_watch::Station::ClipboardRead"));
-        assert!(paste.contains("leaf.paste_recipient.clone()"));
+        // PR1's extraction (the port split) moved the paste's preparation into
+        // `apply_clipboard_payload`; the recipient is captured there now, and
+        // the Linux async read rewrites this pin again in PR4 of the split.
+        let delivery = method_body("Runtime", "apply_clipboard_payload");
+        assert!(delivery.contains("leaf.paste_recipient.clone()"));
         assert!(!paste.contains("set_focus("));
         assert!(!paste.contains("set_files_keyboard("));
         let k144 = method_body("Runtime", "insert_path_into_terminal");

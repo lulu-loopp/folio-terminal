@@ -350,7 +350,28 @@ impl ShellThread {
     }
 
     fn door(worker: &WorkerCtx, window: NativeWindow, request: &Handoff) -> Result<(), String> {
+        #[cfg(not(target_os = "linux"))]
         let _ = worker;
+        #[cfg(target_os = "linux")]
+        let open_local_file =
+            |window, path: &Path| crate::linux_files::open_local_file(worker, window, path);
+        #[cfg(target_os = "linux")]
+        let open_local_path =
+            |window, path: &Path| crate::linux_files::open_local_path(worker, window, path);
+        #[cfg(target_os = "linux")]
+        let open_local_path_verified = |window, path: &Path, target| {
+            crate::linux_files::open_local_path_verified(worker, window, path, target)
+        };
+        #[cfg(target_os = "linux")]
+        let reveal_in_explorer =
+            |window, path: &Path| crate::linux_files::reveal_in_explorer(worker, window, path);
+        #[cfg(target_os = "linux")]
+        let reveal_verified = |window, path: &Path, target| {
+            crate::linux_files::reveal_verified(worker, window, path, target)
+        };
+        #[cfg(target_os = "linux")]
+        let shell_execute =
+            |window, target: &str| crate::linux_files::shell_execute(worker, window, target);
         match request {
             Handoff::Open(path) => open_local_path(window, path),
             Handoff::OpenVerified(path, target) => {
@@ -816,28 +837,28 @@ mod portable_handoff {
     }
 
     /// Open one already-policy-checked address with the system's handler.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn shell_execute(window: NativeWindow, target: &str) -> Result<(), String> {
         let _ = (window, target);
         Err(not_here("opening an address"))
     }
 
     /// Open one worker-validated local image with its default handler.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn open_local_file(window: NativeWindow, path: &Path) -> Result<(), String> {
         let _ = (window, path);
         Err(not_here("opening a file"))
     }
 
     /// Open one file a person picked out of a directory listing.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn open_local_path(window: NativeWindow, path: &Path) -> Result<(), String> {
         let _ = (window, path);
         Err(not_here("opening a file"))
     }
 
     /// The same, for a path a worker has already answered for.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn open_local_path_verified(
         window: NativeWindow,
         path: &Path,
@@ -848,14 +869,14 @@ mod portable_handoff {
     }
 
     /// Show a file in the file manager.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn reveal_in_explorer(window: NativeWindow, path: &Path) -> Result<(), String> {
         let _ = (window, path);
         Err(not_here("showing a file in the file manager"))
     }
 
     /// The same, for a path a worker has already answered for.
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn reveal_verified(
         window: NativeWindow,
         path: &Path,
@@ -881,9 +902,12 @@ pub use portable_handoff::program_on_path;
 /// The other seven, on a platform with neither a Win32 shell nor a `NSWorkspace` —
 /// private to this module, reached only through [`ShellThread::hand_over`].
 #[cfg(all(not(windows), not(target_os = "macos")))]
+use portable_handoff::open_system_fonts_page;
+
+#[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
 use portable_handoff::{
-    open_local_file, open_local_path, open_local_path_verified, open_system_fonts_page,
-    reveal_in_explorer, reveal_verified, shell_execute,
+    open_local_file, open_local_path, open_local_path_verified, reveal_in_explorer,
+    reveal_verified, shell_execute,
 };
 
 /// **The seven verbs that leave this window, over `NSWorkspace`** (M2-2) —
@@ -894,11 +918,7 @@ use macos_handoff::{
     reveal_in_explorer, reveal_verified, shell_execute,
 };
 
-// PR1 carries the hoist so the second Unix caller can arrive in one piece; on
-// Linux the caller (the platform's own file doors) is still one PR away, so the
-// helper is briefly dead there rather than duplicated in `macos_handoff`.
 #[cfg(unix)]
-#[allow(dead_code)]
 pub(crate) fn openable_unix_path(path: &Path) -> Result<(), String> {
     use std::os::unix::ffi::OsStrExt;
     let bytes = path.as_os_str().as_bytes();
@@ -2631,7 +2651,7 @@ mod tests {
     ///
     /// MUTATION: make the portable arm answer `Ok(())` and the first assertion
     /// goes red, which is a reveal that reports success and shows nothing.
-    #[cfg(all(not(windows), not(target_os = "macos")))]
+    #[cfg(all(not(windows), not(target_os = "macos"), not(target_os = "linux")))]
     #[test]
     fn the_posix_reveal_hands_over_a_path_and_not_a_command_line() {
         let window = crate::NativeWindow::stand_in(0);
