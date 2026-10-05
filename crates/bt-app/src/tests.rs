@@ -5,6 +5,19 @@
 //! which the table reads as "not a link". These three are the whole vocabulary the tables below
 //! need, spelled once so that a test that cares about an arm does not have to spell a struct.
 
+/// RED mutation: cap `for_each_window_index` at one item; the later windows do
+/// not repaint when the program-discovery answer lands.
+#[test]
+fn a_program_answer_landing_repaints_every_window() {
+    let mut repainted = [false; 3];
+    for_each_window_index(repainted.len(), |index| {
+        repainted[index] = true;
+        Ok::<_, std::convert::Infallible>(())
+    })
+    .expect("an infallible fake repaint");
+    assert_eq!(repainted, [true, true, true]);
+}
+
 // ── `bt-source`, and the one set of helpers every reader in this module asks
 //    it through (`docs/plans/bt-app-split-prep.md` §6.3, tickets P3 and P14)
 //
@@ -45010,6 +45023,7 @@ pub(crate) fn leaf_saying(text: &str) -> LeafSession {
         // takes one from.
         incarnation: next_incarnation(),
         pty: None,
+        pending_program_birth: None,
         foreground_program_cadence: foreground_program::Cadence::default(),
         // No ConPTY, so no reader thread, so nothing to wake — see the field.
         wake: None,

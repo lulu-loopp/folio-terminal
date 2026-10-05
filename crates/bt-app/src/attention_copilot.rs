@@ -854,9 +854,8 @@ fn run_probe() -> Option<Version> {
     // ones are what keep a program path holding a space one token.
     let output = {
         use std::os::windows::process::CommandExt as _;
-        command
-            .raw_arg(probe_command_tail(&copilot))
-            .output()
+        command.raw_arg(probe_command_tail(&copilot));
+        bt_platform::probe_output(command)
             .inspect(|output| {
                 bt_platform::file_reads::pipe_output(
                     bt_platform::file_reads::Lane::Attention,

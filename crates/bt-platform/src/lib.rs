@@ -2967,6 +2967,564 @@ pub fn quiet_command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Comm
     command
 }
 
+/// A child process whose lifetime is the lifetime of one machine probe.
+///
+/// The immediate child and everything it starts are one unit: Windows keeps
+/// them in a per-probe kill-on-close job, while Unix keeps them in a process
+/// group led by the immediate child. Dropping this value, ending it explicitly,
+/// unwinding past it, or ending this process therefore ends the whole unit.
+#[derive(Debug)]
+pub struct ProbeChild {
+    child: std::process::Child,
+    guard: ProbeChildGuard,
+}
+
+impl ProbeChild {
+    /// The immediate child's process id.
+    #[must_use]
+    pub fn id(&self) -> u32 {
+        self.child.id()
+    }
+
+    /// End the probe and every process it started.
+    pub fn kill(&mut self) -> std::io::Result<()> {
+        let contained = self.guard.end();
+        match self.child.kill() {
+            Ok(()) => Ok(()),
+            Err(_) if contained => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Ask whether the immediate child has ended. A settled immediate child
+    /// also settles the probe, so descendants cannot retain its output pipes.
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let status = self.child.try_wait()?;
+        if status.is_some() {
+            self.guard.end();
+        }
+        Ok(status)
+    }
+
+    /// Wait and collect both output streams, then end descendants left by a
+    /// successful immediate child before this owner returns.
+    pub fn wait_with_output(self) -> std::io::Result<std::process::Output> {
+        // SAFETY: both fields are moved out exactly once, and `ManuallyDrop`
+        // prevents `ProbeChild::drop` from observing either moved field. The
+        // local guard remains unwind-safe and is explicitly ended below.
+        let mut this = std::mem::ManuallyDrop::new(self);
+        let child = unsafe { std::ptr::read(&raw mut this.child) };
+        let mut guard = unsafe { std::ptr::read(&raw mut this.guard) };
+        let output = child.wait_with_output();
+        guard.end();
+        output
+    }
+}
+
+impl std::ops::Deref for ProbeChild {
+    type Target = std::process::Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for ProbeChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.child
+    }
+}
+
+impl Drop for ProbeChild {
+    fn drop(&mut self) {
+        self.guard.end();
+    }
+}
+
+#[derive(Debug)]
+struct ProbeChildGuard {
+    #[cfg(windows)]
+    job: Option<std::os::windows::io::OwnedHandle>,
+    #[cfg(unix)]
+    process_group: Option<i32>,
+}
+
+#[cfg(unix)]
+static PROBE_PROCESS_GROUPS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::BTreeSet<i32>>,
+> = std::sync::LazyLock::new(Default::default);
+
+/// End every Unix probe group still owned by this process before the process
+/// takes its non-unwinding exit door. Windows needs no matching registry: the
+/// kernel closes every job handle when the process ends, including on a hard
+/// termination, and kill-on-close performs the same operation there.
+#[cfg(unix)]
+pub(crate) fn end_probe_children_for_process_exit() {
+    let groups: Vec<_> = PROBE_PROCESS_GROUPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .copied()
+        .collect();
+    for group in groups {
+        // SAFETY: every id in the registry was minted by `probe_guard` from a
+        // child this process started as a process-group leader.
+        unsafe {
+            let _ = libc::kill(-group, libc::SIGKILL);
+        }
+    }
+}
+
+impl ProbeChildGuard {
+    fn uncontained() -> Self {
+        Self {
+            #[cfg(windows)]
+            job: None,
+            #[cfg(unix)]
+            process_group: None,
+        }
+    }
+
+    fn end(&mut self) -> bool {
+        #[cfg(windows)]
+        return self.job.take().is_some();
+        #[cfg(unix)]
+        if let Some(group) = self.process_group.take() {
+            PROBE_PROCESS_GROUPS
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remove(&group);
+            // SAFETY: `group` is the process group id minted from the immediate
+            // child this guard owns. A negative pid addresses that group only.
+            unsafe {
+                let _ = libc::kill(-group, libc::SIGKILL);
+            }
+            return true;
+        }
+        #[allow(unreachable_code)]
+        false
+    }
+}
+
+/// Start a command as one contained machine probe.
+///
+/// On Windows `CREATE_SUSPENDED` keeps the child from executing before its
+/// process handle has been assigned to the new job. The sole initial thread is
+/// then found through the documented process-local snapshot API and resumed.
+/// Windows 10 1809, Folio's minimum, supports nested jobs; if job creation,
+/// configuration, or assignment is nevertheless refused, the child is resumed
+/// and the probe runs uncontained after one process-wide diagnostic. A refusal
+/// to resume is a start failure and the still-suspended child is ended.
+///
+/// On Unix the command enters a new process group before `exec`, so there is no
+/// interval in which a descendant can escape its guard.
+pub fn spawn_probe(command: &mut std::process::Command) -> std::io::Result<ProbeChild> {
+    spawn_probe_with(command, probe_guard)
+}
+
+fn spawn_probe_with(
+    command: &mut std::process::Command,
+    guard: impl FnOnce(&std::process::Child) -> std::io::Result<ProbeChildGuard>,
+) -> std::io::Result<ProbeChild> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_SUSPENDED: u32 = 0x0000_0004;
+        command.creation_flags(CREATE_NO_WINDOW | CREATE_SUSPENDED);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        command.process_group(0);
+    }
+
+    let mut child = command.spawn()?;
+    let held = match guard(&child) {
+        Ok(guard) => guard,
+        Err(error) => {
+            static SAID: std::sync::Once = std::sync::Once::new();
+            SAID.call_once(|| {
+                eprintln!("Folio probe containment unavailable; probes will still run: {error}");
+            });
+            ProbeChildGuard::uncontained()
+        }
+    };
+
+    #[cfg(windows)]
+    if let Err(error) = resume_probe(&child) {
+        let _ = child.kill();
+        return Err(error);
+    }
+
+    Ok(ProbeChild { child, guard: held })
+}
+
+#[cfg(windows)]
+fn probe_guard(child: &std::process::Child) -> std::io::Result<ProbeChildGuard> {
+    use std::mem::size_of;
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+
+    // SAFETY: creates an unnamed job with default security. The returned handle
+    // is immediately put under `OwnedHandle` and closed exactly once.
+    let job = unsafe { CreateJobObjectW(None, None) }?;
+    // SAFETY: ownership of the newly created handle moves to `OwnedHandle`.
+    let job = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(job.0) };
+    let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    // SAFETY: the information class matches `limits`; both handles remain live
+    // for the duration of the calls and name objects this function owns.
+    unsafe {
+        SetInformationJobObject(
+            windows::Win32::Foundation::HANDLE(job.as_raw_handle()),
+            JobObjectExtendedLimitInformation,
+            std::ptr::from_ref::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>(&limits).cast(),
+            u32::try_from(size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>())
+                .expect("job information size fits u32"),
+        )?;
+        AssignProcessToJobObject(
+            windows::Win32::Foundation::HANDLE(job.as_raw_handle()),
+            windows::Win32::Foundation::HANDLE(child.as_raw_handle()),
+        )?;
+    }
+    Ok(ProbeChildGuard { job: Some(job) })
+}
+
+#[cfg(windows)]
+fn resume_probe(child: &std::process::Child) -> std::io::Result<()> {
+    use std::os::windows::io::{AsRawHandle as _, FromRawHandle as _};
+    use windows::Win32::System::Diagnostics::ProcessSnapshotting::{
+        HPSS, HPSSWALK, PSS_CAPTURE_THREADS, PSS_THREAD_ENTRY, PSS_WALK_THREADS,
+        PssCaptureSnapshot, PssFreeSnapshot, PssWalkMarkerCreate, PssWalkMarkerFree,
+        PssWalkSnapshot,
+    };
+    use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    fn error(code: u32) -> std::io::Error {
+        std::io::Error::from_raw_os_error(i32::try_from(code).unwrap_or(i32::MAX))
+    }
+
+    struct Snapshot {
+        process: windows::Win32::Foundation::HANDLE,
+        handle: HPSS,
+    }
+    impl Drop for Snapshot {
+        fn drop(&mut self) {
+            // SAFETY: this pair came from `PssCaptureSnapshot` and is freed once.
+            unsafe {
+                let _ = PssFreeSnapshot(self.process, self.handle);
+            }
+        }
+    }
+    struct Marker(HPSSWALK);
+    impl Drop for Marker {
+        fn drop(&mut self) {
+            // SAFETY: this marker came from `PssWalkMarkerCreate` and is freed once.
+            unsafe {
+                let _ = PssWalkMarkerFree(self.0);
+            }
+        }
+    }
+
+    let process = windows::Win32::Foundation::HANDLE(child.as_raw_handle());
+    let mut snapshot = HPSS::default();
+    // SAFETY: `process` is the live process handle of the suspended child and
+    // `snapshot` is a valid out pointer. Only its thread table is requested.
+    let result =
+        unsafe { PssCaptureSnapshot(process, PSS_CAPTURE_THREADS, None, &raw mut snapshot) };
+    if result != 0 {
+        return Err(error(result));
+    }
+    let snapshot = Snapshot {
+        process,
+        handle: snapshot,
+    };
+    let mut marker = HPSSWALK::default();
+    // SAFETY: `marker` is a valid out pointer and the default allocator is used.
+    let result = unsafe { PssWalkMarkerCreate(None, &raw mut marker) };
+    if result != 0 {
+        return Err(error(result));
+    }
+    let marker = Marker(marker);
+    let mut entry = PSS_THREAD_ENTRY::default();
+    // SAFETY: the byte slice covers the complete correctly aligned output
+    // value for a thread walk over this live snapshot and marker.
+    let bytes = unsafe {
+        std::slice::from_raw_parts_mut(
+            std::ptr::from_mut(&mut entry).cast::<u8>(),
+            std::mem::size_of::<PSS_THREAD_ENTRY>(),
+        )
+    };
+    let result =
+        unsafe { PssWalkSnapshot(snapshot.handle, PSS_WALK_THREADS, marker.0, Some(bytes)) };
+    if result != 0 {
+        return Err(error(result));
+    }
+    // SAFETY: asks for only the right needed to resume the thread id found in
+    // this process's own freshly created child.
+    let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, false, entry.ThreadId) }?;
+    // SAFETY: ownership of the newly opened thread handle moves here.
+    let thread = unsafe { std::os::windows::io::OwnedHandle::from_raw_handle(thread.0) };
+    // SAFETY: the handle names the suspended initial thread and is live here.
+    let resumed =
+        unsafe { ResumeThread(windows::Win32::Foundation::HANDLE(thread.as_raw_handle())) };
+    if resumed == u32::MAX {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn probe_guard(child: &std::process::Child) -> std::io::Result<ProbeChildGuard> {
+    let group = i32::try_from(child.id())
+        .map_err(|_| std::io::Error::other("the probe pid does not fit a process-group id"))?;
+    PROBE_PROCESS_GROUPS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(group);
+    Ok(ProbeChildGuard {
+        process_group: Some(group),
+    })
+}
+
+#[cfg(not(any(windows, unix)))]
+fn probe_guard(_: &std::process::Child) -> std::io::Result<ProbeChildGuard> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "this platform has no probe containment arm",
+    ))
+}
+
+/// Run one contained probe to completion and collect its output.
+pub fn probe_output(mut command: std::process::Command) -> std::io::Result<std::process::Output> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    spawn_probe(&mut command)?.wait_with_output()
+}
+
+#[cfg(all(test, windows))]
+mod probe_child_tests {
+    use super::*;
+    use std::io::{BufRead as _, BufReader, Write as _};
+    use std::process::Stdio;
+    use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows::Win32::System::Threading::{
+        OpenProcess, PROCESS_SYNCHRONIZE, PROCESS_TERMINATE, TerminateProcess, WaitForSingleObject,
+    };
+
+    const HELPER_MODE: &str = "PROBE_CHILD_HELPER_MODE";
+
+    #[test]
+    fn helper_grandchild_waits() {
+        if std::env::var(HELPER_MODE).as_deref() != Ok("grandchild") {
+            return;
+        }
+        println!("ready {}", std::process::id());
+        std::io::stdout().flush().expect("flush readiness");
+        std::thread::park();
+    }
+
+    #[test]
+    fn helper_child_starts_a_grandchild() {
+        if std::env::var(HELPER_MODE).as_deref() != Ok("child") {
+            return;
+        }
+        let mut grandchild = quiet_command(std::env::current_exe().expect("test executable"));
+        grandchild
+            .args([
+                "--exact",
+                "probe_child_tests::helper_grandchild_waits",
+                "--nocapture",
+            ])
+            .env(HELPER_MODE, "grandchild")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut grandchild = grandchild.spawn().expect("start grandchild helper");
+        let mut output = BufReader::new(grandchild.stdout.take().expect("grandchild stdout"));
+        let pid = loop {
+            let mut line = String::new();
+            assert_ne!(
+                output.read_line(&mut line).expect("grandchild readiness"),
+                0,
+                "grandchild ended before readiness"
+            );
+            if let Some(pid) = line.strip_prefix("ready ") {
+                break pid.trim().parse::<u32>().expect("numeric grandchild pid");
+            }
+        };
+        println!("ready {} {pid}", std::process::id());
+        std::io::stdout().flush().expect("flush readiness");
+        std::thread::park();
+        drop(grandchild);
+    }
+
+    struct Witness(HANDLE);
+
+    impl Witness {
+        fn of(pid: u32) -> Self {
+            // SAFETY: opens a process id printed by a helper this test started,
+            // for synchronization and test cleanup only.
+            Self(unsafe {
+                OpenProcess(PROCESS_SYNCHRONIZE | PROCESS_TERMINATE, false, pid)
+                    .expect("open owned helper")
+            })
+        }
+
+        fn alive(&self) -> bool {
+            // SAFETY: the handle is live and owned by this witness.
+            (unsafe { WaitForSingleObject(self.0, 0) }) == WAIT_TIMEOUT
+        }
+
+        fn stays_alive(&self) {
+            // SAFETY: this is the same live test-owned process handle. The
+            // wait is a failure ceiling for an unexpected exit, not a sleep.
+            assert_eq!(
+                unsafe { WaitForSingleObject(self.0, 250) },
+                WAIT_TIMEOUT,
+                "the handed-off helper was contained"
+            );
+        }
+
+        fn wait_gone(&self) {
+            // SAFETY: the handle is live and owned by this witness. This is a
+            // failure ceiling, not a timing assertion; the kernel signals exit.
+            assert_eq!(
+                unsafe { WaitForSingleObject(self.0, 10_000) },
+                WAIT_OBJECT_0,
+                "the owned helper process did not end"
+            );
+        }
+
+        fn end(&self) {
+            // SAFETY: every witness in these tests names only a process printed
+            // by the test's own helper tree.
+            unsafe {
+                let _ = TerminateProcess(self.0, 1);
+            }
+        }
+    }
+
+    impl Drop for Witness {
+        fn drop(&mut self) {
+            // SAFETY: every witness names only a helper this test started. The
+            // cleanup also makes a deliberately red containment mutation leave
+            // no helper behind before the handle is closed exactly once.
+            unsafe {
+                if self.alive() {
+                    let _ = TerminateProcess(self.0, 1);
+                    let _ = WaitForSingleObject(self.0, 10_000);
+                }
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    fn helper_command() -> std::process::Command {
+        let mut command = quiet_command(std::env::current_exe().expect("test executable"));
+        command
+            .args([
+                "--exact",
+                "probe_child_tests::helper_child_starts_a_grandchild",
+                "--nocapture",
+            ])
+            .env(HELPER_MODE, "child")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        command
+    }
+
+    fn ready(child: &mut std::process::Child) -> (Witness, Witness) {
+        let mut output = BufReader::new(child.stdout.take().expect("helper stdout"));
+        let line = loop {
+            let mut line = String::new();
+            assert_ne!(
+                output.read_line(&mut line).expect("helper readiness"),
+                0,
+                "helper ended before readiness"
+            );
+            if line.starts_with("ready ") {
+                break line;
+            }
+        };
+        let mut words = line.split_whitespace();
+        assert_eq!(words.next(), Some("ready"));
+        let direct = words.next().unwrap().parse::<u32>().unwrap();
+        let grandchild = words.next().unwrap().parse::<u32>().unwrap();
+        (Witness::of(direct), Witness::of(grandchild))
+    }
+
+    fn ready_probe(child: &mut ProbeChild) -> (Witness, Witness) {
+        ready(&mut child.child)
+    }
+
+    /// RED mutation: make `ProbeChild::kill` call only `Child::kill`; the
+    /// grandchild remains live.
+    #[test]
+    fn a_probe_deadline_ends_its_child_and_grandchild() {
+        let mut command = helper_command();
+        let mut child = spawn_probe(&mut command).expect("start contained helper");
+        let (direct, grandchild) = ready_probe(&mut child);
+        assert!(direct.alive() && grandchild.alive());
+        child.kill().expect("end probe at deadline");
+        direct.wait_gone();
+        grandchild.wait_gone();
+        let _ = child.wait();
+    }
+
+    /// RED mutation: remove `ProbeChild`'s `Drop`; both helpers remain live.
+    #[test]
+    fn dropping_a_probe_guard_ends_its_child_and_grandchild() {
+        let mut command = helper_command();
+        let mut child = spawn_probe(&mut command).expect("start contained helper");
+        let (direct, grandchild) = ready_probe(&mut child);
+        drop(child);
+        direct.wait_gone();
+        grandchild.wait_gone();
+    }
+
+    /// RED mutation: turn the hand-off door into `spawn_probe`; dropping the
+    /// direct handle would end the two processes before these assertions.
+    #[test]
+    fn a_quiet_handoff_is_not_probe_contained() {
+        let mut child = helper_command().spawn().expect("start handed-off helper");
+        let (direct, grandchild) = ready(&mut child);
+        drop(child);
+        direct.stays_alive();
+        grandchild.stays_alive();
+        direct.end();
+        grandchild.end();
+        direct.wait_gone();
+        grandchild.wait_gone();
+    }
+
+    /// RED mutation: propagate the injected assignment error from
+    /// `spawn_probe_with`; the probe would be refused instead of running.
+    #[test]
+    fn assignment_failure_runs_uncontained_and_can_be_cleaned_up_by_its_owner() {
+        let mut command = helper_command();
+        let mut child = spawn_probe_with(&mut command, |_| {
+            Err(std::io::Error::other("injected assignment refusal"))
+        })
+        .expect("assignment failure degrades to an uncontained probe");
+        let (direct, grandchild) = ready_probe(&mut child);
+        drop(child);
+        assert!(direct.alive() && grandchild.alive());
+        direct.end();
+        grandchild.end();
+        direct.wait_gone();
+        grandchild.wait_gone();
+    }
+}
+
 /// **What a start through [`quiet_command`] carries from this process** (0.4.7
 /// ticket U-39): the facts a refused start is read against — whether a console
 /// is attached, what the three standard handles the child inherits are, the
@@ -3429,7 +3987,9 @@ fn read_system_locale_declaration() -> Option<LocaleDeclaration> {
 /// say*, and the caller's whole contract is to carry on without it.
 #[cfg(target_os = "macos")]
 fn quiet_command_text(program: &str, arguments: &[&str]) -> Option<String> {
-    let output = quiet_command(program).args(arguments).output().ok()?;
+    let mut command = quiet_command(program);
+    command.args(arguments);
+    let output = probe_output(command).ok()?;
     output
         .status
         .success()

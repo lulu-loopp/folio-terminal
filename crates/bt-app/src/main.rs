@@ -445,6 +445,9 @@ const PANIC_LOG_FILENAME: &str = "folio-panic.log";
 #[derive(Clone, Copy, Debug)]
 enum AppEvent {
     PtyOutput,
+    /// The launch/profile-table program walk landed on the existing
+    /// background preparation road. The answer is adopted between frames.
+    ProfileProgramsReady,
     /// A keyboard layout's copied Shift table landed from the worker road.
     /// The answer is in `App::layout_tables`; this event only breaks a parked
     /// loop, and the next key lookup drains the channel too if the wake is lost.
@@ -834,7 +837,8 @@ impl AppEvent {
             Self::ClipboardPictureReady => Station::ClipboardRead,
             Self::FileIndexReady => Station::FileIndex,
             Self::WebPageSpoke => Station::WebSpoke,
-            Self::PsReadLineProbed
+            Self::ProfileProgramsReady
+            | Self::PsReadLineProbed
             | Self::PowerShellProfileProbed
             | Self::CopilotProbed
             | Self::UpdateChecked
@@ -11456,6 +11460,10 @@ struct DpiSnapshot {
 /// seat, and `bt-app` — the one crate allowed to know both — holds the pairing.
 struct LeafSession {
     pty: Option<PtySession>,
+    /// A launch-time terminal whose program answer has not landed yet. It owns
+    /// no process; the requested identity is retained here until the program
+    /// preparation worker supplies one coherent snapshot.
+    pending_program_birth: Option<PendingProgramBirth>,
     foreground_program_cadence: foreground_program::Cadence,
     /// **Which shell this is, told apart from the one that stood here before**
     /// (review X-1).
@@ -11785,6 +11793,12 @@ struct LeafSession {
     /// with the shell it was about. Written by `stage_paste`; read by the card's layout, draw and
     /// hit; taken by the card's answer.
     pending_paste: Option<PendingPaste>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PendingProgramBirth {
+    seed: LeafSeed,
+    uses_default: bool,
 }
 
 struct TabState {
@@ -38162,16 +38176,30 @@ fn create_leaf_session(
     // the file named. A WSL leaf falling back to PowerShell must not be handed
     // `/home/me`, and a Git Bash falling back to Windows PowerShell is a pane
     // that does want the PSReadLine probe.
-    let started = startable_profile(&seed.profile, programs);
+    let pending_program_birth =
+        (programs.is_pending() && probe_input.is_none()).then(|| PendingProgramBirth {
+            seed: seed.clone(),
+            uses_default: seed.profile.is_empty(),
+        });
+    let requested_profile = if seed.profile.is_empty() {
+        profiles::fallback_profile_id()
+    } else {
+        seed.profile.as_str()
+    };
+    let started = if pending_program_birth.is_some() {
+        Started::Nothing
+    } else {
+        startable_profile(requested_profile, programs)
+    };
     let spawn_profile = match &started {
-        Started::AsAsked | Started::Nothing => seed.profile.as_str(),
+        Started::AsAsked | Started::Nothing => requested_profile,
         Started::FellBack(to) => to.as_str(),
     };
     // **The one trigger.** A user who only ever opens WSL or `pwsh` never starts
     // this process, because the module that is broken is the one `Windows
     // PowerShell 5.1` ships and nothing else on this machine is affected by it.
     // Idempotent — see `psreadline::begin_probe`.
-    if spawn_profile == profiles::WINDOWS_POWERSHELL_ID {
+    if pending_program_birth.is_none() && spawn_profile == profiles::WINDOWS_POWERSHELL_ID {
         psreadline::begin_probe();
     }
     // There used to be a second trigger here (§7.40 ③): a `wsl.exe` started
@@ -38420,11 +38448,12 @@ fn create_leaf_session(
         // Nothing on this machine can stand in, so there is no shell behind this
         // pane at all: `pty` is `None` above and what is left is a pane that
         // holds its place in the tree and says why it is empty.
-        Started::Nothing => {
+        Started::Nothing if pending_program_birth.is_none() => {
             session
-                .feed(no_program_banner(&seed.profile).as_bytes())
+                .feed(no_program_banner(requested_profile).as_bytes())
                 .context("write the no-program banner into the leaf's first line")?;
         }
+        Started::Nothing => {}
     }
     if let Some(fallback) = &shell_fallback {
         session
@@ -38462,6 +38491,7 @@ fn create_leaf_session(
         // when there is no ConPTY — see the field.
         wake: pty.is_some().then_some(wake),
         pty,
+        pending_program_birth,
         foreground_program_cadence: foreground_program::Cadence::default(),
         paste_recipient: profiles::paste_recipient(
             profiles::index_of_id(&profile),
@@ -41831,10 +41861,19 @@ impl Runtime<'_> {
         let focus_mode = settings_store.loaded().focus_mode;
         // Probed here rather than beside the first shell, which is where it used
         // to sit: the opening window is *titled* after the default profile, and
-        // resolving which profile that is needs to know what this machine can
-        // start. It is an environment read and four `is_file` calls, so moving it
-        // ahead of the window costs the launch nothing measurable.
-        let profile_programs = profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
+        // Resolving which profile that is needs a PATH walk, and a path the
+        // environment names can block in a filesystem redirector. The first
+        // frame therefore owns the truthful pending value below; the existing
+        // preparation worker publishes the complete answer later, and no shell
+        // is born until it does.
+        let profile_programs = profiles::ProfilePrograms::pending();
+        {
+            let proxy = proxy.clone();
+            profiles::install_program_probe_wake(move || {
+                let _ = proxy.send_event(AppEvent::ProfileProgramsReady);
+            });
+        }
+        profiles::begin_program_probe();
         // **Folio's own older PSReadLine is replaced here, without asking**
         // (ruling 2026-09-21, option A; ticket 56). At the launch and before the
         // first window, because a pane of this Folio starting a PowerShell is
@@ -41857,7 +41896,6 @@ impl Runtime<'_> {
         shell_integration::begin_startup_migration();
         // Folio's own `folio.ps1`, compared and repaired on a worker nobody waits for: the first
         // PowerShell birth that arrives before it finishes prepares it on its own birth worker.
-        shell_integration::begin_powershell_preparation_for(&profile_programs);
         // Three registry reads, on this thread, finishing before the next line
         // (§7.40 ②). This used to start a worker running `wsl.exe --list` and a
         // `getent` inside the distribution — and the `profiles::title` call
@@ -41866,11 +41904,12 @@ impl Runtime<'_> {
         // machine to boot before it could ask for a window, and the console
         // Windows handed that `wsl.exe` was a Windows Terminal window opening in
         // front of Folio. What is left costs microseconds and starts nothing.
-        wsl::start(profile_programs.program("wsl"));
+        // WSL titles begin when the program answer lands; while it is pending
+        // there is no executable to condition the registry reading on.
         let default_profile =
             profiles::default_profile(&settings_store.loaded().default_profile, &profile_programs);
         // The same answer as an id, for the seeds — see `Runtime::default_profile_id`.
-        let default_profile_id = profiles::id(default_profile);
+        let default_profile_id = String::new();
         // The command line, put to this machine: the folder asked about, the
         // profile looked up in this build's table, and the crossing into that
         // profile's namespace. Everything it could not honour comes back in the
@@ -42148,7 +42187,11 @@ impl Runtime<'_> {
                     (
                         seat,
                         LeafSeed {
-                            profile: profiles::id(cli_plan.profile),
+                            profile: if cli.profile.as_deref().is_some_and(profiles::has_id) {
+                                profiles::id(cli_plan.profile)
+                            } else {
+                                default_profile_id.clone()
+                            },
                             cwd: cli_plan.cwd.clone(),
                             // A profile the command line named and this build has
                             // not got is reported on a card naming the id, not by
@@ -60163,6 +60206,16 @@ impl LostDevice for TheDeviceAndItsWindows<'_> {
     }
 }
 
+fn for_each_window_index<E>(
+    count: usize,
+    mut answer: impl FnMut(usize) -> Result<(), E>,
+) -> Result<(), E> {
+    for index in 0..count {
+        answer(index)?;
+    }
+    Ok(())
+}
+
 impl FolioApp {
     fn new(
         proxy: EventLoopProxy<AppEvent>,
@@ -60220,14 +60273,14 @@ impl FolioApp {
         &mut self,
         mut answer: impl FnMut(&mut Runtime<'_>) -> Result<()>,
     ) -> Result<()> {
-        for index in 0..self.windows.len() {
+        for_each_window_index(self.windows.len(), |index| {
             if let Some(mut runtime) = self.runtime_at(index)
                 && runtime.window.leaving.is_none()
             {
                 answer(&mut runtime)?;
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 
     /// The same walk, and the windows on their way out are in it (§7.35).
@@ -64170,6 +64223,17 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             // frames discarded with this arm draining, against 1 of 765 without
             // it.
             AppEvent::PtyOutput => Ok(()),
+            AppEvent::ProfileProgramsReady => {
+                let Some(programs) = profiles::take_program_probe() else {
+                    return;
+                };
+                if let Some(app) = self.app.as_mut() {
+                    app.profile_programs = programs;
+                    shell_integration::begin_powershell_preparation_for(&app.profile_programs);
+                    wsl::start(app.profile_programs.program("wsl"));
+                }
+                self.for_each_window(|runtime| runtime.start_pending_program_births())
+            }
             AppEvent::LayoutTablesReady => {
                 if let Some(app) = self.app.as_mut() {
                     app.layout_tables.apply_answers();

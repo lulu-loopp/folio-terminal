@@ -177,13 +177,13 @@ mod imp {
         shell_pid: u32,
     ) -> Option<BTreeSet<u32>> {
         let executable = std::env::current_exe().ok()?;
-        let mut child = crate::quiet_command(executable)
+        let mut command = crate::quiet_command(executable);
+        command
             .args([CONSOLE_MEMBERS_FLAG, &shell_pid.to_string()])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
+            .stderr(Stdio::null());
+        let mut child = crate::spawn_probe(&mut command).ok()?;
         let deadline = Instant::now() + OBSERVATION_INTERVAL;
         let status = loop {
             match child.try_wait().ok()? {

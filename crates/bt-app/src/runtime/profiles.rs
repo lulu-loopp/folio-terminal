@@ -3,7 +3,7 @@
 
 use crate::{
     FilesFocusArrival, Popup, Runtime, cli, i18n, launch_wire, persist, profile_menu_anchor,
-    profiles, seats, settings, shell_integration, text_field, toast,
+    profiles, seats, settings, text_field, toast,
 };
 use anyhow::Result;
 use bt_layout::SeatId;
@@ -192,7 +192,11 @@ impl Runtime<'_> {
     /// profile across at least one gesture — a folder chooser, a tear-out, a
     /// save — and a position does not survive one.
     pub(in crate::runtime) fn default_profile_id(&self) -> String {
-        profiles::id(self.default_profile())
+        if self.app.profile_programs.is_pending() {
+            String::new()
+        } else {
+            profiles::id(self.default_profile())
+        }
     }
 
     /// Whether that answer came from the machine rather than from the reader —
@@ -404,9 +408,8 @@ impl Runtime<'_> {
     /// reasons, which is why they are one call rather than two lists that have
     /// to be kept in step.
     fn adopt_profile_table(&mut self) -> Result<()> {
-        self.app.profile_programs =
-            profiles::ProfilePrograms::probe(&bt_pty::SystemShellEnvironment);
-        shell_integration::begin_powershell_preparation_for(&self.app.profile_programs);
+        self.app.profile_programs = profiles::ProfilePrograms::pending();
+        profiles::begin_program_probe();
         self.app.first_run_attempted = false;
         self.publish_frame(FrameTrigger {
             occurred_at: Instant::now(),

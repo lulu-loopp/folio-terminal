@@ -2212,7 +2212,7 @@ fn run_git_with_input(
     if feeding {
         command.stdin(Stdio::piped());
     }
-    let mut child = command.spawn().map_err(|error| {
+    let mut child = bt_platform::spawn_probe(&mut command).map_err(|error| {
         GitFault::GitMissing(format!(
             "{} would not start: {error}",
             program_name(&command)

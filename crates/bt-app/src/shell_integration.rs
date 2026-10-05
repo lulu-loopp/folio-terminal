@@ -2369,7 +2369,7 @@ fn powershell_probe_command(program: &Path) -> Result<std::process::Command, Par
     }
 }
 
-fn stopped_output(mut child: std::process::Child) -> ProbeOutput {
+fn stopped_output(mut child: bt_platform::ProbeChild) -> ProbeOutput {
     let _ = child.kill();
     child.wait_with_output().map_or_else(
         |_| ProbeOutput {
@@ -2397,7 +2397,8 @@ fn run_powershell_probe(
     // asks about the program a pane will run, so it asks about the one an
     // administrator installed.
     use std::process::Stdio;
-    let mut child = powershell_probe_command(program)?
+    let mut probe = powershell_probe_command(program)?;
+    probe
         .args(["-NoProfile", "-NonInteractive", "-Command", command])
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -2405,8 +2406,8 @@ fn run_powershell_probe(
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = bt_platform::spawn_probe(&mut probe)
         .map_err(|error| ParseProbeFailure::Spawn(error.to_string()))?;
     if let Some(input) = input {
         let written = child.stdin.take().map_or_else(
@@ -3157,10 +3158,13 @@ mod tests {
             !worker.contains(".join()"),
             "the window thread waits for no startup worker"
         );
+        let landing = source
+            .find("AppEvent::ProfileProgramsReady =>")
+            .expect("the program answer's landing");
         let warmed = source
-            .find("shell_integration::begin_powershell_preparation_for(&profile_programs);")
-            .expect("launch starts the script's preparation");
-        assert!(warmed < source.find("opening_window_attributes(").unwrap());
+            .find("shell_integration::begin_powershell_preparation_for(&app.profile_programs);")
+            .expect("the answer starts the script's preparation");
+        assert!(landing < warmed, "preparation follows the program answer");
         let probe = source_for_profile_probe();
         let command = source_for_probe_command();
         assert!(command.contains("quiet_command_named"));
@@ -4429,6 +4433,7 @@ mod tests {
                 "Runtime::pop_out_preview",
                 "Runtime::restart_shell",
                 "Runtime::split_seat",
+                "Runtime::start_pending_program_births",
                 "create_leaf_session",
                 "create_tab_state",
             ],

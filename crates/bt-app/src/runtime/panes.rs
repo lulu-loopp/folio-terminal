@@ -4,7 +4,7 @@
 use crate::{
     ColumnNotch, CommandFlash, DividerGrip, Drag, DragCarry, DragHandover, DragSource, DropLanding,
     FilesFocusArrival, FlashBand, FolderPick, FormulaSwitches, FrameImageReferences, FrameTraces,
-    HandoverInto, LeafId, LeafOnStage, LeafSession, MathHoverExit, MenuPaint, Motion,
+    HandoverInto, LeafId, LeafOnStage, LeafSeed, LeafSession, MathHoverExit, MenuPaint, Motion,
     NewWindowPlan, NoticeHost, PaneDraw, PaneMenuState, PaneTransform, PopoverTrigger, Popup,
     PopupOwner, PresentIntent, PreviewSurface, RAIL_TEXT_FADE, RAIL_TEXT_FADE_OPEN_DELAY,
     RAIL_TRANSITION, RevealTween, RowHost, RowPayload, RowPayloadKind, RowVerb, Runtime, SplitSeed,
@@ -39,6 +39,88 @@ use winit::event::MouseScrollDelta;
 use winit::window::{Window, WindowId};
 
 impl Runtime<'_> {
+    /// Start every launch-time terminal only after the complete machine-program
+    /// answer has landed. Until this call each such leaf is a drawable terminal
+    /// model with no process, so the first frame never waits and no provisional
+    /// shell can differ from the resolved one.
+    pub(crate) fn start_pending_program_births(&mut self) -> Result<()> {
+        let default = profiles::id(profiles::default_profile(
+            &self.app.settings_store.loaded().default_profile,
+            &self.app.profile_programs,
+        ));
+        let render_physical =
+            presentation_physical_size(self.window.renderer.presentation_geometry());
+        let rail = self.rail_posture();
+        let chrome = self.platform_chrome();
+        let scale = self.window.renderer.scale_factor() as f32;
+        let metrics = seats::seat_metrics(self.window.renderer.dpi_milli().get());
+        let formulas = FormulaSwitches::from_settings(self.app.settings_store.loaded());
+        let scrollback = scrollback_quota(self.app.settings_store.loaded().scrollback_lines);
+        let line_wrapping = self.app.settings_store.loaded().line_wrapping;
+
+        for tab_index in 0..self.window.tabs.len() {
+            let pending: Vec<_> = self.window.tabs[tab_index]
+                .sessions
+                .iter()
+                .filter_map(|(seat, leaf)| {
+                    leaf.pending_program_birth
+                        .clone()
+                        .map(|birth| (*seat, birth, leaf.text_scale))
+                })
+                .collect();
+            if pending.is_empty() {
+                continue;
+            }
+            let (layout, _, _, _) = solve_seats(
+                &self.window.tabs[tab_index].seats,
+                &self.window.renderer,
+                render_physical,
+                self.window.size_policy,
+                rail,
+                chrome,
+            );
+            for (seat, birth, text_scale) in pending {
+                let seed = if birth.uses_default {
+                    LeafSeed {
+                        profile: default.clone(),
+                        ..birth.seed
+                    }
+                } else {
+                    birth.seed
+                };
+                let body = seats::birth_body_viewport(
+                    &self.window.tabs[tab_index].seats,
+                    &layout,
+                    seat,
+                    &metrics,
+                    scale,
+                );
+                let view = LeafView::at(&mut self.app.gpu, &self.window.renderer, text_scale)?;
+                let spawned = create_leaf_session(
+                    view,
+                    body,
+                    LeafId {
+                        tab: self.window.tabs[tab_index].id,
+                        seat,
+                    },
+                    &self.window.pty_wake,
+                    None,
+                    &seed,
+                    &self.app.profile_programs,
+                    formulas,
+                    scrollback,
+                    line_wrapping,
+                )?;
+                self.window.tabs[tab_index].sessions.insert(seat, spawned);
+            }
+        }
+        self.refresh_chrome();
+        self.publish_frame(FrameTrigger {
+            occurred_at: Instant::now(),
+            source: FrameSource::Expose,
+        })
+    }
+
     /// Re-solve the tree against the current surface and place the terminal
     /// seat.
     ///

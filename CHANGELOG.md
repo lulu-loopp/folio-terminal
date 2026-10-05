@@ -40,6 +40,8 @@ All notable changes to Folio are recorded here. The format follows
 
 ### Fixed
 
+- Commands Folio runs to learn about the machine no longer leave helper processes behind after a timeout or after Folio exits.
+- An unavailable network folder in PATH no longer delays the first Folio window.
 - PowerShell integration preparation can be retried after a failed or missing write, concurrent preparations cannot leave a partial script, and an update trial's temporary script is removed when that transaction is retired.
 - PowerShell's integration loader now keeps its PSReadLine reflection state process-wide and silently leaves the shell unchanged if its owned script cannot be read.
 - Folio left running now learns about a new version within a day.

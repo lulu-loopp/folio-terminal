@@ -1046,6 +1046,9 @@ windows = { version = "0.62.2", features = [
     # namespace is called `Diagnostics::Debug` because a debugger is the other
     # thing that makes them; nothing here attaches to anything.
     "Win32_System_Diagnostics_Debug",
+    # `PssCaptureSnapshot`'s process-local thread walk finds the one initial
+    # thread of a suspended probe without taking a system-wide thread snapshot.
+    "Win32_System_Diagnostics_ProcessSnapshotting",
     # `CreateToolhelp32Snapshot` / `Process32FirstW` / `Process32NextW`: this
     # process's parent pid, which the update's recovery build excludes from
     # the trials it counts (`install_flip::parent_of_this_process`, 0.4.7
@@ -1064,6 +1067,9 @@ windows = { version = "0.62.2", features = [
     # (`Win32_System_IO`), and the events the watcher thread waits on and the
     # caller stops it with (`Win32_System_Threading`). See `DirWatch`.
     "Win32_System_IO",
+    # Per-probe kill-on-close jobs: a probe's descendants end with the probe,
+    # including when Folio itself exits (T-PROBE-CHILD).
+    "Win32_System_JobObjects",
     "Win32_System_Memory",
     # `CreateNamedPipeW` / `ConnectNamedPipe` / `DisconnectNamedPipe` /
     # `WaitNamedPipeW`: the attention endpoint and the `folio attention` verb's

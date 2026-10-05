@@ -572,13 +572,13 @@ mod arm {
         bound: Duration,
     ) -> Result<Answer, Refusal> {
         let refuse = |why| Refusal::at(stage, why);
-        let mut child = crate::quiet_command(program)
+        let mut command = crate::quiet_command(program);
+        command
             .args(arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|_| refuse(Why::DidNotStart))?;
+            .stderr(Stdio::piped());
+        let mut child = crate::spawn_probe(&mut command).map_err(|_| refuse(Why::DidNotStart))?;
         let (mut stdout, mut stderr) = (
             child.stdout.take().expect("stdout was piped"),
             child.stderr.take().expect("stderr was piped"),

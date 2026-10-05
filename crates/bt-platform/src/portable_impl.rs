@@ -1730,6 +1730,7 @@ pub fn install_console_ctrl_handler() -> bool {
 pub fn leave_process(code: i32) -> ! {
     use std::io::Write;
 
+    crate::end_probe_children_for_process_exit();
     let _ = std::io::stdout().flush();
     let _ = std::io::stderr().flush();
     std::process::exit(code)
