@@ -2255,6 +2255,10 @@ pub enum PolicyCause {
     Location,
     /// The row's arguments cannot be read ([`RowProcessScope::Unreadable`]): no claim.
     Unreadable,
+    /// A question this answer depends on got no answer — PowerShell did not answer in time, or
+    /// the account's environment could not be read — so nothing is claimed, and the next visit
+    /// to the Profiles page asks again (release read m2).
+    Undetermined,
 }
 
 impl PolicyCause {
@@ -2270,7 +2274,52 @@ impl PolicyCause {
             Self::Process => Some(crate::i18n::Text::CapPowerShellPolicyProcess),
             Self::Location => Some(crate::i18n::Text::CapPowerShellPolicyLocation),
             Self::Unreadable => Some(crate::i18n::Text::CapPowerShellNotProvided),
+            Self::Undetermined => Some(crate::i18n::Text::CapPowerShellUndetermined),
         }
+    }
+}
+
+/// **Whether the managed line may be offered for a row, and what the row says when it may not**
+/// (release read B1).
+///
+/// The line goes into the edition's `$PROFILE.CurrentUserCurrentHost`, which **every** session of
+/// that edition reads — Folio's other rows, Windows Terminal, the Start menu's PowerShell, an
+/// editor's terminal. So two sessions are asked, and both must load the file:
+///
+/// * **an ordinary session** of the edition: the scopes with no row's arguments, its Process scope
+///   the one the account's fresh environment gives every session
+///   ([`ProfileObservation::ordinary_process`]). If it would refuse the file, writing the file
+///   would make every such session print "cannot be loaded" in red;
+/// * **the clicked row**: its own `-ExecutionPolicy` as its Process scope ([`policy_cause`]). If it
+///   refuses, the line would do nothing for the row it was asked for.
+///
+/// When only one refuses, its cause is the row's. When both do, the cause shown is the one that
+/// decides what the user can do: Group Policy first (nothing the user runs changes it), then the
+/// row's own Process scope (it outranks [`POLICY_COMMAND`], so the command would not help this
+/// row), then the ordinary session's cause — whose command, when it is [`PolicyCause::Changeable`],
+/// sets the CurrentUser scope every session of the account reads.
+fn edition_cause(observed: &ProfileObservation, row: RowProcessScope) -> PolicyCause {
+    let loads = observed.remote_signed_loads();
+    let own = policy_cause(observed.scopes, loads, row);
+    let ordinary = observed
+        .ordinary_process
+        .map_or(PolicyCause::Undetermined, |process| {
+            policy_cause(observed.scopes, loads, RowProcessScope::Set(process))
+        });
+    both_sessions(ordinary, own)
+}
+
+/// [`edition_cause`]'s one decision, over the two sessions' causes.
+fn both_sessions(ordinary: PolicyCause, own: PolicyCause) -> PolicyCause {
+    use PolicyCause::{Allows, Organisation, Process, Undetermined, Unreadable};
+    match (ordinary, own) {
+        (_, Unreadable) => Unreadable,
+        (Undetermined, _) | (_, Undetermined) => Undetermined,
+        (Allows, own) => own,
+        (ordinary, Allows) => ordinary,
+        (Organisation, _) | (_, Organisation) => Organisation,
+        (_, Process) => Process,
+        (ordinary, _) => ordinary,
     }
 }
 
@@ -2284,6 +2333,7 @@ impl PowerShellProfileFallback {
             Self::PolicyProcess => Some(PolicyCause::Process),
             Self::PolicyLocation => Some(PolicyCause::Location),
             Self::Unreadable => Some(PolicyCause::Unreadable),
+            Self::Undetermined => Some(PolicyCause::Undetermined),
             Self::NotNeeded
             | Self::Pending
             | Self::Offer
@@ -2382,16 +2432,25 @@ fn row_process_scope(program: &Path, arguments: &[OsString]) -> RowProcessScope 
 ///
 /// The answer per program, because the two generations answer differently and a
 /// reader's own profile row may name a third `pwsh` entirely.
-type ProfileAnswer = std::sync::Arc<OnceLock<Option<PathBuf>>>;
+///
+/// **Only an answer is kept** (release read m2): a probe that ran out of time or failed is not an
+/// answer about the file, and keeping it would drop that edition from every later removal for the
+/// life of the process. The slot is held while its one question is asked, so concurrent askers
+/// share an answer that arrives; after a failure the next asker asks again.
+type ProfileAnswer = std::sync::Arc<Mutex<Option<PathBuf>>>;
 type ProfileAnswers = std::collections::BTreeMap<PathBuf, ProfileAnswer>;
 static PROFILE_ANSWERS: OnceLock<std::sync::Mutex<ProfileAnswers>> = OnceLock::new();
 
 /// The two profile scopes a Windows account can carry. Every executable of one
 /// edition reads the same CurrentUserCurrentHost profile, so this is the key
 /// that makes two uncomposable rows flip together.
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-enum PowerShellEdition {
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+pub enum PowerShellEdition {
+    #[serde(rename = "windows_powershell")]
     WindowsPowerShell,
+    #[serde(rename = "powershell_7")]
     PowerShellSeven,
 }
 
@@ -2414,6 +2473,13 @@ struct ProfileObservation {
     edition_says: Option<bool>,
     /// What can be known without the edition's answer ([`PROFILE_COMMAND`]'s `Local=`/`Marked=`).
     location: ProfileLocation,
+    /// **The Process scope an ordinary session of the edition starts with** — the
+    /// `PSExecutionPolicyPreference` of the account's fresh logon environment, the block every
+    /// session started from the Start menu, Explorer or another terminal inherits; `Undefined`
+    /// when the account sets none. The probe's own Process scope ([`PolicyScopes::process`]) is
+    /// Folio's environment, which no other session shares. `None` when the fresh block could not
+    /// be read: then what an ordinary session does is not known ([`PolicyCause::Undetermined`]).
+    ordinary_process: Option<crate::psreadline::ExecutionPolicy>,
     line_present: bool,
 }
 
@@ -2479,8 +2545,19 @@ impl FallbackNotices {
 
 static FALLBACK_NOTICES: OnceLock<FallbackNotices> = OnceLock::new();
 
-static PROFILE_OBSERVATIONS: OnceLock<Mutex<BTreeMap<PowerShellEdition, ProfileObservation>>> =
-    OnceLock::new();
+static PROFILE_OBSERVATIONS: OnceLock<
+    Mutex<BTreeMap<PowerShellEdition, Heard<ProfileObservation>>>,
+> = OnceLock::new();
+
+/// **What has been heard from a question asked in the background**: nothing yet, a failure (the
+/// question was asked and got no answer), or the answer. A failure is not an answer about the
+/// row, and the row says so (release read m2).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Heard<T> {
+    NotYet,
+    Failed,
+    Answer(T),
+}
 
 /// What an uncomposable PowerShell row can honestly offer on the Profiles page.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2509,6 +2586,10 @@ pub enum PowerShellProfileFallback {
     /// The row's arguments cannot be read, so nothing is claimed and nothing offered
     /// ([`PolicyCause::Unreadable`]).
     Unreadable,
+    /// A question the row depends on — the parse answer, or the edition's observation — was
+    /// asked and got no answer; the next visit to the Profiles page asks again
+    /// ([`PolicyCause::Undetermined`]).
+    Undetermined,
     /// This platform has no `$PROFILE` probe ([`PROFILE_PROBE_EXISTS`]), so nothing is observed
     /// and nothing is offered.
     Unsupported,
@@ -2533,44 +2614,57 @@ pub fn powershell_profile_fallback(
 ) -> PowerShellProfileFallback {
     let composable = integration_enabled && powershell_arguments_are_safe(program, arguments);
     let no_profile = asks_for_no_profile(program, arguments);
-    let pending = classify_powershell_arguments(program, arguments).is_some_and(|parsed| {
+    let parse = if classify_powershell_arguments(program, arguments).is_some_and(|parsed| {
         matches!(
             parsed.terminal,
             PowerShellTerminal::Command { .. } | PowerShellTerminal::EncodedCommand { .. }
-        ) && cached_parse_answer(program, arguments).is_none()
-    });
+        )
+    }) {
+        heard_parse(program, arguments)
+    } else {
+        Heard::Answer(())
+    };
     let observed = PROFILE_OBSERVATIONS
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .get(&powershell_edition(program))
-        .cloned();
+        .cloned()
+        .unwrap_or(Heard::NotYet);
     let row = row_process_scope(program, arguments);
     profile_fallback_from_parts(
         PROFILE_PROBE_EXISTS,
         integration_enabled,
         composable,
-        pending,
         no_profile,
-        observed.map(|observed| {
-            (
-                policy_cause(observed.scopes, observed.remote_signed_loads(), row),
-                observed.line_present,
-            )
-        }),
+        parse,
+        match observed {
+            Heard::NotYet => Heard::NotYet,
+            Heard::Failed => Heard::Failed,
+            Heard::Answer(observed) => {
+                Heard::Answer((edition_cause(&observed, row), observed.line_present))
+            }
+        },
     )
 }
 
 /// The row model's one decision. `Offer` needs an observation of the row's edition: before the
 /// first one lands the row is `Pending`, and on a platform with no probe it never lands, which
-/// is `Unsupported` rather than a wait.
+/// is `Unsupported` rather than a wait. A question that was asked and got no answer — the parse
+/// probe, or the observation — is `Undetermined`, never the "not provided" of a refusal.
+///
+/// **A line that is present is `Enabled` only when both sessions load it** ([`edition_cause`]):
+/// a line an ordinary session refuses — written by an older Folio, or by hand, before the policy
+/// tightened — is the policy's row, with its sentence and, where the user can change it, its
+/// Copy button; the line's removal is the Settings row "PowerShell $PROFILE line", shown while
+/// the line is present.
 fn profile_fallback_from_parts(
     probe_exists: bool,
     integration_enabled: bool,
     composable: bool,
-    pending: bool,
     no_profile: bool,
-    observed: Option<(PolicyCause, bool)>,
+    parse: Heard<()>,
+    observed: Heard<(PolicyCause, bool)>,
 ) -> PowerShellProfileFallback {
     if composable {
         return PowerShellProfileFallback::NotNeeded;
@@ -2581,18 +2675,23 @@ fn profile_fallback_from_parts(
     if !probe_exists {
         return PowerShellProfileFallback::Unsupported;
     }
-    if pending {
-        return PowerShellProfileFallback::Pending;
-    }
-    match observed {
-        None => PowerShellProfileFallback::Pending,
-        Some((PolicyCause::Changeable, _)) => PowerShellProfileFallback::PolicyChangeable,
-        Some((PolicyCause::Organisation, _)) => PowerShellProfileFallback::PolicyManaged,
-        Some((PolicyCause::Process, _)) => PowerShellProfileFallback::PolicyProcess,
-        Some((PolicyCause::Location, _)) => PowerShellProfileFallback::PolicyLocation,
-        Some((PolicyCause::Unreadable, _)) => PowerShellProfileFallback::Unreadable,
-        Some((PolicyCause::Allows, true)) => PowerShellProfileFallback::Enabled,
-        Some((PolicyCause::Allows, false)) => PowerShellProfileFallback::Offer,
+    match (parse, observed) {
+        (Heard::NotYet, _) | (Heard::Answer(()), Heard::NotYet) => {
+            PowerShellProfileFallback::Pending
+        }
+        (Heard::Failed, _) | (Heard::Answer(()), Heard::Failed) => {
+            PowerShellProfileFallback::Undetermined
+        }
+        (Heard::Answer(()), Heard::Answer((cause, line_present))) => match cause {
+            PolicyCause::Changeable => PowerShellProfileFallback::PolicyChangeable,
+            PolicyCause::Organisation => PowerShellProfileFallback::PolicyManaged,
+            PolicyCause::Process => PowerShellProfileFallback::PolicyProcess,
+            PolicyCause::Location => PowerShellProfileFallback::PolicyLocation,
+            PolicyCause::Unreadable => PowerShellProfileFallback::Unreadable,
+            PolicyCause::Undetermined => PowerShellProfileFallback::Undetermined,
+            PolicyCause::Allows if line_present => PowerShellProfileFallback::Enabled,
+            PolicyCause::Allows => PowerShellProfileFallback::Offer,
+        },
     }
 }
 
@@ -2608,7 +2707,17 @@ fn publish_profile_observation(program: &Path, observed: ProfileObservation) {
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|error| error.into_inner())
-        .insert(powershell_edition(program), observed);
+        .insert(powershell_edition(program), Heard::Answer(observed));
+}
+
+/// **The edition was asked and did not answer** (release read m2): its row says so instead of
+/// keeping an older answer or reading as a refusal, until the next visit asks again.
+fn publish_profile_observation_failed(program: &Path) {
+    PROFILE_OBSERVATIONS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .insert(powershell_edition(program), Heard::Failed);
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -2677,6 +2786,21 @@ fn cached_parse_answer(program: &Path, arguments: &[OsString]) -> Option<bool> {
     }
 }
 
+/// What the Profiles row has heard from the parse question about this exact row: an answer
+/// (either way), a failure (the last attempt got no answer), or nothing yet.
+fn heard_parse(program: &Path, arguments: &[OsString]) -> Heard<()> {
+    match PARSE_ANSWERS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .get(&parse_key(program, arguments))
+    {
+        Some(ParseAnswer::Valid | ParseAnswer::Invalid) => Heard::Answer(()),
+        Some(ParseAnswer::Failed { .. }) => Heard::Failed,
+        Some(ParseAnswer::Pending { .. }) | None => Heard::NotYet,
+    }
+}
+
 fn command_text(program: &Path, arguments: &[OsString]) -> Option<String> {
     let parsed = classify_powershell_arguments(program, arguments)?;
     if parsed.non_interactive {
@@ -2734,10 +2858,22 @@ struct ParseAttempt {
     number: u8,
 }
 
+/// **Who asks a parse question**, and so whether the attempt limit applies.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ParseAsker {
+    /// Startup, a profile-table change or a birth: at most [`PARSE_PROBE_ATTEMPT_LIMIT`] attempts
+    /// per exact row in a process, so a host that keeps failing goes quiet.
+    Background,
+    /// A visit to the Profiles page — an edge a person makes, never a loop: a failed question is
+    /// asked once more whatever the count (release read m2), as the page's observation is.
+    Visit,
+}
+
 /// Claim one bounded attempt before starting any worker or process. A failed
 /// answer remains unknown, and the next birth may claim the next attempt; a
-/// pending, grammatical or exhausted answer starts nothing.
-fn claim_parse_attempt(question: ParseQuestion) -> Option<ParseAttempt> {
+/// pending or grammatical answer starts nothing, and neither does an exhausted one unless a
+/// visit asks ([`ParseAsker::Visit`]).
+fn claim_parse_attempt(question: ParseQuestion, asker: ParseAsker) -> Option<ParseAttempt> {
     let number = {
         let mut answers = PARSE_ANSWERS
             .get_or_init(Default::default)
@@ -2745,8 +2881,10 @@ fn claim_parse_attempt(question: ParseQuestion) -> Option<ParseAttempt> {
             .unwrap_or_else(|error| error.into_inner());
         let number = match answers.get(&question.key) {
             None => 1,
-            Some(ParseAnswer::Failed { attempts, .. }) if *attempts < PARSE_PROBE_ATTEMPT_LIMIT => {
-                attempts + 1
+            Some(ParseAnswer::Failed { attempts, .. })
+                if *attempts < PARSE_PROBE_ATTEMPT_LIMIT || asker == ParseAsker::Visit =>
+            {
+                attempts.saturating_add(1)
             }
             Some(
                 ParseAnswer::Pending { .. }
@@ -2794,9 +2932,17 @@ fn run_parse_attempt(attempt: ParseAttempt) {
     publish_parse_attempt(attempt.question.key, attempt.number, result);
 }
 
-fn ask_parse_question(question: ParseQuestion) {
-    if let Some(attempt) = claim_parse_attempt(question) {
+fn ask_parse_question(question: ParseQuestion, asker: ParseAsker) {
+    if let Some(attempt) = claim_parse_attempt(question, asker) {
         run_parse_attempt(attempt);
+    }
+}
+
+/// **The Profiles page's visit asks every failed parse question again** (release read m2), on
+/// the visit's own observation worker; a question with an answer, or one in flight, is not asked.
+fn ask_failed_parse_questions_again(questions: Vec<ParseQuestion>) {
+    for question in questions {
+        ask_parse_question(question, ParseAsker::Visit);
     }
 }
 
@@ -2808,7 +2954,7 @@ fn request_parse_retry(
     question: ParseQuestion,
     start: impl FnOnce(ParseAttempt) -> Result<(), String>,
 ) {
-    let Some(attempt) = claim_parse_attempt(question) else {
+    let Some(attempt) = claim_parse_attempt(question, ParseAsker::Background) else {
         return;
     };
     let key = attempt.question.key.clone();
@@ -2916,7 +3062,7 @@ fn output_prefix(bytes: &[u8]) -> String {
 }
 
 fn run_parse_probe(program: &Path, text: &str) -> Result<bool, ParseProbeFailure> {
-    let output = run_powershell_probe(program, PARSE_COMMAND, Some(text))?;
+    let output = run_powershell_probe(program, PARSE_COMMAND, Some(text), PROBE_DEADLINE)?;
     parse_probe_answer(output)
 }
 
@@ -2949,8 +3095,10 @@ fn profile_key(program: &Path) -> PathBuf {
 }
 
 /// Resolving executable aliases can touch disk, so it happens only on workers.
-/// All aliases point at the same OnceLock before any worker asks PowerShell.
-fn cached_profile_answer(program: &Path) -> Option<PathBuf> {
+/// All aliases point at the same slot before any worker asks PowerShell. `deadline` is the
+/// asker's patience ([`PROBE_DEADLINE`] for the Profiles page, [`REMOVAL_PROBE_DEADLINE`] for a
+/// removal somebody asked for).
+fn cached_profile_answer(program: &Path, deadline: std::time::Duration) -> Option<PathBuf> {
     let resolved = bt_platform::program_on_path(program).unwrap_or_else(|| program.to_path_buf());
     let canonical = std::fs::canonicalize(&resolved).unwrap_or_else(|_| resolved.clone());
     let slot = {
@@ -2966,14 +3114,21 @@ fn cached_profile_answer(program: &Path) -> Option<PathBuf> {
         answers.insert(profile_key(program), slot.clone());
         slot
     };
-    answer_once(&slot, || run_profile_probe(&resolved))
+    answer_once(&slot, || run_profile_path_probe(&resolved, deadline))
 }
 
+/// The slot's answer, asking for it only when there is none: an answer is kept, a failure is
+/// not, and the question is asked with the slot held, so an asker that arrives meanwhile reads
+/// the answer instead of asking again.
 fn answer_once(
-    slot: &OnceLock<Option<PathBuf>>,
+    slot: &Mutex<Option<PathBuf>>,
     ask: impl FnOnce() -> Option<PathBuf>,
 ) -> Option<PathBuf> {
-    slot.get_or_init(ask).clone()
+    let mut held = slot.lock().unwrap_or_else(|error| error.into_inner());
+    if held.is_none() {
+        *held = ask();
+    }
+    held.clone()
 }
 
 #[cfg(windows)]
@@ -3066,10 +3221,24 @@ fn stopped_output(mut child: bt_platform::ProbeChild) -> ProbeOutput {
     )
 }
 
+/// **How long a question the Profiles page or a birth asks may take**: the parse probe and the
+/// page-entry observation. Short, because nobody is waiting for it and the next visit or birth
+/// asks again.
+const PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// **How long the one question a removal needs may take** — where a PowerShell keeps `$PROFILE`,
+/// asked by the Settings remover, `--remove-shell-integration` and both uninstall verbs: an
+/// operation somebody asked for once, which is not asked again by itself. A Windows PowerShell
+/// whose module analysis cache is cold can take tens of seconds before its first command
+/// (measured 22–46 s on a CI image, T-INTEGRATION-INJECT-4 round 7); the path question runs no
+/// command, so this is the bound on a start, not on a lookup (release read M1).
+const REMOVAL_PROBE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(60);
+
 fn run_powershell_probe(
     program: &Path,
     command: &str,
     input: Option<&str>,
+    patience: std::time::Duration,
 ) -> Result<ProbeOutput, ParseProbeFailure> {
     // Through the quiet door (§7.40 ①): without `CREATE_NO_WINDOW` a console
     // window opens on screen the first time a PowerShell pane is opened.
@@ -3111,7 +3280,7 @@ fn run_powershell_probe(
         }
     }
     let _started_pid = child.id(); // Only this owned child may be stopped.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = std::time::Instant::now() + patience;
     loop {
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -3155,14 +3324,38 @@ fn run_powershell_probe(
     })
 }
 
+/// **Where this PowerShell keeps `$PROFILE`, and nothing else** — the one question a removal
+/// needs (release read M1). No cmdlet runs: a cmdlet is found through command discovery, which is
+/// what a cold module analysis cache makes slow, while `$PROFILE` is a variable the host sets
+/// before its first command. Windows only, like [`PROFILE_COMMAND`].
 #[cfg(windows)]
-fn run_profile_probe(program: &Path) -> Option<PathBuf> {
-    probe_profile_observation(program).map(|observed| observed.path)
+const PROFILE_PATH_COMMAND: &str =
+    "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); $PROFILE.CurrentUserCurrentHost";
+
+#[cfg(windows)]
+fn run_profile_path_probe(program: &Path, patience: std::time::Duration) -> Option<PathBuf> {
+    if profile_sandboxed() {
+        return None;
+    }
+    let output = run_powershell_probe(program, PROFILE_PATH_COMMAND, None, patience).ok()?;
+    parse_profile_path(std::str::from_utf8(&output.stdout).ok()?)
 }
 
 #[cfg(not(windows))]
-fn run_profile_probe(_program: &Path) -> Option<PathBuf> {
+fn run_profile_path_probe(_program: &Path, _patience: std::time::Duration) -> Option<PathBuf> {
     None
+}
+
+/// The path [`PROFILE_PATH_COMMAND`] prints: its first line, taken verbatim, and only when it is
+/// absolute — whatever the shell names is the file, wherever it is.
+#[cfg(windows)]
+fn parse_profile_path(stdout: &str) -> Option<PathBuf> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
 }
 
 /// **Whether this platform can ask a PowerShell for its `$PROFILE` and execution policy** — the
@@ -3171,16 +3364,26 @@ fn run_profile_probe(_program: &Path) -> Option<PathBuf> {
 /// ([`profile_fallback_from_parts`]) offers no fallback there.
 const PROFILE_PROBE_EXISTS: bool = cfg!(windows);
 
-fn probe_profile_observation(program: &Path) -> Option<ProfileObservation> {
+fn probe_profile_observation(
+    worker: &bt_platform::admission::WorkerCtx,
+    program: &Path,
+) -> Option<ProfileObservation> {
     probe_profile_observation_unless(profile_sandboxed(), || {
         #[cfg(windows)]
         {
-            let output = run_powershell_probe(program, PROFILE_COMMAND, None).ok()?;
-            parse_profile_observation(std::str::from_utf8(&output.stdout).ok()?)
+            let output =
+                run_powershell_probe(program, PROFILE_COMMAND, None, PROBE_DEADLINE).ok()?;
+            let mut observed =
+                parse_profile_observation(std::str::from_utf8(&output.stdout).ok()?)?;
+            let fresh = bt_platform::environment::fresh_logon_environment(worker)
+                .ok()
+                .flatten();
+            observed.ordinary_process = ordinary_process_scope(fresh.as_deref());
+            Some(observed)
         }
         #[cfg(not(windows))]
         {
-            let _ = program;
+            let _ = (worker, program);
             None
         }
     })
@@ -3258,27 +3461,30 @@ fn parse_profile_observation(stdout: &str) -> Option<ProfileObservation> {
         path,
         edition_says,
         location,
+        ordinary_process: None,
         line_present: false,
     })
 }
 
-/// Read the one line the probe command writes.
-///
-/// Split out so the reading is testable without a PowerShell, and taken
-/// **verbatim**: whatever the shell said is the path, whichever drive it is on
-/// and whichever folder — there is no shape this function is entitled to expect,
-/// because the answer is exactly the thing this build must not think it knows.
-///
-/// Kept as the narrow path-only parser for existing fixtures; production now
-/// reads path and execution policy together through [`parse_profile_observation`].
-#[cfg(test)]
-#[must_use]
-pub fn parse_profile_answer(stdout: &str) -> Option<PathBuf> {
-    stdout
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(PathBuf::from)
+/// **The Process scope every ordinary session of the account starts with**: the
+/// `PSExecutionPolicyPreference` named in `fresh` (the account's fresh logon block), `Undefined`
+/// when the block names none, and `None` when there is no block to read. The name is matched
+/// without case, as Windows matches environment names. Windows only, like the probe that reads it.
+#[cfg(windows)]
+fn ordinary_process_scope(
+    fresh: Option<&[(OsString, OsString)]>,
+) -> Option<crate::psreadline::ExecutionPolicy> {
+    let fresh = fresh?;
+    Some(
+        fresh
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("PSExecutionPolicyPreference"))
+            .map(|(_, value)| value.to_string_lossy())
+            .filter(|value| !value.trim().is_empty())
+            .map_or(crate::psreadline::ExecutionPolicy::Undefined, |value| {
+                crate::psreadline::ExecutionPolicy::parse(&value)
+            }),
+    )
 }
 
 /// Whether this profile's text already dot-sources the script.
@@ -3421,7 +3627,7 @@ fn spawn_powershell_preparation(work: PowershellPreparation) -> Result<(), Strin
             PowershellPreparation::ScriptAndQuestions(questions) => {
                 let _ = powershell_script_for_birth();
                 for question in questions {
-                    ask_parse_question(question);
+                    ask_parse_question(question, ParseAsker::Background);
                 }
             }
             PowershellPreparation::ParseAttempt(attempt) => run_parse_attempt(attempt),
@@ -3464,14 +3670,22 @@ pub fn add_to_profile(
     line: &str,
     at: std::time::SystemTime,
 ) -> std::io::Result<ProfileWrite> {
-    add_profile_with_forms(profile, line, &profile_marks::Forms::new(&[]), at)
+    add_profile_with_forms(
+        profile,
+        line,
+        &profile_marks::Forms::new(&[]),
+        Some(&free_backup_path(profile, at)),
+    )
 }
 
+/// `backup` is where the file as it stood is copied first, when there is a file; `None` takes no
+/// copy. Whether a write takes one is the caller's decision (`profile_marks::ProfileFiles`: one
+/// copy, before Folio's first write).
 fn add_profile_with_forms(
     profile: &Path,
     line: &str,
     forms: &profile_marks::Forms,
-    at: std::time::SystemTime,
+    backup: Option<&Path>,
 ) -> std::io::Result<ProfileWrite> {
     let existing = read_profile_for_edit(profile)?;
     let original = existing.as_deref().unwrap_or_default();
@@ -3505,7 +3719,7 @@ fn add_profile_with_forms(
         text.push_str(newline);
         decoded.encode(&text)
     };
-    let backup = replace_profile(profile, original, &bytes, at)?;
+    let backup = replace_profile(profile, original, &bytes, backup)?;
     Ok(ProfileWrite {
         profile: profile.to_path_buf(),
         backup,
@@ -3627,11 +3841,14 @@ fn read_profile_for_edit(profile: &Path) -> std::io::Result<Option<Vec<u8>>> {
     Ok(Some(bytes))
 }
 
+/// Replace the profile's bytes, atomically, after checking it still holds `original`. A file
+/// that exists is copied to `backup` first when one is named (never over an existing file); a
+/// file that does not is created, with its folders. Answers the copy it wrote.
 fn replace_profile(
     profile: &Path,
     original: &[u8],
     bytes: &[u8],
-    at: std::time::SystemTime,
+    backup: Option<&Path>,
 ) -> std::io::Result<Option<PathBuf>> {
     use std::io::Write;
     let existing = read_profile_for_edit(profile)?;
@@ -3640,15 +3857,17 @@ fn replace_profile(
             crate::i18n::Text::ShellProfileChanged.text(),
         ));
     }
+    let existed = existing.is_some();
     let backup = if let Some(before) = existing {
-        let path = free_backup_path(profile, at);
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-        file.write_all(&before)?;
-        file.sync_all()?;
-        Some(path)
+        if let Some(path) = backup {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(path)?;
+            file.write_all(&before)?;
+            file.sync_all()?;
+        }
+        backup.map(Path::to_path_buf)
     } else {
         if let Some(parent) = profile.parent() {
             std::fs::create_dir_all(parent)?;
@@ -3656,7 +3875,7 @@ fn replace_profile(
         None
     };
     refuse_profile_path(profile)?;
-    if backup.is_some() {
+    if existed {
         bt_persist::atomic_replace_preserving(profile, bytes).map_err(std::io::Error::other)?;
     } else {
         bt_persist::atomic_write(profile, bytes).map_err(std::io::Error::other)?;
@@ -3737,32 +3956,51 @@ mod tests {
     use crate::profiles::{Origin, ProgramSource};
     use bt_source::{Index, Pattern, Search, View, needle};
 
+    /// PIN (release read m2) — **concurrent askers share one answer, and a failure is not an
+    /// answer**: eight askers of a profile path that is answered make one query; after a query
+    /// that got no answer, the next asker asks again, and its answer is then kept.
+    ///
+    /// RED (mutation: `failure_kept` — `answer_once` keeps the first result, `None` included,
+    /// as the `OnceLock` it replaced did: the second asker never asks).
     #[test]
-    fn shell_integration_startup_and_pane_share_one_query_even_on_failure() {
-        for answer in [
+    fn shell_integration_profile_path_askers_share_an_answer_and_ask_again_after_a_failure() {
+        let answered = Some(PathBuf::from("D:/redirected Documents/资料/profile.ps1"));
+        let slot = std::sync::Arc::new(Mutex::new(None));
+        let queries = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let slot = slot.clone();
+                let queries = queries.clone();
+                let answered = answered.clone();
+                scope.spawn(move || {
+                    assert_eq!(
+                        answer_once(&slot, || {
+                            queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            answered.clone()
+                        }),
+                        answered
+                    );
+                });
+            }
+        });
+        assert_eq!(queries.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        let slot = Mutex::new(None);
+        assert_eq!(
+            answer_once(&slot, || None),
             None,
-            Some(PathBuf::from("D:/redirected Documents/profile.ps1")),
-        ] {
-            let slot = std::sync::Arc::new(OnceLock::new());
-            let queries = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-            std::thread::scope(|scope| {
-                for _ in 0..8 {
-                    let slot = slot.clone();
-                    let queries = queries.clone();
-                    let answer = answer.clone();
-                    scope.spawn(move || {
-                        assert_eq!(
-                            answer_once(&slot, || {
-                                queries.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                                answer.clone()
-                            }),
-                            answer
-                        );
-                    });
-                }
-            });
-            assert_eq!(queries.load(std::sync::atomic::Ordering::SeqCst), 1);
-        }
+            "the probe ran out of time"
+        );
+        let asked_again = std::cell::Cell::new(false);
+        assert_eq!(
+            answer_once(&slot, || {
+                asked_again.set(true);
+                answered.clone()
+            }),
+            answered
+        );
+        assert!(asked_again.get(), "a failure is asked again");
+        assert_eq!(answer_once(&slot, || panic!("an answer is kept")), answered);
     }
 
     #[test]
@@ -3836,7 +4074,13 @@ mod tests {
         forms: &profile_marks::Forms,
         action: profile_marks::Action,
     ) -> profile_marks::Report {
-        profile_marks::apply_recorded(paths, forms, action, |_| Ok(()))
+        profile_marks::apply_recorded(
+            paths,
+            forms,
+            action,
+            &mut profile_marks::ProfileFiles::default(),
+            |_| Ok(()),
+        )
     }
 
     #[cfg(windows)]
@@ -3943,7 +4187,8 @@ mod tests {
         assert!(command.contains("quiet_command_named"));
         assert!(command.contains("quiet_command(program)"));
         assert!(probe.contains("-NoProfile"));
-        assert!(probe.contains("from_secs(5)"));
+        assert_eq!(PROBE_DEADLINE, std::time::Duration::from_secs(5));
+        assert!(REMOVAL_PROBE_DEADLINE > PROBE_DEADLINE);
         let parse_probe = include_str!("shell_integration.rs")
             .split_once("fn run_parse_probe(program: &Path, text: &str)")
             .expect("the Windows target parser probe")
@@ -3951,7 +4196,11 @@ mod tests {
             .split_once("fn profile_key")
             .expect("the item after that probe")
             .0;
-        assert!(parse_probe.contains("run_powershell_probe(program, PARSE_COMMAND, Some(text))"));
+        assert!(
+            parse_probe.contains(
+                "run_powershell_probe(program, PARSE_COMMAND, Some(text), PROBE_DEADLINE)"
+            )
+        );
         assert!(probe.contains("Stdio::piped()"));
         assert!(probe.contains("input.as_bytes()"));
         assert!(!probe.contains(".arg(input)"));
@@ -4025,7 +4274,7 @@ mod tests {
             .split_once("fn run_powershell_probe(")
             .unwrap()
             .1
-            .split_once("#[cfg(windows)]\nfn run_profile_probe")
+            .split_once("/// **Where this PowerShell keeps `$PROFILE`, and nothing else**")
             .unwrap()
             .0
     }
@@ -4332,9 +4581,21 @@ mod tests {
             Enabled, NoProfile, NotNeeded, Offer, Pending, PolicyChangeable, PolicyLocation,
             PolicyManaged, PolicyProcess,
         };
-        let decide = |composable, pending, no_profile, observed| {
-            profile_fallback_from_parts(true, true, composable, pending, no_profile, observed)
-        };
+        let decide =
+            |composable, pending: bool, no_profile, observed: Option<(PolicyCause, bool)>| {
+                profile_fallback_from_parts(
+                    true,
+                    true,
+                    composable,
+                    no_profile,
+                    if pending {
+                        Heard::NotYet
+                    } else {
+                        Heard::Answer(())
+                    },
+                    observed.map_or(Heard::NotYet, Heard::Answer),
+                )
+            };
         assert_eq!(decide(true, false, false, None), NotNeeded);
         assert_eq!(decide(false, false, false, Some((Allows, false))), Offer);
         assert_eq!(decide(false, true, false, None), Pending);
@@ -4637,8 +4898,8 @@ mod tests {
                 true,
                 false,
                 false,
-                false,
-                Some((
+                Heard::Answer(()),
+                Heard::Answer((
                     policy_cause(remote_signed, Some(true), RowProcessScope::Absent),
                     true
                 )),
@@ -4797,7 +5058,14 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                profile_fallback_from_parts(true, true, false, false, false, Some((cause, false))),
+                profile_fallback_from_parts(
+                    true,
+                    true,
+                    false,
+                    false,
+                    Heard::Answer(()),
+                    Heard::Answer((cause, false))
+                ),
                 state
             );
             assert_eq!(state.policy_cause(), Some(cause));
@@ -4837,6 +5105,7 @@ mod tests {
                 local_fixed: true,
                 marked: false,
             },
+            ordinary_process: Some(Undefined),
             line_present: false,
         };
         publish_profile_observation(program, observed(Restricted));
@@ -4990,6 +5259,321 @@ mod tests {
         }
     }
 
+    /// PIN (release read B1) — **the managed line is offered only where an ordinary session of
+    /// the edition and the clicked row both load it**, and the row says the cause a user can act
+    /// on otherwise. The full table: who set the ordinary session's policy (nothing refusing, the
+    /// client default, CurrentUser, LocalMachine, MachinePolicy, UserPolicy, the account's
+    /// environment, Group Policy's `RemoteSigned` against an Internet-zone profile, an
+    /// environment that could not be read) × what the row's own arguments say (nothing,
+    /// `-ExecutionPolicy Bypass`, `-ExecutionPolicy Restricted`, an unreadable `-ep:Bypass`,
+    /// `-NoProfile`) × whether the line is already there. A line that is there is `Enabled` only
+    /// where it would be offered; under a policy an ordinary session refuses, it is the policy's
+    /// row (with Copy where the user can change it) — the old Folio's or the hand-written line is
+    /// removed by the Settings "PowerShell $PROFILE line" row. And where the row is
+    /// `PolicyChangeable`, the copied command makes it `Offer`: it fixes every session.
+    ///
+    /// RED (mutations: `row_only` — `edition_cause` answers the row's own cause: the Bypass row
+    /// on a default client is offered, the blocker; `ordinary_only` — it answers the ordinary
+    /// session's: the row's own `Restricted` is offered; `changeable_over_process` — `both_sessions`
+    /// prefers the ordinary session's `Changeable` to the row's own `Process`: Copy offered on a
+    /// row the command cannot fix; `probe_process_is_ordinary` — the ordinary session reads the
+    /// probe's Process scope instead of the account's).
+    #[test]
+    fn the_line_is_offered_only_where_an_ordinary_session_and_the_row_both_load_it() {
+        use crate::psreadline::ExecutionPolicy::{
+            AllSigned, Bypass, RemoteSigned, Restricted, Undefined,
+        };
+        use PowerShellProfileFallback::{
+            NoProfile, Offer, PolicyChangeable, PolicyLocation, PolicyManaged, PolicyProcess,
+            Undetermined, Unreadable,
+        };
+        let none = Undefined;
+        let observed = |scopes: PolicyScopes, ordinary, edition_says| ProfileObservation {
+            path: PathBuf::from(r"C:\Users\me\Documents\WindowsPowerShell\profile.ps1"),
+            scopes,
+            edition_says,
+            location: ProfileLocation {
+                local_fixed: true,
+                marked: false,
+            },
+            ordinary_process: ordinary,
+            line_present: false,
+        };
+        // The probe's own Process scope is Folio's: Bypass here, which no ordinary session has.
+        let with_probe_bypass = |scopes: PolicyScopes| PolicyScopes {
+            process: Bypass,
+            ..scopes
+        };
+        let here = Some(true);
+        let sessions = [
+            (
+                "nothing refuses",
+                observed(
+                    scopes(none, none, none, RemoteSigned, none),
+                    Some(none),
+                    here,
+                ),
+            ),
+            (
+                "the client default",
+                observed(scopes(none, none, none, none, none), Some(none), here),
+            ),
+            (
+                "CurrentUser Restricted",
+                observed(scopes(none, none, none, Restricted, none), Some(none), here),
+            ),
+            (
+                "LocalMachine AllSigned",
+                observed(scopes(none, none, none, none, AllSigned), Some(none), here),
+            ),
+            (
+                "MachinePolicy Restricted",
+                observed(
+                    scopes(Restricted, none, none, RemoteSigned, none),
+                    Some(none),
+                    here,
+                ),
+            ),
+            (
+                "UserPolicy AllSigned",
+                observed(
+                    scopes(none, AllSigned, none, RemoteSigned, none),
+                    Some(none),
+                    here,
+                ),
+            ),
+            (
+                "the account's environment sets Restricted",
+                observed(
+                    with_probe_bypass(scopes(none, none, none, none, none)),
+                    Some(Restricted),
+                    here,
+                ),
+            ),
+            (
+                "Group Policy RemoteSigned, an Internet-zone profile",
+                observed(
+                    scopes(RemoteSigned, none, none, none, none),
+                    Some(none),
+                    Some(false),
+                ),
+            ),
+            (
+                "the account's environment could not be read",
+                observed(scopes(none, none, none, RemoteSigned, none), None, here),
+            ),
+        ];
+        let rows: [(&str, Option<RowProcessScope>); 5] = [
+            ("no -ExecutionPolicy", Some(RowProcessScope::Absent)),
+            (
+                "-ExecutionPolicy Bypass",
+                Some(RowProcessScope::Set(Bypass)),
+            ),
+            (
+                "-ExecutionPolicy Restricted",
+                Some(RowProcessScope::Set(Restricted)),
+            ),
+            ("-ep:Bypass", Some(RowProcessScope::Unreadable)),
+            ("-NoProfile", None),
+        ];
+        #[rustfmt::skip]
+        let expected = [
+            //                     nothing           Bypass            Restricted     -ep:Bypass  -NoProfile
+            /* nothing refuses */ [Offer,            Offer,            PolicyProcess, Unreadable, NoProfile],
+            /* client default  */ [PolicyChangeable, PolicyChangeable, PolicyProcess, Unreadable, NoProfile],
+            /* CurrentUser     */ [PolicyChangeable, PolicyChangeable, PolicyProcess, Unreadable, NoProfile],
+            /* LocalMachine    */ [PolicyChangeable, PolicyChangeable, PolicyProcess, Unreadable, NoProfile],
+            /* MachinePolicy   */ [PolicyManaged,    PolicyManaged,    PolicyManaged, Unreadable, NoProfile],
+            /* UserPolicy      */ [PolicyManaged,    PolicyManaged,    PolicyManaged, Unreadable, NoProfile],
+            /* account's env   */ [PolicyProcess,    PolicyProcess,    PolicyProcess, Unreadable, NoProfile],
+            /* GP RemoteSigned */ [PolicyLocation,   PolicyLocation,   PolicyLocation, Unreadable, NoProfile],
+            /* env unreadable  */ [Undetermined,     Undetermined,     Undetermined,  Unreadable, NoProfile],
+        ];
+        let state = |session: &ProfileObservation, row: Option<RowProcessScope>, present| {
+            profile_fallback_from_parts(
+                true,
+                true,
+                false,
+                row.is_none(),
+                Heard::Answer(()),
+                Heard::Answer((
+                    edition_cause(session, row.unwrap_or(RowProcessScope::Absent)),
+                    present,
+                )),
+            )
+        };
+        for ((who, session), expected) in sessions.iter().zip(expected) {
+            for ((what, row), expected) in rows.iter().zip(expected) {
+                assert_eq!(state(session, *row, false), expected, "{who} × {what}");
+                // The line already there: Enabled only where it would be offered.
+                let present = if expected == Offer {
+                    PowerShellProfileFallback::Enabled
+                } else {
+                    expected
+                };
+                assert_eq!(
+                    state(session, *row, true),
+                    present,
+                    "{who} × {what}, line present"
+                );
+                // Copy's command fixes it for every session, this row included.
+                if expected == PolicyChangeable {
+                    let after = ProfileObservation {
+                        scopes: PolicyScopes {
+                            current_user: POLICY_COMMAND_POLICY,
+                            ..session.scopes
+                        },
+                        ..session.clone()
+                    };
+                    assert_eq!(
+                        state(&after, *row, false),
+                        Offer,
+                        "{who} × {what}, after Copy"
+                    );
+                }
+            }
+        }
+        // `both_sessions` over every pair of causes it can be handed: one session that allows
+        // takes the other's cause; Group Policy before the row's own Process scope before the
+        // ordinary session's cause.
+        use PolicyCause::{Allows, Changeable, Location, Organisation, Process};
+        for own in [Allows, Changeable, Organisation, Process, Location] {
+            assert_eq!(both_sessions(Allows, own), own);
+            assert_eq!(both_sessions(own, Allows), own);
+            assert_eq!(
+                both_sessions(own, PolicyCause::Unreadable),
+                PolicyCause::Unreadable
+            );
+            assert_eq!(
+                both_sessions(PolicyCause::Undetermined, own),
+                PolicyCause::Undetermined
+            );
+        }
+        assert_eq!(both_sessions(Changeable, Process), Process);
+        assert_eq!(both_sessions(Location, Process), Process);
+        assert_eq!(both_sessions(Process, Changeable), Process);
+        assert_eq!(both_sessions(Organisation, Process), Organisation);
+        assert_eq!(both_sessions(Changeable, Location), Changeable);
+        assert_eq!(both_sessions(Location, Changeable), Location);
+    }
+
+    /// PIN (release read B1) — **an ordinary session's Process scope is the account's fresh
+    /// environment's `PSExecutionPolicyPreference`**, any case of its name, `Undefined` when the
+    /// account sets none or sets it empty, and unknown when there is no block to read.
+    ///
+    /// RED (mutation: `case_sensitive_name` — the name compared exactly: a block that spells it
+    /// `PSEXECUTIONPOLICYPREFERENCE` reads as unset).
+    #[cfg(windows)]
+    #[test]
+    fn an_ordinary_sessions_process_scope_is_the_accounts_environment() {
+        use crate::psreadline::ExecutionPolicy::{AllSigned, Bypass, Undefined};
+        let block = |pairs: &[(&str, &str)]| -> Vec<(OsString, OsString)> {
+            pairs
+                .iter()
+                .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+                .collect()
+        };
+        assert_eq!(ordinary_process_scope(None), None);
+        assert_eq!(
+            ordinary_process_scope(Some(&block(&[("Path", r"C:\工具")]))),
+            Some(Undefined)
+        );
+        assert_eq!(
+            ordinary_process_scope(Some(&block(&[(
+                "PSEXECUTIONPOLICYPREFERENCE",
+                "allsigned"
+            )]))),
+            Some(AllSigned)
+        );
+        assert_eq!(
+            ordinary_process_scope(Some(&block(&[("PSExecutionPolicyPreference", "Bypass")]))),
+            Some(Bypass)
+        );
+        assert_eq!(
+            ordinary_process_scope(Some(&block(&[("PSExecutionPolicyPreference", " ")]))),
+            Some(Undefined)
+        );
+    }
+
+    /// PIN (release read B1) — **after Enable and Undo on a machine that had no `$PROFILE`, an
+    /// ordinary Windows PowerShell 5.1 session under `Restricted` prints nothing**, through a real
+    /// 5.1 child (`bt_pty::test_shell`, no profile, no history). The child stands in for an
+    /// ordinary session's profile load at the sandbox's path — PowerShell's host loads a profile
+    /// that exists, under the session's policy — so a file left behind, even an empty one, is the
+    /// red "cannot be loaded because running scripts is disabled" every session would print.
+    /// Never the user's real `$PROFILE`: the profile and the data root are a temporary directory.
+    ///
+    /// RED (mutation: `retire_keeps_file` — `ProfileFiles::retire` skips the file's deletion: the
+    /// empty file stays and the child prints the refusal).
+    #[cfg(windows)]
+    #[test]
+    fn after_enable_and_undo_an_ordinary_restricted_session_prints_nothing() {
+        use bt_pty::test_shell::Hygiene;
+        let Some(program) = bt_platform::program_on_path(Path::new("powershell.exe")) else {
+            eprintln!("powershell.exe: not installed; real-session arm skipped");
+            return;
+        };
+        let root = temp_dir("enable-undo-restricted");
+        let data = root.join("data");
+        let profile = root
+            .join("文档")
+            .join("WindowsPowerShell")
+            .join("profile.ps1");
+        let script = data.join(SCRIPT_DIRECTORY).join(SCRIPT_FILE_PS1);
+        let ordinary = |profile: &Path| {
+            let hygiene = Hygiene::new();
+            let literal = profile.display().to_string().replace('\'', "''");
+            let output = hygiene
+                .command(&program, bt_platform::quiet_command)
+                .args([
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Restricted",
+                    "-Command",
+                ])
+                .arg(format!(
+                    "[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); \
+                     if (Test-Path -LiteralPath '{literal}') {{ . '{literal}' }}; 'session done'"
+                ))
+                .output()
+                .expect("Windows PowerShell starts");
+            (
+                String::from_utf8_lossy(&output.stdout).into_owned(),
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            )
+        };
+        // The stand-in is faithful: a file there, even an empty one, is refused.
+        std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
+        std::fs::write(&profile, b"").unwrap();
+        let (_, refused) = ordinary(&profile);
+        assert!(
+            !refused.trim().is_empty(),
+            "an empty profile under Restricted is an error in every session"
+        );
+        std::fs::remove_dir_all(root.join("文档")).unwrap();
+
+        profile_runtime::install_recorded(
+            &profile,
+            &data,
+            &script,
+            profile_marks::MANAGED_LINE,
+            std::time::UNIX_EPOCH,
+            Some(PowerShellEdition::WindowsPowerShell),
+        )
+        .expect("Enable writes the line");
+        assert!(profile.is_file());
+        profile_runtime::undo_profile_install(&profile, &data).expect("Undo");
+        let (stdout, stderr) = ordinary(&profile);
+        assert_eq!(
+            stderr.trim(),
+            "",
+            "an ordinary session prints nothing: {stdout}"
+        );
+        assert_eq!(stdout.trim(), "session done");
+        assert!(!root.join("文档").exists(), "nothing Folio created is left");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     /// PIN — **no button before the edition has been looked at** (review C-5 of
     /// T-INTEGRATION-INJECT-4). An uncomposable row whose edition has no observation yet is
     /// `Pending`: the line may already be there, or the policy may refuse it.
@@ -4998,7 +5582,7 @@ mod tests {
     #[test]
     fn an_unobserved_edition_is_pending_not_offered() {
         assert_eq!(
-            profile_fallback_from_parts(true, true, false, false, false, None),
+            profile_fallback_from_parts(true, true, false, false, Heard::Answer(()), Heard::NotYet),
             PowerShellProfileFallback::Pending
         );
     }
@@ -5013,16 +5597,17 @@ mod tests {
     #[test]
     fn a_platform_without_the_profile_probe_never_offers() {
         for observed in [
-            None,
-            Some((PolicyCause::Allows, false)),
-            Some((PolicyCause::Allows, true)),
-            Some((PolicyCause::Changeable, false)),
+            Heard::NotYet,
+            Heard::Failed,
+            Heard::Answer((PolicyCause::Allows, false)),
+            Heard::Answer((PolicyCause::Allows, true)),
+            Heard::Answer((PolicyCause::Changeable, false)),
         ] {
-            for pending in [false, true] {
+            for parse in [Heard::Answer(()), Heard::NotYet, Heard::Failed] {
                 assert_eq!(
-                    profile_fallback_from_parts(false, true, false, pending, false, observed),
+                    profile_fallback_from_parts(false, true, false, false, parse, observed),
                     PowerShellProfileFallback::Unsupported,
-                    "{observed:?} pending={pending}"
+                    "{observed:?} parse={parse:?}"
                 );
             }
         }
@@ -5334,7 +5919,8 @@ mod tests {
         let arguments = os_words(&["-Command", "'天下為公'"]);
         let question = ParseQuestion::new(program, &arguments, "'天下為公'".to_owned());
 
-        let first = claim_parse_attempt(question.clone()).expect("first attempt");
+        let first =
+            claim_parse_attempt(question.clone(), ParseAsker::Background).expect("first attempt");
         publish_parse_attempt(
             first.question.key,
             first.number,
@@ -5345,7 +5931,8 @@ mod tests {
         );
         assert_eq!(cached_parse_answer(program, &arguments), None);
 
-        let second = claim_parse_attempt(question).expect("failure is retryable");
+        let second =
+            claim_parse_attempt(question, ParseAsker::Background).expect("failure is retryable");
         assert_eq!(second.number, 2);
         publish_parse_attempt(second.question.key, second.number, Ok(true));
         assert_eq!(cached_parse_answer(program, &arguments), Some(true));
@@ -5362,7 +5949,8 @@ mod tests {
 
         assert_eq!(PARSE_PROBE_ATTEMPT_LIMIT, 3);
         for expected in 1..=3 {
-            let attempt = claim_parse_attempt(question.clone()).expect("bounded attempt");
+            let attempt = claim_parse_attempt(question.clone(), ParseAsker::Background)
+                .expect("bounded attempt");
             assert_eq!(attempt.number, expected);
             publish_parse_attempt(
                 attempt.question.key,
@@ -5374,8 +5962,67 @@ mod tests {
                 }),
             );
         }
-        assert!(claim_parse_attempt(question).is_none());
+        assert!(claim_parse_attempt(question.clone(), ParseAsker::Background).is_none());
         assert_eq!(cached_parse_answer(program, &arguments), None);
+    }
+
+    /// PIN (release read m2) — **a parse question that got no answer says so in the row, and a
+    /// visit to the Profiles page asks it again past the attempt limit**; births still do not.
+    /// What the row says while the question is in flight is `Pending`; after a failure it is
+    /// `Undetermined` ("could not be determined … asks again"), never the "not provided" of an
+    /// answer.
+    ///
+    /// RED (mutations: `visit_limited` — the attempt limit also binds `ParseAsker::Visit`;
+    /// `failed_is_pending` — `heard_parse` reads `Failed` as `NotYet`).
+    #[test]
+    fn a_failed_parse_question_is_undetermined_and_a_visit_asks_it_again() {
+        let program = Path::new("C:/unique/parser-visit/pwsh.exe");
+        let arguments = os_words(&["-NoExit", "-Command", "Write-Output 雨"]);
+        let question = ParseQuestion::new(program, &arguments, "Write-Output 雨".to_owned());
+        let fail = |attempt: ParseAttempt| {
+            publish_parse_attempt(
+                attempt.question.key,
+                attempt.number,
+                Err(ParseProbeFailure::Deadline {
+                    stdout: "[]".to_owned(),
+                    stderr: "[]".to_owned(),
+                }),
+            );
+        };
+        let first =
+            claim_parse_attempt(question.clone(), ParseAsker::Background).expect("first attempt");
+        assert_eq!(heard_parse(program, &arguments), Heard::NotYet, "in flight");
+        fail(first);
+        assert_eq!(heard_parse(program, &arguments), Heard::Failed);
+        for _ in 1..PARSE_PROBE_ATTEMPT_LIMIT {
+            fail(claim_parse_attempt(question.clone(), ParseAsker::Background).expect("bounded"));
+        }
+        assert!(claim_parse_attempt(question.clone(), ParseAsker::Background).is_none());
+        let visit = claim_parse_attempt(question.clone(), ParseAsker::Visit)
+            .expect("a visit asks a failed question again");
+        assert_eq!(visit.number, PARSE_PROBE_ATTEMPT_LIMIT + 1);
+        assert!(
+            claim_parse_attempt(question.clone(), ParseAsker::Visit).is_none(),
+            "a question in flight is not asked twice"
+        );
+        publish_parse_attempt(visit.question.key, visit.number, Ok(false));
+        assert_eq!(heard_parse(program, &arguments), Heard::Answer(()));
+        assert!(
+            claim_parse_attempt(question, ParseAsker::Visit).is_none(),
+            "an answered question is not asked again"
+        );
+        assert_eq!(
+            profile_fallback_from_parts(true, true, false, false, Heard::Failed, Heard::NotYet),
+            PowerShellProfileFallback::Undetermined
+        );
+        assert_eq!(
+            PowerShellProfileFallback::Undetermined.policy_cause(),
+            Some(PolicyCause::Undetermined)
+        );
+        assert_eq!(
+            PolicyCause::Undetermined.sentence(),
+            Some(crate::i18n::Text::CapPowerShellUndetermined)
+        );
     }
 
     /// RED (mutation: execute the claimed attempt inside `request_parse_retry`
@@ -5389,7 +6036,7 @@ mod tests {
         let arguments = os_words(&["-Command", "Write-Output '混合 script'"]);
         let question =
             ParseQuestion::new(program, &arguments, "Write-Output '混合 script'".to_owned());
-        let failed = claim_parse_attempt(question).expect("first attempt");
+        let failed = claim_parse_attempt(question, ParseAsker::Background).expect("first attempt");
         publish_parse_attempt(
             failed.question.key,
             failed.number,
@@ -7667,11 +8314,12 @@ mod tests {
     /// written on the Documents known folder and the answer PowerShell gives sit
     /// on two different drives — and the file the shell names is the one with
     /// the integration in it while the composed one is two bytes of nothing.
+    #[cfg(windows)]
     #[test]
     fn the_profile_is_the_file_the_shell_names_and_never_one_this_build_composed() {
         let composed_root = Path::new(r"C:\Users\me\Documents");
         let answer =
-            parse_profile_answer("D:\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1\r\n")
+            parse_profile_path("D:\\Documents\\PowerShell\\Microsoft.PowerShell_profile.ps1\r\n")
                 .expect("the shell answered");
         assert_eq!(
             answer,
@@ -7681,8 +8329,13 @@ mod tests {
             !answer.starts_with(composed_root),
             "the answer is not under the folder a composing build would have used"
         );
-        assert_eq!(parse_profile_answer("   \r\n"), None);
-        assert_eq!(parse_profile_answer(""), None);
+        assert_eq!(parse_profile_path("   \r\n"), None);
+        assert_eq!(parse_profile_path(""), None);
+        assert_eq!(
+            parse_profile_path("profile.ps1\r\n"),
+            None,
+            "a relative answer"
+        );
     }
 
     /// Which programs are asked about at all.

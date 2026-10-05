@@ -9569,6 +9569,7 @@ impl ProfileButton {
             | Fallback::PolicyProcess
             | Fallback::PolicyLocation
             | Fallback::Unreadable
+            | Fallback::Undetermined
             | Fallback::Unsupported => None,
         }
     }
