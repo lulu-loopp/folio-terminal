@@ -142,10 +142,6 @@ fn unavailable_hint_text() -> &'static str {
     crate::i18n::Text::ProfileHintUnavailable.text()
 }
 
-fn pending_hint_text() -> &'static str {
-    crate::i18n::Text::VersionChecking.text()
-}
-
 /// **The `˅` menu's second section: one row, and what it is for** (H113,
 /// mock-up 7417-7423).
 ///
@@ -3879,8 +3875,6 @@ pub struct ProfileLine {
     pub deletable: bool,
     pub hidden: bool,
     pub available: bool,
-    /// The program walk has not answered, so this row asserts no absence yet.
-    pub pending: bool,
 }
 
 /// Every row of the Profiles page, top to bottom.
@@ -3909,19 +3903,16 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
                     index,
                     mark: profile.mark,
                     title: title(index),
-                    command: match (programs.is_pending(), available, is_agent) {
-                        (true, _, _) => pending_hint_text().to_owned(),
-                        (false, true, _) => command_line(profile, programs.program(&profile.id)),
+                    command: match (available, is_agent) {
+                        (true, _) => command_line(profile, programs.program(&profile.id)),
                         // An agent this window did not find says **where it
                         // looked**, because the answer to "but I use it every
                         // day" is very often "inside WSL" and a row that only
                         // said 「没找到」 left the reader with nothing to do. What
                         // to do about it is the group's line and not this one's
                         // — see [`agent_note_after`].
-                        (false, false, true) => {
-                            crate::i18n::agent_not_found_on_windows(title(index))
-                        }
-                        (false, false, false) => crate::i18n::profile_not_installed(title(index)),
+                        (false, true) => crate::i18n::agent_not_found_on_windows(title(index)),
+                        (false, false) => crate::i18n::profile_not_installed(title(index)),
                     },
                     capability: available.then(|| {
                         capability_text_for_launch(
@@ -3932,13 +3923,12 @@ pub fn page_lines(programs: &ProfilePrograms, default: usize, automatic: bool) -
                         .text()
                     }),
                     is_agent,
-                    is_default: !programs.is_pending() && index == default,
-                    default_is_automatic: !programs.is_pending() && automatic,
+                    is_default: index == default,
+                    default_is_automatic: automatic,
                     is_fallback: index == fallback,
                     deletable: profile.origin == Origin::User,
                     hidden: profile.hidden,
                     available,
-                    pending: programs.is_pending(),
                 }
             })
             .collect()
@@ -3970,7 +3960,7 @@ pub fn agent_note_after(lines: &[ProfileLine]) -> Option<usize> {
     for (position, line) in lines.iter().enumerate() {
         if line.is_agent {
             last = Some(position);
-            missing |= !line.available && !line.pending;
+            missing |= !line.available;
         }
     }
     if missing { last } else { None }
@@ -5261,12 +5251,10 @@ fn is_a_git_on(platform: HostPlatform, path: &Path, environment: &dyn ShellEnvir
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProfilePrograms {
     resolved: BTreeMap<String, Option<OsString>>,
-    pending: bool,
 }
 
 impl ProfilePrograms {
     /// Ask the machine, once, what each profile would start.
-    #[cfg(test)]
     #[must_use]
     pub fn probe(environment: &dyn ShellEnvironment) -> Self {
         with_table(|table| Self::probe_rows(&table.profiles, environment))
@@ -5285,25 +5273,7 @@ impl ProfilePrograms {
                 .iter()
                 .map(|profile| (profile.id.clone(), Self::resolve_row(profile, environment)))
                 .collect(),
-            pending: false,
         }
-    }
-
-    /// A truthful launch-time answer before the machine walk has landed.
-    /// Nothing is advertised or started from it; terminal leaves keep their
-    /// requested profile and acquire a process when the settled value arrives.
-    #[must_use]
-    pub fn pending() -> Self {
-        Self {
-            resolved: BTreeMap::new(),
-            pending: true,
-        }
-    }
-
-    /// Whether the machine has not answered yet.
-    #[must_use]
-    pub fn is_pending(&self) -> bool {
-        self.pending
     }
 
     /// Where one row's program is on this machine, or `None` when it is nowhere.
@@ -5391,7 +5361,6 @@ impl ProfilePrograms {
                     })
                     .collect()
             }),
-            pending: false,
         }
     }
 
@@ -5450,162 +5419,6 @@ impl ProfilePrograms {
     pub fn is_available(&self, id: &str) -> bool {
         self.program(id).is_some()
     }
-}
-
-/// One filesystem question from an environment-named program location. A slow
-/// redirector is abandoned at this bound so the next PATH entry is still asked.
-const PROGRAM_PATH_ENTRY_DEADLINE: Duration = Duration::from_millis(40);
-
-trait ProgramFileQuestion {
-    /// `None` is a question that did not answer inside its bound.
-    fn ask(&self, path: &Path) -> Option<bool>;
-}
-
-struct DeadlineProgramFileQuestion<'a>(&'a bt_platform::admission::WorkerCtx);
-
-fn ask_program_file_before_deadline(
-    _worker: &bt_platform::admission::WorkerCtx,
-    asked: PathBuf,
-    question: impl FnOnce(PathBuf) -> bool + Send + 'static,
-) -> Option<bool> {
-    let (send, receive) = std::sync::mpsc::sync_channel(1);
-    bt_platform::spawn_at_priority(
-        "powershell-script-prepare",
-        bt_platform::ThreadPriority::BelowNormal,
-        move |_worker| {
-            let _ = send.send(question(asked));
-        },
-    )
-    .ok()?;
-    receive.recv_timeout(PROGRAM_PATH_ENTRY_DEADLINE).ok()
-}
-
-impl ProgramFileQuestion for DeadlineProgramFileQuestion<'_> {
-    fn ask(&self, path: &Path) -> Option<bool> {
-        ask_program_file_before_deadline(self.0, path.to_path_buf(), |asked| {
-            bt_pty::SystemShellEnvironment.is_file(&asked)
-        })
-    }
-}
-
-type ProgramVariableQuestion = dyn Fn(&str) -> Option<OsString> + Send + Sync;
-
-struct ProgramProbeEnvironment<Q> {
-    variable: Arc<ProgramVariableQuestion>,
-    question: Q,
-    answers: Mutex<BTreeMap<PathBuf, bool>>,
-    timed_out: AtomicU64,
-}
-
-impl<'a> ProgramProbeEnvironment<DeadlineProgramFileQuestion<'a>> {
-    fn new(worker: &'a bt_platform::admission::WorkerCtx) -> Self {
-        Self {
-            variable: Arc::new(|key| std::env::var_os(key)),
-            question: DeadlineProgramFileQuestion(worker),
-            answers: Mutex::new(BTreeMap::new()),
-            timed_out: AtomicU64::new(0),
-        }
-    }
-}
-
-#[cfg(test)]
-impl<Q> ProgramProbeEnvironment<Q> {
-    fn with_seams(
-        variable: impl Fn(&str) -> Option<OsString> + Send + Sync + 'static,
-        question: Q,
-    ) -> Self {
-        Self {
-            variable: Arc::new(variable),
-            question,
-            answers: Mutex::new(BTreeMap::new()),
-            timed_out: AtomicU64::new(0),
-        }
-    }
-}
-
-impl<Q: ProgramFileQuestion> ShellEnvironment for ProgramProbeEnvironment<Q> {
-    fn var_os(&self, key: &str) -> Option<OsString> {
-        (self.variable)(key)
-    }
-
-    fn is_file(&self, path: &Path) -> bool {
-        if let Some(answer) = self
-            .answers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(path)
-            .copied()
-        {
-            return answer;
-        }
-        let answer = self.question.ask(path).unwrap_or_else(|| {
-            self.timed_out.fetch_add(1, Ordering::Relaxed);
-            false
-        });
-        self.answers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(path.to_path_buf(), answer);
-        answer
-    }
-}
-
-static PROGRAM_PROBE_REVISION: AtomicU64 = AtomicU64::new(0);
-static PROGRAM_PROBE_ANSWER: Mutex<Option<(u64, ProfilePrograms)>> = Mutex::new(None);
-static PROGRAM_PROBE_WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
-
-fn spawn_program_probe_worker(
-    work: impl FnOnce(&bt_platform::admission::WorkerCtx) + Send + 'static,
-) -> std::io::Result<std::thread::JoinHandle<()>> {
-    bt_platform::spawn_at_priority(
-        "powershell-script-prepare",
-        bt_platform::ThreadPriority::BelowNormal,
-        move |worker| work(worker),
-    )
-}
-
-/// Install the window-loop wake used by launch and later profile-table probes.
-pub fn install_program_probe_wake(wake: impl Fn() + Send + Sync + 'static) {
-    let _ = PROGRAM_PROBE_WAKE.set(Box::new(wake));
-}
-
-/// Ask for the current profile table on the existing background preparation
-/// road. A newer table revision supersedes an older answer before publication.
-pub fn begin_program_probe() {
-    let revision = PROGRAM_PROBE_REVISION.fetch_add(1, Ordering::AcqRel) + 1;
-    let rows = with_table(|table| table.profiles.clone());
-    let started = spawn_program_probe_worker(move |worker| {
-        let environment = ProgramProbeEnvironment::new(worker);
-        let answer = ProfilePrograms::probe_rows(&rows, &environment);
-        let timed_out = environment.timed_out.load(Ordering::Relaxed);
-        if timed_out != 0 {
-            eprintln!(
-                "Folio program discovery skipped {timed_out} filesystem questions after their per-entry deadline"
-            );
-        }
-        if PROGRAM_PROBE_REVISION.load(Ordering::Acquire) == revision {
-            *PROGRAM_PROBE_ANSWER
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some((revision, answer));
-            if let Some(wake) = PROGRAM_PROBE_WAKE.get() {
-                wake();
-            }
-        }
-    });
-    if let Err(error) = started {
-        eprintln!("Folio program discovery worker would not start: {error}");
-    }
-}
-
-/// Take the newest completed program answer, if one has landed.
-pub fn take_program_probe() -> Option<ProfilePrograms> {
-    PROGRAM_PROBE_ANSWER
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .take()
-        .and_then(|(revision, answer)| {
-            (PROGRAM_PROBE_REVISION.load(Ordering::Acquire) == revision).then_some(answer)
-        })
 }
 
 /// Which row of the menu, and **what kind of row** — the two lists the picker
@@ -5949,8 +5762,7 @@ pub fn layout(
     // default profile — or unplugging the drive Git lives on — cannot make the
     // menu change width under the pointer.
     let annotation = measure(hint_text(), px(HINT_FONT_LOGICAL_PX))
-        .max(measure(unavailable_hint_text(), px(HINT_FONT_LOGICAL_PX)))
-        .max(measure(pending_hint_text(), px(HINT_FONT_LOGICAL_PX)));
+        .max(measure(unavailable_hint_text(), px(HINT_FONT_LOGICAL_PX)));
     // Measured before the closure below borrows `measure` for the rest of the
     // function, not because the order matters to the layout.
     let files_hint = measure(files_pane_hint_text(), px(HINT_FONT_LOGICAL_PX));
@@ -6162,7 +5974,7 @@ pub fn hit(
     // after the folder is known, and the default profile is startable by
     // construction (`default_profile` refuses one this machine cannot run).
     if contains(layout.new_in_folder, x, y) {
-        return Some((!programs.is_pending()).then_some(MenuRow::NewInFolder));
+        return Some(Some(MenuRow::NewInFolder));
     }
     for (index, (row, entry)) in layout.recent.iter().zip(menu_rows(recent)).enumerate() {
         if contains(*row, x, y) {
@@ -6292,9 +6104,7 @@ pub fn build(
                 // by an `if/else` that could one day pick wrong: `default` is
                 // resolved through [`default_profile`], which refuses to answer
                 // with a profile this machine cannot start.
-                hint: if programs.is_pending() {
-                    Some(hint(pending_hint_text().to_owned()))
-                } else if available {
+                hint: if available {
                     (index == default).then(|| hint(hint_text().to_owned()))
                 } else {
                     Some(hint(unavailable_hint_text().to_owned()))
@@ -6362,14 +6172,12 @@ pub fn build(
             // glyph names the thing being chosen, not the thing being opened.
             mark: Some(ActionIcon::NewTerminalInFolder.mark()),
             name: new_in_folder_text(),
-            hint: programs
-                .is_pending()
-                .then(|| hint(pending_hint_text().to_owned())),
+            hint: None,
             // A system chooser is not a verb the shortcut table carries.
             accel: None,
             dirty: false,
             hovered: hover == Some(MenuRow::NewInFolder),
-            available: !programs.is_pending(),
+            available: true,
             pin: None,
         },
         scale,
@@ -16248,7 +16056,6 @@ mod tests {
                 .iter()
                 .map(|profile| (profile.id.clone(), None))
                 .collect(),
-            pending: false,
         };
         assert_eq!(
             table
@@ -22820,213 +22627,6 @@ mod tests {
         assert!(
             table().offered_to_start(&after).contains(&gitbash),
             "and the row arrives with the install, on the next probe"
-        );
-    }
-
-    struct OneBlockedFileQuestion {
-        blocked: PathBuf,
-        release: Arc<Mutex<std::sync::mpsc::Receiver<()>>>,
-        asked: Mutex<Vec<PathBuf>>,
-    }
-
-    impl ProgramFileQuestion for OneBlockedFileQuestion {
-        fn ask(&self, path: &Path) -> Option<bool> {
-            self.asked
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(path.to_path_buf());
-            if path != self.blocked {
-                return Some(true);
-            }
-            let release = Arc::clone(&self.release);
-            let (send, receive) = std::sync::mpsc::sync_channel(1);
-            bt_platform::spawn_at_priority(
-                "powershell-script-prepare",
-                bt_platform::ThreadPriority::BelowNormal,
-                move |_worker| {
-                    let answer = release
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .recv()
-                        .is_ok();
-                    let _ = send.send(answer);
-                },
-            )
-            .ok()?;
-            receive.recv_timeout(PROGRAM_PATH_ENTRY_DEADLINE).ok()
-        }
-    }
-
-    /// RED mutation: return `false` directly from the first unanswered file
-    /// question instead of continuing `search_path`; the later entry is never
-    /// asked and the program remains absent.
-    #[test]
-    fn a_path_entry_that_never_answers_does_not_hold_the_later_entries() {
-        let root = std::env::current_dir().expect("test working directory");
-        let slow_root = root.join("slow-entry");
-        let fast_root = root.join("fast-entry");
-        let slow = slow_root.join("tool.exe");
-        let fast = fast_root.join("tool.exe");
-        let path = std::env::join_paths([&slow_root, &fast_root]).expect("two path entries");
-        let (release, blocked) = std::sync::mpsc::sync_channel(1);
-        let question = OneBlockedFileQuestion {
-            blocked: slow.clone(),
-            release: Arc::new(Mutex::new(blocked)),
-            asked: Mutex::new(Vec::new()),
-        };
-        let environment = ProgramProbeEnvironment::with_seams(
-            move |key| (key == "PATH").then(|| path.clone()),
-            question,
-        );
-
-        assert_eq!(search_path(&environment, "tool.exe"), Some(fast.clone()));
-        release
-            .send(())
-            .expect("release the test-owned blocked question");
-        assert_eq!(environment.timed_out.load(Ordering::Relaxed), 1);
-        assert_eq!(
-            *environment
-                .question
-                .asked
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-            vec![slow, fast]
-        );
-    }
-
-    /// RED mutation: run `spawn_program_probe_worker`'s work inline (or join
-    /// it before returning); this test remains held at the blocked walk and the
-    /// launch-time frame model below is never produced.
-    #[test]
-    fn a_blocked_program_walk_cannot_hold_the_first_frame() {
-        let (entered, begun) = std::sync::mpsc::sync_channel(1);
-        let (release, blocked) = std::sync::mpsc::sync_channel(1);
-        let worker = spawn_program_probe_worker(move |_worker| {
-            entered.send(()).expect("announce the blocked walk");
-            blocked.recv().expect("release the blocked walk");
-        })
-        .expect("start the existing preparation worker");
-        begun
-            .recv()
-            .expect("the worker reached its blocked question");
-
-        let pending = ProfilePrograms::pending();
-        let first_frame = layout(
-            [0.0, 0.0, 100.0, 30.0],
-            MenuSide::Below,
-            &pending,
-            (960.0, 600.0),
-            1.0,
-            &[],
-            &chord_table(),
-            &mut fake_measure,
-        );
-        assert!(first_frame.profiles.is_empty());
-        assert!(pending.is_pending());
-
-        release.send(()).expect("release the test-owned walk");
-        worker.join().expect("the test-owned walk ended");
-    }
-
-    /// RED mutation: construct launch programs with `bare()` instead of
-    /// `ProfilePrograms::pending`; Settings asserts programs are absent and a
-    /// first shell row appears before the machine has answered.
-    #[test]
-    fn launch_programs_pending_is_true_on_every_program_surface() {
-        let pending = ProfilePrograms::pending();
-        assert!(pending.is_pending());
-        assert!(table().offered_to_start(&pending).is_empty());
-        let lines = page_lines(&pending, fallback_profile(), true);
-        assert!(lines.iter().all(|line| {
-            line.pending
-                && !line.available
-                && !line.is_default
-                && !line.default_is_automatic
-                && line.command == pending_hint_text()
-        }));
-        assert_eq!(agent_note_after(&lines), None);
-
-        let layout = layout(
-            [0.0, 0.0, 100.0, 30.0],
-            MenuSide::Below,
-            &pending,
-            (960.0, 600.0),
-            1.0,
-            &[],
-            &chord_table(),
-            &mut fake_measure,
-        );
-        assert!(layout.profiles.is_empty(), "no shell is advertised pending");
-        let folder = layout.new_in_folder;
-        assert_eq!(
-            hit(
-                &layout,
-                &pending,
-                &[],
-                f64::from((folder[0] + folder[2]) / 2.0),
-                f64::from((folder[1] + folder[3]) / 2.0),
-            ),
-            Some(None),
-            "a default-shell folder action is body until the default is known"
-        );
-    }
-
-    /// RED mutation: store the menu ordinal instead of `MenuRow::Profile`'s
-    /// table identity; PowerShell 5.1 moves from row zero to row one when
-    /// PowerShell 7 lands, and the highlight or activation follows the wrong
-    /// item.
-    #[test]
-    fn an_open_menu_updates_on_landing_and_keeps_highlight_and_press_by_identity() {
-        let before_machine = FakeMachine::bare_windows()
-            .with_var("ProgramFiles", r"C:\Program Files")
-            .with_file(r"C:\Program Files\Git\bin\bash.exe");
-        let before = ProfilePrograms::probe(&before_machine);
-        let target = index_of_id("gitbash");
-        let mut menu = ProfileMenu::default();
-        menu.toggle();
-        assert!(menu.set_hover(Some(MenuRow::Profile(target))));
-        let before_layout = layout(
-            [0.0, 0.0, 100.0, 30.0],
-            MenuSide::Below,
-            &before,
-            (960.0, 600.0),
-            1.0,
-            &[],
-            &chord_table(),
-            &mut fake_measure,
-        );
-        assert_eq!(before_layout.profiles.last(), Some(&target));
-
-        let after =
-            ProfilePrograms::probe(&before_machine.with_file(r"C:\WINDOWS\System32\wsl.exe"));
-        let after_layout = layout(
-            [0.0, 0.0, 100.0, 30.0],
-            MenuSide::Below,
-            &after,
-            (960.0, 600.0),
-            1.0,
-            &[],
-            &chord_table(),
-            &mut fake_measure,
-        );
-        assert_ne!(after_layout.profiles[0], target, "a row arrived above it");
-        let ordinal = after_layout
-            .profiles
-            .iter()
-            .position(|index| *index == target)
-            .expect("the highlighted item remains in the updated list");
-        assert_eq!(menu.hover(), Some(MenuRow::Profile(target)));
-        let item = after_layout.items[ordinal];
-        assert_eq!(
-            hit(
-                &after_layout,
-                &after,
-                &[],
-                f64::from((item[0] + item[2]) / 2.0),
-                f64::from((item[1] + item[3]) / 2.0),
-            ),
-            Some(Some(MenuRow::Profile(target))),
-            "the pressed row acts on the identity it showed"
         );
     }
 

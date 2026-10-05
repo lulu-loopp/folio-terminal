@@ -40,7 +40,6 @@ App.pending_new_windows	-	LIFE	windows	the 2026-09-25 table
 App.pending_restore_answer	-	ASYNC	windows	the 2026-09-25 table
 App.pins_store	-	DUR	files	proposed by census-1
 App.profiles_store	-	DUR	profiles	the 2026-09-25 table
-App.profile_programs	-	OBS	profiles	T-LAUNCH-PROBE: profiles owns the pending machine-program question; the application adopts its revisioned answer
 App.quake	-	LIFE	quake	the 2026-09-25 table
 App.quit	-	LIFE	windows	the 2026-09-25 table
 App.recent	-	DUR	windows	the 2026-09-25 table

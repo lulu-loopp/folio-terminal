@@ -594,7 +594,6 @@ fn the_rung_has_one_owner() {
         "apply_tabs_leaf_metrics",
         // the restart reads the rung it hands the constructor
         "Runtime::restart_shell",
-        "Runtime::start_pending_program_births",
         // the pane head's mark and its tip read the requested rung
         "Runtime::pane_text_sizes",
         "Runtime::rebuild_tooltip_anchors",

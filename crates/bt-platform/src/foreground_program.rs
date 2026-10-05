@@ -202,7 +202,7 @@ mod imp {
             return None;
         }
         let mut output = String::new();
-        child.stdout.take()?.read_to_string(&mut output).ok()?;
+        child.take_stdout()?.read_to_string(&mut output).ok()?;
         let members = output
             .lines()
             .map(str::parse)

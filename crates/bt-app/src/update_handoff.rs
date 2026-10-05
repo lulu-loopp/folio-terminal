@@ -845,7 +845,7 @@ mod tests {
     use bt_platform::install_txn::{self, Hold};
 
     use super::{
-        FolioCopy, HandedOff, HandoffJob, Leaving, Looked, Spawner, Staged, StartCount,
+        Detached, FolioCopy, HandedOff, HandoffJob, Leaving, Looked, Spawner, Staged, StartCount,
         apply_command_line, counted_start, look, perform, perform_counted,
     };
     use crate::persist::SessionStore;
@@ -860,6 +860,51 @@ mod tests {
         Asker, Class, Disk, HeaderOutcome, Home, Inventories, Journal, JournalRead, Layout,
         Located, Nonce, Phase, PhaseKind, StartAction, StartView, TxnId, at_start, decide,
     };
+
+    #[cfg(windows)]
+    #[test]
+    fn detached_handoff_helper_waits() {
+        if !std::env::args_os().any(|argument| argument == "--exact") {
+            return;
+        }
+        std::thread::park();
+    }
+
+    /// RED mutation: make the product's `Detached::spawn_detached` retain a
+    /// `ProbeChild`; dropping that owner ends this deliberately handed-off
+    /// process before the zero-duration kernel observation.
+    #[cfg(windows)]
+    #[test]
+    fn a_real_update_handoff_is_not_probe_contained() {
+        struct Started {
+            running: Running,
+            image: PathBuf,
+        }
+        impl Drop for Started {
+            fn drop(&mut self) {
+                let _ = bt_platform::install_flip::ask(
+                    self.running,
+                    &[&self.image],
+                    bt_platform::install_flip::Ask::End,
+                );
+            }
+        }
+
+        let image = std::env::current_exe().expect("this test executable");
+        let arguments = [
+            OsString::from("--exact"),
+            OsString::from("update_handoff::tests::detached_handoff_helper_waits"),
+            OsString::from("--nocapture"),
+        ];
+        let running = Detached
+            .spawn_detached(&image, &arguments)
+            .expect("start through the product update hand-off");
+        let started = Started { running, image };
+        assert!(
+            bt_platform::install_flip::still_running(started.running),
+            "the product hand-off dropped a containment owner over its result"
+        );
+    }
 
     /// PIN (U-32) — **every road process shows its failure window with the box
     /// a process with no application can raise, and none of them with the

@@ -580,8 +580,8 @@ mod arm {
             .stderr(Stdio::piped());
         let mut child = crate::spawn_probe(&mut command).map_err(|_| refuse(Why::DidNotStart))?;
         let (mut stdout, mut stderr) = (
-            child.stdout.take().expect("stdout was piped"),
-            child.stderr.take().expect("stderr was piped"),
+            child.take_stdout().expect("stdout was piped"),
+            child.take_stderr().expect("stderr was piped"),
         );
         let deadline = Instant::now() + bound;
         let collected = (|| {

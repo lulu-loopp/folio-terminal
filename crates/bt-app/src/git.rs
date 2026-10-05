@@ -53,7 +53,7 @@
 //! extension makes for the same reason.
 
 use std::ffi::OsStr;
-use std::io::Read;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -2134,6 +2134,114 @@ fn git_command(program: &Path, dir: &Path, arguments: &[&OsStr]) -> Command {
     command
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GitHookPolicy {
+    /// This command invokes no Git hook. Its complete process tree belongs to
+    /// the bounded question and is ended with it.
+    Contained,
+    /// This command can invoke `post-index-change`, `post-checkout` or
+    /// `reference-transaction`.
+    /// A hook may deliberately leave a background process running, so only the
+    /// direct Git child belongs to the bounded question.
+    HooksMayOutlive,
+}
+
+/// Every Git subcommand Folio constructs, and the lifetime decision for hooks
+/// it can invoke. Keep this closed: an unlisted command is refused before it is
+/// started, so adding a product subcommand requires an explicit decision here.
+const GIT_SUBCOMMAND_POLICIES: [(&str, GitHookPolicy); 13] = [
+    ("add", GitHookPolicy::HooksMayOutlive),
+    ("branch", GitHookPolicy::HooksMayOutlive),
+    ("checkout", GitHookPolicy::HooksMayOutlive),
+    ("clean", GitHookPolicy::Contained),
+    ("diff", GitHookPolicy::Contained),
+    ("for-each-ref", GitHookPolicy::Contained),
+    ("log", GitHookPolicy::Contained),
+    ("restore", GitHookPolicy::HooksMayOutlive),
+    ("rev-list", GitHookPolicy::Contained),
+    ("rev-parse", GitHookPolicy::Contained),
+    ("show", GitHookPolicy::Contained),
+    ("status", GitHookPolicy::Contained),
+    ("tag", GitHookPolicy::HooksMayOutlive),
+];
+
+fn git_hook_policy(command: &Command) -> io::Result<GitHookPolicy> {
+    // `git_command` contributes the eight fixed words before the caller's
+    // argument vector. The first caller word is therefore the subcommand.
+    let subcommand = command
+        .get_args()
+        .nth(8)
+        .and_then(OsStr::to_str)
+        .ok_or_else(|| io::Error::other("Folio's Git command has no subcommand"))?;
+    GIT_SUBCOMMAND_POLICIES
+        .iter()
+        .find_map(|&(word, policy)| (word == subcommand).then_some(policy))
+        .ok_or_else(|| {
+            io::Error::other(format!("Git subcommand `{subcommand}` has no hook policy"))
+        })
+}
+
+enum GitChild {
+    Contained(bt_platform::ProbeChild),
+    HooksMayOutlive(std::process::Child),
+}
+
+impl GitChild {
+    fn spawn_product(command: &mut Command) -> io::Result<Self> {
+        match git_hook_policy(command)? {
+            GitHookPolicy::Contained => bt_platform::spawn_probe(command).map(Self::Contained),
+            GitHookPolicy::HooksMayOutlive => command.spawn().map(Self::HooksMayOutlive),
+        }
+    }
+
+    #[cfg(test)]
+    fn spawn_fixture(command: &mut Command) -> io::Result<Self> {
+        bt_platform::spawn_probe(command).map(Self::Contained)
+    }
+
+    fn take_stdin(&mut self) -> Option<std::process::ChildStdin> {
+        match self {
+            Self::Contained(child) => child.take_stdin(),
+            Self::HooksMayOutlive(child) => child.stdin.take(),
+        }
+    }
+
+    fn take_stdout(&mut self) -> Option<std::process::ChildStdout> {
+        match self {
+            Self::Contained(child) => child.take_stdout(),
+            Self::HooksMayOutlive(child) => child.stdout.take(),
+        }
+    }
+
+    fn take_stderr(&mut self) -> Option<std::process::ChildStderr> {
+        match self {
+            Self::Contained(child) => child.take_stderr(),
+            Self::HooksMayOutlive(child) => child.stderr.take(),
+        }
+    }
+
+    fn try_wait(&mut self) -> io::Result<Option<std::process::ExitStatus>> {
+        match self {
+            Self::Contained(child) => child.try_wait(),
+            Self::HooksMayOutlive(child) => child.try_wait(),
+        }
+    }
+
+    fn kill(&mut self) -> io::Result<()> {
+        match self {
+            Self::Contained(child) => child.kill(),
+            Self::HooksMayOutlive(child) => child.kill(),
+        }
+    }
+
+    fn wait(&mut self) -> io::Result<std::process::ExitStatus> {
+        match self {
+            Self::Contained(child) => child.wait(),
+            Self::HooksMayOutlive(child) => child.wait(),
+        }
+    }
+}
+
 /// Read one pipe to its end on a thread of its own.
 ///
 /// Both pipes are drained concurrently because a child that fills one while we
@@ -2183,8 +2291,13 @@ fn program_name(command: &Command) -> String {
 }
 
 /// Run one `git`, and never wait for it longer than `timeout`.
+fn run_product_git(command: Command, timeout: Duration) -> GitOutcome<GitRun> {
+    run_product_git_with_input(command, timeout, Vec::new())
+}
+
+#[cfg(test)]
 fn run_git(command: Command, timeout: Duration) -> GitOutcome<GitRun> {
-    run_git_with_input(command, timeout, Vec::new())
+    run_git_with_input(command, timeout, Vec::new(), true)
 }
 
 /// The same, with a pathspec list fed down the child's own standard input.
@@ -2203,23 +2316,43 @@ fn run_git(command: Command, timeout: Duration) -> GitOutcome<GitRun> {
 /// pathspec longer than the pipe's buffer blocks until somebody reads it, and a
 /// parent that had written its list from the polling loop would be blocked in the
 /// write while the child was blocked waiting for the rest of it.
+fn run_product_git_with_input(
+    command: Command,
+    timeout: Duration,
+    input: Vec<u8>,
+) -> GitOutcome<GitRun> {
+    run_git_with_input(command, timeout, input, false)
+}
+
 fn run_git_with_input(
     mut command: Command,
     timeout: Duration,
     input: Vec<u8>,
+    fixture: bool,
 ) -> GitOutcome<GitRun> {
     let feeding = !input.is_empty();
     if feeding {
         command.stdin(Stdio::piped());
     }
-    let mut child = bt_platform::spawn_probe(&mut command).map_err(|error| {
+    #[cfg(not(test))]
+    let _ = fixture;
+    #[cfg(test)]
+    let child = fixture.then(|| GitChild::spawn_fixture(&mut command));
+    #[cfg(test)]
+    let child = match child {
+        Some(child) => child,
+        None => GitChild::spawn_product(&mut command),
+    };
+    #[cfg(not(test))]
+    let child = GitChild::spawn_product(&mut command);
+    let mut child = child.map_err(|error| {
         GitFault::GitMissing(format!(
             "{} would not start: {error}",
             program_name(&command)
         ))
     })?;
     if feeding {
-        let mut pipe = child.stdin.take();
+        let mut pipe = child.take_stdin();
         // Below normal for the reason [`drain`] gives: a thread does not inherit
         // the band of the thread that spawned it.
         bt_platform::spawn_at_priority(
@@ -2238,8 +2371,8 @@ fn run_git_with_input(
         )
         .expect("spawn a git stdin writer");
     }
-    let out = drain(child.stdout.take());
-    let err = drain(child.stderr.take());
+    let out = drain(child.take_stdout());
+    let err = drain(child.take_stderr());
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
@@ -2392,7 +2525,7 @@ pub fn answer(
                 dir,
                 &[OsStr::new("rev-parse"), OsStr::new("--show-toplevel")],
             );
-            match run_git(command, timeout) {
+            match run_product_git(command, timeout) {
                 Ok(run) if run.ok => GitAnswer::Repo {
                     dir: dir.clone(),
                     outcome: Ok(repo_root(&String::from_utf8_lossy(&run.stdout))),
@@ -2414,7 +2547,7 @@ pub fn answer(
                     OsStr::new("--ignore-submodules=none"),
                 ],
             );
-            match run_git(command, timeout) {
+            match run_product_git(command, timeout) {
                 Ok(run) if run.ok => GitAnswer::Status {
                     root: root.clone(),
                     outcome: Ok(parse_status(&run.stdout)),
@@ -2448,7 +2581,7 @@ pub fn answer(
                     OsStr::new("refs/tags"),
                 ],
             );
-            match run_git(command, timeout) {
+            match run_product_git(command, timeout) {
                 Ok(run) if run.ok => GitAnswer::Refs {
                     root: root.clone(),
                     outcome: Ok(parse_refs(&run.stdout, now_unix)),
@@ -2493,7 +2626,7 @@ pub fn answer(
             // A query that resolves to nothing exits non-zero and says nothing,
             // which is the ordinary case and not a failure: `--quiet` is asked
             // for precisely so that "no such revision" is silence.
-            if let Ok(run) = run_git(verify, timeout)
+            if let Ok(run) = run_product_git(verify, timeout)
                 && run.ok
             {
                 push(&String::from_utf8_lossy(&run.stdout));
@@ -2512,7 +2645,7 @@ pub fn answer(
                         OsStr::new(&cap),
                     ],
                 );
-                match run_git(command, timeout) {
+                match run_product_git(command, timeout) {
                     Ok(run) if run.ok => {
                         push(&String::from_utf8_lossy(&run.stdout));
                         None
@@ -2592,7 +2725,7 @@ pub fn answer(
             // `main` that does not exist.
             let mut command = command;
             command.args(refs);
-            match run_git(command, timeout) {
+            match run_product_git(command, timeout) {
                 Ok(run) if run.ok => GitAnswer::Log {
                     root: root.clone(),
                     skip: *skip,
@@ -2611,7 +2744,7 @@ pub fn answer(
             let words = diff_arguments(*against, path, renamed_from.as_deref());
             let arguments: Vec<&OsStr> = words.iter().map(OsStr::new).collect();
             let command = git_command(program, root, &arguments);
-            match run_git(command, timeout) {
+            match run_product_git(command, timeout) {
                 // **The one question here whose success is not `status.success()`.**
                 // `--no-index` is a `diff` between two files and answers the
                 // shell's own convention for that: 0 when they are the same, 1
@@ -2637,7 +2770,7 @@ pub fn answer(
             let (words, input) = write_arguments(verb, paths);
             let arguments: Vec<&OsStr> = words.iter().map(OsStr::new).collect();
             let command = git_command(program, root, &arguments);
-            match run_git_with_input(command, timeout, input) {
+            match run_product_git_with_input(command, timeout, input) {
                 Ok(run) if run.ok => GitAnswer::Write {
                     root: root.clone(),
                     verb: verb.clone(),
@@ -2672,7 +2805,7 @@ pub fn answer(
             }
             arguments.push(OsStr::new(path));
             let command = git_command(program, root, &arguments);
-            match run_git(command, timeout) {
+            match run_product_git(command, timeout) {
                 Ok(run) if run.ok => GitAnswer::Show {
                     root: root.clone(),
                     hash: hash.clone(),
@@ -2709,7 +2842,7 @@ pub fn answer(
             }
             arguments.push(OsStr::new(path));
             let command = git_command(program, root, &arguments);
-            match run_git(command, timeout) {
+            match run_product_git(command, timeout) {
                 Ok(run) if run.ok => GitAnswer::DiffRange {
                     root: root.clone(),
                     a: a.clone(),
@@ -2744,7 +2877,7 @@ pub fn answer(
             }
             arguments.push(OsStr::new(target));
             let command = git_command(program, root, &arguments);
-            match run_git(command, timeout) {
+            match run_product_git(command, timeout) {
                 Ok(run) if run.ok => GitAnswer::Checkout {
                     root: root.clone(),
                     target: target.clone(),
@@ -2773,7 +2906,7 @@ pub fn answer(
                     OsStr::new(hash),
                 ],
             );
-            match run_git(command, timeout) {
+            match run_product_git(command, timeout) {
                 Ok(run) if run.ok => GitAnswer::CommitFiles {
                     root: root.clone(),
                     hash: hash.clone(),
@@ -2808,7 +2941,7 @@ pub fn answer(
                 arguments.push(OsStr::new(b));
             }
             let command = git_command(program, root, &arguments);
-            match run_git(command, timeout) {
+            match run_product_git(command, timeout) {
                 Ok(run) if run.ok => GitAnswer::CompareFiles {
                     root: root.clone(),
                     a: a.clone(),
@@ -3963,6 +4096,39 @@ pub fn take_git_worker_notice(notice_pending: &mut bool) -> Option<&'static str>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED mutation: classify `checkout` as contained; the hook-capable set no
+    /// longer matches the reviewed command inventory.
+    #[test]
+    fn every_git_subcommand_has_an_explicit_hook_lifetime() {
+        assert_eq!(
+            GIT_SUBCOMMAND_POLICIES.map(|(word, _)| word),
+            [
+                "add",
+                "branch",
+                "checkout",
+                "clean",
+                "diff",
+                "for-each-ref",
+                "log",
+                "restore",
+                "rev-list",
+                "rev-parse",
+                "show",
+                "status",
+                "tag",
+            ]
+        );
+        assert_eq!(
+            GIT_SUBCOMMAND_POLICIES
+                .iter()
+                .filter_map(
+                    |&(word, policy)| (policy == GitHookPolicy::HooksMayOutlive).then_some(word)
+                )
+                .collect::<Vec<_>>(),
+            ["add", "branch", "checkout", "restore", "tag"]
+        );
+    }
 
     // ── Recorded bytes ─────────────────────────────────────────────────────
     //

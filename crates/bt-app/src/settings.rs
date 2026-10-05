@@ -31010,7 +31010,6 @@ mod tests {
                 deletable: false,
                 hidden: false,
                 available: true,
-                pending: false,
             },
             crate::profiles::ProfileLine {
                 index: 1,
@@ -31025,7 +31024,6 @@ mod tests {
                 deletable: false,
                 hidden: false,
                 available: true,
-                pending: false,
             },
             crate::profiles::ProfileLine {
                 index: 2,
@@ -31040,7 +31038,6 @@ mod tests {
                 deletable: false,
                 hidden: false,
                 available: false,
-                pending: false,
             },
             crate::profiles::ProfileLine {
                 index: 3,
@@ -31055,7 +31052,6 @@ mod tests {
                 deletable: false,
                 hidden: true,
                 available: true,
-                pending: false,
             },
         ]
     }
@@ -31091,7 +31087,6 @@ mod tests {
             deletable: false,
             hidden: false,
             available: false,
-            pending: false,
         });
         lines.push(crate::profiles::ProfileLine {
             index: 3,
@@ -31112,7 +31107,6 @@ mod tests {
             deletable: false,
             hidden: false,
             available: true,
-            pending: false,
         });
         lines
     }
