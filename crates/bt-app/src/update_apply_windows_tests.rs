@@ -3366,18 +3366,32 @@ fn a_start_counts_only_when_acknowledged_and_the_last_resort_is_a_window_here() 
     );
 }
 
-/// RED (U-34, rounds 4 and 5; Codex's finding 14) — **a stale window's mark is
-/// taken over by exactly one of two contenders racing for it** (a soak): the
-/// election is one exclusive lock around read-check-replace, so the first in
-/// replaces the stale value and the second reads the live winner, `Theirs`.
-/// If an outside scanner refuses that second read or replacement, it may
-/// instead answer `Refused`; it may never become another winner. Two threads
-/// race, released together by a barrier, over many rounds, each round from a
-/// fresh stale mark; the two contenders are both live processes (this test and
-/// a synthetic program it started), so neither can be taken for a dead owner.
+/// RED (U-34, rounds 4 and 5; Codex's finding 14; MARK-RACE) — **a stale
+/// window's mark is taken over by exactly one of two contenders racing for
+/// it** (a soak): the election is one exclusive lock around
+/// read-check-replace, so the first in takes the duty and the second reads the
+/// live winner, `Theirs`, or — while the winner still holds the lock, or an
+/// outside scanner refuses its read — truthfully answers `Refused`; it may
+/// never become another winner. Two threads race, released together by a
+/// barrier, over many rounds, each round from a fresh stale mark; the two
+/// contenders are both live processes (this test and a synthetic program it
+/// started), so neither can be taken for a dead owner.
 ///
-/// MUTATION: in `update_apply::take_the_window_within`, skip the lock (check,
-/// then `durable_write`) — both contenders then answer `Mine` in some round.
+/// **The winner's duty is recorded one of two ways**, and each is asserted as
+/// what it is: a replaced mark that names the winner, or — when the
+/// replacement is refused before its rename — the stale mark left byte for
+/// byte with the election lock still held by the winner's answer, so a third
+/// contender finds `WindowHolder::Unmarked`. A scanner that opens the freshly
+/// written mark without delete sharing gives the second way at random under
+/// load; every tenth round holds the mark open the same way
+/// (`trust_harness::hold_without_delete_sharing`), so both ways are asserted
+/// in every run.
+///
+/// MUTATION: in `update_apply::take_the_window_within_using`, give each
+/// contender a lock of its own (both answer `Mine`); or answer a replacement
+/// refused before its rename with `WindowDuty::recorded` instead of
+/// `WindowDuty::held`, which lets the lock go (both answer `Mine` in the first
+/// scanned round).
 #[test]
 fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
     let Some(install) = Install::new("stale-race") else {
@@ -3391,11 +3405,23 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
             started: install_flip::started_of(other).expect("it runs"),
         },
     ];
+    let third = Running { pid: 1, started: 1 };
     let me = crate::update_apply::this_process();
     let stale = format!("{}:{}", me.pid, me.started.wrapping_add(1));
     let mark = crate::update_apply::owner_path(&install.home, install.txn);
     for round in 0..40 {
-        std::fs::write(&mark, format!("{stale}{}", "0".repeat(round % 3))).unwrap();
+        let written = format!("{stale}{}", "0".repeat(round % 3));
+        std::fs::write(&mark, &written).unwrap();
+        let scanned = round % 10 == 9;
+        let scanner = scanned
+            .then(|| bt_platform::trust_harness::hold_without_delete_sharing(&mark).unwrap());
+        // A lock-only winner keeps the lock until its answer is dropped, so
+        // the loser of a scanned round waits briefly, not a whole election.
+        let within = if scanned {
+            Duration::from_millis(300)
+        } else {
+            crate::update_apply::ELECTION_WITHIN
+        };
         let barrier = Arc::new(std::sync::Barrier::new(2));
         let racers: Vec<_> = contenders
             .iter()
@@ -3416,7 +3442,7 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
                             &home,
                             txn,
                             who,
-                            Instant::now() + crate::update_apply::ELECTION_WITHIN,
+                            Instant::now() + within,
                         )
                     },
                 )
@@ -3427,9 +3453,12 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
             .into_iter()
             .map(|racer| racer.join().unwrap())
             .collect();
+        let on_disk =
+            std::fs::read(&mark).map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
         let mine = answers.iter().filter(|answer| answer.is_mine()).count();
         assert_eq!(mine, 1, "round {round}: {answers:?}");
-        let winner = contenders[answers.iter().position(Window::is_mine).unwrap()];
+        let at = answers.iter().position(Window::is_mine).unwrap();
+        let winner = contenders[at];
         assert!(
             answers.contains(&Window::Theirs(winner))
                 || answers
@@ -3437,11 +3466,35 @@ fn a_stale_mark_is_taken_over_by_exactly_one_contender() {
                     .any(|answer| matches!(answer, Window::Refused(_))),
             "round {round}: the loser names the winner or truthfully refuses: {answers:?}"
         );
-        assert_eq!(
-            crate::update_apply::window_owner(&install.home, install.txn),
-            Some(winner),
-            "round {round}"
-        );
+        let Window::Mine(duty) = &answers[at] else {
+            unreachable!("the position is a Mine")
+        };
+        if scanned {
+            assert!(
+                duty.is_lock_backed(),
+                "round {round}: a replacement the scanner refuses records no mark: {answers:?}"
+            );
+        }
+        if duty.is_lock_backed() {
+            assert_eq!(
+                on_disk.as_deref().ok(),
+                Some(written.as_str()),
+                "round {round}: the refused replacement left the stale mark whole: {answers:?}"
+            );
+            assert_eq!(
+                crate::update_apply::window_holder(&install.home, install.txn, third),
+                Ok(Some(crate::update_apply::WindowHolder::Unmarked)),
+                "round {round}: the winner's held lock is its record: {answers:?}"
+            );
+        } else {
+            assert_eq!(
+                crate::update_apply::window_owner(&install.home, install.txn),
+                Some(winner),
+                "round {round}: {answers:?}; the mark's bytes: {on_disk:?}"
+            );
+        }
+        drop(answers);
+        drop(scanner);
     }
 }
 
