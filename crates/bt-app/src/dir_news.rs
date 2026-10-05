@@ -41,11 +41,35 @@ use winit::event_loop::EventLoopProxy;
 
 use crate::{AppEvent, watch_clock::WatchClock};
 
+pub(crate) fn watch_is_armed(watch: &bt_platform::DirWatch) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        watch.is_armed()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = watch;
+        true
+    }
+}
+
+pub(crate) fn take_watch_failure(watch: &mut bt_platform::DirWatch) -> Option<std::io::Error> {
+    #[cfg(target_os = "linux")]
+    {
+        watch.take_failure()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = watch;
+        None
+    }
+}
+
 /// A folder's watch, the time it last moved, and the debounce between them.
 #[derive(Default)]
 pub struct DirNews {
-    /// `None` until the folder exists and the handle opens; `Some` for the rest
-    /// of the process.
+    /// `None` before an attempt or after a reported failure; `Some` while a
+    /// Linux start is pending and while any platform's subscription is armed.
     watch: Option<bt_platform::DirWatch>,
     /// When the watcher thread last saw something move, written there and read
     /// here. One `Option<Instant>` and not a queue: every notification says the
@@ -65,19 +89,36 @@ impl DirNews {
     #[cfg(test)]
     #[must_use]
     pub fn is_armed(&self) -> bool {
-        self.watch.is_some()
+        self.watch.as_ref().is_some_and(watch_is_armed)
     }
 
-    /// Open the folder's watch and wake the loop with `event` whenever it moves.
+    /// Take an asynchronous start failure and retire the failed subscription.
+    pub(crate) fn take_failure(&mut self) -> Option<std::io::Error> {
+        let error = take_watch_failure(self.watch.as_mut()?)?;
+        drop(self.watch.take());
+        Some(error)
+    }
+
+    /// Cancel a start that has not armed yet, for an explicit re-arm request.
+    pub(crate) fn cancel_unarmed(&mut self) {
+        if self
+            .watch
+            .as_ref()
+            .is_some_and(|watch| !watch_is_armed(watch))
+        {
+            drop(self.watch.take());
+        }
+    }
+
+    /// Start the folder's watch and wake the loop with `event` whenever it moves.
     ///
-    /// One `CreateFileW` and no separate existence check: a folder that is not
-    /// there fails to open, and asking twice would be two syscalls to learn one
-    /// thing. The error is handed back rather than reported here — whether a
-    /// missing folder is the ordinary case or a broken installation is a fact
-    /// about *which* folder, and this type does not know which folder it is
-    /// holding.
+    /// No separate existence check: a folder that is not there fails to open.
+    /// Windows and macOS report that failure before returning; Linux queues the
+    /// start on a worker and exposes its one failure through [`Self::take_failure`]
+    /// after the startup wake. Whether a missing folder is ordinary is a fact
+    /// about *which* folder, and this type does not know which folder it holds.
     ///
-    /// **The already-armed answer comes before the proxy is cloned, and that
+    /// **The existing-subscription answer comes before the proxy is cloned, and that
     /// order is load-bearing** — the reason is written out at
     /// [`crate::git_watch::GitWatch::sync`]: a clone is an `Arc` bump on Windows
     /// and, on macOS, a new run loop source and a wake-up of the loop. Arming is

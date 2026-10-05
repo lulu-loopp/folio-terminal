@@ -41,9 +41,10 @@
 //!    is a directory this window was not listening to a moment ago, and Windows
 //!    keeps no log for a subscriber who was not yet listening. So a column that
 //!    already holds an answer for a directory whose watch has just opened is
-//!    told to ask again: that answer was taken while nobody was watching. A
-//!    directory nothing has ever asked about is not re-asked, because the walk
-//!    that put it on screen is about to ask for it for the first time.
+//!    told to ask again once the subscription is armed: that answer was taken
+//!    while nobody was watching. A directory nothing has ever asked about is
+//!    not re-asked, because the walk that put it on screen is about to ask for
+//!    it for the first time.
 //!
 //! # What a notification means here
 //!
@@ -65,7 +66,11 @@ use std::{
 
 use winit::event_loop::EventLoopProxy;
 
-use crate::{AppEvent, watch_clock::WatchClock};
+use crate::{
+    AppEvent,
+    dir_news::{take_watch_failure, watch_is_armed},
+    watch_clock::WatchClock,
+};
 
 /// One watched folder: its subscription, and the clock its notifications feed.
 struct Watched {
@@ -78,6 +83,7 @@ struct Watched {
     /// exactly as every column behaved before today, which is to say the unfold
     /// is still its refresh.
     watch: Option<bt_platform::DirWatch>,
+    initial_read_reported: bool,
     clock: WatchClock,
 }
 
@@ -97,9 +103,11 @@ pub struct FilesWatch {
 
 impl FilesWatch {
     /// **Bring the subscriptions level with what the columns are showing** (rule
-    /// 1), and say which folders were newly armed (rule 3).
+    /// 1), and say which folders owe their first post-attempt read (rule 3).
     ///
-    /// The arrivals come back rather than being acted on here for the reason
+    /// Linux's pending start returns an arrival only after it arms or fails; the
+    /// synchronous platforms return it with the attempt. The arrivals come back
+    /// rather than being acted on here for the reason
     /// nothing in this file parses a notification: what a column should do about
     /// a folder is the window's business, and this type does not know that a
     /// column exists.
@@ -125,7 +133,7 @@ impl FilesWatch {
     ///
     /// One derivation for the real thing and for the tests, on
     /// `GitWatch::sync_with`'s own reasoning: what the gate *is* — the map
-    /// follows the set, departures drop their handles, arrivals are armed once —
+    /// follows the set, departures drop their handles, arrivals are attempted once —
     /// is the same code whether a kernel subscription is actually taken out or
     /// not, and a second copy of it in the tests would be a test of the copy.
     fn sync_with(
@@ -140,23 +148,31 @@ impl FilesWatch {
             return Vec::new();
         }
         let held = self.dirs.len();
-        // Departures first, and the drop is the cancellation: `DirWatch::drop`
-        // sets the stop event and joins its thread.
+        // Departures first; dropping a subscription is the cancellation.
         self.dirs.retain(|directory, _| wanted.contains(directory));
         let departed = self.dirs.len() != held;
         let mut arrived = Vec::new();
         for directory in wanted {
-            if self.dirs.contains_key(directory) {
+            if let Some(entry) = self.dirs.get_mut(directory) {
+                if !entry.initial_read_reported && entry.watch.as_ref().is_none_or(watch_is_armed) {
+                    entry.initial_read_reported = true;
+                    arrived.push(directory.clone());
+                }
                 continue;
+            }
+            let watch = open(directory);
+            let initial_read_reported = watch.as_ref().is_none_or(watch_is_armed);
+            if initial_read_reported {
+                arrived.push(directory.clone());
             }
             self.dirs.insert(
                 directory.clone(),
                 Watched {
-                    watch: open(directory),
+                    watch,
+                    initial_read_reported,
                     clock: WatchClock::default(),
                 },
             );
-            arrived.push(directory.clone());
         }
         if departed || !arrived.is_empty() {
             // A folder that stopped being watched left its unread news behind,
@@ -180,6 +196,12 @@ impl FilesWatch {
     pub fn due(&mut self, now: Instant) -> Vec<PathBuf> {
         if self.dirs.is_empty() {
             return Vec::new();
+        }
+        for (directory, entry) in &mut self.dirs {
+            if let Some(error) = entry.watch.as_mut().and_then(take_watch_failure) {
+                trace(&format!("cannot watch {}: {error}", directory.display()));
+                entry.watch = None;
+            }
         }
         for (directory, at) in std::mem::take(&mut *lock(&self.news)) {
             if let Some(entry) = self.dirs.get_mut(&directory) {
@@ -213,7 +235,7 @@ impl FilesWatch {
             self.dirs.len(),
             self.dirs
                 .values()
-                .filter(|held| held.watch.is_some())
+                .filter(|held| held.watch.as_ref().is_some_and(watch_is_armed))
                 .count(),
         )
     }

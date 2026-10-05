@@ -1464,7 +1464,7 @@ struct Shared {
     /// this is only ever the belt: the same target is never rewritten twice in
     /// a row.
     rewriting_to: RefCell<Option<String>>,
-    wake: Box<dyn Fn()>,
+    wake: Box<dyn Fn() + Send + Sync>,
 }
 
 #[cfg(windows)]
@@ -1587,11 +1587,12 @@ impl WebHost {
     /// document names. `wake` is called after every event is queued and must get
     /// the event loop to call [`WebHost::drain`] — a callback that arrives while
     /// the window is idle would otherwise sit unread until somebody moved the
-    /// mouse.
+    /// mouse. Linux calls it from its browser actor, so it is `Send + Sync`;
+    /// both policy closures stay on the window thread and are called by `drain`.
     pub fn new(
         gate: Box<dyn Fn(&str) -> WebNavigationVerdict>,
         request_gate: Box<dyn Fn(&str) -> WebRequestVerdict>,
-        wake: Box<dyn Fn()>,
+        wake: Box<dyn Fn() + Send + Sync>,
     ) -> Self {
         Self {
             shared: Rc::new(Shared {

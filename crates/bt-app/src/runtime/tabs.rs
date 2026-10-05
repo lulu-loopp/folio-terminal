@@ -8,15 +8,14 @@ use crate::{
     RenameSubject, RowPayload, RowPayloadKind, Runtime, TabCarry, TabClick, TabCloseAction, TabId,
     TabMenuState, TabPress, TabRename, TabSeed, TabState, TabSurface, TablePaint, TearOut,
     absorb_tab_into_layout, absorb_tab_into_strip, attention, blank_page_return, create_tab_state,
-    expire_leaf_attention, float, native_window, new_tab_cwd, notify, pane_can_become_a_tab,
-    pane_into_tab, pane_strip_landing, presentation_physical_size, profiles,
-    recoverable_wheel_scroll_amount, restore, row_strip_landing, scrollback_quota, seats, seed,
-    settling, solve_seats, stepped_tab, strip_insert_slot, tab_close_action, tab_surface,
-    tear_pane_into_tab, two_tabs_mut, webnav,
+    expire_leaf_attention, float, new_tab_cwd, notify, pane_can_become_a_tab, pane_into_tab,
+    pane_strip_landing, presentation_physical_size, profiles, recoverable_wheel_scroll_amount,
+    restore, row_strip_landing, scrollback_quota, seats, seed, settling, solve_seats, stepped_tab,
+    strip_insert_slot, tab_close_action, tab_surface, tear_pane_into_tab, two_tabs_mut, webnav,
 };
 use crate::{LeafView, TextScale};
 use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use bt_layout::SeatId;
 use bt_math::{MathRaster, MathRenderError};
 use bt_render::{FrameSource, FrameTrigger, Travel};
@@ -308,9 +307,7 @@ impl Runtime<'_> {
         }
         match tab_close_action(self.window.tabs.len(), self.window.active_tab, index) {
             TabCloseAction::CloseWindow => {
-                let native = native_window(&self.window.window)?;
-                bt_platform::request_window_close(native)
-                    .map_err(|error| anyhow!(error))
+                self.request_window_close()
                     .context("request close after the final tab")?;
             }
             TabCloseAction::Keep { active_tab } => {

@@ -2095,7 +2095,7 @@ impl WebSeat {
         minted: Mint,
         scale: f64,
         scheme: WebColorScheme,
-        wake: Box<dyn Fn()>,
+        wake: Box<dyn Fn() + Send + Sync>,
     ) -> Result<(Self, Vec<WebOutcome>), String> {
         let folder = user_data_folder().ok_or_else(|| {
             String::from("this machine names no folder a web engine could be given")
@@ -2262,7 +2262,7 @@ impl WebSeat {
         window: bt_platform::NativeWindow,
         scale: f64,
         scheme: WebColorScheme,
-        wake: Box<dyn Fn()>,
+        wake: Box<dyn Fn() + Send + Sync>,
     ) -> Result<(Self, Vec<WebOutcome>), String> {
         let (mut seat, outcomes) =
             Self::open(page, window, BLANK_PAGE, Mint::Blank, scale, scheme, wake)?;

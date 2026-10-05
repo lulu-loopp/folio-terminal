@@ -9,10 +9,7 @@
 //! dialog by `Uninstall…` (T-UNINSTALL-UX); its facts are the dialog's own
 //! (`SettingsPanel::uninstall_card`, `SettingsPanel::uninstall_remove_data`).
 
-use crate::{
-    Runtime, recoverable_clipboard_write, restore, update, update_card, update_job,
-    write_terminal_clipboard_text,
-};
+use crate::{Runtime, restore, update, update_card, update_job};
 use anyhow::Result;
 use winit::keyboard::{Key, NamedKey};
 
@@ -345,10 +342,12 @@ impl Runtime<'_> {
                 self.hand_url_to_the_browser(update::RELEASES_PAGE)?;
             }
             VersionEffect::Copy(command) => {
-                recoverable_clipboard_write(
-                    write_terminal_clipboard_text(command),
+                self.submit_clipboard_write(
+                    command.to_owned(),
                     "copy the package manager's update command",
-                );
+                    crate::ClipboardWriteEffect::None,
+                )
+                .map(drop)?;
             }
             VersionEffect::None => {}
         }

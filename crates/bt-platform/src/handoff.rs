@@ -326,24 +326,31 @@ impl ShellThread {
     ///     |ctx| {
     ///         let shell = bt_platform::ShellThread::enter(ctx);
     ///         shell.hand_over(
+    ///             ctx,
     ///             bt_platform::NativeWindow::stand_in(0),
     ///             &bt_platform::Handoff::FontsPage,
     ///         )
     ///     },
     /// );
     /// ```
-    pub fn hand_over(&self, window: NativeWindow, request: &Handoff) -> Result<(), String> {
+    pub fn hand_over(
+        &self,
+        worker: &WorkerCtx,
+        window: NativeWindow,
+        request: &Handoff,
+    ) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         {
-            objc2::rc::autoreleasepool(|_| Self::door(window, request))
+            objc2::rc::autoreleasepool(|_| Self::door(worker, window, request))
         }
         #[cfg(not(target_os = "macos"))]
         {
-            Self::door(window, request)
+            Self::door(worker, window, request)
         }
     }
 
-    fn door(window: NativeWindow, request: &Handoff) -> Result<(), String> {
+    fn door(worker: &WorkerCtx, window: NativeWindow, request: &Handoff) -> Result<(), String> {
+        let _ = worker;
         match request {
             Handoff::Open(path) => open_local_path(window, path),
             Handoff::OpenVerified(path, target) => {
@@ -887,6 +894,26 @@ use macos_handoff::{
     reveal_in_explorer, reveal_verified, shell_execute,
 };
 
+// PR1 carries the hoist so the second Unix caller can arrive in one piece; on
+// Linux the caller (the platform's own file doors) is still one PR away, so the
+// helper is briefly dead there rather than duplicated in `macos_handoff`.
+#[cfg(unix)]
+#[allow(dead_code)]
+pub(crate) fn openable_unix_path(path: &Path) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    let bytes = path.as_os_str().as_bytes();
+    if bytes.is_empty() {
+        return Err("path is empty".to_owned());
+    }
+    if bytes.contains(&0) {
+        return Err("path contains an embedded NUL".to_owned());
+    }
+    if !path.is_absolute() {
+        return Err("path must be absolute".to_owned());
+    }
+    Ok(())
+}
+
 /// **Everything this product gives to the machine, on a Mac** — the macOS twin
 /// of `windows_handoff`, and the ninth unsafe boundary in this crate (M2-2).
 ///
@@ -952,7 +979,6 @@ use macos_handoff::{
 /// translations. See each for what it decided and what it costs.
 #[cfg(target_os = "macos")]
 mod macos_handoff {
-    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
 
@@ -985,19 +1011,7 @@ mod macos_handoff {
     /// reason one floor down: what a relative path resolves against is this
     /// process's working directory, which is whatever folder the shell that
     /// started Folio was standing in — not something a reader pointed at.
-    fn openable_unix_path(path: &Path) -> Result<(), String> {
-        let bytes = path.as_os_str().as_bytes();
-        if bytes.is_empty() {
-            return Err("path is empty".to_owned());
-        }
-        if bytes.contains(&0) {
-            return Err("path contains an embedded NUL".to_owned());
-        }
-        if !path.is_absolute() {
-            return Err("path must be absolute".to_owned());
-        }
-        Ok(())
-    }
+    use super::openable_unix_path;
 
     /// The narrower gate the image lane keeps: absolute, and a picture.
     ///
@@ -2862,7 +2876,11 @@ mod tests {
                     Handoff::Reveal(scratch.clone()),
                     Handoff::Open(file.clone()),
                 ] {
-                    assert_eq!(shell.hand_over(window, &request), Ok(()), "{request:?}");
+                    assert_eq!(
+                        shell.hand_over(ctx, window, &request),
+                        Ok(()),
+                        "{request:?}"
+                    );
                     let calls = windows_handoff::recorded::take();
                     assert_eq!(calls.len(), 2, "one grant, one hand-off: {calls:?}");
                     assert_eq!(
@@ -2875,7 +2893,7 @@ mod tests {
                 // the refusal is the door's and comes before the call.
                 let program = scratch.join("payload.exe");
                 assert_eq!(
-                    shell.hand_over(window, &Handoff::Open(program)),
+                    shell.hand_over(ctx, window, &Handoff::Open(program)),
                     Err(PROGRAM_REFUSED.to_owned())
                 );
                 assert!(windows_handoff::recorded::take().is_empty());
@@ -2908,6 +2926,7 @@ mod tests {
         type HandOver = dyn Fn(&WorkerCtx) -> Result<(), String>;
         fn through_a_pointer(ctx: &WorkerCtx) -> Result<(), String> {
             ShellThread::enter(ctx).hand_over(
+                ctx,
                 crate::NativeWindow::stand_in(0),
                 &Handoff::Open(PathBuf::from("relative-name.md")),
             )
@@ -2918,6 +2937,7 @@ mod tests {
             |ctx| {
                 let boxed: Box<HandOver> = Box::new(|ctx| {
                     ShellThread::enter(ctx).hand_over(
+                        ctx,
                         crate::NativeWindow::stand_in(0),
                         &Handoff::Open(PathBuf::from("relative-name.md")),
                     )

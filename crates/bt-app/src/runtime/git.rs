@@ -8,11 +8,10 @@ use crate::{
     RenameExit, Runtime, TextFieldSeat, TransferRefusal, answers_for, cli, float, float_git_hover,
     float_git_page_shown, float_graph_hover, git, git_answer_notice, git_document_answer,
     git_document_question, git_full_path, git_graph, git_panel, git_surfaces_wanting_reread,
-    graph_key_of, hang_watch, i18n, input, markdown_gap_paragraph, marks, native_window, preview,
-    profiles, recoverable_clipboard_write, restore, seats, settling, text_field, toast, web_thumb,
+    graph_key_of, i18n, input, markdown_gap_paragraph, marks, native_window, preview, profiles,
+    restore, seats, settling, text_field, toast, web_thumb,
 };
-use anyhow::Context;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use bt_layout::SeatId;
 use bt_render::{FrameSource, FrameTrigger};
 use std::collections::BTreeMap;
@@ -1577,21 +1576,16 @@ impl Runtime<'_> {
     /// waiting for: a copy is invisible, and a verb whose whole effect is
     /// somewhere the reader cannot see has to say that it happened.
     fn copy_from_graph(&mut self, surface: PreviewSurface, text: &str, said: &str) -> Result<()> {
-        let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
-            bt_platform::set_clipboard_text(text)
-        })
-        .map_err(|error| anyhow!(error))
-        .context("copy a commit's own words to the clipboard");
-        if !recoverable_clipboard_write(result, "commit copy") {
-            return Ok(());
-        }
         let anchor = surface.toast_anchor();
-        self.toast(
-            toast::ToastKind::Ok,
-            anchor,
-            None,
-            git_graph::graph_copied(said),
+        self.submit_clipboard_write(
+            text.to_owned(),
+            "commit copy",
+            crate::ClipboardWriteEffect::Toast {
+                anchor,
+                text: git_graph::graph_copied(said),
+            },
         )
+        .map(drop)
     }
 
     /// Go to a commit, paging until it turns up if it has to (D2).
@@ -3076,14 +3070,6 @@ impl Runtime<'_> {
         text: &str,
         said: &str,
     ) -> Result<()> {
-        let result = hang_watch::during(hang_watch::Station::ClipboardWrite, || {
-            bt_platform::set_clipboard_text(text)
-        })
-        .map_err(|error| anyhow!(error))
-        .context("copy a repository's own words to the clipboard");
-        if !recoverable_clipboard_write(result, "git menu copy") {
-            return Ok(());
-        }
         let anchor = match origin {
             GitOrigin::Column(seat) => toast::ToastAnchor::FilesColumn(*seat),
             GitOrigin::Graph(_) => self.git_toast_anchor(&git::GitHost::Graph {
@@ -3094,12 +3080,15 @@ impl Runtime<'_> {
             // over — which is precisely the case `Window` is the answer to.
             GitOrigin::Float(_) => toast::ToastAnchor::Window,
         };
-        self.toast(
-            toast::ToastKind::Ok,
-            anchor,
-            None,
-            git_graph::graph_copied(said),
+        self.submit_clipboard_write(
+            text.to_owned(),
+            "git menu copy",
+            crate::ClipboardWriteEffect::Toast {
+                anchor,
+                text: git_graph::graph_copied(said),
+            },
         )
+        .map(drop)
     }
 
     /// Which origin a request keyed by root should be issued into.

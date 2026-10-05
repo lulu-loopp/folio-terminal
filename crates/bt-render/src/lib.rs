@@ -1758,8 +1758,8 @@ pub enum RenderError {
         context: wgpu::TextureFormat,
         surface: wgpu::TextureFormat,
     },
-    /// The adapter did not offer the one composite alpha mode this target has to
-    /// be configured with.
+    /// The adapter did not offer a supported composite alpha mode for this
+    /// target.
     ///
     /// An error and never a substitution, for the same reason as
     /// [`RenderError::FormatMismatch`]: a composition-visual surface quietly
@@ -1767,7 +1767,7 @@ pub enum RenderError {
     /// have destroyed the property the whole slice exists to establish, with no
     /// symptom until a web preview is asked to show through it.
     #[error(
-        "a {target:?} surface must be configured {required:?}, and this adapter offered {offered:?}"
+        "the {target:?} surface cannot use a supported alpha mode (primary {required:?}); this adapter offered {offered:?}"
     )]
     AlphaModeUnavailable {
         target: WindowTargetKind,
@@ -4838,7 +4838,8 @@ impl SurfaceAlphaReport {
     /// opaque, `CompositionVisual` is premultiplied.
     #[must_use]
     pub fn is_premultiplied(&self) -> bool {
-        alpha_representation(self.target) == SurfaceAlphaRepresentation::Premultiplied
+        alpha_representation(self.target, self.chosen)
+            == Some(SurfaceAlphaRepresentation::Premultiplied)
     }
 }
 
@@ -4887,11 +4888,17 @@ pub enum SurfaceAlphaRepresentation {
 /// glyph output on the Metal path at scale 2 — and a change made here before
 /// that measurement would be a correction nobody has looked at.
 #[must_use]
-fn alpha_representation(target: WindowTargetKind) -> SurfaceAlphaRepresentation {
+fn alpha_representation(
+    target: WindowTargetKind,
+    chosen: wgpu::CompositeAlphaMode,
+) -> Option<SurfaceAlphaRepresentation> {
+    // The chosen mode only matters to a target whose representation follows the
+    // adapter's answer; the doors below have one fixed representation each.
+    let _ = chosen;
     match target {
-        WindowTargetKind::Hwnd => SurfaceAlphaRepresentation::Opaque,
+        WindowTargetKind::Hwnd => Some(SurfaceAlphaRepresentation::Opaque),
         WindowTargetKind::CompositionVisual | WindowTargetKind::MetalLayerOnOwnedView => {
-            SurfaceAlphaRepresentation::Premultiplied
+            Some(SurfaceAlphaRepresentation::Premultiplied)
         }
     }
 }
@@ -4914,7 +4921,7 @@ fn alpha_representation(target: WindowTargetKind) -> SurfaceAlphaRepresentation 
 /// *required* here for a `CAMetalLayer`, and asking for `PreMultiplied` on
 /// Metal would refuse every window this program can open on that platform.
 #[must_use]
-fn required_alpha_mode(target: WindowTargetKind) -> wgpu::CompositeAlphaMode {
+fn primary_alpha_mode(target: WindowTargetKind) -> wgpu::CompositeAlphaMode {
     match target {
         WindowTargetKind::Hwnd => wgpu::CompositeAlphaMode::Opaque,
         WindowTargetKind::CompositionVisual => wgpu::CompositeAlphaMode::PreMultiplied,
@@ -4932,7 +4939,7 @@ fn choose_alpha_mode(
     target: WindowTargetKind,
     offered: &[wgpu::CompositeAlphaMode],
 ) -> Result<wgpu::CompositeAlphaMode, RenderError> {
-    let required = required_alpha_mode(target);
+    let required = primary_alpha_mode(target);
     if offered.contains(&required) {
         Ok(required)
     } else {
@@ -4944,7 +4951,7 @@ fn choose_alpha_mode(
     }
 }
 
-/// Build the surface one of [`WindowTarget`]'s three doors names.
+/// Build the surface named by [`WindowTarget`].
 ///
 /// # The one `unsafe` in this crate, and why it is here rather than in `bt-platform`
 ///
@@ -5103,8 +5110,7 @@ enum AcquiredFrame {
 }
 
 /// What acquiring this frame's attachment said, decided before anything is done
-/// about it so the borrow of [`FrameTarget`] ends first — the reconfigure a
-/// suboptimal swapchain asks for needs `&mut self`.
+/// about it so the borrow of [`FrameTarget`] ends before reconfiguration.
 enum SurfaceAcquisition {
     Frame(wgpu::SurfaceTexture),
     Suboptimal(wgpu::SurfaceTexture),
@@ -10446,18 +10452,22 @@ impl WindowRenderer {
         // both the default-black interval and DXGI's stretch of the old frame.
         self.configure_surface_if_needed(gpu, phase)?;
         phase(PresentPhase::SurfaceAcquire);
-        let acquisition = self.acquire();
-        phase(PresentPhase::ComposeEncode);
-        let (acquired, view) = match acquisition {
-            SurfaceAcquisition::Frame(texture) => {
-                let view = texture.texture.create_view(&Default::default());
-                (AcquiredFrame::Swapchain(texture), view)
-            }
+        let acquisition = match self.acquire() {
             SurfaceAcquisition::Suboptimal(texture) => {
+                // wgpu requires all acquired textures to be released before configure.
+                drop(texture);
                 phase(PresentPhase::SurfaceConfigure(self.surface_generation + 1));
                 let configured = self.configure_surface(gpu);
                 phase(PresentPhase::ComposeEncode);
                 configured?;
+                phase(PresentPhase::SurfaceAcquire);
+                self.acquire()
+            }
+            acquisition => acquisition,
+        };
+        phase(PresentPhase::ComposeEncode);
+        let (acquired, view) = match acquisition {
+            SurfaceAcquisition::Frame(texture) | SurfaceAcquisition::Suboptimal(texture) => {
                 let view = texture.texture.create_view(&Default::default());
                 (AcquiredFrame::Swapchain(texture), view)
             }
@@ -30446,8 +30456,11 @@ mod tests {
                  would refuse every window this program can open there"
             );
             assert_eq!(
-                alpha_representation(WindowTargetKind::MetalLayerOnOwnedView),
-                SurfaceAlphaRepresentation::Premultiplied,
+                alpha_representation(
+                    WindowTargetKind::MetalLayerOnOwnedView,
+                    wgpu::CompositeAlphaMode::PostMultiplied,
+                ),
+                Some(SurfaceAlphaRepresentation::Premultiplied),
                 "the pixels are the same pixels DirectComposition is given"
             );
             // And the two words are read by the two readers that care: the
@@ -30482,20 +30495,23 @@ mod tests {
         #[test]
         fn the_windows_arms_are_unchanged() {
             assert_eq!(
-                required_alpha_mode(WindowTargetKind::Hwnd),
+                primary_alpha_mode(WindowTargetKind::Hwnd),
                 wgpu::CompositeAlphaMode::Opaque
             );
             assert_eq!(
-                alpha_representation(WindowTargetKind::Hwnd),
-                SurfaceAlphaRepresentation::Opaque
+                alpha_representation(WindowTargetKind::Hwnd, wgpu::CompositeAlphaMode::Opaque,),
+                Some(SurfaceAlphaRepresentation::Opaque)
             );
             assert_eq!(
-                required_alpha_mode(WindowTargetKind::CompositionVisual),
+                primary_alpha_mode(WindowTargetKind::CompositionVisual),
                 wgpu::CompositeAlphaMode::PreMultiplied
             );
             assert_eq!(
-                alpha_representation(WindowTargetKind::CompositionVisual),
-                SurfaceAlphaRepresentation::Premultiplied
+                alpha_representation(
+                    WindowTargetKind::CompositionVisual,
+                    wgpu::CompositeAlphaMode::PreMultiplied,
+                ),
+                Some(SurfaceAlphaRepresentation::Premultiplied)
             );
             // Against the lists the backends really answer, so the claim is
             // about what gets configured and not only about what is asked for.
@@ -30614,7 +30630,7 @@ mod tests {
             let visual = WindowTarget::CompositionVisual(std::ptr::null_mut());
             assert_eq!(visual.kind(), WindowTargetKind::CompositionVisual);
             assert_eq!(
-                required_alpha_mode(visual.kind()),
+                primary_alpha_mode(visual.kind()),
                 wgpu::CompositeAlphaMode::PreMultiplied
             );
             // The `Hwnd` arm is exercised by its kind alone: constructing a
@@ -30622,7 +30638,7 @@ mod tests {
             // pinned is that the two kinds are distinct and answer differently.
             assert_ne!(WindowTargetKind::Hwnd, WindowTargetKind::CompositionVisual);
             assert_eq!(
-                required_alpha_mode(WindowTargetKind::Hwnd),
+                primary_alpha_mode(WindowTargetKind::Hwnd),
                 wgpu::CompositeAlphaMode::Opaque
             );
         }
@@ -30637,11 +30653,11 @@ mod tests {
         /// would notice, because everything above here speaks in
         /// [`WindowTargetKind`] and that enum keeps both names on every
         /// platform.
-        #[cfg(not(windows))]
+        #[cfg(not(any(windows, target_os = "linux")))]
         #[test]
-        fn the_window_door_is_the_one_every_platform_has() {
+        fn the_portable_window_door_remains_for_platforms_without_a_native_target() {
             assert_eq!(
-                required_alpha_mode(WindowTargetKind::Hwnd),
+                primary_alpha_mode(WindowTargetKind::Hwnd),
                 wgpu::CompositeAlphaMode::Opaque
             );
             assert_ne!(WindowTargetKind::Hwnd, WindowTargetKind::CompositionVisual);
@@ -30663,7 +30679,7 @@ mod tests {
             let metal = WindowTarget::MetalLayerOnOwnedView(std::ptr::null_mut());
             assert_eq!(metal.kind(), WindowTargetKind::MetalLayerOnOwnedView);
             assert_eq!(
-                required_alpha_mode(metal.kind()),
+                primary_alpha_mode(metal.kind()),
                 wgpu::CompositeAlphaMode::PostMultiplied
             );
             assert_ne!(
