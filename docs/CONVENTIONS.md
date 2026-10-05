@@ -118,6 +118,17 @@ PTY 字节流、用户输入、外部 API、配置文件是边界，要校验；
 - 写完断言问一句：**什么情况下它会红？** 答不上来就是假测试。
 - 写完 CI job 问一句：**它挡过什么？** 答不上来就是空门。
 
+The tracked-text integrity gates run before source-reading guards:
+`scripts/ci/check-no-nul.ps1` refuses a NUL byte that could make grep classify
+source as binary, and `scripts/ci/check-conflict-markers.ps1` refuses a
+committed line beginning `<<<<<<< ` or `>>>>>>> `, including after a first-line
+UTF-8 BOM. Text means strict UTF-8 bytes with no NUL; every binary is an exact
+path with a reason, and the shared reader rejects an unlisted binary, a missing
+or now-text binary row, an unreadable file, and zero scanned text files. A text
+fixture with an intentional marker likewise needs an exact live reason row.
+`gates-can-fail` plants each forbidden state and checks the refusal names both
+the planted file and reason.
+
 ### 【事故】驱动真实子进程的测试，超时按"孩子静默多久"算，不按墙钟总额
 
 （2026-08-20，分支 `test-env-immunity`；技术细节见 `docs/DESIGN.md` §7.1.6c-3b 尾部。）

@@ -3752,7 +3752,9 @@ impl Runtime<'_> {
         let scale = self.window.renderer.scale_factor() as f32;
         let (width, _) = self.window.renderer.presentation_geometry().swapchain_size;
         let width = width as f32;
-        let rail = self.sampled_rail(Instant::now());
+        let now = Instant::now();
+        let rail = self.sampled_rail(now);
+        let pane_transforms = self.pane_transforms(now);
         self.tab_list_target_at(position)
             .or_else(|| {
                 seats::hit_window_chrome(
@@ -3848,7 +3850,7 @@ impl Runtime<'_> {
                 )
             })
             .or_else(|| {
-                seats::hit_chrome(
+                seats::hit_chrome_in_motion(
                     &self.seats,
                     &self.seat_layout,
                     scale,
@@ -3873,6 +3875,7 @@ impl Runtime<'_> {
                     // was cleared the instant the hand reached the list, so the
                     // `✕` beside the `⌄` that opened it goes on taking a press.
                     self.head_run(),
+                    seats::PaneMotionFrame::new(&pane_transforms),
                     position.x,
                     position.y,
                 )

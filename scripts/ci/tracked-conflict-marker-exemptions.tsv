@@ -1,0 +1,3 @@
+# Exact tracked text fixtures that intentionally contain a line-leading Git conflict marker.
+# Every row must still exist and contain such a marker; otherwise the gate rejects the stale row.
+path	reason

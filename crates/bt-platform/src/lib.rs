@@ -13344,7 +13344,7 @@ mod windows_impl {
         {
             return;
         }
-        let name: Vec<u16> = "CONOUT$ ".encode_utf16().collect();
+        let name: Vec<u16> = "CONOUT$\0".encode_utf16().collect();
         let Ok(conout) = (unsafe {
             CreateFileW(
                 PCWSTR(name.as_ptr()),
