@@ -151,7 +151,9 @@ fn procargs2_arguments(bytes: &[u8]) -> Option<Vec<Vec<u8>>> {
     let mut rest = &rest[path_end..];
     let start = rest.iter().position(|byte| *byte != 0)?;
     rest = &rest[start..];
-    let mut arguments = Vec::with_capacity(count);
+    // The count is the answer's own claim: room is reserved for no more
+    // arguments than the bytes after it could hold (each ends in a NUL).
+    let mut arguments = Vec::with_capacity(count.min(rest.len()));
     for _ in 0..count {
         let end = rest.iter().position(|byte| *byte == 0)?;
         arguments.push(rest[..end].to_vec());
@@ -1075,7 +1077,9 @@ mod tests {
     /// from any other process of the same executable by these words.
     ///
     /// MUTATION: in `procargs2_arguments`, start the arguments right after
-    /// the path's own NUL (the padding is read as empty arguments).
+    /// the path's own NUL (the padding is read as empty arguments). The
+    /// boastful count's bound on what is reserved has no observable red here:
+    /// a 64-bit host grants the unbounded reservation (tried on Windows).
     #[test]
     fn a_procargs2_answer_gives_exactly_its_counted_arguments() {
         let words: [&[u8]; 4] = [
@@ -1098,6 +1102,15 @@ mod tests {
         short.extend_from_slice(&answer[4..answer.len() - 37]);
         assert_eq!(procargs2_arguments(&short), None, "fewer than it counts");
         assert_eq!(procargs2_arguments(&answer[..3]), None, "no count");
+
+        // A count the bytes cannot hold reserves nothing it cannot use.
+        let mut boastful = i32::MAX.to_ne_bytes().to_vec();
+        boastful.extend_from_slice(&answer[4..]);
+        assert_eq!(
+            procargs2_arguments(&boastful),
+            None,
+            "far fewer than it counts"
+        );
     }
 
     /// RED (U-40) — **a process's arguments are answered only while it is
