@@ -125,6 +125,52 @@ jobs:
           }
           exit 0
 
+      # A NUL makes common source searchers classify a text file as binary and
+      # skip it. Plant that exact state in a tracked document and require the
+      # byte-reading gate to refuse it.
+      - name: the no-NUL gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "README.md"
+          $original = [IO.File]::ReadAllBytes($file)
+          try {
+            $planted = [byte[]]::new($original.Length + 1)
+            [Array]::Copy($original, $planted, $original.Length)
+            $planted[$original.Length] = 0
+            [IO.File]::WriteAllBytes($file, $planted)
+            $failed = $false
+            try {
+              & ./scripts/ci/check-no-nul.ps1 *> $null
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) { throw "the no-NUL gate accepted a planted NUL byte" }
+          } finally {
+            [IO.File]::WriteAllBytes($file, $original)
+          }
+          exit 0
+
+      # An already committed conflict marker has no unmerged index entry. Plant
+      # one in a tracked document and require the raw-byte gate to refuse it.
+      - name: the conflict-marker gate can actually fail
+        shell: pwsh
+        run: |
+          $file = "README.md"
+          $original = [IO.File]::ReadAllBytes($file)
+          try {
+            [IO.File]::AppendAllText($file, "`n<<<<<<< planted`n=======`n>>>>>>> planted`n")
+            $failed = $false
+            try {
+              & ./scripts/ci/check-conflict-markers.ps1 *> $null
+            } catch {
+              $failed = $true
+            }
+            if (-not $failed) { throw "the conflict-marker gate accepted planted markers" }
+          } finally {
+            [IO.File]::WriteAllBytes($file, $original)
+          }
+          exit 0
+
       # The portable core is crates listed below, which must go on compiling on the two
       # platforms this workflow has one job each on.
       # `scripts/check-portable-core.ps1` is the cheap half of that guard and
@@ -366,6 +412,12 @@ jobs:
       - name: adapter modules do not import policy crates
         shell: pwsh
         run: ./scripts/check-adapter-boundary.ps1
+
+      - name: tracked text is visible to source readers
+        shell: pwsh
+        run: |
+          ./scripts/ci/check-no-nul.ps1
+          ./scripts/ci/check-conflict-markers.ps1
 
       # Each vendored crate must stay a workspace member: its own upstream suite
       # is our regression line against our patches breaking its semantics, and it
@@ -796,6 +848,37 @@ jobs:
       # M1-1 left failing here.
       - name: check the application, every target of it
         run: cargo check --locked --all-targets -p bt-app
+
+      # The application suite still contains Windows-fact fixtures, but these updater modules are
+      # macOS product code and must not wait for a manual re-entry run to compile and execute. Each
+      # filter is required to select at least one test so a renamed module cannot turn this step
+      # green by running nothing. E-12 is the one test that deliberately launches `/usr/bin/open`;
+      # CI keeps the deterministic fake-launch coverage and leaves that real launch to the owner.
+      - name: test the macOS updater modules
+        run: |
+          set -euo pipefail
+          run_app_filter() {
+            filter="$1"
+            log="$RUNNER_TEMP/macos-updater-${filter//[^a-zA-Z0-9]/-}.log"
+            cargo test --locked -p bt-app --bin folio "$filter" -- \
+              --skip the_trial_is_launched_through_launch_services_and_found_by_its_image | tee "$log"
+            grep -Eq '^running [1-9][0-9]* tests?$' "$log" || {
+              echo "the macOS updater filter '$filter' selected no tests"
+              exit 1
+            }
+          }
+          run_app_filter update_apply_macos
+          run_app_filter update_apply::
+          run_app_filter update_recover
+          run_app_filter update_handoff
+          run_app_filter update_trial
+          run_app_filter update_startup
+          log="$RUNNER_TEMP/macos-updater-install-flip.log"
+          cargo test --locked -p bt-platform install_flip | tee "$log"
+          grep -Eq '^running [1-9][0-9]* tests?$' "$log" || {
+            echo "the macOS updater filter 'install_flip' selected no tests"
+            exit 1
+          }
 
       # The eight suites the spike's own table records as green here, plus the
       # two M1-1's branch made green — `bt-transcript` and `bt-viewport`, whose

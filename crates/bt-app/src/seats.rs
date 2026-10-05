@@ -6288,6 +6288,11 @@ pub fn head_run_revealed(revealed: HeadRun, seat: SeatId) -> bool {
 /// which is exactly the "you have to know it is there to make it appear" state
 /// [`ChromePointer::pane_hover`] exists to avoid, and it would re-open this bug
 /// for the first press of every entry into a pane.
+///
+/// [`hit_chrome_in_motion`] is the moving form. It shares [`pane_chrome_box`] with the painter:
+/// quads answer only inside the clip, and a raster control answers only when its whole sprite is
+/// present, because [`clip_pane_chrome`] drops rather than crops partial sprites.
+#[cfg(test)]
 pub fn hit_chrome(
     seats: &Seats,
     layout: &SeatLayout,
@@ -6296,19 +6301,41 @@ pub fn hit_chrome(
     x: f64,
     y: f64,
 ) -> Option<ChromeTarget> {
+    hit_chrome_in_motion(
+        seats,
+        layout,
+        scale,
+        revealed,
+        PaneMotionFrame::default(),
+        x,
+        y,
+    )
+}
+
+/// [`hit_chrome`] through the same sampled pane transforms the painter uses.
+pub fn hit_chrome_in_motion(
+    seats: &Seats,
+    layout: &SeatLayout,
+    scale: f32,
+    revealed: HeadRun,
+    pane_motion: PaneMotionFrame<'_>,
+    x: f64,
+    y: f64,
+) -> Option<ChromeTarget> {
     let (x, y) = (x as f32, y as f32);
     for placement in &layout.rects {
         let Some(device) = placement.device_rect else {
             continue;
         };
-        let rect = [
+        let solved = [
             device.left as f32,
             device.top as f32,
             device.right as f32,
             device.bottom as f32,
         ];
+        let geometry = pane_chrome_box(solved, pane_motion.of(placement.id));
         if matches!(placement.presentation, Presentation::Collapsed(_)) {
-            if contains(rect, x, y) {
+            if contains(geometry.content, x, y) && contains(geometry.clip, x, y) {
                 return Some(ChromeTarget::CollapseBar(placement.id));
             }
             continue;
@@ -6318,7 +6345,7 @@ pub fn hit_chrome(
             // `pane_body_viewport` both round it: the header you can grab is
             // exactly the header you can see.
             let head = pane_head_geometry(
-                rect,
+                geometry.content,
                 placement.kind,
                 layout.seat_is_on_stage(placement.id),
                 false,
@@ -6330,19 +6357,35 @@ pub fn hit_chrome(
             let showing = head_run_revealed(revealed, placement.id);
             // Smallest first inside the head too: the `×` is a dead zone in the
             // drag handle (C35), so it has to answer before the handle does.
-            if showing && head.close.is_some_and(|close| contains(close, x, y)) {
+            if showing
+                && head.close.is_some_and(|close| {
+                    box_contains(geometry.clip, close) && contains(close, x, y)
+                })
+            {
                 return Some(ChromeTarget::PaneClose(placement.id));
             }
-            if showing && head.files.is_some_and(|files| contains(files, x, y)) {
+            if showing
+                && head.files.is_some_and(|files| {
+                    box_contains(geometry.clip, files) && contains(files, x, y)
+                })
+            {
                 return Some(ChromeTarget::PaneFiles(placement.id));
             }
-            if showing && head.float.is_some_and(|float| contains(float, x, y)) {
+            if showing
+                && head.float.is_some_and(|float| {
+                    box_contains(geometry.clip, float) && contains(float, x, y)
+                })
+            {
                 return Some(ChromeTarget::PaneFloat(placement.id));
             }
-            if showing && head.chevron.is_some_and(|split| contains(split, x, y)) {
+            if showing
+                && head.chevron.is_some_and(|split| {
+                    box_contains(geometry.clip, split) && contains(split, x, y)
+                })
+            {
                 return Some(ChromeTarget::PaneMenu(placement.id));
             }
-            if contains(head.head, x, y) {
+            if contains(head.head, x, y) && contains(geometry.clip, x, y) {
                 return Some(ChromeTarget::PaneHeader(placement.id));
             }
         }
@@ -9457,6 +9500,27 @@ impl<'a> PaneMotionFrame<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PaneChromeBox {
+    /// Chrome laid out at its final size from the moving pane's corner.
+    content: [f32; 4],
+    /// The moving pane box through which that chrome is visible and interactive.
+    clip: [f32; 4],
+}
+
+/// The one reading of a pane transform shared by painting and hit testing.
+fn pane_chrome_box(solved: [f32; 4], transform: crate::PaneTransform) -> PaneChromeBox {
+    PaneChromeBox {
+        content: [
+            solved[0] + transform.dx,
+            solved[1] + transform.dy,
+            solved[2] + transform.dx,
+            solved[3] + transform.dy,
+        ],
+        clip: transform.applied_to(solved),
+    }
+}
+
 /// One run of chrome in the three channels it is drawn in.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChromeGroup {
@@ -9748,14 +9812,8 @@ pub fn build_chrome_for_tabs(
         //
         // Both are the solved rectangle when nothing is in flight, and then
         // every expression below is the one that was there before U8.
-        let transform = pane_motion.of(placement.id);
-        let rect = [
-            solved[0] + transform.dx,
-            solved[1] + transform.dy,
-            solved[2] + transform.dx,
-            solved[3] + transform.dy,
-        ];
-        let clip = transform.applied_to(solved);
+        let geometry = pane_chrome_box(solved, pane_motion.of(placement.id));
+        let (rect, clip) = (geometry.content, geometry.clip);
         pane_quads.clear();
         pane_labels.clear();
         pane_sprites.clear();
@@ -40075,6 +40133,69 @@ mod tests {",
             "a real transform has to change the chrome, or the equalities above \
              are pinning a function that ignores its argument"
         );
+    }
+
+    /// RED (T-GUARDS-BLIND) — every moving pane control answers exactly when its sprite survives
+    /// the pane clip, over a grid of translations and horizontal/vertical reveal fractions.
+    ///
+    /// MUTATION: remove the `box_contains(geometry.clip, close)` condition in
+    /// `hit_chrome_in_motion`; a partly clipped close button takes a press and this goes red.
+    #[test]
+    fn moving_pane_controls_take_a_press_if_and_only_if_their_sprite_is_drawn() {
+        let (seats, layout, _, right) = split_pair();
+        let solved = device_box(&layout, right);
+        for dx in [-180.0, -40.0, 0.0, 80.0] {
+            for dy in [-24.0, 0.0, 18.0] {
+                for sx in [0.15, 0.45, 0.8, 1.0] {
+                    for sy in [0.35, 0.75, 1.0] {
+                        let transform = crate::PaneTransform { dx, dy, sx, sy };
+                        let frame = [(right, transform)];
+                        let geometry = pane_chrome_box(solved, transform);
+                        let head = pane_head_geometry(
+                            geometry.content,
+                            SeatKind::Terminal,
+                            layout.seat_is_on_stage(right),
+                            false,
+                            1.0,
+                        );
+                        for (target, control) in [
+                            (ChromeTarget::PaneClose(right), head.close),
+                            (ChromeTarget::PaneFiles(right), head.files),
+                            (ChromeTarget::PaneFloat(right), head.float),
+                            (ChromeTarget::PaneMenu(right), head.chevron),
+                        ] {
+                            let Some(control) = control else {
+                                continue;
+                            };
+                            let x = f64::from((control[0] + control[2]) / 2.0);
+                            let y = f64::from((control[1] + control[3]) / 2.0);
+                            let hit = hit_chrome_in_motion(
+                                &seats,
+                                &layout,
+                                1.0,
+                                HeadRun::hovered(right),
+                                PaneMotionFrame::new(&frame),
+                                x,
+                                y,
+                            );
+                            if box_contains(geometry.clip, control) {
+                                assert_eq!(
+                                    hit,
+                                    Some(target),
+                                    "a drawn control takes its own press: {transform:?}, {control:?}"
+                                );
+                            } else {
+                                assert_ne!(
+                                    hit,
+                                    Some(target),
+                                    "a clipped-away control took a press: {transform:?}, {control:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// PIN — U8. A clipped pane's caption keeps the box it is laid out in and

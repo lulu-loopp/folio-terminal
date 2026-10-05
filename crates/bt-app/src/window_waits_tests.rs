@@ -841,21 +841,16 @@ fn callees_in(world: &World, body: &str, site_name: &str) -> Vec<String> {
         .collect()
 }
 
-/// RED (T-PROBE-CHILD round 4) — **product code is resolved only against its package's product
-/// edges**: `PtySession::shutdown` calls `kill` on a portable-pty child whose type its source
-/// does not write, so the call answers every first-party `kill` its package can reach. `bt-pty`
-/// reaches `bt-platform` only for tests — an optional dependency the test-only `test-shell`
-/// feature activates, and a dev-dependency — so `bt_platform::ProbeChild::kill` is not a callee,
-/// and it is not one either when the edge is a dev-dependency alone. Written as a product
-/// dependency, the same edge makes it one; and `bt-app`, whose edge to `bt-platform` is a product
-/// edge, still reaches it from `GitChild::kill`.
+/// RED (T-PROBE-CHILD round 4, T-GUARDS-BLIND) — **a receiver whose field declaration writes
+/// its type does not become every method with the same name**: `PtySession::shutdown` binds
+/// `child` from `self.child`, whose declaration says `Child`, not `ProbeChild`. That remains true
+/// whether `bt-platform` is unreachable, a dev-dependency, or a product dependency. A real
+/// `ProbeChild` arm in `GitChild::kill` is still attributed, and a local made by the first-party
+/// `CappedReads::new` is still attributed to `CappedReads::observe`.
 ///
-/// MUTATIONS: in `resolve_product`, treat every edge as live whether `optional` or not, and the
-/// first assertion goes red (the merge of `main`'s `test-shell` edge with this branch's
-/// `ProbeChild::kill`); have `dependency_tables` also read `[dev-dependencies]`, and the first
-/// goes red too (the real manifest also writes the dev-dependency; the second assertion holds the
-/// dev-only shape alone); have `World::of` give every package only itself to reach, and the
-/// product-edge assertion goes red.
+/// MUTATIONS: remove `self_field_types` from `local_types`, and the product-edge collision goes
+/// red; make the local branch of `Body::resolve` return no methods, and the `CappedReads` assertion
+/// goes red; give every package only itself to reach, and the real `GitChild` attribution goes red.
 #[test]
 fn a_test_only_edge_lends_product_code_no_first_party_callee() {
     const PROBE_KILL: &str = "bt-platform crate::ProbeChild::kill";
@@ -897,15 +892,67 @@ fn a_test_only_edge_lends_product_code_no_first_party_callee() {
     );
     let callees = callees_in(&product_edge, PTY_SHUTDOWN, "kill");
     assert!(
-        callees.iter().any(|key| key == PROBE_KILL),
-        "a product edge reaches the dependency's methods: {callees:?}"
+        !callees.iter().any(|key| key == PROBE_KILL),
+        "reachability revived a type collision: {callees:?}"
     );
 
     let callees = callees_in(&as_written, "bt-app crate::git::GitChild::kill", "kill");
     assert!(
         callees.iter().any(|key| key == PROBE_KILL),
-        "bt-app's product edge to bt-platform still reaches `ProbeChild::kill`: {callees:?}"
+        "a real `ProbeChild` call is still attributed: {callees:?}"
     );
+
+    let callees = callees_in(
+        &as_written,
+        "bt-pty crate::read_pty_output_without_dump",
+        "observe",
+    );
+    assert!(
+        callees
+            .iter()
+            .any(|key| key == "bt-pty crate::CappedReads::observe"),
+        "a first-party constructor local still has its method: {callees:?}"
+    );
+}
+
+/// RED (T-GUARDS-BLIND) — the three deliberately small local spellings the resolver claims are
+/// all read mechanically. No return-type or data-flow inference is hidden behind that claim.
+///
+/// MUTATIONS: remove, one at a time, the annotation branch, `new_call`, and `literal` in
+/// `local_types`/`constructor_type`; the corresponding row is absent and this test goes red.
+#[test]
+fn written_local_annotation_and_constructor_shapes_are_read() {
+    #[derive(Default)]
+    struct WrittenShape {}
+    impl WrittenShape {
+        fn new() -> Self {
+            Self {}
+        }
+    }
+
+    let annotated: WrittenShape = Default::default();
+    let constructed = WrittenShape::new();
+    let literal = WrittenShape {};
+    let _ = (annotated, constructed, literal);
+
+    let world = World::new();
+    let (src, record) = world
+        .srcs
+        .iter()
+        .enumerate()
+        .flat_map(|(src, source)| source.index.items().iter().map(move |record| (src, record)))
+        .find(|(_, record)| {
+            record.name() == "written_local_annotation_and_constructor_shapes_are_read"
+        })
+        .expect("this test's body is indexed");
+    let body = Body::new(&world, src, record);
+    for name in ["annotated", "constructed", "literal"] {
+        assert_eq!(
+            body.locals.get(name).map(|(_, types)| types),
+            Some(&BTreeSet::from(["WrittenShape".to_owned()])),
+            "the `{name}` spelling carries its written type"
+        );
+    }
 }
 
 /// RED (T-TEST-SHELL-HYGIENE review) — **a `cfg` predicate is read as a product build reads
@@ -1560,6 +1607,8 @@ struct Body<'w> {
     src: usize,
     record: &'static ItemRecord,
     params: HashMap<&'static str, Vec<Tok>>,
+    /// Simple, uniquely named locals whose type the source writes or constructs.
+    locals: HashMap<&'static str, (usize, BTreeSet<String>)>,
     toks: Vec<Tok>,
 }
 
@@ -1596,11 +1645,13 @@ impl<'w> Body<'w> {
         let toks = record
             .body()
             .map_or_else(Vec::new, |body| s.lex(body.start(), body.end()));
+        let locals = local_types(world, src, record, &toks, &params);
         Self {
             world,
             src,
             record,
             params,
+            locals,
             toks,
         }
     }
@@ -1630,9 +1681,27 @@ impl<'w> Body<'w> {
         if here.is_empty() { methods } else { here }
     }
 
+    fn receiver_is_typed(&self, site: &Site) -> bool {
+        match &site.form {
+            Form::Method(Some(chain)) => {
+                chain[0] == "self"
+                    || self.params.contains_key(chain[0])
+                    || self
+                        .locals
+                        .get(chain[0])
+                        .is_some_and(|(bound, _)| *bound < site.at)
+            }
+            Form::Method(None) => false,
+            _ => true,
+        }
+    }
+
     /// The first-party items a call can be, by what the source says of it: a receiver whose type
-    /// is written (`self`, a field of it, a parameter) narrows by that type; one whose type is not
-    /// written answers every method of the name the package can reach.
+    /// is written (`self`, a field of it, a parameter, or a simple local annotation/constructor)
+    /// narrows by that type; one whose type is not written answers every method of the name the
+    /// package can reach. Return types, arbitrary calls, aliases, assignments, and bindings with
+    /// more than one possible local name stay name-matched; this resolver does no data-flow or
+    /// compiler inference.
     fn resolve(&self, site: &Site) -> Vec<Callable> {
         let world = self.world;
         let reach = &world.reach[self.src];
@@ -1677,10 +1746,17 @@ impl<'w> Body<'w> {
                         .type_owner()
                         .map(|owner| BTreeSet::from([owner.to_owned()]))
                         .unwrap_or_default(),
-                    first => match self.params.get(first) {
-                        Some(ty) => World::type_names(self.s(), ty),
-                        None => return any_method(),
-                    },
+                    first => {
+                        if let Some(ty) = self.params.get(first) {
+                            World::type_names(self.s(), ty)
+                        } else if let Some((bound, ty)) = self.locals.get(first)
+                            && *bound < site.at
+                        {
+                            ty.clone()
+                        } else {
+                            return any_method();
+                        }
+                    }
                 };
                 for field in &chain[1..] {
                     types = world.field_types(&types, field);
@@ -1714,6 +1790,134 @@ impl<'w> Body<'w> {
             }
         }
     }
+}
+
+/// The end of a `let` statement, respecting delimiters inside its initializer.
+fn let_end(s: &Src, toks: &[Tok], start: usize) -> usize {
+    let mut depth = 0usize;
+    for (at, tok) in toks.iter().enumerate().skip(start) {
+        match s.text(*tok) {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" if depth > 0 => depth -= 1,
+            ";" if depth == 0 => return at,
+            _ => {}
+        }
+    }
+    toks.len()
+}
+
+fn top_level_token(s: &Src, toks: &[Tok], wanted: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    for (at, tok) in toks.iter().enumerate() {
+        match s.text(*tok) {
+            "(" | "[" | "{" => depth += 1,
+            ")" | "]" | "}" if depth > 0 => depth -= 1,
+            text if depth == 0 && text == wanted => return Some(at),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// A type named by a constructor at the head of an initializer: `T::new(…)` or `T { … }`.
+fn constructor_type(s: &Src, toks: &[Tok]) -> BTreeSet<String> {
+    for (at, tok) in toks.iter().enumerate() {
+        if tok.kind != Kind::Ident || !s.text(*tok).starts_with(|c: char| c.is_ascii_uppercase()) {
+            continue;
+        }
+        let literal = s.is(toks.get(at + 1), "{");
+        let new_call = s.is(toks.get(at + 1), "::")
+            && s.is(toks.get(at + 2), "new")
+            && s.is(toks.get(at + 3), "(");
+        if literal || new_call {
+            return BTreeSet::from([s.text(*tok).to_owned()]);
+        }
+    }
+    BTreeSet::new()
+}
+
+/// Types mechanically carried from `self.field` at the head of an initializer.
+fn self_field_types(
+    world: &World,
+    src: &Src,
+    record: &ItemRecord,
+    toks: &[Tok],
+) -> BTreeSet<String> {
+    let Some(self_at) = toks.iter().position(|tok| src.is(Some(tok), "self")) else {
+        return BTreeSet::new();
+    };
+    if self_at > 1 || !src.is(toks.get(self_at + 1), ".") {
+        return BTreeSet::new();
+    }
+    let Some(field) = toks.get(self_at + 2).filter(|tok| tok.kind == Kind::Ident) else {
+        return BTreeSet::new();
+    };
+    let Some(owner) = record.type_owner() else {
+        return BTreeSet::new();
+    };
+    world.field_types(&BTreeSet::from([owner.to_owned()]), src.text(*field))
+}
+
+/// Locals whose receiver type is present in the source without inference: one simple binding,
+/// one binding of that name in the body, and either `let x: T`, `T::new(…)`, `T { … }`, or a
+/// `self.field` initializer whose field declaration writes its type. A destructuring wrapper such
+/// as `let Some(mut child) = self.child.take()` still has one lower-case binding and is therefore
+/// mechanical; tuples and shadowed names stay name-matched.
+fn local_types(
+    world: &World,
+    src: usize,
+    record: &ItemRecord,
+    toks: &[Tok],
+    params: &HashMap<&str, Vec<Tok>>,
+) -> HashMap<&'static str, (usize, BTreeSet<String>)> {
+    let s = &world.srcs[src];
+    let mut found = HashMap::new();
+    let mut ambiguous = BTreeSet::new();
+    for (at, tok) in toks.iter().enumerate() {
+        if !s.is(Some(tok), "let") {
+            continue;
+        }
+        let end = let_end(s, toks, at + 1);
+        let statement = &toks[at + 1..end];
+        let Some(equal) = top_level_token(s, statement, "=") else {
+            continue;
+        };
+        let pattern = &statement[..equal];
+        let names: Vec<&str> = pattern
+            .iter()
+            .filter(|tok| tok.kind == Kind::Ident)
+            .map(|tok| s.text(*tok))
+            .filter(|name| {
+                !["let", "mut", "ref", "Some", "Ok", "Err", "None"].contains(name)
+                    && !name.starts_with(|c: char| c.is_ascii_uppercase())
+            })
+            .collect();
+        if names.len() != 1 || params.contains_key(names[0]) {
+            continue;
+        }
+        let name = names[0];
+        let types = if let Some(colon) = top_level_token(s, pattern, ":") {
+            World::type_names(s, &pattern[colon + 1..])
+        } else {
+            let initializer = &statement[equal + 1..];
+            let constructed = constructor_type(s, initializer);
+            if constructed.is_empty() {
+                self_field_types(world, s, record, initializer)
+            } else {
+                constructed
+            }
+        };
+        if types.is_empty() {
+            continue;
+        }
+        if found.insert(name, (tok.start, types)).is_some() {
+            ambiguous.insert(name);
+        }
+    }
+    for name in ambiguous {
+        found.remove(name);
+    }
+    found
 }
 
 fn methods_of(all: &[Callable], types: &BTreeSet<String>) -> Vec<Callable> {
@@ -3811,8 +4015,7 @@ fn every_drop_that_may_wait_is_a_row_of_the_closed_inventory(
                 .collect();
             // A receiver whose type is written is exact; one whose type is not is red only when
             // every item of that name the package can reach is a door or a pinned body.
-            let exact = !matches!(&site.form, Form::Method(None))
-                && !matches!(&site.form, Form::Method(Some(chain)) if chain[0] != "self" && !body.params.contains_key(chain[0]));
+            let exact = body.receiver_is_typed(&site);
             if !reached.is_empty() && (exact || reached.len() == candidates.len()) {
                 failures.push(format!(
                     "`{key}` is a `Drop` outside the exception table that calls `{}` at {}, which \
@@ -4088,7 +4291,7 @@ fn every_door_is_where_the_registry_says() {
 //
 // Every vocabulary entry found in the product outside the body of a registered door function, as
 // rows `(crate, cfg arm, item, entry, count)`, over the declared universe above (`World`). The
-// reading is `cfg`-blind, so a Windows arm and its macOS twin are two rows.
+// reading is platform-blind, so a Windows arm and its macOS twin are two rows.
 //
 // **How a site is recognised.** An entry is a path. A path written in the code — called, or handed
 // over as a value — is resolved through the `use` declarations in scope (both spellings: the full

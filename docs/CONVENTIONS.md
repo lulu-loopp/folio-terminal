@@ -118,6 +118,13 @@ PTY 字节流、用户输入、外部 API、配置文件是边界，要校验；
 - 写完断言问一句：**什么情况下它会红？** 答不上来就是假测试。
 - 写完 CI job 问一句：**它挡过什么？** 答不上来就是空门。
 
+The tracked-text integrity gates run before source-reading guards:
+`scripts/ci/check-no-nul.ps1` refuses a NUL byte that could make grep classify
+source as binary, and `scripts/ci/check-conflict-markers.ps1` refuses a
+committed line beginning `<<<<<<< ` or `>>>>>>> `. Both read raw bytes, fail on
+an unreadable tracked text file, and share one explicit binary/third-party
+notice exclusion list. `gates-can-fail` plants each forbidden state separately.
+
 ### 【事故】驱动真实子进程的测试，超时按"孩子静默多久"算，不按墙钟总额
 
 （2026-08-20，分支 `test-env-immunity`；技术细节见 `docs/DESIGN.md` §7.1.6c-3b 尾部。）

@@ -8,6 +8,10 @@ pub fn product_starts_a_pane() {
 
 #[cfg(test)]
 mod tests {
+    use bt_platform::quiet_command as hush;
+    use bt_pty::PtySession as Session;
+    use std::process::Command as ProcessCommand;
+
     #[test]
     fn a_raw_pseudoconsole_spawn() {
         let _ = PtySession::spawn(command(), size(), wake());
@@ -31,6 +35,13 @@ mod tests {
     #[test]
     fn a_git_bash_through_the_quiet_door() {
         let _ = bt_platform::quiet_command(&git_bash()).output();
+    }
+
+    #[test]
+    fn aliases_do_not_hide_shell_starts() {
+        let _ = ProcessCommand::new("pwsh").output();
+        let _ = hush(&git_bash()).output();
+        let _ = Session::spawn(command(), size(), wake());
     }
 
     #[test]
