@@ -4446,6 +4446,20 @@ impl Runtime<'_> {
             // L135 sends the peek the same way and for the same reason: it is a
             // glance, and pressing is you saying you are done glancing.
             self.hide_layout_peek()?;
+            #[cfg(target_os = "linux")]
+            if button == MouseButton::Left
+                && !self.window.window.is_maximized()
+                && self.window.window.fullscreen().is_none()
+                && let Some(position) = self.window.pointer_position
+                && let Some(direction) = crate::linux_resize_direction(
+                    position,
+                    self.window.window.inner_size(),
+                    self.window.window.scale_factor(),
+                )
+                && self.window.window.drag_resize_window(direction).is_ok()
+            {
+                return Ok(());
+            }
             // **A press outside the capsule hands the keyboard back — and leaves
             // the capsule up** (§7.1.5d). Those are two separate facts and both
             // are ruled: the field losing focus is what every text box on this

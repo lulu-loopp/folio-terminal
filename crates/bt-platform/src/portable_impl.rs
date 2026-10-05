@@ -894,8 +894,15 @@ fn unwatched() -> std::io::Error {
 /// The window's outer rectangle. `NSWindow.frame`, flipped; M1-3.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn get_window_rect(window: NativeWindow) -> Result<WindowRect, String> {
-    let _ = window;
-    Err(not_here("reading a window's rectangle"))
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::get_window_rect(window)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        Err(not_here("reading a window's rectangle"))
+    }
 }
 
 /// Place the window's outer rectangle. `setFrame:display:`; M1-3.
@@ -915,15 +922,29 @@ pub fn stand_window_at(window: NativeWindow, rect: WindowRect) -> Result<(), Str
 /// The work area of the display this window is on. `NSScreen.visibleFrame`; M1-3.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn get_work_area(window: NativeWindow) -> Result<WindowRect, String> {
-    let _ = window;
-    Err(not_here("reading a display's work area"))
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::get_work_area(window)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        Err(not_here("reading a display's work area"))
+    }
 }
 
 /// The work area of the display under a point. M1-3.
 #[cfg(not(any(windows, target_os = "macos")))]
 pub fn work_area_at(x: i32, y: i32) -> Result<WindowRect, String> {
-    let _ = (x, y);
-    Err(not_here("reading a display's work area"))
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::work_area_at(x, y)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (x, y);
+        Err(not_here("reading a display's work area"))
+    }
 }
 
 /// The union of every display. M1-3.
@@ -937,11 +958,18 @@ pub fn work_area_at(x: i32, y: i32) -> Result<WindowRect, String> {
 #[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn virtual_screen_rect() -> WindowRect {
-    WindowRect {
-        left: 0,
-        top: 0,
-        right: 0,
-        bottom: 0,
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::virtual_screen_rect()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        WindowRect {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        }
     }
 }
 
@@ -953,8 +981,15 @@ pub fn virtual_screen_rect() -> WindowRect {
 #[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn dpi_at(x: i32, y: i32) -> u32 {
-    let _ = (x, y);
-    96
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::dpi_at(x, y)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (x, y);
+        96
+    }
 }
 
 /// This window's authoritative DPI. `NSWindow.backingScaleFactor` × 96; M1-3.
@@ -977,8 +1012,15 @@ pub fn get_dpi_for_window(window: NativeWindow) -> Result<u32, String> {
 #[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn monitor_id_at(x: i32, y: i32) -> Option<String> {
-    let _ = (x, y);
-    None
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::monitor_id_at(x, y)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (x, y);
+        None
+    }
 }
 
 /// Where the pointer is, in screen coordinates. `NSEvent.mouseLocation`,
@@ -986,7 +1028,14 @@ pub fn monitor_id_at(x: i32, y: i32) -> Option<String> {
 #[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn pointer_position() -> Option<(i32, i32)> {
-    None
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::pointer_position()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
 }
 
 /// Where the pointer is inside one window's client area, in physical pixels from
@@ -995,8 +1044,15 @@ pub fn pointer_position() -> Option<(i32, i32)> {
 #[cfg(not(any(windows, target_os = "macos")))]
 #[must_use]
 pub fn pointer_position_in_window(window: NativeWindow) -> Option<(i32, i32)> {
-    let _ = window;
-    None
+    #[cfg(target_os = "linux")]
+    {
+        crate::linux_display::pointer_position_in_window(window)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        None
+    }
 }
 
 /// Which top-level window the window manager puts under a screen point. M1-3.

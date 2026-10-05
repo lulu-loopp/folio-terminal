@@ -136,6 +136,17 @@ impl Runtime<'_> {
         // window that opened before or after it was changed is still a window of
         // this program.
         set_option_as_alt(&window, app.settings_store.loaded().option_sends_alt);
+        #[cfg(target_os = "linux")]
+        let restored_quake_as_ordinary = plan.quake
+            && crate::linux_window_backend(&window)? == bt_platform::linux_window::Backend::Wayland;
+        #[cfg(not(target_os = "linux"))]
+        let restored_quake_as_ordinary = false;
+        let is_quake = plan.quake && !restored_quake_as_ordinary;
+        if restored_quake_as_ordinary {
+            crate::diagnostics::note(
+                "native Wayland cannot restore or summon the saved quake window; opened its saved tabs as an ordinary visible window",
+            );
+        }
         let native = native_window(&window)?;
         // A second window is a second owner the clipboard may go through — see
         // the first constructor's note.
@@ -456,14 +467,10 @@ impl Runtime<'_> {
         let maximized = placement.is_some_and(|placement| placement.maximized);
         let id = window.id();
         // **Before the window is dressed, because dressing reads it** (§7.54).
-        //
-        // The summoned window's posture is not the `Always on top` row's — it is
-        // above every other window because that is what it is for — and
-        // `dress_new_window` two dozen lines below is where that is said to DWM.
-        // One source of truth for "which window is the summoned one", here, so
-        // that the door, the snapshot, the blur and the row all ask the same
-        // field rather than four copies of a flag.
-        if plan.quake {
+        // `is_quake` was decided from this window's actual native backend: a
+        // saved Wayland summon stays an ordinary visible window because the
+        // compositor cannot provide the restore/focus lifecycle.
+        if is_quake {
             app.quake.adopt(id);
         }
         // **This window's own rectangle is in the vault before anything can ask it for one.**
@@ -534,6 +541,7 @@ impl Runtime<'_> {
             // same plan the launch does.
             placeholder_tab,
         });
+        window.restored_quake_as_ordinary = restored_quake_as_ordinary;
         window.focus_mode = app.settings_store.loaded().focus_mode;
         window.focus_reveal =
             RevealTween::resting(f32::from(u8::from(window.focus_mode)), RAIL_TRANSITION);
@@ -564,12 +572,12 @@ impl Runtime<'_> {
         // which is exactly the state `with_visible(false)` opened it in, and a
         // transfer that is *refused* closes it without it ever having been on the
         // glass.
-        // **And a window a key summons is not shown by its door either** (§7.54),
-        // for the receiving door's reason one step further out: this window is
-        // *born hidden* and stays that way until the press that asked for it is
-        // acted on — which on a restore is a press that may never come. See
-        // `FolioApp::settle_quake`.
-        if plan.receives.is_none() && !plan.quake {
+        // **And an X11 window a key summons is not shown by its door either**
+        // (§7.54): it is born hidden and stays that way until the key press. A
+        // saved Wayland summon has `is_quake == false` above, so its saved tabs
+        // are shown as ordinary UI instead of becoming an un-restorable hidden
+        // window. See `FolioApp::settle_quake`.
+        if plan.receives.is_none() && !is_quake {
             // Maximized only if the file said this window was: a window a verb
             // asked for is one nobody has told to be.
             runtime.show_new_window(maximized)?;
@@ -1192,6 +1200,7 @@ impl Runtime<'_> {
         // `quake` flag, its arranged rectangles, and whether a pinned tab writes
         // down the line it last ran (§7.54e ④).
         let is_quake = self.is_quake_window();
+        let persist_quake_record = is_quake || self.window.restored_quake_as_ordinary;
         let previous = self.app.window_picture(self.window.window.id());
         let scale = self.window.renderer.scale_factor().max(f64::MIN_POSITIVE);
         let native = native_window(&self.window.window).ok();
@@ -1239,7 +1248,7 @@ impl Runtime<'_> {
                 // document that collected the last line every pane in every window
                 // ran would be keeping a command history nobody asked it to keep.
                 root: tab.seats.to_persisted(
-                    &|seat| tab.term_leaf(seat, is_quake && tab.pinned),
+                    &|seat| tab.term_leaf(seat, persist_quake_record && tab.pinned),
                     &|seat| tab.files_state(seat),
                 ),
                 pinned: tab.pinned,
@@ -1267,12 +1276,12 @@ impl Runtime<'_> {
             // other window's and is deliberately never read back — a summon
             // computes its rectangle from the monitor the pointer is on, every
             // time. See `quake::Quake::placement`.
-            quake: is_quake,
+            quake: persist_quake_record,
             // **And the rectangles a hand made**, which are the one thing about
             // this window that *is* read back — filed under the display they
             // were made on, so that the objection above stays answered. Empty
             // for every other window, because only this one has them.
-            quake_placements: if is_quake {
+            quake_placements: if persist_quake_record {
                 self.app.quake.placements()
             } else {
                 Vec::new()

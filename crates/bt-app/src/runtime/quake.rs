@@ -32,6 +32,23 @@ impl Runtime<'_> {
     /// window has been on the glass, ask Win32 which monitor it is actually on.
     pub(crate) fn show_quake_window(&mut self) -> Result<()> {
         let native = native_window(&self.window.window)?;
+        #[cfg(target_os = "linux")]
+        {
+            let backend = crate::linux_window_backend(&self.window.window)?;
+            let refusal = [
+                bt_platform::linux_window::Operation::SetGlobalPosition,
+                bt_platform::linux_window::Operation::Restore,
+                bt_platform::linux_window::Operation::RequestFocus,
+            ]
+            .into_iter()
+            .find_map(|operation| bt_platform::linux_window::refusal(backend, operation));
+            if let Some(reason) = refusal {
+                let message = format!("native Wayland summon is unavailable: {reason}");
+                crate::diagnostics::note(&message);
+                return Err(anyhow::anyhow!(message));
+            }
+            self.restore_minimized_window()?;
+        }
         // **The machine is read in one place and the rules are applied in one
         // place** (§7.54e ③, user ruling 2026-09-05: 「呼出规则唯一…写成一个函数,
         // 所有入口调它」). Which display, how big on it, and whether the reader has
@@ -44,6 +61,12 @@ impl Runtime<'_> {
             native,
             self.window.renderer.dpi_milli().get() * 96 / 1000,
         );
+        #[cfg(target_os = "linux")]
+        if screen.work.right <= screen.work.left || screen.work.bottom <= screen.work.top {
+            let message = "Linux summon placement is unavailable because the display work area could not be read";
+            crate::diagnostics::note(message);
+            return Err(anyhow::anyhow!(message));
+        }
         let settings = self.app.settings_store.loaded();
         let rect = self.app.quake.placement(&screen, settings);
         let work = screen.work;
@@ -62,21 +85,23 @@ impl Runtime<'_> {
             rect.right - rect.left,
             rect.bottom - rect.top,
         );
-        // **`stand_window_at` and not `set_window_outer_rect`** (§7.54, measured
-        // 2026-09-02). Every other caller places a window on the monitor it is
-        // already on; a summon routinely names a different one, and across a dpi
-        // seam a single `SetWindowPos` is not a move but the thing that raises
-        // `WM_DPICHANGED` — after which §7.50's ruling hands the rectangle to
-        // Windows for the length of that message and the summon's own request is
-        // resolved onto the system's suggestion. See that function for the two
-        // measurements and for why saying it again is the fix.
-        //
-        // A rectangle that would not be taken is said out loud and the window is
-        // shown anyway: it is standing somewhere, and a summon a few pixels off is
-        // enormously better than a summon that refused to come down.
+        // **Placement stays on the window-owning winit thread.** X11 uses
+        // `set_outer_position` after the actual backend preflight above; Windows
+        // uses `stand_window_at` so its dpi-seam readback can settle the frame.
+        // Wayland was refused before geometry or visibility changed.
+        #[cfg(target_os = "linux")]
+        self.window
+            .window
+            .set_outer_position(winit::dpi::PhysicalPosition::new(rect.left, rect.top));
+        #[cfg(not(target_os = "linux"))]
         if let Err(error) = bt_platform::stand_window_at(native, rect) {
             eprintln!("BT_QUAKE {error}");
         }
+        #[cfg(target_os = "linux")]
+        self.window
+            .window
+            .set_window_level(winit::window::WindowLevel::AlwaysOnTop);
+        #[cfg(not(target_os = "linux"))]
         if let Err(error) = bt_platform::set_window_topmost(native, true) {
             eprintln!("recoverable always-on-top failure: {error}");
         }
@@ -105,6 +130,22 @@ impl Runtime<'_> {
     /// visible present's dpi check reads — and a hidden window is not a window
     /// that was never shown.
     pub(crate) fn hide_quake_window(&mut self) -> Option<bt_platform::hotkey::Foreground> {
+        #[cfg(target_os = "linux")]
+        match crate::linux_window_backend(&self.window.window) {
+            Ok(bt_platform::linux_window::Backend::X11) => {}
+            Ok(bt_platform::linux_window::Backend::Wayland) => {
+                crate::diagnostics::note(
+                    "native Wayland summon was left visible because restore and activation are unsupported",
+                );
+                return None;
+            }
+            Err(error) => {
+                crate::diagnostics::note(&format!(
+                    "summoned window was left visible because its Linux backend is unknown: {error}"
+                ));
+                return None;
+            }
+        }
         // An owner-thread door (`doors::SetVisible`, whose station the meter enters). A refusal
         // is a hide that had no effect.
         let _ = bt_platform::admission::admitted::<bt_platform::admission::doors::SetVisible, _>(

@@ -112,14 +112,14 @@ pub use windows_impl::native_present_facts;
 /// is hold it, copy it, compare two of them, and hand it back — which is
 /// exactly what `bt-app` does with the fifty it takes.
 ///
-/// **Where the handle is spelled.** Twice, and both spellings are gated:
+/// **Where the handle is spelled.** The platform constructors are gated:
 /// [`NativeWindow::from_win32`] on Windows and [`NativeWindow::from_appkit`] on
-/// macOS. That is §4.4 ① of the plan applied to a type rather than to a
+/// macOS, and X11/Wayland constructors on Linux. That is §4.4 ① of the plan applied to a type rather than to a
 /// module — an SDK type stays inside a backend definition — and it is the same
 /// arrangement `instance::DataDirectoryClaim` already has. The rule is pinned
 /// by `the_native_window_door_has_no_windows_type_in_its_signature`.
 ///
-/// **The bits inside.** An `HWND` on Windows and an `NSView*` on macOS, both
+/// **The bits inside.** An `HWND`, `NSView*`, X11 window ID or Wayland surface,
 /// held as a `NonZeroIsize` rather than as a pointer, so the value is `Send`
 /// and `Sync` for the same reason the `NonZeroIsize` it replaces was: it is a
 /// number that names something, not a reference to it. Whether the thread
@@ -182,10 +182,6 @@ impl NativeWindow {
         }
     }
 
-    // TEMPORARY (2026-10-06, PR2 of the port split): the reader is
-    // `linux_display::pointer_position_in_window`, which arrives with the
-    // Linux windowing work (PR3 of the port split).
-    #[allow(dead_code)]
     #[cfg(target_os = "linux")]
     pub(crate) fn as_x11_window(self) -> u32 {
         self.handle.get() as u32
@@ -14052,11 +14048,17 @@ mod linux_files;
 pub use linux_files::recycle_on_worker;
 
 #[cfg(target_os = "linux")]
+mod linux_display;
+#[cfg(target_os = "linux")]
 mod linux_fonts;
 #[cfg(target_os = "linux")]
 pub use linux_fonts::load_svg_fonts;
 #[cfg(target_os = "linux")]
 mod linux_watch;
+#[cfg(target_os = "linux")]
+pub use linux_display::active_backend as linux_display_backend;
+#[cfg(target_os = "linux")]
+pub use linux_display::install_backend as install_linux_display_backend;
 #[cfg(target_os = "linux")]
 pub use linux_watch::shutdown_watches;
 
@@ -14070,6 +14072,10 @@ pub use linux_process::{register_helper_worker as register_linux_helper_worker, 
 mod linux_notifications;
 #[cfg(target_os = "linux")]
 pub use linux_notifications::shutdown_notifications;
+#[cfg(target_os = "linux")]
+pub mod linux_hotkey;
+#[cfg(target_os = "linux")]
+pub mod linux_window;
 #[cfg(target_os = "linux")]
 pub use linux_dialogs::install_dialog_wake;
 

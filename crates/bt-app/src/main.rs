@@ -447,6 +447,18 @@ enum AppEvent {
     PtyOutput,
     #[cfg(target_os = "linux")]
     NativeDialogReady,
+    #[cfg(target_os = "linux")]
+    WindowCloseRequested(WindowId),
+    #[cfg(target_os = "linux")]
+    NativeHotkeyReady {
+        id: i32,
+        generation: u64,
+    },
+    #[cfg(target_os = "linux")]
+    NativeHotkeyActivated {
+        id: i32,
+        generation: u64,
+    },
     /// A keyboard layout's copied Shift table landed from the worker road.
     /// The answer is in `App::layout_tables`; this event only breaks a parked
     /// loop, and the next key lookup drains the channel too if the wake is lost.
@@ -826,7 +838,11 @@ impl AppEvent {
         use hang_watch::Station;
         match self {
             #[cfg(target_os = "linux")]
-            Self::NativeDialogReady => Station::Chrome,
+            Self::NativeDialogReady
+            | Self::NativeHotkeyReady { .. }
+            | Self::NativeHotkeyActivated { .. } => Station::Chrome,
+            #[cfg(target_os = "linux")]
+            Self::WindowCloseRequested(_) => Station::EventClose,
             Self::PreviewReady => Station::Preview,
             Self::MathReady => Station::Math,
             Self::FilesReady => Station::Files,
@@ -12981,14 +12997,13 @@ struct NewWindowPlan {
     /// See [`TearOut`] for what the errand carries and why the seed tab this
     /// window opens holding is scaffolding.
     receives: Option<TearOut>,
-    /// **Whether this is the window a key summons** (§7.54).
+    /// **Whether this saved window is the summoned terminal** (§7.54).
     ///
-    /// A field of the plan and not a fact discovered afterwards, because three
-    /// things about the window are decided while it is being built and all three
-    /// read it: it stays above other windows whatever the `Always on top` row
-    /// says, it is not put on the screen when the door finishes, and it is
-    /// written into the document as the summoned one. A window told about its own
-    /// kind after it was standing would have been an ordinary window for a frame.
+    /// The actual native backend decides how that identity is presented. X11
+    /// keeps the summon hidden until its chord and can place, restore and focus
+    /// it. Wayland cannot provide that lifecycle, so `Runtime::open_window`
+    /// shows the saved tabs as an ordinary window while retaining this marker and
+    /// its placement preferences in the document.
     quake: bool,
 }
 
@@ -13678,6 +13693,11 @@ struct WindowRuntime {
     background_visible: Option<Duration>,
     first_text_visible: Option<Duration>,
     window_shown: bool,
+    /// This session came from a saved summon that native Wayland cannot hide
+    /// and restore. The live window acts as ordinary UI, while snapshots retain
+    /// the summon marker and its stored per-display placements for a later
+    /// backend that can honor them.
+    restored_quake_as_ordinary: bool,
     first_visible_present_dpi_checked: bool,
     first_text_presented: bool,
     /// The next absolute pre-prompt PTY poll. Querying the deadline never moves
@@ -40913,6 +40933,7 @@ fn new_window_runtime(parts: NewWindowParts) -> WindowRuntime {
         background_visible: None,
         first_text_visible: None,
         window_shown: false,
+        restored_quake_as_ordinary: false,
         first_visible_present_dpi_checked: false,
         first_text_presented: false,
         startup_poll_at: Instant::now() + STARTUP_PTY_POLL_INTERVAL,
@@ -41969,6 +41990,16 @@ impl Runtime<'_> {
         // an `å` before the setting is read.
         set_option_as_alt(&window, settings_store.loaded().option_sends_alt);
         let native = native_window(&window)?;
+        #[cfg(target_os = "linux")]
+        {
+            let backend = linux_window_backend(&window)?;
+            bt_platform::hotkey::set_linux_backend(backend);
+            // These installers bind process-wide backend identity from the live window.
+            // They only set OnceLocks; they do not probe the display or clipboard
+            // service. A mismatch would route later requests to the wrong backend,
+            // so it must stop startup; service failures remain operation-local.
+            bt_platform::install_linux_display_backend(backend).map_err(|error| anyhow!(error))?;
+        }
         // **The clipboard's owner window, told once here and never carried by a
         // caller again** (M1-9). `OpenClipboard` wants a window and
         // `NSPasteboard` does not, so the handle used to be a parameter on a
@@ -52034,7 +52065,7 @@ mod launch_landing_tests {
             .find("restore_minimized_window(window)?")
             .unwrap_or(usize::MAX);
         let front = forward
-            .find("give_foreground_to(native_window(window)?)")
+            .find("take_owned_keyboard_focus(window)")
             .unwrap_or(0);
         assert!(
             restore < front,
@@ -62446,6 +62477,11 @@ impl FolioApp {
             .find(|row| row.action == shortcuts::Action::SummonQuake)
             .and_then(|row| row.chord.clone());
         app.quake.reconcile(wanted.as_ref());
+        if let Some(bt_platform::hotkey::HotkeyFault::Refused(reason)) =
+            app.quake.take_unreported_capability_refusal()
+        {
+            eprintln!("BT_HOTKEY capability unavailable: {reason}");
+        }
         let pressed = app.quake.take_press();
         let blurred = app.quake.take_dismiss();
         let showing = app.quake.is_showing();
@@ -64394,6 +64430,46 @@ impl ApplicationHandler<AppEvent> for FolioApp {
             }
             #[cfg(target_os = "linux")]
             AppEvent::NativeDialogReady => Ok(()),
+            #[cfg(target_os = "linux")]
+            AppEvent::WindowCloseRequested(window_id) => {
+                self.window_event(event_loop, window_id, WindowEvent::CloseRequested);
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            AppEvent::NativeHotkeyReady { id, generation } => {
+                if let Some(app) = self.app.as_mut()
+                    && linux_hotkey_is_current(app.quake.claim(), id, generation)
+                    && let Some(claim) = app.quake.claim()
+                    && let bt_platform::linux_hotkey::LinuxHotkeyStatus::Failed(fault) =
+                        claim.status()
+                {
+                    app.quake.registration_failed(fault);
+                    match app.quake.registration_fault().cloned() {
+                        Some(bt_platform::hotkey::HotkeyFault::Refused(_)) => {
+                            if let Some(bt_platform::hotkey::HotkeyFault::Refused(reason)) =
+                                app.quake.take_unreported_capability_refusal()
+                            {
+                                eprintln!("BT_HOTKEY capability unavailable: {reason}");
+                            }
+                        }
+                        Some(fault) => eprintln!("BT_HOTKEY registration failed: {fault:?}"),
+                        None => {}
+                    }
+                }
+                Ok(())
+            }
+            #[cfg(target_os = "linux")]
+            AppEvent::NativeHotkeyActivated { id, generation } => {
+                if let Some(app) = self.app.as_mut()
+                    && linux_hotkey_is_current(app.quake.claim(), id, generation)
+                    && let Some(claim) = app.quake.claim()
+                    && claim.status() == bt_platform::linux_hotkey::LinuxHotkeyStatus::Active
+                    && claim.take_activation()
+                {
+                    app.quake.press();
+                }
+                Ok(())
+            }
             AppEvent::PreviewReady => {
                 let (mut batch, gone) = self.drain_preview_answers();
                 self.for_each_window(|runtime| runtime.apply_preview_results(&mut batch, gone))
@@ -65028,7 +65104,18 @@ impl ApplicationHandler<AppEvent> for FolioApp {
                     runtime.window.tab_clicks.interrupt();
                     // Do not cancel or synthesize anything: IMM32 may synchronously deliver a partial
                     // Commit during this transition, and the product decision is to accept it.
-                    runtime.window.ime_active = false;
+                    // X11 focus changes only focus the existing XIC; winit does
+                    // not emit a fresh `Ime::Enabled` when that window regains
+                    // focus. Keep the XIC's enabled state across an X11 blur;
+                    // caret offers are gated on native window focus below.
+                    #[cfg(target_os = "linux")]
+                    let keep_ime_context = bt_platform::linux_display_backend()
+                        .is_some_and(|backend| backend.ime_activation_survives_focus_loss());
+                    #[cfg(not(target_os = "linux"))]
+                    let keep_ime_context = false;
+                    if !keep_ime_context {
+                        runtime.window.ime_active = false;
+                    }
                     runtime.window.ime_cursor.reset();
                     hang_watch::during(hang_watch::Station::ImeCaretDestroy, || {
                         runtime.destroy_ime_caret("window_blur")
@@ -67438,7 +67525,7 @@ fn adopt_stored_schemes(settings: &bt_persist::SettingsV1) -> ThemeChange {
 /// `the_window_is_asked_for_transparent_and_invisible`.
 #[must_use]
 fn opening_window_attributes(title: &'static str, size: LogicalSize<f64>) -> WindowAttributes {
-    Window::default_attributes()
+    let attributes = Window::default_attributes()
         // "新 tab，和启动" — one setting for both (mock-up 7575: `bootFresh()`
         // opens its first tab from `defaultProfile()`). The title is replaced
         // by the active tab's own the moment there is one, so what this is
@@ -67482,7 +67569,20 @@ fn opening_window_attributes(title: &'static str, size: LogicalSize<f64>) -> Win
         // Unconditional is also harmless at full opacity: the clear is then
         // `a = 1.0` and `install_window_class_background` keeps its opaque
         // brush, so there is no alpha anywhere for DWM to honour.
-        .with_transparent(true)
+        .with_transparent(true);
+    #[cfg(target_os = "linux")]
+    {
+        use winit::platform::wayland::WindowAttributesExtWayland;
+        // Winit stores this name in one Linux attribute consumed as the
+        // Wayland app_id and the X11 WM_CLASS pair.
+        attributes
+            .with_decorations(false)
+            .with_name("io.github.lulu-loopp.folio", "folio")
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        attributes
+    }
 }
 
 /// **What the Option key does**, told to the window that has to do it (M1-7,
@@ -68447,38 +68547,43 @@ mod floated_page_tests {
         );
     }
 
-    /// RED (§7.54) — **the summoned terminal is not put on the screen by the door
-    /// that opens it, and the door that does put it there states its rectangle
-    /// first.**
+    /// RED (§7.54) — **a summon stays hidden only on a backend that can restore
+    /// and activate it; Wayland opens its saved contents as an ordinary window.**
     ///
-    /// Two halves of one sentence, and neither survives without the other. This
-    /// window is born hidden — on a restore that is the whole of it, because the
-    /// key that would show it may never be pressed — so `open_window` must decline
-    /// to show it; and every summon computes its rectangle afresh against the
-    /// monitor the pointer is on, so the door that does show it must place it
-    /// before it does.
+    /// The backend comes from the actual winit handle. X11 keeps the saved summon
+    /// hidden until its key is pressed and places it at summon time; native Wayland
+    /// cannot restore or focus it, so its saved tabs are shown as an ordinary
+    /// window and its summon metadata remains in the document for a later backend.
     ///
-    /// A source gate rather than a behavioural one because both facts are about a
-    /// door that needs a GPU, a compositor and a real `HWND` to run at all, and
-    /// the thing that can go wrong is a line moving rather than a value changing.
+    /// A source gate rather than a behavioural one because these doors need a
+    /// GPU, a compositor and a live native window to run at all; the regression
+    /// is a missing or misplaced platform branch.
     ///
-    /// MUTATIONS: drop `&& !plan.quake` from the show condition and a restored
-    /// summon stands across the top of the screen at every launch, with no key
-    /// pressed. Drop the placement from `show_quake_window` and it comes down at
-    /// whatever rectangle winit gave it — which on a second monitor is the wrong
-    /// screen. Weaken it back to `set_window_outer_rect` and it comes down at
-    /// three quarters or four thirds of the rectangle it asked for whenever the
-    /// pointer is on a screen of a different dpi — measured on this desk
-    /// 2026-09-02, and the whole reason `stand_window_at` exists. Drop the
-    /// `set_window_topmost` beside it and the twentieth summon arrives behind the
-    /// editor it was called over, because `HWND_TOPMOST` is a place in a z-order
-    /// other programs are entitled to move.
+    /// Mutations: dropping the actual-backend check leaves the Wayland session
+    /// with a hidden, un-restorable summon; dropping the persistence flag loses
+    /// the saved summon marker and its per-display placements. Showing every X11
+    /// summon from `open_window` bypasses the key; removing X11 placement or its
+    /// topmost request loses the existing summon behavior.
     #[test]
     fn a_summoned_window_is_not_shown_by_the_door_that_opens_it() {
         let door = method_body("Runtime", "open_window");
         assert!(
-            door.contains("if plan.receives.is_none() && !plan.quake {"),
-            "the door that opens a window shows the one a key summons:\n{door}"
+            door.contains("crate::linux_window_backend(&window)?")
+                && door.contains("Backend::Wayland")
+                && door.contains("let is_quake = plan.quake && !restored_quake_as_ordinary;")
+                && door.contains("if is_quake {\n            app.quake.adopt(id);")
+                && door.contains("if plan.receives.is_none() && !is_quake {")
+                && door.contains("window.restored_quake_as_ordinary = restored_quake_as_ordinary;"),
+            "the actual backend does not decide whether a saved summon is shown as ordinary:\n{door}"
+        );
+        let snapshot = method_body("Runtime", "window_snapshot");
+        assert!(
+            snapshot.contains(
+                "let persist_quake_record = is_quake || self.window.restored_quake_as_ordinary;"
+            ) && snapshot.contains("quake: persist_quake_record")
+                && snapshot.contains("if persist_quake_record {")
+                && snapshot.contains("tab.term_leaf(seat, persist_quake_record && tab.pinned)"),
+            "the visible Wayland fallback loses the saved summon marker, placements, or tabs:\n{snapshot}"
         );
         let summon = method_body("Runtime", "show_quake_window");
         // **Through the one door and not by doing the arithmetic here** (§7.54e ③).
@@ -68488,9 +68593,23 @@ mod floated_page_tests {
         // not allowed to overrule.
         assert!(
             summon.contains("self.app.quake.placement(&screen, settings)")
+                && summon.contains("set_outer_position(")
                 && summon.contains("stand_window_at("),
             "a summon does not state its own rectangle, or states it the one way \
              that a dpi seam is allowed to overrule:\n{summon}"
+        );
+        let refusal = summon
+            .find("if let Some(reason) = refusal")
+            .expect("the unsupported backend is refused");
+        let placement = summon
+            .find("set_outer_position(")
+            .expect("X11 placement uses winit");
+        let show = summon
+            .find("put_the_window_on_the_glass(false)?")
+            .expect("a supported summon shows the window");
+        assert!(
+            refusal < placement && placement < show,
+            "Wayland refusal must happen before placement or visibility changes:\n{summon}"
         );
         assert!(
             // The call and not the name: the comment above it names the
@@ -68501,7 +68620,8 @@ mod floated_page_tests {
              another dpi lands at the ratio of the two:\n{summon}"
         );
         assert!(
-            summon.contains("set_window_topmost(native, true)"),
+            summon.contains("set_window_level(winit::window::WindowLevel::AlwaysOnTop)")
+                && summon.contains("set_window_topmost(native, true)"),
             "the posture is not re-stated, so a window that has been hidden and \
              shown again may arrive behind what it was called over:\n{summon}"
         );
@@ -68511,6 +68631,11 @@ mod floated_page_tests {
                 && !hide.contains("window_shown = false"),
             "a summon that is sent away is closed rather than hidden, or forgets \
              that it has ever been on the glass:\n{hide}"
+        );
+        assert!(
+            hide.contains("Backend::Wayland")
+                && hide.find("Backend::Wayland") < hide.find("owner_door::set_visible"),
+            "native Wayland must not hide a summon that cannot be restored:\n{hide}"
         );
     }
 
@@ -69439,6 +69564,16 @@ mod opening_window_tests {
             Some(LogicalSize::new(INITIAL_WIDTH, INITIAL_HEIGHT).into())
         );
     }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_window_attributes_set_the_desktop_identity() {
+        let source = bt_source::Index::of_package("bt-app");
+        let body = source
+            .body_of(&bt_source::ItemQuery::function("opening_window_attributes"))
+            .unwrap_or_else(|failure| panic!("{failure}"));
+        assert!(body.contains("with_name(\"io.github.lulu-loopp.folio\", \"folio\")"));
+    }
 }
 
 /// Review X-1 and X-3: the two races a delayed picture paste can lose.
@@ -69671,8 +69806,9 @@ fn install_page_ground_color(compositor: &bt_platform::Compositor) {
 /// [`bt_platform::Compositor`] owns, because a window that will one day have a
 /// hole cut in it for a web preview has to be `PreMultiplied` and no amount of
 /// configuring an `HWND` swapchain will make it so
-/// (`bt_render::WindowTarget`'s own note). That is the whole reason the enum
-/// has two arms.
+/// (`bt_render::WindowTarget`'s own note). The composition-visual target stays
+/// separate from the window-handle target because it has a different alpha
+/// contract.
 ///
 /// **On macOS neither half of that sentence holds, and X-1 measured why.**
 /// wgpu-hal 30's Metal backend offers only `Opaque` and `PostMultiplied` —
@@ -69681,6 +69817,10 @@ fn install_page_ground_color(compositor: &bt_platform::Compositor) {
 /// writing premultiplied pixels and declares `PostMultiplied` to wgpu, with the
 /// platform arm owning the view and clearing its sublayers before every
 /// reconstruction (`docs/plans/port/probe-x1-metal-alpha-2026-09-12.md`).
+///
+/// **Linux names its native window target separately.** The renderer prefers
+/// `PreMultiplied` when the adapter offers it and accepts `Opaque` only when
+/// that is the available fallback.
 ///
 /// **M1-4 is that answer, and it is three statements in this one function.**
 /// `bt_platform::surface_view` makes — or finds again — a plain `NSView` of
@@ -69694,15 +69834,14 @@ fn install_page_ground_color(compositor: &bt_platform::Compositor) {
 /// caller is the rebuild: a clear written at the two constructors would be a
 /// clear that never runs when it matters.
 ///
-/// **A refusal from either door is reported and not propagated** (§4.4, and
-/// M1-1 ② next door). Both doors refuse for one reason only — a thread that is
-/// not the window's, or a view that is in no window — and neither is something
-/// a reader's machine can be; but a `?` here would mean a program defect
-/// closing the window instead of saying so. What the fallback opens is the
-/// window this function opened before this ticket: the portable door, wgpu's
-/// own layer on winit's own view, `Opaque`, no translucent ground offered and
-/// no hole possible. That is a window a reader can work in, with one line on
-/// stderr saying what it is missing.
+/// **A refusal from the macOS owned-view path is reported and not propagated**
+/// (§4.4, and M1-1 ② next door). It refuses for one reason only — a thread that
+/// is not the window's, or a view that is in no window — and neither is
+/// something a reader's machine can be; but a `?` here would mean a program
+/// defect closing the window instead of saying so. The Mac fallback uses the
+/// common winit target with `Opaque`, no translucent ground and no hole. That
+/// is a window a reader can work in, with one line on stderr saying what it is
+/// missing.
 ///
 /// There are three callers: the two window constructors and the device-loss
 /// rebuild, and the third is why the choice is a function rather than a line in
@@ -69731,7 +69870,12 @@ fn window_surface_target(
             }
         }
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        let _ = compositor;
+        bt_render::WindowTarget::LinuxWindow(Arc::clone(window).into())
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         let _ = compositor;
         bt_render::WindowTarget::Hwnd(Arc::clone(window).into())
@@ -69785,8 +69929,28 @@ fn stand_the_window_at(
     rect: bt_platform::WindowRect,
     what: &str,
 ) {
-    let _ = window;
-    if let Err(error) = bt_platform::set_window_outer_rect(native, rect) {
+    #[cfg(target_os = "linux")]
+    let answer = {
+        let _ = native;
+        linux_window_request(
+            window,
+            bt_platform::linux_window::Operation::SetGlobalPosition,
+        )
+        .map(|()| {
+            let _ = window.request_inner_size(PhysicalSize::new(
+                rect.right.abs_diff(rect.left),
+                rect.bottom.abs_diff(rect.top),
+            ));
+            window.set_outer_position(winit::dpi::PhysicalPosition::new(rect.left, rect.top));
+        })
+        .map_err(|error| error.to_string())
+    };
+    #[cfg(not(target_os = "linux"))]
+    let answer = {
+        let _ = window;
+        bt_platform::set_window_outer_rect(native, rect)
+    };
+    if let Err(error) = answer {
         eprintln!("BT_WINDOW {what}: {error}");
     }
 }
@@ -70057,29 +70221,113 @@ fn native_window(window: &Window) -> Result<bt_platform::NativeWindow> {
     let handle = window
         .window_handle()
         .context("get the native window handle")?;
-    match handle.as_raw() {
-        #[cfg(windows)]
-        RawWindowHandle::Win32(handle) => Ok(bt_platform::NativeWindow::from_win32(handle.hwnd)),
-        #[cfg(target_os = "macos")]
-        RawWindowHandle::AppKit(handle) => {
-            Ok(bt_platform::NativeWindow::from_appkit(handle.ns_view))
-        }
-        other => Err(anyhow!(
-            "bt-app has no native window backend for {other:?} on this platform"
-        )),
+    native_window_from_handle(handle.as_raw())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_window_backend(window: &Window) -> Result<bt_platform::linux_window::Backend> {
+    linux_backend_from_handle(window.window_handle()?.as_raw())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_backend_from_handle(
+    handle: RawWindowHandle,
+) -> Result<bt_platform::linux_window::Backend> {
+    use bt_platform::linux_window::Backend;
+    match handle {
+        RawWindowHandle::Xlib(_) | RawWindowHandle::Xcb(_) => Ok(Backend::X11),
+        RawWindowHandle::Wayland(_) => Ok(Backend::Wayland),
+        other => Err(anyhow!("unsupported Linux window backend: {other:?}")),
     }
 }
 
+#[cfg(target_os = "linux")]
+fn linux_window_request(
+    window: &Window,
+    operation: bt_platform::linux_window::Operation,
+) -> Result<()> {
+    if let Some(reason) =
+        bt_platform::linux_window::refusal(linux_window_backend(window)?, operation)
+    {
+        return Err(anyhow!(reason));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn linux_resize_direction(
+    position: PhysicalPosition<f64>,
+    size: PhysicalSize<u32>,
+    scale: f64,
+) -> Option<winit::window::ResizeDirection> {
+    use winit::window::ResizeDirection;
+    let width = f64::from(size.width);
+    let height = f64::from(size.height);
+    if position.x < 0.0 || position.y < 0.0 || position.x >= width || position.y >= height {
+        return None;
+    }
+    let edge = 4.0 * scale;
+    let west = position.x < edge;
+    let east = position.x >= width - edge;
+    let north = position.y < edge;
+    let south = position.y >= height - edge;
+    match (west, east, north, south) {
+        (true, _, true, _) => Some(ResizeDirection::NorthWest),
+        (_, true, true, _) => Some(ResizeDirection::NorthEast),
+        (true, _, _, true) => Some(ResizeDirection::SouthWest),
+        (_, true, _, true) => Some(ResizeDirection::SouthEast),
+        (true, _, _, _) => Some(ResizeDirection::West),
+        (_, true, _, _) => Some(ResizeDirection::East),
+        (_, _, true, _) => Some(ResizeDirection::North),
+        (_, _, _, true) => Some(ResizeDirection::South),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_hotkey_is_current(
+    claim: Option<&bt_platform::hotkey::GlobalHotkey>,
+    id: i32,
+    generation: u64,
+) -> bool {
+    claim.is_some_and(|claim| claim.id() == id && claim.generation() == generation)
+}
+
+#[cfg(target_os = "linux")]
+fn window_focus_request_is_needed(window: &Window) -> Result<bool, String> {
+    if window.has_focus() {
+        return Ok(false);
+    }
+    linux_window_request(window, bt_platform::linux_window::Operation::RequestFocus)
+        .map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
 fn take_owned_keyboard_focus(window: &Window) -> Result<()> {
-    if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+    #[cfg(target_os = "linux")]
+    {
+        if window_focus_request_is_needed(window).map_err(|error| anyhow!(error))? {
+            bt_platform::admission::admitted::<bt_platform::admission::doors::FocusWindow, _>(
+                |token| owner_door::focus_window(token, window),
+            )
+            .map_err(|error| anyhow!("window focus refused: {error:?}"))?;
+        }
         Ok(())
-    } else {
-        Err(anyhow!("the window could not take the keyboard"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+            Ok(())
+        } else {
+            Err(anyhow!("the window could not take the keyboard"))
+        }
     }
 }
 
 fn restore_minimized_window(window: &Window) -> Result<()> {
     if window.is_minimized() == Some(true) {
+        #[cfg(target_os = "linux")]
+        linux_window_request(window, bt_platform::linux_window::Operation::Restore)?;
         window.set_minimized(false);
     }
     Ok(())
@@ -70087,19 +70335,37 @@ fn restore_minimized_window(window: &Window) -> Result<()> {
 
 fn bring_owned_window_forward(window: &Window) -> Result<()> {
     restore_minimized_window(window)?;
-    if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
-        Ok(())
-    } else {
-        Err(anyhow!("the window could not take the keyboard"))
+    #[cfg(target_os = "linux")]
+    {
+        take_owned_keyboard_focus(window)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        if bt_platform::hotkey::give_foreground_to(native_window(window)?) {
+            Ok(())
+        } else {
+            Err(anyhow!("the window could not take the keyboard"))
+        }
     }
 }
 
 fn request_owned_window_close(window: &Window, proxy: &EventLoopProxy<AppEvent>) -> Result<()> {
-    let _ = proxy;
-    bt_platform::request_window_close(native_window(window)?).map_err(|error| anyhow!(error))
+    #[cfg(target_os = "linux")]
+    {
+        proxy
+            .send_event(AppEvent::WindowCloseRequested(window.id()))
+            .map_err(|error| anyhow!(error))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = proxy;
+        bt_platform::request_window_close(native_window(window)?).map_err(|error| anyhow!(error))
+    }
 }
 
 fn minimize_owned_window(window: &Window) -> Result<()> {
+    #[cfg(target_os = "linux")]
+    linux_window_request(window, bt_platform::linux_window::Operation::Minimize)?;
     window.set_minimized(true);
     Ok(())
 }
@@ -70108,8 +70374,106 @@ fn press_owned_title_bar(
     window: &Window,
     frame: &bt_platform::CustomWindowFrame,
 ) -> Result<(), String> {
-    let _ = window;
-    frame.press_title_bar()
+    #[cfg(target_os = "linux")]
+    {
+        let _ = frame;
+        window.drag_window().map_err(|error| error.to_string())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = window;
+        frame.press_title_bar()
+    }
+}
+
+fn native_window_from_handle(handle: RawWindowHandle) -> Result<bt_platform::NativeWindow> {
+    match handle {
+        #[cfg(windows)]
+        RawWindowHandle::Win32(handle) => Ok(bt_platform::NativeWindow::from_win32(handle.hwnd)),
+        #[cfg(target_os = "macos")]
+        RawWindowHandle::AppKit(handle) => {
+            Ok(bt_platform::NativeWindow::from_appkit(handle.ns_view))
+        }
+        #[cfg(target_os = "linux")]
+        RawWindowHandle::Xlib(handle) => {
+            let window = u32::try_from(handle.window)
+                .ok()
+                .and_then(std::num::NonZeroU32::new)
+                .context("Xlib window ID is zero or exceeds 32 bits")?;
+            Ok(bt_platform::NativeWindow::from_x11(window))
+        }
+        #[cfg(target_os = "linux")]
+        RawWindowHandle::Xcb(handle) => Ok(bt_platform::NativeWindow::from_x11(handle.window)),
+        #[cfg(target_os = "linux")]
+        RawWindowHandle::Wayland(handle) => {
+            Ok(bt_platform::NativeWindow::from_wayland(handle.surface))
+        }
+        other => Err(anyhow!(
+            "bt-app has no native window backend for {other:?} on this platform"
+        )),
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_window_tests {
+    use super::{RawWindowHandle, linux_backend_from_handle, native_window_from_handle};
+    use std::{num::NonZeroU32, ptr::NonNull};
+    use winit::raw_window_handle::{WaylandWindowHandle, XcbWindowHandle, XlibWindowHandle};
+
+    #[test]
+    fn linux_window_handles_reach_the_platform_door() {
+        let xlib =
+            native_window_from_handle(RawWindowHandle::Xlib(XlibWindowHandle::new(42))).unwrap();
+        let xcb = native_window_from_handle(RawWindowHandle::Xcb(XcbWindowHandle::new(
+            NonZeroU32::new(42).unwrap(),
+        )))
+        .unwrap();
+        assert_eq!(xlib, xcb);
+        assert_eq!(
+            linux_backend_from_handle(RawWindowHandle::Xlib(XlibWindowHandle::new(42))).unwrap(),
+            bt_platform::linux_window::Backend::X11
+        );
+        assert_eq!(
+            linux_backend_from_handle(RawWindowHandle::Xcb(XcbWindowHandle::new(
+                NonZeroU32::new(42).unwrap(),
+            )))
+            .unwrap(),
+            bt_platform::linux_window::Backend::X11
+        );
+        let surface = NonNull::dangling();
+        assert_eq!(
+            native_window_from_handle(RawWindowHandle::Wayland(WaylandWindowHandle::new(surface)))
+                .unwrap(),
+            bt_platform::NativeWindow::from_wayland(surface)
+        );
+        assert_eq!(
+            linux_backend_from_handle(RawWindowHandle::Wayland(WaylandWindowHandle::new(surface)))
+                .unwrap(),
+            bt_platform::linux_window::Backend::Wayland
+        );
+        assert!(
+            native_window_from_handle(RawWindowHandle::Xlib(XlibWindowHandle::new(0))).is_err()
+        );
+    }
+
+    #[test]
+    fn app_close_requests_reach_the_existing_close_event() {
+        let mouse = include_str!("runtime/mouse.rs");
+        let tabs = include_str!("runtime/tabs.rs");
+        let windows = include_str!("runtime/windows.rs");
+        assert!(mouse.contains("self.request_window_close()"));
+        assert!(tabs.contains("self.request_window_close()"));
+        assert!(windows.contains(
+            "crate::request_owned_window_close(&self.window.window, &self.app.event_proxy)"
+        ));
+
+        let app = include_str!("main.rs");
+        assert!(app.contains("AppEvent::WindowCloseRequested(window.id())"));
+        assert!(app.contains("AppEvent::WindowCloseRequested(window_id) =>"));
+        assert!(
+            app.contains("self.window_event(event_loop, window_id, WindowEvent::CloseRequested);")
+        );
+    }
 }
 
 /// **Hand this window's touch input to the system that already knows what to do
@@ -72214,6 +72578,19 @@ fn main() -> Result<()> {
             let _ = proxy.send_event(AppEvent::NativeDialogReady);
         })
         .map_err(|error| anyhow!(error))?;
+        let proxy = event_loop.create_proxy();
+        bt_platform::linux_hotkey::install_hotkey_wake(move |event| {
+            let event = match event {
+                bt_platform::linux_hotkey::LinuxHotkeyEvent::Ready { id, generation } => {
+                    AppEvent::NativeHotkeyReady { id, generation }
+                }
+                bt_platform::linux_hotkey::LinuxHotkeyEvent::Activated { id, generation } => {
+                    AppEvent::NativeHotkeyActivated { id, generation }
+                }
+            };
+            let _ = proxy.send_event(event);
+        })
+        .map_err(|error| anyhow!(error))?;
     }
     // **The application delegate, and it has to be here** (M3-1, X-4).
     //
@@ -72400,7 +72777,7 @@ mod platform_gate_tests {
 
     /// **The list.** One file per line, in the order `ls` gives them, each with
     /// the reason it is allowed to ask.
-    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 20] = [
+    const FILES_THAT_MAY_NAME_A_PLATFORM: [&str; 25] = [
         // The hook this build writes into somebody else's settings file names a
         // program, and a program is named differently on each platform.
         "attention_copilot.rs",
@@ -72420,9 +72797,11 @@ mod platform_gate_tests {
         "git.rs",
         // The same question one layer up, in the panel.
         "git_panel.rs",
-        // The startup path: the native-window door's two arms, and the five
-        // platform calls M1-1 made non-fatal.
+        // First-window display identity is strict; optional service failures
+        // remain local to their operation.
         "main.rs",
+        // The Linux focus door must refuse a Wayland focus request before calling winit.
+        "owner_door.rs",
         // Which rows the palette offers on this machine.
         "palette_index.rs",
         // Test fixtures compose Windows-only namespace translation with profile
@@ -72430,6 +72809,14 @@ mod platform_gate_tests {
         "profiles.rs",
         // A PowerShell module, which is a Windows fact end to end.
         "psreadline.rs",
+        // Linux's generation-checked native hotkey answers read the current claim here.
+        "quake.rs",
+        // Linux keeps its input method across a focus loss in this ladder.
+        "runtime/keyboard.rs",
+        // Linux's client frame starts a native resize from this pointer gesture.
+        "runtime/mouse.rs",
+        // Linux Wayland summon refusal differs from X11 and from native placement elsewhere.
+        "runtime/quake.rs",
         // The Linux-only minimize restore bridge has only the Linux quake summon caller.
         "runtime/windows.rs",
         // Native failure fixture: Linux reports async watch-start failure; other starts refuse inline.
@@ -73007,7 +73394,7 @@ mod cross_window_drag_tests {
     /// kill a launch** (ticket M1-1; `docs/plans/port/macos-plan-2026-09-12.md`
     /// §4.4, `docs/plans/port/backend-inventory-2026-09-12.md` §3 (a) and §6 ⑥).
     ///
-    /// The inventory's finding, and it is the reason M1-1 is an L rather than an M:
+    /// The original M1 inventory's finding, and it is the reason M1-1 is an L rather than an M:
     /// **seven** of the sixteen steps between `main` and the first frame are a
     /// `bt-platform` call propagated with `?` and `anyhow::Context`, in **both**
     /// window constructors, and every one of them is a Win32 bridge with no work to
@@ -73023,12 +73410,16 @@ mod cross_window_drag_tests {
     /// `?` on a call that cannot fail is not a hazard, it is the caller reading a
     /// `Result`.
     ///
-    /// So this test is a list, and the list is the claim: **these five and no
-    /// others.** A sixth name appearing here is a launch that a platform arm
-    /// nobody has written yet gets to veto.
+    /// The five portable service calls are the M1 exception list. Linux adds a
+    /// separate list for process-wide backend identity: the display and hotkey
+    /// backends are bound from the first window's actual native handle, and the
+    /// installer probes no service availability. A mismatch would make later
+    /// requests use the wrong backend, so it must stop startup.
     ///
-    /// MUTATION: put the `?` back on either of the two, or add a `?` to a sixth
-    /// platform call in either constructor, and this goes red naming it.
+    /// Every other propagated platform call remains fatal to this gate.
+    ///
+    /// MUTATION: add an unlisted propagated call, move a binding out of
+    /// `Runtime::create`'s Linux block, or add one to `open_window`; this goes red.
     #[test]
     fn the_m1_startup_path_has_no_fatal_platform_call_off_windows() {
         /// The five that may still propagate: each of them answers `Ok` on every
@@ -73040,6 +73431,8 @@ mod cross_window_drag_tests {
             "ImagePicker::new",           // step 9
             "Compositor::new",            // step 13
         ];
+        /// The backend calls bind OnceLocks selected from the first native window.
+        const LINUX_BACKEND_BINDINGS: [&str; 1] = ["install_linux_display_backend"];
 
         /// Every `bt_platform::…` call in `body` whose statement carries a `?`.
         ///
@@ -73088,7 +73481,10 @@ mod cross_window_drag_tests {
         for constructor in ["create", "open_window"] {
             let body = method_body("Runtime", constructor);
             let mut fatal = propagated(body);
-            fatal.retain(|name| !MAY_STILL_PROPAGATE.contains(&name.as_str()));
+            fatal.retain(|name| {
+                !MAY_STILL_PROPAGATE.contains(&name.as_str())
+                    && !LINUX_BACKEND_BINDINGS.contains(&name.as_str())
+            });
             assert!(
                 fatal.is_empty(),
                 "`Runtime::{constructor}` lets a platform call that can refuse off Windows decide \
@@ -73112,6 +73508,39 @@ mod cross_window_drag_tests {
                  on a platform with no visual tree"
             );
         }
+
+        let create = method_body("Runtime", "create");
+        let backend_call = create
+            .find("let backend = linux_window_backend(&window)?;")
+            .expect("the first window reads its actual native backend");
+        let cfg_start = create[..backend_call]
+            .rfind("#[cfg(target_os = \"linux\")]")
+            .expect("process backend binding is under the Linux gate");
+        let block_end = backend_call
+            + create[backend_call..]
+                .find("\n        }")
+                .expect("the first-window Linux setup block closes");
+        let binding_block = &create[cfg_start..block_end];
+        for binding in LINUX_BACKEND_BINDINGS {
+            let needle = format!("bt_platform::{binding}(");
+            assert_eq!(
+                create.matches(needle.as_str()).count(),
+                1,
+                "the first window binds {binding} exactly once"
+            );
+            assert_eq!(
+                binding_block.matches(needle.as_str()).count(),
+                1,
+                "the first window binds {binding} inside its Linux block"
+            );
+        }
+        let open_window = method_body("Runtime", "open_window");
+        assert!(
+            LINUX_BACKEND_BINDINGS
+                .iter()
+                .all(|binding| !open_window.contains(*binding)),
+            "a second window does not rebind the process-wide native backend"
+        );
 
         assert!(
             !found(

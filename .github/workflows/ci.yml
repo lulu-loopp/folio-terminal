@@ -1095,11 +1095,14 @@ jobs:
       # installed — the Fontconfig enumeration is about real installed faces,
       # and a runner with none would make the font doors lie by answering
       # empty. Noto CJK and DejaVu give the monospace, CJK and fallback reads
-      # something true to find.
+      # something true to find. The windowing and rendering steps below run on
+      # private displays: Xvfb and Weston, with Mesa's software drivers for
+      # wgpu's Vulkan and GLES backends.
       - name: install Linux desktop test runtimes
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
+            xvfb weston libgl1-mesa-dri mesa-vulkan-drivers \
             fonts-noto-cjk fonts-noto-mono fonts-dejavu-core
 
       # The same fifteen crates `core-macos` checks and in the same order,
@@ -1148,5 +1151,20 @@ jobs:
       - name: clippy the Linux platform crate
         run: cargo clippy -p bt-platform --all-targets --locked -- -D warnings
 
+      - name: build the Linux desktop application
+        run: cargo build -p bt-app --locked -j 2
+
       - name: test Linux platform providers and installed fonts
         run: cargo test -p bt-platform --locked -j 2
+
+      - name: recover Linux rendering after real device loss
+        run: cargo test -p bt-render --lib --locked -j 2 a_lost_device -- --test-threads=1
+
+      - name: test X11 and Wayland window handles
+        run: cargo test -p bt-app --bin folio --locked -j 2 linux_window_tests
+
+      - name: present terminal text on a private X11 display
+        run: python3 scripts/ci/linux-smoke.py x11 --exe target/debug/folio
+
+      - name: present terminal text on a private Wayland display
+        run: python3 scripts/ci/linux-smoke.py wayland --exe target/debug/folio
