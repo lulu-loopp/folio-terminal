@@ -433,8 +433,9 @@ pub(crate) fn reserve_last_trial(
 /// ([`commit_last_trial`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LastTrialCommit {
-    /// Not yet: a holder has the transaction lock, or the receipt is not on
-    /// disk yet. The watch asks again at its next turn.
+    /// Not yet: a holder has the transaction lock, or this trial's receipt is
+    /// not on disk yet — nothing there, or an earlier attempt's that it is
+    /// about to replace. The watch asks again at its next turn.
     Pending,
     /// `Committed` is durable — recorded here, or found already recorded.
     Committed,
@@ -443,6 +444,11 @@ pub(crate) enum LastTrialCommit {
     /// gone or another — so it never asks again; the watch's ordinary read
     /// of the header decides from here.
     NotItsOwn,
+    /// **This process cannot read its own start instant** (the review's F3),
+    /// so its receipt names nobody and can never commit it: said once, never
+    /// asked again; the trial stays uncommitted, its writes held, and a
+    /// recovery decides the transaction.
+    Unprovable,
 }
 
 /// **U-35's reserved trial commits its own transaction** (U-35 round 2, the
@@ -489,6 +495,12 @@ pub(crate) fn commit_last_trial_as(
     pid: u32,
     started: Option<u64>,
 ) -> Result<LastTrialCommit, String> {
+    // Its own start instant is half of what its receipt must name (H.1): a
+    // process that cannot read it wrote a receipt that names nobody, which
+    // neither it nor any holder can ever accept.
+    let Some(started) = started else {
+        return Ok(LastTrialCommit::Unprovable);
+    };
     let _lock = match install_txn::try_hold(&home.lock(), Hold::Exclusive) {
         Ok(Some(lock)) => lock,
         Ok(None) => return Ok(LastTrialCommit::Pending),
@@ -515,12 +527,19 @@ pub(crate) fn commit_last_trial_as(
         return Ok(LastTrialCommit::Pending);
     };
     let receipt = receipt?;
-    // A process whose start instant cannot be read wrote a receipt without
-    // one, which names nobody: the protocol refuses it below.
-    let process = TrialProcess {
-        pid,
-        started: started.unwrap_or_default(),
-    };
+    let process = TrialProcess { pid, started };
+    let names_it = receipt.pid == pid && receipt.started == Some(started);
+    // An earlier attempt of this same trial, which ended before the
+    // transaction was decided (U-35 round 3, F1): its receipt names a process
+    // that no longer runs, and this trial's own receipt replaces it
+    // (`update_trial::write_receipt`) — not yet, so ask again.
+    if !names_it
+        && receipt.txn == txn
+        && receipt.nonce == nonce
+        && !crate::update_trial::names_a_running_process(&receipt)
+    {
+        return Ok(LastTrialCommit::Pending);
+    }
     let mut journaled = Journaled::of(home, worker, journal);
     journaled.record(Actor::Trial, &Event::LastTrialReady { receipt, process })?;
     Ok(LastTrialCommit::Committed)

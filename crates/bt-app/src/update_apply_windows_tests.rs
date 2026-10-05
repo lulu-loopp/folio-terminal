@@ -3866,8 +3866,9 @@ fn u35_a_ready_last_trial_commits_itself_without_any_rescue_process() {
 /// RED (U-35 round 2, the review's B3 and B2) — **a reserved last trial that
 /// is not healthy commits nothing, and the recovery ends it and rolls back
 /// once a rescue copy can run**: a receipt at the reserved nonce that names
-/// another process is refused and the journal stays `TrialStarting` (its
-/// writes stay held); the recovery handed that unready instance back ends
+/// another process, one that runs, is refused and the journal stays
+/// `TrialStarting` (its writes stay held); the recovery handed that unready
+/// instance back ends
 /// exactly it — `EndTrial` over `TrialStarting` — and restores the old build,
 /// and the card it leaves never says the new version was not tried (m1).
 ///
@@ -3880,16 +3881,23 @@ fn u35_an_unready_last_trial_commits_nothing_and_the_recovery_ends_it() {
         return;
     };
     let (nonce, _opened) = reserved_by_the_guard(&install);
-    // A receipt at the reserved name that names another process — one that
-    // has ended since — and the unready instance that runs on.
-    let other = install.start_trial();
-    install.receipt(nonce, nonce, other.pid);
-    install.children.end(other.pid);
+    // A receipt at the reserved name naming another process that runs — this
+    // test process, which is no process of the new build — and the unready
+    // instance that asks to commit on it.
+    let (me, _) = this_process();
+    install.receipt(nonce, nonce, me);
     let unready = install.start_trial();
     let (home, txn) = (install.home.clone(), install.txn);
-    let (me, started) = this_process();
-    let refused =
-        on_a_worker(move |worker| commit_last_trial_as(worker, &home, txn, nonce, me, started));
+    let refused = on_a_worker(move |worker| {
+        commit_last_trial_as(
+            worker,
+            &home,
+            txn,
+            nonce,
+            unready.pid,
+            Some(unready.started),
+        )
+    });
     assert!(
         refused
             .as_ref()
@@ -3926,6 +3934,108 @@ fn u35_an_unready_last_trial_commits_nothing_and_the_recovery_ends_it() {
             untried: false,
         }
     );
+}
+
+/// The receipt this test process writes as the trial: its own pid and start
+/// instant, as `update_trial::receipt_due` makes it.
+fn own_receipt(install: &Install, nonce: Nonce) -> crate::update_trial::ReceiptJob {
+    let (me, started) = this_process();
+    crate::update_trial::ReceiptJob {
+        path: install.home.receipt_path(install.txn, &nonce),
+        bytes: Receipt {
+            txn: install.txn,
+            nonce,
+            pid: me,
+            version: "0.4.7".to_owned(),
+            started,
+        }
+        .encode(),
+    }
+}
+
+/// RED (U-35 round 3, the review's F1) — **a ready reserved trial that dies
+/// before its commit does not stop the next attempt of that trial from
+/// committing**: the first attempt's create-new receipt names a process that
+/// has ended; the next start, its rescue refused, continues as the same
+/// reserved trial; until its own receipt is on disk it waits (`Pending`, not a
+/// refusal); its receipt replaces the earlier attempt's, by the same durable
+/// write; and it commits — with no rescue process at all.
+///
+/// MUTATION: in `update_trial::write_receipt`, keep every existing receipt
+/// (create-new only: the next attempt can never commit); or in
+/// `commit_last_trial_as`, read an earlier attempt's receipt as a refusal.
+#[test]
+fn u35_a_reserved_trial_that_died_ready_does_not_stop_the_next_from_committing() {
+    let Some(install) = moved_in("u35-died-ready") else {
+        return;
+    };
+    let (nonce, _opened) = reserved_by_the_guard(&install);
+    // The first attempt became ready, wrote its receipt, and died.
+    let first = install.start_trial();
+    install.receipt(nonce, nonce, first.pid);
+    install.children.end(first.pid);
+    let stale = std::fs::read(install.home.receipt_path(install.txn, &nonce)).unwrap();
+
+    let mut world = StartsRecorded {
+        said: Vec::new(),
+        spawned: Vec::new(),
+        refuse: true,
+    };
+    let crate::update_startup::Verdict::Continue {
+        trial, last_trial, ..
+    } = a_start(&install, &[], &mut world)
+    else {
+        panic!("a start whose rescue is refused continues");
+    };
+    assert_eq!(
+        (trial, last_trial),
+        (Some((install.txn, nonce)), true),
+        "{:?}",
+        world.said
+    );
+
+    let (home, txn) = (install.home.clone(), install.txn);
+    let (me, started) = this_process();
+    let job = own_receipt(&install, nonce);
+    let (before, written, committed) = on_a_worker(move |worker| {
+        let before = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        let written = crate::update_trial::write_receipt(&job);
+        let committed = commit_last_trial_as(worker, &home, txn, nonce, me, started);
+        (before, written, committed)
+    });
+    assert_eq!(before, Ok(LastTrialCommit::Pending), "an earlier attempt's");
+    assert_eq!(written, Ok(()));
+    assert_ne!(
+        std::fs::read(install.home.receipt_path(install.txn, &nonce)).unwrap(),
+        stale
+    );
+    assert_eq!(committed, Ok(LastTrialCommit::Committed));
+    assert_eq!(install.on_disk().body.phase, Phase::Committed);
+}
+
+/// RED (U-35 round 3, the review's F3) — **a reserved trial that cannot read
+/// its own start instant gets one answer, `Unprovable`, and nothing is
+/// written**: its receipt would name nobody, so neither it nor a holder can
+/// ever accept it, and asking again would be for ever.
+///
+/// MUTATION: in `commit_last_trial_as`, go on without the start instant
+/// (the protocol then refuses every turn: `Err`).
+#[test]
+fn u35_a_trial_that_cannot_read_its_start_instant_is_unprovable() {
+    let Some(install) = moved_in("u35-unprovable") else {
+        return;
+    };
+    let (nonce, _opened) = reserved_by_the_guard(&install);
+    let (me, _) = this_process();
+    install.receipt(nonce, nonce, std::process::id());
+    let (home, txn) = (install.home.clone(), install.txn);
+    let answer =
+        on_a_worker(move |worker| commit_last_trial_as(worker, &home, txn, nonce, me, None));
+    assert_eq!(answer, Ok(LastTrialCommit::Unprovable));
+    assert!(matches!(
+        install.on_disk().body.phase,
+        Phase::TrialStarting { .. }
+    ));
 }
 
 /// A start's world that records what it starts, and refuses every start

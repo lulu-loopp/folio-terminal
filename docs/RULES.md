@@ -1089,10 +1089,17 @@ unacknowledged process is not this case; on macOS the case cannot be observed
 unchanged. At `TrialStarting` the reserved trial is the only one the
 transaction runs: an exit guard names its nonce, a start admits only that
 nonce (with or without `--update-failed`), and a start whose rescue build
-cannot be started continues as that trial. It holds its writes as every trial
+cannot be started continues as that trial — beside a reserved trial that
+already runs, it waits for the data directory's claim (30 s), as every trial
+does, and leaves without handing its command line over; the running trial
+stays the window. It holds its writes as every trial
 does; once ready it takes the transaction lock and records `Committed` itself
 on its own receipt, which must name it exactly (pid and start instant) — the
-one road to `Committed` that needs no rescue process. A recovery that can run
+one road to `Committed` that needs no rescue process. A receipt is written
+create-new and never over another, except over an earlier attempt of the same
+trial: one of the same transaction and nonce that names no running process by
+pid and start instant, which the next attempt replaces whole. A trial that
+cannot read its own start instant says so once and stops asking. A recovery that can run
 adopts it on that receipt, ends a handed-back instance that never became
 ready, or rolls back, and the card after that rollback says the new version
 did not start. If the same image is unlaunchable, that last start is refused
