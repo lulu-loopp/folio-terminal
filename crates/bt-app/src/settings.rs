@@ -7027,6 +7027,10 @@ pub struct SettingsPanel {
     /// **The Profiles rows whose button the latest layout placed** ([`Self::note_placed`]) —
     /// what the keyboard walk is handed, so a button the layout did not place is not a stop.
     placed_buttons: Vec<usize>,
+    /// **The focus order the focus last stood in** ([`Self::keep_focus_reachable`]), so that when
+    /// the control under the focus stops being a stop the focus can go to its neighbour in that
+    /// order — the one fact about where it stood that the new order no longer holds.
+    seen_order: Vec<SettingsTarget>,
     /// **The gear's update mark, carried onto the page it led to** (0.4.6
     /// T-GEAR-MARK-LANDS). Set by [`Self::carry_update_mark`] on the frame this
     /// visit to `About` shows the Version row while the gear is lit — the frame
@@ -7948,6 +7952,7 @@ impl SettingsPanel {
         }
         let order = focus_order(content, self.category, &self.placed_buttons);
         if self.focus.is_some_and(|focus| order.contains(&focus)) {
+            self.seen_order = order;
             return;
         }
         // A picker open on a row that just vanished goes with it, and so does a
@@ -7963,8 +7968,35 @@ impl SettingsPanel {
         {
             self.recording = None;
         }
-        self.focus = order.first().copied();
+        // **A control that stopped being a stop hands the focus to its neighbour on the page**
+        // (coordinator's ruling 2026-10-05): the nearest stop after it in the order it stood
+        // in, else the nearest before it, and the dialog's `×` only when the page has no stop at
+        // all — so pressing Check and then Enter again does not close Settings.
+        let page = page_order(content, self.category, &self.placed_buttons);
+        self.focus = match self.focus {
+            Some(lost) => nearest_stop(&self.seen_order, lost, &page)
+                .or_else(|| page.first().copied())
+                .or_else(|| order.first().copied()),
+            None => order.first().copied(),
+        };
+        self.seen_order = order;
     }
+}
+
+/// The stop of `page` nearest to `lost` in `seen` — the order `lost` stood in: the first one
+/// after it, else the last one before it. `None` when `lost` was not in `seen` or no neighbour
+/// of it is on `page`.
+fn nearest_stop(
+    seen: &[SettingsTarget],
+    lost: SettingsTarget,
+    page: &[SettingsTarget],
+) -> Option<SettingsTarget> {
+    let at = seen.iter().position(|target| *target == lost)?;
+    seen[at + 1..]
+        .iter()
+        .find(|target| page.contains(target))
+        .or_else(|| seen[..at].iter().rev().find(|target| page.contains(target)))
+        .copied()
 }
 
 /// One key press, in the dialog's own vocabulary.
@@ -32745,7 +32777,7 @@ mod tests {
     /// About's Version control then disabling itself (a check in flight, a download, verifying,
     /// a recovery Retry cannot race): the frame's rule
     /// ([`SettingsPanel::keep_focus_on_a_stop`]) leaves the focus on a stop of the new order —
-    /// where the precedent every vanished stop follows puts it, the order's first stop.
+    /// on its nearest neighbour in the order it stood in (after it, else before it), never the ×.
     ///
     /// MUTATIONS, each observed red: delete the `Link` arm of `SettingsPanel::activate` — every
     /// door answers `Inert`; make `keep_focus_on_a_stop` only note the placement — the focus
@@ -32811,6 +32843,8 @@ mod tests {
                     panel.toggle(content);
                     panel.select_category(category);
                     panel.focus_to(*stop);
+                    // The frame before: the focus stood on a stop of the old order.
+                    panel.keep_focus_on_a_stop(content, buttons.clone());
                     panel.keep_focus_on_a_stop(changed, buttons.clone());
                     let focus = panel.focus().expect("a placed focus is kept somewhere");
                     assert!(
@@ -32819,10 +32853,96 @@ mod tests {
                          {control:?}, and the focus rests on {focus:?}, which is no stop"
                     );
                     if !after.contains(stop) {
-                        assert_eq!(Some(&focus), after.first(), "{category:?}: {stop:?}");
+                        // The nearest stop of the page after it, else before it; `×` only for a
+                        // page with no stop.
+                        let page = page_order(changed, category, &buttons);
+                        let at = before.iter().position(|seen| seen == stop).expect("a stop");
+                        let neighbour = before[at + 1..]
+                            .iter()
+                            .find(|seen| page.contains(seen))
+                            .or_else(|| before[..at].iter().rev().find(|seen| page.contains(seen)))
+                            .or(after.first());
+                        assert_eq!(Some(&focus), neighbour, "{category:?}: {stop:?}");
+                        assert_ne!(
+                            focus,
+                            SettingsTarget::Close,
+                            "{category:?}: a page with stops never sends the focus to the ×"
+                        );
                     }
                 }
             }
+        }
+    }
+
+    /// RED (coordinator's ruling 2026-10-05) — **Enter on Check, then Enter again, does not close
+    /// Settings**: the Version control stops being a stop while the check runs, and the focus
+    /// goes to the next stop of the About page, not to the dialog's `×`. With a failed update's
+    /// Details link standing before the control, "next" is the stop after it (Automatic check),
+    /// not the page's first stop (Details).
+    ///
+    /// MUTATIONS, each observed red: give `keep_focus_reachable` back its old answer
+    /// (`order.first()`, the `×`) — the second Enter closes Settings; answer the page's first stop
+    /// instead of the neighbour (`page.first()` before `nearest_stop`) — the Details row.
+    #[test]
+    fn enter_on_check_then_enter_again_does_not_close_settings() {
+        use crate::update_card::{VersionControl, VersionLink, VersionRow};
+
+        let rows = visible_rows(TabLayoutMode::Vertical);
+        let shortcuts = shortcut_lines();
+        let lines = pressable_profile_lines();
+        let with = |control: VersionControl, link: Option<VersionLink>| SettingsContent {
+            values: Box::leak(Box::new(SettingsValues {
+                version_update: VersionRow {
+                    control,
+                    link,
+                    ..VersionRow::default()
+                },
+                ..SettingsValues::sample()
+            })),
+            ..profiles_content(&rows, &shortcuts, &lines)
+        };
+        let version = SettingsTarget::Link(SettingsRow::AboutVersion);
+        let next = SettingsTarget::Combo(SettingsRow::AutoCheck);
+        for (before, after, what) in [
+            (
+                with(VersionControl::Check { enabled: true }, None),
+                with(VersionControl::Check { enabled: false }, None),
+                "Check, then Checking…",
+            ),
+            (
+                with(
+                    VersionControl::Retry { enabled: true },
+                    Some(VersionLink::Details),
+                ),
+                with(
+                    VersionControl::Retry { enabled: false },
+                    Some(VersionLink::Details),
+                ),
+                "Retry beside Details, then Retry disabled",
+            ),
+        ] {
+            let mut panel = SettingsPanel::default();
+            panel.toggle(before);
+            panel.select_category(SettingsCategory::About);
+            panel.focus_to(version);
+            assert_eq!(
+                panel.key(SettingsKey::Activate, before, before.values),
+                SettingsKeyVerdict::Chose(version),
+                "{what}: Enter presses the control"
+            );
+            // The press changed the job; the runtime's press ends with this rule.
+            panel.keep_focus_reachable(after);
+            assert_eq!(
+                panel.focus(),
+                Some(next),
+                "{what}: the next stop of the page"
+            );
+            assert_ne!(
+                panel.key(SettingsKey::Activate, after, after.values),
+                SettingsKeyVerdict::Closed,
+                "{what}: a second Enter does not close Settings"
+            );
+            assert!(panel.is_open(), "{what}");
         }
     }
 

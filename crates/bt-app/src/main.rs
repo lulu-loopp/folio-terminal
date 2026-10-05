@@ -43139,7 +43139,8 @@ impl Runtime<'_> {
         // ring is drawn only on a stop, so a focus left behind there is a keyboard with no ring.
         // Asked on the one road every draw, hover and hit test comes through, with the placement
         // this layout made, and answered by the rule every press already ends with
-        // ([`settings::SettingsPanel::keep_focus_reachable`]: the page's first stop).
+        // ([`settings::SettingsPanel::keep_focus_reachable`]: the nearest stop beside it on the
+        // page).
         if let Some(layout) = &laid {
             self.window
                 .settings

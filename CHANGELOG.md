@@ -113,9 +113,9 @@ All notable changes to Folio are recorded here. The format follows
 - About → Version says what an update is doing after the download: Verifying,
   then ready with Restart…, then Restarting…, instead of Downloading again or
   offering Update and restart for an update already downloaded.
-- In Settings, Enter on About's buttons presses them, and the keyboard focus
-  moves on when the Version button stops being pressable instead of staying on
-  it with no ring.
+- In Settings, Enter on About's buttons presses them, and when a focused
+  button stops being pressable the focus moves to the next control on the page
+  instead of staying on it with no ring.
 - An update download on a slow connection is no longer stopped after ten
   minutes; it stops only when the transfer stalls. This holds for updates made
   from this version on: updating from 0.4.6 still uses 0.4.6's download.
