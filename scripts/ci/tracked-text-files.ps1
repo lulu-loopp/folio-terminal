@@ -5,14 +5,30 @@
 $script:StrictUtf8 = [Text.UTF8Encoding]::new($false, $true)
 
 function Get-TrackedPaths([string] $Repo) {
-    Push-Location $Repo
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = 'git'
+    $start.WorkingDirectory = $Repo
+    $start.UseShellExecute = $false
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.ArgumentList.Add('-c')
+    $start.ArgumentList.Add('core.quotepath=false')
+    $start.ArgumentList.Add('ls-files')
+    $start.ArgumentList.Add('-z')
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
     try {
-        $tracked = @(& git -c core.quotepath=false ls-files)
-        if ($LASTEXITCODE -ne 0) { throw 'git ls-files failed' }
+        if (-not $process.Start()) { throw 'git ls-files could not start' }
+        $memory = [IO.MemoryStream]::new()
+        $process.StandardOutput.BaseStream.CopyTo($memory)
+        $errorText = $process.StandardError.ReadToEnd()
+        $process.WaitForExit()
+        if ($process.ExitCode -ne 0) { throw "git ls-files failed: $errorText" }
+        $decoded = $script:StrictUtf8.GetString($memory.ToArray())
+        return @($decoded.Split([char]0, [StringSplitOptions]::RemoveEmptyEntries))
     } finally {
-        Pop-Location
+        $process.Dispose()
     }
-    return $tracked
 }
 
 function Read-ReasonList([string] $Path, [string] $Header) {

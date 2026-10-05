@@ -7402,6 +7402,9 @@ fn pane_head_control_glyph_box(
     scale: f32,
 ) -> [f32; 4] {
     let [glyph_w, glyph_h] = if verb == crate::icons::ActionIcon::FloatFilesPane {
+        // **Not the slot**: the float glyph is an outline with a gap, and the mock-up gives that
+        // stroke a little more room than the solid folder beside it so both read at one weight.
+        // That fill-against-stroke judgement is specific to the files head.
         let side = (PANE_HEAD_FLOAT_GLYPH_LOGICAL_PX * scale).round().max(1.0);
         [side, side]
     } else {

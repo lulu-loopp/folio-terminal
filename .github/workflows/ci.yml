@@ -155,6 +155,41 @@ jobs:
           }
           exit 0
 
+      # A binary exemption is a live statement about one tracked path, not a
+      # permanent extension exclusion. Require both kinds of stale row to fail.
+      - name: a stale binary exemption can actually fail
+        shell: pwsh
+        run: |
+          $list = "scripts/ci/tracked-binary-files.tsv"
+          $original = [IO.File]::ReadAllBytes($list)
+          try {
+            [IO.File]::AppendAllText($list, "planted-missing.bin`tcanary path is absent`n")
+            $failed = $false
+            $message = ""
+            try { & ./scripts/ci/check-no-nul.ps1 *> $null } catch {
+              $failed = $true
+              $message = $_.Exception.Message
+            }
+            if (-not $failed -or $message -notmatch 'planted-missing.bin' -or $message -notmatch 'not a tracked readable file') {
+              throw "the binary list did not refuse its missing row: $message"
+            }
+
+            [IO.File]::WriteAllBytes($list, $original)
+            [IO.File]::AppendAllText($list, "README.md`tcanary bytes are text`n")
+            $failed = $false
+            $message = ""
+            try { & ./scripts/ci/check-no-nul.ps1 *> $null } catch {
+              $failed = $true
+              $message = $_.Exception.Message
+            }
+            if (-not $failed -or $message -notmatch 'README.md' -or $message -notmatch 'strict UTF-8 text') {
+              throw "the binary list did not refuse its now-text row: $message"
+            }
+          } finally {
+            [IO.File]::WriteAllBytes($list, $original)
+          }
+          exit 0
+
       # An already committed conflict marker has no unmerged index entry. Plant
       # one after a first-line UTF-8 BOM and require the byte gate to name it.
       - name: the conflict-marker gate can actually fail

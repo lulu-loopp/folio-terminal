@@ -841,29 +841,85 @@ fn callees_in(world: &World, body: &str, site_name: &str) -> Vec<String> {
         .collect()
 }
 
-// Parsed by the guard but deliberately absent from the Rust build: these are source-shape
-// fixtures, including calls Rust would reject precisely because the scanner's tentative type is
-// not the receiver's real type.
+// Parsed by the guard but deliberately absent from the Rust build: these source shapes include
+// calls Rust would reject precisely because the guard must not infer the receiver's type.
 #[cfg(any())]
-fn receiver_typing_source_shapes() {
-    let annotated: CappedReads = unreachable!();
-    annotated.kill();
+struct ReceiverTypingSourceShapes {
+    typed_field: CappedReads,
+}
 
-    let constructed = CappedReads::new(unreachable!(), 1);
-    constructed.observe(0);
-    let literal = CappedReads { imaginary: () };
-    let tuple = Phases(0);
+#[cfg(any())]
+impl ReceiverTypingSourceShapes {
+    fn receiver_typing_source_shapes(&mut self) {
+        self.typed_field.observe(0);
 
-    let mut reassigned = CappedReads::new(unreachable!(), 1);
-    reassigned = unreachable!();
-    reassigned.kill();
+        let annotated: CappedReads = unreachable!();
+        annotated.observe(0);
 
-    let factory = Pending::new(None, Vec::new());
-    factory.kill();
+        let chained_constructor = CappedReads::new(unreachable!(), 1).observe(0);
+        chained_constructor.kill();
+        let constructor_later = passthrough(CappedReads::new(unreachable!(), 1));
+        constructor_later.kill();
+        let factory = Pending::new(None, Vec::new());
+        factory.kill();
 
-    let contains = passthrough(CappedReads::new(unreachable!(), 1));
-    contains.kill();
-    let _ = (literal, tuple);
+        let mut reassigned: CappedReads = unreachable!();
+        reassigned = unreachable!();
+        reassigned.kill();
+
+        let shadow_let: CappedReads = unreachable!();
+        let shadow_let = unreachable!();
+        shadow_let.kill();
+
+        let shadow_closure: CappedReads = unreachable!();
+        let _ = |shadow_closure| shadow_closure;
+        shadow_closure.kill();
+
+        let shadow_for: CappedReads = unreachable!();
+        for shadow_for in unreachable!() {
+            drop(shadow_for);
+        }
+        shadow_for.kill();
+
+        let shadow_match: CappedReads = unreachable!();
+        match unreachable!() {
+            shadow_match => drop(shadow_match),
+        }
+        shadow_match.kill();
+
+        let shadow_if: CappedReads = unreachable!();
+        if let Some(shadow_if) = unreachable!() {
+            drop(shadow_if);
+        }
+        shadow_if.kill();
+
+        let slice: &[CappedReads] = unreachable!();
+        slice.kill();
+        let array: [CappedReads; 2] = unreachable!();
+        array.kill();
+        let option: Option<CappedReads> = unreachable!();
+        option.kill();
+        let boxed: Box<CappedReads> = unreachable!();
+        boxed.kill();
+        let generic: CappedReads<Vec<u8>> = unreachable!();
+        generic.kill();
+
+        type ReadsAlias = CappedReads;
+        let alias: ReadsAlias = unreachable!();
+        alias.kill();
+
+        let ambiguous: Pending = unreachable!();
+        ambiguous.kill();
+
+        let trait_method: FileAnimationSource = unreachable!();
+        trait_method.restart();
+
+        let deref_reached: Runtime = unreachable!();
+        deref_reached.preview_here(unreachable!());
+
+        let macro_wrapped = Pending::new(None, Vec::new());
+        passthrough!(macro_wrapped.kill());
+    }
 }
 
 fn source_shape_body<'a>(world: &'a World) -> Body<'a> {
@@ -883,79 +939,125 @@ fn source_shape_body<'a>(world: &'a World) -> Body<'a> {
     Body::new(world, src, record)
 }
 
-/// RED (T-GUARDS-BLIND round 2) — typing is allowed to narrow only a non-empty answer. A written
-/// first-party type with no method of this name, a reassigned local, a factory returning a wrapper,
-/// and an initializer that merely contains a constructor all remain attributed by name. A genuine
-/// constructor local still narrows to its own method.
+/// RED (T-GUARDS-BLIND round 3) — the complete receiver-shape table. Only a direct `self.field`
+/// with one restricted written field type and a uniquely bound, never-assigned annotated local
+/// have a type. Every other row equals the pre-ticket reachable method-name match.
 ///
-/// MUTATIONS: return the empty `typed` set instead of `any_method`; omit the assignment invalidator;
-/// accept `Option<Self>` as `Self`; scan past the initializer head. The corresponding assertion
-/// below goes red for each mutation.
+/// MUTATIONS, in table order: infer the leading constructor; scan for a later constructor; infer
+/// factory returns; ignore assignment; count only `let` shadowing; ignore closure, `for`, match-arm,
+/// or `if let` bindings; peel slice, array, `Option`, `Box`, or generic interiors; resolve aliases;
+/// union same-named types; retain a first-party trait method; retain a `Deref` type; inspect through
+/// a macro argument. Each mutation types its named row and makes the `receiver_types` assertion
+/// red. Removing annotation typing or `self.field` typing makes the corresponding positive row red;
+/// returning an empty preferred set instead of [`nonempty_or`] makes a name-match equality red.
 #[test]
 fn receiver_typing_only_narrows_a_non_empty_source_stated_answer() {
-    const PROBE_KILL: &str = "bt-platform crate::ProbeChild::kill";
     let world = World::new();
     let body = source_shape_body(&world);
-    assert_eq!(
-        body.locals.get("annotated").map(|(_, ty)| ty),
-        Some(&BTreeSet::from(["CappedReads".to_owned()])),
-        "a direct annotation states its type"
-    );
-    for name in ["reassigned", "factory", "contains"] {
-        assert!(
-            !body.locals.contains_key(name),
-            "`{name}` is not a source-stated current receiver type"
+    let shapes = [
+        ("self", "observe", true, "remove self-field typing"),
+        (
+            "annotated",
+            "observe",
+            true,
+            "remove annotated-local typing",
+        ),
+        (
+            "chained_constructor",
+            "kill",
+            false,
+            "infer a leading chained constructor",
+        ),
+        (
+            "constructor_later",
+            "kill",
+            false,
+            "scan for a later constructor",
+        ),
+        ("factory", "kill", false, "infer a factory return"),
+        ("reassigned", "kill", false, "ignore assignment targets"),
+        ("shadow_let", "kill", false, "ignore a second let binding"),
+        ("shadow_closure", "kill", false, "ignore closure parameters"),
+        ("shadow_for", "kill", false, "ignore for-pattern bindings"),
+        ("shadow_match", "kill", false, "ignore match-arm bindings"),
+        ("shadow_if", "kill", false, "ignore if-let bindings"),
+        ("slice", "kill", false, "peel a slice interior"),
+        ("array", "kill", false, "peel an array interior"),
+        ("option", "kill", false, "peel Option's argument"),
+        ("boxed", "kill", false, "peel Box's argument"),
+        ("generic", "kill", false, "ignore generic arguments"),
+        ("alias", "kill", false, "resolve a type alias"),
+        (
+            "ambiguous",
+            "kill",
+            false,
+            "union same-named first-party types",
+        ),
+        (
+            "trait_method",
+            "restart",
+            false,
+            "retain a first-party trait receiver",
+        ),
+        (
+            "deref_reached",
+            "preview_here",
+            false,
+            "retain a Deref receiver",
+        ),
+        (
+            "macro_wrapped",
+            "kill",
+            false,
+            "infer through a macro argument",
+        ),
+    ];
+    let sites = body.sites();
+    for (receiver, method, typed, mutation) in shapes {
+        let site = sites
+            .iter()
+            .find(|site| {
+                site.name == method
+                    && matches!(&site.form, Form::Method(Some(chain)) if chain[0] == receiver)
+            })
+            .unwrap_or_else(|| panic!("the `{receiver}.{method}` fixture call is indexed"));
+        assert_eq!(
+            body.receiver_types(site).is_some(),
+            typed,
+            "the `{receiver}.{method}` row has the promised typing; RED mutation: {mutation}"
         );
-    }
-    for name in ["constructed", "literal", "tuple"] {
-        assert!(
-            body.locals.contains_key(name),
-            "`{name}` is a real constructor head: {:?}",
-            body.locals
-        );
-    }
-
-    let mut kills = BTreeMap::new();
-    for site in body.sites().into_iter().filter(|site| site.name == "kill") {
-        let Form::Method(Some(chain)) = &site.form else {
-            panic!("the fixture's kill is a receiver call");
-        };
-        kills.insert(
-            chain[0],
-            body.resolve(&site)
-                .iter()
-                .map(|callable| world.key(callable))
-                .collect::<BTreeSet<_>>(),
-        );
-    }
-    for name in ["annotated", "reassigned", "factory", "contains"] {
-        assert!(
-            kills[name].contains(PROBE_KILL),
-            "`{name}.kill()` stays name-matched: {:?}",
-            kills[name]
-        );
-    }
-    let observe = body
-        .sites()
-        .into_iter()
-        .find(|site| site.name == "observe")
-        .expect("the real typed call");
-    assert_eq!(
-        body.resolve(&observe)
+        let resolved: BTreeSet<String> = body
+            .resolve(site)
             .iter()
             .map(|callable| world.key(callable))
-            .collect::<Vec<_>>(),
-        ["bt-pty crate::CappedReads::observe"],
-        "a real first-party constructor and method still narrow"
-    );
+            .collect();
+        if typed {
+            assert_eq!(
+                resolved,
+                BTreeSet::from(["bt-pty crate::CappedReads::observe".to_owned()]),
+                "the `{receiver}.{method}` row narrows to its written type"
+            );
+        } else {
+            let named: BTreeSet<String> = world
+                .callables
+                .get(method)
+                .into_iter()
+                .flatten()
+                .filter(|callable| {
+                    world.reach[body.src].contains(&callable.src) && callable.type_owner.is_some()
+                })
+                .map(|callable| world.key(callable))
+                .collect();
+            assert_eq!(resolved, named, "`{receiver}.{method}` stays name-matched");
+        }
+    }
 }
 
-/// RED (T-GUARDS-BLIND round 2) — the real-tree diff against the pre-round-1 local-receiver rule.
-/// Every smaller callee set is non-empty, comes from a source-stated current local type, and drops
-/// only methods owned by a different type. The rows are printed for the ticket report.
-///
-/// MUTATION: make the local receiver branch return `any_method`; the required non-vacuous shrink
-/// inventory is empty and this test goes red.
+/// AUDIT (T-GUARDS-BLIND round 3) — the real-tree diff against the pre-round-1 local-receiver
+/// rule. Direct `self.field` typing already existed at that baseline, so only a newly typed local
+/// can shrink the answer. Every such row is nonempty and drops only methods owned by another type;
+/// the count and rows are printed for the ticket report. The fixture above supplies the RED proof
+/// for both permitted cases even when the real tree has no newly narrowed local today.
 #[test]
 fn real_tree_receiver_narrowing_only_removes_other_types_methods() {
     let world = World::new();
@@ -973,13 +1075,12 @@ fn real_tree_receiver_narrowing_only_removes_other_types_methods() {
                 let Form::Method(Some(chain)) = &site.form else {
                     continue;
                 };
-                if body
-                    .locals
-                    .get(chain[0])
-                    .is_none_or(|(bound, _)| *bound >= site.at)
-                {
+                if chain.len() != 1 || !body.locals.contains_key(chain[0]) {
                     continue;
                 }
+                let Some(types) = body.receiver_types(&site) else {
+                    continue;
+                };
                 let before: BTreeSet<String> = world
                     .callables
                     .get(site.name)
@@ -998,9 +1099,6 @@ fn real_tree_receiver_narrowing_only_removes_other_types_methods() {
                 if before == after || !after.is_subset(&before) {
                     continue;
                 }
-                let types = body
-                    .receiver_types(&site)
-                    .expect("only a source-stated local can narrow");
                 assert!(!after.is_empty(), "typing may never narrow to empty");
                 let removed: Vec<String> = before.difference(&after).cloned().collect();
                 for callable in world
@@ -1020,9 +1118,10 @@ fn real_tree_receiver_narrowing_only_removes_other_types_methods() {
                     );
                 }
                 shrinks.push(format!(
-                    "{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}",
                     key_of(src, record),
                     src.location(site.at),
+                    chain.join("."),
                     types.iter().cloned().collect::<Vec<_>>().join("|"),
                     after.iter().cloned().collect::<Vec<_>>().join("|"),
                     removed.join("|")
@@ -1030,10 +1129,7 @@ fn real_tree_receiver_narrowing_only_removes_other_types_methods() {
             }
         }
     }
-    assert!(
-        !shrinks.is_empty(),
-        "the real tree must exercise the local-receiver narrowing this audit guards"
-    );
+    eprintln!("CALLEE_SHRINK_COUNT\t{}", shrinks.len());
     for row in shrinks {
         eprintln!("CALLEE_SHRINK\t{row}");
     }
@@ -1041,16 +1137,16 @@ fn real_tree_receiver_narrowing_only_removes_other_types_methods() {
 
 /// RED (T-PROBE-CHILD round 4, T-GUARDS-BLIND) — **a receiver whose field declaration writes
 /// its type does not become every method with the same name**: `PtySession::shutdown` binds
-/// `child` from `self.child`, whose declaration says the foreign `Child`, not `ProbeChild`. In the
+/// `child` from `self.child`, but that unannotated local is deliberately untyped. In the
 /// real graph and with a dev-only edge `ProbeChild` is unreachable. With an artificial product
 /// edge the tightened round-2 rule deliberately falls back to the name match, but the inventory
 /// still attributes this source spelling to the registered `Child::kill` vocabulary effect before
-/// treating it as a first-party edge. A real `ProbeChild` arm in `GitChild::kill` and a local made
-/// by the first-party `CappedReads::new` remain attributed to their actual callees.
+/// treating it as a first-party edge. A real `ProbeChild` arm in `GitChild::kill` and the
+/// name-matched `CappedReads::observe` call remain attributed to their actual callees.
 ///
-/// MUTATIONS: remove `self_field_types` from `local_types`, and the product-edge collision goes
-/// red; make the local branch of `Body::resolve` return no methods, and the `CappedReads` assertion
-/// goes red; give every package only itself to reach, and the real `GitChild` attribution goes red.
+/// MUTATIONS: infer a type from the `self.child.take()` initializer, and the product-edge collision
+/// goes red; return no methods for an untyped local, and the `CappedReads` assertion goes red; give
+/// every package only itself to reach, and the real `GitChild` attribution goes red.
 #[test]
 fn a_test_only_edge_lends_product_code_no_first_party_callee() {
     const PROBE_KILL: &str = "bt-platform crate::ProbeChild::kill";
@@ -1111,7 +1207,7 @@ fn a_test_only_edge_lends_product_code_no_first_party_callee() {
         callees
             .iter()
             .any(|key| key == "bt-pty crate::CappedReads::observe"),
-        "a first-party constructor local still has its method: {callees:?}"
+        "an untyped constructor local still has its name-matched method: {callees:?}"
     );
 }
 
@@ -1584,6 +1680,7 @@ struct World {
     reach: Vec<BTreeSet<usize>>,
     callables: HashMap<String, Vec<Callable>>,
     fields: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>>,
+    deref_types: BTreeSet<String>,
 }
 
 /// Words that open a parenthesis without calling anything.
@@ -1633,8 +1730,29 @@ impl World {
         let mut callables: HashMap<String, Vec<Callable>> = HashMap::new();
         let mut fields: HashMap<(String, String), Vec<(usize, &'static ItemRecord)>> =
             HashMap::new();
+        let mut deref_types = BTreeSet::new();
         for (at, src) in srcs.iter().enumerate() {
+            for block in src.index.impls() {
+                if src.in_product(block.whole().start())
+                    && block.trait_name().is_some_and(|name| {
+                        name.rsplit("::")
+                            .next()
+                            .is_some_and(|last| last.trim() == "Deref")
+                    })
+                {
+                    deref_types.insert(block.type_owner().to_owned());
+                }
+            }
             for record in src.index.items() {
+                if record.kind() == ItemKind::Field
+                    && let Some(owner) = record.type_owner()
+                    && (src.product_item(record) || owner == "ReceiverTypingSourceShapes")
+                {
+                    fields
+                        .entry((owner.to_owned(), record.name().to_owned()))
+                        .or_default()
+                        .push((at, record));
+                }
                 if !src.product_item(record) {
                     continue;
                 }
@@ -1649,13 +1767,6 @@ impl World {
                             trait_name: record.trait_name().map(ToOwned::to_owned),
                             record: Some(record),
                         });
-                } else if record.kind() == ItemKind::Field
-                    && let Some(owner) = record.type_owner()
-                {
-                    fields
-                        .entry((owner.to_owned(), record.name().to_owned()))
-                        .or_default()
-                        .push((at, record));
                 }
             }
             // `#[from]` on an error enum's field makes a first-party `From::from` no byte holds.
@@ -1688,6 +1799,7 @@ impl World {
             reach,
             callables,
             fields,
+            deref_types,
         }
     }
 
@@ -1712,84 +1824,104 @@ impl World {
         }
     }
 
-    /// The first-party receiver type a written type spells. References are peeled, but a generic
-    /// wrapper is its own type: `&ProbeChild` says `ProbeChild`, while `Arc<ProbeChild>` says
-    /// `Arc` and therefore supplies no first-party type.
+    /// The one first-party type a written type spells. Only leading references are peeled; the
+    /// rest must be one path with no arguments or other type syntax, and that path's final name
+    /// must identify exactly one reachable first-party type.
     fn written_type(&self, from: usize, src: &Src, toks: &[Tok]) -> BTreeSet<String> {
-        let Some(name) = toks
-            .iter()
-            .take_while(|tok| !src.is(Some(tok), "<"))
-            .filter(|tok| tok.kind == Kind::Ident)
-            .map(|tok| src.text(*tok))
-            .find(|name| name.starts_with(|c: char| c.is_ascii_uppercase()))
-        else {
+        let mut at = 0;
+        while src.is(toks.get(at), "&") {
+            at += 1;
+            if toks.get(at).is_some_and(|tok| tok.kind == Kind::Lifetime) {
+                at += 1;
+            }
+            if src.is(toks.get(at), "mut") {
+                at += 1;
+            }
+        }
+        let path = &toks[at..];
+        if path.is_empty()
+            || path.iter().enumerate().any(|(at, tok)| {
+                if at % 2 == 0 {
+                    tok.kind != Kind::Ident
+                } else {
+                    !src.is(Some(tok), "::")
+                }
+            })
+            || path.len().is_multiple_of(2)
+        {
             return BTreeSet::new();
-        };
-        if self.is_reachable_type(from, name) {
+        }
+        let name = src.text(*path.last().expect("a nonempty path"));
+        if self.reachable_type_locations(from, name).len() == 1 {
             BTreeSet::from([name.to_owned()])
         } else {
             BTreeSet::new()
         }
     }
 
-    fn written_interior_types(&self, from: usize, src: &Src, toks: &[Tok]) -> BTreeSet<String> {
-        toks.iter()
-            .filter(|tok| tok.kind == Kind::Ident)
-            .map(|tok| src.text(*tok))
-            .filter(|name| {
-                name.starts_with(|c: char| c.is_ascii_uppercase())
-                    && self.is_reachable_type(from, name)
+    fn reachable_type_locations(&self, from: usize, name: &str) -> BTreeSet<(usize, String)> {
+        self.reach[from]
+            .iter()
+            .flat_map(|at| {
+                self.srcs[*at]
+                    .index
+                    .items()
+                    .iter()
+                    .filter(|record| {
+                        record.kind().is_type()
+                            && record.name() == name
+                            && self.srcs[*at].product_item(record)
+                    })
+                    .map(|record| (*at, record.module_paths()[0].to_owned()))
             })
-            .map(ToOwned::to_owned)
             .collect()
     }
 
-    fn is_reachable_type(&self, from: usize, name: &str) -> bool {
-        self.reach[from].iter().any(|at| {
-            self.srcs[*at].index.items().iter().any(|record| {
-                record.kind().is_type()
-                    && record.name() == name
-                    && self.srcs[*at].product_item(record)
-            })
-        })
-    }
-
-    /// The types `field` is declared with on any of `owners`.
-    fn field_types(&self, from: usize, owners: &BTreeSet<String>, field: &str) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        for owner in owners {
-            let declared = self.fields.get(&(owner.clone(), field.to_owned()));
-            for (at, record) in declared.into_iter().flatten() {
-                let src = &self.srcs[*at];
-                let toks = src.lex(record.whole().start(), record.whole().end());
-                if let Some(colon) = toks.iter().position(|t| src.is(Some(t), ":")) {
-                    out.extend(self.written_type(from, src, &toks[colon + 1..]));
-                }
-            }
+    fn receiver_type_must_fallback(
+        &self,
+        from: usize,
+        name: &str,
+        types: &BTreeSet<String>,
+    ) -> bool {
+        if types.iter().any(|ty| self.deref_types.contains(ty)) {
+            return true;
         }
-        out
-    }
-
-    /// Whether this associated function is a source-stated constructor of `owner`.
-    fn constructor_returns_owner(&self, callable: &Callable, owner: &str) -> bool {
-        let Some(record) = callable.record else {
-            return false;
-        };
-        let src = &self.srcs[callable.src];
-        let toks = src.lex(record.declaration().start(), record.declaration().end());
-        let Some(arrow) = toks.iter().position(|tok| src.is(Some(tok), "->")) else {
-            return false;
-        };
-        let returned: Vec<&str> = toks[arrow + 1..]
-            .iter()
-            .take_while(|tok| !src.is(Some(tok), "where") && !src.is(Some(tok), "{"))
-            .map(|tok| src.text(*tok))
-            .collect();
-        returned == ["Self"]
-            || (returned.last() == Some(&owner)
-                && returned.iter().all(|part| {
-                    *part == "::" || part.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                }))
+        self.callables
+            .get(name)
+            .into_iter()
+            .flatten()
+            .filter(|callable| {
+                self.reach[from].contains(&callable.src)
+                    && callable
+                        .type_owner
+                        .as_ref()
+                        .is_some_and(|owner| types.contains(owner))
+            })
+            .filter_map(|callable| callable.trait_name.as_deref())
+            .any(|trait_name| {
+                let bare = trait_name
+                    .split('<')
+                    .next()
+                    .unwrap_or(trait_name)
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(trait_name)
+                    .trim();
+                self.callables.values().flatten().any(|candidate| {
+                    self.reach[from].contains(&candidate.src)
+                        && candidate.type_owner.is_none()
+                        && candidate.trait_name.as_deref().is_some_and(|name| {
+                            name.split('<')
+                                .next()
+                                .unwrap_or(name)
+                                .rsplit("::")
+                                .next()
+                                .unwrap_or(name)
+                                .trim()
+                                == bare
+                        })
+                })
+            })
     }
 }
 
@@ -1847,12 +1979,8 @@ impl<'w> Body<'w> {
                 let Some(colon) = param.iter().position(|t| s.is(Some(t), ":")) else {
                     continue;
                 };
-                if let Some(name) = param[..colon]
-                    .iter()
-                    .rev()
-                    .find(|t| t.kind == Kind::Ident && s.text(**t) != "mut")
-                {
-                    params.insert(s.text(*name), param[colon + 1..].to_vec());
+                for name in pattern_names(s, &param[..colon]) {
+                    params.insert(name, param[colon + 1..].to_vec());
                 }
             }
         }
@@ -1895,32 +2023,52 @@ impl<'w> Body<'w> {
         if here.is_empty() { methods } else { here }
     }
 
+    fn self_field_type(&self, field: &str) -> BTreeSet<String> {
+        let Some(owner) = self.record.type_owner() else {
+            return BTreeSet::new();
+        };
+        let module = self.record.module_paths()[0];
+        let mut types = BTreeSet::new();
+        for (at, record) in self
+            .world
+            .fields
+            .get(&(owner.to_owned(), field.to_owned()))
+            .into_iter()
+            .flatten()
+            .filter(|(at, record)| *at == self.src && record.module_paths()[0] == module)
+        {
+            let src = &self.world.srcs[*at];
+            let toks = src.lex(record.whole().start(), record.whole().end());
+            if let Some(colon) = toks.iter().position(|tok| src.is(Some(tok), ":")) {
+                types.extend(self.world.written_type(self.src, src, &toks[colon + 1..]));
+            }
+        }
+        types
+    }
+
     fn receiver_types(&self, site: &Site) -> Option<BTreeSet<String>> {
         let Form::Method(Some(chain)) = &site.form else {
             return None;
         };
-        let mut types = match chain[0] {
-            "self" => self
-                .record
-                .type_owner()
-                .map(|owner| BTreeSet::from([owner.to_owned()]))
+        let types = match chain.as_slice() {
+            ["self", field] => self.self_field_type(field),
+            [local] => self
+                .locals
+                .get(local)
+                .filter(|(bound, _)| *bound < site.at)
+                .map(|(_, types)| types.clone())
                 .unwrap_or_default(),
-            first => {
-                if let Some(ty) = self.params.get(first) {
-                    self.world.written_type(self.src, self.s(), ty)
-                } else if let Some((bound, ty)) = self.locals.get(first)
-                    && *bound < site.at
-                {
-                    ty.clone()
-                } else {
-                    BTreeSet::new()
-                }
-            }
+            _ => BTreeSet::new(),
         };
-        for field in &chain[1..] {
-            types = self.world.field_types(self.src, &types, field);
+        if types.is_empty()
+            || self
+                .world
+                .receiver_type_must_fallback(self.src, site.name, &types)
+        {
+            None
+        } else {
+            Some(types)
         }
-        (!types.is_empty()).then_some(types)
     }
 
     fn receiver_is_typed(&self, site: &Site) -> bool {
@@ -1930,14 +2078,13 @@ impl<'w> Body<'w> {
         }
     }
 
-    /// The first-party items a call can be, by what the source states. A written receiver type may
-    /// only narrow a non-empty answer; if that type has no reachable first-party method of this
-    /// name, resolution falls back to the pre-typing name match. Mechanical receiver types are
-    /// `self`, a directly written field or parameter type, `let x: T`, and an initializer whose
-    /// head is a first-party `T::new(…)`, `T { … }`, or tuple constructor `T(…)`; `T::new` must be
-    /// declared to return `Self`/`T`. Shadowing, later assignment, branches, method chains,
-    /// factories, aliases, and generic/reference interiors not themselves written stay
-    /// name-matched. The resolver performs no return-type or data-flow inference.
+    /// The first-party items a call can be, by what the source states. A receiver type exists only
+    /// for `self.field` whose declaration is a reference or one unambiguous first-party path, and
+    /// for `let name: Type = …` with the same type restriction when `name` has exactly one binding
+    /// in the whole function and is never assigned. Constructor and return expressions are never
+    /// typed. A same-name type ambiguity, trait-provided method, or `Deref` receiver is untyped.
+    /// Every narrowed lookup goes through [`nonempty_or`], so an empty typed answer always returns
+    /// the name-matched answer.
     fn resolve(&self, site: &Site) -> Vec<Callable> {
         let world = self.world;
         let reach = &world.reach[self.src];
@@ -1964,54 +2111,71 @@ impl<'w> Body<'w> {
                 .cloned()
                 .collect()
         };
-        match &site.form {
-            Form::Macro => Vec::new(),
-            Form::Method(_) if site.name == "into" => named("from")
-                .into_iter()
-                .filter(|c| {
-                    c.trait_name
-                        .as_deref()
-                        .is_some_and(|t| t == "From" || t.starts_with("From<"))
-                })
-                .collect(),
-            Form::Method(Some(chain)) if chain.as_slice() == ["self"] => self.own_methods(&all),
-            Form::Method(Some(_)) => {
-                let Some(types) = self.receiver_types(site) else {
-                    return any_method();
-                };
-                let typed = methods_of(&all, &types);
-                if typed.is_empty() {
-                    any_method()
-                } else {
-                    typed
-                }
+        let (fallback, preferred) = match &site.form {
+            Form::Macro => (Vec::new(), Vec::new()),
+            Form::Method(_) if site.name == "into" => {
+                let from: Vec<Callable> = named("from")
+                    .into_iter()
+                    .filter(|c| {
+                        c.trait_name
+                            .as_deref()
+                            .is_some_and(|t| t == "From" || t.starts_with("From<"))
+                    })
+                    .collect();
+                (from.clone(), from)
             }
-            Form::Method(None) => any_method(),
+            Form::Method(Some(chain)) if chain.as_slice() == ["self"] => {
+                let preferred = self
+                    .record
+                    .type_owner()
+                    .filter(|owner| !world.deref_types.contains(*owner))
+                    .map_or_else(Vec::new, |_| self.own_methods(&all));
+                (any_method(), preferred)
+            }
+            Form::Method(Some(_)) => {
+                let preferred = self
+                    .receiver_types(site)
+                    .map_or_else(Vec::new, |types| methods_of(&all, &types));
+                (any_method(), preferred)
+            }
+            Form::Method(None) => (any_method(), any_method()),
             Form::Path(quals) => match quals.last().copied().unwrap_or_default() {
-                "Self" => self.own_methods(&all),
-                "crate" | "self" | "super" => free(&|c: &Callable| c.src == self.src),
-                qualifier if qualifier.starts_with(|c: char| c.is_ascii_uppercase()) => {
-                    methods_of(&all, &BTreeSet::from([qualifier.to_owned()]))
+                "Self" => (any_method(), self.own_methods(&all)),
+                "crate" | "self" | "super" => {
+                    let preferred = free(&|c: &Callable| c.src == self.src);
+                    (free(&|_| true), preferred)
                 }
-                module => free(&|c: &Callable| c.module.rsplit("::").next() == Some(module)),
+                qualifier if qualifier.starts_with(|c: char| c.is_ascii_uppercase()) => (
+                    any_method(),
+                    methods_of(&all, &BTreeSet::from([qualifier.to_owned()])),
+                ),
+                module => {
+                    let preferred =
+                        free(&|c: &Callable| c.module.rsplit("::").next() == Some(module));
+                    (free(&|_| true), preferred)
+                }
             },
             Form::Bare | Form::Value => {
                 if self.params.contains_key(site.name) {
-                    return Vec::new();
-                }
-                let module = self.record.module_paths()[0];
-                let here = free(&|c: &Callable| c.src == self.src && c.module == module);
-                if !here.is_empty() {
-                    return here;
-                }
-                let package = free(&|c: &Callable| c.src == self.src);
-                if package.is_empty() {
-                    free(&|_| true)
+                    (Vec::new(), Vec::new())
                 } else {
-                    package
+                    let module = self.record.module_paths()[0];
+                    let here = free(&|c: &Callable| c.src == self.src && c.module == module);
+                    let package = free(&|c: &Callable| c.src == self.src);
+                    let preferred = if !here.is_empty() { here } else { package };
+                    (free(&|_| true), preferred)
                 }
             }
-        }
+        };
+        nonempty_or(fallback, preferred)
+    }
+}
+
+fn nonempty_or(fallback: Vec<Callable>, preferred: Vec<Callable>) -> Vec<Callable> {
+    if preferred.is_empty() {
+        fallback
+    } else {
+        preferred
     }
 }
 
@@ -2042,107 +2206,123 @@ fn top_level_token(s: &Src, toks: &[Tok], wanted: &str) -> Option<usize> {
     None
 }
 
-/// A type named by a constructor at the exact head of an initializer.
-fn constructor_type(world: &World, from: usize, s: &Src, toks: &[Tok]) -> BTreeSet<String> {
-    let Some(owner) = toks.first().filter(|tok| {
-        tok.kind == Kind::Ident && s.text(**tok).starts_with(|c: char| c.is_ascii_uppercase())
-    }) else {
-        return BTreeSet::new();
-    };
-    let owner = s.text(*owner);
-    if !world.is_reachable_type(from, owner) {
-        return BTreeSet::new();
-    }
-    if s.is(toks.get(1), "{") {
-        return BTreeSet::from([owner.to_owned()]);
-    }
-    if s.is(toks.get(1), "(") {
-        return BTreeSet::from([owner.to_owned()]);
-    }
-    let Some(constructor) = toks
-        .get(2)
-        .filter(|tok| s.is(toks.get(1), "::") && tok.kind == Kind::Ident && s.is(toks.get(3), "("))
-    else {
-        return BTreeSet::new();
-    };
-    let constructor = s.text(*constructor);
-    if constructor != "new" {
-        return BTreeSet::new();
-    }
-    if world
-        .callables
-        .get(constructor)
-        .into_iter()
-        .flatten()
-        .any(|callable| {
-            world.reach[from].contains(&callable.src)
-                && callable.type_owner.as_deref() == Some(owner)
-                && world.constructor_returns_owner(callable, owner)
+fn receiver_pattern_names(src: &Src, toks: &[Tok]) -> BTreeSet<&'static str> {
+    toks.iter()
+        .filter(|tok| tok.kind == Kind::Ident)
+        .map(|tok| src.text(*tok))
+        .filter(|name| {
+            ![
+                "let", "mut", "ref", "Some", "Ok", "Err", "None", "self", "Self",
+            ]
+            .contains(name)
+                && !name.starts_with(|c: char| c.is_ascii_uppercase())
         })
-    {
-        BTreeSet::from([owner.to_owned()])
-    } else {
-        BTreeSet::new()
-    }
+        .collect()
 }
 
-/// Types mechanically carried from `self.field` at the head of an initializer.
-fn self_field_types(
-    world: &World,
-    from: usize,
-    src: &Src,
-    record: &ItemRecord,
-    pattern: &[Tok],
-    toks: &[Tok],
-) -> BTreeSet<String> {
-    if !pattern.iter().any(|tok| src.is(Some(tok), "Some")) {
-        return BTreeSet::new();
-    }
-    if !src.is(toks.first(), "self")
-        || !src.is(toks.get(1), ".")
-        || !src.is(toks.get(3), ".")
-        || !src.is(toks.get(4), "take")
-        || !src.is(toks.get(5), "(")
-    {
-        return BTreeSet::new();
-    }
-    let Some(field) = toks.get(2).filter(|tok| tok.kind == Kind::Ident) else {
-        return BTreeSet::new();
-    };
-    let Some(owner) = record.type_owner() else {
-        return BTreeSet::new();
-    };
-    let mut out = BTreeSet::new();
-    if let Some(declared) = world
-        .fields
-        .get(&(owner.to_owned(), src.text(*field).to_owned()))
-    {
-        for (at, field) in declared {
-            let field_src = &world.srcs[*at];
-            let written = field_src.lex(field.whole().start(), field.whole().end());
-            if let Some(colon) = written.iter().position(|tok| field_src.is(Some(tok), ":")) {
-                out.extend(world.written_interior_types(from, field_src, &written[colon + 1..]));
+/// How often `name` is introduced by any binding form this lexical guard can encounter. A
+/// conservative extra count only disables typing, which is the required direction when a pattern
+/// cannot be decided mechanically.
+fn binding_count(src: &Src, toks: &[Tok], params: &HashMap<&str, Vec<Tok>>, name: &str) -> usize {
+    let mut count = usize::from(params.contains_key(name));
+    for (at, tok) in toks.iter().enumerate() {
+        if src.is(Some(tok), "let") {
+            let end = let_end(src, toks, at + 1);
+            let statement = &toks[at + 1..end];
+            let pattern_end = top_level_token(src, statement, "=").unwrap_or(statement.len());
+            count +=
+                usize::from(receiver_pattern_names(src, &statement[..pattern_end]).contains(name));
+        }
+        if src.is(Some(tok), "for") {
+            let rest = &toks[at + 1..];
+            if let Some(end) = top_level_token(src, rest, "in") {
+                count += usize::from(receiver_pattern_names(src, &rest[..end]).contains(name));
+            }
+        }
+        if src.is(Some(tok), "match") {
+            let open = depth_zero(src, toks, at + 1, &["{"]);
+            let Some(close) = (open < toks.len())
+                .then(|| closing(src, toks, open))
+                .flatten()
+            else {
+                continue;
+            };
+            let arms = &toks[open + 1..close];
+            let mut arm = 0;
+            while arm < arms.len() {
+                let arrow = depth_zero(src, arms, arm, &["=>"]);
+                if arrow >= arms.len() {
+                    break;
+                }
+                let guard = arms[arm..arrow]
+                    .iter()
+                    .position(|tok| src.is(Some(tok), "if"))
+                    .map_or(arrow, |guard| arm + guard);
+                count += usize::from(receiver_pattern_names(src, &arms[arm..guard]).contains(name));
+                let body = arrow + 1;
+                arm = if src.is(arms.get(body), "{") {
+                    closing(src, arms, body).map_or(arms.len(), |close| close + 1)
+                } else {
+                    depth_zero(src, arms, body, &[","])
+                };
+                if src.is(arms.get(arm), ",") {
+                    arm += 1;
+                }
             }
         }
     }
-    out
+    let mut at = 0;
+    while at < toks.len() {
+        if src.is(toks.get(at), "|")
+            && let Some(close) = toks[at + 1..]
+                .iter()
+                .position(|tok| src.is(Some(tok), "|"))
+                .map(|close| close + at + 1)
+        {
+            count += usize::from(receiver_pattern_names(src, &toks[at + 1..close]).contains(name));
+            at = close + 1;
+        } else {
+            at += 1;
+        }
+    }
+    count
 }
 
-/// Locals whose receiver type is present in the source without inference: one simple binding,
-/// one binding of that name in the body, no later assignment, and either `let x: T`, an exact-head
-/// constructor accepted by [`constructor_type`], or exactly `self.field` with a written field
-/// type. Destructuring, branches, method chains, factories, tuples and shadowed names stay
-/// name-matched.
+fn assigned(src: &Src, toks: &[Tok], name: &str, after: usize) -> bool {
+    toks.iter().enumerate().any(|(at, tok)| {
+        if tok.start <= after || !src.is(Some(tok), "=") {
+            return false;
+        }
+        let start = toks[..at]
+            .iter()
+            .rposition(|candidate| {
+                [";", "{", "}"]
+                    .iter()
+                    .any(|stop| src.is(Some(candidate), stop))
+            })
+            .map_or(0, |start| start + 1);
+        let target = &toks[start..at];
+        !target
+            .iter()
+            .any(|candidate| src.is(Some(candidate), "let"))
+            && target
+                .iter()
+                .any(|candidate| candidate.kind == Kind::Ident && src.text(*candidate) == name)
+    })
+}
+
+/// Locals whose receiver type is stated by exactly `let name: Type = …`, where the written type
+/// is a reference or one unambiguous first-party path, the name has exactly one binding in the
+/// whole function, and it is never assigned. Initializers never contribute a type.
 fn local_types(
     world: &World,
     src: usize,
-    record: &ItemRecord,
+    _record: &ItemRecord,
     toks: &[Tok],
     params: &HashMap<&str, Vec<Tok>>,
 ) -> HashMap<&'static str, (usize, BTreeSet<String>)> {
     let s = &world.srcs[src];
     let mut found = HashMap::new();
-    let mut ambiguous = BTreeSet::new();
     for (at, tok) in toks.iter().enumerate() {
         if !s.is(Some(tok), "let") {
             continue;
@@ -2153,49 +2333,29 @@ fn local_types(
             continue;
         };
         let pattern = &statement[..equal];
-        let names: Vec<&str> = pattern
+        let Some(colon) = top_level_token(s, pattern, ":") else {
+            continue;
+        };
+        let binding: Vec<&Tok> = pattern[..colon]
             .iter()
-            .filter(|tok| tok.kind == Kind::Ident)
-            .map(|tok| s.text(*tok))
-            .filter(|name| {
-                !["let", "mut", "ref", "Some", "Ok", "Err", "None"].contains(name)
-                    && !name.starts_with(|c: char| c.is_ascii_uppercase())
-            })
+            .filter(|tok| !s.is(Some(tok), "mut"))
             .collect();
-        if names.len() != 1 || params.contains_key(names[0]) {
+        let [name] = binding.as_slice() else {
+            continue;
+        };
+        if name.kind != Kind::Ident {
             continue;
         }
-        let name = names[0];
-        let types = if let Some(colon) = top_level_token(s, pattern, ":") {
-            world.written_type(src, s, &pattern[colon + 1..])
-        } else {
-            let initializer = &statement[equal + 1..];
-            let constructed = constructor_type(world, src, s, initializer);
-            if constructed.is_empty() {
-                self_field_types(world, src, s, record, pattern, initializer)
-            } else {
-                constructed
-            }
-        };
+        let name = s.text(**name);
+        let types = world.written_type(src, s, &pattern[colon + 1..]);
         if types.is_empty() {
             continue;
         }
         let bound = toks.get(end).map_or(tok.end, |end| end.start);
-        if found.insert(name, (bound, types)).is_some() {
-            ambiguous.insert(name);
+        if binding_count(s, toks, params, name) == 1 && !assigned(s, toks, name, bound) {
+            found.insert(name, (bound, types));
         }
     }
-    for name in ambiguous {
-        found.remove(name);
-    }
-    found.retain(|name, (bound, _)| {
-        !toks.iter().enumerate().any(|(at, tok)| {
-            tok.start > *bound
-                && tok.kind == Kind::Ident
-                && s.text(*tok) == *name
-                && s.is(toks.get(at + 1), "=")
-        })
-    });
     found
 }
 
@@ -3785,10 +3945,12 @@ const JOIN_WITHIN: &str = "bt-pty crate::join_within";
 const PTY_ERROR_FROM: &str = "bt-pty crate::PtyError::from (generated)";
 const REQUEST: &str = "bt-platform crate::http::<Request as Drop>::drop [windows]";
 const SHARED_LOCKED: &str = "bt-platform crate::http::Shared::locked [windows]";
+const MACOS_TASKBAR: &str =
+    "bt-platform crate::macos_notify::<Taskbar as Drop>::drop [target_os = \"macos\"]";
 
 /// **The exception table** (revision (e)3 as corrected by (f)2 and (g)): the `Drop`s that may
 /// reach the vocabulary, each owed a repayment in `docs/plans/structural-debt.md`.
-const EXCEPTIONS: [Exception; 13] = [
+const EXCEPTIONS: [Exception; 14] = [
     Exception {
         row: "DirWatch (Windows)",
         drop: DIRWATCH_WINDOWS,
@@ -3841,10 +4003,14 @@ const EXCEPTIONS: [Exception; 13] = [
         row: "http::Request (Windows)",
         drop: REQUEST,
     },
+    Exception {
+        row: "Taskbar (macOS)",
+        drop: MACOS_TASKBAR,
+    },
 ];
 
 /// **Every pinned body**, walked from the exceptions: nothing a listed `Drop` reaches is exempt.
-const PINNED: [Pinned; 40] = [
+const PINNED: [Pinned; 41] = [
     Pinned {
         body: DIRWATCH_WINDOWS,
         edges: &[&[CLOSE_WINDOWS], &[CLOSE_WINDOWS], &[CLOSE_WINDOWS]],
@@ -3879,7 +4045,7 @@ const PINNED: [Pinned; 40] = [
         body: ADMITTED,
         edges: &[&[ROLE], &[CONTAINS], &[COUNT], &[METER], &[FRESH], &[FRESH]],
         effects: &[],
-        leaves: &[],
+        leaves: &["refused"],
     },
     Pinned {
         body: ROLE,
@@ -3931,7 +4097,7 @@ const PINNED: [Pinned; 40] = [
             ("Receiver::recv_timeout", 1),
             ("JoinHandle::join", 1),
         ],
-        leaves: &["take"],
+        leaves: &["now", "take"],
     },
     Pinned {
         body: QUEUE_CLOSE,
@@ -4027,7 +4193,7 @@ const PINNED: [Pinned; 40] = [
         body: SEATS_SHUTDOWN_ALL,
         edges: &[&[SEAT_SHUTDOWN]],
         effects: &[],
-        leaves: &[],
+        leaves: &["take"],
     },
     Pinned {
         body: PTY,
@@ -4107,6 +4273,12 @@ const PINNED: [Pinned; 40] = [
         edges: &[],
         effects: &[],
         leaves: &[],
+    },
+    Pinned {
+        body: MACOS_TASKBAR,
+        edges: &[],
+        effects: &[],
+        leaves: &["new"],
     },
 ];
 
