@@ -1010,8 +1010,8 @@ mod tests {
         let answers = answers_for(
             &files,
             vec![
-                PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
-                PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe"),
+                PathBuf::from("C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"),
+                PathBuf::from("C:/Program Files/PowerShell/7/pwsh.exe"),
             ],
             |program| {
                 asked.borrow_mut().push(program.to_path_buf());
@@ -1020,7 +1020,7 @@ mod tests {
         );
         assert_eq!(
             *asked.borrow(),
-            [PathBuf::from(r"C:\Program Files\PowerShell\7\pwsh.exe")],
+            [PathBuf::from("C:/Program Files/PowerShell/7/pwsh.exe")],
             "the located edition is not asked"
         );
         let report = operate_with(
@@ -1038,7 +1038,7 @@ mod tests {
         let said = report.text(false);
         assert!(
             said.contains(&format!(
-                r"C:\Program Files\PowerShell\7\pwsh.exe: {}",
+                "C:/Program Files/PowerShell/7/pwsh.exe: {}",
                 Text::ShellProfileUnlocated.text()
             )),
             "{said}"
