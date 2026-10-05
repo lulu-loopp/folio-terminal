@@ -2966,16 +2966,12 @@ text_entries! {
     /// Value-carrying templates for About > Version.
     VersionAvailable,
     VersionDownloading,
-    // zh: pending 047-EXPERIENCE
     /// Both files are on disk and the job is checking them (`update_job::State::Staged`).
     VersionVerifying,
-    // zh: pending 047-EXPERIENCE
     /// Verified and waiting for the restart (`update_job::State::Verified`).
     VersionReady,
-    // zh: pending 047-EXPERIENCE
     /// The verb beside [`Self::VersionReady`]: it raises the Ready card, which asks first.
     VersionRestart,
-    // zh: pending 047-EXPERIENCE
     /// Folio is quitting to put the update in place (`State::Quitting`, `State::Committing`).
     VersionRestarting,
     VersionManaged,
@@ -3896,11 +3892,10 @@ impl Text {
                 "PowerShell integration is not provided for these arguments. $PROFILE is stored where the execution policy may refuse it.",
                 "自定义启动参数，不提供 PowerShell 整合。$PROFILE 所在位置可能被执行策略拒绝。",
             ),
-            // zh: pending RELEASE-READ
             Self::CapPowerShellUndetermined => pick(
                 lang,
                 "PowerShell integration could not be determined for these arguments. Folio asks again when this page opens.",
-                "PowerShell integration could not be determined for these arguments. Folio asks again when this page opens.",
+                "自定义启动参数，PowerShell 整合状态未知。再次打开此页时重新检测。",
             ),
             Self::CapWslBash => pick(
                 lang,
@@ -4846,11 +4841,10 @@ impl Text {
                 "Remove the line from $PROFILE",
                 "从 $PROFILE 移除此行",
             ),
-            // zh: pending RELEASE-READ
             Self::ShellProfileAddedToast => pick(
                 lang,
-                "Added one line to $PROFILE. It takes effect in new Folio panes.",
-                "Added one line to $PROFILE. It takes effect in new Folio panes.",
+                "Written to $PROFILE. Takes effect in new panes.",
+                "已写入 $PROFILE，新窗格中生效。",
             ),
             // **The three installer rows are 「通知」 rows** (user ruling
             // 2026-08-29). 「钩子」 and 「通知程序」 named the mechanism this window
@@ -5022,11 +5016,10 @@ impl Text {
                 "On removes settings, sessions and web data too. Off keeps them.",
                 "开：一并移除设置、会话和网页数据。关：保留。",
             ),
-            // zh: pending RELEASE-READ
             Self::DescUninstallBy => pick(
                 lang,
                 "Close Folio, then run {command}.",
-                "Close Folio, then run {command}.",
+                "关闭 Folio 后运行 {command}。",
             ),
             Self::UninstallCardHeading => pick(lang, "Uninstall Folio?", "卸载 Folio？"),
             Self::UninstallCardKeeps => pick(lang, "Settings and data stay.", "设置和数据保留。"),
@@ -5651,11 +5644,10 @@ impl Text {
                 "Could not query this PowerShell profile within five seconds.",
                 "五秒内未能查到此 PowerShell 的 $PROFILE。",
             ),
-            // zh: pending RELEASE-READ
             Self::ShellProfileUnlocated => pick(
                 lang,
                 "this PowerShell did not say where its $PROFILE is, so a Folio line there, if any, stays",
-                "this PowerShell did not say where its $PROFILE is, so a Folio line there, if any, stays",
+                "此 PowerShell 未报告 $PROFILE 位置，Folio 整合行（如有）保留。",
             ),
             Self::ShellProfileLink => pick(
                 lang,
@@ -5755,14 +5747,10 @@ impl Text {
             Self::VersionDetails => pick(lang, "Details", "详情"),
             Self::VersionAvailable => pick(lang, "{version} available", "有新版 {version}"),
             Self::VersionDownloading => pick(lang, "Downloading {version}", "正在下载 {version}"),
-            // zh: pending 047-EXPERIENCE
-            Self::VersionVerifying => pick(lang, "Verifying {version}", "Verifying {version}"),
-            // zh: pending 047-EXPERIENCE
-            Self::VersionReady => pick(lang, "{version} ready", "{version} ready"),
-            // zh: pending 047-EXPERIENCE
-            Self::VersionRestart => pick(lang, "Restart…", "Restart…"),
-            // zh: pending 047-EXPERIENCE
-            Self::VersionRestarting => pick(lang, "Restarting…", "Restarting…"),
+            Self::VersionVerifying => pick(lang, "Verifying {version}", "正在校验 {version}"),
+            Self::VersionReady => pick(lang, "{version} ready", "{version} 已就绪"),
+            Self::VersionRestart => pick(lang, "Restart…", "重启…"),
+            Self::VersionRestarting => pick(lang, "Restarting…", "重启中…"),
             Self::VersionManaged => pick(
                 lang,
                 "{version} available · {command}",
@@ -6010,24 +5998,7 @@ impl Text {
     ];
 
     #[cfg(test)]
-    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[
-        (Self::CapPowerShellUndetermined, HostPlatform::Windows),
-        (Self::CapPowerShellUndetermined, HostPlatform::MacOs),
-        (Self::ShellProfileUnlocated, HostPlatform::Windows),
-        (Self::ShellProfileUnlocated, HostPlatform::MacOs),
-        (Self::ShellProfileAddedToast, HostPlatform::Windows),
-        (Self::ShellProfileAddedToast, HostPlatform::MacOs),
-        (Self::DescUninstallBy, HostPlatform::Windows),
-        (Self::DescUninstallBy, HostPlatform::MacOs),
-        (Self::VersionVerifying, HostPlatform::Windows),
-        (Self::VersionVerifying, HostPlatform::MacOs),
-        (Self::VersionReady, HostPlatform::Windows),
-        (Self::VersionReady, HostPlatform::MacOs),
-        (Self::VersionRestart, HostPlatform::Windows),
-        (Self::VersionRestart, HostPlatform::MacOs),
-        (Self::VersionRestarting, HostPlatform::Windows),
-        (Self::VersionRestarting, HostPlatform::MacOs),
-    ];
+    const CHINESE_PENDING: &'static [(Self, HostPlatform)] = &[];
 }
 
 // ── the strings that carry a value ─────────────────────────────────────────
